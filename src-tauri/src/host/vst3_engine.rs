@@ -1,7 +1,7 @@
 //! OWNS: a VST3 plugin in the engine: `Vst3Unit` (the processor with its event and parameter lists,
-//! as an `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates,
-//! restarts, re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping
-//! the plugin's tone as `engine_slot` describes: the component's and the edit controller's states in
+//! as an `lf_engine::SlotProcessor`) and what its owner thread does with the plugin (`Vst3`, which
+//! the shared owner loop `engine_slot::serve` drives): the load, activation, a restart and a
+//! re-activation after an eviction, and the teardown's order, keeping the plugin's tone as `engine_slot` describes: the component's and the edit controller's states in
 //! one container (`save_state`, `restore_state`). It followed the WebView bridge's VST3 owner (deleted in
 //! Stage 6) minus its RT thread, its hop-1 ring and the device; the Stage 1 spike's `PluginUnit` was
 //! the unit's prototype. Unlike that owner's, this load creates the
@@ -10,11 +10,10 @@
 //! tone is torn down and created again from the same module (`load`).
 
 use super::super::engine_slot::{
-    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, Restore, FAULT_PROCESS,
-    FAULT_START, OWNER_POLL, REMOVE_TIMEOUT,
+    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported,
+    Restore, Setup, FAULT_PROCESS, FAULT_START,
 };
-use super::super::super::state::ToneRestore;
-use super::super::super::tone::{self, ToneKeeper};
+use super::super::super::tone;
 use super::*;
 use vst3::Steinberg::kNotImplemented;
 
@@ -22,7 +21,6 @@ use lf_engine::grid::Frame;
 use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
 
 use crate::engine_io::SlotHost;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// One activated VST3 processor with its event and parameter lists and pre-sized rows, built on
 /// the owner thread.
@@ -211,17 +209,6 @@ impl SlotProcessor for Vst3Unit {
     }
 }
 
-/// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed. The
-/// engine stops a unit before it leaves; stopping again is a no-op, and covers one that did not.
-fn own(unit: Box<dyn SlotProcessor>) -> Box<Vst3Unit> {
-    let mut unit = unit
-        .into_any()
-        .downcast::<Vst3Unit>()
-        .unwrap_or_else(|_| panic!("an engine slot hands back the unit its owner installed"));
-    unit.stop();
-    unit
-}
-
 /// Everything the owner holds of a loaded plugin besides the unit. Dropping it tears down in the
 /// live order: the separated controller disconnects and terminates, the component deactivates and
 /// terminates, then the fields drop in declaration order (the COM objects, the module last). The
@@ -374,68 +361,6 @@ fn sync_controller(plugin: &Vst3Plugin, slot: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-activate the unit at the engine's current terms and install it. A restart report the plugin
-/// raises from inside the cycle (a `kLatencyChanged` from `setActive(1)`) describes the state just
-/// activated and is consumed, as the live cycle does. On failure the unit comes back to the caller.
-fn reinstall(
-    plugin: &mut Vst3Plugin,
-    mut unit: Box<Vst3Unit>,
-    slot: &SlotHost,
-    restart: &RestartFlags,
-) -> Result<(), (Box<Vst3Unit>, String)> {
-    let activated = plugin.activate(&unit.processor, slot);
-    let raised = restart.take();
-    if raised != 0 {
-        log::info!(
-            "[plugin_host] engine slot {} restartComponent({}) raised during the cycle describes the state just activated; consumed",
-            slot.slot(),
-            restart_flag_names(raised)
-        );
-    }
-    let rate = match activated {
-        Ok((activation, max_frames, rate)) => {
-            unit.rearm(activation, max_frames);
-            rate
-        }
-        Err(e) => return Err((unit, e)),
-    };
-    slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
-}
-
-/// A restart or an eviction: get the unit back (it came from the engine, the owner still holds it
-/// from a failed cycle, or the engine hands it back now) and reinstall it.
-fn cycle(
-    plugin: &mut Vst3Plugin,
-    slot: &SlotHost,
-    restart: &RestartFlags,
-    parked: &mut Option<Box<Vst3Unit>>,
-    back: Option<Box<Vst3Unit>>,
-    why: &str,
-) {
-    let index = slot.slot();
-    let unit = match back.or_else(|| parked.take()) {
-        Some(unit) => unit,
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(Some(unit)) => own(unit),
-            Ok(None) => {
-                log::error!("[plugin_host] engine slot {index} {why}: no unit to cycle");
-                return;
-            }
-            Err(e) => {
-                log::error!("[plugin_host] engine slot {index} {why}: {e}; it keeps playing un-restarted");
-                return;
-            }
-        },
-    };
-    match reinstall(plugin, unit, slot, restart) {
-        Ok(()) => log::info!("[plugin_host] engine slot {index} {why}: setActive(0) → activate → reinstalled"),
-        Err((unit, e)) => {
-            log::error!("[plugin_host] engine slot {index} {why} failed, the slot stays bypassed: {e}");
-            *parked = Some(unit);
-        }
-    }
-}
-
 /// The module and factory an owner loads from.
 pub(super) type Opened = (Option<Vst3Module>, ComPtr<IPluginFactory>);
 
@@ -458,10 +383,6 @@ pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(),
         }
     })
 }
-
-/// What a load hands the owner: the plugin, its unit, its name, the rate it activated at and what it
-/// did with the stored tone.
-type Loaded = (Vst3Plugin, Box<Vst3Unit>, String, u32, Option<ToneRestore>);
 
 /// Create class `target` (`id`) from the factory, initialise it, create its edit controller and give it
 /// the load's component `handler`, with the controller before the activation. The plugin takes the
@@ -527,23 +448,30 @@ fn create(
     }
 }
 
-/// Create the plugin (`create`), restore the stored tone, activate, and build its unit. A component
-/// that refuses its tone may have taken part of it: it is torn down and created again, without a tone,
-/// from the same module, so the plugin runs at the defaults the player is told it loaded with. A
-/// controller no tone reached learns the component's state (`sync_controller`). The handler outlives
-/// the plugin (the caller's).
+/// Create the plugin (`create`) with the load's component handler, restore the stored tone, activate,
+/// and build its unit. A component that refuses its tone may have taken part of it: it is torn down
+/// and created again, without a tone, from the same module, so the plugin runs at the defaults the
+/// player is told it loaded with. A controller no tone reached learns the component's state
+/// (`sync_controller`).
 fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
-    slot: &SlotHost,
-    params: Consumer<ParamEvent>,
-    faults: Arc<AtomicU32>,
-    handler: &ComWrapper<LfComponentHandler>,
-    restart: &RestartFlags,
-    tone: &mut ToneKeeper,
-) -> Result<Loaded, String> {
+    Setup { slot, params, params_tx, sink, faults, tone, .. }: Setup<'_>,
+) -> Result<Loaded<Vst3>, String> {
+    // The load's component handler: an editor's `performEdit` reaches the processor, the caller and
+    // the tone (a change to save). It outlives the plugin, whose controller holds it.
+    let restart = Arc::new(RestartFlags::default());
+    let (edits, edited) = (sink.clone(), tone.edited());
+    let handler = ComWrapper::new(LfComponentHandler {
+        event_tx: params_tx,
+        param_changed: Box::new(move |id, value| {
+            edited.store(true, Release);
+            edits(EngineSlotEvent::ParamChanged { id, value })
+        }),
+        restart: restart.clone(),
+    });
     let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
-    let (mut plugin, mut processor, name) = create(open()?, &target, id, handler)?;
+    let (mut plugin, mut processor, name) = create(open()?, &target, id, &handler)?;
     // The stored tone goes in before the component activates: nothing processes it yet.
     let restored = restore_tone(tone, slot.slot(), &name, |state| restore_state(&plugin, state, slot.slot()));
     if restored == Restore::Refused {
@@ -551,7 +479,7 @@ fn load(
         let opened = (plugin._module.take(), plugin.factory.clone());
         drop(processor);
         drop(plugin);
-        (plugin, processor, _) = create(opened, &target, id, handler)?;
+        (plugin, processor, _) = create(opened, &target, id, &handler)?;
     }
     if restored != Restore::Restored {
         sync_controller(&plugin, slot.slot())?;
@@ -561,209 +489,118 @@ fn load(
     // activated, as a cycle's does (`reinstall`); the param ids are listed after the load anyway.
     let _ = (restart.take(), restart.take_notify());
     let unit = Vst3Unit::new(processor, activation, max_frames, params, faults)?;
-    Ok((plugin, unit, name, rate, restored.report()))
+    let plugin = Vst3 { editor: Vst3Editor::Closed, plugin, handler, restart, slot: slot.slot() as u8 };
+    Ok(Loaded { plugin, unit, name, rate, tone: restored.report() })
 }
 
-/// The engine-mode VST3 owner. `open` yields the module and factory (a bundle in production, an
-/// in-process factory in the tests); returns the teardown's result.
+/// The engine-mode VST3 owner (`engine_slot::serve`). `open` yields the module and factory (a bundle
+/// in production, an in-process factory in the tests); returns the teardown's result.
 pub(super) fn run_with(
     ctx: OwnerCtx,
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent: _, ready, mut tone } = ctx;
-    let index = slot.slot();
-    let faults = Arc::new(AtomicU32::new(0));
-    // The load's component handler: an editor's `performEdit` reaches the processor, the caller and
-    // the tone (a change to save).
-    let restart = Arc::new(RestartFlags::default());
-    let edits = sink.clone();
-    let edited = tone.edited();
-    let handler = ComWrapper::new(LfComponentHandler {
-        event_tx: params_tx,
-        param_changed: Box::new(move |id, value| {
-            edited.store(true, Release);
-            edits(EngineSlotEvent::ParamChanged { id, value })
-        }),
-        restart: restart.clone(),
-    });
-    let loaded = load(id, open, &slot, params, faults.clone(), &handler, &restart, &mut tone);
-    let (mut plugin, unit, name, rate, restored) = match loaded {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return Ok(());
-        }
-    };
-    // Before the load is reported, so the caller's first `set_param` finds its ids.
-    publish_param_ids(&param_ids, &list_vst3_params(&plugin.controller).unwrap_or_default());
-    let kind = unit.kind;
-    // Not installed: the unit, then the plugin, go before the handler the controller holds.
-    if !running.load(Acquire) {
-        drop((unit, plugin));
-        let _ = ready.send(Err("plugin load cancelled".to_string()));
-        return Ok(());
-    }
-    if let Err((unit, e)) = slot.install(unit, rate) {
-        drop((unit, plugin));
-        let _ = ready.send(Err(e));
-        return Ok(());
-    }
-    if ready.send(Ok(Ready { name: name.clone(), kind, tone: restored })).is_err() {
-        log::warn!("[plugin_host] engine slot {index}: the load finished after its caller gave up; undoing it");
-        return teardown(&slot, plugin, None, handler);
-    }
-
-    // The unit while it is out of the engine (a failed restart); `None` while the engine holds it.
-    let mut parked: Option<Box<Vst3Unit>> = None;
-    let mut editor = Vst3Editor::Closed;
-    let mut reported = 0u32;
-    // A panic in the loop must not unwind past a unit the engine still runs (dropping `plugin` would
-    // deactivate and unload code the audio thread is inside): it is caught here, and the ordered
-    // teardown below takes the unit out of the engine first.
-    let served = catch_unwind(AssertUnwindSafe(|| {
-    while running.load(Acquire) {
-        // restartComponent only raised flags (maybe on a foreign thread); the cycle runs here.
-        let flags = restart.take();
-        if flags != 0 {
-            let why = format!("restartComponent({})", restart_flag_names(flags));
-            cycle(&mut plugin, &slot, &restart, &mut parked, None, &why);
-        }
-        // After the cycle, so a re-list the plugin raised during its re-activation lands this turn.
-        if restart.take_notify() & RestartFlags::RELIST != 0 {
-            publish_param_ids(&param_ids, &list_vst3_params(&plugin.controller).unwrap_or_default());
-            sink(EngineSlotEvent::ParamsChanged);
-            tone.note_change(Instant::now());
-        }
-        // A new engine at another rate evicted the unit; it comes back stopped.
-        if let Some(unit) = slot.take_evicted() {
-            cycle(&mut plugin, &slot, &restart, &mut parked, Some(own(unit)), "re-activation after a device change");
-        }
-        // Every turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread here, and its
-        // timers and async updates must not wait for the next editor, or its state lags what it plays
-        // and a tone saved meanwhile is stale. The hosted editor's window needs it too, and reports its
-        // close box here.
-        pump_thread_messages();
-        if matches!(editor, Vst3Editor::Open { .. }) {
-            if matches!(&editor, Vst3Editor::Open { win, .. } if win.close_requested()) {
-                vst3_editor_close(&mut editor);
-                sink(EngineSlotEvent::EditorClosed);
-                let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&plugin));
-            }
-        }
-        let request = if matches!(editor, Vst3Editor::Open { .. }) {
-            wait_for_input(20);
-            requests.try_recv().ok()
-        } else {
-            match requests.recv_timeout(OWNER_POLL) {
-                Ok(request) => Some(request),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                // The handle is gone without an unload; `running` is false by then.
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        };
-        if let Some(request) = request.and_then(|r| super::super::take_uncancelled(r, index as u8)) {
-            match request {
-                OwnerRequest::OpenEditor(cancelled, reply) => {
-                    let was_closed = matches!(editor, Vst3Editor::Closed);
-                    let res = if was_closed {
-                        vst3_editor_open(&plugin.controller, index as u8).map(|opened| editor = opened)
-                    } else {
-                        Ok(())
-                    };
-                    // Opened after the caller's 5 s: it reported failure, so close what this opened.
-                    if was_closed && res.is_ok() && cancelled.load(Relaxed) {
-                        vst3_editor_close(&mut editor);
-                    }
-                    let _ = reply.send(res);
-                }
-                OwnerRequest::CloseEditor(_, reply) => {
-                    if !matches!(editor, Vst3Editor::Closed) {
-                        vst3_editor_close(&mut editor);
-                        let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&plugin));
-                    }
-                    let _ = reply.send(Ok(()));
-                }
-                OwnerRequest::SaveTone(reply) => {
-                    let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&plugin)));
-                }
-                OwnerRequest::ListParams(reply) => {
-                    let res = list_vst3_params(&plugin.controller);
-                    if let Ok(listed) = &res {
-                        publish_param_ids(&param_ids, listed);
-                    }
-                    let _ = reply.send(res);
-                }
-                // The processor got the value through the ring; the controller (what the editor
-                // shows, and what decides a controller-side restart) is told here.
-                OwnerRequest::SetParamNormalized(id, value) => {
-                    if let Some(ctl) = plugin.controller.as_ref() {
-                        // SAFETY: owner thread, live controller.
-                        let r = unsafe { ctl.setParamNormalized(id as ParamID, value) };
-                        if r != kResultOk {
-                            log::debug!("[plugin_host] engine slot {index} controller.setParamNormalized({id}) → {r:#x}");
-                        }
-                    }
-                }
-                OwnerRequest::Wake => {}
-            }
-        }
-        if tone.poll(Instant::now()) {
-            let _ = keep_tone(&mut tone, index, "changes went quiet", &name, || save_state(&plugin));
-        }
-        report_faults(&faults, index, &mut reported);
-    }
-    }));
-    if served.is_err() {
-        log::error!("[plugin_host] engine slot {index}: the VST3 owner panicked; tearing the plugin down");
-    }
-    let editor_open = !matches!(editor, Vst3Editor::Closed);
-    if editor_open {
-        vst3_editor_close(&mut editor);
-    }
-    // Before the teardown: a change not saved yet, and what an open editor may have changed unseen. Not
-    // after a panic, which may have left the plugin half way through something.
-    if served.is_ok() && (editor_open || tone.dirty()) {
-        let _ = keep_tone(&mut tone, index, "unload", &name, || save_state(&plugin));
-    }
-    let result = teardown(&slot, plugin, parked, handler);
-    report_faults(&faults, index, &mut reported);
-    result
+    serve(ctx, |setup| load(id, open, setup))
 }
 
-/// The ordered teardown: the unit leaves the engine (`setProcessing(0)` on the audio thread) and
-/// releases the processor → the controller terminates → `setActive(0)` → `terminate` → the COM
-/// objects release → the module unloads last. A unit the engine does not hand back keeps the plugin
-/// loaded (leaked) rather than unloading code a processor still runs.
-fn teardown(
-    slot: &SlotHost,
+/// A loaded VST3 plugin as its owner holds it. Torn down in the live order (`release`): the editor,
+/// the unit (it releases the processor), the plugin (its `Drop`, the module last), then the handler
+/// its controller held.
+struct Vst3 {
+    editor: Vst3Editor,
     plugin: Vst3Plugin,
-    parked: Option<Box<Vst3Unit>>,
     handler: ComWrapper<LfComponentHandler>,
-) -> Result<(), String> {
-    let index = slot.slot();
-    let t = Instant::now();
-    let unit = match parked {
-        Some(unit) => Some(unit),
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(unit) => unit.map(own),
-            Err(e) => {
-                log::error!("[plugin_host] engine slot {index} VST3 teardown: {e}; leaving the plugin loaded");
-                slot.abandon();
-                std::mem::forget(plugin);
-                std::mem::forget(handler);
-                return Err(e);
+    /// What the plugin's `restartComponent` raised (maybe on a foreign thread), for the owner's turn.
+    restart: Arc<RestartFlags>,
+    slot: u8,
+}
+
+impl OwnedPlugin for Vst3 {
+    type Unit = Vst3Unit;
+    const FORMAT: &'static str = "VST3";
+
+    fn take_restart(&mut self) -> Option<String> {
+        let flags = self.restart.take();
+        (flags != 0).then(|| format!("restartComponent({})", restart_flag_names(flags)))
+    }
+
+    /// A restart report the plugin raises from inside the cycle (a `kLatencyChanged` from
+    /// `setActive(1)`) describes the state just activated and is consumed, as the live cycle does.
+    fn reinstall(&mut self, mut unit: Box<Vst3Unit>, slot: &SlotHost) -> Result<(), (Box<Vst3Unit>, String)> {
+        let activated = self.plugin.activate(&unit.processor, slot);
+        let raised = self.restart.take();
+        if raised != 0 {
+            log::info!(
+                "[plugin_host] engine slot {} restartComponent({}) raised during the cycle describes the state just activated; consumed",
+                slot.slot(),
+                restart_flag_names(raised)
+            );
+        }
+        let rate = match activated {
+            Ok((activation, max_frames, rate)) => {
+                unit.rearm(activation, max_frames);
+                rate
             }
-        },
-    };
-    let remove_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(unit);
-    drop(plugin);
-    drop(handler);
-    log::info!(
-        "[plugin_host] engine slot {index} VST3 teardown: remove={remove_ms} release+deactivate+terminate+module={} ms",
-        t.elapsed().as_millis()
-    );
-    Ok(())
+            Err(e) => return Err((unit, e)),
+        };
+        slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
+    }
+
+    fn turn(&mut self, _sink: &EventSink) -> Reported {
+        Reported { relist: self.restart.take_notify() & RestartFlags::RELIST != 0, changed: false }
+    }
+
+    fn idle(&mut self) -> bool {
+        let closed = matches!(&self.editor, Vst3Editor::Open { win, .. } if win.close_requested());
+        if closed {
+            vst3_editor_close(&mut self.editor);
+        }
+        closed
+    }
+
+    fn params(&mut self) -> Result<Vec<ParamDesc>, String> {
+        list_vst3_params(&self.plugin.controller)
+    }
+
+    fn state(&mut self) -> Result<Option<Vec<u8>>, String> {
+        save_state(&self.plugin)
+    }
+
+    fn editor(&self) -> Editor {
+        match self.editor {
+            Vst3Editor::Closed => Editor::Closed,
+            Vst3Editor::Open { .. } => Editor::Hosted,
+        }
+    }
+
+    fn editor_open(&mut self) -> Result<(), String> {
+        self.editor = vst3_editor_open(&self.plugin.controller, self.slot)?;
+        Ok(())
+    }
+
+    fn editor_close(&mut self) {
+        vst3_editor_close(&mut self.editor);
+    }
+
+    /// The controller (what the editor shows, and what decides a controller-side restart) hears
+    /// what the processor got through the ring.
+    fn set_param_normalized(&mut self, id: u32, value: f64) {
+        if let Some(ctl) = self.plugin.controller.as_ref() {
+            // SAFETY: owner thread, live controller.
+            let r = unsafe { ctl.setParamNormalized(id as ParamID, value) };
+            if r != kResultOk {
+                log::debug!("[plugin_host] engine slot {} controller.setParamNormalized({id}) → {r:#x}", self.slot);
+            }
+        }
+    }
+
+    /// The unit releases the processor → the controller terminates → `setActive(0)` → `terminate` →
+    /// the COM objects release → the module unloads last → the handler goes.
+    fn release(self, unit: Option<Box<Vst3Unit>>) {
+        let Vst3 { editor, plugin, handler, .. } = self;
+        drop(editor);
+        drop(unit);
+        drop(plugin);
+        drop(handler);
+    }
 }

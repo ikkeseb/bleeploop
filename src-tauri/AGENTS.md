@@ -46,17 +46,18 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   passes dry, an instrument slot is silent, loops and click never wait.
 - **Unload order is load-bearing:** `running=false` → `OwnerRequest::Wake` → join the owner, which
   removes the unit from the engine (crossfade to bypass, `stop` on the audio thread; ≤2 s,
-  `REMOVE_TIMEOUT`) → deactivate → terminate → the module unloads LAST. A unit the engine does not hand
-  back leaves the plugin loaded (leaked), never unloaded under a running processor (VST2's own order:
-  § Plugin hosting). Both halves log
-  their timing (`engine slot N VST3 teardown: remove=… release+deactivate+terminate+module=… ms`,
+  `REMOVE_TIMEOUT`) → saves the tone if it changed → deactivate → terminate → the module unloads
+  LAST. A unit the engine does not hand back leaves the plugin loaded (leaked), never unloaded under a
+  running processor (VST2's own order: § Plugin hosting). Both halves log
+  their timing (`engine slot N VST3 teardown: remove=… release=… ms`,
   `owner joined in … ms`), in release too; a plugin's own release can take seconds (Archetype: ~4.8 s,
   the slot dry meanwhile).
 
 ## Operational bits (recurring)
 
 - **`crates/lf-engine` is the pure engine** (briefing: its `src/lib.rs`); `src/engine_io` is its
-  device side (briefing: its `mod.rs`); the plugin units and owners are `host/engine_slot.rs`,
+  device side (briefing: its `mod.rs`); the plugin slots are `host/engine_slot.rs` (the load API and
+  the one owner loop every format shares, `serve`) and each format's unit and owned plugin,
   `host/clap_engine.rs`, `host/vst3_engine.rs`, `src/host/vst2_engine.rs`, which
   `engine_io/plugins.rs` routes the `plugin_*` commands to. `tauri dev` watches all of `src-tauri/`,
   so an engine edit relaunches a running dev app.
@@ -197,7 +198,7 @@ plugin-GUI work.
   `ComPtr<IAudioProcessor>` is already `Send+Sync`. Source-verify against the crate source
   (`~/.cargo/registry/src/index.crates.io-*/vst3-0.3.0/src/bindings.rs`), NOT web docs; methods are
   **camelCase**; `kResultTrue == kResultOk == 0` (compare `== kResultTrue`, never as a bool).
-- **VST3 teardown order** (`vst3_engine.rs`: `teardown`, `Vst3Plugin`'s drop): the unit leaves the
+- **VST3 teardown order** (`vst3_engine.rs`: `Vst3::release`, `Vst3Plugin`'s drop): the unit leaves the
   engine (`setProcessing(0)` on the audio thread) → a separated controller disconnects and terminates →
   `setActive(0)`, only on an active component (a failed restart leaves it inactive) → `terminate` →
   the COM objects drop → `Vst3Module` LAST. Its RAII drop pairs successful `InitDll` with `ExitDll`,
@@ -245,8 +246,9 @@ plugin-GUI work.
     thread (unlike VST3's `setProcessing`); the unit's `stop` calls nothing. The audio thread sends
     one dispatcher opcode, `effProcessEvents`. A dispatcher's return is its opcode's own: 0 from
     `effOpen`, `effMainsChanged`, `effStartProcess`, `effStopProcess` or `effSetChunk` is no failure.
-  - **Teardown:** the unit leaves the engine → `effStopProcess` → `effMainsChanged(0)` → the editor
-    closes → the tone is saved if it changed → `effClose` → the `HostContext` → the module LAST.
+  - **Teardown:** the editor closes → the unit leaves the engine → `effStopProcess` →
+    `effMainsChanged(0)` → the tone is saved if it changed → `effClose` → the `HostContext` → the
+    module LAST.
     **After `effClose` the `AEffect` pointer is dead:** never read it, never clear its `resvd1`.
   - **A unit the engine does not hand back leaks TOGETHER with its effect, its `HostContext` and its
     module** (`mem::forget`): the unit may still be inside the plugin, and the plugin still calls the
@@ -301,10 +303,6 @@ plugin-GUI work.
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
-  choreography (load, restart, eviction, teardown): one shared owner would keep two bugs each copy once
-  had from returning (a load answered as a success before its audio side had started, and a load that
-  finished after its timeout dropping what it had opened without closing it). Not built.
 - Two timeouts free a plugin slot before its unit has left the engine (read from source, never run):
   a load whose setup outlasts its 15 s bound empties the slot at once, while its owner may still
   install the unit and then undo it; an unload that gives up waiting (6 s) for a command still using
@@ -312,8 +310,8 @@ plugin-GUI work.
   load meanwhile fails on "already holds a unit" (rig recall keeps the plugin) or wins the slot
   first; the late owner's unit may sound for its crossfade. Next check: a slot test in
   `engine_io/plugins.rs` with a stand-in owner that outlasts the bound (injectable), and one that
-  holds a handle clone past the unload wait, each followed by a load. Holding the slot until the
-  owner thread ends belongs with the shared owner above.
+  holds a handle clone past the unload wait, each followed by a load. A fix holds the slot until the
+  owner thread ends (`engine_slot::serve` returns).
 - VST2 host gaps (read from source, none reproduced; the only real plugins tried are ReaJS and
   ReaStream, which load, open their editors and swap, and whose `native:tone-recall` fails because
   neither has a parameter that holds a value):

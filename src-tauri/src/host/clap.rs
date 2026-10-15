@@ -5,8 +5,7 @@
 //! modules; both reach these items through `super::`.
 
 use super::editor_window::{
-    create_host_window, drain_after_editor_teardown, pump_thread_messages, set_client_size,
-    show_host_window_front, wait_for_input, HostWindow,
+    create_host_window, drain_after_editor_teardown, set_client_size, show_host_window_front, HostWindow,
 };
 use super::state::ParamDesc;
 
@@ -175,43 +174,7 @@ fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDe
     Ok(out)
 }
 
-/// Owner-side: re-list the plugin's params into the known-id set (load, rescan). A plugin without
-/// the params ext lists nothing, so every host-side set is refused.
-fn refresh_clap_param_ids(instance: &mut PluginInstance<LfHost>, param_ids: &ParamIds) {
-    publish_param_ids(param_ids, &clap_param_descs(instance).unwrap_or_default());
-}
-
-/// Owner-thread side: service one request on clack's main thread (holds the `!Send` instance).
-fn handle_owner_request(
-    req: OwnerRequest,
-    instance: &mut PluginInstance<LfHost>,
-    param_ids: &ParamIds,
-) {
-    match req {
-        OwnerRequest::ListParams(reply) => {
-            let res = clap_param_descs(instance);
-            if let Ok(params) = &res {
-                publish_param_ids(param_ids, params);
-            }
-            let _ = reply.send(res);
-        }
-        // The owner loop (`clap_engine`) serves these before it gets here (they need owner-local
-        // state: the editor slot, the tone keeper). This arm only keeps the match exhaustive and
-        // replies an error if one is ever misrouted here.
-        OwnerRequest::SaveTone(reply) => {
-            let _ = reply.send(Err("owner-local request misrouted to handle_owner_request".to_string()));
-        }
-        OwnerRequest::OpenEditor(_, reply) | OwnerRequest::CloseEditor(_, reply) => {
-            let _ = reply.send(Err("owner-local request misrouted to handle_owner_request".to_string()));
-        }
-        // VST3-only mirror (`set_param` sends it only to a VST3 slot); a CLAP plugin has no
-        // separate controller to keep in sync.
-        OwnerRequest::SetParamNormalized(..) => {}
-        OwnerRequest::Wake => {}
-    }
-}
-
-/// Owner-side PRE-START cancellation gate, shared by the owner loops (CLAP, VST3 and VST2). `None` = the
+/// Owner-side PRE-START cancellation gate of the shared owner loop (`engine_slot::serve`). `None` = the
 /// caller's 5 s wait expired before the owner reached this request, so it must not run at all: the
 /// frontend has booked the operation as failed, and the reply drops with the request (an ignored
 /// send is already the norm here). A request that PASSES here can still be cancelled mid-call —
@@ -518,7 +481,7 @@ mod restart_tests;
 /// forgets it.
 #[cfg(test)]
 mod resize_tests {
-    use super::super::editor_window::{client_size, create_host_window};
+    use super::super::editor_window::{client_size, create_host_window, pump_thread_messages};
     use super::*;
 
     fn shared(hosted_hwnd: &Arc<AtomicIsize>) -> LfShared {

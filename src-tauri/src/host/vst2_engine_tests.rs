@@ -3,11 +3,13 @@
 //! production `run_with` owns it. The editor and the unit are also driven directly, with the test
 //! thread standing in for the owner. No audio device and no visible window: the device renders to
 //! memory and an editor's host window is never shown.
-use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
+use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat, REMOVE_TIMEOUT};
 use super::super::super::editor_window::client_size;
-use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
+use super::super::super::state::ToneRestore;
+use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, ToneKeeper};
 use super::super::super::vst2::fixture::{self, Probe, Shape, TracedEvent};
 use super::super::super::vst2::host_callback;
+use super::super::OwnerRequest;
 use super::*;
 use crate::engine_io::test_rig::TestDevice;
 use lf_engine::{Command, NoteTarget, TimedCommand};
@@ -1423,7 +1425,7 @@ fn a_cycle_whose_unit_the_engine_refuses_leaves_the_plugin_suspended() {
     let mut plugin = plugin_here(&slot, instrument(probe));
     let (unit, _params, _) = unit_here(&mut plugin, &slot, 4096);
     let before = probe.opcodes().len();
-    let (unit, err) = reinstall(&mut plugin, unit, &slot).expect_err("the slot is taken");
+    let (unit, err) = plugin.reinstall(unit, &slot).expect_err("the slot is taken");
     assert!(err.contains("already holds a unit"), "{err}");
     assert!(!plugin.running, "suspended");
     let mut refused = cycle_calls(4096);
@@ -1435,7 +1437,7 @@ fn a_cycle_whose_unit_the_engine_refuses_leaves_the_plugin_suspended() {
     assert_eq!(probe.opcodes().last(), Some(&(EFF_CLOSE, 0)));
     assert_eq!(probe.count(EFF_STOP_PROCESS, 0), 2, "the close did not stop it again");
 
-    let back = slot.remove(REMOVE_TIMEOUT).expect("the first unit comes back").map(own);
+    let back = slot.remove(REMOVE_TIMEOUT).expect("the first unit comes back").map(own::<Vst2Unit>);
     assert!(back.is_some());
     drop(back);
     drop(holding);

@@ -1,7 +1,8 @@
 //! OWNS: a 64-bit VST2 plugin in the engine: `Vst2Unit` (the effect's process call with its rows,
-//! pointer arrays, event list and time info, as an `lf_engine::SlotProcessor`) and the engine-mode
-//! owner thread that loads, resumes, restarts, re-activates after an eviction and tears it down
-//! (`engine_slot` holds the API), keeping the plugin's tone as `engine_slot` describes: its bank chunk
+//! pointer arrays, event list and time info, as an `lf_engine::SlotProcessor`) and what its owner
+//! thread does with the plugin (`Vst2Plugin`, which the shared owner loop `engine_slot::serve`
+//! drives): the load, resume, a restart and a re-activation after an eviction, and the teardown's
+//! order, keeping the plugin's tone as `engine_slot` describes: its bank chunk
 //! or its parameter values in one container (`save_state`, `restore_state`). The interface, the
 //! loader and the host callback are `host/vst2.rs`.
 //!
@@ -17,30 +18,28 @@
 //! - A dispatcher's return is its opcode's own: 0 from `effOpen`, `effMainsChanged`,
 //!   `effStartProcess`, `effStopProcess` or `effSetChunk` is no failure.
 //! - After `effClose` the `AEffect` is freed memory. A unit the engine does not hand back keeps the
-//!   effect, its context and its module loaded with it (`teardown`).
+//!   effect, its context and its module loaded with it (`engine_slot::serve`'s teardown).
 
 use super::engine_slot::{
-    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, FAULT_EVENTS, FAULT_PARAM,
-    OWNER_POLL, REMOVE_TIMEOUT,
+    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Setup,
+    FAULT_EVENTS, FAULT_PARAM,
 };
 use super::super::editor_window::{
-    create_host_window, drain_after_editor_teardown, pump_thread_messages, set_client_size,
-    show_host_window_front, wait_for_input, HostWindow,
+    create_host_window, drain_after_editor_teardown, set_client_size, show_host_window_front, HostWindow,
 };
-use super::super::state::{ParamDesc, ToneRestore};
-use super::super::tone::{self, ToneKeeper, Vst2State, VST2_MAX_CHUNK};
+use super::super::state::ParamDesc;
+use super::super::tone::{self, Vst2State, VST2_MAX_CHUNK};
 use super::super::vst2::{
     open_effect, time_info, validate, EffectInfo, HostContext, OpenError, ProcessingScope, Vst2Effect, Vst2Module,
 };
 use super::super::vst2_abi::*;
-use super::{publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
+use super::{ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{
     AtomicU32,
-    Ordering::{Acquire, Relaxed},
+    Ordering::Relaxed,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -347,18 +346,11 @@ impl SlotProcessor for Vst2Unit {
     }
 }
 
-/// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed.
-fn own(unit: Box<dyn SlotProcessor>) -> Box<Vst2Unit> {
-    unit.into_any()
-        .downcast::<Vst2Unit>()
-        .unwrap_or_else(|_| panic!("an engine slot hands back the unit its owner installed"))
-}
-
 /// Everything the owner holds of a loaded plugin besides the unit. Not `Send` (`Vst2Effect`): every
 /// call below runs on the owner thread. Dropping it closes the plugin in the live order: stopped
 /// and suspended, the editor closed, `effClose`, then the fields in declaration order (the context
 /// after `effClose`, the module LAST). The unit must be out of the engine first; when it is not,
-/// the plugin is forgotten instead (`teardown`).
+/// the plugin is forgotten instead (`engine_slot::serve`'s teardown).
 struct Vst2Plugin {
     effect: Vst2Effect,
     /// What the effect declared at its last activation (`resume`).
@@ -656,65 +648,6 @@ fn show_editor(hwnd: HWND) {
     }
 }
 
-/// Re-activate the plugin at the engine's current terms and install its unit, rows rebuilt. On
-/// failure the unit comes back to the caller and the plugin is left suspended.
-fn reinstall(plugin: &mut Vst2Plugin, mut unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
-    plugin.suspend();
-    let activated = plugin.configure(slot).and_then(|terms| Ok((plugin.resume()?, terms)));
-    match activated {
-        Ok((info, (rate, block))) => {
-            unit.rearm(&info, block);
-            slot.install(unit, rate).map_err(|(unit, e)| {
-                // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
-                plugin.suspend();
-                (own(unit), e)
-            })
-        }
-        Err(e) => Err((unit, e)),
-    }
-}
-
-/// A restart or an eviction: get the unit back (it came from the engine, the owner still holds it
-/// from a failed cycle, or the engine hands it back now) and reinstall it.
-fn cycle(
-    plugin: &mut Vst2Plugin,
-    slot: &SlotHost,
-    parked: &mut Option<Box<Vst2Unit>>,
-    back: Option<Box<Vst2Unit>>,
-    why: &str,
-) {
-    let index = slot.slot();
-    let unit = match back.or_else(|| parked.take()) {
-        Some(unit) => unit,
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(Some(unit)) => own(unit),
-            Ok(None) => {
-                log::error!("[plugin_host] engine slot {index} {why}: no unit to cycle");
-                return;
-            }
-            Err(e) => {
-                log::error!("[plugin_host] engine slot {index} {why}: {e}; it stays as it is");
-                return;
-            }
-        },
-    };
-    match reinstall(plugin, unit, slot) {
-        Ok(()) => log::info!("[plugin_host] engine slot {index} {why}: stopped → suspended → resumed → reinstalled"),
-        Err((unit, e)) => {
-            log::error!("[plugin_host] engine slot {index} {why} failed, the slot stays bypassed: {e}");
-            *parked = Some(unit);
-        }
-    }
-}
-
-/// Owner loop: cycle the plugin now if it has reported a layout change, so what comes next (a
-/// listing, a save) reads the plugin by the counts it has, not the ones before the report.
-fn settle(plugin: &mut Vst2Plugin, slot: &SlotHost, parked: &mut Option<Box<Vst2Unit>>) {
-    if plugin.ctx.take_restart() {
-        cycle(plugin, slot, parked, None, "audioMasterIOChanged");
-    }
-}
-
 /// What an owner loads from: the module (`None` for an in-process plugin), its entry, and the
 /// name a plugin that names nothing gets (the scan's: the file's stem).
 pub(super) struct Opened {
@@ -733,10 +666,6 @@ pub(super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(), String> {
         Ok(Opened { module: Some(module), entry, file_stem })
     })
 }
-
-/// What a load hands the owner: the plugin, its unit, its name, the rate it runs at and what it
-/// did with the stored tone.
-type Loaded = (Vst2Plugin, Box<Vst2Unit>, String, u32, Option<ToneRestore>);
 
 /// Create the instance for `id` (the effect's unique id as 8 hex digits) on a context of its own,
 /// bound to this thread as its owner. An instance this host refuses was never called, so it cannot
@@ -779,11 +708,8 @@ fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost)
 fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
-    slot: &SlotHost,
-    params: Consumer<ParamEvent>,
-    faults: Arc<AtomicU32>,
-    tone: &mut ToneKeeper,
-) -> Result<Loaded, String> {
+    Setup { slot, params, faults, tone, .. }: Setup<'_>,
+) -> Result<Loaded<Vst2Plugin>, String> {
     let Opened { module, entry, file_stem } = open()?;
     let mut plugin = create(module, entry, id, slot)?;
     // SAFETY: the thread that opened the effect.
@@ -805,220 +731,108 @@ fn load(
     // SAFETY: the open effect `info` was just validated from, bound to this context; the plugin
     // closes it only with the unit back in hand.
     let unit = unsafe { Vst2Unit::new(plugin.effect.raw(), plugin.ctx.clone(), &info, block, params, faults) };
-    Ok((plugin, unit, name, rate, restored.report()))
+    Ok(Loaded { plugin, unit, name, rate, tone: restored.report() })
 }
 
-/// The engine-mode VST2 owner. `open` yields the module and its entry (a DLL in production, an
-/// in-process entry in the tests); returns the teardown's result.
+/// The engine-mode VST2 owner (`engine_slot::serve`). `open` yields the module and its entry (a DLL
+/// in production, an in-process entry in the tests); returns the teardown's result.
 pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Opened, String>) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, params_tx: _, param_ids, sink, editor_parent: _, ready, mut tone } = ctx;
-    let index = slot.slot();
-    let faults = Arc::new(AtomicU32::new(0));
-    let loaded = load(id, open, &slot, params, faults.clone(), &mut tone);
-    let (mut plugin, unit, name, rate, restored) = match loaded {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return Ok(());
-        }
-    };
-    // Before the load is reported, so the caller's first `set_param` finds its ids.
-    publish_param_ids(&param_ids, &plugin.list_params());
-    let kind = unit.kind;
-    // Not installed: the unit goes, then the plugin closes.
-    if !running.load(Acquire) {
-        drop(unit);
-        drop(plugin);
-        let _ = ready.send(Err("plugin load cancelled".to_string()));
-        return Ok(());
-    }
-    if let Err((unit, e)) = slot.install(unit, rate) {
-        drop(unit);
-        drop(plugin);
-        let _ = ready.send(Err(e));
-        return Ok(());
-    }
-    if ready.send(Ok(Ready { name: name.clone(), kind, tone: restored })).is_err() {
-        log::warn!("[plugin_host] engine slot {index}: the load finished after its caller gave up; undoing it");
-        return teardown(&slot, plugin, None, None);
-    }
-
-    // The unit while it is out of the engine (a failed restart); `None` while the engine holds it.
-    let mut parked: Option<Box<Vst2Unit>> = None;
-    let mut reported = 0u32;
-    // A panic in the loop must not unwind past a unit the engine still runs (dropping `plugin` would
-    // close and unload code the audio thread is inside): it is caught here, and the ordered teardown
-    // below takes the unit out of the engine first.
-    let served = catch_unwind(AssertUnwindSafe(|| {
-        while running.load(Acquire) {
-            // audioMasterIOChanged only raised latches (on any thread, the audio thread included)
-            // and silenced the unit; the cycle runs here.
-            settle(&mut plugin, &slot, &mut parked);
-            // What the plugin's own editor moved, with the value the plugin reported: told to the
-            // caller, kept for the tone, never read back from the plugin or sent to it again.
-            // Nothing is told by a count the plugin no longer answers to.
-            let (mut moved, declared) = (false, if plugin.unsettled() { 0 } else { plugin.info.params });
-            if let Some(automation) = plugin.ctx.automation() {
-                automation.drain(declared, |param, value| {
-                    moved = true;
-                    sink(EngineSlotEvent::ParamChanged { id: param as u32, value: f64::from(value) });
-                });
-            }
-            // After the cycle, so a re-list the plugin raised while it resumed lands this turn.
-            if plugin.ctx.take_relist() {
-                publish_param_ids(&param_ids, &plugin.list_params());
-                sink(EngineSlotEvent::ParamsChanged);
-                moved = true;
-            }
-            if moved {
-                tone.note_change(Instant::now());
-            }
-            // A new engine at another rate evicted the unit; it comes back stopped.
-            if let Some(unit) = slot.take_evicted() {
-                cycle(&mut plugin, &slot, &mut parked, Some(own(unit)), "re-activation after a device change");
-            }
-            if plugin.ctx.take_need_idle() {
-                // SAFETY: the opcode reads no pointer.
-                unsafe { plugin.call(EFF_IDLE, 0, 0, 0.0) };
-            }
-            // Every turn, editor or not, as the other owners do: a plugin's own message-driven work
-            // (timers, async updates) runs on this thread, and the hosted editor's window reports
-            // its close box here.
-            pump_thread_messages();
-            if plugin.editor.is_some() {
-                // SAFETY: the opcode reads no pointer.
-                unsafe { plugin.call(EFF_EDIT_IDLE, 0, 0, 0.0) };
-            }
-            // A size the plugin asked for from a thread that may not touch the window. With no
-            // editor open there is nothing to size, and the request is dropped.
-            if let (Some((width, height)), Some(window)) = (plugin.ctx.take_resize(), &plugin.editor) {
-                let _ = set_client_size(window.hwnd, width as u32, height as u32);
-            }
-            // The pump ran the plugin's own code, and a request may have waited through a report.
-            settle(&mut plugin, &slot, &mut parked);
-            if plugin.editor.as_ref().is_some_and(HostWindow::close_requested) {
-                plugin.close_editor();
-                sink(EngineSlotEvent::EditorClosed);
-                let _ = keep_tone(&mut tone, index, "editor closed", &name, || plugin.save_state());
-            }
-            let request = if plugin.editor.is_some() {
-                wait_for_input(20);
-                requests.try_recv().ok()
-            } else {
-                match requests.recv_timeout(OWNER_POLL) {
-                    Ok(request) => Some(request),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                    // The handle is gone without an unload; `running` is false by then.
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            };
-            if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
-                settle(&mut plugin, &slot, &mut parked);
-                match request {
-                    OwnerRequest::OpenEditor(cancelled, reply) => {
-                        let was_closed = plugin.editor.is_none();
-                        let res = if was_closed { plugin.embed_editor().map(show_editor) } else { Ok(()) };
-                        // Opened after the caller's 5 s: it reported failure, so close what this opened.
-                        if was_closed && res.is_ok() && cancelled.load(Relaxed) {
-                            plugin.close_editor();
-                        }
-                        let _ = reply.send(res);
-                    }
-                    OwnerRequest::CloseEditor(_, reply) => {
-                        if plugin.close_editor() {
-                            let _ = keep_tone(&mut tone, index, "editor closed", &name, || plugin.save_state());
-                        }
-                        let _ = reply.send(Ok(()));
-                    }
-                    OwnerRequest::SaveTone(reply) => {
-                        let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || plugin.save_state()));
-                    }
-                    OwnerRequest::ListParams(reply) => {
-                        let listed = plugin.list_params();
-                        publish_param_ids(&param_ids, &listed);
-                        let _ = reply.send(Ok(listed));
-                    }
-                    // VST3 only (`EngineSlotHandle::set_param`): a VST2 plugin is one object, and the
-                    // unit's `setParameter` is all it needs.
-                    OwnerRequest::SetParamNormalized(..) => {}
-                    OwnerRequest::Wake => {}
-                }
-            }
-            if tone.poll(Instant::now()) {
-                let _ = keep_tone(&mut tone, index, "changes went quiet", &name, || plugin.save_state());
-            }
-            report_faults(&faults, index, &mut reported);
-        }
-    }));
-    if served.is_err() {
-        log::error!("[plugin_host] engine slot {index}: the VST2 owner panicked; tearing the plugin down");
-    }
-    // A change not saved yet, and what an open editor may have changed unseen. What the plugin
-    // latched since the loop's last turn counts as a change too: it is taken here, for the tone
-    // alone (no caller is told any more). Not after a panic, which may have left the plugin half way
-    // through something.
-    if served.is_ok() {
-        let mut latched = plugin.ctx.take_relist();
-        if let Some(automation) = plugin.ctx.automation() {
-            automation.drain(if plugin.unsettled() { 0 } else { plugin.info.params }, |_, _| latched = true);
-        }
-        if latched {
-            tone.note_change(Instant::now());
-        }
-    }
-    let save = served.is_ok() && (plugin.editor.is_some() || tone.dirty());
-    let result = teardown(&slot, plugin, parked, save.then_some((&mut tone, name.as_str())));
-    report_faults(&faults, index, &mut reported);
-    result
+    serve(ctx, |setup| load(id, open, setup))
 }
 
-/// The ordered teardown: the unit leaves the engine → `effStopProcess` → `effMainsChanged(0)` → the
-/// editor closes → the tone is saved (`save`: there is a change to keep) → `effClose` → the context
-/// goes → the module unloads last. A unit the engine does not hand back is still inside the
-/// plugin's code, and the plugin still calls the host: the unit, the effect, its context and its
-/// module then stay loaded TOGETHER (leaked), and the plugin is neither stopped nor closed.
-fn teardown(
-    slot: &SlotHost,
-    mut plugin: Vst2Plugin,
-    parked: Option<Box<Vst2Unit>>,
-    save: Option<(&mut ToneKeeper, &str)>,
-) -> Result<(), String> {
-    let index = slot.slot();
-    let t = Instant::now();
-    let unit = match parked {
-        Some(unit) => Some(unit),
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(unit) => unit.map(own),
-            Err(e) => {
-                log::error!("[plugin_host] engine slot {index} VST2 teardown: {e}; leaving the plugin loaded");
-                // The editor is this thread's window and goes with it; the tone is saved as every
-                // other save is, with the unit still processing.
-                plugin.close_editor();
-                if let Some((tone, name)) = save {
-                    let _ = keep_tone(tone, index, "unload", name, || plugin.save_state());
-                }
-                slot.abandon();
-                std::mem::forget(plugin);
-                return Err(e);
-            }
-        },
-    };
-    let remove_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    plugin.suspend();
-    plugin.close_editor();
-    if let Some((tone, name)) = save {
-        let _ = keep_tone(tone, index, "unload", name, || plugin.save_state());
+impl OwnedPlugin for Vst2Plugin {
+    type Unit = Vst2Unit;
+    const FORMAT: &'static str = "VST2";
+
+    /// `audioMasterIOChanged` only raised latches (on any thread, the audio thread included) and
+    /// silenced the unit; the owner cycles the plugin before anything reads it by its counts.
+    fn take_restart(&mut self) -> Option<String> {
+        self.ctx.take_restart().then(|| "audioMasterIOChanged".to_string())
     }
-    // The unit holds the context too: it goes first, so the plugin's drop is what frees the context
-    // (after `effClose`) and then unloads the module.
-    drop(unit);
-    drop(plugin);
-    log::info!(
-        "[plugin_host] engine slot {index} VST2 teardown: remove={remove_ms} stop+suspend+close+module={} ms",
-        t.elapsed().as_millis()
-    );
-    Ok(())
+
+    /// Re-activate the plugin at the engine's current terms and install its unit, rows rebuilt. On
+    /// failure the unit comes back to the caller and the plugin is left suspended.
+    fn reinstall(&mut self, mut unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
+        self.suspend();
+        let activated = self.configure(slot).and_then(|terms| Ok((self.resume()?, terms)));
+        match activated {
+            Ok((info, (rate, block))) => {
+                unit.rearm(&info, block);
+                slot.install(unit, rate).map_err(|(unit, e)| {
+                    // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
+                    self.suspend();
+                    (own(unit), e)
+                })
+            }
+            Err(e) => Err((unit, e)),
+        }
+    }
+
+    /// What the plugin's own editor moved, with the value the plugin reported: told to the caller,
+    /// kept for the tone, never read back from the plugin or sent to it again. Nothing is told by a
+    /// count the plugin no longer answers to.
+    fn turn(&mut self, sink: &EventSink) -> Reported {
+        let (mut changed, declared) = (false, if self.unsettled() { 0 } else { self.info.params });
+        if let Some(automation) = self.ctx.automation() {
+            automation.drain(declared, |param, value| {
+                changed = true;
+                sink(EngineSlotEvent::ParamChanged { id: param as u32, value: f64::from(value) });
+            });
+        }
+        Reported { relist: self.ctx.take_relist(), changed }
+    }
+
+    fn idle(&mut self) -> bool {
+        if self.ctx.take_need_idle() {
+            // SAFETY: the opcode reads no pointer.
+            unsafe { self.call(EFF_IDLE, 0, 0, 0.0) };
+        }
+        // A size the plugin asked for from a thread that may not touch the window. With no editor
+        // open there is nothing to size, and the request is dropped.
+        let resize = self.ctx.take_resize();
+        let Some(window) = &self.editor else { return false };
+        // SAFETY: the opcode reads no pointer.
+        unsafe { self.call(EFF_EDIT_IDLE, 0, 0, 0.0) };
+        if let Some((width, height)) = resize {
+            let _ = set_client_size(window.hwnd, width as u32, height as u32);
+        }
+        let closed = window.close_requested();
+        if closed {
+            self.close_editor();
+        }
+        closed
+    }
+
+    fn params(&mut self) -> Result<Vec<ParamDesc>, String> {
+        Ok(self.list_params())
+    }
+
+    fn state(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.save_state()
+    }
+
+    fn editor(&self) -> Editor {
+        if self.editor.is_some() { Editor::Hosted } else { Editor::Closed }
+    }
+
+    fn editor_open(&mut self) -> Result<(), String> {
+        self.embed_editor().map(show_editor)
+    }
+
+    fn editor_close(&mut self) {
+        self.close_editor();
+    }
+
+    fn quiesce(&mut self) {
+        self.suspend();
+    }
+
+    /// The unit holds the context too: it goes first, so the plugin's drop (stopped, suspended,
+    /// `effClose`) is what frees the context and then unloads the module.
+    fn release(self, unit: Option<Box<Vst2Unit>>) {
+        drop(unit);
+        drop(self);
+    }
 }
 
 #[cfg(test)]
