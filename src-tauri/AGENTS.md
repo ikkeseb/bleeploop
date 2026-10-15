@@ -302,7 +302,9 @@ plugin-GUI work.
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
 - `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
-  choreography (load, restart, eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
+  choreography (load, restart, eviction, teardown): one shared owner would keep two bugs each copy once
+  had from returning (a load answered as a success before its audio side had started, and a load that
+  finished after its timeout dropping what it had opened without closing it). Not built.
 - Two timeouts free a plugin slot before its unit has left the engine (read from source, never run):
   a load whose setup outlasts its 15 s bound empties the slot at once, while its owner may still
   install the unit and then undo it; an unload that gives up waiting (6 s) for a command still using

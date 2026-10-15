@@ -16,7 +16,7 @@ every take lands on the grid by itself: there is no latency setting.
 ## Highlights
 
 - **Your amp sim, live.** Load your plugin, pick the guitar's input and press GO LIVE. The round trip
-  is 8 ms at ASIO 64 and 15 ms at 128 on the developer's interface.
+  is 8 ms at ASIO 64 and 15 ms at 128, measured on a Focusrite Scarlett 2i2 (3rd gen).
 - **Takes land on the beat.** The engine places every take from the driver's reported latency, and
   the click is locked to the loop grid, so the click and the loops cannot drift apart.
 - **Hands stay on the guitar.** Learn any looper control onto a MIDI footswitch. The stage view (B)
@@ -28,7 +28,8 @@ every take lands on the grid by itself: there is no latency setting.
 - **More than guitar.** Six built-in synths, one of them a drum kit, and a MIDI keyboard fill the
   other layers.
 
-The installed app tells you when a newer version is out and updates itself from Help.
+The installed app tells you when a newer version is out: an UPDATE button appears in the command
+bar, and the app updates itself from there.
 
 <details>
 <summary><b>Everything it does</b></summary>
@@ -57,11 +58,13 @@ The installed app tells you when a newer version is out and updates itself from 
   Each one bypasses without a click.
 - IN FX: a tempo-synced echo, a reverb and a ring modulator on the live input, heard and recorded,
   while the dry signal and a take's timing stay untouched.
-- Stage view (B, or a learned pedal): a visualizer of the loops in two looks, switched with V. Orbit
+- Stage view (B, or a learned pedal): a visualizer of the loops in three looks, switched with V.
+  Scope, the first, draws what the engine plays: the whole output with the guitar over it, and under
+  it each track live after its FX, so a loop that repeats builds up light while a one-off fades. Orbit
   wraps each track's loop into a ring around the live input; Strata scrolls five ribbons past a now
-  line. Each track's light follows its own loop's waveform and volume (not its FX) and takes its
-  state's colour; the selected track, the bar, the beat and the count-in stay readable from where you
-  stand with the guitar.
+  line; in those two a track's light follows its loop's waveform and volume (not its FX). Each track
+  takes its state's colour; the selected track, the bar, the beat and the count-in stay readable from
+  where you stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3/VST2 plugin slots with floating plugin editors; each slot reloads its last
   plugin at launch with the settings you left it at, never armed, and an exported session carries each
@@ -69,8 +72,8 @@ The installed app tells you when a newer version is out and updates itself from 
 - Plugins are found in the standard CLAP, VST3 and VST2 folders and in any folder you add in Audio
   Settings. VST2 means 64-bit: a 32-bit one is recognised and listed there as not supported, not hosted.
 - Guitar or line input monitored through your plugin inside the engine's callback: an 8 ms round
-  trip at ASIO 64 and 15 ms at 128 on the developer's interface. Takes are placed from the driver's
-  reported latency.
+  trip at ASIO 64 and 15 ms at 128, measured on a Focusrite Scarlett 2i2 (3rd gen). Takes are placed
+  from the driver's reported latency.
 - Share output mirrors the master to a second output device, for OBS, a browser or a voice chat.
 - MIDI controllers are read natively by the app, and a MIDI footswitch, key or CC can be
   learned onto any looper control in Audio Settings: a track action on the selected track or a fixed
@@ -186,8 +189,8 @@ Live project state and open threads: [`STATUS.md`](STATUS.md).
 
 There is no JS unit-test runner. Three layers:
 
-- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that is not docs-only)
-  renders the engine offline:
+- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that
+  changes native code, not on Markdown alone) renders the engine offline:
   every looper transition, the click and grid, a golden-jam port and property tests, bit-identical
   across block sizes, and the synths and FX null-tested against reference renders of the Tone code
   they replaced.

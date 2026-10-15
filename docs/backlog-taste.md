@@ -24,10 +24,10 @@ added a line.
   the next design around: in `logs/stage-view/1920x1080-scope-rich-b.png` lane 1 has a white-hot core
   where the loop has landed while lane 2 right under it is a dim grey contour, and which is which reads
   at any distance with no label.
-  The rest misses. A taste read against the owner's own bar («helt rått å se på, imponerende, men
-  gjennomtenkt og polert», a visual show with less information and more mood, read from across the
+  The rest misses. A taste read against the owner's own bar (a show that is striking to watch and
+  impressive, yet considered and polished; less information and more mood, read from across the
   room) says: polished and legible, but it reads as a dark-mode DAW arrangement view, which is the
-  instrument panel he said he does not want. Named costs, in order: a gutter of OUT/IN/1 to 5 labels,
+  instrument panel the owner does not want. Named costs, in order: a gutter of OUT/IN/1 to 5 labels,
   eight vertical gridlines, an inset frame and a 132 px empty band under lane 5 (12 % of the screen);
   the HERO bay is the largest region and the dimmest, with the guitar a cyan hairline inside a grey
   shape, and empty in five of eight scenes; and a lane carrying an overdub shows three hues at once
@@ -37,7 +37,7 @@ added a line.
   the show, the room's output as a full-height additive field with the guitar wide and bright through
   it, so the largest region on screen is also the brightest.
   That is a reviewer's read of stills from a scripted engine, not the owner's, and the glow building
-  pass by pass is motion no still shows. His eye settles it (`STATUS.md` next jam, 4). Mockups on the
+  pass by pass is motion no still shows. The owner's eye settles it (`STATUS.md` next jam, 4). Mockups on the
   old data were tried and rejected, so a new visual proposal waits for that. The earlier per-look
   questions are superseded (git history holds them). A hitch the owner saw was under the MIDI
   benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run yet.
