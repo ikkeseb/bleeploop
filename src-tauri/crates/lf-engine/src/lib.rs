@@ -23,7 +23,7 @@
 //! | [`clock`] | tempo and its lock, the beat pulse (free-run, count-in, master), the click, the bar line a FADE ends on | `clock.ts` |
 //! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, DUB FEEDBACK, FADE, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
-//! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
+//! | [`engine`] | the callback: rings, the block split, the bus topology, master volume, the Share mix (the master without the click) | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
@@ -154,7 +154,9 @@
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
 //! the input sends, `tests/scope.rs` the live scope taps (their columns, and that the sound does not
 //! change with them on), `tests/toggles.rs` the toggles, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
-//! a lane's pan (the centre's bits against the render before pan: `effects`' unit test). `tests/perf.rs`
+//! a lane's pan (the centre's bits against the render before pan: `effects`' unit test), `tests/share_mix.rs`
+//! the Share mix (no click in it; the jam with the click at 0, bit for bit; the device output's hash from
+//! before it, Windows only). `tests/perf.rs`
 //! holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a multiply's burst, a
 //! TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
 //! sizes 1, 32, 64, 127, 128, 480 and 1024; `tests/gestures.rs` runs proptest gesture scripts (one

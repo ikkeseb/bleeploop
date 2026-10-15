@@ -74,7 +74,8 @@ bar, and the app updates itself from there.
 - Guitar or line input monitored through your plugin inside the engine's callback: an 8 ms round
   trip at ASIO 64 and 15 ms at 128, measured on a Focusrite Scarlett 2i2 (3rd gen). Takes are placed
   from the driver's reported latency.
-- Share output mirrors the master to a second output device, for OBS, a browser or a voice chat.
+- Share output mirrors the master, without the click, to a second output device while ASIO runs, for
+  OBS, a browser or a voice chat (on WASAPI, capture the app's own output: it carries the click).
 - MIDI controllers are read natively by the app, and a MIDI footswitch, key or CC can be
   learned onto any looper control in Audio Settings: a track action on the selected track or a fixed
   one, tap tempo, the click, END STOP, FIXED, RETAKE, AUTO REC, FADE and the input effects, and HOLD to

@@ -26,8 +26,11 @@ use crate::audio_output::AudioBackend;
 const SPEED: f64 = 4.0;
 /// Cycles one wake may catch up (a slow machine renders late rather than all at once).
 const MAX_BURST: usize = 64;
-/// Frames of the tape kept (the left channel by device frame).
+/// Frames of the tape kept (both channels by device frame).
 const TAPE_FRAMES: usize = 1 << 22;
+/// Frames of a Share mirror's tape (both channels by device frame), allocated when it opens: 21 s at
+/// 48 kHz.
+const SHARE_TAPE_FRAMES: usize = 1 << 20;
 /// A WASAPI endpoint buffer in periods (the rig's: 970 frames at a 441-frame period).
 const WASAPI_BUFFER_PERIODS: f64 = 2.2;
 
@@ -74,13 +77,24 @@ impl FakeDevice {
 #[derive(Default)]
 pub(crate) struct FakeShare {
     pub(crate) endpoint: String,
-    /// Frames its tap was fed, and the loudest left sample.
+    /// Frames its tap was fed, and the loudest sample on either side.
     pub(crate) frames: AtomicU64,
     pub(crate) peak: AtomicU32,
+    /// What its tap was fed, both channels by device frame (NaN where it was fed nothing), from frame 0
+    /// to [`SHARE_TAPE_FRAMES`].
+    pub(crate) tape: Mutex<Vec<[f32; 2]>>,
     /// Set by a test: the mirror's stream died.
     pub(crate) faulted: AtomicBool,
     /// The thread its tap was dropped on.
     pub(crate) tap_dropped_on: Mutex<Option<String>>,
+}
+
+impl FakeShare {
+    /// What its tap was fed over `frames`, both channels (NaN where it was fed nothing).
+    pub(crate) fn heard(&self, frames: std::ops::Range<Frame>) -> Vec<[f32; 2]> {
+        let tape = self.tape.lock().unwrap();
+        frames.map(|f| tape.get(f as usize).copied().unwrap_or([f32::NAN; 2])).collect()
+    }
 }
 
 /// The fake's knobs and what it recorded, shared with the test.
@@ -124,7 +138,7 @@ pub(crate) struct Fake {
     /// The device input: channel `c` carries `input(frame) * (c + 1)`.
     input: Mutex<Arc<dyn Fn(Frame) -> f32 + Send + Sync>>,
     /// The left channel played, by device frame (NaN where nothing played).
-    pub(crate) tape: Mutex<Vec<f32>>,
+    pub(crate) tape: Mutex<Vec<[f32; 2]>>,
     /// The device frame each output callback started at, one list per run.
     pub(crate) starts: Mutex<Vec<Vec<Frame>>>,
     pub(crate) shares: Mutex<Vec<Arc<FakeShare>>>,
@@ -174,8 +188,13 @@ impl Fake {
 
     /// The left channel played over `frames` (NaN where nothing played).
     pub(crate) fn heard(&self, frames: std::ops::Range<Frame>) -> Vec<f32> {
+        self.heard_stereo(frames).into_iter().map(|[l, _]| l).collect()
+    }
+
+    /// Both channels played over `frames` (NaN where nothing played).
+    pub(crate) fn heard_stereo(&self, frames: std::ops::Range<Frame>) -> Vec<[f32; 2]> {
         let tape = self.tape.lock().unwrap();
-        frames.map(|f| tape.get(f as usize).copied().unwrap_or(f32::NAN)).collect()
+        frames.map(|f| tape.get(f as usize).copied().unwrap_or([f32::NAN; 2])).collect()
     }
 }
 
@@ -285,13 +304,14 @@ impl Driver for FakeDriver {
         Ok(Started { streams: Streams::new(input_open.then(|| Box::new(()) as Box<dyn Send>), Box::new(Running { fake: self.0.clone(), stop, join: Some(join) })), block: spec.block, input_open })
     }
 
-    fn open_share(&mut self, endpoint: &str, _rate: u32, _block: u32, _core: &Arc<Core>) -> Result<Share, String> {
+    fn open_share(&mut self, endpoint: &str, _rate: u32, _block: u32, core: &Arc<Core>) -> Result<Share, String> {
         if self.0.share_fails.load(Acquire) {
             return Err(format!("fake: no endpoint {endpoint}"));
         }
-        let share = Arc::new(FakeShare { endpoint: endpoint.to_string(), ..FakeShare::default() });
+        let tape = Mutex::new(vec![[f32::NAN; 2]; SHARE_TAPE_FRAMES]);
+        let share = Arc::new(FakeShare { endpoint: endpoint.to_string(), tape, ..FakeShare::default() });
         self.0.shares.lock().unwrap().push(share.clone());
-        Ok((Box::new(FakeMirror(share.clone())), Box::new(FakeTap(share))))
+        Ok((Box::new(FakeMirror(share.clone())), Box::new(FakeTap { share, core: core.clone(), callback: None, off: 0 })))
     }
 }
 
@@ -444,36 +464,56 @@ impl Play {
         *in_frame += k as Frame;
     }
 
-    fn keep<T: Sample>(&self, tape: &mut Vec<f32>, frame: Frame, data: &[T], channels: usize)
+    fn keep<T: Sample>(&self, tape: &mut Vec<[f32; 2]>, frame: Frame, data: &[T], channels: usize)
     where
         f32: FromSample<T>,
     {
         self.fake.starts.lock().unwrap().last_mut().expect("a run's list").push(frame);
         let end = (frame as usize + data.len() / channels).min(TAPE_FRAMES);
         if tape.len() < end {
-            tape.resize(end, f32::NAN);
+            tape.resize(end, [f32::NAN; 2]);
         }
         for (i, s) in data.chunks_exact(channels).enumerate() {
             if let Some(slot) = tape.get_mut(frame as usize + i) {
-                *slot = f32::from_sample(s[0]);
+                *slot = [f32::from_sample(s[0]), f32::from_sample(s[channels.min(2) - 1])];
             }
         }
     }
 }
 
-struct FakeTap(Arc<FakeShare>);
+struct FakeTap {
+    share: Arc<FakeShare>,
+    core: Arc<Core>,
+    /// The frame clock at the callback that pushed last, and the frames it pushed so far: a callback
+    /// larger than the engine's `max_block` pushes in slices, and the clock moves on only after it.
+    callback: Option<Frame>,
+    off: Frame,
+}
 
 impl Tap for FakeTap {
-    fn push(&mut self, left: &[f32], _right: &[f32], _counters: &IoCounters) {
-        self.0.frames.fetch_add(left.len() as u64, Relaxed);
-        let peak = left.iter().fold(f32::from_bits(self.0.peak.load(Relaxed)), |m, s| m.max(s.abs()));
-        self.0.peak.store(peak.to_bits(), Relaxed);
+    fn push(&mut self, left: &[f32], right: &[f32], _counters: &IoCounters) {
+        self.share.frames.fetch_add(left.len() as u64, Relaxed);
+        let peak = left.iter().chain(right).fold(f32::from_bits(self.share.peak.load(Relaxed)), |m, s| m.max(s.abs()));
+        self.share.peak.store(peak.to_bits(), Relaxed);
+        // The slice's device frame (the fake loses no frames, so the clock is the callback's start).
+        let at = self.core.frame.load(Relaxed);
+        if self.callback != Some(at) {
+            (self.callback, self.off) = (Some(at), 0);
+        }
+        let start = (at + self.off) as usize;
+        self.off += left.len() as Frame;
+        let mut tape = self.share.tape.lock().unwrap();
+        for (k, (&l, &r)) in left.iter().zip(right).enumerate() {
+            if let Some(slot) = tape.get_mut(start + k) {
+                *slot = [l, r];
+            }
+        }
     }
 }
 
 impl Drop for FakeTap {
     fn drop(&mut self) {
-        *self.0.tap_dropped_on.lock().unwrap() = std::thread::current().name().map(str::to_string);
+        *self.share.tap_dropped_on.lock().unwrap() = std::thread::current().name().map(str::to_string);
     }
 }
 

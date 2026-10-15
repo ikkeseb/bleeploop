@@ -268,9 +268,10 @@ export function AudioSettings() {
         </select>
       </div>
 
-      {/* Share output: the master mirrored to a Windows device for OBS, a browser or a call,
-          while the engine runs on ASIO. A device that goes away turns it off with a toast. */}
-      <div class="audio-settings__row" title="Mirror the master to another Windows device while ASIO runs">
+      {/* Share output: the master without the click (the engine's Share mix) mirrored to a Windows
+          device for OBS, a browser or a call, while the engine runs on ASIO. A device that goes away
+          turns it off with a toast. */}
+      <div class="audio-settings__row" title="Mirror the master, without the click, to another Windows device while ASIO runs">
         <span class="audio-settings__label">share</span>
         <select
           class="audio-settings__select"
@@ -290,9 +291,9 @@ export function AudioSettings() {
         </select>
       </div>
       <div class="audio-settings__hint audio-settings__hint--info" role="note">
-        Mirrors the master to that device while ASIO runs. Pick one you don't listen on, such as a virtual
-        cable: on the interface in your ears, you hear everything twice. On WASAPI, capture BleepLoop's own
-        output instead.
+        Mirrors the master, without the click, to that device while ASIO runs: capture that device in OBS
+        or the call. Pick one you don't listen on, such as a virtual cable: on the interface in your ears,
+        you hear everything twice. On WASAPI, capture BleepLoop's own output instead: it carries the click.
       </div>
       {/* F22's other half: the Share pick looks like the interface ASIO plays on (`sharesInterface`, a
           brand/model-word match: it cannot see the hardware). A caution in the amber note, never a

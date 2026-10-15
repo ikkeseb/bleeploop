@@ -58,8 +58,9 @@ pub(crate) const LATE_FINISH_PERIODS: f64 = 2.4;
 /// counts once.
 const LATE_FINISH_QUIET: u32 = 32;
 
-/// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the rendered stereo
-/// master every block. Never blocks or allocates.
+/// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the engine's Share mix
+/// every block (`Engine::share`: the master without the click), faded as the device output is. Never
+/// blocks or allocates.
 pub(crate) trait Tap: Send {
     fn push(&mut self, left: &[f32], right: &[f32], counters: &IoCounters);
 }
@@ -520,8 +521,8 @@ enum Source {
 }
 
 /// The output callback: the one clock. It numbers the device frames, renders the engine in slices of
-/// at most its `max_block`, writes stereo to the device, fades on a switch, feeds Share output's tap,
-/// publishes the frame clock and mirrors the engine's counters.
+/// at most its `max_block`, writes stereo to the device, fades on a switch, feeds Share output's tap the
+/// Share mix, publishes the frame clock and mirrors the engine's counters.
 pub(crate) struct Render {
     core: Arc<Core>,
     run: Arc<Run>,
@@ -530,6 +531,8 @@ pub(crate) struct Render {
     source: Source,
     left: Vec<f32>,
     right: Vec<f32>,
+    /// The Share mix of the slice, for the tap.
+    share: [Vec<f32>; 2],
     zeros: Vec<f32>,
     /// The previous callback's entry and frames (WASAPI's dry buffer, the DEV trace).
     last: Option<(Instant, usize)>,
@@ -576,6 +579,7 @@ impl Render {
             source,
             left: vec![0.0; max_block],
             right: vec![0.0; max_block],
+            share: [vec![0.0; max_block], vec![0.0; max_block]],
             zeros: vec![0.0; max_block],
             last: None,
             slips: PhaseSlips::new(),
@@ -789,6 +793,9 @@ impl Render {
                     right.fill(0.0);
                 }
             }
+            // The Share mix fades frame for frame as the device output does: the same ramp from the same
+            // gain.
+            let share_gain = self.gain;
             fade(&mut self.gain, self.step, target, left, right);
             #[cfg(debug_assertions)]
             if let Some(lag) = lag.as_mut() {
@@ -801,7 +808,22 @@ impl Render {
                 tone.block(ctx.frame + off as Frame, x[1], off + m <= avail, left, right);
             }
             if let Some(tap) = tap.as_mut() {
-                tap.push(left, right, counters);
+                let [share_l, share_r] = &mut self.share;
+                let (share_l, share_r) = (&mut share_l[..m], &mut share_r[..m]);
+                match engine.as_deref() {
+                    Some(engine) => {
+                        let [l, r] = engine.share();
+                        share_l.copy_from_slice(l);
+                        share_r.copy_from_slice(r);
+                    }
+                    None => {
+                        share_l.fill(0.0);
+                        share_r.fill(0.0);
+                    }
+                }
+                let mut gain = share_gain;
+                fade(&mut gain, self.step, target, share_l, share_r);
+                tap.push(share_l, share_r, counters);
             }
             clipped |= write(&mut data[off * self.channels..(off + m) * self.channels], self.channels, left, right);
             off += m;
@@ -1272,6 +1294,70 @@ mod tests {
         assert_eq!((l, r), ([0.0; 2], [0.0; 2]));
     }
 
+    /// Share output's tap in a test: what it was fed, both channels, up to the capacity it was built
+    /// with (it never allocates).
+    struct KeptTap(Arc<Mutex<Vec<[f32; 2]>>>);
+
+    impl Tap for KeptTap {
+        fn push(&mut self, left: &[f32], right: &[f32], _counters: &IoCounters) {
+            let mut kept = self.0.lock().unwrap();
+            for (&l, &r) in left.iter().zip(right) {
+                if kept.len() < kept.capacity() {
+                    kept.push([l, r]);
+                }
+            }
+        }
+    }
+
+    /// A jam on the WASAPI join with Share output's tap in from the first block, the callback rendering
+    /// the engine in 128-frame slices: the live input monitored, a count-in and a one-bar take at 240
+    /// BPM, the loop panned left, CLICK on, half a second with the engine faulted (nothing renders),
+    /// then the fade-out. `click` is the click's volume. Returns the device output and what the tap was
+    /// fed, frame by frame.
+    fn share_jam(click: f32) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+        let mut j = Join::sliced(Some(128));
+        let kept = Arc::new(Mutex::new(Vec::with_capacity(6 * RATE as usize)));
+        j.core.rt.lock().unwrap().tap = Some(Box::new(KeptTap(kept.clone())));
+        for command in [lf_engine::Command::SetClickVolume(click), lf_engine::Command::SetBpm(240.0), lf_engine::Command::SetSlotLive(0, true), lf_engine::Command::SetMetronome(true), lf_engine::Command::RecDub(0)] {
+            j.send(0, command);
+        }
+        let mut device = Vec::new();
+        let mut play = |j: &mut Join, seconds: f64| {
+            for _ in 0..(seconds * RATE as f64 / N as f64).round() as usize {
+                device.extend(j.cycle(1).chunks_exact(2).map(|s| [s[0], s[1]]));
+            }
+        };
+        play(&mut j, 2.5);
+        let frame = j.frame();
+        j.send(frame, lf_engine::Command::RecDub(0));
+        j.send(frame, lf_engine::Command::SetPan(0, -0.6));
+        play(&mut j, 1.5);
+        j.core.rt.lock().unwrap().faulted = true;
+        play(&mut j, 0.5);
+        j.core.rt.lock().unwrap().faulted = false;
+        play(&mut j, 0.5);
+        j.render.run.fade_out.store(true, Release);
+        play(&mut j, 0.1);
+        let kept = kept.lock().unwrap().clone();
+        (device, kept)
+    }
+
+    #[test]
+    fn share_output_is_fed_the_share_mix_in_the_device_outputs_slices_and_fades() {
+        let (device, share) = share_jam(0.7);
+        let (clean, clean_share) = share_jam(0.0);
+        assert_eq!(share.len(), device.len(), "fed every frame, the faulted engine's too");
+        assert!(device.iter().zip(&clean).any(|(a, b)| a != b), "the device output carries the click");
+        // The click at 0 changes nothing else: the Share mix with the click on is the device output with
+        // it at 0, both channels, from the fade-in through the faulted engine's silence to the fade-out.
+        for (k, ((s, c), z)) in share.iter().zip(&clean).zip(&clean_share).enumerate() {
+            assert!(s == c && z == c, "frame {k}: share {s:?}, the clean device output {c:?}, its share {z:?}");
+        }
+        let panned = clean.iter().filter(|[l, r]| l != r).count();
+        assert!(panned > RATE as usize / 2, "the panned loop plays on its two channels apart: {panned} frames");
+        assert_eq!(*clean.last().unwrap(), [0.0; 2], "the run faded out");
+    }
+
     #[test]
     fn the_block_load_bins_by_share_of_the_period() {
         use super::super::{LoadHistogram, LOAD_BINS};
@@ -1351,8 +1437,16 @@ mod tests {
 
     impl Join {
         fn new() -> Join {
+            Join::sliced(None)
+        }
+
+        /// [`Join::new`], the callback rendering the engine in slices of at most `max_block` frames.
+        fn sliced(max_block: Option<u32>) -> Join {
             use super::super::pipes::{pipe, PipeConfig};
             let (core, handle) = engine_core();
+            if let Some(max_block) = max_block {
+                core.max_block.store(max_block, Relaxed);
+            }
             let run = Arc::new(Run::new([0, 0]));
             // The device owner's join (`owner.rs`): 500 ms of ring, a 25 ms setpoint.
             let join = PipeConfig { in_rate: RATE, out_rate: RATE, channels: SLOT_COUNT, capacity: RATE as usize / 2, setpoint: 0.025, max_pull: MAX_DEVICE_BLOCK };
@@ -1362,8 +1456,9 @@ mod tests {
             Join { core, input, render, handle, pushed: 0, entry: Instant::now(), events: Vec::new() }
         }
 
-        /// `periods` input periods at once, then one output block, on time.
-        fn cycle(&mut self, periods: usize) {
+        /// `periods` input periods at once, then one output block, on time: what it played (stereo,
+        /// interleaved).
+        fn cycle(&mut self, periods: usize) -> [f32; 2 * N] {
             for _ in 0..periods {
                 let data: Vec<f32> = (0..N as Frame).map(|k| code(self.pushed + k)).collect();
                 self.input.capture(&data, None);
@@ -1375,6 +1470,7 @@ mod tests {
             while let Ok(e) = self.handle.events.pop() {
                 self.events.push(e);
             }
+            out
         }
 
         fn send(&mut self, frame: Frame, command: lf_engine::Command) {

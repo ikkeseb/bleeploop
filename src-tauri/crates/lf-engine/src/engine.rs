@@ -15,6 +15,13 @@
 //! is `align_frames` + the largest live effect's latency + the limiter's. The sends add no term: the dry
 //! signal does not pass through them.
 //!
+//! The Share mix (`Engine::share`, what Share output mirrors) splits from the master bus before the
+//! click: the same master volume, a limiter of its own with the same pre-delay, then the same monitor
+//! (not limited there either). A stream hears the jam on the device output's frames and never the
+//! click. On a mix hot enough that the click pushes the limiter, the device output dips with each click
+//! (and recovers after it) where the Share mix does not. Nothing of the device output's own path changes
+//! with it (`tests/share_mix.rs`).
+//!
 //! `process` renders a block in chunks that end wherever something happens: a command's frame, a
 //! scheduled looper event, a beat, an AUTO trigger, and a render quantum's end (the FX and the reverb
 //! bus work per quantum). Every looper state change therefore lands on its exact frame, and the same
@@ -226,6 +233,11 @@ pub struct Engine {
     /// The frames `process` rendered last: the length of the taps.
     rendered: usize,
     limiter: Compressor,
+    /// The Share mix: the master bus before the click, under the master volume, then through
+    /// `share_limiter` and the monitor added. Both always run, so the Share mix is warm when Share
+    /// output turns on and the same at any block size.
+    share: [Vec<f32>; 2],
+    share_limiter: Compressor,
     master_volume: f32,
     master_muted: bool,
     master_gain: f64,
@@ -303,6 +315,8 @@ impl Engine {
             rendered: 0,
             // Built here, so its start-up gain dip passes on the first frames the device renders.
             limiter: Compressor::master_limiter(config.sample_rate as f32),
+            share: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
+            share_limiter: Compressor::master_limiter(config.sample_rate as f32),
             master_volume: 1.0,
             master_muted: false,
             master_gain: 1.0,
@@ -356,6 +370,12 @@ impl Engine {
     pub fn taps(&self) -> Taps<'_> {
         let n = self.rendered;
         Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n], record: &self.record[..n] }
+    }
+
+    /// The last block's Share mix (the header): the device output without the click.
+    pub fn share(&self) -> [&[f32]; 2] {
+        let n = self.rendered;
+        [&self.share[0][..n], &self.share[1][..n]]
     }
 
     pub fn diag(&self) -> Diag {
@@ -612,6 +632,16 @@ impl Engine {
             }
             let fading = self.looper.render(f, len, &mut self.lanes, &mut self.fades);
             self.fx.render(f, &self.lanes, fading, &self.fades, l, r);
+            // The Share mix: the bus before the click, under the master volume's glide below, frame for
+            // frame.
+            let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
+            let mut g = self.master_gain;
+            let [share_l, share_r] = &mut self.share;
+            for ((sl, sr), (&x, &y)) in share_l[k0..k1].iter_mut().zip(&mut share_r[k0..k1]).zip(l.iter().zip(r.iter())) {
+                *sl = (g * x as f64) as f32;
+                *sr = (g * y as f64) as f32;
+                g = crate::glide(g, target, self.master_coef);
+            }
             let click = &mut self.click[..len];
             click.fill(0.0);
             self.clock.render_click(f, click);
@@ -627,7 +657,6 @@ impl Engine {
                 *r += c;
             }
             self.looper.capture(f, &self.record[k0..k1]);
-            let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
             let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
             for ((((l, r), o), m), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(looper_mix.iter_mut()).zip(wet.iter().zip(sends)) {
                 let g = self.master_gain;
@@ -667,6 +696,13 @@ impl Engine {
         right.copy_from_slice(mix_r);
         self.limiter.process(start, left, right);
         for ((l, r), m) in left.iter_mut().zip(right.iter_mut()).zip(&self.monitor[..n]) {
+            *l += m;
+            *r += m;
+        }
+        let [share_l, share_r] = &mut self.share;
+        let (share_l, share_r) = (&mut share_l[..n], &mut share_r[..n]);
+        self.share_limiter.process(start, share_l, share_r);
+        for ((l, r), m) in share_l.iter_mut().zip(share_r.iter_mut()).zip(&self.monitor[..n]) {
             *l += m;
             *r += m;
         }
