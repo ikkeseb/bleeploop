@@ -30,13 +30,14 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
   state re-runs (`verify/guards/layout-store.mjs`).
 
 `verify/guards/docs.mjs` is the docs guard: cited paths exist, in a tracked `.md` and in the comments
-of tracked `.rs`, `.ts`, `.tsx` and `.mjs` files (a path from a top-level directory, bare or
-backticked; the briefings in `//!` are comments), cited shas resolve (a backticked 7–10 hex characters with a letter; skipped in a shallow clone; the repo
+of tracked `.rs`, `.ts`, `.tsx` and `.mjs` files (a path from a top-level directory, `.github/` too,
+bare or backticked, resolved from the root or the file's own crate; the briefings in `//!` are
+comments), cited shas resolve (a backticked 7–10 hex characters with a letter; skipped in a shallow clone; the repo
 started from one squashed commit, so no doc may cite an earlier sha), the invariant titles in
 `AGENTS.md` and `docs/ARCHITECTURE.md` match, `STATUS.md`'s next jam has ≤ 5 items, and no tracked
 `.md` holds an em dash. A dead path kept on purpose says so in its own clause ("(now `…`)",
-"(removed)", "not yet built", "upstream"), and the guard skips it; a mark in another clause of the
-line does not count. `verify/guards/third-party.mjs` holds `THIRD-PARTY-NOTICES.md` to the shipped
+"(removed)", "not yet built", "upstream"), and the guard skips it. A mark covers one citation, the
+nearest in its own clause ("(now `…`)": the name before it), so it never hides a second path. `verify/guards/third-party.mjs` holds `THIRD-PARTY-NOTICES.md` to the shipped
 crates' and packages' direct runtime dependencies at their locked versions.
 
 A guard counts only once it went red on a deliberately planted bug in the code it claims to cover. A

@@ -67,8 +67,9 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
     setTimeout(() => inputRef?.select(), 0);
   }
 
-  // One-shot "tempo just locked" pulse. The engine freezes BPM at the first master-loop commit (the
-  // feed's `Transport` event says `locked`); without a visible cue that freeze is silent/surprising.
+  // One-shot "tempo just locked" pulse. The engine freezes BPM when the first take's count-in starts
+  // (AUTO REC: at its onset), and the feed's `Transport` event then says `locked`; without a visible cue
+  // that freeze is silent/surprising.
   // Fire a brief pulse only on the false->true edge (not on mount, not on unlock).
   const [justLocked, setJustLocked] = createSignal(false);
   let prevLocked = clock.bpmLocked();

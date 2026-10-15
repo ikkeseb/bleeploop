@@ -189,8 +189,8 @@ Live project state and open threads: [`STATUS.md`](STATUS.md).
 
 There is no JS unit-test runner. Three layers:
 
-- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that touches `src-tauri/`)
-  renders the engine offline:
+- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that
+  changes native code, not on Markdown alone) renders the engine offline:
   every looper transition, the click and grid, a golden-jam port and property tests, bit-identical
   across block sizes, and the synths and FX null-tested against reference renders of the Tone code
   they replaced.

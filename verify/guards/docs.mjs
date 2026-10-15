@@ -10,9 +10,10 @@
 // the OWNER tier (the docs agents route by) is checked for bare filenames too; every other tracked
 // .md only for slashed paths, since its bare names are often upstream crate files. A citation
 // may keep a deliberately dead path by saying so in its own clause (the text between `;`, `:` or a
-// sentence end; `(now \`…\`)`, "(removed)", "not yet built", "upstream", "e.g.", … — see DELIBERATE),
-// so one historical reference does not hide a live one beside it. A code comment is read for paths
-// from a top-level directory (`src/…`, `verify/…`, `src-tauri/…`), bare or in backticks, and only real
+// sentence end; `(now \`…\`)`, "(removed)", "not yet built", "upstream", "e.g.", … — see DELIBERATE);
+// a mark covers the one citation nearest it, so a historical reference does not hide a live one
+// beside it. A code comment is read for paths from a top-level directory (`src/…`, `verify/…`,
+// `.github/…`), bare or in backticks, resolved from the root or the file's own crate, and only real
 // comments are read (a lexer skips string, template, char and regex literals). Shas: 7–10 hex WITH at least one letter (an all-digit run is a number, e.g. a
 // VST3 param id). The cap keeps STATUS.md's next jam (the numbered items under "## Next jam") a list
 // one ordinary jam can cover; the rest waits under "## Not heard yet". Raising NEXT_JAM_CAP is the
@@ -86,7 +87,7 @@ function check(ok, msg) {
 const onDisk = (f) => existsSync(resolve(ROOT, f));
 const mdFiles = git('ls-files', '-z', '*.md', '**/*.md').split('\0').filter(Boolean).filter(onDisk);
 const trackedSet = new Set(git('ls-files', '-z').split('\0').filter(Boolean).filter(onDisk));
-const TOP_DIRS = new Set([...trackedSet].map((t) => t.split('/')[0]).filter((d) => !d.includes('.')));
+const TOP_DIRS = new Set([...trackedSet].filter((t) => t.includes('/')).map((t) => t.split('/')[0]));
 
 // ── 1. backtick paths ──────────────────────────────────────────────────────────────────────
 /** Reduce a backtick span to a candidate path, or null if it does not look like one. */
@@ -113,30 +114,31 @@ function pathExists(p, fromDir) {
   return false;
 }
 
-/** A cited path that is no artifact, not under the root or the citing file's directory, and no relative
- *  tail (`machine.ts`, `host/clap.rs`, `audio/plugin-bridge.ts`) of a tracked file. */
-function dead(p, fromDir) {
+/** A cited path that is no artifact, not under the root or `fromDir`, and (unless `tail` is off) no
+ *  relative tail (`machine.ts`, `host/clap.rs`, `audio/plugin-bridge.ts`) of a tracked file. */
+function dead(p, fromDir, tail = true) {
   if (UNTRACKED_OK.some((re) => re.test(p))) return false;
   if (pathExists(p, fromDir)) return false;
+  if (!tail) return true;
   return ![...trackedSet].some((t) => t.endsWith('/' + p) || t === p);
 }
 
 const dangling = [];
 for (const md of mdFiles) {
-  const text = readFileSync(resolve(ROOT, md), 'utf8');
   const fromDir = dirname(resolve(ROOT, md));
-  const seen = new Set();
-  for (const m of text.matchAll(/`([^`\n]+)`/g)) {
-    const p = candidatePath(m[1]);
-    if (!p || seen.has(p)) continue;
-    if (!p.includes('/') && !OWNER_TIER.has(md)) continue;
-    seen.add(p);
-    if (!dead(p, fromDir)) continue;
-    const lineNo = text.slice(0, m.index).split('\n').length;
-    const lineText = text.split('\n')[lineNo - 1];
-    if (markedDead(lineText, m.index - text.lastIndexOf('\n', m.index - 1) - 1, p)) continue;
-    dangling.push(`${md}:${lineNo}  \`${p}\`   ← ${lineText.trim().slice(0, 110)}`);
-  }
+  const reported = new Set();
+  readFileSync(resolve(ROOT, md), 'utf8').split('\n').forEach((lineText, i) => {
+    const cites = [];
+    for (const m of lineText.matchAll(/`([^`\n]+)`/g)) {
+      const p = candidatePath(m[1]);
+      if (p && (p.includes('/') || OWNER_TIER.has(md))) cites.push({ p, at: m.index, end: m.index + m[0].length });
+    }
+    for (const { p } of unmarked(lineText, cites)) {
+      if (reported.has(p) || !dead(p, fromDir)) continue;
+      reported.add(p);
+      dangling.push(`${md}:${i + 1}  \`${p}\`   ← ${lineText.trim().slice(0, 110)}`);
+    }
+  });
 }
 
 // ── 1b. paths in code comments ────────────────────────────────────────────────────────────────────
@@ -148,6 +150,8 @@ function comments(src, rust) {
   const n = src.length;
   let line = 1;
   let prev = ''; // the last code character, to tell a regex literal from a division
+  let word = ''; // the identifier or keyword `prev` ends, if any (`return /x/` is a regex)
+  const tpl = []; // per open template interpolation (`${`), its unclosed `{` count
   const emit = (text) => {
     for (const t of text.split('\n')) out.push([line++, t]);
     line--;
@@ -157,11 +161,23 @@ function comments(src, rust) {
     let j = i + 1;
     while (j < n && src[j] !== q) {
       if (src[j] === '\\') j++;
-      else if (src[j] === '\n' && !rust && q !== '`') break;
+      else if (src[j] === '\n' && !rust) break;
       j++;
     }
     return j + 1;
   };
+  /** Index past the template text from `i`: past its closing backtick, or past a `${`, which opens an
+   *  interpolation (code, comments included) that a `}` at its own depth closes. */
+  const template = (i) => {
+    let j = i;
+    while (j < n && src[j] !== '`' && !(src[j] === '$' && src[j + 1] === '{')) j += src[j] === '\\' ? 2 : 1;
+    if (j < n && src[j] === '$') {
+      tpl.push(0);
+      return j + 2;
+    }
+    return j + 1;
+  };
+  const JS_BEFORE_REGEX = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
   let i = 0;
   while (i < n) {
     const c = src[i];
@@ -194,14 +210,19 @@ function comments(src, rust) {
       const raw = /^[bc]?r(#*)"/.exec(src.slice(i, i + 300));
       if (raw) end = src.indexOf('"' + raw[1], i + raw[0].length) + 1 + raw[1].length;
     }
-    if (end === -1 && (c === '"' || (!rust && (c === "'" || c === '`')))) end = quoted(i, c);
+    if (end === -1 && !rust && c === '`') end = template(i + 1);
+    if (end === -1 && !rust && c === '}' && tpl.length && tpl[tpl.length - 1] === 0) {
+      tpl.pop();
+      end = template(i + 1);
+    }
+    if (end === -1 && (c === '"' || (!rust && c === "'"))) end = quoted(i, c);
     if (end === -1 && rust && c === "'") {
       // A char literal ('x', '\n', '\u{2014}'), or a lifetime ('a), which has no closing quote.
       const cp = src.codePointAt(i + 1) ?? 0;
       if (src[i + 1] === '\\') end = src.indexOf("'", i + 3) + 1;
       else if (src[i + 1 + (cp > 0xffff ? 2 : 1)] === "'") end = i + 2 + (cp > 0xffff ? 2 : 1);
     }
-    if (end === -1 && !rust && c === '/' && !/[\w)\]$]/.test(prev)) {
+    if (end === -1 && !rust && c === '/' && (!/[\w)\]$]/.test(prev) || JS_BEFORE_REGEX.test(word))) {
       let j = i + 1; // a regex literal: up to the closing slash outside a class
       let cls = false;
       while (j < n && src[j] !== '\n' && (cls || src[j] !== '/')) {
@@ -214,12 +235,18 @@ function comments(src, rust) {
     }
     if (end > i) {
       for (let k = i; k < end && k < n; k++) if (src[k] === '\n') line++;
-      prev = 'x';
+      prev = src[end - 1] === '{' ? '{' : 'x'; // past a `${`, an expression starts
+      word = '';
       i = end;
       continue;
     }
+    if (tpl.length && c === '{') tpl[tpl.length - 1]++;
+    if (tpl.length && c === '}') tpl[tpl.length - 1]--;
     if (c === '\n') line++;
-    else if (!/\s/.test(c)) prev = c;
+    else if (!/\s/.test(c)) {
+      word = /\w/.test(c) ? (/\w/.test(src[i - 1] ?? '') ? word + c : c) : '';
+      prev = c;
+    }
     i++;
   }
   return out;
@@ -230,24 +257,43 @@ function comments(src, rust) {
  *  file by the engine briefing's own convention (`src-tauri/crates/lf-engine/src/lib.rs`), so it is not
  *  read. */
 function citedPaths(text) {
-  const found = new Map(); // path -> index in the text
-  const add = (raw, at) => {
+  const found = []; // every occurrence, so a marked one never hides an unmarked one
+  const add = (raw, at, end) => {
     const p = candidatePath(raw);
-    if (p && p.includes('/') && TOP_DIRS.has(p.split('/')[0]) && !found.has(p)) found.set(p, at);
+    if (p && p.includes('/') && TOP_DIRS.has(p.split('/')[0])) found.push({ p, at, end });
   };
-  for (const m of text.matchAll(/`([^`]+)`/g)) add(m[1], m.index);
+  for (const m of text.matchAll(/`([^`]+)`/g)) add(m[1], m.index, m.index + m[0].length);
   const bare = text.replace(/`[^`]+`/g, (span) => ' '.repeat(span.length)); // a span is read above
-  for (const m of bare.matchAll(/(?<![\w./@-])[a-z][\w-]*\/[\w./@-]*\w/gi)) add(m[0], m.index);
-  return found;
+  for (const m of bare.matchAll(/(?<![\w./@-])\.?[a-z][\w-]*\/[\w./@-]*\w/gi)) add(m[0], m.index, m.index + m[0].length);
+  return found.sort((a, b) => a.at - b.at);
 }
 
-/** Whether the clause of `text` around `at` marks `p` as deliberately dead: a mark counts for its own
- *  clause only, and the path's own name (e.g. `src/gone.ts`) is no mark. */
-function markedDead(text, at, p) {
-  return DELIBERATE.test(clause(text, at).split(p).join(' '));
+/** The citations of one line (`{ p, at, end }`, `at`..`end` the span with its backticks, in text
+ *  order) that no deliberate mark covers. A mark covers one citation: the nearest in its own clause,
+ *  or for "(now `…`)" / "(was `…`)" the one before it (the old name). A citation's own name
+ *  (a path ending in "gone.ts") is no mark. */
+function unmarked(text, cites) {
+  const chars = [...text];
+  for (const c of cites) for (let k = c.at; k < c.end; k++) if (text[k] !== '`') chars[k] = ' ';
+  const blank = chars.join('');
+  const covered = new Set();
+  for (const m of blank.matchAll(new RegExp(DELIBERATE.source, 'gi'))) {
+    const from = m.index;
+    const to = from + m[0].length;
+    const [lo, hi] = clause(text, from);
+    const near = cites.filter((c) => c.at >= lo && c.end <= hi);
+    let pick;
+    if (m[0].endsWith('`')) pick = near.filter((c) => c.end <= from).at(-1);
+    else {
+      const gap = (c) => Math.max(0, c.at - to, from - c.end);
+      for (const c of near) if (!pick || gap(c) < gap(pick)) pick = c;
+    }
+    if (pick) covered.add(pick);
+  }
+  return cites.filter((c) => !covered.has(c));
 }
 
-/** The clause of `text` around `at`. */
+/** The bounds `[from, to)` of the clause of `text` around `at`: cut at `;`, `:` or a sentence end. */
 function clause(text, at) {
   const cut = /[;:]\s|(?<!\b(?:e\.g|i\.e))\.\s/g;
   let from = 0;
@@ -259,7 +305,7 @@ function clause(text, at) {
       break;
     }
   }
-  return text.slice(from, to);
+  return [from, to];
 }
 
 // Dead citations in files other work owned when this scan landed (2026-10), one `file  path` each.
@@ -299,16 +345,28 @@ const deadOkUsed = new Set();
 
 const CODE = /\.(rs|ts|tsx|mjs)$/;
 const codeFiles = [...trackedSet].filter((f) => CODE.test(f) && !f.startsWith('node_modules/'));
+/** The directory of the crate a file belongs to (its nearest tracked Cargo.toml), else the root. A
+ *  code comment's path resolves from the root or from its own crate (an lf-engine test cites the
+ *  crate's grid.rs from the crate root), never as the tail of any file: a crate's lib.rs cited from the
+ *  root package is dead there. */
+function crateDir(file) {
+  for (let dir = dirname(file); dir !== '.'; dir = dirname(dir)) {
+    if (trackedSet.has(`${dir}/Cargo.toml`)) return resolve(ROOT, dir);
+  }
+  return ROOT;
+}
+
 for (const file of codeFiles) {
-  const fromDir = dirname(resolve(ROOT, file));
+  const fromDir = crateDir(file);
+  const reported = new Set();
   for (const [lineNo, text] of comments(readFileSync(resolve(ROOT, file), 'utf8'), file.endsWith('.rs'))) {
-    for (const [p, at] of citedPaths(text)) {
-      if (!dead(p, fromDir)) continue;
-      if (markedDead(text, at, p)) continue;
+    for (const { p } of unmarked(text, citedPaths(text))) {
+      if (reported.has(p) || !dead(p, fromDir, false)) continue;
       if (DEAD_OK.has(`${file}  ${p}`)) {
         deadOkUsed.add(`${file}  ${p}`);
         continue;
       }
+      reported.add(p);
       dangling.push(`${file}:${lineNo}  \`${p}\`   ← ${text.trim().slice(0, 110)}`);
     }
   }
@@ -325,12 +383,28 @@ check(
   JSON.stringify(comments(plantedRs, true)) === JSON.stringify([[1, ' src/live.rs'], [2, ' a /* nested */ src/n.rs ']]),
   `the Rust lexer read ${JSON.stringify(comments(plantedRs, true))}`,
 );
-const mixed = '`src/a.ts` (removed); `src/b.ts` holds it; e.g. `src/c.ts`';
+const plantedJs = 'function f() { return /["/]/; } // src/re.ts\nconst t = `a ${ /* src/i.ts */ {b: `${c}`}.b } // src/no.ts`; // src/yes.ts';
 check(
-  markedDead(mixed, 0, 'src/a.ts') && !markedDead(mixed, 22, 'src/b.ts') && markedDead(mixed, 48, 'src/c.ts'),
-  'a deliberate mark reaches past its own clause, or stops at an "e.g."',
+  JSON.stringify(comments(plantedJs, false)) ===
+    JSON.stringify([[1, ' src/re.ts'], [2, ' src/i.ts '], [2, ' src/yes.ts']]),
+  `the TS lexer, on a regex after a keyword and template interpolations, read ${JSON.stringify(comments(plantedJs, false))}`,
 );
-check(!markedDead('see `src/gone.ts`', 4, 'src/gone.ts'), "a path's own name counted as its mark");
+/** The citations of a planted comment no mark covers. */
+const open = (text) => unmarked(text, citedPaths(text)).map((c) => c.p).join(' ');
+for (const [text, want, why] of [
+  ['`src/a.ts` (removed); `src/b.ts` holds it; e.g. `src/c.ts`', 'src/b.ts', 'a mark reaches past its own clause, or stops at an "e.g."'],
+  ['`src/old.ts` (removed), now implemented in `src/new.ts`', 'src/new.ts', 'a mark covers a second path in its clause'],
+  ['`src/old.ts` (now `src/new.ts`)', 'src/new.ts', 'a "(now `…`)" covers the new name'],
+  ['src/x.ts (removed) was the first; src/x.ts is the second', 'src/x.ts', 'a marked citation hides an unmarked one of the same path'],
+  ['see `src/gone.ts`', 'src/gone.ts', "a path's own name counted as its mark"],
+  ['see .github/workflows/x.yml', '.github/workflows/x.yml', 'a hidden top-level directory is not read'],
+]) {
+  check(open(text) === want, `${why}: "${text}" left "${open(text)}" unmarked, want "${want}"`);
+}
+check(
+  dead('src/lib.rs', crateDir('src/app.tsx'), false) && !dead('src/grid.rs', crateDir(`${LF}tests/retake.rs`), false),
+  'a code comment resolves a path other than from the root or its own crate',
+);
 
 for (const d of dangling) check(false, `dangling path ref  ${d}`);
 check(true, 'path scan ran');

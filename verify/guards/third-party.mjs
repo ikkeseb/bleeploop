@@ -1,11 +1,11 @@
 // verify/guards/third-party.mjs: THIRD-PARTY-NOTICES.md (installed beside the exe) lists every direct
 // runtime dependency of what ships, at the version the lockfile resolves, and nothing else. Shipped:
 // package.json `dependencies` (pnpm-lock.yaml), and the `[dependencies]` and
-// `[target.'…'.dependencies]` tables of src-tauri/Cargo.toml and the lf-engine crate it links
-// (Cargo.lock: the version that crate's own lock entry depends on). Dev and build dependencies do not
-// ship; a `path` dependency (lf-engine) is first-party, so its own external dependencies count instead.
-// Transitive dependencies are not listed in the notices, so they are not checked. midir went missing
-// for a release (v0.8.4) before this guard.
+// `[target.'…'.dependencies]` tables (and their `.<name>` subtables) of src-tauri/Cargo.toml and the
+// lf-engine crate it links (Cargo.lock: the version that crate's own lock entry depends on). Dev and
+// build dependencies do not ship; a `path` dependency (lf-engine) is first-party, so its own external
+// dependencies count instead. Transitive dependencies are not listed in the notices, so they are not
+// checked. midir went missing for a release (v0.8.4) before this guard.
 //
 // Each reader is first run on planted texts, then on the repo. Run: node verify/guards/third-party.mjs
 
@@ -29,27 +29,38 @@ function check(name, fn) {
   }
 }
 
-/** Direct runtime dependency names of a Cargo.toml, path (first-party) dependencies left out. */
+/** Direct runtime dependency names of a Cargo.toml, path (first-party) dependencies left out. A
+ *  dependency is declared as a key of a dependencies table (`serde = …`, `serde.version = …`) or as a
+ *  table of its own (`[dependencies.serde]`, `[target.'…'.dependencies.serde]`). */
 function cargoRuntimeDeps(toml) {
-  const deps = [];
+  const deps = new Map(); // name -> whether it is a path dependency
   let runtime = false;
+  let own = null; // the dependency a `[…dependencies.<name>]` table declares
   let current = null; // the dependency whose value is still open (a multi-line inline table)
   for (const line of toml.split('\n')) {
     const header = line.match(/^\[([^\]]+)\]\s*(#.*)?$/);
     if (header) {
-      runtime = /^(target\.[^\]]+\.)?dependencies$/.test(header[1].trim());
+      const table = header[1].trim().match(/^(?:target\.(?:'[^']*'|"[^"]*"|[^.]+)\.)?dependencies(?:\.(.+))?$/);
+      runtime = !!table;
+      own = table?.[1]?.replace(/^["']|["']$/g, '') ?? null;
+      if (own && !deps.has(own)) deps.set(own, false);
       current = null;
       continue;
     }
     if (!runtime) continue;
-    const entry = line.match(/^([A-Za-z0-9_-]+)\s*=/);
-    if (entry) {
-      current = { name: entry[1], path: false };
-      deps.push(current);
+    const isPath = /\bpath\s*=/.test(line.replace(/#.*$/, ''));
+    if (own) {
+      if (isPath) deps.set(own, true);
+      continue;
     }
-    if (current && /\bpath\s*=/.test(line.replace(/#.*$/, ''))) current.path = true;
+    const entry = line.match(/^([A-Za-z0-9_-]+)(\.[A-Za-z0-9_.-]+)?\s*=/);
+    if (entry) {
+      current = entry[1];
+      if (!deps.has(current)) deps.set(current, false);
+    }
+    if (current && isPath) deps.set(current, true);
   }
-  return deps.filter((d) => !d.path).map((d) => d.name);
+  return [...deps].filter(([, path]) => !path).map(([name]) => name);
 }
 
 /** name → resolved version for the direct dependencies of one package in a Cargo.lock. */
@@ -118,6 +129,9 @@ tauri-build = "2"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 first-party = { path = "crates/first-party" }
+log.version = "0.4"
+log.features = ["std"]
+local.path = "crates/local"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
@@ -127,6 +141,15 @@ asio-sys = { version = "=0.3.0", optional = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 clap-sys = "=0.5.0"
+
+[target.'cfg(windows)'.dependencies.sha2]
+version = "0.10"
+
+[dependencies.other-first-party]
+path = "crates/other"
+
+[dev-dependencies.proptest]
+version = "1"
 
 [profile.dev.package."*"]
 opt-level = 3
@@ -184,8 +207,8 @@ const NOTICES = `# Notices
 |---|---|---|
 | serde | 1.0.229 | MIT OR Apache-2.0 |
 `;
-check('runtime tables only: no build, dev, profile or path dependency', () =>
-  assert.deepStrictEqual(cargoRuntimeDeps(TOML), ['serde', 'windows', 'asio-sys']));
+check('runtime tables and subtables only: no build, dev, profile or path dependency', () =>
+  assert.deepStrictEqual(cargoRuntimeDeps(TOML), ['serde', 'log', 'windows', 'asio-sys', 'sha2']));
 check('a lock entry with a version picks that version among several', () =>
   assert.deepStrictEqual([...cargoLockDeps(LOCK, 'app')], [['serde', '1.0.229'], ['windows', '0.61.3']]));
 check('pnpm: runtime dependencies only, scoped names read', () =>
