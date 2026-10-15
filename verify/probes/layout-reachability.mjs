@@ -65,7 +65,7 @@ await probe(async ({ open }) => {
       { Transport: { frame: 0, master: loop ? master : 0, bpm: 120, locked: loop } },
       ...states.map((state, lane) => ({ Lane: { frame: 0, lane, info: laneInfo(state, state === 'Empty' ? 0 : master) } })),
       { Selected: { frame: 0, lane: 0 } }],
-      anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 }, meter: { peak: 0, clip: false },
+      anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 }, meter: { peak: [0, 0], clip: [false, false] },
       peaks: states.flatMap((state, lane) => state === 'Empty' ? [] : [{ lane, start: 0, count: 4, min: [-0.2, -0.5, -0.3, -0.1], max: [0.2, 0.5, 0.3, 0.1] }]) });
   };
   for (const [width, height] of [[960, 600], [1400, 900]]) {

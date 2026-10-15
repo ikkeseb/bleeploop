@@ -310,7 +310,7 @@ await probe(async ({ browser, open }) => {
         stopAt: null, fading: false, retakePass: 0 } } })),
       { Transport: { frame: 0, master: 0, bpm: 140, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
       anchor: { frame: 0, atMs: t0, rate, grid: 0 },
-      meter: { peak: 0.03, clip: false },
+      meter: { peak: [0.03, 0], clip: [false, false] },
       peaks: [],
     }), { status: STATUS, rate: RATE, t0 });
     const source = page.getByRole('combobox', { name: 'Source for slot 1', exact: true });
@@ -457,7 +457,7 @@ await probe(async ({ browser, open }) => {
         seq: ++seq, reset: false, device: [],
         events: eventsBetween(prev, frame),
         anchor: { frame, atMs: t0 + (frame * 1000) / RATE, rate: RATE, grid },
-        meter: { peak: meterAt(frame), clip: false },
+        meter: { peak: [meterAt(frame), 0], clip: [false, false] },
         peaks: peaksBetween(prev, frame),
       });
       if (dir && prev < RESET && frame >= RESET) {

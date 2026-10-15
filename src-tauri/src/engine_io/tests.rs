@@ -1369,6 +1369,33 @@ fn each_slot_reads_its_own_capture_channel_on_asio_and_wasapi() {
     assert_eq!((diag.rt_allocs, diag.join_starves, diag.join_overruns), (0, 0, 0), "{diag:?}");
 }
 
+/// The fake's four channels again (channel c carries (c + 1) × the input): the meter reads each slot's
+/// own capture channel, live or not, so a clip on one slot's input lights that slot's clip alone.
+#[test]
+fn the_meter_reads_each_slots_own_capture_channel() {
+    let h = Harness::new();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 4;
+    h.fake.set_input(|_| 0.25);
+    // The meter over a tenth of a second, after one to let the last change settle: each slot's peak
+    // (WASAPI's sample conversion leaves it within 1e-6) and clip.
+    let assert_metered = |peak: [f32; SLOT_COUNT], clip: [bool; SLOT_COUNT], what: &str| {
+        h.play(RATE / 10);
+        h.host.take_meter();
+        h.play(RATE / 10);
+        let (got, clipped) = h.host.take_meter();
+        assert!(got.iter().zip(peak).all(|(g, p)| (g - p).abs() < 1e-6) && clipped == clip, "{what}: {got:?} {clipped:?}");
+    };
+    for request in [asio(Some(256)), wasapi(None, None)] {
+        let backend = request.backend;
+        h.open(DeviceRequest { input_channels: [Some(0), Some(3)], ..request });
+        assert_metered([0.25, 1.0], [false, true], &format!("{backend:?}: input 1 on slot 0, input 4 at full scale on slot 1"));
+        h.host.set_slot_input_channel(1, Some(1)).unwrap();
+        assert_metered([0.25, 0.5], [false, false], &format!("{backend:?}: slot 1 moved to input 2"));
+    }
+    assert_eq!(h.host.diag().rt_allocs, 0, "the meter allocates nothing on the audio thread");
+}
+
 #[test]
 fn auto_is_input_two_for_each_slot_an_open_takes_auto_for_a_missing_channel_and_a_change_to_one_is_refused() {
     let h = Harness::new();
@@ -1653,8 +1680,8 @@ fn the_feed_resyncs_a_new_subscriber_and_a_new_engine() {
     let anchor = feed_until(&mut feed, &mut seen, "the running device's anchor", |f| f.anchor.is_some()).anchor.unwrap();
     assert_eq!(anchor.rate, 48_000);
     assert!(anchor.frame >= 0 && anchor.at_ms > 1.7e12, "a device frame at a Unix time");
-    let meter = feed_until(&mut feed, &mut seen, "the input meter moves", |f| f.meter.is_some_and(|m| m.peak > 0.0)).meter.unwrap();
-    assert!(meter.peak <= 0.5 && !meter.clip, "the tone's peak, no clip");
+    let meter = feed_until(&mut feed, &mut seen, "the input meter moves", |f| f.meter.is_some_and(|m| m.peak[0] > 0.0)).meter.unwrap();
+    assert!(meter.peak.iter().all(|&p| p <= 0.5) && meter.clip == [false; SLOT_COUNT], "the tone's peak, no clip");
     let kept = |f: &super::wire::FeedFrame| f.events.iter().any(|e| matches!(e.0, Event::Transport { bpm: 240, .. }));
     if !seen.iter().any(kept) {
         feed_until(&mut feed, &mut seen, "the kept tempo on the transport", kept);
@@ -1771,7 +1798,7 @@ fn a_wasapi_endpoint_with_no_input_plays_output_only() {
     assert!(h.frame() > frame, "the device plays");
     assert!(h.host.set_slot_input_channel(1, Some(0)).is_ok(), "a channel pick changes nothing and is no error");
     let (peak, _) = h.host.take_meter();
-    assert_eq!(peak, 0.0, "the input is silence");
+    assert_eq!(peak, [0.0; SLOT_COUNT], "the input is silence");
     assert_eq!(h.host.diag().join_starves, 0, "a join that never had input is no starve");
     h.fake.wasapi.lock().unwrap()[0].1.in_channels = 2;
     assert!(h.open(asio(Some(256))).input_open);

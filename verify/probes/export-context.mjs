@@ -58,7 +58,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [transport(0), ...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   await page.evaluate(() => window.__lf.autosave.ready());
 
@@ -298,7 +298,7 @@ await probe(async ({ open }) => {
     events: [transport(EIGHT), laneEvent(0, lane('Playing', { length: EIGHT })), ...[1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))),
       { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: 44100, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   const readout = () => slow.page.locator('.transport__loop-v').textContent();
   const running = await readout();

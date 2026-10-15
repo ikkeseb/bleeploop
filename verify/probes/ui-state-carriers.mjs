@@ -90,7 +90,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   // ■ ALL during a first take (its count-in).
@@ -113,10 +113,10 @@ await probe(async ({ open }) => {
   assert.match(liveText ?? '', /Track 2 take recorded/);
 
   // The record meter carries its level as text.
-  await emit({ meter: { peak: 0.5, clip: false } });
+  await emit({ meter: { peak: [0.5, 0], clip: [false, false] } });
   await page.waitForTimeout(300);
   assert.match(await page.locator('[role="meter"]').getAttribute('aria-valuetext'), /-?\d+ dBFS/);
-  await emit({ meter: { peak: 0, clip: false } });
+  await emit({ meter: { peak: [0, 0], clip: [false, false] } });
 
   assert.equal(await page.locator('.cmd__lamp').getAttribute('role'), 'img');
 

@@ -355,7 +355,7 @@ await probe(async ({ browser, open }) => {
       settings: [],
       events: [...empties(0, 1, 2, 3, 4), transport(0, false, 120), { Selected: { frame: 0, lane: 0 } }],
       anchor: anchorAt(0),
-      meter: { peak: 0, clip: false },
+      meter: { peak: [0, 0], clip: [false, false] },
     });
   };
   const VIEWS = await page.evaluate(() => import('/src/ui/stage/views.ts').then((m) => m.STAGE_VIEWS.map((v) => ({ id: v.id, name: v.name, wantsScope: v.wantsScope === true }))));
@@ -432,7 +432,7 @@ await probe(async ({ browser, open }) => {
       ],
       anchor: anchorAt(at),
       peaks: [0, 1, 2, 3].map((i) => wave(i, LOOP)),
-      meter: { peak: 0.32, clip: false },
+      meter: { peak: [0.32, 0], clip: [false, false] },
     });
     await page.evaluate(() => window.__lf.looper.setMute(1, true));
     if (settleMs > 0) await settle(settleMs);
@@ -1233,7 +1233,7 @@ await probe(async ({ browser, open }) => {
       await setOpen(true);
       await showView(v.id);
       await loops(5, 'Playing');
-      await emit({ meter: { peak: 0.3, clip: false } });
+      await emit({ meter: { peak: [0.3, 0], clip: [false, false] } });
       await page.mouse.move(900, 500);
       await settle(3200); // the two buttons gone
       // The JIT's warm-up: the frame run by hand until its code is optimised (unoptimised code boxes

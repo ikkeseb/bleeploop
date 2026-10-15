@@ -38,7 +38,7 @@ const RESET = {
     { Selected: { frame: 0, lane: 0 } },
   ],
   anchor: { frame: 0, atMs: 0, rate: 48000, grid: 0 },
-  meter: { peak: 0, clip: false },
+  meter: { peak: [0, 0], clip: [false, false] },
 };
 
 /** A batch's items as short words: `engine:SetBpm`, `on:60`, `off:60`, `target`, `blur`. */

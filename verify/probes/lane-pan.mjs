@@ -58,7 +58,7 @@ await probe(async ({ open }) => {
       settings: [],
       events: [{ Transport: { frame: 0, master: MASTER, bpm: 120, locked: true } }, ...STATES.map((s, i) => laneEvent(i, s)), { Selected: { frame: 0, lane: 0 } }],
       anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-      meter: { peak: 0, clip: false },
+      meter: { peak: [0, 0], clip: [false, false] },
       peaks: [],
     });
     await page.locator('.lp-lane').first().and(page.locator('[data-state="play"]')).waitFor({ timeout: 5000 });

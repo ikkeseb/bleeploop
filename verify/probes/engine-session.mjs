@@ -84,7 +84,7 @@ await probe(async ({ browser, open }) => {
       { Selected: { frame: 0, lane: 0 } },
     ],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   const pcm = await page.evaluate(async (master) => {
     const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');

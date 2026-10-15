@@ -145,7 +145,7 @@
   display: flex;
   align-items: center;
   gap: clamp(9px, 1vw, 13px);
-  width: clamp(196px, 19vw, 236px);
+  width: clamp(200px, 19vw, 256px);
   position: relative;
   z-index: 1;
 }
@@ -154,7 +154,26 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 74px;
+  width: clamp(80px, 6.6vw, 108px); /* the number and, on the selected lane, "A+B LIVE" beside it */
+}
+/* the number's row: the number, and on the selected lane the live source a take there would hear */
+.lp-lane__head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.lp-lane__src {
+  flex: 0 0 auto;
+  font-size: clamp(10px, 0.68vw, 13px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 0.3em 0.45em;
+  border-radius: 4px;
+  color: var(--play);
+  border: 1px solid color-mix(in srgb, var(--play) 55%, transparent);
+  white-space: nowrap;
 }
 .lp-lane__num {
   font-size: clamp(19px, 1.7vw, 24px);

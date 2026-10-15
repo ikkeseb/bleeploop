@@ -150,7 +150,7 @@ await probe(async ({ open }) => {
           reset: true,
           events: [{ Transport: { frame: 0, master: state === 'Empty' ? 0 : MASTER, bpm: 120, locked: state !== 'Empty' } }, ...lanes(state)],
           anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-          meter: { peak: 0, clip: false },
+          meter: { peak: [0, 0], clip: [false, false] },
         });
       feed('Playing');
       const pcm = Float32Array.from({ length: MASTER }, (_, i) => 0.25 * Math.sin((2 * Math.PI * 220 * i) / RATE));

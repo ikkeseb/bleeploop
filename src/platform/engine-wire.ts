@@ -312,10 +312,11 @@ export interface ClockAnchor {
   grid: Frame;
 }
 
-/** The input's peak since the last frame (linear) and whether it clipped. */
+/** The input since the last frame, per plugin slot (its capture channel, before any plugin): the
+ * linear peak, and whether a sample reached full scale. */
 export interface Meter {
-  peak: number;
-  clip: boolean;
+  peak: [number, number];
+  clip: [boolean, boolean];
 }
 
 /**
@@ -587,7 +588,12 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
     }),
     meter: nullable(o.meter, (v) => {
       const m = obj(v, 'feed.meter');
-      return { peak: num(m.peak, 'meter.peak'), clip: bool(m.clip, 'meter.clip') };
+      const [p0, p1] = array(m.peak, 'meter.peak', ENGINE_SLOTS);
+      const [c0, c1] = array(m.clip, 'meter.clip', ENGINE_SLOTS);
+      return {
+        peak: [num(p0, 'meter.peak[0]'), num(p1, 'meter.peak[1]')],
+        clip: [bool(c0, 'meter.clip[0]'), bool(c1, 'meter.clip[1]')],
+      };
     }),
     peaks: o.peaks === undefined || o.peaks === null ? [] : array(o.peaks, 'feed.peaks').map(decodePeaks),
     // Absent on the wire unless the stage view asked for columns and some finished.

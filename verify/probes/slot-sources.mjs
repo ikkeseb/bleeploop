@@ -83,7 +83,7 @@ async function boot(page) {
       events: [...[0, 1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info: empty } })),
         { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
       anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-      meter: { peak: 0, clip: false },
+      meter: { peak: [0, 0], clip: [false, false] },
     });
   }, { AMP, RATE, empty });
 }

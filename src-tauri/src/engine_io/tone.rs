@@ -64,8 +64,6 @@ const AMP_MAX: f64 = 0.15;
 const PHASE_AMP_FLOOR: f64 = 0.5;
 /// Below this amplitude at the input there is no tone (-46 dBFS: a missing cable, the wrong channel).
 const MIN_LEVEL: f64 = 0.005;
-/// An input sample at or past this clipped (`callback.rs`'s meter rule).
-const CLIP: f32 = 0.999;
 
 /// Table sizes: events, coverage gaps, waveform snippets (the first events'), and a snippet's frames
 /// before its event was seen and after.
@@ -544,7 +542,8 @@ impl Detector {
             self.mode = Mode::Calibrate;
             self.restart();
         }
-        if input.abs() >= CLIP {
+        // The meter's rule: a sample at full scale clipped.
+        if super::callback::full_scale(input) {
             self.clipped += 1;
         }
         let x = input as f64;

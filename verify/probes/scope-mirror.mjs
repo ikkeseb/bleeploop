@@ -65,7 +65,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane() } })), { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   /** The mirror as a look would read it: the ring's stats, and the valid columns of `source` oldest

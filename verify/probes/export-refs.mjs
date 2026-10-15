@@ -168,7 +168,7 @@ await probe(async ({ open, browser }) => {
     settings: [],
     events: [{ Transport: { frame: 0, master: 0, bpm: BPM, locked: false } }, ...lanes(0, Array(5).fill('Empty')), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   const session = await page.evaluate(buildSession, { bpm: BPM, bars: BARS });
   await emit({ events: [{ Transport: { frame: 0, master: session.frames, bpm: BPM, locked: true } },

@@ -72,7 +72,7 @@ await probe(async ({ open }) => {
       settings: [],
       events: [transport(BAR), ...[0, 1, 2].map((i) => laneEvent(i, playing())), laneEvent(3, lane('Empty')), laneEvent(4, lane('Empty')), { Selected: { frame: 0, lane: 0 } }],
       anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-      meter: { peak: 0, clip: false },
+      meter: { peak: [0, 0], clip: [false, false] },
     });
   const sent = () => page.evaluate(() => window.__lf.native.sent.slice());
   const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
