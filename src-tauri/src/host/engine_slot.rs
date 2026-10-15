@@ -420,9 +420,12 @@ pub(super) fn serve<P: OwnedPlugin>(
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
             };
-            if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
-                // A request may have waited through a restart report.
+            // A request may have waited through a restart report: the cycle runs first, and only then
+            // is the request's caller asked whether it still waits (a slow cycle can outlast its 5 s).
+            if request.is_some() {
                 settle(&mut plugin, &slot, &mut parked);
+            }
+            if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
                 match request {
                     OwnerRequest::OpenEditor(cancelled, reply) => {
                         let was_closed = plugin.editor() == Editor::Closed;
@@ -754,6 +757,13 @@ impl EngineSlotHandle {
         self.shutdown()
     }
 
+    /// Test-only: an unload's first step alone: the owner's loop ends at its next check, and
+    /// `unload` still joins it.
+    #[cfg(test)]
+    pub(super) fn stop_serving(&self) {
+        self.running.store(false, Release);
+    }
+
     fn shutdown(&mut self) -> Result<(), String> {
         let Some(owner) = self.owner.take() else {
             return Ok(());
@@ -895,4 +905,162 @@ pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
         f();
     }
     allocations() - before
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::mpsc::channel;
+
+    use lf_engine::grid::Frame;
+    use lf_engine::SlotEvent;
+
+    use super::*;
+    use crate::engine_io::test_rig::TestDevice;
+
+    /// The fake's unit: a silent instrument.
+    struct Silent;
+
+    impl SlotProcessor for Silent {
+        fn kind(&self) -> SlotKind {
+            SlotKind::Instrument
+        }
+        fn latency(&self) -> Frame {
+            0
+        }
+        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+            out.fill(0.0);
+        }
+        fn stop(&mut self) {}
+        fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+            self
+        }
+    }
+
+    /// A pause the fake takes once, where the test armed it: it tells the test it is there, then
+    /// waits (≤ 5 s) for the test's go.
+    #[derive(Default)]
+    struct Hold(Mutex<Option<(Sender<()>, Receiver<()>)>>);
+
+    impl Hold {
+        /// The test's ends: told when the fake is there, and the go.
+        fn arm(&self) -> (Receiver<()>, Sender<()>) {
+            let ((there, here), (go, wait)) = (channel(), channel());
+            *self.0.lock().unwrap() = Some((there, wait));
+            (here, go)
+        }
+
+        fn take(&self) {
+            let armed = self.0.lock().unwrap().take();
+            if let Some((there, go)) = armed {
+                let _ = there.send(());
+                let _ = go.recv_timeout(Duration::from_secs(5));
+            }
+        }
+    }
+
+    /// What the test raises in, and reads of, the fake plugin.
+    #[derive(Default)]
+    struct Shared {
+        restart: AtomicBool,
+        editor_open: AtomicBool,
+        closes: AtomicU32,
+        /// Taken by the next `editor` query: armed between two turns, the one before the turn's wait.
+        before_wait: Hold,
+        /// Taken inside the next `reinstall`, the restart's activation.
+        reinstalling: Hold,
+    }
+
+    /// A plugin with nothing behind it, as `serve` drives every format: a floating editor that is a
+    /// flag, a restart the test raises.
+    struct Fake(Arc<Shared>);
+
+    impl OwnedPlugin for Fake {
+        type Unit = Silent;
+        const FORMAT: &'static str = "fake";
+
+        fn take_restart(&mut self) -> Option<String> {
+            self.0.restart.swap(false, Relaxed).then(|| "restart".to_string())
+        }
+        fn reinstall(&mut self, unit: Box<Silent>, slot: &SlotHost) -> Result<(), (Box<Silent>, String)> {
+            self.0.reinstalling.take();
+            let rate = slot.rate().expect("the test device is open");
+            slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
+        }
+        fn turn(&mut self, _sink: &EventSink) -> Reported {
+            Reported::default()
+        }
+        fn idle(&mut self) -> bool {
+            false
+        }
+        fn params(&mut self) -> Result<Vec<ParamDesc>, String> {
+            Ok(Vec::new())
+        }
+        fn state(&mut self) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+        fn editor(&self) -> Editor {
+            self.0.before_wait.take();
+            if self.0.editor_open.load(Relaxed) { Editor::Floating } else { Editor::Closed }
+        }
+        fn editor_open(&mut self) -> Result<(), String> {
+            self.0.editor_open.store(true, Relaxed);
+            Ok(())
+        }
+        fn editor_close(&mut self) {
+            self.0.editor_open.store(false, Relaxed);
+            self.0.closes.fetch_add(1, Relaxed);
+        }
+        fn release(self, unit: Option<Box<Silent>>) {
+            drop(unit);
+        }
+    }
+
+    fn load_fake(device: &TestDevice, shared: &Arc<Shared>) -> EngineSlotHandle {
+        let shared = shared.clone();
+        spawn(PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
+            serve(ctx, move |setup| {
+                let rate = setup.slot.rate().ok_or("no audio device is open")?;
+                Ok(Loaded { plugin: Fake(shared), unit: Box::new(Silent), name: "Fake".to_string(), rate, tone: None })
+            })
+        })
+        .expect("the fake loads")
+    }
+
+    /// A close request that waited through a restart whose cycle outlasted its caller's 5 s: the
+    /// caller reported the close as failed and the UI still shows the editor open, so the owner
+    /// must not close it after the cycle. The request's cancel is read after the cycle, for every
+    /// format (the request order is `serve`'s alone).
+    #[test]
+    fn a_request_its_caller_gave_up_on_during_a_restart_is_not_served_after_it() {
+        let _one = one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
+        let shared = Arc::new(Shared::default());
+        let handle = load_fake(&device, &shared);
+        assert_eq!(handle.open_editor(), Ok(()));
+        assert!(shared.editor_open.load(Relaxed));
+
+        // The owner between this turn's restart checks and its wait: the restart and the close
+        // arrive there, so the request's own check is the one that meets the restart.
+        let (there, go) = shared.before_wait.arm();
+        there.recv_timeout(Duration::from_secs(5)).expect("the owner is before its wait");
+        let (cycling, activated) = shared.reinstalling.arm();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        shared.restart.store(true, Relaxed);
+        handle.requests.send(OwnerRequest::CloseEditor(cancelled.clone(), reply)).unwrap();
+        go.send(()).unwrap();
+        cycling.recv_timeout(Duration::from_secs(5)).expect("the request waits on the restart's activation");
+        // The activation outlasts the caller's bound: it gives up.
+        cancelled.store(true, Relaxed);
+        activated.send(()).unwrap();
+
+        assert!(answer.recv_timeout(Duration::from_secs(2)).is_err(), "a request its caller gave up on gets no answer");
+        assert!(shared.editor_open.load(Relaxed), "and the editor stays open, as the caller was told");
+        assert_eq!(shared.closes.load(Relaxed), 0);
+        // The player's next close is served.
+        assert_eq!(handle.close_editor(), Ok(()));
+        assert_eq!(shared.closes.load(Relaxed), 1);
+        handle.unload().expect("it unloads");
+    }
 }

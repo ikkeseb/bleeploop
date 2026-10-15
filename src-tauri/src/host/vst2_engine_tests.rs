@@ -1410,6 +1410,38 @@ fn the_owner_loop_serves_editor_requests_the_close_box_and_a_foreign_resize() {
     assert_rendered_only_while_started(probe);
 }
 
+/// A size the plugin asks for from inside `effEditIdle`, on the owner thread, is applied there and
+/// then, and drops an older one queued from another thread: the queued size never overwrites it.
+#[test]
+fn a_size_asked_for_inside_edit_idle_outlives_an_older_one_queued_from_another_thread() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let probe = Probe::new();
+    let shape = Shape { flags: SYNTH | EFF_FLAGS_HAS_EDITOR, ..instrument(probe) };
+    let driven = drive(&device, 0, shape, None);
+    assert_eq!(driven.editor(OwnerRequest::OpenEditor), Ok(()));
+    let hwnd = HWND(probe.editor_parent.load(Relaxed) as *mut c_void);
+    assert_eq!(client_size(hwnd), (400, 300));
+
+    // Hold the owner inside `effIdle`, which it sends before this turn's `effEditIdle`.
+    let (inside, entered) = channel();
+    let (release, go) = channel::<()>();
+    *probe.on_idle.lock().unwrap() = Some(Box::new(move |_| {
+        inside.send(()).unwrap();
+        let _ = go.recv_timeout(Duration::from_secs(5));
+    }));
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
+    entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside effIdle");
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_SIZE_WINDOW, 320, 200, 0.0), 0, "another thread: latched");
+    probe.size_in_edit_idle.store(800 << 32 | 600, Relaxed);
+    release.send(()).unwrap();
+    assert!(wait_for(2000, || !probe.size_answers.lock().unwrap().is_empty()), "the plugin asks inside effEditIdle");
+    std::thread::sleep(Duration::from_millis(100)); // several owner turns
+    assert_eq!(*probe.size_answers.lock().unwrap(), [1], "resized there and then");
+    assert_eq!(client_size(hwnd), (800, 600), "and the older queued size never replaced it");
+    driven.unload().expect("it unloads");
+}
+
 /// A cycle whose unit the engine does not take (the slot holds another unit): the plugin, resumed
 /// for the install, is stopped and suspended again, as every other failed cycle leaves it.
 #[test]

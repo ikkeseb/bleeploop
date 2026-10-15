@@ -786,13 +786,16 @@ impl OwnedPlugin for Vst2Plugin {
             // SAFETY: the opcode reads no pointer.
             unsafe { self.call(EFF_IDLE, 0, 0, 0.0) };
         }
-        // A size the plugin asked for from a thread that may not touch the window. With no editor
-        // open there is nothing to size, and the request is dropped.
-        let resize = self.ctx.take_resize();
-        let Some(window) = &self.editor else { return false };
+        let Some(window) = &self.editor else {
+            // With no editor open there is nothing to size: a size asked for meanwhile is dropped.
+            let _ = self.ctx.take_resize();
+            return false;
+        };
         // SAFETY: the opcode reads no pointer.
         unsafe { self.call(EFF_EDIT_IDLE, 0, 0, 0.0) };
-        if let Some((width, height)) = resize {
+        // A size the plugin asked for from a thread that may not touch the window, taken after the
+        // idle: one it asked for in there was applied at once and dropped the older one queued.
+        if let Some((width, height)) = self.ctx.take_resize() {
             let _ = set_client_size(window.hwnd, width as u32, height as u32);
         }
         let closed = window.close_requested();

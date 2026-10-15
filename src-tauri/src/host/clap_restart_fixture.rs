@@ -153,6 +153,9 @@ struct Observed {
     emit_edit: AtomicBool,
     /// The next main-thread callback calls the host's `clap_host_state.mark_dirty`.
     dirty_on_callback: AtomicBool,
+    /// Runs once at the end of the next `save`, its state written, on the thread that called it.
+    #[allow(clippy::type_complexity)]
+    on_save: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     marked_dirty: AtomicUsize,
 }
 
@@ -422,11 +425,16 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
     }
     let bytes = s.saved.lock().unwrap().clone();
     // SAFETY: the host's stream is valid for this call.
-    unsafe {
+    let written = unsafe {
         let stream = &*stream;
         let Some(write) = stream.write else { return false };
         bytes.is_empty() || write(stream, bytes.as_ptr().cast(), bytes.len() as u64) == bytes.len() as i64
+    };
+    let hook = s.on_save.lock().unwrap().take();
+    if let Some(hook) = hook {
+        hook();
     }
+    written
 }
 
 /// `clap.state` load: read to the end in small pieces, as a plugin reading field by field would.
@@ -1053,6 +1061,44 @@ mod engine {
         assert!(wait_for(2000, || obs.marked_dirty.load(Relaxed) == 1), "the host declares clap.state");
         handle.unload().unwrap();
         assert_eq!(stored(&dir).as_deref(), Some(&b"state y"[..]), "saved before the teardown");
+        assert!(!obs.contract_violation.load(Relaxed), "state calls on the owner thread");
+    }
+
+    /// A change the plugin reports after the owner loop's last turn (a `mark_dirty` from a
+    /// main-thread callback it asked for once the unload had begun): the unload delivers the
+    /// callback, collects the change and stores the tone the plugin has then, its bytes exactly.
+    #[test]
+    fn a_change_reported_after_the_last_owner_turn_is_in_the_tone_the_unload_stores() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-late-change");
+        let obs = Arc::new(Observed::default());
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(0, identity())));
+        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4));
+        *obs.saved.lock().unwrap() = b"state v".to_vec();
+
+        // Hold the owner inside an export's save, past this turn's delivery of callbacks.
+        let (inside, entered) = std::sync::mpsc::channel();
+        let (release, go) = std::sync::mpsc::channel::<()>();
+        *obs.on_save.lock().unwrap() = Some(Box::new(move || {
+            inside.send(()).unwrap();
+            let _ = go.recv_timeout(Duration::from_secs(5));
+        }));
+        let export = handle.start_tone_save().unwrap();
+        entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside the save");
+        *obs.saved.lock().unwrap() = b"state w".to_vec();
+        obs.dirty_on_callback.store(true, Relaxed);
+        let host = obs.host.load(Relaxed);
+        // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
+        unsafe { ((*host).request_callback.unwrap())(host) };
+        // The unload is asked for before the owner gets on: its loop ends without another turn.
+        handle.stop_serving();
+        release.send(()).unwrap();
+        let export = tone::decode(&export.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()).unwrap();
+        assert_eq!(export.state, b"state v", "the export took the state before the change");
+        handle.unload().unwrap();
+        assert_eq!(obs.marked_dirty.load(Relaxed), 1, "the teardown delivered the callback");
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state w"[..]), "and the unload stored the changed tone");
         assert!(!obs.contract_violation.load(Relaxed), "state calls on the owner thread");
     }
 
