@@ -15,6 +15,9 @@
 //!   every lane's pan always moving, printed side by side (no bar of its own).
 //! - The live scope taps: the Stage 2 engine with them off, then on with a reader keeping up, printed
 //!   side by side (no bar of its own).
+//! - The master at 64 and 128 frames: the Stage 2 engine quiet and in sustained gain reduction, and one
+//!   master limiter alone, under and over its threshold on every frame, each block's median beside the
+//!   mean (no bar of its own).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
@@ -32,7 +35,11 @@
 //! other 64-frame block carries their work (47.8 to 48.4 %, the worst of the load's own cycle 51.9 to
 //! 52.6 %). Its p99.9 (79 to 80 %) and worst block (89 to 127 %) are preemption on a busy desktop at
 //! normal priority. A Stage 3 mean near 33 % instead of 25 % is the codegen split `src-tauri/Cargo.toml`
-//! guards against.
+//! guards against. The Share mix's second limiter (six runs alternating with its parent's build, on a
+//! desktop busy enough to put the Stage 2 mean at 4.3 to 8.3 % and the Stage 3 mean at 34 to 49 % in
+//! both): the engine's median block grew by 2 to 8 µs (0.2 to 0.3 point), inside the runs' spread. One
+//! master limiter alone (four runs, as busy) takes 2.3 µs of a 64-frame block under its threshold and
+//! 3.3 µs over it (0.17 and 0.25 %), 4.7 and 6.6 µs of a 128-frame block (0.18 and 0.25 %).
 
 mod common;
 
@@ -40,6 +47,7 @@ use std::time::Instant;
 
 use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
+use lf_engine::dsp::compressor::{Compressor, Params};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
@@ -51,9 +59,14 @@ const BLOCK: usize = 64;
 
 /// Five lanes playing a 4-bar loop, lane 0 overdubbing, the click on; returns the rig and its master.
 fn five_lanes_one_overdubbing() -> (Rig, Frame) {
+    five_lanes_one_overdubbing_from(code)
+}
+
+/// [`five_lanes_one_overdubbing`], the take recorded from `input`.
+fn five_lanes_one_overdubbing_from(input: impl Fn(Frame) -> f32 + 'static) -> (Rig, Frame) {
     let mut rig = Rig::with(Opts { loop_seconds: 60.0, ..Default::default() });
     rig.set(Command::SetMetronome(true));
-    rig.set_input(code);
+    rig.set_input(input);
     let master = rig.record_first_take(0, 4, 2400);
     for _ in 1..5 {
         rig.press(Command::Copy(0));
@@ -120,6 +133,72 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
         worst * 100.0
     );
     assert!(mean < 0.10, "mean block time {:.2} % of the block", mean * 100.0);
+}
+
+/// The master's cost at the two ASIO sizes the play path runs, 64 and 128 frames: the Stage 2 engine,
+/// then the same five lanes recorded from a loud sine, so the five copies sum far past the limiter's
+/// threshold and its gain reduction never lets go (the sine still dips under the threshold around each
+/// zero crossing, where a frame skips the curve's log and power); then one master limiter alone, fed a
+/// square wave whose magnitude stays under the threshold on every frame (quiet) or over it on every
+/// frame (limiting, checked outside the timing): what the Share mix's second limiter adds at its least
+/// and at its most. 30 s each; the median block prints beside the mean, since a busy desktop moves the
+/// mean by more than the limiter costs. No bar of its own (the Stage 2 bar carries it): the numbers
+/// print, to compare a change to the master with its parent.
+#[test]
+#[ignore]
+fn the_master_cost_at_64_and_128_frames() {
+    let loud = |f: Frame| 0.8 * (f as f32 * std::f32::consts::TAU * 220.0 / RATE).sin();
+    let square = |f: Frame| if (f as f32 * 220.0 / RATE).fract() < 0.5 { 1.0f32 } else { -1.0 };
+    let threshold = 10f32.powf(Params::MASTER_LIMITER.threshold / 20.0);
+    let row = |name: &str, block: usize, mut times: Vec<f64>| {
+        let period = block as f64 / 48000.0;
+        let mean = times.iter().sum::<f64>() / times.len() as f64;
+        times.sort_by(f64::total_cmp);
+        let (median, p999, worst) = (times[times.len() / 2], times[times.len() * 999 / 1000], times[times.len() - 1]);
+        println!(
+            "{name:<16} {block:>3} frames: median {:.1} µs ({:.2} %), mean {:.1} µs ({:.2} %), p99.9 {:.2} %, worst {:.1} %",
+            median * 1e6,
+            median / period * 100.0,
+            mean * 1e6,
+            mean / period * 100.0,
+            p999 / period * 100.0,
+            worst / period * 100.0
+        );
+    };
+    for block in [64, 128] {
+        let blocks = 48000 * 30 / block;
+        for (name, (mut rig, _)) in [("engine, stage 2", five_lanes_one_overdubbing()), ("engine, limiting", five_lanes_one_overdubbing_from(loud))] {
+            let input: Vec<f32> = (0..block).map(|k| code(k as Frame) - 0.25).collect();
+            let (mut left, mut right) = (vec![0.0f32; block], vec![0.0f32; block]);
+            let mut times = Vec::with_capacity(blocks);
+            for _ in 0..blocks {
+                let ctx = ProcessContext { frame: rig.frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+                let t = Instant::now();
+                rig.engine.process(&ctx, &input, &mut left, &mut right);
+                times.push(t.elapsed().as_secs_f64());
+                rig.frame += block as Frame;
+            }
+            row(name, block, times);
+        }
+        for (name, level) in [("limiter, quiet", 0.25f32), ("limiter, limiting", 4.0)] {
+            let mut limiter = Compressor::master_limiter(RATE);
+            let (mut left, mut right) = (vec![0.0f32; block], vec![0.0f32; block]);
+            let mut times = Vec::with_capacity(blocks);
+            for b in 0..blocks {
+                let frame = (b * block) as Frame;
+                for (k, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                    *l = level * square(frame + k as Frame);
+                    *r = *l;
+                }
+                assert!(left.iter().all(|x| (x.abs() > threshold) == (level > threshold)), "{name}: a frame on the wrong side of the threshold");
+                let t = Instant::now();
+                limiter.process(frame, &mut left, &mut right);
+                times.push(t.elapsed().as_secs_f64());
+                std::hint::black_box(&left);
+            }
+            row(name, block, times);
+        }
+    }
 }
 
 /// The multiply burst (F14): four one-bar loops, each with an undo target, multiplied to 30 bars (the

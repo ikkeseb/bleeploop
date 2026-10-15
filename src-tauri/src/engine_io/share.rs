@@ -1,7 +1,9 @@
 //! OWNS: Share output (STATUS E2 "user-picked endpoint"): while
 //! ASIO plays (its output bypasses the Windows audio engine, so no app capture can hear it), the
-//! engine's post-limiter stereo master is mirrored to a WASAPI render endpoint the user picked, for
-//! OBS, browsers and voice chat. On WASAPI no mirror opens: app capture takes the main output.
+//! engine's Share mix (`lf_engine::Engine::share`: the master without the click, through its own
+//! limiter, plus the monitor, which is not limited) is mirrored to a WASAPI render endpoint the user
+//! picked, for OBS, browsers and voice chat. On WASAPI no mirror opens: app capture takes the main
+//! output, the click included.
 //!
 //! The engine callback pushes each block through [`ShareTap`] into a [`pipes`] ring (drop-on-full);
 //! the mirror's own cpal stream pulls it through the pipe's resampler and drift controller at the
@@ -34,7 +36,7 @@ const HEADROOM: f64 = 0.100;
 /// buffer) is served in pieces.
 const MAX_PULL: usize = 1024;
 
-/// The callback's end: owned inside the engine lock (`super::Rt`), fed every block after the limiter.
+/// The callback's end: owned inside the engine lock (`super::Rt`), fed the Share mix every block.
 /// Drop-on-full, never blocks; a full ring counts `IoCounters::share_overruns`.
 pub(crate) struct ShareTap {
     push: PushEnd,
@@ -43,7 +45,7 @@ pub(crate) struct ShareTap {
 }
 
 impl ShareTap {
-    /// Push one block of the stereo master (post-limiter, what the main output plays).
+    /// Push one block of the Share mix (what the main output plays, without the click).
     pub(crate) fn push(&mut self, left: &[f32], right: &[f32], counters: &super::IoCounters) {
         let n = left.len().min(right.len());
         let piece = self.scratch.len() / 2;

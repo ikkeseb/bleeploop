@@ -1503,6 +1503,27 @@ fn share_output_mirrors_the_master_only_while_asio_plays_and_drops_its_taps_off_
     assert_eq!(h.host.diag().share_overruns, 0);
 }
 
+/// Through the owner's handoff on the fake ASIO driver: the count-in and CLICK over a silent loop reach
+/// the device output on both channels, and the mirror is fed every frame of it, silent.
+#[test]
+fn share_output_mirrors_the_master_without_the_click() {
+    let mut h = Harness::new();
+    h.host.set_share(Some("obs".into())).unwrap();
+    h.open(asio(Some(256)));
+    let share = h.fake.shares.lock().unwrap()[0].clone();
+    h.send(Command::SetMetronome(true));
+    h.play(RATE / 10);
+    let from = h.frame();
+    h.record_loop();
+    h.play(RATE);
+    let to = h.frame();
+    let device = h.fake.heard_stereo(from..to);
+    for side in 0..2 {
+        assert!(device.iter().map(|s| s[side].abs()).fold(0.0, f32::max) > 0.2, "the device output carries the click (side {side})");
+    }
+    assert!(share.heard(from..to).iter().all(|s| *s == [0.0; 2]), "the mirror is fed every frame, with no click");
+}
+
 #[test]
 fn on_wasapi_share_output_opens_no_mirror() {
     let h = Harness::new();

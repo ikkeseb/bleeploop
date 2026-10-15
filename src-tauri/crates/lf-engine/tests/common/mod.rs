@@ -111,6 +111,9 @@ pub struct Rig {
     pub monitor: Vec<f32>,
     /// The record tap over the same frames (`Taps::record`).
     pub record: Vec<f32>,
+    /// The Share mix's two sides over the same frames (`Engine::share`).
+    pub share: Vec<f32>,
+    pub share_right: Vec<f32>,
     gap_next: bool,
     damaged_next: bool,
     in_buf: Vec<f32>,
@@ -172,6 +175,8 @@ impl Rig {
             bus_right: Vec::new(),
             monitor: Vec::new(),
             record: Vec::new(),
+            share: Vec::new(),
+            share_right: Vec::new(),
             gap_next: false,
             damaged_next: false,
             in_buf: vec![0.0; 4096],
@@ -205,6 +210,8 @@ impl Rig {
         self.bus_right.clear();
         self.monitor.clear();
         self.record.clear();
+        self.share.clear();
+        self.share_right.clear();
     }
 
     /// The next rendered block starts after an input gap (an xrun).
@@ -340,6 +347,9 @@ impl Rig {
             self.bus_right.extend_from_slice(taps.bus[1]);
             self.monitor.extend_from_slice(taps.monitor);
             self.record.extend_from_slice(taps.record);
+            let [share, share_right] = self.engine.share();
+            self.share.extend_from_slice(share);
+            self.share_right.extend_from_slice(share_right);
         }
         self.frame += n as Frame;
         if !self.hold_events {

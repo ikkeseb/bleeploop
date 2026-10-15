@@ -149,6 +149,10 @@ it.
   call of 20 minutes or more hears no dropout in it, also with the interface's own Windows output as the Share device (machine: a
   26-minute `native:engine --share` soak; the mirror's buffer went from 20 to 40 ms after it ran
   short in bursts about every 10.5 minutes there).
+- Share output without the click: a stream or a call hears the loops, the plugins and the guitar but
+  no count-in and no CLICK, while the headphones still click (ASIO only; proven offline and on the fake
+  driver, `src-tauri/crates/lf-engine/tests/share_mix.rs`). On a loud mix the stream may sound a
+  touch louder on the beat than what you hear: the click no longer pushes its limiter down.
 - The live scope taps (`lf_engine::scope`) and SCOPE, the look that draws them: per lane after its FX,
   the live monitor, and the engine's output, a min/max envelope in 4 ms columns over the feed, off
   until a look asks. Proven offline (`src-tauri/crates/lf-engine/tests/scope.rs`,

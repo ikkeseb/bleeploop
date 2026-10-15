@@ -29,7 +29,7 @@
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
-//! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
+//! | `share` | Share output: the master without the click (the engine's Share mix) mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI, the app's only MIDI path: ports and hot-plug, parse, MIDI learn and its stored bindings, the one note router for every note source, the ordered input queue into [`EngineHost::send`] and its part in a rebuild ([`RebuildHook`]) |
 //! | `midi_bench` | DEV: the MIDI latency benchmark (a loopback sender, arrival stamps, the applied-note record's report) and the `settings`/`ends` lock waits, each run only when an environment variable asks |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
@@ -916,7 +916,7 @@ impl EngineHost {
         self.ask("switch_asio", SWITCH_TIMEOUT, |reply| Request::SwitchAsio(Box::new(switch), reply))
     }
 
-    /// Share output (STATUS E2): mirror the post-limiter master to this WASAPI render endpoint while
+    /// Share output (STATUS E2): mirror the master without the click to this WASAPI render endpoint while
     /// ASIO plays (`None` = off). On WASAPI no mirror opens: app capture takes the main output. The pick
     /// is remembered across switches; an endpoint that fails or dies is forgotten (`DeviceEvent::ShareLost`).
     pub fn set_share(&self, endpoint: Option<String>) -> Result<(), String> {
