@@ -1,16 +1,17 @@
-//! The FX chain (`dsp::fx`) with its feedback delay and its pitch shift against the Tone references:
-//! the fx-delay-* and fx-pitch-* scenarios replayed from the manifest through the whole chain, the other
-//! effects bypassed as the probe leaves them. Also: the same bits at any block size, a pitch enabled
-//! live mid-block (the PitchShift connects on the enable's context frame and stays), a chain's history
+//! The FX chain (`dsp::fx`) with its feedback delay and its pitch shift: the fx-pitch-* scenarios
+//! replayed from the manifest through the whole chain against the Tone references, the other effects
+//! bypassed as the probe leaves them. Also: the same bits at any block size, a pitch enabled live
+//! mid-block (the PitchShift connects on the enable's context frame and stays), a chain's history
 //! cleared mid-quantum (the engine's CLEAR and load: from that frame it renders what a chain that heard
 //! only silence renders), and no allocation while rendering or taking a control.
 //!
-//! How close each lands: fx-delay-default renders Blink's bits. fx-delay-hot differs only where
-//! Blink's audio thread flushes denormals to zero (its 0.95 feedback decays the bypassed filter's
-//! leak into them; ±1.2e-38 at most here). The pitch scenarios sit near −70 dB: the oscillator tables
-//! are built with an f64 FFT where Blink uses an f32 one (about one float ulp apart, see
-//! `dsp::oscillator`), which moves the LFO-driven delay times by an ulp, and Blink's float read
-//! position (0.004 frames apart in a 1 s line) turns that into a step of up to 6e-3 on a noise burst.
+//! The delay has no Tone reference: Tone's feeds its echoes back a quantum late, this one on the frame
+//! (`dsp::fx::delay`, whose own test pins where each echo lands). The bypassed delay's leak at −56 dB
+//! (`dsp::fx`) puts the pitch scenarios near −62 dB; without it they sat near −70 dB, the
+//! PitchShift's own residual: the oscillator tables are built with an f64 FFT where Blink uses an f32
+//! one (about one float ulp apart, see `dsp::oscillator`), which moves the LFO-driven delay times by an
+//! ulp, and Blink's float read position (0.004 frames apart in a 1 s line) turns that into a step of
+//! up to 6e-3 on a noise burst.
 
 mod common;
 
@@ -22,30 +23,16 @@ use lf_engine::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxSta
 use lf_engine::dsp::param::QUANTUM;
 
 /// Each scenario with the tightest class it passes (null residual when ported, in dB).
-const SCENARIOS: [(&str, Class); 4] = [
-    ("fx-delay-default-48000", Class::N), // bit-exact
-    ("fx-delay-hot-48000", Class::N),     // −776.5
-    ("fx-pitch-down12-48000", Class::N),  // −71.8
-    ("fx-pitch-up7-48000", Class::N),     // −69.4
+const SCENARIOS: [(&str, Class); 2] = [
+    ("fx-pitch-down12-48000", Class::N), // −61.8 (−71.8 before the delay's leak moved)
+    ("fx-pitch-up7-48000", Class::N),    // −62.1 (−69.4)
 ];
 
 #[test]
-fn delay_and_pitch_scenarios_pass_their_classes() {
+fn pitch_scenarios_pass_their_classes() {
     for (id, class) in SCENARIOS {
         let render = render(id, 128, Schedule::Ahead);
         refs::assert_class(id, std::slice::from_ref(&render), class);
-    }
-}
-
-#[test]
-fn the_delay_renders_blinks_bits_down_to_the_denormals() {
-    let id = "fx-delay-default-48000";
-    assert!(bits(&render(id, 128, Schedule::Ahead)) == bits(&refs::reference(id)[0]), "{id}: not bit-exact");
-    let id = "fx-delay-hot-48000";
-    let (render, reference) = (render(id, 128, Schedule::Ahead), &refs::reference(id)[0]);
-    // Blink's zeros are subnormals here, and what the tail adds them to moves by as little.
-    for (k, (&a, &b)) in render.iter().zip(reference).enumerate() {
-        assert!(a.to_bits() == b.to_bits() || (a - b).abs() < 1e-37, "{id}: frame {k}: {a:e} vs {b:e}");
     }
 }
 

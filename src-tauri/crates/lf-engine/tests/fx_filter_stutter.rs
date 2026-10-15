@@ -4,25 +4,29 @@
 //! events scheduled ahead as Tone's offline clock does and with them landing live mid-block, and no
 //! allocation while rendering or taking a control.
 //!
+//! The chain renders Blink's bits up to the bypassed delay's second echo, and not after: the delay leaks
+//! its echoes in at −56 dB (`dsp::fx`), and Tone feeds them back a quantum late where `dsp::fx::delay`
+//! does not. Each scenario's residual, all of it that leak, is beside it below.
+//!
 //! Decided while porting: a live control lands on its frame with Tone's `now` = that frame and no
 //! lookahead; the stutter restarts its gate at the control's context time, without fx.ts's 256-frame
 //! live lead (the lead covers main-thread jitter the engine does not have).
 
 mod common;
 
-use common::fx::{bits, render, Schedule, BLOCKS};
+use common::fx::{before_second_echo, bits, render, Schedule, BLOCKS};
 use common::refs::{self, Class};
 use lf_engine::dsp::fx::{Ctl, FxChain, FxKind, FxParam, FxTiming};
 use lf_engine::dsp::param::QUANTUM;
 
 /// Each scenario with the tightest class it passes.
 const SCENARIOS: [(&str, Class); 6] = [
-    ("fx-filter-dark-48000", Class::N),
-    ("fx-filter-reso-48000", Class::N),
-    ("fx-filter-reso-44100", Class::N),
-    ("fx-filter-bypass-48000", Class::N),
-    ("fx-stutter-8th-48000", Class::N),
-    ("fx-stutter-137-48000", Class::N),
+    ("fx-filter-dark-48000", Class::N),   // −60.2
+    ("fx-filter-reso-48000", Class::N),   // −63.7
+    ("fx-filter-reso-44100", Class::N),   // −63.8
+    ("fx-filter-bypass-48000", Class::N), // −62.7
+    ("fx-stutter-8th-48000", Class::N),   // −62.5
+    ("fx-stutter-137-48000", Class::N),   // −62.4
 ];
 
 #[test]
@@ -30,8 +34,9 @@ fn filter_and_stutter_scenarios_pass_their_classes() {
     for (id, class) in SCENARIOS {
         let render = render(id, 128, Schedule::Ahead);
         refs::assert_class(id, std::slice::from_ref(&render), class);
-        // Beyond N: the chain renders Blink's bits.
-        assert!(bits(&render) == bits(&refs::reference(id)[0]), "{id}: not bit-exact");
+        // Beyond N: Blink's bits, up to the delay's second echo.
+        let n = before_second_echo(refs::scenario(id));
+        assert!(bits(&render[..n]) == bits(&refs::reference(id)[0][..n]), "{id}: not bit-exact before frame {n}");
     }
 }
 

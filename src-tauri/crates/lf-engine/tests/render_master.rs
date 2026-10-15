@@ -225,9 +225,9 @@ fn a_delay_echo_past_the_loop_end_rings_at_the_head() {
 fn one_more_warm_up_pass_moves_the_master_by_less_than_the_threshold() {
     let mixes = [delay_and_reverb(0.6)];
     let out = render(vec![busy_lane(0)], &[(0, mixes[0])], &[]);
-    // 0.6 feedback: 19 echoes of 0.25 s and a quantum (4.8 s), then the reverb's 2.62 s on the last of
-    // them (the lane's reverb send follows its delay): 7.42 s over 2 s passes. The longer of the two
-    // alone is 3 passes.
+    // 0.6 feedback: 19 echoes of 0.25 s (4.75 s), then the reverb's 2.62 s on the last of them (the
+    // lane's reverb send follows its delay): 7.37 s over 2 s passes. The longer of the two alone is 3
+    // passes.
     assert_eq!(out.warmup, 4);
     let more = wet_master_with(RATE, load(vec![busy_lane(0)]), &mixes, &[], RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
     let diff = max_diff(&out.left, &more.left).max(max_diff(&out.right, &more.right));
@@ -239,11 +239,12 @@ fn one_more_warm_up_pass_moves_the_master_by_less_than_the_threshold() {
 
 // f2)
 #[test]
-fn a_delay_at_full_feedback_warms_for_every_echo_with_its_quantum() {
+fn a_delay_at_full_feedback_warms_for_every_echo_and_no_more() {
     // 23 bars at 300 BPM and 8 kHz: an 18.4 s loop. The 4n delay (0.2 s, the longest division) at the
-    // maximum feedback takes 180 recurrences to fall below the threshold, each its division plus the
-    // 128-frame quantum its feedback is late (16 ms here): 38.9 s, 2.11 passes, so 3. Counted without the
-    // quantum the tail is 36 s, 1.96 passes: 2, and the kept pass misses an echo above the threshold.
+    // maximum feedback takes 180 recurrences to fall below the threshold, each exactly its division (the
+    // feedback reaches the line on the frame it is read): 36 s, 1.96 passes, so 2, and a third changes
+    // the kept pass by less than the threshold. A recurrence a 128-frame quantum longer (16 ms here,
+    // where a port of Tone's cycle lands it) would make it 38.9 s and 3 passes.
     let (rate, bpm, bars) = (8_000, 300, 23);
     let master = bars * frames_per_bar(bpm as f64, rate);
     // One impulse at the loop's end: its echoes reach furthest into the passes after it.
@@ -257,7 +258,7 @@ fn a_delay_at_full_feedback_warms_for_every_echo_with_its_quantum() {
     let echo = peak(&wet_master(rate, session(), &quarter(0.0), &[]).unwrap().left);
     assert!(echo > 0.3 * A, "the echo is there: {echo}");
     let out = wet_master(rate, session(), &quarter(MAX_FEEDBACK), &[]).unwrap();
-    assert_eq!(out.warmup, 3);
+    assert_eq!(out.warmup, 2);
     let more = wet_master_with(rate, session(), &quarter(MAX_FEEDBACK), &[], RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
     let diff = max_diff(&out.left, &more.left).max(max_diff(&out.right, &more.right));
     let relative = diff / echo;

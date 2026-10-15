@@ -12,7 +12,7 @@
 //!   the clock's beat (the lane delay's divisions, [`DIVISIONS`]), fed `gate · x + feedback · y` and
 //!   heard as `level · √(1 − feedback²) · y` (the levels below). The feedback reaches the line on the
 //!   frame it is read ([`DelayNode::read_frame`]), so the repeats land on exact multiples of the delay
-//!   time (a lane's `DelayFx`, a port of Tone on Blink, feeds it back a quantum late).
+//!   time, as a lane's `DelayFx` does.
 //! - REVERB: its own convolver ([`Convolver`]) over the lanes' bus IR (`effects::reverb_ir`), fed
 //!   `gate · x` and heard as `level · (L + R) / 2`: the stereo tail summed to mono as the instruments'
 //!   record path sums a stereo synth.

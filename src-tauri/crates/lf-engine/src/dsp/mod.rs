@@ -6,15 +6,20 @@
 //! them through [`crate::effects`] and [`crate::instruments`], and the limiter on its master bus. The
 //! Blink ports are BSD-3 (`THIRD-PARTY-NOTICES.md`).
 //!
-//! Every scenario passes class N. Bit-exact: the limiter (a literal port of Blink's
-//! DynamicsCompressorKernel), the reverb IR, the filter, stutter and delay FX, the bypass crossfade and
-//! the reverb bus (Blink's partitioned convolver on RustFFT 6.4.1, the FFT Chromium runs, where RustFFT
-//! picks its AVX code as it did for the reference). Near exact, the residual a change is compared
-//! against: the lead, piano, organ and pad −125 to −141 dB (Blink's band-limited PeriodicWave tables),
-//! the bass −114 dB, the drum kit −95 dB (the metals' FM near Nyquist, Blink's biquad tail-stop), the
-//! hot delay −776 dB (Blink's denormal flush), and PitchShift −69 to −72 dB, the nearest to the −60 dB
-//! bar (a 1-ulp wave-table difference moves its float delay reads). FFT paths may take ≤ −120 dB
-//! instead of bit-exact. Two literal Tone behaviours stay: a bypassed chain is not bit-transparent
+//! Every scenario passes class N but the reverb bus's (class S). Bit-exact: the limiter (a literal port
+//! of Blink's DynamicsCompressorKernel) and the reverb IR. Near exact, the residual a change is
+//! compared against: the lead, piano, organ and pad −125 to −141 dB (Blink's band-limited PeriodicWave
+//! tables), the bass −114 dB, the drum kit −95 dB (the metals' FM near Nyquist, Blink's biquad
+//! tail-stop). The feedback delay departs from Tone on purpose and has no reference: Tone feeds its
+//! echoes back a quantum late, this one on the frame they are read (`fx::delay`, whose property test
+//! pins where each echo lands and how it decays). A bypassed delay still leaks its echoes into every
+//! chain at −56 dB, so the FX references match only up to that delay's second echo: there the filter,
+//! the stutter, the bypass crossfade and the reverb bus (Blink's partitioned convolver on RustFFT
+//! 6.4.1, the FFT Chromium runs, where RustFFT picks its AVX code as it did for the reference) are
+//! bit-exact. Over the whole render the leak is the residual: the filter and stutter −60 to −64 dB, the
+//! pitch shift near −62 dB (its own, under the leak, −69 to −72 dB: a 1-ulp wave-table difference moves
+//! its float delay reads), and the reverb bus −59 dB, a hair over class N's −60 dB bar. FFT paths may
+//! take ≤ −120 dB instead of bit-exact. Two literal Tone behaviours stay: a bypassed chain is not bit-transparent
 //! (about +0.035 dB), and a closed stutter gate leaks about 0.2 % of the dry signal.
 //!
 //! Costs per 128-frame quantum at 48 kHz, release, on the dev PC: the pad at 12 voices 85 µs, the drum

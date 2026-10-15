@@ -13,8 +13,8 @@
 //!
 //! Two ways to drive it, the same arithmetic: a quantum at a time ([`DelayNode::process`]), or frame by
 //! frame ([`DelayNode::begin_quantum`], then [`DelayNode::process_frame`] for frames 0 to 127 in order)
-//! for a delay whose input is rendered frame by frame, such as one inside a feedback cycle. What Blink
-//! does to such a cycle belongs to its owner (see `fx::DelayFx`), not to the kernel.
+//! for a delay whose input is rendered frame by frame, such as one inside a feedback cycle. How a cycle
+//! feeds back belongs to its owner (`fx::DelayFx`, `input_fx`), not to the kernel.
 //!
 //! Blink stops processing a delay once its input has been silent for longer than the maximum delay
 //! (the node's tail); this one keeps writing zeros instead, which reads the same, since everything
@@ -116,7 +116,7 @@ impl Delay {
     /// written ([`Delay::write_frame`], for the same `k`, follows). For a delay of at least one frame
     /// this is what [`Delay::process_frame`] reads (its read never reaches the frame being written), so
     /// an owner can feed the delayed frame back into frame `k` itself, where a Blink cycle feeds it a
-    /// quantum late (`fx::DelayFx`).
+    /// quantum late (`fx::DelayFx` says why that port does not).
     pub fn read_frame(&self, k: usize, delay_time: f32) -> f32 {
         self.read(k, delay_time)
     }

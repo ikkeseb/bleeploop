@@ -14,11 +14,11 @@
 //! contiguous blocks on one clock from frame 0, so the output is the same at any block size.
 //!
 //! Warm-up: whole loop passes, at least one, that cover the longest lane's tail: its enabled delay's
-//! echoes until they fall below [`TAIL_THRESHOLD`], each a division plus one render quantum after the
-//! last, and when its reverb send is on too, the reverb's decay plus pre-delay after the last echo
-//! (`warmup_passes`), read from the FX state the engine applied. The pass kept after them starts the
-//! limiter's pre-delay late, so the master's frame 0 is loop position 0, lined up with the stems (the
-//! Tone export kept whole passes, the pre-delay late).
+//! echoes until they fall below [`TAIL_THRESHOLD`], each a division after the last, and when its reverb
+//! send is on too, the reverb's decay plus pre-delay after the last echo (`warmup_passes`), read from
+//! the FX state the engine applied. The pass kept after them starts the limiter's pre-delay late, so
+//! the master's frame 0 is loop position 0, lined up with the stems (the Tone export kept whole passes,
+//! the pre-delay late).
 //!
 //! Known limits:
 //! - A rhythmic FX whose pattern spans several loops (a dotted stutter over one-bar loops) keeps one
@@ -31,7 +31,6 @@
 
 use crate::api::{Command, LaneMix, ProcessContext};
 use crate::dsp::fx::{division_beats, FxKind, FxParam, FxState, DIVISIONS, REVERB_DECAY, REVERB_PRE_DELAY};
-use crate::dsp::param::QUANTUM;
 use crate::engine::{Engine, EngineConfig};
 use crate::grid::{frames_per_bar, Frame, MAX_BPM, MIN_BPM};
 use crate::session::{Load, SessionJob};
@@ -154,7 +153,7 @@ pub fn wet_master_with(rate: u32, mut load: Load, mixes: &[LaneMix], settings: &
     let states: Vec<[FxState; 5]> = lanes.iter().filter(|&&i| i < crate::api::TRACK_COUNT).map(|&i| engine.fx().chain(i).get_state()).collect();
     let bpm = engine.clock().bpm();
     let beat_seconds = frames_per_bar(bpm as f64, rate) as f64 / 4.0 / rate as f64;
-    let warmup = warmup_passes(&states, beat_seconds, master as f64 / rate as f64, rate)
+    let warmup = warmup_passes(&states, beat_seconds, master as f64 / rate as f64)
         .checked_add(options.extra_warmup)
         .ok_or("export render: too many warm-up passes")?;
 
@@ -210,17 +209,16 @@ fn lane_commands(lane: u8, mix: &LaneMix) -> Vec<Command> {
 /// Whole loop passes (at least one) that cover the session's longest tail: on each lane, its enabled
 /// delay's echoes until they fall below [`TAIL_THRESHOLD`] and, when its reverb send is on too, the
 /// reverb's tail (its decay plus pre-delay) after the last of them: the send follows the delay in the
-/// lane's chain (`FxChain::process`), so the reverb rings on the echoes. Each echo recurs a division
-/// plus one render quantum after the last: the feedback reaches the delay a quantum late
-/// (`dsp/fx/delay.rs`). An echo's level is the feedback to the power of the recurrences before it.
-fn warmup_passes(lanes: &[[FxState; 5]], beat_seconds: f64, loop_seconds: f64, rate: u32) -> u32 {
-    let quantum = QUANTUM as f64 / rate as f64;
+/// lane's chain (`FxChain::process`), so the reverb rings on the echoes. Each echo recurs exactly a
+/// division after the last (`dsp/fx/delay.rs`), and its level is the feedback to the power of the
+/// recurrences before it.
+fn warmup_passes(lanes: &[[FxState; 5]], beat_seconds: f64, loop_seconds: f64) -> u32 {
     let mut tail: f64 = 0.0;
     for fx in lanes {
         let delay = fx[FxKind::Delay.index()];
         let [time, feedback, mix] = delay.params;
         let echoes = if !delay.bypassed && mix > 0.0 {
-            let recurrence = division_beats((time.max(0.0) as usize).min(DIVISIONS.len() - 1)) * beat_seconds + quantum;
+            let recurrence = division_beats((time.max(0.0) as usize).min(DIVISIONS.len() - 1)) * beat_seconds;
             let repeats = if feedback > 0.0 { (TAIL_THRESHOLD.ln() / feedback.ln()).ceil().max(1.0) } else { 1.0 };
             recurrence * repeats
         } else {
