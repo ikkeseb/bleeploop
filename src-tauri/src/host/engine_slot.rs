@@ -636,12 +636,13 @@ pub(super) fn spawn(
     tone: Option<ToneBinding>,
     run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
-    spawn_within(LOAD_TIMEOUT, format, slot, editor_parent, sink, tone, run)
+    spawn_within(|ready| ready.recv_timeout(LOAD_TIMEOUT), format, slot, editor_parent, sink, tone, run)
 }
 
-/// `spawn`, its wait for the setup bounded at `bound` (a test shortens it).
+/// `spawn`, its first wait for the owner's report `wait`: bounded at `LOAD_TIMEOUT`, or a test's
+/// that runs out on the test's cue.
 fn spawn_within(
-    bound: Duration,
+    wait: impl FnOnce(&Receiver<Result<Ready, String>>) -> Result<Result<Ready, String>, RecvTimeoutError>,
     format: PluginFormat,
     slot: SlotHost,
     editor_parent: usize,
@@ -675,12 +676,11 @@ fn spawn_within(
         .name(format!("lf-{}-engine-{index}", format.as_str()))
         .spawn(move || run(ctx))
         .map_err(|e| format!("spawn owner thread: {e}"))?;
-    let report = match ready_rx.recv_timeout(bound) {
+    let report = match wait(&ready_rx) {
         // The bound ran out as the owner's unit went in: the load stands, its report a step away.
         Err(late) if !claim.abandon() => {
             log::warn!(
-                "[plugin_host] engine slot {index}: the plugin's setup outlasted its {} ms bound as it went into the engine; the load stands",
-                bound.as_millis()
+                "[plugin_host] engine slot {index}: the plugin's setup outlasted its load bound as it went into the engine; the load stands"
             );
             ready_rx.recv_timeout(REMOVE_TIMEOUT).map_err(|_| late)
         }
@@ -1141,10 +1141,21 @@ mod tests {
     fn a_load_whose_unit_goes_in_as_its_bound_runs_out_stands() {
         let _one = one_engine_test_at_a_time();
         let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
-        // The unit is in the engine when the bound runs out; the report follows it.
-        let report_late = || std::thread::sleep(Duration::from_millis(300));
+        // The bound runs out once the owner has claimed the load and its unit is in the engine, its
+        // report held until then: the order is the test's, not the runner's.
+        let (in_engine_tx, in_engine) = channel();
+        let (ran_out_tx, ran_out) = channel();
+        let report_late = move || {
+            in_engine_tx.send(()).unwrap();
+            ran_out.recv_timeout(Duration::from_secs(5)).expect("the bound ran out");
+        };
+        let bound = move |_: &Receiver<Result<Ready, String>>| {
+            in_engine.recv_timeout(Duration::from_secs(5)).expect("the unit goes in");
+            ran_out_tx.send(()).unwrap();
+            Err(RecvTimeoutError::Timeout)
+        };
         let owner = stand_in_owner(Box::new(Silent), report_late, || {});
-        let loaded = spawn_within(Duration::from_millis(50), PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, owner);
+        let loaded = spawn_within(bound, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, owner);
         let handle = loaded.expect("the owner had its unit going in: the load stands");
         assert_eq!(handle.name(), "Stand-in");
         let next = stand_in(device.host().slot(0), Box::new(Silent), || {}, || {}).err().expect("the slot is taken");
@@ -1161,10 +1172,13 @@ mod tests {
         let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
         let shared = Arc::new(Shared::default());
         let (ended_tx, ended) = channel();
+        // The setup goes on only once its bound has run out and the load has failed.
+        let (failed_tx, failed) = channel();
         let fake = shared.clone();
-        let late = spawn_within(Duration::from_millis(50), PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
+        let bound = |_: &Receiver<Result<Ready, String>>| Err(RecvTimeoutError::Timeout);
+        let late = spawn_within(bound, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
             let served = serve(ctx, move |setup| {
-                std::thread::sleep(Duration::from_millis(300));
+                failed.recv_timeout(Duration::from_secs(5)).map_err(|e| format!("the load never failed: {e}"))?;
                 let rate = setup.slot.rate().ok_or("no audio device is open")?;
                 Ok(Loaded { plugin: Fake(fake), unit: Box::new(Silent), name: "Fake".to_string(), rate, tone: None })
             });
@@ -1172,6 +1186,7 @@ mod tests {
             served
         });
         assert!(late.as_ref().is_err_and(|e| e.contains("timed out")), "{:?}", late.err());
+        failed_tx.send(()).unwrap();
         assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(Ok(())), "the owner ends on its own");
         load_fake(&device, &shared).unload().expect("the slot takes the next load");
     }
