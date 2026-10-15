@@ -736,7 +736,7 @@ fn a_malformed_param_count_is_an_error_not_an_abort() {
 // ── engine mode: the same plugin as a unit inside a test device's engine (`engine_slot`) ────────
 
 mod engine {
-    use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+    use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
     use super::super::super::state::ToneRestore;
     use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
     use super::*;
@@ -779,17 +779,22 @@ mod engine {
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
             tone,
-            move |ctx| {
-                super::super::clap_engine::run(ctx, "bleeploop.restart-fixture", move || {
-                    OBSERVE.with(|o| *o.borrow_mut() = obs);
-                    // SAFETY: as `fixture_instance`: a static entry whose callbacks obey the ABI.
-                    unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }
-                        .map_err(|e| e.to_string())
-                })
-            },
+            owner(obs),
         )
         .expect("the fixture loads into the engine");
         (handle, seen)
+    }
+
+    /// The production owner over the fixture's entry, with a watcher for each instance it creates.
+    fn owner(obs: Vec<Arc<Observed>>) -> impl FnOnce(engine_slot::OwnerCtx) -> Result<(), String> + Send + 'static {
+        move |ctx| {
+            super::super::clap_engine::run(ctx, "bleeploop.restart-fixture", move || {
+                OBSERVE.with(|o| *o.borrow_mut() = obs);
+                // SAFETY: as `fixture_instance`: a static entry whose callbacks obey the ABI.
+                unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }
+                    .map_err(|e| e.to_string())
+            })
+        }
     }
 
     fn installed(device: &TestDevice, slot: usize) -> Option<(SlotKind, lf_engine::grid::Frame)> {
@@ -840,6 +845,33 @@ mod engine {
         );
         assert!(!obs.contract_violation.load(Relaxed));
         assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "start, stop and process ran on the device thread");
+    }
+
+    /// A load its caller gave up on is undone by its owner: given up before the install, the unit
+    /// never enters the engine; given up after it, the report finds nobody and the unit leaves the
+    /// engine. Either way the plugin is deactivated and destroyed, and the slot takes the next load.
+    #[test]
+    fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        for gave_up in [GaveUp::Before, GaveUp::After] {
+            let obs = Arc::new(Observed::default());
+            let (ended, report) = engine_slot::spawn_given_up(device.host().slot(0), gave_up, owner(vec![obs.clone()]));
+            assert_eq!(ended, Ok(()), "{gave_up:?}: the owner ends");
+            if gave_up == GaveUp::Before {
+                assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
+            }
+            // A unit left in the engine would be engaged by now.
+            assert!(device.wait_blocks(4, Duration::from_secs(5)));
+            assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
+            assert_eq!((obs.activations.load(Relaxed), obs.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");
+            assert_eq!(obs.starts.load(Relaxed), obs.stops.load(Relaxed), "{gave_up:?}: stopped if it started");
+            let (deactivate, destroy) = (obs.deactivate_seq.load(Relaxed), obs.destroy_seq.load(Relaxed));
+            assert!(0 < deactivate && deactivate < destroy, "{gave_up:?}: deactivate {deactivate} → destroy {destroy}");
+            assert!(!obs.contract_violation.load(Relaxed), "{gave_up:?}");
+        }
+        let (handle, _) = load(&device, 0, &Arc::new(Observed::default()));
+        handle.unload().expect("the next load takes the slot");
     }
 
     #[test]

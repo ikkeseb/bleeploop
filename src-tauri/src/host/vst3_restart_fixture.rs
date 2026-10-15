@@ -480,7 +480,7 @@ fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
 // ── engine mode: the same component as a unit inside a test device's engine (`engine_slot`) ─────
 
 mod engine {
-    use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+    use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
     use super::super::super::super::state::ToneRestore;
     use super::super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
     use super::super::controller_tests::FixtureController;
@@ -690,22 +690,30 @@ mod engine {
     ) -> (Result<EngineSlotHandle, String>, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let made = Arc::new(Made::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let (factory_made, sink_seen) = (made.clone(), seen.clone());
+        let sink_seen = seen.clone();
         let handle = engine_slot::spawn(
             PluginFormat::Vst3,
             device.host().slot(slot),
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
             tone,
-            move |ctx| {
-                let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
-                super::super::engine::run_with(ctx, &id, move || {
-                    let factory = ComWrapper::new(make(factory_made));
-                    Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
-                })
-            },
+            owner(made.clone(), make),
         );
         (handle, made, seen)
+    }
+
+    /// The production owner over the factory `make` builds on the owner thread.
+    fn owner(
+        made: Arc<Made>,
+        make: impl FnOnce(Arc<Made>) -> FixtureFactory + Send + 'static,
+    ) -> impl FnOnce(engine_slot::OwnerCtx) -> Result<(), String> + Send + 'static {
+        move |ctx| {
+            let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
+            super::super::engine::run_with(ctx, &id, move || {
+                let factory = ComWrapper::new(make(made));
+                Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
+            })
+        }
     }
 
     fn installed(device: &TestDevice, slot: usize) -> Option<(SlotKind, lf_engine::grid::Frame)> {
@@ -750,6 +758,36 @@ mod engine {
         );
         assert!(!s.contract_violation.load(Relaxed));
         assert_eq!(s.rt_calls_off_device.load(Relaxed), 0, "setProcessing and process ran on the device thread");
+    }
+
+    /// A load its caller gave up on is undone by its owner: given up before the install, the unit
+    /// never enters the engine; given up after it, the report finds nobody and the unit leaves the
+    /// engine. Either way both halves are torn down in order, and the slot takes the next load.
+    #[test]
+    fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        for gave_up in [GaveUp::Before, GaveUp::After] {
+            let made = Arc::new(Made::default());
+            let (ended, report) =
+                engine_slot::spawn_given_up(device.host().slot(0), gave_up, owner(made.clone(), FixtureFactory::new));
+            assert_eq!(ended, Ok(()), "{gave_up:?}: the owner ends");
+            if gave_up == GaveUp::Before {
+                assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
+            }
+            // A unit left in the engine would be engaged by now.
+            assert!(device.wait_blocks(4, Duration::from_secs(5)));
+            assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
+            let s = made.component();
+            assert_eq!((s.activations.load(Relaxed), s.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");
+            assert_eq!(s.starts.load(Relaxed), s.stops.load(Relaxed), "{gave_up:?}: stopped if it started");
+            let (deactivate, terminate) = (s.deactivate_seq.load(Relaxed), s.terminate_seq.load(Relaxed));
+            assert!(0 < deactivate && deactivate < terminate, "{gave_up:?}: setActive(0) {deactivate} → terminate {terminate}");
+            assert_eq!(made.controller().terminates.load(Relaxed), 1, "{gave_up:?}: the controller is terminated");
+            assert!(!s.contract_violation.load(Relaxed), "{gave_up:?}");
+        }
+        let (handle, _, _) = load(&device, 0, 0, 0.0);
+        handle.unload().expect("the next load takes the slot");
     }
 
     #[test]

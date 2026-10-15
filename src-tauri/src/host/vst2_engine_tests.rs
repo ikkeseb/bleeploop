@@ -3,7 +3,7 @@
 //! production `run_with` owns it. The editor and the unit are also driven directly, with the test
 //! thread standing in for the owner. No audio device and no visible window: the device renders to
 //! memory and an editor's host window is never shown.
-use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
 use super::super::super::editor_window::client_size;
 use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
 use super::super::super::vst2::fixture::{self, Probe, Shape, TracedEvent};
@@ -101,14 +101,20 @@ fn try_load(device: &TestDevice, slot: usize, shape: Shape, id: &'static str, to
         0,
         Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
         tone,
-        move |ctx| {
-            run_with(ctx, id, move || {
-                fixture::arm(shape);
-                Ok(Opened { module: None, entry: fixture::entry, file_stem: "fixture-file".to_string() })
-            })
-        },
+        owner(shape, id),
     );
     (handle, seen)
+}
+
+/// The production owner over the fixture in `shape`, as plugin `id`: the entry runs on the owner
+/// thread.
+fn owner(shape: Shape, id: &'static str) -> impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static {
+    move |ctx| {
+        run_with(ctx, id, move || {
+            fixture::arm(shape);
+            Ok(Opened { module: None, entry: fixture::entry, file_stem: "fixture-file".to_string() })
+        })
+    }
 }
 
 fn load(device: &TestDevice, slot: usize, shape: Shape) -> (EngineSlotHandle, Seen) {
@@ -218,6 +224,33 @@ fn a_loaded_slot_renders_in_the_engine_and_unloads_in_order() {
     assert_eq!(probe.rt_calls_off_device.load(Relaxed), 0, "every process call ran on the device thread");
     assert_eq!(probe.calls_while_halted.load(Relaxed), 0);
     assert_rendered_only_while_started(probe);
+}
+
+/// A load its caller gave up on is undone by its owner: given up before the install, the unit never
+/// enters the engine; given up after it, the report finds nobody and the unit leaves the engine.
+/// Either way the plugin is stopped, suspended and closed once, and the slot takes the next load.
+#[test]
+fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    for gave_up in [GaveUp::Before, GaveUp::After] {
+        let probe = Probe::new();
+        let (ended, report) = engine_slot::spawn_given_up(device.host().slot(0), gave_up, owner(instrument(probe), ID));
+        assert_eq!(ended, Ok(()), "{gave_up:?}: the owner ends");
+        if gave_up == GaveUp::Before {
+            assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
+        }
+        // A unit left in the engine would be engaged by now.
+        assert!(device.wait_blocks(4, Duration::from_secs(5)));
+        assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
+        let undone = [load_calls(4096), vec![(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0), (EFF_CLOSE, 0)]].concat();
+        assert_eq!(probe.opcodes(), undone, "{gave_up:?}: loaded, then stopped, suspended and closed");
+        assert_eq!((probe.instances.load(Relaxed), probe.closes.load(Relaxed)), (1, 1), "{gave_up:?}");
+        assert_lifecycle_on_the_owner(probe);
+        assert_rendered_only_while_started(probe);
+    }
+    let (handle, _) = load(&device, 0, instrument(Probe::new()));
+    handle.unload().expect("the next load takes the slot");
 }
 
 #[test]
@@ -1269,12 +1302,8 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
         ready,
         tone: ToneKeeper::new(tone, Arc::new(AtomicBool::new(false))),
     };
-    let owner = std::thread::spawn(move || {
-        run_with(ctx, ID, move || {
-            fixture::arm(shape);
-            Ok(Opened { module: None, entry: fixture::entry, file_stem: "fixture-file".to_string() })
-        })
-    });
+    let run = owner(shape, ID);
+    let owner = std::thread::spawn(move || run(ctx));
     let report = loaded.recv_timeout(Duration::from_secs(5)).expect("the owner reports its load");
     assert!(report.is_ok(), "the fixture loads: {:?}", report.err());
     Driven { running, requests, owner, seen }

@@ -503,6 +503,61 @@ pub(crate) fn stand_in(
     })
 }
 
+/// Test-only: when a load's caller gave up, against its owner's check of `running`. `spawn`'s timeout
+/// lowers `running`, then drops the rendezvous; which of the two the owner meets first decides how it
+/// undoes the load.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum GaveUp {
+    /// Before the check: the owner never installs its unit, and reports the cancel.
+    Before,
+    /// After it: the unit is in the engine when the report finds nobody to take it. `running` stays
+    /// up, so the failed report alone must undo the load.
+    After,
+}
+
+/// Test-only: run an owner as `spawn` does for a caller that `gave_up` on its load, and wait (≤ 10 s)
+/// for the owner to end. Returns what the owner returned and, for `Before`, what it reported (the
+/// plugin's name when it reported a load).
+#[cfg(test)]
+pub(super) fn spawn_given_up(
+    slot: SlotHost,
+    gave_up: GaveUp,
+    run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
+) -> (Result<(), String>, Option<Result<String, String>>) {
+    let running = Arc::new(AtomicBool::new(gave_up == GaveUp::After));
+    let (params_tx, params) = RingBuffer::<ParamEvent>::new(EVENT_RING_CAP);
+    let (request_tx, requests) = std::sync::mpsc::channel();
+    let (ready, ready_rx) = load_ready_channel();
+    let ctx = OwnerCtx {
+        slot,
+        running: running.clone(),
+        requests,
+        params,
+        params_tx: Arc::new(Mutex::new(params_tx)),
+        param_ids: ParamIds::default(),
+        sink: Arc::new(|_| {}),
+        editor_parent: 0,
+        ready,
+        tone: ToneKeeper::new(None, Arc::new(AtomicBool::new(false))),
+    };
+    let ready_rx = (gave_up == GaveUp::Before).then_some(ready_rx);
+    let (done_tx, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done_tx.send(run(ctx)));
+    let wait = Duration::from_secs(10);
+    let report = ready_rx.map(|rx| match rx.recv_timeout(wait) {
+        Ok(report) => report.map(|ready| ready.name),
+        Err(e) => Err(format!("no report: {e}")),
+    });
+    let ended = done.recv_timeout(wait).unwrap_or_else(|_| {
+        // Still serving (a bug): end it, so the test fails rather than hangs.
+        running.store(false, Release);
+        let _ = request_tx.send(OwnerRequest::Wake);
+        Err("the owner was still running 10 s after its caller gave up".to_string())
+    });
+    (ended, report)
+}
+
 /// Test-only: the engine-mode tests run one at a time. Each builds whole engines (every page
 /// touched) and a device thread; many at once starved the (since deleted) restart tests' reader
 /// threads on a loaded machine.
