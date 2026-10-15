@@ -2,7 +2,7 @@
 //! input gaps keeps one recorder, a whole-bar master, every committed lane at the master length (a
 //! multiply grows them all, a TRIM keeps it), finite output and no panic; UNDO twice is the identity;
 //! UNDO after an N-cycle overdub gives back the pre-dub loop bit for bit. The presses include TRIM and
-//! HALVE, FADE, HOLD and its release, DUB FEEDBACK, a meter change and a punch-out (a stopped device);
+//! HALVE, WIDE COPY, FADE, HOLD and its release, DUB FEEDBACK, a meter change and a punch-out (a stopped device);
 //! each script starts in a meter drawn from the offered ones, and the whole bars are that meter's.
 //! Rendered at 8 kHz so a case stays cheap; the engine is rate-agnostic.
 
@@ -50,6 +50,7 @@ fn op() -> impl Strategy<Value = Op> {
         2 => lane().prop_map(|i| Op::Press(Command::Undo(i))),
         2 => lane().prop_map(|i| Op::Press(Command::Reverse(i))),
         1 => lane().prop_map(|i| Op::Press(Command::Copy(i))),
+        1 => lane().prop_map(|i| Op::Press(Command::CopyWide(i))),
         3 => (lane(), 1u32..5).prop_map(|(i, b)| Op::Press(Command::Trim(i, b))),
         2 => Just(Op::Press(Command::Action(Action::Halve))),
         2 => Just(Op::Press(Command::Action(Action::FadeAll))),
@@ -76,6 +77,7 @@ fn op() -> impl Strategy<Value = Op> {
             Just(Action::Undo),
             Just(Action::Clear),
             Just(Action::NextTrack),
+            Just(Action::CopyWide),
             (0u8..3).prop_map(Action::Hold),
             (0u8..3).prop_map(Action::Release),
         ]

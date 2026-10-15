@@ -1,7 +1,7 @@
 // verify/guards/midi-wire.mjs — the TS half of native MIDI's wire (`src/platform/midi-wire.ts`, mirroring
 // the serde types of `src-tauri/src/engine_io/midi/mod.rs` and `store.rs`).
 //
-// `verify/fixtures/midi-wire.json` holds native MIDI's 25 action ids (`ActionId::ALL`), one example of
+// `verify/fixtures/midi-wire.json` holds native MIDI's 26 action ids (`ActionId::ALL`), one example of
 // every `MidiEvent` (every port state, binding state and origin, store problem, UI action and learn
 // refusal; the list with its store revision), every `InputEvent` the UI sends, the outbox's `input_send`
 // items (an engine command or an input event) and that command's answers (nothing dropped, or why), the
@@ -93,7 +93,7 @@ check('every native action id reads, in the picker\'s order', () => {
   const read = fixture.actionIds.map((action) => decodeMidiEvent({ learning: { learning: { action, target: null } } }).learning.action);
   assert.deepEqual(read, fixture.actionIds);
   assert.deepEqual([...MIDI_ACTION_IDS], fixture.actionIds, "the UI's ids, in its order");
-  assert.equal(new Set(read).size, 25);
+  assert.equal(new Set(read).size, 26);
 });
 
 // ── Input events: the UI sends these; each reads as sent ────────────────────────────────────────────

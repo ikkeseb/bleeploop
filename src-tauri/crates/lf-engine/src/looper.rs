@@ -57,6 +57,8 @@ pub const MAX_FIXED_BARS: Frame = 32;
 pub const JOB_RATE: Frame = 1024;
 /// The hands-free CLEAR confirm window (`CONFIRM_WINDOW_MS`).
 const CONFIRM_WINDOW_MS: Frame = 2500;
+/// WIDE COPY's offset: the copy plays this many milliseconds behind its source ([`Looper::copy`]).
+pub const WIDE_MS: Frame = 20;
 /// Block jobs in flight at once; `push_job` panics on a full table. A multiply starts the most at one
 /// frame: up to two per other lane (its loop and its undo target, 8), beside the one job that may still
 /// run on each of those lanes (a COPY into it, a TRIM: 4); 16 leaves room for the jobs pressed while
@@ -347,7 +349,9 @@ enum JobKind {
     Restore { src: usize, dst: usize, prev_undo_valid: bool, prev_spare_reversed: bool },
     /// COPY into lane `dst`: done, it becomes STOPPED, or PLAYING when its source played and no stop
     /// reached the copy meanwhile; `feedback` is the DUB FEEDBACK it copied, which `Event::Copied` reports.
-    LaneCopy { src: usize, dst: usize, from: usize, to: usize, resume: bool, feedback: f32 },
+    /// Buffer position `p` of `dst` takes `src`'s `p - shift` around the loop ([`shifted_run`]): 0 for
+    /// COPY, WIDE COPY's offset in heard order (`Looper::copy`).
+    LaneCopy { src: usize, dst: usize, from: usize, to: usize, resume: bool, feedback: f32, shift: Frame },
     /// TRIM: `dst` becomes `src` as `fill` maps it, in heard order: the job's positions are loop
     /// positions as heard, which a `reversed` pair of buffers holds backwards ([`trim_run`]).
     Trim { src: usize, dst: usize, fill: TakeFill, reversed: bool },
@@ -398,7 +402,8 @@ impl Job {
         }
         Some(match self.kind {
             JobKind::Fill { buf, fill } => fill.source(idx as Frame).map_or(0.0, |s| bufs[buf][s as usize]),
-            JobKind::Copy { src, .. } | JobKind::Restore { src, .. } | JobKind::LaneCopy { src, .. } => bufs[src][idx],
+            JobKind::Copy { src, .. } | JobKind::Restore { src, .. } => bufs[src][idx],
+            JobKind::LaneCopy { src, shift, .. } => bufs[src][((idx as Frame + v.modulus - shift) % v.modulus) as usize],
             JobKind::Trim { src, fill, reversed, .. } => {
                 let s = fill.source(heard).unwrap_or(0);
                 bufs[src][if reversed { fill.master - 1 - s } else { s } as usize]
@@ -998,7 +1003,13 @@ impl Looper {
         Applied::Done
     }
 
-    pub fn copy(&mut self, cx: &mut Cx, i: usize) -> Applied {
+    /// COPY lane `i` into the first EMPTY lane (not the recorder's), as a block job. `wide` (WIDE COPY):
+    /// the copy's loop is its source's shifted circularly by [`WIDE_MS`], so it plays that far behind in
+    /// heard order, seamless across the loop edge, and its pan is the mirror of the source's; a source
+    /// within 0.1 of the centre glides to half left and the copy sits half right (`LaneFx::widen`). A
+    /// loop shorter than twice the offset makes a plain copy. Nothing else differs from COPY: the loop
+    /// carries the offset, so a save, an export and a recovery carry it as any lane.
+    pub fn copy(&mut self, cx: &mut Cx, i: usize, wide: bool) -> Applied {
         let src = self.lanes[i];
         // During a later take's count-in no block job may start: the loops restart on its downbeat with
         // no wait (`restart_from_top`).
@@ -1013,6 +1024,15 @@ impl Looper {
         let Some(j) = (0..TRACK_COUNT).find(|&k| self.lanes[k].state == LaneState::Empty && Some(k) != recorder) else {
             return Applied::Done;
         };
+        let offset = (self.sample_rate as Frame * WIDE_MS + 500) / 1000;
+        let wide = wide && self.master >= 2 * offset;
+        // A reversed pair holds heard position `h` at `master - 1 - h`: behind in heard order is ahead in
+        // the buffer.
+        let shift = match (wide, src.reversed) {
+            (false, _) => 0,
+            (true, false) => offset,
+            (true, true) => self.master - offset,
+        };
         let dst = &mut self.lanes[j];
         dst.length = self.master;
         dst.written = self.master;
@@ -1023,8 +1043,11 @@ impl Looper {
         dst.feedback = src.feedback;
         dst.state = LaneState::Stopped;
         cx.fx.copy(i, j, cx.now);
+        if wide {
+            cx.fx.widen(i, j);
+        }
         let resume = src.state == LaneState::Playing && src.stop_at.is_none();
-        let kind = JobKind::LaneCopy { src: src.live, dst: dst.live, from: i, to: j, resume, feedback: src.feedback };
+        let kind = JobKind::LaneCopy { src: src.live, dst: dst.live, from: i, to: j, resume, feedback: src.feedback, shift };
         self.push_job(cx.now, cx.now, j, kind, Visit { lo: 0, span: self.master, off: 0, modulus: self.master });
         Applied::Done
     }
@@ -1235,7 +1258,7 @@ impl Looper {
                     return self.reverse(cx, i);
                 }
             }
-            Action::Copy => {
+            Action::Copy | Action::CopyWide => {
                 if !self.lanes[i].committed() {
                     refuse(cx, Refusal::NoCopy);
                 } else if self.lanes.iter().all(|t| t.state != LaneState::Empty) {
@@ -1243,7 +1266,7 @@ impl Looper {
                 } else if self.restart_pending() {
                     refuse(cx, Refusal::OtherRecording);
                 } else {
-                    return self.copy(cx, i);
+                    return self.copy(cx, i, action == Action::CopyWide);
                 }
             }
             Action::Halve => {
@@ -2190,9 +2213,15 @@ impl Looper {
                 visit.runs(from, to, |a, b| fill_run(data, fill, a, b));
                 buf
             }
-            JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => {
+            JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } => {
                 let (s_buf, d_buf) = pair(&mut self.bufs, src, dst);
                 visit.runs(from, to, |a, b| d_buf[a..b].copy_from_slice(&s_buf[a..b]));
+                dst
+            }
+            JobKind::LaneCopy { src, dst, shift, .. } => {
+                let (s_buf, d_buf) = pair(&mut self.bufs, src, dst);
+                let (m, shift) = (visit.modulus as usize, shift as usize);
+                visit.runs(from, to, |a, b| shifted_run(s_buf, d_buf, m, shift, a, b));
                 dst
             }
             JobKind::Trim { src, dst, fill, reversed } => {
@@ -2616,6 +2645,19 @@ fn fill_run(data: &mut [f32], fill: TakeFill, a: usize, b: usize) {
             data.copy_within(q..q + copied, p);
         }
         data[p + copied..p + n].fill(0.0);
+        p += n;
+    }
+}
+
+/// Positions `[a, b)` of `dst` from `src` read `shift` positions earlier around a loop of `m`:
+/// `dst[p] = src[(p - shift) mod m]`, at most two pieces (`shift` 0: a plain copy). The buffers are
+/// distinct, so nothing overlaps.
+fn shifted_run(src: &[f32], dst: &mut [f32], m: usize, shift: usize, a: usize, b: usize) {
+    let mut p = a;
+    while p < b {
+        let s = (p + m - shift) % m;
+        let n = (b - p).min(m - s);
+        dst[p..p + n].copy_from_slice(&src[s..s + n]);
         p += n;
     }
 }

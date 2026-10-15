@@ -255,6 +255,18 @@ impl LaneFx {
         self.pans[to] = Pan::seeded(self.pans[from].target);
     }
 
+    /// WIDE COPY, after [`LaneFx::copy`]: lane `to` takes the mirror of lane `from`'s pan target at once;
+    /// a `from` within 0.1 of the centre glides to half left and `to` sits half right.
+    pub fn widen(&mut self, from: usize, to: usize) {
+        let pan = self.pans[from].target;
+        if pan.abs() < 0.1 {
+            self.set_pan(from, -0.5);
+            self.pans[to] = Pan::seeded(0.5);
+        } else {
+            self.pans[to] = Pan::seeded(-pan);
+        }
+    }
+
     /// Hand every chain the looper's beat grid if it moved: its origin at `origin` (a device frame), a
     /// beat the quarter note of a bar of `meter` at `bpm` (the delay divisions are note values). No grid
     /// (`master` 0) leaves the last one.

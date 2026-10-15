@@ -23,6 +23,7 @@ pub enum ActionId {
     Mute,
     Reverse,
     Copy,
+    CopyWide,
     HalveTrack,
     NextTrack,
     PrevTrack,
@@ -46,7 +47,7 @@ pub enum ActionId {
 impl ActionId {
     /// Every action, in `ACTION_LABELS` order.
     #[cfg(test)]
-    pub const ALL: [ActionId; 25] = [
+    pub const ALL: [ActionId; 26] = [
         ActionId::RecDub,
         ActionId::PlayStop,
         ActionId::Undo,
@@ -54,6 +55,7 @@ impl ActionId {
         ActionId::Mute,
         ActionId::Reverse,
         ActionId::Copy,
+        ActionId::CopyWide,
         ActionId::HalveTrack,
         ActionId::NextTrack,
         ActionId::PrevTrack,
@@ -85,6 +87,7 @@ impl ActionId {
                 | ActionId::Mute
                 | ActionId::Reverse
                 | ActionId::Copy
+                | ActionId::CopyWide
                 | ActionId::HalveTrack
         )
     }
@@ -199,12 +202,12 @@ pub fn parse_bindings(json: &str) -> Result<Parsed, String> {
 mod tests {
     use super::*;
 
-    // actions.ts ActionId and ACTION_LABELS: the 25 ids, in the picker's order, the first eight lanes.
+    // actions.ts ActionId and ACTION_LABELS: the 26 ids, in the picker's order, the first nine lanes.
     #[test]
-    fn the_25_actions_serialize_as_the_ts_ids_in_label_order_and_the_first_eight_are_lanes() {
+    fn the_26_actions_serialize_as_the_ts_ids_in_label_order_and_the_first_nine_are_lanes() {
         let ids = [
-            "recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "halveTrack", "nextTrack",
-            "prevTrack", "playAll", "stopAll", "fadeAll", "goLive", "stageView", "stageNextView", "tapTempo",
+            "recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "copyWide", "halveTrack",
+            "nextTrack", "prevTrack", "playAll", "stopAll", "fadeAll", "goLive", "stageView", "stageNextView", "tapTempo",
             "clickToggle", "endStopToggle", "fixedToggle", "retakeToggle", "autoRecToggle", "inFxEcho",
             "inFxReverb", "inFxRing",
         ];
@@ -213,7 +216,8 @@ mod tests {
             assert_eq!(serde_json::from_value::<ActionId>(id.into()).unwrap(), action);
         }
         let lanes: Vec<bool> = ActionId::ALL.iter().map(|a| a.is_lane()).collect();
-        assert_eq!(lanes, [[true; 8].as_slice(), &[false; 17]].concat());
+        assert_eq!(ids.len(), ActionId::ALL.len());
+        assert_eq!(lanes, [[true; 9].as_slice(), &[false; 17]].concat());
     }
 
     // midi-actions.ts fromStored: a record saved before targets and HOLD reads with neither; a target is
