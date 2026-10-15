@@ -6,7 +6,7 @@
 //! engine side of both allocates nothing; the buffers are the test's (the host's), built outside it.
 //! A snapshot in flight leaves the rendered output bit for bit as it was (the Web Audio probe
 //! recovery-playback.mjs's continuity). Each track carries its lane's mix as the engine applied it at the
-//! pin (STATUS D21), and the export's wet master renders with that mix, not the host's settings.
+//! pin (D21), and the export's wet master renders with that mix, not the host's settings.
 
 mod common;
 

@@ -29,6 +29,12 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
   under `src/` (Solid, `import.meta.env`, extensionless imports) and gets a fresh copy per `?g=N` query, so module-load
   state re-runs (`verify/guards/layout-store.mjs`).
 
+Where the UI and the native side must agree, one fixture under `verify/fixtures/` holds both halves to
+it: a guard reads it, and a Rust test reads it through `include_str!` (so `rust-test.yml`'s path filter
+covers `verify/fixtures/**`, which `verify/guards/ci-paths.mjs` checks). Two hold a wire
+(`verify/fixtures/engine-wire.json`, `verify/fixtures/midi-wire.json`); `verify/fixtures/fixed-bars.json`
+holds a rule both compute, FIXED's bar math.
+
 `verify/guards/docs.mjs` is the docs guard: cited paths exist, in a tracked `.md` and in the comments
 of tracked `.rs`, `.ts`, `.tsx` and `.mjs` files (a path from a top-level directory, `.github/` too,
 bare or backticked, resolved from the root or the file's own crate; the briefings in `//!` are
