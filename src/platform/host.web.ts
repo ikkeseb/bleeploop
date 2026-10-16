@@ -27,7 +27,7 @@ import {
 import { decodeInputItem, decodeMidiEvent, type Dropped, type ImportReport, type InputEvent, type InputItem, type MidiEvent } from './midi-wire.ts';
 
 const NO_NATIVE_HOST =
-  'Native VST host is unavailable in the browser build — use the built-in synths.';
+  'Native VST host is unavailable in the browser build. Use the built-in synths.';
 
 const webPluginHost: PluginHost = {
   available: false,

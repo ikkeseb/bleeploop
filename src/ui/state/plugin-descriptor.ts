@@ -43,7 +43,7 @@ export function pluginPickerLabel(
   desc: PluginDescriptor,
   peers: readonly PluginDescriptor[],
 ): string {
-  const base = `${desc.name} (${desc.format})`;
+  const base = `${desc.name} (${desc.format.toUpperCase()})`;
   const collisions = peers.filter(
     (peer) =>
       peer.name === desc.name &&

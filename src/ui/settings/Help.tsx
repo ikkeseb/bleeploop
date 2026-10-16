@@ -142,9 +142,9 @@ function Reference(props: { hidden: boolean }) {
             <span class="help__caps">
               <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd>
             </span>
-            <span class="help__label">select a track</span>
+            <span class="help__label">Select a track</span>
           </div>
-          <p class="help__sub">In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</p>
+          <p class="help__sub">In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there.</p>
         </section>
 
         <section class="help__sec">
@@ -251,7 +251,7 @@ function Manual(props: { hidden: boolean }) {
           <li><span class="help__note">↔ WIDE</span> copies it wide: the copy plays 20 ms behind, panned to the other side (a centred track goes half left, the copy half right), so one riff sounds like two guitars. Summed to mono the two cancel in places and sound hollow; a real double is a second take</li>
           <li><span class="help__note">✂ TRIM</span> keeps a track's first bars and repeats them across the loop. The loop keeps its length</li>
           <li>All tracks share one loop, so they stay locked together and can't drift</li>
-          <li>A take shorter than the loop repeats across it — stop early, or set the bars with <span class="help__note">FIXED</span></li>
+          <li>A take shorter than the loop repeats across it: stop early, or set the bars with <span class="help__note">FIXED</span></li>
           <li>Keep playing past the end of the loop and the take grows it: the loop becomes as many whole loops as you played, rounded to the nearest, and the other tracks repeat</li>
         </ul>
       </section>

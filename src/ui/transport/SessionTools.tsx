@@ -27,7 +27,7 @@ export function SessionTools() {
   const [exporting, setExporting] = createSignal(false);
   // Busy from the file read until the tones are restored: until the feed shows the loaded lanes the
   // looper still reads empty, so without it a second pick could start a second import, whose refusal
-  // toasts "Import failed" over the first one's success.
+  // toasts an import failure over the first one's success.
   const [importing, setImporting] = createSignal(false);
 
   // Async since v1 (the offline master render); render failures inside fall back to the dry mix — this
@@ -40,7 +40,7 @@ export function SessionTools() {
       if (filename) notifyInfo(`Exported ${filename}`, 'One .zip with every track + the master as WAV. Look in your Downloads folder.');
     } catch (err) {
       console.error('[transport] export failed', err);
-      notifyError('Export failed', err);
+      notifyError('Could not export the loops. Export again to retry.', err);
     } finally {
       setExporting(false);
     }
@@ -68,7 +68,8 @@ export function SessionTools() {
       await restoreSessionTones(tones);
     } catch (err) {
       console.error('[transport] import failed', err);
-      notifyError('Import failed: ' + (err instanceof Error ? err.message : String(err)));
+      // The reason line names the remedy where there is one (the rate to open it at, a newer build).
+      notifyError('Could not import the session.', err);
     } finally {
       input.value = '';
       setImporting(false);

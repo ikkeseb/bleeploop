@@ -140,7 +140,7 @@ await probe(async ({ open }) => {
   });
   const listed = (user) => [...BUILTIN.map((f) => row(f, true)), ...user.map((f) => row(f, false))];
   /** The Plugins group of slot 1's source picker. */
-  const picker = () => page.locator('[aria-label="Source for slot 1"] optgroup[label="Plugins"] option').allTextContents();
+  const picker = () => page.locator('[aria-label="Source for slot A"] optgroup[label="Plugins"] option').allTextContents();
   const idle = () => page.waitForFunction(async () => {
     const instrument = await import('/src/ui/state/instrument.ts');
     const folders = await import('/src/ui/state/plugin-folders.ts');
@@ -174,7 +174,7 @@ await probe(async ({ open }) => {
   assert.equal(fit.panel, fit.without, 'a long path does not widen the panel');
   await mkdir('logs/plugin-folders', { recursive: true });
   await section.screenshot({ path: 'logs/plugin-folders/section.png' });
-  assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)']);
+  assert.deepEqual(await picker(), ['Probe Amp Sim (VST3)']);
 
   // ── Add: the host's dialog answers a folder ─────────────────────────────────────────────────────────
   await clearCalls();
@@ -185,7 +185,7 @@ await probe(async ({ open }) => {
   console.log('add', JSON.stringify(await calls()));
   assert.deepEqual(await rows(), listed([OWN, LONG, ADDED]), 'the added folder is listed');
   assert.deepEqual(await calls(), ['add(0)', 'scan:false', 'folders'], 'the add passes no path, one scan (not forced) follows, and its end reads the folders again');
-  assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)', 'Found In Folder (clap)'], 'the picker lists what the scan found there');
+  assert.deepEqual(await picker(), ['Probe Amp Sim (VST3)', 'Found In Folder (CLAP)'], 'the picker lists what the scan found there');
 
   // ── Remove ──────────────────────────────────────────────────────────────────────────────────────────
   await clearCalls();
@@ -195,7 +195,7 @@ await probe(async ({ open }) => {
   console.log('remove', JSON.stringify(await calls()));
   assert.deepEqual(await rows(), listed([OWN, LONG]), 'the removed folder is gone from the list');
   assert.deepEqual(await calls(), [`remove:${ADDED.path}`, 'scan:false', 'folders'], 'the remove names the exact path, and one scan follows (then the read of the folders)');
-  assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)'], 'the picker drops what was only in that folder');
+  assert.deepEqual(await picker(), ['Probe Amp Sim (VST3)'], 'the picker drops what was only in that folder');
 
   // ── Cancel: the dialog answers nothing ──────────────────────────────────────────────────────────────
   await clearCalls();
@@ -253,7 +253,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(during.calls, ['scan:false', 'add(0)', 'scan:false', 'folders'], 'ONE follow-up scan runs once the held one ends, and the folders are read once after both');
   assert.equal(during.scanning, false);
   assert.deepEqual(during.found, ['Probe Amp Sim', 'Late Arrival'], 'the result is the scan that started after the add');
-  assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)', 'Late Arrival (vst3)'], 'and the picker shows it');
+  assert.deepEqual(await picker(), ['Probe Amp Sim (VST3)', 'Late Arrival (VST3)'], 'and the picker shows it');
   assert.deepEqual(await rows(), listed([OWN, LONG, LATE_FOLDER]));
   assert.ok(await addButton.isEnabled(), 'Add folder opens again after the scans');
 

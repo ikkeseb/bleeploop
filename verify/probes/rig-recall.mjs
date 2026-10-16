@@ -147,7 +147,7 @@ await probe(async ({ open }) => {
 
   const pick = async (slot, desc) => {
     // No plugin: the slot's default synth (the picker's built-in entry).
-    await page.getByRole('combobox', { name: `Source for slot ${slot + 1}`, exact: true }).selectOption(desc ? keyOf(desc) : ['lead', 'bass'][slot]);
+    await page.getByRole('combobox', { name: `Source for slot ${'AB'[slot]}`, exact: true }).selectOption(desc ? keyOf(desc) : ['lead', 'bass'][slot]);
     await page.waitForFunction(() => window.__recallProbe.slots.slotPendingCounts().every((n) => n === 0));
   };
   /** The close button, as the OS sends it: the close guard runs and approves (an empty jam asks nothing). */
@@ -196,7 +196,7 @@ await probe(async ({ open }) => {
   await pick(0, ALT);
   await launch({ scan: [FX, SYN] });
   // One log line for the missing plugin.
-  s = await settle({ recall: [/^\[rig-recall\] slot 1: Probe Drive \(vst3\) at C:\\probe\\drive\.vst3 is not in this launch's plugin scan/] });
+  s = await settle({ recall: [/^\[rig-recall\] slot 1: Probe Drive \(VST3\) at C:\\probe\\drive\.vst3 is not in this launch's plugin scan/] });
   assert.deepEqual(s.loads, [], 'a plugin missing from the scan is not loaded');
   assert.deepEqual(s.toasts, [], 'a missing plugin raises no toast');
   expectIdle(s, 'missing plugin');
@@ -205,7 +205,7 @@ await probe(async ({ open }) => {
   await launch({ scan: ALL, loads: { 0: 'reject' } });
   s = await settle({ loadFailed: 1 });
   assert.deepEqual(s.loads, [loadOf(0, ALT)], 'a skipped slot keeps its record for a launch where the plugin is back');
-  assert.deepEqual(s.toasts, ['Plugin load failed x1']);
+  assert.deepEqual(s.toasts, ['Could not load the plugin. Pick it again, or another source. x1']);
   assert.deepEqual(s.slots, [null, null]);
   await launch({ scan: ALL });
   s = await settle();
@@ -228,11 +228,11 @@ await probe(async ({ open }) => {
   await launch({ scan: ALL, loads: { 0: 'busy', 1: 'timeout' } });
   s = await settle({ loadFailed: 2 });
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)]);
-  assert.deepEqual({ slots: s.slots, toasts: s.toasts }, { slots: [null, null], toasts: ['Plugin load failed x2'] });
+  assert.deepEqual({ slots: s.slots, toasts: s.toasts }, { slots: [null, null], toasts: ['Could not load the plugin. Pick it again, or another source. x2'] });
   await launch({ scan: ALL, loads: { 0: 'no-thread', 1: 'task' } });
   s = await settle({ loadFailed: 2 });
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'a busy slot and a timed-out setup are retried at the next launch');
-  assert.deepEqual({ slots: s.slots, toasts: s.toasts }, { slots: [null, null], toasts: ['Plugin load failed x2'] });
+  assert.deepEqual({ slots: s.slots, toasts: s.toasts }, { slots: [null, null], toasts: ['Could not load the plugin. Pick it again, or another source. x2'] });
   await launch({ scan: ALL });
   s = await settle();
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'a missing owner thread and a failed task are retried at the next launch');
@@ -245,9 +245,9 @@ await probe(async ({ open }) => {
   await page.waitForFunction(() => window.__recallProbe.calls.load.length === 1 && window.__recallProbe.recall.recallInFlight());
   assert.deepEqual(await closeApp(), { inFlight: true, done: false }, 'a close while a recalled load hangs keeps the marker');
   await launch({ scan: ALL });
-  s = await settle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Probe Amp \(clap\), Probe Drive \(vst3\)/] });
+  s = await settle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Probe Amp \(CLAP\), Probe Drive \(VST3\)/] });
   assert.deepEqual(s.loads, [], 'no recall after a launch died restoring');
-  assert.deepEqual(s.toasts, ['Plugins not restored x1']);
+  assert.deepEqual(s.toasts, ['Could not restore the plugins. Pick a plugin again to load it. x1']);
   expectIdle(s, 'skipped recall');
   await launch({ scan: ALL });
   s = await settle();
@@ -262,9 +262,9 @@ await probe(async ({ open }) => {
     return instrument.slotPlugins().every(Boolean) && recall.recallInFlight() && !recall.rigRecallDone();
   });
   await launch({ scan: ALL });
-  s = await settle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Probe Amp \(clap\), Probe Synth \(vst3\)/] });
+  s = await settle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Probe Amp \(CLAP\), Probe Synth \(VST3\)/] });
   assert.deepEqual(s.loads, [], 'a launch that died right after its loads also skips the next recall');
-  assert.deepEqual(s.toasts, ['Plugins not restored x1']);
+  assert.deepEqual(s.toasts, ['Could not restore the plugins. Pick a plugin again to load it. x1']);
   await launch({ scan: ALL });
   s = await settle();
   assert.deepEqual({ loads: s.loads, toasts: s.toasts }, { loads: [], toasts: [] });
@@ -288,7 +288,7 @@ await probe(async ({ open }) => {
   // it; the other slot's instrument is restored without taking MIDI. The next launch restores only
   // that instrument, which then takes MIDI again.
   await launch({ scan: ALL, holdScan: true });
-  await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption('pad');
+  await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption('pad');
   await page.waitForFunction(() => window.__recallProbe.slots.slotPendingCounts().every((n) => n === 0));
   await page.evaluate(() => window.__recallProbe.releaseScan());
   s = await settle();
@@ -303,7 +303,7 @@ await probe(async ({ open }) => {
 
   // 12. A slot activated while the scan still runs keeps the MIDI slot over a restored instrument.
   await launch({ scan: ALL, holdScan: true });
-  await page.getByRole('button', { name: 'Activate slot 1' }).click();
+  await page.getByRole('button', { name: 'Activate slot A' }).click();
   await page.evaluate(() => window.__recallProbe.releaseScan());
   s = await settle();
   assert.deepEqual({ loads: s.loads, active: s.active }, { loads: [loadOf(1, SYN)], active: 0 },

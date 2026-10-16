@@ -146,7 +146,7 @@ await probe(async ({ open }) => {
   });
   const toasts = await page.evaluate(() => window.__lf.notify.toasts().map((t) => t.message));
   console.log('toasts', JSON.stringify(toasts));
-  for (const message of ['Track 1: overdub layer discarded', 'Track 3: take discarded', 'Track 4: take 1 dropped']) {
+  for (const message of ['Could not keep the overdub on track 1. Overdub it again.', 'Could not keep the take on track 3. Record it again.', 'Could not keep take 1 on track 4. Record it again.']) {
     assert.ok(toasts.includes(message), `the player hears "${message}"`);
   }
   const rejected = consumeConsoleErrors('rejected: input gap');

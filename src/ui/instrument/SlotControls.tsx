@@ -15,6 +15,7 @@ import { volumeDb } from '../looper/shared';
 import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
+import { slotLetter } from '../state/slot-tones';
 
 /**
  * The slot header's own controls (`InstrumentSlot.tsx` lays them out): the input pick and GO LIVE of a
@@ -49,7 +50,7 @@ export function InputPick(props: { slot: 0 | 1 }) {
   return (
     <select
       class="slot__in"
-      aria-label={`Input for slot ${props.slot + 1}`}
+      aria-label={`Input for slot ${slotLetter(props.slot)}`}
       title="The input this slot hears. Auto: input 2 on an interface with two or more"
       value={pick()}
       onClick={(e) => e.stopPropagation()}
@@ -76,7 +77,7 @@ export function LiveButton(props: { slot: 0 | 1 }) {
         class="tgl live"
         classList={{ 'on-green': live() }}
         aria-pressed={live()}
-        aria-label={`Live input for slot ${slot + 1}`}
+        aria-label={`Live input for slot ${slotLetter(slot)}`}
         disabled={slotPendingCounts()[slot] > 0 || liveBusy(slot)}
         onClick={(e) => {
           e.stopPropagation();
@@ -168,7 +169,7 @@ export function SlotVolume(props: { slot: 0 | 1 }) {
           style={{ '--fill': `${(level() / SLOT_GAIN_MAX) * 100}%` }}
           onInput={(ev) => onInput(ev.currentTarget)}
           onDblClick={() => set(1.0)}
-          aria-label={`Volume for slot ${slot + 1}`}
+          aria-label={`Volume for slot ${slotLetter(slot)}`}
           aria-valuetext={db()}
           disabled={slotPendingCounts()[slot] > 0}
         />

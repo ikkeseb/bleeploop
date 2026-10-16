@@ -129,7 +129,7 @@ export function subscribeMidi(onEvent: (event: MidiEvent) => void): MidiSubscrip
   const answered = subscription.epoch.catch(() => 0);
   const epoch: Promise<number> = within(answered, NATIVE_WAIT_MS, 'native MIDI subscribe').catch((err: unknown) => {
     console.error('[platform] native MIDI did not answer the subscribe in time; input goes on without it', err);
-    notifyError('The app lost contact with MIDI', err);
+    notifyError('Could not reach MIDI. Restart BleepLoop to get it back.', err);
     // A late answer still becomes the page's epoch, unless a later subscribe replaced this one.
     void answered.then((late) => {
       if (inputEpoch === epoch && late > 0) adopt(Promise.resolve(late));
@@ -228,10 +228,11 @@ let toldDropped: Dropped | null = null;
 /** The epoch whose refused input the release log last named. */
 let toldStale = 0;
 
-const DROPPED_DETAIL: Record<Exclude<Dropped, 'stale'>, string> = {
-  noDevice: 'No audio device is running.',
-  rebuilding: 'The audio device is restarting.',
-  full: 'The engine had no room for it.',
+/** Each drop's toast: what to do, then why. */
+const DROPPED_TOAST: Record<Exclude<Dropped, 'stale'>, readonly [string, string]> = {
+  noDevice: ['Open an audio device in Audio Settings.', 'No audio device is running.'],
+  rebuilding: ['Try again once the audio device is back.', 'The audio device is restarting.'],
+  full: ['Press or play it again.', 'The engine had no room for it.'],
 };
 
 /**
@@ -249,7 +250,7 @@ async function submit(items: InputItem[]): Promise<boolean> {
   if ('lost' in sent && !sent.timedOut) sent = await sendOnce(batch);
   if ('lost' in sent) {
     console.error('[platform] input batch failed', sent.lost);
-    notifyError('The audio engine did not take a command', sent.lost);
+    notifyError('Could not send that to the audio engine. Press or play it again.', sent.lost);
     if (pendingBlur || items.some(releases)) {
       pendingBlur = true;
       const blur = await sendOnce([BLUR]);
@@ -267,7 +268,8 @@ async function submit(items: InputItem[]): Promise<boolean> {
     }
   } else if (dropped !== null && dropped !== toldDropped) {
     console.error(`[platform] native MIDI dropped input: ${dropped}`);
-    notifyError('The audio engine did not take a command', DROPPED_DETAIL[dropped]);
+    const [hint, why] = DROPPED_TOAST[dropped];
+    notifyError(`Could not send that to the audio engine. ${hint}`, why);
     toldDropped = dropped;
   } else if (dropped === null && items.some(press)) {
     toldDropped = null;

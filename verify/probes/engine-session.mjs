@@ -242,7 +242,7 @@ await probe(async ({ browser, open }) => {
   // ── ShareLost: a toast, and the pick is forgotten ────────────────────────────────────────────────
   assert.deepEqual(await page.evaluate(() => window.__lf.native.shares), ['probe-endpoint'], 'the reloaded page sent the saved pick');
   await emit({ device: [{ ShareLost: { reason: 'the Share output endpoint stopped' } }] });
-  await page.getByText('Share output stopped').waitFor({ timeout: 3000 });
+  await page.getByText('Could not keep Share output running.', { exact: false }).waitFor({ timeout: 3000 });
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices')).shareDeviceId), '');
 
   assert.equal(await page.evaluate(() => window.__audioContexts), 0, 'no AudioContext was built (the engine plays everything)');

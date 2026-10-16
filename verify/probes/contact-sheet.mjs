@@ -317,30 +317,30 @@ await probe(async ({ browser, open }) => {
         await instrument.scanForPlugins();
       }, AMP_SIM);
       await reset();
-      await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
+      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
       await page.waitForTimeout(200);
       await shoot(scene);
 
       scene = '9-amp-sim-live';
-      await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption({ label: 'Probe Amp Sim (vst3)' });
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
-      await page.getByRole('button', { name: 'Editor for slot 1', exact: true, pressed: true }).waitFor();
+      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption({ label: 'Probe Amp Sim (VST3)' });
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
+      await page.getByRole('button', { name: 'Editor for slot A', exact: true, pressed: true }).waitFor();
       // A guitar played at a working level (about -12 dBFS): the input meters have something to show.
       await emit({ meter: { peak: [0.25, 0], clip: [false, false] } });
       await page.waitForTimeout(250);
       await shoot(scene);
 
       scene = '10-amp-sim-idle';
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).click();
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
 
       // Live again, and a first take one second in while the guitar runs hot: one block clipped a moment
       // ago, the input now near -3 dBFS, so the input meters show the level and any clip hold.
       scene = '9b-live-take-hot';
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).click();
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
       await emit({
         events: [transport(0, true, 120), laneEvent(0, lane('Recording'), 2 * RATE), { Beat: { frame: 2 * RATE, beatInBar: 0, countLeft: 0, clicked: true } }],
         anchor: anchorAt(3 * RATE),

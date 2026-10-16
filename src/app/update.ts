@@ -57,7 +57,7 @@ export function updateProgressLabel(stage: UpdateProgress): string {
     case 'verifying':
       return 'Checking the signature';
     case 'installing':
-      return 'Installing — BleepLoop closes now';
+      return 'Installing: BleepLoop closes now';
   }
 }
 
@@ -89,7 +89,7 @@ export async function installUpdate(): Promise<void> {
     await platform.updates.install();
   } catch (error) {
     console.error('[app] update failed', error);
-    notifyError('The update did not install', error);
+    notifyError('Could not install the update. Press UPDATE to try again.', error);
   } finally {
     // A failure leaves the app running, so the read-out must not keep a stage on screen under a
     // button that is pressable again.

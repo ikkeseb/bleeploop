@@ -186,12 +186,12 @@ const tauriEngineHost: EngineHost = {
         if (reported) return;
         reported = true;
         console.error('[host.tauri] engine feed frame rejected', err);
-        notifyError('The audio engine sent something the app cannot read', err);
+        notifyError('Could not read an update from the audio engine. Restart BleepLoop if the screen stops following it.', err);
       }
     };
     invoke('engine_feed', { channel }).catch((err: unknown) => {
       console.error('[host.tauri] engine feed subscribe failed', err);
-      notifyError('The app lost contact with the audio engine', err);
+      notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
     });
     return () => {
       live = false;
@@ -218,7 +218,7 @@ const tauriMidi: MidiHost = {
         if (reported) return;
         reported = true;
         console.error('[host.tauri] MIDI event rejected', err);
-        notifyError('Native MIDI sent something the app cannot read', err);
+        notifyError('Could not read an update from MIDI. Restart BleepLoop if MIDI stops responding.', err);
       }
     };
     // The page's age: a newer page's subscribe wins over an older page's late one, whatever the order
@@ -226,7 +226,7 @@ const tauriMidi: MidiHost = {
     const epoch = invoke<unknown>('midi_subscribe', { channel, origin: performance.timeOrigin }).then(decodeEpoch);
     epoch.catch((err: unknown) => {
       console.error('[host.tauri] MIDI subscribe failed', err);
-      notifyError('The app lost contact with MIDI', err);
+      notifyError('Could not reach MIDI. Restart BleepLoop to get it back.', err);
     });
     return {
       epoch,

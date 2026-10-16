@@ -45,7 +45,7 @@ export async function takeSlotTones(): Promise<SlotTone[]> {
       tones.push({ slot, plugin: { format, path, id, name }, bytes });
     } catch (e) {
       console.error(`[slot-tones] slot ${slotLetter(slot)}: ${desc.name}'s tone could not be saved for the export`, e);
-      notifyError(`The export has no saved settings for ${desc.name}`, e);
+      notifyError(`Could not add the settings of ${desc.name} to the export. Export again to retry.`, e);
     }
   }
   return tones;
@@ -69,12 +69,12 @@ export async function restoreSessionTones(tones: readonly SlotTone[]): Promise<v
       stored = await platform.pluginHost.importTone(tone.slot, tone.bytes, tone.plugin);
     } catch (e) {
       console.error(`[slot-tones] slot ${letter}: the session's tone for ${tone.plugin.name} could not be kept`, e);
-      notifyError(`${tone.plugin.name}: the session's saved settings could not be kept`, e);
+      notifyError(`Could not keep the session's settings for ${tone.plugin.name}. Set it up again by hand.`, e);
       continue;
     }
     const token = stored.reloadToken;
     if (token === null) {
-      notifyInfo(`This session used ${stored.name} in slot ${letter} — load it there to hear the session's tone`);
+      notifyInfo(`This session used ${stored.name} in slot ${letter}. Load it there to hear the session's tone.`);
       continue;
     }
     const reload = await reloadPlugin(tone.slot, tone.plugin, since, token);

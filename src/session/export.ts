@@ -95,7 +95,7 @@ export async function buildExportBundle(
       masterKind = 'wet-engine';
     } else {
       console.error('[export] the engine rendered no wet master — falling back to the dry mixdown', snap.masterError ?? 'no reason given');
-      notifyError('Wet master render failed — exported a dry mixdown instead');
+      notifyError('Could not render the master with its effects. Export again to retry.', 'This export holds a dry master mix instead.');
       masterChannels = mixStereo(snap.tracks, snap.masterLengthFrames, masterLevel);
       masterKind = 'dry-fallback';
     }

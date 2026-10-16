@@ -79,7 +79,7 @@ await probe(async ({ open }) => {
       slots.setSlotPlugins([{ id: 'layout-fixture', name: 'Archetype Petrucci', format: 'vst3', path: 'layout-fixture', isEffect: true }, null]);
       if (window.__lf.slotPlugins()[0]?.id !== 'layout-fixture') throw new Error('Restart Vite to avoid duplicate HMR module state');
       });
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
     }
     // A one-bar loop on lane 1, stopped (the engine's lanes after a load and ■ ALL).
     await boot(page, ['Stopped', 'Empty', 'Empty', 'Empty', 'Empty']);

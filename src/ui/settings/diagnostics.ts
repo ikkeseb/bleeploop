@@ -87,7 +87,7 @@ export async function copyDiagnostics(): Promise<void> {
     notifyInfo('Diagnostics copied');
   } catch (err) {
     console.error('[help] copy diagnostics failed', err);
-    notifyError("Couldn't copy the diagnostics", err);
+    notifyError('Could not copy the diagnostics. Press Copy diagnostics again.', err);
   }
 }
 
@@ -95,6 +95,6 @@ export async function copyDiagnostics(): Promise<void> {
 export function openLogFolder(): void {
   platform.logs.open().catch((err: unknown) => {
     console.error('[help] open log folder failed', err);
-    notifyError("Couldn't open the log folder", err);
+    notifyError('Could not open the log folder. Copy diagnostics for its path.', err);
   });
 }

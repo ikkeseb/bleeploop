@@ -175,7 +175,7 @@ await probe(async ({ open }) => {
       undefined, { timeout: 5000 });
     await report(page, { stage: 'installing' });
     await page.waitForFunction(
-      () => document.querySelector('.update__stage')?.textContent === 'Installing — BleepLoop closes now',
+      () => document.querySelector('.update__stage')?.textContent === 'Installing: BleepLoop closes now',
       undefined, { timeout: 5000 });
     await page.close();
   }
@@ -187,7 +187,7 @@ await probe(async ({ open }) => {
     await pill(page).click();
     const button = panel(page).getByRole('button', { name: 'Update and restart' });
     await button.click();
-    await page.locator('.toast', { hasText: 'The update did not install' }).waitFor({ timeout: 5000 });
+    await page.locator('.toast', { hasText: 'Could not install the update.' }).waitFor({ timeout: 5000 });
     assert.equal(await installs(page), 1, 'the install was not tried');
     assert.equal(await button.isEnabled(), true, 'the button stays disabled after a failure');
     // A stage left on screen under a pressable button would read as an install still running.

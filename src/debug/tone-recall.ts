@@ -269,7 +269,7 @@ async function checkPhase(expect: Expect): Promise<string> {
   check(slotPlugins()[1] === null, 'slot B did not unload');
   await restoreSessionTones(await importSession(bundle!.zipBytes, session));
   await until('slot A back after the second import', () => slotPendingCounts().every((n) => n === 0) && slotPlugins()[0] !== null, 30);
-  const want = `This session used ${b.name} in slot B — load it there to hear the session's tone`;
+  const want = `This session used ${b.name} in slot B. Load it there to hear the session's tone.`;
   const shown = toasts().map((t) => t.message);
   check(shown.includes(want), `toasts ${JSON.stringify(shown)}, want "${want}"`);
   check(slotPlugins()[1] === null && (await loaded())[1] === null, 'the import loaded something into slot B');

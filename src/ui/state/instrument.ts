@@ -246,7 +246,7 @@ const editorAffinity = new Map<string, 0 | 1>();
 /** Non-null = refuse: the OTHER slot already owns this file's editor (returns its 1-based label). */
 export function editorAffinityBlocker(slot: 0 | 1, path: string): string | null {
   const owner = editorAffinity.get(path);
-  return owner !== undefined && owner !== slot ? `slot ${owner + 1}` : null;
+  return owner !== undefined && owner !== slot ? `slot ${owner === 0 ? 'A' : 'B'}` : null;
 }
 
 /** Record a successful editor open — first opener becomes the path's editor owner. */
@@ -316,7 +316,7 @@ async function doSelectPlugin(
     tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken))?.tone;
   } catch (e) {
     console.error('[instrument] plugin load failed', e);
-    notifyError('Plugin load failed', e);
+    notifyError('Could not load the plugin. Pick it again, or another source.', e);
     // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`) —
     // unless the plugin is not at fault: the engine has no device (a load goes into a running engine),
     // or the host was busy with the slot. The rig must come back then.
@@ -329,7 +329,7 @@ async function doSelectPlugin(
   rememberSlotPlugin(slot, desc);
   // The host restored the plugin's stored tone inside the load; one it could not restore (the host
   // logged why) leaves the plugin at its defaults, and the player should know.
-  if (tone === 'failed') notifyError(`${desc.name}: saved settings could not be restored; it loaded with its defaults`);
+  if (tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
   // The level this plugin last had in this slot, else the scan's kind's default.
   setEngineGain(slot, savedPluginLevel(slot, desc));
   // An instrument plugin makes its slot the MIDI/keys slot (a restored one only while `claimMidi` says
@@ -399,7 +399,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     await platform.pluginHost.unloadPlugin(slot);
   } catch (e) {
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
-    notifyError('Plugin unload failed', 'The plugin stays in the slot but is silent. Choose Off or another plugin to retry.');
+    notifyError('Could not unload the plugin. Choose Off or another source to try again.', 'It stays in the slot, silent.');
     setSlotPlugins((prev) => withAt(prev, slot, outgoing));
     setEngineGain(slot, outgoingGain ?? savedPluginLevel(slot, outgoing));
     if (activeSlot() === slot) applyActiveRouting();
@@ -448,7 +448,7 @@ export async function resyncNativeSlots(): Promise<void> {
     loaded = await platform.pluginHost.listLoaded();
   } catch (e) {
     console.error('[instrument] resync: list loaded slots failed', e);
-    notifyError('Could not check the plugin host state', e);
+    notifyError('Could not check which plugins the host holds. Restart BleepLoop if a slot misbehaves.', e);
     return;
   }
   for (const { slot, descriptor } of loaded) {
@@ -461,7 +461,7 @@ export async function resyncNativeSlots(): Promise<void> {
         await platform.pluginHost.unloadPlugin(slot);
       } catch (e) {
         console.error('[instrument] resync: stranded-slot unload failed', e);
-        notifyError('Failed to clear a stranded plugin slot', e);
+        notifyError('Could not clear a plugin left in a slot. Set that slot to Off.', e);
       }
     });
   }
@@ -495,7 +495,7 @@ export async function scanForPlugins(opts: { force?: boolean } = {}): Promise<vo
           setAvailablePlugins(reconcilePluginDescriptors(scanned, slotPlugins()));
         } catch (e) {
           console.error('[instrument] plugin scan failed', e);
-          notifyError('Plugin scan failed', e);
+          notifyError('Could not scan for plugins. Press rescan in the command bar.', e);
         }
       }
     } finally {

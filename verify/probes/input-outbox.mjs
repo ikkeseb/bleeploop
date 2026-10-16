@@ -86,7 +86,7 @@ await probe(async ({ open }) => {
     await a.page.waitForFunction(() => window.__lf.native.batches.length >= 1, undefined, { timeout: 5000 });
     const given = await a.batches();
     assert.equal(given[0].epoch, 0, 'given up, input goes on under epoch 0 (native refuses its input events)');
-    assert.deepEqual((await a.toasts()).map(([m]) => m), ['The app lost contact with MIDI']);
+    assert.deepEqual((await a.toasts()).map(([m]) => m), ['Could not reach MIDI. Restart BleepLoop to get it back.']);
     assert.equal(a.lines('[platform] native MIDI did not answer the subscribe in time'), 1);
     await a.page.evaluate(() => window.__lfReleaseSubscribe());
     await a.page.waitForTimeout(50);
@@ -156,7 +156,7 @@ await probe(async ({ open }) => {
   await page.keyboard.up('f');
   await page.waitForFunction((m) => window.__lf.native.batches.length === m + 3, mark);
   assert.deepEqual((await batches()).slice(mark).map((b) => notes(b.items)), [['off:65'], ['off:65'], ['blur']], 'lost twice with a release: a blur follows');
-  assert.deepEqual((await toasts()).map(([m]) => m), ['The audio engine did not take a command'], 'and the player is told');
+  assert.deepEqual((await toasts()).map(([m]) => m), ['Could not send that to the audio engine. Press or play it again.'], 'and the player is told');
   assert.equal(lines('[platform] input batch failed'), 1, 'with its release-log line');
   await clearToasts();
 
@@ -190,7 +190,7 @@ await probe(async ({ open }) => {
   const capped = (await batches())[mark + 1];
   assert.equal(capped.items.length, 257, 'the waiting batch kept 256 items and the release');
   assert.equal(words(capped.items).at(-1), 'off:80', 'the release was never dropped');
-  assert.ok((await toasts()).some(([m]) => m === 'The audio engine did not take a command'), 'the batch with no answer is told');
+  assert.ok((await toasts()).some(([m]) => m === 'Could not send that to the audio engine. Press or play it again.'), 'the batch with no answer is told');
   // That batch gets no answer either, and held a release: its blur gets none, and is owed.
   await page.waitForFunction((m) => window.__lf.native.batches.length === m + 3, mark, { timeout: 5000 });
   assert.deepEqual(notes((await batches())[mark + 2].items), ['blur']);
@@ -210,7 +210,7 @@ await probe(async ({ open }) => {
   await tap('g');
   await tap('h');
   await page.waitForTimeout(100);
-  assert.deepEqual(await toasts(), [['The audio engine did not take a command', 'No audio device is running.', 1]], 'told once');
+  assert.deepEqual(await toasts(), [['Could not send that to the audio engine. Open an audio device in Audio Settings.', 'No audio device is running.', 1]], 'told once');
   assert.equal(droppedLines(), 1);
   await seam('dropped', null);
   await page.getByRole('button', { name: 'BPM plus' }).click();
