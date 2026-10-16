@@ -5,7 +5,7 @@
  * `__lf.native.sent`):
  *
  * - transport, meter, lamp, looper-announcement and toast state carriers: ■ ALL during a first take, the
- *   record meter's dBFS text, the lamp's role, "Track 2 take recorded" on the live region, a focused
+ *   record meter's dBFS text ("near clipping" from its red, "clipping" at a clip), the lamp's role, "Track 2 take recorded" on the live region, a focused
  *   toast outliving its auto-dismiss; the lamp across a lost device (amber and "no device open" while
  *   none runs, neutral and "running" once one runs again);
  * - the refusal carriers: a STOPPED lane core's title/label reason; the transport keys send the engine's
@@ -116,6 +116,15 @@ await probe(async ({ open }) => {
   await emit({ meter: { peak: [0.5, 0], clip: [false, false] } });
   await page.waitForTimeout(300);
   assert.match(await page.locator('[role="meter"]').getAttribute('aria-valuetext'), /-?\d+ dBFS/);
+  // Its red (−1 dBFS) reads "near clipping"; "clipping" is a frame that carried a clip.
+  const meterSays = (re) =>
+    page.waitForFunction((src) => new RegExp(src).test(document.querySelector('[role="meter"]')?.getAttribute('aria-valuetext') ?? ''), re.source, { timeout: 3000 })
+      .then(() => page.locator('[role="meter"]').getAttribute('aria-valuetext'));
+  await emit({ meter: { peak: [0.95, 0], clip: [false, false] } });
+  const near = await meterSays(/near clipping$/);
+  await emit({ meter: { peak: [1, 0], clip: [true, false] } });
+  const clipped = await meterSays(/ dBFS, clipping$/);
+  console.log('record meter text near full scale, then at a clip', JSON.stringify({ near, clipped }));
   await emit({ meter: { peak: [0, 0], clip: [false, false] } });
 
   assert.equal(await page.locator('.cmd__lamp').getAttribute('role'), 'img');

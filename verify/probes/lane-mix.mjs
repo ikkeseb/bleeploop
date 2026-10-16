@@ -6,7 +6,9 @@
  * the commands unapplied (`holdApply`) or refuse a batch carrying a mix command (`refuseMix`). The probe drives the real controls:
  *
  * - (a) a refused gesture: the fader and an FX division select go back to the applied value; a command
- *   the engine has not applied yet (`holdApply`) keeps the fader on the request until its report;
+ *   the engine has not applied yet (`holdApply`) keeps the fader on the request until its report; the
+ *   FX drawer names a parameter by track, effect and parameter, and its ✕ pressed by key hands focus
+ *   back to the lane's FX pill (by pointer, to nothing);
  * - (b) an equal report during a drag keeps the drag's protection: an unequal `Mix` after it does not move
  *   the fader, and the release and the matching report leave it on the applied value; an equal report
  *   while the pointer is down with none after it: the release ends the overlay;
@@ -148,7 +150,26 @@ await probe(async ({ open }) => {
   assert.equal(selectBack, before, 'a refused division goes back to the applied one');
   await seam('refuseMix', false);
   assert.ok(consumeConsoleErrors('input batch failed').length > 0, 'a refused batch reaches the release log');
-  await fxDrawer(false);
+  // A parameter's name is its track, effect and parameter, with no readout read into it.
+  const named = {
+    time: await page.getByRole('combobox', { name: 'Track 1 delay time', exact: true }).count(),
+    mix: await page.getByRole('slider', { name: 'Track 1 delay mix', exact: true }).count(),
+  };
+  console.log('(a) delay parameter names', JSON.stringify(named));
+  assert.deepEqual(named, { time: 1, mix: 1 }, 'the delay parameters are named track + effect + parameter');
+  // The drawer's ✕ pressed by key hands focus back to the lane's FX pill; by pointer it leaves none there.
+  const closeFx = page.getByRole('button', { name: 'Close FX panel', exact: true });
+  await closeFx.focus();
+  await page.keyboard.press('Enter');
+  await page.locator('.lp-drawer').waitFor({ state: 'detached' });
+  const keyFocus = await page.evaluate(() => document.activeElement?.getAttribute('aria-label'));
+  await fxDrawer(true);
+  await closeFx.click();
+  await page.locator('.lp-drawer').waitFor({ state: 'detached' });
+  const pointerFocus = await page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName);
+  console.log('(a) focus after the FX drawer closed by key, then by pointer', JSON.stringify({ keyFocus, pointerFocus }));
+  assert.equal(keyFocus, 'Track 1 FX', 'a keyboard close of the FX drawer hands focus back to its pill');
+  assert.equal(pointerFocus, 'BODY', 'a pointer close of the FX drawer leaves no control focused');
   await blur();
   // A command the engine has not applied yet: the fader keeps the request until the engine reports it.
   await seam('holdApply', true);

@@ -13,7 +13,7 @@
  * - Help's tabs by keyboard: Tab lands on the selected one, the arrows, Home and End pick and focus a tab
  *   and show its panel (each tab's aria-controls names a tabpanel) without reaching the transport; a
  *   pointer pick of a tab gives Space back to REC/DUB;
- * - real controls keep the key: Space in the BPM field sends nothing; Tab to BPM plus and Enter steps
+ * - real controls keep the key: Space in the BPM field (named BPM) sends nothing; Tab to BPM plus and Enter steps
  *   the tempo (`SetBpm`), never a looper action;
  * - Enter commits a typed BPM (`SetBpm`) with an AUTO REC arm on the feed, and drives no looper action
  *   though the field unmounts under the key;
@@ -166,6 +166,7 @@ await probe(async ({ open }) => {
   // The field takes focus one task after it mounts (Transport.tsx startEditFocused): wait for the
   // focus, not the element, or Space lands on <body> and arms lane 1 — a race no hand can win.
   await page.locator('.transport__bpm-input').waitFor();
+  assert.equal(await page.getByRole('spinbutton', { name: 'BPM', exact: true }).count(), 1, 'the BPM field has a name');
   await page.waitForFunction(() => document.activeElement?.classList.contains('transport__bpm-input'));
   await page.keyboard.press('Space');
   await page.waitForTimeout(150);

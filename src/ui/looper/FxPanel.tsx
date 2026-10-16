@@ -23,8 +23,14 @@ function formatVal(v: number, def: FxParamDef): string {
   return v.toFixed(2);
 }
 
-function ParamControl(props: { index: number; fxIndex: number; def: FxParamDef }) {
+function ParamControl(props: { index: number; fxIndex: number; fx: string; def: FxParamDef }) {
   const key = `fx${props.fxIndex}.${props.def.key}` as const;
+  // The control's name: track, effect and parameter ("Track 1 delay mix"), as IN FX names its sends'
+  // (`src/ui/transport/InputFx.tsx`). The wrapping label alone would give every effect's Mix the same
+  // name, with the numeric readout read into it. Pitch's one parameter is the effect itself.
+  const param = props.def.label.toLowerCase();
+  const fx = props.fx.toLowerCase();
+  const name = `Track ${props.index + 1} ${fx === param ? fx : `${fx} ${param}`}`;
   const value = () => looper.mixShown(props.index, key);
   const set = (v: number) => looper.setFxParam(props.index, props.fxIndex, props.def.key, v);
   // A select's change is the whole gesture; a slider's runs from its pointer or key down to its release.
@@ -43,6 +49,7 @@ function ParamControl(props: { index: number; fxIndex: number; def: FxParamDef }
             max={props.def.max}
             step={props.def.step}
             value={value()}
+            aria-label={name}
             onInput={(e) => set(Number(e.currentTarget.value))}
             onPointerDown={gesture?.onPointerDown}
             onLostPointerCapture={gesture?.onLostPointerCapture}
@@ -58,6 +65,7 @@ function ParamControl(props: { index: number; fxIndex: number; def: FxParamDef }
         <select
           class="fxp-param__select"
           value={value()}
+          aria-label={name}
           onChange={(e) => {
             set(Number(e.currentTarget.value));
             e.currentTarget.value = String(value());
@@ -132,7 +140,7 @@ export function FxPanel(props: { index: number }) {
                 <div class="fxp-mod__params">
                   <For each={FX_PARAM_DEFS[meta.kind]}>
                     {(def) => (
-                      <ParamControl index={props.index} fxIndex={fxI()} def={def} />
+                      <ParamControl index={props.index} fxIndex={fxI()} fx={meta.label} def={def} />
                     )}
                   </For>
                 </div>

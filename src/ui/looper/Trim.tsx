@@ -16,8 +16,8 @@ import './trim.css';
  * The pill opens a small popover under itself, IN FX's pattern (`src/ui/transport/InputFx.tsx`): KEEP
  * FIRST [−] N [+] BARS and a TRIM button. N starts at half the loop's bars, rounded down, and stays in
  * 1..bars−1. TRIM sends the command and closes; Escape, an outside click or the stage view closes it.
- * A keyboard close hands focus back to the pill on the app's behalf (`returnFocus`), so Space after
- * Escape still arms REC.
+ * A keyboard close (Escape, or TRIM pressed by key) hands focus back to the pill on the app's behalf
+ * (`returnFocus`), so Space after it still arms REC.
  */
 
 function TrimControl(props: { index: number; disabled: boolean; returnFocus?: (el: HTMLElement | undefined) => void }) {
@@ -36,9 +36,15 @@ function TrimControl(props: { index: number; disabled: boolean; returnFocus?: (e
     if (!open()) setKeep(Math.max(1, Math.floor(bars() / 2)));
     setOpen((v) => !v);
   };
-  const trim = () => {
+  // `disabled` is the lane's live gate (a reactive prop), so the open popover's TRIM greys out when a
+  // pedal starts an overdub or a stop under it, and a press that races it still sends nothing. The
+  // engine's own check (`Looper::trim`) stays the last word. A keyboard press (a click with detail 0,
+  // as `src/app/transport-keys.ts` reads it) hands focus back to the pill, as Escape does; a pointer
+  // press leaves it where the transport keys' blur put it.
+  const trim = (e: MouseEvent) => {
+    if (props.disabled) return;
     trimLane(props.index, n());
-    close(false);
+    close(e.detail === 0);
   };
   // The stage view hides the lanes: the popover goes with them.
   createEffect(() => {
@@ -102,6 +108,7 @@ function TrimControl(props: { index: number; disabled: boolean; returnFocus?: (e
                   class="trim__go"
                   aria-label={`Trim track ${track} to its first ${n()} ${n() === 1 ? 'bar' : 'bars'}`}
                   title={`Keep bars 1–${n()} of ${bars()} and repeat them across the loop`}
+                  disabled={props.disabled}
                   onClick={trim}
                 >
                   TRIM

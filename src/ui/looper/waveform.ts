@@ -80,9 +80,26 @@ interface Lane {
   gridFont: string;
 }
 
-/** The bar-number font at a given device-pixel ratio (7.5px CSS, mono). */
+/** The bar-number font at a given device-pixel ratio (7.5px CSS): Geist Mono, the `--mono` token's
+ * stack (`src/app.css`). */
 function gridFontFor(dpr: number): string {
-  return `${(7.5 * dpr).toFixed(1)}px ui-monospace, 'SF Mono', Consolas, monospace`;
+  return `${(7.5 * dpr).toFixed(1)}px 'Geist Mono', ui-monospace, Consolas, monospace`;
+}
+
+/**
+ * Geist Mono is an `@font-face` (`src/app.css`) that loads on first use: a grid rasterised before it is
+ * in draws a fallback face, and the cached bitmap keeps it until something else dirties the lane. So the
+ * first lane asks for the face once, and when it lands every lane re-rasterises (a plain field write,
+ * read by the draw loop's dirty check; no signal, invariant 6).
+ */
+let gridFontAsked = false;
+function askGridFont(font: string): void {
+  if (gridFontAsked) return;
+  gridFontAsked = true;
+  if (document.fonts.check(font)) return;
+  void document.fonts.load(font).then(() => {
+    for (const lane of lanes.values()) lane.lastVersion = -2;
+  });
 }
 
 const lanes = new Map<HTMLCanvasElement, Lane>();
@@ -105,8 +122,10 @@ function drawDial(): void {
 /**
  * The command-bar record-level meter rides the loop too: `--lvl` (0..1 over −60..0 dBFS, so a quiet
  * guitar and the AUTO threshold both land somewhere readable) on one element, `is-hot` above −1 dB,
- * aria-valuenow/aria-valuetext refreshed ~6×/s. Transport.tsx puts the AUTO threshold on the same
- * scale via `meterFrac` (a low-frequency effect, not this loop).
+ * aria-valuenow/aria-valuetext refreshed ~6×/s. The text says "near clipping" from that red, and
+ * "clipping" only at full scale (a level of 1 or more: the store's for a frame that carried a clip).
+ * Transport.tsx puts the AUTO threshold on the same scale via `meterFrac` (a low-frequency effect, not
+ * this loop).
  */
 let meter: { el: HTMLElement; last: number; hot: boolean; ariaTick: number } | null = null;
 
@@ -138,7 +157,7 @@ function drawMeter(): void {
     meter.ariaTick = 0;
     meter.el.setAttribute('aria-valuenow', lvl.toFixed(2));
     const db = Math.round(METER_FLOOR_DB + -METER_FLOOR_DB * lvl);
-    meter.el.setAttribute('aria-valuetext', `${db} dBFS${hot ? ', clipping' : ''}`);
+    meter.el.setAttribute('aria-valuetext', `${db} dBFS${raw >= 1 ? ', clipping' : hot ? ', near clipping' : ''}`);
   }
 }
 
@@ -571,6 +590,7 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
   };
   syncSize(lane);
   lanes.set(canvas, lane);
+  askGridFont(lane.gridFont);
 
   if (rafId === 0) rafId = requestAnimationFrame(frame);
 }
