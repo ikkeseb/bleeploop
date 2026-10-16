@@ -3,13 +3,17 @@
  * the `engine-seam` pattern: an init script sets `window.__lfEngineFake`, the probe scripts the feed
  * through `__lf.native` and reads what the UI sends):
  *
- * - ✂ TRIM (F16, `src/ui/looper/Trim.tsx`): the pill shows on a committed lane (PLAYING or STOPPED) over a
- *   loop of two whole bars or more, and on no other (EMPTY, RECORDING, OVERDUBBING, a one-bar loop, a
- *   loop of no whole number of bars); it is disabled while the lane stops at the loop end. Its popover
- *   starts at half the loop's bars, steps inside 1..bars−1, sends `Trim` with the chosen bars and closes;
- *   Escape closes it and hands focus back to the pill, an outside click closes it, neither sends. TRIM
- *   pressed by key hands focus back to the pill too, and the open popover's TRIM is disabled while the
- *   lane stops, as the pill is. An engine refusal lands on its lane. ↶ UNDO names the trim.
+ * - ✂ TRIM (F16, `src/ui/looper/Trim.tsx`), in the lane's EDIT popover (`Edit.tsx`): EDIT opens on a
+ *   committed lane, and TRIM in it is enabled on a committed lane (PLAYING or STOPPED) over a loop of two
+ *   whole bars or more, on no other (EMPTY, RECORDING, OVERDUBBING, a one-bar loop, a loop of no whole
+ *   number of bars, where its line says why); it is disabled while the lane stops at the loop end. Its
+ *   stepper starts at half the loop's bars, steps inside 1..bars−1, sends `Trim` with the chosen bars and
+ *   closes; Escape closes it and hands focus back to EDIT, an outside click closes it, neither sends. TRIM
+ *   pressed by key hands focus back to EDIT too, and the open stepper's TRIM is disabled while the lane
+ *   stops. The menu is reachable by key (EDIT, then Tab to its edits). An engine refusal lands on its
+ *   lane. ↶ UNDO names the trim.
+ * - The lane's pill row is five fixed columns (FX, MUTE, ↺ REV, ↶ UNDO, EDIT) whose legends fit their pills
+ *   at a wide and a narrow window, and ↶ UNDO holds its column, disabled, where there is nothing to undo.
  * - Halve (`halveTrack`, `src/app/actions.ts`): sends the engine's `Halve` (on the engine's own selection,
  *   or `ActionOn` a named track), never a `Trim` with bars the UI counted: the engine judges the lane and
  *   the loop's bars as they stand when the press lands (lf-engine `tests/actions.rs`). Its refusal, from
@@ -19,7 +23,7 @@
  *
  * Cannot see the native engine (lf-engine `tests/trim.rs` and `tests/multiply.rs` hold the audio), Tauri
  * IPC or any timing: the fake answers no command by itself, so every state the DOM shows was scripted.
- * Screenshots of the pill row and the popover land in logs/lane-length/ for the eye.
+ * Screenshots of the pill row, the EDIT menu and the TRIM stepper land in logs/lane-length/ for the eye.
  * Run: pnpm probe lane-length
  */
 import assert from 'node:assert/strict';
@@ -61,10 +65,32 @@ await probe(async ({ open }) => {
   const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
   const trims = async () => (await sent()).filter((c) => c.Trim);
   const lanes = page.locator('.lp-lane');
-  const pill = (i) => lanes.nth(i).getByRole('button', { name: `Trim track ${i + 1}`, exact: true });
+  const edit = (i) => lanes.nth(i).getByRole('button', { name: `Edit track ${i + 1}`, exact: true });
+  const menu = (i) => page.getByRole('dialog', { name: `Edit track ${i + 1}` });
+  const trimItem = (i) => menu(i).getByRole('button', { name: `Trim track ${i + 1}`, exact: true });
+  /** Lane `i`'s TRIM: null while its EDIT is disabled, else whether TRIM in its menu is enabled. */
+  const trimOk = async (i) => {
+    if (await edit(i).isDisabled()) return null;
+    await edit(i).click();
+    await menu(i).waitFor();
+    const ok = !(await trimItem(i).isDisabled());
+    await page.keyboard.press('Escape');
+    await menu(i).waitFor({ state: 'detached' });
+    return ok;
+  };
+  /** EDIT, then TRIM in its menu: lane 1's TRIM stepper. */
+  const openTrim = async () => {
+    await edit(0).click();
+    await trimItem(0).click();
+    await dialog.waitFor();
+  };
   const well = (i) => lanes.nth(i).locator('.lp-lane__wellmsg');
   const runAction = (id, target = null) => page.evaluate(([a, t]) => import('/src/app/actions.ts').then((m) => m.runAction(a, t)), [id, target]);
-  const shown = () => Promise.all([0, 1, 2, 3, 4].map((i) => pill(i).count().then((n) => n === 1)));
+  const shown = async () => {
+    const out = [];
+    for (const i of [0, 1, 2, 3, 4]) out.push(await trimOk(i));
+    return out;
+  };
 
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
   await emit({
@@ -75,10 +101,15 @@ await probe(async ({ open }) => {
     meter: { peak: [0, 0], clip: [false, false] },
   });
 
-  // ── Where the pill shows ─────────────────────────────────────────────────────────────────────────
-  assert.deepEqual(await shown(), [false, false, false, false, false], 'no TRIM on an empty looper');
+  // ── Where TRIM is enabled ────────────────────────────────────────────────────────────────────────
+  const dialog = page.getByRole('dialog', { name: 'Trim track 1' });
+  assert.deepEqual(await shown(), [null, null, null, null, null], 'no EDIT on an empty looper');
   await emit({ events: [laneEvent(0, committed('Playing', 1)), transport(BAR)] });
-  assert.equal(await pill(0).count(), 0, 'a one-bar loop has nothing to trim');
+  assert.equal(await trimOk(0), false, 'a one-bar loop has nothing to trim');
+  await edit(0).click();
+  assert.equal((await trimItem(0).locator('.edit__hint').textContent()).trim(), 'nothing to trim, the loop needs two bars or more', 'and its line says why');
+  await page.keyboard.press('Escape');
+  await menu(0).waitFor({ state: 'detached' });
   await emit({
     events: [
       transport(8 * BAR),
@@ -90,22 +121,52 @@ await probe(async ({ open }) => {
     ],
   });
   const visibility = await shown();
-  console.log('TRIM shown on lanes', JSON.stringify(visibility));
-  assert.deepEqual(visibility, [true, true, false, false, false], 'PLAYING and STOPPED lanes of an 8-bar loop only');
+  console.log('TRIM enabled on lanes (null: EDIT disabled)', JSON.stringify(visibility));
+  assert.deepEqual(visibility, [true, true, null, null, null], 'PLAYING and STOPPED lanes of an 8-bar loop only');
   await emit({ events: [transport(8 * BAR + 480)] });
-  assert.deepEqual(await shown(), [false, false, false, false, false], 'a loop of no whole number of bars: no TRIM');
+  assert.deepEqual(await shown(), [false, false, null, null, null], 'a loop of no whole number of bars: no TRIM');
   await emit({ events: [transport(8 * BAR), laneEvent(1, committed('Playing', 8, { stopAt: 9 * BAR }))] });
-  assert.ok(await pill(1).isDisabled(), 'disabled while the lane stops at the loop end');
-  assert.ok(!(await pill(0).isDisabled()));
+  assert.equal(await trimOk(1), false, 'disabled while the lane stops at the loop end');
+  assert.equal(await trimOk(0), true);
 
-  // ── The popover ──────────────────────────────────────────────────────────────────────────────────
-  const dialog = page.getByRole('dialog', { name: 'Trim track 1' });
+  // ── The menu by key: EDIT, then Tab to its edits; Escape hands focus back to EDIT ────────────────────
+  // A focus the user moves (Escape above handed EDIT its focus on the app's behalf, which keeps the transport
+  // keys): another control first, then EDIT.
+  await lanes.nth(0).getByRole('button', { name: 'Track 1 mute', exact: true }).focus();
+  await edit(0).focus();
+  await page.keyboard.press('Enter');
+  await menu(0).waitFor();
+  assert.equal(await edit(0).getAttribute('aria-expanded'), 'true');
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Edit track 1' && document.activeElement.getAttribute('role') === 'dialog', undefined, { timeout: 5000 });
+  const tabbed = [];
+  for (let k = 0; k < 3; k++) {
+    await page.keyboard.press('Tab');
+    tabbed.push(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')));
+  }
+  console.log('Tab through the EDIT menu', JSON.stringify(tabbed));
+  assert.deepEqual(tabbed, ['Copy track 1 to the first empty lane', 'Copy track 1 wide to the first empty lane', 'Trim track 1'], 'every edit is reachable by key');
+  await page.screenshot({ path: `${outDir}/edit-menu.png` });
+  await page.keyboard.press('Escape');
+  await menu(0).waitFor({ state: 'detached' });
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Edit track 1', 'Escape hands focus back to EDIT');
+  // TRIM by key turns the menu into the stepper.
+  await page.keyboard.press('Tab'); // off EDIT and back: a focus the user moved, so EDIT keeps its keys
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Enter');
+  await menu(0).waitFor();
+  for (let k = 0; k < 3; k++) await page.keyboard.press('Tab');
+  await page.keyboard.press('Enter');
+  await dialog.waitFor();
+  assert.equal(await menu(0).count(), 0, 'the stepper takes the menu\'s place');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
+
+  // ── The stepper ──────────────────────────────────────────────────────────────────────────────────
   const value = () => dialog.locator('.trim__val').textContent().then((t) => t.trim());
   const more = dialog.getByRole('button', { name: 'Keep more bars', exact: true });
   const fewer = dialog.getByRole('button', { name: 'Keep fewer bars', exact: true });
-  await pill(0).click();
-  await dialog.waitFor();
-  assert.equal(await pill(0).getAttribute('aria-expanded'), 'true');
+  await openTrim();
+  assert.equal(await edit(0).getAttribute('aria-expanded'), 'true');
   assert.equal(await value(), '4', 'N starts at half of 8 bars');
   await page.screenshot({ path: `${outDir}/popover.png` });
   for (let k = 0; k < 5; k++) await more.click({ force: true });
@@ -122,36 +183,32 @@ await probe(async ({ open }) => {
   await dialog.waitFor({ state: 'detached' });
   assert.deepEqual(await trims(), [{ Trim: [0, 3] }], 'TRIM sends the chosen bars and closes');
 
-  await pill(0).click();
-  await dialog.waitFor();
+  await openTrim();
   assert.equal(await value(), '4', 'a new popover starts at half again');
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Trim track 1', 'Escape hands focus back to the pill');
-  await pill(0).click();
-  await dialog.waitFor();
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Edit track 1', 'Escape hands focus back to EDIT');
+  await openTrim();
   await page.mouse.click(8, 890);
   await dialog.waitFor({ state: 'detached' });
   assert.deepEqual(await trims(), [{ Trim: [0, 3] }], 'Escape and an outside click send nothing');
-  // TRIM pressed by key sends and hands focus back to the pill, as Escape does.
+  // TRIM pressed by key sends and hands focus back to EDIT, as Escape does.
   const go = dialog.locator('.trim__go');
-  await pill(0).click();
-  await dialog.waitFor();
+  await openTrim();
   await go.focus();
   await page.keyboard.press('Enter');
   await dialog.waitFor({ state: 'detached' });
   assert.deepEqual(await trims(), [{ Trim: [0, 3] }, { Trim: [0, 4] }], 'TRIM by key sends the chosen bars');
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Trim track 1', 'TRIM by key hands focus back to the pill');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Edit track 1', 'TRIM by key hands focus back to EDIT');
   // The open popover follows the lane's gate: a stop pending under it (a pedal) greys TRIM out, and its
   // end gives it back.
-  await pill(0).click();
-  await dialog.waitFor();
+  await openTrim();
   await emit({ events: [laneEvent(0, committed('Playing', 8, { stopAt: 9 * BAR }))] });
-  const gated = { pill: await pill(0).isDisabled(), go: await go.isDisabled() };
+  const gated = { edit: await edit(0).isDisabled(), go: await go.isDisabled() };
   await emit({ events: [laneEvent(0, committed('Playing', 8))] });
   const reopened = await go.isDisabled();
   console.log('TRIM in the open popover while the lane stops, then after', JSON.stringify({ gated, reopened }));
-  assert.deepEqual(gated, { pill: true, go: true }, 'a lane stopping at the loop end disables the open popover\'s TRIM too');
+  assert.deepEqual(gated, { edit: false, go: true }, 'a lane stopping at the loop end disables the open stepper\'s TRIM (EDIT stays: COPY does not wait)');
   assert.equal(reopened, false, 'the gate opening again enables it');
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
@@ -164,8 +221,11 @@ await probe(async ({ open }) => {
   const undo = lanes.nth(0).getByRole('button', { name: 'Track 1 undo or redo the last overdub or trim', exact: true });
   assert.equal((await undo.textContent()).trim(), '↶ UNDO');
   assert.equal(await undo.getAttribute('title'), 'Undo / redo the last overdub or trim');
-  // The fullest pill row (FX, MUTE, ↶ UNDO, ↺ REV, ⧉ COPY, ↔ WIDE, ✂ TRIM) fits its cluster at a wide and a
-  // narrow window.
+  // The pill row (FX, MUTE, ↺ REV, ↶ UNDO, EDIT) fits its cluster at a wide and a narrow window, and ↶ UNDO
+  // holds its column, disabled, on a lane with nothing to undo.
+  const undo4 = lanes.nth(3).getByRole('button', { name: 'Track 4 undo or redo the last overdub or trim', exact: true });
+  assert.ok(await undo4.isDisabled(), 'nothing to undo: UNDO is disabled, not absent');
+  assert.equal(await undo4.getAttribute('title'), 'nothing to undo, overdub first');
   for (const [width, height] of [[1600, 900], [1000, 700]]) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(100);
@@ -179,7 +239,7 @@ await probe(async ({ open }) => {
       });
     });
     console.log(`pill row at ${width} px`, JSON.stringify(row));
-    assert.equal(row.length, 7, 'seven pills');
+    assert.deepEqual(row.map((p) => p.text), ['FX', 'MUTE', '↺ REV', '↶ UNDO', 'EDIT'], 'five pills, in their columns');
     assert.ok(row.every((p) => p.inside && !p.clipped), `every pill fits the row and its legend fits the pill at ${width} px`);
   }
   await page.setViewportSize({ width: 1600, height: 900 });
@@ -191,8 +251,7 @@ await probe(async ({ open }) => {
   const sentHalves = await sent();
   assert.deepEqual(sentHalves, [{ Action: 'Halve' }, { ActionOn: [2, 'Halve'] }], "halve: the engine's action, on its own selection or the named track");
   await emit({ events: [transport(7 * BAR), laneEvent(0, committed('Playing', 7))] });
-  await pill(0).click();
-  await dialog.waitFor();
+  await openTrim();
   assert.equal(await value(), '3', "the popover's N starts at half of 7 bars, rounded down");
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });

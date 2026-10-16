@@ -6,7 +6,7 @@
  *
  * - a lane the feed reports PLAYING with a pending stop (`stopAt`) cues it (`src/ui/looper/Looper.tsx`,
  *   `src/ui/looper/gates.ts`): its REC/DUB core is disabled and names the refusal in its aria-label and
- *   title, its transforms (↺ REV, ↶ UNDO, ✂ TRIM) are disabled, and its PLAY/STOP cap turns into a
+ *   title, its transforms (↺ REV, ↶ UNDO, and ✂ TRIM in its EDIT menu) are disabled, and its PLAY/STOP cap turns into a
  *   visible stop-now control; the same lane without the pending stop has all of them enabled;
  * - a pointer click on that stop-now control sends the engine's PLAY/STOP for the lane (the engine's
  *   second press stops at once: lf-engine `tests/copy.rs`); the feed's STOPPED ends the cue.
@@ -52,12 +52,21 @@ await probe(async ({ open }) => {
   const button = (name) => page.getByRole('button', { name, exact: true });
   const core = page.locator('.lp-lane').first().locator('.lp-core');
   const playStop = page.locator('.lp-lane').first().locator('.lp-pb--play');
-  const transforms = ['Track 1 reverse', 'Track 1 undo or redo the last overdub or trim', 'Trim track 1'];
+  const transforms = ['Track 1 reverse', 'Track 1 undo or redo the last overdub or trim'];
+  /** Is TRIM disabled in lane 1's EDIT menu? Opens the menu, reads, closes it. */
+  const trimDisabled = async () => {
+    const menu = page.getByRole('dialog', { name: 'Edit track 1' });
+    await button('Edit track 1').click();
+    const disabled = await menu.getByRole('button', { name: 'Trim track 1', exact: true }).isDisabled();
+    await page.keyboard.press('Escape');
+    await menu.waitFor({ state: 'detached' });
+    return disabled;
+  };
   const cue = async () => ({
     word: await page.locator('.lp-lane').first().locator('.lp-lane__state').textContent(),
     core: { label: await core.getAttribute('aria-label'), title: await core.getAttribute('title'), disabled: await core.isDisabled() },
     playStop: { label: await playStop.getAttribute('aria-label'), text: (await playStop.textContent()).trim(), visible: await playStop.isVisible() },
-    transforms: Object.fromEntries(await Promise.all(transforms.map(async (name) => [name, await button(name).isDisabled()]))),
+    transforms: { ...Object.fromEntries(await Promise.all(transforms.map(async (name) => [name, await button(name).isDisabled()]))), 'Trim track 1': await trimDisabled() },
   });
 
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
@@ -80,7 +89,7 @@ await probe(async ({ open }) => {
   assert.equal(before.core.label, 'Track 1 overdub');
   assert.ok(!before.core.disabled, 'a playing lane overdubs');
   assert.equal(before.playStop.label, 'Track 1 stop');
-  for (const name of transforms) assert.equal(before.transforms[name], false, `${name} is enabled while nothing is pending`);
+  for (const [name, disabled] of Object.entries(before.transforms)) assert.equal(disabled, false, `${name} is enabled while nothing is pending`);
 
   // The feed says the lane stops at the loop end.
   await emit({ events: [laneEvent(0, committed('Playing', { stopAt: 4 * BAR }), BAR)], anchor: anchorAt(BAR) });
@@ -90,7 +99,7 @@ await probe(async ({ open }) => {
   assert.equal(await pendingCore.count(), 1, 'the core names the pending stop in its aria-label');
   assert.ok(await pendingCore.isDisabled(), 'the core is disabled');
   assert.equal(await pendingCore.getAttribute('title'), 'stopping at loop end, wait or stop now', 'and in its title');
-  for (const name of transforms) assert.ok(await button(name).isDisabled(), `${name} is disabled while the stop is pending`);
+  for (const [name, disabled] of Object.entries(pending.transforms)) assert.ok(disabled, `${name} is disabled while the stop is pending`);
   const stopNow = button('Track 1 stop now');
   assert.ok(await stopNow.isVisible(), 'a visible stop-now control');
   assert.equal(pending.playStop.text, '■ NOW');
