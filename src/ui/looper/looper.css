@@ -214,8 +214,8 @@
   height: 6px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: #23262e;
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.8);
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
 }
 .lp-lane[data-state='play']:not([data-muted]) .lp-lane__state::before,
 .lp-lane[data-state='armed'] .lp-lane__state::before,
@@ -394,8 +394,8 @@
   width: 5px;
   height: 5px;
   border-radius: 999px;
-  background: #23262e;
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.8);
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
   transition: background-color 0.15s, box-shadow 0.15s;
 }
 .lp-pb--fx.has-fx::before {

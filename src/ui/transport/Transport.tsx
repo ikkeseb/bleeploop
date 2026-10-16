@@ -6,6 +6,8 @@ import { autoRecGate, fadeGate, fixedGate, retakeGate, tapGate } from '../looper
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../state/auto-record';
 import { InputFx } from './InputFx';
+import { BarPopoverPanel, createBarPopover } from './BarPopover';
+import '../looper/fxpanel.css';
 import './transport.css';
 
 /**
@@ -13,7 +15,8 @@ import './transport.css';
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
  * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + the meter
  * picker over the beat dots) · TAP ·
- * CLICK / FIXED-N / RETAKE / AUTO toggles · loop ring-dial readout · END STOP · ■/▶ ALL + FADE and its bars
+ * the record modes CLICK / FIXED / RETAKE / AUTO REC / END STOP (each with its lamp; CLICK's volume and
+ * AUTO's sensitivity in a popover off their pill) · loop ring-dial readout · ■/▶ ALL + FADE and its bars
  * + ✕ ALL (two-step) + the record level (raw input is a slot set to Off and live) · IN FX (`InputFx.tsx`) ·
  * spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
  * cluster (`SessionTools.tsx`).
@@ -157,6 +160,22 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
 
   onCleanup(() => clearTimeout(pulseTimer));
 
+  // ----- CLICK's volume and AUTO REC's sensitivity: set-and-forget, so each lives in a popover off its
+  // pill's read-out (BarPopover.tsx), live while the setting is (CLICK on; AUTO on before a loop). A
+  // popover whose read-out goes dead (the mode switched off by a key or a pedal, the tempo locking)
+  // closes with it.
+  const clickVol = () => Math.round(clock.clickVolume() * 100);
+  const clickPop = createBarPopover(props.returnFocus);
+  const clickPopDisabled = () => !clock.metronomeOn();
+  const sensPop = createBarPopover(props.returnFocus);
+  const sensPopDisabled = () => !looper.autoRecordEnabled() || clock.bpmLocked();
+  createEffect(() => {
+    if (clickPopDisabled()) clickPop.close(false);
+  });
+  createEffect(() => {
+    if (sensPopDisabled()) sensPop.close(false);
+  });
+
   // ----- the meter: picked before a loop, locked with the tempo (the engine drops a SetMeter while a
   // loop exists). A compound meter (x/8) counts its dotted quarters: BPM, TAP, the count-in and the dots.
   const meterName = (m: { num: number; den: number }) => `${m.num}/${m.den}`;
@@ -277,7 +296,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
       </div>
 
       {/* TAP beside the tempo it sets; dead once a loop fixes the tempo (clock.tap -> setBpm no-ops while
-          locked). It and END STOP are the `transport__pair`: row 1 while it fits (app/cmd-fit.ts). */}
+          locked). The `transport__pair`: row 1 while it fits (app/cmd-fit.ts). */}
       <button
         class="transport__tgl transport__pair"
         aria-label="Tap tempo"
@@ -290,13 +309,15 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         TAP
       </button>
 
-      {/* Record modes (how the next take records) take the wrapping row, leaving global transport beside
-          the loop dial. Every toggle here, TAP / END STOP and master mute keep ONE aria-label and say
-          on/off through aria-pressed alone; a label that flips as well reads "Click off, pressed". */}
+      {/* Record modes: how the next take records and how a stop lands. They take the wrapping row together,
+          leaving global transport beside the loop dial. Each lights its lamp while on (`transport__tgl--led`). Every
+          toggle here, TAP and master mute keep ONE aria-label and say on/off through aria-pressed alone; a
+          label that flips as well reads "Click off, pressed". */}
       <div class="transport__modes">
-        <div class="transport__click" role="group" aria-label="Metronome">
+        {/* CLICK and its volume read-out: one split pill, the read-out opens the volume. */}
+        <div class="transport__split" role="group" aria-label="Metronome">
           <button
-            class="transport__tgl"
+            class="transport__tgl transport__tgl--led"
             classList={{ 'is-on': clock.metronomeOn() }}
             aria-label="Metronome click"
             aria-pressed={clock.metronomeOn()}
@@ -305,31 +326,50 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           >
             CLICK
           </button>
-          <Show when={clock.metronomeOn()}>
-            <input
-              class="lf-range transport__volume transport__volume--click"
-              type="range"
-              min="0"
-              max="100"
-              step="1"
-              value={Math.round(clock.clickVolume() * 100)}
-              style={{ '--fill': `${Math.round(clock.clickVolume() * 100)}%` }}
-              aria-label="Click volume"
-              aria-valuetext={`${Math.round(clock.clickVolume() * 100)} percent`}
-              title="Click volume"
-              onInput={(e) => clock.setClickVolume(Number((e.target as HTMLInputElement).value) / 100)}
-            />
-          </Show>
+          <button
+            ref={clickPop.trigger}
+            class="transport__tgl transport__readout bar-pop__trigger"
+            classList={{ 'is-on': clock.metronomeOn() }}
+            aria-label="Click volume"
+            aria-haspopup="dialog"
+            aria-expanded={clickPop.open()}
+            aria-controls="lf-click-popover"
+            disabled={clickPopDisabled()}
+            onClick={clickPop.toggle}
+            title="Click volume"
+          >
+            <span class="transport__readout-v">{clickVol()}</span>
+          </button>
+          <BarPopoverPanel pop={clickPop} id="lf-click-popover" label="Click volume" class="bar-pop--param">
+            <label class="fxp-param">
+              <span class="fxp-param__label">Volume</span>
+              <input
+                class="lf-range fxp-param__range"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={clickVol()}
+                style={{ '--fill': `${clickVol()}%` }}
+                disabled={clickPopDisabled()}
+                aria-label="Click volume"
+                aria-valuetext={`${clickVol()} percent`}
+                onInput={(e) => clock.setClickVolume(Number(e.currentTarget.value) / 100)}
+              />
+              <span class="fxp-param__val">{clickVol()}</span>
+            </label>
+          </BarPopoverPanel>
         </div>
 
         {/* Fixed-length record — the length of the NEXT take in bars. Before a loop exists that is the
             first take (count-in, then auto-stop on the downbeat); after it, the next take — a shorter take
             repeats across the loop, a longer one grows the loop in whole loops. Read at arm,
             so the controls stay usable after the BPM lock and are locked only while a capture is live, or
-            while RETAKE (whose passes are master-length) overrides them. */}
+            while RETAKE (whose passes are master-length) overrides them. The bars show only while FIXED
+            is on: off, a take has no length to show. */}
         <div class="transport__fixed" role="group" aria-label="Take length in bars">
           <button
-            class="transport__tgl"
+            class="transport__tgl transport__tgl--led"
             classList={{ 'is-on': looper.fixedLengthEnabled() }}
             aria-label="Fixed take length"
             aria-pressed={looper.fixedLengthEnabled()}
@@ -337,7 +377,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             onClick={() => looper.toggleFixedLength()}
             title={fixedTitle()}
           >
-            FIXED {effectiveFixedBars()}
+            FIXED
           </button>
           <Show when={looper.fixedLengthEnabled()}>
             <div class="transport__bars" role="group" aria-label="Take length in bars">
@@ -369,7 +409,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         {/* RETAKE — a take with a known length (FIXED first take, any later take) keeps rolling; the stop
             gesture keeps the last complete pass. Read at arm, so it is locked while a capture is live. */}
         <button
-          class="transport__tgl"
+          class="transport__tgl transport__tgl--led"
           classList={{ 'is-on': looper.retakeEnabled() }}
           aria-label="Retake"
           aria-pressed={looper.retakeEnabled()}
@@ -382,11 +422,11 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
 
         {/* AUTO REC replaces the first-track count-in with a level arm. The detector listens to the
             existing record tap and keeps a short onset look-back; later tracks still use the master
-            boundary arm. Sensitivity remains editable while LISTENING so a noisy guitar chain can be
-            tuned without cancelling the arm. */}
-        <div class="transport__auto" role="group" aria-label="Automatic record start">
+            boundary arm. Its SENS read-out opens the sensitivity, which stays editable while LISTENING so
+            a noisy guitar chain can be tuned without cancelling the arm. */}
+        <div class="transport__split" role="group" aria-label="Automatic record start">
           <button
-            class="transport__tgl"
+            class="transport__tgl transport__tgl--led"
             classList={{ 'is-on': looper.autoRecordEnabled() }}
             aria-label="Auto record"
             aria-pressed={looper.autoRecordEnabled()}
@@ -394,25 +434,56 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             onClick={() => looper.toggleAutoRecord()}
             title="Start recording when you start playing, instead of counting in (first track). SENS is how quiet a sound may be and still start it: higher = more sensitive."
           >
-            AUTO REC · SENS <span class="transport__auto-value">{looper.autoRecordSensitivity()}</span>
+            AUTO REC
           </button>
-          <input
-            class="lf-range transport__volume transport__volume--auto"
-            classList={{ 'is-inactive': !looper.autoRecordEnabled() }}
-            type="range"
-            min="1"
-            max="100"
-            step="1"
-            value={looper.autoRecordSensitivity()}
-            style={{ '--fill': `${looper.autoRecordSensitivity()}%` }}
-            disabled={!looper.autoRecordEnabled() || clock.bpmLocked()}
-            aria-hidden={!looper.autoRecordEnabled()}
+          <button
+            ref={sensPop.trigger}
+            class="transport__tgl transport__readout bar-pop__trigger"
+            classList={{ 'is-on': looper.autoRecordEnabled() }}
             aria-label="Auto record sensitivity"
-            aria-valuetext={`${looper.autoRecordSensitivity()} of 100`}
-            title="Higher starts recording from quieter input"
-            onInput={(e) => looper.setAutoRecordSensitivity(Number((e.target as HTMLInputElement).value))}
-          />
+            aria-haspopup="dialog"
+            aria-expanded={sensPop.open()}
+            aria-controls="lf-sens-popover"
+            disabled={sensPopDisabled()}
+            onClick={sensPop.toggle}
+            title="Auto record sensitivity"
+          >
+            <span class="transport__readout-k">SENS</span>
+            <span class="transport__readout-v">{looper.autoRecordSensitivity()}</span>
+          </button>
+          <BarPopoverPanel pop={sensPop} id="lf-sens-popover" label="Auto record sensitivity" class="bar-pop--param">
+            <label class="fxp-param">
+              <span class="fxp-param__label">Sens</span>
+              <input
+                class="lf-range fxp-param__range"
+                type="range"
+                min="1"
+                max="100"
+                step="1"
+                value={looper.autoRecordSensitivity()}
+                style={{ '--fill': `${looper.autoRecordSensitivity()}%` }}
+                disabled={sensPopDisabled()}
+                aria-label="Auto record sensitivity"
+                aria-valuetext={`${looper.autoRecordSensitivity()} of 100`}
+                onInput={(e) => looper.setAutoRecordSensitivity(Number(e.currentTarget.value))}
+              />
+              <span class="fxp-param__val">{looper.autoRecordSensitivity()}</span>
+            </label>
+            <p class="bar-pop__hint">Higher starts recording from quieter input. The cyan tick on the record level is the trigger.</p>
+          </BarPopoverPanel>
         </div>
+
+        {/* END STOP — how every stop lands: the last mode, so all five lamps read as one row. */}
+        <button
+          class="transport__tgl transport__tgl--led"
+          classList={{ 'is-on': looper.loopEndStopEnabled() }}
+          aria-label="Stop playing loops at loop end"
+          aria-pressed={looper.loopEndStopEnabled()}
+          onClick={() => looper.toggleLoopEndStop()}
+          title="Stop playback at loop end. Press STOP again for immediate stop. Recording and overdub still commit and stop immediately."
+        >
+          END STOP
+        </button>
       </div>
 
       {/* Loop readout — the mini ring-dial (progress = loopPhase) + N BARS · S.S s. */}
@@ -453,18 +524,6 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           </span>
         </div>
       </div>
-
-      {/* END STOP — how every stop lands, beside the loop it ends and the ■/▶ ALL it changes. */}
-      <button
-        class="transport__tgl transport__pair"
-        classList={{ 'is-on': looper.loopEndStopEnabled() }}
-        aria-label="Stop playing loops at loop end"
-        aria-pressed={looper.loopEndStopEnabled()}
-        onClick={() => looper.toggleLoopEndStop()}
-        title="Stop playback at loop end. Press STOP again for immediate stop. Recording and overdub still commit and stop immediately."
-      >
-        END STOP
-      </button>
 
       {/* Global transport: ■/▶ ALL · FADE + its bars · ✕ ALL (two-step) · record level · IN FX (the
           input sends). ■/▶ ALL and FADE hold their widest word (`data-fit`), so nothing beside them

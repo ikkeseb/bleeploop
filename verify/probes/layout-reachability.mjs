@@ -7,8 +7,9 @@
  *   is reachable, and a lane's canvas survives a keyboard-placement/FX-drawer change (never remounts),
  *   across five keyboard placement/FX-drawer combinations; then the drum-pad ribbon, the two-row
  *   command-bar cap and the muted-lane readout with the loop present;
- * - the command bar with a playing loop, idle modes, from 960 to 1600 px wide (1050 px, once three rows,
- *   included): two rows at most, every control inside the bar and under its own centre point;
+ * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
+ *   bars, RETAKE, AUTO REC, END STOP), from 960 to 1920 px wide (1105: just above the narrow rung): two
+ *   rows at most, every control inside the bar and under its own centre point;
  * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
  *   1040 to 1280 px (the brand once unfolded on a fresh page and jumped ~99 px at the first take);
  * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
@@ -65,10 +66,10 @@ await probe(async ({ open }) => {
   const emit = (page, frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
   /** Wait for the device the app opens, then the engine's reset frame: `states[i]` on lane i over a
    * master of `master` frames, lane 1 selected. */
-  const boot = async (page, states, master = BAR) => {
+  const boot = async (page, states, master = BAR, settings = []) => {
     await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
     const loop = states.some((s) => s !== 'Empty');
-    await emit(page, { reset: true, settings: [], events: [
+    await emit(page, { reset: true, settings, events: [
       { Transport: { frame: 0, master: loop ? master : 0, bpm: 120, locked: loop } },
       ...states.map((state, lane) => ({ Lane: { frame: 0, lane, info: laneInfo(state, state === 'Empty' ? 0 : master) } })),
       { Selected: { frame: 0, lane: 0 } }],
@@ -183,12 +184,16 @@ await probe(async ({ open }) => {
     console.log(JSON.stringify({ name: drumName, ...drums, ok: drumOk }));
     await page.close();
   }
-  // FADE and IN FX widen row 1, which once put the master volume on a third row at 960 and 1100 px. With a loop present the
-  // bar must stay within two rows and every control in it must be reachable, at the Tauri minimum, the
-  // default and the widths between.
-  for (const [width, height] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1280, 820], [1600, 900]]) {
+  // FADE and IN FX widen row 1, which once put the master volume on a third row at 960 and 1100 px, and
+  // every mode on (FIXED's bars beside it) once put row 2 on a third row under 1100 px. With a loop
+  // present the bar must stay within two rows and every control in it must be reachable, at the Tauri
+  // minimum, the default and the widths between, with the modes idle and all on.
+  const ALL_MODES = [{ SetMetronome: true }, { SetFixedLength: true }, { SetFixedBars: 4 }, { SetRetake: true },
+    { SetAutoRecord: true }, { SetLoopEndStop: true }];
+  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1280, 820], [1600, 900], [1920, 1080]]
+    .flatMap(([w, h]) => [[w, h, 'idle'], [w, h, 'modes-on']])) {
     const { page } = await open({ viewport: { width, height }, init });
-    await boot(page, ['Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR);
+    await boot(page, ['Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR, modes === 'modes-on' ? ALL_MODES : []);
     await page.waitForTimeout(250);
     const bar = await page.evaluate(() => {
       const cmd = document.querySelector('.cmd');
@@ -203,11 +208,13 @@ await probe(async ({ open }) => {
         const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         if (!inside || !hit || !(hit === el || el.contains(hit))) unreachable.push(el.getAttribute('aria-label') ?? el.textContent.trim());
       }
-      return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, unreachable };
+      const on = ['Metronome click', 'Fixed take length', 'Retake', 'Auto record', 'Stop playing loops at loop end']
+        .filter((name) => cmd.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') === 'true').length;
+      return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, on, unreachable };
     });
-    const name = `${label}-${width}x${height}-engine`;
+    const name = `${label}-${width}x${height}-engine${modes === 'modes-on' ? '-modes-on' : ''}`;
     await page.locator('.cmd').screenshot({ path: `logs/layout/${name}.png` });
-    const ok = bar.rows <= 2 && !bar.unreachable.length;
+    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'modes-on' ? 5 : 0);
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));

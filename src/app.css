@@ -35,6 +35,10 @@
   --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
   --faint: #7d818d;
   --engaged: #f4efe6; /* warm white: engaged / selected chrome */
+  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they glow
+     in their colour: 0 0 6px) */
+  --led-socket: #23262e;
+  --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.8);
   /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
      below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
   --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23b9bcc6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
@@ -169,9 +173,9 @@ option {
   anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
-   cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · TAP · loop dial · END STOP ·
-   ALL · FADE · ✕ ALL · IN FX · master · tools; the modes cluster (transport.css) drops to row 2,
-   left-aligned under BPM. The ::after element is the forced line break between the two `order` bands
+   cannot see FIXED's bars come and go). Row 1 keeps brand · lamp · BPM · TAP · loop dial · ALL · FADE ·
+   ✕ ALL · IN FX · master · tools; the five record modes (transport.css) drop to row 2, left-aligned
+   under the brand. The ::after element is the forced line break between the two `order` bands
    (its own zero-height line, so the row gap counts twice). The narrower rungs stay in transport.css
    ("Narrow-width ladder"); the last one, the brand's fold, sits with the brand below. */
 .cmd--stack {

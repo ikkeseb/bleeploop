@@ -192,7 +192,7 @@
   }
 }
 
-/* ---- toggle pills — TAP / CLICK / FIXED / RETAKE / AUTO / END STOP / ALL / FADE / ✕ ALL / IN FX */
+/* ---- toggle pills — TAP / CLICK / FIXED / RETAKE / AUTO REC / END STOP / ALL / FADE / ✕ ALL / IN FX */
 .transport__modes,
 .transport__global {
   display: flex;
@@ -287,6 +287,70 @@
   border-color: rgba(244, 239, 230, 0.28);
   text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
+/* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an unlit socket
+   before the legend, lit warm-white while the mode is on, so a mode reads on or off from the guitar.
+   Always in the row, so lighting it never moves the legend or resizes the pill. A mode that is on but
+   greyed out (FIXED under RETAKE over a loop) keeps a dim lamp: set, not in effect. */
+.transport__tgl--led {
+  padding-left: 10px;
+}
+.transport__tgl--led::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
+  transition: background-color 0.12s, box-shadow 0.12s;
+}
+.transport__tgl--led.is-on::before {
+  background: var(--engaged);
+  box-shadow: 0 0 6px var(--engaged);
+}
+.transport__tgl--led.is-on:disabled::before {
+  background: color-mix(in srgb, var(--engaged) 35%, var(--led-socket));
+  box-shadow: none;
+}
+/* A split pill: the mode's toggle and, joined to it, the read-out of its one setting, which opens that
+   setting's popover (Transport.tsx, BarPopover.tsx). The read-out wears the toggle's state. One rim runs
+   round both halves; the 1px gap between them is the divider, and each half lifts on its own hover. */
+.transport__split {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.transport__split > .transport__tgl:first-child {
+  padding-right: 10px;
+  border-right-color: transparent;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.transport__split > .transport__readout {
+  gap: 4px;
+  padding-left: 8px;
+  padding-right: 8px;
+  border-left-color: transparent;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+/* the caret says "opens", as on the meter picker */
+.transport__readout::after {
+  content: '';
+  width: 9px;
+  height: 9px;
+  background: var(--caret-svg) center / 9px 9px no-repeat;
+}
+.transport__readout:disabled::after {
+  opacity: 0.45;
+}
+/* the value holds its widest (100), so a drag never moves the bar */
+.transport__readout-v {
+  display: inline-block;
+  min-width: 3ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 /* two-step confirm (✕ SURE?) = dub-amber warn */
 .transport__tgl.is-armed {
   color: var(--dub);
@@ -294,11 +358,9 @@
   border-color: color-mix(in srgb, var(--dub) 55%, transparent);
 }
 
-/* Mode groups pair a pill with its contextual control. AUTO reserves the control's width. FADE's bars
-   stay beside it: a fade's length is set before the press that ends the song. */
-.transport__click,
+/* FIXED and FADE pair a pill with its bars. FADE's stay beside it: a fade's length is set before the
+   press that ends the song. */
 .transport__fixed,
-.transport__auto,
 .transport__fade {
   display: flex;
   align-items: center;
@@ -419,22 +481,6 @@
 .transport__volume {
   width: 100px;
 }
-.transport__volume--click {
-  width: 64px;
-}
-.transport__volume--auto {
-  width: 64px;
-}
-/* Reserve AUTO's full width so toggling it or crossing 9/10/100 cannot move the stage. */
-.transport__volume--auto.is-inactive {
-  visibility: hidden;
-}
-.transport__auto-value {
-  display: inline-block;
-  width: 3ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
 .transport__volume-val {
   font-family: var(--mono);
   font-size: 11px;
@@ -446,12 +492,11 @@
 
 /* Narrow-width ladder. The `.cmd` card (app.css) is `overflow: hidden` via body, so anything that does
    not fit is simply unreachable. First rung: when one row cannot fit (measured by app/cmd-fit.ts —
-   including the contextual CLICK / FIXED controls and reserved AUTO width) the bar carries
-   `.cmd--stack` and the CLICK / FIXED / RETAKE / AUTO cluster takes a second row under BPM; TAP and
-   END STOP (`.transport__pair`) follow it there only when row 1 is still full without the tool icons
-   (`.cmd--stack-pair`: TAP lands under BPM, END STOP after AUTO); past that the brand folds to its dot
-   (`.cmd--stack-brand`, app.css). `order` moves them visually only —
-   DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
+   including FIXED's bars while it is on) the bar carries `.cmd--stack` and the five record modes take a
+   second row under the brand; TAP (`.transport__pair`) follows them there, under BPM, only when row 1
+   is still full without the tool icons (`.cmd--stack-pair`); past that the brand folds to its dot
+   (`.cmd--stack-brand`, app.css). `order` moves them visually only — DOM/tab order is
+   unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
    cannot see its own effect. */
 .cmd--stack .transport__modes,
 .cmd--stack-pair .transport__pair {
@@ -468,12 +513,14 @@
    picker and the beat dots stay, the dots under the meter in the unit's place), pin the master slider at
    its floor (in a wrapping row, shrink never runs; the tools would wrap to a third row instead) and give
    back the display windows' side padding, so row 1 holds BPM, the loop, ALL to IN FX and master from
-   960 px up (verify/probes/layout-reachability.mjs). It starts at 1100: below that the full row 1 wraps
+   960 px up (verify/probes/layout-reachability.mjs). Row 2 tightens the same way: the pills' padding,
+   FIXED's "bars" and SENS's word go (the popover and the titles still name them), so TAP, every mode
+   on and the app's seven tool icons share it. It starts at 1110: below that the full row 1 wraps
    master onto a third row once the brand has folded. The BPM window holds one width locked or not: above
    this rung the meter's face pays for the lock glyph; here the dots keep the column wide, so the glyph
    gives way (the dimmed ± steppers and the faceless meter still say locked) and the locked meter keeps
    its box. */
-@media (max-width: 1100px) {
+@media (max-width: 1110px) {
   .transport__bpm-unit,
   .transport__bpm-lock {
     display: none;
@@ -496,5 +543,35 @@
   }
   .transport__loop {
     gap: 8px;
+  }
+  .transport__modes {
+    gap: 4px;
+  }
+  .transport__pair,
+  .transport__modes .transport__tgl {
+    padding-left: 9px;
+    padding-right: 9px;
+  }
+  .transport__modes .transport__tgl--led {
+    gap: 5px;
+    padding-left: 8px;
+  }
+  .transport__modes .transport__split > .transport__tgl:first-child {
+    padding-right: 8px;
+  }
+  .transport__modes .transport__readout {
+    gap: 3px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .transport__fixed {
+    gap: 4px;
+  }
+  .transport__readout-k,
+  .transport__fixed .transport__bars-unit {
+    display: none;
+  }
+  .transport__fixed .transport__bars-val {
+    min-width: 22px;
   }
 }

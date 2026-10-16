@@ -273,10 +273,10 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Transport &amp; tempo</h3>
         <ul class="help__list">
           <li>A 1-bar count-in (one bar of clicks, counted down to 1) leads the first recording. You come in on the downbeat after the count, not the button press. A later take recorded with the loops stopped gets the count-in too, and every track starts from the top on that downbeat</li>
-          <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
-          <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat. Off, every take runs until you stop it</li>
+          <li><span class="help__note">CLICK</span> toggles the metronome (never recorded, silent while nothing runs); the number beside it opens its volume. A mode that is on lights its lamp</li>
+          <li><span class="help__note">FIXED</span> records exactly the bars set beside it and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
-          <li><span class="help__note">AUTO REC · SENS</span> replaces the first count-in: arm the track, then playing starts the take. Raise sensitivity for quieter input; the cyan tick on the record level is the trigger</li>
+          <li><span class="help__note">AUTO REC</span> replaces the first count-in: arm the track, then playing starts the take. <span class="help__note">SENS</span> beside it opens the sensitivity: raise it for quieter input; the cyan tick on the record level is the trigger</li>
           <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
           <li>The time signature beside BPM (4/4, 3/4, 6/8, 12/8, 5/4) sets the bar: the click accents its first beat, and FIXED, FADE and the grid count its bars. In 6/8 and 12/8, BPM and TAP count the dotted quarter (two and four beats a bar). It locks with the tempo</li>
         </ul>
