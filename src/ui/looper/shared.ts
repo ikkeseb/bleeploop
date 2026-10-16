@@ -47,8 +47,8 @@ export function volumeDb(v: number): string {
   return (db >= 0 ? '+' : '−') + Math.abs(db).toFixed(1) + ' dB';
 }
 
-/** How long a "press twice to destroy a take" confirm stays armed: ✕ ALL's, and the lane CLEAR's as the UI
- * shows it (`src/app/clear-arm.ts`; the engine's own window is lf-engine's `CONFIRM_WINDOW_MS`). */
+/** How long ✕ ALL's "press twice to destroy every take" confirm stays armed: lf-engine's `CONFIRM_WINDOW_MS`,
+ * the lane CLEAR's (which the engine arms and the feed shows: `LaneInfo.clearArmed`). */
 export const CONFIRM_WINDOW_MS = 2500;
 
 /** A two-press control's `onKeyDown` (lane CLR, ✕ ALL): a held Enter's key repeats would each click it,
@@ -60,7 +60,7 @@ export function noEnterRepeat(e: KeyboardEvent): void {
 /**
  * Two-step confirm latch, the command bar's ✕ ALL. The first `trigger()` only ARMS (opens a `windowMs`
  * window and returns); a second within it runs `action` and disarms. The window auto-closes. No blocking
- * confirm. A lane's CLR is the engine's CLEAR instead (`src/app/clear-arm.ts`). Its button takes
+ * confirm. A lane's CLR is the engine's CLEAR instead (`LaneInfo.clearArmed`). Its button takes
  * `onKeyDown` too (`noEnterRepeat`). Registers its own `onCleanup`, so call it during component setup.
  */
 export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WINDOW_MS) {

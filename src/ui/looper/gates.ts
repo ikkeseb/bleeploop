@@ -53,7 +53,7 @@ const REFUSAL = {
   noFade: refuse('nothing is playing to fade'),
 } as const;
 
-/** CLEAR's first press, by any hand: the engine clears on the second (its `ConfirmClear`; `src/app/clear-arm.ts`). */
+/** CLEAR's first press, by any hand: the engine clears on the second (its `ConfirmClear`; the lane's `clearArmed`). */
 const CONFIRM_CLEAR_TEXT = 'press again to clear';
 
 /** The words for an engine refusal: the vocabulary above. */

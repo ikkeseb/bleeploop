@@ -96,7 +96,8 @@
           "reversed": false,
           "stopAt": null,
           "fading": false,
-          "retakePass": 0
+          "retakePass": 0,
+          "clearArmed": true
         }
       }
     },
@@ -114,7 +115,8 @@
           "reversed": true,
           "stopAt": 184200,
           "fading": false,
-          "retakePass": 2
+          "retakePass": 2,
+          "clearArmed": false
         }
       }
     },
@@ -132,7 +134,8 @@
           "reversed": false,
           "stopAt": 264600,
           "fading": true,
-          "retakePass": 0
+          "retakePass": 0,
+          "clearArmed": false
         }
       }
     },
@@ -267,7 +270,8 @@
               "reversed": false,
               "stopAt": null,
               "fading": false,
-              "retakePass": 0
+              "retakePass": 0,
+              "clearArmed": false
             }
           }
         },
@@ -285,7 +289,8 @@
               "reversed": false,
               "stopAt": null,
               "fading": false,
-              "retakePass": 0
+              "retakePass": 0,
+              "clearArmed": false
             }
           }
         },
@@ -303,7 +308,8 @@
               "reversed": false,
               "stopAt": null,
               "fading": false,
-              "retakePass": 0
+              "retakePass": 0,
+              "clearArmed": false
             }
           }
         },
@@ -321,7 +327,8 @@
               "reversed": false,
               "stopAt": null,
               "fading": false,
-              "retakePass": 0
+              "retakePass": 0,
+              "clearArmed": false
             }
           }
         },
@@ -339,7 +346,8 @@
               "reversed": false,
               "stopAt": null,
               "fading": false,
-              "retakePass": 0
+              "retakePass": 0,
+              "clearArmed": false
             }
           }
         },

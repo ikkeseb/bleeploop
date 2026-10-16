@@ -69,6 +69,7 @@ const EMPTY_LANE: LaneInfo = LaneInfo {
     stop_at: None,
     fading: false,
     retake_pass: 0,
+    clear_armed: false,
 };
 
 /// What the UI was last sent of a lane's waveform.

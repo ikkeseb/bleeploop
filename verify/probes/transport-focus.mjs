@@ -199,7 +199,7 @@ await probe(async ({ open }) => {
 
   // 5. A held Enter on a CLEAR control confirms nothing: a key repeat is not a second press. A release
   //    and a fresh press is. ✕ ALL arms in the UI, so its held Enter sends nothing and the fresh one the
-  //    clear; a lane's CLR is the engine's CLEAR (it arms and confirms: `src/app/clear-arm.ts`), so each
+  //    clear; a lane's CLR is the engine's CLEAR (it arms and confirms: `LaneInfo.clearArmed`), so each
   //    press sends one, never an outright `Clear`.
   const playing = { ...lane('Playing'), length: 96000, canReverse: true };
   const holdsLoop = () => page.evaluate((info) => window.__lf.native.emit({

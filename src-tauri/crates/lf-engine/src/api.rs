@@ -413,6 +413,10 @@ pub struct LaneInfo {
     pub fading: bool,
     /// RETAKE: the 1-based pass in flight, 0 when the lane is not rolling.
     pub retake_pass: u32,
+    /// CLEAR is armed on this lane: its next CLEAR press, within the confirm window, clears it. Down when
+    /// the window ends, on any other looper press (a HOLD release that ends a capture too) and when the
+    /// device stops (`Looper::action`, `Looper::punch_out`).
+    pub clear_armed: bool,
 }
 
 /// A lane's mix as the engine applied it: its volume, mute, DUB FEEDBACK and pan (its target, not where a

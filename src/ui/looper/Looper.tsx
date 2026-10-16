@@ -9,7 +9,6 @@ import { mixGesture } from './mix-gesture';
 import { Edit } from './Edit';
 import { inputArmed } from '../state/native-io';
 import { runAction } from '../../app/actions';
-import { clearArmed } from '../../app/clear-arm';
 import './looper.css';
 
 /**
@@ -270,7 +269,7 @@ function TrackLane(props: {
   // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
   // stage view. EMPTY shows no well message — the bright ● core already says "press to record"; the
   // spoken 'record' action lives on the core button's aria-label.
-  const { displayState, word, stopping, fading, muted, cue, wellMsg, wellCount } = createLaneView(props.index);
+  const { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount } = createLaneView(props.index);
   const fxSelected = () => props.fxTrack === props.index;
   const isEmpty = () => state() === 'EMPTY';
   // Any of the lane's effects engaged in the mix the engine applied (the feed's, never a control's
@@ -346,8 +345,8 @@ function TrackLane(props: {
   // Two-step clear: a take is irreversible, so the first press only ARMS ("SURE?") for a short window;
   // a second press within it actually clears. No blocking window.confirm, which keeps the workflow fast.
   // It is the engine's CLEAR, one arm with the key's and a pedal's: either hand may arm and the other
-  // confirm (`src/app/clear-arm.ts`).
-  const clrArmed = () => clearArmed(props.index);
+  // confirm, and the pill reads the engine's arm off the feed (`clearArmed`).
+  let clrEl: HTMLButtonElement | undefined;
 
   // The waveform canvas is driven entirely by the plain-TS rAF renderer in waveform.ts; Solid only
   // mounts the element and (de)registers it. No reactivity touches the draw loop (invariant 6). The
@@ -390,12 +389,13 @@ function TrackLane(props: {
       role="group"
       aria-label={`Track ${props.index + 1}`}
       aria-current={looper.selectedTrack() === props.index ? 'true' : undefined}
-      onPointerDown={() => {
+      onPointerDown={(e) => {
         pressed = true;
         haltScroll(laneEl?.parentElement);
-        // A selection is a looper press to the engine and disarms CLEAR: not while this lane holds the
-        // arm, or CLR's confirming press would only arm it again.
-        if (!clrArmed()) looper.selectTrack(props.index);
+        // A selection is a looper press to the engine and disarms CLEAR, so CLR's confirming press sends
+        // none (it would only arm the lane again); every other press on the lane selects it.
+        const confirming = clearArmed() && e.target instanceof Node && clrEl?.contains(e.target) === true;
+        if (!confirming) looper.selectTrack(props.index);
       }}
     >
       {/* left cluster: identity · core gesture · play-stop/clear pair */}
@@ -446,18 +446,19 @@ function TrackLane(props: {
             {playStopGlyph()} {stopping() ? 'NOW' : playStopGlyph() === '▶' ? 'PLAY' : 'STOP'}
           </button>
           <button
+            ref={clrEl}
             class="lp-pb lp-pb--clr"
-            classList={{ 'is-armed': clrArmed() }}
+            classList={{ 'is-armed': clearArmed() }}
             disabled={isEmpty()}
             onClick={() => runAction('clear', props.index)}
             onKeyDown={noEnterRepeat}
             aria-label={
-              clrArmed()
+              clearArmed()
                 ? `Track ${props.index + 1} clear, press again to confirm`
                 : `Track ${props.index + 1} clear`
             }
           >
-            {clrArmed() ? 'SURE?' : 'CLR'}
+            {clearArmed() ? 'SURE?' : 'CLR'}
           </button>
         </div>
       </div>

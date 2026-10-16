@@ -125,8 +125,10 @@
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted
 //!   press's, for that pedal's release) and a pedal MUTE's state are the engine's, and so is the value
 //!   a toggle ([`Action::Toggle`]: CLICK, END STOP, FIXED, RETAKE, AUTO REC, an input send) switches, so
-//!   a pedal and a click never undo each other. Every looper press but CLEAR's confirming one disarms a
-//!   pending pedal CLEAR, a toggle too, refused or not (TAP and GO LIVE say they are one with
+//!   a pedal and a click never undo each other. CLEAR is one arm for every hand (the lane's CLR, the key
+//!   and a pedal all press [`Action::Clear`]), on the feed as each lane's [`LaneInfo::clear_armed`] until
+//!   its window ends on its frame or the device stops. Every looper press but CLEAR's confirming one
+//!   disarms a pending CLEAR, a toggle too, refused or not (TAP and GO LIVE say they are one with
 //!   [`Command::Press`]); a setting alone does not. An input send's toggle passes a command held for a
 //!   block job, as its setter does; its disarm keeps its place behind it.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).

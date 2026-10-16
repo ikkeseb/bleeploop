@@ -435,6 +435,87 @@ fn a_pedals_clear_confirms_per_lane() {
     assert_eq!((rig.state(0), rig.state(1)), (LaneState::Playing, LaneState::Playing), "and nothing else");
 }
 
+/// What the feed last carried of lane `i`: whether it showed CLEAR armed there, and the frame.
+fn fed_clear(rig: &Rig, i: usize) -> (bool, Frame) {
+    rig.events
+        .iter()
+        .rev()
+        .find_map(|e| match *e {
+            Event::Lane { frame, lane, info } if lane as usize == i => Some((info.clear_armed, frame)),
+            _ => None,
+        })
+        .expect("the lane was published")
+}
+
+#[test]
+fn the_feed_shows_a_pending_clear_on_its_lane_until_its_window_a_press_or_a_device_stop_ends_it() {
+    // The UI's SURE? (`src/ui/looper/Looper.tsx`) reads `LaneInfo::clear_armed`, so it must say armed
+    // exactly while one more CLEAR on that lane would clear it.
+    let mut rig = two_lanes(1);
+    let window = (2500 * rig.sr as Frame + 999) / 1000;
+    let armed_at = rig.frame;
+    rig.press(Command::ActionOn(1, Action::Clear));
+    assert_eq!(fed_clear(&rig, 1), (true, armed_at), "the arm goes out on its press frame");
+    assert!(!fed_clear(&rig, 0).0, "on its lane only");
+
+    // The window's end, on its frame, with no press: the last frame a second press would clear on still
+    // shows the arm, and the next drops it.
+    rig.advance_to(armed_at + window);
+    assert!(fed_clear(&rig, 1).0, "armed through the window's last frame");
+    rig.advance(1);
+    assert_eq!(fed_clear(&rig, 1), (false, armed_at + window), "dropped on the frame the window ends");
+    // ...and the engine agrees: the last frame of a fresh window still confirms.
+    let armed_at = rig.frame;
+    rig.press(Command::ActionOn(1, Action::Clear));
+    rig.advance_to(armed_at + window - 1);
+    assert!(fed_clear(&rig, 1).0);
+    rig.press(Command::ActionOn(1, Action::Clear));
+    rig.idle();
+    assert_eq!(rig.state(1), LaneState::Empty, "a second press on the window's last frame clears");
+    assert!(!fed_clear(&rig, 1).0, "and the arm is gone with the loop");
+
+    // Any other press drops it: an action on another lane, a selection, an on-screen gesture, CLEAR on
+    // another lane (which arms that one instead).
+    rig.press(Command::Copy(0));
+    rig.idle();
+    for between in [Command::ActionOn(0, Action::Mute), Command::SelectTrack(0), Command::PlayStop(0), Command::Press] {
+        rig.press(Command::ActionOn(1, Action::Clear));
+        assert!(fed_clear(&rig, 1).0);
+        let at = rig.frame;
+        rig.press(between);
+        assert_eq!(fed_clear(&rig, 1), (false, at), "{between:?} drops the arm on its frame");
+    }
+    rig.press(Command::ActionOn(1, Action::Clear));
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert!(!fed_clear(&rig, 1).0 && fed_clear(&rig, 0).0, "CLEAR on another lane moves the arm there");
+    // A setting is no press.
+    rig.press(Command::SetVolume(0, 0.5));
+    assert!(fed_clear(&rig, 0).0, "a setting leaves the arm");
+
+    // A HOLD release that does nothing leaves it; one that ends a capture drops it.
+    rig.press(Command::Action(Action::Release(1)));
+    assert!(fed_clear(&rig, 0).0, "a release with nothing to end is no press");
+    rig.press(Command::SelectTrack(1));
+    rig.press(Command::Action(Action::Hold(0)));
+    assert_eq!(rig.state(1), LaneState::Overdubbing);
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert!(fed_clear(&rig, 0).0);
+    rig.advance(100);
+    let at = rig.frame;
+    rig.press(Command::Action(Action::Release(0)));
+    assert_eq!(fed_clear(&rig, 0), (false, at), "a release that ends the overdub drops the arm");
+    rig.idle();
+
+    // A device stop drops it: the window would otherwise wait out the stop and come back armed.
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert!(fed_clear(&rig, 0).0);
+    rig.punch_out();
+    assert!(!fed_clear(&rig, 0).0, "the stop publishes the arm gone");
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert_ne!(rig.state(0), LaneState::Empty, "the first press after the stop arms again");
+    assert!(fed_clear(&rig, 0).0);
+}
+
 #[test]
 fn a_pedal_bound_to_a_lane_plays_stops_reverses_and_copies_that_lane_not_the_selected_one() {
     // verify/probes/midi-learn.mjs's per-target bindings: PLAY/STOP, REVERSE and COPY bound to lanes 1
