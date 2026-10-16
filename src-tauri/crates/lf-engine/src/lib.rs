@@ -134,11 +134,14 @@
 //!   marked. The one exception to this rule is a hole: the frames a jump skipped inside a take's window
 //!   are zeroed in the callback that finds them, before anything reads the buffer (`Looper::fill_hole`).
 //!   That work scales with audio the device already lost, never with the loop: at most the two windows a
-//!   jump cuts and lands in. Its bars, over the whole callback (zeroing, peaks and marks): at most 1 ns a
-//!   lost frame, the callback that fills a 59 s hole within half a 10 ms WASAPI period at 48 and 192 kHz,
-//!   and a one-block hole at most 1 % of its block (`tests/perf.rs` `a_holes_cost_per_lost_frame`,
-//!   ignored: run it in release after a change on that path). Only WASAPI's dry frames make a long hole;
-//!   a lock miss makes one block.
+//!   jump cuts and lands in. Its bars (`tests/perf.rs`, ignored: run them in release after a change on
+//!   that path): at most 1 ns a lost frame and a one-block hole at most 1 % of its block
+//!   (`a_holes_cost_per_lost_frame`); the callback that finds the largest hole a backend makes, a RETAKE
+//!   pass edge overdue in it, at most a quarter of its period more than the heavy scene's callback on
+//!   that phase (`a_holes_callback_meets_its_deadline_under_the_heavy_scene`). Only WASAPI's dry frames
+//!   make a long hole, at its 10 ms period; a lock miss makes a block, and in a release build nothing
+//!   holds the engine lock while a device runs (the DEV hold does, a second at most). At 192 kHz a hole of
+//!   two windows is over that bar (`src-tauri/AGENTS.md` § Open threads).
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted

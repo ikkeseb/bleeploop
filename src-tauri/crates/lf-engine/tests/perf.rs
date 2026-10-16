@@ -29,6 +29,10 @@
 //! - A hole (`Looper::fill_hole`): the whole callback that zeroes a 59 s hole closing a 60 s take, less
 //!   the same callback without it, at 48 and 192 kHz, and a one-block lock miss's hole at 64 frames. Its
 //!   bars: at most 1 ns per lost frame, the one-block hole at most 1 % of its block.
+//! - A hole's deadline: the callback that finds the largest hole each backend makes, a RETAKE pass edge
+//!   overdue in it, on the heavy scene's heaviest phase, at the smallest periods (ASIO 32 and 64 frames,
+//!   WASAPI's 10 ms) and 44.1 to 192 kHz, the worst of eight. Its bar: at most a quarter of the period
+//!   more than the scene's callback on that phase (the test says why).
 //! - A multiply's push with every source bin marked, over four lanes with undo targets (eight fills'
 //!   marks at once): at most 5 % of a 64-frame block more than the same push unmarked.
 //!
@@ -824,30 +828,221 @@ fn hole_callback(rate: u32, seconds: f64, hole: Frame, block: usize, tries: usiz
 #[test]
 #[ignore]
 fn a_holes_cost_per_lost_frame() {
-    // Long holes come from WASAPI's dry frames (a lock miss loses one block, either backend): the
-    // whole callback that fills one is held against a WASAPI period (10 ms) as well as per lost frame.
+    // The hole's own cost, over the bare engine (the deadline under load: the next test): per lost frame
+    // at 48 and 192 kHz, a 59 s hole closing a 60 s take and an overdue RETAKE edge, and a one-block lock
+    // miss's hole at 64 frames against its block.
     for (rate, block) in [(48_000u32, 480usize), (192_000, 1920)] {
-        let period = block as f64 / rate as f64;
         for retake in [false, true] {
             let hole = if retake { 58 * rate as Frame } else { (59.0 * rate as f64) as Frame };
             let (with, without) = hole_callback(rate, 60.0, hole, block, 3, retake, false);
             let per = (with - without) / hole as f64 * 1e9;
             println!(
-                "{} at {rate} Hz: the callback {:.2} ms ({:.2} ms without it), {per:.3} ns per lost frame, {:.0} % of its {block}-frame period ({:.2} ms)",
+                "{} at {rate} Hz: the callback {:.2} ms ({:.2} ms without it), {per:.3} ns per lost frame",
                 if retake { "an overdue RETAKE edge, two passes' holes (58 s)" } else { "a 59 s hole closing a 60 s take" },
                 with * 1e3,
                 without * 1e3,
-                with / period * 100.0,
-                period * 1e3
             );
             assert!(per <= 1.0, "a hole costs {per:.3} ns per lost frame");
-            assert!(with <= 0.5 * period, "the callback that fills it takes {:.0} % of its period", with / period * 100.0);
         }
     }
     let (with, without) = hole_callback(48_000, 4.0, 64, 64, 50, false, true);
     let period = 64.0 / 48_000.0;
     println!("a one-block lock miss's hole at 64 frames: {:.2} µs more over the callback and the next ({:.3} % of a block)", (with - without) * 1e6, (with - without) / period * 100.0);
     assert!((with - without) / period <= 0.01, "the one-block hole costs {:.3} % of its block", (with - without) / period * 100.0);
+}
+
+/// The heavy scene a hole's callback is held against, at `rate`, in a 60 s buffer (the app's,
+/// `engine_io::HostConfig`): a master of `bars` at 120 BPM on lanes 0 to 3, with `lane_fx` every effect
+/// on every lane as the Stage 3 load sets them, every input send at its heaviest, the pad holding a
+/// four-note chord, the click on; lane 4 rolls a RETAKE later take, a pass the master long. Built at
+/// 1,024-frame blocks.
+fn heavy_hole_scene(rate: u32, bars: f64, lane_fx: bool) -> Rig {
+    let mut rig = Rig::with(Opts { sr: rate, start: rate as Frame, loop_seconds: 60.0, block: 1024, ..Default::default() });
+    rig.set(Command::SetBpm(120.0));
+    rig.set(Command::SetMetronome(true));
+    rig.set_input(code);
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(bars));
+    rig.press(Command::RecDub(0));
+    let end = rig.end_frame();
+    rig.advance_to(end + 1);
+    rig.set(Command::SetFixedLength(false));
+    rig.idle();
+    assert_eq!(rig.master(), bars as Frame * 2 * rate as Frame, "the master is {bars} bars");
+    for _ in 1..4 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    for lane in (0..4).filter(|_| lane_fx) {
+        let set = |p, v| Command::SetFxParam(lane, p, v);
+        for command in [
+            set(FxParam::Cutoff, 1200.0),
+            set(FxParam::Q, 6.0),
+            set(FxParam::Semitones, 7.0),
+            set(FxParam::Rate, 3.0),
+            set(FxParam::Time, 1.0),
+            set(FxParam::Feedback, MAX_FEEDBACK),
+            set(FxParam::Mix, 0.5),
+            set(FxParam::Amount, 1.0),
+        ] {
+            rig.set(command);
+        }
+        for kind in FxKind::ALL {
+            rig.set(Command::SetFxBypass(lane, kind, false));
+        }
+    }
+    input_sends_on(&mut rig);
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)));
+    for note in [48, 52, 55, 59] {
+        rig.set(Command::NoteOn(note, 0.8));
+    }
+    rig.set(Command::SetRetake(true));
+    rig.press(Command::RecDub(4));
+    while rig.lane(4).armed || rig.window().is_some_and(|w| w.1.is_none()) {
+        rig.advance(1024);
+    }
+    assert!((0..4).all(|i| rig.state(i) == LaneState::Playing) && rig.state(4) == LaneState::Recording);
+    rig
+}
+
+/// One device callback of `io`'s length at the heavy scene, `skipped` frames after the last (an xrun
+/// when the device skipped any), the filters' cutoff ramped anew every 18 ms as the Stage 3 load does:
+/// its seconds. `io` holds the input and the two outputs.
+fn scene_callback(rig: &mut Rig, io: &mut [Vec<f32>; 3], skipped: Frame) -> f64 {
+    let [input, left, right] = io;
+    rig.frame += skipped;
+    for (k, x) in input.iter_mut().enumerate() {
+        *x = code(rig.frame + k as Frame) - 0.25;
+    }
+    let block = input.len() as Frame;
+    let ramp = rig.seconds(0.018);
+    if rig.frame / ramp != (rig.frame + block) / ramp {
+        let cutoff = if (rig.frame / ramp) % 2 == 0 { 300.0 } else { 6000.0 };
+        for lane in 0..4 {
+            rig.send_at(rig.frame, Command::SetFxParam(lane, FxParam::Cutoff, cutoff));
+        }
+    }
+    let ctx = ProcessContext { frame: rig.frame, xrun: skipped > 0, damaged: false, align_frames: rig.align - rig.engine.limiter_latency(), input_frames: 0 };
+    let t = Instant::now();
+    rig.engine.process(&ctx, input, left, right);
+    let dt = t.elapsed().as_secs_f64();
+    rig.frame += block;
+    rig.read_events();
+    dt
+}
+
+/// What [`hole_deadline`] measured, seconds each: the callbacks that found the holes, and the scene's
+/// callbacks before them that start a 128-frame quantum of the synths' and FX's work, the phase every
+/// hole's callback is put on (a block of 128 or more holds a quantum start every time).
+struct Deadline {
+    holes: Vec<f64>,
+    scene: Vec<f64>,
+}
+
+/// Each of `trials` holes in the heavy scene at `rate` and `block`: the RETAKE roll's pass edge
+/// overdue in the callback that finds it, the cut pass's rest and the landing pass's start zeroed there,
+/// that callback starting a quantum on the DSP clock. With `long` the device skips from a second into
+/// one pass to a second before the next one's end (two windows of 59 s, the most one callback zeroes:
+/// `Looper::fill_hole`), over 60 s passes; else `lost` frames across the edge, over 4 s passes.
+fn hole_deadline(rate: u32, block: usize, long: bool, lost: Frame, lane_fx: bool, trials: usize) -> Deadline {
+    let mut rig = heavy_hole_scene(rate, if long { 30.0 } else { 2.0 }, lane_fx);
+    let mut io = [vec![0.0f32; block], vec![0.0f32; block], vec![0.0f32; block]];
+    let mut out = Deadline { holes: Vec::with_capacity(trials), scene: Vec::new() };
+    let (sec, q) = (rate as Frame, 128 as Frame);
+    // The engine's DSP clock is the device frame less the frames skipped (`Engine::process`): the rig's
+    // first block's start, then every jump.
+    let mut skipped = rate as Frame;
+    for _ in 0..trials {
+        let (mut s, e) = (rig.start_frame(), rig.end_frame());
+        let len = e - s;
+        // The next pass the jump can start a second into (a long jump lands a second before its pass's end).
+        while long && s + sec <= rig.frame {
+            s += len;
+        }
+        let e = s + len;
+        let from = if long { s + sec } else { e - lost / 2 };
+        let from = from - (from - skipped).rem_euclid(q); // a quantum starts with the hole's callback
+        let to = if long { e + len - sec } else { from + lost };
+        assert!(rig.frame < from && to > e, "the scene renders up to the jump, which crosses the pass edge");
+        while rig.frame + block as Frame <= from {
+            let phase = (rig.frame - skipped).rem_euclid(q);
+            let t = scene_callback(&mut rig, &mut io, 0);
+            if phase == 0 || phase + block as Frame > q {
+                out.scene.push(t);
+            }
+        }
+        rig.advance_to(from);
+        out.holes.push(scene_callback(&mut rig, &mut io, to - from));
+        skipped += to - from;
+        let want = if long { 2 * (len - sec) - block as Frame - q } else { lost };
+        assert!(rig.engine.looper().zeroed_max() >= want, "the callback zeroed both windows' holes");
+        assert_eq!(rig.state(4), LaneState::Recording, "the roll goes on");
+    }
+    out
+}
+
+#[test]
+#[ignore]
+fn a_holes_callback_meets_its_deadline_under_the_heavy_scene() {
+    // The whole callback that finds the largest hole each backend can make, with a RETAKE pass edge
+    // overdue in it, on the heaviest phase of the heavy scene, against the scene's own callbacks on that
+    // phase: the worst of eight holes. The bar: a hole adds at most a quarter of its period. The engine's
+    // callback is to stay within half its period, the other half left to the device side (the WASAPI
+    // join's pull, the Share mirror), a live plugin and the scheduler's lateness, and the heavy scene
+    // takes about a quarter on that phase at the pickable rates: a hole may take the other quarter.
+    //
+    // - ASIO, at the smallest blocks a driver runs (the select offers 64; a driver fixed in its own
+    //   panel can run 32): a hole is a block per lock miss, and in a release build nothing holds the
+    //   engine lock while a device runs; the longest hold is the DEV `engine_hold_lock`'s clamp, a second.
+    // - WASAPI, at its endpoint's default period (10 ms on every endpoint run so far) and rates up to
+    //   192 kHz (an endpoint's own): its dry frames are the stall, unbounded, so the hole is the most one
+    //   callback zeroes, the rest of the pass the jump cut and the start of the one it lands in, at 60 s
+    //   passes (the whole buffer).
+    // - At 96 and 192 kHz the heavy scene alone overruns half its period (every lane effect at four
+    //   times the frames), so the scene there drops the lanes' effects: the most of it the engine plays.
+    // - The two 59 s windows at 64 frames: no backend makes that, printed to show the margin a long hole
+    //   on a short period would lack.
+    let cases: [(&str, u32, usize, bool, bool); 11] = [
+        ("ASIO", 44_100, 32, false, true),
+        ("ASIO", 44_100, 64, false, true),
+        ("ASIO", 48_000, 32, false, true),
+        ("ASIO", 48_000, 64, false, true),
+        ("ASIO", 96_000, 64, false, true),
+        ("ASIO", 192_000, 64, false, true),
+        ("WASAPI", 44_100, 441, true, true),
+        ("WASAPI", 48_000, 480, true, true),
+        ("WASAPI", 96_000, 960, true, true),
+        ("WASAPI", 192_000, 1920, true, true),
+        ("no backend", 48_000, 64, true, false),
+    ];
+    let mut over = Vec::new();
+    for (backend, rate, block, long, barred) in cases {
+        let lane_fx = rate <= 48_000;
+        let Deadline { mut holes, mut scene } = hole_deadline(rate, block, long, rate as Frame, lane_fx, 8);
+        let period = block as f64 / rate as f64;
+        holes.sort_by(f64::total_cmp);
+        scene.sort_by(f64::total_cmp);
+        let pct = |t: f64| t / period * 100.0;
+        let (worst, median, typical) = (holes[holes.len() - 1], holes[holes.len() / 2], scene[scene.len() / 2]);
+        println!(
+            "{backend}, {rate} Hz, {block}-frame period ({:.2} ms), {}, {}: the hole's callback worst {:.3} ms ({:.0} %, {:.0} % over the scene's), median {:.0} %; the scene's callbacks on that phase median {:.0} %, p99.9 {:.0} %, worst {:.0} % ({} of them)",
+            period * 1e3,
+            if long { "two 59 s windows" } else { "1 s across the edge" },
+            if lane_fx { "the heavy scene" } else { "no lane effects" },
+            worst * 1e3,
+            pct(worst),
+            pct(worst - typical),
+            pct(median),
+            pct(typical),
+            pct(scene[scene.len() * 999 / 1000]),
+            pct(scene[scene.len() - 1]),
+            scene.len()
+        );
+        if barred && worst - typical > 0.25 * period {
+            over.push(format!("{backend} {rate} Hz {block}: {:.0} % over the scene's", pct(worst - typical)));
+        }
+    }
+    assert!(over.is_empty(), "a hole adds over a quarter of its period: {over:?}");
 }
 
 /// The multiply's push (F14) with every bin of four one-bar loops and their undo targets marked: the

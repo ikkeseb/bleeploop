@@ -188,7 +188,7 @@ pub async fn engine_status() -> Result<Option<DeviceStatus>, String> {
 }
 
 /// DEV: hold the engine lock `ms` (at most a second) while a device runs: its callbacks miss their
-/// blocks, a real dropout planted for a native check of its mark (`src-tauri/AGENTS.md` § Open threads).
+/// blocks, a real dropout planted for `native:engine-smoke`'s dropout step (`src/debug/engine-smoke.ts`).
 /// False when no device runs.
 #[cfg(debug_assertions)]
 #[tauri::command]

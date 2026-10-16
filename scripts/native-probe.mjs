@@ -47,12 +47,14 @@ const PROBES = {
     pass: /^complete: \d+ swapped, 0 failed/,
     config: CLASSIC,
   },
-  // One launch, closed through its window as the close button does; any other frontend `console.error`
-  // line fails it.
+  // One launch (the probe reloads the WebView inside it), closed through its window as the close button
+  // does; any other frontend `console.error` line fails it but the one its planted dropout logs, which
+  // must come exactly once (`expectedErrors`).
   'engine-smoke': {
     tag: 'engine-smoke',
     config: 'scripts/engine-probe.tauri.json',
     cleanLog: true,
+    expectedErrors: [{ line: /\[engine\] track 0's overdub layer kept a dropout/, count: 1 }],
     phases: [{ name: 'smoke', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
   // The same profile; the save phase ends with app.exe killed while its loops play, the restore phase
@@ -194,6 +196,7 @@ function launch(phase, phaseEnv) {
     let recallLines = 0;
     let requiredSeen = false;
     const webviewErrors = [];
+    const expected = (spec.expectedErrors ?? []).map(() => 0);
     const rustErrors = [];
     let verdict;
     let settled = false;
@@ -202,7 +205,7 @@ function launch(phase, phaseEnv) {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
-      resolve({ line, reason, recallLines, requiredSeen, webviewErrors, rustErrors, stopped: stopRun(child) });
+      resolve({ line, reason, recallLines, requiredSeen, webviewErrors, expected, rustErrors, stopped: stopRun(child) });
     };
     // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
     // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
@@ -243,7 +246,11 @@ function launch(phase, phaseEnv) {
         const clean = raw.replace(/\x1b\[[0-9;]*m/g, '');
         if (clean.includes('[rig-recall]')) recallLines++;
         if (spec.requireLine?.test(clean)) requiredSeen = true;
-        if (spec.cleanLog && clean.includes('[webview][ERROR]') && !clean.includes(`[${spec.tag}]`)) webviewErrors.push(clean);
+        if (spec.cleanLog && clean.includes('[webview][ERROR]') && !clean.includes(`[${spec.tag}]`)) {
+          const k = (spec.expectedErrors ?? []).findIndex((e) => e.line.test(clean));
+          if (k >= 0) expected[k]++;
+          else webviewErrors.push(clean);
+        }
         if (spec.rustErrors && /\]\[ERROR\]/.test(clean) && !clean.includes('[webview]')) rustErrors.push(clean);
         const msg = clean.match(tagged)?.[1]?.trimEnd();
         if (msg === undefined) continue;
@@ -283,6 +290,13 @@ for (const phase of phases) {
     ok = false;
     for (const line of result.webviewErrors) console.log(`  ${line}`);
     result.reason = `${result.webviewErrors.length} frontend console.error line(s) besides the probe's own`;
+    result.line = null;
+  }
+  const miscounted = (spec.expectedErrors ?? []).findIndex((e, k) => result.expected[k] !== e.count);
+  if (ok && miscounted >= 0) {
+    const e = spec.expectedErrors[miscounted];
+    ok = false;
+    result.reason = `${result.expected[miscounted]} frontend console.error line(s) matching ${e.line}, expected ${e.count}`;
     result.line = null;
   }
   if (ok && spec.rustErrors && result.rustErrors.length) {

@@ -11,12 +11,19 @@
  *             a loop of exactly one bar at the rate that runs
  *   take B    lane 2, a later take over that master: ARMED, recording, PLAYING at the master's length
  *   dub       an overdub on lane 1 commits (UNDO offered), and UNDO is taken without a refusal
+ *   dropout   mid-overdub on lane 1, the DEV `holdLock` holds the engine lock 10 ms, so the callbacks miss
+ *             their blocks: a real dropout. The layer is kept with one `Dropout` event; the store's marks
+ *             are one short run of bins, and the lane's canvas draws the rec-red notch there and nowhere
+ *             else. UNDO takes the marks away, REDO brings them back, REVERSE mirrors them through the
+ *             loop's frames, and after a WebView reload (sessionStorage carries the run across) the
+ *             feed's reset brings them back from the engine
  *   transport STOP ALL stops both lanes, PLAY ALL restarts them, CLEAR and CLEAR ALL empty them
  *   plugin    (`VITE_LF_PROBE_PLUGIN` set) that plugin loads into slot 1, GO LIVE takes it live and the
  *             input meter moves
  *
  * It ends with every lane empty, so the runner's window close meets no jam question. `[engine-smoke]` lines go through `console.error`
- * (→ the same log as the Rust host); the runner fails the run on any other `console.error` line.
+ * (→ the same log as the Rust host); the runner fails the run on any other `console.error` line but the
+ * one the planted dropout's `Dropout` event logs (`scripts/native-probe.mjs`, `expectedErrors`).
  *
  * Trigger: `VITE_LF_PROBE=engine-smoke` at Vite start (DEV only). Knobs:
  *   `VITE_LF_PROBE_BUFFER`  the ASIO buffer in frames (default 128)
@@ -30,10 +37,19 @@ import { SAMPLE_RATE_OPTIONS, type BufferFrames, type SampleRate } from '../ui/s
 import { availablePlugins, nativeHostReady, selectPlugin, slotPlugins } from '../ui/state/instrument';
 import { goLive, inputArmed } from '../ui/state/native-io';
 import { platform, type EngineEvent } from '../platform';
-import { clock, looper } from '../ui/state/audio';
+import { PEAK_FRAMES, clock, looper, type PeakView } from '../ui/state/audio';
 import { engineDevice, onEngineEvent, openEngineDevice } from '../ui/state/engine-store';
 
 const TAG = '[engine-smoke]';
+/** What the first document hands the reloaded one (sessionStorage, this launch only). */
+const RELOAD_KEY = 'lf.engineSmoke.reload';
+interface Reloaded {
+  rate: number;
+  block: number;
+  bar: number;
+  /** Lane 1's marks before the reload, reversed. */
+  marks: number[];
+}
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const log = (...args: unknown[]) => console.error(TAG, ...args);
 
@@ -67,6 +83,67 @@ function watchDom(laneIndex: number) {
   return { seen, stop: () => clearInterval(timer) };
 }
 
+const view: PeakView = { min: null, max: null, marks: null, count: 0, version: 0 };
+
+/** Lane `i`'s marked bins in the store, in play order. */
+function marked(i: number): number[] {
+  looper.peaksInto(i, view);
+  const out: number[] = [];
+  for (let b = 0; b < view.count; b++) if (view.marks?.[b]) out.push(b);
+  return out;
+}
+
+const same = (a: number[], b: number[]) => a.length === b.length && a.every((x, k) => x === b[k]);
+
+/** A dropout of 10 ms (a few blocks) marks one short run of bins: at most 4, the loop's end wrapping to its start. */
+function shortRun(bins: number[], count: number): boolean {
+  if (bins.length === 0 || bins.length > 4) return false;
+  const gaps = bins.filter((b, k) => k > 0 && b !== bins[k - 1] + 1).length;
+  return gaps === 0 || (gaps === 1 && bins[0] === 0 && bins[bins.length - 1] === count - 1);
+}
+
+/** The heard bins a reversal puts buffer bins `bins` of a `frames`-long loop at: through its frames, as
+ * the feed maps them (heard frame `frames - 1 - f`). */
+function mirrored(bins: number[], frames: number): number[] {
+  const out = new Set<number>();
+  for (const b of bins) {
+    const last = Math.min((b + 1) * PEAK_FRAMES, frames) - 1;
+    for (let h = Math.floor((frames - 1 - last) / PEAK_FRAMES); h <= Math.floor((frames - 1 - b * PEAK_FRAMES) / PEAK_FRAMES); h++) out.add(h);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * Lane `i`'s canvas over five drawn frames: the columns of its top row in the mark colour (the rec-red
+ * notch, nearly opaque, as `verify/probes/lane-marks.mjs` reads it) must all sit at a marked bin's
+ * frames, `bins` of a `frames`-long loop; with `bins` empty there must be none. A playhead crossing the
+ * notch can hide it in one frame, so the columns are the frames' union.
+ */
+async function canvasMarks(i: number, bins: number[], frames: number): Promise<string> {
+  const red = new Set<number>();
+  let width = 0;
+  for (let n = 0; n < 5; n++) {
+    await new Promise((r) => requestAnimationFrame(r));
+    const c = document.querySelectorAll('.lp-lane')[i]?.querySelector('canvas');
+    check(c instanceof HTMLCanvasElement, `lane ${i + 1} has no canvas`);
+    const top = c!.getContext('2d')!.getImageData(0, 0, c!.width, 1).data;
+    width = c!.width;
+    for (let x = 0; x < width; x++) {
+      const [r, g, , a] = top.slice(4 * x, 4 * x + 4);
+      if (a > 160 && r > 150 && r - g > 80) red.add(x);
+    }
+  }
+  const at = (b: number) => Math.floor(((b * PEAK_FRAMES) / frames) * width);
+  // The notch is 2 device pixels wide (`waveform.ts` `drawMarks`); a column either side for rounding.
+  const notch = Math.max(1, Math.round(2 * devicePixelRatio)) + 1;
+  const stray = [...red].filter((x) => !bins.some((b) => x >= at(b) - 1 && x <= at(b) + notch));
+  const shown = red.size ? `${Math.min(...red)}..${Math.max(...red)}` : 'none';
+  const want = bins.map((b) => at(b)).join(',');
+  check(stray.length === 0, `lane ${i + 1}'s canvas draws the mark colour at columns ${stray.join(',')}, away from the marked bins (at ${want || 'none'} of ${width})`);
+  check(bins.length === 0 || red.size > 0, `lane ${i + 1}'s canvas draws no notch for bins ${bins.join(',')} (at ${want} of ${width})`);
+  return `notch columns ${shown} of ${width}`;
+}
+
 /** The rate pick `VITE_LF_PROBE_RATE` names (null: none, the driver's own rate). */
 export function probeRate(): SampleRate | null {
   const knob = import.meta.env.VITE_LF_PROBE_RATE;
@@ -89,8 +166,17 @@ export async function pickDevice(buffer: BufferFrames, rate: SampleRate | null):
 }
 
 export async function runEngineSmoke(): Promise<void> {
+  let reloaded: Reloaded | null = null;
   try {
-    await run();
+    const raw = sessionStorage.getItem(RELOAD_KEY);
+    sessionStorage.removeItem(RELOAD_KEY);
+    reloaded = raw === null ? null : (JSON.parse(raw) as Reloaded);
+  } catch {
+    reloaded = null;
+  }
+  try {
+    if (reloaded) await afterReload(reloaded);
+    else await run();
   } catch (e) {
     // Empty the looper first, so the runner's window close meets no jam question.
     looper.clearAll();
@@ -174,6 +260,59 @@ async function run(): Promise<void> {
   check(lane(0).state === 'PLAYING' && lane(0).canUndo, 'lane 1 left PLAYING or lost its REDO after UNDO');
   log('dub: overdub committed, UNDO taken');
 
+  // ── A dropout mid-overdub: kept and marked, through UNDO, REDO, REVERSE and a reload ─────────────
+  const hold = platform.engine.holdLock;
+  check(hold !== undefined, 'this build has no holdLock (DEV, Tauri only)');
+  check(marked(0).length === 0, `lane 1 shows marks before the dropout: ${marked(0).join(',')}`);
+  events.length = 0;
+  void looper.recDub(0);
+  await until('lane 1 OVERDUBBING', () => lane(0).state === 'OVERDUBBING', 5);
+  await sleep(500);
+  check(await hold!(10), 'holdLock: no device runs');
+  await sleep(500);
+  void looper.recDub(0);
+  await until('lane 1 back to PLAYING with UNDO after the dropout', () => lane(0).state === 'PLAYING' && lane(0).canUndo, 5);
+  await until("the layer's Dropout event", () => events.some((e) => e.type === 'Dropout'), 5);
+  const dropouts = events.filter((e) => e.type === 'Dropout');
+  check(dropouts.length === 1 && dropouts[0].type === 'Dropout' && dropouts[0].lane === 0 && dropouts[0].overdub, `the dropout's events: ${JSON.stringify(dropouts)}`);
+  const frames = lane(0).lengthFrames;
+  const count = Math.ceil(frames / PEAK_FRAMES);
+  await until("the layer's marks in the store", () => marked(0).length > 0, 5);
+  const marks = marked(0);
+  check(shortRun(marks, count), `lane 1's marks are not one short run: ${marks.join(',')} of ${count} bins`);
+  log(`dropout: the layer kept with one Dropout; marks at bins ${marks.join(',')} of ${count}; ${await canvasMarks(0, marks, frames)}`);
+
+  events.length = 0;
+  looper.undoLastOverdub(0);
+  await until('the marks gone with the layer (UNDO, on the next loop boundary)', () => marked(0).length === 0, 6);
+  log(`dropout: UNDO took the marks away; ${await canvasMarks(0, [], frames)}`);
+  looper.undoLastOverdub(0);
+  await until('the marks back with the layer (REDO)', () => same(marked(0), marks), 6);
+  log(`dropout: REDO brought them back; ${await canvasMarks(0, marks, frames)}`);
+  const back = mirrored(marks, frames);
+  looper.reverse(0);
+  await until('lane 1 reversed with its marks mirrored', () => lane(0).reversed && same(marked(0), back), 6);
+  log(`dropout: REVERSE put them at bins ${back.join(',')}; ${await canvasMarks(0, back, frames)}`);
+  const refusals = events.filter((e) => e.type === 'Refused');
+  check(refusals.length === 0, `UNDO, REDO or REVERSE was refused: ${JSON.stringify(refusals)}`);
+  const handover: Reloaded = { rate, block: device!.block, bar, marks: back };
+  sessionStorage.setItem(RELOAD_KEY, JSON.stringify(handover));
+  log('dropout: reloading the WebView; the reset must bring the marks back from the engine');
+  location.reload();
+}
+
+/** The reloaded document: the marks come back from the engine, then the rest of the run. */
+async function afterReload(saved: Reloaded): Promise<void> {
+  check(platform.engine.available, 'this platform has no engine');
+  await until('the engine device after the reload', () => engineDevice() !== null, 60);
+  await until('lane 1 PLAYING reversed after the reload', () => lane(0).state === 'PLAYING' && lane(0).reversed, 30);
+  await until('the marks back from the engine after the reload', () => same(marked(0), saved.marks), 10);
+  log(`dropout: after the reload the marks are back at bins ${saved.marks.join(',')}; ${await canvasMarks(0, saved.marks, lane(0).lengthFrames)}`);
+  await rest(saved.rate, saved.block, saved.bar);
+}
+
+/** STOP ALL to the end. */
+async function rest(rate: number, block: number, bar: number): Promise<void> {
   // ── STOP ALL, PLAY ALL, CLEAR, CLEAR ALL ────────────────────────────────────────────────────────
   looper.stopAll();
   await until('both lanes STOPPED', () => lane(0).state === 'STOPPED' && lane(1).state === 'STOPPED', 5);
@@ -206,5 +345,5 @@ async function run(): Promise<void> {
   looper.clearAll();
   await until('an empty looper at the end', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
   clock.setMetronome(false);
-  log(`complete: ${rate} Hz, ${device!.block} frames, one bar = ${bar} frames`);
+  log(`complete: ${rate} Hz, ${block} frames, one bar = ${bar} frames`);
 }
