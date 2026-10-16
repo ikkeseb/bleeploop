@@ -650,8 +650,8 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
       </div>
 
       {/* The five lanes. Each item renders its lane plus — when its FX is selected — an FX drawer
-          docked directly under it (the lane's own drawer). The drawer is a SIBLING of the lane, so
-          opening it never remounts the lane's waveform canvas. */}
+          docked directly under it (the lane's own drawer): one row of title, the FX and the close key.
+          The drawer is a SIBLING of the lane, so opening it never remounts the lane's waveform canvas. */}
       <div class="lp__lanes">
         <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>
           {(i) => (
@@ -665,18 +665,16 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
               />
               <Show when={fxTrack() === i}>
                 <div class="lp-drawer" role="group" aria-label={`FX, Track ${i + 1}`}>
-                  <div class="lp-drawer__head">
-                    <span class="lp-drawer__title">FX · Track {i + 1}</span>
-                    <button
-                      class="lp-drawer__close"
-                      onClick={(e) => closeFx(i, e)}
-                      aria-label="Close FX panel"
-                      title="Close FX panel"
-                    >
-                      ✕
-                    </button>
-                  </div>
+                  <span class="lp-drawer__title">FX · Track {i + 1}</span>
                   <FxPanel index={i} />
+                  <button
+                    class="lp-drawer__close"
+                    onClick={(e) => closeFx(i, e)}
+                    aria-label="Close FX panel"
+                    title="Close FX panel"
+                  >
+                    ✕
+                  </button>
                 </div>
               </Show>
             </>

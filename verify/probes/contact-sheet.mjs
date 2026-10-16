@@ -24,8 +24,8 @@
  * -12 dBFS. Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
- * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
- * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); Help opens on its
+ * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
+ * 1000x700 minimum with the keyboard shown included (audit A4; the drawer is one key row); Help opens on its
  * reference, which fits unscrolled at every size, and its Manual tab shows the manual with About this
  * build (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
@@ -212,12 +212,11 @@ await probe(async ({ browser, open }) => {
         return { lane: n, fraction: Math.round(fraction * 1000) / 1000, top: Math.round(r.top), bottom: Math.round(r.bottom), visibleBottom: Math.round(bottom) };
       }));
       console.log(JSON.stringify({ tag, scene, clr }));
-      // Five 57 px lanes plus the drawer do not fit a ~370 px container (1000x700 with the keyboard
-      // shown): that corner scrolls by design, so the five-full-lanes rule holds only above it.
-      const fiveLanesMustFit = height >= 820 || kbd === 'hidden';
+      // The drawer at rest is one key row, so five 57 px lanes fit beside it even in the ~380 px
+      // container of 1000x700 with the keyboard shown.
       for (const c of clr) {
         if (c.missing) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is missing`);
-        else if (fiveLanesMustFit && c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
+        else if (c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
       }
       await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
 

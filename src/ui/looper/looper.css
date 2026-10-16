@@ -394,8 +394,11 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dub) 55%, transparent);
 }
 
-/* ---- the WAVE WELL — recessed canvas surface (waveform + playhead drawn by waveform.ts) ---- */
+/* ---- the WAVE WELL — recessed canvas surface (waveform + playhead drawn by waveform.ts) ----
+   A size container (its size comes from the lane, never its content), so the count-in numeral can
+   scale with the well's height (cqh). */
 .lp-lane__well {
+  container: well / size;
   flex: 1 1 auto;
   min-width: 0;
   position: relative;
@@ -423,6 +426,7 @@
   z-index: 2;
   display: grid;
   place-items: center;
+  align-content: center; /* the count-in's numeral and word sit together at the centre */
   pointer-events: none;
   padding: 0 8px;
   text-align: center;
@@ -435,14 +439,17 @@
   color: color-mix(in srgb, var(--dub) 70%, var(--faint));
 }
 /* the count-in numeral (first take only): big enough to read from the guitar, in the rec colour it
-   is counting toward; the label under it stays the small mono word */
+   is counting toward. Its box is trimmed to the digit (cap height to baseline), so 80cqh draws a digit
+   about 58 % of the well's height at every window size and leaves the small word under it room on the
+   57px lane rung. */
 .lp-lane__count {
   display: block;
-  font-size: clamp(26px, 3vw, 40px);
+  font-size: max(20px, 80cqh);
   font-weight: 600;
   line-height: 1;
+  text-box: trim-both cap alphabetic;
   letter-spacing: -0.04em;
-  margin-bottom: 4px;
+  margin-bottom: clamp(3px, 6cqh, 8px);
   color: var(--rec);
   font-variant-numeric: tabular-nums;
 }
@@ -595,10 +602,11 @@
     padding: 5px 10px;
   }
 }
-/* FX drawer open: the drawer (~100px, flex 0 0 auto) is a sibling INSIDE this container, so the lanes
-   get container − drawer. The full floor (5 × (55px + 2 × 1vh pad) + 6 gaps + drawer) outgrows a
-   ~490px container (1280×820, keyboard shown) and lane 5 scrolls out; drop to the 57px rung here.
-   Above 540px the full floor fits, so large windows keep their normal padding. */
+/* FX drawer open: the drawer (flex 0 0 auto) is a sibling INSIDE this container, so the lanes get
+   container − drawer. At rest it is one key row (~50px) and the 57px rung holds all five lanes in the
+   ~380px container of 1000x700 with the keyboard shown; each engaged FX adds its params' height (up to
+   the drawer's 46 % cap), so the rung reaches up to 540px, where the full floor (5 × (55px + 2 × 1vh
+   pad) + 5 gaps + a drawer with FX engaged) fits. Past what the rung holds, the lanes scroll. */
 @container lp (max-height: 540px) {
   .lp__lanes:has(.lp-drawer) .lp-lane {
     min-height: 57px;
@@ -628,39 +636,47 @@
 
 /* ---- the FX drawer: docked directly UNDER its owning lane (the lane's own drawer) ----
    A panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
-   drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. It sizes to its
-   content up to a cap and scrolls internally. FxPanel internals are styled in fxpanel.css — here it's
-   only positioned + framed. */
+   drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. ONE row: the title,
+   the FxPanel (five keys and DUB FEEDBACK) and the close key, so at rest it costs one key row and five
+   lanes still fit the minimum window (1000x700, keyboard shown). An engaged FX opens its params under
+   its key and the row grows; past the cap the panel scrolls. FxPanel internals are styled in
+   fxpanel.css; here it is positioned, framed and given the row's insets. --drawer-key is the key
+   height, --drawer-inset the module pane's border + padding, so the title and the close key sit on
+   the key row whatever the row's height. */
 .lp-drawer {
+  --drawer-key: 26px;
+  --drawer-inset: 5px;
   flex: 0 0 auto;
   min-height: 0;
   max-height: 46%;
   display: flex;
-  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
   border-radius: 14px;
-  padding: 10px 14px;
+  padding: 6px 11px 6px 14px;
   background: var(--card);
   border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
   overflow: hidden;
 }
-.lp-drawer__head {
+.lp-drawer__title {
   flex: 0 0 auto;
+  height: var(--drawer-key);
+  margin-top: var(--drawer-inset);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding-bottom: 8px;
-}
-.lp-drawer__title {
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 600;
   color: var(--dim);
+  white-space: nowrap;
 }
 .lp-drawer__close {
-  width: 26px;
-  height: 26px;
+  flex: 0 0 auto;
+  width: var(--drawer-key);
+  height: var(--drawer-key);
+  margin-top: var(--drawer-inset);
   display: grid;
   place-items: center;
   border-radius: 8px;
@@ -677,17 +693,63 @@
   color: var(--text);
   background: var(--surf-3);
 }
-/* the FxPanel fills the drawer body + scrolls; drop its standalone frame (the drawer is the frame) */
+/* the FxPanel takes the row between title and close, stretched to the drawer's (capped) height so it
+   scrolls there; its standalone frame drops (the drawer is the frame), and its modules take the
+   row's tighter insets */
 .lp-drawer .fxp {
   flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  gap: 6px;
   background: transparent;
+  border: 0;
   box-shadow: none;
   padding: 0;
+  align-items: flex-start;
   align-content: flex-start;
   scrollbar-width: thin;
   scrollbar-color: var(--edge) transparent;
+}
+/* five equal modules, so engaging one grows the row's height and never moves a key; DUB FEEDBACK
+   keeps the width its one line needs */
+.lp-drawer .fxp-mod {
+  container: fxmod / inline-size; /* a narrow module stacks its params (below) */
+  flex: 1 1 0;
+  min-width: 72px;
+  padding: calc(var(--drawer-inset) - 1px);
+}
+.lp-drawer .fxp-dub {
+  flex: 0 0 auto;
+  width: clamp(272px, 22vw, 340px);
+}
+.lp-drawer .fxp-mod__toggle,
+.lp-drawer .fxp-mod__title {
+  height: var(--drawer-key);
+  padding-block: 0;
+}
+.lp-drawer .fxp-mod__title {
+  display: flex;
+  align-items: center;
+}
+/* a module too narrow for label, range and read-out on one line (five across at the minimum window):
+   the label and read-out share a line over a full-width range or select */
+@container fxmod (max-width: 150px) {
+  .lp-drawer .fxp-param {
+    grid-template-columns: 1fr auto;
+    row-gap: 3px;
+  }
+  .lp-drawer .fxp-param__label {
+    grid-area: 1 / 1;
+  }
+  .lp-drawer .fxp-param__val {
+    grid-area: 1 / 2;
+  }
+  .lp-drawer .fxp-param__range,
+  .lp-drawer .fxp-param__select {
+    grid-area: 2 / 1 / 3 / -1;
+  }
 }
 .lp-drawer .fxp::-webkit-scrollbar {
   width: 8px;

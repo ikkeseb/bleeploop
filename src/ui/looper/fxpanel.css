@@ -67,7 +67,19 @@
   border-color: rgba(244, 239, 230, 0.28);
 }
 
-/* a module that is a setting, not an effect (DUB FEEDBACK): a heading where the key face would be */
+/* a module that is a setting, not an effect (DUB FEEDBACK): a heading where the key face would be,
+   and its one param on the same line */
+.fxp-dub {
+  flex-direction: row;
+  align-items: center;
+}
+.fxp-dub .fxp-mod__params {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fxp-dub .fxp-param {
+  grid-template-columns: auto 1fr auto;
+}
 .fxp-mod__title {
   padding: 6px 7px;
   border: 1px solid transparent;
