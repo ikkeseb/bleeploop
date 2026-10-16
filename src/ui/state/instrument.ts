@@ -241,25 +241,27 @@ export function selectOff(slotIndex: 0 | 1): void {
  * slot holding the path unloads. Real fix (one shared GUI thread for all editors) is a fragile
  * host rework, deliberately deferred.
  */
-const editorAffinity = new Map<string, 0 | 1>();
+// Each path's reservation; the object itself is the reservation's token (`reserveEditor`'s release).
+const editorAffinity = new Map<string, { slot: 0 | 1 }>();
 
 /** Non-null = refuse: the OTHER slot already owns this file's editor (returns its 1-based label). */
 export function editorAffinityBlocker(slot: 0 | 1, path: string): string | null {
-  const owner = editorAffinity.get(path);
+  const owner = editorAffinity.get(path)?.slot;
   return owner !== undefined && owner !== slot ? `slot ${owner === 0 ? 'A' : 'B'}` : null;
 }
 
 /**
  * Reserve `path`'s editor for `slot` before its open is awaited, so a second open racing it (the other
  * slot's, or one during a slot change) is refused by `editorAffinityBlocker`. The first opener becomes the
- * path's editor owner. Returns the release for a failed open: it drops the entry only when this call
- * took it and it still names `slot`.
+ * path's editor owner. Returns the release for a failed open: it drops the entry only while the map still
+ * holds this very reservation (its token), never a later one the same slot took after an unload.
  */
 export function reserveEditor(slot: 0 | 1, path: string): () => void {
   if (editorAffinity.has(path)) return () => {};
-  editorAffinity.set(path, slot);
+  const mine = { slot };
+  editorAffinity.set(path, mine);
   return () => {
-    if (editorAffinity.get(path) === slot) editorAffinity.delete(path);
+    if (editorAffinity.get(path) === mine) editorAffinity.delete(path);
   };
 }
 
