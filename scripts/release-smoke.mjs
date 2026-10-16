@@ -26,7 +26,7 @@
 //   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
 //                1 = input 2) and live, as a user takes the input dry in the slot header, a press on
 //                lane 1's record core takes the lane armed → rec → play, and its waveform canvas is not
-//                flat (lane 3, empty, is the control), nor run away (the record meter at full scale, or
+//                flat (lane 3, empty, is the control), nor run away (the record meter at −1 dBFS or more during the take, or
 //                more than half the bar's columns tall: the loop through the cable feeding back, always
 //                a failure). A flat input take fails the run when this
 //                release must prove the input path again (D26, scripts/release-input-rule.mjs), judged
@@ -317,7 +317,7 @@ try {
     page.evaluate(() => {
       const w = /** @type {any} */ (window);
       clearInterval(w.__releaseSmoke?.timer);
-      const s = { states: [[], [], [], [], []], leds: [], meter: new Set(), meterMax: 0, counts: new Set() };
+      const s = { states: [[], [], [], [], []], leds: [], meter: new Set(), meterMax: 0, takeMax: 0, counts: new Set() };
       s.timer = setInterval(() => {
         document.querySelectorAll('.lp-lane').forEach((el, i) => {
           const st = /** @type {HTMLElement} */ (el).dataset.state;
@@ -329,6 +329,7 @@ try {
         const lvl = Number(/** @type {HTMLElement | null} */ (document.querySelector('.transport__inmeter'))?.style.getPropertyValue('--lvl') || 0);
         s.meter.add(lvl.toFixed(2));
         s.meterMax = Math.max(s.meterMax, lvl);
+        s.takeMax = Math.max(s.takeMax, lvl);
         const count = document.querySelectorAll('.lp-lane')[0]?.querySelector('.lp-lane__count')?.textContent;
         if (count) s.counts.add(count);
       }, 20);
@@ -337,7 +338,7 @@ try {
   const readSampler = () =>
     page.evaluate(() => {
       const s = /** @type {any} */ (window).__releaseSmoke;
-      return { states: s.states, leds: s.leds, meter: s.meter.size, meterMax: s.meterMax, counts: [...s.counts] };
+      return { states: s.states, leds: s.leds, meter: s.meter.size, meterMax: s.meterMax, takeMax: s.takeMax, counts: [...s.counts] };
     });
   /** Per-column ink of a lane's waveform canvas (alpha ≥ 100; full-height columns — grid, playhead — dropped). */
   const laneInk = (index) =>
@@ -521,6 +522,10 @@ try {
 
     /** One take on lane 1: a press on its record core, `release` once the lane plays, then what the lane drew. */
     const record = async (release) => {
+      // The runaway bar reads the take alone: a transient while the slot was set up is not the take's.
+      await page.evaluate(() => {
+        /** @type {any} */ (window).__releaseSmoke.takeMax = 0;
+      });
       const tRec = Date.now();
       await page.locator('.lp-lane').nth(0).locator('.lp-core').click();
       await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'play', undefined, { timeout: 20_000 });
@@ -553,10 +558,12 @@ try {
     const inputFlat = flat(inkA);
     // The slot is live for the take, so the cable's input plays back out of the output it is cabled from:
     // too hot a level runs that loop away. A runaway take reaches full scale or fills the bar where the
-    // click draws a few peaks, and is never a pass, whatever this release must prove.
+    // click draws a few peaks, and is never a pass, whatever this release must prove. The meter's bar is
+    // the command bar's red (−1 dBFS, 0.98 of its −60..0 dB span): its CSS value moves in steps of 0.01
+    // and rounds, so a clipped take can sit at 0.99 and never read 1.00.
     const runaway =
-      seen.meterMax >= 1
-        ? `the record meter reached full scale (${seen.meterMax.toFixed(2)})`
+      seen.takeMax >= 0.98
+        ? `the record meter reached ${seen.takeMax.toFixed(2)} of full scale during the take (−1 dBFS or hotter)`
         : inkA.tall > 0.5 * inkA.w
           ? `lane 1's waveform fills the bar (${inkA.tall} of ${inkA.w} columns ≥ 10 %) where the click draws a few peaks`
           : null;
