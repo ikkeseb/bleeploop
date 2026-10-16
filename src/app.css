@@ -117,6 +117,26 @@ option {
   pointer-events: none;
 }
 
+/* An inline link that does something here (opens Audio Settings on a page): a real <button> wearing the
+   sentence's own type, underlined; hover lifts it to --text. Help's and an empty slot's lines and a
+   toast's action use it. */
+.lf-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.lf-link:hover {
+  color: var(--text);
+  text-decoration-color: currentColor;
+}
+
 .app {
   height: 100%;
   display: flex;
@@ -384,6 +404,12 @@ option {
 }
 .settings-popover > * {
   overflow-y: auto;
+}
+/* The panel takes focus when it opens (app.tsx `focusPanel`), and an open with no pointer input (a key,
+   a toast's action, a script) would draw the UA's focus ring around the whole panel. The ring belongs on
+   the controls inside, which keep theirs; the panel itself is what the open shows. */
+.settings-popover:focus {
+  outline: none;
 }
 
 /* ---- stage + zones ----

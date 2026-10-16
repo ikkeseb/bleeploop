@@ -8,7 +8,9 @@
  * - boot: the UI subscribes first, then hands the web build's `lf.midiLearn` to `importLegacy` verbatim
  *   (the key stays); the import's answer is told once: a toast for the bindings that wait for a port
  *   picked here, one for those it could not read (with its release-log line); a launch that cannot read
- *   the key logs it and hands nothing over (an empty list would mark the import done for good);
+ *   the key logs it and hands nothing over (an empty list would mark the import done for good); each toast's
+ *   action (a button the keyboard reaches) and Help's MIDI LEARN link open Audio Settings on MIDI PEDALS
+ *   with focus in the panel, the toast gone and Help closed;
  * - LEARN waits for an open port and says why in its title (no input open, or the input held by another
  *   program); a pick (a lane action on a named track, a global one without a track) and LEARN call
  *   `learn(action, target)` and show LISTENING at once; Esc ends LISTENING in the same task (before native
@@ -74,6 +76,30 @@ await probe(async ({ open }) => {
       '[midi] stored web binding 3 not imported: missing field `action`',
       '[midi] 2 MIDI bindings from the previous version need a port picked in Audio Settings',
     ]);
+    // Each toast offers the page it names as a real button; the keyboard reaches it, and pressing it
+    // opens Audio Settings on MIDI PEDALS, takes the toast away and puts focus in the panel.
+    const shown = () => told.page.evaluate(() => ({
+      open: !!document.getElementById('lf-audio-popover'),
+      page: document.querySelector('.audio-settings [role="tab"][aria-selected="true"]')?.id ?? null,
+      inPanel: !!document.getElementById('lf-audio-popover')?.contains(document.activeElement),
+      help: !!document.getElementById('lf-help-popover'),
+      toasts: window.__lf.notify.toasts().length,
+    }));
+    const actions = await told.page.locator('.toast__action').allTextContents();
+    assert.deepEqual(actions, ['Audio Settings → MIDI PEDALS', 'Audio Settings → MIDI PEDALS'], 'each import toast offers the MIDI page');
+    await told.page.locator('.toast__action').first().focus();
+    await told.page.keyboard.press('Enter');
+    await told.page.waitForFunction(() => !!document.getElementById('lf-audio-popover'));
+    const fromToast = await shown();
+    console.log('toast action', JSON.stringify(fromToast));
+    assert.deepEqual(fromToast, { open: true, page: 'lf-settings-tab-midi', inPanel: true, help: false, toasts: 1 }, "a toast's action opens the MIDI page, and the toast goes");
+    // Help's MIDI LEARN line does the same, and closes Help.
+    await told.page.evaluate(() => { window.__lf.ui.closeSettings(); window.__lf.ui.openHelp(); });
+    await told.page.locator('.help__link:visible', { hasText: 'MIDI LEARN' }).click();
+    await told.page.waitForFunction(() => !!document.getElementById('lf-audio-popover'));
+    const fromHelp = await shown();
+    console.log('help link', JSON.stringify(fromHelp));
+    assert.deepEqual({ ...fromHelp, toasts: undefined }, { open: true, page: 'lf-settings-tab-midi', inPanel: true, help: false, toasts: undefined }, "Help's link opens the MIDI page and closes Help");
     await told.page.close();
 
     const unreadable = await open({
@@ -152,7 +178,7 @@ await probe(async ({ open }) => {
   const settles = async (read, want, message) => assert.deepEqual(await until(read, want), want, message);
   const listening = () => page.evaluate((s) => document.querySelector(s)?.getAttribute('aria-pressed') ?? null, LEARN);
   const openSettings = async () => {
-    await page.evaluate(() => window.__lf.ui.openSettings());
+    await page.evaluate(() => window.__lf.ui.openSettings('midi'));
     await page.waitForSelector(LEARN);
   };
   const sentSince = (from) => page.evaluate((m) => window.__lf.native.sent.slice(m), from);

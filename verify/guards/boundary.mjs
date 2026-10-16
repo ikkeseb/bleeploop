@@ -4,8 +4,9 @@
 //      runnable in a plain browser (no Tauri/Rust dependency).
 //   2. Files outside `src/platform/` may only import its public seam (`../platform`), not its modules.
 //   3. `src/platform/` may NOT import from the app layers above it: `src/ui/`, `src/session/`, `src/app/`
-//      or `src/debug/` (root-level `src/notify.ts` is not a layer). The boundary serves those layers; a
-//      store or the session code reached from `host.tauri.ts` would regress the architecture invisibly.
+//      or `src/debug/` (the root-level leaves `src/notify.ts` and `src/settings-opener.ts` are not
+//      layers). The boundary serves those layers; a store or the session code reached from
+//      `host.tauri.ts` would regress the architecture invisibly.
 //
 // `classify` is first run on planted sources (every import form of each violation must be flagged, the
 // same import where it is legal and clean files must pass), then on every source file under `src/`. It

@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onMount } from 'solid-js';
+import { For, Show, createSignal, onMount, type JSX } from 'solid-js';
 import { asioStatus } from '../state/audio-devices';
 import asioLogo from '../../assets/third-party/ASIO-compatible-logo-Steinberg-R-white-transparent-RGB.svg';
 import { DRUM_KIT } from '../state/drum-kit';
@@ -7,6 +7,7 @@ import { KEY_ACTIONS } from '../../app/transport-keys';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import { platform } from '../../platform';
 import { BUILD_LABEL, copyDiagnostics, logFolder, openLogFolder } from './diagnostics';
+import { openSettings, type SettingsPage } from '../../settings-opener';
 import './help.css';
 
 /**
@@ -151,7 +152,9 @@ function Reference(props: { hidden: boolean }) {
           <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
           <ul class="help__list">
             <li>A keystroke footswitch or page turner sends keys: set each pedal to one of the looper keys above</li>
-            <li>A MIDI pedal: learn its action in Audio Settings → <span class="help__note">MIDI LEARN</span> (Manual → Pedals)</li>
+            {/* Only the row's name is the link here: a button is an inline block and never wraps, and the
+                whole phrase would push this column a line past the 960x600 fit. */}
+            <li>A MIDI pedal: learn its action in Audio Settings → <SettingsLink page="midi" name="Audio Settings → MIDI LEARN"><span class="help__note">MIDI LEARN</span></SettingsLink> (Manual → Pedals)</li>
           </ul>
         </section>
       </div>
@@ -230,7 +233,7 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
         <ul class="help__list">
-          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
+          <li>A MIDI footswitch or controller: <SettingsLink page="midi">Audio Settings → <span class="help__note">MIDI LEARN</span></SettingsLink>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
           <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo, reverb and ring mod switch as their buttons do</li>
           <li><span class="help__note">HOLD</span>, beside a REC/DUB learned on a momentary pedal: hold the pedal to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
@@ -282,7 +285,7 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Other layers <span class="help__tag">synths · MIDI</span></h3>
         <ul class="help__list">
-          <li>A MIDI controller plays the synths and the other layers. Controller status shows in Audio Settings → diagnostics</li>
+          <li>A MIDI controller plays the synths and the other layers. Controller status shows in <SettingsLink page="diagnostics">Audio Settings → diagnostics</SettingsLink></li>
           <li>Click a slot to send MIDI and keyboard notes to its plugin or built-in synth</li>
           <li>With no controller connected, the computer keys play instead: Reference maps them</li>
         </ul>
@@ -334,5 +337,15 @@ function Manual(props: { hidden: boolean }) {
         </div>
       </section>
     </div>
+  );
+}
+
+/** A place in Audio Settings named in the prose: it closes Help and opens the panel on that page. `name`
+ * when the link's text alone does not say where it goes. */
+function SettingsLink(props: { page: SettingsPage; name?: string; children: JSX.Element }) {
+  return (
+    <button type="button" class="lf-link help__link" aria-label={props.name} onClick={() => openSettings(props.page)}>
+      {props.children}
+    </button>
   );
 }

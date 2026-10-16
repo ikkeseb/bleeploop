@@ -10,6 +10,7 @@ import { encodeInput, encodeItem, type Dropped, type InputItem, type MidiEvent }
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
 import { notifyError } from '../notify';
+import { settingsAction } from '../settings-opener';
 import { reportTauriDiagnostics, tauriConfirmClose, tauriOnCloseRequested, tauriPlatform } from './host.tauri';
 
 const underTauri = isTauri();
@@ -269,7 +270,7 @@ async function submit(items: InputItem[]): Promise<boolean> {
   } else if (dropped !== null && dropped !== toldDropped) {
     console.error(`[platform] native MIDI dropped input: ${dropped}`);
     const [hint, why] = DROPPED_TOAST[dropped];
-    notifyError(`Could not send that to the audio engine. ${hint}`, why);
+    notifyError(`Could not send that to the audio engine. ${hint}`, why, dropped === 'noDevice' ? settingsAction('device') : undefined);
     toldDropped = dropped;
   } else if (dropped === null && items.some(press)) {
     toldDropped = null;
