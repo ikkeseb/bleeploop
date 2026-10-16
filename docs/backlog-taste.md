@@ -14,8 +14,6 @@ added a line.
 - **END STOP reads as a record control:** with END STOP on and FIXED off, a stopped free take keeps
   every whole bar, as built (END STOP only stops playback). The owner asks other players before
   deciding on wording or behaviour.
-- **Is the amp-sim live, from 1.5 m?** Only the slot's pill says so; the 4×22 px record meter is the
-  only clipping cue.
 - **Stage view (B): SCOPE is built and machine verified, and a taste review says it misses the bar.**
   The owner found both older looks (Orbit, Strata) primitive; the diagnosis was that each drew the same
   recorded overview plus a playhead, so nothing on screen knew what was sounding. SCOPE draws the

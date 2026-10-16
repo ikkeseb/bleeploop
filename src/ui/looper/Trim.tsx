@@ -50,6 +50,13 @@ function TrimControl(props: { index: number; disabled: boolean; returnFocus?: (e
   createEffect(() => {
     if (stageOpen()) setOpen(false);
   });
+  // The gate closing under an open popover disables its TRIM; a disabled button drops focus to body,
+  // where the next Space is the transport's, so the focus moves to the dialog instead and Escape still
+  // hands it back to the lane.
+  let panel: HTMLDivElement | undefined;
+  createEffect(() => {
+    if (open() && props.disabled && panel && panel.contains(document.activeElement)) panel.focus();
+  });
   const id = `lf-trim-popover-${props.index}`;
   return (
     <>
@@ -79,7 +86,10 @@ function TrimControl(props: { index: number; disabled: boolean; returnFocus?: (e
               role="dialog"
               aria-label={`Trim track ${track}`}
               tabindex={-1}
-              ref={(el) => queueMicrotask(() => el.focus())}
+              ref={(el) => {
+                panel = el;
+                queueMicrotask(() => el.focus());
+              }}
               onClick={(e) => e.stopPropagation()}
             >
               <div class="trim" role="group" aria-label="Bars to keep">

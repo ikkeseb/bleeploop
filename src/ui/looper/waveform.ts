@@ -97,9 +97,14 @@ function askGridFont(font: string): void {
   if (gridFontAsked) return;
   gridFontAsked = true;
   if (document.fonts.check(font)) return;
-  void document.fonts.load(font).then(() => {
-    for (const lane of lanes.values()) lane.lastVersion = -2;
-  });
+  document.fonts.load(font).then(
+    () => {
+      for (const lane of lanes.values()) lane.lastVersion = -2;
+    },
+    // A face that fails to load or decode leaves the fallback in place; a rejection here would
+    // otherwise surface as an unhandled one in the release log for a numeral nobody can fix at a jam.
+    () => {},
+  );
 }
 
 const lanes = new Map<HTMLCanvasElement, Lane>();
