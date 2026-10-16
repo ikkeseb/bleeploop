@@ -148,7 +148,7 @@ await probe(async ({ open }) => {
   });
 
   // ── Opened: the built-in folders and the player's own ───────────────────────────────────────────────
-  await page.evaluate(() => window.__lf.ui.openSettings());
+  await page.evaluate(() => window.__lf.ui.openSettings('plugins'));
   await section.waitFor();
   await page.waitForFunction(() => document.querySelectorAll('.audio-settings__folder').length === 5);
   console.log('rows', JSON.stringify(await rows()));

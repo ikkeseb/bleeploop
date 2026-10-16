@@ -31,7 +31,7 @@ await probe(async ({ open }) => {
   );
 
   // The MIDI device list: what native MIDI's ports event says, a held port named as such.
-  await page.evaluate(() => window.__lf.ui.openSettings());
+  await page.evaluate(() => window.__lf.ui.openSettings('midi'));
   const LEARN = page.locator('[aria-label="Learn a MIDI control for this action"]');
   const midiRow = page.locator('.audio-settings__diag-row', { hasText: /^midi/ }).locator('b');
   await LEARN.waitFor();

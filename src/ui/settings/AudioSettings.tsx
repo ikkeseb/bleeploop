@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from 'solid-js';
 import { availablePlugins, scanning } from '../state/instrument';
 import {
   asioAvailable,
@@ -68,14 +68,51 @@ import './audio-settings.css';
 /**
  * Global Audio Settings popover: the engine's input and output device, Share output, the buffer size,
  * the sample rate, the ASIO low-latency tier and its driver, the MIDI learn row, the plugin folders and
- * the diagnostics — all GLOBAL last-used preferences (the folder list is the native host's to keep). Mounted inside a `<Show>` in app.tsx, so it re-reads persisted state each
- * time it opens (persisted localStorage is the source of truth; these local signals mirror it).
+ * the diagnostics, all GLOBAL last-used preferences (the folder list is the native host's to keep). Mounted
+ * inside a `<Show>` in app.tsx, so it re-reads persisted state each time it opens (persisted localStorage
+ * is the source of truth; these local signals mirror it).
+ *
+ * Four pages behind a rail, in the order a jam needs them: DEVICE (the round trip, then ASIO, driver,
+ * buffer, rate, the Windows devices and Share), MIDI PEDALS, PLUGINS, DIAGNOSTICS. The page is the
+ * opener's (`page`, app.tsx): the gear opens DEVICE. Every page stays mounted, the others `hidden`, so
+ * each tab's aria-controls names a live panel and a page's state survives a look at another.
  *
  * A device, buffer, rate or driver pick reopens the engine's device at once (a rate the loops were not
  * recorded at asks first: `openEngineDevice`); the input channel is each slot's own pick (the slot
  * header, `src/ui/instrument/SlotControls.tsx`); the ASIO driver row switches the driver live, and the
  * Buffer and Sample rate selects offer only the sizes and rates that driver takes.
  */
+
+/** The panel's pages, in the rail's order. */
+export type SettingsPage = 'device' | 'midi' | 'plugins' | 'diagnostics';
+const PAGES: readonly { id: SettingsPage; label: string }[] = [
+  { id: 'device', label: 'Device' },
+  { id: 'midi', label: 'MIDI pedals' },
+  { id: 'plugins', label: 'Plugins' },
+  { id: 'diagnostics', label: 'Diagnostics' },
+];
+
+/** A rail lamp, the lane LED's vocabulary (the FX pill's socket): unlit, lit warm-white while the page's
+ * thing works, amber (the command bar lamp's warning) while it needs the player. */
+type Lamp = 'off' | 'lit' | 'warn';
+
+/** One page: a tab panel, hidden while another shows. */
+function Page(props: { id: SettingsPage; shown: SettingsPage; children: JSX.Element }) {
+  return (
+    <div
+      class="audio-settings__page"
+      id={`lf-settings-${props.id}`}
+      role="tabpanel"
+      aria-labelledby={`lf-settings-tab-${props.id}`}
+      hidden={props.shown !== props.id}
+    >
+      {props.children}
+    </div>
+  );
+}
+
+/** "2 PEDALS", "1 PLUGIN", "NONE": a rail count. */
+const count = (n: number, one: string, many: string): string => (n === 0 ? 'none' : `${n} ${n === 1 ? one : many}`);
 
 /** Processing-block duration, not an input-to-output latency estimate. */
 function bufferMs(frames: number): string {
@@ -137,7 +174,7 @@ function learnBlocked(): string | null {
   return ports().some((p) => p.state === 'busy') ? 'The MIDI input is held by another program' : 'No MIDI input is open';
 }
 
-export function AudioSettings() {
+export function AudioSettings(props: { page: SettingsPage; onPage: (page: SettingsPage) => void }) {
   const persisted = readAudioDeviceSettings();
   const [selectedDevice, setSelectedDevice] = createSignal(persisted.inputDeviceId);
   const [selectedOutput, setSelectedOutput] = createSignal(persisted.outputDeviceId);
@@ -147,6 +184,68 @@ export function AudioSettings() {
   const [learnPick, setLearnPick] = createSignal<ActionId>(ACTION_IDS[0]);
   const [learnTarget, setLearnTarget] = createSignal<Target>(null);
   onCleanup(cancelLearn);
+  // A learn listening on the MIDI page is out of sight on another page too: leaving the page cancels it.
+  createEffect(
+    on(
+      () => props.page,
+      (page) => {
+        if (page !== 'midi') cancelLearn();
+      },
+      { defer: true },
+    ),
+  );
+
+  const tabEls: Partial<Record<SettingsPage, HTMLButtonElement>> = {};
+  const onTabKey = (e: KeyboardEvent) => {
+    const at = PAGES.findIndex((p) => p.id === props.page);
+    const to = { ArrowUp: at - 1, ArrowDown: at + 1, Home: 0, End: PAGES.length - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    const next = PAGES[(to + PAGES.length) % PAGES.length].id;
+    props.onPage(next);
+    tabEls[next]?.focus();
+  };
+
+  // The rail's lamp and word for each page.
+  const railState: Record<SettingsPage, () => { lamp: Lamp; word: string }> = {
+    device: () => {
+      const d = engineDevice();
+      if (d) return { lamp: 'lit', word: d.backend === 'Asio' ? 'ASIO' : 'WASAPI' };
+      if (engineOpenFailure()) return { lamp: 'warn', word: 'no device' };
+      return { lamp: 'off', word: platform.engine.available ? 'starting' : 'no engine' };
+    },
+    midi: () => {
+      const list = bindings();
+      // Amber only for a binding that waits for the player's pick; one whose port is away just waits.
+      const waits = list.some((l) => l.state === 'blocked' || l.state === 'severalPorts' || l.state === 'severalAbsent');
+      return { lamp: waits ? 'warn' : anyPortOpen() ? 'lit' : 'off', word: count(list.length, 'pedal', 'pedals') };
+    },
+    plugins: () => {
+      if (!platform.pluginHost.available) return { lamp: 'off', word: 'off' };
+      if (scanning()) return { lamp: 'off', word: 'scanning' };
+      const n = availablePlugins().length;
+      return { lamp: n > 0 ? 'lit' : 'off', word: count(n, 'plugin', 'plugins') };
+    },
+    // The command bar lamp's aggregate (app.tsx `systemWarn`), in a word.
+    diagnostics: () => {
+      if (engineDevice()) return { lamp: 'lit', word: 'ok' };
+      if (engineOpenFailure()) return { lamp: 'warn', word: 'no audio' };
+      return { lamp: 'off', word: platform.engine.available ? 'starting' : 'no engine' };
+    },
+  };
+
+  // The DEVICE page's read-out: the round trip the driver reports for the device that runs (input plus
+  // output latency, `DeviceStatus.alignFrames`), in ms; null with no device, or a driver that reports none.
+  const roundTripMs = () => {
+    const d = engineDevice();
+    return d && d.alignFrames > 0 ? ((d.alignFrames / d.sampleRate) * 1000).toFixed(1) : null;
+  };
+  const displaySide = () => {
+    const d = engineDevice();
+    if (!d) return engineOpenFailure() ?? '';
+    const frames = d.alignFrames > 0 ? `${d.alignFrames} frames · ` : '';
+    return `${frames}${kHz(d.sampleRate)} · ${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'}`;
+  };
   const engineReadout = () => {
     const d = engineDevice();
     if (!d) return engineOpenFailure() ? `no device open: ${engineOpenFailure()}` : 'no device open';
@@ -223,500 +322,580 @@ export function AudioSettings() {
 
   return (
     <div class="audio-settings" role="group" aria-label="Audio settings">
-      <div class="audio-settings__title">Audio settings</div>
-
-      <div class="audio-settings__row">
-        <span class="audio-settings__label">input</span>
-        <select
-          class="audio-settings__select"
-          value={usingAsio() ? '' : selectedDevice()}
-          disabled={usingAsio()}
-          onChange={(e) => {
-            const v = e.currentTarget.value;
-            setSelectedDevice(v);
-            writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
-            saveSlotInputChannels(['', '']); // the slots' picks too (a declined switch puts them back)
-            reopenEngine(syncPicks);
-          }}
-          aria-label="Audio input device"
-        >
-          <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
-          <For each={inputDevices()}>
-            {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedDevice()}>{d.name}</option>}
+      {/* The rail: one tab a page, each with its state lamp and word, so the four answers read before a
+          click. The tabs pattern as Help's: Tab reaches the selected tab only, then the page's controls;
+          the arrows (wrapping), Home and End pick and focus a page. */}
+      <div class="audio-settings__rail">
+        <div class="audio-settings__title">Audio settings</div>
+        <div class="audio-settings__tabs" role="tablist" aria-label="Audio settings pages" aria-orientation="vertical">
+          <For each={PAGES}>
+            {(p) => {
+              const s = () => railState[p.id]();
+              return (
+                <button
+                  type="button"
+                  role="tab"
+                  ref={(el) => (tabEls[p.id] = el)}
+                  id={`lf-settings-tab-${p.id}`}
+                  class="audio-settings__tab"
+                  aria-selected={props.page === p.id}
+                  aria-controls={`lf-settings-${p.id}`}
+                  aria-label={p.label}
+                  aria-describedby={`lf-settings-state-${p.id}`}
+                  tabindex={props.page === p.id ? 0 : -1}
+                  onClick={() => props.onPage(p.id)}
+                  onKeyDown={onTabKey}
+                >
+                  <i class="audio-settings__lamp" classList={{ 'is-lit': s().lamp === 'lit', 'is-warn': s().lamp === 'warn' }} aria-hidden="true" />
+                  <span class="audio-settings__tab-name">{p.label}</span>
+                  <span class="audio-settings__tab-state" id={`lf-settings-state-${p.id}`}>
+                    {s().word}
+                  </span>
+                </button>
+              );
+            }}
           </For>
-        </select>
-      </div>
-
-      <div class="audio-settings__row">
-        <span class="audio-settings__label">output</span>
-        <select
-          class="audio-settings__select"
-          value={usingAsio() ? '' : selectedOutput()}
-          disabled={usingAsio()}
-          onChange={(e) => {
-            const v = e.currentTarget.value;
-            setSelectedOutput(v);
-            writeAudioDeviceSettings({ outputDeviceId: v });
-            reopenEngine(syncPicks);
-          }}
-          aria-label="Output device"
-        >
-          <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
-          <For each={outputDevices()}>
-            {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedOutput()}>{d.name}</option>}
-          </For>
-        </select>
+        </div>
       </div>
 
-      {/* Share output: the master without the click (the engine's Share mix) mirrored to a Windows
-          device for OBS, a browser or a call, while the engine runs on ASIO. A device that goes away
-          turns it off with a toast. */}
-      <div class="audio-settings__row" title="Mirror the master, without the click, to another Windows device while ASIO runs">
-        <span class="audio-settings__label">share</span>
-        <select
-          class="audio-settings__select"
-          value={engineShare()}
-          onChange={(e) => {
-            const select = e.currentTarget;
-            void setEngineShare(select.value).then(() => {
-              select.value = engineShare();
-            });
-          }}
-          aria-label="Share output device"
-        >
-          <option value="">Off</option>
-          <For each={outputDevices()}>
-            {(d) => <option value={d.id} selected={d.id === engineShare()}>{d.name}</option>}
-          </For>
-        </select>
-      </div>
-      <div class="audio-settings__hint audio-settings__hint--info" role="note">
-        Mirrors the master, without the click, to that device while ASIO runs: capture that device in OBS
-        or the call. Pick one you don't listen on, such as a virtual cable: on the interface in your ears,
-        you hear everything twice. On WASAPI, capture BleepLoop's own output instead: it carries the click.
-      </div>
-      {/* F22's other half: the Share pick looks like the interface ASIO plays on (`sharesInterface`, a
-          brand/model-word match: it cannot see the hardware). A caution in the amber note, never a
-          block: the pick stays. */}
-      <Show when={shareOnAsioInterface()}>
-        {(name) => (
-          <div class="audio-settings__hint" role="note">
-            {name()} looks like the interface ASIO plays on: if you listen there, you will hear the master
-            twice. Pick a virtual cable or a device you don't listen on.
+      {/* DEVICE: the first move of every jam, read from the guitar. The round trip on top, then the
+          driver side (ASIO, its driver, buffer, rate), then the Windows devices and Share. */}
+      <Page id="device" shown={props.page}>
+        <div class="audio-settings__display">
+          <div class="audio-settings__display-main">
+            <span class="audio-settings__display-label">round trip</span>
+            <Show
+              when={roundTripMs()}
+              fallback={<span class="audio-settings__latency audio-settings__latency--none">{engineDevice() ? 'not reported' : 'no device'}</span>}
+            >
+              {(ms) => (
+                <span class="audio-settings__latency">
+                  {ms()}
+                  <span class="audio-settings__latency-unit">ms</span>
+                </span>
+              )}
+            </Show>
           </div>
-        )}
-      </Show>
-      <Show when={usingAsio()}>
-        <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>
-      </Show>
+          <div class="audio-settings__display-side">{displaySide()}</div>
+        </div>
 
-      <div class="audio-settings__row">
-        <span class="audio-settings__label">buffer</span>
-        <select
-          class="audio-settings__select"
-          value={String(bufferChoice().shown)}
-          onChange={(e) => {
-            const v = Number(e.currentTarget.value);
-            const select = e.currentTarget;
-            // A size outside the list is the driver's own, shown because it runs: nothing to save.
-            if (!(BUFFER_FRAMES_OPTIONS as readonly number[]).includes(v)) {
-              select.value = String(bufferChoice().shown);
-              return;
+        {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
+            only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
+            status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
+        <div
+          class="audio-settings__row"
+          classList={{ 'audio-settings__row--disabled': !asioOffered() }}
+        >
+          <span class="audio-settings__label">ASIO®</span>
+          <Show
+            when={asioOffered()}
+            fallback={
+              <span class="audio-settings__soon">
+                {asioStatus().status === 'disabled-by-flag' ? 'off for this launch (--disable-asio)' : 'unavailable'}
+              </span>
             }
-            void setBufferSize(v as BufferFrames).then(() => {
-              select.value = String(bufferChoice().shown);
-              reopenEngine(syncPicks);
-            });
-          }}
-          aria-label="Buffer size in frames"
-        >
-          <For each={bufferChoice().options}>
-            {(f) => <option value={String(f)} selected={f === bufferChoice().shown}>{f} frames</option>}
-          </For>
-        </select>
-        <span class="audio-settings__readout">{bufferMs(bufferChoice().shown)}</span>
-      </div>
-      <div class="audio-settings__hint audio-settings__hint--info" role="note">
-        {bufferChoice().fixed
-          ? "Set by the driver: change it in the driver's control panel."
-          : 'Frames per device callback: smaller is lower latency, larger is safer.'}
-      </div>
-
-      <div class="audio-settings__row">
-        <span class="audio-settings__label">sample rate</span>
-        <select
-          class="audio-settings__select"
-          value={rateValue(rates().shown)}
-          onChange={(e) => {
-            const select = e.currentTarget;
-            const rate = select.value === '' ? null : (Number(select.value) as SampleRate);
-            void setSampleRatePick(rate).then(() => {
-              select.value = rateValue(rates().shown);
-              reopenEngine(syncPicks);
-            });
-          }}
-          aria-label="Sample rate"
-        >
-          <For each={rates().options}>
-            {(rate) => (
-              <option value={rateValue(rate)} selected={rate === rates().shown}>
-                {rate === null ? deviceRateLabel() : kHz(rate)}
-              </option>
-            )}
-          </For>
-        </select>
-      </div>
-      <div class="audio-settings__hint audio-settings__hint--info" role="note">
-        {!rates().fixed
-          ? "The engine's rate. Loops recorded at one rate wait in recovery at another."
-          : rateOnAsio()
-            ? "Set by the driver: change it in the driver's control panel."
-            : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
-      </div>
-
-      {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
-          only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
-          status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
-      <div
-        class="audio-settings__row"
-        classList={{ 'audio-settings__row--disabled': !asioOffered() }}
-      >
-        <span class="audio-settings__label">ASIO®</span>
-        <Show
-          when={asioOffered()}
-          fallback={
-            <span class="audio-settings__soon">
-              {asioStatus().status === 'disabled-by-flag' ? 'off for this launch (--disable-asio)' : 'unavailable'}
-            </span>
-          }
-        >
-          <label class="audio-settings__toggle">
-            <input
-              type="checkbox"
-              checked={asioEnabled()}
-              disabled={asioStatus().status === 'probing'}
+          >
+            <label class="audio-settings__toggle">
+              <input
+                type="checkbox"
+                checked={asioEnabled()}
+                disabled={asioStatus().status === 'probing'}
+                onChange={(e) => {
+                  const checkbox = e.currentTarget;
+                  void setAsioEnabled(checkbox.checked).then(() => {
+                    checkbox.checked = asioEnabled();
+                    reopenEngine(syncPicks);
+                  });
+                }}
+                aria-label="Use ASIO low-latency audio"
+              />
+              <span class="audio-settings__toggle-text">
+                {!asioEnabled()
+                  ? 'WASAPI'
+                  : asioAvailable()
+                    ? 'low-latency'
+                    : asioStatus().status === 'probing'
+                      ? 'starting driver…'
+                      : 'WASAPI until the driver starts'}
+              </span>
+            </label>
+          </Show>
+        </div>
+        {/* The ASIO driver: picking one switches live — the device closes, the driver
+            starts, the device reopens (`switchEngineAsioDriver`). Automatic names the driver it took. */}
+        <Show when={asioOffered() && asioEnabled()}>
+          <div class="audio-settings__row" title="The ASIO driver the engine opens. Automatic takes the first one that starts.">
+            <span class="audio-settings__label">driver</span>
+            <select
+              class="audio-settings__select"
+              value={selectedDriver()}
+              disabled={asioStatus().status === 'probing' || asioStatus().status === 'timed-out'}
               onChange={(e) => {
-                const checkbox = e.currentTarget;
-                void setAsioEnabled(checkbox.checked).then(() => {
-                  checkbox.checked = asioEnabled();
-                  reopenEngine(syncPicks);
-                });
+                const v = e.currentTarget.value;
+                setSelectedDriver(v);
+                void switchEngineAsioDriver(v).then(syncPicks);
               }}
-              aria-label="Use ASIO low-latency audio"
-            />
-            <span class="audio-settings__toggle-text">
-              {!asioEnabled()
-                ? 'WASAPI'
-                : asioAvailable()
-                  ? 'low-latency'
-                  : asioStatus().status === 'probing'
-                    ? 'starting driver…'
-                    : 'WASAPI until the driver starts'}
-            </span>
-          </label>
+              aria-label="ASIO driver"
+            >
+              <option value="" selected={selectedDriver() === ''}>
+                {selectedDriver() === '' && asioDeviceInfo() ? `Automatic (${asioDeviceInfo()?.name})` : 'Automatic'}
+              </option>
+              <For each={driverOptions()}>
+                {(name) => (
+                  <option value={name} selected={name === selectedDriver()}>
+                    {asioDrivers().length === 0 || asioDrivers().includes(name) ? name : `${name} (not installed)`}
+                  </option>
+                )}
+              </For>
+            </select>
+          </div>
         </Show>
-      </div>
-      {/* The ASIO driver: picking one switches live — the device closes, the driver
-          starts, the device reopens (`switchEngineAsioDriver`). Automatic names the driver it took. */}
-      <Show when={asioOffered() && asioEnabled()}>
-        <div class="audio-settings__row" title="The ASIO driver the engine opens. Automatic takes the first one that starts.">
-          <span class="audio-settings__label">driver</span>
+        <Show when={asioOffered() && asioEnabled() && !asioAvailable() && asioStatus().status !== 'probing'}>
+          <div class="audio-settings__hint audio-settings__hint--asio" role="status">
+            <span>
+              {asioStatus().status === 'blocked'
+                ? 'The previous ASIO start did not complete, so it was skipped this time.'
+                : asioStatus().status === 'timed-out'
+                  ? asioStatus().detail
+                  : asioStatus().status === 'failed'
+                    ? `ASIO could not start: ${asioStatus().detail}.`
+                    : 'ASIO has not been started yet.'}
+            </span>
+            <Show when={asioRetryable()}>
+              <button
+                type="button"
+                class="audio-settings__btn"
+                onClick={() =>
+                  void probeAsio(true).then((report) => {
+                    // The device runs on WASAPI meanwhile: a driver that starts takes over at once.
+                    if (report.status === 'ready') reopenEngine(syncPicks);
+                  })
+                }
+                aria-label="Retry starting the ASIO driver"
+              >
+                RETRY ASIO
+              </button>
+            </Show>
+          </div>
+        </Show>
+
+        <div class="audio-settings__row">
+          <span class="audio-settings__label">buffer</span>
           <select
             class="audio-settings__select"
-            value={selectedDriver()}
-            disabled={asioStatus().status === 'probing' || asioStatus().status === 'timed-out'}
+            value={String(bufferChoice().shown)}
             onChange={(e) => {
-              const v = e.currentTarget.value;
-              setSelectedDriver(v);
-              void switchEngineAsioDriver(v).then(syncPicks);
+              const v = Number(e.currentTarget.value);
+              const select = e.currentTarget;
+              // A size outside the list is the driver's own, shown because it runs: nothing to save.
+              if (!(BUFFER_FRAMES_OPTIONS as readonly number[]).includes(v)) {
+                select.value = String(bufferChoice().shown);
+                return;
+              }
+              void setBufferSize(v as BufferFrames).then(() => {
+                select.value = String(bufferChoice().shown);
+                reopenEngine(syncPicks);
+              });
             }}
-            aria-label="ASIO driver"
+            aria-label="Buffer size in frames"
           >
-            <option value="" selected={selectedDriver() === ''}>
-              {selectedDriver() === '' && asioDeviceInfo() ? `Automatic (${asioDeviceInfo()?.name})` : 'Automatic'}
-            </option>
-            <For each={driverOptions()}>
-              {(name) => (
-                <option value={name} selected={name === selectedDriver()}>
-                  {asioDrivers().length === 0 || asioDrivers().includes(name) ? name : `${name} (not installed)`}
+            <For each={bufferChoice().options}>
+              {(f) => <option value={String(f)} selected={f === bufferChoice().shown}>{f} frames</option>}
+            </For>
+          </select>
+          <span class="audio-settings__readout">{bufferMs(bufferChoice().shown)}</span>
+        </div>
+        <div class="audio-settings__hint audio-settings__hint--info" role="note">
+          {bufferChoice().fixed
+            ? "Set by the driver: change it in the driver's control panel."
+            : 'Frames per device callback: smaller is lower latency, larger is safer.'}
+        </div>
+
+        <div class="audio-settings__row">
+          <span class="audio-settings__label">sample rate</span>
+          <select
+            class="audio-settings__select"
+            value={rateValue(rates().shown)}
+            onChange={(e) => {
+              const select = e.currentTarget;
+              const rate = select.value === '' ? null : (Number(select.value) as SampleRate);
+              void setSampleRatePick(rate).then(() => {
+                select.value = rateValue(rates().shown);
+                reopenEngine(syncPicks);
+              });
+            }}
+            aria-label="Sample rate"
+          >
+            <For each={rates().options}>
+              {(rate) => (
+                <option value={rateValue(rate)} selected={rate === rates().shown}>
+                  {rate === null ? deviceRateLabel() : kHz(rate)}
                 </option>
               )}
             </For>
           </select>
         </div>
-      </Show>
-      <Show when={asioOffered() && asioEnabled() && !asioAvailable() && asioStatus().status !== 'probing'}>
-        <div class="audio-settings__hint audio-settings__hint--asio" role="status">
-          <span>
-            {asioStatus().status === 'blocked'
-              ? 'The previous ASIO start did not complete, so it was skipped this time.'
-              : asioStatus().status === 'timed-out'
-                ? asioStatus().detail
-                : asioStatus().status === 'failed'
-                  ? `ASIO could not start: ${asioStatus().detail}.`
-                  : 'ASIO has not been started yet.'}
-          </span>
-          <Show when={asioRetryable()}>
-            <button
-              type="button"
-              class="audio-settings__btn"
-              onClick={() =>
-                void probeAsio(true).then((report) => {
-                  // The device runs on WASAPI meanwhile: a driver that starts takes over at once.
-                  if (report.status === 'ready') reopenEngine(syncPicks);
-                })
-              }
-              aria-label="Retry starting the ASIO driver"
-            >
-              RETRY ASIO
-            </button>
-          </Show>
+        <div class="audio-settings__hint audio-settings__hint--info" role="note">
+          {!rates().fixed
+            ? "The engine's rate. Loops recorded at one rate wait in recovery at another."
+            : rateOnAsio()
+              ? "Set by the driver: change it in the driver's control panel."
+              : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
         </div>
-      </Show>
 
-      {/* MIDI learn: pick an action (a track action also its track), LEARN, and the next CC or note-on from
-          any port runs it from then on (a second click or Esc cancels; with no open port LEARN says why
-          it waits). A learned message never reaches the play path. Learn, the bindings, their store and
-          the momentary/latching read are native MIDI's (`state/midi.ts` asks it); each line can switch the
-          kind, a momentary REC/DUB pedal can HOLD, one from the previous version says so, and a line that
-          does not run says why; one no port can be found for alone is assigned to a port picked here. */}
-      <div class="audio-settings__row" title="A MIDI footswitch or key runs this action">
-        <span class="audio-settings__label">midi learn</span>
-        <select
-          class="audio-settings__select"
-          value={learnPick()}
-          disabled={learning() !== null}
-          onChange={(e) => setLearnPick(e.currentTarget.value as ActionId)}
-          aria-label="Action to learn"
-        >
-          <optgroup label="Track actions">
-            <For each={LANE_ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
-          </optgroup>
-          <optgroup label="Global actions">
-            <For each={GLOBAL_ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
-          </optgroup>
-        </select>
-        <button
-          type="button"
-          class="audio-settings__btn"
-          classList={{ 'audio-settings__btn--listening': learning() !== null }}
-          aria-pressed={learning() !== null}
-          disabled={learning() === null && learnBlocked() !== null}
-          title={learning() === null ? (learnBlocked() ?? undefined) : undefined}
-          onClick={() =>
-            learning() === null ? learn(learnPick(), isLaneAction(learnPick()) ? learnTarget() : null) : cancelLearn()
-          }
-          aria-label="Learn a MIDI control for this action"
-        >
-          {learning() === null ? 'LEARN' : 'LISTENING'}
-        </button>
-      </div>
-      <Show when={isLaneAction(learnPick())}>
-        <div class="audio-settings__row" title="The track this action acts on">
-          <span class="audio-settings__label">on track</span>
+        <div class="audio-settings__sub">Windows devices</div>
+        <div class="audio-settings__row">
+          <span class="audio-settings__label">input</span>
           <select
             class="audio-settings__select"
-            value={learnTarget() === null ? '' : String(learnTarget())}
-            disabled={learning() !== null}
-            onChange={(e) => setLearnTarget(e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
-            aria-label="Track the action acts on"
+            value={usingAsio() ? '' : selectedDevice()}
+            disabled={usingAsio()}
+            onChange={(e) => {
+              const v = e.currentTarget.value;
+              setSelectedDevice(v);
+              writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
+              saveSlotInputChannels(['', '']); // the slots' picks too (a declined switch puts them back)
+              reopenEngine(syncPicks);
+            }}
+            aria-label="Audio input device"
           >
-            <option value="">Selected track</option>
-            <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>{(i) => <option value={String(i)}>Track {i + 1}</option>}</For>
+            <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
+            <For each={inputDevices()}>
+              {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedDevice()}>{d.name}</option>}
+            </For>
           </select>
         </div>
-      </Show>
-      <Show when={learning() !== null}>
-        <div class="audio-settings__hint audio-settings__hint--info" role="status">Tap a pedal or key on a MIDI device. Esc cancels.</div>
-      </Show>
-      <Show when={awaitingRelease()}>
-        {(b) => (
-          <div class="audio-settings__hint audio-settings__hint--info" role="status">
-            Learned {midiSource(b())}. Let go of the pedal, and try it once this line is gone.
+
+        <div class="audio-settings__row">
+          <span class="audio-settings__label">output</span>
+          <select
+            class="audio-settings__select"
+            value={usingAsio() ? '' : selectedOutput()}
+            disabled={usingAsio()}
+            onChange={(e) => {
+              const v = e.currentTarget.value;
+              setSelectedOutput(v);
+              writeAudioDeviceSettings({ outputDeviceId: v });
+              reopenEngine(syncPicks);
+            }}
+            aria-label="Output device"
+          >
+            <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
+            <For each={outputDevices()}>
+              {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedOutput()}>{d.name}</option>}
+            </For>
+          </select>
+        </div>
+
+        <Show when={usingAsio()}>
+          <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>
+        </Show>
+        {/* Share output: the master without the click (the engine's Share mix) mirrored to a Windows
+            device for OBS, a browser or a call, while the engine runs on ASIO. A device that goes away
+            turns it off with a toast. */}
+        <div class="audio-settings__row" title="Mirror the master, without the click, to another Windows device while ASIO runs">
+          <span class="audio-settings__label">share</span>
+          <select
+            class="audio-settings__select"
+            value={engineShare()}
+            onChange={(e) => {
+              const select = e.currentTarget;
+              void setEngineShare(select.value).then(() => {
+                select.value = engineShare();
+              });
+            }}
+            aria-label="Share output device"
+          >
+            <option value="">Off</option>
+            <For each={outputDevices()}>
+              {(d) => <option value={d.id} selected={d.id === engineShare()}>{d.name}</option>}
+            </For>
+          </select>
+        </div>
+        <div class="audio-settings__hint audio-settings__hint--info" role="note">
+          Mirrors the master, without the click, to that device while ASIO runs: capture that device in OBS
+          or the call. Pick one you don't listen on, such as a virtual cable: on the interface in your ears,
+          you hear everything twice. On WASAPI, capture BleepLoop's own output instead: it carries the click.
+        </div>
+        {/* F22's other half: the Share pick looks like the interface ASIO plays on (`sharesInterface`, a
+            brand/model-word match: it cannot see the hardware). A caution in the amber note, never a
+            block: the pick stays. */}
+        <Show when={shareOnAsioInterface()}>
+          {(name) => (
+            <div class="audio-settings__hint" role="note">
+              {name()} looks like the interface ASIO plays on: if you listen there, you will hear the master
+              twice. Pick a virtual cable or a device you don't listen on.
+            </div>
+          )}
+        </Show>
+
+      </Page>
+
+      {/* MIDI PEDALS: the second move. */}
+      <Page id="midi" shown={props.page}>
+        {/* The MIDI inputs as native MIDI sees them, where the pedal is learned: LEARN listens on the open
+            ones only. */}
+        <div class="audio-settings__row">
+          <span class="audio-settings__label">inputs</span>
+          <span class="audio-settings__value">{portsSummary()}</span>
+        </div>
+        {/* MIDI learn: pick an action (a track action also its track), LEARN, and the next CC or note-on from
+            any port runs it from then on (a second click or Esc cancels; with no open port LEARN says why
+            it waits). A learned message never reaches the play path. Learn, the bindings, their store and
+            the momentary/latching read are native MIDI's (`state/midi.ts` asks it); each line can switch the
+            kind, a momentary REC/DUB pedal can HOLD, one from the previous version says so, and a line that
+            does not run says why; one no port can be found for alone is assigned to a port picked here. */}
+        <div class="audio-settings__row" title="A MIDI footswitch or key runs this action">
+          <span class="audio-settings__label">midi learn</span>
+          <select
+            class="audio-settings__select"
+            value={learnPick()}
+            disabled={learning() !== null}
+            onChange={(e) => setLearnPick(e.currentTarget.value as ActionId)}
+            aria-label="Action to learn"
+          >
+            <optgroup label="Track actions">
+              <For each={LANE_ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
+            </optgroup>
+            <optgroup label="Global actions">
+              <For each={GLOBAL_ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
+            </optgroup>
+          </select>
+          <button
+            type="button"
+            class="audio-settings__btn"
+            classList={{ 'audio-settings__btn--listening': learning() !== null }}
+            aria-pressed={learning() !== null}
+            disabled={learning() === null && learnBlocked() !== null}
+            title={learning() === null ? (learnBlocked() ?? undefined) : undefined}
+            onClick={() =>
+              learning() === null ? learn(learnPick(), isLaneAction(learnPick()) ? learnTarget() : null) : cancelLearn()
+            }
+            aria-label="Learn a MIDI control for this action"
+          >
+            {learning() === null ? 'LEARN' : 'LISTENING'}
+          </button>
+        </div>
+        <Show when={isLaneAction(learnPick())}>
+          <div class="audio-settings__row" title="The track this action acts on">
+            <span class="audio-settings__label">on track</span>
+            <select
+              class="audio-settings__select"
+              value={learnTarget() === null ? '' : String(learnTarget())}
+              disabled={learning() !== null}
+              onChange={(e) => setLearnTarget(e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
+              aria-label="Track the action acts on"
+            >
+              <option value="">Selected track</option>
+              <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>{(i) => <option value={String(i)}>Track {i + 1}</option>}</For>
+            </select>
           </div>
-        )}
-      </Show>
-      <Show when={bindings().length > 0}>
-        <ul class="audio-settings__bindings" aria-label="MIDI bindings">
-          <For each={bindings()}>
-            {(l, index) => {
-              const b = () => l.binding;
-              // The port an assignment would move this binding to: none until the player picks one (a pedal
-              // is never moved onto another controller by a default).
-              const [assignTo, setAssignTo] = createSignal('');
-              const picked = () => (ports().some((p) => p.id === assignTo()) ? assignTo() : '');
-              return (
-                <li class="audio-settings__binding" classList={{ 'is-idle': notLive(l) !== null }} title={l.displayName}>
-                  <span class="audio-settings__binding-action">{bindingAction(b())}</span>
-                  <span class="audio-settings__binding-src">{midiSource(b())}</span>
-                  <button
-                    type="button"
-                    class="audio-settings__chip"
-                    onClick={() => setMomentary(index(), !b().momentary)}
-                    aria-label={`${bindingAction(b())} on ${midiSource(b())}: ${b().momentary ? 'momentary' : 'latching'} pedal, switch to ${b().momentary ? 'latching' : 'momentary'}`}
-                    title="How the pedal was read. Switch it if a press runs twice, or every other press runs nothing"
-                  >
-                    {b().momentary ? 'momentary' : 'latching'}
-                  </button>
-                  <Show when={b().action === 'recDub'}>
+        </Show>
+        <Show when={learning() !== null}>
+          <div class="audio-settings__hint audio-settings__hint--info" role="status">Tap a pedal or key on a MIDI device. Esc cancels.</div>
+        </Show>
+        <Show when={awaitingRelease()}>
+          {(b) => (
+            <div class="audio-settings__hint audio-settings__hint--info" role="status">
+              Learned {midiSource(b())}. Let go of the pedal, and try it once this line is gone.
+            </div>
+          )}
+        </Show>
+        <Show when={bindings().length > 0}>
+          <ul class="audio-settings__bindings" aria-label="MIDI bindings">
+            <For each={bindings()}>
+              {(l, index) => {
+                const b = () => l.binding;
+                // The port an assignment would move this binding to: none until the player picks one (a pedal
+                // is never moved onto another controller by a default).
+                const [assignTo, setAssignTo] = createSignal('');
+                const picked = () => (ports().some((p) => p.id === assignTo()) ? assignTo() : '');
+                return (
+                  <li class="audio-settings__binding" classList={{ 'is-idle': notLive(l) !== null }} title={l.displayName}>
+                    <span class="audio-settings__binding-action">{bindingAction(b())}</span>
+                    <span class="audio-settings__binding-src">{midiSource(b())}</span>
                     <button
                       type="button"
                       class="audio-settings__chip"
-                      classList={{ 'is-on': b().hold }}
-                      disabled={!b().momentary}
-                      aria-pressed={b().hold}
-                      onClick={() => setHold(index(), !b().hold)}
-                      aria-label={`Hold to record on ${midiSource(b())}`}
-                      title={b().momentary ? 'Hold the pedal to record or overdub, let go to stop' : 'HOLD needs a momentary pedal'}
+                      onClick={() => setMomentary(index(), !b().momentary)}
+                      aria-label={`${bindingAction(b())} on ${midiSource(b())}: ${b().momentary ? 'momentary' : 'latching'} pedal, switch to ${b().momentary ? 'latching' : 'momentary'}`}
+                      title="How the pedal was read. Switch it if a press runs twice, or every other press runs nothing"
                     >
-                      HOLD
+                      {b().momentary ? 'momentary' : 'latching'}
                     </button>
-                  </Show>
-                  <button
-                    type="button"
-                    class="audio-settings__binding-clear"
-                    onClick={() => forget(index())}
-                    aria-label={`Forget ${bindingAction(b())} on ${midiSource(b())}, ${l.displayName}`}
-                  >
-                    ✕
-                  </button>
-                  {/* Second line: where it came from, why it does not run, and a port to run it on. */}
-                  <Show when={l.origin === 'legacy' || notLive(l) !== null}>
-                    <div class="audio-settings__binding-why">
-                      <Show when={l.origin === 'legacy'}>
-                        <span class="audio-settings__binding-origin">from the previous version</span>
-                      </Show>
-                      <Show when={notLive(l)}>{(why) => <span class="audio-settings__binding-idle">{why()}</span>}</Show>
-                      <Show when={ASSIGNABLE.includes(l.state) && ports().length > 0}>
-                        <select
-                          class="audio-settings__select audio-settings__select--assign"
-                          value={picked()}
-                          onChange={(e) => setAssignTo(e.currentTarget.value)}
-                          aria-label={`Port for ${bindingAction(b())} on ${midiSource(b())}`}
-                        >
-                          <option value="" disabled>
-                            pick a port
-                          </option>
-                          <For each={ports()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
-                        </select>
-                        <button
-                          type="button"
-                          class="audio-settings__chip"
-                          disabled={picked() === ''}
-                          onClick={() => assign(index(), picked())}
-                          aria-label={`Assign ${bindingAction(b())} on ${midiSource(b())} to this port`}
-                          title={picked() === '' ? 'Pick the port this binding runs on first' : 'Run this binding on the port picked here from now on'}
-                        >
-                          ASSIGN
-                        </button>
-                      </Show>
-                    </div>
-                  </Show>
-                </li>
-              );
-            }}
-          </For>
-        </ul>
-      </Show>
-
-      {/* Plugin folders: what the scan walks. The host's own folders are read-only; the player's are
-          added through the native folder dialog (the host opens it) and removed with ✕. Each change is
-          followed by a scan (`state/plugin-folders.ts`); a folder that is gone says so and is skipped. Under
-          the folders, what the last scan found and cannot host (a 32-bit VST2, say), with why. */}
-      <Show when={platform.pluginHost.available}>
-        <div class="audio-settings__folders" role="group" aria-label="Plugin folders">
-          <div class="audio-settings__row" title="The folders the plugin scan walks">
-            <span class="audio-settings__label">folders</span>
-            <button
-              type="button"
-              class="audio-settings__btn"
-              disabled={scanning() || pluginFoldersBusy()}
-              onClick={() => void addPluginFolder()}
-            >
-              Add folder…
-            </button>
-          </div>
-          <ul class="audio-settings__folder-list">
-            <For each={pluginFolders().builtin}>
-              {(folder) => (
-                <li class="audio-settings__folder audio-settings__folder--builtin" title={folder.path}>
-                  <span class="audio-settings__folder-path">{folder.path}</span>
-                  <Show when={!folder.exists}>
-                    <span class="audio-settings__folder-missing">missing</span>
-                  </Show>
-                </li>
-              )}
-            </For>
-            <For each={pluginFolders().user}>
-              {(folder) => (
-                <li class="audio-settings__folder" title={folder.path}>
-                  <span class="audio-settings__folder-path">{folder.path}</span>
-                  <Show when={!folder.exists}>
-                    <span class="audio-settings__folder-missing">missing</span>
-                  </Show>
-                  <button
-                    type="button"
-                    class="audio-settings__binding-clear"
-                    disabled={pluginFoldersBusy()}
-                    onClick={() => void removePluginFolder(folder.path)}
-                    aria-label={`Remove folder ${folder.path}`}
-                  >
-                    ✕
-                  </button>
-                </li>
-              )}
+                    <Show when={b().action === 'recDub'}>
+                      <button
+                        type="button"
+                        class="audio-settings__chip"
+                        classList={{ 'is-on': b().hold }}
+                        disabled={!b().momentary}
+                        aria-pressed={b().hold}
+                        onClick={() => setHold(index(), !b().hold)}
+                        aria-label={`Hold to record on ${midiSource(b())}`}
+                        title={b().momentary ? 'Hold the pedal to record or overdub, let go to stop' : 'HOLD needs a momentary pedal'}
+                      >
+                        HOLD
+                      </button>
+                    </Show>
+                    <button
+                      type="button"
+                      class="audio-settings__binding-clear"
+                      onClick={() => forget(index())}
+                      aria-label={`Forget ${bindingAction(b())} on ${midiSource(b())}, ${l.displayName}`}
+                    >
+                      ✕
+                    </button>
+                    {/* Second line: where it came from, why it does not run, and a port to run it on. */}
+                    <Show when={l.origin === 'legacy' || notLive(l) !== null}>
+                      <div class="audio-settings__binding-why">
+                        <Show when={l.origin === 'legacy'}>
+                          <span class="audio-settings__binding-origin">from the previous version</span>
+                        </Show>
+                        <Show when={notLive(l)}>{(why) => <span class="audio-settings__binding-idle">{why()}</span>}</Show>
+                        <Show when={ASSIGNABLE.includes(l.state) && ports().length > 0}>
+                          <select
+                            class="audio-settings__select audio-settings__select--assign"
+                            value={picked()}
+                            onChange={(e) => setAssignTo(e.currentTarget.value)}
+                            aria-label={`Port for ${bindingAction(b())} on ${midiSource(b())}`}
+                          >
+                            <option value="" disabled>
+                              pick a port
+                            </option>
+                            <For each={ports()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+                          </select>
+                          <button
+                            type="button"
+                            class="audio-settings__chip"
+                            disabled={picked() === ''}
+                            onClick={() => assign(index(), picked())}
+                            aria-label={`Assign ${bindingAction(b())} on ${midiSource(b())} to this port`}
+                            title={picked() === '' ? 'Pick the port this binding runs on first' : 'Run this binding on the port picked here from now on'}
+                          >
+                            ASSIGN
+                          </button>
+                        </Show>
+                      </div>
+                    </Show>
+                  </li>
+                );
+              }}
             </For>
           </ul>
-          <Show when={pluginFolders().unsupported.length > 0}>
-            <div class="audio-settings__unsupported">
-              <div class="audio-settings__unsupported-summary">
-                {pluginFolders().unsupported.length === 1
-                  ? '1 plugin found but not supported'
-                  : `${pluginFolders().unsupported.length} plugins found but not supported`}
-              </div>
-              <ul class="audio-settings__unsupported-list">
-                <For each={pluginFolders().unsupported}>
-                  {(plugin) => (
-                    <li class="audio-settings__unsupported-item" title={plugin.path}>
-                      <span class="audio-settings__unsupported-file">{plugin.path.split(/[\\/]/).pop()}</span>
-                      <span class="audio-settings__unsupported-reason">{plugin.reason}</span>
-                    </li>
-                  )}
-                </For>
-              </ul>
-            </div>
-          </Show>
-        </div>
-      </Show>
+        </Show>
 
-      {/* Diagnostics: the read-only host/engine/plugin/midi status. The command-bar system lamp is
-          their aggregate; this is the full read-out. The plugin-scan live region stays in the command
-          bar (single announcer), so these rows are plain text — no role=status here. */}
-      <div class="audio-settings__diag" role="group" aria-label="Diagnostics">
-        <div class="audio-settings__diag-title">diagnostics</div>
-        <div class="audio-settings__diag-row">
-          <span>host</span>
-          <b>{platform.kind}</b>
+        <Show when={bindings().length === 0 && learning() === null}>
+          <div class="audio-settings__hint audio-settings__hint--info" role="note">No pedals learned yet: pick an action, press LEARN, then tap the pedal once.</div>
+        </Show>
+      </Page>
+
+      {/* PLUGINS: the second move's other half. */}
+      <Page id="plugins" shown={props.page}>
+        {/* Plugin folders: what the scan walks. The host's own folders are read-only; the player's are
+            added through the native folder dialog (the host opens it) and removed with ✕. Each change is
+            followed by a scan (`state/plugin-folders.ts`); a folder that is gone says so and is skipped. Under
+            the folders, what the last scan found and cannot host (a 32-bit VST2, say), with why. */}
+        <Show
+          when={platform.pluginHost.available}
+          fallback={<div class="audio-settings__hint audio-settings__hint--info audio-settings__hint--flush" role="note">No plugin host in this build.</div>}
+        >
+          <div class="audio-settings__folders" role="group" aria-label="Plugin folders">
+            <div class="audio-settings__row" title="The folders the plugin scan walks">
+              <span class="audio-settings__label">folders</span>
+              <button
+                type="button"
+                class="audio-settings__btn"
+                disabled={scanning() || pluginFoldersBusy()}
+                onClick={() => void addPluginFolder()}
+              >
+                Add folder…
+              </button>
+            </div>
+            <ul class="audio-settings__folder-list">
+              <For each={pluginFolders().builtin}>
+                {(folder) => (
+                  <li class="audio-settings__folder audio-settings__folder--builtin" title={folder.path}>
+                    <span class="audio-settings__folder-path">{folder.path}</span>
+                    <Show when={!folder.exists}>
+                      <span class="audio-settings__folder-missing">missing</span>
+                    </Show>
+                  </li>
+                )}
+              </For>
+              <For each={pluginFolders().user}>
+                {(folder) => (
+                  <li class="audio-settings__folder" title={folder.path}>
+                    <span class="audio-settings__folder-path">{folder.path}</span>
+                    <Show when={!folder.exists}>
+                      <span class="audio-settings__folder-missing">missing</span>
+                    </Show>
+                    <button
+                      type="button"
+                      class="audio-settings__binding-clear"
+                      disabled={pluginFoldersBusy()}
+                      onClick={() => void removePluginFolder(folder.path)}
+                      aria-label={`Remove folder ${folder.path}`}
+                    >
+                      ✕
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+            <Show when={pluginFolders().unsupported.length > 0}>
+              <div class="audio-settings__unsupported">
+                <div class="audio-settings__unsupported-summary">
+                  {pluginFolders().unsupported.length === 1
+                    ? '1 plugin found but not supported'
+                    : `${pluginFolders().unsupported.length} plugins found but not supported`}
+                </div>
+                <ul class="audio-settings__unsupported-list">
+                  <For each={pluginFolders().unsupported}>
+                    {(plugin) => (
+                      <li class="audio-settings__unsupported-item" title={plugin.path}>
+                        <span class="audio-settings__unsupported-file">{plugin.path.split(/[\\/]/).pop()}</span>
+                        <span class="audio-settings__unsupported-reason">{plugin.reason}</span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            </Show>
+          </div>
+        </Show>
+
+      </Page>
+
+      {/* DIAGNOSTICS: last. */}
+      <Page id="diagnostics" shown={props.page}>
+        {/* Diagnostics: the read-only host/engine/plugin/midi status. The command-bar system lamp is
+            their aggregate (this page's rail lamp mirrors it); this is the full read-out. The plugin-scan live region stays in the command
+            bar (single announcer), so these rows are plain text — no role=status here. */}
+        <div class="audio-settings__diag" role="group" aria-label="Diagnostics">
+          <div class="audio-settings__diag-row">
+            <span>host</span>
+            <b>{platform.kind}</b>
+          </div>
+          <div class="audio-settings__diag-row">
+            <span>engine</span>
+            <b>{engineReadout()}</b>
+          </div>
+          <div class="audio-settings__diag-row">
+            <span>plugin</span>
+            <b>
+              {platform.pluginHost.available
+                ? scanning()
+                  ? 'scanning…'
+                  : `${availablePlugins().length} found`
+                : 'unavailable'}
+            </b>
+          </div>
+          <div class="audio-settings__diag-row">
+            <span>midi</span>
+            <b>{portsSummary()}</b>
+          </div>
         </div>
-        <div class="audio-settings__diag-row">
-          <span>engine</span>
-          <b>{engineReadout()}</b>
-        </div>
-        <div class="audio-settings__diag-row">
-          <span>plugin</span>
-          <b>
-            {platform.pluginHost.available
-              ? scanning()
-                ? 'scanning…'
-                : `${availablePlugins().length} found`
-              : 'unavailable'}
-          </b>
-        </div>
-        <div class="audio-settings__diag-row">
-          <span>midi</span>
-          <b>{portsSummary()}</b>
-        </div>
-      </div>
+      </Page>
     </div>
   );
 }

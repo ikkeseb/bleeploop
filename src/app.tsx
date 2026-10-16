@@ -6,7 +6,7 @@ import { Looper } from './ui/looper/Looper';
 import { Transport } from './ui/transport/Transport';
 import { SessionTools } from './ui/transport/SessionTools';
 import { InstrumentSlot } from './ui/instrument/InstrumentSlot';
-import { AudioSettings } from './ui/settings/AudioSettings';
+import { AudioSettings, type SettingsPage } from './ui/settings/AudioSettings';
 import { Help } from './ui/settings/Help';
 import { UpdatePanel } from './ui/settings/UpdatePanel';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
@@ -27,6 +27,9 @@ import { installLfDebug } from './debug/lf';
 
 export function App() {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  // The Audio Settings page the panel shows: the gear opens DEVICE; an opener that names a page (`__lf.ui`
+  // today) lands there.
+  const [settingsPage, setSettingsPage] = createSignal<SettingsPage>('device');
   const [helpOpen, setHelpOpen] = createSignal(false);
   const [updateOpen, setUpdateOpen] = createSignal(false);
   // The command-bar popovers share one anchor (top-right), so opening one closes the others — they can
@@ -34,6 +37,7 @@ export function App() {
   const openSettings = () => {
     setHelpOpen(false);
     setUpdateOpen(false);
+    setSettingsPage('device');
     setSettingsOpen((v) => !v);
   };
   const openHelp = () => {
@@ -157,7 +161,10 @@ export function App() {
       // Debug surface for automated (Playwright) verification + by-ear/by-eye gates: `src/debug/lf.ts`.
       // The popover drivers are supplied here because their signals are component-local.
       installLfDebug({
-        openSettings: () => setSettingsOpen(true),
+        openSettings: (page = 'device') => {
+          setSettingsPage(page);
+          setSettingsOpen(true);
+        },
         closeSettings: () => setSettingsOpen(false),
         openHelp: () => setHelpOpen(true),
         closeHelp: () => setHelpOpen(false),
@@ -454,7 +461,7 @@ export function App() {
             ref={focusPanel}
             onClick={(e) => e.stopPropagation()}
           >
-            <AudioSettings />
+            <AudioSettings page={settingsPage()} onPage={setSettingsPage} />
           </div>
         </div>
       </Show>

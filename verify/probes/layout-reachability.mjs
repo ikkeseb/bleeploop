@@ -15,8 +15,9 @@
  *   1920x1080 the open Help and Audio Settings popovers do not overlap the command bar's rendered box,
  *   stay inside the window and keep at least the right edge's margin on their left (a hint's one-line
  *   width once pushed Audio Settings to the window's left edge), also with a spacer one window tall
- *   planted in the panel body (native-only rows this tier never renders), whose lowest row (stepping
- *   into a block taller than the panel) must then scroll into reach; without the spacer, Help's
+ *   planted in the panel body (Audio Settings: the page that shows; native-only rows this tier never
+ *   renders), whose lowest row (stepping into a block taller than the panel) must then scroll into
+ *   reach; without the spacer, Help's
  *   reference (the tab it opens on) scrolls not at all;
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open and its FILTER engaged (its
  *   params grow the drawer past one key row), so the lane stack scrolls:
@@ -247,15 +248,17 @@ await probe(async ({ open }) => {
         const m = await page.evaluate(({ id, tall }) => {
           const box = el => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; };
           const bar = document.querySelector('.cmd'), dialog = document.getElementById(id), body = dialog.firstElementChild;
+          // What scrolls: the panel body, or in Audio Settings the page that shows (its rail stays put).
+          const scroller = id === 'lf-audio-popover' ? body.querySelector(':scope > [role="tabpanel"]:not([hidden])') : body;
           // How far the real rows scroll, before any spacer: Help's reference (what `?` opens on) must not.
-          const scroll = body.scrollHeight - body.clientHeight;
-          // Under the title, above every real row.
-          if (tall) body.firstElementChild.after(Object.assign(document.createElement('div'), { id: 'layout-spacer', style: `height: ${innerHeight}px; flex: none` }));
+          const scroll = scroller.scrollHeight - scroller.clientHeight;
+          // Under the title (a page's first block), above every real row.
+          if (tall) scroller.firstElementChild.after(Object.assign(document.createElement('div'), { id: 'layout-spacer', style: `height: ${innerHeight}px; flex: none` }));
           // The lowest row: from the body's lowest child, step into a block taller than the scroller (a
           // tab panel, a column of Help's two-column reference) until a row fits it.
           const lowest = el => [...el.children].reduce((a, b) => (b.getBoundingClientRect().bottom >= a.getBoundingClientRect().bottom ? b : a));
-          let last = lowest(body);
-          while (last.getBoundingClientRect().height > body.clientHeight && last.firstElementChild) last = lowest(last);
+          let last = lowest(scroller);
+          while (last.getBoundingClientRect().height > scroller.clientHeight && last.firstElementChild) last = lowest(last);
           last.scrollIntoView({ block: 'nearest' });
           const r = box(last);
           const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
@@ -264,7 +267,7 @@ await probe(async ({ open }) => {
         }, { id, tall });
         const name = `${label}-${width}x${height}-${id}${tall ? '-tall-content' : ''}`;
         await page.screenshot({ path: `logs/layout/${name}.png` });
-        await page.evaluate(id => { document.getElementById('layout-spacer')?.remove(); document.getElementById(id).firstElementChild.scrollTop = 0; }, id);
+        await page.evaluate(id => { document.getElementById('layout-spacer')?.remove(); const body = document.getElementById(id).firstElementChild; body.scrollTop = 0; if (id === 'lf-audio-popover') for (const page of body.querySelectorAll(':scope > [role="tabpanel"]')) page.scrollTop = 0; }, id);
         const overlaps = m.panel.top < m.bar.bottom && m.panel.bottom > m.bar.top && m.panel.left < m.bar.right && m.panel.right > m.bar.left;
         const inside = [m.dialog, m.panel, m.lastRow].every(b => b.top >= 0 && b.left >= 0 && b.bottom <= m.view.height + 0.5 && b.right <= m.view.width + 0.5);
         const fits = tall || id !== 'lf-help-popover' || m.scroll === 0;

@@ -152,7 +152,7 @@ await probe(async ({ open }) => {
   const settles = async (read, want, message) => assert.deepEqual(await until(read, want), want, message);
   const listening = () => page.evaluate((s) => document.querySelector(s)?.getAttribute('aria-pressed') ?? null, LEARN);
   const openSettings = async () => {
-    await page.evaluate(() => window.__lf.ui.openSettings());
+    await page.evaluate(() => window.__lf.ui.openSettings('midi'));
     await page.waitForSelector(LEARN);
   };
   const sentSince = (from) => page.evaluate((m) => window.__lf.native.sent.slice(m), from);

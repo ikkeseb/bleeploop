@@ -1,6 +1,7 @@
 import * as audioDeviceSettings from '../ui/state/audio-settings';
 import { asioStatus, probeAsio, setAsioEnabled, setBufferSize } from '../ui/state/audio-devices';
 import { autosave } from '../session/autosave';
+import type { SettingsPage } from '../ui/settings/AudioSettings';
 import { buildExportBundle } from '../session/export';
 import { importSession } from '../session/import';
 import {
@@ -83,7 +84,8 @@ export interface LfDebug {
    * popover MOUNT is platform-agnostic — flipping the signal renders it — so a probe can open +
    * screenshot the settings/help popovers headless. */
   ui: {
-    openSettings: () => void;
+    /** Opens on `page`, DEVICE by default (as the gear does). */
+    openSettings: (page?: SettingsPage) => void;
     closeSettings: () => void;
     openHelp: () => void;
     closeHelp: () => void;
