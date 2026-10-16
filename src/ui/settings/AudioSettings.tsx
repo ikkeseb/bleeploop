@@ -72,8 +72,8 @@ import './audio-settings.css';
  * inside a `<Show>` in app.tsx, so it re-reads persisted state each time it opens (persisted localStorage
  * is the source of truth; these local signals mirror it).
  *
- * Four pages behind a rail, in the order a jam needs them: DEVICE (the round trip, then ASIO, driver,
- * buffer, rate, the Windows devices and Share), MIDI PEDALS, PLUGINS, DIAGNOSTICS. The page is the
+ * Four pages behind a rail, in the order a jam needs them: DEVICE (ASIO, driver, buffer, rate, the
+ * round trip they give, the Windows devices and Share), MIDI PEDALS, PLUGINS, DIAGNOSTICS. The page is the
  * opener's (`page`, app.tsx): the gear opens DEVICE. Every page stays mounted, the others `hidden`, so
  * each tab's aria-controls names a live panel and a page's state survives a look at another.
  *
@@ -234,17 +234,16 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     },
   };
 
-  // The DEVICE page's read-out: the round trip the driver reports for the device that runs (input plus
-  // output latency, `DeviceStatus.alignFrames`), in ms; null with no device, or a driver that reports none.
-  const roundTripMs = () => {
+  // The DEVICE page's round trip: what the driver reports for the device that runs (input plus output
+  // latency, `DeviceStatus.alignFrames`), in ms, then frames and backend. A driver that reports none
+  // (the browser rig's 0) says so.
+  const roundTripReported = () => (engineDevice()?.alignFrames ?? 0) > 0;
+  const roundTrip = () => {
     const d = engineDevice();
-    return d && d.alignFrames > 0 ? ((d.alignFrames / d.sampleRate) * 1000).toFixed(1) : null;
-  };
-  const displaySide = () => {
-    const d = engineDevice();
-    if (!d) return engineOpenFailure() ?? '';
-    const frames = d.alignFrames > 0 ? `${d.alignFrames} frames · ` : '';
-    return `${frames}${kHz(d.sampleRate)} · ${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'}`;
+    if (!d) return 'no device';
+    const backend = d.backend === 'Asio' ? 'ASIO' : 'WASAPI';
+    if (d.alignFrames <= 0) return `not reported · ${backend}`;
+    return `${((d.alignFrames / d.sampleRate) * 1000).toFixed(1)} ms · ${d.alignFrames} frames · ${backend}`;
   };
   const engineReadout = () => {
     const d = engineDevice();
@@ -358,27 +357,9 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
         </div>
       </div>
 
-      {/* DEVICE: the first move of every jam, read from the guitar. The round trip on top, then the
-          driver side (ASIO, its driver, buffer, rate), then the Windows devices and Share. */}
+      {/* DEVICE: the first move of every jam. The driver side (ASIO, its driver, buffer, rate) and the
+          round trip those picks give, then the Windows devices and Share. */}
       <Page id="device" shown={props.page}>
-        <div class="audio-settings__display">
-          <div class="audio-settings__display-main">
-            <span class="audio-settings__display-label">round trip</span>
-            <Show
-              when={roundTripMs()}
-              fallback={<span class="audio-settings__latency audio-settings__latency--none">{engineDevice() ? 'not reported' : 'no device'}</span>}
-            >
-              {(ms) => (
-                <span class="audio-settings__latency">
-                  {ms()}
-                  <span class="audio-settings__latency-unit">ms</span>
-                </span>
-              )}
-            </Show>
-          </div>
-          <div class="audio-settings__display-side">{displaySide()}</div>
-        </div>
-
         {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
             only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
             status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
@@ -541,6 +522,14 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             : rateOnAsio()
               ? "Set by the driver: change it in the driver's control panel."
               : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
+        </div>
+
+        {/* The result of the picks above, read as the rest of the panel reads: a label and a mono value. */}
+        <div class="audio-settings__row audio-settings__row--readout" title="The round trip the driver reports for the device that runs: input plus output latency">
+          <span class="audio-settings__label">round trip</span>
+          <span class="audio-settings__readout audio-settings__readout--value" classList={{ 'is-none': !roundTripReported() }}>
+            {roundTrip()}
+          </span>
         </div>
 
         <div class="audio-settings__sub">Windows devices</div>
