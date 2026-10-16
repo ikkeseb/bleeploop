@@ -27,7 +27,13 @@ Focusrite's, which no longer exists, so the first launch falls back to automatic
 unrelated driver until `Audient USB Audio ASIO Driver` is picked once in Audio Settings
 (`src-tauri/AGENTS.md` § Open threads). Its EVO Control app sets the ASIO buffer size and the sample rate
 from the system tray, which is the handle for a check no device has ever run: a rate or buffer changed in
-the driver's own panel while the app plays.
+the driver's own panel while the app plays. To hear only the app's wet signal, its monitor mix (EVO
+Control's mixer button, then the knob) goes fully clockwise, playback only; toward the inputs the dry
+guitar plays beside the amp-sim. Its main volume is also Windows' volume for the device and scales the
+ASIO output with it, so at a volume where Windows sounds are tolerable the guitar plays quieter than on
+the Scarlett, in Ableton as well (owner, 2026-10-16). The app passes a slot's plugin at unity and the
+master stops at 0 dB, so the gap is loudness, not a lost gain stage; turning the other apps down in
+Windows' Volume mixer helped little. Parked: `docs/backlog-taste.md` § Parked ideas.
 
 **Machine verification (Windows):** the push gates are `AGENTS.md`'s; the rig probes, when to run each,
 and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where the rig stands: every rig
@@ -51,7 +57,7 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 
 Install v0.8.5 (published 2026-10-16, CI-built, ASIO SDK 2.3.4 where local builds use 2.3.3; an
 installed v0.8.4 offers it in Help) rather than `pnpm dev:asio`: it has SCOPE and the UPDATE pill.
-Audio Settings: the Audient ASIO driver, buffer 128; the guitar's slot on In 1. Play a real jam with these in it and say what felt off.
+Audio Settings: the Audient ASIO driver, buffer 128; the guitar's slot on In 1; EVO Control's monitor mix fully clockwise. Play a real jam with these in it and say what felt off.
 After the jam, agents note what it tried under "Last play", drop what it answered and refill this
 list from § Not heard yet: at most five, and the docs guard counts them.
 

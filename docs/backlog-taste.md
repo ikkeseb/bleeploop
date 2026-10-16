@@ -72,6 +72,11 @@ added a line.
   its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). A meter per
   track (one lane in 4/4 over another in 3/4; 2026-10-15): more than passing a lane its meter
   (`grid.rs` module doc).
+- **Parked by the owner (2026-10-16): a built-in compressor** right after a slot's plugin, one knob, no
+  look-ahead (no added latency), recorded with the take: the density OTT gives the guitar in Ableton,
+  for the loudness the EVO 4 lacks at a Windows volume the owner tolerates (`STATUS.md`, the EVO 4).
+  The engine's `dsp::compressor` already runs the master limiter. Larger alternative: a plugin chain
+  in a slot (amp-sim → OTT).
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
   first take (it meets the bar math every meter shares, `grid.rs`); more built-in
   synths (they fill layers, they do not compete with
