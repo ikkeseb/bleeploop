@@ -1,6 +1,6 @@
 import { createMemo, type Accessor } from 'solid-js';
 import { clock, looper, type TrackState } from '../state/audio';
-import { laneCue } from './gates';
+import { laneCue, refusalText } from './gates';
 
 /**
  * OWNS: what a lane shows — its display state, the word it reads as, its well message and its count-in
@@ -47,7 +47,10 @@ interface LaneView {
   /** The lane fades out (FADE) and stops where the fade ends. */
   fading: Accessor<boolean>;
   muted: Accessor<boolean>;
-  /** A refused press's reason on this lane (gates.ts `refuseOnLane`), while the cue lasts; else ''. */
+  /** CLEAR is armed on this lane (the engine's `LaneInfo.clearArmed`): its next CLEAR press clears it. */
+  clearArmed: Accessor<boolean>;
+  /** A refused press's reason on this lane (gates.ts `refuseOnLane`), while the cue lasts, or CLEAR's arm
+   * on it (`clearArmed`); else ''. */
   cue: Accessor<string>;
   /** The well's message: the cue, else the pending stop, the armed wait or the AUTO REC listen; else ''. */
   wellMsg: Accessor<string>;
@@ -80,9 +83,14 @@ export function createLaneView(i: number): LaneView {
     if (track().retakePass > 0) return 'TAKE'; // a rolling RETAKE counts its passes
     return d;
   });
+  // CLEAR armed on the lane, as the engine holds it: one arm for every hand, which the engine drops on
+  // its window's end, any other looper press and a device stop.
+  const clearArmed = () => track().clearArmed;
+  // A refused press's reason, or CLEAR's arm.
   const cue = createMemo(() => {
     const c = laneCue();
-    return c !== null && c.track === i ? c.text : '';
+    if (c !== null && c.track === i) return c.text;
+    return clearArmed() ? refusalText('ConfirmClear') : '';
   });
   // Only ARMED/LISTENING and a pending stop carry a well message; EMPTY shows nothing (the lane's record
   // affordance already says "press to record"). A refusal cue outranks every message while it lasts.
@@ -103,5 +111,5 @@ export function createLaneView(i: number): LaneView {
     return '';
   };
   const wellCount = () => (!cue() && countedIn() ? clock.countLeft() : 0);
-  return { displayState, word, stopping, fading, muted, cue, wellMsg, wellCount };
+  return { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount };
 }

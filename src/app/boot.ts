@@ -4,8 +4,7 @@ import { recallRig } from '../ui/state/rig-recall';
 import { setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
 import { platform } from '../platform';
-import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
-import { refusalText, refuseOnLane } from '../ui/looper/gates';
+import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
 import { onEngineEvent, openEngineDevice, restoreEngineShare, startEngineStore, whenDevice } from '../ui/state/engine-store';
 import { session } from '../ui/state/audio';
 import { autosave } from '../session/autosave';
@@ -26,7 +25,10 @@ export function bootEngine(): () => void {
   const stopFeed = startEngineStore();
   const stopRefusals = onEngineEvent((ev) => {
     if (ev.type !== 'Refused') return;
-    refuseOnLane(ev.lane, refusalText(ev.reason), ev.reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined);
+    // CLEAR's first press is no refusal on the lane, which shows the engine's arm itself
+    // (`LaneInfo.clearArmed`): the screen reader hears it.
+    if (ev.reason === 'ConfirmClear') announceLooper(`Track ${ev.lane + 1}: ${refusalText(ev.reason)}`);
+    else refuseOnLane(ev.lane, refusalText(ev.reason));
   });
   let stopAutosave: (() => void) | null = null;
   let disposed = false;

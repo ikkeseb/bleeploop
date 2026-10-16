@@ -55,7 +55,7 @@ pub const MAX_FIXED_BARS: Frame = 32;
 /// Buffer positions a block job moves per rendered frame. A job always starts where a read or write head
 /// will next touch, so at this rate it stays ahead of both; 60 s at 48 kHz takes about 59 ms.
 pub const JOB_RATE: Frame = 1024;
-/// The hands-free CLEAR confirm window (`CONFIRM_WINDOW_MS`).
+/// CLEAR's confirm window, every hand's (`src/ui/looper/shared.ts` `CONFIRM_WINDOW_MS`, ✕ ALL's there).
 const CONFIRM_WINDOW_MS: Frame = 2500;
 /// WIDE COPY's offset: the copy plays this many milliseconds behind its source ([`Looper::copy`]).
 pub const WIDE_MS: Frame = 20;
@@ -469,6 +469,8 @@ pub struct Looper {
     auto_record: bool,
     auto_sensitivity: f64,
     selected: usize,
+    /// A pending CLEAR: its lane, and the first frame its confirm window no longer covers. On the feed as
+    /// each lane's [`LaneInfo::clear_armed`], so the UI shows the engine's arm, never a guess of it.
     clear_armed: Option<(usize, Frame)>,
     /// Per HOLD control: the lane its last accepted press acted on, until its release.
     holds: [Option<usize>; HOLD_CONTROLS],
@@ -582,6 +584,7 @@ impl Looper {
             stop_at: t.stop_at,
             fading: t.fade_from.is_some(),
             retake_pass: rolling.map_or(0, |r| r.pass),
+            clear_armed: self.clear_armed.is_some_and(|(lane, _)| lane == i),
         }
     }
 
@@ -1223,7 +1226,7 @@ impl Looper {
             Action::Clear => {
                 if self.lanes[i].state == LaneState::Empty {
                     refuse(cx, Refusal::NoClear);
-                } else if self.clear_armed.is_some_and(|(lane, at)| lane == i && (cx.now - at) * 1000 < CONFIRM_WINDOW_MS * self.sample_rate as Frame) {
+                } else if self.clear_armed.is_some_and(|(lane, until)| lane == i && cx.now < until) {
                     let wait = self.wait_for(Some(i), false);
                     if wait != Applied::Done {
                         return wait;
@@ -1231,7 +1234,9 @@ impl Looper {
                     self.clear_armed = None;
                     self.clear_now(cx, i);
                 } else {
-                    self.clear_armed = Some((i, cx.now));
+                    // The window's last frame is the last `f` with `(f - now) * 1000 < CONFIRM_WINDOW_MS * rate`.
+                    let window = (CONFIRM_WINDOW_MS * self.sample_rate as Frame + 999) / 1000;
+                    self.clear_armed = Some((i, cx.now + window));
                     refuse(cx, Refusal::ConfirmClear);
                 }
             }
@@ -1638,6 +1643,8 @@ impl Looper {
     /// commits as that edge would have kept it. A RETAKE approval's next take is not armed. Loop-end
     /// stops and block jobs carry on when rendering resumes.
     pub fn punch_out(&mut self, cx: &mut Cx) {
+        // A stopped device ends a pending CLEAR: its window would wait out the stop, and come back armed.
+        self.clear_armed = None;
         let Some(mut rec) = self.rec else { return };
         let i = rec.lane;
         if self.lanes[i].armed || self.lanes[i].auto_armed {
@@ -1991,18 +1998,23 @@ impl Looper {
     // ── Time ───────────────────────────────────────────────────────────────────────────────────────
 
     /// The earliest frame something is scheduled for (a window edge, a counted-in later take's downbeat,
-    /// a loop-end stop, a boundary swap, a job completing); the caller skips what is not after the frame
+    /// a loop-end stop, a boundary swap, a job completing, a pending CLEAR's window ending); the caller skips what is not after the frame
     /// it renders.
     pub fn next_event(&self) -> Option<Frame> {
         let lanes = self.lanes.iter().flat_map(|t| [t.stop_at, t.switch_at]).flatten();
         let rec = self.rec.iter().flat_map(|r| [r.restart, r.start.filter(|_| self.lanes[r.lane].armed), r.end]).flatten();
         let jobs = self.jobs.iter().flatten().map(Job::done_frame);
-        lanes.chain(rec).chain(jobs).min()
+        let clear = self.clear_armed.map(|(_, until)| until);
+        lanes.chain(rec).chain(jobs).chain(clear).min()
     }
 
     /// Run everything scheduled for `cx.now`.
     pub fn events(&mut self, cx: &mut Cx) {
         let now = cx.now;
+        // A pending CLEAR's window ends on its frame, so the feed's `clear_armed` drops on it.
+        if self.clear_armed.is_some_and(|(_, until)| until <= now) {
+            self.clear_armed = None;
+        }
         for i in 0..TRACK_COUNT {
             if self.lanes[i].switch_at.is_some_and(|at| at <= now) {
                 self.switch_audible(i, now);

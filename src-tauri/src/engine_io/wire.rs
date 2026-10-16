@@ -250,6 +250,7 @@ struct LaneInfoDef {
     stop_at: Option<Frame>,
     fading: bool,
     retake_pass: u32,
+    clear_armed: bool,
 }
 
 #[derive(Serialize, Deserialize)]

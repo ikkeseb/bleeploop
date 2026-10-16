@@ -21,7 +21,8 @@ import { dismissLaneCue, refuseOnLane, tapGate } from '../ui/looper/gates';
  * ▶/■ ALL, FADE and the toggles CLICK, END STOP, FIXED, RETAKE, AUTO REC and the three sends) go to the
  * engine as its `Action`: on the lane the engine has selected when the press lands (never the UI's copy
  * of the selection, which a feed frame may not have refreshed yet), or `ActionOn` a named track. The
- * engine gates them, confirms CLEAR per lane, resolves HOLD's lane, switches a toggle from the value it
+ * engine gates them, confirms CLEAR per lane (one arm for the lane's CLR, the key and a pedal alike, on
+ * the feed as the lane's `clearArmed`), resolves HOLD's lane, switches a toggle from the value it
  * has then (so a pedal and a click never undo each other) and names a refusal on the feed
  * (`src/app/boot.ts` puts it on the lane). The rows the UI owns (`GLOBAL`) run their control's facade
  * call, which sends the control's own command, after a `Press` that tells the engine a looper press came

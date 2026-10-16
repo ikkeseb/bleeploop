@@ -251,3 +251,45 @@ fn an_event_with_a_mix_stays_under_twice_the_size_of_one_without() {
     // 56 bytes before `Event::Mix` (the largest variant was `Lane`); a whole `LaneMix` would make it 192.
     assert!(std::mem::size_of::<Event>() <= 112, "{} bytes", std::mem::size_of::<Event>());
 }
+
+/// Whether the last `Lane` the feed heard for `lane` showed CLEAR armed.
+fn fed_clear_armed(rig: &Rig, lane: u8) -> bool {
+    rig.events
+        .iter()
+        .rev()
+        .find_map(|e| match *e {
+            Event::Lane { lane: l, info, .. } if l == lane => Some(info.clear_armed),
+            _ => None,
+        })
+        .expect("the lane was published")
+}
+
+#[test]
+fn a_stops_publish_the_full_ring_refused_goes_out_while_idle() {
+    // A CLEAR armed, then the ring filled with a slider's mixes, then the device stops: the stop
+    // disarms, but its publish finds the ring full, and no block runs to offer it again. The host's
+    // idle publish (`Engine::publish_idle`, the feed's tick while no device runs) does.
+    let mut rig = Rig::with_event_capacity(Opts::default(), 16);
+    rig.set_input(code);
+    rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.idle();
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert!(fed_clear_armed(&rig, 0), "the arm went out");
+    rig.hold_events = true;
+    for k in 0..32 {
+        rig.press(Command::SetVolume(0, 0.5 + k as f32 / 100.0));
+    }
+    assert!(rig.lane(0).clear_armed, "a setting leaves the arm");
+    rig.punch_out();
+    assert!(!rig.lane(0).clear_armed, "the stop disarms");
+    assert!(fed_clear_armed(&rig, 0), "its publish found the ring full: the feed still says armed");
+    assert!(rig.engine.diag().events_dropped > 0);
+    rig.engine.publish_idle();
+    rig.read_events();
+    assert!(!fed_clear_armed(&rig, 0), "offered again while idle, the disarm arrives");
+    let mark = rig.events.len();
+    rig.engine.publish_idle();
+    rig.read_events();
+    assert_eq!(rig.events.len(), mark, "and nothing already delivered goes out twice");
+}

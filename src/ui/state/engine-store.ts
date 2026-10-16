@@ -95,6 +95,8 @@ interface TrackView {
   /** FADE: the lane fades out and stops at `stopAt`. */
   readonly fading: boolean;
   readonly retakePass: number;
+  /** CLEAR is armed on this lane, as the engine holds it (`LaneInfo.clearArmed`): the CLR pill reads SURE?. */
+  readonly clearArmed: boolean;
 }
 
 const TRACK_STATE: Record<LaneState, TrackState> = {
@@ -116,6 +118,7 @@ const EMPTY_INFO: LaneInfo = {
   stopAt: null,
   fading: false,
   retakePass: 0,
+  clearArmed: false,
 };
 
 function trackView(info: LaneInfo): TrackView {
@@ -130,6 +133,7 @@ function trackView(info: LaneInfo): TrackView {
     stopAt: info.stopAt,
     fading: info.fading,
     retakePass: info.retakePass,
+    clearArmed: info.clearArmed,
   };
 }
 
@@ -144,7 +148,8 @@ function sameTrack(a: TrackView, b: TrackView): boolean {
     a.reversed === b.reversed &&
     a.stopAt === b.stopAt &&
     a.fading === b.fading &&
-    a.retakePass === b.retakePass
+    a.retakePass === b.retakePass &&
+    a.clearArmed === b.clearArmed
   );
 }
 

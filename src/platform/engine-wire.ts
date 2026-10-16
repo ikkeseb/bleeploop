@@ -286,6 +286,10 @@ export interface LaneInfo {
   /** FADE: the lane fades out and stops at `stopAt`. */
   fading: boolean;
   retakePass: number;
+  /** CLEAR is armed on this lane: its next CLEAR press clears it. The engine's own arm, which every hand
+   * shares (the lane's CLR, the key, a pedal); it drops it on the window's end, any other looper press
+   * and a device stop. The native engine always sends it; a scripted probe frame may leave it out. */
+  clearArmed: boolean;
 }
 
 /** Rust `lf_engine::Event`, decoded to a `type`-tagged union. */
@@ -478,6 +482,7 @@ function decodeLaneInfo(v: unknown): LaneInfo {
     stopAt: o.stopAt === null ? null : frame(o.stopAt, 'LaneInfo.stopAt'),
     fading: bool(o.fading, 'LaneInfo.fading'),
     retakePass: int(o.retakePass, 'LaneInfo.retakePass'),
+    clearArmed: o.clearArmed === undefined ? false : bool(o.clearArmed, 'LaneInfo.clearArmed'),
   };
 }
 

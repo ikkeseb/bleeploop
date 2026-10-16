@@ -9,10 +9,17 @@
  *   sends `SelectTrack`, Space `Action RecDub`, Backspace `Action Undo`, the arrows and PageUp/PageDown
  *   `Action PrevTrack`/`NextTrack`, Delete `Action Clear`, each once; the selection the UI shows is the
  *   feed's `Selected` (5,1,5,1,2,1,2,3 as the engine wraps it). An engine refusal shows its reason on its
- *   lane only and leaves by itself (1.6 s); CLEAR's `ConfirmClear` shows "press again to clear" on its lane
- *   for the confirm window (2.5 s); the next looper press (an arrow, a digit, the second Delete) takes the
- *   cue down at once; a Delete past the window finds no cue, and the engine's answer shows it again; the
- *   engine's `Cleared` empties the lane with no cue left.
+ *   lane only and leaves by itself (1.6 s).
+ * - CLEAR, ONE ARM FOR EVERY HAND, the engine's (`LaneInfo.clearArmed` on the feed): the lane's CLR pill, the
+ *   Delete key and a learned pedal (native MIDI's `pressed`, its CLEAR sent natively) each press the
+ *   engine's CLEAR and never send an outright `Clear`; one press leaves the loop in place; the pill reads
+ *   SURE? and the well "press again to clear" exactly while the feed's lane says `clearArmed`, whichever
+ *   hand armed it: no UI timer ends it early (it outlasts 2.5 s while the engine still says armed), a
+ *   pedal's `pressed` does not take it down, a `ConfirmClear` alone (a late answer) raises nothing, and it
+ *   goes when the lane says so; the engine's `Cleared` empties the lane. Either hand confirms what the
+ *   other armed (mouse then key, key then mouse, pedal then mouse, mouse then pedal); CLR's confirming
+ *   click sends no `SelectTrack` before it (a selection disarms the engine), while REC/DUB on an armed
+ *   lane still selects it first.
  * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", with its SENS read-out live: it opens
  *   the sensitivity popover, whose slider takes keys, and Escape hands focus back to the read-out (AUTO
  *   sends the engine's AUTO REC toggle, and the button shows the `Toggled` the fake answers); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
@@ -30,6 +37,7 @@
  * Run: pnpm probe jam-keys
  */
 import assert from 'node:assert/strict';
+import { isDeepStrictEqual } from 'node:util';
 import { probe } from '../harness/probe.ts';
 
 const RATE = 48000;
@@ -295,37 +303,123 @@ await probe(async ({ open }) => {
   assert.deepEqual(navSent, ['PrevTrack', 'NextTrack', 'PrevTrack', 'NextTrack', 'NextTrack', 'PrevTrack', 'NextTrack', 'NextTrack'], 'the arrow and page keys step the selection');
   assert.deepEqual(navSeen, [5, 1, 5, 1, 2, 1, 2, 3], 'the selection shown is the one the engine wrapped to');
 
-  // ── KEYS: CLEAR is Delete, guarded by the engine; the cue is the UI's ────────────────────────────
-  await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 2, feedback: 1 } }, laneEvent(2, looping('Stopped'))] });
-  const confirm = { events: [{ Refused: { frame: BAR, lane: 2, reason: 'ConfirmClear' } }] };
-  const laneNow = async () => ({ state: await lanes.nth(2).getAttribute('data-state'), cue: (await cues())[2] });
-  assert.deepEqual(await press('3'), [{ SelectTrack: 2 }]);
-  await emit({ events: [{ Selected: { frame: BAR, lane: 2 } }] });
-  assert.deepEqual(await press('Delete'), [{ Action: 'Clear' }], "Delete sends the engine's CLEAR");
-  await emit(confirm);
-  const oneDelete = await laneNow();
-  assert.ok(oneDelete.state !== 'empty' && oneDelete.cue === 'press again to clear', `one Delete does not clear; the lane says to press again (${JSON.stringify(oneDelete)})`);
-  assert.deepEqual(await press('ArrowDown'), [{ Action: 'NextTrack' }]);
-  assert.equal((await laneNow()).cue, '', 'an arrow key between the two Deletes takes the cue down');
-  await press('ArrowUp');
-  assert.deepEqual(await press('Delete'), [{ Action: 'Clear' }]);
-  await emit(confirm);
-  assert.equal((await laneNow()).cue, 'press again to clear', 'the engine asks again after the arrow');
-  assert.deepEqual(await press('1'), [{ SelectTrack: 0 }]);
-  assert.equal((await laneNow()).cue, '', 'a digit key between the two Deletes takes the cue down');
-  await press('3');
-  await press('Delete');
-  const confirmLife = await cueLife(confirm);
-  console.log(`the CLEAR cue lived ${confirmLife.toFixed(0)} ms`);
-  assert.ok(confirmLife > 2400 && confirmLife < 4500, `the CLEAR cue lasts the 2.5 s confirm window, then goes (${confirmLife.toFixed(0)} ms)`);
-  assert.deepEqual(await press('Delete'), [{ Action: 'Clear' }], 'a Delete after the confirm window goes to the engine');
-  await emit(confirm);
-  const lateDelete = await laneNow();
-  assert.ok(lateDelete.state !== 'empty' && lateDelete.cue === 'press again to clear', 'a Delete after the confirm window arms again instead of clearing');
-  assert.deepEqual(await press('Delete'), [{ Action: 'Clear' }]);
-  assert.equal((await laneNow()).cue, '', 'the second Delete takes the cue down at once');
-  await emit({ events: [{ Cleared: { frame: BAR, lane: 2 } }, laneEvent(2, lane('Empty'))] });
-  const doubleDelete = await laneNow();
-  assert.deepEqual(doubleDelete, { state: 'empty', cue: '' }, 'two Deletes in a row clear the track, no cue left');
+  // ── CLEAR: one arm for the pill, the key and a pedal, the engine's; one press never clears ─────────
+  // The fake judges no CLEAR: each step scripts the engine's answer (a first press's `ConfirmClear` and
+  // the lane's `clearArmed`, a confirming one's `Cleared`), as lf-engine's tests have the engine give it
+  // (`tests/actions.rs`: `a_pedals_clear_confirms_per_lane`, and the feed's flag following the arm, its
+  // window, a press and a device stop). What is proved here is the UI's half: what each hand sends, and
+  // that the lane shows the feed's arm and nothing else.
+  const L = 3;
+  const pill = lanes.nth(L).locator('.lp-pb--clr');
+  const midi = (ev) => page.evaluate((e) => window.__lf.native.midiEmit(e), ev);
+  const playingLane = (clearArmed) => laneEvent(L, looping('Playing', { clearArmed }));
+  const armAnswer = { events: [{ Refused: { frame: BAR, lane: L, reason: 'ConfirmClear' } }, playingLane(true)] };
+  const disarmAnswer = { events: [playingLane(false)] };
+  const clearedAnswer = { events: [{ Cleared: { frame: BAR, lane: L } }, laneEvent(L, lane('Empty'))] };
+  const clearPress = (c) => c.Action === 'Clear' || (c.ActionOn?.[0] === L && c.ActionOn[1] === 'Clear');
+  const shown = async () => ({
+    state: await lanes.nth(L).getAttribute('data-state'),
+    pill: (await pill.textContent()).trim(),
+    cue: (await cues())[L],
+  });
+  const IDLE = { state: 'play', pill: 'CLR', cue: '' };
+  const ARMED = { state: 'play', pill: 'SURE?', cue: 'press again to clear' };
+  const CLEARED = { state: 'empty', pill: 'CLR', cue: '' };
+  /** Wait until the lane shows `want`, or fail with what it shows. */
+  const shows = async (want, what) => {
+    const t0 = Date.now();
+    let now = await shown();
+    while (!isDeepStrictEqual(now, want) && Date.now() - t0 < 2000) {
+      await page.waitForTimeout(20);
+      now = await shown();
+    }
+    assert.deepEqual(now, want, what);
+  };
+  /** One press by `hand`: what it sent the engine. */
+  const hands = {
+    mouse: async () => {
+      await clearSent();
+      await pill.click();
+      await sentAtLeast(1);
+      await page.waitForTimeout(50);
+      return sent();
+    },
+    key: async () => press('Delete'),
+    pedal: async () => {
+      await clearSent();
+      await midi('pressed');
+      await page.waitForTimeout(50);
+      return sent();
+    },
+  };
+  /** Press with `hand` and check it sent one engine CLEAR (a pedal's is native: none) and no outright one. */
+  const pressClear = async (hand) => {
+    const out = await hands[hand]();
+    assert.ok(!out.some((c) => c.Clear !== undefined || c === 'ClearAll'), `${hand}: an outright clear went out (${JSON.stringify(out)})`);
+    assert.equal(out.filter(clearPress).length, hand === 'pedal' ? 0 : 1, `${hand}: one press is one engine CLEAR (${JSON.stringify(out)})`);
+    return out;
+  };
+  const holdLoop = async () => {
+    await emit({ events: [playingLane(false)] });
+    await shows(IDLE, 'the lane holds its loop, CLR unarmed');
+  };
+  await holdLoop();
+  assert.deepEqual(await press('4'), [{ SelectTrack: L }]);
+  await emit({ events: [{ Selected: { frame: BAR, lane: L } }] });
 
+  // Each hand alone: one press arms and never clears; the arm lasts as long as the engine says (no UI
+  // timer, no pedal `pressed`, no late answer moves it); a second press clears.
+  for (const hand of ['mouse', 'key', 'pedal']) {
+    await pressClear(hand);
+    await shows(IDLE, `${hand}: one press, before the engine answers, leaves the loop and shows no arm`);
+    await emit(armAnswer);
+    await shows(ARMED, `${hand}: the engine's arm shows (SURE?, "press again to clear") and the loop stays`);
+    await page.waitForTimeout(2700);
+    await shows(ARMED, `${hand}: no UI timer ends the arm while the engine still holds it`);
+    await midi('pressed');
+    await page.waitForTimeout(50);
+    await shows(ARMED, `${hand}: a pedal's pressed notice does not take the engine's arm down`);
+    await emit(disarmAnswer);
+    await shows(IDLE, `${hand}: the arm goes when the engine says (its window ended), the loop still there`);
+    await emit({ events: [{ Refused: { frame: BAR, lane: L, reason: 'ConfirmClear' } }] });
+    await page.waitForTimeout(50);
+    await shows(IDLE, `${hand}: a ConfirmClear alone (a late answer) raises no arm`);
+    await pressClear(hand);
+    await emit(armAnswer);
+    await shows(ARMED, `${hand}: the next press is the engine's to arm again`);
+    await pressClear(hand);
+    await shows(ARMED, `${hand}: the confirming press guesses nothing before the engine answers`);
+    await emit(clearedAnswer);
+    await shows(CLEARED, `${hand}: two presses clear the lane`);
+    await holdLoop();
+    console.log(`CLEAR by ${hand}: one press armed, the arm followed the feed only, two presses cleared`);
+  }
+
+  // Cross hands: the arm is the engine's one, so either confirms what the other armed.
+  for (const [first, second] of [
+    ['mouse', 'key'],
+    ['key', 'mouse'],
+    ['pedal', 'mouse'],
+    ['mouse', 'pedal'],
+  ]) {
+    await pressClear(first);
+    await emit(armAnswer);
+    await shows(ARMED, `${first} arms`);
+    const out = await pressClear(second);
+    if (second === 'mouse') assert.deepEqual(out, [{ ActionOn: [L, 'Clear'] }], 'a confirming click sends no SelectTrack first, which would disarm the engine');
+    await emit(clearedAnswer);
+    await shows(CLEARED, `armed by ${first}, confirmed by ${second}: the lane clears`);
+    await holdLoop();
+    console.log(`CLEAR armed by ${first}, confirmed by ${second}`);
+  }
+
+  // REC/DUB on an armed lane still selects it, so the keys follow the take there; only CLR's confirming
+  // click skips the selection.
+  await emit(armAnswer);
+  await shows(ARMED, 'armed again');
+  await clearSent();
+  await lanes.nth(L).locator('.lp-core').click();
+  assert.deepEqual(await sentAtLeast(2), [{ SelectTrack: L }, { RecDub: L }], 'REC/DUB on the armed lane selects it before its press');
+  await emit(disarmAnswer);
+  await shows(IDLE, "the engine's answer to that press drops the arm");
 });

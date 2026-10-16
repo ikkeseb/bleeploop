@@ -69,6 +69,7 @@ const EMPTY_LANE: LaneInfo = LaneInfo {
     stop_at: None,
     fading: false,
     retake_pass: 0,
+    clear_armed: false,
 };
 
 /// What the UI was last sent of a lane's waveform.
@@ -173,6 +174,7 @@ impl Feed {
     /// is built (`seq` stays). The reset that ends the hold, or a new subscriber's, reads the status, the
     /// meter and the waveforms afresh.
     pub(crate) fn tick_held(&mut self) {
+        self.host.publish_if_idle();
         self.drain();
         self.scope(false);
         self.held_device.extend(self.host.take_device_events());
@@ -184,6 +186,8 @@ impl Feed {
     /// Read everything once; the frame to send, if anything changed or the anchor is due. `reset`: a
     /// new subscriber or the end of a hold: the frame carries the whole state.
     pub(crate) fn tick(&mut self, mut reset: bool) -> Option<FeedFrame> {
+        // A stopped engine renders no block that would offer again what its full ring refused.
+        self.host.publish_if_idle();
         reset |= self.drain();
         let mut device = std::mem::take(&mut self.held_device);
         device.extend(self.host.take_device_events());

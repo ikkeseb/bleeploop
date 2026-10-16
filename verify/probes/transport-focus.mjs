@@ -17,8 +17,9 @@
  *   the tempo (`SetBpm`), never a looper action;
  * - Enter commits a typed BPM (`SetBpm`) with an AUTO REC arm on the feed, and drives no looper action
  *   though the field unmounts under the key;
- * - a held Enter on a lane's CLR and on ✕ ALL sends no clear (a key repeat is not the second press), and a
- *   held Tab still moves on past them; a fresh Enter after the release sends it once;
+ * - a held Enter on ✕ ALL sends no clear, and on a lane's CLR one engine CLEAR (the press that arms; a key
+ *   repeat is not the second press), and a held Tab still moves on past them; a fresh Enter after the
+ *   release sends one more (✕ ALL's clear, CLR's confirming CLEAR);
  * - Enter on a Tab-focused lane core sends `SelectTrack` before its `RecDub`, as a pointer press does;
  * - a select the pointer opened (the slot's input, the FX drawer's division) gives the keys back however
  *   its list closed (a new value, the same value, dismissed): Space and ArrowDown send REC/DUB and NEXT
@@ -197,16 +198,19 @@ await probe(async ({ open }) => {
   assert.ok(!afterCommit.some((c) => c.Action !== undefined || c.ActionOn !== undefined), 'Enter in the BPM field also drove the looper');
 
   // 5. A held Enter on a CLEAR control confirms nothing: a key repeat is not a second press. A release
-  //    and a fresh press is, and sends the clear once.
+  //    and a fresh press is. ✕ ALL arms in the UI, so its held Enter sends nothing and the fresh one the
+  //    clear; a lane's CLR is the engine's CLEAR (it arms and confirms: `LaneInfo.clearArmed`), so each
+  //    press sends one, never an outright `Clear`.
   const playing = { ...lane('Playing'), length: 96000, canReverse: true };
   const holdsLoop = () => page.evaluate((info) => window.__lf.native.emit({
     seq: 4, reset: false,
     events: [{ Lane: { frame: 0, lane: 0, info } }, { Transport: { frame: 0, master: 96000, bpm: 120, locked: true } }],
   }), playing);
   await holdsLoop();
-  for (const [name, isClear] of [
-    ['Track 1 clear', (c) => c.Clear !== undefined],
-    ['Clear all tracks', (c) => c === 'ClearAll'],
+  const laneClear = (c) => c.ActionOn?.[0] === 0 && c.ActionOn[1] === 'Clear';
+  for (const [name, isClear, onHold] of [
+    ['Track 1 clear', laneClear, 1],
+    ['Clear all tracks', (c) => c === 'ClearAll', 0],
   ]) {
     const control = page.getByRole('button', { name, exact: true });
     await control.focus();
@@ -218,10 +222,11 @@ await probe(async ({ open }) => {
     await page.waitForTimeout(100);
     const held = await sent();
     console.log(`sent after a held Enter on ${name}`, JSON.stringify(held));
-    assert.equal(held.filter(isClear).length, 0, `a held Enter on ${name} confirmed the clear`);
+    assert.equal(held.filter(isClear).length, onHold, `a held Enter on ${name} was not one press`);
     await page.keyboard.press('Enter');
     await page.waitForTimeout(100);
-    assert.equal((await sent()).filter(isClear).length, 1, `a second Enter on ${name} did not clear once`);
+    assert.equal((await sent()).filter(isClear).length, onHold + 1, `a second Enter on ${name} was not one more press`);
+    assert.ok(!(await sent()).some((c) => c.Clear !== undefined), `${name} sent an outright clear`);
     // A held Tab that reaches it moves on past it (the guard is Enter's only): from the control before
     // it, the first Tab lands on it and the repeat must leave.
     await control.focus();
