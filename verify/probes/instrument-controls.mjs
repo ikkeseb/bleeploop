@@ -4,8 +4,10 @@
  * (host.web.ts served with `available: true`): native MIDI's port list (scripted with
  * `__lf.native.midiEmit`) reads in the Audio Settings diagnostics and the command bar's status lamp, a port
  * another program holds says so, and LEARN is enabled only while a port is open; both empty native slots
- * show the install hint, the keyboard octave survives a placement remount, and the slot volume (a
- * plugin's output gain) honors the unity detent under keyboard steps and slider input. The plugin host and
+ * show the install hint, the keyboard octave survives a placement remount, the slot volume (a
+ * plugin's output gain) honors the unity detent under keyboard steps and slider input, and with one
+ * plugin file in both slots, a second EDITOR pressed while the first open is in flight is refused (one
+ * open reaches the host). The plugin host and
  * native MIDI are simulated in the page; no native or hardware claim (which port Windows lets the app open
  * is native MIDI's, `src-tauri/src/engine_io/midi/ports.rs`). Run: pnpm probe instrument-controls
  */
@@ -115,4 +117,32 @@ await probe(async ({ open }) => {
     1,
     'approaching unity must retain the soft detent',
   );
+
+  // Two editor opens racing: the same plugin file in both slots shares one GUI runtime, so only the
+  // first open may run. A's open is held in flight while B's EDITOR is pressed: B is refused at once,
+  // the host sees one open, and one editor results once A's lands.
+  await page.evaluate(async () => {
+    const { platform } = await import('/src/platform/index.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
+    const descriptor = instrument.slotPlugins()[0];
+    await instrument.selectPlugin(1, descriptor);
+    window.__opens = [];
+    let land;
+    window.__landOpen = () => land();
+    const held = new Promise((resolve) => (land = resolve));
+    platform.pluginHost.openEditor = async (slot) => {
+      window.__opens.push(slot);
+      await held;
+    };
+  });
+  const editor = (letter, pressed) => page.getByRole('button', { name: `Editor for slot ${letter}`, exact: true, ...(pressed === undefined ? {} : { pressed }) });
+  await editor('B').waitFor();
+  await editor('A').click();
+  await page.waitForFunction(() => window.__opens.length === 1);
+  await editor('B').click();
+  await page.locator('.toast', { hasText: 'Could not open a second editor for this plugin.' }).waitFor({ timeout: 5000 });
+  await page.evaluate(() => window.__landOpen());
+  await editor('A', true).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__opens), [0], 'the host saw one editor open: slot A, which pressed first');
+  assert.equal(await editor('B').getAttribute('aria-pressed'), 'false', "slot B's racing open was refused");
 });

@@ -249,9 +249,18 @@ export function editorAffinityBlocker(slot: 0 | 1, path: string): string | null 
   return owner !== undefined && owner !== slot ? `slot ${owner === 0 ? 'A' : 'B'}` : null;
 }
 
-/** Record a successful editor open — first opener becomes the path's editor owner. */
-export function noteEditorOpened(slot: 0 | 1, path: string): void {
-  if (!editorAffinity.has(path)) editorAffinity.set(path, slot);
+/**
+ * Reserve `path`'s editor for `slot` before its open is awaited, so a second open racing it (the other
+ * slot's, or one during a slot change) is refused by `editorAffinityBlocker`. The first opener becomes the
+ * path's editor owner. Returns the release for a failed open: it drops the entry only when this call
+ * took it and it still names `slot`.
+ */
+export function reserveEditor(slot: 0 | 1, path: string): () => void {
+  if (editorAffinity.has(path)) return () => {};
+  editorAffinity.set(path, slot);
+  return () => {
+    if (editorAffinity.get(path) === slot) editorAffinity.delete(path);
+  };
 }
 
 /** Drop a path's affinity when NO slot holds it anymore (the module actually unloaded). */
