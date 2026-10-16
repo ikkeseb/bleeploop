@@ -264,7 +264,7 @@ async function runPhase(phase: string | undefined): Promise<void> {
   }
   if (phase === 'skip') {
     return nothingRestored((shown) =>
-      shown.length === 1 && shown[0] === 'Plugins not restored x1' ? `skipped: nothing restored, one toast "${shown[0]}"` : null);
+      shown.length === 1 && shown[0] === 'Could not restore the plugins. Pick a plugin again to load it. x1' ? `skipped: nothing restored, one toast "${shown[0]}"` : null);
   }
   if (phase === 'after') return nothingRestored((shown) => (shown.length === 0 ? 'clean: nothing restored, no toast' : null));
   log(`FAIL unknown phase "${phase}"`);

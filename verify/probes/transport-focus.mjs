@@ -258,8 +258,8 @@ await probe(async ({ open }) => {
     await devices.refreshInputDevices();
     host.available = false;
   });
-  await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption('off');
-  const inputPick = page.getByRole('combobox', { name: 'Input for slot 1', exact: true });
+  await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption('off');
+  const inputPick = page.getByRole('combobox', { name: 'Input for slot A', exact: true });
   const divisionPick = page.locator('.lp-drawer .fxp-param__select').first();
   const revealDivision = async () => {
     await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
@@ -309,7 +309,7 @@ await probe(async ({ open }) => {
   // A keyboard user keeps the select: from a known value, Tab onto it and an arrow there picks the next
   // one, no NEXT TRACK goes out, and the focus stays for the next.
   await inputPick.selectOption('0');
-  await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).focus();
+  await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).focus();
   for (let i = 0; i < 6 && !(await inputPick.evaluate((el) => document.activeElement === el)); i++) await page.keyboard.press('Tab');
   assert.ok(await inputPick.evaluate((el) => document.activeElement === el), 'Tab from the slot source did not reach the slot input select');
   await clearSent();

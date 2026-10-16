@@ -85,7 +85,7 @@ await probe(async ({ open }) => {
     window.__paramProbe = { state, instrument, descriptors };
   });
 
-  await page.getByRole('button', { name: /Plugin parameters for slot 1/ }).click();
+  await page.getByRole('button', { name: /Plugin parameters for slot A/ }).click();
   const alpha = page.locator('input[aria-label="Alpha"]');
   const beta = page.locator('input[aria-label="Beta"]');
   await alpha.waitFor();

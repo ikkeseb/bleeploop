@@ -100,10 +100,10 @@ await probe(async ({ browser, open }) => {
   /** What the UI sent native MIDI's router (note targets, notes), each as JSON. */
   const inputSent = () => page.evaluate(() => window.__lf.native.inputSent.map((c) => JSON.stringify(c)));
   const settle = () => page.waitForTimeout(60);
-  const picker = (slot) => page.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
-  const input = (slot) => page.getByRole('combobox', { name: `Input for slot ${slot}`, exact: true });
-  const volume = (slot) => page.getByRole('slider', { name: `Volume for slot ${slot}`, exact: true });
-  const live = (slot) => page.getByRole('button', { name: `Live input for slot ${slot}`, exact: true });
+  const picker = (slot) => page.getByRole('combobox', { name: `Source for slot ${'AB'[slot - 1]}`, exact: true });
+  const input = (slot) => page.getByRole('combobox', { name: `Input for slot ${'AB'[slot - 1]}`, exact: true });
+  const volume = (slot) => page.getByRole('slider', { name: `Volume for slot ${'AB'[slot - 1]}`, exact: true });
+  const live = (slot) => page.getByRole('button', { name: `Live input for slot ${'AB'[slot - 1]}`, exact: true });
 
   const opened = await page.evaluate(() => window.__lf.native.opened[0]);
   console.log('opened', JSON.stringify(opened));
@@ -127,7 +127,7 @@ await probe(async ({ browser, open }) => {
   assert.deepEqual(listing, [
     'Off',
     { group: 'Built-in', options: ['Lead', 'Bass', 'Pad', 'Piano', 'Organ', 'Drum'] },
-    { group: 'Plugins', options: ['Probe Amp Sim (vst3)'] },
+    { group: 'Plugins', options: ['Probe Amp Sim (VST3)'] },
   ]);
   assert.equal(await input(1).count(), 0, 'a synth takes no input: no input pick');
 
@@ -156,9 +156,9 @@ await probe(async ({ browser, open }) => {
   assert.deepEqual(picks, ['[0,0]', '[1,1]'], 'each input pick switches its own slot');
   await clearSent();
   await live(1).click();
-  await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+  await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
   await live(2).click();
-  await page.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed: true }).waitFor();
+  await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor();
   const liveSent = await sent();
   assert.deepEqual(liveSent.filter((c) => c.startsWith('{"SetSlotLive"')), ['{"SetSlotLive":[0,true]}', '{"SetSlotLive":[1,true]}'],
     'going live on slot B leaves slot A live');
@@ -175,8 +175,8 @@ await probe(async ({ browser, open }) => {
   await volume(2).fill('0.7');
   await settle();
   assert.deepEqual(await sent(), ['{"SetInstrumentGain":["pad",0.7]}'], "a synth slot's volume is the synth's level");
-  await picker(2).selectOption({ label: 'Probe Amp Sim (vst3)' });
-  await page.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed: true }).waitFor(); // the effect auto-starts
+  await picker(2).selectOption({ label: 'Probe Amp Sim (VST3)' });
+  await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor(); // the effect auto-starts
   await clearSent();
   await volume(2).fill('0.8');
   await settle();
@@ -206,8 +206,8 @@ await probe(async ({ browser, open }) => {
     const context = await browser.newContext();
     const { page: p, consumeConsoleErrors } = await open({ context, viewport: { width: 1280, height: 800 }, init: (pg) => engineInit(pg) });
     await boot(p);
-    const pk = (slot) => p.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
-    const inp = (slot) => p.getByRole('combobox', { name: `Input for slot ${slot}`, exact: true });
+    const pk = (slot) => p.getByRole('combobox', { name: `Source for slot ${'AB'[slot - 1]}`, exact: true });
+    const inp = (slot) => p.getByRole('combobox', { name: `Input for slot ${'AB'[slot - 1]}`, exact: true });
     const saved = () => p.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices') ?? '{}').slotInputChannels ?? null);
     const sentNow = () => p.evaluate(() => window.__lf.native.sent.map((c) => JSON.stringify(c)));
     const clear = () => p.evaluate(() => void (window.__lf.native.sent.length = 0));
@@ -229,7 +229,7 @@ await probe(async ({ browser, open }) => {
     assert.deepEqual(await saved(), ['', '1'], 'a pick the device lacks is saved as Auto; the other stays');
     assert.equal(await inp(1).inputValue(), '', 'and the slot shows Auto');
     const autoText = (slot, text) => p.waitForFunction(([s, t]) =>
-      document.querySelector(`[aria-label="Input for slot ${s}"] option[value=""]`)?.textContent === t, [slot, text], { timeout: 2000 })
+      document.querySelector(`[aria-label="Input for slot ${'AB'[s - 1]}"] option[value=""]`)?.textContent === t, [slot, text], { timeout: 2000 })
       .then(() => true, () => false);
     assert.ok(await autoText(1, 'Auto · In 2'), "Auto names the input the engine reads for the slot (its status)");
     assert.ok(await autoText(2, 'Auto'), "a slot with a pick of its own keeps Auto plain: the status reads the pick's channel");
@@ -275,8 +275,8 @@ await probe(async ({ browser, open }) => {
     // 2. GO LIVE pressed (the named action) while a tone reload holds live slot A. Under the amp, A plays
     // a synth, and B is Off (takes input): the press must still reach A, whose plugin the reload removed.
     await pk(1).selectOption('lead');
-    await pk(1).selectOption({ label: 'Probe Amp Sim (vst3)' });
-    await p.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+    await pk(1).selectOption({ label: 'Probe Amp Sim (VST3)' });
+    await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     const duringReload = (presses) => p.evaluate(async (presses) => {
       const { platform } = await import('/src/platform/index.ts');
       const instrument = await import('/src/ui/state/instrument.ts');
@@ -300,8 +300,8 @@ await probe(async ({ browser, open }) => {
     console.log('one press during the reload', JSON.stringify(stopped));
     assert.deepEqual(stopped, { result: 'reloaded', live: false, sent: ['{"SetSlotLive":[0,false]}'] },
       'a stop pressed during the reload wins: the reload does not resume GO LIVE');
-    await p.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).click();
-    await p.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+    await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).click();
+    await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     const twice = await duringReload(2);
     console.log('two presses during the reload', JSON.stringify(twice));
     assert.equal(twice.live, true, 'stop then go during the reload leaves the slot live');
@@ -309,15 +309,15 @@ await probe(async ({ browser, open }) => {
 
     // 5. The plugin's level is kept per slot and plugin.
     await clear();
-    await p.getByRole('slider', { name: 'Volume for slot 1', exact: true }).fill('0.8');
+    await p.getByRole('slider', { name: 'Volume for slot A', exact: true }).fill('0.8');
     await p.waitForTimeout(60);
     const levelKey = `lf.pluginGain.0.${JSON.stringify(['vst3', AMP.path, AMP.id])}`;
     assert.equal(await p.evaluate((k) => localStorage.getItem(k), levelKey), '0.8', 'the plugin level is saved per slot and plugin');
     await pk(1).selectOption('lead');
     await p.waitForFunction(() => !window.__lf.slotPlugins()[0]);
     await clear();
-    await pk(1).selectOption({ label: 'Probe Amp Sim (vst3)' });
-    await p.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+    await pk(1).selectOption({ label: 'Probe Amp Sim (VST3)' });
+    await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     assert.ok((await sentNow()).includes('{"SetSlotGain":[0,0.8]}'), `loaded again, it comes back at its level: ${await sentNow()}`);
 
     // 4. A pick whose unload fails is not saved; one that unloads is.
@@ -363,13 +363,13 @@ await probe(async ({ browser, open }) => {
     const context = await browser.newContext();
     const { page: p } = await open({ context, viewport: { width, height }, init: (pg) => engineInit(pg) });
     await boot(p);
-    const pk = (slot) => p.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
+    const pk = (slot) => p.getByRole('combobox', { name: `Source for slot ${'AB'[slot - 1]}`, exact: true });
     await pk(1).selectOption('off');
-    await p.getByRole('combobox', { name: 'Input for slot 1', exact: true }).selectOption('1');
-    await p.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).click();
-    await pk(2).selectOption({ label: 'Probe Amp Sim (vst3)' });
-    await p.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed: true }).waitFor();
-    await p.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+    await p.getByRole('combobox', { name: 'Input for slot A', exact: true }).selectOption('1');
+    await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).click();
+    await pk(2).selectOption({ label: 'Probe Amp Sim (VST3)' });
+    await p.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor();
+    await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     await p.evaluate(() => document.activeElement?.blur());
     await p.mouse.move(width - 2, height - 2); // no hover on the caps
     await p.waitForTimeout(200);

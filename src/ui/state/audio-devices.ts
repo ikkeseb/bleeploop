@@ -82,7 +82,7 @@ export async function refreshInputDevices(): Promise<boolean> {
     return true;
   } catch (e) {
     console.error('[instrument] list input devices failed', e);
-    notifyError('Could not list audio inputs', e);
+    notifyError('Could not list the audio inputs. Reopen Audio Settings to try again.', e);
     return false;
   }
 }
@@ -98,7 +98,7 @@ export async function refreshOutputDevices(): Promise<boolean> {
     return true;
   } catch (e) {
     console.error('[instrument] list output devices failed', e);
-    notifyError('Could not list audio outputs', e);
+    notifyError('Could not list the audio outputs. Reopen Audio Settings to try again.', e);
     return false;
   }
 }
@@ -186,7 +186,7 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
     });
   } catch (e) {
     console.error('[instrument] ASIO probe failed', e);
-    notifyError('Could not start the ASIO driver', e);
+    notifyError('Could not start the ASIO driver. Press RETRY ASIO in Audio Settings.', e);
     report = { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
     setAsioStatus(report);
   }
@@ -240,7 +240,7 @@ export async function refreshAsioDrivers(): Promise<boolean> {
     return true;
   } catch (e) {
     console.error('[instrument] list ASIO drivers failed', e);
-    notifyError('Could not list the ASIO drivers', e);
+    notifyError('Could not list the ASIO drivers. Reopen Audio Settings to try again.', e);
     return false;
   }
 }
@@ -285,7 +285,7 @@ export async function initAudioDeviceSettings(): Promise<void> {
     if (saved.asioEnabled && status.status === 'unprobed') await probeAsio(false);
   } catch (e) {
     console.error('[instrument] ASIO status query failed', e);
-    notifyError('Could not check ASIO availability', e);
+    notifyError('Could not check whether ASIO is available. Restart BleepLoop to check again.', e);
   }
 }
 

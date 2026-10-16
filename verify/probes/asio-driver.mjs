@@ -75,11 +75,11 @@ await probe(async ({ open }) => {
     return out;
   });
   console.log('failed open', JSON.stringify(failed));
-  assert.deepEqual(failed.notes, ['No audio device open — see Audio Settings', 'No audio device open — see Audio Settings']);
+  assert.deepEqual(failed.notes, ['No audio device open. See Audio Settings.', 'No audio device open. See Audio Settings.']);
   assert.equal(failed.rescan.disabled, true);
   assert.match(failed.rescan.title, /no audio device is open/);
   assert.equal(failed.engine, 'no device open: fake: Buffer size 64 is not in the supported range 512..=512');
-  assert.ok(failed.toasts.some((t) => t.startsWith("Couldn't open the audio device: fake: Buffer size 64")), 'the open keeps its toast');
+  assert.ok(failed.toasts.some((t) => t.startsWith('Could not open the audio device.') && t.includes(': fake: Buffer size 64')), 'the open keeps its toast');
   assert.equal(consumeConsoleErrors('[engine] device open failed Error: fake: Buffer size 64').length, 1, 'and its release-log line');
 
   // 2. An ASIO host appears (scripted): the probe, then the saved device opens on it.
@@ -215,7 +215,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(refused.slice(0, 4), ['switch:ASIO4ALL v2', 'close', 'open:Asio:64', 'open:Asio:64']);
   const after = await readSettings();
   const toasts = await page.evaluate(() => window.__lf.notify.toasts().map((t) => t.message));
-  assert.ok(toasts.includes("Couldn't switch the ASIO driver"), 'the refusal toasts');
+  assert.ok(toasts.includes('Could not switch the ASIO driver. Pick it again, or another one.'), 'the refusal toasts');
   assert.equal(consumeConsoleErrors('[engine] ASIO driver switch failed').length, 1, 'and logs');
   assert.equal(after.driver.value, 'Yamaha Steinberg USB ASIO');
   assert.equal(after.saved.asioDriver, 'Yamaha Steinberg USB ASIO');
@@ -253,7 +253,7 @@ await probe(async ({ open }) => {
     { runs: 48000, shown: 'Yamaha Steinberg USB ASIO', saved: 'Yamaha Steinberg USB ASIO' },
     'the device runs on the driver that ran, and the pick says so',
   );
-  assert.ok(afterSave.toasts.includes('The device did not switch'), 'the failed save toasts');
+  assert.ok(afterSave.toasts.includes('Could not switch the audio device. Try again, or export the loops first.'), 'the failed save toasts');
   assert.equal(consumeConsoleErrors('[engine] the recovery save before a rate change failed').length, 1, 'and logs');
   await page.evaluate(async () => {
     const { autosave } = await import('/src/session/autosave.ts');

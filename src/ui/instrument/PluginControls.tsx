@@ -3,6 +3,7 @@ import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
 import { editorAffinityBlocker, noteEditorOpened, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
+import { slotLetter } from '../state/slot-tones';
 import { liveShown, toggleLive } from './live';
 import './plugin-controls.css';
 
@@ -62,9 +63,8 @@ export function PluginBar(props: {
         if (quiet) return;
         setEditorError(`editor owned by ${owner}`);
         notifyError(
-          'Same plugin file in both slots',
-          `Its GUI can only serve one slot's editor per load. ${owner} opened it first. ` +
-            'Load another format of the plugin in this slot for a second editor.',
+          'Could not open a second editor for this plugin. Load another format of it in this slot.',
+          `Both slots hold the same plugin file, and its GUI serves one slot's editor per load. ${owner} opened it first.`,
         );
         return;
       }
@@ -91,7 +91,12 @@ export function PluginBar(props: {
         setEditorError('close failed');
       }
       console.error('[PluginControls] editor toggle failed', e);
-      if (!quiet) notifyError(wantOpen ? 'Plugin editor failed to open' : 'Plugin editor failed to close', e);
+      if (!quiet) {
+        notifyError(
+          wantOpen ? 'Could not open the plugin editor. Press EDITOR again.' : 'Could not close the plugin editor. Press EDITOR again.',
+          e,
+        );
+      }
     } finally {
       setEditorBusy(false);
     }
@@ -119,7 +124,7 @@ export function PluginBar(props: {
         class="tgl"
         classList={{ on: editorOpen() }}
         aria-pressed={editorOpen()}
-        aria-label={`Editor for slot ${props.slot + 1}`}
+        aria-label={`Editor for slot ${slotLetter(props.slot)}`}
         disabled={sourcePending() || editorBusy()}
         onClick={() => void toggleEditor()}
       >
@@ -132,7 +137,7 @@ export function PluginBar(props: {
         classList={{ on: props.paramsOpen }}
         aria-expanded={props.paramsOpen}
         aria-controls={props.drawerId}
-        aria-label={`Plugin parameters for slot ${props.slot + 1}`}
+        aria-label={`Plugin parameters for slot ${slotLetter(props.slot)}`}
         disabled={sourcePending()}
         onClick={props.onToggleParams}
       >
@@ -180,7 +185,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
       ps = await platform.pluginHost.listParams(props.slot);
     } catch (e) {
       console.error('[PluginControls] listParams failed', e);
-      if (alive && mine === listing) notifyError("Couldn't load the plugin's controls", e);
+      if (alive && mine === listing) notifyError("Could not load the plugin's controls. Choose Off, then load the plugin again.", e);
     }
     if (!alive || mine !== listing) return;
     setTotalParams(ps.length);

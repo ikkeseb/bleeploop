@@ -362,9 +362,9 @@ async function restoreLatestImpl(): Promise<Restore> {
   }
 }
 
-function reportFailure(message: string, error: unknown): void {
-  console.error(`[autosave] ${message}`, error);
-  notifyError(message, error);
+function reportFailure(log: string, toast: string, error: unknown): void {
+  console.error(`[autosave] ${log}`, error);
+  notifyError(toast, error);
 }
 
 const kHz = (rate: number) => `${rate / 1000} kHz`;
@@ -405,7 +405,7 @@ function start(from: SessionSource): () => void {
       // A user gesture can legitimately beat startup restore to the all-empty precondition. In that
       // case their live work wins and the next stable commit replaces the old recovery.
       saveInitial = !inspectJam().blank;
-      if (!saveInitial) reportFailure('Jam recovery could not be restored', error);
+      if (!saveInitial) reportFailure('Jam recovery could not be restored', 'Could not restore the last jam. Restart BleepLoop before recording to try again.', error);
     })
     .then(() => {
       if (stopped) return;
@@ -434,7 +434,7 @@ function start(from: SessionSource): () => void {
           .catch((error) => {
             // Do not toast/retry every 500 ms. A later state change gets one fresh attempt.
             failedFingerprint = fingerprint;
-            reportFailure('Jam autosave failed', error);
+            reportFailure('Jam autosave failed', 'Could not save the loops for recovery. Export them to keep them.', error);
           })
           .finally(() => {
             saving = false;

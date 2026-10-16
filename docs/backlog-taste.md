@@ -47,10 +47,10 @@ added a line.
 - **FADE (unheard):** the level is r² of a linear ramp from the press to the first bar line at or
   after its bars (2 bars pressed mid-bar lasts up to almost 3). A natural ending? Start on the next bar
   instead? Keep the − 2 BARS + stepper visible beside ■ ALL?
-- **Command bar with an UPDATE offer:** the bar holds two rows from 960 px with every mode on, but
-  the UPDATE pill joins row 2's tools, so with every mode on at 1000 px and below it breaks onto a
-  third row (108 → 146 px) while an offer stands (measured 2026-10-17). The tool icons behind one
-  menu, or live with it?
+- **Command bar with an UPDATE offer:** the sliders sit in popovers and the five record modes carry lamps
+  (`proto11/bar-ab` landed), so the bar holds two rows from 960 px with every mode on. The UPDATE pill
+  joins row 2's tools, so with every mode on at 1000 px and below it breaks onto a third row (108 → 146 px)
+  while an offer stands (measured 2026-10-17). The tool icons behind one menu, or live with it?
 - **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
   log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the

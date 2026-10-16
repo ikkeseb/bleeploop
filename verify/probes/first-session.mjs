@@ -202,7 +202,7 @@ await probe(async ({ open, browser }) => {
   page = importer.page;
   await emptyEngine(page);
   await page.locator('input[type=file]').setInputFiles({ name: 'broken.zip', mimeType: 'application/zip', buffer: Buffer.from('not a zip') });
-  await page.getByText(/Import failed:/).waitFor();
+  await page.getByText('Could not import the session.').waitFor();
   assert.equal(await loaded(page), null, 'a malformed zip loads nothing');
   assert.equal(importer.consumeConsoleErrors('[transport] import failed').length, 1, 'and reaches the release log');
   const pickerPromise = page.waitForEvent('filechooser');

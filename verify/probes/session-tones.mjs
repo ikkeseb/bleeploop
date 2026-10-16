@@ -358,11 +358,11 @@ await probe(async ({ open }) => {
     'an empty slot B is left alone: nothing loads there',
   );
   assert.deepEqual(out.afterSecond.slots, ['amp', null]);
-  assert.deepEqual(out.afterSecond.toasts, ["This session used Probe Synth in slot B — load it there to hear the session's tone"]);
+  assert.deepEqual(out.afterSecond.toasts, ["This session used Probe Synth in slot B. Load it there to hear the session's tone."]);
 
   assert.equal(out.refused.slot, 'syn', 'a tone the host could not restore never fails the load');
   assert.ok(
-    out.refused.toasts.includes('Probe Synth: saved settings could not be restored; it loaded with its defaults'),
+    out.refused.toasts.includes('Could not restore the saved settings of Probe Synth. Set it up again from its defaults.'),
     `the player is told: ${JSON.stringify(out.refused.toasts)}`,
   );
   assert.ok(

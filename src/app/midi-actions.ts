@@ -38,18 +38,20 @@ function tellImport(report: ImportReport | null): void {
   if (report.blocked.length > 0) {
     const waiting = `${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version need a port picked in Audio Settings`;
     console.error(`[midi] ${waiting}`);
-    notifyError(waiting, 'Until then they run nothing.');
+    notifyError(
+      `Could not run ${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version. Pick their port in Audio Settings.`,
+    );
   }
   if (report.unreadable !== null || report.rejected.length > 0) {
-    const what = report.unreadable !== null ? 'The MIDI bindings' : plural(report.rejected.length, 'MIDI binding', 'MIDI bindings');
-    notifyError(`${what} from the previous version could not be read`, 'Learn them again in Audio Settings.');
+    const what = report.unreadable !== null ? 'the MIDI bindings' : plural(report.rejected.length, 'MIDI binding', 'MIDI bindings');
+    notifyError(`Could not read ${what} from the previous version. Learn them again in Audio Settings.`);
   }
 }
 
 /** The previous version's bindings did not reach native MIDI this launch (the next one tries again). */
 function importFailed(log: string, err: unknown): void {
   console.error(log, err);
-  notifyError('Could not read the MIDI bindings from the previous version', err);
+  notifyError('Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.', err);
 }
 
 function importLegacy(): void {

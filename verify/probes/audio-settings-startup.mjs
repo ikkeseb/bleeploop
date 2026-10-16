@@ -102,7 +102,7 @@ await probe(async ({ open }) => {
     await pause(100);
     const input = document.querySelector('[aria-label="Audio input device"]');
     const output = document.querySelector('[aria-label="Output device"]');
-    const slotInput = document.querySelector('[aria-label="Input for slot 1"]');
+    const slotInput = document.querySelector('[aria-label="Input for slot A"]');
     const asioUi = {
       inputDisabled: input.disabled,
       outputDisabled: output.disabled,
@@ -139,7 +139,7 @@ await probe(async ({ open }) => {
       await p.addInitScript(installHost);
     },
   });
-  await failed.page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'The audio engine failed to start'), undefined, { timeout: 10000 });
+  await failed.page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'Could not start the audio engine. Restart BleepLoop.'), undefined, { timeout: 10000 });
   const blocked = await failed.page.evaluate(async () => {
     const instrument = await import('/src/ui/state/instrument.ts');
     await window.__lf.scanForPlugins();

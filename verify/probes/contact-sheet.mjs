@@ -18,10 +18,11 @@
  * stopping live input; 9b-live-take-hot (shot after 10) = live again, a first take one second in, slot
  * A's input clipped a moment ago and now near -3 dBFS (scene 9 plays it at about -12 dBFS): the card's
  * meter, CLIP and the lane's "A LIVE" (asserted by `live-meter`). 13-jam (shot last, live still on) is a
- * mid-jam picture over a two-bar loop: lane 1 PLAYING, lane 2 PLAYING over an overdub layer (UNDO, REV,
- * TRIM; COPY and WIDE hide while no lane is free) with FILTER and DELAY engaged and the drawer closed,
- * lane 3 OVERDUB in flight (selected, "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about
- * -12 dBFS. Writes
+ * mid-jam picture over a two-bar loop: lane 1 PLAYING, lane 2 PLAYING over an overdub layer (REV, UNDO and
+ * EDIT enabled) with FILTER and DELAY engaged and the drawer closed, lane 3 OVERDUB in flight (selected,
+ * "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about -12 dBFS; its right clusters keep five
+ * fixed columns (FX, MUTE, REV, UNDO, EDIT) at one x on every lane. 13b-jam-edit is the same jam with lane
+ * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
@@ -40,7 +41,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '14-modes-on'];
+  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13b-jam-edit', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -316,30 +317,30 @@ await probe(async ({ browser, open }) => {
         await instrument.scanForPlugins();
       }, AMP_SIM);
       await reset();
-      await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
+      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
       await page.waitForTimeout(200);
       await shoot(scene);
 
       scene = '9-amp-sim-live';
-      await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption({ label: 'Probe Amp Sim (vst3)' });
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
-      await page.getByRole('button', { name: 'Editor for slot 1', exact: true, pressed: true }).waitFor();
+      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption({ label: 'Probe Amp Sim (VST3)' });
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
+      await page.getByRole('button', { name: 'Editor for slot A', exact: true, pressed: true }).waitFor();
       // A guitar played at a working level (about -12 dBFS): the input meters have something to show.
       await emit({ meter: { peak: [0.25, 0], clip: [false, false] } });
       await page.waitForTimeout(250);
       await shoot(scene);
 
       scene = '10-amp-sim-idle';
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).click();
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
 
       // Live again, and a first take one second in while the guitar runs hot: one block clipped a moment
       // ago, the input now near -3 dBFS, so the input meters show the level and any clip hold.
       scene = '9b-live-take-hot';
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).click();
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
       await emit({
         events: [transport(0, true, 120), laneEvent(0, lane('Recording'), 2 * RATE), { Beat: { frame: 2 * RATE, beatInBar: 0, countLeft: 0, clicked: true } }],
         anchor: anchorAt(3 * RATE),
@@ -381,10 +382,13 @@ await probe(async ({ browser, open }) => {
         const jam = await page.evaluate(async () => {
           const { looper } = await import('/src/ui/state/audio.ts');
           const lanes = [...document.querySelectorAll('.lp-lane')];
-          const pills = (n) => ['undo', 'rev', 'copy', 'wide', 'trim'].filter((k) => lanes[n]?.querySelector(`.lp-pb--${k}`));
+          const pills = (n) => ['rev', 'undo', 'edit'].filter((k) => lanes[n]?.querySelector(`.lp-pb--${k}:not(:disabled)`));
+          // Each column's left edge on every lane, the five pills in their order.
+          const columns = [0, 1, 2, 3, 4].map((c) => lanes.map((l) => l.querySelectorAll('.lp-lane__mods > .lp-pb')[c]?.getBoundingClientRect().left ?? NaN));
           return {
             words: lanes.map((l) => l.querySelector('.lp-lane__state')?.textContent),
             lane2Pills: pills(1),
+            ragged: columns.map((xs) => Math.max(...xs) - Math.min(...xs)).filter((d) => !(d < 0.5)).length,
             lane2Fx: [0, 1, 2, 3, 4].filter((k) => !looper.fxBypassShown(1, k)),
             drawerOpen: !!document.querySelector('[role="group"][aria-label^="FX, Track"]'),
           };
@@ -392,9 +396,22 @@ await probe(async ({ browser, open }) => {
         console.log(JSON.stringify({ tag, scene, ...jam }));
         const words = ['PLAYING', 'PLAYING', 'OVERDUB', 'MUTED', 'FADING'];
         if (jam.words.join() !== words.join()) fail(`${tag} ${scene}: lanes read ${jam.words.join(', ')}, not ${words.join(', ')}`);
-        if (jam.lane2Pills.join() !== 'undo,rev,trim') fail(`${tag} ${scene}: lane 2 shows ${jam.lane2Pills.join(', ') || 'no pills'}, not undo, rev, trim`);
+        if (jam.lane2Pills.join() !== 'rev,undo,edit') fail(`${tag} ${scene}: lane 2 enables ${jam.lane2Pills.join(', ') || 'no pills'}, not rev, undo, edit`);
+        if (jam.ragged) fail(`${tag} ${scene}: ${jam.ragged} of the five pill columns stand at different x on different lanes`);
         if (jam.lane2Fx.join() !== '0,3') fail(`${tag} ${scene}: lane 2 has FX ${jam.lane2Fx.join(', ') || 'none'} engaged, not filter and delay`);
         if (jam.drawerOpen) fail(`${tag} ${scene}: the FX drawer is open`);
+
+        // The same jam with lane 2's EDIT menu open over the lanes.
+        scene = '13b-jam-edit';
+        await page.getByRole('button', { name: 'Edit track 2', exact: true }).click();
+        const menu = page.getByRole('dialog', { name: 'Edit track 2' });
+        await menu.waitFor();
+        await page.waitForTimeout(150);
+        await shoot(scene);
+        const items = await menu.getByRole('button').evaluateAll((els) => els.map((el) => el.disabled));
+        if (items.join() !== 'true,true,false') fail(`${tag} ${scene}: COPY, WIDE, TRIM disabled ${items.join(', ')}, not true, true, false`);
+        await page.keyboard.press('Escape');
+        await menu.waitFor({ state: 'detached' });
       }
 
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);

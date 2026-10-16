@@ -26,7 +26,7 @@ export async function refreshPluginFolders(): Promise<void> {
     if (mine === latest) setPluginFolders(folders);
   } catch (e) {
     console.error('[plugin-folders] reading the plugin folders failed', e);
-    notifyError('Could not read the plugin folders', e);
+    notifyError('Could not read the plugin folders. Reopen Audio Settings to try again.', e);
   }
 }
 
@@ -53,12 +53,12 @@ async function change(request: () => Promise<PluginFolders | null>, failure: str
 
 /** Add a folder: the native host opens its folder dialog and takes the path from it. */
 export function addPluginFolder(): Promise<void> {
-  return change(() => platform.pluginHost.addPluginFolder(), 'Could not add the plugin folder');
+  return change(() => platform.pluginHost.addPluginFolder(), 'Could not add the plugin folder. Pick it again.');
 }
 
 /** Remove one of the player's folders, spelled as the list shows it. */
 export function removePluginFolder(path: string): Promise<void> {
-  return change(() => platform.pluginHost.removePluginFolder(path), 'Could not remove the plugin folder');
+  return change(() => platform.pluginHost.removePluginFolder(path), 'Could not remove the plugin folder. Press ✕ again.');
 }
 
 /** Read-only reactive accessors: the folders, and whether a change is in flight. */

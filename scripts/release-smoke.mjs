@@ -506,17 +506,17 @@ try {
     const fixed = (await page.locator('button[aria-label="Fixed take length"]').textContent())?.trim();
     must(fixed === 'FIXED 1', `the take length reads "${fixed}"`);
     // The input dry, as a user takes it: slot 1 Off, its input picked, GO LIVE.
-    const source = page.locator('select[aria-label="Source for slot 1"]');
+    const source = page.locator('select[aria-label="Source for slot A"]');
     const sourceWas = await source.locator('option:checked').textContent();
     await source.selectOption('off');
-    const inputSel = page.locator('select[aria-label="Input for slot 1"]');
+    const inputSel = page.locator('select[aria-label="Input for slot A"]');
     await inputSel.waitFor({ state: 'visible', timeout: 10_000 });
     await inputSel.selectOption(String(opts.channel));
     const input = await inputSel.locator('option:checked').textContent();
     // GO LIVE keeps one name; aria-pressed carries its state.
-    const goLive = page.locator('button[aria-label="Live input for slot 1"]');
+    const goLive = page.locator('button[aria-label="Live input for slot A"]');
     if ((await goLive.getAttribute('aria-pressed')) !== 'true') await goLive.click();
-    await page.locator('button[aria-label="Live input for slot 1"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
+    await page.locator('button[aria-label="Live input for slot A"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
     await sleep(3000); // the idle window: LEDs and the meter before any take
     const idle = await readSampler();
 
@@ -596,7 +596,7 @@ try {
     await page.locator('button[aria-label="Track 1 clear, press again to confirm"]').click({ timeout: 3000 });
     await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'empty', undefined, { timeout: 10_000 });
     await source.selectOption(SYNTH.id);
-    await page.locator('button[aria-label="Activate slot 1"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
+    await page.locator('button[aria-label="Activate slot A"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
     must((await source.inputValue()) === SYNTH.id, `slot 1's source reads "${await source.inputValue()}", not ${SYNTH.id}`);
     // The PC keys play only with the keyboard pane on screen and no field holding the focus.
     const keysToggle = page.locator('button[aria-label="On-screen keyboard"]');

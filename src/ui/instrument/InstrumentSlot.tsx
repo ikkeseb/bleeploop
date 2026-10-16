@@ -77,7 +77,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
       class="slot"
       classList={{ 'slot--active': isActive() }}
       role="group"
-      aria-label={`Slot ${slotIdx + 1}${isActive() ? ', active' : ''}`}
+      aria-label={`Slot ${letter}${isActive() ? ', active' : ''}`}
       aria-busy={pending()}
       onClick={() => setActiveSlot(slotIdx)}
     >
@@ -85,7 +85,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         <button
           class="slot__id"
           aria-pressed={isActive()}
-          aria-label={`Activate slot ${slotIdx + 1}`}
+          aria-label={`Activate slot ${letter}`}
           onClick={(e) => {
             e.stopPropagation();
             setActiveSlot(slotIdx);
@@ -97,7 +97,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
             the built-in instruments, then the native plugins (Tauri only; ONE list scales to any count). */}
         <select
           class="slot__source"
-          aria-label={`Source for slot ${slotIdx + 1}`}
+          aria-label={`Source for slot ${letter}`}
           aria-busy={pending()}
           disabled={pending()}
           value={source()}
@@ -165,9 +165,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
       <Show when={platform.pluginHost.available && availablePlugins().length === 0}>
         <span class="slot__plugin-note" role="note">
           {scanning()
-            ? 'scanning plugins…'
+            ? 'Scanning plugins…'
             : !engineDevice() && engineOpenFailure()
-              ? 'No audio device open — see Audio Settings'
+              ? 'No audio device open. See Audio Settings.'
               : 'No plugins found · the standard CLAP, VST3 and VST2 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar'}
         </span>
       </Show>

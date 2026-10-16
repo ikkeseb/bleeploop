@@ -48,7 +48,7 @@ export async function toggleLive(slot: 0 | 1, quiet = false): Promise<void> {
     console.error('[PluginControls] go-live toggle failed', e);
     if (quiet) return;
     setError((prev) => withAt(prev, slot, wantLive ? 'input failed' : 'stop failed'));
-    notifyError(wantLive ? "Couldn't start live input" : 'Live input stop failed', e);
+    notifyError(wantLive ? 'Could not start the live input. Press GO LIVE again.' : 'Could not stop the live input. Press INPUT LIVE again.', e);
   } finally {
     setBusy((prev) => withAt(prev, slot, false));
   }

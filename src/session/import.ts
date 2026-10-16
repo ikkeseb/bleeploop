@@ -97,8 +97,8 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
   if (session.sampleRate !== engineRate) {
     // Deliberate v0 constraint: no resampling (see the header comment).
     throw new Error(
-      `This session was exported at ${session.sampleRate} Hz, but the audio engine is running at ` +
-        `${engineRate} Hz. Import can't resample yet — load it on a setup running at ${session.sampleRate} Hz.`,
+      `This session was exported at ${session.sampleRate} Hz and the engine runs at ${engineRate} Hz. ` +
+        `Open it on a setup running at ${session.sampleRate} Hz.`,
     );
   }
 

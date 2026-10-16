@@ -67,8 +67,8 @@ await probe(async ({ open }) => {
     const toasts = await toastsOf(told.page);
     console.log('import toasts', JSON.stringify(toasts));
     assert.deepEqual(toasts, [
-      ['2 MIDI bindings from the previous version need a port picked in Audio Settings', 'Until then they run nothing.'],
-      ['1 MIDI binding from the previous version could not be read', 'Learn them again in Audio Settings.'],
+      ['Could not run 2 MIDI bindings from the previous version. Pick their port in Audio Settings.', undefined],
+      ['Could not read 1 MIDI binding from the previous version. Learn them again in Audio Settings.', undefined],
     ], 'the import tells what waits for a port and what it could not read');
     assert.deepEqual(told.consumeConsoleErrors(/^\[midi\]/), [
       '[midi] stored web binding 3 not imported: missing field `action`',
@@ -96,7 +96,7 @@ await probe(async ({ open }) => {
       unreadable.consumeConsoleErrors('[midi] the stored web bindings could not be read; none handed over this launch').length, 1,
       `and the release log says so: ${JSON.stringify(unreadable.consoleErrors)}`,
     );
-    assert.deepEqual((await toastsOf(unreadable.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version'], 'and the player hears it');
+    assert.deepEqual((await toastsOf(unreadable.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.'], 'and the player hears it');
     await unreadable.page.close();
 
     const refused = await open({
@@ -106,7 +106,7 @@ await probe(async ({ open }) => {
       },
     });
     await refused.page.waitForFunction(() => window.__lf.notify.toasts().length >= 1, undefined, { timeout: 5000 });
-    assert.deepEqual((await toastsOf(refused.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version'], 'a refused import is told');
+    assert.deepEqual((await toastsOf(refused.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.'], 'a refused import is told');
     assert.equal(refused.consumeConsoleErrors('[midi] importing the stored web bindings failed').length, 1, 'with its release-log line');
     await refused.page.close();
   }
@@ -229,12 +229,12 @@ await probe(async ({ open }) => {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(500);
   assert.deepEqual((await calls()).slice(stuck), [['learn', 'clear', 1]], 'the cancel waits for the learn');
-  await page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'MIDI learn failed'), undefined, { timeout: 5000 });
+  await page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'Could not start the MIDI learn. Press LEARN again.'), undefined, { timeout: 5000 });
   await page.waitForFunction((n) => window.__lf.native.midiCalls.length >= n + 2, stuck, { timeout: 5000 });
   assert.deepEqual((await calls()).slice(stuck), [['learn', 'clear', 1], ['cancelLearn']], 'given up after its wait, the learn lets the cancel go');
   assert.equal(consumeConsoleErrors('[midi] learn failed').length, 1, 'with its release-log line');
   // The cancel waits on the same hold, and is given up in its turn.
-  await page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'MIDI cancel learn failed'), undefined, { timeout: 5000 });
+  await page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'Could not stop the MIDI learn. Press LEARN, then stop it again.'), undefined, { timeout: 5000 });
   await page.evaluate(() => {
     window.__lf.native.midiHold = null;
     window.__lf.notify.toasts().forEach((t) => window.__lf.notify.dismissToast(t.id));
@@ -367,12 +367,12 @@ await probe(async ({ open }) => {
   await midi({ gone: { names: ['FS-6 Pedal'] } }, { store: { problem: { failed: { why: 'Access is denied. (os error 5)' } } } });
   const toasts = await until(() => toastsOf(page), (t) => t.length >= 2);
   console.log('toasts', JSON.stringify(toasts));
-  assert.ok(toasts.some(([m, d]) => m === 'MIDI device disconnected — FS-6 Pedal' && d === 'Held notes were released.'), 'an unplugged port toasts');
-  assert.ok(toasts.some(([m, d]) => m === 'MIDI bindings could not be saved; BleepLoop keeps trying' && d === 'Access is denied. (os error 5)'), 'a store problem toasts');
+  assert.ok(toasts.some(([m, d]) => m === 'Could not reach FS-6 Pedal. Reconnect it to play on.' && d === 'The MIDI device disconnected, and its held notes were released.'), 'an unplugged port toasts');
+  assert.ok(toasts.some(([m, d]) => m === 'Could not save the MIDI bindings. BleepLoop keeps trying.' && d === 'Access is denied. (os error 5)'), 'a store problem toasts');
   const epochs = await page.evaluate(() => [...new Set(window.__lf.native.midiCalls.filter((c) => c[0] !== 'subscribe').map((c) => c[1]))]);
   assert.deepEqual(epochs, [1], 'every native MIDI call carries the page\'s epoch');
   assert.deepEqual(consumeConsoleErrors(/^\[midi\]/), [
     '[midi] input disconnected: FS-6 Pedal',
-    '[midi] bindings store: MIDI bindings could not be saved; BleepLoop keeps trying: Access is denied. (os error 5)',
+    '[midi] bindings store: Could not save the MIDI bindings. BleepLoop keeps trying. Access is denied. (os error 5)',
   ], 'each reaches the release log (and nothing else does: the harness fails on any other)');
 });

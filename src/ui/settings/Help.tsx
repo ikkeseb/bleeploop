@@ -142,9 +142,9 @@ function Reference(props: { hidden: boolean }) {
             <span class="help__caps">
               <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd>
             </span>
-            <span class="help__label">select a track</span>
+            <span class="help__label">Select a track</span>
           </div>
-          <p class="help__sub">In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</p>
+          <p class="help__sub">In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there.</p>
         </section>
 
         <section class="help__sec">
@@ -244,14 +244,14 @@ function Manual(props: { hidden: boolean }) {
           <li>The big ring records a track, then overdubs (layers) onto it once it has a take</li>
           <li><span class="help__note">▶ / ■</span> plays or stops a track &middot; <span class="help__note">CLR</span> clears it (press twice to confirm)</li>
           <li><span class="help__note">↶ UNDO</span> undoes the last overdub layer or trim (press again to redo)</li>
-          <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0 &middot; the pan beside it (L / C / R) centres on a double-click, Alt-click or 0</li>
+          <li><span class="help__note">FX</span> opens a track's effects, and its lamp lights while any of them is on &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0 and resets to it on a double-click &middot; the pan beside it (L / C / R) centres on a double-click, Alt-click or 0</li>
           <li><span class="help__note">DUB FEEDBACK</span>, last in the FX drawer, is what an overdub keeps of the layers under it: 100 % keeps them all, 0 % replaces them, and in between the old layers fade pass by pass</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
-          <li><span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
+          <li><span class="help__note">EDIT</span> opens a track's edits: <span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
           <li><span class="help__note">↔ WIDE</span> copies it wide: the copy plays 20 ms behind, panned to the other side (a centred track goes half left, the copy half right), so one riff sounds like two guitars. Summed to mono the two cancel in places and sound hollow; a real double is a second take</li>
           <li><span class="help__note">✂ TRIM</span> keeps a track's first bars and repeats them across the loop. The loop keeps its length</li>
           <li>All tracks share one loop, so they stay locked together and can't drift</li>
-          <li>A take shorter than the loop repeats across it — stop early, or set the bars with <span class="help__note">FIXED</span></li>
+          <li>A take shorter than the loop repeats across it: stop early, or set the bars with <span class="help__note">FIXED</span></li>
           <li>Keep playing past the end of the loop and the take grows it: the loop becomes as many whole loops as you played, rounded to the nearest, and the other tracks repeat</li>
         </ul>
       </section>

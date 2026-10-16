@@ -10,6 +10,8 @@
  * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
  *   bars, RETAKE, AUTO REC, END STOP), from 960 to 1920 px wide (1105: just above the narrow rung): two
  *   rows at most, every control inside the bar and under its own centre point;
+ * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
+ *   1040 to 1280 px (the brand once unfolded on a fresh page and jumped ~99 px at the first take);
  * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
  *   1920x1080 the open Help and Audio Settings popovers do not overlap the command bar's rendered box,
  *   stay inside the window and keep at least the right edge's margin on their left (a hint's one-line
@@ -81,7 +83,7 @@ await probe(async ({ open }) => {
       slots.setSlotPlugins([{ id: 'layout-fixture', name: 'Archetype Petrucci', format: 'vst3', path: 'layout-fixture', isEffect: true }, null]);
       if (window.__lf.slotPlugins()[0]?.id !== 'layout-fixture') throw new Error('Restart Vite to avoid duplicate HMR module state');
       });
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
     }
     // A one-bar loop on lane 1, stopped (the engine's lanes after a load and ■ ALL).
     await boot(page, ['Stopped', 'Empty', 'Empty', 'Empty', 'Empty']);
@@ -214,6 +216,28 @@ await probe(async ({ open }) => {
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));
+    await page.close();
+  }
+  // A fresh page's bar fit is final: the web font loads after the first measure (Geist is requested
+  // once the bar has text) and moves every child's width, so a bar measured only before it can show the
+  // brand unfolded while row 1 lacks its spacer minimum, then jump ~99 px at the next DOM change (the
+  // first take). The sizes straddle the fold edge (1260 px caught it); an unrelated DOM change must
+  // leave the bar's fit flags where the fresh page put them.
+  for (const width of [1040, 1050, 1240, 1260, 1280]) {
+    const { page } = await open({ viewport: { width, height: 700 }, init });
+    await page.locator('.cmd .brand').waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.waitForTimeout(250);
+    const fit = () => page.evaluate(() => document.querySelector('.cmd').className);
+    const fresh = await fit();
+    await page.evaluate(() => { const probe = document.createElement('span'); document.querySelector('.cmd').append(probe); probe.remove(); });
+    await page.waitForTimeout(250);
+    const forced = await fit();
+    const name = `${label}-${width}-fresh-fit`;
+    const ok = fresh === forced;
+    if (!ok) failures.push(name);
+    results.push({ name, ok, fresh, forced });
+    console.log(JSON.stringify({ name, ok, fresh, forced }));
     await page.close();
   }
   // Popovers hang under the command bar's real bottom edge (a fixed offset once covered the bar's

@@ -337,7 +337,7 @@
   gap: 5px;
 }
 
-/* ---- pill button (STOP/PLAY/CLR + FX/MUTE/undo/reverse) ---- */
+/* ---- pill button (STOP/PLAY/CLR + FX/MUTE/REV/UNDO/EDIT) ---- */
 .lp-pb {
   height: clamp(20px, 4.2cqh, 24px);
   min-width: 58px;
@@ -374,7 +374,7 @@
   border-color: rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
-/* engaged (FX / MUTE / reverse) = the lit warm-white legend of every engaged control */
+/* engaged (FX / MUTE / REV) = the lit warm-white legend of every engaged control */
 .lp-pb.is-on {
   color: var(--engaged);
   background: var(--surf-3);
@@ -495,7 +495,7 @@
   }
 }
 
-/* ---- right cluster: FX/MUTE/undo/reverse pills over the mix row (volume slider and pan) ---- */
+/* ---- right cluster: FX/MUTE/REV/UNDO/EDIT pills over the mix row (volume slider and pan) ---- */
 .lp-lane__right {
   flex: 0 0 auto;
   width: clamp(240px, 20vw, 264px);
@@ -512,19 +512,18 @@
 .lp-lane[data-state='empty'] .lp-lane__mix {
   opacity: 0.55;
 }
+/* Five fixed columns, FX · MUTE · REV · UNDO · EDIT, the same on every lane: a pill that does not apply
+   is disabled, never absent, so no column moves when another lane's state changes. The widths follow the
+   legends (FX's is the shortest, ↶ UNDO's the longest), so every legend keeps its air in the narrowest
+   cluster. */
 .lp-lane__mods {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 5px;
 }
 .lp-lane__mods .lp-pb {
-  flex: 1 1 auto;
   min-width: 0;
   padding: 0;
-}
-/* Six pills or more (FX, MUTE, ↶ UNDO, ↺ REV, ⧉ COPY, ↔ WIDE, ✂ TRIM) overflow one row of the narrowest
-   cluster: COPY, WIDE and TRIM keep their glyph; their names stay in the label and the title. */
-.lp-lane__mods:has(> :nth-child(6)) .lp-pb__word {
-  display: none;
 }
 
 /* the mix row: the volume fader takes what the pan (a fixed 44px range and its read-out) leaves */
