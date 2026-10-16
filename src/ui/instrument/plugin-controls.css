@@ -211,6 +211,7 @@
   align-items: center;
   gap: 10px;
   padding: 0 18px 10px;
+  margin-top: auto; /* stays on the foot of a card stretched to its sibling's height */
 }
 /* the meter takes the header's bottom padding */
 .slot:has(> .slot__meter) > .slot__row {

@@ -2,7 +2,7 @@
    flex items of the `.cmd` header (Transport returns a Fragment); the `.cmd` card + brand/lamp/tools
    live in app.css. Styled to the "Instrument" tokens (src/app.css):
    matte key faces, sans labels, a sunk display window for BPM + loop; colour rationed to state
-   (--engaged on, --play mic-live/loop, --dub two-step confirm). */
+   (--engaged on, --play record level/loop, --dub two-step confirm). */
 
 /* ---- BPM group — big numeral, ± steppers, unit + beat dots. It and the loop readout sit in a sunk
    display window: the one "screen" on the panel. ---- */
@@ -192,16 +192,17 @@
   }
 }
 
-/* ---- toggle pills — CLICK / FIXED / AUTO / TAP / ALL / CLEAR / MIC ---- */
+/* ---- toggle pills — TAP / CLICK / FIXED / RETAKE / AUTO / END STOP / ALL / FADE / ✕ ALL / IN FX */
 .transport__modes,
 .transport__global {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-/* record-level meter — a 4px vertical bar beside MIC, filled from the bottom by --lvl (0..1 over
-   −60..0 dBFS, set by the waveform rAF loop); --play normally, --rec within 1 dB of full scale. With
-   AUTO on, `has-thr` draws a cyan tick at --thr: where the detector's RMS trigger sits on that scale. */
+/* record-level meter — a 4px vertical bar between ✕ ALL and IN FX, filled from the bottom by --lvl
+   (0..1 over −60..0 dBFS, set by the waveform rAF loop); --play normally, --rec within 1 dB of full
+   scale. With AUTO on, `has-thr` draws a cyan tick at --thr: where the detector's RMS trigger sits
+   on that scale. */
 .transport__inmeter {
   --lvl: 0;
   --thr: 0;
@@ -285,13 +286,6 @@
   background: var(--surf-3);
   border-color: rgba(244, 239, 230, 0.28);
   text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
-}
-/* live/on-green (mic live) */
-.transport__tgl.is-on-green {
-  color: var(--play);
-  background: color-mix(in srgb, var(--play) 8%, var(--surf-2));
-  border-color: color-mix(in srgb, var(--play) 40%, transparent);
-  text-shadow: 0 0 10px color-mix(in srgb, var(--play) 45%, transparent);
 }
 /* two-step confirm (✕ SURE?) = dub-amber warn */
 .transport__tgl.is-armed {

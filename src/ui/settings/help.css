@@ -13,7 +13,7 @@
   overflow-y: auto;
   padding: 14px 18px 16px;
   border-radius: 14px;
-  /* near-opaque panel (the popover floats over the busy lanes — see audio-settings.css) */
+  /* opaque panel (the popover floats over the busy lanes — see audio-settings.css) */
   background: var(--panel);
   border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
