@@ -185,7 +185,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
       ps = await platform.pluginHost.listParams(props.slot);
     } catch (e) {
       console.error('[PluginControls] listParams failed', e);
-      if (alive && mine === listing) notifyError("Could not load the plugin's controls. Close PARAMS and open it again.", e);
+      if (alive && mine === listing) notifyError("Could not load the plugin's controls. Choose Off, then load the plugin again.", e);
     }
     if (!alive || mine !== listing) return;
     setTotalParams(ps.length);

@@ -285,7 +285,7 @@ export async function initAudioDeviceSettings(): Promise<void> {
     if (saved.asioEnabled && status.status === 'unprobed') await probeAsio(false);
   } catch (e) {
     console.error('[instrument] ASIO status query failed', e);
-    notifyError('Could not check whether ASIO is available. Turn ASIO on in Audio Settings to try again.', e);
+    notifyError('Could not check whether ASIO is available. Restart BleepLoop to check again.', e);
   }
 }
 

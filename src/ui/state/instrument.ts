@@ -461,7 +461,7 @@ export async function resyncNativeSlots(): Promise<void> {
         await platform.pluginHost.unloadPlugin(slot);
       } catch (e) {
         console.error('[instrument] resync: stranded-slot unload failed', e);
-        notifyError('Could not clear a plugin left in a slot. Set that slot to Off.', e);
+        notifyError('Could not clear a plugin left in a slot. Restart BleepLoop.', e);
       }
     });
   }

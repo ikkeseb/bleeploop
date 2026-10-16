@@ -89,7 +89,7 @@ export async function installUpdate(): Promise<void> {
     await platform.updates.install();
   } catch (error) {
     console.error('[app] update failed', error);
-    notifyError('Could not install the update. Press UPDATE to try again.', error);
+    notifyError('Could not install the update. Press Update and restart to try again.', error);
   } finally {
     // A failure leaves the app running, so the read-out must not keep a stage on screen under a
     // button that is pressable again.
