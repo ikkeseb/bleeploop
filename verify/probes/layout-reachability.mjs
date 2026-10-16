@@ -7,8 +7,10 @@
  *   is reachable, and a lane's canvas survives a keyboard-placement/FX-drawer change (never remounts),
  *   across five keyboard placement/FX-drawer combinations; then the drum-pad ribbon, the two-row
  *   command-bar cap and the muted-lane readout with the loop present;
- * - the command bar with a playing loop, idle modes, from 960 to 1600 px wide: two rows at most, every
- *   control inside the bar and under its own centre point;
+ * - the command bar with a playing loop, idle modes, from 960 to 1600 px wide (1050 px, once three rows,
+ *   included): two rows at most, every control inside the bar and under its own centre point;
+ * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
+ *   1040 to 1280 px (the brand once unfolded on a fresh page and jumped ~99 px at the first take);
  * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
  *   1920x1080 the open Help and Audio Settings popovers do not overlap the command bar's rendered box,
  *   stay inside the window and keep at least the right edge's margin on their left (a hint's one-line
@@ -182,7 +184,7 @@ await probe(async ({ open }) => {
   // FADE and IN FX widen row 1, which once put the master volume on a third row at 960 and 1100 px. With a loop present the
   // bar must stay within two rows and every control in it must be reachable, at the Tauri minimum, the
   // default and the widths between.
-  for (const [width, height] of [[960, 600], [1000, 700], [1100, 700], [1280, 820], [1600, 900]]) {
+  for (const [width, height] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1280, 820], [1600, 900]]) {
     const { page } = await open({ viewport: { width, height }, init });
     await boot(page, ['Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR);
     await page.waitForTimeout(250);
@@ -207,6 +209,28 @@ await probe(async ({ open }) => {
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));
+    await page.close();
+  }
+  // A fresh page's bar fit is final: the web font loads after the first measure (Geist is requested
+  // once the bar has text) and moves every child's width, so a bar measured only before it can show the
+  // brand unfolded while row 1 lacks its spacer minimum, then jump ~99 px at the next DOM change (the
+  // first take). The sizes straddle the fold edge (1260 px caught it); an unrelated DOM change must
+  // leave the bar's fit flags where the fresh page put them.
+  for (const width of [1040, 1050, 1240, 1260, 1280]) {
+    const { page } = await open({ viewport: { width, height: 700 }, init });
+    await page.locator('.cmd .brand').waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.waitForTimeout(250);
+    const fit = () => page.evaluate(() => document.querySelector('.cmd').className);
+    const fresh = await fit();
+    await page.evaluate(() => { const probe = document.createElement('span'); document.querySelector('.cmd').append(probe); probe.remove(); });
+    await page.waitForTimeout(250);
+    const forced = await fit();
+    const name = `${label}-${width}-fresh-fit`;
+    const ok = fresh === forced;
+    if (!ok) failures.push(name);
+    results.push({ name, ok, fresh, forced });
+    console.log(JSON.stringify({ name, ok, fresh, forced }));
     await page.close();
   }
   // Popovers hang under the command bar's real bottom edge (a fixed offset once covered the bar's
