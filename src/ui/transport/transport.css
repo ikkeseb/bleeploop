@@ -267,6 +267,18 @@
   border-color: rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
+/* A pill whose word changes (▶ ALL / ■ ALL / ■ NOW, FADE / FADING) holds the width of its widest
+   word, in an unseen zero-height line above the one shown (Transport.tsx `data-fit`). */
+.transport__tgl--fit {
+  flex-direction: column;
+  gap: 0;
+}
+.transport__tgl--fit::before {
+  content: attr(data-fit);
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
 /* engaged = the lit warm-white legend (selection/mode on) */
 .transport__tgl.is-on {
   color: var(--engaged);
@@ -336,10 +348,19 @@
   height: 38px;
   flex: 0 0 auto;
 }
+/* The read-out and its unseen sizer (Transport.tsx) share one grid cell under LOOP: the cell is as wide
+   as the widest read-out at every rung, so ▶ ALL, FADE, ✕ ALL and IN FX hold their x from the empty
+   window to the longest loop. */
 .transport__loop-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  row-gap: 2px;
+}
+.transport__loop-v,
+.transport__loop-fit {
+  grid-area: 2 / 1;
+}
+.transport__loop-fit {
+  visibility: hidden;
 }
 .transport__loop-k {
   font-size: 9.5px;
@@ -347,13 +368,16 @@
   letter-spacing: 0.1em;
   color: var(--faint);
 }
-.transport__loop-v {
+.transport__loop-v,
+.transport__loop-fit {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.transport__loop-v small {
+.transport__loop-v small,
+.transport__loop-fit small {
   color: var(--dim);
   font-weight: 400;
   font-size: 11px;
@@ -439,19 +463,29 @@
 .cmd--stack-pair .transport__pair {
   order: 2;
 }
-/* Further rungs drop the loop seconds + BPM beat dots. */
+/* Further rung: drop the loop seconds. */
 @media (max-width: 1180px) {
-  .transport__loop-v small {
+  .transport__loop-v small,
+  .transport__loop-fit small {
     display: none;
   }
 }
-/* Last rung (the Tauri minWidth is 960): drop the BPM unit and the beat dots (the meter picker stays),
-   pin the master slider at its floor (in a wrapping row, shrink never runs — the tools would wrap to a
-   third row instead) and tighten the card. */
-@media (max-width: 1040px) {
+/* Last rung (the Tauri minWidth is 960; the card tightens at 1040, app.css): drop the BPM unit (the meter
+   picker and the beat dots stay, the dots under the meter in the unit's place), pin the master slider at
+   its floor (in a wrapping row, shrink never runs; the tools would wrap to a third row instead) and give
+   back the display windows' side padding, so row 1 holds BPM, the loop, ALL to IN FX and master from
+   960 px up (verify/probes/layout-reachability.mjs). It starts at 1100: below that the full row 1 wraps
+   master onto a third row once the brand has folded. The BPM window holds one width locked or not: above
+   this rung the meter's face pays for the lock glyph; here the dots keep the column wide, so the glyph
+   gives way (the dimmed ± steppers and the faceless meter still say locked) and the locked meter keeps
+   its box. */
+@media (max-width: 1100px) {
   .transport__bpm-unit,
-  .transport__beats {
+  .transport__bpm-lock {
     display: none;
+  }
+  .transport__meter:disabled {
+    padding: 2px 19px 2px 0; /* the face's 5 + 14 px, kept on one side */
   }
   .transport__master .transport__volume {
     width: 60px;
@@ -459,11 +493,6 @@
   .transport__master {
     gap: 6px;
   }
-}
-
-/* Narrow bar: the display windows give back their side padding so row 1 keeps its measured width and
-   the tool icons stay on it (verify/probes/layout-reachability.mjs at 960 × 600). */
-@media (max-width: 1040px) {
   .transport__bpm-group,
   .transport__loop {
     padding: 0 3px;
