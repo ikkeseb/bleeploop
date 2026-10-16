@@ -1,5 +1,5 @@
 import { createSignal } from 'solid-js';
-import { sendEngine } from '../../platform';
+import { sendEngine, sendEngineReported } from '../../platform';
 import { notifyError } from '../../notify';
 import { activeSlot, serializeSlot, slotOff, slotPlugins, withAt } from './instrument-slots';
 
@@ -29,13 +29,13 @@ const liveSends: [number, number] = [0, 0];
  * press that rode in the same batch while this setting reached the engine; the slot then reads not live
  * while it is, and the next GO LIVE press sends live again.
  */
-function setEngineLive(slot: 0 | 1, on: boolean): Promise<boolean> {
+function setEngineLive(slot: 0 | 1, on: boolean, ownToast = false): Promise<boolean> {
   if (inputArmed()[slot] === on) return Promise.resolve(true);
   const send = ++liveSends[slot];
-  const took = sendEngine({ SetSlotLive: [slot, on] });
+  const took = (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] });
   setInputArmed((prev) => withAt(prev, slot, on));
   return took.then((ok) => {
-    // The outbox logged and toasted the lost batch; GO LIVE's press reports it too (`live.ts`).
+    // The outbox logged the lost batch, and toasted it unless the caller tells the player (`ownToast`).
     if (!ok && liveSends[slot] === send) setInputArmed((prev) => withAt(prev, slot, !on));
     return ok;
   });
@@ -121,25 +121,27 @@ export function resendEngineLive(): void {
   sendEngine({ SetSlotLive: [0, a] }, { SetSlotLive: [1, b] });
 }
 
-/** Throw when the engine did not get `slot`'s live flag: the caller's refusal path reports it. */
-async function sendLive(slot: 0 | 1, on: boolean): Promise<void> {
-  if (!(await setEngineLive(slot, on))) throw new Error(`The batch carrying SetSlotLive ${on} did not reach the engine.`);
+/** Throw when the engine did not get `slot`'s live flag. `ownToast`: the caller's refusal path tells the
+ * player (GO LIVE's press, `live.ts`), so the outbox does not. */
+async function sendLive(slot: 0 | 1, on: boolean, ownToast: boolean): Promise<void> {
+  if (!(await setEngineLive(slot, on, ownToast))) throw new Error(`The batch carrying SetSlotLive ${on} did not reach the engine.`);
 }
 
 /**
  * Go LIVE on `slot`: the engine's device is already open (Audio Settings picks it, the slot its
  * channel); going live only routes the slot's input, through its plugin or dry while the slot is Off.
  * One op on the slot's chain; rejects when the engine did not get it (the slot reads not live again).
+ * `ownToast`: the caller toasts that rejection itself (`sendLive`).
  */
-export function goLive(slot: 0 | 1): Promise<void> {
+export function goLive(slot: 0 | 1, ownToast = false): Promise<void> {
   return serializeSlot(slot, async () => {
-    if (slotPlugins()[slot] || slotOff()[slot]) await sendLive(slot, true);
+    if (slotPlugins()[slot] || slotOff()[slot]) await sendLive(slot, true, ownToast);
   });
 }
 
 /** Stop LIVE on `slot`. One op on the slot's chain; idempotent; rejects as `goLive` does. */
-export function stopLive(slot: 0 | 1): Promise<void> {
-  return serializeSlot(slot, () => sendLive(slot, false));
+export function stopLive(slot: 0 | 1, ownToast = false): Promise<void> {
+  return serializeSlot(slot, () => sendLive(slot, false, ownToast));
 }
 
 /**

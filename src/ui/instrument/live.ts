@@ -41,8 +41,9 @@ export async function toggleLive(slot: 0 | 1, quiet = false): Promise<void> {
   clearLiveError(slot);
   try {
     // The engine's device is open and the slot's channel is the slot's own pick: going live only routes.
-    if (wantLive) await goLive(slot);
-    else await stopLive(slot);
+    // A lost batch is told once, here, unless `quiet` (then the outbox's toast tells it).
+    if (wantLive) await goLive(slot, !quiet);
+    else await stopLive(slot, !quiet);
   } catch (e) {
     // The engine did not get the slot's live flag (its batch was lost), or the slot's op chain failed.
     console.error('[PluginControls] go-live toggle failed', e);

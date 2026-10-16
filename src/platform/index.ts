@@ -75,6 +75,9 @@ const WAITING_MAX = 256;
 /** What waits for the next send, and the promise its callers hold. */
 interface Batch {
   items: InputItem[];
+  /** Whether a lost send toasts: false while every caller in it tells the player itself
+   * (`sendEngineReported`). The release log names every lost batch. */
+  toastLost: boolean;
   settle: (took: boolean) => void;
   submitted: Promise<boolean>;
 }
@@ -163,20 +166,22 @@ const droppable = (item: InputItem): boolean => noteOf(item)?.on === true || 'en
  * settled (or `NATIVE_WAIT_MS` passed): Tauri's IPC does not keep two calls in the order they were made, so
  * a slot pick and the note after it, or a looper press and a note, reach native code in the order they
  * happened only this way. Nothing is sent while the platform has no engine (the browser build without the
- * DEV fake). False when an item was dropped (the waiting batch was full).
+ * DEV fake). False when an item was dropped (the waiting batch was full). `ownToast`: the caller tells the
+ * player itself when the batch is lost, so the outbox toasts only for the batch's other callers.
  */
-function enqueue(items: InputItem[]): Promise<boolean> {
+function enqueue(items: InputItem[], ownToast = false): Promise<boolean> {
   if (!platform.engine.available) return Promise.resolve(false);
   if (items.length === 0) return Promise.resolve(true);
   if (!waiting) {
     let settle!: (took: boolean) => void;
     const submitted = new Promise<boolean>((resolve) => (settle = resolve));
-    waiting = { items: [], settle, submitted };
+    waiting = { items: [], toastLost: false, settle, submitted };
     if (!sending) {
       sending = true;
       queueMicrotask(() => void drain());
     }
   }
+  if (!ownToast) waiting.toastLost = true;
   let kept = true;
   for (const item of items) {
     if (waiting.items.length >= WAITING_MAX && droppable(item)) {
@@ -200,7 +205,7 @@ async function drain(): Promise<void> {
       const batch = waiting;
       waiting = null;
       overflowTold = false;
-      batch.settle(await submit(batch.items));
+      batch.settle(await submit(batch.items, batch.toastLost));
     }
   } finally {
     sending = false;
@@ -238,19 +243,19 @@ const DROPPED_TOAST: Record<Exclude<Dropped, 'stale'>, readonly [string, string]
 /**
  * Send one batch. Refused (a rejection: native refuses a batch whole or runs it), it is sent once more; one
  * that got no answer in time is not (it may still run, and twice would repeat a looper press). Lost, it is
- * logged and toasted, and when it held a release a blur follows, which releases every hold of this page
+ * logged and toasted (unless each of its callers tells the player itself: `sendEngineReported`), and when it held a release a blur follows, which releases every hold of this page
  * natively (a note must not stick); a blur that is lost too rides at the head of the next batch. What
  * native MIDI dropped of a batch that ran (a press with no device running) is logged and toasted once
  * (`toldDropped`); input of a page native MIDI no longer counts as current is logged once per epoch. True
  * when the batch ran and nothing of it was dropped.
  */
-async function submit(items: InputItem[]): Promise<boolean> {
+async function submit(items: InputItem[], toastLost: boolean): Promise<boolean> {
   const batch = pendingBlur ? [BLUR, ...items] : items;
   let sent = await sendOnce(batch);
   if ('lost' in sent && !sent.timedOut) sent = await sendOnce(batch);
   if ('lost' in sent) {
     console.error('[platform] input batch failed', sent.lost);
-    notifyError('Could not send that to the audio engine. Press or play it again.', sent.lost);
+    if (toastLost) notifyError('Could not send that to the audio engine. Press or play it again.', sent.lost);
     if (pendingBlur || items.some(releases)) {
       pendingBlur = true;
       const blur = await sendOnce([BLUR]);
@@ -292,6 +297,12 @@ async function submit(items: InputItem[]): Promise<boolean> {
  */
 export function sendEngine(...commands: EngineCommand[]): Promise<boolean> {
   return enqueue(commands.map(encodeItem.engine));
+}
+
+/** `sendEngine` for a caller that names its own loss to the player (GO LIVE's press): a lost batch that
+ * carried only such commands is logged but not toasted here. */
+export function sendEngineReported(...commands: EngineCommand[]): Promise<boolean> {
+  return enqueue(commands.map(encodeItem.engine), true);
 }
 
 /**
