@@ -1,13 +1,15 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
 import { registerLane, setGridBeats, unregisterLane } from './waveform';
-import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
+import { masterBars, noEnterRepeat, volumeDb } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate, reverseGate, undoGate, why } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
 import { mixGesture } from './mix-gesture';
 import { Edit } from './Edit';
 import { inputArmed } from '../state/native-io';
+import { runAction } from '../../app/actions';
+import { clearArmed } from '../../app/clear-arm';
 import './looper.css';
 
 /**
@@ -342,8 +344,10 @@ function TrackLane(props: {
   };
 
   // Two-step clear: a take is irreversible, so the first press only ARMS ("SURE?") for a short window;
-  // a second press within it actually clears. No blocking window.confirm — keeps the workflow fast.
-  const clr = createTwoStepConfirm(() => looper.clear(props.index));
+  // a second press within it actually clears. No blocking window.confirm, which keeps the workflow fast.
+  // It is the engine's CLEAR, one arm with the key's and a pedal's: either hand may arm and the other
+  // confirm (`src/app/clear-arm.ts`).
+  const clrArmed = () => clearArmed(props.index);
 
   // The waveform canvas is driven entirely by the plain-TS rAF renderer in waveform.ts; Solid only
   // mounts the element and (de)registers it. No reactivity touches the draw loop (invariant 6). The
@@ -389,7 +393,9 @@ function TrackLane(props: {
       onPointerDown={() => {
         pressed = true;
         haltScroll(laneEl?.parentElement);
-        looper.selectTrack(props.index);
+        // A selection is a looper press to the engine and disarms CLEAR: not while this lane holds the
+        // arm, or CLR's confirming press would only arm it again.
+        if (!clrArmed()) looper.selectTrack(props.index);
       }}
     >
       {/* left cluster: identity · core gesture · play-stop/clear pair */}
@@ -441,17 +447,17 @@ function TrackLane(props: {
           </button>
           <button
             class="lp-pb lp-pb--clr"
-            classList={{ 'is-armed': clr.armed() }}
+            classList={{ 'is-armed': clrArmed() }}
             disabled={isEmpty()}
-            onClick={clr.trigger}
-            onKeyDown={clr.onKeyDown}
+            onClick={() => runAction('clear', props.index)}
+            onKeyDown={noEnterRepeat}
             aria-label={
-              clr.armed()
+              clrArmed()
                 ? `Track ${props.index + 1} clear, press again to confirm`
                 : `Track ${props.index + 1} clear`
             }
           >
-            {clr.armed() ? 'SURE?' : 'CLR'}
+            {clrArmed() ? 'SURE?' : 'CLR'}
           </button>
         </div>
       </div>

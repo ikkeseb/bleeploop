@@ -277,6 +277,16 @@ async function submit(items: InputItem[]): Promise<boolean> {
   return dropped === null;
 }
 
+const sendWatchers = new Set<(command: EngineCommand) => void>();
+
+/** Hear every engine command `sendEngine` queues from now on, as it is queued: for UI state the engine
+ * ends on a command and names on no feed event (a lane CLEAR's arm, `src/app/clear-arm.ts`). Returns the
+ * stop. */
+export function onEngineSend(watch: (command: EngineCommand) => void): () => void {
+  sendWatchers.add(watch);
+  return () => void sendWatchers.delete(watch);
+}
+
 /**
  * Queue commands for the engine. What one task sends leaves with the next outbox batch (`enqueue`), so a
  * gesture's commands reach the same block together, in order with the notes around them. A batch the host
@@ -291,6 +301,7 @@ async function submit(items: InputItem[]): Promise<boolean> {
  * a command the engine did take brings the value back through its lane's `Mix` (`engine-store.ts`).
  */
 export function sendEngine(...commands: EngineCommand[]): Promise<boolean> {
+  for (const command of commands) for (const watch of sendWatchers) watch(command);
   return enqueue(commands.map(encodeItem.engine));
 }
 

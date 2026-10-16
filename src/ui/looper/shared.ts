@@ -47,15 +47,21 @@ export function volumeDb(v: number): string {
   return (db >= 0 ? '+' : '−') + Math.abs(db).toFixed(1) + ' dB';
 }
 
-/** How long a "press twice to destroy a take" confirm stays armed (lane CLR, ✕ ALL, the CLEAR key). */
+/** How long a "press twice to destroy a take" confirm stays armed: ✕ ALL's, and the lane CLEAR's as the UI
+ * shows it (`src/app/clear-arm.ts`; the engine's own window is lf-engine's `CONFIRM_WINDOW_MS`). */
 export const CONFIRM_WINDOW_MS = 2500;
 
+/** A two-press control's `onKeyDown` (lane CLR, ✕ ALL): a held Enter's key repeats would each click it,
+ * and a repeat is not a second press. Enter only: a held Tab must still move focus on past the button. */
+export function noEnterRepeat(e: KeyboardEvent): void {
+  if (e.key === 'Enter' && e.repeat) e.preventDefault();
+}
+
 /**
- * Two-step confirm latch. The first `trigger()` only ARMS (opens a `windowMs` window and returns); a
- * second within it runs `action` and disarms. The window auto-closes. Shared by the per-track CLR and
- * the command bar's ✕ ALL so "press twice to destroy a take" behaves identically — no blocking confirm.
- * Its button takes `onKeyDown` too: a held Enter's key repeats would each click it, and a repeat is not
- * a second press. Registers its own `onCleanup`, so call it during component setup.
+ * Two-step confirm latch, the command bar's ✕ ALL. The first `trigger()` only ARMS (opens a `windowMs`
+ * window and returns); a second within it runs `action` and disarms. The window auto-closes. No blocking
+ * confirm. A lane's CLR is the engine's CLEAR instead (`src/app/clear-arm.ts`). Its button takes
+ * `onKeyDown` too (`noEnterRepeat`). Registers its own `onCleanup`, so call it during component setup.
  */
 export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WINDOW_MS) {
   const [armed, setArmed] = createSignal(false);
@@ -70,12 +76,8 @@ export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WIND
       timer = setTimeout(() => setArmed(false), windowMs);
     }
   };
-  const onKeyDown = (e: KeyboardEvent) => {
-    // Enter only: a held Tab must still move focus on past the button.
-    if (e.key === 'Enter' && e.repeat) e.preventDefault();
-  };
   onCleanup(() => clearTimeout(timer));
-  return { armed, trigger, onKeyDown };
+  return { armed, trigger, onKeyDown: noEnterRepeat };
 }
 
 /** Mounted while a popover is open (IN FX, a lane's TRIM): Escape closes it wherever focus is (a pointer

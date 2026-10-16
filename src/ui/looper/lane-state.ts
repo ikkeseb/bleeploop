@@ -1,6 +1,7 @@
 import { createMemo, type Accessor } from 'solid-js';
 import { clock, looper, type TrackState } from '../state/audio';
-import { laneCue } from './gates';
+import { laneCue, refusalText } from './gates';
+import { clearArmed } from '../../app/clear-arm';
 
 /**
  * OWNS: what a lane shows — its display state, the word it reads as, its well message and its count-in
@@ -47,7 +48,8 @@ interface LaneView {
   /** The lane fades out (FADE) and stops where the fade ends. */
   fading: Accessor<boolean>;
   muted: Accessor<boolean>;
-  /** A refused press's reason on this lane (gates.ts `refuseOnLane`), while the cue lasts; else ''. */
+  /** A refused press's reason on this lane (gates.ts `refuseOnLane`), while the cue lasts, or CLEAR's arm
+   * on it (`clear-arm.ts`); else ''. */
   cue: Accessor<string>;
   /** The well's message: the cue, else the pending stop, the armed wait or the AUTO REC listen; else ''. */
   wellMsg: Accessor<string>;
@@ -80,9 +82,11 @@ export function createLaneView(i: number): LaneView {
     if (track().retakePass > 0) return 'TAKE'; // a rolling RETAKE counts its passes
     return d;
   });
+  // A refused press's reason, or CLEAR's arm (`clear-arm.ts`: one for every hand; any press drops it).
   const cue = createMemo(() => {
     const c = laneCue();
-    return c !== null && c.track === i ? c.text : '';
+    if (c !== null && c.track === i) return c.text;
+    return clearArmed(i) ? refusalText('ConfirmClear') : '';
   });
   // Only ARMED/LISTENING and a pending stop carry a well message; EMPTY shows nothing (the lane's record
   // affordance already says "press to record"). A refusal cue outranks every message while it lasts.

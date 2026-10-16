@@ -4,15 +4,15 @@ import { recallRig } from '../ui/state/rig-recall';
 import { setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
 import { platform } from '../platform';
-import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import { refusalText, refuseOnLane } from '../ui/looper/gates';
+import { startClearArm } from './clear-arm';
 import { onEngineEvent, openEngineDevice, restoreEngineShare, startEngineStore, whenDevice } from '../ui/state/engine-store';
 import { session } from '../ui/state/audio';
 import { autosave } from '../session/autosave';
 
 /**
  * The boot chain: subscribe to the engine's feed (its reset frame brings the engine's settings), put an
- * engine refusal on its lane, start the ASIO driver when it is the saved choice and open the saved
+ * engine refusal on its lane and its CLEAR arm on the lane's CLR (`clear-arm.ts`), start the ASIO driver when it is the saved choice and open the saved
  * device. Everything that needs a running engine waits for the first device: Share output, local
  * recovery (its restore loads into an engine at the device's rate) and the plugin host, activated at
  * the device's rate: it resyncs the slots a WebView reload stranded, scans the installed CLAP/VST3/VST2
@@ -24,9 +24,11 @@ import { autosave } from '../session/autosave';
 export function bootEngine(): () => void {
   if (!platform.engine.available) return () => {};
   const stopFeed = startEngineStore();
+  // CLEAR's first press is no refusal to the player: the lane shows its arm (`clear-arm.ts`).
+  const stopClearArm = startClearArm();
   const stopRefusals = onEngineEvent((ev) => {
-    if (ev.type !== 'Refused') return;
-    refuseOnLane(ev.lane, refusalText(ev.reason), ev.reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined);
+    if (ev.type !== 'Refused' || ev.reason === 'ConfirmClear') return;
+    refuseOnLane(ev.lane, refusalText(ev.reason));
   });
   let stopAutosave: (() => void) | null = null;
   let disposed = false;
@@ -58,5 +60,6 @@ export function bootEngine(): () => void {
     stopAutosave?.();
     stopFeed();
     stopRefusals();
+    stopClearArm();
   };
 }

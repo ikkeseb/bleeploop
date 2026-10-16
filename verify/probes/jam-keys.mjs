@@ -13,6 +13,14 @@
  *   for the confirm window (2.5 s); the next looper press (an arrow, a digit, the second Delete) takes the
  *   cue down at once; a Delete past the window finds no cue, and the engine's answer shows it again; the
  *   engine's `Cleared` empties the lane with no cue left.
+ * - CLEAR, ONE ARM FOR EVERY HAND (`src/app/clear-arm.ts`): the lane's CLR pill, the Delete key and a learned
+ *   pedal (native MIDI's `pressed`, its CLEAR sent natively) each press the engine's CLEAR and never send an
+ *   outright `Clear`; one press leaves the loop in place, and the engine's `ConfirmClear` turns the pill to
+ *   SURE? and the well to "press again to clear", whichever hand pressed; both go back by themselves after
+ *   the confirm window, and the next press is the engine's to judge again; the confirming press takes them
+ *   down at once and the engine's `Cleared` empties the lane. Either hand confirms what the other armed
+ *   (mouse then key, key then mouse, pedal then mouse, mouse then pedal), and CLR's confirming click sends
+ *   no `SelectTrack` before it (a selection disarms the engine). Any other press on the lane drops the arm.
  * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", beside its sensitivity slider (AUTO
  *   sends the engine's AUTO REC toggle, and the button shows the `Toggled` the fake answers); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
  *   pressable as the approve gesture (while a plain take records, it is refused); `TakeRejected` and
@@ -29,6 +37,7 @@
  * Run: pnpm probe jam-keys
  */
 import assert from 'node:assert/strict';
+import { isDeepStrictEqual } from 'node:util';
 import { probe } from '../harness/probe.ts';
 
 const RATE = 48000;
@@ -301,4 +310,111 @@ await probe(async ({ open }) => {
   const doubleDelete = await laneNow();
   assert.deepEqual(doubleDelete, { state: 'empty', cue: '' }, 'two Deletes in a row clear the track, no cue left');
 
+  // ── CLEAR: one arm for the pill, the key and a pedal; one press never clears ─────────────────────
+  // The fake judges no CLEAR: each step scripts the engine's answer (`ConfirmClear` to a first press,
+  // `Cleared` to a confirming one), as lf-engine's tests have the engine give it (`tests/actions.rs`
+  // `a_pedals_clear_confirms_per_lane`, `tests/golden_jam.rs`'s press after the window). What is proved
+  // here is the UI's half: what each hand sends, and what the lane shows from the engine's answer.
+  const L = 3;
+  const pill = lanes.nth(L).locator('.lp-pb--clr');
+  const midi = (ev) => page.evaluate((e) => window.__lf.native.midiEmit(e), ev);
+  const armAnswer = { events: [{ Refused: { frame: BAR, lane: L, reason: 'ConfirmClear' } }] };
+  const clearedAnswer = { events: [{ Cleared: { frame: BAR, lane: L } }, laneEvent(L, lane('Empty'))] };
+  const clearPress = (c) => c.Action === 'Clear' || (c.ActionOn?.[0] === L && c.ActionOn[1] === 'Clear');
+  const shown = async () => ({
+    state: await lanes.nth(L).getAttribute('data-state'),
+    pill: (await pill.textContent()).trim(),
+    cue: (await cues())[L],
+  });
+  const IDLE = { state: 'play', pill: 'CLR', cue: '' };
+  const ARMED = { state: 'play', pill: 'SURE?', cue: 'press again to clear' };
+  const CLEARED = { state: 'empty', pill: 'CLR', cue: '' };
+  /** Wait until the lane shows `want`, or fail with what it shows. */
+  const shows = async (want, what) => {
+    const t0 = Date.now();
+    let now = await shown();
+    while (!isDeepStrictEqual(now, want) && Date.now() - t0 < 2000) {
+      await page.waitForTimeout(20);
+      now = await shown();
+    }
+    assert.deepEqual(now, want, what);
+  };
+  /** One press by `hand`: what it sent the engine, every CLEAR in it the engine's to judge. */
+  const hands = {
+    mouse: async () => {
+      await clearSent();
+      await pill.click();
+      await sentAtLeast(1);
+      await page.waitForTimeout(50);
+      return sent();
+    },
+    key: async () => press('Delete'),
+    pedal: async () => {
+      await clearSent();
+      await midi('pressed');
+      await page.waitForTimeout(50);
+      return sent();
+    },
+  };
+  /** Press with `hand` and check it sent one CLEAR press at most (a pedal's is native) and no outright one. */
+  const pressClear = async (hand) => {
+    const out = await hands[hand]();
+    assert.ok(!out.some((c) => c.Clear !== undefined || c === 'ClearAll'), `${hand}: an outright clear went out (${JSON.stringify(out)})`);
+    assert.equal(out.filter(clearPress).length, hand === 'pedal' ? 0 : 1, `${hand}: one press is one engine CLEAR (${JSON.stringify(out)})`);
+    return out;
+  };
+  const holdLoop = async () => {
+    await emit({ events: [laneEvent(L, looping('Playing'))] });
+    await shows(IDLE, 'the lane holds its loop, CLR unarmed');
+  };
+  await holdLoop();
+  assert.deepEqual(await press('4'), [{ SelectTrack: L }]);
+  await emit({ events: [{ Selected: { frame: BAR, lane: L } }] });
+
+  // Each hand alone: one press arms and never clears; the window lapses; a press arms again; a second clears.
+  for (const hand of ['mouse', 'key', 'pedal']) {
+    await pressClear(hand);
+    await shows(IDLE, `${hand}: one press, before the engine answers, leaves the loop and arms nothing`);
+    await emit(armAnswer);
+    await shows(ARMED, `${hand}: one press arms (SURE?, "press again to clear") and the loop stays`);
+    await page.waitForTimeout(2700);
+    await shows(IDLE, `${hand}: the confirm window lapses, the loop still there`);
+    await pressClear(hand);
+    await emit(armAnswer);
+    await shows(ARMED, `${hand}: a press after the window arms again, never clears`);
+    await pressClear(hand);
+    await shows(IDLE, `${hand}: the confirming press takes the arm down at once`);
+    await emit(clearedAnswer);
+    await shows(CLEARED, `${hand}: two presses clear the lane`);
+    await holdLoop();
+    console.log(`CLEAR by ${hand}: one press armed, the window lapsed, two presses cleared`);
+  }
+
+  // Cross hands: the arm is one state, so either confirms what the other armed.
+  for (const [first, second] of [
+    ['mouse', 'key'],
+    ['key', 'mouse'],
+    ['pedal', 'mouse'],
+    ['mouse', 'pedal'],
+  ]) {
+    await pressClear(first);
+    await emit(armAnswer);
+    await shows(ARMED, `${first} arms`);
+    const out = await pressClear(second);
+    if (second === 'mouse') assert.deepEqual(out, [{ ActionOn: [L, 'Clear'] }], 'a confirming click sends no SelectTrack first, which would disarm the engine');
+    await shows(IDLE, `${second} confirms: the arm goes at once`);
+    await emit(clearedAnswer);
+    await shows(CLEARED, `armed by ${first}, confirmed by ${second}: the lane clears`);
+    await holdLoop();
+    console.log(`CLEAR armed by ${first}, confirmed by ${second}`);
+  }
+
+  // Any other press on the lane drops the arm: the engine disarms on it, so the lane stops saying SURE?.
+  await pressClear('mouse');
+  await emit(armAnswer);
+  await shows(ARMED, 'armed again');
+  await clearSent();
+  await lanes.nth(L).locator('.lp-pb--play').click();
+  assert.deepEqual(await sentAtLeast(1), [{ PlayStop: L }], 'PLAY on the armed lane sends its own press, no selection first');
+  await shows(IDLE, "PLAY on the armed lane drops CLEAR's arm");
 });
