@@ -8,7 +8,9 @@
  * the children's intrinsic widths + gaps + padding (the spacer counts as its min-width) — against the
  * bar's width, and flag `.cmd--stack`; CSS (app.css + transport.css) drops the modes cluster to a
  * second row. Child widths are intrinsic in both arrangements, so the flag cannot oscillate.
- * Re-measured on bar resize and on any DOM change inside it (a slider sliding in, a label changing).
+ * Re-measured on bar resize, on any DOM change inside it (a slider sliding in, a label changing) and when
+ * a web font finishes loading (Geist is requested only once the bar has text, after the first measure, and
+ * its metrics change every child's width without touching the bar's box or its DOM).
  */
 const SPACER_MIN_PX = 8;
 
@@ -68,8 +70,10 @@ export function installCmdFit(bar: HTMLElement): () => void {
   ro.observe(bar);
   const mo = new MutationObserver(schedule);
   mo.observe(bar, { childList: true, subtree: true, characterData: true });
+  document.fonts.addEventListener('loadingdone', schedule);
   measure();
   return () => {
+    document.fonts.removeEventListener('loadingdone', schedule);
     ro.disconnect();
     mo.disconnect();
     if (raf) cancelAnimationFrame(raf);
