@@ -64,6 +64,7 @@ function Fader(props: { index: number; disabled: boolean }) {
   // A styled native <input type=range> (same idiom as the command bar's master/click sliders) over a
   // 0..150 integer domain (= vol × 100); the unity tick + dB read-out are the per-track additions.
   // It shows its gesture's value until the engine has it (`mixGesture`), and builds on what it shows.
+  // A double-click resets it to 0 dB, as the slot fader and the pan do.
   const vol = () => looper.mixShown(props.index, 'volume');
   const gesture = mixGesture(props.index, 'volume');
   const frac = () => Math.max(0, Math.min(1, vol() / 1.5));
@@ -114,6 +115,12 @@ function Fader(props: { index: number; disabled: boolean }) {
           onKeyUp={gesture.onKeyUp}
           onPointerDown={gesture.onPointerDown}
           onLostPointerCapture={gesture.onLostPointerCapture}
+          onDblClick={(e) => {
+            // One send, and none when it already shows 0 dB. Resync the thumb as `onInput` does.
+            if (props.disabled || vol() === 1.0) return;
+            looper.setVolume(props.index, 1.0);
+            e.currentTarget.value = String(Math.round(vol() * 100));
+          }}
           onBlur={gesture.onBlur}
         />
       </div>
@@ -265,6 +272,9 @@ function TrackLane(props: {
   const { displayState, word, stopping, fading, muted, cue, wellMsg, wellCount } = createLaneView(props.index);
   const fxSelected = () => props.fxTrack === props.index;
   const isEmpty = () => state() === 'EMPTY';
+  // Any of the lane's effects engaged in the mix the engine applied (the feed's, never a control's
+  // overlay), the IN FX pill's rule. The FX pill's lamp shows it; its lit legend says the drawer is open.
+  const fxEngaged = () => !isEmpty() && looper.fxState(props.index).some((s) => !s.bypassed);
   const stateWord = () => {
     const w = word();
     return w === 'TAKE' ? `TAKE ${track().retakePass}` : STATE_WORD[w];
@@ -468,7 +478,7 @@ function TrackLane(props: {
           <button
             ref={props.fxRef}
             class="lp-pb lp-pb--fx"
-            classList={{ 'is-on': fxSelected() }}
+            classList={{ 'is-on': fxSelected(), 'has-fx': fxEngaged() }}
             disabled={isEmpty()}
             onClick={() => props.onToggleFx(props.index)}
             aria-label={`Track ${props.index + 1} FX`}

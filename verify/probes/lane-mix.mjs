@@ -21,6 +21,9 @@
  * - (e) MUTE sends the engine's toggle on each press (two quick presses: two toggles, one batch) and
  *   shows only the engine's mute, following its reports;
  * - (f) an effect's bypass pressed twice before any report builds on what it shows: it ends unbypassed;
+ * - (i) the FX pill's lamp lights while the engine's mix has any of the lane's effects engaged, the
+ *   drawer open or not, never on an EMPTY lane; a double-click on the fader's thumb sends 0 dB once, and
+ *   nothing when it already shows 0 dB or the lane is EMPTY;
  * - (h) a lane's `Cleared` and a `Copied` into it cancel its pending overlay; the lane going EMPTY and a
  *   reset frame too;
  * - (g) autosave: a save whose snapshot pinned another mix (B) than the one it inspected (A) does not
@@ -313,6 +316,61 @@ await probe(async ({ open }) => {
   assert.equal(followedF, 'false', 'settled, the bypass follows the engine again');
   await fxDrawer(false);
   await blur();
+
+  // ── (i) The FX pill's lamp and the fader's double-click ───────────────────────────────────────────
+  // Lane 1 carries the filter and the delay (above). The pill's lamp lights from the engine's mix, the
+  // drawer open or not (its pill then wears the engaged legend too); an EMPTY lane never lights it.
+  const pill = (i) => lanes(page).nth(i).getByRole('button', { name: `Track ${i + 1} FX`, exact: true });
+  const lamp = (i) => pill(i).evaluate((el) => el.classList.contains('has-fx'));
+  const lampShows = (i, on) =>
+    page.waitForFunction(([i, on]) => document.querySelectorAll('.lp-pb--fx')[i]?.classList.contains('has-fx') === on, [i, on], { timeout: 5000 });
+  const engagedMix = () =>
+    page.evaluate(async () => {
+      const { defaultLaneMix } = await import('/src/platform/host.web.ts');
+      const mix = defaultLaneMix();
+      return mix.fx.map((s, k) => (k === 0 ? { ...s, bypassed: false } : s));
+    });
+  await lampShows(0, true);
+  const closed = { lane1: await lamp(0), lane2: await lamp(1) };
+  await fxDrawer(true);
+  const drawerOpen = { lamp: await lamp(0), legend: await pill(0).evaluate((el) => el.classList.contains('is-on')) };
+  await fxDrawer(false);
+  await blur();
+  await seam('holdEcho', true);
+  await emitMix(0, { volume: await applied(0) }); // the engine reports every effect bypassed
+  await lampShows(0, false).catch(() => {});
+  const bypassedReport = await lamp(0);
+  await emitMix(3, { fx: await engagedMix() }); // an EMPTY lane's mix with the filter engaged
+  const emptyLane = await lamp(3);
+  await emitMix(3, {});
+  await seam('holdEcho', false);
+  await emitMix(0, { volume: await applied(0), fx: await page.evaluate(async () => (await import('/src/platform/host.web.ts')).fakeMixModel.lane(0).fx) });
+  await lampShows(0, true);
+  console.log('(i) FX lamp', JSON.stringify({ closed, drawerOpen, bypassedReport, emptyLane }));
+  assert.deepEqual(closed, { lane1: true, lane2: false }, 'the pill lights while any of its effects is engaged');
+  assert.deepEqual(drawerOpen, { lamp: true, legend: true }, 'the open drawer: the legend, and the lamp still lit');
+  assert.equal(bypassedReport, false, "the lamp follows the engine's mix");
+  assert.equal(emptyLane, false, 'an EMPTY lane never lights it');
+  // A double-click returns the fader to 0 dB: one send, none at 0 dB already, none on an EMPTY lane.
+  await fader(1).fill('60');
+  await engineHas(1, 0.6);
+  await blur();
+  await clearSent();
+  const vbox = await fader(1).boundingBox();
+  await fader(1).dblclick({ position: { x: vbox.width * 0.4, y: vbox.height / 2 } }); // on the thumb
+  await engineHas(1, 1);
+  const volumes = async () => (await sent()).filter((c) => c.SetVolume); // a click also selects the lane
+  const reset = { sent: await volumes(), shown: await shown(1) };
+  await blur();
+  await clearSent();
+  await fader(1).dblclick({ position: { x: vbox.width * (2 / 3), y: vbox.height / 2 } }); // on the thumb at unity
+  await fader(3).dblclick({ force: true });
+  await page.waitForTimeout(100);
+  const idle = await volumes();
+  await blur();
+  console.log('(i) double-click', JSON.stringify({ reset, idle }));
+  assert.deepEqual(reset, { sent: [{ SetVolume: [1, 1] }], shown: 100 }, 'a double-click on the thumb sends 0 dB once and shows it');
+  assert.deepEqual(idle, [], 'at 0 dB already, or on an EMPTY lane, it sends nothing');
 
   // ── (h) The cancels: Cleared, a Copied into the lane, EMPTY, a reset frame ────────────────────────
   await seam('holdEcho', true);
