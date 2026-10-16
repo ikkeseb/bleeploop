@@ -440,6 +440,12 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </svg>
         <div class="transport__loop-meta">
           <span class="transport__loop-k">LOOP</span>
+          {/* Unseen, under the read-out: the widest one it can show (150 bars of 6/8 at 300 BPM fill the
+              60 s buffer), so the window keeps one width from the empty "—" on and the controls beside
+              it never move when a take lands. */}
+          <span class="transport__loop-fit" aria-hidden="true">
+            000 BARS <small>· 00.0 s</small>
+          </span>
           <span class="transport__loop-v">
             <Show when={hasMaster()} fallback="—">
               {loopBars()} {loopBars() === 1 ? 'BAR' : 'BARS'} <small>· {loopSecs().toFixed(1)} s</small>
@@ -461,10 +467,12 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
       </button>
 
       {/* Global transport: ■/▶ ALL · FADE + its bars · ✕ ALL (two-step) · record level · IN FX (the
-          input sends). */}
+          input sends). ■/▶ ALL and FADE hold their widest word (`data-fit`), so nothing beside them
+          moves when the word does; ✕ ALL does not (its ✕ SURE? would fold the brand at 1280 px). */}
       <div class="transport__global">
         <button
-          class="transport__tgl"
+          class="transport__tgl transport__tgl--fit"
+          data-fit="■ NOW"
           classList={{ 'is-on': anyLive() }}
           disabled={!hasMaster() && !anyLive()}
           onClick={() => (anyLive() ? looper.stopAll() : looper.playAll())}
@@ -475,7 +483,8 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </button>
         <div class="transport__fade" role="group" aria-label="Fade out">
           <button
-            class="transport__tgl"
+            class="transport__tgl transport__tgl--fit"
+            data-fit="FADING"
             classList={{ 'is-armed': engineFade.fading() }}
             disabled={!fadeState().ok}
             onClick={() => engineFade.fadeAll()}
