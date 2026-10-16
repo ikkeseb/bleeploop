@@ -231,7 +231,7 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
         <ul class="help__list">
           <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
-          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo, reverb and ring mod switch as their buttons do</li>
+          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo, reverb and ring mod switch as their buttons do</li>
           <li><span class="help__note">HOLD</span>, beside a REC/DUB learned on a momentary pedal: hold the pedal to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
           <li><span class="help__note">Halve track</span> (MIDI learn only) keeps the selected track's first half, as <span class="help__note">✂ TRIM</span> does; undo gives the whole loop back</li>
@@ -248,6 +248,7 @@ function Manual(props: { hidden: boolean }) {
           <li><span class="help__note">DUB FEEDBACK</span>, last in the FX drawer, is what an overdub keeps of the layers under it: 100 % keeps them all, 0 % replaces them, and in between the old layers fade pass by pass</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
           <li><span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
+          <li><span class="help__note">↔ WIDE</span> copies it wide: the copy plays 20 ms behind, panned to the other side (a centred track goes half left, the copy half right), so one riff sounds like two guitars. Summed to mono the two cancel in places and sound hollow; a real double is a second take</li>
           <li><span class="help__note">✂ TRIM</span> keeps a track's first bars and repeats them across the loop. The loop keeps its length</li>
           <li>All tracks share one loop, so they stay locked together and can't drift</li>
           <li>A take shorter than the loop repeats across it — stop early, or set the bars with <span class="help__note">FIXED</span></li>

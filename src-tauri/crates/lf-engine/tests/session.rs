@@ -462,6 +462,36 @@ fn a_wet_master_rendered_from_a_snapshot_takes_the_snapshots_mix_not_the_setting
     assert!((heard / unity - 0.5).abs() < 0.01, "the lane at the snapshot's half volume: {heard} against {unity}");
 }
 
+#[test]
+fn a_wide_copy_saves_and_loads_as_any_lane() {
+    // WIDE COPY writes its offset into the copy's loop and its side into the pans: nothing else to save.
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(120.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.press(Command::CopyWide(0));
+    rig.idle();
+    rig.advance(rig.seconds(0.3));
+    let loops: Vec<Vec<f32>> = (0..2).map(|i| rig.pcm(i)).collect();
+    assert_ne!(loops[0], loops[1], "the copy is offset");
+    let s = snapshot(&mut rig, 2 * master as usize);
+    assert_eq!(s.result, Some(Ok(())));
+    let pans: Vec<f32> = mixes(&s).iter().map(|(_, m)| m.pan).collect();
+    assert_eq!(pans, [-0.5, 0.5], "each lane's side");
+
+    let mut fresh = Rig::new();
+    fresh.advance(4800);
+    let capacity = fresh.engine.looper().capacity() as usize;
+    let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load_of(&s, capacity, master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR)))) else { unreachable!() };
+    assert_eq!(load.result, Some(Ok(())));
+    for (i, want) in loops.iter().enumerate() {
+        assert_eq!(&fresh.pcm(i), want, "lane {i} loads as it was saved");
+    }
+    let again = snapshot(&mut fresh, 2 * master as usize);
+    assert_eq!(mixes(&again), mixes(&s), "and with the same mix, its pan included");
+}
+
 // ── A load carries each lane's mix; a block's due commands apply before its session job ─────────────
 
 /// A one-bar loop on lane 0 at 120 BPM, snapshotted at the defaults: the snapshot, and the loop as it

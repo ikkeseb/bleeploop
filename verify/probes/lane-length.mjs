@@ -140,8 +140,8 @@ await probe(async ({ open }) => {
   const undo = lanes.nth(0).getByRole('button', { name: 'Track 1 undo or redo the last overdub or trim', exact: true });
   assert.equal((await undo.textContent()).trim(), '↶ UNDO');
   assert.equal(await undo.getAttribute('title'), 'Undo / redo the last overdub or trim');
-  // The fullest pill row (FX, MUTE, ↶ UNDO, ↺ REV, ⧉ COPY, ✂ TRIM) fits its cluster at a wide and a narrow
-  // window.
+  // The fullest pill row (FX, MUTE, ↶ UNDO, ↺ REV, ⧉ COPY, ↔ WIDE, ✂ TRIM) fits its cluster at a wide and a
+  // narrow window.
   for (const [width, height] of [[1600, 900], [1000, 700]]) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(100);
@@ -155,7 +155,7 @@ await probe(async ({ open }) => {
       });
     });
     console.log(`pill row at ${width} px`, JSON.stringify(row));
-    assert.equal(row.length, 6, 'six pills');
+    assert.equal(row.length, 7, 'seven pills');
     assert.ok(row.every((p) => p.inside && !p.clipped), `every pill fits the row and its legend fits the pill at ${width} px`);
   }
   await page.setViewportSize({ width: 1600, height: 900 });

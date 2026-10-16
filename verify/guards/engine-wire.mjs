@@ -52,15 +52,15 @@ const tag = (v) => (typeof v === 'string' ? [v, undefined] : Object.entries(v)[0
 const keys = (o) => Object.keys(o).sort();
 
 const COMMANDS = [
-  'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
+  'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMeter', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',
 ];
 const ACTIONS = [
-  'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'Halve',
-  'Hold', 'Release', 'FadeAll', 'Toggle',
+  'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'CopyWide',
+  'Halve', 'Hold', 'Release', 'FadeAll', 'Toggle',
 ];
 const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring'];
 const REFUSALS = [

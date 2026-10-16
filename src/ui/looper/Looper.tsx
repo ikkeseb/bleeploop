@@ -15,7 +15,7 @@ import './looper.css';
  * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
  * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
  * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of
- * FX/MUTE/undo/reverse/copy/trim pills over a mix row (a horizontal volume slider and the pan).
+ * FX/MUTE/undo/reverse/copy/wide/trim pills over a mix row (a horizontal volume slider and the pan).
  *
  * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
  * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
@@ -515,8 +515,9 @@ function TrackLane(props: {
             </button>
           </Show>
 
-          {/* Track COPY — duplicates the whole lane (loop, volume, mute, FX) into the first EMPTY lane.
-              Hidden while no lane is free. */}
+          {/* Track COPY — duplicates the whole lane (loop, volume, mute, FX) into the first EMPTY lane;
+              ↔ WIDE beside it copies it wide (the engine's `CopyWide`: 20 ms behind, the other side).
+              Both hidden while no lane is free. */}
           <Show when={canReverse() && hasFreeLane()}>
             <button
               class="lp-pb lp-pb--copy"
@@ -526,6 +527,16 @@ function TrackLane(props: {
             >
               <span>
                 ⧉<span class="lp-pb__word"> COPY</span>
+              </span>
+            </button>
+            <button
+              class="lp-pb lp-pb--wide"
+              onClick={() => looper.copyWide(props.index)}
+              aria-label={`Copy track ${props.index + 1} wide to the first empty lane`}
+              title="Copy wide: the copy plays 20 ms behind, panned to the other side"
+            >
+              <span>
+                ↔<span class="lp-pb__word"> WIDE</span>
               </span>
             </button>
           </Show>

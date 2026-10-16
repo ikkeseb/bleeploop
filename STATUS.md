@@ -114,6 +114,9 @@ it.
   440 Hz default are an agent's pick: keep, or name what to change.
 - Multiply: over a 1-bar loop, FIXED 4 on another lane grows the loop to 4 bars with no seam. FIXED
   off: a take stopped ~1.6 loops in grows to two loops, ~1.3 keeps one.
+- ↔ WIDE (COPY wide: the copy 20 ms behind, mirrored pan; a centred lane goes half left, the copy
+  half right; machine: `tests/copy.rs`): on a guitar riff, does it sound like two guitars, and is
+  20 ms the right gap?
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings
   the 8 back; no click at either swap.
 - DUB FEEDBACK 50 %, two passes: the old layers fade; 0 % replaces; ↶ UNDO brings the loop back.

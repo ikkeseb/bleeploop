@@ -24,7 +24,7 @@
 //! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, DUB FEEDBACK, FADE, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume, the Share mix (the master without the click) | `engine.ts`, `master.ts` |
-//! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
+//! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR, COPY and WIDE COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |

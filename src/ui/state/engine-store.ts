@@ -1214,6 +1214,7 @@ export const engineLooper = {
   undoLastOverdub: (i: number): void => void sendEngine({ Undo: i }),
   reverse: (i: number): void => void sendEngine({ Reverse: i }),
   copy: (i: number): void => void sendEngine({ Copy: i }),
+  copyWide: (i: number): void => void sendEngine({ CopyWide: i }),
   clear: (i: number): void => void sendEngine({ Clear: i }),
   stopAll: (): void => void sendEngine('StopAll'),
   playAll: (): void => void sendEngine('PlayAll'),

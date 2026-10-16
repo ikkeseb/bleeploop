@@ -11,7 +11,7 @@ import { dismissLaneCue, refuseOnLane, tapGate } from '../ui/looper/gates';
  * (`transport-keys.ts`) dispatch through it; learned MIDI runs natively from a port of this table
  * (`src-tauri/src/engine_io/midi/actions.rs`), and the rows the UI owns reach it back through
  * `midi-actions.ts` (`runNativeAction`, `nativePressed`). Each action is an on-screen control's: the lane
- * core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve: the first half); the command bar's ▶/■
+ * core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY, ↔ WIDE and ✂ TRIM (halve: the first half); the command bar's ▶/■
  * ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN FX's three sends; the slot's GO LIVE,
  * the stage view's cap and its view switch.
  *
@@ -28,7 +28,7 @@ import { dismissLaneCue, refuseOnLane, tapGate } from '../ui/looper/gates';
  * (a pending pedal CLEAR is not confirmed past it); a refused TAP says why on the selected lane, where
  * the player is looking (gates.ts `refuseOnLane`).
  */
-type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy' | 'halveTrack';
+type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy' | 'copyWide' | 'halveTrack';
 /** The global actions the engine runs as its own. */
 type EngineGlobalId =
   | 'nextTrack'
@@ -61,6 +61,7 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   mute: 'Mute / unmute',
   reverse: 'Reverse / forward',
   copy: 'Copy to an empty track',
+  copyWide: 'Copy wide to an empty track',
   halveTrack: 'Halve track (keep first half)',
   nextTrack: 'Next track',
   prevTrack: 'Previous track',
@@ -91,6 +92,7 @@ const LANE: Readonly<Record<LaneActionId, EngineAction>> = {
   mute: 'Mute',
   reverse: 'Reverse',
   copy: 'Copy',
+  copyWide: 'CopyWide',
   // TRIM to the first half of the loop's bars, rounded down (one UNDO away): the engine's `Halve` judges
   // the bars as the loop stands when the press lands.
   halveTrack: 'Halve',

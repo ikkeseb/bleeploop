@@ -46,6 +46,7 @@ fn lane(action: ActionId) -> Option<Action> {
         ActionId::Mute => Action::Mute,
         ActionId::Reverse => Action::Reverse,
         ActionId::Copy => Action::Copy,
+        ActionId::CopyWide => Action::CopyWide,
         ActionId::HalveTrack => Action::Halve,
         _ => return None,
     })
@@ -150,6 +151,7 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::Undo(_)
         | Command::Reverse(_)
         | Command::Copy(_)
+        | Command::CopyWide(_)
         | Command::Trim(..)
         | Command::Clear(_)
         | Command::PlayAll
@@ -205,7 +207,7 @@ mod tests {
         run.out.iter().map(|o| o.command).collect()
     }
 
-    // actions.ts runAction, pressHold and releaseHold, row by row: all 25 actions on the selected lane
+    // actions.ts runAction, pressHold and releaseHold, row by row: all 26 actions on the selected lane
     // and, for the eight lane actions, on a named one; HOLD's press both ways and its release.
     #[test]
     fn the_fire_table() {
@@ -230,6 +232,8 @@ mod tests {
             (Fire::Run { action: Reverse, target: Some(2) }, on2(Action::Reverse), pressed()),
             (Fire::Run { action: Copy, target: None }, a(Action::Copy), pressed()),
             (Fire::Run { action: Copy, target: Some(2) }, on2(Action::Copy), pressed()),
+            (Fire::Run { action: CopyWide, target: None }, a(Action::CopyWide), pressed()),
+            (Fire::Run { action: CopyWide, target: Some(2) }, on2(Action::CopyWide), pressed()),
             (Fire::Run { action: HalveTrack, target: None }, a(Action::Halve), pressed()),
             (Fire::Run { action: HalveTrack, target: Some(2) }, on2(Action::Halve), pressed()),
             (Fire::Run { action: NextTrack, target: None }, a(Action::NextTrack), pressed()),
@@ -287,6 +291,7 @@ mod tests {
             Command::Undo(1),
             Command::Reverse(1),
             Command::Copy(1),
+            Command::CopyWide(1),
             Command::Trim(1, 2),
             Command::Clear(1),
             Command::PlayAll,

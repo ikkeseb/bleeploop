@@ -10,7 +10,7 @@
  *   Alt-click centre it (the Alt-click sends nothing but the centre);
  * - (b) the overlay (3b's rule, `lane-mix` covers the machinery): a key gesture whose report waits shows
  *   its value over an unequal `Mix`, the report ends it, and a later `Mix` moves the control;
- * - (c) layout at 1000x700, 1280x820 and 1920x1080 with six pills on lane 1: the pan is 44x24, on one
+ * - (c) layout at 1000x700, 1280x820 and 1920x1080 with seven pills on lane 1: the pan is 44x24, on one
  *   mix row with the volume fader, and every control and read-out of each lane's right cluster lies
  *   inside it, overlaps no other, is not clipped and is under its own centre point (the reach test of
  *   `layout-reachability`), the read-outs at their widest (`L 100`, `−40.0 dB`);
@@ -355,7 +355,7 @@ await probe(async ({ open }) => {
     await page.screenshot({ path: `logs/probes/lane-pan-${name}.png` });
     for (const l of m) console.log('(c)', name, JSON.stringify({ ...l, cluster: Math.round(l.cluster.width), pan: [l.pan.width, l.pan.height], fader: Math.round(l.fader.width) }));
     const expectedWidth = Math.min(264, Math.max(240, width * 0.2));
-    assert.equal(m[0].pills, 6, 'lane 1 shows six pills (FX, MUTE, UNDO, REV, COPY, TRIM)');
+    assert.equal(m[0].pills, 7, 'lane 1 shows seven pills (FX, MUTE, UNDO, REV, COPY, WIDE, TRIM)');
     assert.deepEqual(m[1].readouts, ['−40.0 dB', 'L 100'], 'lane 2 shows the widest read-outs');
     for (const l of m) {
       assert.ok(Math.abs(l.cluster.width - expectedWidth) < 0.5, `${name} lane ${l.lane}: the cluster is clamp(240px, 20vw, 264px) wide (${l.cluster.width})`);
