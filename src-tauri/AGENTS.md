@@ -302,6 +302,13 @@ plugin-GUI work.
 
 ## Open threads (no gate)
 
+- Two host tests timed out once in a local `pnpm rust:check` on 2026-10-16 (8a18e5ad plus a
+  scripts/docs change; the rerun passed 4/4 and CI passed that commit):
+  `clap::resize_tests::a_request_from_another_thread_never_waits_for_the_owner` ("request_resize waited
+  for the window's thread", `clap.rs` 540) and `engine_slot::tests::a_request_its_caller_gave_up_on_during_a_restart_is_not_served_after_it`
+  ("the request waits on the restart's activation", `engine_slot.rs` 1124). Next check: loop the two
+  under a parallel `cargo build` and read whether their bound is a fixed wait a loaded PC outlasts.
+
 - Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a

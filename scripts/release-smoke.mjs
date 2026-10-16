@@ -26,7 +26,9 @@
 //   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
 //                1 = input 2) and live, as a user takes the input dry in the slot header, a press on
 //                lane 1's record core takes the lane armed → rec → play, and its waveform canvas is not
-//                flat (lane 3, empty, is the control). A flat input take fails the run when this
+//                flat (lane 3, empty, is the control), nor run away (the record meter at full scale, or
+//                more than half the bar's columns tall: the loop through the cable feeding back, always
+//                a failure). A flat input take fails the run when this
 //                release must prove the input path again (D26, scripts/release-input-rule.mjs), judged
 //                against the last release: the nearest `v*` tag that is not this version's own
 //                (package.json), so a rerun on a commit that carries this version's tag, or after
@@ -549,6 +551,20 @@ try {
 
     const { recMs, inkA, seen, lane1 } = await record(() => goLive.click()); // input off: the loop plays on
     const inputFlat = flat(inkA);
+    // The slot is live for the take, so the cable's input plays back out of the output it is cabled from:
+    // too hot a level runs that loop away. A runaway take reaches full scale or fills the bar where the
+    // click draws a few peaks, and is never a pass, whatever this release must prove.
+    const runaway =
+      seen.meterMax >= 1
+        ? `the record meter reached full scale (${seen.meterMax.toFixed(2)})`
+        : inkA.tall > 0.5 * inkA.w
+          ? `lane 1's waveform fills the bar (${inkA.tall} of ${inkA.w} columns ≥ 10 %) where the click draws a few peaks`
+          : null;
+    must(
+      runaway === null,
+      `the input take ran away: ${runaway}: feedback through the loopback cable, or the level too hot\n` +
+        `turn the interface's output or the input gain down and run again`,
+    );
     if (inputFlat === null) {
       return [
         `input take passed: lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, slot 1 ${sourceWas} → Off on "${input}", live for the take`,
