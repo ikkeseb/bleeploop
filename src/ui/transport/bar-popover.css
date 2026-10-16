@@ -1,0 +1,39 @@
+/* A command-bar pill's popover (BarPopover.tsx). It hangs under the pill whose popover is open (anchor
+   positioning, as the settings popover hangs from the bar: app.css), flipping to the pill's right edge
+   near the window's. */
+.bar-pop__trigger[aria-expanded='true'] {
+  anchor-name: --bar-pop;
+}
+.bar-pop {
+  position: fixed;
+  top: 60px; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
+  right: clamp(16px, 2vw, 28px);
+  position-anchor: --bar-pop;
+  top: calc(anchor(bottom) + 8px);
+  right: auto;
+  left: anchor(left);
+  position-try-fallbacks: flip-inline;
+  outline: none;
+}
+
+/* One setting on the floating panel: label, the range and its value, in the lane FX modules' type
+   (fxpanel.css), with an optional hint under it. */
+.bar-pop--param {
+  width: 248px;
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
+}
+.bar-pop--param .fxp-param {
+  grid-template-columns: auto 1fr auto;
+}
+.bar-pop__hint {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--faint);
+}

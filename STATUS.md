@@ -92,6 +92,9 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 Built, and proven by machine where a probe reaches, but never played. A line leaves when a jam answers
 it.
 
+- CLR, the CLEAR key and a pedal share one arm, the engine's: arm with one, confirm with another; SURE?
+  shows exactly while a second press would clear (machine: `tests/actions.rs`, the `jam-keys` probe). Does
+  it read in time from the guitar, and does a slip on CLR never cost a loop?
 - Lane state colour lands on the beat, no fade (rec, dub, play, mute): does a quick stop-then-play read as a
   flicker from the guitar? The core's hover fade stays (machine: the contact sheet, no timing).
 - The count-in numeral now fills the lane well at every window size, and the FX pill carries a lamp while

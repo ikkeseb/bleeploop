@@ -20,7 +20,8 @@
  *   other armed (mouse then key, key then mouse, pedal then mouse, mouse then pedal); CLR's confirming
  *   click sends no `SelectTrack` before it (a selection disarms the engine), while REC/DUB on an armed
  *   lane still selects it first.
- * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", beside its sensitivity slider (AUTO
+ * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", with its SENS read-out live: it opens
+ *   the sensitivity popover, whose slider takes keys, and Escape hands focus back to the read-out (AUTO
  *   sends the engine's AUTO REC toggle, and the button shows the `Toggled` the fake answers); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
  *   pressable as the approve gesture (while a plain take records, it is refused); `TakeRejected` and
  *   `PassDropped` each reach the player (a toast naming the lane) and the release log (one console.error);
@@ -126,11 +127,37 @@ await probe(async ({ open }) => {
     return {
       state: l.getAttribute('data-state'),
       well: l.querySelector('.lp-lane__wellmsg')?.textContent?.trim(),
-      slider: document.querySelector('[aria-label="Auto record sensitivity"]') !== null,
+      sens: document.querySelector('button[aria-label="Auto record sensitivity"]')?.disabled === false,
     };
   });
   console.log('AUTO arm', JSON.stringify(listening));
-  assert.deepEqual(listening, { state: 'listening', well: 'WAITING FOR INPUT', slider: true }, 'an AUTO arm reads LISTENING beside its sensitivity');
+  assert.deepEqual(listening, { state: 'listening', well: 'WAITING FOR INPUT', sens: true }, 'an AUTO arm reads LISTENING beside its sensitivity');
+  // The sensitivity stays tunable while LISTENING: by keyboard, the read-out opens it, and Escape returns.
+  const sens = page.getByRole('button', { name: 'Auto record sensitivity', exact: true });
+  await sens.focus();
+  await page.keyboard.press('Enter');
+  const sensSlider = page.getByRole('dialog', { name: 'Auto record sensitivity' }).getByRole('slider');
+  await sensSlider.focus();
+  await page.keyboard.press('End');
+  assert.equal(await sensSlider.inputValue(), '100', 'the sensitivity slider takes keys while LISTENING');
+  assert.match(await sens.textContent(), /100/, 'the read-out shows the sensitivity');
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'Auto record sensitivity' }).waitFor({ state: 'detached' });
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Auto record sensitivity', 'Escape hands focus back to the read-out');
+  // One bar popover at a time: opening SENS by keyboard while CLICK's is open closes CLICK's (they share
+  // one anchor, so both open stacked at one spot and one outside click closed only one).
+  await page.getByRole('button', { name: 'Metronome click' }).click();
+  await page.waitForFunction(() => document.querySelector('button[aria-label="Click volume"]')?.disabled === false);
+  await page.getByRole('button', { name: 'Click volume', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('dialog', { name: 'Click volume' }).waitFor();
+  await sens.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('dialog', { name: 'Auto record sensitivity' }).waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 1, 'opening SENS closes the CLICK popover: exactly one bar popover is mounted');
+  await page.mouse.click(5, 300);
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Metronome click' }).click();
   await emit({ events: [laneEvent(0, lane('Empty'))] });
   await clearSent();
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();

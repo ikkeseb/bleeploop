@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onMount } from 'solid-js';
+import { For, Show, createSignal, onMount, type JSX } from 'solid-js';
 import { asioStatus } from '../state/audio-devices';
 import asioLogo from '../../assets/third-party/ASIO-compatible-logo-Steinberg-R-white-transparent-RGB.svg';
 import { DRUM_KIT } from '../state/drum-kit';
@@ -7,6 +7,7 @@ import { KEY_ACTIONS } from '../../app/transport-keys';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import { platform } from '../../platform';
 import { BUILD_LABEL, copyDiagnostics, logFolder, openLogFolder } from './diagnostics';
+import { openSettings, type SettingsPage } from '../../settings-opener';
 import './help.css';
 
 /**
@@ -151,7 +152,9 @@ function Reference(props: { hidden: boolean }) {
           <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
           <ul class="help__list">
             <li>A keystroke footswitch or page turner sends keys: set each pedal to one of the looper keys above</li>
-            <li>A MIDI pedal: learn its action in Audio Settings → <span class="help__note">MIDI LEARN</span> (Manual → Pedals)</li>
+            {/* Only the row's name is the link here: a button is an inline block and never wraps, and the
+                whole phrase would push this column a line past the 960x600 fit. */}
+            <li>A MIDI pedal: learn its action in Audio Settings → <SettingsLink page="midi" name="Audio Settings → MIDI LEARN"><span class="help__note">MIDI LEARN</span></SettingsLink> (Manual → Pedals)</li>
           </ul>
         </section>
       </div>
@@ -230,7 +233,7 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
         <ul class="help__list">
-          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
+          <li>A MIDI footswitch or controller: <SettingsLink page="midi">Audio Settings → <span class="help__note">MIDI LEARN</span></SettingsLink>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
           <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo, reverb and ring mod switch as their buttons do</li>
           <li><span class="help__note">HOLD</span>, beside a REC/DUB learned on a momentary pedal: hold the pedal to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
@@ -270,10 +273,10 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Transport &amp; tempo</h3>
         <ul class="help__list">
           <li>A 1-bar count-in (one bar of clicks, counted down to 1) leads the first recording. You come in on the downbeat after the count, not the button press. A later take recorded with the loops stopped gets the count-in too, and every track starts from the top on that downbeat</li>
-          <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
-          <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat. Off, every take runs until you stop it</li>
+          <li><span class="help__note">CLICK</span> toggles the metronome (never recorded, silent while nothing runs); the number beside it opens its volume. A mode that is on lights its lamp</li>
+          <li><span class="help__note">FIXED</span> records exactly the bars set beside it and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
-          <li><span class="help__note">AUTO REC · SENS</span> replaces the first count-in: arm the track, then playing starts the take. Raise sensitivity for quieter input; the cyan tick on the record level is the trigger</li>
+          <li><span class="help__note">AUTO REC</span> replaces the first count-in: arm the track, then playing starts the take. <span class="help__note">SENS</span> beside it opens the sensitivity: raise it for quieter input; the cyan tick on the record level is the trigger</li>
           <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
           <li>The time signature beside BPM (4/4, 3/4, 6/8, 12/8, 5/4) sets the bar: the click accents its first beat, and FIXED, FADE and the grid count its bars. In 6/8 and 12/8, BPM and TAP count the dotted quarter (two and four beats a bar). It locks with the tempo</li>
         </ul>
@@ -282,7 +285,7 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Other layers <span class="help__tag">synths · MIDI</span></h3>
         <ul class="help__list">
-          <li>A MIDI controller plays the synths and the other layers. Controller status shows in Audio Settings → diagnostics</li>
+          <li>A MIDI controller plays the synths and the other layers. Controller status shows in <SettingsLink page="diagnostics">Audio Settings → diagnostics</SettingsLink></li>
           <li>Click a slot to send MIDI and keyboard notes to its plugin or built-in synth</li>
           <li>With no controller connected, the computer keys play instead: Reference maps them</li>
         </ul>
@@ -334,5 +337,15 @@ function Manual(props: { hidden: boolean }) {
         </div>
       </section>
     </div>
+  );
+}
+
+/** A place in Audio Settings named in the prose: it closes Help and opens the panel on that page. `name`
+ * when the link's text alone does not say where it goes. */
+function SettingsLink(props: { page: SettingsPage; name?: string; children: JSX.Element }) {
+  return (
+    <button type="button" class="lf-link help__link" aria-label={props.name} onClick={() => openSettings(props.page)}>
+      {props.children}
+    </button>
   );
 }

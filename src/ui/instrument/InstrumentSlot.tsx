@@ -24,6 +24,7 @@ import { engineDevice, engineOpenFailure } from '../state/engine-store';
 import { PluginBar, PluginParams } from './PluginControls';
 import { InputPick, LiveButton, SlotMeter, SlotVolume } from './SlotControls';
 import { liveShown } from './live';
+import { openSettings, type SettingsPage } from '../../settings-opener';
 
 /**
  * One instrument slot (A / B) — a compact card. Its header: the A/B identity button, the source picker
@@ -164,11 +165,18 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
       </div>
       <Show when={platform.pluginHost.available && availablePlugins().length === 0}>
         <span class="slot__plugin-note" role="note">
-          {scanning()
-            ? 'Scanning plugins…'
-            : !engineDevice() && engineOpenFailure()
-              ? 'No audio device open. See Audio Settings.'
-              : 'No plugins found · the standard CLAP, VST3 and VST2 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar'}
+          {scanning() ? (
+            'Scanning plugins…'
+          ) : !engineDevice() && engineOpenFailure() ? (
+            <>
+              No audio device open. See <SettingsLink page="device" />.
+            </>
+          ) : (
+            <>
+              No plugins found · the standard CLAP, VST3 and VST2 folders are scanned · add your own in{' '}
+              <SettingsLink page="plugins" /> · rescan ⟳ in the command bar
+            </>
+          )}
         </span>
       </Show>
       {/* Params drawer (accordion). Mounted whenever a plugin is loaded (so onParamChanged tracks live
@@ -190,5 +198,22 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         <SlotMeter slot={slotIdx} />
       </Show>
     </div>
+  );
+}
+
+/** "Audio Settings" in the slot's note, opening the panel on the page the note is about (the card's own
+ * click, which picks the slot, does not take it). */
+function SettingsLink(props: { page: SettingsPage }) {
+  return (
+    <button
+      type="button"
+      class="lf-link"
+      onClick={(e) => {
+        e.stopPropagation();
+        openSettings(props.page);
+      }}
+    >
+      Audio Settings
+    </button>
   );
 }

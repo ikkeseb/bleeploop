@@ -253,7 +253,7 @@ await probe(async ({ browser, open }) => {
 
       scene = '7-audio-settings';
       await page.evaluate(() => window.__lf.ui.openSettings());
-      await page.getByRole('group', { name: 'Audio settings', exact: true }).waitFor();
+      await page.getByRole('group', { name: 'Audio Settings', exact: true }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
       await page.evaluate(() => window.__lf.ui.closeSettings());

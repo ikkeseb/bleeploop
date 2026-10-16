@@ -1,17 +1,18 @@
-/* Global Audio Settings popover — "Instrument". A floating opaque panel anchored top-right under
-   the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
-   buffer-size + the ASIO toggle render as matte key faces; the read-only host/isolated/plugin/midi
-   DIAGNOSTICS sit in a sunk readout well at the foot. Chrome stays monochrome — engaged = the
-   warm-white --engaged, --dub = a deferred-change / warning note. */
+/* Global Audio Settings popover: "Instrument". A floating opaque panel anchored top-right under the
+   command-bar gear (see .settings-popover in app.css): a rail of four pages on the left, one page on the
+   right. The rail's tabs are key faces only when selected (warm-white legend, engaged = selected chrome),
+   each with a lamp in the lane LED's vocabulary and a one-word state. The controls render as matte key
+   faces, the read-outs (the buffer's block, DEVICE's round trip) in the mono legend beside them. Chrome
+   stays monochrome: engaged = the warm-white --engaged, --dub = a deferred-change / warning note. */
 .audio-settings {
   display: flex;
-  flex-direction: column;
-  gap: 9px;
-  /* A set width, so the hints wrap instead of setting it: as shrink-to-fit, the Share hint's one line
-     sized the panel and, once it outgrew the window, pushed it to the window's left edge. 1080px is the
-     width that line gave it; a narrower window keeps the bar's side margin on both sides. */
-  width: min(1080px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
-  padding: 15px;
+  /* A set size, so a page switch never resizes or moves the panel: the rail stays put and a page taller
+     than the panel scrolls inside itself. The width fits the minimum 1000 px window beside the bar's
+     side margins; the height is the DEVICE page with ASIO's driver row and a three-line Share hint, and
+     shrinks with the popover's own cap (`max-height: stretch`) in a short window. */
+  width: min(800px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
+  height: 548px;
+  min-height: 0;
   border-radius: 14px;
   /* opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
      legible without a blur. */
@@ -19,15 +20,151 @@
   border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
 }
+/* The page scrolls, never the panel (app.css gives every popover body overflow-y: auto). */
+.settings-popover > .audio-settings {
+  overflow: hidden;
+}
 
-/* panel title — caps eyebrow */
+/* ---- the rail ---- */
+.audio-settings__rail {
+  flex: 0 0 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 15px 10px;
+  border-right: 1px solid var(--edge);
+}
+
+/* panel title: caps eyebrow over the rail */
 .audio-settings__title {
+  padding-left: 9px;
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--dim);
   font-weight: 600;
-  margin-bottom: 3px;
+}
+
+.audio-settings__tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* A tab: the lamp, the page's name and, under it, its state word. No face until hovered or selected. */
+.audio-settings__tab {
+  display: grid;
+  grid-template-columns: 5px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 9px;
+  row-gap: 3px;
+  align-items: center;
+  padding: 8px 9px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.audio-settings__tab:hover {
+  background: var(--surf-1);
+}
+.audio-settings__tab[aria-selected='true'] {
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+}
+.audio-settings__tab-name {
+  grid-column: 2;
+  color: var(--dim);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+.audio-settings__tab:hover .audio-settings__tab-name {
+  color: var(--text);
+}
+.audio-settings__tab[aria-selected='true'] .audio-settings__tab-name {
+  color: var(--engaged);
+}
+.audio-settings__tab-state {
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+.audio-settings__tab[aria-selected='true'] .audio-settings__tab-state {
+  color: var(--dim);
+}
+/* The lamp: the FX pill's socket and light (looper.css .lp-pb--fx), beside the page's name. Amber = the
+   command bar lamp's warning (app.css .cmd__lamp--warn): the page needs the player. */
+.audio-settings__lamp {
+  grid-row: 1;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: #23262e;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.8);
+  transition: background-color 0.15s, box-shadow 0.15s;
+}
+.audio-settings__lamp.is-lit {
+  background: var(--engaged);
+  box-shadow: 0 0 6px var(--engaged);
+}
+.audio-settings__lamp.is-warn {
+  background: var(--dub);
+  box-shadow: 0 0 6px var(--dub);
+}
+
+/* ---- a page ---- */
+.audio-settings__page {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 15px 16px 16px;
+}
+/* a read-only page is a Tab stop (DIAGNOSTICS): the app's focus ring, inside the panel's clipped edge */
+.audio-settings__page:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -3px;
+}
+.audio-settings__page[hidden] {
+  display: none;
+}
+
+/* a sub-heading inside a page (DEVICE's Windows devices): a quieter eyebrow over a hairline */
+.audio-settings__sub {
+  margin-top: 7px;
+  padding-top: 13px;
+  border-top: 1px solid var(--edge);
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* a row's plain-text value (MIDI's inputs): the select's legend, without its face */
+.audio-settings__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 11px;
 }
 
 .audio-settings__row {
@@ -99,6 +236,22 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+/* A row whose value is a read-out alone (DEVICE's round trip): the select's height, so the rows keep
+   their rhythm, and the value in the legend's colour; words for "no number" stay --dim. */
+.audio-settings__row--readout {
+  min-height: 30px;
+}
+.audio-settings__readout--value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.audio-settings__readout--value.is-none {
+  color: var(--dim);
+}
 
 /* Deferred-change hint: a device/channel swap only takes effect on the next GO LIVE while a slot is
    live. Amber note, mixed up to at least --dim brightness so it stays legible. */
@@ -108,6 +261,12 @@
   font-size: 10px;
   line-height: 1.4;
   color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+}
+
+/* A hint that is the page's only line (PLUGINS with no plugin host) starts at the page's edge. */
+.audio-settings__hint--flush {
+  margin-top: 0;
+  padding-left: 0;
 }
 
 /* A standing explanation, not a deferred change or a fault: quiet grey instead of the amber note. */
@@ -398,36 +557,28 @@
   color: var(--dim);
 }
 
-/* Diagnostics — a sunk readout well at the foot: the
-   read-only host/isolated/plugin/midi/bridge state. Reads as a status display, distinct from the
-   interactive controls above. The aggregate of these is the command-bar system lamp. */
+/* Diagnostics: the DIAGNOSTICS page, a sunk read-out well: the read-only host/engine/plugin/midi state.
+   Reads as a status display, distinct from the controls of the other pages. The aggregate of these is the
+   command-bar system lamp (and this page's rail lamp). */
 .audio-settings__diag {
-  margin-top: 5px;
-  padding: 11px 12px;
+  padding: 12px 14px;
   border-radius: 10px;
   background: var(--sunk);
   border: 1px solid transparent;
   box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.audio-settings__diag-title {
-  font-size: 9.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--dim);
-  font-weight: 600;
-  margin-bottom: 1px;
+  gap: 8px;
 }
 .audio-settings__diag-row {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: 12px;
 }
-/* key = --dim caps label (secondary but legible); value = --text mono read-out (the live state, primary) */
+/* key = --dim caps label (secondary but legible); value = --text mono read-out (the live state, primary),
+   wrapping on the page's width rather than cut: the engine line is the longest */
 .audio-settings__diag-row span {
+  flex: 0 0 74px;
   color: var(--dim);
   font-weight: 500;
   text-transform: uppercase;
@@ -435,14 +586,13 @@
   font-size: 9.5px;
 }
 .audio-settings__diag-row b {
+  flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--mono);
   font-weight: 500;
   font-size: 10.5px;
+  line-height: 1.5;
   font-variant-numeric: tabular-nums;
   color: var(--text);
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 24ch;
+  overflow-wrap: anywhere;
 }

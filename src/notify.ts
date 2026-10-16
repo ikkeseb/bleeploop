@@ -19,10 +19,18 @@ export interface Toast {
   message: string;
   /** Reactive, like `count`: the newest repeat's detail. */
   readonly detail?: string;
+  /** One thing the player can do about it from the toast (`toast/Toasts.tsx` renders a button): e.g.
+   * open Audio Settings on the page the message names. A repeat keeps the first toast's. */
+  readonly action?: ToastAction;
   /** Repeat count — a duplicate message increments this instead of stacking a second toast. Reactive
    * (a getter over the toast's own signal): a repeat updates the toast in place, never replaces it,
    * so `<For>` keeps its row and a focused Dismiss keeps keyboard focus. */
   readonly count: number;
+}
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
 }
 
 interface Repeat {
@@ -138,17 +146,17 @@ function holdsFocus(id: number): boolean {
  * toast is pushed; past MAX_VISIBLE the oldest one keyboard focus is not in is dropped (its timer
  * cleared).
  */
-export function notifyError(message: string, detail?: unknown): void {
-  push('error', message, detail);
+export function notifyError(message: string, detail?: unknown, action?: ToastAction): void {
+  push('error', message, detail, action);
 }
 
 /** A success/confirmation toast (e.g. "export saved") — same store, dedupe and lifetime as an error,
  * rendered with the calm accent. NOT a logging surface: nothing here replaces a `console.error`. */
-export function notifyInfo(message: string, detail?: unknown): void {
-  push('info', message, detail);
+export function notifyInfo(message: string, detail?: unknown, action?: ToastAction): void {
+  push('info', message, detail, action);
 }
 
-function push(kind: Toast['kind'], message: string, detail: unknown): void {
+function push(kind: Toast['kind'], message: string, detail: unknown, action?: ToastAction): void {
   const text = serializeDetail(detail);
   const current = toasts();
   const existing = current.find((t) => t.message === message && t.kind === kind);
@@ -162,6 +170,7 @@ function push(kind: Toast['kind'], message: string, detail: unknown): void {
     id: nextId++,
     kind,
     message,
+    action,
     get count() {
       return repeat().count;
     },

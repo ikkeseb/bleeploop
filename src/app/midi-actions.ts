@@ -3,6 +3,7 @@ import { importLegacyBindings, setMidiActionHandler, startMidi } from '../ui/sta
 import { refuseOnLane } from '../ui/looper/gates';
 import type { ImportReport, MidiActionId } from '../platform';
 import { notifyError } from '../notify';
+import { settingsAction } from '../settings-opener';
 import { nativePressed, runNativeAction, type ActionId } from './actions';
 
 /**
@@ -40,18 +41,20 @@ function tellImport(report: ImportReport | null): void {
     console.error(`[midi] ${waiting}`);
     notifyError(
       `Could not run ${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version. Pick their port in Audio Settings.`,
+      undefined,
+      settingsAction('midi'),
     );
   }
   if (report.unreadable !== null || report.rejected.length > 0) {
     const what = report.unreadable !== null ? 'the MIDI bindings' : plural(report.rejected.length, 'MIDI binding', 'MIDI bindings');
-    notifyError(`Could not read ${what} from the previous version. Learn them again in Audio Settings.`);
+    notifyError(`Could not read ${what} from the previous version. Learn them again in Audio Settings.`, undefined, settingsAction('midi'));
   }
 }
 
 /** The previous version's bindings did not reach native MIDI this launch (the next one tries again). */
 function importFailed(log: string, err: unknown): void {
   console.error(log, err);
-  notifyError('Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.', err);
+  notifyError('Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.', err, settingsAction('midi'));
 }
 
 function importLegacy(): void {

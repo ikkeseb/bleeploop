@@ -49,6 +49,7 @@ import { engineResync } from './instrument';
 import { withAt } from './instrument-slots';
 import { engineInputLive, toggleEngineInput } from './native-io';
 import { notifyError, notifyInfo } from '../../notify';
+import { settingsAction } from '../../settings-opener';
 
 /**
  * OWNS: the UI's view of the native engine (invariants 3 and 6): the feed reducer, the device that
@@ -638,7 +639,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
   switch (ev.type) {
     case 'Lost':
       console.error(`[engine] ${ev.backend} device lost: ${ev.reason}`);
-      notifyError('Could not reach the audio device. Reconnect it and pick it in Audio Settings, or restart BleepLoop.', ev.reason);
+      notifyError('Could not reach the audio device. Reconnect it and pick it in Audio Settings, or restart BleepLoop.', ev.reason, settingsAction('device'));
       // Kept as why no device runs; every reader gates it on the device status, which a recovery or a
       // fallback in the same or a later frame may already have filled.
       setOpenFailure(ev.reason);
@@ -652,7 +653,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
       break;
     case 'ShareLost':
       console.error(`[engine] share output lost: ${ev.reason}`);
-      notifyError('Could not keep Share output running. Pick its device again in Audio Settings.', ev.reason);
+      notifyError('Could not keep Share output running. Pick its device again in Audio Settings.', ev.reason, settingsAction('device'));
       forgetShare();
       break;
     case 'EngineFaulted':
@@ -1685,7 +1686,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     return { status: runs.status, declined: false };
   } catch (err) {
     console.error('[engine] device open failed', err);
-    notifyError('Could not open the audio device. Pick another in Audio Settings.', err);
+    notifyError('Could not open the audio device. Pick another in Audio Settings.', err, settingsAction('device'));
     setOpenFailure(errorText(err));
     // The device that ran keeps running, or the owner reopens it (`Owner::open`,
     // `src-tauri/src/engine_io/owner.rs`): its picks go back, saved and shown.
@@ -1716,7 +1717,7 @@ export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | n
         await switchAsioDriver(previous);
       } catch (err) {
         console.error('[engine] ASIO driver switch back failed', err);
-        notifyError('Could not switch back to the previous ASIO driver. Pick a driver in Audio Settings.', err);
+        notifyError('Could not switch back to the previous ASIO driver. Pick a driver in Audio Settings.', err, settingsAction('device'));
       }
     };
     try {

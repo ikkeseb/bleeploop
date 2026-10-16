@@ -1,8 +1,9 @@
 /**
- * Drives the rendered command bar and lane through AUTO REC's toggle and sensitivity slider at
- * seven desktop widths (960..1920 px), in engine mode on the web engine fake (`window.__lfEngineFake`
- * set before the app loads, a reset frame with five EMPTY lanes), and asserts the command-bar height and
- * lane top never move: AUTO must not reflow the stage when switched on/off or dragged end-to-end.
+ * Drives the rendered command bar and lane through AUTO REC's toggle and its sensitivity (the SENS
+ * read-out's popover, its slider driven end to end by key) at seven desktop widths (960..1920 px), in
+ * engine mode on the web engine fake (`window.__lfEngineFake` set before the app loads, a reset frame with
+ * five EMPTY lanes), and asserts the command-bar height and lane top never move: AUTO must not reflow the
+ * stage when switched on/off or set from 1 to 100, and the read-out is live only while AUTO is on.
  * Screenshots the 1730 px case before and after enabling. Proves layout stability only; it says nothing
  * about auto-record detection itself (the engine's: lf-engine `tests/auto_record.rs`) or anything below
  * the DOM. Run: pnpm probe transport-auto-layout
@@ -43,8 +44,12 @@ await probe(async ({ open }) => {
     const before = await bounds();
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-off.png' });
     const auto = page.getByRole('button', { name: 'Auto record', exact: true });
+    const sens = page.getByRole('button', { name: 'Auto record sensitivity', exact: true });
     assert.equal(await auto.getAttribute('aria-pressed'), 'false');
+    assert.equal(await sens.isDisabled(), true, 'SENS is dead while AUTO is off');
     await auto.click();
+    assert.equal(await sens.isDisabled(), false, 'SENS is live while AUTO is on');
+    await sens.click();
     const slider = page.getByRole('slider', { name: 'Auto record sensitivity', exact: true });
     await slider.waitFor({ state: 'visible' });
     await slider.focus();
@@ -55,12 +60,14 @@ await probe(async ({ open }) => {
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-on.png' });
     await page.keyboard.press('Home');
     assert.equal(await slider.inputValue(), '1');
+    await page.keyboard.press('Escape');
+    await slider.waitFor({ state: 'detached' });
     await page.waitForTimeout(150);
     const adjusted = await bounds();
     assert.equal(await auto.getAttribute('aria-pressed'), 'true');
     await auto.click();
     await page.waitForTimeout(150);
-    assert.equal(await slider.isVisible(), false);
+    assert.equal(await sens.isDisabled(), true);
     const disabled = await bounds();
     const pass = [enabled, adjusted, disabled].every(value =>
       Math.abs(value.bar - before.bar) < 0.5 && Math.abs(value.lane - before.lane) < 0.5);

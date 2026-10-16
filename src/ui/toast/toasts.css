@@ -93,6 +93,16 @@
   word-break: break-word;
 }
 
+/* the toast's action: an inline link (.lf-link, app.css) in the detail's size, under the message */
+.toast .toast__action {
+  align-self: flex-start;
+  margin-top: 3px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+}
+
 /* close affordance — a matte key face; the whole toast body is also a pointer dismiss shortcut */
 .toast__close {
   position: relative; /* anchors the ::before hit pad */

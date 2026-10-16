@@ -10,7 +10,8 @@
  *   lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
  *   a PC key (its note to native MIDI's router, `__lf.native.inputSent`, by its owner `key:<code>`), the
- *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
+ *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14; its bars
+ *   show only while FIXED is on), IN FX
  *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged),
  *   ⧉ COPY and ↔ WIDE in the lane's EDIT menu (`Copy`, `CopyWide`; the `copyWide` action is the engine's
  *   `CopyWide`, on its own selection or a named track);
@@ -348,10 +349,12 @@ await probe(async ({ open }) => {
   await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });
   await clearSent();
   const fixedToggle = page.getByRole('button', { name: 'Fixed take length', exact: true });
+  const fixedBars = page.locator('.transport__fixed .transport__bars-val');
+  assert.equal(await fixedBars.count(), 0, 'FIXED off shows no bars');
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'true', "FIXED shows the engine's Toggled");
-  assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 4', 'FIXED 4 over a 2-bar loop: two loops');
+  assert.equal((await fixedBars.textContent()).trim(), '4bars', 'FIXED 4 over a 2-bar loop: two loops');
   assert.match(await fixedToggle.getAttribute('title'), /Longer: the loop grows to it in whole loops/);
   const more = page.getByRole('button', { name: 'More bars', exact: true });
   const fewer = page.getByRole('button', { name: 'Fewer bars', exact: true });
@@ -365,7 +368,7 @@ await probe(async ({ open }) => {
   await clearSent();
   await more.click();
   await emit({ events: [laneEvent(0, committed), transport(BAR, true, 120)] });
-  assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 6', 'over a 1-bar loop every bar is a whole loop');
+  assert.equal((await fixedBars.textContent()).trim(), '6bars', 'over a 1-bar loop every bar is a whole loop');
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(2), [{ SetFixedBars: 6 }, { Action: { Toggle: 'Fixed' } }]);
 
@@ -397,6 +400,7 @@ await probe(async ({ open }) => {
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'false', "FIXED shows the engine's off");
+  assert.equal(await fixedBars.count(), 0, 'FIXED off hides its bars');
 
   // ── A later take's wait: counted in or not is the engine's to say (its beats' `countLeft`) ─────────
   const count = (i) => lanes.nth(i).locator('.lp-lane__count');
