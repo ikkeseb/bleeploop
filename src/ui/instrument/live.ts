@@ -44,11 +44,11 @@ export async function toggleLive(slot: 0 | 1, quiet = false): Promise<void> {
     if (wantLive) await goLive(slot);
     else await stopLive(slot);
   } catch (e) {
-    // Rare (the slot's op chain failed); report generically.
+    // The engine did not get the slot's live flag (its batch was lost), or the slot's op chain failed.
     console.error('[PluginControls] go-live toggle failed', e);
     if (quiet) return;
     setError((prev) => withAt(prev, slot, wantLive ? 'input failed' : 'stop failed'));
-    notifyError(wantLive ? 'Could not start the live input. Press GO LIVE again.' : 'Could not stop the live input. Press INPUT LIVE again.', e);
+    notifyError(wantLive ? 'Could not go live. Press GO LIVE again.' : 'Could not stop the live input. Press INPUT LIVE again.', e);
   } finally {
     setBusy((prev) => withAt(prev, slot, false));
   }

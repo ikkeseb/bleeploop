@@ -14,6 +14,8 @@
  *   store's clip counter), and goes out ~1.5 s later, the other slot going live or not meanwhile;
  * - the selected lane names the live slots ("A LIVE", "A+B LIVE", "B LIVE"), the other lanes nothing,
  *   and the badge follows the selection and GO LIVE off;
+ * - a GO LIVE (or a stop) whose batch never reaches the host leaves the slot as it was and says so (a
+ *   toast and the release log), since the engine echoes no live flag;
  * - at 1000×700, 1280×820 and 1920×1080: the CLIP lamp, the badge and the pill are at least their
  *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, and the
  *   meter runs most of the card's width.
@@ -36,7 +38,7 @@ const meter = (a, b, clip = [false, false]) => ({ meter: { peak: [a, b], clip } 
 await probe(async ({ open }) => {
   for (const [width, height] of VIEWPORTS) {
     const tag = `${width}x${height}`;
-    const { page, consoleErrors } = await open({
+    const { page, consoleErrors, consumeConsoleErrors } = await open({
       viewport: { width, height },
       init: async (p) => {
         await p.route('**/src/platform/host.web.ts', async (route) => {
@@ -214,6 +216,29 @@ await probe(async ({ open }) => {
       await live(2).click();
       await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: false }).waitFor();
       assert.deepEqual(await badges(), ['', '', '', '', ''], 'nothing live: no badge');
+
+      // A lost GO LIVE: the batch never reaches the host (the fake loses it and its one resend), so the
+      // slot stays GO LIVE and the press says so; a lost stop leaves it INPUT LIVE the same way.
+      const lose = () => page.evaluate(() => void (window.__lf.native.failSends = 2));
+      const sentLive = () => page.evaluate(() => window.__lf.native.sent.filter((c) => c?.SetSlotLive?.[0] === 0).length);
+      const before = await sentLive();
+      await lose();
+      await live(1).click();
+      await page.locator('.toast', { hasText: 'Could not go live. Press GO LIVE again.' }).waitFor({ timeout: 5000 });
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
+      await page.waitForFunction(() => !document.querySelector('[aria-label="Live input for slot A"]')?.disabled);
+      assert.equal((await live(1).textContent()).trim(), 'GO LIVE', 'a lost GO LIVE leaves the slot GO LIVE');
+      assert.equal(await sentLive(), before, 'the engine fake applied no SetSlotLive from the lost batch');
+      assert.equal(consumeConsoleErrors('[PluginControls] go-live toggle failed').length, 1, 'the lost GO LIVE reaches the release log');
+      await live(1).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
+      await lose();
+      await live(1).click();
+      await page.locator('.toast', { hasText: 'Could not stop the live input. Press INPUT LIVE again.' }).waitFor({ timeout: 5000 });
+      await page.waitForFunction(() => !document.querySelector('[aria-label="Live input for slot A"]')?.disabled);
+      assert.equal((await live(1).textContent()).trim(), 'INPUT LIVE', 'a lost stop leaves the slot INPUT LIVE');
+      assert.equal(consumeConsoleErrors('[PluginControls] go-live toggle failed').length, 1, 'the lost stop reaches the release log');
+      assert.equal(consumeConsoleErrors('[platform] input batch failed').length, 2, 'the outbox logged both lost batches');
     }
     assert.deepEqual(consoleErrors, [], `${tag}: no console errors`);
     await page.context().close();
