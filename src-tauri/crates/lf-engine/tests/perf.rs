@@ -981,6 +981,35 @@ fn hole_deadline(rate: u32, block: usize, long: bool, lost: Frame, lane_fx: bool
     out
 }
 
+/// One case of the hole deadline at `rate` and `block`, `long` as [`hole_deadline`] takes it, printed:
+/// the worst of eight hole callbacks, the scene's median on that phase and the period, seconds each. At
+/// 96 kHz and up the heavy scene alone overruns half its period (every lane effect at four times the
+/// frames), so the scene there drops the lanes' effects: the most of it the engine plays.
+fn deadline_case(backend: &str, rate: u32, block: usize, long: bool) -> (f64, f64, f64) {
+    let lane_fx = rate <= 48_000;
+    let Deadline { mut holes, mut scene } = hole_deadline(rate, block, long, rate as Frame, lane_fx, 8);
+    let period = block as f64 / rate as f64;
+    holes.sort_by(f64::total_cmp);
+    scene.sort_by(f64::total_cmp);
+    let pct = |t: f64| t / period * 100.0;
+    let (worst, median, typical) = (holes[holes.len() - 1], holes[holes.len() / 2], scene[scene.len() / 2]);
+    println!(
+        "{backend}, {rate} Hz, {block}-frame period ({:.2} ms), {}, {}: the hole's callback worst {:.3} ms ({:.0} %, {:.0} % over the scene's), median {:.0} %; the scene's callbacks on that phase median {:.0} %, p99.9 {:.0} %, worst {:.0} % ({} of them)",
+        period * 1e3,
+        if long { "two 59 s windows" } else { "1 s across the edge" },
+        if lane_fx { "the heavy scene" } else { "no lane effects" },
+        worst * 1e3,
+        pct(worst),
+        pct(worst - typical),
+        pct(median),
+        pct(typical),
+        pct(scene[scene.len() * 999 / 1000]),
+        pct(scene[scene.len() - 1]),
+        scene.len()
+    );
+    (worst, typical, period)
+}
+
 #[test]
 #[ignore]
 fn a_holes_callback_meets_its_deadline_under_the_heavy_scene() {
@@ -989,7 +1018,9 @@ fn a_holes_callback_meets_its_deadline_under_the_heavy_scene() {
     // phase: the worst of eight holes. The bar: a hole adds at most a quarter of its period. The engine's
     // callback is to stay within half its period, the other half left to the device side (the WASAPI
     // join's pull, the Share mirror), a live plugin and the scheduler's lateness, and the heavy scene
-    // takes about a quarter on that phase at the pickable rates: a hole may take the other quarter.
+    // takes about a quarter on that phase at the pickable rates: a hole may take the other quarter. It
+    // fails at 192 kHz, the operating limit (`src/lib.rs`'s hole rule); the absolute bar at the pickable
+    // rates is the next test.
     //
     // - ASIO, at the smallest blocks a driver runs (the select offers 64; a driver fixed in its own
     //   panel can run 32): a hole is a block per lock miss, and in a release build nothing holds the
@@ -998,8 +1029,6 @@ fn a_holes_callback_meets_its_deadline_under_the_heavy_scene() {
     //   192 kHz (an endpoint's own): its dry frames are the stall, unbounded, so the hole is the most one
     //   callback zeroes, the rest of the pass the jump cut and the start of the one it lands in, at 60 s
     //   passes (the whole buffer).
-    // - At 96 and 192 kHz the heavy scene alone overruns half its period (every lane effect at four
-    //   times the frames), so the scene there drops the lanes' effects: the most of it the engine plays.
     // - The two 59 s windows at 64 frames: no backend makes that, printed to show the margin a long hole
     //   on a short period would lack.
     let cases: [(&str, u32, usize, bool, bool); 11] = [
@@ -1017,32 +1046,36 @@ fn a_holes_callback_meets_its_deadline_under_the_heavy_scene() {
     ];
     let mut over = Vec::new();
     for (backend, rate, block, long, barred) in cases {
-        let lane_fx = rate <= 48_000;
-        let Deadline { mut holes, mut scene } = hole_deadline(rate, block, long, rate as Frame, lane_fx, 8);
-        let period = block as f64 / rate as f64;
-        holes.sort_by(f64::total_cmp);
-        scene.sort_by(f64::total_cmp);
-        let pct = |t: f64| t / period * 100.0;
-        let (worst, median, typical) = (holes[holes.len() - 1], holes[holes.len() / 2], scene[scene.len() / 2]);
-        println!(
-            "{backend}, {rate} Hz, {block}-frame period ({:.2} ms), {}, {}: the hole's callback worst {:.3} ms ({:.0} %, {:.0} % over the scene's), median {:.0} %; the scene's callbacks on that phase median {:.0} %, p99.9 {:.0} %, worst {:.0} % ({} of them)",
-            period * 1e3,
-            if long { "two 59 s windows" } else { "1 s across the edge" },
-            if lane_fx { "the heavy scene" } else { "no lane effects" },
-            worst * 1e3,
-            pct(worst),
-            pct(worst - typical),
-            pct(median),
-            pct(typical),
-            pct(scene[scene.len() * 999 / 1000]),
-            pct(scene[scene.len() - 1]),
-            scene.len()
-        );
+        let (worst, typical, period) = deadline_case(backend, rate, block, long);
         if barred && worst - typical > 0.25 * period {
-            over.push(format!("{backend} {rate} Hz {block}: {:.0} % over the scene's", pct(worst - typical)));
+            over.push(format!("{backend} {rate} Hz {block}: {:.0} % over the scene's", (worst - typical) / period * 100.0));
         }
     }
     assert!(over.is_empty(), "a hole adds over a quarter of its period: {over:?}");
+}
+
+#[test]
+#[ignore]
+fn a_holes_callback_ends_inside_its_period_at_the_pickable_rates() {
+    // The absolute bar beside the incremental one above: at the rates a player picks (44.1 and 48 kHz)
+    // and every buffer the app offers there (under ASIO the select's 64 to 1,024 and the 32 a driver's
+    // own panel can set, with the DEV hold's second as the hole; under WASAPI the endpoint's 10 ms period,
+    // with two 59 s windows), the worst of eight callbacks that find the largest hole, on the heavy
+    // scene's heaviest phase, ends inside its period. The engine's callback alone, offline: the margin
+    // printed is what the device side, a live plugin and the scheduler share (`src-tauri/AGENTS.md`).
+    let mut late = Vec::new();
+    for rate in [44_100u32, 48_000] {
+        let cases = [32, 64, 128, 256, 512, 1024].map(|block| ("ASIO", block, false));
+        for (backend, block, long) in cases.into_iter().chain([("WASAPI", rate as usize / 100, true)]) {
+            let (worst, _, period) = deadline_case(backend, rate, block, long);
+            let margin = period - worst;
+            println!("  margin: {:.3} ms, {:.0} % of the period", margin * 1e3, margin / period * 100.0);
+            if margin <= 0.0 {
+                late.push(format!("{backend} {rate} Hz {block}: {:.0} % of its period", worst / period * 100.0));
+            }
+        }
+    }
+    assert!(late.is_empty(), "a hole's callback overruns its period: {late:?}");
 }
 
 /// The multiply's push (F14) with every bin of four one-bar loops and their undo targets marked: the

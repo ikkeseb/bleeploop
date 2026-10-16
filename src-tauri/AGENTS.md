@@ -333,21 +333,25 @@ plugin-GUI work.
     written, never run (2026-10-16). Next check: `pnpm native:engine-smoke` on the rig (ASIO), from
     Windows or the WSL wrapper, with no app running; PASS ends `=== engine-smoke: PASS ...`, and the
     `[engine-smoke] dropout:` lines name the bins and the notch's columns.
-  - The callback that fills a hole, on the device. `lf-engine`'s `tests/perf.rs`
-    `a_holes_callback_meets_its_deadline_under_the_heavy_scene` (ignored, release) times only
-    `Engine::process`, offline: not cpal's conversion, the WASAPI join's pull or the Share mirror, not a
-    real driver's period and scheduling, and no plugin. At 44.1 to 96 kHz the largest hole adds under a
-    fifth of its period there; at 192 kHz, over the bench's quarter, a WASAPI stall of two windows (two
-    59 s passes) adds 34 and 44 % of the 10 ms period and the DEV hold's second at ASIO 64 frames 30 and
-    59 % (two runs), while the scene alone, without its lane effects, takes 80 to 86 % there (2026-10-16,
-    the dev PC). Its options, none chosen: accept one late callback after a stall of a minute or more at
-    192 kHz (or a second's DEV hold), or zero a hole as a budgeted block job, with what
-    playback, a commit, UNDO, REDO, a snapshot and a reused RETAKE buffer read until it is done
-    (`lib.rs`'s hole rule, rejected once in the design). Next check, not built: a phase of
-    `native:engine`'s heavy scene (`engine_io/probe.rs`) that rolls a RETAKE take and holds the engine
-    lock a second across a pass edge (`EngineHost::hold_lock`), on ASIO 64 and on WASAPI, reading
-    `over_budget` and the block load of the callbacks after it; and the period each WASAPI endpoint
-    opens at (`DeviceStatus.block`; the rig's delivered 441 frames at 44.1 kHz, 10 ms: `callback.rs`).
+  - The callback that fills a hole, on the device. The zeroing stays synchronous, in the callback that
+    finds the hole (`lf-engine`'s `lib.rs` hole rule), with this operating limit (2026-10-16, the dev
+    PC, offline in `tests/perf.rs`, ignored, release):
+    - At 44.1 and 48 kHz, every buffer offered (ASIO 32 to 1,024 frames with the DEV hold's second;
+      WASAPI's 10 ms with two 59 s windows), the worst callback that finds the largest hole on the heavy
+      scene ends inside its period, at least 46 % of it left (ASIO 48 kHz, 32 frames: 0.30 ms;
+      `a_holes_callback_ends_inside_its_period_at_the_pickable_rates`). Up to 96 kHz a hole adds under a
+      fifth of the period over the scene (`a_holes_callback_meets_its_deadline_under_the_heavy_scene`).
+    - At 192 kHz (a device's own rate) it overruns. The scene without its lane effects takes 79 to 86 %
+      of the period on that phase (median), and the hole's callback 109 to 140 % (worst of eight), a hole
+      adding 30 to 59 % (two runs, WASAPI two windows and the DEV hold at ASIO 64). That test fails
+      there, the marker. Not built: zeroing as a budgeted block job, which every buffer reader would
+      have to wait on (playback, a commit, UNDO, REDO, a snapshot, a reused RETAKE buffer).
+    - Not measured: cpal's conversion, the WASAPI join's pull, the Share mirror, a live plugin, a real
+      driver's period and scheduling. Next check, not built: a phase of `native:engine`'s heavy scene
+      (`engine_io/probe.rs`) that rolls a RETAKE take and holds the engine lock a second across a pass
+      edge (`EngineHost::hold_lock`), on ASIO 64 and on WASAPI, reading `over_budget` and the block load
+      of the callbacks after it; and the period each WASAPI endpoint opens at (`DeviceStatus.block`; the
+      rig's delivered 441 frames at 44.1 kHz, 10 ms: `callback.rs`).
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.

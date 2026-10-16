@@ -2092,20 +2092,21 @@ impl Looper {
 
     /// A job's destination marks, set whole at its push: its sources are final while it runs (`Job::
     /// ahead`), so the marks now are the marks when it is done, and a reader that sees what it writes
-    /// sees them already. A copy takes its source's whole; a fill or a TRIM maps each run of marked
-    /// source bins through the job's position map, read from the source's words frozen in a scratch (an
-    /// in-place fill never reads a mark it set), into the destination's words, whose rewritten range
-    /// (and anything past the loop) is cleared first; a bin straddling a fill's low end keeps its own
-    /// mark. Tiles repeat a mark, padding and cut bars drop it. One copy of the words, then one range
-    /// per tile of each run, set a word at a time.
+    /// sees them already. A copy takes its source's whole; a fill, a TRIM or a WIDE COPY maps each run of
+    /// marked source bins through the job's position map, read from the source's words frozen in a
+    /// scratch (an in-place fill never reads a mark it set), into the destination's words, whose
+    /// rewritten range (and anything past the loop) is cleared first; a bin straddling a fill's low end
+    /// keeps its own mark. Tiles repeat a mark, padding and cut bars drop it; a shift that is not whole
+    /// bins marks the (at most two) bins each moved bin's frames reach. One copy of the words, then one
+    /// range per tile or piece of each run, set a word at a time.
     fn job_marks(&mut self, kind: JobKind, visit: Visit) {
         let (src, dst) = match kind {
-            JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => {
+            JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, shift: 0, .. } => {
                 self.overview.copy_marks(src, dst);
                 return;
             }
             JobKind::Fill { buf, .. } => (buf, buf),
-            JobKind::Trim { src, dst, .. } => (src, dst),
+            JobKind::Trim { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => (src, dst),
         };
         for (w, word) in self.mark_src.iter_mut().zip(self.overview.mark_words(src)) {
             *w = word;
@@ -2146,6 +2147,16 @@ impl Looper {
                         mark_range(dst_words, a, b);
                         t += fill.period;
                     }
+                });
+            }
+            JobKind::LaneCopy { shift, .. } => {
+                // `dst[p] = src[(p - shift) mod m]` (`shifted_run`): a run's frames move `shift` on, the
+                // part past the loop's end to its start.
+                dst_words.fill(0);
+                for_runs(&self.mark_src, |from, to| {
+                    let (a, b) = (from * pf + shift, (to * pf).min(m) + shift);
+                    mark_range(dst_words, a, b.min(m));
+                    mark_range(dst_words, a.max(m) - m, b - m);
                 });
             }
             _ => unreachable!(),

@@ -138,10 +138,15 @@
 //!   that path): at most 1 ns a lost frame and a one-block hole at most 1 % of its block
 //!   (`a_holes_cost_per_lost_frame`); the callback that finds the largest hole a backend makes, a RETAKE
 //!   pass edge overdue in it, at most a quarter of its period more than the heavy scene's callback on
-//!   that phase (`a_holes_callback_meets_its_deadline_under_the_heavy_scene`). Only WASAPI's dry frames
-//!   make a long hole, at its 10 ms period; a lock miss makes a block, and in a release build nothing
-//!   holds the engine lock while a device runs (the DEV hold does, a second at most). At 192 kHz a hole of
-//!   two windows is over that bar (`src-tauri/AGENTS.md` § Open threads).
+//!   that phase (`a_holes_callback_meets_its_deadline_under_the_heavy_scene`), and at the pickable rates
+//!   (44.1 and 48 kHz) and every buffer offered there, done inside its period
+//!   (`a_holes_callback_ends_inside_its_period_at_the_pickable_rates`). Only WASAPI's dry frames make a
+//!   long hole, at its 10 ms period; a lock miss makes a block, and in a release build nothing holds the
+//!   engine lock while a device runs (the DEV hold does, a second at most). **The operating limit:** the
+//!   zeroing stays in that one callback, measured to hold the quarter-period bar up to 96 kHz. At 192 kHz
+//!   (a device's own rate, never a pick) it does not: there the callback that found the largest hole
+//!   overran its period, so a stall there costs a late callback. Measured offline, the engine's callback
+//!   alone (`src-tauri/AGENTS.md` § Open threads).
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted

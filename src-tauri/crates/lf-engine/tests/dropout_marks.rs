@@ -3,9 +3,9 @@
 //! tail, the instruments' record path or the input sends, never changes or discards a sample of a take,
 //! an overdub layer or a RETAKE pass. A span the device never delivered is silence in a take and the old
 //! loop in a layer. The capture marks the bins those frames landed in; the marks travel with the audio
-//! (UNDO, REDO, a fill's tiles, TRIM, a multiply, COPY, REVERSE) and go with it (CLEAR, a load). One
-//! `Dropout` per window says so. RETAKE's own cases are `tests/retake.rs`, a layer's punch ramps
-//! `tests/punch_ramps.rs`, the routing proof `tests/dropout_tap.rs`.
+//! (UNDO, REDO, a fill's tiles, TRIM, a multiply, COPY and WIDE COPY's shift, REVERSE) and go with it
+//! (CLEAR, a load). One `Dropout` per window says so. RETAKE's own cases are `tests/retake.rs`, a layer's
+//! punch ramps `tests/punch_ramps.rs`, the routing proof `tests/dropout_tap.rs`.
 
 mod common;
 
@@ -444,6 +444,73 @@ fn a_reversed_trim_and_a_reversed_lane_put_the_mark_where_it_is_heard() {
     rig.press(Command::Trim(0, 1));
     rig.idle();
     assert_eq!(rig.marks(0), [46, 47, 92, 93], "the reversed TRIM's tiles, in heard order");
+}
+
+/// Lane 0: 4 bars at 240 BPM and `sr` from the frame code, reversed or not, then WIDE COPY into lane 1.
+/// `lost`: the 128-frame block that many frames into the take reaches the engine as silence, damaged.
+fn wide_copied(sr: u32, reversed: bool, lost: Option<Frame>) -> Rig {
+    let mut rig = Rig::at(sr);
+    rig.set(Command::SetBpm(240.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(4.0));
+    rig.set_input(code);
+    rig.press(Command::RecDub(0));
+    if let Some(at) = lost {
+        let d = rig.start_frame() + at;
+        rig.set_input(move |f| if (d..d + 128).contains(&f) { 0.0 } else { code(f) });
+        rig.advance_to(d);
+        damaged(&mut rig, 128);
+    }
+    rig.advance_to(rig.end_frame() + 1);
+    rig.set_level(0.0);
+    rig.idle();
+    if reversed {
+        rig.press(Command::Reverse(0));
+        rig.advance_to(rig.next_boundary() + 1);
+    }
+    rig.press(Command::CopyWide(0));
+    rig.idle();
+    rig
+}
+
+#[test]
+fn a_wide_copy_marks_every_frame_its_shifted_audio_took_from_a_dropout() {
+    // Differential: the same take clean and with a lost block, both WIDE COPY'd. Every heard frame where
+    // the two copies differ took its audio from the lost block, so its bin is marked, wherever the
+    // shift (20 ms: 960 or 882 frames, never whole bins) carried it: inside a bin's run, across a bin
+    // edge, across the loop edge, forward or reversed. The loop (187.5 or 172.3 bins) is not whole bins.
+    let mut missed = vec![];
+    for sr in [48_000u32, 44_100] {
+        let m = 4 * sr as Frame;
+        for reversed in [false, true] {
+            // Where the lost block is heard: 144 frames into a bin, which the shift carries past the next
+            // heard bin's start and, reversed, past the heard bins its buffer bin reaches
+            // (`Overview::heard_marked`); and 300 frames before the loop's end, which it carries across
+            // the loop edge (reversed, the buffer's start, which the buffer's shift wraps to its end).
+            for heard in [50 * PF + 144, m - 300] {
+                let at = if reversed { m - heard - 128 } else { heard };
+                let tag = format!("{sr} Hz, reversed {reversed}, lost at {at}");
+                let (clean, hit) = (wide_copied(sr, reversed, None), wide_copied(sr, reversed, Some(at)));
+                assert_eq!((hit.master(), hit.lane(1).reversed, hit.state(1)), (m, reversed, LaneState::Playing), "{tag}");
+                let mut differ = [vec![], vec![]];
+                for lane in [0, 1] {
+                    let (a, b, marks) = (clean.pcm(lane), hit.pcm(lane), hit.marks(lane));
+                    differ[lane] = (0..a.len()).filter(|&h| a[h] != b[h]).collect::<Vec<usize>>();
+                    assert!(!differ[lane].is_empty(), "{tag}, lane {lane}: the lost block changed the loop");
+                    let unmarked: Vec<usize> = differ[lane].iter().copied().filter(|&h| !marks.contains(&(h / PEAK_FRAMES))).collect();
+                    if !unmarked.is_empty() {
+                        missed.push(format!("{tag}, lane {lane}: {} affected frames unmarked, from {:?} (marks {marks:?})", unmarked.len(), unmarked.first()));
+                    }
+                }
+                let (src, copy) = (hit.marks(0), hit.marks(1));
+                assert!(differ[1].iter().any(|&h| !src.contains(&(h / PEAK_FRAMES))), "{tag}: the shift moves the damage out of the source's marked bins");
+                // A mark is a bin's precision: a shift that is not whole bins spreads a run over one more
+                // bin, the loop's partial last bin one more where it wraps.
+                assert!(copy.len() <= src.len() + 2, "{tag}: two bins over at most ({src:?} → {copy:?})");
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
 }
 
 #[test]
