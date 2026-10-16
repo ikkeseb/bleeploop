@@ -69,7 +69,7 @@ function writeRig(rig: SavedRig): void {
   }
 }
 
-const label = (p: SavedPlugin) => `${p.name} (${p.format})`;
+const label = (p: SavedPlugin) => `${p.name} (${p.format.toUpperCase()})`;
 
 /** Remember `desc` as slot `slot`'s plugin (its load succeeded). */
 export function rememberSlotPlugin(slot: 0 | 1, desc: PluginDescriptor): void {
@@ -150,7 +150,7 @@ export async function recallRig(
       writeRig([null, null]);
       removeMarker();
       console.error(`[rig-recall] the last launch stopped while restoring ${leftover}; nothing restored, the slots are forgotten`);
-      notifyError('Plugins not restored', `The last launch stopped while restoring ${leftover}. Pick a plugin again to load it.`);
+      notifyError('Could not restore the plugins. Pick a plugin again to load it.', `The last launch stopped while restoring ${leftover}.`);
       return;
     }
     const rig = readRig();

@@ -61,8 +61,8 @@ await probe(async ({ open }) => {
       ...meter(0, 0),
     });
 
-    const picker = (slot) => page.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
-    const live = (slot) => page.getByRole('button', { name: `Live input for slot ${slot}`, exact: true });
+    const picker = (slot) => page.getByRole('combobox', { name: `Source for slot ${'AB'[slot - 1]}`, exact: true });
+    const live = (slot) => page.getByRole('button', { name: `Live input for slot ${'AB'[slot - 1]}`, exact: true });
     const card = (slot) => page.locator('.slot').nth(slot - 1);
     const cardMeter = (slot) => card(slot).locator('.slot__meter');
     const lane = (i) => page.locator('.lp-lane').nth(i);
@@ -96,7 +96,7 @@ await probe(async ({ open }) => {
 
     // GO LIVE on A: its pill, its meter at its own level, the selected lane's badge.
     await live(1).click();
-    await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+    await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     assert.equal((await live(1).textContent()).trim(), 'INPUT LIVE');
     await emit(meter(0.5, 0.0316));
     await until(1, 'A live at −6 dBFS', (m) => m.live && Math.abs(m.lvl - frac(0.5)) < 0.01);
@@ -105,7 +105,7 @@ await probe(async ({ open }) => {
 
     // B live too: each card its own level; the badge names both.
     await live(2).click();
-    await page.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed: true }).waitFor();
+    await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor();
     await emit(meter(0.5, 0.0316));
     await until(2, 'B live at −30 dBFS', (m) => m.live && Math.abs(m.lvl - frac(0.0316)) < 0.01);
     const [a, b] = [await read(1), await read(2)];
@@ -199,7 +199,7 @@ await probe(async ({ open }) => {
       const toggledAt = Date.now();
       for (const pressed of [false, true]) {
         await live(2).click();
-        await page.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed }).waitFor();
+        await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed }).waitFor();
       }
       const kept = await read(1);
       assert.ok(kept.clip && kept.pk >= 0.999, `B toggled ${Date.now() - toggledAt} ms into A's hold: A's CLIP and peak hold: ${JSON.stringify(kept)}`);
@@ -207,12 +207,12 @@ await probe(async ({ open }) => {
 
       // GO LIVE off: the meter goes dark and the badge drops the slot.
       await live(1).click();
-      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
       await until(1, 'A dark once not live', (m) => !m.live && m.lvl === 0 && m.pk === 0);
       assert.equal((await live(1).textContent()).trim(), 'GO LIVE');
       assert.deepEqual(await badges(), ['', '', 'B LIVE', '', ''], 'the badge names B alone');
       await live(2).click();
-      await page.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed: false }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: false }).waitFor();
       assert.deepEqual(await badges(), ['', '', '', '', ''], 'nothing live: no badge');
     }
     assert.deepEqual(consoleErrors, [], `${tag}: no console errors`);

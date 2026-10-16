@@ -97,8 +97,8 @@ await probe(async ({ open }) => {
   );
   assert.deepEqual(duplicateOptions.map((option) => option.value), [keys[0], keys[4]]);
   assert.deepEqual(duplicateOptions.map((option) => option.text), [
-    'Probe A (vst3) · probe',
-    'Probe A (vst3) · vendor',
+    'Probe A (VST3) · probe',
+    'Probe A (VST3) · vendor',
   ]);
   await page.locator('.slot__source').first().selectOption(keys[4]);
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);

@@ -82,11 +82,11 @@ export function setMidiActionHandler(h: MidiActionHandler | null): void {
 }
 
 function storeProblemText(problem: StoreProblem): [string, string] {
-  if ('readOnly' in problem) return ['MIDI bindings cannot be saved this session', problem.readOnly.why];
-  if ('conflict' in problem) return ['MIDI bindings were changed by another BleepLoop; this session does not save over them', problem.conflict.why];
-  if ('failed' in problem) return ['MIDI bindings could not be saved; BleepLoop keeps trying', problem.failed.why];
+  if ('readOnly' in problem) return ['Could not save the MIDI bindings this session. Changes made now last until BleepLoop closes.', problem.readOnly.why];
+  if ('conflict' in problem) return ['Could not save the MIDI bindings, as another BleepLoop changed them. Run one BleepLoop at a time to keep them.', problem.conflict.why];
+  if ('failed' in problem) return ['Could not save the MIDI bindings. BleepLoop keeps trying.', problem.failed.why];
   const n = problem.rejected.count;
-  return [`${n} stored MIDI binding${n === 1 ? '' : 's'} could not be read`, 'They stay in the file, unused.'];
+  return [`Could not read ${n} stored MIDI binding${n === 1 ? '' : 's'}. Learn them again in Audio Settings.`, 'They stay in the file, unused.'];
 }
 
 /**
@@ -107,7 +107,7 @@ function onEvent(ev: MidiEvent): void {
       // Native MIDI released what the port held; the player should know why the notes stopped.
       for (const name of ev.names) {
         console.error(`[midi] input disconnected: ${name}`);
-        notifyError(`MIDI device disconnected — ${name}`, 'Held notes were released.');
+        notifyError(`Could not reach ${name}. Reconnect it to play on.`, 'The MIDI device disconnected, and its held notes were released.');
       }
       break;
     case 'bindings':
@@ -134,7 +134,7 @@ function onEvent(ev: MidiEvent): void {
       break;
     case 'store': {
       const [message, detail] = storeProblemText(ev.problem);
-      console.error(`[midi] bindings store: ${message}: ${detail}`);
+      console.error(`[midi] bindings store: ${message} ${detail}`);
       notifyError(message, detail);
       break;
     }
@@ -168,9 +168,19 @@ export function startMidi(): () => void {
   return () => subscription.stop();
 }
 
-function failed(what: string, err: unknown): void {
+/** Each native MIDI command's failure toast: what failed, then what to do. */
+const FAILED = {
+  learn: 'Could not start the MIDI learn. Press LEARN again.',
+  'cancel learn': 'Could not stop the MIDI learn. Press LEARN, then stop it again.',
+  forget: 'Could not forget the MIDI binding. Press ✕ again.',
+  'pedal switch': 'Could not switch the pedal kind. Switch it again.',
+  'HOLD switch': 'Could not switch HOLD. Switch it again.',
+  assign: 'Could not move the binding to that port. Assign it again.',
+} as const;
+
+function failed(what: keyof typeof FAILED, err: unknown): void {
   console.error(`[midi] ${what} failed`, err);
-  notifyError(`MIDI ${what} failed`, err);
+  notifyError(FAILED[what], err);
 }
 
 /** Learn the next CC or note-on, from any port, onto `action` (a lane action on track `target`, null the
@@ -199,7 +209,7 @@ export function cancelLearn(): boolean {
 
 /** An edit by index of the list shown now. Refused because the list changed since, it does nothing: the
  * fresh list is shown, or about to be. */
-function edit(what: string, call: (epoch: number, revision: number) => Promise<boolean>): void {
+function edit(what: keyof typeof FAILED, call: (epoch: number, revision: number) => Promise<boolean>): void {
   const seen = revision;
   queued(what, (epoch) => call(epoch, seen)).catch((err: unknown) => failed(what, err));
 }

@@ -135,7 +135,7 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
   const s = json as Record<string, unknown>;
   // 'LoopForge' is the app's earlier name: exports written under it still import.
   if (s.app !== 'BleepLoop' && s.app !== 'LoopForge') {
-    throw new Error(`session.json: app tag is ${JSON.stringify(s.app)}, expected "BleepLoop" — not a BleepLoop session`);
+    throw new Error(`session.json: app tag is ${JSON.stringify(s.app)}, expected "BleepLoop": not a BleepLoop session`);
   }
   // formatVersion gate: MISSING is treated as legacy v1 (every pre-versioning export still imports);
   // 1 (4/4) and 2 (another meter) are this build's formats; an integer > 2 was written by a newer
@@ -146,7 +146,7 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
     throw new Error(`session.json: formatVersion must be a positive integer, got ${JSON.stringify(fv)}`);
   }
   if (fv > 2) {
-    throw new Error(`This session was exported by a newer version of BleepLoop (format v${fv}) — update BleepLoop to open it.`);
+    throw new Error(`This session was exported by a newer version of BleepLoop (format v${fv}). Update BleepLoop to open it.`);
   }
   const meter = sessionMeter(s.meter, fv, meters);
   const num = (key: string): number => {

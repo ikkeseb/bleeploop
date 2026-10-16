@@ -577,15 +577,17 @@ function applyEvent(ev: EngineEvent): void {
     case 'TakeRejected':
       console.error(`[engine] track ${ev.lane}'s ${ev.overdub ? 'overdub layer' : 'take'} rejected: input gap`);
       notifyError(
-        `Track ${ev.lane + 1}: ${ev.overdub ? 'overdub layer' : 'take'} discarded`,
-        'The audio input dropped out while it recorded. No damaged audio was kept; try again.',
+        ev.overdub
+          ? `Could not keep the overdub on track ${ev.lane + 1}. Overdub it again.`
+          : `Could not keep the take on track ${ev.lane + 1}. Record it again.`,
+        'The audio input dropped out while it recorded, so no damaged audio was kept.',
       );
       break;
     case 'PassDropped':
       console.error(`[engine] track ${ev.lane}'s retake pass ${ev.pass} dropped: input gap`);
       notifyError(
-        `Track ${ev.lane + 1}: take ${ev.pass} dropped`,
-        'The audio input dropped out during it, so it was not kept, nor the take before it.',
+        `Could not keep take ${ev.pass} on track ${ev.lane + 1}. Record it again.`,
+        'The audio input dropped out during it, so neither it nor the take before it was kept.',
       );
       break;
     // COPY, CLEAR and a pedal's MUTE reach the lane's mix as its next `Mix`; a pending gesture on the lane
@@ -631,7 +633,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
   switch (ev.type) {
     case 'Lost':
       console.error(`[engine] ${ev.backend} device lost: ${ev.reason}`);
-      notifyError('Audio device lost', ev.reason);
+      notifyError('Could not reach the audio device. Reconnect it and BleepLoop picks it up again.', ev.reason);
       // Kept as why no device runs; every reader gates it on the device status, which a recovery or a
       // fallback in the same or a later frame may already have filled.
       setOpenFailure(ev.reason);
@@ -645,14 +647,14 @@ function applyDeviceEvent(ev: DeviceEvent): void {
       break;
     case 'ShareLost':
       console.error(`[engine] share output lost: ${ev.reason}`);
-      notifyError('Share output stopped', ev.reason);
+      notifyError('Could not keep Share output running. Pick its device again in Audio Settings.', ev.reason);
       forgetShare();
       break;
     case 'EngineFaulted':
       console.error('[engine] the engine faulted and was replaced');
       notifyError(
-        'The audio engine restarted',
-        'The loops left with it. Restart BleepLoop to get back the last saved ones; a new recording replaces them.',
+        'Could not keep the audio engine running. Restart BleepLoop to get back the last saved loops.',
+        'The engine restarted and the loops left with it. A new recording replaces the saved ones.',
       );
       break;
     case 'LoopsDropped':
@@ -672,7 +674,7 @@ function setDevice(status: DeviceStatus | null): void {
   // Once per open: WASAPI may run output only (no capture device, a microphone Windows blocks).
   if (status && !status.inputOpen && (device()?.inputOpen ?? true)) {
     console.error(`[engine] ${status.outputName} opened without an input`);
-    notifyError('The audio input did not open', 'The engine plays, but hears nothing. Check the input device and Windows microphone privacy.');
+    notifyError('Could not open the audio input. Check the input device and Windows microphone privacy.', 'The engine plays, but hears nothing.');
   }
   // No device: the playhead holds where it is until the next anchor arrives.
   if (!status) plain.clock = { ...plain.clock, frame: renderedFrame(), atMs: Date.now(), rate: 0 };
@@ -1678,7 +1680,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     return { status: runs.status, declined: false };
   } catch (err) {
     console.error('[engine] device open failed', err);
-    notifyError("Couldn't open the audio device", err);
+    notifyError('Could not open the audio device. Pick another in Audio Settings.', err);
     setOpenFailure(errorText(err));
     // The device that ran keeps running, or the owner reopens it (`Owner::open`,
     // `src-tauri/src/engine_io/owner.rs`): its picks go back, saved and shown.
@@ -1709,14 +1711,14 @@ export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | n
         await switchAsioDriver(previous);
       } catch (err) {
         console.error('[engine] ASIO driver switch back failed', err);
-        notifyError("Couldn't switch back to the previous ASIO driver", err);
+        notifyError('Could not switch back to the previous ASIO driver. Pick a driver in Audio Settings.', err);
       }
     };
     try {
       await switchAsioDriver(driver);
     } catch (err) {
       console.error('[engine] ASIO driver switch failed', err);
-      notifyError("Couldn't switch the ASIO driver", err);
+      notifyError('Could not switch the ASIO driver. Pick it again, or another one.', err);
       return (await openPicked()).status;
     }
     if (previous === driver) return (await openPicked()).status;
@@ -1753,7 +1755,7 @@ async function switchDroppingLoops(wanted: DeviceChoice, restore?: () => Promise
     await autosave.saveNow();
   } catch (err) {
     console.error('[engine] the recovery save before a rate change failed', err);
-    notifyError('The device did not switch', 'The loops could not be saved to recovery first, so they stay here.');
+    notifyError('Could not switch the audio device. Try again, or export the loops first.', 'The loops could not be saved to recovery first, so they stay here.');
     if (!opened) throw err;
     const ran = opened;
     putBackPicks();
@@ -1791,7 +1793,7 @@ export function setEngineShare(id: string): Promise<void> {
     .catch((err: unknown) => {
       if (pick === sharePicks) forgetShare();
       console.error('[engine] share output failed', err);
-      notifyError("Couldn't start Share output", err);
+      notifyError('Could not start Share output. Pick its device again.', err);
     });
   return shareTail;
 }
@@ -1821,7 +1823,7 @@ export function setEngineSlotInputChannel(slot: 0 | 1, channel: string): Promise
     } catch (err) {
       saveSlotInputChannels(withAt(slotInputChannels(), slot, before));
       console.error('[engine] input channel switch failed', err);
-      notifyError("Couldn't switch the input channel", err);
+      notifyError('Could not switch the input channel. Pick it again.', err);
     }
   });
 }

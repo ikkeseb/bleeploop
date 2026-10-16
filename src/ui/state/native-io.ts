@@ -89,7 +89,7 @@ export function toggleEngineInput(): boolean {
   const order = [active, active === 0 ? 1 : 0] as const;
   const empty = order.find((s) => !slotPlugins()[s] && slotOff()[s]) ?? order.find((s) => !slotPlugins()[s]);
   if (empty === undefined) {
-    notifyError('Both slots hold a plugin', 'Set a slot to Off and go live on it to hear and record the input.');
+    notifyError('Could not go live, as both slots hold a plugin. Set a slot to Off and go live on it.', 'An Off slot hears and records the input dry.');
     return false;
   }
   setEngineLive(empty, true);

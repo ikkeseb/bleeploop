@@ -31,7 +31,7 @@ export async function saveForQuit(): Promise<boolean> {
     return true;
   } catch (error) {
     console.error('[app] autosave flush before close failed', error);
-    notifyError('Could not update recovery before closing', error);
+    notifyError('Could not save the loops for recovery before closing. Export them to keep them.', error);
     // A failed save must never trap the window: the user decides whether to lose the jam.
     return window.confirm('The loops could not be saved for recovery. Close anyway? They will be lost.');
   }
@@ -64,7 +64,7 @@ export function installCloseGuard(): () => void {
         await confirmNativeClose();
       } catch (error) {
         console.error('[app] native close approval failed', error);
-        notifyError('BleepLoop could not close', error);
+        notifyError('Could not close BleepLoop. Close it again.', error);
         closePending = false;
       }
     };

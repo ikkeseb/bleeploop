@@ -99,7 +99,7 @@ await probe(async ({ open }) => {
       window.__closeRequest();
       const deadline = performance.now() + 5000;
       while (abortedDeletes === 0 && performance.now() < deadline) await wait(20);
-      const failureNotice = 'Could not update recovery before closing';
+      const failureNotice = 'Could not save the loops for recovery before closing.';
       while (!(window.__closeApprovals > 0) && !document.body.textContent.includes(failureNotice)
         && performance.now() < deadline) await wait(20);
       const approvalsAfterFailure = window.__closeApprovals ?? 0;
@@ -154,7 +154,7 @@ await probe(async ({ open }) => {
     window.__closeRequest();
     await waitFor(() => (window.__closeApprovals ?? 0) > approvalsBefore, 'close approval during the first take');
     const approvals = (window.__closeApprovals ?? 0) - approvalsBefore;
-    const visibleError = document.body.textContent.includes('Could not update recovery before closing');
+    const visibleError = document.body.textContent.includes('Could not save the loops for recovery before closing.');
     const savedAfterClose = await lf.autosave.hasSaved();
     return {
       stateAtClose,

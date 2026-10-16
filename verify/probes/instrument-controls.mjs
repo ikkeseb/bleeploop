@@ -89,9 +89,9 @@ await probe(async ({ open }) => {
     window.__gain = () => instrument.pluginGain()[0];
   });
 
-  const paramsButton = page.getByRole('button', { name: /Plugin parameters for slot 1/ });
+  const paramsButton = page.getByRole('button', { name: /Plugin parameters for slot A/ });
   await paramsButton.click();
-  const output = page.getByRole('slider', { name: 'Volume for slot 1', exact: true });
+  const output = page.getByRole('slider', { name: 'Volume for slot A', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
   await page.waitForFunction(() => window.__gain() === 1);
   await output.focus();

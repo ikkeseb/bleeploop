@@ -229,9 +229,9 @@ const SCRIPT = [
   { t: s(REC2), click: true },
   { t: s(REC2) + 0.1, move: REST, dur: 0.8 },
   // Tracks 1-2 play: slot A swaps to the other amp-sim.
-  { t: s(LAND2) + 0.15, cam: { role: 'group', name: /^Slot 1\b/ }, zoom: 1.5, dur: 0.9, pad: { x: 20, y: 60 } },
-  { t: s(LAND2) + 0.2, move: { role: 'combobox', name: 'Source for slot 1' }, dur: 0.8 },
-  { t: s(LAND2) + 1.1, click: true, pick: `${AMP_SIMS[1].name} (vst3)` },
+  { t: s(LAND2) + 0.15, cam: { role: 'group', name: /^Slot A\b/ }, zoom: 1.5, dur: 0.9, pad: { x: 20, y: 60 } },
+  { t: s(LAND2) + 0.2, move: { role: 'combobox', name: 'Source for slot A' }, dur: 0.8 },
+  { t: s(LAND2) + 1.1, click: true, pick: `${AMP_SIMS[1].name} (VST3)` },
   { t: s(LAND2) + 2.6, cam: 'full', dur: 1.0 },
   // Take 3: arm track 3.
   { t: s(REC3) - 0.9, move: button('Track 3 record'), dur: 0.8 },
@@ -313,10 +313,10 @@ await probe(async ({ browser, open }) => {
       meter: { peak: [0.03, 0], clip: [false, false] },
       peaks: [],
     }), { status: STATUS, rate: RATE, t0 });
-    const source = page.getByRole('combobox', { name: 'Source for slot 1', exact: true });
+    const source = page.getByRole('combobox', { name: 'Source for slot A', exact: true });
     await source.locator('option', { hasText: AMP_SIMS[0].name }).waitFor({ state: 'attached' });
-    await source.selectOption({ label: `${AMP_SIMS[0].name} (vst3)` });
-    await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+    await source.selectOption({ label: `${AMP_SIMS[0].name} (VST3)` });
+    await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     await page.evaluate(() => document.activeElement?.blur());
     await page.evaluate(() => { window.__mediaSlowLoad = true; });
     await page.clock.pauseAt(t0);
@@ -380,7 +380,7 @@ await probe(async ({ browser, open }) => {
           if (a.pick) {
             // The select under the pointer: chosen without opening its native dropdown.
             await page.mouse.move(p.x, p.y);
-            const el = page.getByRole('combobox', { name: 'Source for slot 1', exact: true });
+            const el = page.getByRole('combobox', { name: 'Source for slot A', exact: true });
             await el.selectOption({ label: a.pick });
             await page.evaluate(() => document.activeElement?.blur());
           } else {
@@ -467,7 +467,7 @@ await probe(async ({ browser, open }) => {
           engineInputSends.setOn('echo', false);
           window.__lf.looper.setFxBypass(0, 3, true); // DELAY, `FX_META`'s order
           // The picker sits under the modal stage view, out of Playwright's reach: picked as a change event.
-          const picker = document.querySelector('select[aria-label="Source for slot 1"]');
+          const picker = document.querySelector('select[aria-label="Source for slot A"]');
           picker.value = [...picker.options].find((o) => o.textContent.includes(name)).value;
           picker.dispatchEvent(new Event('change', { bubbles: true }));
         }, AMP_SIMS[0].name);

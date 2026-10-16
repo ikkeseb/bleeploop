@@ -50,7 +50,7 @@ export function bootEngine(): () => void {
       await recallRig(availablePlugins(), restorePlugin);
     } catch (e) {
       console.error('[app] engine boot failed', e);
-      notifyError('The audio engine failed to start', e);
+      notifyError('Could not start the audio engine. Restart BleepLoop.', e);
     }
   })();
   return () => {
