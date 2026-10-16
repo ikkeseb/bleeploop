@@ -16,7 +16,8 @@
  *   planted in the panel body (native-only rows this tier never renders), whose lowest row (stepping
  *   into a block taller than the panel) must then scroll into reach; without the spacer, Help's
  *   reference (the tab it opens on) scrolls not at all;
- * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls:
+ * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open and its FILTER engaged (its
+ *   params grow the drawer past one key row), so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
  *   wholly into the stack's view from the nearer edge and leaves a lane already in view unscrolled
  *   (under reduced motion inside the frame's own dispatch); a pointer press on a half-hidden lane's PLAY
@@ -255,8 +256,9 @@ await probe(async ({ open }) => {
     }
     await page.close();
   }
-  // The selected lane follows the transport keys into view. With lane 1's FX drawer open the lane stack
-  // scrolls at both sizes, and a lane the arrows or a digit selected below its fold stayed hidden, its
+  // The selected lane follows the transport keys into view. With lane 1's FX drawer open and its FILTER
+  // engaged the lane stack scrolls at both sizes (the drawer at rest is one key row, and five lanes fit
+  // beside it at 1000x700), and a lane the arrows or a digit selected below its fold stayed hidden, its
   // refusal cue with it. A key sends its command; the engine's `Selected` (answered here, as the engine
   // would) moves the selection. After each answer the selected lane must lie wholly inside the stack's
   // visible rect, scrolled there from the nearer edge and not at all when it already showed; under
@@ -267,6 +269,8 @@ await probe(async ({ open }) => {
     await page.emulateMedia({ reducedMotion: motion });
     await boot(page, ['Stopped', 'Stopped', 'Stopped', 'Stopped', 'Stopped']);
     await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
+    await page.getByRole('button', { name: 'Filter, track 1', exact: true }).click();
+    await page.locator('.lp-drawer .fxp-mod--on .fxp-param').first().waitFor();
     await page.evaluate(() => {
       document.activeElement?.blur();
       const stack = document.querySelector('.lp__lanes');
