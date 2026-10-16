@@ -49,9 +49,9 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 
 ## Next jam
 
-Run `pnpm dev:asio` from `main`: no release has SCOPE or the UPDATE pill yet (v0.8.4 predates both).
-Once a later release is cut, install it instead (CI-built, ASIO SDK 2.3.4 where local builds use
-2.3.3). Audio Settings: ASIO, buffer 128. Play a real jam with these in it and say what felt off.
+Install v0.8.5 (published 2026-10-16, CI-built, ASIO SDK 2.3.4 where local builds use 2.3.3; an
+installed v0.8.4 offers it in Help) rather than `pnpm dev:asio`: it has SCOPE and the UPDATE pill.
+Audio Settings: the Audient ASIO driver, buffer 128; the guitar's slot on In 1. Play a real jam with these in it and say what felt off.
 After the jam, agents note what it tried under "Last play", drop what it answered and refill this
 list from § Not heard yet: at most five, and the docs guard counts them.
 
