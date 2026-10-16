@@ -92,6 +92,15 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 Built, and proven by machine where a probe reaches, but never played. A line leaves when a jam answers
 it.
 
+- GO LIVE lights only from the engine's live flag, now in the feed: with no audio device running it stays
+  unlit until one does, and a lost press toasts once ("Could not go live. Press GO LIVE again."). Does
+  the pill ever lag the guitar going live, and is it ever lit while the dry guitar is silent?
+- Audio Settings is four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS) with a lamp
+  and a state word each, the round trip an ordinary row under the picks; a MIDI toast's button lands on
+  MIDI PEDALS. Does a pedal's port pick take fewer moves than before, and does the lamp read from the chair?
+- The command bar's CLICK volume and AUTO REC SENS sliders sit in popovers, the engaged mode pills carry
+  an LED, END STOP stands with the modes: do the five pills still read from 1.5 m, and is a slider in a
+  popover one move too many mid-jam?
 - CLR, the CLEAR key and a pedal share one arm, the engine's: arm with one, confirm with another; SURE?
   shows exactly while a second press would clear (machine: `tests/actions.rs`, the `jam-keys` probe). Does
   it read in time from the guitar, and does a slip on CLR never cost a loop?
