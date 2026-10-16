@@ -247,6 +247,7 @@ function TrackLane(props: {
   index: number;
   fxTrack: number | null;
   onToggleFx: (i: number) => void;
+  fxRef: (el: HTMLButtonElement) => void;
   returnFocus?: (el: HTMLElement | undefined) => void;
 }) {
   const track = looper.track(props.index);
@@ -465,6 +466,7 @@ function TrackLane(props: {
       <div class="lp-lane__right">
         <div class="lp-lane__mods">
           <button
+            ref={props.fxRef}
             class="lp-pb lp-pb--fx"
             classList={{ 'is-on': fxSelected() }}
             disabled={isEmpty()}
@@ -555,7 +557,7 @@ function TrackLane(props: {
   );
 }
 
-/** `returnFocus` is the transport keys' (app.tsx), for a keyboard close of a lane's popover. */
+/** `returnFocus` is the transport keys' (app.tsx), for a keyboard close of a lane's popover or FX drawer. */
 export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
   const master = () => looper.masterLengthFrames();
   const hasMaster = () => master() > 0;
@@ -576,6 +578,15 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
   // lane), or null.
   const [fxTrack, setFxTrack] = createSignal<number | null>(null);
   const toggleFx = (i: number) => setFxTrack((cur) => (cur === i ? null : i));
+  // Each lane's FX pill: the drawer's ✕ pressed by key (a click with detail 0, as
+  // `src/app/transport-keys.ts` reads it) unmounts the focused button, so focus goes back to the pill
+  // that opened it, on the app's behalf so Space there still arms REC. A pointer close leaves focus
+  // where the transport keys' blur put it.
+  const fxPills: (HTMLButtonElement | undefined)[] = [];
+  const closeFx = (i: number, e: MouseEvent) => {
+    setFxTrack(null);
+    if (e.detail === 0) props.returnFocus?.(fxPills[i]);
+  };
 
   // If the track whose FX drawer is open gets cleared back to EMPTY, close the drawer.
   createEffect(() => {
@@ -645,14 +656,20 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
         <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>
           {(i) => (
             <>
-              <TrackLane index={i} fxTrack={fxTrack()} onToggleFx={toggleFx} returnFocus={props.returnFocus} />
+              <TrackLane
+                index={i}
+                fxTrack={fxTrack()}
+                onToggleFx={toggleFx}
+                fxRef={(el) => (fxPills[i] = el)}
+                returnFocus={props.returnFocus}
+              />
               <Show when={fxTrack() === i}>
                 <div class="lp-drawer" role="group" aria-label={`FX, Track ${i + 1}`}>
                   <div class="lp-drawer__head">
                     <span class="lp-drawer__title">FX · Track {i + 1}</span>
                     <button
                       class="lp-drawer__close"
-                      onClick={() => setFxTrack(null)}
+                      onClick={(e) => closeFx(i, e)}
                       aria-label="Close FX panel"
                       title="Close FX panel"
                     >

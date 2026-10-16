@@ -207,6 +207,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           <input
             ref={refInput}
             class="transport__bpm-input"
+            aria-label="BPM"
             type="number"
             min="40"
             max="300"

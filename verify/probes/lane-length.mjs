@@ -7,8 +7,9 @@
  *   loop of two whole bars or more, and on no other (EMPTY, RECORDING, OVERDUBBING, a one-bar loop, a
  *   loop of no whole number of bars); it is disabled while the lane stops at the loop end. Its popover
  *   starts at half the loop's bars, steps inside 1..bars−1, sends `Trim` with the chosen bars and closes;
- *   Escape closes it and hands focus back to the pill, an outside click closes it, neither sends. An
- *   engine refusal lands on its lane. ↶ UNDO names the trim.
+ *   Escape closes it and hands focus back to the pill, an outside click closes it, neither sends. TRIM
+ *   pressed by key hands focus back to the pill too, and the open popover's TRIM is disabled while the
+ *   lane stops, as the pill is. An engine refusal lands on its lane. ↶ UNDO names the trim.
  * - Halve (`halveTrack`, `src/app/actions.ts`): sends the engine's `Halve` (on the engine's own selection,
  *   or `ActionOn` a named track), never a `Trim` with bars the UI counted: the engine judges the lane and
  *   the loop's bars as they stand when the press lands (lf-engine `tests/actions.rs`). Its refusal, from
@@ -132,6 +133,29 @@ await probe(async ({ open }) => {
   await page.mouse.click(8, 890);
   await dialog.waitFor({ state: 'detached' });
   assert.deepEqual(await trims(), [{ Trim: [0, 3] }], 'Escape and an outside click send nothing');
+  // TRIM pressed by key sends and hands focus back to the pill, as Escape does.
+  const go = dialog.locator('.trim__go');
+  await pill(0).click();
+  await dialog.waitFor();
+  await go.focus();
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'detached' });
+  assert.deepEqual(await trims(), [{ Trim: [0, 3] }, { Trim: [0, 4] }], 'TRIM by key sends the chosen bars');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Trim track 1', 'TRIM by key hands focus back to the pill');
+  // The open popover follows the lane's gate: a stop pending under it (a pedal) greys TRIM out, and its
+  // end gives it back.
+  await pill(0).click();
+  await dialog.waitFor();
+  await emit({ events: [laneEvent(0, committed('Playing', 8, { stopAt: 9 * BAR }))] });
+  const gated = { pill: await pill(0).isDisabled(), go: await go.isDisabled() };
+  await emit({ events: [laneEvent(0, committed('Playing', 8))] });
+  const reopened = await go.isDisabled();
+  console.log('TRIM in the open popover while the lane stops, then after', JSON.stringify({ gated, reopened }));
+  assert.deepEqual(gated, { pill: true, go: true }, 'a lane stopping at the loop end disables the open popover\'s TRIM too');
+  assert.equal(reopened, false, 'the gate opening again enables it');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
+  assert.deepEqual(await trims(), [{ Trim: [0, 3] }, { Trim: [0, 4] }], 'the gated popover sent nothing');
 
   // An engine refusal lands on its lane; ↶ UNDO names the trim.
   await emit({ events: [{ Refused: { frame: BAR, lane: 0, reason: 'Capturing' } }] });
