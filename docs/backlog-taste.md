@@ -47,11 +47,11 @@ added a line.
 - **FADE (unheard):** the level is r² of a linear ramp from the press to the first bar line at or
   after its bars (2 bars pressed mid-bar lasts up to almost 3). A natural ending? Start on the next bar
   instead? Keep the − 2 BARS + stepper visible beside ■ ALL?
-- **Command bar under 1100 px:** still three rows in the app (its extra tool icons): CLICK on at
-  ≤ 1000 px, CLICK + FIXED at ≤ 1100 px. Two rows there need about 150 px less on row 2: the tool
-  icons behind one menu? Measured 2026-10-10: the UPDATE pill costs the bar nothing from 1000 px up
-  (same height with and without an offer), and adds a row at 900 px (108 → 146 px) while an offer
-  stands.
+- **Command bar under 1100 px:** still three rows with modes on at ≤ 1000 px (the loop read-out
+  and ▶ ALL/FADE now reserve their width and the beat dots stay, 2026-10-16). Two built answers wait on
+  the owner's eye in Darkroom: sliders into popovers + LED mode pills (`proto11/bar-ab`), and one TAKE
+  chip holding the five modes (`proto11/bar-c`). Measured 2026-10-10: the UPDATE pill costs the bar
+  nothing from 1000 px up and adds a row at 900 px while an offer shows.
 - **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
   log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the

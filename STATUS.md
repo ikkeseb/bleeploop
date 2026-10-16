@@ -92,6 +92,12 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 Built, and proven by machine where a probe reaches, but never played. A line leaves when a jam answers
 it.
 
+- Lane state colour lands on the beat, no fade (rec, dub, play, mute): does a quick stop-then-play read as a
+  flicker from the guitar? The core's hover fade stays (machine: the contact sheet, no timing).
+- The count-in numeral now fills the lane well at every window size, and the FX pill carries a lamp while
+  any lane effect is on: does 4-3-2-1 read from 1.5 m, and does the lamp read as FX, not as a state LED?
+- The FX drawer sits on one row (title, five FX keys, DUB FEEDBACK inline): five lanes stay on screen at
+  1000x700 with it open; are the FX keys still big enough to hit while playing?
 - Buffer 256 and 64: the take on the click at each size, a short switch gap, and a plugin loaded while
   loops play crossfades in without a click (machine: `tests/slots.rs`).
 - An instrument (a plugin or a built-in synth) entering or leaving a slot while GO LIVE is on: the dry
