@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | this file | [`MidiHost`] and its UI calls, [`Core`] (the state every thread shares, under one lock), which stored bindings are live, the timers, the UI events | `src/ui/state/midi.ts` (glue) |
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` (removed) |
-//! | `bindings` | [`Binding`], the 25 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
+//! | `bindings` | [`Binding`], the 26 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
 //! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
 //! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts` (removed), `instrument.ts` `routeEngine` |

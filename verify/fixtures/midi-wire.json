@@ -121,7 +121,7 @@
     { "already": true, "unreadable": null, "imported": [], "blocked": [], "rejected": [], "skipped": [] }
   ],
   "actionIds": [
-    "recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "halveTrack", "nextTrack", "prevTrack",
+    "recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "copyWide", "halveTrack", "nextTrack", "prevTrack",
     "playAll", "stopAll", "fadeAll", "goLive", "stageView", "stageNextView", "tapTempo", "clickToggle",
     "endStopToggle", "fixedToggle", "retakeToggle", "autoRecToggle", "inFxEcho", "inFxReverb", "inFxRing"
   ]

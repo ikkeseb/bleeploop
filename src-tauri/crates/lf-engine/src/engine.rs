@@ -916,6 +916,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             | Command::Undo(_)
             | Command::Reverse(_)
             | Command::Copy(_)
+            | Command::CopyWide(_)
             | Command::Trim(..)
             | Command::Clear(_)
             | Command::PlayAll
@@ -931,7 +932,8 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         Command::Stop(i) => lane(i).map_or(Applied::Done, |i| looper.stop_command(cx, i)),
         Command::Undo(i) => lane(i).map_or(Applied::Done, |i| looper.undo(cx, i)),
         Command::Reverse(i) => lane(i).map_or(Applied::Done, |i| looper.reverse(cx, i)),
-        Command::Copy(i) => lane(i).map_or(Applied::Done, |i| looper.copy(cx, i)),
+        Command::Copy(i) => lane(i).map_or(Applied::Done, |i| looper.copy(cx, i, false)),
+        Command::CopyWide(i) => lane(i).map_or(Applied::Done, |i| looper.copy(cx, i, true)),
         Command::Trim(i, bars) => lane(i).map_or(Applied::Done, |i| looper.trim(cx, i, bars as Frame)),
         Command::Clear(i) => lane(i).map_or(Applied::Done, |i| looper.clear(cx, i)),
         Command::PlayAll => looper.play_all(cx),

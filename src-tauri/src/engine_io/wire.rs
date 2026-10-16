@@ -93,6 +93,7 @@ enum CommandDef {
     Undo(u8),
     Reverse(u8),
     Copy(u8),
+    CopyWide(u8),
     Trim(u8, u32),
     Clear(u8),
     PlayAll,
@@ -149,6 +150,7 @@ enum ActionDef {
     Mute,
     Reverse,
     Copy,
+    CopyWide,
     Halve,
     Hold(u8),
     Release(u8),
@@ -592,7 +594,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 46;
+    const COMMANDS: usize = 47;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -642,12 +644,13 @@ mod tests {
             SetPan(..) => 43,
             SetScope(_) => 44,
             SetMeter(_) => 45,
+            CopyWide(_) => 46,
         }
     }
 
     /// Every `Action` and `Refusal` variant, by position: a new one fails to compile here until the
     /// fixture sends (or answers) it.
-    const ACTIONS: usize = 16;
+    const ACTIONS: usize = 17;
     fn action_index(a: &Action) -> usize {
         match a {
             Action::RecDub => 0,
@@ -666,6 +669,7 @@ mod tests {
             Action::Release(_) => 13,
             Action::FadeAll => 14,
             Action::Toggle(_) => 15,
+            Action::CopyWide => 16,
         }
     }
 

@@ -1,12 +1,13 @@
 //! COPY (`machine.ts` copy): the whole lane into the first EMPTY lane, never the recorder's, as a block
 //! job; the copy plays when its source played on, else it lands STOPPED, as it does when a STOP or a
 //! STOP ALL reaches it before it is done. The golden jam copies a playing lane; these are the guards
-//! around it.
+//! around it. WIDE COPY (engine only) is COPY with the copy's loop 20 ms behind its source's, circularly,
+//! and its pan the source's mirror.
 
 mod common;
 
 use common::{code, Rig};
-use lf_engine::{Command, Event, LaneState};
+use lf_engine::{Action, Command, Event, LaneState, Refusal};
 
 fn copies(rig: &Rig) -> usize {
     rig.events.iter().filter(|e| matches!(e, Event::Copied { .. })).count()
@@ -114,4 +115,67 @@ fn a_stop_while_a_copy_runs_keeps_the_copy_stopped() {
         rig.advance(rig.master());
         assert!(rig.output.as_ref().unwrap().1.iter().all(|&y| y == 0.0), "{tag}: silent");
     }
+}
+
+/// Lane 0's and lane 1's pan targets, and where lane 1's pan is.
+fn pans(rig: &Rig) -> (f32, f32, f64) {
+    let fx = rig.engine.fx();
+    (fx.pan(0), fx.pan(1), fx.pan_position(1))
+}
+
+#[test]
+fn a_wide_copy_is_its_source_20_ms_behind_on_the_other_side() {
+    // (reversed, the source's pan, the source's and the copy's pans after): a centred source (|pan| under
+    // 0.1) goes half left and the copy half right; another takes the mirror of its pan.
+    for (reversed, pan, want) in [(false, 0.0, (-0.5, 0.5)), (false, 0.6, (0.6, -0.6)), (true, -0.05, (-0.5, 0.5)), (true, -0.3, (-0.3, 0.3))] {
+        let tag = format!("reversed {reversed}, pan {pan}");
+        let mut rig = looping();
+        if reversed {
+            rig.press(Command::Reverse(0));
+            rig.advance_to(rig.next_boundary() + 1);
+        }
+        rig.press(Command::SetPan(0, pan));
+        rig.advance(rig.seconds(0.3));
+        rig.press(Command::CopyWide(0));
+        assert_eq!((pans(&rig).1, pans(&rig).2), (want.1, want.1 as f64), "{tag}: the copy sits on its side from the press");
+        rig.idle();
+        rig.advance(rig.seconds(0.3));
+        assert_eq!(copies(&rig), 1, "{tag}: answered as COPY is");
+        assert_eq!((rig.state(1), rig.lane(1).reversed), (LaneState::Playing, reversed), "{tag}");
+        assert_eq!(pans(&rig).0, want.0, "{tag}: the source's pan");
+        assert_eq!(pans(&rig).1, want.1, "{tag}: the copy's pan");
+        // Heard order (the rig's `pcm` reads a reversed lane backwards): the copy at loop position h plays
+        // the source's h - 20 ms, around the loop edge.
+        let (src, copy) = (rig.pcm(0), rig.pcm(1));
+        let (m, d) = (src.len(), 960);
+        assert_eq!(rig.sr, 48_000);
+        assert_eq!(copy.len(), m, "{tag}");
+        assert!(src.windows(2).all(|w| w[0] != w[1]), "{tag}: every sample of the source tells its place");
+        assert_eq!((copy[d - 1], copy[d], copy[m - 1]), (src[m - 1], src[0], src[m - 1 - d]), "{tag}: frame-exact at the loop edge");
+        let shifted: Vec<f32> = (0..m).map(|h| src[(h + m - d) % m]).collect();
+        assert!(copy == shifted, "{tag}: the copy is its source shifted by 20 ms");
+    }
+}
+
+#[test]
+fn a_plain_copy_is_its_source_at_its_pan() {
+    let mut rig = looping();
+    rig.press(Command::SetPan(0, 0.6));
+    rig.advance(rig.seconds(0.3));
+    rig.press(Command::Copy(0));
+    rig.idle();
+    assert_eq!(rig.pcm(1), rig.pcm(0));
+    assert_eq!(pans(&rig), (0.6, 0.6, 0.6f32 as f64));
+}
+
+#[test]
+fn a_wide_copy_is_gated_and_refused_as_copy_is() {
+    let mut rig = Rig::new();
+    rig.press(Command::Action(Action::CopyWide));
+    assert!(rig.events.iter().any(|e| matches!(e, Event::Refused { lane: 0, reason: Refusal::NoCopy, .. })), "nothing to copy");
+    let mut rig = looping();
+    rig.press(Command::ActionOn(0, Action::CopyWide));
+    rig.idle();
+    assert_eq!((copies(&rig), rig.state(1)), (1, LaneState::Playing), "a named lane");
+    assert_ne!(rig.pcm(1), rig.pcm(0), "the action copies wide");
 }

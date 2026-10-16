@@ -64,6 +64,7 @@ export type EngineAction =
   | 'Mute'
   | 'Reverse'
   | 'Copy'
+  | 'CopyWide'
   | 'Halve'
   | { Hold: number }
   | { Release: number }
@@ -145,6 +146,7 @@ const ACTIONS: readonly Extract<EngineAction, string>[] = [
   'Mute',
   'Reverse',
   'Copy',
+  'CopyWide',
   'Halve',
   'FadeAll',
 ];
@@ -184,6 +186,8 @@ export type EngineCommand =
   | { Undo: number }
   | { Reverse: number }
   | { Copy: number }
+  /** WIDE COPY: COPY, the copy 20 ms behind its source and panned to the other side. */
+  | { CopyWide: number }
   /** TRIM (F16): the lane keeps its first `bars` bars as heard, repeated across the loop. */
   | { Trim: [number, number] }
   | { Clear: number }
@@ -665,7 +669,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
 // ── Command and request validators (the fixture guard; the UI builds these values typed) ────────────
 
 const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff', 'Press'] as const;
-const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Clear', 'SelectTrack'] as const;
+const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Clear', 'SelectTrack'] as const;
 const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope'] as const;
 const NUMBER_COMMANDS = [
   'SetBpm',

@@ -17,7 +17,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | Thread | Owns | Talks to others through |
 |---|---|---|
 | **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview`: the Web MIDI permission deny, `lib.rs`), the plugin folder dialog (modal over the main window, `src/host/folders.rs`), the close guard (`lf://close-requested`), and the synchronous commands: `input_send` (the UI's one ordered batch of engine commands and note input, one in flight at a time), `midi_subscribe`, `plugin_asio_status`, `plugin_asio_device_info`, `lib.rs`'s own | IPC in; window events out (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) |
-| **Command threads** (Tauri async runtime) | Nothing long-lived. Every other command in `host/commands.rs`, `engine_io/mode.rs` and `engine_io/midi_mode.rs` is `async fn`; blocking engine work (an open waits up to 15 s) goes to `spawn_blocking` | Device requests to the device owner; plugin requests to a slot owner (`owner_request_5s`, ≤5 s); a load spawns the owner and waits ≤15 s on its rendezvous (a result that arrives later is the owner's to undo); device lists enumerate cpal directly (no stream opens) |
+| **Command threads** (Tauri async runtime) | Nothing long-lived. Every other command in `host/commands.rs`, `engine_io/mode.rs` and `engine_io/midi_mode.rs` is `async fn`; blocking engine work (an open waits up to 15 s) goes to `spawn_blocking` | Device requests to the device owner; plugin requests to a slot owner (`owner_request_5s`, ≤5 s); a load spawns the owner and waits ≤15 s on its rendezvous (a setup that ends later never installs and is the owner's to release; a unit already going in at the bound stands: `engine_slot::LoadClaim`); device lists enumerate cpal directly (no stream opens) |
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry and runs with flush-to-zero on (`engine_io/fpu.rs`) | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
@@ -72,7 +72,10 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   already its own: never point two worktrees at one `CARGO_TARGET_DIR`. Sharing one, every worktree
   links the same `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one
   worktree can run another's build of `app` or `lf-engine`. From WSL, Windows cargo does not see a
-  `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it).
+  `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it). Each target grows to 12–16 GB, so
+  at most two worktrees hold a build at a time (`dev`'s integration tree and one feature tree), and
+  a feature tree is cleaned when its branch is merged: `cargo clean --manifest-path
+  <absolute path>/src-tauri/Cargo.toml`, an absolute path, never `cd` then delete.
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
   a plain `cargo build` must work without the LLVM/ASIO SDK, and `tauri dev` forces
   `--no-default-features` anyway. `[profile.dev.package."*"]` and lf-engine build at opt-level 3;
@@ -155,7 +158,7 @@ plugin-GUI work.
   setup, and only that load moves the slot on: one that finishes for a replaced document, or that an
   unload cancelled, unloads what it loaded, and the slot takes no load until the plugin's unit has
   left the engine (an unload holds it the same way); a load for the new document waits for it
-  (`engine_io/plugins.rs`). Two timeouts free the slot early (§ Open threads). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
+  (`engine_io/plugins.rs`). An unload that gives up on a handle still in use frees the slot early (§ Open threads). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
   shared `PluginHostState` there (`host/commands.rs`).
 - **The `!Send` instance (clack `PluginInstance`, the VST3 component, the VST2 effect) lives on its
   owner thread**, NOT `tauri::State`; only the `Send` unit (`ClapUnit`, `Vst3Unit`, `Vst2Unit`: the
@@ -303,15 +306,14 @@ plugin-GUI work.
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- Two timeouts free a plugin slot before its unit has left the engine (read from source, never run):
-  a load whose setup outlasts its 15 s bound empties the slot at once, while its owner may still
-  install the unit and then undo it; an unload that gives up waiting (6 s) for a command still using
-  the handle empties the slot while that command's drop of the handle still tears the plugin down. A
-  load meanwhile fails on "already holds a unit" (rig recall keeps the plugin) or wins the slot
-  first; the late owner's unit may sound for its crossfade. Next check: a slot test in
-  `engine_io/plugins.rs` with a stand-in owner that outlasts the bound (injectable), and one that
-  holds a handle clone past the unload wait, each followed by a load. A fix holds the slot until the
-  owner thread ends (`engine_slot::serve` returns).
+- An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
+  that command's drop of the handle still tears the plugin down (read from source, never run; no
+  command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on
+  "already holds a unit" (rig recall keeps the plugin) or wins the slot first; the late owner's unit
+  may sound for its crossfade. A load whose unit went in as its 15 s bound ran out, and whose report
+  then took 2 s more, frees the slot the same way (`engine_slot::LoadClaim`). Next check: a slot test
+  in `engine_io/plugins.rs` that holds a handle clone past the unload wait, then loads. A fix carries
+  an owner-ended flag in `Leaving`.
 - VST2 host gaps (read from source, none reproduced; the only real plugins tried are ReaJS and
   ReaStream, which load, open their editors and swap, and whose `native:tone-recall` fails because
   neither has a parameter that holds a value):

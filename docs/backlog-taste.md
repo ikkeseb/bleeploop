@@ -74,11 +74,9 @@ added a line.
 ## Parked ideas (for the long run)
 
 - **The owner's own ideas, not scheduled:** full panel drag, with plugin editors inline, each filling
-  its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). COPY with an
-  offset for width (2026-09-18): a lane copied, the copy a little behind its source, the two panned
-  apart so the part sounds wider. Today's nearest: COPY, pan, and the copy's DELAY at 1/16, Fbk 0, Mix
-  100 %; the width wants offsets shorter than the delay's shortest, 1/16. A meter per track (one lane
-  in 4/4 over another in 3/4; 2026-10-15): more than passing a lane its meter (`grid.rs` module doc).
+  its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). A meter per
+  track (one lane in 4/4 over another in 3/4; 2026-10-15): more than passing a lane its meter
+  (`grid.rs` module doc).
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
   first take (it meets the bar math every meter shares, `grid.rs`); more built-in
   synths (they fill layers, they do not compete with

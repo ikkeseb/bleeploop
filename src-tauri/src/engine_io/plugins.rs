@@ -13,8 +13,9 @@
 //! `frontendEpoch`); only that load moves the slot on. A load that finishes for a replaced document, or
 //! one an unload cancelled meanwhile, unloads what it loaded, and the slot stays out of reach until
 //! the plugin's unit has left the engine; a load for the new document waits for it (≤ `VACATE_WAIT`).
-//! Two timeouts free the slot early: a setup past its bound (`load`'s error branch) and an unload
-//! that gives up on a shared handle (`unload_handle`); `src-tauri/AGENTS.md` § Open threads.
+//! A setup past its bound frees the slot with no unit left in it (`engine_slot::LoadClaim`). An unload
+//! that gives up on a shared handle (`unload_handle`) frees it early; `src-tauri/AGENTS.md` § Open
+//! threads.
 //! Every request that changes a slot (load, unload, a parameter, the editor) names its document and is
 //! refused from a replaced one, checked under the slots lock as it takes the slot. Commands clone a
 //! loaded slot's handle out of the lock, so a slow owner round trip on one slot holds up nobody else.
@@ -109,8 +110,9 @@ impl LoadTarget<'_> {
         let handle = match loaded {
             Ok(handle) => handle,
             Err(e) => {
-                // A setup that timed out leaves its owner running: it may still install its unit and
-                // undo it after this (`src-tauri/AGENTS.md` § Open threads).
+                // A setup that timed out had not claimed its load, so its owner never installs
+                // (`engine_slot::LoadClaim`); one that had is a load that stands. Only a claimed load
+                // whose report then took 2 s more leaves a unit to undo (`src-tauri/AGENTS.md` § Open threads).
                 slots[usize::from(slot)] = EngineSlot::Empty;
                 return Err(e);
             }

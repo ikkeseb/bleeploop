@@ -52,6 +52,9 @@ pub enum Command {
     Reverse(u8),
     /// Copy the lane into the first EMPTY lane (answered by [`Event::Copied`]).
     Copy(u8),
+    /// WIDE COPY: COPY, the copy playing [`crate::looper::WIDE_MS`] behind its source and panned to
+    /// the other side ([`crate::looper::Looper::copy`]); answered as COPY is.
+    CopyWide(u8),
     /// TRIM (F16): the lane keeps its first `bars` bars as heard and repeats them across the loop, whose
     /// length stays; the loop before it becomes the lane's undo target. A committed lane only, over a
     /// loop of whole bars, `1 <= bars <` its bars; anything else is refused with a reason
@@ -368,6 +371,8 @@ pub enum Action {
     Reverse,
     /// COPY into the first EMPTY lane.
     Copy,
+    /// WIDE COPY into the first EMPTY lane ([`Command::CopyWide`]), gated and refused as COPY is.
+    CopyWide,
     /// TRIM to the first half of the loop's whole bars, rounded down, as the loop stands when the press
     /// applies; refused as [`Command::Trim`] is.
     Halve,

@@ -1330,6 +1330,7 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
     let ctx = OwnerCtx {
         slot: device.host().slot(slot),
         running: running.clone(),
+        claim: Default::default(),
         requests: owner_requests,
         params,
         params_tx: Arc::new(Mutex::new(params_tx)),

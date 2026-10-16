@@ -22,8 +22,8 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{
-    AtomicBool, AtomicU32,
-    Ordering::{Acquire, Relaxed, Release},
+    AtomicBool, AtomicU32, AtomicU8,
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -160,10 +160,35 @@ pub(super) fn report_faults(faults: &AtomicU32, slot: usize, reported: &mut u32)
     }
 }
 
+/// Settles a load whose caller's bound runs out as the owner's setup ends: the owner claims the load
+/// before its unit goes in, the caller abandons it on its timeout, and only the first of the two
+/// holds. A claimed load stands (its caller waits for the report, a step away); an abandoned one
+/// never installs. So a load that failed on its bound leaves no unit behind in the slot it frees.
+#[derive(Default)]
+pub(super) struct LoadClaim(AtomicU8);
+
+impl LoadClaim {
+    const OPEN: u8 = 0;
+    const CLAIMED: u8 = 1;
+    const ABANDONED: u8 = 2;
+
+    /// The owner, before the install: false when the caller has given up (the load is cancelled).
+    pub(super) fn claim(&self) -> bool {
+        self.0.compare_exchange(Self::OPEN, Self::CLAIMED, AcqRel, Acquire).is_ok()
+    }
+
+    /// The caller, on its timeout: false when the owner has claimed the load first.
+    fn abandon(&self) -> bool {
+        self.0.compare_exchange(Self::OPEN, Self::ABANDONED, AcqRel, Acquire).is_ok()
+    }
+}
+
 /// What an engine-mode owner thread starts with.
 pub(super) struct OwnerCtx {
     pub(super) slot: SlotHost,
     pub(super) running: Arc<AtomicBool>,
+    /// Claimed before the unit goes in (`LoadClaim`).
+    pub(super) claim: Arc<LoadClaim>,
     pub(super) requests: Receiver<OwnerRequest>,
     /// The unit's end of the slot's event ring (`EngineSlotHandle::set_param` pushes params).
     pub(super) params: Consumer<ParamEvent>,
@@ -365,7 +390,7 @@ pub(super) fn serve<P: OwnedPlugin>(
     ctx: OwnerCtx,
     load: impl FnOnce(Setup<'_>) -> Result<Loaded<P>, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent, ready, mut tone } = ctx;
+    let OwnerCtx { slot, running, claim, requests, params, params_tx, param_ids, sink, editor_parent, ready, mut tone } = ctx;
     let index = slot.slot();
     let faults = Arc::new(AtomicU32::new(0));
     let setup = Setup { slot: &slot, params, params_tx, sink: &sink, editor_parent, faults: faults.clone(), tone: &mut tone };
@@ -379,7 +404,7 @@ pub(super) fn serve<P: OwnedPlugin>(
     // Before the load is reported, so the caller's first `set_param` finds its ids.
     publish_param_ids(&param_ids, &plugin.params().unwrap_or_default());
     let kind = unit.kind();
-    let installed = match running.load(Acquire) {
+    let installed = match claim.claim() {
         true => slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e)),
         false => Err((unit, "plugin load cancelled".to_string())),
     };
@@ -630,8 +655,23 @@ pub(super) fn spawn(
     tone: Option<ToneBinding>,
     run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
+    spawn_within(Receiver::recv_timeout, format, slot, editor_parent, sink, tone, run)
+}
+
+/// `spawn`, each wait for the owner's report `wait` given its bound (`LOAD_TIMEOUT`, then
+/// `REMOVE_TIMEOUT` for a claimed load's report): the bound itself, or a test's wait on its own cue.
+fn spawn_within(
+    mut wait: impl FnMut(&Receiver<Result<Ready, String>>, Duration) -> Result<Result<Ready, String>, RecvTimeoutError>,
+    format: PluginFormat,
+    slot: SlotHost,
+    editor_parent: usize,
+    sink: EventSink,
+    tone: Option<ToneBinding>,
+    run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
+) -> Result<EngineSlotHandle, String> {
     let index = slot.slot();
     let running = Arc::new(AtomicBool::new(true));
+    let claim = Arc::new(LoadClaim::default());
     let edited = Arc::new(AtomicBool::new(false));
     let (params_tx, params) = RingBuffer::<ParamEvent>::new(EVENT_RING_CAP);
     let params_tx = Arc::new(Mutex::new(params_tx));
@@ -641,6 +681,7 @@ pub(super) fn spawn(
     let ctx = OwnerCtx {
         slot,
         running: running.clone(),
+        claim: claim.clone(),
         requests,
         params,
         params_tx: params_tx.clone(),
@@ -654,7 +695,18 @@ pub(super) fn spawn(
         .name(format!("lf-{}-engine-{index}", format.as_str()))
         .spawn(move || run(ctx))
         .map_err(|e| format!("spawn owner thread: {e}"))?;
-    match ready_rx.recv_timeout(LOAD_TIMEOUT) {
+    let report = match wait(&ready_rx, LOAD_TIMEOUT) {
+        // The bound ran out as the owner's unit went in: the load stands, its report a step away.
+        Err(late) if !claim.abandon() => {
+            log::warn!(
+                "[plugin_host] engine slot {index}: the plugin's setup outlasted its {} ms bound as it went into the engine; the load stands",
+                LOAD_TIMEOUT.as_millis()
+            );
+            wait(&ready_rx, REMOVE_TIMEOUT).map_err(|_| late)
+        }
+        report => report,
+    };
+    match report {
         Ok(Ok(Ready { name, kind, tone })) => Ok(EngineSlotHandle {
             slot: index,
             format,
@@ -674,8 +726,10 @@ pub(super) fn spawn(
             Err(e)
         }
         Err(e) => {
-            // Setup hung: the owner is left to finish and undo its own late result (its ready
-            // send fails once `ready_rx` drops here).
+            // Setup hung: the owner never installs once it finds the load abandoned, and releases the
+            // plugin when its setup ends. A claimed load whose report outlasted the second wait too is
+            // the owner's to undo (its ready send fails once `ready_rx` drops here), its unit still in
+            // the slot this frees (`src-tauri/AGENTS.md` § Open threads).
             running.store(false, Release);
             Err(format!("plugin setup timed out: {e}"))
         }
@@ -829,9 +883,20 @@ pub(crate) fn stand_in(
     in_engine: impl FnOnce() + Send + 'static,
     leaving: impl FnOnce() + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
-    spawn(PluginFormat::Clap, slot, 0, Arc::new(|_| {}), None, move |ctx| {
+    spawn(PluginFormat::Clap, slot, 0, Arc::new(|_| {}), None, stand_in_owner(unit, in_engine, leaving))
+}
+
+/// Test-only: `stand_in`'s owner.
+#[cfg(test)]
+fn stand_in_owner(
+    unit: Box<dyn lf_engine::SlotProcessor>,
+    in_engine: impl FnOnce() + Send + 'static,
+    leaving: impl FnOnce() + Send + 'static,
+) -> impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static {
+    move |ctx| {
         let kind = unit.kind();
         let installed = match ctx.slot.rate() {
+            _ if !ctx.claim.claim() => Err("plugin load cancelled".to_string()),
             Some(rate) => ctx.slot.install(unit, rate).map_err(|(_, e)| e),
             None => Err("no audio device is open".to_string()),
         };
@@ -847,12 +912,13 @@ pub(crate) fn stand_in(
             leaving();
         }
         ctx.slot.remove(REMOVE_TIMEOUT).map(drop)
-    })
+    }
 }
 
-/// Test-only: when a load's caller gave up, against its owner's check of `running`. `spawn`'s timeout
-/// lowers `running`, then drops the rendezvous; which of the two the owner meets first decides how it
-/// undoes the load.
+/// Test-only: when a load's caller gave up, against its owner's claim (`LoadClaim`). `spawn`'s timeout
+/// abandons a load its owner has not claimed; one it has, it gives up on only when the report outlasts
+/// a second wait too, and then drops the rendezvous. Which the owner meets decides how it undoes the
+/// load.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum GaveUp {
@@ -873,12 +939,17 @@ pub(super) fn spawn_given_up(
     run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
 ) -> (Result<(), String>, Option<Result<String, String>>) {
     let running = Arc::new(AtomicBool::new(gave_up == GaveUp::After));
+    let claim = Arc::new(LoadClaim::default());
+    if gave_up == GaveUp::Before {
+        claim.abandon();
+    }
     let (params_tx, params) = RingBuffer::<ParamEvent>::new(EVENT_RING_CAP);
     let (request_tx, requests) = std::sync::mpsc::channel();
     let (ready, ready_rx) = load_ready_channel();
     let ctx = OwnerCtx {
         slot,
         running: running.clone(),
+        claim,
         requests,
         params,
         params_tx: Arc::new(Mutex::new(params_tx)),
@@ -1091,5 +1162,68 @@ mod tests {
         assert_eq!(handle.close_editor(), Ok(()));
         assert_eq!(shared.closes.load(Relaxed), 1);
         handle.unload().expect("it unloads");
+    }
+
+    /// The setup's bound runs out just as the owner puts its unit in the engine: the load stands.
+    /// Failed, it would free the slot while its unit is still there, and the next load into the slot
+    /// would fail on it ("already holds a unit").
+    #[test]
+    fn a_load_whose_unit_goes_in_as_its_bound_runs_out_stands() {
+        let _one = one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
+        // The bound runs out once the owner has claimed the load and its unit is in the engine, its
+        // report held until then: the order is the test's, not the runner's.
+        let (in_engine_tx, in_engine) = channel();
+        let (ran_out_tx, ran_out) = channel();
+        let report_late = move || {
+            in_engine_tx.send(()).unwrap();
+            ran_out.recv_timeout(Duration::from_secs(5)).expect("the bound ran out");
+        };
+        let mut cue = Some((in_engine, ran_out_tx));
+        let wait = move |ready: &Receiver<Result<Ready, String>>, _bound| match cue.take() {
+            Some((in_engine, ran_out_tx)) => {
+                in_engine.recv_timeout(Duration::from_secs(5)).expect("the unit goes in");
+                ran_out_tx.send(()).unwrap();
+                Err(RecvTimeoutError::Timeout)
+            }
+            // The claimed load's report comes once the owner is scheduled again, however late: only
+            // a deadlock outlasts this.
+            None => ready.recv_timeout(Duration::from_secs(30)),
+        };
+        let owner = stand_in_owner(Box::new(Silent), report_late, || {});
+        let loaded = spawn_within(wait, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, owner);
+        let handle = loaded.expect("the owner had its unit going in: the load stands");
+        assert_eq!(handle.name(), "Stand-in");
+        let next = stand_in(device.host().slot(0), Box::new(Silent), || {}, || {}).err().expect("the slot is taken");
+        assert!(next.contains("already holds a unit"), "{next}");
+        handle.unload().expect("it unloads");
+        stand_in(device.host().slot(0), Box::new(Silent), || {}, || {}).expect("the slot takes the next load").unload().unwrap();
+    }
+
+    /// A setup that outlasts its bound: the load fails and the owner never puts its unit in the
+    /// engine, so the slot takes the next load once the owner has ended.
+    #[test]
+    fn a_setup_past_its_bound_fails_and_leaves_the_slot_free() {
+        let _one = one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
+        let shared = Arc::new(Shared::default());
+        let (ended_tx, ended) = channel();
+        // The setup goes on only once its bound has run out and the load has failed.
+        let (failed_tx, failed) = channel();
+        let fake = shared.clone();
+        let bound = |_: &Receiver<Result<Ready, String>>, _| Err(RecvTimeoutError::Timeout);
+        let late = spawn_within(bound, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
+            let served = serve(ctx, move |setup| {
+                failed.recv_timeout(Duration::from_secs(5)).map_err(|e| format!("the load never failed: {e}"))?;
+                let rate = setup.slot.rate().ok_or("no audio device is open")?;
+                Ok(Loaded { plugin: Fake(fake), unit: Box::new(Silent), name: "Fake".to_string(), rate, tone: None })
+            });
+            let _ = ended_tx.send(served.clone());
+            served
+        });
+        assert!(late.as_ref().is_err_and(|e| e.contains("timed out")), "{:?}", late.err());
+        failed_tx.send(()).unwrap();
+        assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(Ok(())), "the owner ends on its own");
+        load_fake(&device, &shared).unload().expect("the slot takes the next load");
     }
 }

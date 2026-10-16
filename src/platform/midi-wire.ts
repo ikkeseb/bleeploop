@@ -25,6 +25,7 @@ export type MidiActionId =
   | 'mute'
   | 'reverse'
   | 'copy'
+  | 'copyWide'
   | 'halveTrack'
   | 'nextTrack'
   | 'prevTrack'
@@ -44,9 +45,9 @@ export type MidiActionId =
   | 'inFxReverb'
   | 'inFxRing';
 export const MIDI_ACTION_IDS: readonly MidiActionId[] = [
-  'recDub', 'playStop', 'undo', 'clear', 'mute', 'reverse', 'copy', 'halveTrack', 'nextTrack', 'prevTrack', 'playAll',
-  'stopAll', 'fadeAll', 'goLive', 'stageView', 'stageNextView', 'tapTempo', 'clickToggle', 'endStopToggle', 'fixedToggle',
-  'retakeToggle', 'autoRecToggle', 'inFxEcho', 'inFxReverb', 'inFxRing',
+  'recDub', 'playStop', 'undo', 'clear', 'mute', 'reverse', 'copy', 'copyWide', 'halveTrack', 'nextTrack', 'prevTrack',
+  'playAll', 'stopAll', 'fadeAll', 'goLive', 'stageView', 'stageNextView', 'tapTempo', 'clickToggle', 'endStopToggle',
+  'fixedToggle', 'retakeToggle', 'autoRecToggle', 'inFxEcho', 'inFxReverb', 'inFxRing',
 ];
 
 /** One learned message (Rust `Binding`). `portId` is the port's identity, matched by equality; `portName`
