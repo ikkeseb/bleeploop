@@ -13,7 +13,8 @@
  *   engine fake, `platform.logs`, the ASIO status and the slot state replaced in the page before Help
  *   opens): the ASIO licence lines render, Open log folder shows and calls the host, and the copied block
  *   names the ASIO status, the plugin with its format (never its path) and the folder;
- * - engine mode on the web engine fake (`window.__lfEngineFake`): the block reads the device that runs.
+ * - engine mode on the web engine fake (`window.__lfEngineFake`): the block reads the device that runs, and
+ *   in Audio Settings Tab from the DIAGNOSTICS rail tab focuses that page (it holds no control of its own).
  *
  * Cannot see the Rust commands, Explorer, WebView2's clipboard or a real device: every native answer
  * here is a stand-in. Run: pnpm probe diagnostics [--shots=<dir>]
@@ -123,6 +124,14 @@ await probe(async ({ browser, open }) => {
       assert.ok(lines.includes(line), `missing "${line}"`);
     }
     assert.ok(lines.some((l) => /^Buffer: \d+ frames$/.test(l)), 'the buffer');
+    // Audio Settings' DIAGNOSTICS page holds no control: Tab from its rail tab lands on the page itself,
+    // never past the panel.
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => window.__lf.ui.openSettings('diagnostics'));
+    await page.locator('#lf-settings-tab-diagnostics').focus();
+    await page.keyboard.press('Tab');
+    const tabbed = await page.evaluate(() => document.activeElement?.id || document.activeElement?.getAttribute('aria-label'));
+    assert.equal(tabbed, 'lf-settings-diagnostics', 'Tab from the DIAGNOSTICS tab focuses its page');
     await page.close();
   }
 

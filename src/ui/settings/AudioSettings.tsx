@@ -91,14 +91,17 @@ const PAGES = (['device', 'midi', 'plugins', 'diagnostics'] as const).map((id) =
  * thing works, amber (the command bar lamp's warning) while it needs the player. */
 type Lamp = 'off' | 'lit' | 'warn';
 
-/** One page: a tab panel, hidden while another shows. */
-function Page(props: { id: SettingsPage; shown: SettingsPage; children: JSX.Element }) {
+/** One page: a tab panel, hidden while another shows. A page with no control of its own (`readOnly`:
+ * DIAGNOSTICS) is a Tab stop itself, as Help's panels are, so Tab from its rail tab lands on it instead
+ * of leaving the panel; a click on it is blurred again (`src/app/transport-keys.ts`). */
+function Page(props: { id: SettingsPage; shown: SettingsPage; readOnly?: boolean; children: JSX.Element }) {
   return (
     <div
       class="audio-settings__page"
       id={`lf-settings-${props.id}`}
       role="tabpanel"
       aria-labelledby={`lf-settings-tab-${props.id}`}
+      tabindex={props.readOnly ? 0 : undefined}
       hidden={props.shown !== props.id}
     >
       {props.children}
@@ -851,7 +854,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
       </Page>
 
       {/* DIAGNOSTICS: last. */}
-      <Page id="diagnostics" shown={props.page}>
+      <Page id="diagnostics" shown={props.page} readOnly>
         {/* Diagnostics: the read-only host/engine/plugin/midi status. The command-bar system lamp is
             their aggregate (this page's rail lamp mirrors it); this is the full read-out. The plugin-scan live region stays in the command
             bar (single announcer), so these rows are plain text — no role=status here. */}

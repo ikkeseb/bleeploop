@@ -135,6 +135,11 @@
   gap: 9px;
   padding: 15px 16px 16px;
 }
+/* a read-only page is a Tab stop (DIAGNOSTICS): the app's focus ring, inside the panel's clipped edge */
+.audio-settings__page:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -3px;
+}
 .audio-settings__page[hidden] {
   display: none;
 }
