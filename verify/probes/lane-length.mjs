@@ -12,6 +12,8 @@
  *   pressed by key hands focus back to EDIT too, and the open stepper's TRIM is disabled while the lane
  *   stops. The menu is reachable by key (EDIT, then Tab to its edits). An engine refusal lands on its
  *   lane. ↶ UNDO names the trim.
+ * - COPY or WIDE focused in the open menu when the last empty lane fills (its own press by key, or a pedal's
+ *   copy on the feed): the menu closes and the focus is on the lane's EDIT, never dropped to the page.
  * - The lane's pill row is five fixed columns (FX, MUTE, ↺ REV, ↶ UNDO, EDIT) whose legends fit their pills
  *   at a wide and a narrow window, and ↶ UNDO holds its column, disabled, where there is nothing to undo.
  * - Halve (`halveTrack`, `src/app/actions.ts`): sends the engine's `Halve` (on the engine's own selection,
@@ -309,4 +311,39 @@ await probe(async ({ open }) => {
   };
   assert.ok(await headAfter(1, 0.5, 1), 'half a loop in, the lane spans the loop');
   assert.ok(await headAfter(2, 1.5, 2), '1.5 loops in, the lane spans two loops: the take runs on');
+
+  // ── COPY or WIDE by key into the last empty lane: the focus stays in the lane ─────────────────────────
+  // The copy fills the last empty lane, which closes COPY and WIDE in every lane: the focused button must not
+  // drop the focus to the page, where the next Space is no longer this lane's.
+  const focusAt = () =>
+    page.evaluate(() => {
+      const el = document.activeElement;
+      return { label: el?.getAttribute('aria-label') ?? el?.tagName, lane: [...document.querySelectorAll('.lp-lane')].findIndex((l) => l.contains(el)) };
+    });
+  const lastFree = (on) => [transport(8 * BAR), ...[0, 1, 2, 3].map((i) => laneEvent(i, committed('Playing', 8))), laneEvent(4, on ? committed('Playing', 8) : lane('Empty'))];
+  for (const [word, sends] of [['Copy track 1 to the first empty lane', { Copy: 0 }], ['Copy track 1 wide to the first empty lane', { CopyWide: 0 }]]) {
+    for (const how of ['pressed', 'a pedal']) {
+      await emit({ events: lastFree(false) });
+      await lanes.nth(0).getByRole('button', { name: 'Track 1 mute', exact: true }).focus();
+      await edit(0).focus();
+      await page.keyboard.press('Enter');
+      await menu(0).waitFor();
+      await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'dialog', undefined, { timeout: 5000 });
+      while ((await focusAt()).label !== word) await page.keyboard.press('Tab');
+      await clearSent();
+      if (how === 'pressed') {
+        await page.keyboard.press('Enter');
+        assert.deepEqual(await sent(), [sends], `${word} by key sends its edit`);
+      }
+      await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 4, feedback: 1 } }, ...lastFree(true)] });
+      await page.waitForTimeout(150);
+      const at = await focusAt();
+      console.log(`focus after ${word} (${how}) filled the last empty lane`, JSON.stringify(at));
+      assert.deepEqual(at, { label: 'Edit track 1', lane: 0 }, `${word} (${how}): the focus is on the lane's EDIT, not dropped`);
+      if (await menu(0).count()) {
+        await page.keyboard.press('Escape');
+        await menu(0).waitFor({ state: 'detached' });
+      }
+    }
+  }
 });

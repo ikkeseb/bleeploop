@@ -76,14 +76,15 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
   createEffect(() => {
     if (view() !== null && (stageOpen() || !gate().ok)) setView(null);
   });
-  // An edit whose gate closes under the open menu (a pedal starts an overdub, a copy fills the last empty
-  // lane) disables its row; a disabled button drops focus to body, where the next Space is the
-  // transport's, so the focus moves to the menu instead and Escape still hands it back to the pill.
+  // An edit whose gate closes under the open menu while it has the focus (a pedal starts an overdub, a
+  // copy fills the last empty lane) disables its row, and a disabled button drops the focus to the page,
+  // out of the lane. The menu closes as a keyboard close does: the focus goes back to the lane's EDIT, on
+  // the app's behalf, so Space there still arms REC.
   let menu: HTMLDivElement | undefined;
   createEffect(() => {
     for (const item of ITEMS) item.gate(props.index);
     const el = document.activeElement;
-    if (menu && el instanceof HTMLButtonElement && el.disabled && menu.contains(el)) menu.focus();
+    if (menu && el instanceof HTMLButtonElement && el.disabled && menu.contains(el)) close(true);
   });
 
   const press = (item: Item, e: MouseEvent) => {
