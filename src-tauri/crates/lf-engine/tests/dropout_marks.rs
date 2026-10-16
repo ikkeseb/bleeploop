@@ -15,6 +15,7 @@ use common::dub::{pos_fn, ramp};
 use common::{code, frame_of, Delay, Opts, Rig};
 use lf_engine::api::damage;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
+use lf_engine::input_fx::InputFx;
 use lf_engine::looper::JOB_RATE;
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, Load, LoadTrack, NoteTarget, SessionError, SessionJob, SlotEvent, SlotKind, SlotProcessor, Snapshot};
@@ -866,15 +867,18 @@ fn echo_and_reverb_mark_a_window_their_memory_reaches() {
 }
 
 /// The record tap and its damage over `frames` from a damaged block of 128 input frames at `d` (silence
-/// where `damage`, a 220 Hz tone elsewhere), the echo on at feedback `feedback`, `change` applied at
-/// `d + change_at`.
-fn echo_run(damage: bool, feedback: f64, change_at: Frame, change: Command, frames: Frame) -> (Vec<f32>, Vec<u8>) {
+/// where `damage`, a 220 Hz tone elsewhere), the echo on at feedback `feedback` and division `time`
+/// (settled), each of `changes` applied that many frames after `d`.
+fn echo_run(damage: bool, feedback: f64, time: f64, changes: &[(Frame, Command)], frames: Frame) -> (Vec<f32>, Vec<u8>) {
     let mut rig = Rig::new();
     rig.set(Command::SetBpm(120.0));
+    rig.set(Command::SetInputSendParam(InputSendParam::EchoTime, time));
     echo_on(&mut rig, feedback);
     let d = rig.frame + 2000;
     rig.set_input(move |f| if damage && (d..d + 128).contains(&f) { 0.0 } else { 0.3 * (TAU * 220.0 * f as f64 / 48_000.0).sin() as f32 });
-    rig.send_at(d + change_at, change);
+    for &(at, change) in changes {
+        rig.send_at(d + at, change);
+    }
     rig.advance_to(d);
     rig.keep_output();
     if damage {
@@ -895,8 +899,8 @@ fn every_echo_repeat_above_minus_60_db_is_marked_when_the_controls_turn_down_mid
     let change_at = 146_400;
     for (name, change) in [("feedback down", Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.0)), ("delay down", Command::SetInputSendParam(InputSendParam::EchoTime, 3.0))] {
         let frames = 5 * 48_000;
-        let (clean, _) = echo_run(false, 0.95, change_at, change, frames);
-        let (hit, marks) = echo_run(true, 0.95, change_at, change, frames);
+        let (clean, _) = echo_run(false, 0.95, 1.0, &[(change_at, change)], frames);
+        let (hit, marks) = echo_run(true, 0.95, 1.0, &[(change_at, change)], frames);
         let diff: Vec<f32> = clean.iter().zip(&hit).map(|(a, b)| (a - b).abs()).collect();
         let first = diff[12_000..12_000 + 12_128 + 128].iter().fold(0.0f32, |m, &x| m.max(x));
         assert!(first > 0.01, "{name}: the first repeat differs ({first})");
@@ -914,14 +918,185 @@ fn an_echo_delay_turned_up_after_the_countdown_ends_marks_the_dropout_it_plays_a
     // still holds and plays the dropout again, during the ramp and at 0.5 s. Every frame that differs
     // from the clean run's is marked.
     let change = Command::SetInputSendParam(InputSendParam::EchoTime, 0.0);
-    let (clean, _) = echo_run(false, 0.0, 18_000, change, 48_000);
-    let (hit, marks) = echo_run(true, 0.0, 18_000, change, 48_000);
+    let (clean, _) = echo_run(false, 0.0, 1.0, &[(18_000, change)], 48_000);
+    let (hit, marks) = echo_run(true, 0.0, 1.0, &[(18_000, change)], 48_000);
     let diff: Vec<f32> = clean.iter().zip(&hit).map(|(a, b)| (a - b).abs()).collect();
     let first = diff[12_000..12_000 + 256].iter().fold(0.0f32, |m, &x| m.max(x));
     assert!(first > 0.01, "the first repeat differs ({first})");
     assert!(diff[18_000..].iter().any(|&x| x > first * 0.001), "the dropout plays again after the change");
     let missed: Vec<usize> = (128..diff.len()).filter(|&k| diff[k] > first * 0.001 && marks[k] == 0).collect();
     assert!(missed.is_empty(), "{} affected frames unmarked, from {:?} (last {:?})", missed.len(), missed.first(), missed.last());
+}
+
+#[test]
+fn an_echo_shortened_then_fed_back_then_lengthened_marks_the_repeat_it_reads_again() {
+    // The critique's sequence at 120 BPM: a settled 4n delay (0.5 s) at no feedback, a block lost at
+    // t = 0; 8n (0.25 s) at 0.10 s, feedback 0.4 at 0.15 s, 4n again at 2.05 s. The eighth-note repeats
+    // fall under −60 dB of the first near 2.0 s, but the line still holds the one written at 1.75 s
+    // (0.4⁷, −56 dB), and the quarter-note read head plays it again at 2.25 s. Every frame that differs
+    // from the clean run's by more than −60 dB of the first repeat is marked, and so is a window opened
+    // after 2.0 s that hears it; one opened at 4.5 s is not.
+    let s = |x: f64| (x * 48_000.0) as Frame;
+    let time = |v: f64| Command::SetInputSendParam(InputSendParam::EchoTime, v);
+    let changes = [(s(0.10), time(1.0)), (s(0.15), Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.4)), (s(2.05), time(0.0))];
+    let (clean, _) = echo_run(false, 0.0, 0.0, &changes, s(3.0));
+    let (hit, marks) = echo_run(true, 0.0, 0.0, &changes, s(3.0));
+    let diff: Vec<f32> = clean.iter().zip(&hit).map(|(a, b)| (a - b).abs()).collect();
+    let first = diff.iter().fold(0.0f32, |m, &x| m.max(x));
+    assert!(first > 0.01, "the first repeat differs ({first})");
+    let replay = s(2.25) as usize;
+    assert!(diff[replay..replay + 256].iter().any(|&x| x > first * 0.001), "the repeat written at 1.75 s plays again at 2.25 s");
+    let missed: Vec<usize> = (128..diff.len()).filter(|&k| diff[k] > first * 0.001 && marks[k] == 0).collect();
+    assert!(missed.is_empty(), "{} affected frames unmarked, from {:?} (last {:?})", missed.len(), missed.first(), missed.last());
+    for (after, marked) in [(s(2.15), true), (s(4.5), false)] {
+        let setup = |r: &mut Rig| {
+            r.set(time(0.0));
+            echo_on(r, 0.0);
+        };
+        let mid = |r: &mut Rig| {
+            let d = r.frame - 128;
+            for &(at, change) in &changes {
+                r.send_at(d + at, change);
+            }
+        };
+        let (marks, first) = window_after(Opts::default(), 120.0, 4, setup, 0.25, |d| d, after, mid);
+        assert_eq!(marks.first() == Some(&first), marked, "a window {after} frames after the dropout: {marks:?}");
+    }
+}
+
+/// xorshift64*: the source of the random control sequences, the same on every run.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) % n
+    }
+}
+
+/// A control change in an echo sequence.
+#[derive(Clone, Copy, Debug)]
+enum Turn {
+    Time(f64),
+    Feedback(f64),
+    Tempo(u32),
+    On(bool),
+}
+
+const ECHO_SR: u32 = 48_000;
+const ECHO_FRAMES: usize = 6 * ECHO_SR as usize;
+
+/// ECHO alone (level 1, 120 BPM, on from frame 0 at division and feedback `start`), rendered clean
+/// and with input block `lost` silent and `LOST`, side by side, each of `turns` applied on its frame and
+/// the blocks cut at `blocks`' sizes in turn. The input is a 220 Hz tone under a hash of the frame, or
+/// with `burst` that only inside `lost`, so the damaged run's line stays silent and its echo idles
+/// whenever the send is off. Returns the frames where the outputs differ by more than −60 dB of the
+/// lost block's peak (the first repeat at no feedback) and those of them the damaged run left unmarked.
+fn echo_sides(burst: bool, lost: std::ops::Range<usize>, start: (f64, f64), turns: &[(usize, Turn)], blocks: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    let ir = [0.0f32; 256]; // the reverb stays off
+    let tone = |f: usize| 0.3 * (TAU * 220.0 * f as f64 / ECHO_SR as f64).sin() as f32 + 0.1 * ((f * 7919 % 1000) as f32 / 1000.0 - 0.5);
+    let clean: Vec<f32> = (0..ECHO_FRAMES).map(|f| if burst && !lost.contains(&f) { 0.0 } else { tone(f) }).collect();
+    let render = |hit: bool| -> (Vec<f32>, Vec<u8>) {
+        let mut fx = InputFx::new(ECHO_SR, [&ir[..], &ir[..]]);
+        fx.follow_tempo(120, Meter::FOUR_FOUR, 0);
+        fx.set_param(InputSendParam::EchoLevel, 1.0, 0);
+        fx.set_param(InputSendParam::EchoTime, start.0, 0);
+        fx.set_param(InputSendParam::EchoFeedback, start.1, 0);
+        fx.set_on(InputSend::Echo, true, 0);
+        let mut x = clean.clone();
+        let mut marks = vec![0u8; ECHO_FRAMES];
+        if hit {
+            x[lost.clone()].fill(0.0);
+            marks[lost.clone()].fill(damage::LOST);
+        }
+        let mut out = vec![0.0f32; ECHO_FRAMES];
+        let (mut f, mut next, mut b) = (0, 0, 0);
+        while f < ECHO_FRAMES {
+            while next < turns.len() && turns[next].0 == f {
+                let at = f as Frame;
+                match turns[next].1 {
+                    Turn::Time(v) => fx.set_param(InputSendParam::EchoTime, v, at),
+                    Turn::Feedback(v) => fx.set_param(InputSendParam::EchoFeedback, v, at),
+                    Turn::Tempo(bpm) => fx.follow_tempo(bpm, Meter::FOUR_FOUR, at),
+                    Turn::On(on) => fx.set_on(InputSend::Echo, on, at),
+                }
+                next += 1;
+            }
+            let end = turns.get(next).map_or(ECHO_FRAMES, |t| t.0).min(f + blocks[b % blocks.len()]);
+            fx.render(f as Frame, &x[f..end], &mut out[f..end], &mut marks[f..end]);
+            (f, b) = (end, b + 1);
+        }
+        (out, marks)
+    };
+    let (dry, _) = render(false);
+    let (wet, marks) = render(true);
+    let bar = 0.001 * clean[lost].iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+    let above: Vec<usize> = (0..ECHO_FRAMES).filter(|&k| (dry[k] - wet[k]).abs() > bar).collect();
+    let missed = above.iter().copied().filter(|&k| marks[k] == 0).collect();
+    (above, missed)
+}
+
+#[test]
+fn every_echo_replay_above_minus_60_db_is_marked_under_random_controls() {
+    // A random control sequence per seed: the division and the tempo up and down, the feedback (0 to
+    // 0.95), the send on and off, every 50 ms to half a second, from a random division and feedback;
+    // every other seed a burst (`echo_sides`). Wherever the clean and the damaged run differ by more
+    // than −60 dB, the damaged run is marked: no sequence replays a dropout unmarked.
+    const SEEDS: u64 = 1000;
+    const SR: usize = ECHO_SR as usize;
+    let (mut late, mut changed, mut idle) = (0, 0, 0);
+    for seed in 0..SEEDS {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ (seed + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+        let lost = 4800 + rng.below(2 * SR as u64) as usize;
+        let lost = lost..lost + 64 + rng.below(449) as usize;
+        let start = (rng.below(4) as f64, rng.below(96) as f64 / 100.0);
+        let mut turns = Vec::new();
+        let mut at = 0;
+        loop {
+            at += 2400 + rng.below(SR as u64 / 2) as usize;
+            if at >= ECHO_FRAMES - SR {
+                break;
+            }
+            turns.push((at, match rng.below(8) {
+                0..=2 => Turn::Time(rng.below(4) as f64),
+                3 => Turn::Tempo(40 + rng.below(261) as u32),
+                4 | 5 => Turn::Feedback(if rng.below(3) == 0 { 0.0 } else { rng.below(96) as f64 / 100.0 }),
+                _ => Turn::On(rng.below(4) != 0),
+            }));
+        }
+        let blocks: Vec<usize> = (0..64).map(|_| 1 + rng.below(1024) as usize).collect();
+        let burst = seed % 2 == 1;
+        let (above, missed) = echo_sides(burst, lost.clone(), start, &turns, &blocks);
+        assert!(missed.is_empty(), "seed {seed}: {} frames above −60 dB unmarked, from {:?} (last {:?}); lost {lost:?}, burst {burst}, starting at {start:?}, turns {turns:?}", missed.len(), missed.first(), missed.last());
+        let after = |k: usize| turns.iter().any(|&(at, t)| at > lost.end && at < k && matches!(t, Turn::Time(_) | Turn::Tempo(_)));
+        // The send off at `k` (by the last on or off before it, past its ramp): a burst's damaged run idles.
+        let off = |k: usize| turns.iter().rev().find(|&&(at, t)| at + 1200 < k && matches!(t, Turn::On(_))).is_some_and(|&(_, t)| matches!(t, Turn::On(false)));
+        late += above.last().is_some_and(|&k| k > lost.end + 2 * SR) as u32;
+        changed += above.iter().any(|&k| after(k)) as u32;
+        idle += (burst && above.iter().any(|&k| off(k))) as u32;
+    }
+    // Not vacuous: many sequences replay the dropout past 2 s, after the delay has changed, and while a
+    // burst's damaged run idles.
+    assert!(late > SEEDS as u32 / 5 && changed > SEEDS as u32 / 2 && idle > SEEDS as u32 / 20, "replays past 2 s in {late} seeds, after a delay change in {changed}, idle in {idle}");
+}
+
+#[test]
+fn an_echo_idling_on_a_line_the_dropout_emptied_follows_the_controls_the_clean_line_repeats_under() {
+    // A burst lost whole (`echo_sides`): the damaged run's line never sounds, so once the send is off
+    // its echo idles and computes no control values, while the clean run repeats the burst. A feedback
+    // or a delay turned up meanwhile still sets how long that runs: every repeat above −60 dB is marked.
+    let lost = 4800..5056;
+    let cases = [
+        ("feedback up while idle", (1.0, 0.0), [(6000, Turn::On(false)), (9600, Turn::Feedback(0.9))]),
+        ("delay up while idle", (3.0, 0.5), [(6000, Turn::On(false)), (9600, Turn::Time(0.0))]),
+    ];
+    for (name, start, turns) in cases {
+        let (above, missed) = echo_sides(true, lost.clone(), start, &turns, &[480]);
+        assert!(above.last().is_some_and(|&k| k > 48_000), "{name}: the clean run repeats the burst past 1 s");
+        assert!(missed.is_empty(), "{name}: {} frames above −60 dB unmarked, from {:?} (last {:?})", missed.len(), missed.first(), missed.last());
+    }
 }
 
 #[test]

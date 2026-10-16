@@ -195,6 +195,13 @@ impl DelayNode {
         self.delay_time.native.calculate_sample_accurate_values(q, &mut self.times, delay_time_input);
     }
 
+    /// The longest delay time of the quantum begun, in seconds, as [`Delay`] reads it (NaN as the
+    /// maximum).
+    pub fn longest_time(&self) -> f32 {
+        let max = self.delay.max_delay_time();
+        self.times.iter().fold(0.0, |a, &t| a.max(if t.is_nan() { max } else { t }))
+    }
+
     /// Frame `k` of the quantum begun: `input` in, the delayed frame out (see [`Delay::process_frame`]).
     pub fn process_frame(&mut self, k: usize, input: f32) -> f32 {
         self.delay.process_frame(k, input, self.times[k])

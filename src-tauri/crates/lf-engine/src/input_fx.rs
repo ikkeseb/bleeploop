@@ -72,13 +72,19 @@
 //! - REVERB: the impulse response's length after the last damaged frame, exact (a convolution's
 //!   support is finite and the convolver has no latency).
 //! - ECHO: `K` repeats of its delay `D` after it, `K` the repeats down to −60 dB of the first
-//!   (`⌊ln 0.001 / ln fb⌋ + 1`: 1 at no feedback, 8 at the default 0.4, 135 at 0.95). Each quantum takes
-//!   the larger of each control's target and its value there, and `until` never moves back: a feedback
-//!   or a delay turned down leaves the repeats already in the line marked until the bound they started
-//!   under, and one turned up extends it. Run out, the countdown still watches the line while it holds
-//!   what the dropout left in it (its length past `until`): a delay longer than any it was read at reads
-//!   back to it, and the countdown starts again from where it ended. The gaps between repeats are
-//!   marked too (a false mark), never a repeat above −60 dB.
+//!   (`⌊ln 0.001 / ln fb⌋ + 1`: 1 at no feedback, 8 at the default 0.4, 135 at 0.95), `fb` and `D` the
+//!   largest feedback and delay since the countdown began. A repeat is a read `D` back and a write
+//!   scaled by the feedback, so after `j` writes the dropout is at most `fb^j` of what entered, and it
+//!   needs at least `(p − last) / D` writes to reach line position `p`: the positions that can still
+//!   hold it at −60 dB or above end at `held`, `(K − 1)·D` past the last damaged frame `last`, and
+//!   `until` is `D` later, the last frame a read can reach one of them. Both only grow, whatever the
+//!   controls do: a feedback or a delay turned down leaves the repeats already in the line marked until
+//!   the bound they started under, and one turned up extends it. Run out, the countdown still watches
+//!   the line while it holds a position before `held` (its length past `held`): a read that reaches
+//!   back to one plays the dropout again, so the countdown starts again there. The gaps between repeats
+//!   are marked too (a false mark), and so are repeats a delay turned down shortened; never a repeat
+//!   above −60 dB. While the echo idles it computes no control values, so the countdown takes, for those
+//!   quanta, the last ones it computed and every target set since: a value ramps between them.
 //! - RING MOD has no memory: its output's damage is its input's, on the same frame.
 //!
 //! A jump in the device frame pauses the sends' clock, so what either still holds comes out displaced:
@@ -144,13 +150,20 @@ struct Echo {
     span: usize,
     /// The quantum being rendered renders nothing.
     idle: bool,
-    /// The damage lane (module doc): the last DSP frame a dropout entered (or a jump displaced the line;
-    /// none once the line has overwritten it), the frame its `TAIL` runs to, the quantum's `K·D + 1`,
-    /// and the longest `D` read since that countdown began.
+    /// The damage lane (module doc): the last DSP frame a dropout entered (or a jump displaced the line,
+    /// or a read reached back to it; none once the line has overwritten it), the line positions before
+    /// `held` that may still hold it at −60 dB or above, the frame its `TAIL` runs to, and the largest
+    /// feedback, its `K` and the largest `D` since that countdown began.
     last: Option<u64>,
+    held: u64,
     until: u64,
-    reach: u64,
-    seen: u64,
+    fb_max: f32,
+    repeats: u64,
+    d_max: u64,
+    /// The largest feedback and delay (seconds) the quantum being rendered uses: its own values, or
+    /// while idle the last ones computed, raised by every target set since.
+    fb_now: f32,
+    delay_now: f64,
 }
 
 impl Echo {
@@ -178,42 +191,44 @@ impl Echo {
             span,
             idle: true,
             last: None,
+            held: 0,
             until: 0,
-            reach: 1,
-            seen: 0,
+            fb_max: 0.0,
+            repeats: 1,
+            d_max: 0,
+            fb_now: feedback as f32,
+            delay_now: START_BEAT_PERIOD * division_beats(time),
         }
     }
 
-    /// `D` in frames (module doc): the larger of the delay's target and its value in the quantum begun,
-    /// rounded up a quantum more.
+    /// The longest the quantum being rendered reads back, in frames: two more than its longest delay,
+    /// for the read position's float rounding and its second tap.
     fn delay_frames(&self) -> u64 {
-        let seconds = self.delay_seconds().max(self.delay.delay_time.native.intrinsic_value() as f64);
-        (seconds * self.sample_rate as f64).ceil() as u64 + QUANTUM as u64
+        (self.delay_now * self.sample_rate as f64).ceil() as u64 + 2
     }
 
-    /// `K·D + 1` (module doc) from the larger of each control's target and its value in the quantum
-    /// begun.
-    fn reach(&self) -> u64 {
-        let fb = self.feedbacks.iter().fold(self.feedback as f32, |a, &b| a.max(b)) as f64;
-        let repeats = if fb <= 0.0 {
-            1
-        } else if fb >= 1.0 {
-            return u64::MAX;
-        } else {
-            (0.001f64.ln() / fb.ln()).floor() as u64 + 1
-        };
-        repeats.saturating_mul(self.delay_frames()).saturating_add(1)
+    /// The countdown from `last` under the largest controls since it began, the quantum begun's
+    /// included (module doc).
+    fn extend(&mut self, last: u64) {
+        if self.fb_now > self.fb_max {
+            self.fb_max = self.fb_now;
+            let fb = self.fb_max as f64;
+            self.repeats = if fb >= 1.0 { u64::MAX } else { (0.001f64.ln() / fb.ln()).floor() as u64 + 1 };
+        }
+        self.d_max = self.d_max.max(self.delay_frames());
+        self.held = self.held.max(last.saturating_add((self.repeats - 1).saturating_mul(self.d_max)).saturating_add(1));
+        self.until = self.until.max(self.held.saturating_add(self.d_max));
     }
 
-    /// A dropout entered the line at DSP frame `f`, or a jump displaced what the line holds there: its
-    /// `TAIL` runs `K·D + 1` past it, from the controls now unless a countdown runs.
+    /// A dropout entered the line at DSP frame `f`, a jump displaced what the line holds there, or a read
+    /// there reaches back to what a dropout left in it: its countdown runs from `f`, under the controls
+    /// from now on unless a countdown runs.
     fn enter(&mut self, f: u64) {
         if self.until <= f {
-            self.reach = self.reach();
-            self.seen = self.delay_frames();
+            (self.fb_max, self.repeats, self.d_max) = (0.0, 1, 0);
         }
         self.last = Some(f);
-        self.until = self.until.max(f.saturating_add(self.reach));
+        self.extend(f);
     }
 
     fn set_on(&mut self, on: bool, ctl: Ctl) {
@@ -230,10 +245,12 @@ impl Echo {
             InputSendParam::EchoTime => {
                 self.time = clamp_index(value, DIVISIONS.len());
                 self.delay.delay_time.ramp_to(self.delay_seconds(), RAMP, ctl.now, ctl.frame);
+                self.delay_now = self.delay_now.max(self.delay_seconds());
             }
             InputSendParam::EchoFeedback => {
                 self.feedback = value.clamp(0.0, MAX_FEEDBACK);
                 self.feedback_gain.ramp_to(self.feedback, RAMP, ctl.now, ctl.frame);
+                self.fb_now = self.fb_now.max(self.feedback as f32);
             }
             _ => {
                 self.level = value.clamp(0.0, 1.0);
@@ -248,6 +265,7 @@ impl Echo {
         let now = ctl.context_time(self.sample_rate);
         self.delay.delay_time.cancel_scheduled_values(now, ctl.frame);
         self.delay.delay_time.set_value_at_time(self.delay_seconds(), now, ctl.frame);
+        self.delay_now = self.delay_now.max(self.delay_seconds());
     }
 
     fn begin_quantum(&mut self, q: u64) {
@@ -261,21 +279,21 @@ impl Echo {
                 *level *= (1.0 - fb * fb).sqrt();
             }
             self.delay.begin_quantum(q, None);
-            if let Some(last) = self.last {
-                if self.until > q {
-                    // A countdown runs: the controls of this quantum may extend it, never shorten it.
-                    self.reach = self.reach();
-                    self.until = self.until.max(last.saturating_add(self.reach));
-                    self.seen = self.seen.max(self.delay_frames());
-                } else if q >= self.until.saturating_add(self.span as u64) {
-                    // The line has overwritten all the dropout left in it.
-                    self.last = None;
-                } else if self.delay_frames() > self.seen {
-                    // Run out, while the line still holds what the dropout left in it up to `until`: a
-                    // delay longer than any it was read at reads back to it, so it plays as if it
-                    // entered there.
-                    self.enter(self.until);
-                }
+            self.fb_now = self.feedbacks.iter().fold(0.0, |a, &b| a.max(b));
+            self.delay_now = self.delay.longest_time() as f64;
+        }
+        // Idle or not: the line the clean run would hold still repeats what the dropout left in it.
+        if let Some(last) = self.last {
+            if self.until > q {
+                // A countdown runs: the controls of this quantum may extend it, never shorten it.
+                self.extend(last);
+            } else if q >= self.held.saturating_add(self.span as u64) {
+                // The line has overwritten every position that held the dropout.
+                self.last = None;
+            } else if q.saturating_sub(self.delay_frames()) < self.held {
+                // Run out, while the line still holds positions before `held`: a read of this quantum
+                // can reach back to one, and what it plays is written again.
+                self.enter(q);
             }
         }
     }
