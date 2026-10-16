@@ -16,8 +16,8 @@ it, and an oddity seen there is the new driver's until shown otherwise.
 
 **What the EVO 4 changes for the rig,** read from its manual (User Manual 5.0) and confirmed on the PC:
 the guitar goes in the front instrument jack, which is channel 1 and overrides the rear Mic/Line 1; the
-mic is on channel 2, which the loopback cable the rig protocol needs also wants, so the two now compete
-for one input; a slot's Auto input reads In 2 on a device with two or more inputs
+mic is on channel 2, so the loopback cable goes from rear output L into the front instrument jack, the
+guitar's cable doing it, and the mic stays (`docs/VERIFY.md` § The owner's loopback run); a slot's Auto input reads In 2 on a device with two or more inputs
 (`input_channel` in `src-tauri/src/engine_io/transition.rs`), so the guitar on channel 1 needs In 1
 picked in the slot. Monitors sit on the rear L/R and headphones on the front jack, and SmartMuting mutes the
 monitor outputs whenever a headphone jack is in, by design and with no setting to turn it off. Its own
@@ -34,13 +34,14 @@ and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where th
 probe passed on the engine-only app between 2026-09-29 and 10-05 (`native:engine`'s counter check
 forgives the join's trims and starves in a WASAPI open's first 3 s: D25); `native:engine-loopback
 --rate=48000` last passed 21/21 at 64, 128 and 256 on 2026-10-03. `release:smoke` last passed 7/7 on
-2026-10-07 on v0.8.2's runner build, its input take through the loopback cable into In 2. Driver latency
+2026-10-16 on the runner build of 8a18e5ad (v0.8.5) on the EVO 4 at ASIO 128, its input take through
+the cable from output L into In 1. Driver latency
 reports are not guitar latency; after a relevant change, rerun only the affected check.
-**The untested input path:** the owner keeps the EVO 4's input 2 for a mic and runs no loopback cable
-(2026-10-14), so `release:smoke`'s input take and `native:engine-loopback` cannot run on this rig. The
-device side (`src-tauri/src/engine_io`, `src-tauri/src/host`) has changed since v0.8.4 with no input take
-through a real driver since: a defect there shows first in a jam or a tester's report. A check that
-needs the device free may run while the owner is away from the PC.
+**The input path on the EVO 4:** `release:smoke`'s input take passed through the cable on 2026-10-16,
+so the Audient driver's input reaches a loop. Where a take lands against the click is
+`native:engine-loopback`'s, never run on the EVO 4 (its default input is 2: `--channel=0` for the
+owner's cabling), and no Scarlett baseline answers it. A check that needs the device free may run while
+the owner is away from the PC; one that needs the cable needs the owner to cable it.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
