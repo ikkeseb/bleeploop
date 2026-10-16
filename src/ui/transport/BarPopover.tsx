@@ -19,8 +19,18 @@ export interface BarPopover {
   trigger: (el: HTMLButtonElement) => void;
 }
 
+/** The one bar popover that is open, if any. The panels share one anchor (`bar-popover.css`), so two open
+ * at once would stack at one spot and leave one outside click closing only one: opening a popover closes
+ * the other, which unmounts its backdrop and releases its Escape handler. */
+const [owner, setOwner] = createSignal<symbol | null>(null);
+
 export function createBarPopover(returnFocus?: (el: HTMLElement | undefined) => void): BarPopover {
-  const [open, setOpen] = createSignal(false);
+  const me = Symbol('bar-popover');
+  const open = (): boolean => owner() === me;
+  const setOpen = (v: boolean): void => {
+    if (v) setOwner(me);
+    else if (owner() === me) setOwner(null);
+  };
   let trigger: HTMLButtonElement | undefined;
   // The stage view covers the command bar but not this portal: left open, its controls stay focusable
   // behind the stage and take the transport keys. Opening the stage closes it, as it does Settings and
@@ -30,7 +40,7 @@ export function createBarPopover(returnFocus?: (el: HTMLElement | undefined) => 
   });
   return {
     open,
-    toggle: () => setOpen((v) => !v),
+    toggle: () => setOpen(!open()),
     close: (keyboard) => {
       setOpen(false);
       if (keyboard) returnFocus?.(trigger);

@@ -136,6 +136,20 @@ await probe(async ({ open }) => {
   await page.keyboard.press('Escape');
   await page.getByRole('dialog', { name: 'Auto record sensitivity' }).waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Auto record sensitivity', 'Escape hands focus back to the read-out');
+  // One bar popover at a time: opening SENS by keyboard while CLICK's is open closes CLICK's (they share
+  // one anchor, so both open stacked at one spot and one outside click closed only one).
+  await page.getByRole('button', { name: 'Metronome click' }).click();
+  await page.waitForFunction(() => document.querySelector('button[aria-label="Click volume"]')?.disabled === false);
+  await page.getByRole('button', { name: 'Click volume', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('dialog', { name: 'Click volume' }).waitFor();
+  await sens.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('dialog', { name: 'Auto record sensitivity' }).waitFor();
+  assert.equal(await page.getByRole('dialog').count(), 1, 'opening SENS closes the CLICK popover: exactly one bar popover is mounted');
+  await page.mouse.click(5, 300);
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Metronome click' }).click();
   await emit({ events: [laneEvent(0, lane('Empty'))] });
   await clearSent();
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();
