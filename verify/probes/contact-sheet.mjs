@@ -1,13 +1,15 @@
 /** Screenshot contact sheet: fixed looper scenes at three viewports (1280x820, 1920x1080, 1000x700),
  * keyboard bottom and hidden, in engine mode on the web engine fake (`src/platform/host.web.ts`, the
  * `engine-seam` pattern: `window.__lfEngineFake` set before the app loads, every lane, the clock and the
- * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11 and 12 run in one fresh browser
+ * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11, 12 and 14 run in one fresh browser
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
  * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help (Help's
  * reference, as `?` opens it), 6-help-manual (its Manual tab, About included),
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
- * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
+ * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 14-modes-on (a reset frame
+ * with CLICK, FIXED 4, RETAKE, AUTO REC and END STOP on, then the five lanes of scene 5, drawer closed: the
+ * command bar's rows with every mode on) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
@@ -15,7 +17,11 @@
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
  * stopping live input; 9b-live-take-hot (shot after 10) = live again, a first take one second in, slot
  * A's input clipped a moment ago and now near -3 dBFS (scene 9 plays it at about -12 dBFS): the card's
- * meter, CLIP and the lane's "A LIVE" (asserted by `live-meter`). Writes
+ * meter, CLIP and the lane's "A LIVE" (asserted by `live-meter`). 13-jam (shot last, live still on) is a
+ * mid-jam picture over a two-bar loop: lane 1 PLAYING, lane 2 PLAYING over an overdub layer (UNDO, REV,
+ * TRIM; COPY and WIDE hide while no lane is free) with FILTER and DELAY engaged and the drawer closed,
+ * lane 3 OVERDUB in flight (selected, "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about
+ * -12 dBFS. Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
@@ -34,7 +40,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx'];
+  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -269,6 +275,18 @@ await probe(async ({ browser, open }) => {
       await page.keyboard.press('Escape');
       await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
 
+      // A reload's reset frame from an engine that remembers every record mode on (FIXED at 4 bars), then
+      // the five stopped lanes of scene 5 with the drawer closed. RETAKE over a loop greys FIXED out.
+      scene = '14-modes-on';
+      await reset([{ SetMetronome: true }, { SetFixedLength: true }, { SetFixedBars: 4 }, { SetRetake: true }, { SetAutoRecord: true }, { SetLoopEndStop: true }]);
+      await emit(loopFrame({ count: 5, playing: [] }));
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      const modes = await page.evaluate(() => ['Metronome click', 'Fixed take length', 'Retake', 'Auto record', 'Stop playing loops at loop end']
+        .filter((name) => document.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') !== 'true'));
+      console.log(JSON.stringify({ tag, scene, off: modes }));
+      if (modes.length) fail(`${tag} ${scene}: not shown ON: ${modes.join(', ')}`);
+
       // A reload's reset frame from an engine that remembers every input send on.
       scene = '11-engine-in-fx';
       await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }]);
@@ -333,6 +351,52 @@ await probe(async ({ browser, open }) => {
       await emit({ meter: { peak: [0.7, 0], clip: [false, false] } });
       await page.waitForTimeout(300);
       await shoot(scene);
+
+      // Mid-jam over a two-bar loop at 120 BPM, a second into it, the guitar live through slot A.
+      scene = '13-jam';
+      {
+        const master = 4 * RATE;
+        const bins = Math.ceil(master / PEAK_FRAMES);
+        const loop = { length: master, canReverse: true };
+        await emit({
+          events: [transport(master, true, 120),
+            laneEvent(0, lane('Playing', loop)),
+            laneEvent(1, lane('Playing', { ...loop, canUndo: true })),
+            laneEvent(2, lane('Overdubbing', loop)),
+            laneEvent(3, lane('Playing', loop)),
+            laneEvent(4, lane('Playing', { ...loop, fading: true, stopAt: 3 * master })),
+            { Selected: { frame: 0, lane: 2 } }],
+          anchor: anchorAt(RATE),
+          peaks: [0, 1, 2, 3, 4].map((i) => wave(i, bins)),
+          meter: { peak: [0.25, 0], clip: [false, false] },
+        });
+        // FILTER and DELAY engaged on lane 2 (the drawer's bypass keys' setter; the fake reports the Mix).
+        await page.evaluate(async () => {
+          const { looper } = await import('/src/ui/state/audio.ts');
+          looper.setFxBypass(1, 0, false);
+          looper.setFxBypass(1, 3, false);
+        });
+        await page.evaluate(() => window.__lf.looper.setMute(3, true));
+        await page.waitForTimeout(400);
+        await shoot(scene);
+        const jam = await page.evaluate(async () => {
+          const { looper } = await import('/src/ui/state/audio.ts');
+          const lanes = [...document.querySelectorAll('.lp-lane')];
+          const pills = (n) => ['undo', 'rev', 'copy', 'wide', 'trim'].filter((k) => lanes[n]?.querySelector(`.lp-pb--${k}`));
+          return {
+            words: lanes.map((l) => l.querySelector('.lp-lane__state')?.textContent),
+            lane2Pills: pills(1),
+            lane2Fx: [0, 1, 2, 3, 4].filter((k) => !looper.fxBypassShown(1, k)),
+            drawerOpen: !!document.querySelector('[role="group"][aria-label^="FX, Track"]'),
+          };
+        });
+        console.log(JSON.stringify({ tag, scene, ...jam }));
+        const words = ['PLAYING', 'PLAYING', 'OVERDUB', 'MUTED', 'FADING'];
+        if (jam.words.join() !== words.join()) fail(`${tag} ${scene}: lanes read ${jam.words.join(', ')}, not ${words.join(', ')}`);
+        if (jam.lane2Pills.join() !== 'undo,rev,trim') fail(`${tag} ${scene}: lane 2 shows ${jam.lane2Pills.join(', ') || 'no pills'}, not undo, rev, trim`);
+        if (jam.lane2Fx.join() !== '0,3') fail(`${tag} ${scene}: lane 2 has FX ${jam.lane2Fx.join(', ') || 'none'} engaged, not filter and delay`);
+        if (jam.drawerOpen) fail(`${tag} ${scene}: the FX drawer is open`);
+      }
 
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
       await context.close();
