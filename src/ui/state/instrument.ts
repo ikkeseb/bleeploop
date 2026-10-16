@@ -399,7 +399,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     await platform.pluginHost.unloadPlugin(slot);
   } catch (e) {
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
-    notifyError('Plugin unload failed', 'The plugin stays in the slot but is silent. Choose none or another plugin to retry.');
+    notifyError('Plugin unload failed', 'The plugin stays in the slot but is silent. Choose Off or another plugin to retry.');
     setSlotPlugins((prev) => withAt(prev, slot, outgoing));
     setEngineGain(slot, outgoingGain ?? savedPluginLevel(slot, outgoing));
     if (activeSlot() === slot) applyActiveRouting();

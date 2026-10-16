@@ -294,7 +294,7 @@ function Manual(props: { hidden: boolean }) {
           <li>Drag any divider to resize &middot; double-click it to reset</li>
           <li>Keyboard bar: move it above / below the looper, or hide it</li>
           <li>The keyboard icon among the command bar's tools shows a hidden keyboard again</li>
-          <li><span class="help__note">Stage view</span> (<kbd class="help__kbd">B</kbd>, the stage icon, or a learned pedal) fills the window with a visualizer of the loops: each track's light follows its own loop's waveform and volume (not its FX) and takes its state's colour, with the selected track, the bar, the beat and the count-in still readable from across the room. <kbd class="help__kbd">V</kbd> or its bottom-right button switches the look. The looper keys stay live; B, Esc or the ✕ button leaves it</li>
+          <li><span class="help__note">Stage view</span> (<kbd class="help__kbd">B</kbd>, the stage icon, or a learned pedal) fills the window with a visualizer of the loops, each track in its state's colour, with the selected track, the bar, the beat and the count-in still readable from across the room. The default look, SCOPE, draws each track's live signal after its FX, with the engine's whole output above them; ORBIT and STRATA draw each track's recorded loop and its volume. <kbd class="help__kbd">V</kbd> or its bottom-right button switches the look. The looper keys stay live; B, Esc or the ✕ button leaves it</li>
         </ul>
       </section>
 

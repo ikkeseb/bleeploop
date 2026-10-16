@@ -11,15 +11,23 @@
  * app layers, and this module is none. It imports ONLY `solid-js` — no ui/session/platform deps — so it
  * stays a leaf every layer can safely depend on. `<Toasts>` (in `src/ui/`) renders the signal.
  */
-import { createSignal } from 'solid-js';
+import { createSignal, type Setter } from 'solid-js';
 
 export interface Toast {
   id: number;
   kind: 'error' | 'info';
   message: string;
-  detail?: string;
-  /** Repeat count — a duplicate message increments this instead of stacking a second toast. */
+  /** Reactive, like `count`: the newest repeat's detail. */
+  readonly detail?: string;
+  /** Repeat count — a duplicate message increments this instead of stacking a second toast. Reactive
+   * (a getter over the toast's own signal): a repeat updates the toast in place, never replaces it,
+   * so `<For>` keeps its row and a focused Dismiss keeps keyboard focus. */
+  readonly count: number;
+}
+
+interface Repeat {
   count: number;
+  detail?: string;
 }
 
 /** How long a toast lingers before auto-dismiss (ms). A repeat resets its timer. */
@@ -40,6 +48,8 @@ const [toasts, setToasts] = createSignal<Toast[]>([]);
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 /** Per-toast birth timestamp (ms), for the HARD_MAX_MS lifetime ceiling. Cleaned with the timer. */
 const bornAt = new Map<number, number>();
+/** Per-toast setter behind its `count` and `detail` getters. Cleaned with the timer. */
+const repeats = new Map<number, Setter<Repeat>>();
 let nextId = 1;
 let autoDismissMs = AUTO_DISMISS_MS;
 
@@ -109,6 +119,13 @@ function clearTimer(id: number): void {
 function forget(id: number): void {
   clearTimer(id);
   bornAt.delete(id);
+  repeats.delete(id);
+}
+
+/** Whether keyboard focus sits inside toast `id` (the store also runs where there is no document). */
+function holdsFocus(id: number): boolean {
+  const toast = globalThis.document?.querySelector<HTMLElement>(`[data-toast-id="${id}"]`);
+  return toast?.contains(document.activeElement) ?? false;
 }
 
 /**
@@ -118,7 +135,8 @@ function forget(id: number): void {
  * DEDUPE: if a visible toast already carries the same `message`, its count is incremented, its detail
  * replaced with the newest, and its auto-dismiss timer RESET — so repeated arm failures (a spammy
  * retry loop) collapse into one "×N" toast instead of stacking four identical ones. Otherwise the
- * toast is pushed; past MAX_VISIBLE the oldest is dropped (its timer cleared).
+ * toast is pushed; past MAX_VISIBLE the oldest one keyboard focus is not in is dropped (its timer
+ * cleared).
  */
 export function notifyError(message: string, detail?: unknown): void {
   push('error', message, detail);
@@ -135,21 +153,32 @@ function push(kind: Toast['kind'], message: string, detail: unknown): void {
   const current = toasts();
   const existing = current.find((t) => t.message === message && t.kind === kind);
   if (existing) {
-    setToasts(
-      current.map((t) =>
-        t.id === existing.id ? { ...t, count: t.count + 1, detail: text } : t,
-      ),
-    );
+    repeats.get(existing.id)?.((r) => ({ count: r.count + 1, detail: text }));
     arm(existing.id); // reset the linger window on repeat
     return;
   }
-  const toast: Toast = { id: nextId++, kind, message, detail: text, count: 1 };
+  const [repeat, setRepeat] = createSignal<Repeat>({ count: 1, detail: text });
+  const toast: Toast = {
+    id: nextId++,
+    kind,
+    message,
+    get count() {
+      return repeat().count;
+    },
+    get detail() {
+      return repeat().detail;
+    },
+  };
   bornAt.set(toast.id, Date.now());
+  repeats.set(toast.id, setRepeat);
   let next = [...current, toast];
   while (next.length > MAX_VISIBLE) {
-    const dropped = next[0];
+    // The oldest goes, unless keyboard focus sits in it: the auto-dismiss defers for focus the same
+    // way, and removing the focused toast would drop focus on <body>, where Space is REC. The new
+    // toast is not rendered yet, so one is always free to go.
+    const dropped = next.find((t) => !holdsFocus(t.id)) ?? next[0];
     forget(dropped.id);
-    next = next.slice(1);
+    next = next.filter((t) => t !== dropped);
   }
   setToasts(next);
   arm(toast.id);
