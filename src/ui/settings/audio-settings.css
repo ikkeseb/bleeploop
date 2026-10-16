@@ -1,9 +1,8 @@
 /* Global Audio Settings popover — "Instrument". A floating near-opaque panel anchored top-right under
    the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
-   buffer-size + the ASIO toggle render as matte key faces; the rec-align trim is a sunk numeric well;
-   the read-only host/isolated/plugin/midi DIAGNOSTICS sit in a sunk
-   readout well at the foot. Chrome stays monochrome — engaged = the warm-white --engaged, --dub = a
-   deferred-change / warning note. */
+   buffer-size + the ASIO toggle render as matte key faces; the read-only host/isolated/plugin/midi
+   DIAGNOSTICS sit in a sunk readout well at the foot. Chrome stays monochrome — engaged = the
+   warm-white --engaged, --dub = a deferred-change / warning note. */
 .audio-settings {
   display: flex;
   flex-direction: column;
@@ -90,34 +89,6 @@
 .audio-settings__select option {
   background: var(--option);
   color: var(--text);
-}
-.audio-settings__select--channel {
-  flex: 0 0 auto;
-}
-
-/* rec-align trim input — a narrow sunk numeric well (same height as the selects). The by-ear
-   record-latency offset surface (an open eye-gate) — restyled, function verbatim. */
-.audio-settings__number {
-  flex: 0 0 auto;
-  width: 5.5em;
-  height: 30px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  color: var(--text);
-  background: var(--sunk);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
-  padding: 0 10px;
-  font: inherit;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  transition: border-color 0.15s;
-}
-.audio-settings__number:hover {
-  border-color: var(--line-2);
-}
-.audio-settings__number:focus-visible {
-  outline-offset: 1px;
 }
 
 .audio-settings__readout {

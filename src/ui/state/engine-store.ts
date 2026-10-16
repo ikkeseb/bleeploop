@@ -1775,15 +1775,25 @@ function forgetShare(): void {
   writeAudioDeviceSettings({ shareDeviceId: '' });
 }
 
+// Share picks reach the engine one at a time, in the order picked, so the last pick is the one that
+// runs; a failure clears the pick only while no newer one is waiting, or a slow pick's failure would
+// wipe the player's newer one.
+let shareTail: Promise<void> = Promise.resolve();
+let sharePicks = 0;
+
 /** Mirror the master to `id` ('' = off), and keep the pick for the next launch. */
 export function setEngineShare(id: string): Promise<void> {
+  const pick = ++sharePicks;
   setShareSignal(id);
   writeAudioDeviceSettings({ shareDeviceId: id });
-  return platform.engine.setShare(id || null).catch((err: unknown) => {
-    forgetShare();
-    console.error('[engine] share output failed', err);
-    notifyError("Couldn't start Share output", err);
-  });
+  shareTail = shareTail
+    .then(() => platform.engine.setShare(id || null))
+    .catch((err: unknown) => {
+      if (pick === sharePicks) forgetShare();
+      console.error('[engine] share output failed', err);
+      notifyError("Couldn't start Share output", err);
+    });
+  return shareTail;
 }
 
 /** Send the saved Share pick to the engine (boot, once a device runs). */

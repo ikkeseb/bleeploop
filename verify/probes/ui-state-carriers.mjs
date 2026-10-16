@@ -6,7 +6,8 @@
  *
  * - transport, meter, lamp, looper-announcement and toast state carriers: ■ ALL during a first take, the
  *   record meter's dBFS text ("near clipping" from its red, "clipping" at a clip), the lamp's role, "Track 2 take recorded" on the live region, a focused
- *   toast outliving its auto-dismiss; the lamp across a lost device (amber and "no device open" while
+ *   toast outliving its auto-dismiss and keeping keyboard focus through a repeat of itself and a burst
+ *   past the four-toast cap; the lamp across a lost device (amber and "no device open" while
  *   none runs, neutral and "running" once one runs again);
  * - the refusal carriers: a STOPPED lane core's title/label reason; the transport keys send the engine's
  *   action (the engine gates it now: lf-engine `tests/actions.rs`) and an engine refusal is announced on
@@ -155,6 +156,18 @@ await probe(async ({ open }) => {
   await toast.locator('.toast__close').focus();
   await page.waitForTimeout(2500);
   assert.equal(await toast.count(), 1, 'focused toast must outlive its auto-dismiss timer');
+  // A repeat updates the focused toast in place, and a burst past the cap evicts around it: keyboard
+  // focus stays on its Dismiss either way (on <body>, Space would be REC).
+  const kept = await page.evaluate(() => {
+    const close = document.activeElement;
+    window.__lf.notify.notifyError('Probe error', 'again');
+    const repeat = { focusKept: document.activeElement === close, count: close.closest('.toast')?.querySelector('.toast__count')?.textContent };
+    for (const n of [1, 2, 3, 4]) window.__lf.notify.notifyError(`Probe burst ${n}`);
+    return { ...repeat, visible: document.querySelectorAll('.toast').length, focusKeptPastCap: document.activeElement === close && close.isConnected };
+  });
+  console.log('toast focus', JSON.stringify(kept));
+  assert.deepEqual(kept, { focusKept: true, count: '×2', visible: 4, focusKeptPastCap: true },
+    'a repeat and a burst past the cap keep the focused toast and its focus, at four toasts');
   await page.evaluate(async () => {
     const { setAutoDismissMsForProbe } = await import('/src/notify.ts');
     for (const item of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(item.id);

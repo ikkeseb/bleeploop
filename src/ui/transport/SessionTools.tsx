@@ -25,6 +25,10 @@ export function SessionTools() {
   // before snapshotting the editable session; export.ts repeats this guard against races.
   const anyCommitted = createMemo(() => anyTrackIn('PLAYING', 'STOPPED', 'OVERDUBBING'));
   const [exporting, setExporting] = createSignal(false);
+  // Busy from the file read until the tones are restored: until the feed shows the loaded lanes the
+  // looper still reads empty, so without it a second pick could start a second import, whose refusal
+  // toasts "Import failed" over the first one's success.
+  const [importing, setImporting] = createSignal(false);
 
   // Async since v1 (the offline master render); render failures inside fall back to the dry mix — this
   // catch is the net for anything else (snapshot/zip/download), so a rejection never goes unhandled.
@@ -48,7 +52,11 @@ export function SessionTools() {
   const onImportPick = async (e: Event) => {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
-    if (!file) return;
+    if (!file || importing()) {
+      input.value = '';
+      return;
+    }
+    setImporting(true);
     try {
       const limit = maxImportArchiveBytes(sampleRate());
       if (file.size > limit) {
@@ -63,6 +71,7 @@ export function SessionTools() {
       notifyError('Import failed: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       input.value = '';
+      setImporting(false);
     }
   };
 
@@ -86,8 +95,10 @@ export function SessionTools() {
       <button
         type="button"
         class="tool tool--import"
-        disabled={hasMaster() || anyLive()}
+        classList={{ 'tool--on': importing() }}
+        disabled={hasMaster() || anyLive() || importing()}
         onClick={() => importInputRef?.click()}
+        aria-busy={importing()}
         aria-label="Import a session zip"
         title="Import a BleepLoop export zip (stems + session.json), only while the looper is empty"
       >

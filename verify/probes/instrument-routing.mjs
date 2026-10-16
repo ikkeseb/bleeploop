@@ -140,7 +140,7 @@ await probe(async ({ open }) => {
   assert.equal(result.afterInstrument.targets.at(-1), plugin(1), 'to the plugin');
   assert.deepEqual(result.failedSwap, {
     slot1: 'a', calls: ['unload:1'], routed: [off(1)], after: [plugin(1)],
-    toast: 'The plugin stays in the slot but is silent. Choose none or another plugin to retry.',
+    toast: 'The plugin stays in the slot but is silent. Choose Off or another plugin to retry.',
   }, 'a failed unload keeps the old plugin, makes no load call, raises the toast naming the way out, routes nowhere while it runs and back to the plugin after');
   assert.deepEqual(result.retrySwap, { slot1: 'b', calls: ['unload:1', 'load:1:b'], routed: [off(1)], after: [plugin(1)] },
     'the retry swap completes; neither swap selects a built-in');

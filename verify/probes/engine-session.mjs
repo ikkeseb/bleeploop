@@ -15,7 +15,7 @@
  *   loads it back into the engine and sends the loaded lanes' mix, DUB FEEDBACK and pan included;
  * - import: the exported zip goes to the engine as one session (header, PCM, orientation), and the store
  *   sends the loaded lanes' mix; the same zip with its session.json written before pan (no `pan`) loads
- *   every lane centred;
+ *   every lane centred; while that load is held, IMPORT reads busy and a second pick starts no load;
  * - Share output: the saved pick reaches the engine at boot, and ShareLost clears it with a toast.
  *
  * Cannot see the native engine, the Rust side of the bytes or Tauri's raw IPC: the fake records them.
@@ -196,8 +196,36 @@ await probe(async ({ browser, open }) => {
   const legacySession = structuredClone(session);
   for (const t of legacySession.tracks) delete t.pan;
   const legacyZip = makeZip(entries.map((e) => (e.name.endsWith('-session.json') ? { name: e.name, data: new TextEncoder().encode(JSON.stringify(legacySession)) } : e)));
-  await page.locator('input[type="file"]').setInputFiles({ name: 'legacy.zip', mimeType: 'application/zip', buffer: Buffer.from(legacyZip) });
-  await page.waitForFunction(() => window.__lf.native.loadedSessions.length === 3, undefined, { timeout: 10000 });
+  const legacyFile = { name: 'legacy.zip', mimeType: 'application/zip', buffer: Buffer.from(legacyZip) };
+  // IMPORT is busy while its load runs (held here at the engine), and a second pick then starts nothing.
+  await page.evaluate(() => {
+    const native = window.__lf.native;
+    const real = native.loadSession;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    window.__importHold = { calls: 0, release: () => { native.loadSession = real; release(); } };
+    native.loadSession = async (bytes) => {
+      window.__importHold.calls++;
+      await held;
+      return real.call(native, bytes);
+    };
+  });
+  await page.locator('input[type="file"]').setInputFiles(legacyFile);
+  await page.waitForFunction(() => window.__importHold.calls === 1, undefined, { timeout: 10000 });
+  const importTool = page.locator('.tool--import');
+  const busy = { ariaBusy: await importTool.getAttribute('aria-busy'), disabled: await importTool.isDisabled() };
+  await page.locator('input[type="file"]').setInputFiles(legacyFile);
+  await page.waitForTimeout(300);
+  const secondPick = await page.evaluate(() => window.__importHold.calls);
+  await page.evaluate(() => window.__importHold.release());
+  await page.waitForFunction(() => window.__lf.native.loadedSessions.length >= 3, undefined, { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector('.tool--import')?.getAttribute('aria-busy') !== 'true', undefined, { timeout: 5000 });
+  await page.waitForTimeout(300);
+  const afterImport = await page.evaluate(() => window.__lf.native.loadedSessions.length);
+  console.log('import busy', JSON.stringify({ ...busy, secondPick, afterImport }));
+  assert.deepEqual(busy, { ariaBusy: 'true', disabled: true }, 'IMPORT reads busy and is disabled while an import runs');
+  assert.equal(secondPick, 1, 'a second pick while an import runs starts no second load');
+  assert.equal(afterImport, 3, 'one pick, one load');
   const legacy = await page.evaluate(async () => {
     const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
     return splitSessionBytes(window.__lf.native.loadedSessions[2].slice().buffer).header;

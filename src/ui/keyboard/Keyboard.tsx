@@ -116,7 +116,11 @@ export function Keyboard(props: KeyboardProps = {}) {
     const rel = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
     return Math.round(72 + rel * 55); // top of key = softer, bottom = harder
   }
+  // Only the main button plays: a right or middle click is not a press, and with a lane recording it
+  // would land in the take. `button`, not `isPrimary`: every finger of a touch chord reports button 0,
+  // but only the first is primary.
   function onPointerDown(e: PointerEvent, note: number) {
+    if (e.button !== 0) return;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false };
@@ -125,6 +129,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   }
   // Drum pads fire at a fixed velocity (they're one-shots, not a velocity-sensitive key surface).
   function onPadPointerDown(e: PointerEvent, note: number) {
+    if (e.button !== 0) return;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false };
@@ -161,7 +166,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     // with the pane hidden (this component stays mounted underneath, so its window listener would
     // otherwise still fire). Drum mode's 1–4 then select lanes (src/app/transport-keys.ts).
     if (stageOpen()) return;
-    // Yield to text entry only: typing in a settings field (device <select>, the rec-align number box)
+    // Yield to text entry only: typing in a settings field (a device <select>, the BPM number box)
     // must not play — and with a track armed, record — notes. Unlike the transport yield in
     // src/app/transport-keys.ts this
     // does NOT include BUTTON or tabindex widgets: a focused cap never competes for a–l/w–p/z/x.
