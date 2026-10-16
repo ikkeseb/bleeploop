@@ -7,7 +7,8 @@
  * host is handed the plugin session.json names with each tone (it refuses a tone of another plugin). A
  * reload is skipped when the player picked another plugin for the slot while the import was in flight, or
  * the same plugin again (another instance), and its parked tone is handed back; the reload's load passes
- * the reload token the import answered. GO LIVE comes back after the reload, and the other slot going
+ * the reload token the import answered. An export whose take of a slot's tone straddles a swap of that
+ * slot leaves the tone out (it may be the new plugin's) and says so. GO LIVE comes back after the reload, and the other slot going
  * live meanwhile (its unload included) stays live beside it: both slots may be live. An archive whose tone
  * entry is past the tone limit is refused before anything is handed to the host. The plugin host is a
  * stand-in that records its calls and treats a tone as opaque bytes, as the frontend does. Cannot see
@@ -21,7 +22,7 @@ const RATE = 48000;
 const MASTER = 2 * RATE; // one bar at 120 BPM
 
 await probe(async ({ open }) => {
-  const { page } = await open({
+  const { page, consumeConsoleErrors } = await open({
     init: async (p) => {
       // The stand-in native host must be available at boot, as the Tauri one is.
       await p.route('**/src/platform/host.web.ts', async (route) => {
@@ -182,6 +183,7 @@ await probe(async ({ open }) => {
       };
       loadTokens.length = 0;
       const first = await reimport();
+      await pause(50); // the live flags reach the UI on the feed, after the batch that sent them
       const afterFirst = {
         ...first,
         tokens: { answered: answered.splice(0), passed: loadTokens.splice(0) },
@@ -242,6 +244,7 @@ await probe(async ({ open }) => {
       loadGate.open();
       await reloading;
       loadGate = null;
+      await pause(50);
       const liveChoice = { calls: calls.slice(), liveMidReload, live: nativeIo.inputArmed().slice() };
 
       // ── The player makes slot B live while slot A's reload unloads: both are live after it ──────────
@@ -257,6 +260,7 @@ await probe(async ({ open }) => {
       unloadGate.open();
       await unloading;
       unloadGate = null;
+      await pause(50);
       const liveDuringUnload = { calls: calls.slice(), liveMidUnload, live: nativeIo.inputArmed().slice() };
 
       // ── The player switches slot A to the synth and back to the amp while the import is in flight ───
@@ -280,6 +284,39 @@ await probe(async ({ open }) => {
         token: answered[0] ?? null,
         slots: instrument.slotPlugins().map((d) => d?.id ?? null),
       };
+
+      // ── The player swaps slot A while the export takes its tone ─────────────────────────────────────
+      // The take answers after the swap, with the new plugin's state: the export must not name the amp
+      // for those bytes, so slot A's tone is left out and the player is told; slot B's goes on.
+      feed('Playing');
+      await pause(50);
+      let takeGate = { slot: 0, asked: false, ...gate() };
+      const take = host.takeTone;
+      host.takeTone = async (slot) => {
+        if (takeGate?.slot === slot) {
+          takeGate.asked = true;
+          await takeGate.closed;
+        }
+        return take(slot);
+      };
+      const toastsBeforeSwap = new Set(toasts().map((t) => t.message));
+      calls.length = 0;
+      const exporting = buildExportBundle(session);
+      await until('the take of slot A', () => takeGate.asked);
+      await instrument.selectPlugin(0, synth);
+      takeGate.open();
+      const swapped = parseZip((await exporting).zipBytes);
+      takeGate = null;
+      host.takeTone = take;
+      const swapText = (name) => new TextDecoder().decode(swapped.find((e) => e.name.endsWith(name))?.data ?? new Uint8Array());
+      const swapDuringExport = {
+        calls: calls.slice(),
+        files: swapped.map((e) => e.name),
+        plugins: JSON.parse(swapText('-session.json')).plugins?.map((p) => [p.slot, p.id]) ?? [],
+        toneB: swapText('-tone-slot-b.bin'),
+        newToasts: toasts().map((t) => t.message).filter((m) => !toastsBeforeSwap.has(m)),
+      };
+      await instrument.selectPlugin(0, amp);
 
       // ── A tone entry past the tone limit never reaches the host ─────────────────────────────────────
       feed('Empty');
@@ -306,6 +343,7 @@ await probe(async ({ open }) => {
         liveChoice,
         liveDuringUnload,
         sameAgain,
+        swapDuringExport,
         tooBig,
         loadedSessions: native.loadedSessions.length,
       };
@@ -388,6 +426,13 @@ await probe(async ({ open }) => {
   );
   assert.deepEqual(out.sameAgain.slots, ['amp', 'syn']);
   assert.ok(out.sameAgain.token !== null && out.sameAgain.after.includes(`forget 0 ${out.sameAgain.token}`), `its parked tone is handed back: ${out.sameAgain.after.join(', ')}`);
+
+  assert.deepEqual(out.swapDuringExport.calls.slice(0, 3), ['unload 0', 'load 0 syn', 'take 0'], `slot A's take answered after its swap: ${out.swapDuringExport.calls.join(', ')}`);
+  assert.deepEqual(out.swapDuringExport.plugins, [['B', 'syn']], 'session.json names no plugin for slot A, whose take straddled the swap');
+  assert.ok(!out.swapDuringExport.files.some((n) => n.endsWith('-tone-slot-a.bin')), `and carries no tone file for it: ${out.swapDuringExport.files.join(', ')}`);
+  assert.equal(out.swapDuringExport.toneB, 'syn state 1', 'slot B’s tone goes on');
+  assert.deepEqual(out.swapDuringExport.newToasts, ['Could not export the tone. The plugin changed while exporting; try again.']);
+  assert.equal(consumeConsoleErrors('[slot-tones] slot A: Probe Amp changed while its tone was taken').length, 1, 'and the release log says why');
 
   assert.match(out.tooBig.error ?? '', /tone/, `an oversized tone entry is refused: ${out.tooBig.error}`);
   assert.deepEqual(out.tooBig.calls, [], 'before anything reaches the host');

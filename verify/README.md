@@ -71,7 +71,8 @@ command the UI sends (`__lf.native.sent`) and hands the feed frames the probe sc
 (`__lf.native.emit`) to the UI. Nothing answers a command but a lane's mix, which the fake reports as
 the engine's `Mix` once it changes (its seams `holdEcho`, `holdApply` and `refuseMix` hold or refuse that),
 and a toggle (CLICK, END STOP, FIXED, RETAKE, AUTO REC, a send), which it switches or refuses as the
-engine's gate would on the scripted looper and answers with `Toggled` or `Refused`,
+engine's gate would on the scripted looper and answers with `Toggled` or `Refused`, and GO LIVE's
+`SetSlotLive`, which it answers with the feed's `live` flags,
 so a probe proves gesture → command and frame → screen, never the engine
 (`verify/probes/engine-seam.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
 outbox's batches (`__lf.native.batches`, each with its epoch; their input events flattened in

@@ -192,7 +192,7 @@ async function run(): Promise<void> {
     await selectPlugin(0, desc!);
     check(slotPlugins()[0]?.id === desc!.id, `could not load ${desc!.name}`);
     await goLive(0);
-    check(inputArmed()[0], 'GO LIVE did not take slot 1 live');
+    await until('the feed to show slot 1 live (GO LIVE)', () => inputArmed()[0], 5);
     const levels: number[] = [];
     for (let i = 0; i < 50; i++) {
       levels.push(looper.levelValue());

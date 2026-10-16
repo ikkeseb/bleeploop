@@ -477,6 +477,10 @@ pub struct FeedFrame {
     pub anchor: Option<ClockAnchor>,
     /// `null` while no device runs.
     pub meter: Option<Meter>,
+    /// Each plugin slot's live flag (GO LIVE) as the engine applied it (`Overview::slot_live`): on a
+    /// reset frame, and on a frame where it changed; absent otherwise. The UI shows GO LIVE from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<[bool; SLOT_COUNT]>,
     pub peaks: Vec<PeakUpdate>,
     /// Absent unless the stage view asked for the scope and this frame carries columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -857,6 +861,8 @@ mod tests {
         assert!(scope.min.iter().chain(&scope.max).all(|c| c.len() == scope.min[0].len()), "every array holds the same columns");
         assert!(frames.iter().any(|f| f.scope.is_none()), "and one without them (the field is absent then)");
         assert!(frames.iter().filter_map(|f| f.meter).any(|m| m.peak[0] != m.peak[1] && m.clip[0] != m.clip[1]), "a meter per slot");
+        assert!(frames.iter().any(|f| f.reset && f.live.is_some_and(|l| l[0] != l[1])), "a reset frame with each slot's live flag");
+        assert!(frames.iter().any(|f| f.live.is_none()), "and a frame where it did not change (the field is absent then)");
     }
 
     #[test]

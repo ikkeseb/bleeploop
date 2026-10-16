@@ -537,6 +537,29 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
 function applyCommand(c: EngineCommand): void {
   applyMixCommand(c);
   applyToggleCommand(c);
+  applyLiveCommand(c);
+}
+
+// ── The fake's GO LIVE: each slot's live flag, as the engine's overview holds it ──────────────────────
+
+/** Each slot's live flag as the fake applied it (`SetSlotLive`); a scripted frame's `live` sets it too. */
+const fakeLive: [boolean, boolean] = [false, false];
+let liveScheduled = false;
+
+/** Apply a `SetSlotLive` as the engine does; a change is answered on the feed's `live`, a microtask later
+ * (never inside the call that sent it), as the engine's feed sends it when it changed. */
+function applyLiveCommand(c: EngineCommand): void {
+  if (typeof c !== 'object' || !('SetSlotLive' in c)) return;
+  const [slot, on] = c.SetSlotLive;
+  if (fakeLive[slot] === on) return;
+  fakeLive[slot] = on;
+  if (liveScheduled) return;
+  liveScheduled = true;
+  queueMicrotask(() => {
+    liveScheduled = false;
+    const frame: FeedFrame = { seq: 0, reset: false, events: [], device: [], anchor: null, meter: lastMeter, live: [fakeLive[0], fakeLive[1]], peaks: [], scope: null };
+    for (const onFrame of engineSubscribers) onFrame(frame);
+  });
 }
 
 /** A load sets each loaded lane's mix whole, as the engine clamps it (over a mix sent to the EMPTY
@@ -835,6 +858,7 @@ export const webEngineFake: EngineFake = {
     const frame = decodeFeedFrame(raw);
     applyMixFrame(frame);
     applyToggleFrame(frame);
+    if (frame.live) [fakeLive[0], fakeLive[1]] = frame.live;
     if (frame.meter) lastMeter = { peak: [frame.meter.peak[0], frame.meter.peak[1]], clip: [false, false] };
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.

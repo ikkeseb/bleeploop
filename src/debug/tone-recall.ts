@@ -231,7 +231,7 @@ async function checkPhase(expect: Expect): Promise<string> {
   // A2: a session carries each slot's tone.
   const [a, b] = slotPlugins() as [PluginDescriptor, PluginDescriptor];
   await goLive(0);
-  check(inputArmed()[0], 'slot A did not go live');
+  await until('the feed to show slot A live', () => inputArmed()[0], 5);
   clock.setBpm(120);
   await until('120 BPM', () => clock.bpm() === 120, 5);
   looper.setFixedLengthEnabled(true);
@@ -258,7 +258,7 @@ async function checkPhase(expect: Expect): Promise<string> {
   check(reloaded.join() === '0,1', `the import reloaded ${JSON.stringify(loads)}, not both slots with a restored tone`);
   const a2 = await valueProblems(expect, v);
   check(a2.length === 0, `after the import (moved to ${w.join(', ')} first): ${a2.join('; ')}`);
-  check(inputArmed()[0] && !inputArmed()[1], `GO LIVE after the reload: ${JSON.stringify(inputArmed())}`);
+  await until(`GO LIVE back on slot A alone after the reload (the feed shows ${JSON.stringify(inputArmed())})`, () => inputArmed()[0] && !inputArmed()[1], 5);
   check(lane(0).state === 'PLAYING', `lane 1 is ${lane(0).state} after the import`);
   log(`imported: both slots reloaded and read their session tone again (from ${w.map((x) => x.toFixed(4)).join(', ')}); slot A live again`);
 

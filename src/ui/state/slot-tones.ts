@@ -4,7 +4,8 @@
  * (`src-tauri/src/host/tone.rs`), so rig recall brings the player's tone back with the plugin. This
  * module moves tones across a session export and import:
  *
- * - export takes each loaded slot's tone fresh, through the slot's owner (`takeSlotTones`);
+ * - export takes each loaded slot's tone fresh, through the slot's owner, and names the plugin the slot
+ *   held throughout the take (`takeSlotTones`);
  * - import stores each tone under its slot and the plugin session.json names for it (the host refuses
  *   a tone file of another plugin). A slot that holds that plugin now is reloaded in place so the load applies it,
  *   keeping its level and GO LIVE, unless the player picked another plugin for it, or loaded it again,
@@ -31,15 +32,23 @@ export const slotLetter = (slot: 0 | 1): 'A' | 'B' => (slot === 0 ? 'A' : 'B');
 /**
  * Each loaded slot's tone, saved fresh through its owner (the store gets it too). A plugin that keeps no
  * state has none; a slot whose save fails is left out of the export, logged and toasted once, and the
- * export goes on without it.
+ * export goes on without it. So is a slot whose plugin changed while its tone was taken (a load or an
+ * unload began: `slotSourceGeneration`), since the bytes may be another plugin's than the one the file
+ * would name.
  */
 export async function takeSlotTones(): Promise<SlotTone[]> {
   const tones: SlotTone[] = [];
   for (const slot of [0, 1] as const) {
     const desc = slotPlugins()[slot];
     if (!desc) continue;
+    const since = slotSourceGeneration(slot);
     try {
       const bytes = await platform.pluginHost.takeTone(slot);
+      if (slotSourceGeneration(slot) !== since) {
+        console.error(`[slot-tones] slot ${slotLetter(slot)}: ${desc.name} changed while its tone was taken for the export; left out`);
+        notifyError('Could not export the tone. The plugin changed while exporting; try again.', `Slot ${slotLetter(slot)} held ${desc.name} when the export began.`);
+        continue;
+      }
       if (!bytes) continue;
       const { format, path, id, name } = desc;
       tones.push({ slot, plugin: { format, path, id, name }, bytes });

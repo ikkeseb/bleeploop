@@ -657,7 +657,7 @@ async function run(): Promise<void> {
   if (want) {
     const desc = await loadInSlot1(want, format);
     await goLive(0);
-    check(inputArmed()[0], `GO LIVE did not take ${desc.name} live`);
+    await until(`the feed to show ${desc.name} live (GO LIVE)`, () => inputArmed()[0], 5);
     short = `${desc.name} [${desc.format}]`;
     source = `${short} live in slot 1, gain ${pluginGain()[0]}`;
   } else {
@@ -672,7 +672,7 @@ async function run(): Promise<void> {
     }
     check(!slotPlugins()[0] || !slotPlugins()[1], 'MIC needs an empty slot');
     if (!looper.inputArmed()) check(await looper.toggleInput(), 'MIC could not take an empty slot live');
-    check(looper.inputArmed(), 'MIC is not live');
+    await until('the feed to show MIC live', () => looper.inputArmed(), 5);
     short = 'MIC';
     source = `MIC (the input dry through an empty live slot ${inputArmed()[0] ? 1 : 2}${unloaded})`;
   }

@@ -1,7 +1,7 @@
 import { createSignal } from 'solid-js';
-import { sendEngine } from '../../platform';
+import { sendEngine, sendEngineReported } from '../../platform';
 import { notifyError } from '../../notify';
-import { activeSlot, serializeSlot, slotOff, slotPlugins, withAt } from './instrument-slots';
+import { activeSlot, serializeSlot, slotOff, slotPlugins } from './instrument-slots';
 
 /**
  * OWNS: which slots hear their own input (GO LIVE, the engine's `SetSlotLive`; the capture channel is
@@ -11,15 +11,29 @@ import { activeSlot, serializeSlot, slotOff, slotPlugins, withAt } from './instr
  * (`instrument-slots.ts`) so they can never interleave with a plugin swap; `disarmInputInternal` is
  * exported for `instrument.ts`'s teardown paths, which are already inside a serialised op and must not
  * re-enter the chain.
+ *
+ * The engine owns the flags (invariant 3): `inputArmed` is the feed's `live` (`adoptEngineLive`, from
+ * `engine-store.ts`), never the UI's own guess. A press sends `SetSlotLive` and the cap follows once the
+ * engine applied it; a batch that did not reach the host leaves the flag where the engine has it, and
+ * GO LIVE's press says so once (`live.ts`).
  */
 
-// Whether each slot hears its own input.
+// Whether each slot hears its own input, as the engine applied it (the feed's `live`).
 const [inputArmed, setInputArmed] = createSignal<[boolean, boolean]>([false, false]);
 
-function setEngineLive(slot: 0 | 1, on: boolean): void {
-  if (inputArmed()[slot] === on) return;
-  sendEngine({ SetSlotLive: [slot, on] });
-  setInputArmed((prev) => withAt(prev, slot, on));
+/** The feed's live flags (`engine-store.ts`): the only writer of `inputArmed`. */
+export function adoptEngineLive(live: readonly [boolean, boolean]): void {
+  const [a, b] = inputArmed();
+  if (a !== live[0] || b !== live[1]) setInputArmed([live[0], live[1]]);
+}
+
+/**
+ * Send `slot`'s live flag. Resolves with the batch's submission (`sendEngine`; false: it did not reach
+ * the host). The slot shows it once the feed does. `ownToast`: the caller tells the player of a lost
+ * batch (`sendEngineReported`), so the outbox only logs it.
+ */
+function setEngineLive(slot: 0 | 1, on: boolean, ownToast = false): Promise<boolean> {
+  return (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] });
 }
 
 // A tone reload of a live slot, from its unload to its resume: the slot counts as live meanwhile.
@@ -39,7 +53,7 @@ export function holdEngineLive(slot: 0 | 1, on: boolean): void {
  * slot's live state is its own.
  */
 export function resumeEngineLive(slot: 0 | 1): void {
-  if (slotPlugins()[slot] && liveIntent[slot] !== false) setEngineLive(slot, true);
+  if (slotPlugins()[slot] && liveIntent[slot] !== false) void setEngineLive(slot, true);
 }
 
 /** Whether `slot` is live, or will be once the source op holding it settles: the player's latest press
@@ -78,11 +92,11 @@ export function engineInputLive(): boolean {
  * The looper facade's MIC toggle (the player sets a slot to Off and goes live instead): the device input
  * dry through a slot without a plugin, heard and recorded. On: an Off slot first, the active one first,
  * else a slot without a plugin. Off: every such live slot stops. With a plugin in both slots none is
- * empty, and it says so. Returns whether the input is live now.
+ * empty, and it says so. Returns whether it asked for live (the flag follows on the feed).
  */
 export function toggleEngineInput(): boolean {
   if (engineInputLive()) {
-    for (const s of [0, 1] as const) if (!slotPlugins()[s]) setEngineLive(s, false);
+    for (const s of [0, 1] as const) if (!slotPlugins()[s]) void setEngineLive(s, false);
     return false;
   }
   const active = activeSlot();
@@ -92,38 +106,48 @@ export function toggleEngineInput(): boolean {
     notifyError('Could not go live, as both slots hold a plugin. Set a slot to Off and go live on it.', 'An Off slot hears and records the input dry.');
     return false;
   }
-  setEngineLive(empty, true);
+  void setEngineLive(empty, true);
   return true;
 }
 
-/** Tell a new engine (or one the WebView lost track of) which slots are live. */
+/** On a reset frame, before its flags are adopted: tell a new engine the slots the feed last showed live
+ * (the settings replay has them too), and the engine a reloaded page finds that none is (a fresh page
+ * shows none). */
 export function resendEngineLive(): void {
   const [a, b] = inputArmed();
   sendEngine({ SetSlotLive: [0, a] }, { SetSlotLive: [1, b] });
 }
 
+/** Throw when the engine did not get `slot`'s live flag. `ownToast`: the caller's refusal path tells the
+ * player (GO LIVE's press, `live.ts`), so the outbox does not. */
+async function sendLive(slot: 0 | 1, on: boolean, ownToast: boolean): Promise<void> {
+  if (!(await setEngineLive(slot, on, ownToast))) throw new Error(`The batch carrying SetSlotLive ${on} did not reach the engine.`);
+}
+
 /**
  * Go LIVE on `slot`: the engine's device is already open (Audio Settings picks it, the slot its
  * channel); going live only routes the slot's input, through its plugin or dry while the slot is Off.
- * One op on the slot's chain.
+ * One op on the slot's chain; rejects when the batch did not reach the host (the slot stays as the feed
+ * shows it).
+ * `ownToast`: the caller toasts that rejection itself (`sendLive`).
  */
-export function goLive(slot: 0 | 1): Promise<void> {
+export function goLive(slot: 0 | 1, ownToast = false): Promise<void> {
   return serializeSlot(slot, async () => {
-    if (slotPlugins()[slot] || slotOff()[slot]) setEngineLive(slot, true);
+    if (slotPlugins()[slot] || slotOff()[slot]) await sendLive(slot, true, ownToast);
   });
 }
 
-/** Stop LIVE on `slot`. One op on the slot's chain; idempotent. */
-export function stopLive(slot: 0 | 1): Promise<void> {
-  return serializeSlot(slot, async () => setEngineLive(slot, false));
+/** Stop LIVE on `slot`. One op on the slot's chain; idempotent; rejects as `goLive` does. */
+export function stopLive(slot: 0 | 1, ownToast = false): Promise<void> {
+  return serializeSlot(slot, () => sendLive(slot, false, ownToast));
 }
 
 /**
  * Stop `slot`'s live input from inside an already-serialized slot op (load-swap / clear teardown in
- * `instrument.ts`), so it must NOT re-enter serializeSlot.
+ * `instrument.ts`), so it must NOT re-enter serializeSlot. It does not wait for the submission.
  */
 export async function disarmInputInternal(slot: 0 | 1): Promise<void> {
-  setEngineLive(slot, false);
+  void setEngineLive(slot, false);
 }
 
 /** Read-only reactive accessor: per-slot live flags. */

@@ -1,6 +1,7 @@
 //! OWNS: what the UI draws from the looper, shared with a reader that never takes the engine lock (the
 //! host's feed thread, and its device owner's check that the engine holds audio): the master grid's
-//! anchor, each lane's state, buffer, orientation and frames, and each buffer's waveform peaks. The
+//! anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks, and each
+//! plugin slot's live flag as the engine applied it (GO LIVE: the UI shows it from here, invariant 3). The
 //! looper stores into it (relaxed atomic stores and bit sets: it never allocates, locks or waits); a
 //! reader polls it ([`EngineHandle::overview`](crate::EngineHandle)). Each value is current on its own:
 //! a reader may see one lane's update a chunk before another's, and a bin a chunk before the lane's
@@ -13,7 +14,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 
-use crate::api::{LaneState, TRACK_COUNT};
+use crate::api::{LaneState, SLOT_COUNT, TRACK_COUNT};
 use crate::grid::Frame;
 
 /// Frames per waveform bin.
@@ -22,6 +23,8 @@ pub const PEAK_FRAMES: usize = 1024;
 pub struct Overview {
     grid: AtomicI64,
     lanes: [LaneCell; TRACK_COUNT],
+    /// Each plugin slot's live flag, as the last applied `Command::SetSlotLive` left it.
+    slots_live: [AtomicBool; SLOT_COUNT],
     buffers: Box<[Peaks]>,
     capacity: usize,
 }
@@ -74,6 +77,7 @@ impl Overview {
         Overview {
             grid: AtomicI64::new(0),
             lanes: std::array::from_fn(|_| LaneCell::default()),
+            slots_live: std::array::from_fn(|_| AtomicBool::new(false)),
             buffers: (0..buffers).map(|_| Peaks::new(bins)).collect(),
             capacity,
         }
@@ -82,6 +86,17 @@ impl Overview {
     /// The master grid's anchor (`Looper::anchor`): loop position 0 plays at `grid + k * master`.
     pub fn grid(&self) -> Frame {
         self.grid.load(Relaxed)
+    }
+
+    /// Whether plugin slot `slot` is live (GO LIVE), as the engine applied it; false out of range.
+    pub fn slot_live(&self, slot: usize) -> bool {
+        self.slots_live.get(slot).is_some_and(|l| l.load(Relaxed))
+    }
+
+    pub(crate) fn set_slot_live(&self, slot: usize, live: bool) {
+        if let Some(l) = self.slots_live.get(slot) {
+            l.store(live, Relaxed);
+        }
     }
 
     pub fn lane(&self, i: usize) -> LaneView {

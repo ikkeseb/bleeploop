@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
-import { editorAffinityBlocker, noteEditorOpened, slotPendingCounts } from '../state/instrument';
+import { editorAffinityBlocker, reserveEditor, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
 import { liveShown, toggleLive } from './live';
@@ -56,7 +56,9 @@ export function PluginBar(props: {
     // Same plugin FILE in both slots shares one GUI runtime whose message thread binds to the FIRST
     // slot that opens an editor — a second open from the other slot (concurrent OR after close) wedges
     // inside the plugin, and killing the frozen window kills the app. Refuse it up front. (Another
-    // format of the plugin, e.g. CLAP and VST3, = two modules = fine.)
+    // format of the plugin, e.g. CLAP and VST3, = two modules = fine.) The check and the reservation run
+    // before the open is awaited, so two opens racing each other cannot both pass.
+    let release = () => {};
     if (wantOpen) {
       const owner = editorAffinityBlocker(props.slot, props.descriptor.path);
       if (owner) {
@@ -68,6 +70,7 @@ export function PluginBar(props: {
         );
         return;
       }
+      release = reserveEditor(props.slot, props.descriptor.path);
     }
     setEditorBusy(true);
     setEditorError(null);
@@ -75,7 +78,6 @@ export function PluginBar(props: {
       if (wantOpen) {
         await platform.pluginHost.openEditor(props.slot, 'embedded');
         setEditorOpen(true);
-        noteEditorOpened(props.slot, props.descriptor.path);
       } else {
         await platform.pluginHost.closeEditor(props.slot);
         setEditorOpen(false);
@@ -85,6 +87,7 @@ export function PluginBar(props: {
       // failure means the window is likely still open → keep editorOpen(true) so the toggle doesn't claim
       // it closed (the next click then retries the close, not a second open).
       if (wantOpen) {
+        release();
         setEditorError('no editor');
         setEditorOpen(false);
       } else {
