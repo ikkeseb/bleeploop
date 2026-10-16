@@ -2,11 +2,11 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, 
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
 import { registerLane, setGridBeats, unregisterLane } from './waveform';
 import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
-import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
+import { announceLooper, liveMsg, playStopGate, recDubGate, reverseGate, undoGate, why } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
 import { mixGesture } from './mix-gesture';
-import { Trim } from './Trim';
+import { Edit } from './Edit';
 import { inputArmed } from '../state/native-io';
 import './looper.css';
 
@@ -14,8 +14,9 @@ import './looper.css';
  * The looper UI: five full-width horizontal LANES stacked in the looper zone (composition binding:
  * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
  * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
- * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of
- * FX/MUTE/undo/reverse/copy/wide/trim pills over a mix row (a horizontal volume slider and the pan).
+ * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of five
+ * fixed pill columns, FX · MUTE · REV · UNDO · EDIT (COPY, WIDE and TRIM), over a mix row (a horizontal
+ * volume slider and the pan).
  *
  * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
  * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
@@ -259,13 +260,11 @@ function TrackLane(props: {
 }) {
   const track = looper.track(props.index);
   const state = () => track().state;
-  const canUndo = () => track().canUndo;
-  const canReverse = () => track().canReverse;
   const reversed = () => track().reversed;
-  const hasFreeLane = () => {
-    for (let j = 0; j < looper.trackCount; j++) if (looper.track(j)().state === 'EMPTY') return true;
-    return false;
-  };
+  // REV and UNDO hold their columns on every lane: disabled, with the engine's reason as the title, where
+  // a press would be refused (gates.ts).
+  const rev = createMemo(() => reverseGate(props.index));
+  const undo = createMemo(() => undoGate(props.index));
   // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
   // stage view. EMPTY shows no well message — the bright ● core already says "press to record"; the
   // spoken 'record' action lives on the core button's aria-label.
@@ -472,7 +471,8 @@ function TrackLane(props: {
         </Show>
       </div>
 
-      {/* right cluster: FX / MUTE / undo / reverse pills over the mix row (volume and pan). */}
+      {/* right cluster: five fixed pill columns over the mix row (volume and pan); a pill that does not
+          apply is disabled, never absent, so MUTE sits at one x on every lane. */}
       <div class="lp-lane__right">
         <div class="lp-lane__mods">
           <button
@@ -497,64 +497,33 @@ function TrackLane(props: {
             MUTE
           </button>
 
-          {/* One-level undo of the last overdub or trim — appears only once a take has been dubbed or
-              trimmed (its own affordance = "you just changed it, here's undo"). Toggles undo/redo. */}
-          <Show when={canUndo()}>
-            <button
-              class="lp-pb lp-pb--undo"
-              disabled={stopping()}
-              onClick={() => looper.undoLastOverdub(props.index)}
-              aria-label={`Track ${props.index + 1} undo or redo the last overdub or trim`}
-              title="Undo / redo the last overdub or trim"
-            >
-              ↶ UNDO
-            </button>
-          </Show>
+          {/* Per-track reverse: toggles forward/reversed; the swap lands on the next loop boundary
+              (click-free, like undo). */}
+          <button
+            class="lp-pb lp-pb--rev"
+            disabled={!rev().ok}
+            classList={{ 'is-on': reversed() }}
+            onClick={() => looper.reverse(props.index)}
+            aria-label={`Track ${props.index + 1} reverse`}
+            aria-pressed={reversed()}
+            title={why(rev()) ?? 'Reverse / forward (toggle)'}
+          >
+            ↺ REV
+          </button>
 
-          {/* Per-track reverse — available whenever the track has a committed loop. Toggles
-              forward/reversed; the swap lands on the next loop boundary (click-free, like undo). */}
-          <Show when={canReverse()}>
-            <button
-              class="lp-pb lp-pb--rev"
-              disabled={stopping()}
-              classList={{ 'is-on': reversed() }}
-              onClick={() => looper.reverse(props.index)}
-              aria-label={`Track ${props.index + 1} reverse`}
-              aria-pressed={reversed()}
-              title="Reverse / forward (toggle)"
-            >
-              ↺ REV
-            </button>
-          </Show>
+          {/* One-level undo of the last overdub or trim; a second press redoes it. */}
+          <button
+            class="lp-pb lp-pb--undo"
+            disabled={!undo().ok}
+            onClick={() => looper.undoLastOverdub(props.index)}
+            aria-label={`Track ${props.index + 1} undo or redo the last overdub or trim`}
+            title={why(undo()) ?? 'Undo / redo the last overdub or trim'}
+          >
+            ↶ UNDO
+          </button>
 
-          {/* Track COPY — duplicates the whole lane (loop, volume, mute, FX) into the first EMPTY lane;
-              ↔ WIDE beside it copies it wide (the engine's `CopyWide`: 20 ms behind, the other side).
-              Both hidden while no lane is free. */}
-          <Show when={canReverse() && hasFreeLane()}>
-            <button
-              class="lp-pb lp-pb--copy"
-              onClick={() => looper.copy(props.index)}
-              aria-label={`Copy track ${props.index + 1} to the first empty lane`}
-              title="Copy this lane to the first empty lane"
-            >
-              <span>
-                ⧉<span class="lp-pb__word"> COPY</span>
-              </span>
-            </button>
-            <button
-              class="lp-pb lp-pb--wide"
-              onClick={() => looper.copyWide(props.index)}
-              aria-label={`Copy track ${props.index + 1} wide to the first empty lane`}
-              title="Copy wide: the copy plays 20 ms behind, panned to the other side"
-            >
-              <span>
-                ↔<span class="lp-pb__word"> WIDE</span>
-              </span>
-            </button>
-          </Show>
-
-          {/* ✂ TRIM — keep the first N bars, repeated across the loop; one UNDO away. */}
-          <Trim index={props.index} returnFocus={props.returnFocus} />
+          {/* ⧉ COPY, ↔ WIDE and ✂ TRIM, behind one pill (`Edit.tsx`). */}
+          <Edit index={props.index} returnFocus={props.returnFocus} />
         </div>
 
         {/* the mix row: the volume fader and the pan */}

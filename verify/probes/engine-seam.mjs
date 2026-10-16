@@ -12,8 +12,8 @@
  *   a PC key (its note to native MIDI's router, `__lf.native.inputSent`, by its owner `key:<code>`), the
  *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
  *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged),
- *   ⧉ COPY and ↔ WIDE beside it (`Copy`, `CopyWide`; the `copyWide` action is the engine's `CopyWide`,
- *   on its own selection or a named track);
+ *   ⧉ COPY and ↔ WIDE in the lane's EDIT menu (`Copy`, `CopyWide`; the `copyWide` action is the engine's
+ *   `CopyWide`, on its own selection or a named track);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
  *   beat is heard (its frame and the output latency against the clock anchor), a live take, a committed
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
@@ -206,17 +206,26 @@ await probe(async ({ open }) => {
   await page.getByRole('slider', { name: 'Track 1 volume' }).fill('80');
   assert.deepEqual(await sentAtLeast(1), [{ SetVolume: [0, 0.8] }], 'the fader sends SetVolume');
   await page.waitForFunction(() => window.__lf.looper.trackVolume(0) === 0.8, undefined, { timeout: 5000 });
-  // ↔ WIDE sits beside ⧉ COPY on a committed lane while a lane is free, each sending its own command.
-  // A press in a lane selects it first (`SelectTrack`): the pill's own command follows.
-  const pillOf = (name) => lanes.nth(0).getByRole('button', { name, exact: true });
+  // ↔ WIDE sits beside ⧉ COPY in the lane's EDIT menu on a committed lane while a lane is free, each
+  // sending its own command and closing the menu. A press in a lane selects it first (`SelectTrack`): the
+  // edit's own command follows.
+  const edit = lanes.nth(0).getByRole('button', { name: 'Edit track 1', exact: true });
+  const menu = page.getByRole('dialog', { name: 'Edit track 1' });
+  const editOf = async (name) => {
+    await edit.click();
+    return menu.getByRole('button', { name, exact: true });
+  };
   const pillSent = async () => (await sentAtLeast(1)).filter((c) => c.SelectTrack === undefined);
   await clearSent();
-  await pillOf('Copy track 1 wide to the first empty lane').click();
+  const wide = await editOf('Copy track 1 wide to the first empty lane');
+  assert.equal((await wide.locator('.edit__word').textContent()).trim(), '↔WIDE');
+  await wide.click();
   assert.deepEqual(await pillSent(), [{ CopyWide: 0 }], '↔ WIDE sends CopyWide');
-  assert.equal((await pillOf('Copy track 1 wide to the first empty lane').textContent()).trim(), '↔ WIDE');
+  await menu.waitFor({ state: 'detached' });
   await clearSent();
-  await pillOf('Copy track 1 to the first empty lane').click();
+  await (await editOf('Copy track 1 to the first empty lane')).click();
   assert.deepEqual(await pillSent(), [{ Copy: 0 }], '⧉ COPY sends Copy');
+  await menu.waitFor({ state: 'detached' });
   await clearSent();
   for (const target of [null, 2]) await page.evaluate((t) => import('/src/app/actions.ts').then((m) => m.runAction('copyWide', t)), target);
   assert.deepEqual(await sentAtLeast(2), [{ Action: 'CopyWide' }, { ActionOn: [2, 'CopyWide'] }], "the copyWide action is the engine's");

@@ -5,8 +5,8 @@ import type { Refusal } from '../../platform';
 
 /**
  * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
- * One predicate per control the UI disables and titles (the lane core, ▶/■, ✂ TRIM; the command bar's
- * TAP, FADE, FIXED, RETAKE and AUTO REC), returning WHY a press is refused, so the control's disabled
+ * One predicate per control the UI disables and titles (the lane core, ▶/■, ↺ REV, ↶ UNDO and EDIT's
+ * COPY, WIDE and TRIM; the command bar's TAP, FADE, FIXED, RETAKE and AUTO REC), returning WHY a press is refused, so the control's disabled
  * state, its title and its ARIA label speak the vocabulary a refused key or pedal press speaks. The engine
  * keeps its own self-protection; these mirror it for the UI, they do not replace it. A hands-free press is
  * gated by the engine, which names its reason by the same vocabulary (`refusalText`, `lf_engine::Refusal::text`);
@@ -16,6 +16,11 @@ import type { Refusal } from '../../platform';
  * handler — never from the 60 fps draw loop (invariant 6).
  */
 export type Gate = { ok: true } | { ok: false; reason: string };
+
+/** A gate's refusal for a control's title, or undefined when it lets the press through. */
+export function why(g: Gate): string | undefined {
+  return g.ok ? undefined : g.reason;
+}
 
 /** Shared frozen results, one object per outcome, so a per-lane memo over a gate sees an unchanged
  * outcome as `===`-equal and settles instead of re-firing its disabled/title/aria subscribers. */
@@ -43,6 +48,7 @@ const REFUSAL = {
   autoRecLocked: refuse('AUTO REC starts a first take, clear all to use it'),
   capturing: refuse('this track is recording, stop it first'),
   noTrim: refuse('nothing to trim, the loop needs two bars or more'),
+  noEdit: refuse('nothing to edit, record first'),
   fading: refuse('fading out, wait or stop now'),
   noFade: refuse('nothing is playing to fade'),
 } as const;
@@ -155,6 +161,34 @@ export function trimGate(i: number): Gate {
   if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') return REFUSAL.capturing;
   if (t.state === 'EMPTY' || loopWholeBars() < 2) return REFUSAL.noTrim;
   return stopping(t) ?? OK;
+}
+
+/** May ↶ UNDO act on lane `i`? The engine's check (`Action::Undo`): something to undo, and no stop pending. */
+export function undoGate(i: number): Gate {
+  const t = looper.track(i)();
+  if (!t.canUndo) return REFUSAL.noUndo;
+  return stopping(t) ?? OK;
+}
+
+/** May ↺ REV act on lane `i`? The engine's check (`Action::Reverse`): a committed loop, no stop pending. */
+export function reverseGate(i: number): Gate {
+  const t = looper.track(i)();
+  if (!t.canReverse) return REFUSAL.noReverse;
+  return stopping(t) ?? OK;
+}
+
+/** May COPY or WIDE act on lane `i`? The engine's check (`Action::Copy`): a committed loop, and an EMPTY
+ * lane to copy it to. (Its last refusal, a restart pending, has no sign in the feed: the engine names it.) */
+export function copyGate(i: number): Gate {
+  if (!looper.track(i)().canReverse) return REFUSAL.noCopy;
+  for (let j = 0; j < looper.trackCount; j++) if (looper.track(j)().state === 'EMPTY') return OK;
+  return REFUSAL.noFreeLane;
+}
+
+/** May lane `i`'s EDIT pill open? Only over a committed loop: what COPY, WIDE and TRIM act on. Each of
+ * them then gates itself inside the popover. */
+export function editGate(i: number): Gate {
+  return looper.track(i)().canReverse ? OK : REFUSAL.noEdit;
 }
 
 /** May TAP set the tempo? Not once a loop has fixed it. */

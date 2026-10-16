@@ -3,7 +3,7 @@ import { looper, type TrackState } from '../state/audio';
 import { framesPerBar } from '../state/quantize';
 
 /**
- * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`, `Trim.tsx`), the waveform renderer
+ * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`, `Edit.tsx`), the waveform renderer
  * (`waveform.ts`), the command bar (`Transport.tsx`, `SessionTools.tsx`, `InputFx.tsx`) and the stage
  * view (`src/ui/stage/StageView.tsx`) share. They live apart from the components so the renderer never imports a component that imports
  * the renderer.

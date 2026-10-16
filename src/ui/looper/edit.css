@@ -1,0 +1,96 @@
+/* The lane's EDIT pill and its popover — "Instrument". The pill wears the select caret (--caret-svg as a
+   mask, so it takes the legend's colour in every state) and turns it over while open. The popover hangs
+   under the pill (anchor positioning, as IN FX's hangs from its pill: input-fx.css); only the open lane's
+   pill carries the anchor name, so one name serves five lanes. The floating panel tone and a hairline
+   of top light; chrome stays monochrome. */
+.lp-pb--edit {
+  grid-auto-flow: column;
+  column-gap: 3px;
+  justify-content: center;
+}
+.lp-pb--edit::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  mask: var(--caret-svg) center / contain no-repeat;
+  transition: transform 0.15s;
+}
+.lp-pb--edit.is-open {
+  anchor-name: --lf-edit;
+  color: var(--engaged);
+  background: var(--surf-3);
+}
+.lp-pb--edit.is-open::after {
+  transform: rotate(180deg);
+}
+
+.edit-popover {
+  position: fixed;
+  top: 40vh; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
+  right: clamp(16px, 2vw, 28px);
+  position-anchor: --lf-edit;
+  top: calc(anchor(bottom) + 6px);
+  right: anchor(right);
+  position-try-fallbacks: flip-block;
+  outline: none;
+}
+
+/* The menu: one row per edit, its legend over a faint line that says what it does, or, disabled, why
+   not (the engine's refusal words). */
+.edit {
+  width: 236px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
+}
+.edit__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--sans);
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s;
+}
+.edit__item:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.edit__item:active:not(:disabled) {
+  background: var(--sunk);
+  box-shadow: var(--pressed);
+}
+.edit__item:disabled {
+  cursor: not-allowed;
+  color: var(--faint);
+}
+.edit__word {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.edit__glyph {
+  width: 12px;
+  text-align: center;
+}
+.edit__hint {
+  padding-left: 19px; /* under the word, past the glyph's column */
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--faint);
+}
