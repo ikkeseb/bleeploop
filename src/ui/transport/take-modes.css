@@ -1,0 +1,115 @@
+/* TAKE chip and its popover (TakeModes.tsx) — "Instrument". The chip is a command-bar pill: a faint
+   TAKE kicker (the loop window's LOOP voice), the phrase, the themed caret. A mode that is on reads in
+   the lit warm-white legend, FREE in the plain legend, a mode that does not apply now and the
+   separators faint. The popover hangs under the chip (anchor positioning, as IN FX's does) on the
+   floating panel tone: the five keys in one column, each mode's setting beside its key. */
+
+.transport__take {
+  anchor-name: --take;
+  gap: 9px;
+  padding-right: 10px;
+}
+.transport__take[aria-expanded='true'] {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.transport__take-k {
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+/* The phrase and its unseen sizer share one grid cell: the chip is as wide as the widest phrase. */
+.transport__take-v {
+  display: grid;
+  justify-items: start;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.transport__take-fit,
+.transport__take-phrase {
+  grid-area: 1 / 1;
+}
+.transport__take-fit {
+  visibility: hidden;
+}
+.transport__take-term {
+  color: var(--engaged);
+  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
+}
+.transport__take-term.is-free {
+  color: var(--dim);
+  text-shadow: none;
+}
+.transport__take-term.is-idle,
+.transport__take-sep,
+.transport__take-more {
+  color: var(--faint);
+  text-shadow: none;
+}
+.transport__take-sep {
+  white-space: pre;
+}
+.transport__take-caret {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  background: var(--caret-svg) center / 9px 9px no-repeat;
+  transition: transform 0.15s;
+}
+.transport__take[aria-expanded='true'] .transport__take-caret {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .transport__take-caret {
+    transition: none;
+  }
+}
+
+/* ---- the popover ---- */
+.take-pop {
+  position: fixed;
+  top: 60px; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
+  left: clamp(16px, 2vw, 28px);
+  position-anchor: --take;
+  top: calc(anchor(bottom) + 8px);
+  left: anchor(left);
+  position-try-fallbacks: flip-inline;
+  display: grid;
+  grid-template-columns: max-content 184px;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 10px 14px 10px 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
+  outline: none;
+}
+/* The portal sits outside the command bar, so its buttons take the bar's reset here (app.css `:where(.cmd
+   button)`): zero specificity, so the pill and stepper rules win. */
+:where(.take-pop button) {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+}
+.take-pop__key {
+  justify-content: center;
+}
+/* A mode's setting stays in view, dimmed and disabled, while the mode is off: the popover never changes
+   size, and FIXED's bars read before FIXED is on. */
+.take-pop__set {
+  transition: opacity 0.12s;
+}
+.take-pop__set.is-off {
+  opacity: 0.4;
+}
+.take-pop__set.is-off .transport__step:disabled {
+  opacity: 1; /* the group's dim, not twice */
+}
+.take-pop .fxp-param {
+  grid-template-columns: 32px 1fr 24px;
+}

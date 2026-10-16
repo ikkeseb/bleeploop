@@ -13,11 +13,12 @@
  *   action (the engine gates it now: lf-engine `tests/actions.rs`) and an engine refusal is announced on
  *   the looper status line with its lane and reason; while a lane records, another lane's core is
  *   disabled and its hover and label say why;
- * - toggles: each toggle it presses (CLICK, FIXED, RETAKE, AUTO, the master mute, lane 1's MUTE and REV)
+ * - toggles: each toggle it presses (the TAKE popover's CLICK, FIXED, RETAKE, AUTO and END STOP, the master
+ *   mute, lane 1's MUTE and REV)
  *   keeps ONE accessible name in both states and carries its state in aria-pressed alone; the lane core,
  *   whose name says the action, carries no aria-pressed. REV's and MUTE's states are the engine's: the
  *   probe echoes REV on the feed as the engine would, and the fake reports MUTE's toggle as the lane's
- *   `Mix`. Not pressed here: END STOP, lane FX and the keyboard show/hide cap
+ *   `Mix`. Not pressed here: lane FX and the keyboard show/hide cap
  *   (which still flips its name).
  *
  * Cannot see the native engine (its gates, what a take records, the meter's source): the fake answers no
@@ -234,13 +235,19 @@ await probe(async ({ open }) => {
   // is unlocked and AUTO REC is enabled.
   assert.equal(await page.evaluate(() => window.__lf.clock.bpmLocked()), false);
   const unstable = [];
+  // The record modes are the TAKE popover's keys (`src/ui/transport/TakeModes.tsx`); it closes before the
+  // master mute, since its backdrop takes an outside click.
+  await page.getByRole('button', { name: 'Take modes', exact: true }).click();
   for (const [name, state] of [
     ['Metronome click', 'window.__lf.clock.metronomeOn()'],
     ['Fixed take length', 'window.__lf.looper.fixedLengthEnabled()'],
     ['Retake', 'window.__lf.looper.retakeEnabled()'],
     ['Auto record', 'window.__lf.looper.autoRecordEnabled()'],
-    ['Mute master', 'window.__lf.master.muted()'],
+    ['Stop playing loops at loop end', 'window.__lf.looper.loopEndStopEnabled()'],
   ]) if (!(await pressToggle(page, name, state))) unstable.push(name);
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'Take modes', exact: true }).waitFor({ state: 'detached' });
+  if (!(await pressToggle(page, 'Mute master', 'window.__lf.master.muted()'))) unstable.push('Mute master');
 
   await emit({ events: [transport(BAR, true), laneEvent(0, committed('Stopped'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'STOPPED');

@@ -9,7 +9,8 @@
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
  * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 14-modes-on (a reset frame
  * with CLICK, FIXED 4, RETAKE, AUTO REC and END STOP on, then the five lanes of scene 5, drawer closed: the
- * command bar's rows with every mode on) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
+ * command bar with every mode on, the TAKE chip's phrase cut to its "+3"), 15-take-modes (the same, the
+ * TAKE popover open: its five keys read on) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
@@ -40,7 +41,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '14-modes-on'];
+  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '14-modes-on', '15-take-modes'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -281,10 +282,18 @@ await probe(async ({ browser, open }) => {
       await emit(loopFrame({ count: 5, playing: [] }));
       await page.waitForTimeout(250);
       await shoot(scene);
+      // The record modes live behind the TAKE chip: its popover shows each key on.
+      scene = '15-take-modes';
+      await page.getByRole('button', { name: 'Take modes', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Take modes', exact: true }).waitFor();
+      await page.waitForTimeout(200);
+      await shoot(scene);
       const modes = await page.evaluate(() => ['Metronome click', 'Fixed take length', 'Retake', 'Auto record', 'Stop playing loops at loop end']
         .filter((name) => document.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') !== 'true'));
       console.log(JSON.stringify({ tag, scene, off: modes }));
       if (modes.length) fail(`${tag} ${scene}: not shown ON: ${modes.join(', ')}`);
+      await page.keyboard.press('Escape');
+      await page.getByRole('dialog', { name: 'Take modes', exact: true }).waitFor({ state: 'detached' });
 
       // A reload's reset frame from an engine that remembers every input send on.
       scene = '11-engine-in-fx';

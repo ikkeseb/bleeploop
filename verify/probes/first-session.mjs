@@ -5,7 +5,7 @@
  * would answer through `__lf.native.snapshotBytes`, and reads the sessions loaded into it):
  *
  * - an empty looper: Export is disabled, Import is enabled, Help's Manual tab names the Session tools;
- * - the first take through real controls: FIXED (aria-pressed off, then on, from the `Toggled` the fake
+ * - the first take through real controls: FIXED in the TAKE popover (aria-pressed off, then on, from the `Toggled` the fake
  *   answers) and its Fewer bars stepper send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
  *   key's press and release reach native MIDI's router (`__lf.native.inputSent`); the take the feed then
  *   reports makes Import disabled;
@@ -106,6 +106,8 @@ await probe(async ({ open, browser }) => {
   await page.keyboard.press('Escape');
 
   // ── The first take, through real controls ────────────────────────────────────────────────────────
+  // FIXED lives in the TAKE chip's popover (`src/ui/transport/TakeModes.tsx`).
+  await page.getByRole('button', { name: 'Take modes', exact: true }).click();
   const fixed = page.getByRole('button', { name: 'Fixed take length', exact: true });
   assert.equal(await fixed.getAttribute('aria-pressed'), 'false');
   await clearSent(page);
@@ -116,7 +118,9 @@ await probe(async ({ open, browser }) => {
   console.log('FIXED sent', JSON.stringify(fixedSent));
   assert.deepEqual(fixedSent[0], { Action: { Toggle: 'Fixed' } }, "FIXED sends the engine's toggle");
   assert.deepEqual(fixedSent.at(-1), { SetFixedBars: 1 }, 'Fewer bars steps down to one bar');
-  assert.equal((await fixed.textContent()).trim(), 'FIXED 1');
+  assert.match((await page.locator('.transport__take-phrase').innerText()).trim(), /^FIXED 1( ·|$)/, 'the TAKE chip reads the bars');
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'Take modes', exact: true }).waitFor({ state: 'detached' });
   await clearSent(page);
   await page.getByRole('button', { name: 'Track 1 record', exact: true }).click();
   await page.waitForFunction(() => window.__lf.native.sent.length >= 2, undefined, { timeout: 5000 });

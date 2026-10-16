@@ -494,17 +494,22 @@ try {
   const taken = deviced && (await check('take', async () => {
     const control = await laneInk(2);
     await startSampler();
+    // CLICK and FIXED are keys in the TAKE chip's popover (`src/ui/transport/TakeModes.tsx`).
+    await page.locator('button[aria-label="Take modes"]').click();
+    await page.locator('#lf-take-popover').waitFor({ timeout: 5000 });
     if ((await pressed('Metronome click')) !== 'true') await page.locator('button[aria-label="Metronome click"]').click();
     await page.waitForFunction(() => document.querySelector('button[aria-label="Metronome click"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
     if ((await pressed('Fixed take length')) !== 'true') await page.locator('button[aria-label="Fixed take length"]').click();
     await page.waitForFunction(() => document.querySelector('button[aria-label="Fixed take length"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
     for (let i = 0; i < 16; i++) {
-      const bars = Number.parseInt((await page.locator('.transport__fixed .transport__bars-val').textContent()) ?? '', 10);
+      const bars = Number.parseInt((await page.locator('#lf-take-popover .transport__bars-val').textContent()) ?? '', 10);
       if (bars === 1) break;
       await page.locator(`button[aria-label="${bars > 1 ? 'Fewer bars' : 'More bars'}"]`).click();
     }
-    const fixed = (await page.locator('button[aria-label="Fixed take length"]').textContent())?.trim();
-    must(fixed === 'FIXED 1', `the take length reads "${fixed}"`);
+    const fixed = (await page.locator('.transport__take-phrase').innerText())?.trim();
+    must(/^FIXED 1( ·|$)/.test(fixed ?? ''), `the take length reads "${fixed}"`);
+    await page.keyboard.press('Escape');
+    await page.locator('#lf-take-popover').waitFor({ state: 'detached', timeout: 5000 });
     // The input dry, as a user takes it: slot 1 Off, its input picked, GO LIVE.
     const source = page.locator('select[aria-label="Source for slot 1"]');
     const sourceWas = await source.locator('option:checked').textContent();

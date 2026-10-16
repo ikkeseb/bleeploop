@@ -108,7 +108,9 @@ await probe(async ({ open }) => {
   });
 
   // ── FEED → DOM: AUTO REC listening, then a rolling RETAKE ────────────────────────────────────────
+  // AUTO REC lives in the TAKE chip's popover (`src/ui/transport/TakeModes.tsx`), open until the Escape below.
   await clearSent();
+  await page.getByRole('button', { name: 'Take modes', exact: true }).click();
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'AutoRec' } }], "AUTO sends the engine's toggle");
   assert.equal(await page.getByRole('button', { name: 'Auto record', exact: true }).getAttribute('aria-pressed'), 'true', "AUTO shows the engine's Toggled");
@@ -128,6 +130,8 @@ await probe(async ({ open }) => {
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'AutoRec' } }]);
   assert.equal(await page.getByRole('button', { name: 'Auto record', exact: true }).getAttribute('aria-pressed'), 'false');
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'Take modes', exact: true }).waitFor({ state: 'detached' });
 
   const core = (i) => lanes.nth(i).locator('.lp-core');
   await emit({ events: [laneEvent(0, lane('Recording'))] });

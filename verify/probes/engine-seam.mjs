@@ -6,11 +6,13 @@
  * - boot: the saved device opens once (WASAPI in the browser, the saved buffer); the first reset frame
  *   gets what the UI persists and owns (master and click level; the note target, through `input`), not defaults the
  *   engine has; no AudioContext is ever built (the app has no Web Audio path);
- * - gesture → command: BPM +, CLICK (the engine's toggle, shown from the `Toggled` the fake answers), the
+ * - gesture → command: BPM +, CLICK in the TAKE popover (the engine's toggle, shown from the `Toggled` the
+ *   fake answers), the
  *   lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
  *   a PC key (its note to native MIDI's router, `__lf.native.inputSent`, by its owner `key:<code>`), the
- *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
+ *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14; the
+ *   TAKE chip reads the bars), IN FX
  *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged),
  *   ⧉ COPY and ↔ WIDE beside it (`Copy`, `CopyWide`; the `copyWide` action is the engine's `CopyWide`,
  *   on its own selection or a named track);
@@ -91,6 +93,20 @@ await probe(async ({ open }) => {
   const blur = () => page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
   const lanes = page.locator('.lp-lane');
   const well = (i) => lanes.nth(i).locator('.lp-lane__wellmsg');
+  // The record modes live behind the TAKE chip (`src/ui/transport/TakeModes.tsx`): its popover opens to
+  // reach a key and closes (Escape) before a press elsewhere, since its backdrop takes an outside click.
+  const takeDialog = page.getByRole('dialog', { name: 'Take modes', exact: true });
+  const openTake = async () => {
+    if (await takeDialog.count()) return;
+    await page.getByRole('button', { name: 'Take modes', exact: true }).click();
+    await takeDialog.waitFor();
+  };
+  const closeTake = async () => {
+    if (!(await takeDialog.count())) return;
+    await page.keyboard.press('Escape');
+    await takeDialog.waitFor({ state: 'detached' });
+  };
+  const takePhrase = async () => (await page.locator('.transport__take-phrase').innerText()).replace(/\s+/g, ' ').trim();
 
   // ── Boot ──────────────────────────────────────────────────────────────────────────────────────
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
@@ -130,9 +146,12 @@ await probe(async ({ open }) => {
   assert.equal(await page.locator('.transport__bpm-num').textContent(), '121');
 
   await clearSent();
+  await openTake();
   await page.getByRole('button', { name: 'Metronome click' }).click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Click' } }], "CLICK sends the engine's toggle");
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "CLICK shows the engine's Toggled");
+  assert.equal(await takePhrase(), 'FREE · CLICK', 'the TAKE chip reads CLICK on');
+  await closeTake();
 
   await clearSent();
   await lanes.nth(0).locator('.lp-core').click();
@@ -326,7 +345,9 @@ await probe(async ({ open }) => {
   const adopted = await sentAtLeast(1);
   console.log('second reset sent', JSON.stringify(adopted));
   assert.equal(await page.getByRole('slider', { name: 'Track 1 volume' }).inputValue(), '50', "the engine's lane volume is adopted");
+  await openTake();
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "the engine's click is adopted");
+  await closeTake();
   assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
   assert.ok(!adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMetronome !== undefined), 'adopted settings are not pushed back');
   assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
@@ -338,11 +359,12 @@ await probe(async ({ open }) => {
   // ── FIXED past the loop (F14 multiply): a bar at a time up to the loop, whole loops above it ─────
   await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });
   await clearSent();
+  await openTake();
   const fixedToggle = page.getByRole('button', { name: 'Fixed take length', exact: true });
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'true', "FIXED shows the engine's Toggled");
-  assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 4', 'FIXED 4 over a 2-bar loop: two loops');
+  assert.match(await takePhrase(), /^FIXED 4( ·|$)/, 'FIXED 4 over a 2-bar loop: two loops');
   assert.match(await fixedToggle.getAttribute('title'), /Longer: the loop grows to it in whole loops/);
   const more = page.getByRole('button', { name: 'More bars', exact: true });
   const fewer = page.getByRole('button', { name: 'Fewer bars', exact: true });
@@ -356,7 +378,7 @@ await probe(async ({ open }) => {
   await clearSent();
   await more.click();
   await emit({ events: [laneEvent(0, committed), transport(BAR, true, 120)] });
-  assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 6', 'over a 1-bar loop every bar is a whole loop');
+  assert.match(await takePhrase(), /^FIXED 6( ·|$)/, 'over a 1-bar loop every bar is a whole loop');
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(2), [{ SetFixedBars: 6 }, { Action: { Toggle: 'Fixed' } }]);
 
@@ -388,6 +410,8 @@ await probe(async ({ open }) => {
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'false', "FIXED shows the engine's off");
+  assert.match(await takePhrase(), /^FREE( ·|$)/, 'the TAKE chip reads FREE with FIXED off');
+  await closeTake();
 
   // ── A later take's wait: counted in or not is the engine's to say (its beats' `countLeft`) ─────────
   const count = (i) => lanes.nth(i).locator('.lp-lane__count');

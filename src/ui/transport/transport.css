@@ -192,8 +192,7 @@
   }
 }
 
-/* ---- toggle pills — TAP / CLICK / FIXED / RETAKE / AUTO / END STOP / ALL / FADE / ✕ ALL / IN FX */
-.transport__modes,
+/* ---- pills — TAP / TAKE (take-modes.css) / ALL / FADE / ✕ ALL / IN FX; TAKE's popover wears them too */
 .transport__global {
   display: flex;
   align-items: center;
@@ -294,18 +293,14 @@
   border-color: color-mix(in srgb, var(--dub) 55%, transparent);
 }
 
-/* Mode groups pair a pill with its contextual control. AUTO reserves the control's width. FADE's bars
-   stay beside it: a fade's length is set before the press that ends the song. */
-.transport__click,
-.transport__fixed,
-.transport__auto,
+/* FADE's bars stay beside it: a fade's length is set before the press that ends the song. */
 .transport__fade {
   display: flex;
   align-items: center;
   gap: 7px;
 }
 
-/* the fixed-length bar stepper (mono readout between ± steppers) */
+/* the bar stepper of FADE and of TAKE's FIXED (a readout between ± steppers) */
 .transport__bars {
   display: flex;
   align-items: center;
@@ -415,25 +410,9 @@
   color: var(--rec);
 }
 
-/* the volume ranges wear the app-wide `.lf-range` skin (app.css); only widths live here */
+/* the master range wears the app-wide `.lf-range` skin (app.css); only its width lives here */
 .transport__volume {
   width: 100px;
-}
-.transport__volume--click {
-  width: 64px;
-}
-.transport__volume--auto {
-  width: 64px;
-}
-/* Reserve AUTO's full width so toggling it or crossing 9/10/100 cannot move the stage. */
-.transport__volume--auto.is-inactive {
-  visibility: hidden;
-}
-.transport__auto-value {
-  display: inline-block;
-  width: 3ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 .transport__volume-val {
   font-family: var(--mono);
@@ -445,16 +424,14 @@
 }
 
 /* Narrow-width ladder. The `.cmd` card (app.css) is `overflow: hidden` via body, so anything that does
-   not fit is simply unreachable. First rung: when one row cannot fit (measured by app/cmd-fit.ts —
-   including the contextual CLICK / FIXED controls and reserved AUTO width) the bar carries
-   `.cmd--stack` and the CLICK / FIXED / RETAKE / AUTO cluster takes a second row under BPM; TAP and
-   END STOP (`.transport__pair`) follow it there only when row 1 is still full without the tool icons
-   (`.cmd--stack-pair`: TAP lands under BPM, END STOP after AUTO); past that the brand folds to its dot
-   (`.cmd--stack-brand`, app.css). `order` moves them visually only —
-   DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
+   not fit is simply unreachable. First rung: when one row cannot fit (measured by app/cmd-fit.ts) the
+   bar carries `.cmd--stack` and the TAKE chip takes a second row under BPM; TAP (`.transport__tap`)
+   follows it there, before it, only when row 1 is still full without the tool icons (`.cmd--stack-tap`);
+   past that the brand folds to its dot (`.cmd--stack-brand`, app.css). `order` moves them visually
+   only: DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
    cannot see its own effect. */
-.cmd--stack .transport__modes,
-.cmd--stack-pair .transport__pair {
+.cmd--stack .transport__take,
+.cmd--stack-tap .transport__tap {
   order: 2;
 }
 /* Further rung: drop the loop seconds. */

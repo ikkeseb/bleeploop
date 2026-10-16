@@ -148,10 +148,9 @@ option {
   min-width: 0;
   anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
 }
-/* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
-   cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · TAP · loop dial · END STOP ·
-   ALL · FADE · ✕ ALL · IN FX · master · tools; the modes cluster (transport.css) drops to row 2,
-   left-aligned under BPM. The ::after element is the forced line break between the two `order` bands
+/* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts. Row 1 keeps
+   brand · lamp · BPM · TAP · loop dial · ALL · FADE · ✕ ALL · IN FX · master · tools; the TAKE chip
+   (transport.css) drops to row 2, left-aligned under BPM. The ::after element is the forced line break between the two `order` bands
    (its own zero-height line, so the row gap counts twice). The narrower rungs stay in transport.css
    ("Narrow-width ladder"); the last one, the brand's fold, sits with the brand below. */
 .cmd--stack {

@@ -1,8 +1,10 @@
 /**
- * Drives the rendered command bar and lane through AUTO REC's toggle and sensitivity slider at
- * seven desktop widths (960..1920 px), in engine mode on the web engine fake (`window.__lfEngineFake`
- * set before the app loads, a reset frame with five EMPTY lanes), and asserts the command-bar height and
- * lane top never move: AUTO must not reflow the stage when switched on/off or dragged end-to-end.
+ * Drives the rendered command bar and lane through AUTO REC's toggle and sensitivity slider in the TAKE
+ * popover at seven desktop widths (960..1920 px), in engine mode on the web engine fake
+ * (`window.__lfEngineFake` set before the app loads, a reset frame with five EMPTY lanes), and asserts
+ * the command-bar height and lane top never move: AUTO must not reflow the stage when switched on/off or
+ * dragged end-to-end, though the TAKE chip's phrase changes with it (FREE, FREE · AUTO REC). Off, the
+ * slider stays in the popover, disabled.
  * Screenshots the 1730 px case before and after enabling. Proves layout stability only; it says nothing
  * about auto-record detection itself (the engine's: lf-engine `tests/auto_record.rs`) or anything below
  * the DOM. Run: pnpm probe transport-auto-layout
@@ -42,6 +44,7 @@ await probe(async ({ open }) => {
     }));
     const before = await bounds();
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-off.png' });
+    await page.getByRole('button', { name: 'Take modes', exact: true }).click();
     const auto = page.getByRole('button', { name: 'Auto record', exact: true });
     assert.equal(await auto.getAttribute('aria-pressed'), 'false');
     await auto.click();
@@ -60,7 +63,7 @@ await probe(async ({ open }) => {
     assert.equal(await auto.getAttribute('aria-pressed'), 'true');
     await auto.click();
     await page.waitForTimeout(150);
-    assert.equal(await slider.isVisible(), false);
+    assert.equal(await slider.isDisabled(), true);
     const disabled = await bounds();
     const pass = [enabled, adjusted, disabled].every(value =>
       Math.abs(value.bar - before.bar) < 0.5 && Math.abs(value.lane - before.lane) < 0.5);
