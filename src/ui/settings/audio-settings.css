@@ -1,4 +1,4 @@
-/* Global Audio Settings popover — "Instrument". A floating near-opaque panel anchored top-right under
+/* Global Audio Settings popover — "Instrument". A floating opaque panel anchored top-right under
    the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
    buffer-size + the ASIO toggle render as matte key faces; the read-only host/isolated/plugin/midi
    DIAGNOSTICS sit in a sunk readout well at the foot. Chrome stays monochrome — engaged = the
@@ -13,7 +13,7 @@
   width: min(1080px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
   padding: 15px;
   border-radius: 14px;
-  /* near-opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
+  /* opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
      legible without a blur. */
   background: var(--panel);
   border: 1px solid var(--edge);

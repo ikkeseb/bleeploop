@@ -24,7 +24,7 @@
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: linear-gradient(180deg, #14161b, #111317 70%); /* card fill: a faint top-lit tone ramp */
   --hair: rgba(255, 255, 255, 0.055); /* the top edge light */
-  --panel: rgba(16, 18, 22, 0.97); /* floating panel (popovers, toasts) */
+  --panel: #101216; /* floating panel (popovers, toasts): opaque, a lane never reads through it */
   --panel-drop: 0 20px 48px -14px rgba(0, 0, 0, 0.72); /* the one drop shadow: a floating panel over the lanes */
   --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6); /* :active — the control face sinks into --sunk */
   --option: #14171d; /* a themed <select>'s open option list */
@@ -150,10 +150,10 @@ option {
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
    cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · TAP · loop dial · END STOP ·
-   ALL/MIC · master · tools; the modes cluster (transport.css) drops to row 2, left-aligned under BPM.
-   The ::after element is the forced line break between the two `order` bands (its own zero-height
-   line, so the row gap counts twice). The narrower rungs stay in transport.css ("Narrow-width ladder");
-   the last one, the brand's fold, sits with the brand below. */
+   ALL · FADE · ✕ ALL · IN FX · master · tools; the modes cluster (transport.css) drops to row 2,
+   left-aligned under BPM. The ::after element is the forced line break between the two `order` bands
+   (its own zero-height line, so the row gap counts twice). The narrower rungs stay in transport.css
+   ("Narrow-width ladder"); the last one, the brand's fold, sits with the brand below. */
 .cmd--stack {
   flex-wrap: wrap;
   row-gap: 3px;
@@ -429,6 +429,11 @@ option {
   scrollbar-width: thin;
   padding: 1px; /* keep the active glow from clipping against the region edge */
 }
+/* no drawer open: the two cards stretch to one band (a live card's meter row would otherwise leave
+   a hole under its sibling). The region hugs its content: the band is the taller card's height. */
+.src:not(:has(.slot__drawer--open)) {
+  align-items: stretch;
+}
 .slot {
   flex: 1 1 0; /* two equal columns */
   max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
@@ -440,7 +445,6 @@ option {
   display: flex;
   flex-direction: column;
   cursor: pointer;
-  --sc: var(--cyan); /* per-slot state colour — one token, precedence set in JS (live→play-green) */
   container: slot / inline-size; /* the header's one-line form keys on the card's width */
   transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
 }

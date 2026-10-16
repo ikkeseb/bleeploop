@@ -13,7 +13,6 @@ import {
   slotPendingCounts,
   slotPlugins,
 } from '../state/instrument';
-import { inputArmed } from '../state/native-io';
 import {
   pluginDescriptorKey,
   pluginPickerLabel,
@@ -51,8 +50,6 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
   // auto-starts (live + editor) and clears this; a reload resync never sets it, so it never reopens
   // windows. Plain variable — it is read once at PluginBar mount, nothing renders from it.
   let freshPickKey: string | null = null;
-  // Active state colour: cyan = engaged/selection; a live slot lifts it to play-green.
-  const sc = () => (inputArmed()[slotIdx] ? 'var(--play)' : 'var(--cyan)');
   // The picker's value: '' (its hidden "Updating…" entry) while a source change is queued.
   const source = () =>
     pending() ? '' : plugin() ? pluginDescriptorKey(plugin()!) : slotOff()[slotIdx] ? 'off' : slotIds()[slotIdx];
@@ -82,7 +79,6 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
       role="group"
       aria-label={`Slot ${slotIdx + 1}${isActive() ? ', active' : ''}`}
       aria-busy={pending()}
-      style={{ '--sc': sc() }}
       onClick={() => setActiveSlot(slotIdx)}
     >
       <div class="slot__row">
