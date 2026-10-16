@@ -17,8 +17,9 @@
  *   width once pushed Audio Settings to the window's left edge), also with a spacer one window tall
  *   planted in the panel body (Audio Settings: the page that shows; native-only rows this tier never
  *   renders), whose lowest row (stepping into a block taller than the panel) must then scroll into
- *   reach; without the spacer, Help's
- *   reference (the tab it opens on) scrolls not at all;
+ *   reach; without the spacer, Help's reference (the tab it opens on) scrolls not at all; the scripted
+ *   open (no pointer input) focuses the panel and draws no outline around it, while a control inside
+ *   keeps the focus ring;
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open and its FILTER engaged (its
  *   params grow the drawer past one key row), so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
@@ -248,6 +249,13 @@ await probe(async ({ open }) => {
         const m = await page.evaluate(({ id, tall }) => {
           const box = el => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; };
           const bar = document.querySelector('.cmd'), dialog = document.getElementById(id), body = dialog.firstElementChild;
+          // A scripted open (no pointer input) focuses the panel: no ring around the panel itself, while a
+          // control inside keeps the app's focus ring.
+          const focused = document.activeElement === dialog, ring = getComputedStyle(dialog).outlineStyle;
+          const control = body.querySelector('button:not(:disabled), select:not(:disabled)');
+          control.focus();
+          const innerRing = getComputedStyle(control).outlineStyle;
+          dialog.focus();
           // What scrolls: the panel body, or in Audio Settings the page that shows (its rail stays put).
           const scroller = id === 'lf-audio-popover' ? body.querySelector(':scope > [role="tabpanel"]:not([hidden])') : body;
           // How far the real rows scroll, before any spacer: Help's reference (what `?` opens on) must not.
@@ -262,7 +270,7 @@ await probe(async ({ open }) => {
           last.scrollIntoView({ block: 'nearest' });
           const r = box(last);
           const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-          return { stacked: bar.classList.contains('cmd--stack'), scroll, bar: box(bar), dialog: box(dialog), panel: box(body),
+          return { focused, ring, innerRing, stacked: bar.classList.contains('cmd--stack'), scroll, bar: box(bar), dialog: box(dialog), panel: box(body),
             lastRow: r, lastRowHit: !!hit && last.contains(hit), view: { width: innerWidth, height: innerHeight } };
         }, { id, tall });
         const name = `${label}-${width}x${height}-${id}${tall ? '-tall-content' : ''}`;
@@ -274,10 +282,11 @@ await probe(async ({ open }) => {
         // The panel hangs from the bar's right edge and sizes itself: its left margin is never thinner.
         const margins = { left: m.panel.left, right: m.view.width - m.panel.right };
         const anchored = margins.left >= margins.right - 0.5;
-        const ok = !overlaps && inside && anchored && m.lastRowHit && fits;
-        console.log(JSON.stringify({ name, ok, overlaps, inside, anchored, margins, fits, gap: m.panel.top - m.bar.bottom, ...m }));
+        const ringless = m.focused && m.ring === 'none' && m.innerRing === 'solid';
+        const ok = !overlaps && inside && anchored && m.lastRowHit && fits && ringless;
+        console.log(JSON.stringify({ name, ok, overlaps, inside, anchored, margins, fits, ringless, gap: m.panel.top - m.bar.bottom, ...m }));
         if (!ok) failures.push(name);
-        results.push({ name, ok, overlaps, inside, anchored, fits, ...m });
+        results.push({ name, ok, overlaps, inside, anchored, fits, ringless, ...m });
       }
       await page.evaluate(fn => window.__lf.ui[fn](), hide);
     }

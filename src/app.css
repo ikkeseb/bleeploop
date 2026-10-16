@@ -385,6 +385,12 @@ option {
 .settings-popover > * {
   overflow-y: auto;
 }
+/* The panel takes focus when it opens (app.tsx `focusPanel`), and an open with no pointer input (a key,
+   a toast's action, a script) would draw the UA's focus ring around the whole panel. The ring belongs on
+   the controls inside, which keep theirs; the panel itself is what the open shows. */
+.settings-popover:focus {
+  outline: none;
+}
 
 /* ---- stage + zones ----
    The stage hosts the SplitStack that fills it; the divider tracks are the gaps between zones. Zones are
