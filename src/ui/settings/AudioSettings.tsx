@@ -315,13 +315,13 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
   });
 
   return (
-    <div class="audio-settings" role="group" aria-label="Audio settings">
+    <div class="audio-settings" role="group" aria-label="Audio Settings">
       {/* The rail: one tab a page, each with its state lamp and word, so the four answers read before a
           click. The tabs pattern as Help's: Tab reaches the selected tab only, then the page's controls;
           the arrows (wrapping), Home and End pick and focus a page. */}
       <div class="audio-settings__rail">
-        <div class="audio-settings__title">Audio settings</div>
-        <div class="audio-settings__tabs" role="tablist" aria-label="Audio settings pages" aria-orientation="vertical">
+        <div class="audio-settings__title">Audio Settings</div>
+        <div class="audio-settings__tabs" role="tablist" aria-label="Audio Settings pages" aria-orientation="vertical">
           <For each={PAGES}>
             {(p) => {
               const s = () => railState[p.id]();

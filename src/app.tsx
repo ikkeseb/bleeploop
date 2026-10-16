@@ -434,17 +434,17 @@ export function App() {
               <circle cx="12" cy="17.4" r="0.9" fill="currentColor" stroke="none" />
             </svg>
           </button>
-          {/* Audio settings gear: opens the global device/buffer-size popover. Native-only. */}
+          {/* Audio Settings gear: opens the global device/buffer-size popover. Native-only. */}
           <Show when={platform.pluginHost.available}>
             <button
               type="button"
               class="tool tool--gear"
               classList={{ 'tool--on': settingsOpen() }}
-              aria-label="Audio settings"
+              aria-label="Audio Settings"
               aria-expanded={settingsOpen()}
               aria-controls="lf-audio-popover"
               ref={gearBtn}
-              title="Audio settings"
+              title="Audio Settings"
               onClick={openSettings}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -456,7 +456,7 @@ export function App() {
         </div>
       </header>
 
-      {/* Audio settings popover: a full-screen transparent backdrop click-catcher (closes on
+      {/* Audio Settings popover: a full-screen transparent backdrop click-catcher (closes on
           outside click; Escape handled at the window level above) anchoring the panel top-right under
           the command-bar gear. The keyboard/MIDI play path still works behind it (keydown isn't blocked). */}
       <Show when={settingsOpen()}>
@@ -465,7 +465,7 @@ export function App() {
             class="settings-popover"
             id="lf-audio-popover"
             role="dialog"
-            aria-label="Audio settings"
+            aria-label="Audio Settings"
             tabindex={-1}
             ref={(el) => {
               settingsEl = el;
