@@ -1,7 +1,7 @@
 import { createSignal } from 'solid-js';
 import { sendEngine, sendEngineReported } from '../../platform';
 import { notifyError } from '../../notify';
-import { activeSlot, serializeSlot, slotOff, slotPlugins, withAt } from './instrument-slots';
+import { activeSlot, serializeSlot, slotOff, slotPlugins } from './instrument-slots';
 
 /**
  * OWNS: which slots hear their own input (GO LIVE, the engine's `SetSlotLive`; the capture channel is
@@ -12,33 +12,28 @@ import { activeSlot, serializeSlot, slotOff, slotPlugins, withAt } from './instr
  * exported for `instrument.ts`'s teardown paths, which are already inside a serialised op and must not
  * re-enter the chain.
  *
- * The engine echoes no live flag (`SetSlotLive` in `src-tauri/crates/lf-engine/src/engine.rs` sends no
- * event), so the UI's flag is the one it sent: shown at once, and taken back when the batch carrying it
- * did not reach the host (`setEngineLive`).
+ * The engine owns the flags (invariant 3): `inputArmed` is the feed's `live` (`adoptEngineLive`, from
+ * `engine-store.ts`), never the UI's own guess. A press sends `SetSlotLive` and the cap follows once the
+ * engine applied it; a batch that did not reach the host leaves the flag where the engine has it, and
+ * GO LIVE's press says so once (`live.ts`).
  */
 
-// Whether each slot hears its own input.
+// Whether each slot hears its own input, as the engine applied it (the feed's `live`).
 const [inputArmed, setInputArmed] = createSignal<[boolean, boolean]>([false, false]);
 
-// Each slot's latest `SetSlotLive` send: a lost one takes its flip back only while no later one followed.
-const liveSends: [number, number] = [0, 0];
+/** The feed's live flags (`engine-store.ts`): the only writer of `inputArmed`. */
+export function adoptEngineLive(live: readonly [boolean, boolean]): void {
+  const [a, b] = inputArmed();
+  if (a !== live[0] || b !== live[1]) setInputArmed([live[0], live[1]]);
+}
 
 /**
- * Send `slot`'s live flag and show it. Resolves with the batch's submission (`sendEngine`): false takes
- * the flip back, unless a later send for the slot followed. False can also mean native MIDI dropped a
- * press that rode in the same batch while this setting reached the engine; the slot then reads not live
- * while it is, and the next GO LIVE press sends live again.
+ * Send `slot`'s live flag. Resolves with the batch's submission (`sendEngine`; false: it did not reach
+ * the host). The slot shows it once the feed does. `ownToast`: the caller tells the player of a lost
+ * batch (`sendEngineReported`), so the outbox only logs it.
  */
 function setEngineLive(slot: 0 | 1, on: boolean, ownToast = false): Promise<boolean> {
-  if (inputArmed()[slot] === on) return Promise.resolve(true);
-  const send = ++liveSends[slot];
-  const took = (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] });
-  setInputArmed((prev) => withAt(prev, slot, on));
-  return took.then((ok) => {
-    // The outbox logged the lost batch, and toasted it unless the caller tells the player (`ownToast`).
-    if (!ok && liveSends[slot] === send) setInputArmed((prev) => withAt(prev, slot, !on));
-    return ok;
-  });
+  return (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] });
 }
 
 // A tone reload of a live slot, from its unload to its resume: the slot counts as live meanwhile.
@@ -97,7 +92,7 @@ export function engineInputLive(): boolean {
  * The looper facade's MIC toggle (the player sets a slot to Off and goes live instead): the device input
  * dry through a slot without a plugin, heard and recorded. On: an Off slot first, the active one first,
  * else a slot without a plugin. Off: every such live slot stops. With a plugin in both slots none is
- * empty, and it says so. Returns whether the input is live now.
+ * empty, and it says so. Returns whether it asked for live (the flag follows on the feed).
  */
 export function toggleEngineInput(): boolean {
   if (engineInputLive()) {
@@ -115,7 +110,9 @@ export function toggleEngineInput(): boolean {
   return true;
 }
 
-/** Tell a new engine (or one the WebView lost track of) which slots are live. */
+/** On a reset frame, before its flags are adopted: tell a new engine the slots the feed last showed live
+ * (the settings replay has them too), and the engine a reloaded page finds that none is (a fresh page
+ * shows none). */
 export function resendEngineLive(): void {
   const [a, b] = inputArmed();
   sendEngine({ SetSlotLive: [0, a] }, { SetSlotLive: [1, b] });
@@ -130,7 +127,8 @@ async function sendLive(slot: 0 | 1, on: boolean, ownToast: boolean): Promise<vo
 /**
  * Go LIVE on `slot`: the engine's device is already open (Audio Settings picks it, the slot its
  * channel); going live only routes the slot's input, through its plugin or dry while the slot is Off.
- * One op on the slot's chain; rejects when the engine did not get it (the slot reads not live again).
+ * One op on the slot's chain; rejects when the batch did not reach the host (the slot stays as the feed
+ * shows it).
  * `ownToast`: the caller toasts that rejection itself (`sendLive`).
  */
 export function goLive(slot: 0 | 1, ownToast = false): Promise<void> {

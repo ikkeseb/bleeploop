@@ -168,6 +168,7 @@ for (const f of fixture.feed) {
     assert.equal(decoded.device.length, f.device.length);
     if ('status' in f) assert.deepEqual(decoded.status, f.status);
     if ('settings' in f) assert.deepEqual(decoded.settings, f.settings);
+    if ('live' in f) assert.deepEqual(decoded.live, f.live);
     assert.deepEqual(decoded.anchor, f.anchor);
     assert.deepEqual(decoded.meter, f.meter);
     assert.deepEqual(decoded.peaks, f.peaks);
@@ -262,6 +263,8 @@ const refused = {
   'a unit action with a payload': () => decodeCommand({ Action: { FadeAll: 1 } }),
   'a press with a payload': () => decodeCommand({ Press: 0 }),
   'a feed frame without its events': () => decodeFeedFrame({ seq: 0, reset: false }),
+  "a third slot's live flag": () => decodeFeedFrame({ ...structuredClone(fixture.feed[0]), live: [true, false, true] }),
+  'a live flag that is no bool': () => decodeFeedFrame({ ...structuredClone(fixture.feed[0]), live: [1, 0] }),
   'a status without inputOpen': () => {
     const s = structuredClone(fixture.deviceStatuses[0]);
     delete s.inputOpen;

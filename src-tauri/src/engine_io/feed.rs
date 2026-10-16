@@ -1,7 +1,7 @@
 //! OWNS: the feed (its frame: `wire.rs`): what the UI reads back from the
 //! engine, built on its own non-RT thread about 60 times a second ([`FeedFrame`]). Each tick drains the
-//! engine's events and the device's, and reads the device status, the clock anchor, the input meter
-//! and the lanes' waveforms; a frame goes out when any of them changed, and at least every `REFRESH`
+//! engine's events and the device's, and reads the device status, the clock anchor, the input meter,
+//! each plugin slot's live flag and the lanes' waveforms; a frame goes out when any of them changed, and at least every `REFRESH`
 //! while a device runs (the UI extrapolates its playhead from the anchor between frames). Never PCM.
 //!
 //! The scope taps (`lf_engine::scope`) are drained every tick whatever the frame carries, held or not:
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use lf_engine::grid::Frame;
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::scope::{ScopeBin, SCOPE_SOURCES};
-use lf_engine::{Event, LaneInfo, LaneState, Overview, TRACK_COUNT};
+use lf_engine::{Event, LaneInfo, LaneState, Overview, SLOT_COUNT, TRACK_COUNT};
 
 use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, WireCommand, WireEvent};
 use super::{DeviceEvent, DeviceStatus, EngineHost};
@@ -92,6 +92,8 @@ pub(crate) struct Feed {
     /// What the last frames said.
     status: Option<DeviceStatus>,
     meter: Option<Meter>,
+    /// Each plugin slot's live flag as last sent (`Overview::slot_live`; all off with no engine).
+    live: [bool; SLOT_COUNT],
     sent: Option<Instant>,
     drained: Vec<Event>,
     /// Each lane's waveform as last sent (`None`: nothing yet, or a reset since).
@@ -123,6 +125,7 @@ impl Feed {
             selected: (0, 0),
             status: None,
             meter: None,
+            live: [false; SLOT_COUNT],
             sent: None,
             drained: Vec::with_capacity(256),
             drawn: [None; TRACK_COUNT],
@@ -195,19 +198,22 @@ impl Feed {
         });
         let metered = meter != self.meter;
         self.meter = meter;
+        let now_live: [bool; SLOT_COUNT] = std::array::from_fn(|s| self.overview.as_ref().is_some_and(|o| o.slot_live(s)));
+        let live = (reset || now_live != self.live).then_some(now_live);
+        self.live = now_live;
         let peaks = self.peaks(reset);
         // A reset carries no scope: the UI replaces its view with this frame, so the trace starts over.
         let scope = self.scope(!reset);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
         // A batch of columns is itself a reason to send: a tick that built one never drops it.
-        if !(reset || due || metered || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some()) {
+        if !(reset || due || metered || live.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some()) {
             return None;
         }
         let events = if reset { self.state_events() } else { self.drained.iter().copied().map(WireEvent).collect() };
         let settings = reset.then(|| self.host.settings().into_iter().map(WireCommand).collect());
         self.sent = Some(Instant::now());
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, peaks, scope, settings })
+        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, live, peaks, scope, settings })
     }
 
     /// Build this frame's batch from the columns `drain` took. `send` false — held, nobody subscribed,

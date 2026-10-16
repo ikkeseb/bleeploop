@@ -241,7 +241,9 @@ await probe(async ({ open }) => {
   await page.locator('.slot__source').first().selectOption(keys[3], { noWaitAfter: true });
   await page.waitForFunction(() => !!window.__slotPendingProbe.loadRelease);
   assert.equal((await slotUi(0)).pickerDisabled, true);
-  const liveSent = () => page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetSlotLive).map((c) => c.SetSlotLive));
+  // GO LIVE's presses only: the load into the emptied slot stops its live input first (a stop, sent
+  // as asked whatever the slot showed).
+  const liveSent = () => page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetSlotLive?.[1]).map((c) => c.SetSlotLive));
   assert.deepEqual(await liveSent(), [], 'no GO LIVE while the source load runs');
   await page.evaluate(() => window.__slotPendingProbe.loadRelease());
   await page.waitForFunction(() => window.__slotPendingProbe.autoEditorOpened === true);

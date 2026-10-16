@@ -98,7 +98,7 @@ async function run(): Promise<string> {
   await selectPlugin(0, desc!);
   check(slotPlugins()[0]?.id === desc!.id, `could not load ${desc!.name}`);
   await goLive(0);
-  check(inputArmed()[0], 'GO LIVE did not take slot 1 live');
+  await until('the feed to show slot 1 live (GO LIVE)', () => inputArmed()[0], 5);
   log(`plugin: ${desc!.name} (${desc!.format}) live in slot 1`);
 
   // ── Three lanes looping ─────────────────────────────────────────────────────────────────────────

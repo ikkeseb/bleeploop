@@ -251,6 +251,7 @@
     {
       "seq": 0,
       "reset": true,
+      "live": [true, false],
       "events": [
         { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "meter": { "num": 6, "den": 8, "beats": 2 }, "locked": true } },
         {

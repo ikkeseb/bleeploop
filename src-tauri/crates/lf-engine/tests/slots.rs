@@ -1,6 +1,6 @@
 //! The plugin slot rack (`src/slots.rs`) driven through the engine: install and removal through the
 //! ports with their bypass crossfades, the engine never dropping a unit, the notes a slot holds, one
-//! plugin call per block, the live flag and gain, where each output goes and where it is recorded, and
+//! plugin call per block, the live flag (and the overview's copy the feed shows) and gain, where each output goes and where it is recorded, and
 //! the whole of it bit-identical at any block size. New with the engine: the web app's slots
 //! (`plugin-bridge.ts`, `instrument-slots.ts`) had no rig guard to port.
 //!
@@ -649,6 +649,25 @@ fn an_effects_latency_moves_the_take_only_while_its_slot_is_live() {
     assert_eq!(idle, (PHYS + LIMITER, 1.0), "the effect's slot off, the dry slot live: no latency");
     let other = aligned_take(|rig| rig.install(1, Box::new(Delay::new(PLUGIN))));
     assert_eq!(other.0, PHYS + LIMITER, "an effect in a slot that is not live");
+}
+
+#[test]
+fn the_overview_shows_each_slots_live_flag_once_the_engine_applies_it() {
+    let mut rig = Rig::new();
+    let live = |rig: &Rig| [0, 1].map(|s| rig.engine.looper().overview().slot_live(s));
+    assert_eq!(live(&rig), [false, false], "the rig's GO LIVE still waits in the ring");
+    rig.advance(1);
+    assert_eq!(live(&rig), [true, false], "applied: slot A live");
+    rig.set(Command::SetSlotLive(1, true));
+    assert_eq!(live(&rig), [true, true], "both slots may be live");
+    rig.set(Command::SetSlotLive(0, false));
+    assert_eq!(live(&rig), [false, true], "off follows too");
+    rig.send_at(rig.frame + 1000, Command::SetSlotLive(1, false));
+    rig.advance(1);
+    assert_eq!(live(&rig), [false, true], "a command not due yet shows nothing");
+    rig.advance(1000);
+    assert_eq!(live(&rig), [false, false], "it shows from its frame");
+    assert!(!rig.engine.looper().overview().slot_live(2), "a slot out of range is never live");
 }
 
 #[test]

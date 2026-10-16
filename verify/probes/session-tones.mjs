@@ -183,6 +183,7 @@ await probe(async ({ open }) => {
       };
       loadTokens.length = 0;
       const first = await reimport();
+      await pause(50); // the live flags reach the UI on the feed, after the batch that sent them
       const afterFirst = {
         ...first,
         tokens: { answered: answered.splice(0), passed: loadTokens.splice(0) },
@@ -243,6 +244,7 @@ await probe(async ({ open }) => {
       loadGate.open();
       await reloading;
       loadGate = null;
+      await pause(50);
       const liveChoice = { calls: calls.slice(), liveMidReload, live: nativeIo.inputArmed().slice() };
 
       // ── The player makes slot B live while slot A's reload unloads: both are live after it ──────────
@@ -258,6 +260,7 @@ await probe(async ({ open }) => {
       unloadGate.open();
       await unloading;
       unloadGate = null;
+      await pause(50);
       const liveDuringUnload = { calls: calls.slice(), liveMidUnload, live: nativeIo.inputArmed().slice() };
 
       // ── The player switches slot A to the synth and back to the amp while the import is in flight ───

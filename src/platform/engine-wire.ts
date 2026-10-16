@@ -396,6 +396,9 @@ export interface FeedFrame {
    * lane's mix as the engine last applied it (its `Mix`, also among the reset's events), or as sent
    * while no engine has reported the lane yet. A setting missing from it is at the engine's default. */
   settings?: EngineCommand[];
+  /** Each plugin slot's live flag (GO LIVE) as the engine applied it: on a reset frame and when it
+   * changed; absent = unchanged. The UI shows GO LIVE from it (invariant 3). */
+  live?: [boolean, boolean];
   events: EngineEvent[];
   device: DeviceEvent[];
   /** Absent = unchanged; null = no device runs; else the device that runs now. */
@@ -659,6 +662,10 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
   };
   if ('status' in o) out.status = o.status === null ? null : decodeDeviceStatus(o.status);
   if (o.settings !== undefined) out.settings = array(o.settings, 'feed.settings').map(decodeCommand);
+  if (o.live !== undefined) {
+    const [l0, l1] = array(o.live, 'feed.live', ENGINE_SLOTS);
+    out.live = [bool(l0, 'feed.live[0]'), bool(l1, 'feed.live[1]')];
+  }
   return out;
 }
 

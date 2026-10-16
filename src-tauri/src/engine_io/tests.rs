@@ -1778,6 +1778,36 @@ fn the_feed_resyncs_a_new_subscriber_and_a_new_engine() {
 }
 
 #[test]
+fn the_feed_carries_each_slots_live_flag_as_the_engine_applied_it() {
+    use super::feed::Feed;
+    let h = Harness::new();
+    let mut feed = Feed::new(h.host.clone());
+    let first = feed.tick(true).expect("a new subscriber gets a frame at once");
+    assert_eq!(first.live, Some([false; SLOT_COUNT]), "no engine: no slot is live, and a reset says so");
+    h.open(asio(Some(256)));
+    let mut seen = Vec::new();
+    feed_until(&mut feed, &mut seen, "the first engine resets the UI", |f| f.reset);
+    h.send(Command::SetSlotLive(1, true));
+    feed_until(&mut feed, &mut seen, "slot B goes live", |f| f.live == Some([false, true]));
+    let again = feed.tick(true).expect("a reset frame");
+    assert_eq!(again.live, Some([false, true]), "a reset carries the flags whether or not they changed");
+    h.send(Command::SetSlotLive(1, false));
+    feed_until(&mut feed, &mut seen, "slot B stops", |f| f.live == Some([false, false]));
+    feed_until(&mut feed, &mut seen, "a frame that changed no flag leaves the field out (the anchor's refresh)", |f| f.live.is_none());
+
+    // A new engine (another rate) gets the flag from the settings replay, and the feed shows it.
+    h.send(Command::SetSlotLive(0, true));
+    feed_until(&mut feed, &mut seen, "slot A goes live", |f| f.live == Some([true, false]));
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    feed_until(&mut feed, &mut seen, "the new engine resets the UI", |f| f.reset);
+    let replayed = |f: &super::wire::FeedFrame| f.live == Some([true, false]);
+    if !seen.last().is_some_and(replayed) {
+        feed_until(&mut feed, &mut seen, "the replayed GO LIVE on the new engine", replayed);
+    }
+}
+
+#[test]
 fn the_feed_draws_a_take_as_it_records_and_the_whole_loop_on_a_reset() {
     use super::feed::Feed;
     use super::wire::FeedFrame;

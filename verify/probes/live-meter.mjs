@@ -3,7 +3,7 @@
  * scripted with `__lf.native.emit`), with the native-only chrome on (`host.web.ts` served with
  * `available: true`, as `contact-sheet` does). Both slots Off, so each takes its own input.
  *
- * Proves, at 1280×820:
+ * Proves, at 1280×820 (the fake answers GO LIVE's `SetSlotLive` on the feed's `live`, as the engine does):
  * - each slot card meters its OWN input (the feed's `meter.peak[slot]`): GO LIVE lights the card's meter
  *   and the INPUT LIVE pill, the meter's `--lvl` follows the slot's level on the −60..0 dBFS span, and
  *   a slot not live stays dark whatever its input reads;
@@ -15,7 +15,9 @@
  * - the selected lane names the live slots ("A LIVE", "A+B LIVE", "B LIVE"), the other lanes nothing,
  *   and the badge follows the selection and GO LIVE off;
  * - a GO LIVE (or a stop) whose batch never reaches the host leaves the slot as it was and says so (a
- *   single toast, GO LIVE's and not the outbox's, and the release log), since the engine echoes no live flag;
+ *   single toast, GO LIVE's and not the outbox's, and the release log); the cap is the feed's `live`, so a
+ *   stop the engine applied though its batch answered false shows GO LIVE, and two lost MIC presses leave
+ *   nothing live;
  * - at 1000×700, 1280×820 and 1920×1080: the CLIP lamp, the badge and the pill are at least their
  *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, and the
  *   meter runs most of the card's width.
@@ -247,6 +249,36 @@ await probe(async ({ open }) => {
         'a lost stop is told once, by INPUT LIVE',
       );
       assert.equal(consumeConsoleErrors('[platform] input batch failed').length, 2, 'the outbox logged both lost batches');
+
+      // The cap is the feed's flag, never the press's guess. A stop whose batch native MIDI answered as
+      // partly dropped (a press beside it) still reached the engine: the cap follows it to GO LIVE.
+      await page.evaluate(() => void (window.__lf.native.dropped = 'noDevice'));
+      await live(1).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
+      await page.waitForFunction(() => !document.querySelector('[aria-label="Live input for slot A"]')?.disabled);
+      await page.evaluate(() => void (window.__lf.native.dropped = null));
+      assert.equal((await live(1).textContent()).trim(), 'GO LIVE', 'a stop the engine applied shows, whatever the batch answered');
+      consumeConsoleErrors('[platform] native MIDI dropped input');
+      assert.equal(consumeConsoleErrors('[PluginControls] go-live toggle failed').length, 1);
+      // Two MIC presses in flight together (one batch), lost: neither reached the engine, so nothing is
+      // live (a guess would have flipped on, then off, then rolled the off back to on).
+      await page.evaluate(() => {
+        window.__lf.native.failSends = 2;
+        void window.__lf.looper.toggleInput();
+        void window.__lf.looper.toggleInput();
+      });
+      await page.waitForFunction(() => window.__lf.native.failSends === 0);
+      await page.waitForTimeout(100);
+      assert.deepEqual(
+        [(await live(1).textContent()).trim(), (await live(2).textContent()).trim()],
+        ['GO LIVE', 'GO LIVE'],
+        'two lost MIC presses leave both slots as the engine has them',
+      );
+      assert.equal(consumeConsoleErrors('[platform] input batch failed').length, 1, 'the lost batch, logged');
+      assert.ok(
+        (await page.evaluate(() => window.__lf.native.batches.at(-1).items.filter((i) => i.engine?.SetSlotLive).length)) === 2,
+        'both presses rode in the lost batch',
+      );
     }
     assert.deepEqual(consoleErrors, [], `${tag}: no console errors`);
     await page.context().close();
