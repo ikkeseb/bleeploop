@@ -8,6 +8,7 @@ import {
 } from '../../platform';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from './audio-settings';
 import { notifyError, notifyInfo } from '../../notify';
+import { settingsAction } from '../../settings-opener';
 
 /**
  * OWNS: the process-wide native audio configuration the Audio Settings panel edits — the enumerated
@@ -186,7 +187,7 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
     });
   } catch (e) {
     console.error('[instrument] ASIO probe failed', e);
-    notifyError('Could not start the ASIO driver. Press RETRY ASIO in Audio Settings.', e);
+    notifyError('Could not start the ASIO driver. Press RETRY ASIO in Audio Settings.', e, settingsAction('device'));
     report = { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
     setAsioStatus(report);
   }
@@ -205,6 +206,7 @@ async function noteMissingDriver(pick: string): Promise<void> {
   notifyInfo(
     `ASIO driver ${pick} is not installed`,
     `${running ? `Playing through ${running} instead. ` : ''}Pick a driver in Audio Settings.`,
+    settingsAction('device'),
   );
 }
 

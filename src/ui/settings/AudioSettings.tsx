@@ -63,6 +63,7 @@ import {
   switchEngineAsioDriver,
 } from '../state/engine-store';
 import { sharesInterface } from './share-target';
+import { SETTINGS_PAGE_LABELS, type SettingsPage } from '../../settings-opener';
 import './audio-settings.css';
 
 /**
@@ -84,13 +85,7 @@ import './audio-settings.css';
  */
 
 /** The panel's pages, in the rail's order. */
-export type SettingsPage = 'device' | 'midi' | 'plugins' | 'diagnostics';
-const PAGES: readonly { id: SettingsPage; label: string }[] = [
-  { id: 'device', label: 'Device' },
-  { id: 'midi', label: 'MIDI pedals' },
-  { id: 'plugins', label: 'Plugins' },
-  { id: 'diagnostics', label: 'Diagnostics' },
-];
+const PAGES = (['device', 'midi', 'plugins', 'diagnostics'] as const).map((id) => ({ id, label: SETTINGS_PAGE_LABELS[id] }));
 
 /** A rail lamp, the lane LED's vocabulary (the FX pill's socket): unlit, lit warm-white while the page's
  * thing works, amber (the command bar lamp's warning) while it needs the player. */

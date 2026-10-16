@@ -1,7 +1,7 @@
 import * as audioDeviceSettings from '../ui/state/audio-settings';
 import { asioStatus, probeAsio, setAsioEnabled, setBufferSize } from '../ui/state/audio-devices';
 import { autosave } from '../session/autosave';
-import type { SettingsPage } from '../ui/settings/AudioSettings';
+import type { SettingsPage } from '../settings-opener';
 import { buildExportBundle } from '../session/export';
 import { importSession } from '../session/import';
 import {

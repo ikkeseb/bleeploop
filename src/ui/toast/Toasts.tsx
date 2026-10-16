@@ -9,7 +9,7 @@ import './toasts.css';
  *
  * Non-modal + pointer-transparent container (the play path stays live behind it). Each toast is an
  * `aria-live` status; the whole body is a pointer dismiss shortcut, with a real close `<button>` for
- * keyboard users. Auto-dismiss + dedupe live in the store, not here.
+ * keyboard users, and a toast that carries an action shows it as a button before the close. Auto-dismiss + dedupe live in the store, not here.
  */
 export function Toasts() {
   return (
@@ -38,6 +38,23 @@ export function Toasts() {
               </span>
               <Show when={t.detail}>
                 <span class="toast__detail">{t.detail}</span>
+              </Show>
+              {/* What to do about it, as a real button: the body's pointer dismiss must not take its
+                  click (it dismisses too, after running the action). */}
+              <Show when={t.action}>
+                {(action) => (
+                  <button
+                    type="button"
+                    class="toast__action lf-link"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dismissToast(t.id);
+                      action().run();
+                    }}
+                  >
+                    {action().label}
+                  </button>
+                )}
               </Show>
             </div>
             <button

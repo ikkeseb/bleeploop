@@ -6,7 +6,8 @@ import { Looper } from './ui/looper/Looper';
 import { Transport } from './ui/transport/Transport';
 import { SessionTools } from './ui/transport/SessionTools';
 import { InstrumentSlot } from './ui/instrument/InstrumentSlot';
-import { AudioSettings, type SettingsPage } from './ui/settings/AudioSettings';
+import { AudioSettings } from './ui/settings/AudioSettings';
+import { registerSettingsOpener, type SettingsPage } from './settings-opener';
 import { Help } from './ui/settings/Help';
 import { UpdatePanel } from './ui/settings/UpdatePanel';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
@@ -27,8 +28,8 @@ import { installLfDebug } from './debug/lf';
 
 export function App() {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
-  // The Audio Settings page the panel shows: the gear opens DEVICE; an opener that names a page (`__lf.ui`
-  // today) lands there.
+  // The Audio Settings page the panel shows: the gear opens DEVICE; an opener that names a page (a toast's
+  // action, Help's link, an empty slot's line, `__lf.ui`: `src/settings-opener.ts`) lands there.
   const [settingsPage, setSettingsPage] = createSignal<SettingsPage>('device');
   const [helpOpen, setHelpOpen] = createSignal(false);
   const [updateOpen, setUpdateOpen] = createSignal(false);
@@ -39,6 +40,16 @@ export function App() {
     setUpdateOpen(false);
     setSettingsPage('device');
     setSettingsOpen((v) => !v);
+  };
+  // Open Audio Settings on `page`, or switch an open panel to it; the panel takes focus either way, so an
+  // opener that goes away (a toast's action) never leaves focus on <body>.
+  let settingsEl: HTMLDivElement | undefined;
+  const showSettings = (page: SettingsPage) => {
+    setHelpOpen(false);
+    setUpdateOpen(false);
+    setSettingsPage(page);
+    if (settingsOpen()) queueMicrotask(() => settingsEl?.focus());
+    else setSettingsOpen(true);
   };
   const openHelp = () => {
     setSettingsOpen(false);
@@ -133,6 +144,7 @@ export function App() {
     // page held. Its events, what its bindings fire in the UI, the web's bindings handed over once
     // (`src/app/midi-actions.ts`).
     onCleanup(installMidiActions());
+    onCleanup(registerSettingsOpener(showSettings));
     // Keyboard transport (the named actions of `src/app/actions.ts`, plus 1–5) + the Escape popover
     // close + the pointer-blur discipline: `src/app/transport-keys.ts`. Window-level, so it never
     // depends on what is focused or mounted.
@@ -161,10 +173,7 @@ export function App() {
       // Debug surface for automated (Playwright) verification + by-ear/by-eye gates: `src/debug/lf.ts`.
       // The popover drivers are supplied here because their signals are component-local.
       installLfDebug({
-        openSettings: (page = 'device') => {
-          setSettingsPage(page);
-          setSettingsOpen(true);
-        },
+        openSettings: (page = 'device') => showSettings(page),
         closeSettings: () => setSettingsOpen(false),
         openHelp: () => setHelpOpen(true),
         closeHelp: () => setHelpOpen(false),
@@ -376,7 +385,7 @@ export function App() {
                 nativeHostReady() || scanning()
                   ? 'Rescan plugins'
                   : !engineDevice() && engineOpenFailure()
-                    ? 'Rescan plugins: no audio device is open, so the plugin host has not started (see Audio Settings)'
+                    ? 'Rescan plugins: no audio device is open, so the plugin host has not started (see Audio Settings → DEVICE)'
                     : 'Rescan plugins: the plugin host is still starting'
               }
               aria-busy={scanning()}
@@ -458,7 +467,10 @@ export function App() {
             role="dialog"
             aria-label="Audio settings"
             tabindex={-1}
-            ref={focusPanel}
+            ref={(el) => {
+              settingsEl = el;
+              focusPanel(el);
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <AudioSettings page={settingsPage()} onPage={setSettingsPage} />

@@ -17,6 +17,7 @@ import {
   type StoreProblem,
 } from '../../platform';
 import { notifyError } from '../../notify';
+import { settingsAction } from '../../settings-opener';
 
 /**
  * OWNS: native MIDI as the UI shows it, built from native MIDI's events (`platform.midi`): the input
@@ -135,7 +136,7 @@ function onEvent(ev: MidiEvent): void {
     case 'store': {
       const [message, detail] = storeProblemText(ev.problem);
       console.error(`[midi] bindings store: ${message} ${detail}`);
-      notifyError(message, detail);
+      notifyError(message, detail, 'rejected' in ev.problem ? settingsAction('midi') : undefined);
       break;
     }
     case 'held':
