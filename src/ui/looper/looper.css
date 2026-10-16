@@ -56,7 +56,8 @@
   position: relative;
   overflow: hidden;
   --sc: var(--faint);
-  transition: border-color 0.2s, background 0.2s;
+  /* no transition here, on the core's face or on its ring: a state colour lands on the frame the feed
+     switches it, like a hardware REC LED. Only the core's hover eases. */
 }
 .lp-lane[data-state='play'] { --sc: var(--play); }
 .lp-lane[data-state='rec'] { --sc: var(--rec); }
@@ -251,7 +252,7 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px var(--sunk), 0 0 0 4px var(--edge);
   position: relative;
   cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.2s, transform 0.12s;
+  transition: border-color 0.15s, transform 0.12s; /* the hover; box-shadow is state colour */
 }
 .lp-core:hover:not(:disabled) {
   border-color: var(--dim);
@@ -285,7 +286,6 @@
   border-radius: 999px;
   border: 2px solid var(--sc);
   opacity: 0;
-  transition: opacity 0.2s;
 }
 .lp-lane[data-state='play'] .lp-core::before {
   opacity: 0.9;
