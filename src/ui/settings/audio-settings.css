@@ -1,18 +1,24 @@
 /* Global Audio Settings popover — "Instrument". A floating near-opaque panel anchored top-right under
-   the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
-   buffer-size + the ASIO toggle render as matte key faces; the rec-align trim is a sunk numeric well;
-   the read-only host/isolated/plugin/midi DIAGNOSTICS sit in a sunk
-   readout well at the foot. Chrome stays monochrome — engaged = the warm-white --engaged, --dub = a
-   deferred-change / warning note. */
+   the command-bar gear (see .settings-popover in app.css). Three titled groups — DEVICE, MIDI PEDALS,
+   PLUGINS — each a column of rows: a sentence-case label, then a control column capped at --as-col so
+   a select is as wide as its longest option, not the panel, and each hint sits right under its control.
+   A wide panel sets DEVICE beside the other two; a narrow one stacks them. Selects + the ASIO toggle
+   render as matte key faces; the read-only DIAGNOSTICS sit in a sunk readout well at the foot. Chrome
+   stays monochrome — engaged = the warm-white --engaged, --dub = a deferred-change / warning note. */
 .audio-settings {
+  --as-label: 84px; /* the label column */
+  --as-gap: 12px;
+  --as-indent: calc(var(--as-label) + var(--as-gap)); /* where the control column starts */
+  --as-col: 520px; /* the control column's cap */
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 16px;
   /* A set width, so the hints wrap instead of setting it: as shrink-to-fit, the Share hint's one line
-     sized the panel and, once it outgrew the window, pushed it to the window's left edge. 1080px is the
-     width that line gave it; a narrower window keeps the bar's side margin on both sides. */
+     sized the panel and, once it outgrew the window, pushed it to the window's left edge. A narrower
+     window keeps the bar's side margin on both sides. Its own width picks one or two columns below. */
   width: min(1080px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
-  padding: 15px;
+  container-type: inline-size;
+  padding: 16px 20px 18px;
   border-radius: 14px;
   /* near-opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
      legible without a blur. */
@@ -26,26 +32,80 @@
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--dim);
+  color: var(--text);
   font-weight: 600;
-  margin-bottom: 3px;
+}
+
+/* The groups: DEVICE alone in the first, wider column (its hints are the long ones), MIDI PEDALS over
+   PLUGINS in the second (.side); one column, in that order, when the panel is too narrow for two control
+   columns side by side. The diagnostics' four read-outs take two columns there too. */
+.audio-settings__groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 22px 44px;
+  align-items: start;
+}
+@container (min-width: 820px) {
+  .audio-settings__groups {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+.audio-settings__side {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+}
+.audio-settings__group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+/* group title — the caps eyebrow of the diagnostics' title, with a hairline running out to the column's
+   edge: the group reads as one block without a box around it */
+.audio-settings__group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 2px;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+.audio-settings__group-title::after {
+  content: '';
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--edge);
+}
+/* rows that belong together inside a group (the driver; its timing; where the sound goes): a tighter
+   rhythm within, the group's wider gap between */
+.audio-settings__cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
 }
 
 .audio-settings__row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--as-gap);
+  min-height: 30px;
+  max-width: calc(var(--as-indent) + var(--as-col));
 }
 
-/* control label — caps, --dim (readable functional label, never the sub-legible --faint) */
+/* control label — sentence case, --dim (readable functional label, never the sub-legible --faint);
+   the caps eyebrow is the group's */
 .audio-settings__label {
-  width: 74px;
+  width: var(--as-label);
   flex: 0 0 auto;
   color: var(--dim);
-  font-size: 9.5px;
+  font-size: 11.5px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
 /* matte key-face <select> — themed caret, explicit background so no UA face bleeds through */
@@ -67,7 +127,7 @@
   background-size: 12px 12px;
   padding: 0 28px 0 11px;
   font: inherit;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
   transition: color 0.15s, background-color 0.15s;
@@ -129,14 +189,17 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Deferred-change hint: a device/channel swap only takes effect on the next GO LIVE while a slot is
-   live. Amber note, mixed up to at least --dim brightness so it stays legible. */
+/* A hint sits right under its control, in the control column: a caution (the Share pick on the ASIO
+   interface, the ASIO start) in the amber note, mixed up to at least --dim brightness so it stays
+   legible. */
 .audio-settings__hint {
-  margin-top: -4px;
-  padding-left: 83px;
-  font-size: 10px;
-  line-height: 1.4;
+  margin-top: -3px;
+  padding-left: var(--as-indent);
+  max-width: calc(var(--as-indent) + var(--as-col));
+  font-size: 11px;
+  line-height: 1.45;
   color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+  text-wrap: pretty;
 }
 
 /* A standing explanation, not a deferred change or a fault: quiet grey instead of the amber note. */
@@ -195,8 +258,9 @@
    its action and says why on that line (in the folders' amber note), with a port select and ASSIGN when
    the player must pick its port. */
 .audio-settings__bindings {
-  margin: -4px 0 0;
-  padding: 0 0 0 83px;
+  margin: -2px 0 0;
+  padding: 0 0 0 var(--as-indent);
+  max-width: calc(var(--as-indent) + var(--as-col));
   list-style: none;
   display: flex;
   flex-direction: column;
@@ -313,7 +377,8 @@
 }
 .audio-settings__folder-list {
   margin: 0;
-  padding: 0 0 0 83px;
+  padding: 0 0 0 var(--as-indent);
+  max-width: calc(var(--as-indent) + var(--as-col));
   list-style: none;
   display: flex;
   flex-direction: column;
@@ -353,7 +418,8 @@
    they are (--faint file names, --dim reasons, a size down). A long list scrolls inside its own box
    instead of pushing the diagnostics down; a long name or reason is cut (the line's title has the path). */
 .audio-settings__unsupported {
-  padding: 4px 0 0 83px;
+  padding: 4px 0 0 var(--as-indent);
+  max-width: calc(var(--as-indent) + var(--as-col));
   font-size: 10px;
 }
 .audio-settings__unsupported-summary {
@@ -402,7 +468,7 @@
 
 .audio-settings__soon {
   color: var(--dim);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 /* ASIO low-latency tier toggle — a checkbox + a state word, left-aligned in the value column. Engaged
@@ -412,7 +478,7 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text);
   cursor: pointer;
 }
@@ -431,7 +497,7 @@
    read-only host/isolated/plugin/midi/bridge state. Reads as a status display, distinct from the
    interactive controls above. The aggregate of these is the command-bar system lamp. */
 .audio-settings__diag {
-  margin-top: 5px;
+  margin-top: 4px;
   padding: 11px 12px;
   border-radius: 10px;
   background: var(--sunk);
@@ -474,4 +540,20 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 24ch;
+}
+
+/* A wide panel sets the four read-outs two by two on the groups' own columns, each value as long as its
+   cell lets it be (after the well's own rules, which this overrides). */
+@container (min-width: 820px) {
+  .audio-settings__diag {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    column-gap: 44px;
+  }
+  .audio-settings__diag-row b {
+    max-width: none;
+  }
+  .audio-settings__diag-title {
+    grid-column: 1 / -1;
+  }
 }
