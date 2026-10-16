@@ -116,7 +116,7 @@ await probe(async ({ open, browser }) => {
   console.log('FIXED sent', JSON.stringify(fixedSent));
   assert.deepEqual(fixedSent[0], { Action: { Toggle: 'Fixed' } }, "FIXED sends the engine's toggle");
   assert.deepEqual(fixedSent.at(-1), { SetFixedBars: 1 }, 'Fewer bars steps down to one bar');
-  assert.equal((await fixed.textContent()).trim(), 'FIXED 1');
+  assert.equal((await page.locator('.transport__fixed .transport__bars-val').textContent()).trim(), '1bar');
   await clearSent(page);
   await page.getByRole('button', { name: 'Track 1 record', exact: true }).click();
   await page.waitForFunction(() => window.__lf.native.sent.length >= 2, undefined, { timeout: 5000 });

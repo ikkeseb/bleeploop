@@ -3,12 +3,12 @@
  *
  * The bar's controls are all min-content (nowrap pills, fixed sliders) and body is overflow:hidden, so
  * a window narrower than their sum would push master + the tools off-screen. A media query cannot
- * decide this: the row's width changes with the contextual CLICK / FIXED controls,
- * so a bar that fits idle at 1440 clips busy. Measure the ONE-ROW requirement instead — the sum of
+ * decide this: the row's width changes with FIXED's bars and the words that change (the loop read-out),
+ * so a bar that fits idle can clip busy. Measure the ONE-ROW requirement instead — the sum of
  * the children's intrinsic widths + gaps + padding (the spacer counts as its min-width) — against the
  * bar's width, and flag `.cmd--stack`; CSS (app.css + transport.css) drops the modes cluster to a
  * second row. Child widths are intrinsic in both arrangements, so the flag cannot oscillate.
- * Re-measured on bar resize and on any DOM change inside it (a slider sliding in, a label changing).
+ * Re-measured on bar resize and on any DOM change inside it (FIXED's bars appearing, a label changing).
  */
 const SPACER_MIN_PX = 8;
 
@@ -40,10 +40,10 @@ export function installCmdFit(bar: HTMLElement): () => void {
     // Second rung: with the modes on row 2, can the REST still share row 1? If not, the tools cluster
     // joins the modes on row 2 (right-aligned) instead of wrapping onto a third row of its own, so the
     // bar stays two rows while row 2 fits and the stage below does not jump when a loop readout
-    // appears. The stacked bar wraps (`.cmd--stack`, app.css), so a row 2 that does not fit breaks
-    // onto a third row: measured under 1100 px (`docs/backlog-taste.md`, Command bar under 1100 px).
-    // Third rung: TAP and END STOP (`.transport__pair`) hold row 1 only while it still fits without the
-    // tools; otherwise they join the modes. Last rung: if row 1 still overflows with all three on row 2
+    // appears. The stacked bar wraps (`.cmd--stack`, app.css), so a row 2 that does not fit would break
+    // onto a third row (`verify/probes/layout-reachability.mjs` holds two rows from 960 px with every
+    // mode on). Third rung: TAP (`.transport__pair`) holds row 1 only while it still fits without the
+    // tools; otherwise it joins the modes. Last rung: if row 1 still overflows with all three on row 2
     // (FADE and IN FX at 960 and 1100 px), the brand folds to its dot (app.css). Every rung
     // measures intrinsic widths (the folded brand reports its unfolded scrollWidth), so none can see its
     // own effect.
