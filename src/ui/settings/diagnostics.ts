@@ -5,8 +5,9 @@ import { notifyError, notifyInfo } from '../../notify';
 import { engineDevice } from '../state/engine-store';
 
 /**
- * OWNS: what a tester's report carries — the build line Help's "About this build" shows, the plain-text
- * block its Copy diagnostics button puts on the clipboard, and Open log folder. The block names the
+ * OWNS: what a tester's report carries — the build line Help's "About this build" and Audio Settings'
+ * foot row show, the plain-text block their Copy diagnostics buttons put on the clipboard, and Open log
+ * folder. The block names the
  * build, the audio path and device, the slots' plugins, the WebView and the release log's folder: no
  * file contents, nothing personal beyond what a device name carries (the log path reads
  * `%LOCALAPPDATA%`, never the user's profile). Read at click time, so it shows the device that runs now.

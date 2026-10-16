@@ -151,8 +151,12 @@ await probe(async ({ open }) => {
   /** Asserts that `read` comes to deep-equal `want` within `until`'s deadline. */
   const settles = async (read, want, message) => assert.deepEqual(await until(read, want), want, message);
   const listening = () => page.evaluate((s) => document.querySelector(s)?.getAttribute('aria-pressed') ?? null, LEARN);
+  // The learn row lives in Audio Settings' MIDI PEDALS fold, closed at rest; a fold opened stays open
+  // across the panel's reopens.
   const openSettings = async () => {
     await page.evaluate(() => window.__lf.ui.openSettings());
+    const fold = page.getByRole('button', { name: /^MIDI pedals/ });
+    if ((await fold.getAttribute('aria-expanded')) === 'false') await fold.click();
     await page.waitForSelector(LEARN);
   };
   const sentSince = (from) => page.evaluate((m) => window.__lf.native.sent.slice(m), from);

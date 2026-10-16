@@ -1,17 +1,23 @@
-/* Global Audio Settings popover — "Instrument". A floating opaque panel anchored top-right under
-   the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
-   buffer-size + the ASIO toggle render as matte key faces; the read-only host/isolated/plugin/midi
-   DIAGNOSTICS sit in a sunk readout well at the foot. Chrome stays monochrome — engaged = the
-   warm-white --engaged, --dub = a deferred-change / warning note. */
+/* Global Audio Settings popover — "Instrument". A floating opaque panel anchored top-right under the
+   command-bar gear (see .settings-popover in app.css): ONE column, the first move first.
+   - DEVICE is the one raised card (the card tone + top light): its head (eyebrow, the lamp and state
+     word), the display window with the round trip as the one large read-out (the bar's BPM numeral:
+     34px, lit warm-white, but Geist Mono), then the ASIO switch, the driver or the Windows devices and
+     the buffer as matte key faces, and its own fold (sample rate and Share) at the card's foot.
+   - MIDI PEDALS and PLUGINS are flat folds on the panel tone, split by a hairline: a head that says in
+     one line what the fold holds, the body expanding in place (the panel scrolls).
+   - Diagnostics is the quiet foot row: text keys, the build, and the read-only status folded into a
+     sunk readout well.
+   Chrome stays monochrome — engaged = the warm-white --engaged, --dub = a deferred-change / warning
+   note, the lamp's --play green = a device runs (as the command bar's system lamp). */
 .audio-settings {
+  --as-label: 70px; /* the row label column */
+  --as-indent: calc(var(--as-label) + 10px); /* where a row's control starts: hints and lists align to it */
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  /* A set width, so the hints wrap instead of setting it: as shrink-to-fit, the Share hint's one line
-     sized the panel and, once it outgrew the window, pushed it to the window's left edge. 1080px is the
-     width that line gave it; a narrower window keeps the bar's side margin on both sides. */
-  width: min(1080px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
-  padding: 15px;
+  /* A set width: the column the first move reads down. A narrower window keeps the bar's side margin. */
+  width: min(520px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
+  padding: 14px 14px 10px;
   border-radius: 14px;
   /* opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
      legible without a blur. */
@@ -27,18 +33,151 @@
   letter-spacing: 0.08em;
   color: var(--dim);
   font-weight: 600;
-  margin-bottom: 3px;
+  margin: 0 2px 10px;
 }
 
+/* ---- DEVICE: the raised card ---- */
+.audio-settings__device {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 14px 0;
+  margin-bottom: 6px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair);
+}
+.audio-settings__device-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.audio-settings__eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+/* the state word and its lamp: --faint dot while nothing runs, green while a device runs, the amber ring
+   (the command bar's warn lamp) when the device could not open */
+.audio-settings__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.audio-settings__lamp {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--faint);
+}
+.audio-settings__state--open .audio-settings__lamp {
+  background: var(--play);
+  box-shadow: 0 0 8px -1px var(--play);
+}
+.audio-settings__state--warn {
+  color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+}
+.audio-settings__state--warn .audio-settings__lamp {
+  background: var(--dub);
+  box-shadow: 0 0 0 2px var(--surf-1), 0 0 0 3px var(--dub);
+}
+
+/* The display window: the command bar's sunk "screen" (transport.css .transport__bpm-group), the round
+   trip lit in it, the route and the numbers it is made of beside it. */
+.audio-settings__display {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 62px;
+  padding: 9px 14px;
+  border-radius: 10px;
+  background: var(--sunk);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 2px 5px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
+}
+.audio-settings__latency {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 108px;
+}
+.audio-settings__latency-num {
+  font-family: var(--mono);
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--engaged);
+  text-shadow: 0 0 14px rgba(246, 241, 231, 0.18);
+}
+.audio-settings__latency-unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--faint);
+}
+.audio-settings__latency--none .audio-settings__latency-num {
+  color: var(--faint);
+  text-shadow: none;
+}
+.audio-settings__display-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 14px;
+  border-left: 1px solid var(--hair);
+}
+.audio-settings__display-cap {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+.audio-settings__display-route {
+  font-size: 11px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* the reason no device opened: the amber note, wrapping to two lines rather than cut */
+.audio-settings__display-route--warn {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.35;
+  color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+}
+.audio-settings__display-nums {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* ---- rows: a caps label, then its control ---- */
 .audio-settings__row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
+  min-height: 28px;
 }
 
 /* control label — caps, --dim (readable functional label, never the sub-legible --faint) */
 .audio-settings__label {
-  width: 74px;
+  width: var(--as-label);
   flex: 0 0 auto;
   color: var(--dim);
   font-size: 9.5px;
@@ -51,7 +190,7 @@
 .audio-settings__select {
   flex: 1 1 auto;
   min-width: 0;
-  height: 30px;
+  height: 28px;
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
@@ -96,7 +235,7 @@
   min-width: 56px;
   color: var(--dim);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -104,7 +243,7 @@
    live. Amber note, mixed up to at least --dim brightness so it stays legible. */
 .audio-settings__hint {
   margin-top: -4px;
-  padding-left: 83px;
+  padding-left: var(--as-indent);
   font-size: 10px;
   line-height: 1.4;
   color: color-mix(in srgb, var(--dub) 55%, var(--dim));
@@ -113,6 +252,11 @@
 /* A standing explanation, not a deferred change or a fault: quiet grey instead of the amber note. */
 .audio-settings__hint--info {
   color: var(--faint);
+}
+
+/* The amber note inside a fold head's line: something in the fold wants a look. */
+.audio-settings__warn {
+  color: color-mix(in srgb, var(--dub) 55%, var(--dim));
 }
 
 /* ASIO startup status line: the reason ASIO is not in use + the explicit RETRY action. Same amber
@@ -160,6 +304,164 @@
   background: var(--surf-3);
 }
 
+/* ---- folds: a head that says what it holds, a body that expands in place ---- */
+.audio-settings__fold {
+  border-top: 1px solid var(--edge);
+}
+.audio-settings__fold-head {
+  width: 100%;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 0 2px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.audio-settings__fold-head:hover,
+.audio-settings__fold-head[aria-expanded='true'] {
+  color: var(--text);
+}
+.audio-settings__fold-head:focus-visible {
+  outline-offset: -2px;
+}
+/* no plugin host: the same line, nothing to open (the chevron's room kept so the titles align) */
+.audio-settings__fold-head--static {
+  cursor: default;
+  padding-left: 20px;
+}
+.audio-settings__fold-head--static:hover {
+  color: var(--dim);
+}
+.audio-settings__fold-title {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.audio-settings__fold-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11px;
+  color: var(--faint);
+}
+/* a summary in parts: the part that gives way when the line is short is cut, the others stay whole */
+.audio-settings__fold-summary:has(.audio-settings__fold-give) {
+  display: flex;
+  justify-content: flex-end;
+}
+.audio-settings__fold-summary > span {
+  flex: 0 0 auto;
+}
+.audio-settings__fold-summary > .audio-settings__fold-give {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.audio-settings__chevron {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  transition: transform 0.15s;
+}
+[aria-expanded='true'] > .audio-settings__chevron {
+  transform: rotate(90deg);
+}
+/* the card's own fold: a hairline across the card's foot, its title in words rather than caps (it is a
+   part of DEVICE, not a section of its own) */
+.audio-settings__fold-head--inner {
+  width: auto;
+  min-height: 36px;
+  margin: 0 -14px;
+  padding: 0 14px 0 12px;
+  border-top: 1px solid var(--hair);
+  border-radius: 0 0 11px 11px;
+}
+.audio-settings__fold-head--inner .audio-settings__fold-title {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.audio-settings__fold-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 0 12px;
+}
+.audio-settings__fold-body[hidden] {
+  display: none;
+}
+
+/* ---- Diagnostics: the quiet foot row ---- */
+.audio-settings__foot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge);
+}
+/* text keys: no face until hover (actions, quieter than the card's key faces) */
+.audio-settings__foot-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
+}
+.audio-settings__foot-btn:first-child {
+  padding-left: 2px;
+}
+.audio-settings__foot-btn:hover,
+.audio-settings__foot-btn[aria-expanded='true'] {
+  color: var(--text);
+}
+.audio-settings__foot-btn:hover:not(:first-child) {
+  background: var(--surf-2);
+}
+.audio-settings__foot-btn:active:not(:first-child) {
+  background: var(--sunk);
+  box-shadow: var(--pressed);
+}
+.audio-settings__build {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .audio-settings__chevron {
+    transition: none;
+  }
+}
+
 /* The learned MIDI bindings: one line each in the value column (action · message · the pedal-kind switch
    · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. One from the
    previous version wraps a second line saying so (in the legend's --dim); one that does not run now dims
@@ -167,7 +469,7 @@
    the player must pick its port. */
 .audio-settings__bindings {
   margin: -4px 0 0;
-  padding: 0 0 0 83px;
+  padding: 0 0 0 var(--as-indent);
   list-style: none;
   display: flex;
   flex-direction: column;
@@ -187,8 +489,9 @@
 .audio-settings__binding-why {
   flex: 1 0 100%;
   display: flex;
+  flex-wrap: wrap; /* in the narrow column the port pick and ASSIGN take a line of their own */
   align-items: center;
-  gap: 6px;
+  gap: 4px 6px;
   min-width: 0;
   padding-bottom: 2px;
 }
@@ -199,12 +502,20 @@
 }
 .audio-settings__binding-idle {
   flex: 0 1 auto;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10px;
   color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+}
+/* the port pick and ASSIGN wrap as one */
+.audio-settings__binding-assign {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .audio-settings__select--assign {
   flex: 0 1 auto;
@@ -284,7 +595,7 @@
 }
 .audio-settings__folder-list {
   margin: 0;
-  padding: 0 0 0 83px;
+  padding: 0 0 0 var(--as-indent);
   list-style: none;
   display: flex;
   flex-direction: column;
@@ -324,7 +635,7 @@
    they are (--faint file names, --dim reasons, a size down). A long list scrolls inside its own box
    instead of pushing the diagnostics down; a long name or reason is cut (the line's title has the path). */
 .audio-settings__unsupported {
-  padding: 4px 0 0 83px;
+  padding: 4px 0 0 var(--as-indent);
   font-size: 10px;
 }
 .audio-settings__unsupported-summary {
@@ -376,34 +687,53 @@
   font-size: 11px;
 }
 
-/* ASIO low-latency tier toggle — a checkbox + a state word, left-aligned in the value column. Engaged
-   accent = the warm-white --engaged (the app-wide chrome "engaged"), not the record-red default. */
+/* ASIO low-latency tier — a switch + a state word, left-aligned in the value column. The switch is the
+   checkbox itself (its name and its checked state are the control's): a matte track with a --dim knob,
+   on = the warm-white --engaged track (the app-wide chrome "engaged") with a dark knob. */
 .audio-settings__toggle {
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   font-size: 11px;
   color: var(--text);
   cursor: pointer;
 }
-.audio-settings__toggle input {
-  accent-color: var(--engaged);
+.audio-settings__switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 30px;
+  height: 17px;
+  margin: 0;
+  border-radius: 999px;
+  background: radial-gradient(circle at 8.5px 50%, var(--dim) 0 5px, transparent 5.5px), var(--surf-3);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
   cursor: pointer;
 }
-.audio-settings__toggle input:focus-visible {
-  outline-offset: 1px;
+.audio-settings__switch:checked {
+  background: radial-gradient(circle at calc(100% - 8.5px) 50%, var(--bg) 0 5px, transparent 5.5px), var(--engaged);
+}
+.audio-settings__switch:disabled {
+  cursor: default;
+  background: radial-gradient(circle at calc(100% - 8.5px) 50%, var(--faint) 0 5px, transparent 5.5px), var(--surf-2);
+}
+.audio-settings__switch:focus-visible {
+  outline-offset: 2px;
 }
 .audio-settings__toggle-text {
   color: var(--dim);
 }
+.audio-settings__switch:checked + .audio-settings__toggle-text {
+  color: var(--text);
+}
 
-/* Diagnostics — a sunk readout well at the foot: the
-   read-only host/isolated/plugin/midi/bridge state. Reads as a status display, distinct from the
-   interactive controls above. The aggregate of these is the command-bar system lamp. */
+/* Diagnostics' read-out, folded under the foot row — a sunk readout well: the read-only
+   host/engine/plugin/midi state. Reads as a status display, distinct from the interactive controls
+   above. The aggregate of these is the command-bar system lamp. */
 .audio-settings__diag {
-  margin-top: 5px;
-  padding: 11px 12px;
+  margin-top: 8px;
+  padding: 10px 12px;
   border-radius: 10px;
   background: var(--sunk);
   border: 1px solid transparent;
@@ -412,13 +742,8 @@
   flex-direction: column;
   gap: 6px;
 }
-.audio-settings__diag-title {
-  font-size: 9.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--dim);
-  font-weight: 600;
-  margin-bottom: 1px;
+.audio-settings__diag[hidden] {
+  display: none;
 }
 .audio-settings__diag-row {
   display: flex;
@@ -444,5 +769,5 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 24ch;
+  min-width: 0;
 }

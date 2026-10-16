@@ -32,6 +32,7 @@ await probe(async ({ open }) => {
 
   // The MIDI device list: what native MIDI's ports event says, a held port named as such.
   await page.evaluate(() => window.__lf.ui.openSettings());
+  await page.getByRole('button', { name: /^MIDI pedals/ }).click(); // the learn row's fold, closed at rest
   const LEARN = page.locator('[aria-label="Learn a MIDI control for this action"]');
   const midiRow = page.locator('.audio-settings__diag-row', { hasText: /^midi/ }).locator('b');
   await LEARN.waitFor();
@@ -46,6 +47,7 @@ await probe(async ({ open }) => {
   await page.waitForFunction(() => document.querySelector('.audio-settings__diag')?.textContent.includes('FS-6'));
   assert.equal(await midiRow.textContent(), 'FS-6 Pedal, Keystation 49 (held by another program), Launchkey (closed)');
   assert.equal(await LEARN.isDisabled(), false, 'an open port can learn');
+  assert.match(await page.getByRole('button', { name: /^MIDI pedals/ }).textContent(), /learned\s· FS-6 Pedal, Keystation 49/, 'the fold\'s head names the ports');
   const lamp = await page.locator('[title^="host:"]').first().getAttribute('title');
   assert.ok(lamp?.includes('midi: FS-6 Pedal, Keystation 49 (held by another program)'), `the status lamp lists the ports: ${lamp}`);
   await page.evaluate(() => window.__lf.ui.closeSettings());

@@ -149,6 +149,12 @@ await probe(async ({ open }) => {
 
   // ── Opened: the built-in folders and the player's own ───────────────────────────────────────────────
   await page.evaluate(() => window.__lf.ui.openSettings());
+  // The folders live in Audio Settings' PLUGINS fold, closed at rest; its head says what it holds.
+  const fold = page.getByRole('button', { name: /^Plugins/ });
+  await page.waitForFunction(() => document.querySelectorAll('.audio-settings__folder').length === 5);
+  assert.equal(await fold.getAttribute('aria-expanded'), 'false', 'PLUGINS is closed at rest');
+  assert.match(await fold.textContent(), /Plugins5 folders · \d+ plugins?$/, 'its head counts the folders and the plugins');
+  await fold.click();
   await section.waitFor();
   await page.waitForFunction(() => document.querySelectorAll('.audio-settings__folder').length === 5);
   console.log('rows', JSON.stringify(await rows()));

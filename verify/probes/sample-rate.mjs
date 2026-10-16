@@ -207,6 +207,7 @@ await probe(async ({ open }) => {
   assert.deepEqual({ value: picked.value, saved: picked.saved, runs: picked.runs }, { value: '48000', saved: 48000, runs: 48000 });
   await mkdir('logs/layout', { recursive: true });
   await page.evaluate(() => window.__lf.ui.openSettings());
+  await page.getByRole('button', { name: /^Sample rate and share/ }).click(); // DEVICE's fold, closed at rest
   await page.locator('[aria-label="Sample rate"]').scrollIntoViewIfNeeded();
   await page.screenshot({ path: 'logs/layout/sample-rate.png' });
   await page.evaluate(() => window.__lf.ui.closeSettings());

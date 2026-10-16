@@ -6,14 +6,15 @@
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
  * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help (Help's
  * reference, as `?` opens it), 6-help-manual (its Manual tab, About included),
- * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
+ * 7-audio-settings (a WASAPI device's status with its reported latency), 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
  * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 14-modes-on (a reset frame
  * with CLICK, FIXED 4, RETAKE, AUTO REC and END STOP on, then the five lanes of scene 5, drawer closed: the
  * command bar's rows with every mode on) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
- * loaded (slot A's source picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in
+ * loaded (slot A's source picker offers the amp-sim under Plugins); 7b-audio-settings-pedals = Audio
+ * Settings there (three plugin folders), MIDI PEDALS open over a port and three learned pedals; 9-amp-sim-live = the amp-sim picked in
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
  * stopping live input; 9b-live-take-hot (shot after 10) = live again, a first take one second in, slot
  * A's input clipped a moment ago and now near -3 dBFS (scene 9 plays it at about -12 dBFS): the card's
@@ -39,11 +40,15 @@ import { probe } from '../harness/probe.ts';
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
-const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
+const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings', '7b-audio-settings-pedals',
   '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
+/** The fake's device reports no latency: a WASAPI device's status as the native engine sends it (input
+ * plus output, 22 ms at 48 kHz), so Audio Settings' DEVICE read-out shows a real number. */
+const DEVICE = { backend: 'Wasapi', sampleRate: RATE, block: 256, inputName: 'Fake input', outputName: 'Fake output',
+  alignFrames: 1056, inputFrames: 528, inputOpen: true, inputChannels: [1, 1] };
 const AMP_SIM = { id: 'probe.amp-sim', name: 'Probe Amp Sim', format: 'vst3', isEffect: true,
   path: 'C:\\Program Files\\Common Files\\VST3\\Probe Amp Sim.vst3' };
 
@@ -251,6 +256,7 @@ await probe(async ({ browser, open }) => {
       await page.evaluate(() => window.__lf.ui.closeHelp());
 
       scene = '7-audio-settings';
+      await emit({ status: DEVICE });
       await page.evaluate(() => window.__lf.ui.openSettings());
       await page.getByRole('group', { name: 'Audio settings', exact: true }).waitFor();
       await page.waitForTimeout(250);
@@ -309,6 +315,11 @@ await probe(async ({ browser, open }) => {
           await new Promise((r) => setTimeout(r, 50));
         }
         host.scanPlugins = async () => [ampSim];
+        host.pluginFolders = async () => ({
+          builtin: [{ path: 'C:\\Program Files\\Common Files\\VST3', exists: true }, { path: 'C:\\Program Files\\Common Files\\CLAP', exists: true }],
+          user: [{ path: 'D:\\Audio\\Plugins', exists: true }],
+          unsupported: [],
+        });
         host.loadPlugin = async (slot) => ({ slot, descriptor: ampSim });
         host.unloadPlugin = async () => {};
         host.openEditor = async () => {};
@@ -319,6 +330,27 @@ await probe(async ({ browser, open }) => {
       await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
       await page.waitForTimeout(200);
       await shoot(scene);
+
+      // Audio Settings in the Windows app, MIDI PEDALS open: a pedalboard's port and three learned pedals.
+      scene = '7b-audio-settings-pedals';
+      await emit({ status: DEVICE });
+      await page.evaluate(() => {
+        const binding = (b) => ({ portId: 'pedal', portName: 'FS-6 Pedal', channel: 0, kind: 'cc', pressHigh: true, momentary: true, hold: false, target: null, ...b });
+        const listed = (b) => ({ binding: b, origin: 'native', ordinal: false, blocked: null, displayName: b.portName, state: 'live' });
+        window.__lf.native.midiEmit({ ports: { ports: [{ id: 'pedal', name: 'FS-6 Pedal', state: 'open' }] } });
+        window.__lf.native.midiEmit({ bindings: { revision: 1, bindings: [
+          listed(binding({ number: 64, action: 'recDub', hold: true })),
+          listed(binding({ number: 65, action: 'playStop', target: 1, momentary: false })),
+          listed(binding({ number: 66, action: 'undo' })),
+        ] } });
+        window.__lf.ui.openSettings();
+      });
+      await page.getByRole('button', { name: /^MIDI pedals/ }).click();
+      await page.getByRole('list', { name: 'MIDI bindings', exact: true }).waitFor();
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      await page.getByRole('button', { name: /^MIDI pedals/ }).click();
+      await page.evaluate(() => window.__lf.ui.closeSettings());
 
       scene = '9-amp-sim-live';
       await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption({ label: 'Probe Amp Sim (VST3)' });
