@@ -633,7 +633,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
   switch (ev.type) {
     case 'Lost':
       console.error(`[engine] ${ev.backend} device lost: ${ev.reason}`);
-      notifyError('Could not reach the audio device. Reconnect it and BleepLoop picks it up again.', ev.reason);
+      notifyError('Could not reach the audio device. Reconnect it and pick it in Audio Settings, or restart BleepLoop.', ev.reason);
       // Kept as why no device runs; every reader gates it on the device status, which a recovery or a
       // fallback in the same or a later frame may already have filled.
       setOpenFailure(ev.reason);
