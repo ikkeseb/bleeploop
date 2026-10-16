@@ -149,6 +149,7 @@ pub mod wire;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
@@ -991,6 +992,26 @@ impl EngineHost {
     /// and a second acquisition could straddle a rebuild and mix one engine's events with another's
     /// columns. The feed drains the columns every tick, whatever it sends: a ring left to fill would
     /// make the next batch a replay of seconds of old sound.
+    /// With no device running nothing renders, so nothing offers again what the full event ring refused at
+    /// the stop (`Engine::publish_idle`): do it here, under the engine lock, as a slot host services its
+    /// port (`SlotHost::service_if_idle`). The feed calls it every tick, before it drains.
+    pub(crate) fn publish_if_idle(&self) {
+        if self.core.running.load(Acquire) {
+            return;
+        }
+        let mut rt = self.core.rt.lock().unwrap_or_else(|e| e.into_inner());
+        // The owner raises `running` under this lock: a device may have started while this waited.
+        if self.core.running.load(Acquire) || rt.faulted {
+            return;
+        }
+        let rt = &mut *rt;
+        let Some(engine) = rt.engine.as_mut() else { return };
+        if catch_unwind(AssertUnwindSafe(|| engine.publish_idle())).is_err() {
+            self.core.counters.panics.fetch_add(1, Relaxed);
+            self.core.latch_fault(rt);
+        }
+    }
+
     pub(crate) fn drain_feed_scope(&self, out: &mut Vec<Event>, columns: Option<&mut Vec<ScopeBin>>) -> (u64, Option<Arc<Overview>>, u32) {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
         let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return (self.core.engine_gen.load(Acquire), None, 0) };

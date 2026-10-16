@@ -424,6 +424,19 @@ impl Engine {
         self.looper.publish(&mut cx, self.replayed);
     }
 
+    /// While no device runs and the host holds the engine: offer the lanes' state, their mixes and the
+    /// transport again, as every block's publish does. Nothing renders while a device is stopped, so what
+    /// a full event ring refused at the stop (`punch_out`'s publish: a CLEAR's arm gone, a punched-out
+    /// take) would wait for the next device; the host calls this once its feed drained the ring. Offers
+    /// only what differs from what the ring last took. A no-op before the first block.
+    pub fn publish_idle(&mut self) {
+        if !self.started {
+            return;
+        }
+        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        self.looper.publish(&mut cx, self.replayed);
+    }
+
     /// Each lane's mix as the engine applies it ([`Looper::mix`], as its [`Event::Mix`] carries it) and
     /// the frame the next block would start at; `None` until the commands queued ahead of the first
     /// block are all taken (`replayed`). The host reads it from an engine it replaced (`owner.rs` `swap_engine`): a
