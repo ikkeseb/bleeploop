@@ -35,8 +35,8 @@ export const DRUM_KIT: ReadonlyArray<DrumVoice> = [
   // row 3 — the essentials
   { note: 36, label: 'Kick', key: 'a' },
   { note: 38, label: 'Snare', key: 's' },
-  { note: 42, label: 'CH', key: 'd' },
-  { note: 46, label: 'OH', key: 'f' },
+  { note: 42, label: 'C-Hat', key: 'd' },
+  { note: 46, label: 'O-Hat', key: 'f' },
   // row 4 — second kick & toms
   { note: 35, label: 'Kick 2', key: 'z' },
   { note: 45, label: 'Lo Tom', key: 'x' },
