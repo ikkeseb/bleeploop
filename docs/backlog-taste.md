@@ -49,13 +49,13 @@ added a line.
   instead? Keep the − 2 BARS + stepper visible beside ■ ALL?
 - **Command bar with an UPDATE offer:** the sliders sit in popovers and the five record modes carry lamps
   (`proto11/bar-ab` landed), so the bar holds two rows from 960 px with every mode on. The UPDATE pill
-  joins row 2's tools, so with every mode on at 1000 px and below it breaks onto a third row (108 → 146 px)
-  while an offer stands (measured 2026-10-17). The tool icons behind one menu, or live with it?
+  joins row 2's tools, so with every mode on and the seven tool icons it breaks onto a third row (98 → 131 px
+  in the browser rig) below 1080 px and from 1120 to 1160 px while an offer stands (measured 2026-10-17;
+  FIXED's stepper keeping its unit down to 1000 px costs the 1040 to 1080 band). The tool icons behind one
+  menu, or live with it?
 - **From the designer walk (2026-10-17), small calls:** the IN FX popover's sliders are about 40 px long in a
-  480 px panel; the UPDATE pill is 34 px tall with 10 px type beside 30 px mode pills; FIXED drops its unit
-  ("4") below 1110 px while FADE keeps "2 BARS"; Tab order
-  in the two-row bar runs row 2, row 1, row 2's tools (visual `order` only). The FX drawer with all five FX
-  on at 1000x700 is a Darkroom round (`bleeploop-walk13`).
+  480 px panel. The FX drawer with all five FX on at 1000x700 is a Darkroom round (a candidate on
+  `pw15/drawer`, before and after in `bleeploop-push15`).
 - **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
   log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the

@@ -513,8 +513,8 @@
    including FIXED's bars while it is on) the bar carries `.cmd--stack` and the five record modes take a
    second row under the brand; TAP (`.transport__pair`) follows them there, under BPM, only when row 1
    is still full without the tool icons (`.cmd--stack-pair`); past that the brand folds to its dot
-   (`.cmd--stack-brand`, app.css). `order` moves them visually only — DOM/tab order is
-   unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
+   (`.cmd--stack-brand`, app.css). `order` moves them visually only: the DOM keeps the one-row order,
+   and `.cmd`'s `reading-flow` (app.css) walks Tab through the rows as drawn. The width stays intrinsic (no flex-basis: 100%) so the measurement
    cannot see its own effect. */
 .cmd--stack .transport__modes,
 .cmd--stack-pair .transport__pair {
@@ -531,10 +531,11 @@
    picker and the beat dots stay, the dots under the meter in the unit's place), pin the master slider at
    its floor (in a wrapping row, shrink never runs; the tools would wrap to a third row instead) and give
    back the display windows' side padding, so row 1 holds BPM, the loop, ALL to IN FX and master from
-   960 px up (verify/probes/layout-reachability.mjs). Row 2 tightens the same way: the pills' padding,
-   FIXED's "bars" and SENS's word go (the popover and the titles still name them), so TAP, every mode
-   on and the app's seven tool icons share it. It starts at 1110: below that the full row 1 wraps
-   master onto a third row once the brand has folded. The BPM window holds one width locked or not: above
+   960 px up (verify/probes/layout-reachability.mjs). Row 2 tightens the same way: the pills' padding
+   and SENS's word go (the popover and the title still name it), so TAP, every mode on and the app's
+   seven tool icons share it (at 990 px and below FIXED's and FADE's "bars" go too, the rung after this
+   one). It starts at 1110: below that the full row 1 wraps master onto a third row once the brand has
+   folded. The BPM window holds one width locked or not: above
    this rung the meter's face pays for the lock glyph; here the dots keep the column wide, so the glyph
    gives way (the dimmed ± steppers and the faceless meter still say locked) and the locked meter keeps
    its box. */
@@ -585,11 +586,18 @@
   .transport__fixed {
     gap: 4px;
   }
-  .transport__readout-k,
-  .transport__fixed .transport__bars-unit {
+  .transport__readout-k {
     display: none;
   }
-  .transport__fixed .transport__bars-val {
+}
+/* The Tauri minimum's band: with every mode on and the seven tool icons, row 2 runs about 15 px short at
+   960 px while FIXED's stepper carries its unit (about 24 px spare at 1000), so both steppers show the
+   bare value here; one reads as the other at every width. */
+@media (max-width: 990px) {
+  .transport__bars-unit {
+    display: none;
+  }
+  .transport__bars-val {
     min-width: 22px;
   }
 }
