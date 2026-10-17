@@ -13,10 +13,12 @@
  * - a remove sends the folder's exact path, shows the answered list and scans again;
  * - a cancelled dialog (the host answers null) changes nothing and scans nothing;
  * - a refused add shows a toast and logs the error; the list stays;
- * - the plugins the last scan found and cannot host (`unsupported`): none renders nothing; two show the
- *   summary line `2 plugins found but not supported`, each file name and reason, the full path and the
- *   whole reason as the line's title, without widening the panel; the list is read again after each scan that ends (a forced
- *   rescan here), so one entry says `1 plugin`, and an empty answer removes the block;
+ * - the plugins the last scan found and did not load, those it cannot host (`unsupported`) and those
+ *   whose scan failed (`failed`): none renders nothing; one of each shows `2 plugins found but not
+ *   loaded`, the failed one first, each row with its kind word; two show each file name and reason, the
+ *   full path and the whole reason as the line's title, without widening the panel; the list is read
+ *   again after each scan that ends (a forced rescan here), so one entry says `1 plugin`, and an empty
+ *   answer removes the block;
  * - while a scan runs, `Add folder…` is disabled; an add that still completes during a scan held open
  *   (the scan walked the folders it started with) is followed by ONE more scan, and the picker ends
  *   on that scan's result.
@@ -44,6 +46,7 @@ const ADDED = { path: 'E:\\Amp Sims', exists: true };
 const LATE_FOLDER = { path: 'F:\\Late', exists: true };
 const STALE_FOLDER = { path: 'G:\\Stale', exists: true };
 const OLD_DLL = { path: 'C:\\Program Files\\VSTPlugins\\Old Amp.dll', reason: 'a 32-bit plugin: this build hosts 64-bit only' };
+const STUCK = { path: 'C:\\Program Files\\Common Files\\VST3\\Stuck Reverb.vst3', reason: 'timed out after 20 s' };
 const SHELL_DLL = { path: 'D:\\Plugins\\Waves\\WaveShell1-VST 14.0_x64.dll', reason: `a shell plugin that bundles many: ${'it lists several sub-plugins, '.repeat(8)}`.trim() };
 const empty = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
 
@@ -60,7 +63,7 @@ async function engineInit(page) {
 
 /**
  * Wait for the engine boot, then script the host (`window.__folders`): `lists` is what it holds,
- * `plugins` what a scan finds (read when the scan STARTS), `unsupportedAfterScan` what the host's list says once a scan ends (undefined: unchanged), `nextAdd` what the dialog's add does (a
+ * `plugins` what a scan finds (read when the scan STARTS), `afterScan` what the host's `unsupported` and `failed` lists say once a scan ends (undefined: unchanged), `nextAdd` what the dialog's add does (a
  * folder, null for cancel, a string for a refusal), `gate` a promise a scan waits on before it
  * answers, `calls` everything the page asked for.
  */
@@ -99,7 +102,7 @@ async function boot(page, script) {
       state.calls.push(`scan:${force}`);
       const found = [...state.plugins]; // what the folders held when this scan started
       if (state.gate) await state.gate;
-      if (state.unsupportedAfterScan) state.lists = { ...state.lists, unsupported: state.unsupportedAfterScan };
+      if (state.afterScan) state.lists = { ...state.lists, ...state.afterScan };
       return found;
     };
     await instrument.scanForPlugins();
@@ -118,7 +121,7 @@ async function boot(page, script) {
 
 await probe(async ({ open }) => {
   const { page, consumeConsoleErrors } = await open({ viewport: { width: 1280, height: 800 }, init: engineInit });
-  await boot(page, { lists: { builtin: BUILTIN, user: [OWN, LONG], unsupported: [] }, plugins: [AMP] });
+  await boot(page, { lists: { builtin: BUILTIN, user: [OWN, LONG], unsupported: [], failed: [] }, plugins: [AMP] });
 
   const section = page.getByRole('group', { name: 'Plugin folders', exact: true });
   const addButton = section.getByRole('button', { name: 'Add folder…', exact: true });
@@ -308,36 +311,45 @@ await probe(async ({ open }) => {
   assert.deepEqual(burst, ['scan:false', 'scan:true', 'folders'], 'three requests during a scan: one follow-up, forced (and one read of the folders at the end)');
 
   // ── The plugins the scan cannot host ────────────────────────────────────────────────────────────────
-  const unsupported = section.locator('.audio-settings__unsupported');
-  const summary = unsupported.locator('.audio-settings__unsupported-summary');
-  const shown = () => unsupported.locator('.audio-settings__unsupported-item').evaluateAll((items) => items.map((li) => ({
-    file: li.querySelector('.audio-settings__unsupported-file').textContent,
-    reason: li.querySelector('.audio-settings__unsupported-reason').textContent,
+  const unsupported = section.locator('.audio-settings__not-loaded');
+  const summary = unsupported.locator('.audio-settings__not-loaded-summary');
+  const shown = () => unsupported.locator('.audio-settings__not-loaded-item').evaluateAll((items) => items.map((li) => ({
+    file: li.querySelector('.audio-settings__not-loaded-file').textContent,
+    reason: li.querySelector('.audio-settings__not-loaded-reason').textContent,
     title: li.title,
   })));
-  const rescan = async (answer) => {
-    await page.evaluate((answer) => (window.__folders.unsupportedAfterScan = answer), answer);
+  const rescan = async (unsupported, failed = []) => {
+    await page.evaluate((answer) => (window.__folders.afterScan = answer), { unsupported, failed });
     await clearCalls();
     // The command bar's rescan sits behind the settings backdrop: the state module takes its request.
     await page.evaluate(async () => (await import('/src/ui/state/instrument.ts')).scanForPlugins({ force: true }));
     await idle();
   };
   assert.equal(await unsupported.count(), 0, 'an empty list renders nothing');
-  assert.ok(!(await section.textContent()).includes('not supported'), 'not even the summary');
+  assert.ok(!(await section.textContent()).includes('not loaded'), 'not even the summary');
+
+  // A bundle whose scan failed joins the list with its kind word and the host's reason, and is counted.
+  await rescan([OLD_DLL], [STUCK]);
+  await summary.waitFor();
+  const kinds = () => unsupported.locator('.audio-settings__not-loaded-item').evaluateAll((items) => items.map((li) => li.querySelector('.audio-settings__not-loaded-kind')?.textContent ?? null));
+  console.log('failed', JSON.stringify({ summary: await summary.textContent(), items: await shown(), kinds: await kinds() }));
+  assert.equal(await summary.textContent(), '2 plugins found but not loaded', 'the summary counts the failed bundle beside the unsupported one');
+  assert.deepEqual(await shown(), [STUCK, OLD_DLL].map((u) => ({ file: u.path.split('\\').pop(), reason: u.reason, title: `${u.path}: ${u.reason}` })), 'the failed bundle first, with the host\'s reason');
+  assert.deepEqual(await kinds(), ['failed', 'unsupported'], 'each row says which kind it is');
 
   await rescan([OLD_DLL, SHELL_DLL]);
   await summary.waitFor();
   console.log('unsupported', JSON.stringify({ summary: await summary.textContent(), items: await shown(), calls: await calls() }));
-  assert.equal(await summary.textContent(), '2 plugins found but not supported', 'the scan that ended refreshed the list');
+  assert.equal(await summary.textContent(), '2 plugins found but not loaded', 'the scan that ended refreshed the list');
   assert.ok((await calls()).includes('folders'), 'by reading the folders again');
   assert.deepEqual(await shown(), [OLD_DLL, SHELL_DLL].map((u) => ({ file: u.path.split('\\').pop(), reason: u.reason, title: `${u.path}: ${u.reason}` })), 'file name, reason, the full path and the whole reason as the title');
   const wide = await section.evaluate((group) => {
     const panel = group.closest('.audio-settings');
     const width = () => Math.round(panel.getBoundingClientRect().width);
     const box = panel.getBoundingClientRect();
-    const reasons = [...group.querySelectorAll('.audio-settings__unsupported-reason')];
+    const reasons = [...group.querySelectorAll('.audio-settings__not-loaded-reason')];
     const shown = { panel: width(), cut: reasons.some((r) => r.scrollWidth > r.clientWidth), inside: reasons.every((r) => r.getBoundingClientRect().right <= box.right) };
-    const block = group.querySelector('.audio-settings__unsupported');
+    const block = group.querySelector('.audio-settings__not-loaded');
     block.style.display = 'none';
     const without = width();
     block.style.display = '';
@@ -349,12 +361,12 @@ await probe(async ({ open }) => {
   await section.screenshot({ path: 'logs/plugin-folders/unsupported.png' });
 
   await rescan([OLD_DLL]);
-  await page.waitForFunction(() => document.querySelectorAll('.audio-settings__unsupported-item').length === 1);
-  assert.equal(await summary.textContent(), '1 plugin found but not supported', 'one entry says plugin, not plugins');
+  await page.waitForFunction(() => document.querySelectorAll('.audio-settings__not-loaded-item').length === 1);
+  assert.equal(await summary.textContent(), '1 plugin found but not loaded', 'one entry says plugin, not plugins');
   assert.deepEqual((await shown()).map((u) => u.file), ['Old Amp.dll']);
 
   await rescan([]);
   await unsupported.waitFor({ state: 'detached' });
-  assert.ok(!(await section.textContent()).includes('not supported'), 'an empty answer removes the block');
+  assert.ok(!(await section.textContent()).includes('not loaded'), 'an empty answer removes the block');
   assert.deepEqual(await rows(), listed([OWN, LONG, LATE_FOLDER, STALE_FOLDER]), 'the folder rows are as they were');
 });

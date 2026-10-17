@@ -116,20 +116,41 @@ pub struct UnsupportedPlugin {
     pub reason: String,
 }
 
+/// A plugin bundle whose scan failed (its child crashed, timed out or printed nothing usable, or
+/// could not be run), with a short category in the host's words (`scan::failure_category`), never
+/// the child's own output. The scan cache keeps a bundle-side failure until the bundle changes or
+/// the picker's rescan retries it; it is never listed in the picker.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedPlugin {
+    pub path: String,
+    pub reason: String,
+}
+
+/// What the last scan found and did not list: the files it cannot host and the bundles whose scan
+/// failed. One scan's, replaced whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotListed {
+    pub unsupported: Vec<UnsupportedPlugin>,
+    pub failed: Vec<FailedPlugin>,
+}
+
 /// The scan's folders (`host/folders.rs`): `builtin` is every root the scan walks by itself (the
 /// fixed CLAP and VST3 roots with the `CLAP_PATH`/`VST3_PATH` entries, then the VST2 roots),
-/// read-only; `user` is the player's own list; `unsupported` is what the last scan in this run
-/// found in them and cannot host (empty before the first scan). `src/platform/host.ts` mirrors it.
+/// read-only; `user` is the player's own list; `unsupported` and `failed` are what the last scan in
+/// this run found in them and did not list (`NotListed`; empty before the first scan).
+/// `src/platform/host.ts` mirrors it.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginFolders {
     pub builtin: Vec<PluginFolder>,
     pub user: Vec<PluginFolder>,
     pub unsupported: Vec<UnsupportedPlugin>,
+    pub failed: Vec<FailedPlugin>,
 }
 
 /// Shared host state managed by Tauri (`.manage()` in `lib.rs`): the WebView document epoch, the
-/// plugin folder list's locks and the last scan's unsupported plugins. The plugin slots themselves
+/// plugin folder list's locks and what the last scan did not list. The plugin slots themselves
 /// live in engine mode's state (`engine_io::plugins`).
 #[derive(Default)]
 pub struct PluginHostState {
@@ -141,9 +162,9 @@ pub struct PluginHostState {
     pub(crate) folders_write: std::sync::Mutex<()>,
     /// Up while the folder dialog is open: a second `plugin_folder_add` opens no second dialog.
     pub(crate) folder_dialog_open: std::sync::atomic::AtomicBool,
-    /// The plugins the last scan found and cannot host. Each scan replaces the list whole, while it
-    /// still holds the scan lock (`scan::scan_all`); `plugin_folders` reads it.
-    pub(crate) scan_unsupported: std::sync::Mutex<Vec<UnsupportedPlugin>>,
+    /// What the last scan found and did not list. Each scan replaces it whole, while it still holds
+    /// the scan lock (`scan::scan_all`); `plugin_folders` reads it.
+    pub(crate) scan_not_listed: std::sync::Mutex<NotListed>,
 }
 
 impl PluginHostState {

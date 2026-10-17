@@ -94,7 +94,7 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
             let cache_path = data_dir.as_ref().map(|dir| dir.join("plugin-scan.json"));
             let folders_path = data_dir.as_ref().map(|dir| dir.join(FOLDERS_FILE));
             let state = app.state::<PluginHostState>();
-            super::scan::scan_all(cache_path.as_deref(), folders_path.as_deref(), force, &state.scan_unsupported)
+            super::scan::scan_all(cache_path.as_deref(), folders_path.as_deref(), force, &state.scan_not_listed)
         })
         .await
         .map_err(|e| format!("plugin scan task: {e}"))?
@@ -120,15 +120,16 @@ fn folders_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(FOLDERS_FILE))
 }
 
-/// The folder list as Audio Settings shows it, with what the last scan could not host.
+/// The folder list as Audio Settings shows it, with what the last scan did not list.
 #[cfg(windows)]
 fn folders_view(state: &PluginHostState, user: &[String]) -> PluginFolders {
-    let unsupported = state.scan_unsupported.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    super::folders::view(user, unsupported)
+    let not_listed = state.scan_not_listed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    super::folders::view(user, not_listed)
 }
 
 /// The folders the scan walks: its built-in roots (read-only) and the player's own
-/// (`host/folders.rs`), and the plugins the last scan found in them and cannot host, each with why:
+/// (`host/folders.rs`), and the plugins the last scan found in them and did not list (cannot host,
+/// or whose scan failed), each with why:
 /// one call after a `plugin_scan` describes that scan. An `Err` when the stored list cannot be read;
 /// it is then left as it is.
 #[tauri::command]

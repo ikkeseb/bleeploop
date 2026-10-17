@@ -173,7 +173,8 @@ plugin-GUI work.
   `VST_PATH`), then the folders the player added in Audio Settings (`src/host/folders.rs`). A
   built-in root yields its own format, a player's folder every format. A 32-bit VST2 and a VST2 shell
   (several plugins in one file) are listed as unsupported, with why, and never hosted (a load
-  refuses a shell too, by its category). A plugin reached twice keeps the
+  refuses a shell too, by its category); a bundle whose scan failed is listed beside them with a
+  short host-worded category, never the child's output (Audio Settings' PLUGINS page, never the picker). A plugin reached twice keeps the
   FIRST spelling met, and no path is canonicalised on its way into a descriptor: the tone store and
   the frontend hash `(format, path, id)` byte for byte, so a respelled path orphans its saved tone.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.

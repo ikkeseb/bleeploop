@@ -522,47 +522,45 @@
   color: var(--faint);
 }
 
-/* Plugins the last scan found and cannot host: under the folders in the same value column, quieter than
-   they are (--faint file names, --dim reasons, a size down). A long list scrolls inside its own box
-   instead of pushing the diagnostics down; a long name or reason is cut (the line's title has the path). */
-.audio-settings__unsupported {
+/* Plugins the last scan found and did not load (failed, unsupported): under the folders in the same value
+   column, quieter than they are (--faint file names and kind words, --dim reasons, a size down). One grid,
+   each row a subgrid, so the kind words and the reasons line up in columns. A long list scrolls inside its
+   own box instead of pushing the diagnostics down; a long name or reason is cut (the line's title has
+   the path and the whole reason). */
+.audio-settings__not-loaded {
   padding: 4px 0 0 83px;
   font-size: 10px;
 }
-.audio-settings__unsupported-summary {
+.audio-settings__not-loaded-summary {
   color: var(--dim);
 }
-.audio-settings__unsupported-list {
+.audio-settings__not-loaded-list {
   margin: 2px 0 0;
   padding: 0;
   list-style: none;
   max-height: 96px;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  display: grid;
+  grid-template-columns: fit-content(180px) max-content minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 1px;
 }
-.audio-settings__unsupported-item {
-  display: flex;
-  gap: 8px;
+.audio-settings__not-loaded-item {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   min-width: 0;
   color: var(--faint);
 }
-.audio-settings__unsupported-file {
-  flex: 0 1 auto;
+.audio-settings__not-loaded-file,
+.audio-settings__not-loaded-reason {
   min-width: 0;
-  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.audio-settings__unsupported-reason {
-  flex: 1 1 0;
-  width: 0; /* as the folder path: its text never sets the panel's width */
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.audio-settings__not-loaded-reason {
+  contain: inline-size; /* as the folder path: its text never sets the panel's width */
   color: var(--dim);
 }
 
