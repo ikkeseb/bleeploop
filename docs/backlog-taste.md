@@ -52,7 +52,7 @@ added a line.
   joins row 2's tools, so with every mode on at 1000 px and below it breaks onto a third row (108 → 146 px)
   while an offer stands (measured 2026-10-17). The tool icons behind one menu, or live with it?
 - **From the designer walk (2026-10-17), small calls:** the IN FX popover's sliders are about 40 px long in a
-  480 px panel; the UPDATE pill is 34 px tall with 10 px type beside 30 px mode pills; FIXED drops its unit
+  480 px panel; FIXED drops its unit
   ("4") below 1110 px while FADE keeps "2 BARS"; the ARMED cue "WAITING FOR DOWNBEAT" is bare text while the
   other cues sit in a box; the ASIO row's unticked box beside "WASAPI" can read as "WASAPI off"; Tab order
   in the two-row bar runs row 2, row 1, row 2's tools (visual `order` only). Disabled by tone or by
