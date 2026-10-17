@@ -15,7 +15,7 @@
  *   (`restoreSessionTones`).
  */
 import { platform, type PluginFormat, type ToneImport } from '../../platform';
-import { notifyError, notifyInfo } from '../../notify';
+import { notifyError, notifyNote } from '../../notify';
 import { slotPlugins } from './instrument-slots';
 import { reloadPlugin, slotSourceGeneration } from './instrument';
 
@@ -83,7 +83,7 @@ export async function restoreSessionTones(tones: readonly SlotTone[]): Promise<v
     }
     const token = stored.reloadToken;
     if (token === null) {
-      notifyInfo(`This session used ${stored.name} in slot ${letter}. Load it there to hear the session's tone.`);
+      notifyNote(`This session used ${stored.name} in slot ${letter}. Load it there to hear the session's tone.`);
       continue;
     }
     const reload = await reloadPlugin(tone.slot, tone.plugin, since, token);
