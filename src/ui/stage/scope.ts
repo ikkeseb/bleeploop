@@ -2,7 +2,9 @@ import { PEAK_FRAMES, SCOPE_MASTER, SCOPE_MONITOR, looper, type ScopeView } from
 import { LANES, feed } from './stage-feed';
 import {
   ALPHAS,
+  HEARD,
   clamp,
+  clockNow,
   contourAlpha,
   contourColor,
   createStamp,
@@ -598,11 +600,12 @@ function createScope(): ViewDraw {
         if (d > 0 && d <= most) lead = d;
       }
       // Fresh by the clock, before the modulo places it: the column's own device frame stands ahead of
-      // the frame heard now by no more than LEAD_COLUMNS, so a batch whole loops behind (which the
-      // modulo would place just ahead on a short loop) never takes the beam.
+      // the frame heard now (this frame's clock read, `stepLight`'s) by no more than LEAD_COLUMNS, so a
+      // batch whole loops behind (which the modulo would place just ahead on a short loop) never takes
+      // the beam.
       let fresh = false;
       if (feed.moving && recent && bx >= 0) {
-        const age = view.frame - looper.heardFrameValue();
+        const age = view.frame - Math.round(clockNow[HEARD]);
         fresh = age > 0 && age <= LEAD_COLUMNS * drawnBin;
       }
       if (fresh) {

@@ -407,11 +407,29 @@ function heardFrame(): number {
   return renderedFrame() - plain.heardLag;
 }
 
-function phaseValue(): number {
+/**
+ * The draw loop's clock read: the loop phase into `out[0]` (0 with no loop) and the device frame heard
+ * now into `out[1]`. One `Date.now()` and all the arithmetic in this one body, written into a typed
+ * array: a double returned from a call the JIT did not inline is boxed, and whether it inlines depends
+ * on what ran before (the stage-view probe's budget case). `heardFrame`'s sum, inlined.
+ */
+function clockInto(out: Float64Array): void {
+  const c = plain.clock;
+  const heard = (c.rate > 0 ? c.frame + ((Date.now() - c.atMs) * c.rate) / 1000 : c.frame) - plain.heardLag;
+  out[1] = heard;
   const m = plain.master;
-  if (m <= 0) return 0;
-  const p = (heardFrame() - plain.clock.grid) % m;
-  return (p < 0 ? p + m : p) / m;
+  if (m <= 0) {
+    out[0] = 0;
+    return;
+  }
+  const p = (heard - c.grid) % m;
+  out[0] = (p < 0 ? p + m : p) / m;
+}
+const phaseOut = new Float64Array(2);
+
+function phaseValue(): number {
+  clockInto(phaseOut);
+  return phaseOut[0];
 }
 
 /** When device frame `frame` is heard, on `Date.now()`'s clock; now while no device runs. */
@@ -1268,6 +1286,13 @@ export const engineLooper = {
   /** The input level (linear; at least 1 while the last frame carried a clip): slot `slot`'s, else the
    * louder slot's (the command bar's meter). */
   levelValue: (slot?: 0 | 1): number => (slot === undefined ? Math.max(inputLevel(0), inputLevel(1)) : inputLevel(slot)),
+  /** `levelValue()` into `out[0]`, for the stage's draw loop: computed in this one body and written to a
+   * typed array, so no double crosses a call the JIT may not inline (`clockInto`). */
+  levelInto: (out: Float64Array): void => {
+    const a = plain.clip[0] ? Math.max(1, plain.level[0]) : plain.level[0];
+    const b = plain.clip[1] ? Math.max(1, plain.level[1]) : plain.level[1];
+    out[0] = a > b ? a : b;
+  },
   /** Slot `slot`'s loudest input level (linear) since the last take, then 0 until a frame arrives: its
    * one reader is the slot card's meter, whose held peak must not miss a frame between two draws. */
   takePeak: (slot: 0 | 1): number => {
@@ -1289,8 +1314,9 @@ export const engineLooper = {
    * `gridValue() + k * masterFramesValue()`. The draw loop places a frame-stamped scope column on the
    * loop with it, the way `phaseValue` places the playhead; no signal read. */
   gridValue: (): number => plain.clock.grid,
-  /** The device frame heard now, whole: the draw loop judges a scope column's age by it (invariant 6: no signal read). */
-  heardFrameValue: (): number => Math.round(heardFrame()),
+  /** The stage's clock read, once a frame (`clockInto`): the phase and the heard frame, by which the
+   * scope look judges a column's age. Invariant 6: no signal read. */
+  clockInto,
   /** Lane `i`'s effects as the engine applied them. */
   fxState: (i: number): readonly FxState[] => mixes[i][0]().fx,
   setFxBypass,

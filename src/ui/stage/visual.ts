@@ -7,7 +7,11 @@ import { LANES, feed, type LaneKind } from './stage-feed';
  * envelope the views rasterise. `stepLight` runs once per frame before the view draws; it reads the
  * plain feed and the looper's non-reactive getters only (invariant 6). Its own code allocates nothing
  * in steady playback, as the stage-view probe's budget case measures in headless Chromium; what that
- * case still sees is one boxed number a frame inside `looper.phaseValue()`.
+ * case still sees is one boxed number a frame, the `Date.now()` inside `looper.clockInto`. The looper's
+ * values arrive through typed arrays (`clockInto`, `levelInto`), never as a returned double: one
+ * returned from a call the JIT did not inline is boxed, and whether it inlines depends on what ran
+ * before (measured: 42 to 47 bytes a frame for orbit and strata run alone, through `phaseValue` and
+ * `levelValue`).
  *
  * No audio reaches the UI: a lane's "level now" is its overview under the playhead times its volume,
  * so it sees neither lane FX nor a fade. The lift (1 / the lane's own recent peak, capped) makes a
@@ -287,6 +291,12 @@ const REST_FROM = 1; // the phase the loop last moved at
 const REST_AT = 2; // and when
 const CLIP_AT = 3; // the last input clip
 const BEAT_PHASE = 4; // the phase the beat check last read
+/** The frame's clock read (`looper.clockInto`), taken in `stepLight` while the loop moves: the loop
+ * phase, and the device frame heard now (`HEARD`, the scope look's freshness test reads it). */
+export const clockNow = new Float64Array(2);
+export const HEARD = 1;
+/** The input level (`looper.levelInto`). */
+const inputNow = new Float64Array(1);
 /** The beat a pulse last marked (-1: none yet; the next frame marks its beat unpulsed). */
 let beatIdx = -1;
 /** The beat the previous frame read. */
@@ -356,7 +366,8 @@ export function stepLight(now: number): void {
   // The shown phase: the engine's while the loop moves; at rest, eased to the loop start (the next PLAY
   // starts from the top, so a playhead that ran on would lie).
   if (feed.moving) {
-    light.phase = master > 0 ? looper.phaseValue() : 0;
+    looper.clockInto(clockNow);
+    light.phase = master > 0 ? clockNow[0] : 0;
     mem[REST_FROM] = light.phase;
     mem[REST_AT] = now;
   } else {
@@ -396,8 +407,9 @@ export function stepLight(now: number): void {
     light.slow[i] = Math.max(light.lit[i] * light.amp[i], light.slow[i] * fall400);
   }
 
-  // The input meter (`levelValue` reads at least 1 while the engine reports a clip).
-  const raw = looper.levelValue();
+  // The input meter (`levelInto` reads at least 1 while the engine reports a clip).
+  looper.levelInto(inputNow);
+  const raw = inputNow[0];
   if (raw >= 1) mem[CLIP_AT] = now;
   light.clip = now - mem[CLIP_AT] < 120;
   light.input = Math.max(raw > 1 ? 1 : raw, light.input * Math.exp(-dt / 140));

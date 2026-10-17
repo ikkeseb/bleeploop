@@ -59,9 +59,15 @@
  * - budget (per look, 1920x1080): five lanes PLAYING on an 8-bar loop, the frame's code warmed up by
  *   running it by hand: the mean script time of the stage's frame over 240 frames is under 6 ms, and the
  *   sampling heap profiler attributes under 32 bytes a frame to the frame's call tree. The floor is one
- *   boxed number a frame, about 16 to 22 bytes: the looper's `phaseValue` reads Date.now(). An array or
- *   an object a frame adds 32 bytes or more and fails. Closing the stage stops its rAF loop. Also prints
- *   the frame interval and the hidden looper lanes' cost.
+ *   boxed number a frame, about 12 to 22 bytes: the looper's `clockInto` reads Date.now(). An array or
+ *   an object a frame adds 32 bytes or more and fails. SCOPE is measured as the device runs it: every
+ *   feed frame brings a running clock anchor and the fresh live columns now due, through the warm-up
+ *   (spaced as a feed not locked to the display: no batch, one or two a frame) and the whole window,
+ *   and the case asserts the stage's clock read moved, a batch came on most frames and the beam then
+ *   stood a fresh column's lead past the drawn playhead (the freshness test took one). The warm-up
+ *   runs at 960x540 (Chromium's canvas flush stalls scale with the pixels) and its settling is timed on
+ *   the frame alone, its slowest 5 % left out. Closing the stage stops its rAF loop.
+ *   Also prints the frame interval and the hidden looper lanes' cost.
  * - keys: a held A lights no key and sends native MIDI's router no note (`__lf.native.inputSent`) inside
  *   the view (it does outside); drum mode's 3
  *   plays no pad inside it but selects lane 3; V plays the Hi Tom pad outside the view and leaves the
@@ -79,8 +85,8 @@
  * view is read from: the fake answers no command by itself, so every state on screen was scripted, and
  * the frame time is headless Chromium's script time, not a frame on the rig. The scope columns are
  * scripted too: nothing here says the engine folds what it claims to fold (`lf-engine`'s scope tests
- * and `verify/probes/scope-mirror.mjs` own that), and the `budget` case still runs the look with no
- * column at all, so what the fold and the per-column strips cost a frame is unmeasured.
+ * and `verify/probes/scope-mirror.mjs` own that), and the `budget` case's columns are one constant
+ * level from one source, so a busier stream's strips are unmeasured.
  * Run: pnpm probe stage-view
  */
 import assert from 'node:assert/strict';
@@ -111,6 +117,15 @@ const SHORT_COLUMNS = SHORT / BIN;
  * would be measuring its own emit, not the fold.
  */
 const CHUNK = 800;
+/** How far past the frame heard now the budget case's live columns run: 125 ms, the engine rendering
+ * an output latency ahead, inside the look's LEAD_COLUMNS (200 ms), so each batch is fresh by the clock. */
+const FEED_LEAD = 6000;
+/** The feed frames' spacing over the budget warm-up's hand-run frames, in ms: a 60 Hz frame on
+ * average, but the feed is not locked to the display, so a real frame gets no batch, one or two. A
+ * warm-up that only ever saw one batch a frame left the frame's code without feedback for the frames
+ * that get none, and it deoptimised inside the heap window (V8's `--log-deopt`: "Insufficient type
+ * feedback" in the idle branch of `scope.ts` `draw`). */
+const FEED_STEPS = [1000 / 60, 0, 2000 / 60, 1000 / 60, 500 / 60, 1500 / 60, 1000 / 60, 1000 / 60];
 /** Batch boundaries every `step` columns of a `cols`-column pass. */
 const cutsEvery = (cols, step) => {
   const out = [];
@@ -1532,6 +1547,13 @@ await probe(async ({ browser, open }) => {
       await emit({ meter: { peak: [0.3, 0], clip: [false, false] } });
       await page.mouse.move(900, 500);
       await settle(3200); // the two buttons gone
+      // The warm-up runs in a quarter of the pixels, the window at full size. A hand-run frame's canvas
+      // work is presented by no real frame, so Chromium flushes it in one stall every 692 frames, and
+      // at 1920x1080 under load that stall alone took 12 s (orbit), so the warm-up's 20 s ran out after
+      // two bursts and about 1400 frames, too few to reach the optimising tier (and too few for the
+      // settle check to mean anything). The code the JIT optimises is the same at either size.
+      await page.setViewportSize({ width: 960, height: 540 });
+      await settle(200);
       // The JIT's warm-up: the frame run by hand until its code is optimised (unoptimised code boxes
       // every fractional intermediate, which says nothing about the steady state). A FIXED count
       // measured the tier instead of the code: 6000 iterations optimised strata and scope but not
@@ -1540,17 +1562,71 @@ await probe(async ({ browser, open }) => {
       // (2026-10-09). So run bursts until the hand-run frame stops getting faster, which is what
       // "optimised" looks like from here, and cap the wait. A look that never settles fails the bar
       // below, as it should.
-      const warm = await page.evaluate(() => {
+      //
+      // A look that draws the live columns (SCOPE) is measured on the path the device runs: every
+      // frame the feed brings a running clock anchor (rate 48 kHz, as the engine's feed refreshes it, so
+      // the phase read takes its `Date.now()` path) and the columns that finished since the last one,
+      // up to `FEED_LEAD` frames past the frame heard then, so each is fresh by the clock. The warm-up's
+      // hand-run frames get the same: each moves the device clock a 60 Hz frame on and brings its four
+      // or so columns, so the code the warm-up optimises is the code the window runs (a warm-up that
+      // saw a column every sixteenth frame left the fold to re-tier inside the window: 100 to 660
+      // bytes a frame from one run to the next). After it the feeder runs on the real frames, a page-
+      // side rAF loop under its own name, so neither the trampoline nor the heap walk counts it, through
+      // the window to the beam check after it.
+      const feeds = v.wantsScope;
+      const warm = await page.evaluate(async (o) => {
+        const { clockNow, HEARD } = await import('/src/ui/stage/visual.ts');
         const s = window.__raf;
+        let tick = () => {};
+        if (o.feeds) {
+          const f = (window.__feed = { seq: o.seq, rendered: clockNow[HEARD], next: -1, batches: 0, run: true, amp: new Float32Array(o.chunk).fill(0.5) });
+          /** One feed frame `dtMs` after the last: the anchor, and the columns now due. */
+          tick = (dtMs) => {
+            f.rendered += (dtMs * o.rate) / 1000;
+            const frame = Math.round(f.rendered);
+            const to = Math.floor((frame + o.lead) / o.bin);
+            if (f.next < 0) f.next = to - 50;
+            const anchor = { frame, atMs: Date.now(), rate: o.rate, grid: 0 };
+            if (to <= f.next) window.__lf.native.emit({ seq: ++f.seq, reset: false, events: [], anchor });
+            // At most CHUNK columns a batch, as the engine's feed carries them (the ring holds 1024).
+            for (let from = f.next; from < to; from += o.chunk) {
+              const n = Math.min(to - from, o.chunk);
+              window.__lf.native.emit({ seq: ++f.seq, reset: false, events: [], anchor, scope: window.__sc.batch(from * o.bin, f.amp, o.gain, 0, n, false, false) });
+              f.batches++;
+            }
+            if (to > f.next) f.next = to;
+          };
+        }
         s.manual = true;
         const until = performance.now() + 20000;
         // One burst is bounded in BOTH frames and wall time, so a slow look cannot run past the
         // deadline inside a burst the loop only checks between them.
+        // Only the frame itself is timed, not the feed frame before it, and a burst reads as the mean of
+        // its fastest 95 % of frames: the one call that flushes the queued canvas work (above) stalls,
+        // and the plain mean read that as an unsettled frame (measured: orbit, 692 calls in 14.4 s,
+        // nearly all of it in one; the case failed with 2 bursts, best 13 to 16 ms, at a load of 4 to
+        // 8). Not the median: the page's clock ticks in 0.1 ms, and most frames read 0.
+        let fedMs = 0;
+        let calls = 0;
+        const per = new Float64Array(4000);
         const burst = () => {
           const t0 = performance.now();
           let k = 0;
-          for (; k < 4000 && performance.now() - t0 < 2000; k++) s.stage(performance.now());
-          return (performance.now() - t0) / Math.max(1, k);
+          for (; k < 4000 && performance.now() - t0 < 2000; k++) {
+            const a = performance.now();
+            tick(o.dts[k % o.dts.length]);
+            const b = performance.now();
+            s.stage(b);
+            per[k] = performance.now() - b;
+            fedMs += b - a;
+          }
+          calls += k;
+          if (k === 0) return Infinity;
+          const kept = Math.max(1, Math.floor(k * 0.95));
+          const sorted = per.subarray(0, k).sort();
+          let sum = 0;
+          for (let i = 0; i < kept; i++) sum += sorted[i];
+          return sum / kept;
         };
         // TWO consecutive bursts without a real improvement, not one: a single flat burst is as likely
         // to be timing noise before the tier changes as it is to be the tier having changed.
@@ -1566,28 +1642,75 @@ await probe(async ({ browser, open }) => {
           if (flat >= 2) break;
         }
         s.manual = false;
-        return { passes, bestMs: +best.toFixed(4), settled: flat >= 2 };
-      });
+        if (o.feeds) {
+          let last = performance.now();
+          const feedScope = () => {
+            if (!window.__feed.run) return;
+            const now = performance.now(); // the wall clock, not the frame's timestamp
+            tick(now - last);
+            last = now;
+            requestAnimationFrame(feedScope);
+          };
+          requestAnimationFrame(feedScope);
+        }
+        return { passes, calls, bestMs: +best.toFixed(4), feedMs: +(fedMs / Math.max(1, calls)).toFixed(4), settled: flat >= 2 };
+      }, { feeds, seq, lead: FEED_LEAD, bin: BIN, rate: RATE, chunk: CHUNK, gain: LANE1_ONLY, dts: FEED_STEPS });
+      await page.setViewportSize({ width: 1920, height: 1080 });
       await settle(400);
       const cdp = await page.context().newCDPSession(page);
       await cdp.send('HeapProfiler.enable');
       await cdp.send('HeapProfiler.startSampling', { samplingInterval: 64, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
       const stats = await page.evaluate(async () => {
+        // The heard frame as the stage's own frame read it (`stepLight`'s clock read).
+        const { clockNow, HEARD } = await import('/src/ui/stage/visual.ts');
         const s = window.__raf;
         for (const k of ['stageFrame', 'frame']) Object.assign(s[k], { n: 0, ms: 0, max: 0 });
+        const f = window.__feed;
+        const at0 = { ms: Date.now(), heard: clockNow[HEARD], batches: f?.batches ?? 0 };
         s.on = true;
         const until = performance.now() + 20000; // a dead loop fails below instead of hanging here
         while (s.stageFrame.n < 240 && performance.now() < until) await new Promise((r) => setTimeout(r, 50));
         s.on = false;
         const c = document.querySelector('.sv-canvas');
-        return { stage: { ...s.stageFrame }, lanes: { ...s.frame }, canvas: [c.width, c.height], hiddenLaneWidth: document.querySelector('.lp-lane canvas').clientWidth };
+        const fed = f && { ms: Date.now() - at0.ms, heardMoved: Math.round(clockNow[HEARD] - at0.heard), batches: f.batches - at0.batches };
+        return { stage: { ...s.stageFrame }, lanes: { ...s.frame }, canvas: [c.width, c.height], hiddenLaneWidth: document.querySelector('.lp-lane canvas').clientWidth, fed };
       });
       const { profile } = await cdp.send('HeapProfiler.stopSampling');
       await cdp.detach();
+      // The freshness test took a column: with the stream still running, the beam over the next frames
+      // stands about FEED_LEAD past the drawn playhead, which only a column judged fresh by the clock
+      // can put it (a stale or absent stream leaves it on the playhead). Read off the hero bay's top row
+      // as `byHand` does, between frames, after the heap window so no read-back lands inside it. Then
+      // the feeder stops, before any assertion can end the group with it running.
+      const beam = feeds && (await page.evaluate(async () => {
+        const { light } = await import('/src/ui/stage/visual.ts');
+        const g = window.__sc.geom();
+        const ctx = document.querySelector('.sv-canvas').getContext('2d');
+        const y = g.top + Math.floor(0.1 * 2 * g.unit);
+        const out = [];
+        for (let k = 0; k < 8; k++) {
+          await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+          const row = ctx.getImageData(g.x0, y, g.tw, 1).data;
+          let sum = 0;
+          let n = 0;
+          for (let x = 0; x < g.tw; x++) {
+            if (Math.max(row[4 * x], row[4 * x + 1], row[4 * x + 2]) >= 150) {
+              sum += x + 0.5;
+              n++;
+            }
+          }
+          let off = n > 0 ? sum / n - light.phase * g.tw : null;
+          if (off !== null && off < -g.tw / 2) off += g.tw; // across the wrap
+          out.push({ n, off: off === null ? null : +off.toFixed(1) });
+        }
+        window.__feed.run = false;
+        return { tw: g.tw, frames: out, seq: window.__feed.seq };
+      }));
+      if (beam) seq = beam.seq;
       // Everything allocated under the stage's frame, by the function the profiler names for it. One
-      // boxed number a frame is the floor: the looper's `phaseValue` reads Date.now(), a fresh heap number
-      // each time (as it does for the looper lanes' loop), named as `phaseValue` or, once inlined, as its
-      // caller in the stage. The probe's own trampoline (its performance.now()) is left out.
+      // boxed number a frame is the floor: the looper's `clockInto` reads Date.now(), a fresh heap number
+      // each time (as `phaseValue` does for the looper lanes' loop), named as `clockInto` or, once
+      // inlined, as its caller in the stage. The probe's own trampoline (its performance.now()) is left out.
       const by = {};
       let bytes = 0;
       const walk = (node, inside) => {
@@ -1604,7 +1727,18 @@ await probe(async ({ browser, open }) => {
       console.log(JSON.stringify({ view: v.id, warm, frames: stats.stage.n, meanMs: +mean.toFixed(3), maxMs: +stats.stage.max.toFixed(2), canvas: stats.canvas,
         frameIntervalMs: +((stats.stage.last - stats.stage.first) / (stats.stage.n - 1)).toFixed(2),
         bytesPerFrame: +(bytes / stats.stage.n).toFixed(1), allocatedBy: by,
-        hiddenLooperLanes: { meanMs: +(stats.lanes.ms / Math.max(1, stats.lanes.n)).toFixed(3), clientWidth: stats.hiddenLaneWidth } }));
+        hiddenLooperLanes: { meanMs: +(stats.lanes.ms / Math.max(1, stats.lanes.n)).toFixed(3), clientWidth: stats.hiddenLaneWidth },
+        ...(feeds && { fed: stats.fed, beam: beam.frames }) }));
+      if (feeds) {
+        // The clock ran through the window (within a quarter of the wall time: a parked anchor moves 0),
+        // a batch was due on most of its frames, and the beam stood a fresh column's lead ahead.
+        const aheadPx = (FEED_LEAD / LOOP) * beam.tw;
+        const expect = (stats.fed.ms * RATE) / 1000;
+        assert.ok(Math.abs(stats.fed.heardMoved - expect) < expect / 4, `${v.id}: the clock ran through the heap window (the heard frame moved ${stats.fed.heardMoved} frames in ${stats.fed.ms} ms, ${Math.round(expect)} expected)`);
+        assert.ok(stats.fed.batches >= 0.8 * stats.stage.n, `${v.id}: fresh columns arrived through the heap window (${stats.fed.batches} batches over ${stats.stage.n} frames)`);
+        const ahead = beam.frames.filter((b) => b.off !== null && b.n <= 6 && b.off > aheadPx / 2 && b.off < aheadPx + 4);
+        assert.ok(ahead.length >= 1, `${v.id}: the beam took a fresh column, standing about ${aheadPx.toFixed(1)} px past the drawn playhead on a frame after the window (${JSON.stringify(beam.frames)})`);
+      }
       // Without this the warm-up can run out of bursts or clock having never settled, and the heap bar
       // below would then be read off a frame still climbing down the tiers, which is the exact failure
       // the fixed warm-up had: it went red on code with no allocation site in it.
