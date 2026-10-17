@@ -106,7 +106,9 @@ it.
   the two states differ); the Audio Settings gear is Lucide's settings icon (the owner's pick, B, from six candidates in `bleeploop-push16` r1); every lane-well cue sits in one box
   and the count-in numeral stands beside its word; Tab walks the two-row bar as drawn; the UPDATE pill has a
   mode pill's size; FIXED and FADE both keep their unit to 1000 px; the IN FX popover stacks its sends so
-  every slider is 214 px long (was about 40), an off send saying in one line what it adds. Does a popover 10 px lower read as its
+  every slider is 214 px long (was about 40), an off send saying in one line what it adds; the lane core no
+  longer grows on hover or springs on release (the owner saw hairlines from its centre on the rig): hover
+  is a rim tone, a press darkens the face, the release is instant. Does a popover 10 px lower read as its
   pill's, does the note toast still catch the eye when it must, does the in-app ask read as a question to
   answer before playing on, and do the disabled tools still read as present from the chair?
 - A plugin bundle whose scan failed (2026-10-17, machine-verified, no real failed bundle seen yet): it is
@@ -134,7 +136,7 @@ it.
   shows exactly while a second press would clear (machine: `tests/actions.rs`, the `jam-keys` probe). Does
   it read in time from the guitar, and does a slip on CLR never cost a loop?
 - Lane state colour lands on the beat, no fade (rec, dub, play, mute): does a quick stop-then-play read as a
-  flicker from the guitar? The core's hover fade stays (machine: the contact sheet, no timing).
+  flicker from the guitar? The core's rim-tone hover stays (machine: the contact sheet, no timing).
 - The count-in numeral now fills the lane well at every window size, and the FX pill carries a lamp while
   any lane effect is on: does 4-3-2-1 read from 1.5 m, and does the lamp read as FX, not as a state LED?
 - The FX drawer sits on one row (title, five FX keys, DUB FEEDBACK inline) with every engaged FX's params on
