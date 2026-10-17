@@ -92,6 +92,12 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 Built, and proven by machine where a probe reaches, but never played. A line leaves when a jam answers
 it.
 
+- The designer walk's fixes (2026-10-17, measured in the rig, never played): every command-bar popover
+  (CLICK, SENS, IN FX) now opens under the bar, not under its pill, so IN FX no longer covers END STOP; the
+  BPM editor keeps the numeral's box while you type; GO LIVE keeps INPUT LIVE's width; Tab wraps inside
+  Audio Settings and Help; a toast that is neither an error nor a finished action (update offer, loops
+  kept, driver not installed, plugin to load, device fallback) reads as a dim note, not a green check.
+  Does a popover 10 px lower read as its pill's, and does the note toast still catch the eye when it must?
 - GO LIVE lights only from the engine's live flag, now in the feed: with no audio device running it stays
   unlit until one does, and a lost press toasts once ("Could not go live. Press GO LIVE again."). Does
   the pill ever lag the guitar going live, and is it ever lit while the dry guitar is silent?
