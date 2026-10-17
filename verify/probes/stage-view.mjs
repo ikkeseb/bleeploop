@@ -30,8 +30,10 @@
  *   only holds inside one batch fails exactly where a pulse straddles two: a pass repeated is over
  *   twice as bright as one pass (the look's ADD / FADE converges on 2.44x at ten), a one-off then
  *   silence falls to a fifth of its own single pass, and once the stream stops the trace fades out and
- *   then holds still. A batch the engine could not splice (`gap`) leaves the bay's light where it was:
- *   an xrun costs one 4 ms window, not the picture.
+ *   then holds still but for the beam. A batch the engine could not splice (`gap`) leaves the bay's
+ *   light where it was: an xrun costs one 4 ms window, not the picture. With a later take in flight the
+ *   beam stands inside the HUD's bar and on the drawn playhead, within one column: with no column
+ *   ever, after a stream that stopped, and on the look laid out again over that stream's columns.
  * - count: a first take's count-in (no master, `Beat`s with countLeft 4..1) shows each numeral in the
  *   overlay, inside the window at three sizes, with the message line empty, and nothing at 0; an armed
  *   later take beside a PLAYING lane (countLeft 0) reads WAITING FOR DOWNBEAT and shows no numeral.
@@ -546,20 +548,38 @@ await probe(async ({ browser, open }) => {
     }
     return { ...l, waitedMs: Date.now() - t0 };
   };
-  /** Pixels that differ between the canvas now and `ms` later. */
-  const moved = (ms) => page.evaluate(async (wait) => {
+  /** Pixels that differ between the canvas now and `ms` later. `offBeam` (the SCOPE look only) leaves
+   * out the columns the beam stands in at either grab, found where the hero bay's top tenth is bright. */
+  const moved = (ms, offBeam = false) => page.evaluate(async ([wait, skipBeam]) => {
     const c = document.querySelector('.sv-canvas');
     const grab = async () => {
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       return c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     };
+    const skip = new Uint8Array(c.width);
+    const markBeam = (d) => {
+      if (!skipBeam) return;
+      const g = window.__sc.geom();
+      const y = g.top + Math.floor(0.1 * 2 * g.unit);
+      const half = Math.ceil(9 * g.dpr); // the beam's glow is 14 CSS px wide
+      for (let x = g.x0; x < g.x0 + g.tw; x++) {
+        const p = 4 * (y * c.width + x);
+        if (Math.max(d[p], d[p + 1], d[p + 2]) < 150) continue;
+        for (let k = Math.max(0, x - half); k <= Math.min(c.width - 1, x + half); k++) skip[k] = 1;
+      }
+    };
     const a = await grab();
     await new Promise((r) => setTimeout(r, wait));
     const b = await grab();
+    markBeam(a);
+    markBeam(b);
     let n = 0;
-    for (let p = 0; p < a.length; p += 4) if (Math.abs(a[p] - b[p]) + Math.abs(a[p + 1] - b[p + 1]) + Math.abs(a[p + 2] - b[p + 2]) > 24) n++;
+    for (let p = 0; p < a.length; p += 4) {
+      if (skip[(p / 4) % c.width]) continue;
+      if (Math.abs(a[p] - b[p]) + Math.abs(a[p + 1] - b[p + 1]) + Math.abs(a[p + 2] - b[p + 2]) > 24) n++;
+    }
     return n;
-  }, ms);
+  }, [ms, offBeam]);
   /** HUD boxes: whether any two overlap, any leaves the window, and a chip number's cap height. */
   const layout = () => page.evaluate(async () => {
     await document.fonts.ready;
@@ -906,10 +926,11 @@ await probe(async ({ browser, open }) => {
       const locked = await run(whole, d.passes, 0);
       // The stream stops here. The per-column dim only erases where a new column lands, so the trace
       // would otherwise freeze with light on it: the look fades it out over a bounded time and then
-      // holds still. Read the bay once the fade is over, and then that nothing moves at all.
+      // holds still. Read the bay once the fade is over, and then that nothing moves but the beam,
+      // which the drawn playhead carries on while the loop moves (section 5).
       await settle(1200);
       const faded = (await readBays(win))[0];
-      const stillPx = await moved(300);
+      const stillPx = await moved(300, true);
       const oneOff = await run(whole, 1 + d.silence, 1);
       const singleCut = await run(d.split, 1, 0);
       const lockedCut = await run(d.split, d.passes, 0);
@@ -942,7 +963,7 @@ await probe(async ({ browser, open }) => {
       assert.ok(oneOffCut.light < singleCut.light * 0.5, `${d.name}: and split, a one-off still decays (${oneOffCut.light} against ${singleCut.light})`);
       assert.ok(Math.abs(lockedCut.light - locked.light) < locked.light * 0.25, `${d.name}: where the batch boundary falls does not change what a locked pass leaves (${lockedCut.light} split against ${locked.light} whole)`);
       assert.ok(faded.g - locked.base < single.light * 0.05, `${d.name}: the stale stream fades out, not freezes mid-light (${faded.g - locked.base} green left of ${locked.light})`);
-      assert.ok(stillPx < 20, `${d.name}: and then the drawing holds still (${stillPx} px moved in 300 ms)`);
+      assert.ok(stillPx < 20, `${d.name}: and then the drawing holds still but for the beam (${stillPx} px moved in 300 ms)`);
     }
 
     // ── 4. a gap does not wipe the trace ───────────────────────────────────────────────────────────
@@ -968,6 +989,62 @@ await probe(async ({ browser, open }) => {
     console.log(JSON.stringify({ gap: { greenOverTheStillPicture: { beforeTheGap: held[0], afterIt: held[1] }, still: gap.after.g } }));
     assert.ok(held[0] > 20_000, `control: the bay holds live light before the gap (${held[0]} green over the still picture)`);
     assert.ok(held[1] > held[0] * 0.8, `a gap costs one 4 ms window, not the trace (${held[1]} green left of ${held[0]})`);
+    // ── 5. the beam stands where the HUD's bar says ────────────────────────────────────────────────
+    // A later take in flight beside a playing loop, 2.6 bars into 8: the HUD reads bar 3. Read the
+    // bar read-out and the beam's x off the canvas in one frame, twice: with no column ever (the
+    // browser rig's ordinary case) and after a stream of columns that STOPPED a second before the
+    // scene (the screenshot sheets' case: their rich scenes leave columns in the mirror, and a device
+    // has the same mirror whenever the columns stop while the loop moves: the taps reopened and not
+    // yet answered, a held feed). The beam is read in the hero bay's top tenth, which only the beam
+    // reaches (the master's body stays inside the middle 70 %), as the centre of its bright core.
+    const beamAndBar = () => page.evaluate(async () => {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const { light } = await import('/src/ui/stage/visual.ts');
+      const g = window.__sc.geom();
+      const label = document.querySelector('.sv-bar')?.getAttribute('aria-label') ?? '';
+      const [, bar, bars] = label.match(/Bar (\d+) of (\d+)/) ?? [];
+      const y = g.top + Math.floor(0.1 * 2 * g.unit);
+      const row = document.querySelector('.sv-canvas').getContext('2d').getImageData(g.x0, y, g.tw, 1).data;
+      let sum = 0;
+      let n = 0;
+      for (let x = 0; x < g.tw; x++) {
+        if (Math.max(row[4 * x], row[4 * x + 1], row[4 * x + 2]) >= 150) {
+          sum += x + 0.5;
+          n++;
+        }
+      }
+      return { bar: Number(bar), bars: Number(bars), beamPx: n, beam: n > 0 ? sum / n / g.tw : null, drawn: light.phase, tw: g.tw };
+    });
+    const agree = (what, r) => {
+      // One column: the beam's core (2 device px) plus a frame's travel (16 ms of 16 s, 1.3 px).
+      const tol = 4 / r.tw;
+      assert.ok(r.beam !== null && r.beamPx <= 6, `${what}: one beam stands in the hero bay (${r.beamPx} bright px)`);
+      const lo = (r.bar - 1) / r.bars;
+      const hi = r.bar / r.bars;
+      assert.ok(r.beam >= lo - tol && r.beam <= hi + tol, `${what}: the beam at ${r.beam.toFixed(4)} of the sweep stands inside the HUD's bar ${r.bar} of ${r.bars} ([${lo}, ${hi}])`);
+      assert.ok(Math.abs(r.beam - r.drawn) <= tol, `${what}: the beam at ${r.beam.toFixed(4)} is the drawn playhead at ${r.drawn.toFixed(4)}, within one column (${tol.toFixed(4)})`);
+    };
+    await boot(page);
+    await settle(900);
+    await laterTake(true, 2.6 * BAR);
+    await settle(450);
+    const noColumn = await beamAndBar();
+    await rich(6.02 * BAR, 450);
+    await page.evaluate(() => window.__lf.looper.setMute(1, false));
+    await settle(1000);
+    await laterTake(true, 2.6 * BAR);
+    await settle(450);
+    const afterStop = await beamAndBar();
+    // The look laid out afresh over that mirror (the view closed and opened again: the taps' ask is
+    // owed and not yet answered), read inside its first IDLE_WAIT_MS (250 ms).
+    await setOpen(false);
+    await setOpen(true);
+    const reopened = await beamAndBar();
+    console.log(JSON.stringify({ beamAndBar: { noColumn, afterAStoppedStream: afterStop, reopenedOverIt: reopened } }));
+    agree('no column ever', noColumn);
+    agree('a stream that stopped', afterStop);
+    agree('the look opened again over a stopped stream', reopened);
+
     // Leave the look as the groups after this one expect it: no columns, and the trace faded out.
     await boot(page);
     await settle(900);
