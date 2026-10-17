@@ -103,7 +103,7 @@ it.
   button no longer also says "in Audio Settings"; DUB FEEDBACK reads KEEP and PITCH's knob SHIFT; Help's
   Manual shows the EXPORT and IMPORT icons themselves. Third pass, on the owner's Darkroom answers: every
   disabled control in the bar and the tool cluster fades by tone (the enabled tool icons a step brighter so
-  the two states differ); the Audio Settings gear is redrawn for 16 px; every lane-well cue sits in one box
+  the two states differ); the Audio Settings gear is Lucide's settings icon (the owner's pick, B, from six candidates in `bleeploop-push16` r1); every lane-well cue sits in one box
   and the count-in numeral stands beside its word; Tab walks the two-row bar as drawn; the UPDATE pill has a
   mode pill's size; FIXED and FADE both keep their unit to 1000 px; the IN FX popover stacks its sends so
   every slider is 214 px long (was about 40), an off send saying in one line what it adds. Does a popover 10 px lower read as its
