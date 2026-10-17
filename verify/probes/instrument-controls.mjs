@@ -4,7 +4,8 @@
  * (host.web.ts served with `available: true`): native MIDI's port list (scripted with
  * `__lf.native.midiEmit`) reads in the Audio Settings diagnostics and the command bar's status lamp, a port
  * another program holds says so, and LEARN is enabled only while a port is open; both empty native slots
- * show the install hint (in sans, as prose), the keyboard octave survives a placement remount, the slot volume (a
+ * show the install hint (in sans, as prose), the keyboard's hide cap reads the one close glyph ✕, the keyboard
+ * octave survives a placement remount, PARAMS wears the shared SVG caret (turned over open), the slot volume (a
  * plugin's output gain) honors the unity detent under keyboard steps and slider input, and with one
  * plugin file in both slots, a second EDITOR pressed while the first open is in flight is refused (one
  * open reaches the host), and an open that fails late, after its slot unloaded the plugin and reserved its
@@ -69,6 +70,9 @@ await probe(async ({ open }) => {
   console.log('install hint fonts', JSON.stringify(noteFonts));
   assert.ok(noteFonts.every((f) => f.startsWith('Geist') && !f.includes('Mono')), `the install hint is set in ${noteFonts[0]}`);
 
+  // The keyboard's hide cap is the app's one close glyph, ✕ (the FX drawer, a MIDI binding, a plugin folder).
+  assert.equal((await page.getByRole('button', { name: 'Hide keyboard', exact: true }).textContent()).trim(), '✕', 'hide keyboard reads ✕');
+
   const octaveDown = page.getByRole('button', { name: 'Octave down', exact: true });
   await octaveDown.click();
   await octaveDown.click();
@@ -97,7 +101,18 @@ await probe(async ({ open }) => {
   });
 
   const paramsButton = page.getByRole('button', { name: /Plugin parameters for slot A/ });
+  // PARAMS wears the app's one caret (--caret-svg, the EDIT pill's), not a text glyph, turned over open.
+  const paramsCaret = () =>
+    paramsButton.evaluate((el) => {
+      const after = getComputedStyle(el, '::after');
+      return { text: el.textContent.trim(), mask: after.maskImage, transform: after.transform };
+    });
+  const caretClosed = await paramsCaret();
+  assert.equal(caretClosed.text, 'PARAMS', `PARAMS carries no text caret: ${caretClosed.text}`);
+  assert.ok(caretClosed.mask.includes('M3 6l5 5 5-5'), `PARAMS wears the shared SVG caret: ${caretClosed.mask.slice(0, 60)}`);
+  assert.equal(caretClosed.transform, 'none', 'the caret points down while the drawer is shut');
   await paramsButton.click();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.slot__params.on'), '::after').transform !== 'none');
   const output = page.getByRole('slider', { name: 'Volume for slot A', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
   await page.waitForFunction(() => window.__gain() === 1);

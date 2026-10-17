@@ -381,7 +381,7 @@ export function Keyboard(props: KeyboardProps = {}) {
                 title={drumActive() ? 'Hide drums' : 'Hide keyboard'}
                 onClick={() => props.onHide?.()}
               >
-                ×
+                ✕
               </button>
             </Show>
           </div>
