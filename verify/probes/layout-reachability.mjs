@@ -28,12 +28,12 @@
  * - at 1000x700 and 1440x900 Tab from an open Help or Audio Settings walks its stops and wraps to the
  *   first without leaving the panel, Shift+Tab from the first or the panel lands on the last, and Help's
  *   Manual panel, focused from its tab, draws its ring inside Help's box (sides and top);
- * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open and its FILTER engaged (its
+ * - at 960x600 (reduced motion) and 1000x640 with lane 1's FX drawer open and its FILTER engaged (its
  *   params grow the drawer past one key row), so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
  *   wholly into the stack's view from the nearer edge and leaves a lane already in view unscrolled
  *   (under reduced motion inside the frame's own dispatch); a pointer press on a half-hidden lane's PLAY
- *   lands (sends `PlayStop`) and scrolls nothing. At 1000x700 (smooth) a second select arriving inside a
+ *   lands (sends `PlayStop`) and scrolls nothing. At 1000x640 (smooth) a second select arriving inside a
  *   reveal's first frames ends in view, and a pointer press on a lane stops a reveal still running where
  *   the press found it.
  *
@@ -432,14 +432,14 @@ await probe(async ({ open }) => {
     await page.close();
   }
   // The selected lane follows the transport keys into view. With lane 1's FX drawer open and its FILTER
-  // engaged the lane stack scrolls at both sizes (the drawer at rest is one key row, and five lanes fit
-  // beside it at 1000x700), and a lane the arrows or a digit selected below its fold stayed hidden, its
+  // engaged the lane stack scrolls at both sizes (at 1000x700 five lanes fit beside the drawer with its
+  // params open too, in the tight rung, so the smooth case runs 60 px shorter), and a lane the arrows or a digit selected below its fold stayed hidden, its
   // refusal cue with it. A key sends its command; the engine's `Selected` (answered here, as the engine
   // would) moves the selection. After each answer the selected lane must lie wholly inside the stack's
   // visible rect, scrolled there from the nearer edge and not at all when it already showed; under
   // reduced motion already inside the frame's own dispatch (no smooth scroll). A pointer press on a
   // half-hidden lane's PLAY must land and scroll nothing: the lane is under the pointer.
-  for (const [width, height, motion] of [[960, 600, 'reduce'], [1000, 700, 'no-preference']]) {
+  for (const [width, height, motion] of [[960, 600, 'reduce'], [1000, 640, 'no-preference']]) {
     const { page } = await open({ viewport: { width, height }, init });
     await page.emulateMedia({ reducedMotion: motion });
     await boot(page, ['Stopped', 'Stopped', 'Stopped', 'Stopped', 'Stopped']);

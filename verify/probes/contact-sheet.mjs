@@ -30,9 +30,9 @@
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
  * 1000x700 minimum with the keyboard shown included (audit A4; the drawer is one key row); with all five of
- * lane 1's FX engaged the drawer stays under 110 px (the params share one row), every param's range is at
- * least 60 px wide and the five lanes lie wholly inside the unscrolled lane stack, lanes 1-4 at 1000x700
- * with the keyboard shown (walk a12); Help opens on its
+ * lane 1's FX engaged the drawer stays under 110 px (the params share one row), every FX param's range is
+ * at least 91 px wide and the five lanes lie wholly inside the unscrolled lane stack at every size, 1000x700
+ * with the keyboard shown included (walk a12; the tight lane rung); Help opens on its
  * reference, which fits unscrolled at every size, and its Manual tab shows the manual with About this
  * build at the reference's height (Help never resizes on a tab switch) with the tabs in reach when the
  * Manual is scrolled to its foot, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
@@ -230,10 +230,10 @@ await probe(async ({ browser, open }) => {
 
       // Lane 1 playing with all five of its FX engaged: their params share ONE row under the keys (walk
       // a12: each FX once stacked its params under its key, a 176 px drawer at 1000x700 that left lane 4 a
-      // sliver and lane 5 out of view). The drawer stays under 110 px, every param's range at least 60 px
-      // wide, and the five lanes lie wholly inside the unscrolled lane stack; at 1000x700 with the
-      // keyboard shown the 57 px lane floor leaves room for a drawer of about 70 px, so lane 5 still
-      // scrolls there and lanes 1-4 must show.
+      // sliver and lane 5 out of view). The drawer stays under 110 px, every FX param's range at least
+      // 91 px wide (its width at 1000 px), and all five lanes lie wholly inside the unscrolled lane stack,
+      // at 1000x700 with the keyboard shown too: there the tight rung (looper.css, params open in a short
+      // stack) takes the 35 px the 57 px lane floor left lane 5 cut by.
       scene = '5b-fx-all-on';
       await emit(loopFrame({ count: 5, playing: [0] }));
       const fxKeys = ['Filter', 'Pitch', 'Stutter', 'Delay', 'Reverb'].map((fx) => page.getByRole('button', { name: `${fx}, track 1`, exact: true }));
@@ -250,14 +250,13 @@ await probe(async ({ browser, open }) => {
           drawer: Math.round(document.querySelector('.lp-drawer').getBoundingClientRect().height * 10) / 10,
           inside: [...document.querySelectorAll('.lp-lane')].map((l) => { const r = l.getBoundingClientRect(); return r.top >= s.top - 0.5 && r.bottom <= s.bottom + 0.5; }),
           lanes: [...document.querySelectorAll('.lp-lane')].map((l) => box(l.getBoundingClientRect())),
-          ranges: [...document.querySelectorAll('.lp-drawer .fxp-param__range')].map((r) => [r.getAttribute('aria-label'), Math.round(r.getBoundingClientRect().width)]),
+          ranges: [...document.querySelectorAll('.lp-drawer .fxp-params .fxp-param__range')].map((r) => [r.getAttribute('aria-label'), Math.round(r.getBoundingClientRect().width)]),
         };
       });
       console.log(JSON.stringify({ tag, scene, ...allFx }));
       if (!(allFx.drawer < 110)) fail(`${tag} ${scene}: the drawer with all five FX engaged is ${allFx.drawer} px tall (under 110 px: one params row)`);
-      for (const [name, w] of allFx.ranges) if (!(w >= 60)) fail(`${tag} ${scene}: ${name} is ${w} px wide (at least 60 px)`);
-      const mustShow = tag === '1000x700-bottom' ? 4 : 5;
-      const hidden = allFx.inside.slice(0, mustShow).flatMap((ok, i) => (ok ? [] : [i + 1]));
+      for (const [name, w] of allFx.ranges) if (!(w >= 91)) fail(`${tag} ${scene}: ${name} is ${w} px wide (at least 91 px)`);
+      const hidden = allFx.inside.flatMap((ok, i) => (ok ? [] : [i + 1]));
       if (allFx.scrollTop !== 0 || hidden.length) fail(`${tag} ${scene}: lane ${hidden.join(', ') || '(none)'} not wholly inside the lane stack (scrollTop ${allFx.scrollTop}; lanes ${JSON.stringify(allFx.lanes)} in ${allFx.stack} px)`);
       for (const key of fxKeys) await key.click();
       await page.waitForFunction(() => !document.querySelector('.lp-drawer .fxp-params'));

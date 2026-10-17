@@ -12,6 +12,10 @@
   position: relative;
   padding: 1px 1px 0; /* hairline so the lanes' active glow/rings aren't clipped by the zone edge */
   overflow: hidden; /* keep lane glows contained to the looper zone (the parent .zone also clips) */
+  /* The lanes-area size container. The lane stack is its only in-flow child and fills its content box,
+     so `lp`'s height and cqh ARE the lane stack's; it sits here, not on the stack, so a query can style
+     the stack itself (its gap in the tight rung below). */
+  container: lp / size;
 }
 
 /* zero-specificity reset (:where, 0,0,0) so every single-class lane button rule below wins over it.
@@ -27,16 +31,14 @@
 }
 
 /* ============ THE LANE STACK ============
-   A container context (size) so the core button can size to the lanes-area HEIGHT (cqh) — it shrinks
-   when the stage splitter makes the looper zone short. */
+   The core button sizes to the lanes-area HEIGHT (cqh, container `lp` on .lp) — it shrinks when the
+   stage splitter makes the looper zone short. */
 .lp__lanes {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: clamp(6px, 1vh, 10px);
-  container-type: size;
-  container-name: lp;
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -643,6 +645,24 @@
     min-height: 57px;
     gap: 10px;
     padding: 5px 10px;
+  }
+}
+/* The tight rung: with FX params open (the drawer 105px: one key row + one params row) the 57px rung
+   needs 5 × 57 + 105 + 5 gaps of up to 10px = 440px. Below that the whole stack steps down one notch
+   together: lanes pad 3px (53px: the two 20px pills + their 5px gap + 3px pad + border), one 4px gap
+   between every lane and the drawer, and the drawer's top pad 3px like the lanes' (its key row keeps
+   its own 5px margin, so the keys sit 8px from the edge, the params 6px). That floor is 387px, under the
+   ~390px stack of 1000x700 with the keyboard shown. Only heights change, so no slider loses width. */
+@container lp (max-height: 440px) {
+  .lp__lanes:has(.lp-drawer .fxp-params) {
+    gap: 4px;
+  }
+  .lp__lanes:has(.lp-drawer .fxp-params) .lp-lane {
+    min-height: 53px;
+    padding-block: 3px;
+  }
+  .lp__lanes:has(.lp-drawer .fxp-params) .lp-drawer {
+    padding-top: 3px;
   }
 }
 @container lp (max-height: 300px) {
