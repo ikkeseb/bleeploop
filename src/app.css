@@ -197,7 +197,7 @@ option {
 }
 @media (max-width: 1040px) {
   .cmd {
-    gap: 8px;
+    column-gap: 8px; /* the row gap stays .cmd--stack's: a `gap` here would override it */
     padding-left: 12px;
     padding-right: 12px;
   }
@@ -308,7 +308,7 @@ option {
   height: 16px;
   transition: transform 0.35s;
 }
-.tool:hover {
+.tool:hover:not(:disabled) {
   color: var(--text);
   background: var(--surf-3);
 }

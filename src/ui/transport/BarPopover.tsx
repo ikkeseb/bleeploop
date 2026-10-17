@@ -9,7 +9,7 @@ import './bar-popover.css';
  * the bar's other popovers (app.tsx): focus moves into the panel on open, Escape or a click outside
  * closes it, and a keyboard close hands focus back to the pill on the app's behalf (`returnFocus`, the
  * transport keys', so Space after Escape still arms REC); the play path stays live behind it. The panel
- * hangs under the pill that opened it (`bar-popover.css`).
+ * hangs below the command bar, aligned to the pill that opened it (`bar-popover.css`).
  */
 export interface BarPopover {
   open: () => boolean;

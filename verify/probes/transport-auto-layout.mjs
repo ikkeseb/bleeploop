@@ -4,6 +4,10 @@
  * engine mode on the web engine fake (`window.__lfEngineFake` set before the app loads, a reset frame with
  * five EMPTY lanes), and asserts the command-bar height and lane top never move: AUTO must not reflow the
  * stage when switched on/off or set from 1 to 100, and the read-out is live only while AUTO is on.
+ * At each width it also holds the bar's own layout: the stacked bar's row gap stays 3 px, the BPM
+ * editor opens in the numeral's box (the bar and stage do not move while typing), every bar popover
+ * (IN FX's, SENS's) opens below the bar's bottom edge, aligned to its pill, leaving END STOP uncovered,
+ * and a disabled tool (Export, the looper empty) shows no hover face.
  * Screenshots the 1730 px case before and after enabling. Proves layout stability only; it says nothing
  * about auto-record detection itself (the engine's: lf-engine `tests/auto_record.rs`) or anything below
  * the DOM. Run: pnpm probe transport-auto-layout
@@ -43,6 +47,65 @@ await probe(async ({ open }) => {
     }));
     const before = await bounds();
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-off.png' });
+
+    // The stacked bar keeps its 3 px row gap at every width (the narrow media rule sets column-gap only).
+    const rowGap = await page.evaluate(() => {
+      const bar = document.querySelector('.cmd');
+      return bar.classList.contains('cmd--stack') ? getComputedStyle(bar).rowGap : null;
+    });
+    if (rowGap !== null) assert.equal(rowGap, '3px', `${width}: the stacked bar's row gap`);
+
+    // A disabled tool shows no hover face (Export, nothing to export).
+    const exportTool = page.locator('.tool--export');
+    assert.equal(await exportTool.isDisabled(), true, 'Export is disabled on an empty looper');
+    const eb = await exportTool.boundingBox();
+    await page.mouse.move(eb.x + eb.width / 2, eb.y + eb.height / 2);
+    await page.waitForTimeout(250);
+    const exportFace = await exportTool.evaluate((el) => getComputedStyle(el).backgroundColor);
+    await page.mouse.move(1, 1);
+    assert.equal(exportFace, 'rgba(0, 0, 0, 0)', `${width}: a disabled tool lit a hover face`);
+
+    // The BPM editor opens in the numeral's box: nothing in the bar or the stage moves while typing.
+    const numBox = await page.locator('.transport__bpm-num').boundingBox();
+    await page.locator('.transport__bpm-num').click();
+    const editor = page.locator('.transport__bpm-input');
+    await editor.waitFor();
+    await editor.fill('300');
+    await page.waitForTimeout(150);
+    const editBox = await editor.boundingBox();
+    const editing = await bounds();
+    console.log(JSON.stringify({ width, rowGap, exportFace, numBox, editBox, editing }));
+    await page.keyboard.press('Escape');
+    await editor.waitFor({ state: 'detached' });
+    assert.ok(Math.abs(editBox.width - numBox.width) < 0.5 && Math.abs(editBox.height - numBox.height) < 0.5,
+      `${width}: the BPM editor ${editBox.width}x${editBox.height} is not the numeral's ${numBox.width}x${numBox.height}`);
+    assert.ok(Math.abs(editing.bar - before.bar) < 0.5 && Math.abs(editing.lane - before.lane) < 0.5,
+      `${width}: typing a tempo moved the bar (${before.bar} -> ${editing.bar}) or the stage`);
+
+    // A bar popover hangs below the bar, aligned to its pill, over nothing in the bar (IN FX on row 1
+    // used to hang inside the bar over END STOP on row 2).
+    const popoverPlace = (pillName, dialogName) => page.evaluate(([pillName, dialogName]) => {
+      const bar = document.querySelector('.cmd').getBoundingClientRect();
+      const pill = document.querySelector(`button[aria-label="${pillName}"]`).getBoundingClientRect();
+      const pop = document.querySelector(`[role="dialog"][aria-label="${dialogName}"]`);
+      const p = pop.getBoundingClientRect();
+      const end = document.querySelector('button[aria-label="Stop playing loops at loop end"]');
+      const e = end.getBoundingClientRect();
+      const hits = document.elementsFromPoint(e.left + e.width / 2, e.top + e.height / 2);
+      return {
+        barBottom: bar.bottom, top: p.top, aligned: Math.min(Math.abs(p.left - pill.left), Math.abs(p.right - pill.right)),
+        endCovered: hits.some((el) => pop.contains(el)),
+      };
+    }, [pillName, dialogName]);
+    await page.getByRole('button', { name: 'Input effects', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
+    const infx = await popoverPlace('Input effects', 'Input effects');
+    console.log(JSON.stringify({ width, infx }));
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor({ state: 'detached' });
+    assert.ok(infx.top >= infx.barBottom, `${width}: the IN FX popover's top ${infx.top} is inside the bar (bottom ${infx.barBottom})`);
+    assert.ok(infx.aligned < 1, `${width}: the IN FX popover is ${infx.aligned} px off its pill's edge`);
+    assert.equal(infx.endCovered, false, `${width}: the IN FX popover covers END STOP`);
     const auto = page.getByRole('button', { name: 'Auto record', exact: true });
     const sens = page.getByRole('button', { name: 'Auto record sensitivity', exact: true });
     assert.equal(await auto.getAttribute('aria-pressed'), 'false');
@@ -52,6 +115,8 @@ await probe(async ({ open }) => {
     await sens.click();
     const slider = page.getByRole('slider', { name: 'Auto record sensitivity', exact: true });
     await slider.waitFor({ state: 'visible' });
+    const sensPop = await popoverPlace('Auto record sensitivity', 'Auto record sensitivity');
+    assert.ok(sensPop.top >= sensPop.barBottom && sensPop.aligned < 1, `${width}: the SENS popover ${JSON.stringify(sensPop)}`);
     await slider.focus();
     await page.keyboard.press('End');
     assert.equal(await slider.inputValue(), '100');
