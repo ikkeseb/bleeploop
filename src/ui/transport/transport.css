@@ -506,8 +506,8 @@
    including FIXED's bars while it is on) the bar carries `.cmd--stack` and the five record modes take a
    second row under the brand; TAP (`.transport__pair`) follows them there, under BPM, only when row 1
    is still full without the tool icons (`.cmd--stack-pair`); past that the brand folds to its dot
-   (`.cmd--stack-brand`, app.css). `order` moves them visually only — DOM/tab order is
-   unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
+   (`.cmd--stack-brand`, app.css). `order` moves them visually only: the DOM keeps the one-row order,
+   and `.cmd`'s `reading-flow` (app.css) walks Tab through the rows as drawn. The width stays intrinsic (no flex-basis: 100%) so the measurement
    cannot see its own effect. */
 .cmd--stack .transport__modes,
 .cmd--stack-pair .transport__pair {

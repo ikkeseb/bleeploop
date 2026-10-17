@@ -10,7 +10,8 @@
  *   two-row command-bar cap and the muted-lane readout with the loop present;
  * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
  *   bars, RETAKE, AUTO REC, END STOP), from 960 to 1920 px wide (1105: just above the narrow rung): two
- *   rows at most, every control inside the bar and under its own centre point;
+ *   rows at most, every control inside the bar and under its own centre point, Tab walking it as drawn
+ *   (row 1 left to right, then row 2);
  * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
  *   1040 to 1280 px (the brand once unfolded on a fresh page and jumped ~99 px at the first take);
  * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
@@ -207,7 +208,7 @@ await probe(async ({ open }) => {
   // minimum, the default and the widths between, with the modes idle and all on.
   const ALL_MODES = [{ SetMetronome: true }, { SetFixedLength: true }, { SetFixedBars: 4 }, { SetRetake: true },
     { SetAutoRecord: true }, { SetLoopEndStop: true }];
-  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1280, 820], [1600, 900], [1920, 1080]]
+  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1280, 820], [1440, 900], [1600, 900], [1920, 1080]]
     .flatMap(([w, h]) => [[w, h, 'idle'], [w, h, 'modes-on']])) {
     const { page } = await open({ viewport: { width, height }, init });
     await boot(page, ['Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR, modes === 'modes-on' ? ALL_MODES : []);
@@ -229,9 +230,28 @@ await probe(async ({ open }) => {
         .filter((name) => cmd.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') === 'true').length;
       return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, on, unreachable };
     });
+    // Tab walks the bar in its visual order, row 1 left to right, then row 2: the stacked rows are a
+    // visual `order` (transport.css), which once sent Tab through row 2's modes before row 1's ■ ALL.
+    await page.evaluate(() => { document.activeElement?.blur(); document.body.focus(); });
+    const walk = [];
+    for (let i = 0; i < 80; i++) {
+      await page.keyboard.press('Tab');
+      const stop = await page.evaluate(() => {
+        const el = document.activeElement, cmd = document.querySelector('.cmd');
+        if (!el || !cmd.contains(el)) return null;
+        const r = el.getBoundingClientRect(), c = cmd.getBoundingClientRect();
+        return { name: el.getAttribute('aria-label') ?? el.textContent.trim(), x: r.left,
+          row: cmd.classList.contains('cmd--stack') && (r.top + r.bottom) / 2 > (c.top + c.bottom) / 2 ? 2 : 1 };
+      });
+      if (!stop) { if (walk.length) break; continue; }
+      walk.push(stop);
+    }
+    const visual = [...walk].sort((a, b) => a.row - b.row || a.x - b.x).map((s) => s.name);
+    bar.tabOrder = walk.map((s) => `${s.row}:${s.name}`);
+    bar.tabInVisualOrder = walk.length > 10 && walk.every((s, i) => s.name === visual[i]);
     const name = `${label}-${width}x${height}-engine${modes === 'modes-on' ? '-modes-on' : ''}`;
     await page.locator('.cmd').screenshot({ path: `logs/layout/${name}.png` });
-    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'modes-on' ? 5 : 0);
+    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'modes-on' ? 5 : 0) && bar.tabInVisualOrder;
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));

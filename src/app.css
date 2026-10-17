@@ -171,6 +171,9 @@ option {
   box-shadow: inset 0 1px 0 var(--hair);
   min-width: 0;
   anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
+  /* Tab and the accessibility tree follow the rows as drawn: the stacked bar's rows are a visual `order`
+     (transport.css), and its DOM keeps the one-row order (Chromium 137+, so WebView2's evergreen runtime) */
+  reading-flow: flex-visual;
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
    cannot see FIXED's bars come and go). Row 1 keeps brand · lamp · BPM · TAP · loop dial · ALL · FADE ·
