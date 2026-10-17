@@ -236,9 +236,11 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
-/* A row whose value is a read-out alone (DEVICE's round trip): the select's height, so the rows keep
-   their rhythm, and the value in the legend's colour; words for "no number" stay --dim. */
-.audio-settings__row--readout {
+/* A row whose value is a read-out alone (DEVICE's round trip) or the ASIO toggle: the select's height,
+   so the rows keep their rhythm, and a read-out's value in the legend's colour; words for "no number"
+   stay --dim. */
+.audio-settings__row--readout,
+.audio-settings__row--toggle {
   min-height: 30px;
 }
 .audio-settings__readout--value {
@@ -319,37 +321,64 @@
   background: var(--surf-3);
 }
 
-/* The learned MIDI bindings: one line each in the value column (action · message · the pedal-kind switch
-   · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. One from the
-   previous version wraps a second line saying so (in the legend's --dim); one that does not run now dims
-   its action and says why on that line (in the folders' amber note), with a port select and ASSIGN when
-   the player must pick its port. */
+/* The learned MIDI bindings: one line each in the value column, a table of four columns every line
+   shares (a subgrid): action · message | the pedal-kind switch | HOLD on a REC/DUB pedal | the ✕ that
+   forgets it, each line one height. The port name is the line's title. One from the previous version
+   wraps a second line saying so (in the legend's --dim); one that does not run now dims its action and
+   says why on that line (in the folders' amber note), with a port select and ASSIGN when the player must
+   pick its port, ending on the switches' right edge. */
 .audio-settings__bindings {
   margin: -4px 0 0;
   padding: 0 0 0 83px;
   list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  row-gap: 2px;
 }
 .audio-settings__binding {
-  display: flex;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-auto-rows: 24px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  row-gap: 2px;
   min-width: 0;
   font-size: 10.5px;
+}
+.audio-settings__binding-name {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* The space before each key is its own margin, not a column gap: a list with no HOLD has an empty
+   third column that then takes no room, and the second line's ASSIGN still ends on the switches' edge. */
+.audio-settings__binding > .audio-settings__chip,
+.audio-settings__binding > .audio-settings__binding-clear {
+  margin-left: 8px;
+}
+.audio-settings__binding > .audio-settings__chip {
+  grid-column: 2;
+}
+.audio-settings__binding > .audio-settings__chip + .audio-settings__chip {
+  grid-column: 3;
+}
+.audio-settings__binding > .audio-settings__binding-clear {
+  grid-column: 4;
 }
 .audio-settings__binding.is-idle .audio-settings__binding-action {
   color: var(--dim);
 }
 .audio-settings__binding-why {
-  flex: 1 0 100%;
+  grid-column: 1 / -2;
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  padding-bottom: 2px;
+}
+.audio-settings__binding-why .audio-settings__select--assign {
+  margin-left: auto;
 }
 .audio-settings__binding-origin {
   flex: 0 0 auto;
@@ -384,7 +413,7 @@
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
-/* the pedal-kind switch and HOLD: small key faces; HOLD engaged = warm-white */
+/* the pedal-kind switch, HOLD and ASSIGN: small key faces with caps legends; HOLD engaged = warm-white */
 .audio-settings__chip {
   flex: 0 0 auto;
   height: 22px;
@@ -459,6 +488,8 @@
   color: var(--text);
 }
 .audio-settings__folder--builtin {
+  /* the ✕ column (24 px and the gap) kept empty, so `missing` ends on one edge on every line */
+  padding-right: 32px;
   color: var(--dim);
 }
 .audio-settings__folder-path {

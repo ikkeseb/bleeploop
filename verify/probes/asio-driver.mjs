@@ -5,7 +5,8 @@
  *
  * - a first open that fails: the slot note says no audio device is open (not "No plugins found"), the
  *   disabled rescan button's title says why, Diagnostics' engine row carries the reason, and the open's
- *   toast stays;
+ *   toast stays; a driver that starts meanwhile is not called low-latency, nor the buffer given a block
+ *   length, until a device runs on it;
  * - the Driver row lists Automatic (naming the driver it took) and the installed drivers; picking one
  *   switches the driver (the scripted host closes the device on ASIO and reopens it, as the native
  *   device owner does), then the picks open; the pick is saved and the saved buffer left alone;
@@ -140,12 +141,26 @@ await probe(async ({ open }) => {
     window.__asioFake = asio;
     delete window.__lfFakeOpenError;
     await settings.probeAsio(true);
+    // The driver started and no device runs yet: DEVICE claims neither low latency nor a block length.
+    const deviceRow = async () => {
+      window.__lf.ui.openSettings();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const out = {
+        word: document.querySelector('.audio-settings__toggle-text')?.textContent ?? null,
+        block: document.querySelector('[aria-label="Buffer size in frames"]').closest('.audio-settings__row').querySelector('.audio-settings__readout').textContent,
+      };
+      window.__lf.ui.closeSettings();
+      return out;
+    };
+    const idle = await deviceRow();
     const status = await store.openEngineDevice();
-    return { status, calls: calls.splice(0) };
+    return { status, calls: calls.splice(0), idle, runs: await deviceRow() };
   }, DRIVERS);
   console.log('running', JSON.stringify(running));
   assert.deepEqual(running.calls, ['probe:', 'open:Asio:64']);
   assert.equal(running.status.block, 64, 'Focusrite takes 64');
+  assert.deepEqual(running.idle, { word: 'no device', block: 'no device' }, 'a started driver with no device open claims no low latency and no block');
+  assert.deepEqual(running.runs, { word: 'low-latency', block: '~1.3 ms/block' }, 'the device on ASIO does');
 
   const readSettings = () =>
     page.evaluate(async () => {

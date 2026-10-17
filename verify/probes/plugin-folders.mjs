@@ -4,7 +4,8 @@
  * probe scripts. Drives the real section and asserts what it shows and what it asks the host for:
  *
  * - opened, it lists the host's built-in folders (read-only, no remove button) and the player's own
- *   (each with `Remove folder <path>`); a folder that is gone says `missing`; a long path is cut with
+ *   (each with `Remove folder <path>`); a folder that is gone says `missing`, on one right edge for both
+ *   kinds; a long path is cut with
  *   an ellipsis, carries the whole path as its title and does not widen the panel (measured against
  *   the panel with the section hidden);
  * - `Add folder…` asks the host (which opens the dialog: no path leaves the page), shows the list it
@@ -13,8 +14,8 @@
  * - a cancelled dialog (the host answers null) changes nothing and scans nothing;
  * - a refused add shows a toast and logs the error; the list stays;
  * - the plugins the last scan found and cannot host (`unsupported`): none renders nothing; two show the
- *   summary line `2 plugins found but not supported`, each file name and reason, the full path as the
- *   line's title, without widening the panel; the list is read again after each scan that ends (a forced
+ *   summary line `2 plugins found but not supported`, each file name and reason, the full path and the
+ *   whole reason as the line's title, without widening the panel; the list is read again after each scan that ends (a forced
  *   rescan here), so one entry says `1 plugin`, and an empty answer removes the block;
  * - while a scan runs, `Add folder…` is disabled; an add that still completes during a scan held open
  *   (the scan walked the folders it started with) is followed by ONE more scan, and the picker ends
@@ -162,7 +163,8 @@ await probe(async ({ open }) => {
     const path = long.querySelector('.audio-settings__folder-path');
     const button = long.querySelector('button').getBoundingClientRect();
     const box = panel.getBoundingClientRect();
-    const shown = { cut: path.scrollWidth > path.clientWidth, panel: width(), inside: button.right <= box.right && button.left >= box.left };
+    const missing = [...group.querySelectorAll('.audio-settings__folder-missing')].map((m) => Math.round(m.getBoundingClientRect().right * 2) / 2);
+    const shown = { cut: path.scrollWidth > path.clientWidth, panel: width(), inside: button.right <= box.right && button.left >= box.left, missing };
     group.style.display = 'none';
     const without = width();
     group.style.display = '';
@@ -172,6 +174,8 @@ await probe(async ({ open }) => {
   assert.ok(fit.cut, 'a long path is cut (its title has it whole)');
   assert.ok(fit.inside, 'its remove button stays inside the panel');
   assert.equal(fit.panel, fit.without, 'a long path does not widen the panel');
+  assert.equal(fit.missing.length, 2, 'a built-in and an own folder are missing');
+  assert.equal(new Set(fit.missing).size, 1, 'both `missing` words end on one edge (a built-in line keeps the ✕ column)');
   await mkdir('logs/plugin-folders', { recursive: true });
   await section.screenshot({ path: 'logs/plugin-folders/section.png' });
   assert.deepEqual(await picker(), ['Probe Amp Sim (VST3)']);
@@ -326,7 +330,7 @@ await probe(async ({ open }) => {
   console.log('unsupported', JSON.stringify({ summary: await summary.textContent(), items: await shown(), calls: await calls() }));
   assert.equal(await summary.textContent(), '2 plugins found but not supported', 'the scan that ended refreshed the list');
   assert.ok((await calls()).includes('folders'), 'by reading the folders again');
-  assert.deepEqual(await shown(), [OLD_DLL, SHELL_DLL].map((u) => ({ file: u.path.split('\\').pop(), reason: u.reason, title: u.path })), 'file name, reason, full path as the title');
+  assert.deepEqual(await shown(), [OLD_DLL, SHELL_DLL].map((u) => ({ file: u.path.split('\\').pop(), reason: u.reason, title: `${u.path}: ${u.reason}` })), 'file name, reason, the full path and the whole reason as the title');
   const wide = await section.evaluate((group) => {
     const panel = group.closest('.audio-settings');
     const width = () => Math.round(panel.getBoundingClientRect().width);
