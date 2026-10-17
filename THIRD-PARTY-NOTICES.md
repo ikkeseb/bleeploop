@@ -23,6 +23,15 @@ in `src/assets/fonts/` and bundled into the app. They are licensed under the SIL
 1.1, not the repository's MIT licence. The licence text is `licenses/OFL-1.1-Geist.txt`; the installer
 puts it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
 
+### Lucide icon: ISC
+
+The Audio Settings gear in the command bar (`src/app.tsx`, `.tool--gear`) is the `settings` icon of
+Lucide (Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather
+(MIT); all other copyright (c) for Lucide are held by Lucide Contributors 2022), inlined as SVG path
+data and licensed under the ISC licence, whose permission notice must travel with every copy: the
+licence text is `licenses/ISC-Lucide.txt`; the installer puts it beside the exe. Upstream:
+<https://github.com/lucide-icons/lucide>.
+
 ## Rust / native dependencies (`src-tauri/`)
 
 All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.

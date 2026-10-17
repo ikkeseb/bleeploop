@@ -18,9 +18,9 @@
  * device-pixel ratio of 2 as `logs/transport-auto-layout/tools-loop.png`.
  * Then the Audio Settings gear (the native chrome on: host.web.ts served with `available: true`), at 1440x900
  * over a stopped one-bar loop, at a device-pixel ratio of 1 and of 2: its rendered bitmap matches itself
- * turned by one tooth (45 degrees, resampled) and by two (90 degrees, the pixel grid's own turn, no
- * resampling), a ring between its root circle and its tips crosses eight evenly spaced teeth, its hub is
- * open, and its ink box sits in the button's centre within 0.5 px. Writes logs/transport-auto-layout/
+ * turned by one tooth (60 degrees, resampled) and by three (180 degrees, the pixel grid's own turn, no
+ * resampling), a ring through its tooth tips crosses six evenly spaced teeth, its hub is open, and its ink
+ * box sits in the button's centre within 0.5 px. Writes logs/transport-auto-layout/
  * tools-<dpr>x.png (the tool cluster with 6 px around it) and gear-<dpr>x.png (32 px around the gear).
  * Screenshots the 1730 px case before and after enabling. Proves layout, tone and the gear's raster only
  * (in Chromium, not WebView2 on the rig's display scale); it says nothing
@@ -336,18 +336,19 @@ await probe(async ({ browser, open }) => {
   assert.notEqual(tone.EXPORT.color, tone.faint, 'an enabled tool reads as the disabled one');
   await context.close();
 
-  // The Audio Settings gear is drawn for 16 px: rotationally symmetric as rendered, and centred in its
-  // button. The Feather path it replaced put its teeth between pixels and read lopsided (0.46 off its
-  // 45-degree turn and 0.32 off its 90-degree one at 1x; 0.42 and 0.33 at 2x). TURN_LIMIT allows a
-  // symmetric drawing's own antialiasing: a diagonal tooth rasterizes unlike an upright one, so the
-  // resampled turn of the gear drawn for 16 px sits near 0.28 at 1x (0.14 at 2x); the 90-degree turn is
-  // exact on the grid and leaves only the rasterizer (0.07 and 0.05).
+  // The Audio Settings gear (Lucide's settings icon, the owner's pick) is rotationally symmetric as
+  // rendered, and centred in its button. A Feather path once put its teeth between pixels and read lopsided
+  // (0.46 off its one-tooth turn at 1x). TURN_LIMIT allows a symmetric drawing's own antialiasing: a
+  // diagonal tooth rasterizes unlike an upright one, so the resampled 60-degree turn sits near 0.29 at 1x
+  // (0.14 at 2x); the 180-degree turn is exact on the grid and leaves only the rasterizer (0.08 and 0.04).
   // The turns alone pass a filled square or disc, so the drawing is also read as a gear: TOOTH_RING (of the
-  // ink box's half-width: 6.2 of 7 px, between the root circle's 5.2 and the tips) crosses TEETH teeth, each
-  // within SPACING degrees of its place one tooth on from the last, and the hub's hole carries at most
-  // HUB_INK coverage (the drawn hole is 2 px across at 1x, its edge antialiased into the centre pixels: 0.26;
-  // a filled hub reads 1).
-  const TEETH = 8, TURN_LIMIT = { [360 / TEETH]: 0.35, 90: 0.15 }, TOOTH_RING = 0.88, SPACING = 5, HUB_INK = 0.5;
+  // ink box's half-width, which runs across the teeth at 60 degrees: a ring of 9.2 drawing units, against
+  // the stroke over the lobes' tips at 9.1 to 10.9) crosses TEETH teeth, each within SPACING degrees of its
+  // place one tooth on from the last. The ring reads 6 teeth from 0.92 to 0.96 at both ratios (nearer the
+  // root it cuts each lobe's two flanks apart, 0.84 to 0.91 at 1x), the eight-toothed gear it replaced 8,
+  // a filled disc or square none. The hub's hole carries at most HUB_INK coverage (the drawn hole is 2.8 px
+  // across at 1x: 0; a filled hub reads 1).
+  const TEETH = 6, TURN_LIMIT = { [360 / TEETH]: 0.35, 180: 0.15 }, TOOTH_RING = 0.94, SPACING = 5, HUB_INK = 0.5;
   await mkdir('logs/transport-auto-layout', { recursive: true });
   for (const dpr of [1, 2]) {
     const context = await browser.newContext({ deviceScaleFactor: dpr });
