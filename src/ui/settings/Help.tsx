@@ -8,6 +8,7 @@ import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import { platform } from '../../platform';
 import { BUILD_LABEL, copyDiagnostics, logFolder, openLogFolder } from './diagnostics';
 import { SETTINGS_PAGE_LABELS, openSettings, settingsPath, type SettingsPage } from '../../settings-opener';
+import { ExportIcon, ImportIcon } from '../transport/session-icons';
 import './help.css';
 
 /**
@@ -304,8 +305,8 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Session</h3>
         <ul class="help__list">
-          <li><span class="help__note">⬇</span> (the export icon among the command bar's tools) exports every track + a master mix as WAV, with a session.json and each loaded plugin's settings, in one zip</li>
-          <li><span class="help__note">⬆</span> imports such a zip, only while the looper is empty; the loops are restored locally on reopen anyway</li>
+          <li><span class="help__icon" role="img" aria-label="Export"><ExportIcon /></span> (the export icon among the command bar's tools) exports every track + a master mix as WAV, with a session.json and each loaded plugin's settings, in one zip</li>
+          <li><span class="help__icon" role="img" aria-label="Import"><ImportIcon /></span> imports such a zip, only while the looper is empty; the loops are restored locally on reopen anyway</li>
         </ul>
       </section>
 
