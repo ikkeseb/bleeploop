@@ -1,13 +1,55 @@
-/* IN FX popover — "Instrument". Hangs under its command-bar pill (bar-popover.css) and wears the lane FX
-   panel's modules (fxpanel.css) on the floating panel tone. Chrome stays monochrome; engaged = the
-   warm-white legend. */
+/* IN FX popover — "Instrument". Hangs under the command bar (bar-popover.css) and wears the lane FX
+   panel's key faces, sliders and select (fxpanel.css) on the floating panel tone. Chrome stays monochrome;
+   engaged = the warm-white legend.
+   The sends stack full width, one row each: the key face is the row's header in a fixed column, and an
+   engaged send lists its params to the right, one full-width row per param, so every slider runs about
+   210 px at the panel's 480 (the side-by-side modules left each about 40). Label, slider and value sit in
+   fixed columns, so the sliders of every send start and end at one x. A send that is off shows a faint
+   line saying what it adds, so the dry panel reads as three calm rows, not a sliver. */
 .infx-popover .infx {
   width: 480px;
+  flex-direction: column;
   flex-wrap: nowrap;
-  align-items: flex-start;
+  gap: 4px;
+  padding: 10px;
   background: var(--panel);
   box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
 }
 .infx-popover .fxp-mod {
+  flex: none; /* a column of flex: 1 1 0 modules would share the height equally */
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 16px;
   min-width: 0;
+  padding: 8px 9px;
+}
+.infx-popover .fxp-mod__toggle {
+  flex: none;
+  width: 96px;
+  min-height: 28px;
+}
+.infx-popover .fxp-mod__params {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+}
+/* each param row as tall as the key face, so the first one lines up with it */
+.infx-popover .fxp-param {
+  grid-template-columns: 40px 1fr 52px;
+  gap: 10px;
+  min-height: 28px;
+}
+.infx-popover .fxp-param__val {
+  min-width: 0;
+}
+/* the division select keeps its key face at its own width, where the sliders start */
+.infx-popover .fxp-param__select {
+  grid-column: 2 / 3;
+  justify-self: start;
+  min-width: 92px;
+}
+.infx__blurb {
+  align-self: center;
+  font-size: 11px;
+  color: var(--faint);
 }

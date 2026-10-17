@@ -8,6 +8,9 @@
  * editor opens in the numeral's box (the bar and stage do not move while typing), every bar popover
  * (IN FX's, SENS's) opens below the bar's bottom edge, aligned to its pill, leaving END STOP uncovered,
  * and a disabled tool (Export, the looper empty) shows no hover face.
+ * At 1000x700 and 1440x900, with every input send on (a reset frame from an engine that remembers them), the
+ * IN FX popover's sliders are real controls: each at least 160 px long (side by side, the sends left each
+ * about 40), and the popover's bottom edge inside the window.
  * At 1440x900 with a stopped one-bar loop it holds the disabled tone: the BPM steppers (locked), IMPORT
  * (a loop is in), lane 1's core (STOPPED) and a disabled read-out's caret (SENS, AUTO off) fade by tone,
  * never by opacity: each at an effective opacity of 1 in the --faint legend a disabled pill wears, an
@@ -221,6 +224,39 @@ await probe(async ({ browser, open }) => {
     await page.close();
   }
   assert.deepEqual(failures, [], 'AUTO moved the stage at these viewport widths');
+
+  // The IN FX popover with every send on: each slider a real control, the panel inside the window.
+  const MIN_SLIDER = 160;
+  for (const [width, height] of [[1000, 700], [1440, 900]]) {
+    const { page } = await open({ viewport: { width, height }, init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+    await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+    await page.evaluate((f) => window.__lf.native.emit(f), {
+      seq: 1,
+      reset: true,
+      settings: ['echo', 'reverb', 'ring'].map((id) => ({ SetInputSend: [id, true] })),
+      events: [
+        ...[0, 1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info: EMPTY } })),
+        { Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
+        { Selected: { frame: 0, lane: 0 } },
+      ],
+      anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
+      meter: { peak: [0, 0], clip: [false, false] },
+    });
+    await page.getByRole('button', { name: 'Input effects', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
+    const sends = await page.evaluate(() => ({
+      on: [...document.querySelectorAll('.infx .fxp-mod__toggle')].map((b) => b.getAttribute('aria-pressed')),
+      sliders: [...document.querySelectorAll('.infx .fxp-param__range')].map((r) => [r.getAttribute('aria-label'), r.getBoundingClientRect().width]),
+      bottom: document.querySelector('#lf-infx-popover').getBoundingClientRect().bottom,
+      panel: (({ width, height }) => ({ width, height }))(document.querySelector('#lf-infx-popover .infx').getBoundingClientRect()),
+    }));
+    console.log(JSON.stringify({ infxSends: `${width}x${height}`, ...sends }));
+    await page.close();
+    assert.deepEqual(sends.on, ['true', 'true', 'true'], `${width}x${height}: not every send shows on`);
+    assert.equal(sends.sliders.length, 5, `${width}x${height}: the sends' sliders`);
+    for (const [name, w] of sends.sliders) assert.ok(w >= MIN_SLIDER, `${width}x${height}: the IN FX slider "${name}" is ${w.toFixed(1)} px long (at least ${MIN_SLIDER})`);
+    assert.ok(sends.bottom <= height, `${width}x${height}: the IN FX popover's bottom edge ${sends.bottom} is below the window`);
+  }
 
   // Disabled by tone, never by opacity (the rule .tgl:disabled and the lane pills state): with a stopped
   // one-bar loop the BPM steppers are locked, IMPORT waits for an empty looper and lane 1's core says play
