@@ -14,6 +14,8 @@
   height: 8px;
   background: currentColor;
   mask: var(--caret-svg) center / contain no-repeat;
+  /* Forced colours (Windows high contrast) would paint the mask with Canvas: keep currentColor. */
+  forced-color-adjust: none;
   transition: transform 0.15s;
 }
 .lp-pb--edit.is-open {
