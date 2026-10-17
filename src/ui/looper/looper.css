@@ -329,7 +329,9 @@
   }
 }
 
-/* play-stop + clear, stacked; one width on every lane whichever word (PLAY, STOP, NOW) it shows */
+/* play-stop + clear, stacked; one width on every lane whichever word (PLAY, STOP, NOW) it shows. 62px
+   holds ▶ PLAY (about 43px of type) on a narrower pad and keeps the pair inside the left cluster's 200px
+   at the 1000px floor (live-meter) */
 .lp-lane__pair {
   flex: 0 0 auto;
   display: flex;
@@ -337,7 +339,8 @@
   gap: 5px;
 }
 .lp-lane__pair .lp-pb {
-  min-width: 64px;
+  width: 62px;
+  padding: 0 8px;
 }
 
 /* ---- pill button (STOP/PLAY/CLR + FX/MUTE/REV/UNDO/EDIT) ---- */
