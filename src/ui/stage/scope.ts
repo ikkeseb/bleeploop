@@ -164,12 +164,16 @@ function createScope(): ViewDraw {
   let resized = true;
   // The trace's own state. The newest column drawn and the sweep it was placed in are device frames:
   // they live in a typed array, not in a closure variable that would box on every store.
-  const mem = new Float64Array(5);
+  const mem = new Float64Array(9);
   const DRAWN = 0; // the newest column already drawn, -1 before the first
   const SPAN = 1; // the sweep's span in frames
   const GRID = 2; // and the grid anchor it was placed against
   const BEAM = 3; // the beam's x in the trace last frame (device px, fractional), -1 for none
   const LEAD = 4; // and how far it stood ahead of the drawn playhead
+  const BSPAN = 5; // the master, the grid and the column bin that x was placed in
+  const BGRID = 6;
+  const BBIN = 7;
+  const NEWEST = 8; // the mirror's newest column frame last frame: a column arrived when it moved
   let drawnEpoch = -1;
   let drawnBin = 0;
   let cw = 1; // one column's width in device px
@@ -238,6 +242,7 @@ function createScope(): ViewDraw {
     mem[SPAN] = 0;
     mem[BEAM] = -1;
     mem[LEAD] = 0;
+    mem[NEWEST] = -1;
     drawnBin = 0;
     drawnEpoch = -1;
     pendX = -1;
@@ -422,6 +427,10 @@ function createScope(): ViewDraw {
       beam[0] = -2;
       return;
     }
+    // A column arrived when the mirror's newest one moved: a new sweep below re-places the newest
+    // column it already had, and that is no sign the stream is alive.
+    const arrived = view.frame !== mem[NEWEST];
+    mem[NEWEST] = view.frame;
     const master = looper.masterFramesValue();
     const span = master > 0 ? master : FALLBACK_COLUMNS * bin;
     // Loop position 0 plays at the master grid's anchor, so a column's phase is its own frame's.
@@ -462,7 +471,7 @@ function createScope(): ViewDraw {
     let n = Math.round((view.frame - mem[DRAWN]) / bin);
     mem[DRAWN] = view.frame;
     if (n <= 0) return;
-    beam[ALIVE] = 1; // the stream is alive, whatever this frame's columns fold into
+    if (arrived) beam[ALIVE] = 1; // the stream is alive, whatever this frame's columns fold into
     const most = Math.min(view.count, Math.ceil(span / bin), gx.length); // after a stall, one sweep is all the x there are
     if (n > most) {
       // Columns are being discarded, so the pending one is no longer the neighbour of the first kept
@@ -569,6 +578,15 @@ function createScope(): ViewDraw {
       mem[BEAM] = -1;
       mem[LEAD] = 0;
     } else {
+      // A new sweep (a multiply, a new master, a restart's new grid): the last x means another place.
+      const grid = looper.gridValue();
+      if (master !== mem[BSPAN] || grid !== mem[BGRID] || drawnBin !== mem[BBIN]) {
+        mem[BSPAN] = master;
+        mem[BGRID] = grid;
+        mem[BBIN] = drawnBin;
+        mem[BEAM] = -1;
+        mem[LEAD] = 0;
+      }
       const ph = light.phase * tw;
       let most = drawnBin > 0 ? (LEAD_COLUMNS * drawnBin * tw) / master : 0;
       if (most > tw / 4) most = tw / 4;

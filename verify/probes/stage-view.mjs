@@ -33,11 +33,13 @@
  *   then holds still but for the beam. A batch the engine could not splice (`gap`) leaves the bay's
  *   light where it was: an xrun costs one 4 ms window, not the picture. With a later take in flight the
  *   beam stands inside the HUD's bar and on the drawn playhead, within one column: with no column
- *   ever, after a stream that stopped, and opened a quarter beat before a bar line and before the loop
- *   end (the HUD reads the bar the playhead is in). With the frames run by hand on a parked clock, it
- *   also holds every frame and never steps back: on the look laid out again over a stale stream just
- *   ahead of the playhead, under a trickle (a delivery every 300 ms), and past a late batch of old
- *   columns, where a fresh column may carry it no further ahead than its own lead.
+ *   ever, after a stream that stopped, and opened before a bar line, over the loop's last beat (its
+ *   last slack window too, in 4/4 and 6/8) and past the wrap (the HUD reads the bar the playhead is
+ *   in; a downbeat shown a moment early reads bar 1). With the frames run by hand on a parked clock,
+ *   it also holds every frame and never steps back: on the look laid out again over a stale stream
+ *   just ahead of the playhead, under a trickle (a delivery every 300 ms), past a late batch of old
+ *   columns, and after a multiply or a restart on a new grid, where a fresh column may carry it no
+ *   further ahead than its own lead.
  * - count: a first take's count-in (no master, `Beat`s with countLeft 4..1) shows each numeral in the
  *   overlay, inside the window at three sizes, with the message line empty, and nothing at 0; an armed
  *   later take beside a PLAYING lane (countLeft 0) reads WAITING FOR DOWNBEAT and shows no numeral.
@@ -1049,18 +1051,45 @@ await probe(async ({ browser, open }) => {
     agree('a stream that stopped', afterStop);
 
     // The HUD's bar is the bar the drawn playhead stands in, read from the wrapped phase: opened a
-    // quarter beat before bar 3's line it reads bar 2, and a third of a beat before the loop's end
-    // bar 8, where the beam stands (rounding to the nearest beat read bar 3 and bar 1).
-    for (const [what, beats] of [['a quarter beat before bar 3', 7.75], ['a third of a beat before the loop end', 31.68]]) {
+    // quarter beat before bar 3's line it reads bar 2, and over the loop's last beat bar 8, where the
+    // beam stands (rounding to the nearest beat read bar 3 and bar 1, and a slack added before the
+    // wrap read bar 1 inside its last window), in 4/4 and in 6/8 (two dotted quarters a bar); just
+    // past the wrap it reads bar 1. Each scene shows the beat the playhead last crossed.
+    const SIX_EIGHT = { num: 6, den: 8, beats: 2 };
+    const hudScenes = [
+      ['a quarter beat before bar 3', 7.75, 4],
+      ['a third of a beat before the loop end', 31.68, 4],
+      ['inside the last slack window before the loop end', 0.9990234375 * 32, 4],
+      ['at the loop start after the wrap', 32, 4],
+      ['in 6/8, at 0.999 of the loop', 0.999 * 16, 2],
+    ];
+    for (const [what, beats, perBar] of hudScenes) {
       await setOpen(false);
       await boot(page);
-      await emit({ events: [transport(LOOP, true, 120), laneEvent(0, playing(LOOP)), ...empties(1, 2, 3, 4), beatAt(beats * (RATE / 2))], anchor: parkedAt(beats * (RATE / 2)), peaks: [wave(0, LOOP)] });
+      const master = 8 * perBar * (RATE / 2);
+      const meter = perBar === 2 ? SIX_EIGHT : undefined;
+      const crossed = Math.floor(beats);
+      await emit({
+        events: [{ Transport: { frame: 0, master, bpm: 120, locked: true, ...(meter ? { meter } : {}) } }, laneEvent(0, playing(master)), ...empties(1, 2, 3, 4), { Beat: { frame: crossed * (RATE / 2), beatInBar: crossed % perBar, countLeft: 0, clicked: false } }],
+        anchor: parkedAt(beats * (RATE / 2)),
+        peaks: [wave(0, master)],
+      });
       await setOpen(true);
       const r = await beamAndBar();
       console.log(JSON.stringify({ hudBar: { what, ...r } }));
-      assert.equal(r.bar, Math.floor(beats / 4) + 1, `opened ${what}: the HUD reads the bar the playhead stands in`);
+      assert.equal(r.bar, Math.floor((crossed % (8 * perBar)) / perBar) + 1, `opened ${what}: the HUD reads the bar the playhead stands in`);
       agree(`opened ${what}`, r);
     }
+    // The control for the slack: the loop's downbeat shown 5 ms before the playhead reaches it (a
+    // timer's millisecond, a new anchor) reads bar 1, not the bar before it.
+    await setOpen(false);
+    await boot(page);
+    await emit({ events: [transport(LOOP, true, 120), laneEvent(0, playing(LOOP)), ...empties(1, 2, 3, 4)], anchor: parkedAt(31.99 * (RATE / 2)), peaks: [wave(0, LOOP)] });
+    await setOpen(true);
+    await emit({ events: [{ Beat: { frame: LOOP, beatInBar: 0, countLeft: 0, clicked: false } }] });
+    await settle(100);
+    const early = await hud();
+    assert.match(early.bar, /^1\s*\/\s*8$/, `the loop's downbeat shown a moment early reads bar 1 (${early.bar})`);
 
     /**
      * The SCOPE look's frames run by hand, `dt` ms apart, all in one task, so no real frame lands in
@@ -1088,7 +1117,7 @@ await probe(async ({ browser, open }) => {
         s.manual = true;
         for (let k = 0; k < o.plan.length; k++) {
           const heard = o.heard0 + Math.round((k * o.dt * o.rate) / 1000);
-          send({ anchor: { frame: heard, atMs: Date.now(), rate: 0, grid: 0 } });
+          send({ anchor: { frame: heard, atMs: Date.now(), rate: 0, grid: o.grid } });
           if (o.plan[k] !== null) {
             const to = Math.floor((heard + o.plan[k]) / o.bin);
             if (to > next) {
@@ -1113,7 +1142,7 @@ await probe(async ({ browser, open }) => {
         const label = document.querySelector('.sv-bar')?.getAttribute('aria-label') ?? '';
         const [, bar, bars] = label.match(/Bar (\d+) of (\d+)/) ?? [];
         return { seq, frames: out, bar: Number(bar), bars: Number(bars), tw: g.tw };
-      }, { dt: 1000 / 60, rate: RATE, bin: BIN, gain: LANE1_ONLY, kick: false, ...o, seq });
+      }, { dt: 1000 / 60, rate: RATE, bin: BIN, gain: LANE1_ONLY, kick: false, grid: 0, ...o, seq });
       seq = r.seq;
       return r;
     };
@@ -1190,6 +1219,26 @@ await probe(async ({ browser, open }) => {
     });
     steady('a trickle of columns', trickle, LEAD);
     steady('a late batch, then the stream again', late, LEAD);
+
+    // A new sweep under a beam a fresh column carried 7 px ahead of a parked playhead, just past the
+    // wrap: a multiply that doubles the loop, and a restart that re-anchors the grid at the playhead.
+    // That x means another place in the new sweep, so with no fresh column the beam stands on the
+    // drawn playhead at once rather than holding there until the playhead catches it up.
+    const NEAR = 2 * LOOP + 1000;
+    for (const [what, change, grid] of [
+      ['a multiply that doubles the loop', { events: [transport(2 * LOOP, true, 120)] }, 0],
+      ['a restart on a new grid', { anchor: { frame: NEAR, atMs: Date.now(), rate: 0, grid: NEAR } }, NEAR],
+    ]) {
+      await boot(page);
+      await emit({ events: [transport(LOOP, true, 120), laneEvent(0, playing(LOOP)), ...empties(1, 2, 3, 4)], anchor: parkedAt(NEAR), peaks: [wave(0, LOOP)] });
+      await settle(300);
+      const before = await byHand({ heard0: NEAR, rate: 0, plan: Array(10).fill(3700) });
+      const last = before.frames.at(-1);
+      assert.ok(last.beam - last.drawn > 4, `control, ${what}: a fresh column carries the beam ahead of the playhead first (${(last.beam - last.drawn).toFixed(1)} px)`);
+      await settle(600); // the column is no longer fresh (the frames by hand ran ahead of the clock)
+      await emit(change);
+      steady(`after ${what}`, await byHand({ heard0: NEAR, rate: 0, grid, plan: Array(5).fill(null) }), 0);
+    }
 
     // Leave the look as the groups after this one expect it: no columns, and the trace faded out.
     await boot(page);
