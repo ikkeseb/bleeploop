@@ -98,14 +98,22 @@ export interface UnsupportedPlugin {
   reason: string;
 }
 
+/** A plugin bundle whose last scan failed (a crash, a timeout, output that did not parse): its full path
+ * and the host's reason on one line. A forced `scanPlugins` retries it. */
+export interface FailedPlugin {
+  path: string;
+  reason: string;
+}
+
 /** The plugin scan's folders (`src-tauri/src/host/folders.rs`): `builtin` is what the scan walks by
  * itself (the standard CLAP, VST3 and VST2 folders, then `CLAP_PATH`/`VST3_PATH`), read-only; `user` is
- * the player's own list, kept in `plugin-folders.json`; `unsupported` is what the last scan in this run
- * found and cannot host. */
+ * the player's own list, kept in `plugin-folders.json`; `unsupported` and `failed` are what the last scan
+ * in this run found and did not list: plugins it cannot host, and bundles whose scan failed. */
 export interface PluginFolders {
   builtin: PluginFolder[];
   user: PluginFolder[];
   unsupported: UnsupportedPlugin[];
+  failed: FailedPlugin[];
 }
 
 export interface PluginHost {

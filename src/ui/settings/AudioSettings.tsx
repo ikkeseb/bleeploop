@@ -112,6 +112,13 @@ function Page(props: { id: SettingsPage; shown: SettingsPage; readOnly?: boolean
 /** "2 PEDALS", "1 PLUGIN", "NONE": a rail count. */
 const count = (n: number, one: string, many: string): string => (n === 0 ? 'none' : `${n} ${n === 1 ? one : many}`);
 
+/** What the last scan found and did not load, as PLUGINS lists it: the failed bundles first (a rescan
+ * may bring them back), then the ones this build cannot host, each row with its kind word. */
+const notLoaded = () => [
+  ...pluginFolders().failed.map((p) => ({ ...p, kind: 'failed' })),
+  ...pluginFolders().unsupported.map((p) => ({ ...p, kind: 'unsupported' })),
+];
+
 /** Processing-block duration, not an input-to-output latency estimate. */
 function bufferMs(frames: number): string {
   return `~${((frames / sampleRate()) * 1000).toFixed(1)} ms/block`;
@@ -791,7 +798,8 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
         {/* Plugin folders: what the scan walks. The host's own folders are read-only; the player's are
             added through the native folder dialog (the host opens it) and removed with ✕. Each change is
             followed by a scan (`state/plugin-folders.ts`); a folder that is gone says so and is skipped. Under
-            the folders, what the last scan found and cannot host (a 32-bit VST2, say), with why. */}
+            the folders, what the last scan found and did not load, with why: a bundle whose scan failed (the
+            picker's rescan retries it) and one this build cannot host (a 32-bit VST2, say). The picker stays clean. */}
         <Show
           when={platform.pluginHost.available}
           fallback={<div class="audio-settings__hint audio-settings__hint--info audio-settings__hint--flush" role="note">No plugin host in this build.</div>}
@@ -844,19 +852,18 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                 No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.
               </div>
             </Show>
-            <Show when={pluginFolders().unsupported.length > 0}>
-              <div class="audio-settings__unsupported">
-                <div class="audio-settings__unsupported-summary">
-                  {pluginFolders().unsupported.length === 1
-                    ? '1 plugin found but not supported'
-                    : `${pluginFolders().unsupported.length} plugins found but not supported`}
+            <Show when={notLoaded().length > 0}>
+              <div class="audio-settings__not-loaded">
+                <div class="audio-settings__not-loaded-summary">
+                  {notLoaded().length === 1 ? '1 plugin found but not loaded' : `${notLoaded().length} plugins found but not loaded`}
                 </div>
-                <ul class="audio-settings__unsupported-list" tabindex={0} aria-label="Plugins found but not supported">
-                  <For each={pluginFolders().unsupported}>
+                <ul class="audio-settings__not-loaded-list" tabindex={0} aria-label="Plugins found but not loaded">
+                  <For each={notLoaded()}>
                     {(plugin) => (
-                      <li class="audio-settings__unsupported-item" title={`${plugin.path}: ${plugin.reason}`}>
-                        <span class="audio-settings__unsupported-file">{plugin.path.split(/[\\/]/).pop()}</span>
-                        <span class="audio-settings__unsupported-reason">{plugin.reason}</span>
+                      <li class="audio-settings__not-loaded-item" title={`${plugin.path}: ${plugin.reason}`}>
+                        <span class="audio-settings__not-loaded-file">{plugin.path.split(/[\\/]/).pop()}</span>
+                        <span class="audio-settings__not-loaded-kind">{plugin.kind}</span>
+                        <span class="audio-settings__not-loaded-reason">{plugin.reason}</span>
                       </li>
                     )}
                   </For>

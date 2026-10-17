@@ -13,7 +13,7 @@
 
 use super::engine_slot::PluginFormat;
 use super::pe;
-use super::state::{PluginDescriptor, UnsupportedPlugin};
+use super::state::{FailedPlugin, NotListed, PluginDescriptor, UnsupportedPlugin};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -227,22 +227,32 @@ struct ScanStats {
     scanned: usize,
     cached: usize,
     fresh: usize,
-    failed: Vec<String>,
 }
 
-/// What one scan found: the plugins to list, and the files that are plugins this build cannot
-/// host, each with why.
+/// What one scan found: the plugins to list, the files that are plugins this build cannot host,
+/// and the bundles whose scan failed, each with why.
 #[derive(Default, Debug, PartialEq, Eq)]
 struct Scanned {
     plugins: Vec<PluginDescriptor>,
     unsupported: Vec<UnsupportedPlugin>,
+    failed: Vec<FailedPlugin>,
 }
 
 impl Scanned {
-    fn take(&mut self, path: &str, outcome: &ScanOutcome) {
-        self.plugins.extend(outcome.plugins.iter().cloned());
-        if let Some(reason) = &outcome.unsupported {
-            self.unsupported.push(UnsupportedPlugin { path: path.to_string(), reason: reason.clone() });
+    /// One bundle's outcome: `Err` is a failed scan, listed with the first line of its reason (a
+    /// crash's stderr can run to many; the log keeps them all).
+    fn take(&mut self, path: &str, outcome: &Result<ScanOutcome, String>) {
+        match outcome {
+            Ok(outcome) => {
+                self.plugins.extend(outcome.plugins.iter().cloned());
+                if let Some(reason) = &outcome.unsupported {
+                    self.unsupported.push(UnsupportedPlugin { path: path.to_string(), reason: reason.clone() });
+                }
+            }
+            Err(reason) => {
+                let line = reason.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("scan failed");
+                self.failed.push(FailedPlugin { path: path.to_string(), reason: line.to_string() });
+            }
         }
     }
 }
@@ -292,7 +302,7 @@ fn scan_bundles(
                     Err(ScanError::Host(e)) => {
                         // Not the bundle's fault: report it, remember nothing for it.
                         log::warn!("[scan] could not run a scan child for {key}: {e}");
-                        stats.failed.push(key.clone());
+                        found.take(&key, &Err(format!("could not run a scan child: {e}")));
                         continue;
                     }
                 };
@@ -303,19 +313,13 @@ fn scan_bundles(
                     },
                     None => {
                         // Unstat-able bundle: use the outcome, do not remember it.
-                        match outcome {
-                            Ok(outcome) => found.take(&key, &outcome),
-                            Err(_) => stats.failed.push(key.clone()),
-                        }
+                        found.take(&key, &outcome);
                         continue;
                     }
                 }
             }
         };
-        match &entry.outcome {
-            Ok(outcome) => found.take(&key, outcome),
-            Err(_) => stats.failed.push(key.clone()),
-        }
+        found.take(&key, &entry.outcome);
         next.bundles.insert(key, entry);
     }
     (found, next, stats)
@@ -751,11 +755,11 @@ mod tests {
         let expected = vec![unsupported(&narrow, UNSUPPORTED_32_BIT), unsupported(&shell, UNSUPPORTED_SHELL)];
 
         // Cold: the 32-bit file gets no child; the shell's child says what it is.
-        let (cold, cache, stats) = scan_roots(&roots, &ScanCache::default(), false, scan);
+        let (cold, cache, _) = scan_roots(&roots, &ScanCache::default(), false, scan);
         assert_eq!(cold.plugins, vec![desc(&good, "Good")]);
         assert_eq!(cold.unsupported, expected);
         assert_eq!(children.load(Ordering::Relaxed), 2);
-        assert!(stats.failed.is_empty(), "an unsupported plugin is not a failed scan");
+        assert!(cold.failed.is_empty(), "an unsupported plugin is not a failed scan");
         assert!(!cache.bundles.contains_key(&narrow.to_string_lossy().to_string()), "the walk's verdict is not cached");
 
         // Cached, through the file: no child, the same two reasons.
@@ -904,11 +908,16 @@ mod tests {
         let scan = |p: &Path| {
             children.fetch_add(1, Ordering::Relaxed);
             if p == bad {
-                Err(ScanError::Bundle("timed out".into()))
+                Err(ScanError::Bundle("exit=Some(1) stderr=load failed: bad image\n  at line two\n".into()))
             } else {
                 Ok(ScanOutcome::plugins(vec![desc(p, "Good")]))
             }
         };
+        // Listed with its path and the first line of the host's reason.
+        let failed = vec![FailedPlugin {
+            path: bad.to_string_lossy().to_string(),
+            reason: "exit=Some(1) stderr=load failed: bad image".into(),
+        }];
 
         // First launch: everything is scanned, the failure is remembered too.
         let (found, cache, stats) = scan_bundles(&files, &ScanCache::default(), false, scan);
@@ -917,7 +926,8 @@ mod tests {
         assert_eq!(children.load(Ordering::Relaxed), 2);
         assert_eq!(stats.cached, 0);
         assert_eq!(stats.fresh, 2);
-        assert_eq!(stats.failed, vec![bad.to_string_lossy().to_string()]);
+        assert_eq!(found.failed, failed);
+        assert!(found.unsupported.is_empty(), "a failed scan is not an unsupported plugin");
         assert!(cache.bundles[&bad.to_string_lossy().to_string()].outcome.is_err());
 
         // Second launch: no child runs; the same descriptors and the same failure come from memory.
@@ -926,17 +936,17 @@ mod tests {
         assert_eq!(children.load(Ordering::Relaxed), 2, "an unchanged bundle spawns no child");
         assert_eq!(stats2.cached, 2);
         assert_eq!(stats2.fresh, 0);
-        assert_eq!(stats2.failed, stats.failed);
+        assert_eq!(found2.failed, failed, "the cached failure is listed with its reason");
 
         // The bad plugin was updated (bytes changed → size differs): only it is rescanned.
         std::fs::write(&bad, b"v2-fixed").unwrap();
-        let (_, cache3, stats3) = scan_bundles(&files, &cache2, false, |p: &Path| {
+        let (found3, cache3, stats3) = scan_bundles(&files, &cache2, false, |p: &Path| {
             children.fetch_add(1, Ordering::Relaxed);
             Ok(ScanOutcome::plugins(vec![desc(p, "Fixed")]))
         });
         assert_eq!(children.load(Ordering::Relaxed), 3);
         assert_eq!((stats3.cached, stats3.fresh), (1, 1));
-        assert!(stats3.failed.is_empty());
+        assert!(found3.failed.is_empty());
         assert!(cache3.bundles[&bad.to_string_lossy().to_string()].outcome.is_ok());
 
         // The rescan button: everything is scanned again regardless of fingerprints.
@@ -962,7 +972,14 @@ mod tests {
                 }
             });
         assert_eq!(found.plugins.len(), 1);
-        assert_eq!(stats.failed, vec![a.to_string_lossy().to_string()]);
+        assert_eq!(stats.fresh, 2);
+        assert_eq!(
+            found.failed,
+            vec![FailedPlugin {
+                path: a.to_string_lossy().to_string(),
+                reason: "could not run a scan child: spawn: exe missing".into(),
+            }]
+        );
         assert!(
             !cache.bundles.contains_key(&a.to_string_lossy().to_string()),
             "a host-side failure must be retried next launch"
@@ -1559,14 +1576,15 @@ static SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// back. A bundle whose child exits non-zero (handled error OR hard crash), times out, or whose
 /// stdout doesn't parse is logged as `failed` and remembered as such; the parent always survives.
 /// `cache_path` None (no app data dir) = scan everything, remember nothing. The plugins this build
-/// cannot host (path and why) replace `unsupported`, the host state's list, before the scan gives
-/// way to the next one: the descriptors returned and that list are one scan's, published together.
+/// cannot host and the bundles whose scan failed (path and why) replace `not_listed`, the host
+/// state's lists, before the scan gives way to the next one: the descriptors returned and those
+/// lists are one scan's, published together.
 /// Emits the P9.1 gate diag in debug builds.
 pub fn scan_all(
     cache_path: Option<&Path>,
     folders_path: Option<&Path>,
     force: bool,
-    unsupported: &std::sync::Mutex<Vec<UnsupportedPlugin>>,
+    not_listed: &std::sync::Mutex<NotListed>,
 ) -> Result<Vec<PluginDescriptor>, String> {
     let _scan = SCAN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let started = Instant::now();
@@ -1598,15 +1616,13 @@ pub fn scan_all(
         stats.cached,
         stats.fresh,
         if force { " (forced)" } else { "" },
-        stats.failed.len(),
+        found.failed.len(),
         found.unsupported.len(),
         found.plugins.len()
     );
-    if !stats.failed.is_empty() {
-        log::warn!(
-            "[scan] not listed (rescan from the picker to retry): {}",
-            stats.failed.join("; ")
-        );
+    let failed: Vec<&str> = found.failed.iter().map(|f| f.path.as_str()).collect();
+    if !failed.is_empty() {
+        log::warn!("[scan] not listed (rescan from the picker to retry): {}", failed.join("; "));
     }
     for plugin in &found.unsupported {
         log::info!("[scan] not listed: {}: {}", plugin.path, plugin.reason);
@@ -1620,12 +1636,13 @@ pub fn scan_all(
             "forced": force,
             "elapsed_ms": elapsed_ms as u64,
             "ok": found.plugins.len(),
-            "failed": stats.failed,
+            "failed": failed,
             "unsupported": found.unsupported.len(),
         });
         println!("[diag] {diag}");
     }
     // Still under the scan lock: a later scan cannot publish before this one.
-    *unsupported.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = found.unsupported;
+    *not_listed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        NotListed { unsupported: found.unsupported, failed: found.failed };
     Ok(found.plugins)
 }
