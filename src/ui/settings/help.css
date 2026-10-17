@@ -171,6 +171,16 @@
 .help__list .help__note {
   font-size: 0.94em;
 }
+/* a command-bar tool's own icon (session-icons.tsx) inside prose, sized to the line */
+.help__icon {
+  display: inline-block;
+  vertical-align: -0.2em;
+}
+.help__icon svg {
+  display: block;
+  width: 1.2em;
+  height: 1.2em;
+}
 
 .help__inline {
   display: flex;

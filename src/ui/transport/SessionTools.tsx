@@ -5,6 +5,7 @@ import { restoreSessionTones } from '../state/slot-tones';
 import { notifyError, notifyInfo } from '../../notify';
 import { looper, sampleRate, session } from '../state/audio';
 import { anyTrackIn } from '../looper/shared';
+import { ExportIcon, ImportIcon } from './session-icons';
 
 /**
  * EXPORT / IMPORT as two icon tools in the command bar's far-right tool cluster (app.tsx `.tools`).
@@ -88,10 +89,7 @@ export function SessionTools() {
         aria-label="Export loops as a zip of WAV files"
         title="Export one .zip: each track + a master mix as WAV, plus session.json"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-          <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5" stroke-linecap="round" stroke-linejoin="round" />
-          <path d="M4 17v2.5h16V17" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
+        <ExportIcon />
       </button>
       <button
         type="button"
@@ -103,10 +101,7 @@ export function SessionTools() {
         aria-label="Import a session zip"
         title="Import a BleepLoop export zip (stems + session.json), only while the looper is empty"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-          <path d="M12 15V4M7.5 8.5 12 4l4.5 4.5" stroke-linecap="round" stroke-linejoin="round" />
-          <path d="M4 17v2.5h16V17" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
+        <ImportIcon />
       </button>
       <input
         ref={importInputRef}

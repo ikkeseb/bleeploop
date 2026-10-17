@@ -144,7 +144,7 @@ export function PluginBar(props: {
         disabled={sourcePending()}
         onClick={props.onToggleParams}
       >
-        PARAMS <span class="slot__caret" aria-hidden="true">▾</span>
+        PARAMS
       </button>
       <Show when={editorError()}>
         <span class="pc__err">{editorError()}</span>

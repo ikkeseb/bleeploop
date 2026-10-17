@@ -61,18 +61,24 @@
   color: var(--play);
   border-color: color-mix(in srgb, var(--play) 60%, transparent);
 }
-/* the PARAMS drawer-disclosure pill — a caret that flips when open */
+/* the PARAMS drawer-disclosure pill: the app's one caret (--caret-svg as a mask, so it takes the
+   legend's colour in every state, as the lane's EDIT pill wears it), turned over while open */
 .slot__params {
   gap: 5px;
   display: inline-flex;
   align-items: center;
 }
-.slot__caret {
-  display: inline-block;
-  font-size: 9px;
+.slot__params::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  mask: var(--caret-svg) center / contain no-repeat;
+  /* Forced colours (Windows high contrast) would paint the mask with Canvas: keep currentColor. */
+  forced-color-adjust: none;
   transition: transform 0.18s;
 }
-.slot__params.on .slot__caret {
+.slot__params.on::after {
   transform: rotate(180deg);
 }
 .pc__err {

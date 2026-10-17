@@ -4,7 +4,8 @@
  * `window.__lfEngineFake`, the probe scripts the feed through `__lf.native` and the snapshot the engine
  * would answer through `__lf.native.snapshotBytes`, and reads the sessions loaded into it):
  *
- * - an empty looper: Export is disabled, Import is enabled, Help's Manual tab names the Session tools;
+ * - an empty looper: Export is disabled, Import is enabled, Help's Manual tab names the Session tools and
+ *   shows each tool's own icon (the same SVG, named), sized to the line;
  * - the first take through real controls: FIXED (aria-pressed off, then on, from the `Toggled` the fake
  *   answers) and its Fewer bars stepper send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
  *   key's press and release reach native MIDI's router (`__lf.native.inputSent`); the take the feed then
@@ -103,6 +104,24 @@ await probe(async ({ open, browser }) => {
   await page.getByRole('button', { name: 'Help', exact: true }).click();
   await page.getByRole('tab', { name: 'Manual', exact: true }).click();
   assert.match(await page.locator('#lf-help-popover').innerText(), /Session/);
+  // The Session lines show the tools' own icons (session-icons.tsx), named, not arrow glyphs.
+  const helpIcons = await page.evaluate(() => {
+    const svg = (sel) => document.querySelector(sel)?.innerHTML;
+    const icon = (name) => document.querySelector(`#lf-help-popover [role="img"][aria-label="${name}"]`);
+    const size = (name) => icon(name)?.querySelector('svg')?.getBoundingClientRect().height;
+    return {
+      exportSame: !!icon('Export') && icon('Export').querySelector('svg').innerHTML === svg('.tool--export svg'),
+      importSame: !!icon('Import') && icon('Import').querySelector('svg').innerHTML === svg('.tool--import svg'),
+      arrows: /[⬇⬆]/.test(document.querySelector('#lf-help-popover').textContent),
+      exportPx: size('Export'),
+      linePx: parseFloat(getComputedStyle(icon('Export')?.closest('li') ?? document.body).fontSize),
+    };
+  });
+  console.log('help session icons', JSON.stringify(helpIcons));
+  assert.equal(helpIcons.exportSame, true, "Help's export icon is the export tool's");
+  assert.equal(helpIcons.importSame, true, "Help's import icon is the import tool's");
+  assert.equal(helpIcons.arrows, false, 'no ⬇/⬆ glyph stands in for the tools');
+  assert.ok(helpIcons.exportPx >= helpIcons.linePx && helpIcons.exportPx <= 1.5 * helpIcons.linePx, `the icon is sized to the line: ${helpIcons.exportPx} px on ${helpIcons.linePx} px text`);
   await page.keyboard.press('Escape');
 
   // ── The first take, through real controls ────────────────────────────────────────────────────────
