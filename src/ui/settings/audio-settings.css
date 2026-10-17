@@ -9,7 +9,7 @@
   /* A set size, so a page switch never resizes or moves the panel: the rail stays put and a page taller
      than the panel scrolls inside itself. The width fits the minimum 1000 px window beside the bar's
      side margins; the height is the DEVICE page with ASIO's driver row and a three-line Share hint, and
-     shrinks with the popover's own cap (`max-height: stretch`) in a short window. */
+     shrinks with the popover's own cap (`max-height: stretch`) in a short window or above a toast. */
   width: min(800px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
   height: 548px;
   min-height: 0;
@@ -23,6 +23,12 @@
 /* The page scrolls, never the panel (app.css gives every popover body overflow-y: auto). */
 .settings-popover > .audio-settings {
   overflow: hidden;
+}
+/* A toast never covers a page: while one shows, the popover's cap (`max-height: stretch`, app.css) ends
+   8 px above the toast stack (its height from Toasts.tsx, its inset from toasts.css), and the page scrolls
+   inside the shorter panel. Only a short window brings the panel down that far. */
+:root:has(.toast) .settings-popover:has(> .audio-settings) {
+  margin-bottom: calc(var(--toasts-h, 0px) + var(--toasts-inset) + 8px);
 }
 
 /* ---- the rail ---- */

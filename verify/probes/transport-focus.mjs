@@ -113,8 +113,9 @@ await probe(async ({ open }) => {
       focused: document.activeElement?.id ?? null,
       selected: tabs.filter((t) => t.getAttribute('aria-selected') === 'true').map((t) => t.id),
       tabbable: tabs.filter((t) => t.tabIndex === 0).map((t) => t.id),
-      // Each tab's panel by its aria-controls, so a dangling id reads as no panel.
-      shown: tabs.filter((t) => document.getElementById(t.getAttribute('aria-controls'))?.checkVisibility()).map((t) => t.id),
+      // Each tab's panel by its aria-controls, so a dangling id reads as no panel; the other tab's panel is
+      // laid out but unseen (Help keeps one height), so the check reads `visibility` too.
+      shown: tabs.filter((t) => document.getElementById(t.getAttribute('aria-controls'))?.checkVisibility({ visibilityProperty: true })).map((t) => t.id),
       panels: tabs.map((t) => document.getElementById(t.getAttribute('aria-controls'))?.getAttribute('role') ?? null),
     };
   });
@@ -141,7 +142,8 @@ await probe(async ({ open }) => {
   await page.keyboard.press('End');
   await page.keyboard.press('Tab');
   assert.equal((await tabState()).focused, 'lf-help-manual', 'Tab from the Manual tab did not land on its panel');
-  const helpScroll = () => page.evaluate(() => document.querySelector('#lf-help-popover .help').scrollTop);
+  // The panel scrolls under Help's tabs (help.css), never Help itself.
+  const helpScroll = () => page.evaluate(() => document.getElementById('lf-help-manual').scrollTop);
   await page.keyboard.press('PageDown');
   await page.waitForTimeout(250);
   assert.ok((await helpScroll()) > 0, 'PageDown on the Manual panel did not scroll it');

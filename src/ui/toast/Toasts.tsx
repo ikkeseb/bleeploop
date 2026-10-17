@@ -1,4 +1,4 @@
-import { For, Show } from 'solid-js';
+import { For, Show, onCleanup } from 'solid-js';
 import { dismissToast, toasts } from '../../notify';
 import './toasts.css';
 
@@ -14,13 +14,25 @@ import './toasts.css';
 /** What a screen reader hears before the message: the kind the rule's colour and glyph show. */
 const SPOKEN_KIND = { error: 'Error', info: 'Done', note: 'Note' } as const;
 
+/** The stack's height as `--toasts-h` on the root, so an open Audio Settings ends above the stack
+ * (audio-settings.css) instead of showing a page's text under a toast. */
+function publishHeight(el: HTMLDivElement): void {
+  const root = document.documentElement;
+  const observer = new ResizeObserver(() => root.style.setProperty('--toasts-h', `${el.offsetHeight}px`));
+  observer.observe(el);
+  onCleanup(() => {
+    observer.disconnect();
+    root.style.removeProperty('--toasts-h');
+  });
+}
+
 export function Toasts() {
   return (
     // ONE persistent live region (role="log": implicit polite live semantics + it legitimizes the
     // aria-label, which the generic role would drop). The toasts themselves stay role-less — a
     // per-toast role="status" would nest a SECOND, freshly-inserted live region, which NVDA/JAWS
     // can announce twice or miss entirely.
-    <div class="toasts" role="log" aria-live="polite" aria-label="Notifications">
+    <div class="toasts" ref={publishHeight} role="log" aria-live="polite" aria-label="Notifications">
       <For each={toasts()}>
         {(t) => (
           <div
