@@ -187,7 +187,7 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
     });
   } catch (e) {
     console.error('[instrument] ASIO probe failed', e);
-    notifyError('Could not start the ASIO driver. Press RETRY ASIO in Audio Settings.', e, settingsAction('device'));
+    notifyError('Could not start the ASIO driver. Press RETRY ASIO.', e, settingsAction('device'));
     report = { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
     setAsioStatus(report);
   }
@@ -205,7 +205,7 @@ async function noteMissingDriver(pick: string): Promise<void> {
   const running = asioDeviceInfo()?.name;
   notifyNote(
     `ASIO driver ${pick} is not installed`,
-    `${running ? `Playing through ${running} instead. ` : ''}Pick a driver in Audio Settings.`,
+    `${running ? `Playing through ${running} instead. ` : ''}Pick a driver.`,
     settingsAction('device'),
   );
 }

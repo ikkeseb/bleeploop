@@ -5,8 +5,10 @@
  *
  * - a first open that fails: the slot note says no audio device is open (not "No plugins found"), the
  *   disabled rescan button's title says why, Diagnostics' engine row carries the reason, and the open's
- *   toast stays; a driver that starts meanwhile is not called low-latency, nor the buffer given a block
- *   length, until a device runs on it;
+ *   toast stays, its message naming no place its action (Audio Settings → DEVICE) names; DEVICE and
+ *   DIAGNOSTICS on the rail read one word for the failed open; a driver that starts meanwhile is not
+ *   named as what runs, nor the buffer given a block length, until a device runs on it, and then the
+ *   ASIO row names it and DIAGNOSTICS reads audio ok;
  * - the Driver row lists Automatic (naming the driver it took) and the installed drivers; picking one
  *   switches the driver (the scripted host closes the device on ASIO and reopens it, as the native
  *   device owner does), then the picks open; the pick is saved and the saved buffer left alone;
@@ -71,6 +73,8 @@ await probe(async ({ open }) => {
       rescan: { disabled: rescan.disabled, title: rescan.title },
       engine: engineRow?.querySelector('b')?.textContent ?? null,
       toasts: window.__lf.notify.toasts().map((t) => `${t.message}: ${t.detail ?? ''}`),
+      acted: window.__lf.notify.toasts().filter((t) => t.action).map((t) => ({ message: t.message, action: t.action.label })),
+      rail: Object.fromEntries([...document.querySelectorAll('.audio-settings__tab')].map((t) => [t.id.replace('lf-settings-tab-', ''), t.querySelector('.audio-settings__tab-state').textContent])),
     };
     window.__lf.ui.closeSettings();
     return out;
@@ -82,6 +86,10 @@ await probe(async ({ open }) => {
   assert.equal(failed.engine, 'no device open: fake: Buffer size 64 is not in the supported range 512..=512');
   assert.ok(failed.toasts.some((t) => t.startsWith('Could not open the audio device.') && t.includes(': fake: Buffer size 64')), 'the open keeps its toast');
   assert.equal(consumeConsoleErrors('[engine] device open failed Error: fake: Buffer size 64').length, 1, 'and its release-log line');
+  assert.deepEqual(failed.acted, [{ message: 'Could not open the audio device. Pick another.', action: 'Audio Settings → DEVICE' }],
+    'a toast with an action leaves the place to the action');
+  assert.equal(failed.rail.device, 'no device', 'DEVICE names the failed open');
+  assert.equal(failed.rail.diagnostics, failed.rail.device, 'DIAGNOSTICS reads the same word for it');
 
   // 2. An ASIO host appears (scripted): the probe, then the saved device opens on it.
   const running = await page.evaluate(async (drivers) => {
@@ -148,6 +156,7 @@ await probe(async ({ open }) => {
       const out = {
         word: document.querySelector('.audio-settings__toggle-text')?.textContent ?? null,
         block: document.querySelector('[aria-label="Buffer size in frames"]').closest('.audio-settings__row').querySelector('.audio-settings__readout').textContent,
+        diagnostics: document.querySelector('#lf-settings-state-diagnostics')?.textContent ?? null,
       };
       window.__lf.ui.closeSettings();
       return out;
@@ -159,8 +168,8 @@ await probe(async ({ open }) => {
   console.log('running', JSON.stringify(running));
   assert.deepEqual(running.calls, ['probe:', 'open:Asio:64']);
   assert.equal(running.status.block, 64, 'Focusrite takes 64');
-  assert.deepEqual(running.idle, { word: 'no device', block: 'no device' }, 'a started driver with no device open claims no low latency and no block');
-  assert.deepEqual(running.runs, { word: 'low-latency', block: '~1.3 ms/block' }, 'the device on ASIO does');
+  assert.deepEqual(running.idle, { word: 'on · no device', block: 'no device', diagnostics: 'no device' }, 'a started driver with no device open is not named as what runs, and no block');
+  assert.deepEqual(running.runs, { word: 'on · Focusrite USB ASIO', block: '~1.3 ms/block', diagnostics: 'audio ok' }, 'the device on ASIO names its driver');
 
   const readSettings = () =>
     page.evaluate(async () => {
@@ -313,7 +322,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(missing(gone), [
     {
       message: 'ASIO driver Old Interface ASIO is not installed',
-      detail: 'Playing through Focusrite USB ASIO instead. Pick a driver in Audio Settings.',
+      detail: 'Playing through Focusrite USB ASIO instead. Pick a driver.',
       count: 1,
     },
   ]);
