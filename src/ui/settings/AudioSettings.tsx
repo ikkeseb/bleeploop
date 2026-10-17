@@ -245,15 +245,14 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     return `${((d.alignFrames / d.sampleRate) * 1000).toFixed(1)} ms · ${d.alignFrames} frames · ${backend}`;
   };
   // The ASIO row's state word: what the box does (on, off), then what runs: the driver while the device
-  // runs on ASIO, else WASAPI or the rail's word for no device. A driver that started runs nothing
-  // until the device opens on it.
+  // runs on ASIO, WASAPI while a device runs on it, else the rail's word for no device. A driver that
+  // started, or failed, runs nothing until a device opens.
   const asioWord = () => {
     const on = asioEnabled();
     const running = engineDevice();
     const state = on ? 'on' : 'off';
     if (running?.backend === 'Asio') return `${state} · ${running.outputName}`;
     if (on && asioStatus().status === 'probing') return 'on · starting driver…';
-    if (on && !asioAvailable()) return 'on · WASAPI until the driver starts';
     return `${state} · ${running ? 'WASAPI runs' : deviceState().word}`;
   };
   const engineReadout = () => {

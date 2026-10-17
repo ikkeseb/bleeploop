@@ -7,7 +7,8 @@
  *   disabled rescan button's title says why, Diagnostics' engine row carries the reason, and the open's
  *   toast stays, its message naming no place its action (Audio Settings → DEVICE) names; DEVICE and
  *   DIAGNOSTICS on the rail read one word for the failed open; a driver that starts meanwhile is not
- *   named as what runs, nor the buffer given a block length, until a device runs on it, and then the
+ *   named as what runs, nor the buffer given a block length, until a device runs on it (nor WASAPI
+ *   while a failed driver leaves no device open: the row reads DEVICE's word), and then the
  *   ASIO row names it and DIAGNOSTICS reads audio ok;
  * - the Driver row lists Automatic (naming the driver it took) and the installed drivers; picking one
  *   switches the driver (the scripted host closes the device on ASIO and reopens it, as the native
@@ -162,13 +163,27 @@ await probe(async ({ open }) => {
       return out;
     };
     const idle = await deviceRow();
+    // The driver then fails to start, and still no device runs: the ASIO row says what DEVICE and
+    // DIAGNOSTICS say, never that WASAPI runs. Then it starts again.
+    asio.failNext = true;
+    await settings.probeAsio(true);
+    const rail = (id) => document.querySelector(`#lf-settings-state-${id}`)?.textContent ?? null;
+    window.__lf.ui.openSettings();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const bothFailed = { status: settings.asioStatus().status, word: document.querySelector('.audio-settings__toggle-text')?.textContent ?? null, device: rail('device'), diagnostics: rail('diagnostics') };
+    window.__lf.ui.closeSettings();
+    await settings.probeAsio(true);
+    const probes = calls.splice(0);
     const status = await store.openEngineDevice();
-    return { status, calls: calls.splice(0), idle, runs: await deviceRow() };
+    return { status, probes, calls: calls.splice(0), idle, bothFailed, runs: await deviceRow() };
   }, DRIVERS);
   console.log('running', JSON.stringify(running));
-  assert.deepEqual(running.calls, ['probe:', 'open:Asio:64']);
+  assert.deepEqual(running.probes, ['probe:', 'probe:', 'probe:'], 'the probe that starts the driver, the one that fails, the one that starts it again');
+  assert.deepEqual(running.calls, ['open:Asio:64']);
   assert.equal(running.status.block, 64, 'Focusrite takes 64');
   assert.deepEqual(running.idle, { word: 'on · no device', block: 'no device', diagnostics: 'no device' }, 'a started driver with no device open is not named as what runs, and no block');
+  assert.deepEqual(running.bothFailed, { status: 'failed', word: 'on · no device', device: 'no device', diagnostics: 'no device' },
+    'a failed driver with no WASAPI device open: the ASIO row, DEVICE and DIAGNOSTICS agree');
   assert.deepEqual(running.runs, { word: 'on · Focusrite USB ASIO', block: '~1.3 ms/block', diagnostics: 'audio ok' }, 'the device on ASIO names its driver');
 
   const readSettings = () =>

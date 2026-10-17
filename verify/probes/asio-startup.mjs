@@ -168,7 +168,7 @@ await probe(async ({ open }) => {
   assert.ok(bootProbe >= 0 && bootProbe < b.startup.indexOf('scan'), 'saved ON probes at boot, before plugins become selectable');
   assert.ok(bootProbe < b.startup.findIndex((c) => c.startsWith('open:')), 'the boot probe settles before the device opens');
   assert.equal(b.before.status, 'blocked');
-  assert.deepEqual(b.before.toggle, { checked: true, disabled: false, text: 'on · WASAPI until the driver starts' });
+  assert.deepEqual(b.before.toggle, { checked: true, disabled: false, text: 'on · WASAPI runs' });
   assert.match(b.before.hint ?? '', /previous ASIO start did not complete/);
   assert.equal(b.before.retry, true);
   assert.deepEqual(b.calls, ['probe:true', 'open:Asio'], 'a RETRY that starts the driver opens the device on ASIO');
