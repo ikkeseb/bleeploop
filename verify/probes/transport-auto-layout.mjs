@@ -11,7 +11,8 @@
  * Then the Audio Settings gear (the native chrome on: host.web.ts served with `available: true`), at 1440x900
  * over a stopped one-bar loop, at a device-pixel ratio of 1 and of 2: its rendered bitmap matches itself
  * turned by one tooth (45 degrees, resampled) and by two (90 degrees, the pixel grid's own turn, no
- * resampling), and its ink box sits in the button's centre within 0.5 px. Writes logs/transport-auto-layout/
+ * resampling), a ring between its root circle and its tips crosses eight evenly spaced teeth, its hub is
+ * open, and its ink box sits in the button's centre within 0.5 px. Writes logs/transport-auto-layout/
  * tools-<dpr>x.png (the tool cluster with 6 px around it) and gear-<dpr>x.png (32 px around the gear).
  * Screenshots the 1730 px case before and after enabling. Proves layout and the gear's raster only (in
  * Chromium, not WebView2 on the rig's display scale); it says nothing
@@ -26,9 +27,11 @@ const EMPTY = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUn
 
 /** A rendered icon's ink box (device pixels, sub-pixel edges) and how far the icon is from its own turn:
  * the summed |coverage difference| between the bitmap and itself turned by `deg` about the ink box's
- * centre (bilinear), over the summed coverage. Coverage is read from the channel where the icon's colour
- * and the background differ most. */
-const inkOf = (page, png, { bg, fg, turns }) => page.evaluate(async ({ b64, bg, fg, turns }) => {
+ * centre (bilinear), over the summed coverage. Also the most ink on a pixel within 1 device px of that
+ * centre (`hub`), and the ink runs met going round a ring at `ring` of the ink box's half-width (each
+ * run's centre angle, degrees). Coverage is read from the channel where the icon's colour and the
+ * background differ most. */
+const inkOf = (page, png, { bg, fg, turns, ring }) => page.evaluate(async ({ b64, bg, fg, turns, ring }) => {
   const img = new Image();
   img.src = `data:image/png;base64,${b64}`;
   await img.decode();
@@ -66,8 +69,28 @@ const inkOf = (page, png, { bg, fg, turns }) => page.evaluate(async ({ b64, bg, 
     }
     return +(err / ink).toFixed(3);
   };
-  return { box: { left, top, right, bottom }, centre: [cx, cy], err: Object.fromEntries(turns.map((d) => [d, turned(d)])) };
-}, { b64: png.toString('base64'), bg, fg, turns });
+  let hub = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= 1) hub = Math.max(hub, at(x, y));
+  }
+  const r = (ring * (right - left)) / 2, STEPS = 720;
+  const inked = Array.from({ length: STEPS }, (_, i) => {
+    const t = (2 * Math.PI * i) / STEPS;
+    return sample(cx + r * Math.sin(t), cy - r * Math.cos(t)) > 0.5;
+  });
+  // Runs of ink round the ring (clockwise from 12 o'clock), started at a gap so none wraps.
+  const start = inked.indexOf(false), runs = [];
+  if (start >= 0) {
+    let from = -1;
+    for (let k = 1; k <= STEPS; k++) {
+      const i = (start + k) % STEPS;
+      if (inked[i] && from < 0) from = start + k;
+      if (!inked[i] && from >= 0) { runs.push(((((from + start + k - 1) / 2) * 360) / STEPS) % 360); from = -1; }
+    }
+  }
+  return { box: { left, top, right, bottom }, centre: [cx, cy], err: Object.fromEntries(turns.map((d) => [d, turned(d)])), hub,
+    teeth: runs.map((a) => +a.toFixed(1)) };
+}, { b64: png.toString('base64'), bg, fg, turns, ring });
 
 await probe(async ({ browser, open }) => {
   await mkdir('logs/layout', { recursive: true });
@@ -199,7 +222,12 @@ await probe(async ({ browser, open }) => {
   // symmetric drawing's own antialiasing: a diagonal tooth rasterizes unlike an upright one, so the
   // resampled turn of the gear drawn for 16 px sits near 0.28 at 1x (0.14 at 2x); the 90-degree turn is
   // exact on the grid and leaves only the rasterizer (0.07 and 0.05).
-  const TEETH = 8, TURN_LIMIT = { [360 / TEETH]: 0.35, 90: 0.15 };
+  // The turns alone pass a filled square or disc, so the drawing is also read as a gear: TOOTH_RING (of the
+  // ink box's half-width: 6.2 of 7 px, between the root circle's 5.2 and the tips) crosses TEETH teeth, each
+  // within SPACING degrees of its place one tooth on from the last, and the hub's hole carries at most
+  // HUB_INK coverage (the drawn hole is 2 px across at 1x, its edge antialiased into the centre pixels: 0.26;
+  // a filled hub reads 1).
+  const TEETH = 8, TURN_LIMIT = { [360 / TEETH]: 0.35, 90: 0.15 }, TOOTH_RING = 0.88, SPACING = 5, HUB_INK = 0.5;
   await mkdir('logs/transport-auto-layout', { recursive: true });
   for (const dpr of [1, 2]) {
     const context = await browser.newContext({ deviceScaleFactor: dpr });
@@ -247,7 +275,7 @@ await probe(async ({ browser, open }) => {
     });
     const clip = { x: Math.floor(place.button.x), y: Math.floor(place.button.y), width: 34, height: 34 };
     const png = await page.screenshot({ clip });
-    const ink = await inkOf(page, png, { bg: place.bg, fg: place.fg, turns: Object.keys(TURN_LIMIT).map(Number) });
+    const ink = await inkOf(page, png, { bg: place.bg, fg: place.fg, turns: Object.keys(TURN_LIMIT).map(Number), ring: TOOTH_RING });
     // CSS px from the button's layout centre (the bar centres the cluster at a fractional y; the svg paints
     // snapped to the pixel grid, so up to half a pixel of this is the snap).
     const off = [ink.centre[0] / dpr + clip.x - (place.button.x + place.button.width / 2),
@@ -261,6 +289,10 @@ await probe(async ({ browser, open }) => {
     for (const [deg, limit] of Object.entries(TURN_LIMIT)) {
       assert.ok(ink.err[deg] <= limit, `${dpr}x: the gear is ${ink.err[deg]} off itself turned ${deg} degrees (limit ${limit})`);
     }
+    assert.equal(ink.teeth.length, TEETH, `${dpr}x: the gear's tooth ring crosses ${ink.teeth.length} teeth (${ink.teeth})`);
+    const spacing = ink.teeth.map((a, i) => (ink.teeth[(i + 1) % TEETH] - a + 360) % 360);
+    assert.ok(spacing.every((d) => Math.abs(d - 360 / TEETH) <= SPACING), `${dpr}x: the gear's teeth are spaced ${spacing.map((d) => d.toFixed(1))} degrees`);
+    assert.ok(ink.hub <= HUB_INK, `${dpr}x: the gear's hub carries ${ink.hub.toFixed(2)} ink at its centre (limit ${HUB_INK})`);
     assert.ok(Math.abs(off[0]) <= 0.5 && Math.abs(off[1]) <= 0.5, `${dpr}x: the gear's ink box is ${off.map((v) => v.toFixed(2))} px off the button's centre`);
   }
 }, { launch: {} });
