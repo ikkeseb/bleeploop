@@ -285,7 +285,7 @@ export function StageView(props: { onExit: () => void }) {
             class="sv-btn sv-btn--view"
             tabindex="-1"
             aria-label={`Stage look: ${currentStageView().name.toLowerCase()}. Next look`}
-            title="Next stage view (V)"
+            title="Next look (V)"
             onClick={nextStageView}
           >
             <span class="sv-btn__name">{currentStageView().name}</span>

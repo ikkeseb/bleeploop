@@ -7,7 +7,7 @@
  *
  * - enter: B (either case), the `stageView` action, the command-bar cap, the exit button and Escape open
  *   and close it; the normal UI is inert while open and its lane canvas is the same element after.
- * - views: it opens on the first look; V and the view switch cycle the looks in order and wrap; a look
+ * - views: it opens on the first look; V and the view switch (titled and named "Next look") cycle the looks in order and wrap; a look
  *   switch sends the engine only the one `SetScope` the looks' own `wantsScope` owes and never touches
  *   the transport; the choice survives close and reopen and a page reload; the lane selection carries
  *   across looks; one canvas, its backing store at the device-pixel ratio capped at 1.5 (checked at a
@@ -628,6 +628,9 @@ await probe(async ({ browser, open }) => {
       const h = await hud();
       seen.push(await view());
       assert.equal(h.pill, VIEWS[k].name, `the view switch names the look (${h.pill})`);
+      // Its hover says what its accessible name says: the next look, never "stage view" (the whole view).
+      const switchName = await page.locator('.sv-btn--view').evaluate((el) => ({ label: el.getAttribute('aria-label'), title: el.title }));
+      assert.ok(switchName.label.endsWith('Next look') && switchName.title === 'Next look (V)', `the view switch's title and name agree on "Next look" (${JSON.stringify(switchName)})`);
       assert.equal(await page.locator('.sv canvas').count(), 1, 'one stage canvas');
       assert.deepEqual((await chips()).map((c) => c.current), [false, false, true, false, false], `lane 3 stays selected in ${VIEWS[k].id}`);
       await clearSent();
