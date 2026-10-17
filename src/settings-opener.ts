@@ -34,7 +34,12 @@ export function openSettings(page: SettingsPage): void {
   opener?.(page);
 }
 
+/** The way to `page` as every toast, title and Help line writes it: the rail's name for the page. */
+export function settingsPath(page: SettingsPage): string {
+  return `Audio Settings → ${SETTINGS_PAGE_LABELS[page].toUpperCase()}`;
+}
+
 /** A toast's action that opens Audio Settings on `page`. */
 export function settingsAction(page: SettingsPage): { label: string; run: () => void } {
-  return { label: `Audio Settings → ${SETTINGS_PAGE_LABELS[page].toUpperCase()}`, run: () => openSettings(page) };
+  return { label: settingsPath(page), run: () => openSettings(page) };
 }

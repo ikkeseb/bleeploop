@@ -7,7 +7,7 @@ import { Transport } from './ui/transport/Transport';
 import { SessionTools } from './ui/transport/SessionTools';
 import { InstrumentSlot } from './ui/instrument/InstrumentSlot';
 import { AudioSettings } from './ui/settings/AudioSettings';
-import { registerSettingsOpener, type SettingsPage } from './settings-opener';
+import { registerSettingsOpener, settingsPath, type SettingsPage } from './settings-opener';
 import { Help } from './ui/settings/Help';
 import { UpdatePanel } from './ui/settings/UpdatePanel';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
@@ -385,7 +385,7 @@ export function App() {
                 nativeHostReady() || scanning()
                   ? 'Rescan plugins'
                   : !engineDevice() && engineOpenFailure()
-                    ? 'Rescan plugins: no audio device is open, so the plugin host has not started (see Audio Settings → DEVICE)'
+                    ? `Rescan plugins: no audio device is open, so the plugin host has not started (see ${settingsPath('device')})`
                     : 'Rescan plugins: the plugin host is still starting'
               }
               aria-busy={scanning()}
