@@ -104,6 +104,10 @@ it.
   Manual shows the EXPORT and IMPORT icons themselves. Does a popover 10 px lower read as its pill's, does
   the note toast still catch the eye when it must, and does the in-app ask read as a question to answer
   before playing on?
+- SCOPE's beam (2026-10-17, machine-verified, never seen on a device): when the live columns stop while the
+  loop moves (the view closed and reopened, a look stepped back to SCOPE, a held feed) the beam moves on with
+  the bar instead of freezing at the last column. Does the beam ever jump or lag the bar when you open the
+  view mid-loop?
 - GO LIVE lights only from the engine's live flag, now in the feed: with no audio device running it stays
   unlit until one does, and a lost press toasts once ("Could not go live. Press GO LIVE again."). Does
   the pill ever lag the guitar going live, and is it ever lit while the dry guitar is silent?
