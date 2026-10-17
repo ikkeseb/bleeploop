@@ -468,10 +468,11 @@ export function App() {
               title="Audio Settings"
               onClick={openSettings}
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true">
-                {/* Drawn for 16 px: eight teeth on a true circle, their tips 7 px out, the upright teeth 3 px wide. */}
-                <path d="M10.35 5.3L10.65 2.4L13.35 2.4L13.65 5.3A6.9 6.9 0 0 1 15.57 6.1L17.83 4.26L19.74 6.17L17.9 8.43A6.9 6.9 0 0 1 18.7 10.35L21.6 10.65L21.6 13.35L18.7 13.65A6.9 6.9 0 0 1 17.9 15.57L19.74 17.83L17.83 19.74L15.57 17.9A6.9 6.9 0 0 1 13.65 18.7L13.35 21.6L10.65 21.6L10.35 18.7A6.9 6.9 0 0 1 8.43 17.9L6.17 19.74L4.26 17.83L6.1 15.57A6.9 6.9 0 0 1 5.3 13.65L2.4 13.35L2.4 10.65L5.3 10.35A6.9 6.9 0 0 1 6.1 8.43L4.26 6.17L6.17 4.26L8.43 6.1A6.9 6.9 0 0 1 10.35 5.3Z" />
-                <circle cx="12" cy="12" r="2.4" />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                {/* Drawn as Lucide's settings icon (ISC): six rounded teeth, one pointing up, and its hub, at the
+                    siblings' 1.8 stroke. The owner's pick 2026-10-17. */}
+                <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
+                <circle cx="12" cy="12" r="3" />
               </svg>
             </button>
           </Show>
