@@ -243,6 +243,16 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     if (d.alignFrames <= 0) return `not reported · ${backend}`;
     return `${((d.alignFrames / d.sampleRate) * 1000).toFixed(1)} ms · ${d.alignFrames} frames · ${backend}`;
   };
+  // The ASIO row's state word: low-latency only while the device that runs is on ASIO; a driver that
+  // started says what runs instead (WASAPI, or no device at all).
+  const asioWord = () => {
+    if (!asioEnabled()) return 'WASAPI';
+    const running = engineDevice();
+    if (running?.backend === 'Asio') return 'low-latency';
+    if (asioStatus().status === 'probing') return 'starting driver…';
+    if (!asioAvailable()) return 'WASAPI until the driver starts';
+    return running ? 'WASAPI runs' : 'no device';
+  };
   const engineReadout = () => {
     const d = engineDevice();
     if (!d) return engineOpenFailure() ? `no device open: ${engineOpenFailure()}` : 'no device open';
@@ -362,7 +372,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
             status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
         <div
-          class="audio-settings__row"
+          class="audio-settings__row audio-settings__row--toggle"
           classList={{ 'audio-settings__row--disabled': !asioOffered() }}
         >
           <span class="audio-settings__label">ASIO®</span>
@@ -388,15 +398,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                 }}
                 aria-label="Use ASIO low-latency audio"
               />
-              <span class="audio-settings__toggle-text">
-                {!asioEnabled()
-                  ? 'WASAPI'
-                  : asioAvailable()
-                    ? 'low-latency'
-                    : asioStatus().status === 'probing'
-                      ? 'starting driver…'
-                      : 'WASAPI until the driver starts'}
-              </span>
+              <span class="audio-settings__toggle-text">{asioWord()}</span>
             </label>
           </Show>
         </div>
@@ -482,7 +484,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
               {(f) => <option value={String(f)} selected={f === bufferChoice().shown}>{f} frames</option>}
             </For>
           </select>
-          <span class="audio-settings__readout">{bufferMs(bufferChoice().shown)}</span>
+          <span class="audio-settings__readout">{engineDevice() ? bufferMs(bufferChoice().shown) : 'no device'}</span>
         </div>
         <div class="audio-settings__hint audio-settings__hint--info" role="note">
           {bufferChoice().fixed
@@ -699,8 +701,10 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                 const picked = () => (ports().some((p) => p.id === assignTo()) ? assignTo() : '');
                 return (
                   <li class="audio-settings__binding" classList={{ 'is-idle': notLive(l) !== null }} title={l.displayName}>
-                    <span class="audio-settings__binding-action">{bindingAction(b())}</span>
-                    <span class="audio-settings__binding-src">{midiSource(b())}</span>
+                    <span class="audio-settings__binding-name">
+                      <span class="audio-settings__binding-action">{bindingAction(b())}</span>
+                      <span class="audio-settings__binding-src">{midiSource(b())}</span>
+                    </span>
                     <button
                       type="button"
                       class="audio-settings__chip"
@@ -708,7 +712,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                       aria-label={`${bindingAction(b())} on ${midiSource(b())}: ${b().momentary ? 'momentary' : 'latching'} pedal, switch to ${b().momentary ? 'latching' : 'momentary'}`}
                       title="How the pedal was read. Switch it if a press runs twice, or every other press runs nothing"
                     >
-                      {b().momentary ? 'momentary' : 'latching'}
+                      {b().momentary ? 'MOMENTARY' : 'LATCHING'}
                     </button>
                     <Show when={b().action === 'recDub'}>
                       <button
@@ -747,7 +751,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                             aria-label={`Port for ${bindingAction(b())} on ${midiSource(b())}`}
                           >
                             <option value="" disabled>
-                              pick a port
+                              Pick a port
                             </option>
                             <For each={ports()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
                           </select>
@@ -839,7 +843,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                 <ul class="audio-settings__unsupported-list">
                   <For each={pluginFolders().unsupported}>
                     {(plugin) => (
-                      <li class="audio-settings__unsupported-item" title={plugin.path}>
+                      <li class="audio-settings__unsupported-item" title={`${plugin.path}: ${plugin.reason}`}>
                         <span class="audio-settings__unsupported-file">{plugin.path.split(/[\\/]/).pop()}</span>
                         <span class="audio-settings__unsupported-reason">{plugin.reason}</span>
                       </li>

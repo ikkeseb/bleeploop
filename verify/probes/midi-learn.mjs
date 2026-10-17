@@ -18,8 +18,8 @@
  *   panel cancel too; every native MIDI call waits for the one before it, so a cancel made while the learn
  *   is still on its way reaches native MIDI after it; a `learning: null` event ends LISTENING, an
  *   `awaitingRelease` event shows the learned message's hint until its null;
- * - the list renders native MIDI's `bindings`: action, message, pedal kind, HOLD on REC/DUB, and a line
- *   from the previous version says so; each line's kind switch, HOLD and ✕ call `setMomentary`, `setHold`
+ * - the list renders native MIDI's `bindings` as a table every line shares (action and message, pedal
+ *   kind, HOLD on REC/DUB, ✕; one height a line), and a line from the previous version says so; each line's kind switch, HOLD and ✕ call `setMomentary`, `setHold`
  *   and `forget` by its index and the store revision its list came with, and a refused edit (the list
  *   changed since) toasts nothing; a line that does not run says why (blocked with native MIDI's reason,
  *   not connected, several ports or another missing port of its name, its port held by another program);
@@ -301,7 +301,8 @@ await probe(async ({ open }) => {
   ] } });
   const readLines = () => page.evaluate(() =>
     [...document.querySelectorAll('.audio-settings__binding')].map((li) => ({
-      text: [...li.children].slice(0, 3).map((el) => el.textContent.trim()).join(' | '),
+      text: ['action', 'src'].map((part) => li.querySelector(`.audio-settings__binding-${part}`).textContent)
+        .concat(li.querySelector('.audio-settings__chip').textContent.trim()).join(' | '),
       origin: li.querySelector('.audio-settings__binding-origin')?.textContent ?? null,
       why: li.querySelector('.audio-settings__binding-idle')?.textContent ?? null,
       idle: li.classList.contains('is-idle'),
@@ -310,16 +311,39 @@ await probe(async ({ open }) => {
   );
   const PREVIOUS = 'from the previous version';
   const want = [
-    { text: 'Record / overdub | CC 64 · ch 1 | momentary', origin: null, why: null, idle: false, assign: false },
-    { text: 'Play / stop · Track 3 | note 36 · ch 10 | latching', origin: PREVIOUS, why: 'learned again in another run', idle: true, assign: true },
-    { text: 'Click on / off | CC 21 · ch 1 | latching', origin: null, why: 'Launchkey is not connected', idle: true, assign: true },
-    { text: 'Undo / redo | CC 22 · ch 1 | momentary', origin: PREVIOUS, why: 'several connected ports are named Twin', idle: true, assign: true },
-    { text: 'Mute / unmute · Track 5 | CC 23 · ch 1 | latching', origin: PREVIOUS, why: 'another missing port is named Twin', idle: true, assign: true },
-    { text: 'Stop all | CC 24 · ch 1 | latching', origin: PREVIOUS, why: 'Keystation 49 is held by another program', idle: true, assign: false },
+    { text: 'Record / overdub | CC 64 · ch 1 | MOMENTARY', origin: null, why: null, idle: false, assign: false },
+    { text: 'Play / stop · Track 3 | note 36 · ch 10 | LATCHING', origin: PREVIOUS, why: 'learned again in another run', idle: true, assign: true },
+    { text: 'Click on / off | CC 21 · ch 1 | LATCHING', origin: null, why: 'Launchkey is not connected', idle: true, assign: true },
+    { text: 'Undo / redo | CC 22 · ch 1 | MOMENTARY', origin: PREVIOUS, why: 'several connected ports are named Twin', idle: true, assign: true },
+    { text: 'Mute / unmute · Track 5 | CC 23 · ch 1 | LATCHING', origin: PREVIOUS, why: 'another missing port is named Twin', idle: true, assign: true },
+    { text: 'Stop all | CC 24 · ch 1 | LATCHING', origin: PREVIOUS, why: 'Keystation 49 is held by another program', idle: true, assign: false },
   ];
   const lines = await until(readLines, want);
   console.log('bindings', JSON.stringify(lines));
   assert.deepEqual(lines, want, 'each line shows its binding and where it came from; one that does not run says why; only one no port is found for alone offers an assignment, one no present port answers to included');
+  // The list is a table: every kind switch on one column (both edges), HOLD beside it, each line one
+  // height, and a second line's port select and ASSIGN ending on the switches' right edge.
+  const table = await page.evaluate(() => {
+    const edge = (el, side) => Math.round(el.getBoundingClientRect()[side] * 2) / 2;
+    const lines = [...document.querySelectorAll('.audio-settings__binding')];
+    const all = (sel, side) => [...new Set(lines.flatMap((li) => [...li.querySelectorAll(sel)].map((el) => edge(el, side))))];
+    return {
+      kindLeft: [...new Set(lines.map((li) => edge(li.querySelector('.audio-settings__chip'), 'left')))],
+      kindRight: [...new Set(lines.map((li) => edge(li.querySelector('.audio-settings__chip'), 'right')))],
+      holdRight: all('[aria-label^="Hold to record"]', 'right'),
+      assignRight: all('[aria-label^="Assign"]', 'right'),
+      clearRight: all('[aria-label^="Forget"]', 'right'),
+      rows: [...new Set(lines.flatMap((li) => getComputedStyle(li).gridTemplateRows.split(' ')))],
+      heights: [...new Set(lines.map((li) => edge(li, 'height')))],
+    };
+  });
+  console.log('bindings table', JSON.stringify(table));
+  assert.equal(table.kindLeft.length, 1, 'every kind switch starts on one edge');
+  assert.equal(table.kindRight.length, 1, 'and ends on one edge');
+  assert.equal(table.clearRight.length, 1, 'every ✕ ends on one edge');
+  assert.deepEqual(table.assignRight, table.holdRight, 'ASSIGN ends where HOLD does');
+  assert.deepEqual(table.rows, ['24px'], 'every line one height');
+  assert.equal(table.heights.length, 2, 'a binding is one line or two');
   const row = (i) => page.locator('.audio-settings__binding').nth(i);
   await row(0).getByRole('button', { name: /momentary pedal, switch to latching/ }).click();
   await settles(lastCall, ['setMomentary', 7, 0, false], 'the kind switch reads the pedal the other way, on the list it was made against');
@@ -330,6 +354,7 @@ await probe(async ({ open }) => {
   // ASSIGN: no port until the player picks one.
   const assignButton = (i) => row(i).getByRole('button', { name: /^Assign/ });
   assert.equal(await row(1).locator('select').inputValue(), '', 'the port select starts on no port');
+  assert.equal((await row(1).locator('select option').first().textContent()).trim(), 'Pick a port');
   assert.equal(await assignButton(1).isDisabled(), true, 'ASSIGN waits for a pick');
   assert.equal(await assignButton(3).isDisabled(), true);
   await row(1).locator('select').selectOption('keys');
