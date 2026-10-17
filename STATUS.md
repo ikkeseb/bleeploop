@@ -110,7 +110,10 @@ it.
   answer before playing on, and do the disabled tools still read as present from the chair?
 - SCOPE's beam (2026-10-17, machine-verified, never seen on a device): when the live columns stop while the
   loop moves (the view closed and reopened, a look stepped back to SCOPE, a held feed) the beam moves on with
-  the bar instead of freezing at the last column. Does the beam ever jump or lag the bar when you open the
+  the bar instead of freezing at the last column; a column takes the beam only when its own device frame
+  is fresh, so a late or sporadic batch (even whole loops behind) neither pulls it back nor pushes it
+  ahead, a multiply or a restart starts it over, and the HUD's bar is the bar the beam stands in (it read
+  bar 1 over the loop's last half beat). Does the beam ever jump, stutter or lag the bar when you open the
   view mid-loop?
 - GO LIVE lights only from the engine's live flag, now in the feed: with no audio device running it stays
   unlit until one does, and a lost press toasts once ("Could not go live. Press GO LIVE again."). Does
