@@ -171,6 +171,9 @@ option {
   box-shadow: inset 0 1px 0 var(--hair);
   min-width: 0;
   anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
+  /* Tab and the accessibility tree follow the rows as drawn: the stacked bar's rows are a visual `order`
+     (transport.css), and its DOM keeps the one-row order (Chromium 137+, so WebView2's evergreen runtime) */
+  reading-flow: flex-visual;
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
    cannot see FIXED's bars come and go). Row 1 keeps brand · lamp · BPM · TAP · loop dial · ALL · FADE ·
@@ -284,7 +287,8 @@ option {
   border: 0;
 }
 
-/* tools — far right, flat icon buttons */
+/* tools — far right, flat icon buttons: a --dim glyph at rest; disabled = a --faint glyph (tone, never an
+   opacity fade, as .tgl:disabled), so a dead tool still reads as present across the room */
 .tools {
   display: inline-flex;
   align-items: center;
@@ -298,7 +302,7 @@ option {
   border-radius: 10px;
   display: grid;
   place-items: center;
-  color: var(--faint);
+  color: var(--dim);
   cursor: pointer;
   background: none;
   transition: color 0.15s, transform 0.08s, background 0.15s, box-shadow 0.12s;
@@ -317,7 +321,7 @@ option {
 }
 .tool:disabled {
   cursor: default;
-  opacity: 0.5;
+  color: var(--faint);
 }
 .tool--gear:hover svg {
   transform: rotate(35deg);
@@ -325,18 +329,19 @@ option {
 /* A word among the tool icons, for the one thing that must not be missed and has no icon that could
    say it: UPDATE (`src/ui/settings/UpdatePanel.tsx`). It is mounted only while there is something to
    press, so it costs nothing the rest of the time — the warm-white legend is the "something waits
-   here" signal the Help cap's corner dot used to carry. */
+   here" signal the Help cap's corner dot used to carry. Its height, corner and type are a mode pill's
+   (`.transport__tgl`, transport.css), so it stands in the bar as one of them (app-update probe). */
 .tool-pill {
-  height: 34px;
+  height: 30px;
   padding: 0 11px;
   border: 1px solid var(--line-2);
-  border-radius: 10px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.06em;
   color: var(--engaged);
   background: var(--surf-2);
   box-shadow: inset 0 1px 0 var(--hair);

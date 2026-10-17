@@ -36,9 +36,12 @@ import {
  *
  * Each column is placed by its OWN device frame, not by counting back from the playhead: its loop
  * phase is `(frame - the master grid's anchor) mod the sweep's span`, which is exact and jitter-free
- * at any loop length. The newest column therefore sits one output latency ahead of the drawn
- * playhead, and while columns arrive the beam rides the newest one, which is the honest place for it;
- * with none arriving it is the drawn playhead, which the HUD's bar reads too.
+ * at any loop length. The newest column therefore sits about one output latency ahead of the drawn
+ * playhead, and while columns arrive the beam rides the newest one, which is the honest place for it.
+ * A column takes the beam only when the clock says it is fresh: it arrived within IDLE_WAIT_MS and its
+ * own device frame stands ahead of the frame heard now by no more than LEAD_COLUMNS. Otherwise (none yet, a stream that
+ * stopped, a late batch of old columns) the drawn playhead carries the beam, which the HUD's bar reads
+ * too, and the beam never steps back nor gains more than one column on the playhead in a frame.
  *
  * Two canvases, both sized in `layout` and never per frame: a still bitmap (the wells, the hairlines,
  * the bar ticks, the bay names, the selection mark and every lane's contour), invalidated per bay by
@@ -101,6 +104,10 @@ const BEAT_MS = 420;
  * trace fades out over IDLE_FADE_MS and then stops compositing until columns return. */
 const IDLE_WAIT_MS = 250;
 const IDLE_FADE_MS = 400;
+/** How far ahead of the drawn playhead a fresh column can stand, in 4 ms columns (200 ms): one output
+ * latency less the feed's own delay. On a short loop the beam's reach on the sweep also stops at a
+ * quarter of it. */
+const LEAD_COLUMNS = 50;
 /** The contour reaches a little past the live light's 70 % of the bay's half height. */
 const LIVE_REACH = 0.35;
 const CONTOUR_REACH = 0.4;
@@ -157,18 +164,23 @@ function createScope(): ViewDraw {
   let resized = true;
   // The trace's own state. The newest column drawn and the sweep it was placed in are device frames:
   // they live in a typed array, not in a closure variable that would box on every store.
-  const mem = new Float64Array(3);
+  const mem = new Float64Array(9);
   const DRAWN = 0; // the newest column already drawn, -1 before the first
   const SPAN = 1; // the sweep's span in frames
   const GRID = 2; // and the grid anchor it was placed against
+  const BEAM = 3; // the beam's x in the trace last frame (device px, fractional), -1 for none
+  const LEAD = 4; // and how far it stood ahead of the drawn playhead
+  const BSPAN = 5; // the master, the grid and the column bin that x was placed in
+  const BGRID = 6;
+  const BBIN = 7;
+  const NEWEST = 8; // the mirror's newest column frame last frame: a column arrived when it moved
   let drawnEpoch = -1;
   let drawnBin = 0;
   let cw = 1; // one column's width in device px
-  /** `beam[0]`: where the beam stands, the newest column's x in the trace, -1 while the trace is out of
-   * step with the mirror (no beam this frame), -2 while no column has arrived at all (the drawn
-   * playhead carries it). `beam[1]`: whether a column arrived this frame; after IDLE_WAIT_MS without
-   * one the drawn playhead carries the beam too (`draw`). Int32 slots rather than return values, which
-   * box crossing a frame's call. */
+  /** `beam[0]`: the newest column's x in the trace, -1 while the trace is out of step with the mirror
+   * (no column to ride this frame), -2 while no column has arrived at all. `beam[1]`: whether a column
+   * arrived this frame. `draw` decides whether that column carries the beam or the drawn playhead
+   * does. Int32 slots rather than return values, which box crossing a frame's call. */
   const beam = new Int32Array(2);
   const ALIVE = 1;
   /**
@@ -228,6 +240,9 @@ function createScope(): ViewDraw {
     s.countSize = clamp(0.36 * s.h, 140, 480);
     mem[DRAWN] = -1;
     mem[SPAN] = 0;
+    mem[BEAM] = -1;
+    mem[LEAD] = 0;
+    mem[NEWEST] = -1;
     drawnBin = 0;
     drawnEpoch = -1;
     pendX = -1;
@@ -412,6 +427,10 @@ function createScope(): ViewDraw {
       beam[0] = -2;
       return;
     }
+    // A column arrived when the mirror's newest one moved: a new sweep below re-places the newest
+    // column it already had, and that is no sign the stream is alive.
+    const arrived = view.frame !== mem[NEWEST];
+    mem[NEWEST] = view.frame;
     const master = looper.masterFramesValue();
     const span = master > 0 ? master : FALLBACK_COLUMNS * bin;
     // Loop position 0 plays at the master grid's anchor, so a column's phase is its own frame's.
@@ -438,9 +457,9 @@ function createScope(): ViewDraw {
     if (newest >= tw) newest = tw - 1;
     beam[0] = newest;
     if (view.epoch !== drawnEpoch) {
-      // The trace broke (an xrun, a ring overrun, a new engine). Resynchronise and skip one beam, but
-      // never wipe the trace: one 4 ms window is not worth a full-screen blink mid-jam, and the next
-      // pass's own dimming carries the old light away. A look just laid out (`drawnEpoch` -1) meets the
+      // The trace broke (an xrun, a ring overrun, a new engine). Resynchronise, with no column to ride
+      // this frame, but never wipe the trace: one 4 ms window is not worth a full-screen blink mid-jam,
+      // and the next pass's own dimming carries the old light away. A look just laid out (`drawnEpoch` -1) meets the
       // mirror's columns at an age it does not know, so that is no sign the stream is alive.
       beam[ALIVE] = drawnEpoch < 0 ? 0 : 1;
       drawnEpoch = view.epoch;
@@ -452,7 +471,7 @@ function createScope(): ViewDraw {
     let n = Math.round((view.frame - mem[DRAWN]) / bin);
     mem[DRAWN] = view.frame;
     if (n <= 0) return;
-    beam[ALIVE] = 1; // the stream is alive, whatever this frame's columns fold into
+    if (arrived) beam[ALIVE] = 1; // the stream is alive, whatever this frame's columns fold into
     const most = Math.min(view.count, Math.ceil(span / bin), gx.length); // after a stall, one sweep is all the x there are
     if (n > most) {
       // Columns are being discarded, so the pending one is no longer the neighbour of the first kept
@@ -537,15 +556,69 @@ function createScope(): ViewDraw {
     if (resized || feed.selected !== shownSel || feed.beatsPerLoop !== shownBeats || feed.beatsPerBar !== shownPerBar) redrawAll(pal);
     for (let i = 0; i < LANES; i++) if (laneChanged(stamp, i)) rasterise(pal, i);
     pullColumns(pal, quiet);
-    // The beam with no column to ride: the drawn playhead. That is also the case once the columns have
-    // stopped arriving (the taps reopened and not yet answered, a held feed, a fault): the newest
-    // column then stands where the loop WAS, and a beam left on it stops while the loop and the HUD's
-    // bar move on. The phase is read HERE, in the frame's own hot code: the same read inside
-    // `pullColumns` boxes a number every frame (measured, 21 bytes a frame, by the stage-view probe's
-    // budget case).
+    // Where the beam stands. A column carries it only while the clock calls it fresh: arrived within
+    // IDLE_WAIT_MS, and its device frame ahead of the heard one by no more than LEAD_COLUMNS. A column behind the
+    // playhead is old (a stream that stopped, a late batch the engine sent after a held feed), and the
+    // drawn playhead carries the beam, as with no column at all: a beam left on it would stand where
+    // the loop WAS while the loop and the HUD's bar move on. The beam never steps back: one that stood
+    // ahead holds there until the playhead reaches it; and taking a column over, it gains at most one
+    // column a frame on the playhead. The phase is read HERE, in the frame's own hot code: the same
+    // read inside `pullColumns` boxes a number every frame (measured, 21 bytes a frame, by the
+    // stage-view probe's budget case).
+    const master = looper.masterFramesValue();
+    const recent = beam[ALIVE] !== 0 || now - idle[SEEN] <= IDLE_WAIT_MS;
     let bx = beam[0];
-    if (bx === -2 || (beam[ALIVE] === 0 && now - idle[SEEN] > IDLE_WAIT_MS)) {
-      bx = Math.round(light.phase * tw);
+    if (master <= 0) {
+      // No loop yet (a first take): no clock places a column on a loop, so the newest column carries
+      // the beam while columns arrive, else the drawn playhead (the sweep's start).
+      if (bx === -2 || !recent) {
+        bx = Math.round(light.phase * tw);
+        if (bx >= tw) bx = tw - 1;
+      }
+      mem[BEAM] = -1;
+      mem[LEAD] = 0;
+    } else {
+      // A new sweep (a multiply, a new master, a restart's new grid): the last x means another place.
+      const grid = looper.gridValue();
+      if (master !== mem[BSPAN] || grid !== mem[BGRID] || drawnBin !== mem[BBIN]) {
+        mem[BSPAN] = master;
+        mem[BGRID] = grid;
+        mem[BBIN] = drawnBin;
+        mem[BEAM] = -1;
+        mem[LEAD] = 0;
+      }
+      const ph = light.phase * tw;
+      let most = drawnBin > 0 ? (LEAD_COLUMNS * drawnBin * tw) / master : 0;
+      if (most > tw / 4) most = tw / 4;
+      let lead = 0;
+      if (feed.moving && mem[BEAM] >= 0) {
+        let d = mem[BEAM] - ph;
+        if (d < -tw / 2) d += tw;
+        else if (d > tw / 2) d -= tw;
+        if (d > 0 && d <= most) lead = d;
+      }
+      // Fresh by the clock, before the modulo places it: the column's own device frame stands ahead of
+      // the frame heard now by no more than LEAD_COLUMNS, so a batch whole loops behind (which the
+      // modulo would place just ahead on a short loop) never takes the beam.
+      let fresh = false;
+      if (feed.moving && recent && bx >= 0) {
+        const age = view.frame - looper.heardFrameValue();
+        fresh = age > 0 && age <= LEAD_COLUMNS * drawnBin;
+      }
+      if (fresh) {
+        let d = bx - ph;
+        if (d < -tw / 2) d += tw;
+        else if (d > tw / 2) d -= tw;
+        if (d > lead && d <= most) {
+          const cap = mem[LEAD] + cw;
+          lead = d < cap ? d : cap > lead ? cap : lead;
+        }
+      }
+      let at = ph + lead;
+      if (at >= tw) at -= tw;
+      mem[BEAM] = at;
+      mem[LEAD] = lead;
+      bx = Math.round(at);
       if (bx >= tw) bx = tw - 1;
     }
     // The columns stopped arriving: the device stopped, a fault, the taps closed, a held feed. The

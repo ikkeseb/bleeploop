@@ -5,7 +5,8 @@
  *
  * - no updater (the browser build): no pill in the command bar, no toast, and nothing about an update
  *   in Help, which is where the offer used to live;
- * - an offer with the looper empty: one toast (a note: no ✓, no "Done") names the version, the pill appears, its panel carries the
+ * - an offer with the looper empty: one toast (a note: no ✓, no "Done") names the version, the pill appears
+ *   in a mode pill's height, corner and type size, its panel carries the
  *   version and the notes (bullets and bold dropped), and the press installs at once, asking nothing;
  * - an offer during a jam (a committed loop on the feed): the press asks first, in the app's own dialog
  *   (`src/ui/confirm/`; no native confirm opens); "no" installs nothing, "yes" saves the jam for
@@ -110,6 +111,16 @@ await probe(async ({ open }) => {
     assert.equal(await pill(page).innerText(), 'UPDATE', 'the pill reads'); // innerText: the CSS uppercase
     assert.equal(await pill(page).getAttribute('title'), 'BleepLoop v9.9.9 is ready to install', 'the pill title');
     assert.equal(await pill(page).getAttribute('aria-label'), 'Update ready, version 9.9.9', 'the pill name');
+    // The pill is a mode pill in its geometry (CLICK's here): its height, corner and type, so it stands in
+    // the bar as one of them; only its warm-white legend is its own.
+    const shape = (el) => {
+      const s = getComputedStyle(el);
+      return { height: el.getBoundingClientRect().height, radius: s.borderTopLeftRadius, font: s.fontSize };
+    };
+    const geometry = { update: await pill(page).evaluate(shape),
+      mode: await page.getByRole('button', { name: 'Metronome click', exact: true }).evaluate(shape) };
+    console.log(JSON.stringify({ geometry }));
+    assert.deepEqual(geometry.update, geometry.mode, 'the UPDATE pill is shaped like a mode pill');
     // The old home must stay empty: Help is a reference, not where the app keeps its actions.
     await page.locator('.tool--help').click();
     assert.equal(await page.locator('#lf-help-popover').getByText(/update/i).count(), 0, 'the offer is back in Help');

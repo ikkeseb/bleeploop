@@ -1289,6 +1289,8 @@ export const engineLooper = {
    * `gridValue() + k * masterFramesValue()`. The draw loop places a frame-stamped scope column on the
    * loop with it, the way `phaseValue` places the playhead; no signal read. */
   gridValue: (): number => plain.clock.grid,
+  /** The device frame heard now, whole: the draw loop judges a scope column's age by it (invariant 6: no signal read). */
+  heardFrameValue: (): number => Math.round(heardFrame()),
   /** Lane `i`'s effects as the engine applied them. */
   fxState: (i: number): readonly FxState[] => mixes[i][0]().fx,
   setFxBypass,
