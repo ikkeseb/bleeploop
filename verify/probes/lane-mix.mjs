@@ -139,12 +139,12 @@ await probe(async ({ open }) => {
   const delay = page.getByRole('button', { name: 'Delay, track 1', exact: true });
   await delay.click();
   await page.waitForFunction(() => window.__lf.looper.fxState(0)[3].bypassed === false, undefined, { timeout: 5000 });
-  const division = page.locator('.fxp-mod', { has: delay }).locator('select').first();
+  const division = page.getByRole('combobox', { name: 'Track 1 delay time', exact: true });
   const before = await division.inputValue();
   await seam('refuseMix', true);
   await division.selectOption({ index: before === '3' ? 0 : 3 });
   await page.waitForFunction(
-    (b) => document.querySelector('.fxp-mod--on select')?.value === b,
+    (b) => document.querySelector('select[aria-label="Track 1 delay time"]')?.value === b,
     before,
     { timeout: 5000 },
   ).catch(() => {});

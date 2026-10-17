@@ -12,6 +12,10 @@
   position: relative;
   padding: 1px 1px 0; /* hairline so the lanes' active glow/rings aren't clipped by the zone edge */
   overflow: hidden; /* keep lane glows contained to the looper zone (the parent .zone also clips) */
+  /* The lanes-area size container. The lane stack is its only in-flow child and fills its content box,
+     so `lp`'s height and cqh ARE the lane stack's; it sits here, not on the stack, so a query can style
+     the stack itself (its gap in the tight rung below). */
+  container: lp / size;
 }
 
 /* zero-specificity reset (:where, 0,0,0) so every single-class lane button rule below wins over it.
@@ -27,16 +31,14 @@
 }
 
 /* ============ THE LANE STACK ============
-   A container context (size) so the core button can size to the lanes-area HEIGHT (cqh) — it shrinks
-   when the stage splitter makes the looper zone short. */
+   The core button sizes to the lanes-area HEIGHT (cqh, container `lp` on .lp) — it shrinks when the
+   stage splitter makes the looper zone short. */
 .lp__lanes {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: clamp(6px, 1vh, 10px);
-  container-type: size;
-  container-name: lp;
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -645,6 +647,24 @@
     padding: 5px 10px;
   }
 }
+/* The tight rung: with FX params open (the drawer 105px: one key row + one params row) the 57px rung
+   needs 5 × 57 + 105 + 5 gaps of up to 10px = 440px. Below that the whole stack steps down one notch
+   together: lanes pad 3px (53px: the two 20px pills + their 5px gap + 3px pad + border), one 4px gap
+   between every lane and the drawer, and the drawer's top pad 3px like the lanes' (its key row keeps
+   its own 5px margin, so the keys sit 8px from the edge, the params 6px). That floor is 387px, under the
+   ~390px stack of 1000x700 with the keyboard shown. Only heights change, so no slider loses width. */
+@container lp (max-height: 440px) {
+  .lp__lanes:has(.lp-drawer .fxp-params) {
+    gap: 4px;
+  }
+  .lp__lanes:has(.lp-drawer .fxp-params) .lp-lane {
+    min-height: 53px;
+    padding-block: 3px;
+  }
+  .lp__lanes:has(.lp-drawer .fxp-params) .lp-drawer {
+    padding-top: 3px;
+  }
+}
 @container lp (max-height: 300px) {
   .lp-lane__state {
     font-size: 8.5px;
@@ -669,8 +689,9 @@
    A panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
    drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. ONE row: the title,
    the FxPanel (five keys and DUB FEEDBACK) and the close key, so at rest it costs one key row and five
-   lanes still fit the minimum window (1000x700, keyboard shown). An engaged FX opens its params under
-   its key and the row grows; past the cap the panel scrolls. FxPanel internals are styled in
+   lanes still fit the minimum window (1000x700, keyboard shown). Engaged FX open ONE params row under
+   the keys (all five engaged: one row at 1000 px wide, two at the narrowest); past the cap the panel
+   scrolls. FxPanel internals are styled in
    fxpanel.css; here it is positioned, framed and given the row's insets. --drawer-key is the key
    height, --drawer-inset the module pane's border + padding, so the title and the close key sit on
    the key row whatever the row's height. */
@@ -725,35 +746,38 @@
   background: var(--surf-3);
 }
 /* the FxPanel takes the row between title and close, stretched to the drawer's (capped) height so it
-   scrolls there; its standalone frame drops (the drawer is the frame), and its modules take the
-   row's tighter insets */
+   scrolls there; its standalone frame drops (the drawer is the frame). Its keys row keeps the module
+   inset around each key, so the title and the close key sit on the key row; its params row flows under
+   the keys. */
 .lp-drawer .fxp {
   flex: 1 1 auto;
   align-self: stretch;
+  flex-direction: column;
+  flex-wrap: nowrap;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  gap: 6px;
+  gap: 0;
   background: transparent;
   border: 0;
   box-shadow: none;
   padding: 0;
-  align-items: flex-start;
-  align-content: flex-start;
   scrollbar-width: thin;
   scrollbar-color: var(--edge) transparent;
 }
-/* five equal modules, so engaging one grows the row's height and never moves a key; DUB FEEDBACK
-   keeps the width its one line needs */
-.lp-drawer .fxp-mod {
-  container: fxmod / inline-size; /* a narrow module stacks its params (below) */
+/* five equal keys, so engaging one never moves a key; DUB FEEDBACK keeps the width its one line needs */
+.lp-drawer .fxp-mod__toggle {
   flex: 1 1 0;
-  min-width: 72px;
-  padding: calc(var(--drawer-inset) - 1px);
+  min-width: 62px;
+  margin: var(--drawer-inset);
+}
+.lp-drawer .fxp-params {
+  padding-inline: var(--drawer-inset);
 }
 .lp-drawer .fxp-dub {
   flex: 0 0 auto;
   width: clamp(272px, 22vw, 340px);
+  padding: calc(var(--drawer-inset) - 1px);
 }
 .lp-drawer .fxp-mod__toggle,
 .lp-drawer .fxp-mod__title {
@@ -763,24 +787,6 @@
 .lp-drawer .fxp-mod__title {
   display: flex;
   align-items: center;
-}
-/* a module too narrow for label, range and read-out on one line (five across at the minimum window):
-   the label and read-out share a line over a full-width range or select */
-@container fxmod (max-width: 150px) {
-  .lp-drawer .fxp-param {
-    grid-template-columns: 1fr auto;
-    row-gap: 3px;
-  }
-  .lp-drawer .fxp-param__label {
-    grid-area: 1 / 1;
-  }
-  .lp-drawer .fxp-param__val {
-    grid-area: 1 / 2;
-  }
-  .lp-drawer .fxp-param__range,
-  .lp-drawer .fxp-param__select {
-    grid-area: 2 / 1 / 3 / -1;
-  }
 }
 .lp-drawer .fxp::-webkit-scrollbar {
   width: 8px;
