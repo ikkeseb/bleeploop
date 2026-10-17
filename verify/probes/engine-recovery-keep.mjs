@@ -240,6 +240,16 @@ async function settle(page) {
   await page.evaluate(() => window.__lf.autosave.flush());
 }
 
+/** Answer the app's rate ask (`src/ui/confirm/`) with `button` once it shows; resolves with its text. */
+async function answerAsk(page, button) {
+  const ask = page.getByRole('alertdialog', { name: 'Sample rate change', exact: true });
+  await ask.waitFor({ timeout: 5000 });
+  const body = await ask.locator('#lf-confirm-body').innerText();
+  await ask.getByRole('button', { name: button, exact: true }).click();
+  await ask.waitFor({ state: 'detached' });
+  return body;
+}
+
 const cases = {
   async reset({ browser, open }) {
     const { page, context } = await boot(browser, open);
@@ -462,12 +472,8 @@ const cases = {
     const opened = (await opens()).length;
 
     // Declined: nothing switches, and the pick goes back to the device that runs.
-    let asked = '';
-    page.once('dialog', (d) => {
-      asked = d.message();
-      void d.dismiss();
-    });
     await buffer.selectOption(pick);
+    const asked = await answerAsk(page, 'Cancel');
     await page.waitForFunction((n) => window.__lf.native.forced.length === n + 1, opened, { timeout: 5000 });
     await page.waitForFunction((v) => document.querySelector('select[aria-label="Buffer size in frames"]').value === v, was, { timeout: 5000 });
     console.log('asked:', JSON.stringify(asked));
@@ -481,8 +487,8 @@ const cases = {
       window.__lfEngineFakeRate = 44100;
     });
     const acceptedAt = Date.now();
-    page.once('dialog', (d) => void d.accept());
     await buffer.selectOption(pick);
+    await answerAsk(page, 'Switch');
     await page.waitForFunction(() => window.__lf.native.forced.at(-1) === true, undefined, { timeout: 10000 });
     const flushed = await slot(page, 'latest');
     assert.ok(flushed.savedAt >= acceptedAt, 'the recovery was saved after the confirm, before the switch');
@@ -528,8 +534,8 @@ const cases = {
     const buffer = page.getByRole('combobox', { name: 'Buffer size in frames' });
     const pick = (await buffer.inputValue()) === '256' ? '512' : '256';
     await page.evaluate(() => (window.__lfEngineFakeRate = 44100));
-    page.once('dialog', (d) => void d.accept());
     await buffer.selectOption(pick);
+    await answerAsk(page, 'Switch');
     await page.waitForFunction(() => window.__lf.native.forced.at(-1) === true, undefined, { timeout: 10000 });
     const atForced = await page.evaluate(() => window.__atForcedOpen);
     console.log('the recovery as the switch was forced:', JSON.stringify(atForced));
@@ -579,9 +585,9 @@ const cases = {
       });
 
     for (const pick of others) {
-      page.once('dialog', (d) => void d.accept());
       const opens = await page.evaluate(() => window.__lf.native.opened.length);
       await buffer.selectOption(pick);
+      await answerAsk(page, 'Switch');
       // Refused, then the reopen after the failed save.
       await page.waitForFunction((n) => window.__lf.native.opened.length >= n + 2, opens, { timeout: 10000 }).catch(() => null);
       await page.waitForTimeout(300);
