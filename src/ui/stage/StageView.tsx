@@ -40,6 +40,9 @@ type Tone = 'cue' | 'wait' | 'listen' | 'stop' | 'take';
 
 const HUD_LIT_MS = 2000; // the HUD brightens this long after a change
 const CONTROLS_MS = 3000; // the two buttons hide after this long without the pointer
+/** Of a beat: a phase this close before a beat line reads as past it (`loopBar`). A 32nd of a beat is
+ * 16 ms at 120 BPM: on an 8-bar loop, under two device px of the SCOPE sweep. */
+const BEAT_SLACK = 1 / 32;
 
 export function StageView(props: { onExit: () => void }) {
   const lanes = Array.from({ length: looper.trackCount }, (_, i) => ({ i, track: looper.track(i), ...createLaneView(i) }));
@@ -68,15 +71,17 @@ export function StageView(props: { onExit: () => void }) {
   /** The beat is worth showing: the loop moves, or a count-in runs. */
   const live = () => moving() || count() > 0;
   // The bar of the loop that plays (1-based; 0 with no loop): re-read on each beat from the plain loop
-  // phase (invariant 6: the beat signal, never the draw loop). The phase is rounded to the nearest beat
-  // first, since a beat's signal and the phase are read a moment apart and a downbeat must not read as
-  // the bar before it. At rest the loop is cued at its start: bar 1.
+  // phase (invariant 6: the beat signal, never the draw loop), the bar the drawn playhead stands in.
+  // The beat's signal and the phase are read a moment apart (a timer's millisecond, a new clock anchor),
+  // so a phase within BEAT_SLACK of a beat line counts as past it and a downbeat never reads as the bar
+  // before it; rounding to the nearest beat instead read up to half a beat early, and over the
+  // loop's last half beat it read bar 1 while the beam still stood in the last bar. At rest the loop is cued at its start: bar 1.
   const loopBar = createMemo(() => {
     clock.beat();
     const beats = bars() * perBar();
     if (beats === 0) return 0;
     if (!moving()) return 1;
-    return Math.floor((Math.round(looper.phaseValue() * beats) % beats) / perBar()) + 1;
+    return Math.floor((Math.floor(looper.phaseValue() * beats + BEAT_SLACK) % beats) / perBar()) + 1;
   });
 
   const spoken = (l: Lane): string => {
