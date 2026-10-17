@@ -355,10 +355,12 @@
   height: 9px;
   background: var(--caret-svg) center / 9px 9px no-repeat;
 }
-/* disabled, the caret takes the --faint legend: the baked --dim caret as a mask over a --faint fill */
+/* disabled, the caret takes the --faint legend: the baked --dim caret as a mask over the legend's colour */
 .transport__readout:disabled::after {
-  background: var(--faint);
+  background: currentColor;
   mask: var(--caret-svg) center / 9px 9px no-repeat;
+  /* Forced colours (Windows high contrast) would paint the mask with Canvas: keep currentColor. */
+  forced-color-adjust: none;
 }
 /* the value holds its widest (100), so a drag never moves the bar */
 .transport__readout-v {

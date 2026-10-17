@@ -192,7 +192,7 @@ await probe(async ({ browser, open }) => {
     probe.remove();
     const read = (el, pseudo) => {
       const cs = getComputedStyle(el, pseudo);
-      let opacity = Number(cs.opacity);
+      let opacity = Number(cs.opacity) * (pseudo ? Number(getComputedStyle(el).opacity) : 1);
       for (let up = el.parentElement; up; up = up.parentElement) opacity *= Number(getComputedStyle(up).opacity);
       return { disabled: el.disabled, opacity, color: cs.color, fill: cs.backgroundColor };
     };
