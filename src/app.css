@@ -284,7 +284,8 @@ option {
   border: 0;
 }
 
-/* tools — far right, flat icon buttons */
+/* tools — far right, flat icon buttons: a --dim glyph at rest; disabled = a --faint glyph (tone, never an
+   opacity fade, as .tgl:disabled), so a dead tool still reads as present across the room */
 .tools {
   display: inline-flex;
   align-items: center;
@@ -298,7 +299,7 @@ option {
   border-radius: 10px;
   display: grid;
   place-items: center;
-  color: var(--faint);
+  color: var(--dim);
   cursor: pointer;
   background: none;
   transition: color 0.15s, transform 0.08s, background 0.15s, box-shadow 0.12s;
@@ -317,7 +318,7 @@ option {
 }
 .tool:disabled {
   cursor: default;
-  opacity: 0.5;
+  color: var(--faint);
 }
 .tool--gear:hover svg {
   transform: rotate(35deg);

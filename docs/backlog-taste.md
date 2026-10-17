@@ -55,8 +55,8 @@ added a line.
   480 px panel; the UPDATE pill is 34 px tall with 10 px type beside 30 px mode pills; FIXED drops its unit
   ("4") below 1110 px while FADE keeps "2 BARS"; the ARMED cue "WAITING FOR DOWNBEAT" is bare text while the
   other cues sit in a box; the ASIO row's unticked box beside "WASAPI" can read as "WASAPI off"; Tab order
-  in the two-row bar runs row 2, row 1, row 2's tools (visual `order` only). Disabled by tone or by
-  opacity, and the FX drawer with all five FX on at 1000x700, are Darkroom rounds (`bleeploop-walk13`).
+  in the two-row bar runs row 2, row 1, row 2's tools (visual `order` only). The FX drawer with all five FX
+  on at 1000x700 is a Darkroom round (`bleeploop-walk13`).
 - **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
   log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the

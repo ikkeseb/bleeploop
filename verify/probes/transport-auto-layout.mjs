@@ -8,6 +8,11 @@
  * editor opens in the numeral's box (the bar and stage do not move while typing), every bar popover
  * (IN FX's, SENS's) opens below the bar's bottom edge, aligned to its pill, leaving END STOP uncovered,
  * and a disabled tool (Export, the looper empty) shows no hover face.
+ * At 1440x900 with a stopped one-bar loop it holds the disabled tone: the BPM steppers (locked), IMPORT
+ * (a loop is in), lane 1's core (STOPPED) and a disabled read-out's caret (SENS, AUTO off) fade by tone,
+ * never by opacity: each at an effective opacity of 1 in the --faint legend a disabled pill wears, an
+ * enabled tool (EXPORT) a brighter one. It saves that tool cluster (the native chrome on) at a
+ * device-pixel ratio of 2 as `logs/transport-auto-layout/tools-loop.png`.
  * Screenshots the 1730 px case before and after enabling. Proves layout stability only; it says nothing
  * about auto-record detection itself (the engine's: lf-engine `tests/auto_record.rs`) or anything below
  * the DOM. Run: pnpm probe transport-auto-layout
@@ -16,9 +21,10 @@ import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { probe } from '../harness/probe.ts';
 
+const BAR = 2 * 48000; // one 4/4 bar at 120 BPM
 const EMPTY = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
 
-await probe(async ({ open }) => {
+await probe(async ({ browser, open }) => {
   await mkdir('logs/layout', { recursive: true });
   const failures = [];
   for (const width of [960, 1280, 1400, 1500, 1600, 1730, 1920]) {
@@ -141,4 +147,82 @@ await probe(async ({ open }) => {
     await page.close();
   }
   assert.deepEqual(failures, [], 'AUTO moved the stage at these viewport widths');
+
+  // Disabled by tone, never by opacity (the rule .tgl:disabled and the lane pills state): with a stopped
+  // one-bar loop the BPM steppers are locked, IMPORT waits for an empty looper and lane 1's core says play
+  // first; SENS is dead while AUTO is off. Each keeps an effective opacity of 1 and the --faint legend.
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+  const { page } = await open({
+    context,
+    viewport: { width: 1440, height: 900 },
+    init: async (p) => {
+      // The native chrome on (host.web.ts served with `available: true`), so the cluster holds all seven
+      // tools, as the walk's crop does.
+      await p.route('**/src/platform/host.web.ts', async (route) => {
+        const response = await route.fetch();
+        const body = (await response.text()).replace('available: false', 'available: true');
+        await route.fulfill({ response, body });
+      });
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
+    },
+  });
+  await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+  await page.evaluate((f) => window.__lf.native.emit(f), {
+    seq: 1,
+    reset: true,
+    settings: [],
+    events: [
+      { Lane: { frame: 0, lane: 0, info: { ...EMPTY, state: 'Stopped', length: BAR } } },
+      ...[1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info: EMPTY } })),
+      { Transport: { frame: 0, master: BAR, bpm: 120, locked: true } },
+      { Selected: { frame: 0, lane: 0 } },
+    ],
+    anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
+    meter: { peak: [0, 0], clip: [false, false] },
+  });
+  await page.locator('.lp-lane[data-state="stop"] .lp-core:disabled').first().waitFor({ timeout: 5000 });
+  await page.locator('.tool--import:disabled').waitFor();
+  await page.mouse.move(1, 1);
+  await page.waitForTimeout(250); // past every colour transition
+  const tone = await page.evaluate(() => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--faint)';
+    document.body.append(probe);
+    const faint = getComputedStyle(probe).color;
+    probe.remove();
+    const read = (el, pseudo) => {
+      const cs = getComputedStyle(el, pseudo);
+      let opacity = Number(cs.opacity);
+      for (let up = el.parentElement; up; up = up.parentElement) opacity *= Number(getComputedStyle(up).opacity);
+      return { disabled: el.disabled, opacity, color: cs.color, fill: cs.backgroundColor };
+    };
+    const q = (sel) => document.querySelector(sel);
+    return {
+      faint,
+      'BPM minus': read(q('button[aria-label="BPM minus"]')),
+      'BPM plus': read(q('button[aria-label="BPM plus"]')),
+      IMPORT: read(q('.tool--import')),
+      'track 1 core': read(q('.lp-lane .lp-core')),
+      'SENS caret': { ...read(q('button[aria-label="Auto record sensitivity"]'), '::after'), disabled: q('button[aria-label="Auto record sensitivity"]').disabled },
+      EXPORT: read(q('.tool--export')),
+    };
+  });
+  console.log(JSON.stringify({ tone }));
+  // The crop first, so a red run leaves the picture too.
+  const tools = await page.locator('.tools').boundingBox();
+  await mkdir('logs/transport-auto-layout', { recursive: true });
+  await page.screenshot({
+    path: 'logs/transport-auto-layout/tools-loop.png',
+    clip: { x: tools.x - 6, y: tools.y - 6, width: tools.width + 12, height: tools.height + 12 },
+  });
+  for (const name of ['BPM minus', 'BPM plus', 'IMPORT', 'track 1 core', 'SENS caret']) {
+    const t = tone[name];
+    assert.equal(t.disabled, true, `${name} is disabled in this state`);
+    assert.equal(t.opacity, 1, `${name}: a disabled control faded by opacity (${t.opacity})`);
+    const legend = name === 'SENS caret' ? t.fill : t.color;
+    assert.equal(legend, tone.faint, `${name}: the disabled legend ${legend} is not --faint ${tone.faint}`);
+  }
+  assert.equal(tone.EXPORT.disabled, false, 'EXPORT is live with a loop in');
+  assert.notEqual(tone.EXPORT.color, tone.faint, 'an enabled tool reads as the disabled one');
+  await context.close();
 }, { launch: {} });

@@ -269,9 +269,15 @@
 .lp-core:focus-visible {
   outline-offset: 3px;
 }
-.lp-core:disabled {
-  opacity: 0.4;
+/* disabled = no face, a hairline rim in the bezel, a --faint glyph: tone, never an opacity fade (the
+   .lp-pb:disabled block below). [data-state] outranks the state glyph colours below (EMPTY's red ●); the
+   state ring is the lane's, not the control's, and stays. */
+.lp-lane[data-state] .lp-core:disabled {
   cursor: not-allowed;
+  color: var(--faint);
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 0 3px var(--sunk), 0 0 0 4px var(--edge);
 }
 .lp-core svg {
   width: 38%;
