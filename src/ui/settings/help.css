@@ -1,37 +1,36 @@
 /* Help popover — "Instrument". Same floating panel as AudioSettings, anchored top-right under the
    command-bar help cap (see .settings-popover in app.css, whose `max-height: stretch` is the only height
-   cap: the reference fits whole from the 960x600 minimum up, the manual scrolls to the window's foot). Two tabs:
+   cap). Both tabs' panels share one grid cell under the tabs, so Help stands at the taller panel's height
+   (the manual's, under that cap) whichever tab shows, and a tab switch never resizes it; the panel that
+   shows scrolls under the tabs, never Help itself, so the tabs stay put. The reference fits whole from
+   the 960x600 minimum up. Two tabs:
    REFERENCE in two columns (looper keys + pedals | play keys + octave + drum pads), MANUAL one column.
    Body 12.5 px, the key labels in --text, prose in --dim. Keys render as matte key-face chips (sharps
    sunk a tone, like black keys); the play keys as a small keyboard; the drum pads as a 4-column grid of
    sunk wells mirroring the on-screen 4×4. Colour is spent only on sound — chrome stays monochrome. */
 .help {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  row-gap: 12px;
   width: min(600px, calc(100vw - 32px));
-  overflow-y: auto;
-  padding: 14px 18px 16px;
+  /* the sides and the foot are the panels' padding, so a panel's scrollbar runs along Help's edge */
+  padding: 14px 0 0;
   border-radius: 14px;
   /* opaque panel (the popover floats over the busy lanes — see audio-settings.css) */
   background: var(--panel);
   border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
-  scrollbar-width: thin;
-  scrollbar-color: var(--edge) transparent;
 }
-.help::-webkit-scrollbar {
-  width: 8px;
-}
-.help::-webkit-scrollbar-thumb {
-  background: var(--edge);
-  border-radius: 999px;
+/* The panel scrolls, never Help (app.css gives every popover body overflow-y: auto). */
+.settings-popover > .help {
+  overflow: hidden;
 }
 
 /* the tabs — caps eyebrows; the selected one lit warm-white over a hairline underline */
 .help__tabs {
   display: flex;
   gap: 18px;
+  margin: 0 18px;
   border-bottom: 1px solid var(--edge);
 }
 .help__tab {
@@ -57,22 +56,39 @@
 }
 
 .help__panel {
+  grid-area: 2 / 1;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 18px 16px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) transparent;
+}
+.help__panel::-webkit-scrollbar {
+  width: 8px;
+}
+.help__panel::-webkit-scrollbar-thumb {
+  background: var(--edge);
+  border-radius: 999px;
 }
 .help__panel:focus-visible {
   outline: 2px solid var(--cyan); /* the app's keyboard focus ring (app.css); a panel is a Tab stop */
-  outline-offset: -2px; /* inside the .help scroller, which clips an outside ring (as .audio-settings__page) */
+  outline-offset: -2px; /* inside its own box, which Help clips (as .audio-settings__page) */
 }
+/* The other tab's panel stays mounted (Help.tsx) and laid out in the shared cell, so it still holds
+   Help's height; unseen, it takes no pointer, no Tab stop and no screen-reader line. `hidden` alone
+   would lose to the display above, and display: none would drop its height. */
 .help__panel[hidden] {
-  display: none; /* the other tab's panel stays mounted (Help.tsx); `hidden` alone loses to the display above */
+  visibility: hidden;
 }
 .help__panel--ref {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 24px;
   align-items: start;
+  align-content: start;
 }
 .help__col {
   display: flex;
@@ -238,8 +254,10 @@
    type, so it still fits unscrolled under the command bar's two rows. The manual scrolls anyway. */
 @media (max-height: 719px) {
   .help {
-    gap: 8px;
+    row-gap: 8px;
     padding-top: 8px;
+  }
+  .help__panel {
     padding-bottom: 10px;
   }
   .help__tab {

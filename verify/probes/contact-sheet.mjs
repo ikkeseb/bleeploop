@@ -30,7 +30,8 @@
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
  * 1000x700 minimum with the keyboard shown included (audit A4; the drawer is one key row); Help opens on its
  * reference, which fits unscrolled at every size, and its Manual tab shows the manual with About this
- * build, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
+ * build at the reference's height (Help never resizes on a tab switch) with the tabs in reach when the
+ * Manual is scrolled to its foot, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
  * AUTO REC line pointing at the SENS word only where the bar shows it (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
@@ -228,8 +229,11 @@ await probe(async ({ browser, open }) => {
       // and which panel shows.
       const helpState = () => page.evaluate(() => {
         const h = document.querySelector('#lf-help-popover .help');
-        const shown = [...h.querySelectorAll('[role="tabpanel"]')].filter((p) => p.checkVisibility()).map((p) => p.id);
-        const about = [...h.querySelectorAll('.help__h')].some((el) => el.textContent === 'About this build' && el.checkVisibility());
+        // The other tab's panel is laid out but unseen, so the check reads `visibility` too.
+        const seen = (el) => el.checkVisibility({ visibilityProperty: true });
+        const panel = [...h.querySelectorAll('[role="tabpanel"]')].find(seen);
+        const shown = [...h.querySelectorAll('[role="tabpanel"]')].filter(seen).map((p) => p.id);
+        const about = [...h.querySelectorAll('.help__h')].some((el) => el.textContent === 'About this build' && seen(el));
         // HOLD is a learned MIDI REC/DUB's option: it reads only beside MIDI LEARN, never beside the
         // keystroke pedals, whose release stops nothing.
         const hold = [...h.querySelectorAll('.help__note')].filter((el) => el.textContent === 'HOLD')
@@ -243,7 +247,16 @@ await probe(async ({ browser, open }) => {
         const autoRec = [...h.querySelectorAll('#lf-help-manual li')].find((li) => li.textContent.startsWith('AUTO REC'))?.textContent ?? '';
         const sensWord = [...document.querySelectorAll('.cmd .transport__readout-k')].some((el) => el.textContent === 'SENS' && el.checkVisibility());
         const sensClaim = /SENS beside it/.test(autoRec) && !sensWord ? 'says SENS sits beside AUTO REC, which the bar does not show' : '';
-        return { shown, about, hold, switches, sensClaim, content: h.scrollHeight, view: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
+        // What scrolls (Help, or the panel that shows), how tall Help stands, and whether the selected tab
+        // is still under the pointer with everything scrolled to its foot.
+        const scroll = Math.max(h.scrollHeight - h.clientHeight, panel ? panel.scrollHeight - panel.clientHeight : 0);
+        const height = Math.round(h.getBoundingClientRect().height * 10) / 10;
+        for (const el of [h, panel]) if (el) el.scrollTop = el.scrollHeight;
+        const tab = h.querySelector('[role="tab"][aria-selected="true"]'), t = tab.getBoundingClientRect();
+        const tabHit = document.elementFromPoint((t.left + t.right) / 2, (t.top + t.bottom) / 2);
+        const tabInReach = !!tabHit && tab.contains(tabHit);
+        for (const el of [h, panel]) if (el) el.scrollTop = 0;
+        return { shown, about, hold, switches, sensClaim, height, tabInReach, scroll };
       });
       scene = '6-help';
       await page.evaluate(() => window.__lf.ui.openHelp());
@@ -264,6 +277,10 @@ await probe(async ({ browser, open }) => {
       const unnamed = manual.switches.filter((s) => s.includes('('));
       if (unnamed.length) fail(`${tag} ${scene}: the Manual's Pedals section does not name the bar's switches as the bar does: ${unnamed.join(', ')}`);
       if (manual.sensClaim) fail(`${tag} ${scene}: the Manual's AUTO REC line ${manual.sensClaim}`);
+      // One height for both tabs (the taller one's, under the popover's cap), and the tabs stay in reach
+      // with the Manual scrolled to its foot.
+      if (Math.abs(manual.height - ref.height) > 0.5) fail(`${tag} ${scene}: Help resizes on a tab switch (${ref.height} px on Reference, ${manual.height} px on Manual)`);
+      if (!manual.tabInReach) fail(`${tag} ${scene}: the Manual scrolled to its foot takes the tabs with it`);
       await page.evaluate(() => window.__lf.ui.closeHelp());
 
       scene = '7-audio-settings';

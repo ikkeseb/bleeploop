@@ -9,7 +9,8 @@
  *   version and the notes (bullets and bold dropped), and the press installs at once, asking nothing;
  * - an offer during a jam (a committed loop on the feed): the press asks first; "no" installs nothing,
  *   "yes" saves the jam for recovery and installs;
- * - the install's read-out: each stage the native side reports (`lf://update-progress`) reaches the
+ * - the install's read-out: the press turns the title to "Updating" and the button's word to UPDATING…
+ *   without moving its box; each stage the native side reports (`lf://update-progress`) reaches the
  *   panel — a download with a size fills the bar, one without leaves it indeterminate, and the signature
  *   check and the installer each say so;
  * - a failed install: the error toast, its `console.error` line, the read-out cleared, and the button
@@ -158,9 +159,15 @@ await probe(async ({ open }) => {
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
     await pill(page).click();
     const button = panel(page).getByRole('button', { name: /Update and restart|Updating/ });
+    const width = () => button.evaluate((el) => Math.round(el.getBoundingClientRect().width * 10) / 10);
+    const before = await width();
     await button.click();
     await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 5000 });
     assert.equal(await button.isEnabled(), false, 'the button stays pressable during an install');
+    // The press changes the words, never the button's box, and the title says what is happening.
+    assert.equal(await button.innerText(), 'UPDATING…', 'the button while it installs');
+    assert.equal(await width(), before, `the button resizes as it installs (${before} px before)`);
+    assert.match(await panel(page).locator('.update__title').innerText(), /^Updating\s*v9\.9\.9$/, 'the title while it installs');
 
     const stage = panel(page).locator('.update__stage');
     const fill = panel(page).locator('.update__fill');

@@ -104,10 +104,11 @@ export function Help() {
           )}
         </For>
       </div>
-      {/* Both panels stay mounted, the other one hidden, so each tab's aria-controls names a live panel
-          and About's build line is in the DOM whichever tab shows (scripts/release-smoke.mjs reads it).
-          Each panel is a Tab stop (the reference holds no control, the manual's first is at its foot), so
-          the keys read and scroll it there; a pointer click into one gives the keys back to the
+      {/* Both panels stay mounted, the other one hidden but laid out (help.css), so Help keeps the taller
+          one's height on a tab switch, each tab's aria-controls names a live panel and About's build line
+          is in the DOM whichever tab shows (scripts/release-smoke.mjs reads it). Each panel is a Tab stop
+          and its own scroller under the tabs (the reference holds no control, the manual's first is at its
+          foot), so the keys read and scroll it there; a pointer click into one gives the keys back to the
           transport (transport-keys.ts). */}
       <Reference hidden={tab() !== 'reference'} />
       <Manual hidden={tab() !== 'manual'} />

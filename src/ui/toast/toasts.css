@@ -1,11 +1,15 @@
 /* Toast surface (error, info, note) — "Instrument". A quiet opaque panel stack bottom-right (placement
    is its own open eye-gate — kept, not moved). z-index 200 sits ABOVE the settings/help popover backdrop (z 40)
-   so a failure toast is never occluded by an open popover. The container is pointer-transparent (the
-   play path stays live behind it); each toast opts back in. */
+   so a failure toast is never occluded by an open popover; an open Audio Settings ends above the stack
+   instead (audio-settings.css reads `--toasts-inset` here and the stack's height, Toasts.tsx). The
+   container is pointer-transparent (the play path stays live behind it); each toast opts back in. */
+:root {
+  --toasts-inset: clamp(12px, 2vw, 24px);
+}
 .toasts {
   position: fixed;
-  right: clamp(12px, 2vw, 24px);
-  bottom: clamp(12px, 2vw, 24px);
+  right: var(--toasts-inset);
+  bottom: var(--toasts-inset);
   z-index: 200;
   display: flex;
   flex-direction: column;

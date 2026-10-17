@@ -17,14 +17,15 @@
  *   1920x1080 the open Help and Audio Settings popovers do not overlap the command bar's rendered box,
  *   stay inside the window and keep at least the right edge's margin on their left (a hint's one-line
  *   width once pushed Audio Settings to the window's left edge), also with a spacer one window tall
- *   planted in the panel body (Audio Settings: the page that shows; native-only rows this tier never
- *   renders), whose lowest row (stepping into a block taller than the panel) must then scroll into
- *   reach; without the spacer, Help's reference (the tab it opens on) scrolls not at all; the scripted
- *   open (no pointer input) focuses the panel and draws no outline around it, while a control inside
- *   keeps the focus ring;
+ *   planted in the tab panel that shows (Audio Settings' page, Help's panel under its tabs; it stands in
+ *   for native-only rows this tier never renders), whose lowest row (stepping into a block taller than
+ *   the panel) must then scroll into reach, for Audio Settings also with an error toast up, where neither
+ *   the panel nor that row may reach under the toast stack; without the spacer, Help's reference (the
+ *   tab it opens on) scrolls not at all; the scripted open (no pointer input) focuses the panel and draws
+ *   no outline around it, while a control inside keeps the focus ring;
  * - at 1000x700 and 1440x900 Tab from an open Help or Audio Settings walks its stops and wraps to the
  *   first without leaving the panel, Shift+Tab from the first or the panel lands on the last, and Help's
- *   Manual panel, focused from its tab, draws its ring inside the `.help` scroller (sides and top);
+ *   Manual panel, focused from its tab, draws its ring inside Help's box (sides and top);
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open and its FILTER engaged (its
  *   params grow the drawer past one key row), so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
@@ -268,7 +269,19 @@ await probe(async ({ open }) => {
       await page.evaluate(fn => window.__lf.ui[fn](), show);
       await page.locator(`#${id}`).waitFor();
       await page.waitForTimeout(150);
-      for (const tall of [false, true]) {
+      // The real rows; a spacer planted; Audio Settings again with an error toast up (a toast never
+      // covers a page: the panel ends above the toast stack and its lowest row scrolls clear of it).
+      for (const mode of id === 'lf-audio-popover' ? ['rows', 'tall', 'toast'] : ['rows', 'tall']) {
+        const tall = mode !== 'rows', toast = mode === 'toast';
+        if (toast) {
+          await page.evaluate(async () => {
+            const notify = await import('/src/notify.ts');
+            notify.setAutoDismissMsForProbe(60_000);
+            notify.notifyError('Could not open the audio device.', 'probe: the device is busy', { label: 'Audio Settings → DEVICE', run() {} });
+          });
+          await page.locator('.toast').waitFor();
+          await page.waitForTimeout(150);
+        }
         const m = await page.evaluate(({ id, tall }) => {
           const box = el => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; };
           const bar = document.querySelector('.cmd'), dialog = document.getElementById(id), body = dialog.firstElementChild;
@@ -279,8 +292,9 @@ await probe(async ({ open }) => {
           control.focus();
           const innerRing = getComputedStyle(control).outlineStyle;
           dialog.focus();
-          // What scrolls: the panel body, or in Audio Settings the page that shows (its rail stays put).
-          const scroller = id === 'lf-audio-popover' ? body.querySelector(':scope > [role="tabpanel"]:not([hidden])') : body;
+          // What scrolls: the tab panel that shows (Audio Settings' page beside its rail, Help's panel under
+          // its tabs), never the panel body.
+          const scroller = body.querySelector(':scope > [role="tabpanel"]:not([hidden])');
           // How far the real rows scroll, before any spacer: Help's reference (what `?` opens on) must not.
           const scroll = scroller.scrollHeight - scroller.clientHeight;
           // Under the title (a page's first block), above every real row.
@@ -293,12 +307,19 @@ await probe(async ({ open }) => {
           last.scrollIntoView({ block: 'nearest' });
           const r = box(last);
           const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+          const toasts = document.querySelector('.toast') ? box(document.querySelector('.toasts')) : null;
           return { focused, ring, innerRing, stacked: bar.classList.contains('cmd--stack'), scroll, bar: box(bar), dialog: box(dialog), panel: box(body),
-            lastRow: r, lastRowHit: !!hit && last.contains(hit), view: { width: innerWidth, height: innerHeight } };
+            lastRow: r, lastRowHit: !!hit && last.contains(hit), toasts, view: { width: innerWidth, height: innerHeight } };
         }, { id, tall });
-        const name = `${label}-${width}x${height}-${id}${tall ? '-tall-content' : ''}`;
+        const name = `${label}-${width}x${height}-${id}${tall ? '-tall-content' : ''}${toast ? '-toast' : ''}`;
         await page.screenshot({ path: `logs/layout/${name}.png` });
-        await page.evaluate(id => { document.getElementById('layout-spacer')?.remove(); const body = document.getElementById(id).firstElementChild; body.scrollTop = 0; if (id === 'lf-audio-popover') for (const page of body.querySelectorAll(':scope > [role="tabpanel"]')) page.scrollTop = 0; }, id);
+        await page.evaluate(id => {
+          document.getElementById('layout-spacer')?.remove();
+          const body = document.getElementById(id).firstElementChild;
+          body.scrollTop = 0;
+          for (const panel of body.querySelectorAll(':scope > [role="tabpanel"]')) panel.scrollTop = 0;
+          for (const t of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(t.id);
+        }, id);
         const overlaps = m.panel.top < m.bar.bottom && m.panel.bottom > m.bar.top && m.panel.left < m.bar.right && m.panel.right > m.bar.left;
         const inside = [m.dialog, m.panel, m.lastRow].every(b => b.top >= 0 && b.left >= 0 && b.bottom <= m.view.height + 0.5 && b.right <= m.view.width + 0.5);
         const fits = tall || id !== 'lf-help-popover' || m.scroll === 0;
@@ -306,10 +327,13 @@ await probe(async ({ open }) => {
         const margins = { left: m.panel.left, right: m.view.width - m.panel.right };
         const anchored = margins.left >= margins.right - 0.5;
         const ringless = m.focused && m.ring === 'none' && m.innerRing === 'solid';
-        const ok = !overlaps && inside && anchored && m.lastRowHit && fits && ringless;
-        console.log(JSON.stringify({ name, ok, overlaps, inside, anchored, margins, fits, ringless, gap: m.panel.top - m.bar.bottom, ...m }));
+        // With a toast up, neither the panel nor its lowest row reaches under the toast stack.
+        const under = (b) => !!m.toasts && b.top < m.toasts.bottom && b.bottom > m.toasts.top + 0.5 && b.left < m.toasts.right && b.right > m.toasts.left;
+        const clearOfToast = !toast || (!!m.toasts && !under(m.panel) && !under(m.lastRow));
+        const ok = !overlaps && inside && anchored && m.lastRowHit && fits && ringless && clearOfToast;
+        console.log(JSON.stringify({ name, ok, overlaps, inside, anchored, margins, fits, ringless, clearOfToast, gap: m.panel.top - m.bar.bottom, ...m }));
         if (!ok) failures.push(name);
-        results.push({ name, ok, overlaps, inside, anchored, fits, ringless, ...m });
+        results.push({ name, ok, overlaps, inside, anchored, fits, ringless, clearOfToast, ...m });
       }
       await page.evaluate(fn => window.__lf.ui[fn](), hide);
     }
@@ -318,8 +342,8 @@ await probe(async ({ open }) => {
   // Tab and Shift+Tab wrap inside an open popover: it is non-modal, and the controls past its edges lie
   // hidden under it. From the panel (where an open puts focus) Tab walks every stop and comes back to
   // the first without ever leaving the panel; Shift+Tab from the first stop and from the panel itself
-  // lands on the last. Help's Manual tab panel, a Tab stop inside the `.help` scroller, scrolls there
-  // and draws its focus ring inside that scroller's box (an outside ring was cut off along the top).
+  // lands on the last. Help's Manual tab panel, a Tab stop and its own scroller under the tabs, draws its
+  // focus ring inside Help's box (an outside ring was cut off along the top).
   for (const [width, height] of [[1000, 700], [1440, 900]]) {
     const { page } = await open({ viewport: { width, height }, init });
     await boot(page, ['Stopped', 'Empty', 'Empty', 'Empty', 'Empty']);
