@@ -14,7 +14,8 @@
  * - `fadeAll` ('Fade out all', `src/app/actions.ts`): in MIDI learn's picker; it sends the engine's
  *   action.
  * - DUB FEEDBACK (the lane's FX drawer, `src/ui/looper/FxPanel.tsx`): the slider starts at 100 %, sends
- *   `SetDubFeedback` as a fraction, its label says what the number keeps (KEEP), reads REPLACE at 0; a reset frame's value is adopted, COPY hands the
+ *   `SetDubFeedback` as a fraction, its label says what the number keeps (KEEP), reads REPLACE at 0
+ *   (and PITCH's parameter beside it reads SHIFT, named "Track 1 pitch shift"); a reset frame's value is adopted, COPY hands the
  *   copy the value the engine's `Copied` says it copied (the source may have moved since), and CLEAR
  *   resets it (`Cleared`), each as the lane's `Mix` the fake reports after it.
  *
@@ -176,6 +177,12 @@ await probe(async ({ browser, open }) => {
   assert.equal(await dub(0).inputValue(), '100', 'DUB FEEDBACK starts at 100 %');
   assert.equal(await dubText(), '100 %');
   assert.equal(await page.locator('.fxp-dub .fxp-param__label').innerText(), 'KEEP', 'the value says what it keeps: KEEP 100 %');
+  // PITCH's parameter is named for what it moves (the engine's semitone shift), not PITCH again.
+  await page.getByRole('button', { name: 'Pitch, track 1', exact: true }).click();
+  const shift = page.getByRole('slider', { name: 'Track 1 pitch shift', exact: true });
+  await shift.waitFor({ timeout: 3000 });
+  assert.equal(await page.locator('.fxp-param', { has: shift }).locator('.fxp-param__label').innerText(), 'SHIFT', 'PITCH\'s parameter reads SHIFT');
+  await page.getByRole('button', { name: 'Pitch, track 1', exact: true }).click();
   await clearSent();
   await dub(0).fill('50');
   assert.deepEqual(await sentAtLeast(1), [{ SetDubFeedback: [0, 0.5] }], 'the slider sends a fraction');
