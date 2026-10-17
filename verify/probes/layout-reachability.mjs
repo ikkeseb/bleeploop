@@ -9,9 +9,10 @@
  *   one line inside its pad, in one scheme: words or a one-letter prefix, never bare initials), the
  *   two-row command-bar cap and the muted-lane readout with the loop present;
  * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
- *   bars, RETAKE, AUTO REC, END STOP), from 960 to 1920 px wide (1105: just above the narrow rung): two
- *   rows at most, every control inside the bar and under its own centre point, Tab walking it as drawn
- *   (row 1 left to right, then row 2);
+ *   bars, RETAKE, AUTO REC, END STOP), and with every mode on before the first take, from 960 to 1920 px
+ *   wide (1105: just above the narrow rung): two rows at most, every control inside the bar and under its
+ *   own centre point, Tab walking it as drawn (row 1 left to right, then row 2), and FIXED's and FADE's bar
+ *   steppers both with their unit or both bare;
  * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
  *   1040 to 1280 px (the brand once unfolded on a fresh page and jumped ~99 px at the first take);
  * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
@@ -205,13 +206,15 @@ await probe(async ({ open }) => {
   // FADE and IN FX widen row 1, which once put the master volume on a third row at 960 and 1100 px, and
   // every mode on (FIXED's bars beside it) once put row 2 on a third row under 1100 px. With a loop
   // present the bar must stay within two rows and every control in it must be reachable, at the Tauri
-  // minimum, the default and the widths between, with the modes idle and all on.
+  // minimum, the default and the widths between, with the modes idle and all on; all on also before the
+  // first take (`empty-modes-on`), where TAP, BPM and FIXED's bars are live and stay in the Tab walk.
   const ALL_MODES = [{ SetMetronome: true }, { SetFixedLength: true }, { SetFixedBars: 4 }, { SetRetake: true },
     { SetAutoRecord: true }, { SetLoopEndStop: true }];
-  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1280, 820], [1440, 900], [1600, 900], [1920, 1080]]
-    .flatMap(([w, h]) => [[w, h, 'idle'], [w, h, 'modes-on']])) {
+  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1110, 700], [1280, 820], [1440, 900], [1600, 900], [1920, 1080]]
+    .flatMap(([w, h]) => [[w, h, 'idle'], [w, h, 'modes-on'], [w, h, 'empty-modes-on']])) {
     const { page } = await open({ viewport: { width, height }, init });
-    await boot(page, ['Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR, modes === 'modes-on' ? ALL_MODES : []);
+    const empty = modes === 'empty-modes-on';
+    await boot(page, [empty ? 'Empty' : 'Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR, modes === 'idle' ? [] : ALL_MODES);
     await page.waitForTimeout(250);
     const bar = await page.evaluate(() => {
       const cmd = document.querySelector('.cmd');
@@ -228,7 +231,13 @@ await probe(async ({ open }) => {
       }
       const on = ['Metronome click', 'Fixed take length', 'Retake', 'Auto record', 'Stop playing loops at loop end']
         .filter((name) => cmd.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') === 'true').length;
-      return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, on, unreachable };
+      // FIXED's and FADE's bar steppers read alike at every width: both with their unit or both bare
+      // (FIXED once dropped "bars" at 1110 px and below while FADE kept "2 BARS").
+      const units = [...cmd.querySelectorAll('.transport__bars-unit')].map((el) => el.checkVisibility());
+      // Row 2's free width (stacked with the tools): the room a wider mode could take before row 2 wraps.
+      const tools = cmd.querySelector('.tools').getBoundingClientRect(), row2 = cmd.querySelector('.transport__modes').getBoundingClientRect();
+      const row2Slack = cmd.classList.contains('cmd--stack-tools') ? Math.round(tools.left - row2.right - parseFloat(getComputedStyle(cmd).columnGap)) : null;
+      return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, on, unreachable, units, row2Slack };
     });
     // Tab walks the bar in its visual order, row 1 left to right, then row 2: the stacked rows are a
     // visual `order` (transport.css), which once sent Tab through row 2's modes before row 1's ■ ALL.
@@ -249,9 +258,10 @@ await probe(async ({ open }) => {
     const visual = [...walk].sort((a, b) => a.row - b.row || a.x - b.x).map((s) => s.name);
     bar.tabOrder = walk.map((s) => `${s.row}:${s.name}`);
     bar.tabInVisualOrder = walk.length > 10 && walk.every((s, i) => s.name === visual[i]);
-    const name = `${label}-${width}x${height}-engine${modes === 'modes-on' ? '-modes-on' : ''}`;
+    const name = `${label}-${width}x${height}-engine${modes === 'idle' ? '' : `-${modes}`}`;
     await page.locator('.cmd').screenshot({ path: `logs/layout/${name}.png` });
-    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'modes-on' ? 5 : 0) && bar.tabInVisualOrder;
+    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'idle' ? 0 : 5) && bar.tabInVisualOrder
+      && bar.units.length === (modes === 'idle' ? 1 : 2) && new Set(bar.units).size === 1;
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));
