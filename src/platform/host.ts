@@ -99,7 +99,8 @@ export interface UnsupportedPlugin {
 }
 
 /** A plugin bundle whose last scan failed (a crash, a timeout, output that did not parse): its full path
- * and the host's reason on one line. A forced `scanPlugins` retries it. */
+ * and a short category in the host's words ("timed out after 20 s"), never the plugin's own output. A
+ * forced `scanPlugins` retries it. */
 export interface FailedPlugin {
   path: string;
   reason: string;

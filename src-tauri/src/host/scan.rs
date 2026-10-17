@@ -239,8 +239,8 @@ struct Scanned {
 }
 
 impl Scanned {
-    /// One bundle's outcome: `Err` is a failed scan, listed with the first line of its reason (a
-    /// crash's stderr can run to many; the log keeps them all).
+    /// One bundle's outcome: `Err` is a failed scan, listed with its `failure_category`, never the
+    /// raw reason (which can carry the child's stderr; the log keeps that).
     fn take(&mut self, path: &str, outcome: &Result<ScanOutcome, String>) {
         match outcome {
             Ok(outcome) => {
@@ -250,11 +250,42 @@ impl Scanned {
                 }
             }
             Err(reason) => {
-                let line = reason.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("scan failed");
-                self.failed.push(FailedPlugin { path: path.to_string(), reason: line.to_string() });
+                self.failed.push(FailedPlugin { path: path.to_string(), reason: failure_category(reason) });
             }
         }
     }
+}
+
+/// What the player is shown for a failed scan: a short category in the host's words, read from the
+/// leading text of the raw reason (`run_gated_child`, `scan_all`'s parse, the host-side branch in
+/// `scan_bundles`; also an entry an older build cached). Never any of the child's own output: a
+/// plugin's stderr may hold a licence token or a path it should not show. An exit code is kept (hex
+/// for a Windows crash status); anything unrecognised is "the scan failed".
+fn failure_category(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix("timed out after ") {
+        return match rest.split('s').next().and_then(|n| n.parse::<u64>().ok()) {
+            Some(secs) => format!("timed out after {secs} s"),
+            None => "timed out".to_string(),
+        };
+    }
+    if let Some(rest) = raw.strip_prefix("exit=") {
+        let code = rest
+            .strip_prefix("Some(")
+            .and_then(|r| r.split(')').next())
+            .and_then(|n| n.parse::<i32>().ok());
+        return match code {
+            Some(code) if code < 0 => format!("the scan child crashed (exit 0x{:08X})", code as u32),
+            Some(code) => format!("the scan child failed (exit {code})"),
+            None => "the scan child crashed".to_string(),
+        };
+    }
+    if raw.starts_with("parse failed") {
+        return "the scan child's report could not be read".to_string();
+    }
+    if raw.starts_with("could not run a scan child") {
+        return "could not run a scan child".to_string();
+    }
+    "the scan failed".to_string()
 }
 
 /// The cache-aware core of `scan_all`, with the child runner injected so the cache logic is testable
@@ -913,10 +944,10 @@ mod tests {
                 Ok(ScanOutcome::plugins(vec![desc(p, "Good")]))
             }
         };
-        // Listed with its path and the first line of the host's reason.
+        // Listed with its path and the host's category, not the child's stderr.
         let failed = vec![FailedPlugin {
             path: bad.to_string_lossy().to_string(),
-            reason: "exit=Some(1) stderr=load failed: bad image".into(),
+            reason: "the scan child failed (exit 1)".into(),
         }];
 
         // First launch: everything is scanned, the failure is remembered too.
@@ -959,6 +990,42 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_scan_shows_a_category_and_never_the_childs_output() {
+        const SECRET: &str = "LICENSE-TOKEN-7f3a9c";
+        let cases = [
+            ("timed out after 20s; killed process tree".to_string(), "timed out after 20 s"),
+            (format!("exit=Some(1) stderr={SECRET}\nmore"), "the scan child failed (exit 1)"),
+            (format!("exit=Some(-1073741819) stderr={SECRET}"), "the scan child crashed (exit 0xC0000005)"),
+            (format!("exit=None stderr={SECRET}"), "the scan child crashed"),
+            (format!("parse failed: expected value at line 1 column 1 ({SECRET})"), "the scan child's report could not be read"),
+            (format!("could not run a scan child: spawn: {SECRET}"), "could not run a scan child"),
+            (format!("wait: {SECRET}"), "the scan failed"),
+            (SECRET.to_string(), "the scan failed"),
+        ];
+        for (raw, shown) in cases {
+            assert_eq!(failure_category(&raw), shown, "{raw}");
+        }
+
+        // Through the scan, the cache (as an older build wrote it: the raw reason) and the wire.
+        let scratch = Scratch::new("secret");
+        let bad = scratch.bundle("bad.clap", b"v1");
+        let files = vec![bad.clone()];
+        let raw = format!("exit=Some(1) stderr={SECRET}: licence check failed");
+        let (fresh, cache, _) =
+            scan_bundles(&files, &ScanCache::default(), false, |_: &Path| Err(ScanError::Bundle(raw.clone())));
+        let (cached, _, stats) = scan_bundles(&files, &cache, false, |_: &Path| unreachable!("cached"));
+        assert_eq!(stats.cached, 1);
+        for found in [fresh, cached] {
+            assert_eq!(found.failed.len(), 1);
+            assert_eq!(found.failed[0].reason, "the scan child failed (exit 1)");
+            let not_listed = NotListed { unsupported: Vec::new(), failed: found.failed };
+            let wire = serde_json::to_string(&super::super::folders::view(&[], not_listed)).unwrap();
+            assert!(!wire.contains(SECRET), "{wire}");
+            assert!(wire.contains("the scan child failed (exit 1)"));
+        }
+    }
+
+    #[test]
     fn host_side_failures_and_removed_bundles_are_not_remembered() {
         let scratch = Scratch::new("host");
         let a = scratch.bundle("a.clap", b"a");
@@ -977,7 +1044,7 @@ mod tests {
             found.failed,
             vec![FailedPlugin {
                 path: a.to_string_lossy().to_string(),
-                reason: "could not run a scan child: spawn: exe missing".into(),
+                reason: "could not run a scan child".into(),
             }]
         );
         assert!(

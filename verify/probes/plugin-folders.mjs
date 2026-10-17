@@ -46,7 +46,7 @@ const ADDED = { path: 'E:\\Amp Sims', exists: true };
 const LATE_FOLDER = { path: 'F:\\Late', exists: true };
 const STALE_FOLDER = { path: 'G:\\Stale', exists: true };
 const OLD_DLL = { path: 'C:\\Program Files\\VSTPlugins\\Old Amp.dll', reason: 'a 32-bit plugin: this build hosts 64-bit only' };
-const STUCK = { path: 'C:\\Program Files\\Common Files\\VST3\\Stuck Reverb.vst3', reason: 'timed out after 20s; killed process tree' };
+const STUCK = { path: 'C:\\Program Files\\Common Files\\VST3\\Stuck Reverb.vst3', reason: 'timed out after 20 s' };
 const SHELL_DLL = { path: 'D:\\Plugins\\Waves\\WaveShell1-VST 14.0_x64.dll', reason: `a shell plugin that bundles many: ${'it lists several sub-plugins, '.repeat(8)}`.trim() };
 const empty = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
 

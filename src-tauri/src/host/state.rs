@@ -117,8 +117,9 @@ pub struct UnsupportedPlugin {
 }
 
 /// A plugin bundle whose scan failed (its child crashed, timed out or printed nothing usable, or
-/// could not be run), with the host's reason on one line. The scan cache keeps a bundle-side failure
-/// until the bundle changes or the picker's rescan retries it; it is never listed in the picker.
+/// could not be run), with a short category in the host's words (`scan::failure_category`), never
+/// the child's own output. The scan cache keeps a bundle-side failure until the bundle changes or
+/// the picker's rescan retries it; it is never listed in the picker.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FailedPlugin {
