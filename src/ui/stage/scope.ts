@@ -38,8 +38,8 @@ import {
  * phase is `(frame - the master grid's anchor) mod the sweep's span`, which is exact and jitter-free
  * at any loop length. The newest column therefore sits about one output latency ahead of the drawn
  * playhead, and while columns arrive the beam rides the newest one, which is the honest place for it.
- * A column takes the beam only when the clock says it is fresh: it arrived within IDLE_WAIT_MS and it
- * stands ahead of the drawn playhead by no more than LEAD_COLUMNS. Otherwise (none yet, a stream that
+ * A column takes the beam only when the clock says it is fresh: it arrived within IDLE_WAIT_MS and its
+ * own device frame stands ahead of the frame heard now by no more than LEAD_COLUMNS. Otherwise (none yet, a stream that
  * stopped, a late batch of old columns) the drawn playhead carries the beam, which the HUD's bar reads
  * too, and the beam never steps back nor gains more than one column on the playhead in a frame.
  *
@@ -105,8 +105,8 @@ const BEAT_MS = 420;
 const IDLE_WAIT_MS = 250;
 const IDLE_FADE_MS = 400;
 /** How far ahead of the drawn playhead a fresh column can stand, in 4 ms columns (200 ms): one output
- * latency less the feed's own delay. One further ahead is an old column from an earlier pass. On a
- * short loop the reach stops at a quarter of the sweep, so behind and ahead stay told apart. */
+ * latency less the feed's own delay. On a short loop the beam's reach on the sweep also stops at a
+ * quarter of it. */
 const LEAD_COLUMNS = 50;
 /** The contour reaches a little past the live light's 70 % of the bay's half height. */
 const LIVE_REACH = 0.35;
@@ -557,7 +557,7 @@ function createScope(): ViewDraw {
     for (let i = 0; i < LANES; i++) if (laneChanged(stamp, i)) rasterise(pal, i);
     pullColumns(pal, quiet);
     // Where the beam stands. A column carries it only while the clock calls it fresh: arrived within
-    // IDLE_WAIT_MS, and ahead of the drawn playhead by no more than LEAD_COLUMNS. A column behind the
+    // IDLE_WAIT_MS, and its device frame ahead of the heard one by no more than LEAD_COLUMNS. A column behind the
     // playhead is old (a stream that stopped, a late batch the engine sent after a held feed), and the
     // drawn playhead carries the beam, as with no column at all: a beam left on it would stand where
     // the loop WAS while the loop and the HUD's bar move on. The beam never steps back: one that stood
@@ -597,7 +597,15 @@ function createScope(): ViewDraw {
         else if (d > tw / 2) d -= tw;
         if (d > 0 && d <= most) lead = d;
       }
+      // Fresh by the clock, before the modulo places it: the column's own device frame stands ahead of
+      // the frame heard now by no more than LEAD_COLUMNS, so a batch whole loops behind (which the
+      // modulo would place just ahead on a short loop) never takes the beam.
+      let fresh = false;
       if (feed.moving && recent && bx >= 0) {
+        const age = view.frame - looper.heardFrameValue();
+        fresh = age > 0 && age <= LEAD_COLUMNS * drawnBin;
+      }
+      if (fresh) {
         let d = bx - ph;
         if (d < -tw / 2) d += tw;
         else if (d > tw / 2) d -= tw;

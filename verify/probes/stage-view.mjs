@@ -1147,11 +1147,11 @@ await probe(async ({ browser, open }) => {
       return r;
     };
     /** Every frame of a `byHand` run: one beam, inside the HUD's bar, between the drawn playhead and
-     * `ahead` frames past it (within one column), and never a step back. Logs the run's worst and
+     * `ahead` frames past it on a sweep of `span` (within one column), and never a step back. Logs the run's worst and
      * asserts with its first three misses. */
-    const steady = (what, r, ahead) => {
+    const steady = (what, r, ahead, span = LOOP) => {
       const tol = 4;
-      const aheadPx = (ahead / LOOP) * r.tw;
+      const aheadPx = (ahead / span) * r.tw;
       const lo = ((r.bar - 1) / r.bars) * r.tw;
       const hi = (r.bar / r.bars) * r.tw;
       const worst = { back: 0, behind: 0, ahead: 0 };
@@ -1168,7 +1168,8 @@ await probe(async ({ browser, open }) => {
         if (off < -tol || off > aheadPx + tol) miss.push(`frame ${f.k}: the beam at ${f.beam.toFixed(1)} px is ${off.toFixed(1)} px off the drawn playhead at ${f.drawn.toFixed(1)} px`);
         const prev = r.frames[i - 1]?.beam;
         if (prev != null) {
-          const step = f.beam - prev;
+          let step = f.beam - prev;
+          if (step < -r.tw / 2) step += r.tw; // across the wrap
           worst.back = Math.min(worst.back, step);
           if (step < -0.5) miss.push(`frame ${f.k}: the beam steps back ${(-step).toFixed(1)} px`);
         }
@@ -1219,6 +1220,21 @@ await probe(async ({ browser, open }) => {
     });
     steady('a trickle of columns', trickle, LEAD);
     steady('a late batch, then the stream again', late, LEAD);
+
+    // A late batch whole loops behind on a 1 s loop: the stream stopped, and long after it a batch
+    // arrives whose newest column is one loop (then three) behind the playhead, 40 ms past it once
+    // wrapped, which is just where a fresh column would stand. Its own device frame says it is old,
+    // so from its arrival on the beam stays on the drawn playhead.
+    const ONE_S = RATE;
+    for (const loopsBehind of [1, 3]) {
+      const at = 5 * ONE_S + Math.round(0.3 * ONE_S);
+      await boot(page);
+      await emit({ events: [transport(ONE_S, true, 120), laneEvent(0, playing(ONE_S)), ...empties(1, 2, 3, 4)], anchor: parkedAt(at), peaks: [wave(0, ONE_S)] });
+      await settle(300);
+      const quiet = Math.round((loopsBehind + 0.5) * 60);
+      const r = await byHand({ heard0: at, plan: [...Array(10).fill(LEAD), ...Array(quiet).fill(null), LEAD - loopsBehind * ONE_S, ...Array(14).fill(null)] });
+      steady(`a batch ${loopsBehind} loop${loopsBehind > 1 ? 's' : ''} behind on a 1 s loop`, { ...r, frames: r.frames.slice(10 + quiet) }, 0, ONE_S);
+    }
 
     // A new sweep under a beam a fresh column carried 7 px ahead of a parked playhead, just past the
     // wrap: a multiply that doubles the loop, and a restart that re-anchors the grid at the playhead.
