@@ -37,7 +37,8 @@ import {
  * Each column is placed by its OWN device frame, not by counting back from the playhead: its loop
  * phase is `(frame - the master grid's anchor) mod the sweep's span`, which is exact and jitter-free
  * at any loop length. The newest column therefore sits one output latency ahead of the drawn
- * playhead, and the beam rides the newest column, which is the honest place for it.
+ * playhead, and while columns arrive the beam rides the newest one, which is the honest place for it;
+ * with none arriving it is the drawn playhead, which the HUD's bar reads too.
  *
  * Two canvases, both sized in `layout` and never per frame: a still bitmap (the wells, the hairlines,
  * the bar ticks, the bay names, the selection mark and every lane's contour), invalidated per bay by
@@ -165,8 +166,9 @@ function createScope(): ViewDraw {
   let cw = 1; // one column's width in device px
   /** `beam[0]`: where the beam stands, the newest column's x in the trace, -1 while the trace is out of
    * step with the mirror (no beam this frame), -2 while no column has arrived at all (the drawn
-   * playhead carries it). `beam[1]`: whether the engine's columns are still arriving. Int32 slots
-   * rather than return values, which box crossing a frame's call. */
+   * playhead carries it). `beam[1]`: whether a column arrived this frame; after IDLE_WAIT_MS without
+   * one the drawn playhead carries the beam too (`draw`). Int32 slots rather than return values, which
+   * box crossing a frame's call. */
   const beam = new Int32Array(2);
   const ALIVE = 1;
   /**
@@ -438,12 +440,13 @@ function createScope(): ViewDraw {
     if (view.epoch !== drawnEpoch) {
       // The trace broke (an xrun, a ring overrun, a new engine). Resynchronise and skip one beam, but
       // never wipe the trace: one 4 ms window is not worth a full-screen blink mid-jam, and the next
-      // pass's own dimming carries the old light away.
+      // pass's own dimming carries the old light away. A look just laid out (`drawnEpoch` -1) meets the
+      // mirror's columns at an age it does not know, so that is no sign the stream is alive.
+      beam[ALIVE] = drawnEpoch < 0 ? 0 : 1;
       drawnEpoch = view.epoch;
       mem[DRAWN] = view.frame;
       pendX = -1;
       beam[0] = -1;
-      beam[ALIVE] = 1;
       return;
     }
     let n = Math.round((view.frame - mem[DRAWN]) / bin);
@@ -534,11 +537,14 @@ function createScope(): ViewDraw {
     if (resized || feed.selected !== shownSel || feed.beatsPerLoop !== shownBeats || feed.beatsPerBar !== shownPerBar) redrawAll(pal);
     for (let i = 0; i < LANES; i++) if (laneChanged(stamp, i)) rasterise(pal, i);
     pullColumns(pal, quiet);
-    // The beam with no column to ride: the drawn playhead. The phase is read HERE, in the frame's own
-    // hot code: the same read inside `pullColumns` boxes a number every frame (measured, 21 bytes a
-    // frame, by the stage-view probe's budget case).
+    // The beam with no column to ride: the drawn playhead. That is also the case once the columns have
+    // stopped arriving (the taps reopened and not yet answered, a held feed, a fault): the newest
+    // column then stands where the loop WAS, and a beam left on it stops while the loop and the HUD's
+    // bar move on. The phase is read HERE, in the frame's own hot code: the same read inside
+    // `pullColumns` boxes a number every frame (measured, 21 bytes a frame, by the stage-view probe's
+    // budget case).
     let bx = beam[0];
-    if (bx === -2) {
+    if (bx === -2 || (beam[ALIVE] === 0 && now - idle[SEEN] > IDLE_WAIT_MS)) {
       bx = Math.round(light.phase * tw);
       if (bx >= tw) bx = tw - 1;
     }
