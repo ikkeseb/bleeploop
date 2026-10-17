@@ -23,7 +23,7 @@
 //                answered is named in the PASS line, not judged: the PC's interface changes, and a
 //                baseline belongs to the interface that made it (docs/VERIFY.md). `--driver=<substring>`
 //                pins it when a run must prove one particular interface.
-//   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
+//   take         with CLICK on, FIXED 1 bar and slot A set to Off on input `--channel=` (0-based, default
 //                1 = input 2) and live, as a user takes the input dry in the slot header, a press on
 //                lane 1's record core takes the lane armed → rec → play, and its waveform canvas is not
 //                flat (lane 3, empty, is the control), nor run away (the record meter at −1 dBFS or more during the take, or
@@ -40,7 +40,7 @@
 //                changed (a moved file counts at its old path), when src-tauri/Cargo.toml differs
 //                beyond its [package] version line, or when a cpal or asio-sys entry of
 //                src-tauri/Cargo.lock differs, came or went (scripts/release-changes.mjs asks git).
-//                Otherwise the synth take stands in: lane 1 cleared, slot 1 set to the Organ, the PC
+//                Otherwise the synth take stands in: lane 1 cleared, slot A set to the Organ, the PC
 //                keys A, D, G and K (a C major chord) held from before the record press until the lane
 //                plays, and the same bar for the waveform. The PASS line says which take passed
 //   feed         something on screen moves with the engine: the beat LEDs, the record-level meter, the
@@ -448,7 +448,17 @@ try {
     must((await asioBox.count()) === 1, `no ASIO toggle: the row reads "${await page.locator('.audio-settings__soon').first().textContent().catch(() => '?')}"`);
     const asioWasOn = await asioBox.isChecked();
     if (!asioWasOn) await asioBox.check();
-    await page.waitForFunction(() => document.querySelector('input[aria-label="Use ASIO low-latency audio"]')?.closest('label')?.textContent?.includes('low-latency'), undefined, { timeout: 20_000 });
+    // The ASIO row reads "on · <the driver that runs>" once the device runs on ASIO (AudioSettings' asioWord:
+    // "on · starting driver…" while the driver starts, "on · WASAPI runs" on a fallback); the engine row says ASIO.
+    await page.waitForFunction(
+      () => {
+        const word = document.querySelector('.audio-settings__toggle-text')?.textContent ?? '';
+        const row = [...document.querySelectorAll('.audio-settings__diag-row')].find((r) => r.querySelector('span')?.textContent === 'engine');
+        return word.startsWith('on · ') && word !== 'on · starting driver…' && word !== 'on · WASAPI runs' && (row?.querySelector('b')?.textContent ?? '').startsWith('ASIO');
+      },
+      undefined,
+      { timeout: 20_000 },
+    );
     const driver = (await page.locator('select[aria-label="Audio input device"] option').first().textContent()) ?? '';
     // WHICH driver answered is not this probe's business (the interface on the PC changes; a baseline
     // names its own, docs/VERIFY.md). THAT one answered is: an empty pick means Audio Settings found no
@@ -498,14 +508,18 @@ try {
     await page.waitForFunction(() => document.querySelector('button[aria-label="Metronome click"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
     if ((await pressed('Fixed take length')) !== 'true') await page.locator('button[aria-label="Fixed take length"]').click();
     await page.waitForFunction(() => document.querySelector('button[aria-label="Fixed take length"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
+    // The pill reads FIXED alone; its bars show beside it while it is on, the count and its unit ("1bar" as
+    // text, "1 BAR" on screen).
+    const barsVal = page.locator('.transport__fixed .transport__bars-val');
+    const readBars = async () => Number.parseInt((await barsVal.textContent()) ?? '', 10);
     for (let i = 0; i < 16; i++) {
-      const bars = Number.parseInt((await page.locator('.transport__fixed .transport__bars-val').textContent()) ?? '', 10);
+      const bars = await readBars();
       if (bars === 1) break;
       await page.locator(`button[aria-label="${bars > 1 ? 'Fewer bars' : 'More bars'}"]`).click();
     }
-    const fixed = (await page.locator('button[aria-label="Fixed take length"]').textContent())?.trim();
-    must(fixed === 'FIXED 1', `the take length reads "${fixed}"`);
-    // The input dry, as a user takes it: slot 1 Off, its input picked, GO LIVE.
+    must((await readBars()) === 1, `the take length reads "${await barsVal.textContent()}", not 1 bar`);
+    const fixed = 'FIXED 1 bar';
+    // The input dry, as a user takes it: slot A Off, its input picked, GO LIVE.
     const source = page.locator('select[aria-label="Source for slot A"]');
     const sourceWas = await source.locator('option:checked').textContent();
     await source.selectOption('off');
@@ -574,7 +588,7 @@ try {
     );
     if (inputFlat === null) {
       return [
-        `input take passed: lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, slot 1 ${sourceWas} → Off on "${input}", live for the take`,
+        `input take passed: lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, slot A ${sourceWas} → Off on "${input}", live for the take`,
         waveform(inkA),
         `screenshot ${join(out, 'after-take.png')}`,
       ];
@@ -589,7 +603,7 @@ try {
         `${inputFlat}\nplug the loopback cable from an output into "${input}" at a working level and run again`,
     );
 
-    // The synth take: lane 1 cleared, slot 1 on a built-in synth, a chord held across the whole take. Its
+    // The synth take: lane 1 cleared, slot A on a built-in synth, a chord held across the whole take. Its
     // notes are PC keys, down before the record press (a pointer held on an on-screen key could not also
     // press the record core), so they sound from before the downbeat wherever the downbeat falls.
     await page.locator('button[aria-label="Track 1 clear"]').click();
@@ -597,7 +611,7 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'empty', undefined, { timeout: 10_000 });
     await source.selectOption(SYNTH.id);
     await page.locator('button[aria-label="Activate slot A"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
-    must((await source.inputValue()) === SYNTH.id, `slot 1's source reads "${await source.inputValue()}", not ${SYNTH.id}`);
+    must((await source.inputValue()) === SYNTH.id, `slot A's source reads "${await source.inputValue()}", not ${SYNTH.id}`);
     // The PC keys play only with the keyboard pane on screen and no field holding the focus.
     const keysToggle = page.locator('button[aria-label="On-screen keyboard"]');
     if ((await keysToggle.getAttribute('aria-pressed')) !== 'true') await keysToggle.click();
@@ -660,7 +674,7 @@ try {
 
   // ── exit ──────────────────────────────────────────────────────────────────────────────────────
   await check('exit', async () => {
-    const clearAll = page.locator('button.transport__tgl', { hasText: '✕' });
+    const clearAll = page.locator('button[aria-label="Clear all tracks"]');
     // Disabled with every lane empty (a take that failed before recording).
     if (await clearAll.isEnabled()) {
       await clearAll.click();
