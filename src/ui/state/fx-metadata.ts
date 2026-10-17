@@ -28,7 +28,7 @@ const FILTER_PARAMS: readonly FxParamDef[] = [
   { key: 'q', label: 'Reso', min: 0.1, max: 14, step: 0.1, default: 2 },
 ];
 const PITCH_PARAMS: readonly FxParamDef[] = [
-  { key: 'semitones', label: 'Pitch', min: -12, max: 12, step: 1, default: 0, unit: 'st', integer: true },
+  { key: 'semitones', label: 'Shift', min: -12, max: 12, step: 1, default: 0, unit: 'st', integer: true },
 ];
 const STUTTER_PARAMS: readonly FxParamDef[] = [
   { key: 'rate', label: 'Rate', min: 0, max: 3, step: 1, default: 1, integer: true, choices: DIVISION_LABELS },

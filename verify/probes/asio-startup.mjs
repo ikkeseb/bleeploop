@@ -144,7 +144,7 @@ await probe(async ({ open }) => {
   assert.ok(a.startup.includes('status'), 'boot reads the status');
   assert.ok(a.startup.includes('open:Wasapi'), 'saved OFF opens the device on WASAPI');
   assert.equal(a.before.status, 'unprobed');
-  assert.deepEqual(a.before.toggle, { checked: false, disabled: false, text: 'WASAPI' });
+  assert.deepEqual(a.before.toggle, { checked: false, disabled: false, text: 'off · WASAPI runs' });
   assert.equal(a.before.retry, false, 'no retry line while the preference is off');
   assert.equal(a.before.aboutBuild, true, 'About this build shows whenever ASIO is compiled in');
   assert.equal(a.after.saved, true, 'turning ASIO on saves the preference');
@@ -152,7 +152,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(a.savedAtProbe, [true], 'the explicit probe runs with "on" already saved');
   assert.equal(a.after.status, 'ready');
   assert.equal(a.after.available, true);
-  assert.deepEqual(a.after.toggle, { checked: true, disabled: false, text: 'low-latency' });
+  assert.deepEqual(a.after.toggle, { checked: true, disabled: false, text: 'on · Fake output' });
   assert.equal(a.after.inputDisabled, true);
   assert.equal(a.after.inputName, 'Probe ASIO');
 
@@ -168,14 +168,14 @@ await probe(async ({ open }) => {
   assert.ok(bootProbe >= 0 && bootProbe < b.startup.indexOf('scan'), 'saved ON probes at boot, before plugins become selectable');
   assert.ok(bootProbe < b.startup.findIndex((c) => c.startsWith('open:')), 'the boot probe settles before the device opens');
   assert.equal(b.before.status, 'blocked');
-  assert.deepEqual(b.before.toggle, { checked: true, disabled: false, text: 'WASAPI until the driver starts' });
+  assert.deepEqual(b.before.toggle, { checked: true, disabled: false, text: 'on · WASAPI runs' });
   assert.match(b.before.hint ?? '', /previous ASIO start did not complete/);
   assert.equal(b.before.retry, true);
   assert.deepEqual(b.calls, ['probe:true', 'open:Asio'], 'a RETRY that starts the driver opens the device on ASIO');
   assert.deepEqual(b.savedAtProbe, [true, true], 'the boot probe and RETRY run with "on" saved');
   assert.equal(b.after.status, 'ready');
   assert.equal(b.after.retry, false);
-  assert.deepEqual(b.after.toggle, { checked: true, disabled: false, text: 'low-latency' });
+  assert.deepEqual(b.after.toggle, { checked: true, disabled: false, text: 'on · Fake output' });
 
   // C: timed-out → no retry in this process, the restart sentence shows, ASIO stays off.
   const c = await scenario('timed-out', { asioEnabled: true }, 'unprobed', ['timed-out'], `return { startup, state: read() };`);

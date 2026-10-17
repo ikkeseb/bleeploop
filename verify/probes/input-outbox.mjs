@@ -210,7 +210,7 @@ await probe(async ({ open }) => {
   await tap('g');
   await tap('h');
   await page.waitForTimeout(100);
-  assert.deepEqual(await toasts(), [['Could not send that to the audio engine. Open an audio device in Audio Settings.', 'No audio device is running.', 1]], 'told once');
+  assert.deepEqual(await toasts(), [['Could not send that to the audio engine. Open an audio device.', 'No audio device is running.', 1]], 'told once');
   assert.equal(droppedLines(), 1);
   await seam('dropped', null);
   await page.getByRole('button', { name: 'BPM plus' }).click();

@@ -40,21 +40,21 @@ function tellImport(report: ImportReport | null): void {
     const waiting = `${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version need a port picked in Audio Settings`;
     console.error(`[midi] ${waiting}`);
     notifyError(
-      `Could not run ${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version. Pick their port in Audio Settings.`,
+      `Could not run ${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version. Pick their port.`,
       undefined,
       settingsAction('midi'),
     );
   }
   if (report.unreadable !== null || report.rejected.length > 0) {
     const what = report.unreadable !== null ? 'the MIDI bindings' : plural(report.rejected.length, 'MIDI binding', 'MIDI bindings');
-    notifyError(`Could not read ${what} from the previous version. Learn them again in Audio Settings.`, undefined, settingsAction('midi'));
+    notifyError(`Could not read ${what} from the previous version. Learn them again.`, undefined, settingsAction('midi'));
   }
 }
 
 /** The previous version's bindings did not reach native MIDI this launch (the next one tries again). */
 function importFailed(log: string, err: unknown): void {
   console.error(log, err);
-  notifyError('Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.', err, settingsAction('midi'));
+  notifyError('Could not read the MIDI bindings from the previous version. Learn them again.', err, settingsAction('midi'));
 }
 
 function importLegacy(): void {

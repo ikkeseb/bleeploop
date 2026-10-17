@@ -204,14 +204,18 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     tabEls[next]?.focus();
   };
 
+  // What the device side runs, in one word: DEVICE's rail state, DIAGNOSTICS' while no device runs and
+  // the ASIO row's, so one state reads one way wherever it shows.
+  const deviceState = (): { lamp: Lamp; word: string } => {
+    const d = engineDevice();
+    if (d) return { lamp: 'lit', word: d.backend === 'Asio' ? 'ASIO' : 'WASAPI' };
+    if (engineOpenFailure()) return { lamp: 'warn', word: 'no device' };
+    return { lamp: 'off', word: platform.engine.available ? 'starting' : 'no engine' };
+  };
+
   // The rail's lamp and word for each page.
   const railState: Record<SettingsPage, () => { lamp: Lamp; word: string }> = {
-    device: () => {
-      const d = engineDevice();
-      if (d) return { lamp: 'lit', word: d.backend === 'Asio' ? 'ASIO' : 'WASAPI' };
-      if (engineOpenFailure()) return { lamp: 'warn', word: 'no device' };
-      return { lamp: 'off', word: platform.engine.available ? 'starting' : 'no engine' };
-    },
+    device: deviceState,
     midi: () => {
       const list = bindings();
       // Amber only for a binding that waits for the player's pick; one whose port is away just waits.
@@ -224,12 +228,9 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
       const n = availablePlugins().length;
       return { lamp: n > 0 ? 'lit' : 'off', word: count(n, 'plugin', 'plugins') };
     },
-    // The command bar lamp's aggregate (app.tsx `systemWarn`), in a word.
-    diagnostics: () => {
-      if (engineDevice()) return { lamp: 'lit', word: 'ok' };
-      if (engineOpenFailure()) return { lamp: 'warn', word: 'no audio' };
-      return { lamp: 'off', word: platform.engine.available ? 'starting' : 'no engine' };
-    },
+    // The command bar lamp (app.tsx `systemWarn`), which watches the device alone: its word claims
+    // audio only, and the other pages' lamps stay their own.
+    diagnostics: () => (engineDevice() ? { lamp: 'lit', word: 'audio ok' } : deviceState()),
   };
 
   // The DEVICE page's round trip: what the driver reports for the device that runs (input plus output
@@ -243,15 +244,16 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     if (d.alignFrames <= 0) return `not reported · ${backend}`;
     return `${((d.alignFrames / d.sampleRate) * 1000).toFixed(1)} ms · ${d.alignFrames} frames · ${backend}`;
   };
-  // The ASIO row's state word: low-latency only while the device that runs is on ASIO; a driver that
-  // started says what runs instead (WASAPI, or no device at all).
+  // The ASIO row's state word: what the box does (on, off), then what runs: the driver while the device
+  // runs on ASIO, WASAPI while a device runs on it, else the rail's word for no device. A driver that
+  // started, or failed, runs nothing until a device opens.
   const asioWord = () => {
-    if (!asioEnabled()) return 'WASAPI';
+    const on = asioEnabled();
     const running = engineDevice();
-    if (running?.backend === 'Asio') return 'low-latency';
-    if (asioStatus().status === 'probing') return 'starting driver…';
-    if (!asioAvailable()) return 'WASAPI until the driver starts';
-    return running ? 'WASAPI runs' : 'no device';
+    const state = on ? 'on' : 'off';
+    if (running?.backend === 'Asio') return `${state} · ${running.outputName}`;
+    if (on && asioStatus().status === 'probing') return 'on · starting driver…';
+    return `${state} · ${running ? 'WASAPI runs' : deviceState().word}`;
   };
   const engineReadout = () => {
     const d = engineDevice();
@@ -464,6 +466,8 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
           <span class="audio-settings__label">buffer</span>
           <select
             class="audio-settings__select"
+            classList={{ 'audio-settings__select--fixed': bufferChoice().options.length === 1 }}
+            disabled={bufferChoice().options.length === 1}
             value={String(bufferChoice().shown)}
             onChange={(e) => {
               const v = Number(e.currentTarget.value);
@@ -496,6 +500,8 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
           <span class="audio-settings__label">sample rate</span>
           <select
             class="audio-settings__select"
+            classList={{ 'audio-settings__select--fixed': rates().options.length === 1 }}
+            disabled={rates().options.length === 1}
             value={rateValue(rates().shown)}
             onChange={(e) => {
               const select = e.currentTarget;
@@ -833,6 +839,11 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                 )}
               </For>
             </ul>
+            <Show when={!scanning() && availablePlugins().length === 0}>
+              <div class="audio-settings__hint audio-settings__hint--info" role="note">
+                No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.
+              </div>
+            </Show>
             <Show when={pluginFolders().unsupported.length > 0}>
               <div class="audio-settings__unsupported">
                 <div class="audio-settings__unsupported-summary">
@@ -859,8 +870,8 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
 
       {/* DIAGNOSTICS: last. */}
       <Page id="diagnostics" shown={props.page} readOnly>
-        {/* Diagnostics: the read-only host/engine/plugin/midi status. The command-bar system lamp is
-            their aggregate (this page's rail lamp mirrors it); this is the full read-out. The plugin-scan live region stays in the command
+        {/* Diagnostics: the read-only host/engine/plugin/midi status. The command-bar system lamp warns
+            on the device alone (this page's rail lamp mirrors it); this is the full read-out. The plugin-scan live region stays in the command
             bar (single announcer), so these rows are plain text — no role=status here. */}
         <div class="audio-settings__diag" role="group" aria-label="Diagnostics">
           <div class="audio-settings__diag-row">

@@ -9,8 +9,8 @@ added a line.
 ## With the app open, `pnpm dev:asio`
 
 - **Sample rate row (unseen):** Audio Settings' select under Buffer, "Device (44.1 kHz)" / "44.1 kHz"
-  / "48 kHz" (under ASIO only the rates the driver runs; under WASAPI the device's alone, with a hint
-  that Windows sets it). Clear beside Buffer, and is the hint useful?
+  / "48 kHz" (under ASIO only the rates the driver runs; under WASAPI a read-out of the device's own
+  rate, no caret, with a hint that Windows sets it). Clear beside Buffer, and is the hint useful?
 - **END STOP reads as a record control:** with END STOP on and FIXED off, a stopped free take keeps
   every whole bar, as built (END STOP only stops playback). The owner asks other players before
   deciding on wording or behaviour.

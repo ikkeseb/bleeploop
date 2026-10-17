@@ -7,6 +7,10 @@
  * - the saved buffer size and driver choice reach the engine's device open before plugins become
  *   selectable, and a manual rescan made while the host starts does not bypass startup;
  * - the last of two buffer picks is the one shown and saved;
+ * - on WASAPI with ASIO offered and off, DEVICE's ASIO row says what the box does and what runs
+ *   (`off · WASAPI runs`) at the other rows' height, and the Sample rate, one option under WASAPI, is a
+ *   read-out (the select's box, disabled, no caret, the legend's colour) while the Buffer stays a pick;
+ *   the rail's DIAGNOSTICS claims audio only (`audio ok`); PLUGINS with no plugin says what to do;
  * - under ASIO the input and output device selects are disabled and name the ASIO device, and a slot's
  *   input pick offers the ASIO device's inputs; pruning an unplugged Windows endpoint leaves the slots'
  *   input picks alone;
@@ -89,6 +93,35 @@ await probe(async ({ open }) => {
     await Promise.all([settings.setBufferSize(64), settings.setBufferSize(256)]);
     const final = { shown: settings.bufferFrames(), saved: readAudioDeviceSettings().bufferFrames };
 
+    window.__lf.ui.openSettings('device');
+    await pause(100);
+    const rowOf = (label) => document.querySelector(`[aria-label="${label}"]`).closest('.audio-settings__row');
+    const rate = document.querySelector('[aria-label="Sample rate"]');
+    const buffer = document.querySelector('[aria-label="Buffer size in frames"]');
+    const wasapiUi = {
+      word: document.querySelector('.audio-settings__toggle-text')?.textContent ?? null,
+      asioRow: rowOf('Use ASIO low-latency audio').getBoundingClientRect().height,
+      bufferRow: rowOf('Buffer size in frames').getBoundingClientRect().height,
+      rate: {
+        options: rate.options.length,
+        disabled: rate.disabled,
+        caret: getComputedStyle(rate).backgroundImage,
+        height: rate.getBoundingClientRect().height,
+        color: getComputedStyle(rate).color,
+      },
+      buffer: {
+        disabled: buffer.disabled,
+        caret: getComputedStyle(buffer).backgroundImage !== 'none',
+        height: buffer.getBoundingClientRect().height,
+        color: getComputedStyle(buffer).color,
+      },
+      rail: Object.fromEntries([...document.querySelectorAll('.audio-settings__tab')].map((t) => [t.id.replace('lf-settings-tab-', ''), t.querySelector('.audio-settings__tab-state').textContent])),
+    };
+    window.__lf.ui.openSettings('plugins');
+    await pause(60);
+    wasapiUi.pluginsHint = document.querySelector('#lf-settings-plugins .audio-settings__hint')?.textContent.trim() ?? null;
+    window.__lf.ui.closeSettings();
+
     await settings.setAsioEnabled(true);
     writeAudioDeviceSettings({ inputDeviceId: 'unplugged-windows-endpoint', inputChannel: '1' });
     settings.saveSlotInputChannels(['1', '']);
@@ -110,13 +143,22 @@ await probe(async ({ open }) => {
       slotInputs: slotInput ? slotInput.options.length - 1 : null,
     };
     window.__lf.ui.closeSettings();
-    return { startup, earlyScan, final, afterWindowsPrune, asioUi };
+    return { startup, earlyScan, final, wasapiUi, afterWindowsPrune, asioUi };
   });
   console.log(JSON.stringify(result));
   assert.equal(result.earlyScan, false, 'a manual rescan must not bypass startup');
   assert.deepEqual(result.startup, ['open:Wasapi:128', 'init', 'scan'],
     'the saved buffer and driver reach the device open before plugins become selectable');
   assert.deepEqual(result.final, { shown: 256, saved: 256 }, 'the last buffer pick is shown and saved');
+  const w = result.wasapiUi;
+  assert.equal(w.word, 'off · WASAPI runs', 'the ASIO row says the box is off and WASAPI runs');
+  assert.equal(w.asioRow, w.bufferRow, 'the ASIO row keeps the rows\' rhythm');
+  assert.deepEqual({ ...w.rate, color: null }, { options: 1, disabled: true, caret: 'none', height: w.buffer.height, color: null },
+    'one rate on offer: the select\'s box as a read-out, no caret, no Tab stop');
+  assert.equal(w.rate.color, w.buffer.color, 'its value in the legend\'s colour, not the disabled one');
+  assert.deepEqual({ disabled: w.buffer.disabled, caret: w.buffer.caret }, { disabled: false, caret: true }, 'the buffer stays a pick');
+  assert.deepEqual({ device: w.rail.device, diagnostics: w.rail.diagnostics }, { device: 'WASAPI', diagnostics: 'audio ok' }, 'DIAGNOSTICS claims audio only');
+  assert.equal(w.pluginsHint, 'No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.', 'PLUGINS with no plugin says what to do');
   assert.deepEqual(result.asioUi, { inputDisabled: true, outputDisabled: true, name: 'Probe ASIO', slotInputs: 4 });
   assert.deepEqual(result.afterWindowsPrune, { inputChannel: '1', slotInputChannels: ['1', ''] },
     'pruning an unrelated Windows endpoint must not reset the ASIO input picks');

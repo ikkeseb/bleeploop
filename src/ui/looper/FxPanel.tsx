@@ -27,10 +27,8 @@ function ParamControl(props: { index: number; fxIndex: number; fx: string; def: 
   const key = `fx${props.fxIndex}.${props.def.key}` as const;
   // The control's name: track, effect and parameter ("Track 1 delay mix"), as IN FX names its sends'
   // (`src/ui/transport/InputFx.tsx`). The wrapping label alone would give every effect's Mix the same
-  // name, with the numeric readout read into it. Pitch's one parameter is the effect itself.
-  const param = props.def.label.toLowerCase();
-  const fx = props.fx.toLowerCase();
-  const name = `Track ${props.index + 1} ${fx === param ? fx : `${fx} ${param}`}`;
+  // name, with the numeric readout read into it.
+  const name = `Track ${props.index + 1} ${props.fx.toLowerCase()} ${props.def.label.toLowerCase()}`;
   const value = () => looper.mixShown(props.index, key);
   const set = (v: number) => looper.setFxParam(props.index, props.fxIndex, props.def.key, v);
   // A select's change is the whole gesture; a slider's runs from its pointer or key down to its release.
@@ -93,7 +91,7 @@ function DubFeedback(props: { index: number }) {
       </span>
       <div class="fxp-mod__params">
         <label class="fxp-param">
-          <span class="fxp-param__label">Old</span>
+          <span class="fxp-param__label">Keep</span>
           <input
             type="range"
             class="lf-range fxp-param__range"

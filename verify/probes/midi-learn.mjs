@@ -70,8 +70,8 @@ await probe(async ({ open }) => {
     const toasts = await toastsOf(told.page);
     console.log('import toasts', JSON.stringify(toasts));
     assert.deepEqual(toasts, [
-      ['Could not run 2 MIDI bindings from the previous version. Pick their port in Audio Settings.', undefined],
-      ['Could not read 1 MIDI binding from the previous version. Learn them again in Audio Settings.', undefined],
+      ['Could not run 2 MIDI bindings from the previous version. Pick their port.', undefined],
+      ['Could not read 1 MIDI binding from the previous version. Learn them again.', undefined],
     ], 'the import tells what waits for a port and what it could not read');
     assert.deepEqual(told.consumeConsoleErrors(/^\[midi\]/), [
       '[midi] stored web binding 3 not imported: missing field `action`',
@@ -134,7 +134,7 @@ await probe(async ({ open }) => {
       unreadable.consumeConsoleErrors('[midi] the stored web bindings could not be read; none handed over this launch').length, 1,
       `and the release log says so: ${JSON.stringify(unreadable.consoleErrors)}`,
     );
-    assert.deepEqual((await toastsOf(unreadable.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.'], 'and the player hears it');
+    assert.deepEqual((await toastsOf(unreadable.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version. Learn them again.'], 'and the player hears it');
     await unreadable.page.close();
 
     const refused = await open({
@@ -144,7 +144,7 @@ await probe(async ({ open }) => {
       },
     });
     await refused.page.waitForFunction(() => window.__lf.notify.toasts().length >= 1, undefined, { timeout: 5000 });
-    assert.deepEqual((await toastsOf(refused.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version. Learn them again in Audio Settings.'], 'a refused import is told');
+    assert.deepEqual((await toastsOf(refused.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version. Learn them again.'], 'a refused import is told');
     assert.equal(refused.consumeConsoleErrors('[midi] importing the stored web bindings failed').length, 1, 'with its release-log line');
     await refused.page.close();
   }

@@ -229,6 +229,12 @@
 .audio-settings__select:focus-visible {
   outline-offset: 1px;
 }
+/* A select with one option (WASAPI's rate, a driver's one buffer size) is a read-out: the same box with
+   no caret, disabled so no Tab stop, its value in the legend's colour rather than the disabled --faint. */
+.audio-settings__select--fixed:disabled {
+  background-image: none;
+  color: var(--dim);
+}
 .audio-settings__select option {
   background: var(--option);
   color: var(--text);
@@ -572,10 +578,12 @@
   font-size: 11px;
 }
 
-/* ASIO low-latency tier toggle — a checkbox + a state word, left-aligned in the value column. Engaged
-   accent = the warm-white --engaged (the app-wide chrome "engaged"), not the record-red default. */
+/* ASIO low-latency tier toggle — a checkbox + a state word (on or off, then what runs: a driver's name
+   is cut, never wrapped), left-aligned in the value column. Engaged accent = the warm-white --engaged
+   (the app-wide chrome "engaged"), not the record-red default. */
 .audio-settings__toggle {
   flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -591,12 +599,16 @@
   outline-offset: 1px;
 }
 .audio-settings__toggle-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--dim);
 }
 
 /* Diagnostics: the DIAGNOSTICS page, a sunk read-out well: the read-only host/engine/plugin/midi state.
-   Reads as a status display, distinct from the controls of the other pages. The aggregate of these is the
-   command-bar system lamp (and this page's rail lamp). */
+   Reads as a status display, distinct from the controls of the other pages. The command-bar system lamp
+   (and this page's rail lamp) warns on the device alone. */
 .audio-settings__diag {
   padding: 12px 14px;
   border-radius: 10px;

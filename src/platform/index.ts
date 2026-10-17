@@ -236,7 +236,7 @@ let toldStale = 0;
 
 /** Each drop's toast: what to do, then why. */
 const DROPPED_TOAST: Record<Exclude<Dropped, 'stale'>, readonly [string, string]> = {
-  noDevice: ['Open an audio device in Audio Settings.', 'No audio device is running.'],
+  noDevice: ['Open an audio device.', 'No audio device is running.'],
   rebuilding: ['Try again once the audio device is back.', 'The audio device is restarting.'],
   full: ['Press or play it again.', 'The engine had no room for it.'],
 };
