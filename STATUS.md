@@ -97,7 +97,13 @@ it.
   BPM editor keeps the numeral's box while you type; GO LIVE keeps INPUT LIVE's width; Tab wraps inside
   Audio Settings and Help; a toast that is neither an error nor a finished action (update offer, loops
   kept, driver not installed, plugin to load, device fallback) reads as a dim note, not a green check.
-  Does a popover 10 px lower read as its pill's, and does the note toast still catch the eye when it must?
+  Second pass the same day: the 48 kHz switch and the mid-jam update ask are the app's own dialog (focus
+  on Cancel, Esc declines), not a Windows box; Help keeps one height on both tabs; an open Audio Settings
+  ends above a toast; the ASIO row says what runs ("off · WASAPI runs"); a toast with an Audio Settings
+  button no longer also says "in Audio Settings"; DUB FEEDBACK reads KEEP and PITCH's knob SHIFT; Help's
+  Manual shows the EXPORT and IMPORT icons themselves. Does a popover 10 px lower read as its pill's, does
+  the note toast still catch the eye when it must, and does the in-app ask read as a question to answer
+  before playing on?
 - GO LIVE lights only from the engine's live flag, now in the feed: with no audio device running it stays
   unlit until one does, and a lost press toasts once ("Could not go live. Press GO LIVE again."). Does
   the pill ever lag the guitar going live, and is it ever lit while the dry guitar is silent?
