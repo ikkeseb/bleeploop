@@ -32,7 +32,7 @@ export function UpdatePanel() {
         {(ready) => (
           <>
             <div class="update__title">
-              Update ready <span class="update__ver">v{ready().version}</span>
+              {updateInstalling() ? 'Updating' : 'Update ready'} <span class="update__ver">v{ready().version}</span>
             </div>
             <ul class="update__list">
               <For each={updateNoteLines(ready().notes)}>{(line) => <li>{line}</li>}</For>
@@ -40,8 +40,8 @@ export function UpdatePanel() {
             <p class="update__sub">
               BleepLoop closes, installs it and opens again. Your committed loops come back.
             </p>
-            {/* The read-out replaces the copy above the button only once a stage has arrived, so a
-                press that fails before the native side reports anything still reads as a press. */}
+            {/* The read-out joins under the copy only once a stage has arrived, so a press that fails
+                before the native side reports anything still reads as a press. */}
             <Show when={updateProgress()}>
               {(stage) => {
                 const fraction = () => updateProgressFraction(stage());
@@ -67,9 +67,11 @@ export function UpdatePanel() {
               }}
             </Show>
             <div class="update__actions">
+              {/* Holds its widest word (`data-fit`, update-panel.css), so the press never resizes it. */}
               <button
                 type="button"
                 class="update__btn"
+                data-fit="Update and restart"
                 disabled={updateInstalling()}
                 onClick={() => void installUpdate()}
               >

@@ -106,6 +106,9 @@
   margin-top: 2px;
 }
 .update__btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
   padding: 6px 12px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -119,6 +122,14 @@
   letter-spacing: 0.06em;
   cursor: pointer;
   transition: background-color 0.15s;
+}
+/* The word changes (UPDATE AND RESTART / UPDATING…) and the button keeps the widest one's width, in an
+   unseen zero-height line above the one shown (UpdatePanel.tsx `data-fit`; the bar's pills do the same). */
+.update__btn::before {
+  content: attr(data-fit);
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
 }
 .update__btn:hover:not(:disabled) {
   background: var(--surf-3);
