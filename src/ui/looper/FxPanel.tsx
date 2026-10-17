@@ -93,7 +93,7 @@ function DubFeedback(props: { index: number }) {
       </span>
       <div class="fxp-mod__params">
         <label class="fxp-param">
-          <span class="fxp-param__label">Old</span>
+          <span class="fxp-param__label">Keep</span>
           <input
             type="range"
             class="lf-range fxp-param__range"
