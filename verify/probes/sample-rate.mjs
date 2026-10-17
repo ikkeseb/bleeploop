@@ -5,9 +5,10 @@
  *
  * - the row shows the device's rate ("Device (44.1 kHz)") and the rates the driver runs;
  * - picking 48 kHz while the engine holds loops: the open asks for `sampleRate: 48000`, the engine
- *   refuses it (`OpenError::RateChange`, scripted as the native owner answers) and the existing confirm
- *   appears; declined, the pick goes back to the device's rate; accepted, the forced open runs at 48 kHz
- *   and the row shows it;
+ *   refuses it (`OpenError::RateChange`, scripted as the native owner answers) and the app's own ask
+ *   appears (`src/ui/confirm/`; no native dialog opens): focus on its no button, Space taken from the
+ *   transport, Tab wrapping inside; declined (Enter on no, Escape, a click outside), the pick goes back
+ *   to the device's rate; accepted (a click on yes), the forced open runs at 48 kHz and the row shows it;
  * - the pick survives a reload: the first open asks for it and the row shows it;
  * - a rate, buffer, ASIO on/off or output device pick whose open fails (the device that ran keeps
  *   running, or the native owner reopens it): every pick that ran goes back, saved and shown;
@@ -19,7 +20,7 @@
  * The native half (the driver's rates, the pick's resolution, the refusal and the rebuild) is
  * `cargo test` (`engine_io/transition.rs`, `engine_io/tests.rs`); this probe sees neither a driver nor
  * cpal, and no lane: the refusal stands in for the engine holding audio. logs/layout/sample-rate.png
- * shows the panel.
+ * shows the panel, logs/layout/sample-rate-ask.png the ask.
  * Run: pnpm probe sample-rate
  */
 import { probe } from '../harness/probe.ts';
@@ -118,6 +119,25 @@ const pick = (page, label, value) =>
 const pickRate = async (page, value) =>
   (await pick(page, 'Sample rate', value)).map(({ sampleRate, backend, forced }) => ({ sampleRate, backend, forced }));
 
+/** The focused element's text. */
+const focusedText = (page) => page.evaluate(() => document.activeElement?.textContent?.trim() ?? null);
+
+/** Pick 48 kHz while the engine refuses it: the app's own ask shows (no native dialog), `answer(ask)`
+ * answers it, and the pick's opens come back with what the ask showed when it appeared. */
+async function askedPick(page, answer) {
+  const picking = pickRate(page, '48000');
+  const ask = page.getByRole('alertdialog', { name: 'Sample rate change', exact: true });
+  await ask.waitFor({ timeout: 5000 });
+  const shown = await ask.evaluate((el) => ({
+    title: document.getElementById(el.getAttribute('aria-labelledby'))?.textContent.trim(),
+    body: document.getElementById(el.getAttribute('aria-describedby'))?.innerText.trim(),
+    focused: document.activeElement?.textContent.trim(),
+    buttons: [...el.querySelectorAll('button')].map((b) => b.textContent.trim()),
+  }));
+  await answer(ask);
+  return { opens: await picking, ask: shown };
+}
+
 /** The control labelled `label` and the saved setting `key`, as the panel shows them. */
 const readPick = (page, label, key) =>
   page.evaluate(async ([l, k]) => {
@@ -160,6 +180,13 @@ await probe(async ({ open }) => {
     },
   });
   const { page, consumeConsoleErrors } = app;
+  // The rate ask is the app's own: a native dialog (window.confirm) must never open.
+  const nativeDialogs = [];
+  page.on('dialog', (d) => {
+    if (d.type() === 'beforeunload') return void d.accept();
+    nativeDialogs.push(`${d.type()}: ${d.message()}`);
+    void d.dismiss();
+  });
 
   // 1. Boot: the first open asks for the device's own rate, and the row says which it is.
   await page.waitForFunction(() => window.__lf.native.opened.length > 0, undefined, { timeout: 10000 });
@@ -171,7 +198,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(first.options, [['', 'Device (44.1 kHz)'], ['44100', '44.1 kHz'], ['48000', '48 kHz']]);
   assert.deepEqual({ value: first.value, runs: first.runs }, { value: '', runs: 44100 });
 
-  // 2. 48 kHz while the engine holds loops: the existing confirm; declined, nothing changes.
+  // 2. 48 kHz while the engine holds loops: the app's own ask; declined, nothing changes.
   await page.evaluate(async () => {
     window.__driver.holdsLoops = true;
     const { autosave } = await import('/src/session/autosave.ts');
@@ -180,21 +207,65 @@ await probe(async ({ open }) => {
       window.__saves++;
     };
   });
-  let asked = null;
-  page.once('dialog', (d) => {
-    asked = d.message();
-    void d.dismiss();
+  await mkdir('logs/layout', { recursive: true });
+  const declined = await askedPick(page, async (ask) => {
+    // The panel stands at the window's centre, over the open Audio Settings (the topmost element there).
+    const placed = await ask.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { dx: Math.round(r.left + r.width / 2 - innerWidth / 2), dy: Math.round(r.top + r.height / 2 - innerHeight / 2), onTop: el.contains(top), settings: !!document.getElementById('lf-audio-popover') };
+    });
+    console.log('ask placed', JSON.stringify(placed));
+    assert.deepEqual(placed, { dx: 0, dy: 0, onTop: true, settings: true }, 'the ask sits centred, on top, over Audio Settings');
+    await page.screenshot({ path: 'logs/layout/sample-rate-ask.png' });
+    // The keys are the ask's: a digit (a track select on the transport) sends nothing, Tab wraps
+    // between the two buttons, and Enter presses the focused one.
+    const sentBefore = await page.evaluate(() => window.__lf.native.sent.length);
+    await page.keyboard.press('2');
+    assert.equal(await page.evaluate(() => window.__lf.native.sent.length), sentBefore, 'a transport key under the ask sends nothing');
+    const tabs = [];
+    for (let i = 0; i < 3; i++) {
+      await page.keyboard.press(i === 2 ? 'Shift+Tab' : 'Tab');
+      tabs.push(await focusedText(page));
+    }
+    console.log('ask tabs', JSON.stringify(tabs));
+    assert.deepEqual(tabs, ['Switch', 'Cancel', 'Switch'], 'Tab and Shift+Tab wrap inside the ask');
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Enter');
+    await ask.waitFor({ state: 'detached' });
   });
-  const declined = await pickRate(page, '48000');
-  console.log('declined', JSON.stringify(declined), asked);
-  assert.deepEqual(declined[0], { sampleRate: 48000, backend: 'Asio', forced: false }, 'the pick asks for 48 kHz');
-  assert.match(asked ?? '', /Probe ASIO runs at 48 kHz\. Your loops were recorded at 44\.1 kHz/, 'the existing confirm');
+  console.log('declined', JSON.stringify(declined.opens), JSON.stringify(declined.ask));
+  assert.deepEqual(declined.opens[0], { sampleRate: 48000, backend: 'Asio', forced: false }, 'the pick asks for 48 kHz');
+  assert.match(declined.ask.body, /Probe ASIO runs at 48 kHz\. Your loops were recorded at 44\.1 kHz/, 'the ask keeps its text');
+  assert.equal(declined.ask.title, 'Sample rate change', 'the ask is named by its title');
+  assert.equal(declined.ask.focused, 'Cancel', 'focus lands on the no button');
+  assert.deepEqual(declined.ask.buttons, ['Switch', 'Cancel']);
   const kept = await readRow(page);
   assert.deepEqual({ value: kept.value, saved: kept.saved, runs: kept.runs }, { value: '', saved: null, runs: 44100 }, 'declined: the device rate stays');
+  // With the ask gone the same digit reaches the transport again (so the silence above was the ask's).
+  const sentAfter = await page.evaluate(() => window.__lf.native.sent.length);
+  await page.keyboard.press('2');
+  console.log('digit without the ask', JSON.stringify(await page.evaluate((n) => window.__lf.native.sent.slice(n), sentAfter)));
+  assert.ok((await page.evaluate(() => window.__lf.native.sent.length)) > sentAfter, 'the digit reaches the transport without the ask');
+  // Escape and a click outside the panel answer no as well.
+  for (const how of ['Escape', 'outside']) {
+    const again = await askedPick(page, async (ask) => {
+      if (how === 'Escape') await page.keyboard.press('Escape');
+      else await page.mouse.click(8, 400);
+      await ask.waitFor({ state: 'detached' });
+    });
+    assert.deepEqual(again.opens.map((o) => o.forced), [false, false], `${how}: no forced open`);
+    const still = await readRow(page);
+    assert.deepEqual({ value: still.value, saved: still.saved, runs: still.runs }, { value: '', saved: null, runs: 44100 }, `${how} declines`);
+  }
 
   // Accepted: the recovery saves first, then the forced open runs at the pick.
-  page.once('dialog', (d) => void d.accept());
-  const accepted = await pickRate(page, '48000');
+  const accepted = (
+    await askedPick(page, async (ask) => {
+      await ask.getByRole('button', { name: 'Switch', exact: true }).click();
+      await ask.waitFor({ state: 'detached' });
+    })
+  ).opens;
   console.log('accepted', JSON.stringify(accepted));
   assert.deepEqual(accepted.slice(0, 2), [
     { sampleRate: 48000, backend: 'Asio', forced: false },
@@ -205,7 +276,6 @@ await probe(async ({ open }) => {
   console.log('picked', JSON.stringify(picked));
   assert.deepEqual(picked.options, [['', 'Device'], ['44100', '44.1 kHz'], ['48000', '48 kHz']]);
   assert.deepEqual({ value: picked.value, saved: picked.saved, runs: picked.runs }, { value: '48000', saved: 48000, runs: 48000 });
-  await mkdir('logs/layout', { recursive: true });
   await page.evaluate(() => window.__lf.ui.openSettings());
   await page.locator('[aria-label="Sample rate"]').scrollIntoViewIfNeeded();
   await page.screenshot({ path: 'logs/layout/sample-rate.png' });
@@ -276,4 +346,6 @@ await probe(async ({ open }) => {
 
   // 8. An output device pick whose open fails: the endpoint that ran goes back, saved and shown.
   await failedPick(app, 'Output device', 'outputDeviceId', 'out-b', { output: 'out-b', backend: 'Wasapi' });
+
+  assert.deepEqual(nativeDialogs, [], 'no native dialog opened');
 });

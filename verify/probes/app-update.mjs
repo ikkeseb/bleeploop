@@ -7,8 +7,9 @@
  *   in Help, which is where the offer used to live;
  * - an offer with the looper empty: one toast (a note: no ✓, no "Done") names the version, the pill appears, its panel carries the
  *   version and the notes (bullets and bold dropped), and the press installs at once, asking nothing;
- * - an offer during a jam (a committed loop on the feed): the press asks first; "no" installs nothing,
- *   "yes" saves the jam for recovery and installs;
+ * - an offer during a jam (a committed loop on the feed): the press asks first, in the app's own dialog
+ *   (`src/ui/confirm/`; no native confirm opens); "no" installs nothing, "yes" saves the jam for
+ *   recovery and installs;
  * - the install's read-out: each stage the native side reports (`lf://update-progress`) reaches the
  *   panel — a download with a size fills the bar, one without leaves it indeterminate, and the signature
  *   check and the installer each say so;
@@ -27,15 +28,15 @@ const shots = arg('shots');
 const OFFER = { version: '9.9.9', notes: '- **Faster takes.** A take lands sooner.\n- A second change' };
 const TOAST = 'BleepLoop v9.9.9 is ready: press UPDATE in the command bar';
 
-/** Page helpers: the scripted updater, the window.confirm answers, and the feed frames the engine sends. */
+/** Page helpers: the scripted updater, a recorder of native confirms (the asks are the app's own, so it
+ * must stay empty), and the feed frames the engine sends. */
 function pageScript(script) {
   if (script) window.__lfUpdateFake = { ...script, installs: 0 };
   window.__lfEngineFake = true;
   window.__confirms = [];
-  window.__confirmAnswer = true;
   window.confirm = (message) => {
     window.__confirms.push(message);
-    return window.__confirmAnswer;
+    return true;
   };
   const RATE = 48000;
   const frames = 2 * RATE; // one bar at 120 BPM
@@ -124,7 +125,8 @@ await probe(async ({ open }) => {
     if (shots) await page.screenshot({ path: `${shots}/app-update-panel.png` });
     await panel(page).getByRole('button', { name: 'Update and restart' }).click();
     await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 5000 });
-    assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'an empty looper was asked');
+    assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'a native confirm opened');
+    assert.equal(await page.getByRole('alertdialog').count(), 0, 'an empty looper was asked');
     await page.close();
   }
 
@@ -138,15 +140,19 @@ await probe(async ({ open }) => {
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
     await pill(page).click();
     const button = panel(page).getByRole('button', { name: 'Update and restart' });
-    await page.evaluate(() => { window.__confirmAnswer = false; });
+    // The ask is the app's own dialog: named, its text kept, focus on its no button.
+    const ask = page.getByRole('alertdialog', { name: 'Update during a jam', exact: true });
     await button.click();
-    await page.waitForFunction(() => window.__confirms.length === 1, undefined, { timeout: 5000 });
-    assert.match(await page.evaluate(() => window.__confirms[0]), /^Update to v9\.9\.9 now\?/, 'the jam ask');
+    await ask.waitFor({ timeout: 5000 });
+    assert.match(await ask.locator('#lf-confirm-body').innerText(), /^Update to v9\.9\.9 now\?/, 'the jam ask');
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent.trim()), 'Cancel', 'focus on the no button');
+    await ask.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await ask.waitFor({ state: 'detached' });
     assert.equal(await installs(page), 0, 'installed after a "no"');
-    await page.evaluate(() => { window.__confirmAnswer = true; });
     await button.click();
+    await ask.getByRole('button', { name: 'Update', exact: true }).click();
     await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 10_000 });
-    assert.equal(await page.evaluate(() => window.__confirms.length), 2, 'the second press was not asked');
+    assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'a native confirm opened');
     assert.equal(await page.evaluate(() => window.__lf.autosave.hasSaved()), true, 'the jam was not saved for recovery');
     await page.close();
   }

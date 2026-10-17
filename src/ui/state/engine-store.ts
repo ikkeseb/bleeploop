@@ -50,6 +50,7 @@ import { withAt } from './instrument-slots';
 import { adoptEngineLive, engineInputLive, toggleEngineInput } from './native-io';
 import { notifyError, notifyInfo, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
+import { confirm } from '../confirm/confirm-store';
 
 /**
  * OWNS: the UI's view of the native engine (invariants 3 and 6): the feed reducer, the device that
@@ -1675,7 +1676,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
         `${refused.device} runs at ${kHz(refused.to)}. Your loops were recorded at ${kHz(refused.from)} and ` +
         `cannot play there. They stay in recovery and come back the next time BleepLoop starts at ` +
         `${kHz(refused.from)}.\n\nSwitch anyway?`;
-      if (!window.confirm(ask)) {
+      if (!(await confirm({ title: 'Sample rate change', body: ask, yes: 'Switch', no: 'Cancel' }))) {
         putBackPicks();
         return { status: device(), declined: true };
       }

@@ -38,6 +38,7 @@ import { readAudioDeviceSettings, writeAudioDeviceSettings } from '../ui/state/a
 import { pluginDescriptorKey } from '../ui/state/plugin-descriptor';
 import { recallInFlight, rigRecallDone } from '../ui/state/rig-recall';
 import { toasts } from '../notify';
+import { confirmSeam } from '../ui/confirm/confirm-store';
 import { confirmNativeClose, onNativeCloseRequested, platform, type PluginDescriptor } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -170,8 +171,10 @@ async function settleWindow(): Promise<boolean> {
 async function check(expect: Expect, early: boolean): Promise<void> {
   // The runner closes this phase the way the close button does, on any verdict. A jam this dev origin
   // restored from its recovery makes the close guard ask first, in a dialog that blocks the page:
-  // answer it as the owner would, and leave that recovery (maybe the owner's) unwritten.
+  // answer it as the owner would, and leave that recovery (maybe the owner's) unwritten. The app's own
+  // asks (a device rate change, an update mid-jam) get the same yes through their seam.
   window.confirm = () => true;
+  confirmSeam.answer = () => true;
   Object.assign(autosave, { flush: async () => {} });
   const firstPass = sessionStorage.getItem(RELOADED);
   const notEarly = early ? [] : ['the probe started after the recall had finished: its spy saw nothing'];
