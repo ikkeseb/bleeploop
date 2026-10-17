@@ -101,9 +101,13 @@ it.
   on Cancel, Esc declines), not a Windows box; Help keeps one height on both tabs; an open Audio Settings
   ends above a toast; the ASIO row says what runs ("off · WASAPI runs"); a toast with an Audio Settings
   button no longer also says "in Audio Settings"; DUB FEEDBACK reads KEEP and PITCH's knob SHIFT; Help's
-  Manual shows the EXPORT and IMPORT icons themselves. Does a popover 10 px lower read as its pill's, does
-  the note toast still catch the eye when it must, and does the in-app ask read as a question to answer
-  before playing on?
+  Manual shows the EXPORT and IMPORT icons themselves. Third pass, on the owner's Darkroom answers: every
+  disabled control in the bar and the tool cluster fades by tone (the enabled tool icons a step brighter so
+  the two states differ); the Audio Settings gear is redrawn for 16 px; every lane-well cue sits in one box
+  and the count-in numeral stands beside its word; Tab walks the two-row bar as drawn; the UPDATE pill has a
+  mode pill's size; FIXED and FADE both keep their unit to 1000 px. Does a popover 10 px lower read as its
+  pill's, does the note toast still catch the eye when it must, does the in-app ask read as a question to
+  answer before playing on, and do the disabled tools still read as present from the chair?
 - SCOPE's beam (2026-10-17, machine-verified, never seen on a device): when the live columns stop while the
   loop moves (the view closed and reopened, a look stepped back to SCOPE, a held feed) the beam moves on with
   the bar instead of freezing at the last column. Does the beam ever jump or lag the bar when you open the
