@@ -87,7 +87,7 @@ function storeProblemText(problem: StoreProblem): [string, string] {
   if ('conflict' in problem) return ['Could not save the MIDI bindings, as another BleepLoop changed them. Changes made now are not saved; restart BleepLoop before you learn them again.', problem.conflict.why];
   if ('failed' in problem) return ['Could not save the MIDI bindings. BleepLoop keeps trying.', problem.failed.why];
   const n = problem.rejected.count;
-  return [`Could not read ${n} stored MIDI binding${n === 1 ? '' : 's'}. Learn them again in Audio Settings.`, 'They stay in the file, unused.'];
+  return [`Could not read ${n} stored MIDI binding${n === 1 ? '' : 's'}. Learn them again.`, 'They stay in the file, unused.'];
 }
 
 /**
