@@ -28,7 +28,8 @@
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
  * 1000x700 minimum with the keyboard shown included (audit A4; the drawer is one key row); Help opens on its
  * reference, which fits unscrolled at every size, and its Manual tab shows the manual with About this
- * build (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
+ * build, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
+ * AUTO REC line pointing at the SENS word only where the bar shows it (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
@@ -231,7 +232,16 @@ await probe(async ({ browser, open }) => {
         // keystroke pedals, whose release stops nothing.
         const hold = [...h.querySelectorAll('.help__note')].filter((el) => el.textContent === 'HOLD')
           .map((el) => `${el.closest('[role="tabpanel"]')?.id}${el.closest('.help__sec')?.textContent.includes('MIDI LEARN') ? '' : ' (no MIDI LEARN)'}`);
-        return { shown, about, hold, content: h.scrollHeight, view: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
+        // The Pedals section names the bar's switches as the bar's legends read (TAP, never "tap tempo").
+        const bar = [...document.querySelectorAll('.cmd button')].filter((b) => b.checkVisibility()).map((b) => b.textContent.trim());
+        const pedals = [...h.querySelectorAll('#lf-help-manual .help__sec')].find((sec) => sec.textContent.includes('MIDI LEARN'));
+        const pedalNotes = [...(pedals?.querySelectorAll('.help__note') ?? [])].map((el) => el.textContent);
+        const switches = ['TAP', 'CLICK', 'END STOP', 'FIXED'].map((name) => `${name}${pedalNotes.includes(name) ? '' : ' (not named)'}${bar.includes(name) ? '' : ' (not in the bar)'}`);
+        // AUTO REC's line may point at the SENS word only where the bar shows it (it drops it when narrow).
+        const autoRec = [...h.querySelectorAll('#lf-help-manual li')].find((li) => li.textContent.startsWith('AUTO REC'))?.textContent ?? '';
+        const sensWord = [...document.querySelectorAll('.cmd .transport__readout-k')].some((el) => el.textContent === 'SENS' && el.checkVisibility());
+        const sensClaim = /SENS beside it/.test(autoRec) && !sensWord ? 'says SENS sits beside AUTO REC, which the bar does not show' : '';
+        return { shown, about, hold, switches, sensClaim, content: h.scrollHeight, view: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
       });
       scene = '6-help';
       await page.evaluate(() => window.__lf.ui.openHelp());
@@ -249,6 +259,9 @@ await probe(async ({ browser, open }) => {
       console.log(JSON.stringify({ tag, scene, ...manual }));
       if (manual.shown.join() !== 'lf-help-manual' || !manual.about) fail(`${tag} ${scene}: the Manual tab shows ${manual.shown.join() || 'no panel'}${manual.about ? '' : ', without About this build'}`);
       if (manual.hold.join() !== 'lf-help-manual') fail(`${tag} ${scene}: HOLD reads in ${manual.hold.join(', ') || 'no panel'}, not once in the manual beside MIDI LEARN`);
+      const unnamed = manual.switches.filter((s) => s.includes('('));
+      if (unnamed.length) fail(`${tag} ${scene}: the Manual's Pedals section does not name the bar's switches as the bar does: ${unnamed.join(', ')}`);
+      if (manual.sensClaim) fail(`${tag} ${scene}: the Manual's AUTO REC line ${manual.sensClaim}`);
       await page.evaluate(() => window.__lf.ui.closeHelp());
 
       scene = '7-audio-settings';

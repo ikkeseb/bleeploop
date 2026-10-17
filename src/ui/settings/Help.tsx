@@ -234,7 +234,7 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
         <ul class="help__list">
           <li>A MIDI footswitch or controller: <SettingsLink page="midi" />. Pick an action beside <span class="help__note">MIDI LEARN</span>, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
-          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo, reverb and ring mod switch as their buttons do</li>
+          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; <span class="help__note">TAP</span>, <span class="help__note">CLICK</span>, <span class="help__note">END STOP</span>, <span class="help__note">FIXED</span> and IN FX's ECHO, REVERB and RING MOD work as their buttons do</li>
           <li><span class="help__note">HOLD</span>, beside a REC/DUB learned on a momentary pedal: hold the pedal to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
           <li><span class="help__note">Halve track</span> (MIDI learn only) keeps the selected track's first half, as <span class="help__note">✂ TRIM</span> does; undo gives the whole loop back</li>
@@ -276,7 +276,7 @@ function Manual(props: { hidden: boolean }) {
           <li><span class="help__note">CLICK</span> toggles the metronome (never recorded, silent while nothing runs); the number beside it opens its volume. A mode that is on lights its lamp</li>
           <li><span class="help__note">FIXED</span> records exactly the bars set beside it and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
-          <li><span class="help__note">AUTO REC</span> replaces the first count-in: arm the track, then playing starts the take. <span class="help__note">SENS</span> beside it opens the sensitivity: raise it for quieter input; the cyan tick on the record level is the trigger</li>
+          <li><span class="help__note">AUTO REC</span> replaces the first count-in: arm the track, then playing starts the take. The number beside it opens its sensitivity (<span class="help__note">SENS</span>): raise it for quieter input; the cyan tick on the record level is the trigger</li>
           <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
           <li>The time signature beside BPM (4/4, 3/4, 6/8, 12/8, 5/4) sets the bar: the click accents its first beat, and FIXED, FADE and the grid count its bars. In 6/8 and 12/8, BPM and TAP count the dotted quarter (two and four beats a bar). It locks with the tempo</li>
         </ul>
