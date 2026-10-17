@@ -9,10 +9,11 @@
  *   toast outliving its auto-dismiss and keeping keyboard focus through a repeat of itself and a burst
  *   past the four-toast cap; the lamp across a lost device (amber and "no device open" while
  *   none runs, neutral and "running" once one runs again);
- * - the refusal carriers: a STOPPED lane core's title/label reason; the transport keys send the engine's
+ * - the refusal carriers: a lane cap's aria-label names its action and its title the refusal, in
+ *   sentence case (a STOPPED core, an EMPTY lane's core and PLAY); the transport keys send the engine's
  *   action (the engine gates it now: lf-engine `tests/actions.rs`) and an engine refusal is announced on
  *   the looper status line with its lane and reason; while a lane records, another lane's core is
- *   disabled and its hover and label say why;
+ *   disabled and its hover says why;
  * - toggles: each toggle it presses (CLICK, FIXED, RETAKE, AUTO, the master mute, lane 1's MUTE and REV)
  *   keeps ONE accessible name in both states and carries its state in aria-pressed alone; the lane core,
  *   whose name says the action, carries no aria-pressed. REV's and MUTE's states are the engine's: the
@@ -177,8 +178,8 @@ await probe(async ({ open }) => {
   await emit({ events: [laneEvent(0, committed('Stopped'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'STOPPED');
   const stoppedCore = page.locator('.lp-lane[aria-label="Track 1"] .lp-core');
-  assert.match(await stoppedCore.getAttribute('aria-label'), /play first to overdub/);
-  assert.equal(await stoppedCore.getAttribute('title'), 'play first to overdub');
+  assert.equal(await stoppedCore.getAttribute('aria-label'), 'Track 1 overdub', 'the core names its action');
+  assert.equal(await stoppedCore.getAttribute('title'), 'Play first to overdub', 'and its title the reason, in sentence case');
 
   // The transport keys send the engine's action on its selection; the engine gates it and names a
   // refusal on the feed, which the looper status line says with its lane.
@@ -210,6 +211,11 @@ await probe(async ({ open }) => {
   assert.deepEqual(await actions(), ['PlayStop'], 'Enter on an EMPTY lane goes to the engine, which gates it');
   await emit({ events: [{ Refused: { frame: 0, lane: 0, reason: 'Empty' } }] });
   assert.equal((await live.textContent())?.trim(), 'Track 1: nothing to play, record first');
+  // The first session's lane: its caps name their action, and the hover says why PLAY waits, capitalised.
+  const firstLane = page.locator('.lp-lane[aria-label="Track 1"]');
+  const firstCaps = await firstLane.evaluate((el) => [el.querySelector('.lp-core'), el.querySelector('.lp-pb--play')].map((b) => [b.getAttribute('aria-label'), b.getAttribute('title')]));
+  console.log(JSON.stringify({ firstCaps }));
+  assert.deepEqual(firstCaps, [['Track 1 record', 'Record'], ['Track 1 play', 'Nothing to play, record first']], 'an EMPTY lane: action in the name, reason in the title');
 
   // An EMPTY selected lane arms on Space.
   await clearSent();
@@ -222,8 +228,8 @@ await probe(async ({ open }) => {
   // While lane 1 records, lane 2's core is refused, and its hover and label say why.
   const otherCore = page.locator('.lp-lane[aria-label="Track 2"] .lp-core');
   assert.equal(await otherCore.isDisabled(), true);
-  assert.equal(await otherCore.getAttribute('title'), 'another track is recording, stop it first');
-  assert.equal(await otherCore.getAttribute('aria-label'), 'Track 2 another track is recording, stop it first');
+  assert.equal(await otherCore.getAttribute('title'), 'Another track is recording, stop it first');
+  assert.equal(await otherCore.getAttribute('aria-label'), 'Track 2 record');
   // The core's name says the action ("Track 1 stop recording"), so a pressed state would contradict it.
   const recordingCorePressed = await page.locator('.lp-lane[aria-label="Track 1"] .lp-core').getAttribute('aria-pressed');
   console.log(JSON.stringify({ recordingCorePressed }));

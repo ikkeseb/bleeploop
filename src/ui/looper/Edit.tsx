@@ -132,6 +132,11 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
                     <For each={ITEMS}>
                       {(item) => {
                         const g = () => item.gate(props.index);
+                        // The hint reads on from the word ("COPY to the first empty track"), a refusal too.
+                        const hint = () => {
+                          const r = g();
+                          return r.ok ? item.hint : r.reason;
+                        };
                         return (
                           <button
                             class="edit__item"
@@ -146,7 +151,7 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
                               </span>
                               {item.word}
                             </span>
-                            <span class="edit__hint">{why(g()) ?? item.hint}</span>
+                            <span class="edit__hint">{hint()}</span>
                           </button>
                         );
                       }}

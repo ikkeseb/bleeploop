@@ -5,8 +5,8 @@
  * Web Audio probe loop-end-stop.mjs, in engine mode:
  *
  * - a lane the feed reports PLAYING with a pending stop (`stopAt`) cues it (`src/ui/looper/Looper.tsx`,
- *   `src/ui/looper/gates.ts`): its REC/DUB core is disabled and names the refusal in its aria-label and
- *   title, its transforms (↺ REV, ↶ UNDO, and ✂ TRIM in its EDIT menu) are disabled, and its PLAY/STOP cap turns into a
+ *   `src/ui/looper/gates.ts`): its REC/DUB core is disabled, keeps its action in its aria-label and
+ *   names the refusal in its title, its transforms (↺ REV, ↶ UNDO, and ✂ TRIM in its EDIT menu) are disabled, and its PLAY/STOP cap turns into a
  *   visible stop-now control; the same lane without the pending stop has all of them enabled;
  * - a pointer click on that stop-now control sends the engine's PLAY/STOP for the lane (the engine's
  *   second press stops at once: lf-engine `tests/copy.rs`); the feed's STOPPED ends the cue.
@@ -95,10 +95,10 @@ await probe(async ({ open }) => {
   await emit({ events: [laneEvent(0, committed('Playing', { stopAt: 4 * BAR }), BAR)], anchor: anchorAt(BAR) });
   const pending = await cue();
   console.log('pending', JSON.stringify(pending));
-  const pendingCore = button('Track 1 stopping at loop end, wait or stop now');
-  assert.equal(await pendingCore.count(), 1, 'the core names the pending stop in its aria-label');
+  const pendingCore = button('Track 1 overdub');
+  assert.equal(await pendingCore.count(), 1, 'the core keeps its action in its aria-label');
   assert.ok(await pendingCore.isDisabled(), 'the core is disabled');
-  assert.equal(await pendingCore.getAttribute('title'), 'stopping at loop end, wait or stop now', 'and in its title');
+  assert.equal(await pendingCore.getAttribute('title'), 'Stopping at loop end, wait or stop now', 'and names the pending stop in its title');
   for (const [name, disabled] of Object.entries(pending.transforms)) assert.ok(disabled, `${name} is disabled while the stop is pending`);
   const stopNow = button('Track 1 stop now');
   assert.ok(await stopNow.isVisible(), 'a visible stop-now control');

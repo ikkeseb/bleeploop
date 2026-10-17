@@ -227,7 +227,7 @@ await probe(async ({ open }) => {
   // holds its column, disabled, on a lane with nothing to undo.
   const undo4 = lanes.nth(3).getByRole('button', { name: 'Track 4 undo or redo the last overdub or trim', exact: true });
   assert.ok(await undo4.isDisabled(), 'nothing to undo: UNDO is disabled, not absent');
-  assert.equal(await undo4.getAttribute('title'), 'nothing to undo, overdub first');
+  assert.equal(await undo4.getAttribute('title'), 'Nothing to undo, overdub first');
   for (const [width, height] of [[1600, 900], [1000, 700]]) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(100);
