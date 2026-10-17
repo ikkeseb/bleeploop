@@ -329,12 +329,15 @@
   }
 }
 
-/* play-stop + clear, stacked */
+/* play-stop + clear, stacked; one width on every lane whichever word (PLAY, STOP, NOW) it shows */
 .lp-lane__pair {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 5px;
+}
+.lp-lane__pair .lp-pb {
+  min-width: 64px;
 }
 
 /* ---- pill button (STOP/PLAY/CLR + FX/MUTE/REV/UNDO/EDIT) ---- */

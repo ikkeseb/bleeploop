@@ -291,6 +291,13 @@
   border-color: rgba(244, 239, 230, 0.28);
   text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
+/* on but greyed out (FIXED under RETAKE over a loop): the disabled face, its dim lamp alone says "set" */
+.transport__tgl.is-on:disabled {
+  color: var(--faint);
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.06);
+  text-shadow: none;
+}
 /* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an unlit socket
    before the legend, lit warm-white while the mode is on, so a mode reads on or off from the guitar.
    Always in the row, so lighting it never moves the legend or resizes the pill. A mode that is on but
