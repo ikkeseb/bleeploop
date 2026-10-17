@@ -105,7 +105,8 @@ it.
   disabled control in the bar and the tool cluster fades by tone (the enabled tool icons a step brighter so
   the two states differ); the Audio Settings gear is redrawn for 16 px; every lane-well cue sits in one box
   and the count-in numeral stands beside its word; Tab walks the two-row bar as drawn; the UPDATE pill has a
-  mode pill's size; FIXED and FADE both keep their unit to 1000 px. Does a popover 10 px lower read as its
+  mode pill's size; FIXED and FADE both keep their unit to 1000 px; the IN FX popover stacks its sends so
+  every slider is 214 px long (was about 40), an off send saying in one line what it adds. Does a popover 10 px lower read as its
   pill's, does the note toast still catch the eye when it must, does the in-app ask read as a question to
   answer before playing on, and do the disabled tools still read as present from the chair?
 - SCOPE's beam (2026-10-17, machine-verified, never seen on a device): when the live columns stop while the

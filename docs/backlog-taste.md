@@ -53,9 +53,9 @@ added a line.
   in the browser rig) below 1080 px and from 1120 to 1160 px while an offer stands (measured 2026-10-17;
   FIXED's stepper keeping its unit down to 1000 px costs the 1040 to 1080 band). The tool icons behind one
   menu, or live with it?
-- **From the designer walk (2026-10-17), small calls:** the IN FX popover's sliders are about 40 px long in a
-  480 px panel. The FX drawer with all five FX on at 1000x700 is a Darkroom round (a candidate on
-  `pw15/drawer`, before and after in `bleeploop-push15`).
+- **From the designer walk (2026-10-17), small calls:** the FX drawer with all five FX on at 1000x700 is a
+  Darkroom round (a candidate on `pw15/drawer`, before and after in `bleeploop-push15`). The IN FX
+  popover's stacked sends (214 px sliders, a one-line hint per off send) are a round in `bleeploop-push16`.
 - **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
   log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the
