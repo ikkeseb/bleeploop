@@ -28,7 +28,9 @@ puts it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
 The Audio Settings gear in the command bar (`src/app.tsx`, `.tool--gear`) is the `settings` icon of
 Lucide (Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather
 (MIT); all other copyright (c) for Lucide are held by Lucide Contributors 2022), inlined as SVG path
-data and licensed under the ISC licence. Upstream: <https://github.com/lucide-icons/lucide>.
+data and licensed under the ISC licence, whose permission notice must travel with every copy: the
+licence text is `licenses/ISC-Lucide.txt`; the installer puts it beside the exe. Upstream:
+<https://github.com/lucide-icons/lucide>.
 
 ## Rust / native dependencies (`src-tauri/`)
 
