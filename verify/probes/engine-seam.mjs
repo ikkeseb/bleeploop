@@ -22,8 +22,9 @@
  *   fake reports as the engine does), a lane's mix kept when it only goes EMPTY and reset by `Cleared`'s
  *   `Mix`, a multiply take's record head sweeping its window (the canvas),
  *   a later take's wait as the engine's beats tell it (a count-in from stopped loops: COUNT-IN, the
- *   numeral, no head on the canvas; an arm beside a playing loop: WAITING FOR DOWNBEAT, no numeral, the
- *   amber head; a cancelled count leaving no numeral behind, a beat still to be shown included; a
+ *   numeral, numeral and boxed word inside the well and apart at 960x600 and 1600x900, no head on the canvas; an arm beside a playing loop: WAITING FOR DOWNBEAT, no numeral, the
+ *   amber head, the word in the box a pending stop's and a refusal's word sit in (padding, border, radius
+ *   and fill read from computed style); a cancelled count leaving no numeral behind, a beat still to be shown included; a
  *   cancel and a re-arm in one frame; COUNT-IN and no head from the frame the count's first beat
  *   arrives, the numeral when it is heard; a cancelled count's late beat leaving a newer numeral up; a
  *   reset frame's replayed count leaving the next arm uncounted),
@@ -437,6 +438,19 @@ await probe(async ({ open }) => {
   assert.equal(await lanes.nth(1).getAttribute('data-state'), 'armed');
   assert.match(await well(1).textContent(), /COUNT-IN/, 'a later take the engine counts in reads COUNT-IN');
   assert.equal(await count(1).textContent(), '4');
+  // The numeral and the boxed word both fit the well, apart, down to the native minimum window.
+  for (const size of [{ width: 960, height: 600 }, { width: 1600, height: 900 }]) {
+    await page.setViewportSize(size);
+    const fit = await lanes.nth(1).locator('.lp-lane__well').evaluate((w) => {
+      const r = (el) => el.getBoundingClientRect();
+      const [well, digit, box] = [r(w), r(w.querySelector('.lp-lane__count')), r(w.querySelector('.lp-lane__cue'))];
+      const inside = (b) => b.top >= well.top && b.bottom <= well.bottom && b.left >= well.left && b.right <= well.right;
+      const apart = digit.bottom <= box.top || digit.right <= box.left;
+      return { well: well.height, digit: digit.height, box: box.height, inside: inside(digit) && inside(box), apart };
+    });
+    console.log(`count-in at ${size.width}x${size.height}:`, JSON.stringify(fit));
+    assert.ok(fit.inside && fit.apart, `the count-in's numeral and word fit the well, apart, at ${size.width}x${size.height}`);
+  }
   assert.equal(await amberHeadSeen(1), false, 'no head rides the stopped loop during the count');
   for (const left of [3, 2, 1]) {
     at += BAR / 4;
@@ -459,7 +473,25 @@ await probe(async ({ open }) => {
   assert.match(await well(1).textContent(), /WAITING FOR DOWNBEAT/, 'an arm beside a playing loop waits for the boundary');
   assert.equal(await count(1).count(), 0, 'no numeral without a count');
   assert.equal(await amberHeadSeen(1), true, 'the amber head rides the loop phase while it waits');
-  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+  // Every well message sits in the one cue box: the armed wait reads as a pending stop (lane 1) and a
+  // refusal (lane 5) do, the refusal's amber border its own. The box is the element that draws the word.
+  const cueBox = (i) =>
+    well(i).evaluate((w) => {
+      const word = w.textContent.replace(/^\d+/, '').trim();
+      const el = [w, ...w.querySelectorAll('*')].reverse().find((e) => e.textContent.trim() === word);
+      const cs = getComputedStyle(el);
+      const keys = ['padding', 'borderWidth', 'borderStyle', 'borderRadius', 'backgroundColor', 'borderColor'];
+      return Object.fromEntries(keys.map((k) => [k, cs[k]]));
+    });
+  await emit({ events: [laneEvent(0, { ...committed, stopAt: at + BAR }, at), { Refused: { frame: at, lane: 4, reason: 'PlayFirst' } }] });
+  await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[4].querySelector('.lp-lane__wellmsg.is-cue'), undefined, { timeout: 3000 });
+  const [armedBox, stopBox, refusedBox] = [await cueBox(1), await cueBox(0), await cueBox(4)];
+  console.log('cue boxes (armed, stopping, refused):', JSON.stringify([armedBox, stopBox, refusedBox]));
+  assert.deepEqual(armedBox, stopBox, 'the armed wait sits in the pending stop\'s box');
+  const { borderColor: _, ...refusedShape } = refusedBox;
+  const { borderColor: __, ...armedShape } = armedBox;
+  assert.deepEqual(armedShape, refusedShape, "the armed wait sits in the refusal's box");
+  await emit({ events: [laneEvent(0, committed, at), laneEvent(1, lane('Empty'), at)] });
 
   // (c) A count cancelled mid-way, then, before any new beat, an ordinary arm beside a playing loop:
   // the cancelled count's numeral is gone, so nothing reads as counted in.

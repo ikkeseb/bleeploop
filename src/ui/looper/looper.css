@@ -88,18 +88,6 @@
 .lp-lane.is-stopping .lp-pb--play {
   border-color: var(--dub);
 }
-.lp-lane.is-stopping .lp-lane__wellmsg,
-.lp-lane .lp-lane__wellmsg.is-cue {
-  inset: 50% auto auto 50%;
-  transform: translate(-50%, -50%);
-  width: max-content;
-  max-width: calc(100% - 16px);
-  padding: 6px 10px;
-  border: 1px solid var(--edge);
-  border-radius: 6px;
-  background: var(--bg);
-  letter-spacing: 0.16em;
-}
 
 /* Keyboard/MIDI-selected lane — the edge lights warm-white so "which track will Space/Enter hit" is
    glanceable without competing with the state colour (--sc). No rail (owner, 2026-09-23). The doubled
@@ -446,29 +434,39 @@
   height: 100%;
   display: block;
 }
-/* EMPTY / ARMED message centred in the well (over the faint canvas centre line) */
+/* The well's message centred in the well (over the faint canvas centre line): the word in the cue's
+   box, one box for every message (the armed wait, the listen, a pending stop, a refusal), and the
+   count-in's numeral on its own beside it (a row: the box under the numeral overflows the 57px rung). */
 .lp-lane__wellmsg {
   position: absolute;
   inset: 0;
   z-index: 2;
   display: grid;
+  grid-auto-flow: column;
   place-items: center;
-  align-content: center; /* the count-in's numeral and word sit together at the centre */
+  place-content: center; /* the count-in's numeral and word sit together at the centre */
+  column-gap: clamp(8px, 12cqh, 16px);
   pointer-events: none;
   padding: 0 8px;
   text-align: center;
   font-size: clamp(10px, 0.9vw, 11px);
   font-weight: 500;
-  letter-spacing: 0.14em;
   color: var(--faint);
+}
+.lp-lane__cue {
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  background: var(--bg);
+  letter-spacing: 0.16em;
 }
 .lp-lane[data-state='armed'] .lp-lane__wellmsg {
   color: color-mix(in srgb, var(--dub) 70%, var(--faint));
 }
-/* the count-in numeral (first take only): big enough to read from the guitar, in the rec colour it
+/* the count-in numeral (a counted-in take): big enough to read from the guitar, in the rec colour it
    is counting toward. Its box is trimmed to the digit (cap height to baseline), so 80cqh draws a digit
-   about 58 % of the well's height at every window size and leaves the small word under it room on the
-   57px lane rung. */
+   about 58 % of the well's height at every window size. */
 .lp-lane__count {
   display: block;
   font-size: max(20px, 80cqh);
@@ -476,21 +474,22 @@
   line-height: 1;
   text-box: trim-both cap alphabetic;
   letter-spacing: -0.04em;
-  margin-bottom: clamp(3px, 6cqh, 8px);
   color: var(--rec);
   font-variant-numeric: tabular-nums;
 }
 .lp-lane[data-state='listening'] .lp-lane__wellmsg {
   color: color-mix(in srgb, var(--cyan) 70%, var(--faint));
 }
-/* A refused transport key (gates.ts refuseOnLane): its reason sits in the well in the ENDING note's
-   box, amber like the armed CLR, and the lane edge turns amber until the cue times out. The sighted
-   twin of the screen-reader announcement; after the state rules above so it wins on any lane. */
+/* A refused transport key (gates.ts refuseOnLane): its reason sits in the cue's box, amber like the
+   armed CLR, and the lane edge turns amber until the cue times out. The sighted twin of the
+   screen-reader announcement; after the state rules above so it wins on any lane. */
 .lp-lane .lp-lane__wellmsg.is-cue {
-  border-color: var(--dub);
   color: var(--dub);
   text-transform: uppercase;
   animation: lp-cue-in 0.16s ease-out;
+}
+.lp-lane__wellmsg.is-cue .lp-lane__cue {
+  border-color: var(--dub);
 }
 .lp-lane.is-cued.is-cued {
   border-color: var(--dub);

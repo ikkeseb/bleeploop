@@ -464,7 +464,7 @@ function TrackLane(props: {
                 {wellCount()}
               </span>
             </Show>
-            {wellMsg()}
+            <span class="lp-lane__cue">{wellMsg()}</span>
           </div>
         </Show>
       </div>
