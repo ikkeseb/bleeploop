@@ -21,6 +21,8 @@
  *   repeat is not the second press), and a held Tab still moves on past them; a fresh Enter after the
  *   release sends one more (✕ ALL's clear, CLR's confirming CLEAR);
  * - Enter on a Tab-focused lane core sends `SelectTrack` before its `RecDub`, as a pointer press does;
+ * - a mouse press on an EMPTY lane core leaves it untransformed on hover and 300 ms after a release over it
+ *   or off it, with no focus ring; a Tab onto it draws the ring;
  * - a select the pointer opened (the slot's input, the FX drawer's division) gives the keys back however
  *   its list closed (a new value, the same value, dismissed): Space and ArrowDown send REC/DUB and NEXT
  *   TRACK and leave the value alone, and a letter is no type-ahead in it; so does one a click on its
@@ -251,6 +253,46 @@ await probe(async ({ open }) => {
   const coreSent = await sent();
   console.log('sent after Enter on the Track 2 core', JSON.stringify(coreSent));
   assert.deepEqual(coreSent, [{ SelectTrack: 1 }, { RecDub: 1 }], 'a keyboard-activated core did not select its lane, then REC/DUB');
+
+  // 6b. A mouse press on an EMPTY lane core is a hardware button's: no size change on hover or after the
+  //     release (a scale() on that face drew seams through its centre while it animated), and no focus
+  //     ring after a release over the core or off it; a Tab onto the core draws the ring.
+  const emptyCore = page.locator('.lp-lane').nth(4).locator('.lp-core');
+  assert.equal(await page.locator('.lp-lane').nth(4).getAttribute('data-state'), 'empty', 'lane 5 is not EMPTY');
+  const coreLook = () => emptyCore.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { transform: cs.transform, outline: `${cs.outlineStyle} ${cs.outlineWidth}` };
+  });
+  const flat = (t) => t === 'none' || t === 'matrix(1, 0, 0, 1, 0, 0)';
+  const noRing = (o) => o.startsWith('none') || o.endsWith(' 0px');
+  await page.evaluate(() => document.activeElement?.blur());
+  const coreBox = await emptyCore.boundingBox();
+  const cx = coreBox.x + coreBox.width / 2;
+  const cy = coreBox.y + coreBox.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.waitForTimeout(300);
+  const hovered = await coreLook();
+  for (const offCore of [false, true]) {
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.waitForTimeout(150);
+    if (offCore) await page.mouse.move(cx + coreBox.width * 3, cy);
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    const released = await coreLook();
+    console.log(`lane 5 core: hovered ${JSON.stringify(hovered)}; 300 ms after a release ${offCore ? 'off' : 'over'} it ${JSON.stringify(released)}`);
+    assert.ok(flat(hovered.transform), `a hovered core is transformed: ${hovered.transform}`);
+    assert.ok(flat(released.transform), `the core is still transformed 300 ms after a release ${offCore ? 'off' : 'over'} it: ${released.transform}`);
+    assert.ok(noRing(released.outline), `the core draws a focus ring after a mouse release ${offCore ? 'off' : 'over'} it: ${released.outline}`);
+  }
+  await emptyCore.focus();
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Tab');
+  const tabbed = await coreLook();
+  console.log('lane 5 core after Tab', JSON.stringify(tabbed));
+  assert.ok(await emptyCore.evaluate((el) => document.activeElement === el), 'Tab did not land back on the lane 5 core');
+  assert.ok(!noRing(tabbed.outline), `a Tab-focused core draws no focus ring: ${tabbed.outline}`);
+  await page.evaluate(() => document.activeElement?.blur());
 
   // 7. A select the pointer opened gives the keys back however its list closed: Space and ArrowDown reach
   //    the looper and leave the value alone. The slot's input select (slot 1 Off, on a four-input device),

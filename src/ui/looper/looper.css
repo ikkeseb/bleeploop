@@ -59,7 +59,7 @@
   overflow: hidden;
   --sc: var(--faint);
   /* no transition here, on the core's face or on its ring: a state colour lands on the frame the feed
-     switches it, like a hardware REC LED. Only the core's hover eases. */
+     switches it, like a hardware REC LED. Only the core's hover rim eases. */
 }
 .lp-lane[data-state='play'] { --sc: var(--play); }
 .lp-lane[data-state='rec'] { --sc: var(--rec); }
@@ -242,19 +242,20 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px var(--sunk), 0 0 0 4px var(--edge);
   position: relative;
   cursor: pointer;
-  transition: border-color 0.15s, transform 0.12s; /* the hover; box-shadow is state colour */
+  transition: border-color 0.15s; /* the hover's rim; box-shadow is state colour */
 }
+/* A hardware REC button: hover lifts the rim's tone, a press darkens the face and sinks the glyph, and
+   the release is instant. No transform on the core itself: a scale() on this rounded gradient face with
+   its shadows rasterises with hairline seams through the centre while it animates (the owner saw them
+   on hover and release). The pointer-press probe (verify/probes/transport-focus.mjs) holds this. */
 .lp-core:hover:not(:disabled) {
   border-color: var(--dim);
-  transform: scale(1.03);
-}
-@media (prefers-reduced-motion: reduce) {
-  .lp-core:hover:not(:disabled) {
-    transform: none;
-  }
 }
 .lp-core:active:not(:disabled) {
-  transform: translateY(1px) scale(0.99);
+  filter: brightness(0.8);
+}
+.lp-core:active:not(:disabled) svg {
+  transform: translateY(1px);
 }
 .lp-core:focus-visible {
   outline-offset: 3px;
