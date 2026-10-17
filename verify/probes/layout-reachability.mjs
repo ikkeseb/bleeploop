@@ -415,7 +415,7 @@ await probe(async ({ open }) => {
     await boot(page, ['Stopped', 'Stopped', 'Stopped', 'Stopped', 'Stopped']);
     await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
     await page.getByRole('button', { name: 'Filter, track 1', exact: true }).click();
-    await page.locator('.lp-drawer .fxp-mod--on .fxp-param').first().waitFor();
+    await page.locator('.lp-drawer .fxp-params .fxp-param').first().waitFor();
     await page.evaluate(() => {
       document.activeElement?.blur();
       const stack = document.querySelector('.lp__lanes');

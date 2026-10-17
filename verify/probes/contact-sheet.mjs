@@ -4,7 +4,8 @@
  * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11, 12 and 14 run in one fresh browser
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
- * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help (Help's
+ * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 5b-fx-all-on (the
+ * same with lane 1 playing and all five of its FX engaged), 6-help (Help's
  * reference, as `?` opens it), 6-help-manual (its Manual tab, About included),
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
  * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 14-modes-on (a reset frame
@@ -28,7 +29,10 @@
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
- * 1000x700 minimum with the keyboard shown included (audit A4; the drawer is one key row); Help opens on its
+ * 1000x700 minimum with the keyboard shown included (audit A4; the drawer is one key row); with all five of
+ * lane 1's FX engaged the drawer stays under 110 px (the params share one row), every param's range is at
+ * least 60 px wide and the five lanes lie wholly inside the unscrolled lane stack, lanes 1-4 at 1000x700
+ * with the keyboard shown (walk a12); Help opens on its
  * reference, which fits unscrolled at every size, and its Manual tab shows the manual with About this
  * build at the reference's height (Help never resizes on a tab switch) with the tabs in reach when the
  * Manual is scrolled to its foot, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
@@ -44,7 +48,7 @@ import { probe } from '../harness/probe.ts';
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
-const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
+const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
   '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13b-jam-edit', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
@@ -223,6 +227,41 @@ await probe(async ({ browser, open }) => {
         if (c.missing) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is missing`);
         else if (c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
       }
+
+      // Lane 1 playing with all five of its FX engaged: their params share ONE row under the keys (walk
+      // a12: each FX once stacked its params under its key, a 176 px drawer at 1000x700 that left lane 4 a
+      // sliver and lane 5 out of view). The drawer stays under 110 px, every param's range at least 60 px
+      // wide, and the five lanes lie wholly inside the unscrolled lane stack; at 1000x700 with the
+      // keyboard shown the 57 px lane floor leaves room for a drawer of about 70 px, so lane 5 still
+      // scrolls there and lanes 1-4 must show.
+      scene = '5b-fx-all-on';
+      await emit(loopFrame({ count: 5, playing: [0] }));
+      const fxKeys = ['Filter', 'Pitch', 'Stutter', 'Delay', 'Reverb'].map((fx) => page.getByRole('button', { name: `${fx}, track 1`, exact: true }));
+      for (const key of fxKeys) await key.click();
+      await page.waitForFunction(() => document.querySelectorAll('.lp-drawer .fxp-param').length >= 9);
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      const allFx = await page.evaluate(() => {
+        const stack = document.querySelector('.lp__lanes'), s = stack.getBoundingClientRect();
+        const box = (r) => [Math.round(r.top - s.top), Math.round(r.bottom - s.top)];
+        return {
+          scrollTop: stack.scrollTop,
+          stack: Math.round(s.height),
+          drawer: Math.round(document.querySelector('.lp-drawer').getBoundingClientRect().height * 10) / 10,
+          inside: [...document.querySelectorAll('.lp-lane')].map((l) => { const r = l.getBoundingClientRect(); return r.top >= s.top - 0.5 && r.bottom <= s.bottom + 0.5; }),
+          lanes: [...document.querySelectorAll('.lp-lane')].map((l) => box(l.getBoundingClientRect())),
+          ranges: [...document.querySelectorAll('.lp-drawer .fxp-param__range')].map((r) => [r.getAttribute('aria-label'), Math.round(r.getBoundingClientRect().width)]),
+        };
+      });
+      console.log(JSON.stringify({ tag, scene, ...allFx }));
+      if (!(allFx.drawer < 110)) fail(`${tag} ${scene}: the drawer with all five FX engaged is ${allFx.drawer} px tall (under 110 px: one params row)`);
+      for (const [name, w] of allFx.ranges) if (!(w >= 60)) fail(`${tag} ${scene}: ${name} is ${w} px wide (at least 60 px)`);
+      const mustShow = tag === '1000x700-bottom' ? 4 : 5;
+      const hidden = allFx.inside.slice(0, mustShow).flatMap((ok, i) => (ok ? [] : [i + 1]));
+      if (allFx.scrollTop !== 0 || hidden.length) fail(`${tag} ${scene}: lane ${hidden.join(', ') || '(none)'} not wholly inside the lane stack (scrollTop ${allFx.scrollTop}; lanes ${JSON.stringify(allFx.lanes)} in ${allFx.stack} px)`);
+      for (const key of fxKeys) await key.click();
+      await page.waitForFunction(() => !document.querySelector('.lp-drawer .fxp-params'));
+      await emit(loopFrame({ count: 5, playing: [] }));
       await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
 
       // Help opens on its reference; its manual (and About) is a tab away. Each logs how far it scrolls

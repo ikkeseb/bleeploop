@@ -6,8 +6,10 @@ import { mixDisposal, mixGesture } from './mix-gesture';
 import './fxpanel.css';
 
 /**
- * Per-track FX panel. Renders the five FX (fixed chain order) for one track: each is a bypass
- * toggle plus its params (sliders for continuous params, a select for tempo-synced divisions).
+ * Per-track FX panel, two rows. The keys: the five FX (fixed chain order) as bypass toggles, then DUB
+ * FEEDBACK. Under them, while any FX is engaged, ONE row of every engaged FX's params (sliders for
+ * continuous params, a select for tempo-synced divisions), each FX's group led by a tag naming it, so
+ * engaging all five grows the drawer by one row, not by the tallest FX's stack.
  * All edits go through the looper's setFx* API, which sends them to the engine; each control shows its
  * gesture's value until the engine's `Mix` has it (`mix-gesture.ts`), and builds on what it shows. No
  * audio runs here.
@@ -116,38 +118,45 @@ function DubFeedback(props: { index: number }) {
 }
 
 export function FxPanel(props: { index: number }) {
+  // A bypass press is a whole gesture: it toggles what the key shows.
+  const engaged = (fxI: number) => !looper.fxBypassShown(props.index, fxI);
   return (
     <div class="fxp">
-      <For each={FX_META}>
-        {(meta, fxI) => {
-          // A bypass press is a whole gesture: it toggles what the key shows.
-          const bypassed = () => looper.fxBypassShown(props.index, fxI());
-          mixDisposal(props.index, `fx${fxI()}`);
-          return (
-            <div class="fxp-mod" classList={{ 'fxp-mod--on': !bypassed() }}>
+      <div class="fxp-keys">
+        <For each={FX_META}>
+          {(meta, fxI) => {
+            mixDisposal(props.index, `fx${fxI()}`);
+            return (
               <button
                 class="fxp-mod__toggle"
-                classList={{ 'fxp-mod__toggle--on': !bypassed() }}
-                onClick={() => looper.setFxBypass(props.index, fxI(), !bypassed())}
-                aria-pressed={!bypassed()}
+                classList={{ 'fxp-mod__toggle--on': engaged(fxI()) }}
+                onClick={() => looper.setFxBypass(props.index, fxI(), engaged(fxI()))}
+                aria-pressed={engaged(fxI())}
                 aria-label={`${meta.label}, track ${props.index + 1}`}
               >
                 {meta.label}
               </button>
-              <Show when={!bypassed()}>
-                <div class="fxp-mod__params">
+            );
+          }}
+        </For>
+        <DubFeedback index={props.index} />
+      </div>
+      <Show when={FX_META.some((_, fxI) => engaged(fxI))}>
+        <div class="fxp-params">
+          <For each={FX_META}>
+            {(meta, fxI) => (
+              <Show when={engaged(fxI())}>
+                <div class="fxp-group" style={{ '--params': FX_PARAM_DEFS[meta.kind].length }}>
+                  <span class="fxp-group__tag">{meta.label}</span>
                   <For each={FX_PARAM_DEFS[meta.kind]}>
-                    {(def) => (
-                      <ParamControl index={props.index} fxIndex={fxI()} fx={meta.label} def={def} />
-                    )}
+                    {(def) => <ParamControl index={props.index} fxIndex={fxI()} fx={meta.label} def={def} />}
                   </For>
                 </div>
               </Show>
-            </div>
-          );
-        }}
-      </For>
-      <DubFeedback index={props.index} />
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   );
 }
