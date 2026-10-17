@@ -1,6 +1,7 @@
 import { createSignal } from 'solid-js';
 import { notifyError, notifyNote } from '../notify';
 import { platform, type AppUpdate, type UpdateProgress } from '../platform';
+import { confirm } from '../ui/confirm/confirm-store';
 import { rigRecallOnClose } from '../ui/state/rig-recall';
 import { jamInProgress, saveForQuit } from './close-guard';
 
@@ -75,9 +76,12 @@ export async function installUpdate(): Promise<void> {
   if (!update || installing()) return;
   if (
     jamInProgress() &&
-    !window.confirm(
-      `Update to v${update.version} now? BleepLoop closes, installs it and opens again. The latest committed loops will be saved locally. Audio still being recorded is not included.`,
-    )
+    !(await confirm({
+      title: 'Update during a jam',
+      body: `Update to v${update.version} now? BleepLoop closes, installs it and opens again. The latest committed loops will be saved locally. Audio still being recorded is not included.`,
+      yes: 'Update',
+      no: 'Cancel',
+    }))
   ) {
     return;
   }

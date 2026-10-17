@@ -12,6 +12,7 @@ import { Help } from './ui/settings/Help';
 import { UpdatePanel } from './ui/settings/UpdatePanel';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
+import { Confirm } from './ui/confirm/Confirm';
 import { StageView } from './ui/stage/StageView';
 import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import * as layoutStore from './ui/layout/layout-store';
@@ -539,6 +540,7 @@ export function App() {
           reach only console.error (invisible in a release WebView2 build). Rendered once, above the
           popovers; pointer-transparent so the play path stays live behind it. */}
       <Toasts />
+      <Confirm />
 
       {/* The stage view: a full-window layer over the command bar and the stage below, which stay mounted
           (no pane remounts, the looper keeps drawing) but go inert and unpainted while it is open. */}

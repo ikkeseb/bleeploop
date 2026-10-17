@@ -246,8 +246,11 @@ await probe(async ({ open }) => {
       throw new Error('injected: the recovery save failed');
     };
   });
-  page.once('dialog', (d) => void d.accept());
-  const kept = await pickDriver('RME at 44.1 kHz');
+  const switching = pickDriver('RME at 44.1 kHz');
+  // The app's own ask (`src/ui/confirm/`): yes.
+  const ask = page.getByRole('alertdialog', { name: 'Sample rate change', exact: true });
+  await ask.getByRole('button', { name: 'Switch', exact: true }).click({ timeout: 5000 });
+  const kept = await switching;
   console.log('save failed', JSON.stringify(kept));
   const back = kept.indexOf('switch:Yamaha Steinberg USB ASIO');
   assert.ok(back > kept.indexOf('switch:RME at 44.1 kHz'), 'the store switches back to the driver that ran');
