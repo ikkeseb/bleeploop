@@ -1,5 +1,5 @@
 import { createSignal } from 'solid-js';
-import { notifyError, notifyInfo } from '../notify';
+import { notifyError, notifyNote } from '../notify';
 import { platform, type AppUpdate, type UpdateProgress } from '../platform';
 import { rigRecallOnClose } from '../ui/state/rig-recall';
 import { jamInProgress, saveForQuit } from './close-guard';
@@ -31,7 +31,7 @@ export async function checkForUpdate(): Promise<void> {
   }
   if (!update) return;
   setOffered(update);
-  notifyInfo(`BleepLoop v${update.version} is ready: press UPDATE in the command bar`);
+  notifyNote(`BleepLoop v${update.version} is ready: press UPDATE in the command bar`);
 }
 
 /** The release notes as the update panel lists them: one line per bullet, the markdown emphasis dropped. */

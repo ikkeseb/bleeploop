@@ -3,7 +3,7 @@ import { dismissToast, toasts } from '../../notify';
 import './toasts.css';
 
 /**
- * The single error-toast surface. Renders `notify.ts`'s toast signal as a fixed
+ * The single toast surface (error, info, note). Renders `notify.ts`'s toast signal as a fixed
  * bottom-right stack above all app chrome, so a failure that would otherwise reach only `console.error`
  * (invisible in a release WebView2 build) is actually seen. Mounted once in `App` next to the popovers.
  *
@@ -11,6 +11,9 @@ import './toasts.css';
  * `aria-live` status; the whole body is a pointer dismiss shortcut, with a real close `<button>` for
  * keyboard users, and a toast that carries an action shows it as a button before the close. Auto-dismiss + dedupe live in the store, not here.
  */
+/** What a screen reader hears before the message: the kind the rule's colour and glyph show. */
+const SPOKEN_KIND = { error: 'Error', info: 'Done', note: 'Note' } as const;
+
 export function Toasts() {
   return (
     // ONE persistent live region (role="log": implicit polite live semantics + it legitimizes the
@@ -22,14 +25,14 @@ export function Toasts() {
         {(t) => (
           <div
             class="toast"
-            classList={{ 'toast--info': t.kind === 'info' }}
+            classList={{ 'toast--info': t.kind === 'info', 'toast--note': t.kind === 'note' }}
             data-toast-id={t.id}
             onClick={() => dismissToast(t.id)}
             title="Dismiss"
           >
             <span class="toast__accent" aria-hidden="true" />
             <div class="toast__body">
-              <span class="lf-visually-hidden">{t.kind === 'info' ? 'Done' : 'Error'}</span>
+              <span class="lf-visually-hidden">{SPOKEN_KIND[t.kind]}</span>
               <span class="toast__msg">
                 {t.message}
                 <Show when={t.count > 1}>
