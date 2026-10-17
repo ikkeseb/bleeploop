@@ -37,8 +37,8 @@ const ITEMS: readonly Item[] = [
     glyph: '⧉',
     word: 'COPY',
     hint: 'to the first empty track',
-    label: (t) => `Copy track ${t} to the first empty lane`,
-    title: 'Copy this lane to the first empty lane',
+    label: (t) => `Copy track ${t} to the first empty track`,
+    title: 'Copy this track to the first empty track',
     gate: copyGate,
     run: (i) => looper.copy(i),
   },
@@ -46,7 +46,7 @@ const ITEMS: readonly Item[] = [
     glyph: '↔',
     word: 'WIDE',
     hint: 'a copy 20 ms behind, the other side',
-    label: (t) => `Copy track ${t} wide to the first empty lane`,
+    label: (t) => `Copy track ${t} wide to the first empty track`,
     title: 'Copy wide: the copy plays 20 ms behind, panned to the other side',
     gate: copyGate,
     run: (i) => looper.copyWide(i),
@@ -105,7 +105,7 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
         aria-haspopup="dialog"
         aria-expanded={view() !== null}
         aria-controls={id}
-        title={why(gate()) ?? 'Copy, copy wide or trim this lane'}
+        title={why(gate()) ?? 'Copy, copy wide or trim this track'}
         onClick={() => setView((v) => (v === null ? 'menu' : null))}
       >
         EDIT

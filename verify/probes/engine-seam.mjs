@@ -218,13 +218,13 @@ await probe(async ({ open }) => {
   };
   const pillSent = async () => (await sentAtLeast(1)).filter((c) => c.SelectTrack === undefined);
   await clearSent();
-  const wide = await editOf('Copy track 1 wide to the first empty lane');
+  const wide = await editOf('Copy track 1 wide to the first empty track');
   assert.equal((await wide.locator('.edit__word').textContent()).trim(), '↔WIDE');
   await wide.click();
   assert.deepEqual(await pillSent(), [{ CopyWide: 0 }], '↔ WIDE sends CopyWide');
   await menu.waitFor({ state: 'detached' });
   await clearSent();
-  await (await editOf('Copy track 1 to the first empty lane')).click();
+  await (await editOf('Copy track 1 to the first empty track')).click();
   assert.deepEqual(await pillSent(), [{ Copy: 0 }], '⧉ COPY sends Copy');
   await menu.waitFor({ state: 'detached' });
   await clearSent();
