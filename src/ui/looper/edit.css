@@ -1,6 +1,6 @@
 /* The lane's EDIT pill and its popover — "Instrument". The pill wears the select caret (--caret-svg as a
    mask, so it takes the legend's colour in every state) and turns it over while open. The popover hangs
-   under the pill (anchor positioning, as IN FX's hangs from its pill: input-fx.css); only the open lane's
+   under the pill (anchor positioning; the bar's popovers hang under the bar instead: bar-popover.css); only the open lane's
    pill carries the anchor name, so one name serves five lanes. The floating panel tone and a hairline
    of top light; chrome stays monochrome. */
 .lp-pb--edit {

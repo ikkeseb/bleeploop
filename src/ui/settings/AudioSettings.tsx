@@ -840,7 +840,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
                     ? '1 plugin found but not supported'
                     : `${pluginFolders().unsupported.length} plugins found but not supported`}
                 </div>
-                <ul class="audio-settings__unsupported-list">
+                <ul class="audio-settings__unsupported-list" tabindex={0} aria-label="Plugins found but not supported">
                   <For each={pluginFolders().unsupported}>
                     {(plugin) => (
                       <li class="audio-settings__unsupported-item" title={`${plugin.path}: ${plugin.reason}`}>
