@@ -5,8 +5,9 @@
  *
  * - access and canvas identity: with a stopped one-bar loop on the feed, every control and source label
  *   is reachable, and a lane's canvas survives a keyboard-placement/FX-drawer change (never remounts),
- *   across five keyboard placement/FX-drawer combinations; then the drum-pad ribbon, the two-row
- *   command-bar cap and the muted-lane readout with the loop present;
+ *   across five keyboard placement/FX-drawer combinations; then the drum-pad ribbon (each pad's label on
+ *   one line inside its pad, in one scheme: words or a one-letter prefix, never bare initials), the
+ *   two-row command-bar cap and the muted-lane readout with the loop present;
  * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
  *   bars, RETAKE, AUTO REC, END STOP), from 960 to 1920 px wide (1105: just above the narrow rung): two
  *   rows at most, every control inside the bar and under its own centre point;
@@ -174,14 +175,26 @@ await probe(async ({ open }) => {
       const rows = new Set([...bar.children].filter(el => !el.classList.contains('cmd__sr')).map(el => el.getBoundingClientRect())
         .filter(r => r.width > 0 && r.height > 0).map(r => Math.round((r.top + r.bottom) / 2 / 14))).size;
       const pads = [...document.querySelectorAll('.kb__pad')].map(el => el.getBoundingClientRect());
+      // Each pad's label on one line inside its pad.
+      const labels = [...document.querySelectorAll('.kb__pad')].map((pad) => {
+        // The text's own boxes (a range), one per line, not the label's block.
+        const label = pad.querySelector('.kb__pad-label');
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        const p = pad.getBoundingClientRect(), lines = range.getClientRects(), r = range.getBoundingClientRect();
+        const fits = lines.length === 1 && r.left >= p.left + 1 && r.right <= p.right - 1;
+        return { text: label.textContent.trim(), fits };
+      });
       const lane = document.querySelector('.lp-lane');
-      return { padCount: pads.length, padsOffscreen: pads.filter(r => r.bottom > innerHeight + 0.5 || r.top < 0).length,
+      return { padCount: pads.length, padLabels: labels.map(l => l.text), labelsUnfit: labels.filter(l => !l.fits).map(l => l.text), padsOffscreen: pads.filter(r => r.bottom > innerHeight + 0.5 || r.top < 0).length,
         cmdHeight: bar.getBoundingClientRect().height, cmdRows: rows,
         mutedAttr: lane.getAttribute('data-muted'), mutedWord: lane.querySelector('.lp-lane__state').textContent.trim() };
     });
     await page.evaluate(() => { window.__lf.looper.setMute(0, false); window.__lf.selectSynth(0, 'lead'); });
     const drumName = `${label}-${width}x${height}-drums-muted`;
-    const drumOk = drums.padCount === 16 && drums.padsOffscreen === 0 && drums.cmdRows <= 2 && drums.mutedAttr === 'true' && drums.mutedWord === 'MUTED';
+    // One label scheme: words, a variant as a one-letter prefix (C-Hat, E-Snr), never bare initials (CH).
+    drums.labelsOffScheme = drums.padLabels.filter(t => !/^(?:[A-Z]-)?[A-Z][a-z]+(?: (?:[A-Z][a-z]+|\d))?$/.test(t));
+    const drumOk = drums.padCount === 16 && drums.padsOffscreen === 0 && drums.labelsUnfit.length === 0 && drums.labelsOffScheme.length === 0 && drums.cmdRows <= 2 && drums.mutedAttr === 'true' && drums.mutedWord === 'MUTED';
     if (!drumOk) failures.push(drumName);
     results.push({ name: drumName, ...drums });
     console.log(JSON.stringify({ name: drumName, ...drums, ok: drumOk }));

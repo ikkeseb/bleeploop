@@ -7,7 +7,7 @@ import type { Refusal } from '../../platform';
  * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
  * One predicate per control the UI disables and titles (the lane core, ▶/■, ↺ REV, ↶ UNDO and EDIT's
  * COPY, WIDE and TRIM; the command bar's TAP, FADE, FIXED, RETAKE and AUTO REC), returning WHY a press is refused, so the control's disabled
- * state, its title and its ARIA label speak the vocabulary a refused key or pedal press speaks. The engine
+ * state and its title speak the vocabulary a refused key or pedal press speaks. The engine
  * keeps its own self-protection; these mirror it for the UI, they do not replace it. A hands-free press is
  * gated by the engine, which names its reason by the same vocabulary (`refusalText`, `lf_engine::Refusal::text`);
  * TAP, which the UI owns, is gated here (`src/app/actions.ts`).
@@ -17,9 +17,15 @@ import type { Refusal } from '../../platform';
  */
 export type Gate = { ok: true } | { ok: false; reason: string };
 
-/** A gate's refusal for a control's title, or undefined when it lets the press through. */
+/** `text` as a title or tooltip reads: its first letter capitalised. The vocabulary below stays lowercase,
+ * since an announcement and a lane cue carry it after a track ("Track 1: nothing to play, record first"). */
+export function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** A gate's refusal for a control's title, in sentence case, or undefined when it lets the press through. */
 export function why(g: Gate): string | undefined {
-  return g.ok ? undefined : g.reason;
+  return g.ok ? undefined : sentence(g.reason);
 }
 
 /** Shared frozen results, one object per outcome, so a per-lane memo over a gate sees an unchanged
@@ -27,7 +33,8 @@ export function why(g: Gate): string | undefined {
 const OK: Gate = Object.freeze({ ok: true });
 const refuse = (reason: string) => Object.freeze({ ok: false as const, reason });
 
-/** The refusal vocabulary: short phrases a title, an aria-label and an announcement can all carry. */
+/** The refusal vocabulary: short phrases a title (through `why`), an announcement and a lane cue all carry.
+ * A control's aria-label names its action and never a reason: the title, its description, says why. */
 const REFUSAL = {
   stopping: refuse('stopping at loop end, wait or stop now'),
   playFirst: refuse('play first to overdub'),

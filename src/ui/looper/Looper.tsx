@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, 
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
 import { registerLane, setGridBeats, unregisterLane } from './waveform';
 import { masterBars, noEnterRepeat, volumeDb } from './shared';
-import { announceLooper, liveMsg, playStopGate, recDubGate, reverseGate, undoGate, why } from './gates';
+import { announceLooper, liveMsg, playStopGate, recDubGate, reverseGate, sentence, undoGate, why } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
 import { mixGesture } from './mix-gesture';
@@ -318,7 +318,7 @@ function TrackLane(props: {
         return 'cancel auto record';
       case 'RECORDING':
         return 'stop recording';
-      // STOPPED never speaks from here: recDubGate always refuses it, so recDubLabel says the reason.
+      // STOPPED: recDubGate always refuses it, so the core's title says why.
       case 'PLAYING':
       case 'STOPPED':
         return 'overdub';
@@ -329,18 +329,11 @@ function TrackLane(props: {
   // The refusal gates (gates.ts) own every "why not": STOPPED (decision a — play it first), reverse
   // (M-4), a pending loop-end stop, and another lane capturing (except an EMPTY lane during a rolling
   // RETAKE). Memoized per lane so the five-lane scans run once per state change.
+  // A control's aria-label names its action; a refusal goes in its title (its description), as on ↺ REV.
   const recGate = createMemo(() => recDubGate(props.index));
-  const recDubLabel = () => {
-    const g = recGate();
-    return g.ok ? recDubAria() : g.reason;
-  };
   const playGate = createMemo(() => playStopGate(props.index));
   const playStopGlyph = () => (state() === 'STOPPED' || state() === 'EMPTY' ? '▶' : '■');
   const playStopAction = () => (stopping() ? 'stop now' : playStopGlyph() === '▶' ? 'play' : 'stop');
-  const playStopLabel = () => {
-    const g = playGate();
-    return g.ok ? playStopAction() : g.reason;
-  };
 
   // Two-step clear: a take is irreversible, so the first press only ARMS ("SURE?") for a short window;
   // a second press within it actually clears. No blocking window.confirm, which keeps the workflow fast.
@@ -421,8 +414,8 @@ function TrackLane(props: {
             if (e.detail === 0) looper.selectTrack(props.index);
             void looper.recDub(props.index);
           }}
-          aria-label={`Track ${props.index + 1} ${recDubLabel()}`}
-          title={recDubLabel()}
+          aria-label={`Track ${props.index + 1} ${recDubAria()}`}
+          title={why(recGate()) ?? sentence(recDubAria())}
         >
           {coreGlyph()}
         </button>
@@ -432,15 +425,13 @@ function TrackLane(props: {
             class="lp-pb lp-pb--play"
             disabled={!playGate().ok}
             onClick={() => looper.playStop(props.index)}
-            aria-label={`Track ${props.index + 1} ${playStopLabel()}`}
+            aria-label={`Track ${props.index + 1} ${playStopAction()}`}
             title={
               fading()
                 ? 'Fading out. Press to stop now.'
                 : stopping()
                   ? 'Stopping at loop end. Press again to stop now.'
-                  : playGate().ok
-                    ? undefined
-                    : playStopLabel()
+                  : why(playGate())
             }
           >
             {playStopGlyph()} {stopping() ? 'NOW' : playStopGlyph() === '▶' ? 'PLAY' : 'STOP'}

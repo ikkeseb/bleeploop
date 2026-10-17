@@ -10,8 +10,8 @@
  *   stepper starts at half the loop's bars, steps inside 1..bars−1, sends `Trim` with the chosen bars and
  *   closes; Escape closes it and hands focus back to EDIT, an outside click closes it, neither sends. TRIM
  *   pressed by key hands focus back to EDIT too, and the open stepper's TRIM is disabled while the lane
- *   stops. The menu is reachable by key (EDIT, then Tab to its edits). An engine refusal lands on its
- *   lane. ↶ UNDO names the trim.
+ *   stops. The menu is reachable by key (EDIT, then Tab to its edits); COPY says "track" in its line,
+ *   hover and name. An engine refusal lands on its lane. ↶ UNDO names the trim.
  * - COPY or WIDE focused in the open menu when the last empty lane fills (its own press by key, or a pedal's
  *   copy on the feed): the menu closes and the focus is on the lane's EDIT, never dropped to the page.
  * - The lane's pill row is five fixed columns (FX, MUTE, ↺ REV, ↶ UNDO, EDIT) whose legends fit their pills
@@ -146,7 +146,11 @@ await probe(async ({ open }) => {
     tabbed.push(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')));
   }
   console.log('Tab through the EDIT menu', JSON.stringify(tabbed));
-  assert.deepEqual(tabbed, ['Copy track 1 to the first empty lane', 'Copy track 1 wide to the first empty lane', 'Trim track 1'], 'every edit is reachable by key');
+  assert.deepEqual(tabbed, ['Copy track 1 to the first empty track', 'Copy track 1 wide to the first empty track', 'Trim track 1'], 'every edit is reachable by key');
+  // COPY's line, its hover and its name say "track", as the lanes do on screen (Track 1, Selected track).
+  const copyWords = await menu(0).locator('.edit__item').first().evaluate((el) => ({ hint: el.querySelector('.edit__hint').textContent.trim(), title: el.title }));
+  console.log('COPY words', JSON.stringify(copyWords));
+  assert.deepEqual(copyWords, { hint: 'to the first empty track', title: 'Copy this track to the first empty track' }, 'COPY says track, never lane');
   await page.screenshot({ path: `${outDir}/edit-menu.png` });
   await page.keyboard.press('Escape');
   await menu(0).waitFor({ state: 'detached' });
@@ -227,7 +231,7 @@ await probe(async ({ open }) => {
   // holds its column, disabled, on a lane with nothing to undo.
   const undo4 = lanes.nth(3).getByRole('button', { name: 'Track 4 undo or redo the last overdub or trim', exact: true });
   assert.ok(await undo4.isDisabled(), 'nothing to undo: UNDO is disabled, not absent');
-  assert.equal(await undo4.getAttribute('title'), 'nothing to undo, overdub first');
+  assert.equal(await undo4.getAttribute('title'), 'Nothing to undo, overdub first');
   for (const [width, height] of [[1600, 900], [1000, 700]]) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(100);
@@ -321,7 +325,7 @@ await probe(async ({ open }) => {
       return { label: el?.getAttribute('aria-label') ?? el?.tagName, lane: [...document.querySelectorAll('.lp-lane')].findIndex((l) => l.contains(el)) };
     });
   const lastFree = (on) => [transport(8 * BAR), ...[0, 1, 2, 3].map((i) => laneEvent(i, committed('Playing', 8))), laneEvent(4, on ? committed('Playing', 8) : lane('Empty'))];
-  for (const [word, sends] of [['Copy track 1 to the first empty lane', { Copy: 0 }], ['Copy track 1 wide to the first empty lane', { CopyWide: 0 }]]) {
+  for (const [word, sends] of [['Copy track 1 to the first empty track', { Copy: 0 }], ['Copy track 1 wide to the first empty track', { CopyWide: 0 }]]) {
     for (const how of ['pressed', 'a pedal']) {
       await emit({ events: lastFree(false) });
       await lanes.nth(0).getByRole('button', { name: 'Track 1 mute', exact: true }).focus();

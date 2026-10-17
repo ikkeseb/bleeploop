@@ -9,8 +9,9 @@
  *   (the key stays); the import's answer is told once: a toast for the bindings that wait for a port
  *   picked here, one for those it could not read (with its release-log line); a launch that cannot read
  *   the key logs it and hands nothing over (an empty list would mark the import done for good); each toast's
- *   action (a button the keyboard reaches) and Help's MIDI LEARN link open Audio Settings on MIDI PEDALS
- *   with focus in the panel, the toast gone and Help closed;
+ *   action (a button the keyboard reaches) and Help's MIDI PEDALS link open Audio Settings on MIDI PEDALS
+ *   with focus in the panel, the toast gone and Help closed; every Help link into Audio Settings names
+ *   the way as the rail names the page (Audio Settings → <the rail's page>);
  * - LEARN waits for an open port and says why in its title (no input open, or the input held by another
  *   program); a pick (a lane action on a named track, a global one without a track) and LEARN call
  *   `learn(action, target)` and show LISTENING at once; Esc ends LISTENING in the same task (before native
@@ -93,13 +94,24 @@ await probe(async ({ open }) => {
     const fromToast = await shown();
     console.log('toast action', JSON.stringify(fromToast));
     assert.deepEqual(fromToast, { open: true, page: 'lf-settings-tab-midi', inPanel: true, help: false, toasts: 1 }, "a toast's action opens the MIDI page, and the toast goes");
-    // Help's MIDI LEARN line does the same, and closes Help.
+    // Help's MIDI PEDALS line does the same, and closes Help.
     await told.page.evaluate(() => { window.__lf.ui.closeSettings(); window.__lf.ui.openHelp(); });
-    await told.page.locator('.help__link:visible', { hasText: 'MIDI LEARN' }).click();
+    // Every link into Audio Settings, on both tabs, by its accessible name.
+    const helpLinks = await told.page.evaluate(() =>
+      [...document.querySelectorAll('.help__link')].map((el) => el.getAttribute('aria-label') ?? el.textContent.trim()),
+    );
+    await told.page.locator('#lf-help-reference .help__link').click();
     await told.page.waitForFunction(() => !!document.getElementById('lf-audio-popover'));
     const fromHelp = await shown();
     console.log('help link', JSON.stringify(fromHelp));
     assert.deepEqual({ ...fromHelp, toasts: undefined }, { open: true, page: 'lf-settings-tab-midi', inPanel: true, help: false, toasts: undefined }, "Help's link opens the MIDI page and closes Help");
+    // A link names its page as the rail does, never a row on it or a lowercase word.
+    const rail = await told.page.evaluate(() =>
+      [...document.querySelectorAll('.audio-settings__tab')].map((el) => el.getAttribute('aria-label').toUpperCase()),
+    );
+    console.log('help links', JSON.stringify({ helpLinks, rail }));
+    assert.ok(helpLinks.length >= 3, 'Help links into Audio Settings from both tabs');
+    for (const name of helpLinks) assert.ok(rail.some((page) => name === `Audio Settings → ${page}`), `Help's "${name}" names a page of the rail (${rail.join(', ')})`);
     await told.page.close();
 
     const unreadable = await open({
