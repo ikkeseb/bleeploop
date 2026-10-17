@@ -5,7 +5,7 @@
  *
  * - no updater (the browser build): no pill in the command bar, no toast, and nothing about an update
  *   in Help, which is where the offer used to live;
- * - an offer with the looper empty: one toast names the version, the pill appears, its panel carries the
+ * - an offer with the looper empty: one toast (a note: no ✓, no "Done") names the version, the pill appears, its panel carries the
  *   version and the notes (bullets and bold dropped), and the press installs at once, asking nothing;
  * - an offer during a jam (a committed loop on the feed): the press asks first; "no" installs nothing,
  *   "yes" saves the jam for recovery and installs;
@@ -90,6 +90,20 @@ await probe(async ({ open }) => {
   {
     const { page } = await openApp({ update: OFFER });
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
+    // An offer is a note, not a finished action: the neutral rule and an "i", and a screen reader hears
+    // "Note", never the confirmation's ✓ and "Done".
+    const kind = await page.locator('.toast', { hasText: TOAST }).evaluate((el) => {
+      const accent = el.querySelector('.toast__accent');
+      const dim = getComputedStyle(document.documentElement).getPropertyValue('--dim').trim();
+      const probe = Object.assign(document.createElement('span'), { style: `color: ${dim}` });
+      document.body.append(probe);
+      const dimColor = getComputedStyle(probe).color;
+      probe.remove();
+      return { note: el.classList.contains('toast--note'), info: el.classList.contains('toast--info'),
+        spoken: el.querySelector('.lf-visually-hidden')?.textContent, glyph: getComputedStyle(accent, '::after').content,
+        dimRule: getComputedStyle(accent).color === dimColor };
+    });
+    assert.deepEqual(kind, { note: true, info: false, spoken: 'Note', glyph: '"i"', dimRule: true }, 'the offer toasts as a note');
     await pill(page).waitFor({ timeout: 5000 });
     assert.equal(await pill(page).innerText(), 'UPDATE', 'the pill reads'); // innerText: the CSS uppercase
     assert.equal(await pill(page).getAttribute('title'), 'BleepLoop v9.9.9 is ready to install', 'the pill title');

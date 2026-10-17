@@ -1,4 +1,4 @@
-/* Error-toast surface — "Instrument". A quiet opaque panel stack bottom-right (placement
+/* Toast surface (error, info, note) — "Instrument". A quiet opaque panel stack bottom-right (placement
    is its own open eye-gate — kept, not moved). z-index 200 sits ABOVE the settings/help popover backdrop (z 40)
    so a failure toast is never occluded by an open popover. The container is pointer-transparent (the
    play path stays live behind it); each toast opts back in. */
@@ -59,6 +59,14 @@
 }
 .toast--info .toast__accent::after {
   content: '✓';
+}
+
+/* a note (a kept recovery, an update on offer) is neither: the neutral rule and an "i" */
+.toast--note .toast__accent {
+  color: var(--dim);
+}
+.toast--note .toast__accent::after {
+  content: 'i';
 }
 
 .toast__body {

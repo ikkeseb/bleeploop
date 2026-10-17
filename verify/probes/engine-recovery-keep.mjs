@@ -9,7 +9,7 @@
  * - clear: the player's CLEAR ALL of a saved jam deletes it;
  * - partial: a CLEAR of one lane, or a CLEAR ALL followed by a new jam, lets no empty snapshot delete
  *   the jam (a new engine's, read before its reset frame arrives); the CLEAR of the last loop does;
- * - launch: a launch whose device runs at another rate keeps the jam and says why; a new jam there
+ * - launch: a launch whose device runs at another rate keeps the jam and says why (a note toast, no "Done"); a new jam there
  *   moves it aside instead of overwriting it, and a launch at its rate restores it;
  * - rates: three rates keep three jams, and a launch at each restores its own;
  * - sweep: a player's clear at a rate deletes the jam kept at that rate too, so it never comes back;
@@ -343,6 +343,10 @@ const cases = {
     const second = await boot(browser, open, context);
     await second.page.evaluate(() => window.__lf.autosave.ready());
     await second.page.getByText('Loops kept in recovery').waitFor({ timeout: 5000 });
+    // Kept loops are a note to act on, not a finished action: no ✓ and no "Done" for a screen reader.
+    const keptToast = await second.page.locator('.toast', { hasText: 'Loops kept in recovery' }).evaluate((el) => ({
+      note: el.classList.contains('toast--note'), spoken: el.querySelector('.lf-visually-hidden')?.textContent }));
+    assert.deepEqual(keptToast, { note: true, spoken: 'Note' }, 'the kept loops toast as a note');
     assert.equal(await second.page.evaluate(() => window.__lf.native.loadedSessions.length), 0, 'nothing loads at the wrong rate');
     assert.deepEqual((await slot(second.page, 'latest')).stems, jamA, 'the 48 kHz jam is still the latest');
 

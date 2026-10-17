@@ -3,7 +3,7 @@
  * slot's tone, taken fresh through the host, and names its plugin in session.json; an import hands each
  * tone to the host (`importTone`), reloads a slot that holds that plugin through the normal unload and
  * load, keeping its level and GO LIVE, and leaves a slot that holds another plugin or none alone, with
- * one toast naming the plugin to load. A load whose stored tone the host could not restore toasts. The
+ * one toast (a note) naming the plugin to load. A load whose stored tone the host could not restore toasts. The
  * host is handed the plugin session.json names with each tone (it refuses a tone of another plugin). A
  * reload is skipped when the player picked another plugin for the slot while the import was in flight, or
  * the same plugin again (another instance), and its parked tone is handed back; the reload's load passes
@@ -201,6 +201,7 @@ await probe(async ({ open }) => {
         ...second,
         slots: instrument.slotPlugins().map((d) => d?.id ?? null),
         toasts: toasts().map((t) => t.message),
+        kinds: toasts().map((t) => t.kind),
       };
 
       // ── A stored tone the host could not restore: the load goes on, and says so ────────────────────
@@ -397,6 +398,7 @@ await probe(async ({ open }) => {
   );
   assert.deepEqual(out.afterSecond.slots, ['amp', null]);
   assert.deepEqual(out.afterSecond.toasts, ["This session used Probe Synth in slot B. Load it there to hear the session's tone."]);
+  assert.deepEqual(out.afterSecond.kinds, ['note'], 'what to load is a note, not a finished action');
 
   assert.equal(out.refused.slot, 'syn', 'a tone the host could not restore never fails the load');
   assert.ok(

@@ -15,7 +15,8 @@ import { createSignal, type Setter } from 'solid-js';
 
 export interface Toast {
   id: number;
-  kind: 'error' | 'info';
+  /** `info` confirms a finished action, `note` tells something to know or do (neutral), `error` a failure. */
+  kind: 'error' | 'info' | 'note';
   message: string;
   /** Reactive, like `count`: the newest repeat's detail. */
   readonly detail?: string;
@@ -154,6 +155,12 @@ export function notifyError(message: string, detail?: unknown, action?: ToastAct
  * rendered with the calm accent. NOT a logging surface: nothing here replaces a `console.error`. */
 export function notifyInfo(message: string, detail?: unknown, action?: ToastAction): void {
   push('info', message, detail, action);
+}
+
+/** A neutral note: something the player should know or do that is neither a failure nor a finished
+ * action (a kept recovery, an update on offer). Same store, dedupe and lifetime; no ✓, no "Done". */
+export function notifyNote(message: string, detail?: unknown, action?: ToastAction): void {
+  push('note', message, detail, action);
 }
 
 function push(kind: Toast['kind'], message: string, detail: unknown, action?: ToastAction): void {

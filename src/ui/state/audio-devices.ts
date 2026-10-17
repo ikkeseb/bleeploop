@@ -7,7 +7,7 @@ import {
   type AudioOutputDevice,
 } from '../../platform';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from './audio-settings';
-import { notifyError, notifyInfo } from '../../notify';
+import { notifyError, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
 
 /**
@@ -203,7 +203,7 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
 async function noteMissingDriver(pick: string): Promise<void> {
   if (!pick || !(await refreshAsioDrivers()) || asioDrivers().includes(pick)) return;
   const running = asioDeviceInfo()?.name;
-  notifyInfo(
+  notifyNote(
     `ASIO driver ${pick} is not installed`,
     `${running ? `Playing through ${running} instead. ` : ''}Pick a driver in Audio Settings.`,
     settingsAction('device'),

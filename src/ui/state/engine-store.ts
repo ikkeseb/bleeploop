@@ -48,7 +48,7 @@ import { autosave } from '../../session/autosave';
 import { engineResync } from './instrument';
 import { withAt } from './instrument-slots';
 import { adoptEngineLive, engineInputLive, toggleEngineInput } from './native-io';
-import { notifyError, notifyInfo } from '../../notify';
+import { notifyError, notifyInfo, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
 
 /**
@@ -649,7 +649,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
       break;
     case 'Fallback':
       console.error(`[engine] fell back to ${deviceLabel(ev.status)}`);
-      notifyInfo('Switched to another audio device', deviceLabel(ev.status));
+      notifyNote('Switched to another audio device', deviceLabel(ev.status));
       break;
     case 'ShareLost':
       console.error(`[engine] share output lost: ${ev.reason}`);
@@ -665,7 +665,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
       break;
     case 'LoopsDropped':
       console.error(`[engine] the loops recorded at ${ev.from} Hz left the engine: it was rebuilt at ${ev.to} Hz`);
-      notifyInfo(
+      notifyNote(
         'Loops kept in recovery',
         `The audio engine was rebuilt at ${kHz(ev.to)} for the backup device, and your loops were recorded at ` +
           `${kHz(ev.from)}. Reconnect ${ev.device} and restart BleepLoop to get them back.`,

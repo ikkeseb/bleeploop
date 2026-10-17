@@ -21,6 +21,9 @@
  *   reach; without the spacer, Help's reference (the tab it opens on) scrolls not at all; the scripted
  *   open (no pointer input) focuses the panel and draws no outline around it, while a control inside
  *   keeps the focus ring;
+ * - at 1000x700 and 1440x900 Tab from an open Help or Audio Settings walks its stops and wraps to the
+ *   first without leaving the panel, Shift+Tab from the first or the panel lands on the last, and Help's
+ *   Manual panel, focused from its tab, draws its ring inside the `.help` scroller (sides and top);
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open and its FILTER engaged (its
  *   params grow the drawer past one key row), so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
@@ -294,6 +297,68 @@ await probe(async ({ open }) => {
         console.log(JSON.stringify({ name, ok, overlaps, inside, anchored, margins, fits, ringless, gap: m.panel.top - m.bar.bottom, ...m }));
         if (!ok) failures.push(name);
         results.push({ name, ok, overlaps, inside, anchored, fits, ringless, ...m });
+      }
+      await page.evaluate(fn => window.__lf.ui[fn](), hide);
+    }
+    await page.close();
+  }
+  // Tab and Shift+Tab wrap inside an open popover: it is non-modal, and the controls past its edges lie
+  // hidden under it. From the panel (where an open puts focus) Tab walks every stop and comes back to
+  // the first without ever leaving the panel; Shift+Tab from the first stop and from the panel itself
+  // lands on the last. Help's Manual tab panel, a Tab stop inside the `.help` scroller, scrolls there
+  // and draws its focus ring inside that scroller's box (an outside ring was cut off along the top).
+  for (const [width, height] of [[1000, 700], [1440, 900]]) {
+    const { page } = await open({ viewport: { width, height }, init });
+    await boot(page, ['Stopped', 'Empty', 'Empty', 'Empty', 'Empty']);
+    for (const [id, show, hide] of [['lf-help-popover', 'openHelp', 'closeHelp'], ['lf-audio-popover', 'openSettings', 'closeSettings']]) {
+      await page.evaluate(fn => window.__lf.ui[fn](), show);
+      await page.waitForFunction(id => document.activeElement === document.getElementById(id), id);
+      // Where focus is: a stable tag per element, and whether it sits inside the panel.
+      const at = () => page.evaluate(id => {
+        const a = document.activeElement, d = document.getElementById(id);
+        a.dataset.wrapProbe ??= String((window.__wrapProbe = (window.__wrapProbe ?? 0) + 1));
+        return { tag: a.dataset.wrapProbe, panel: a === d, inside: d.contains(a), name: a.getAttribute('aria-label') || a.id || a.textContent.trim().slice(0, 30) || a.tagName };
+      }, id);
+      const walk = [];
+      for (let i = 0; i < 120; i++) {
+        await page.keyboard.press('Tab');
+        const now = await at();
+        if (walk.length && now.tag === walk[0].tag) { walk.push(now); break; }
+        walk.push(now);
+        if (!now.inside) break;
+      }
+      const stops = walk.slice(0, -1), wrapped = walk.length > 2 && walk.at(-1).tag === walk[0].tag;
+      await page.keyboard.press('Shift+Tab');
+      const back = await at();
+      await page.evaluate(id => document.getElementById(id).focus(), id);
+      await page.keyboard.press('Shift+Tab');
+      const fromPanel = await at();
+      const last = stops.at(-1);
+      const name = `${label}-${width}x${height}-${id}-tab-wraps`;
+      const ok = wrapped && walk.every(w => w.inside && !w.panel) && back.tag === last?.tag && fromPanel.tag === last?.tag;
+      console.log(JSON.stringify({ name, ok, wrapped, stops: stops.map(w => w.name), left: walk.find(w => !w.inside)?.name, back: back.name, fromPanel: fromPanel.name }));
+      if (!ok) failures.push(name);
+      results.push({ name, ok, wrapped, stops: stops.length, back, fromPanel });
+      if (id === 'lf-help-popover') {
+        await page.getByRole('tab', { name: 'Manual', exact: true }).focus();
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Tab');
+        const ring = await page.evaluate(() => {
+          const panel = document.activeElement, scroller = panel.closest('.help');
+          const cs = getComputedStyle(panel), grow = parseFloat(cs.outlineOffset) + parseFloat(cs.outlineWidth);
+          const p = panel.getBoundingClientRect(), s = scroller.getBoundingClientRect();
+          const box = { left: s.left + scroller.clientLeft, top: s.top + scroller.clientTop };
+          Object.assign(box, { right: box.left + scroller.clientWidth, bottom: box.top + scroller.clientHeight });
+          return { id: panel.id, ring: cs.outlineStyle, outer: { left: p.left - grow, top: p.top - grow, right: p.right + grow, bottom: p.bottom + grow }, box };
+        });
+        // The panel is taller than the scroller, so its foot is out of view by design; the sides and the
+        // top it scrolls to must show.
+        const ringName = `${label}-${width}x${height}-help-manual-ring`;
+        const ringOk = ring.id === 'lf-help-manual' && ring.ring === 'solid' && ring.outer.left >= ring.box.left - 0.5
+          && ring.outer.right <= ring.box.right + 0.5 && ring.outer.top >= ring.box.top - 0.5;
+        console.log(JSON.stringify({ name: ringName, ok: ringOk, ...ring }));
+        if (!ringOk) failures.push(ringName);
+        results.push({ name: ringName, ok: ringOk, ...ring });
       }
       await page.evaluate(fn => window.__lf.ui[fn](), hide);
     }

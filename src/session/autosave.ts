@@ -14,7 +14,7 @@
  *   another rate to that rate's key; a player's clear deletes its engine's rate's jam from both places;
  *   a launch restores the running rate's jam from either, and it becomes the latest.
  */
-import { notifyError, notifyInfo } from '../notify';
+import { notifyError, notifyNote } from '../notify';
 import { encodeRecovery } from './recovery-encode';
 import { exportBase, snapshotBars, type StemSnapshot } from './stem-archive';
 import { importSession } from './import';
@@ -373,7 +373,7 @@ const kHz = (rate: number) => `${rate / 1000} kHz`;
 function reportKept(rate: number): void {
   const running = jam().sampleRate();
   console.info(`[autosave] the recovery holds loops recorded at ${rate} Hz and the device runs at ${running} Hz: kept`);
-  notifyInfo(
+  notifyNote(
     'Loops kept in recovery',
     `They were recorded at ${kHz(rate)}, and this audio device runs at ${kHz(running)}. ` +
       `Start BleepLoop on a ${kHz(rate)} device to get them back.`,

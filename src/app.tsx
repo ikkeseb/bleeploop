@@ -65,9 +65,11 @@ export function App() {
   // A11y: manage focus for the two command-bar popovers. On open, focus moves into the panel (so a
   // keyboard/SR user lands on the content, not stranded on the trigger); on a KEYBOARD close, focus
   // returns to the trigger that opened it (no lost focus after Escape). These are non-modal popovers
-  // — the play path stays live behind them — so role="dialog" + focus return, not a trap. The return
-  // goes through transportKeys.returnFocus so Space/Enter on the returned trigger still drive the
-  // looper (the transport yield rule lives at the handler in transport-keys.ts).
+  // — the play path stays live behind them, Escape and a backdrop click close them — so role="dialog"
+  // + focus return, not a trap; but Tab and Shift+Tab wrap inside the open panel (`wrapTab`), since the
+  // controls past its edges lie hidden under it. The return goes through transportKeys.returnFocus so
+  // Space/Enter on the returned trigger still drive the looper (the transport yield rule lives at the
+  // handler in transport-keys.ts).
   let helpBtn: HTMLButtonElement | undefined;
   let gearBtn: HTMLButtonElement | undefined;
   let stageBtn: HTMLButtonElement | undefined;
@@ -78,6 +80,24 @@ export function App() {
   let transportKeys: TransportKeys | undefined;
   const lastInputWasPointer = () => transportKeys?.lastInputWasPointer() ?? false;
   const focusPanel = (el: HTMLDivElement) => queueMicrotask(() => el.focus());
+  // Tab past the panel's last control lands on its first, Shift+Tab before the first (or from the panel
+  // itself, where an open puts focus) on its last. The panel's Tab stops in DOM order (no positive
+  // tabindex in it); a hidden page's controls are not stops.
+  const wrapTab = (e: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    if (e.key !== 'Tab' || e.altKey || e.ctrlKey || e.metaKey) return;
+    const panel = e.currentTarget;
+    const stops = [
+      ...panel.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href], [tabindex]'),
+    ].filter((el) => el.tabIndex >= 0 && !(el as HTMLButtonElement).disabled && el.checkVisibility({ visibilityProperty: true }));
+    if (!stops.length) return;
+    const at = document.activeElement;
+    const to = e.shiftKey
+      ? (at === stops[0] || at === panel) && stops[stops.length - 1]
+      : at === stops[stops.length - 1] && stops[0];
+    if (!to) return;
+    e.preventDefault();
+    to.focus();
+  };
   createEffect<boolean>((prevOpen) => {
     const open = helpOpen();
     if (prevOpen && !open && !lastInputWasPointer()) transportKeys?.returnFocus(helpBtn);
@@ -472,6 +492,7 @@ export function App() {
               focusPanel(el);
             }}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={wrapTab}
           >
             <AudioSettings page={settingsPage()} onPage={setSettingsPage} />
           </div>
@@ -489,6 +510,7 @@ export function App() {
             tabindex={-1}
             ref={focusPanel}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={wrapTab}
           >
             <UpdatePanel />
           </div>
@@ -506,6 +528,7 @@ export function App() {
             tabindex={-1}
             ref={focusPanel}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={wrapTab}
           >
             <Help />
           </div>

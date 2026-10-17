@@ -245,6 +245,8 @@ await probe(async ({ open }) => {
   assert.deepEqual({ value: fellBack.value, saved: fellBack.saved }, { value: '', saved: 48000 });
   assert.match(fellBack.hint ?? '', /^Set by Windows/);
   assert.equal(consumeConsoleErrors('[engine] fell back to Fake input → Fake output').length, 1, 'the fallback is logged');
+  // A switch the player did not make is a note to know, not a finished action.
+  assert.deepEqual(await page.evaluate(() => window.__lf.notify.toasts().filter((t) => t.message === 'Switched to another audio device').map((t) => t.kind)), ['note'], 'the fallback toasts as a note');
 
   // 6. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
   // shows, and the player's pick stays saved for a driver that runs it.

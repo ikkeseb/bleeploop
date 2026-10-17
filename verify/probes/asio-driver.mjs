@@ -15,7 +15,7 @@
  * - a switch the host refuses: a toast, the device reopens and the pick stays the driver that runs;
  * - a switch to a driver at another rate while the engine holds loops, confirmed, whose recovery save
  *   fails: the driver that ran comes back before the device reopens, so it runs there, not silent;
- * - a saved driver no longer installed (the host takes the automatic choice): one toast names it and the
+ * - a saved driver no longer installed (the host takes the automatic choice): one toast (a note) names it and the
  *   driver that runs, the pick stays saved and the Driver row marks it not installed; an installed pick,
  *   Automatic, or a probe that found no driver says nothing of the kind.
  *
@@ -317,6 +317,10 @@ await probe(async ({ open }) => {
       count: 1,
     },
   ]);
+  // A request, not a finished action: the toast is a note (no ✓, and a screen reader hears "Note").
+  const goneToast = await page.locator('.toast', { hasText: 'is not installed' }).evaluate((el) => ({
+    note: el.classList.contains('toast--note'), spoken: el.querySelector('.lf-visually-hidden')?.textContent }));
+  assert.deepEqual(goneToast, { note: true, spoken: 'Note' }, 'the missing driver toasts as a note');
   const goneRow = await readSettings();
   console.log('gone row', JSON.stringify(goneRow.driver));
   assert.equal(goneRow.saved.asioDriver, 'Old Interface ASIO', 'the pick stays saved');
