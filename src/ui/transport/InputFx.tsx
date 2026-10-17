@@ -11,15 +11,16 @@ import './input-fx.css';
  * through them (`src-tauri/crates/lf-engine/src/input_fx.rs`). A rig setting, kept in localStorage by the
  * engine store.
  *
- * The command-bar pill opens its popover (`BarPopover.tsx`) with the three sends as FxPanel's modules
- * (the same key-face toggle, sliders and division select); the pill reads engaged (warm white) while any
- * send is on. The ring's frequency reads in whole Hz with its unit.
+ * The command-bar pill opens its popover (`BarPopover.tsx`) with the three sends stacked as rows in FxPanel's
+ * faces (the same key-face toggle, sliders and division select; the layout is `input-fx.css`'s); a send that
+ * is off shows what it adds instead of its params. The pill reads engaged (warm white) while any send is
+ * on. The ring's frequency reads in whole Hz with its unit.
  */
 
-const SENDS: readonly { id: InputSendId; label: string }[] = [
-  { id: 'echo', label: 'Echo' },
-  { id: 'reverb', label: 'Reverb' },
-  { id: 'ring', label: 'Ring mod' },
+const SENDS: readonly { id: InputSendId; label: string; blurb: string }[] = [
+  { id: 'echo', label: 'Echo', blurb: 'Repeats in time with the tempo' },
+  { id: 'reverb', label: 'Reverb', blurb: 'A room around the note' },
+  { id: 'ring', label: 'Ring mod', blurb: 'Metallic, bell-like overtones' },
 ];
 
 function formatValue(v: number, def: InputSendParamDef): string {
@@ -98,7 +99,7 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
                 >
                   {send.label}
                 </button>
-                <Show when={sends.on(send.id)}>
+                <Show when={sends.on(send.id)} fallback={<span class="infx__blurb">{send.blurb}</span>}>
                   <div class="fxp-mod__params">
                     <For each={sends.params.filter((d) => d.send === send.id)}>
                       {(def) => <SendParam def={def} send={send.label} />}
