@@ -87,8 +87,7 @@
   padding: 0 18px 9px;
   overflow: hidden;
   color: var(--faint);
-  font-family: var(--mono);
-  font-size: 9.5px; /* the app's smallest secondary mono size (.pc__more); it wraps rather than shrink */
+  font-size: 9.5px; /* prose in sans (mono is for changing numerals), at .pc__more's size; it wraps rather than shrink */
   line-height: 1.2;
 }
 /* The note is a whole extra row per slot. Below the 600 px window floor that row pushes the drum pads
@@ -174,16 +173,33 @@
 /* ---- live and hot, readable from where the guitarist stands ----
    INPUT LIVE is the brightest object in a live slot's card: the play colour as a filled face with a dark
    legend (the lane's REC badge idiom), a size up from the row's other caps, and larger again on a large
-   window. */
+   window. GO LIVE holds INPUT LIVE's box (its dot, gap and word in the hero type, unseen in the same grid
+   cell), so going live moves nothing beside it in the row. */
+.tgl.live {
+  display: inline-grid;
+  place-items: center;
+  padding: 8px 13px;
+}
+.tgl.live::after,
 .tgl.live.on-green {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   font-size: clamp(12px, 0.75vw, 14px);
   line-height: 1.17;
   letter-spacing: 0.06em;
   font-weight: 700;
-  padding: 8px 13px;
+}
+.tgl.live::after {
+  content: 'INPUT LIVE';
+  grid-area: 1 / 1;
+  padding-left: 13px; /* the dot (7px) and the gap (6px) */
+  visibility: hidden;
+}
+.live__face {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tgl.live.on-green {
   color: #0b0b0d;
   background: var(--play);
   border-color: var(--play);

@@ -19,8 +19,9 @@
  *   stop the engine applied though its batch answered false shows GO LIVE, and two lost MIC presses leave
  *   nothing live;
  * - at 1000×700, 1280×820 and 1920×1080: the CLIP lamp, the badge and the pill are at least their
- *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, and the
- *   meter runs most of the card's width.
+ *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, the
+ *   meter runs most of the card's width, and GO LIVE holds INPUT LIVE's box (going live changes neither
+ *   the pill's size and place nor the card's height).
  *
  * Cannot see: the engine's meter (per-slot peaks and clips: `src-tauri/src/engine_io/tests.rs`
  * `the_meter_reads_each_slots_own_capture_channel`), WebView2, a real guitar, or whether the meter
@@ -98,10 +99,23 @@ await probe(async ({ open }) => {
     assert.deepEqual(await read(1), { live: false, lvl: 0, pk: 0, clip: false }, `${tag}: a slot not live: its meter dark whatever its input`);
     assert.deepEqual(await badges(), ['', '', '', '', ''], `${tag}: nothing live: no lane names a source`);
 
-    // GO LIVE on A: its pill, its meter at its own level, the selected lane's badge.
+    // GO LIVE on A: its pill, its meter at its own level, the selected lane's badge. The pill holds
+    // INPUT LIVE's box in both states, so going live moves nothing beside it and the card keeps its height.
+    const pillBox = () => page.evaluate(() => {
+      const r = (el) => el.getBoundingClientRect();
+      const card = document.querySelector('.slot');
+      const pill = r(card.querySelector('.tgl.live'));
+      return { w: pill.width, h: pill.height, x: pill.left, card: r(card).height };
+    });
+    const goLive = await pillBox();
     await live(1).click();
     await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     assert.equal((await live(1).textContent()).trim(), 'INPUT LIVE');
+    const inputLive = await pillBox();
+    console.log(tag, 'GO LIVE / INPUT LIVE box', JSON.stringify({ goLive, inputLive }));
+    for (const k of ['w', 'h', 'x', 'card']) {
+      assert.ok(Math.abs(goLive[k] - inputLive[k]) < 0.5, `${tag}: going live moved the slot row (${k}: ${goLive[k]} -> ${inputLive[k]})`);
+    }
     await emit(meter(0.5, 0.0316));
     await until(1, 'A live at −6 dBFS', (m) => m.live && Math.abs(m.lvl - frac(0.5)) < 0.01);
     assert.deepEqual(await read(2), { live: false, lvl: 0, pk: 0, clip: false }, `${tag}: B not live stays dark`);

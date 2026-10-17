@@ -55,7 +55,9 @@
   cursor: not-allowed;
 }
 
-/* the 34px numeral — a click-to-edit button, lit like a display readout */
+/* the 34px numeral — a click-to-edit button, lit like a display readout. It and its editor share one
+   fixed 64px box (three tabular digits; the tempo is a whole 40..300), so typing a tempo neither
+   widens the bar nor makes it re-measure its rows (app/cmd-fit.ts). */
 .transport__bpm-num {
   font-size: 34px;
   font-weight: 600;
@@ -68,7 +70,7 @@
   border: 0;
   padding: 0 2px;
   cursor: text;
-  min-width: 62px;
+  min-width: 64px;
   text-align: center;
 }
 .transport__bpm-num:hover:not(:disabled) {
@@ -78,7 +80,8 @@
   cursor: default;
 }
 
-/* the inline editor — matches the numeral so there's no layout jump on edit */
+/* the inline editor — the numeral's box, so there's no layout jump on edit: a number input sizes itself
+   by its `size` (about 20 characters) and the line height `normal`, never by min-width or line-height */
 .transport__bpm-input {
   font-family: inherit;
   font-size: 34px;
@@ -90,7 +93,8 @@
   background: none;
   border: 0;
   padding: 0 2px;
-  min-width: 62px;
+  width: 64px;
+  height: 34px;
   text-align: center;
   outline: none;
   -moz-appearance: textfield;
@@ -286,6 +290,13 @@
   background: var(--surf-3);
   border-color: rgba(244, 239, 230, 0.28);
   text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
+}
+/* on but greyed out (FIXED under RETAKE over a loop): the disabled face, its dim lamp alone says "set" */
+.transport__tgl.is-on:disabled {
+  color: var(--faint);
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.06);
+  text-shadow: none;
 }
 /* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an unlit socket
    before the legend, lit warm-white while the mode is on, so a mode reads on or off from the guitar.

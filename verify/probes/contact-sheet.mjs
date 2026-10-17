@@ -21,7 +21,9 @@
  * mid-jam picture over a two-bar loop: lane 1 PLAYING, lane 2 PLAYING over an overdub layer (REV, UNDO and
  * EDIT enabled) with FILTER and DELAY engaged and the drawer closed, lane 3 OVERDUB in flight (selected,
  * "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about -12 dBFS; its right clusters keep five
- * fixed columns (FX, MUTE, REV, UNDO, EDIT) at one x on every lane. 13b-jam-edit is the same jam with lane
+ * fixed columns (FX, MUTE, REV, UNDO, EDIT) at one x on every lane, and its PLAY/STOP/NOW pills end at
+ * one x whichever word they show; in 14-modes-on, FIXED greyed out wears the disabled face, no lit
+ * legend. 13b-jam-edit is the same jam with lane
  * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
@@ -286,6 +288,15 @@ await probe(async ({ browser, open }) => {
         .filter((name) => document.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') !== 'true'));
       console.log(JSON.stringify({ tag, scene, off: modes }));
       if (modes.length) fail(`${tag} ${scene}: not shown ON: ${modes.join(', ')}`);
+      // FIXED, on but greyed out under RETAKE over a loop, wears the disabled face: no lit legend.
+      const fixedFace = await page.evaluate(() => {
+        const el = document.querySelector('button[aria-label="Fixed take length"]');
+        const cs = getComputedStyle(el);
+        return { disabled: el.disabled, color: cs.color, glow: cs.textShadow, faint: getComputedStyle(document.documentElement).getPropertyValue('--faint').trim() };
+      });
+      console.log(JSON.stringify({ tag, scene, fixedFace }));
+      if (!fixedFace.disabled) fail(`${tag} ${scene}: FIXED is not greyed out under RETAKE over a loop`);
+      else if (fixedFace.color !== 'rgb(125, 129, 141)' || fixedFace.glow !== 'none') fail(`${tag} ${scene}: greyed-out FIXED draws a lit legend (${fixedFace.color}, ${fixedFace.glow})`);
 
       // A reload's reset frame from an engine that remembers every input send on.
       scene = '11-engine-in-fx';
@@ -389,6 +400,8 @@ await probe(async ({ browser, open }) => {
             words: lanes.map((l) => l.querySelector('.lp-lane__state')?.textContent),
             lane2Pills: pills(1),
             ragged: columns.map((xs) => Math.max(...xs) - Math.min(...xs)).filter((d) => !(d < 0.5)).length,
+            pairWords: lanes.map((l) => l.querySelector('.lp-pb--play')?.textContent.trim()),
+            pairRight: lanes.map((l) => l.querySelector('.lp-pb--play')?.getBoundingClientRect().right ?? NaN),
             lane2Fx: [0, 1, 2, 3, 4].filter((k) => !looper.fxBypassShown(1, k)),
             drawerOpen: !!document.querySelector('[role="group"][aria-label^="FX, Track"]'),
           };
@@ -398,6 +411,8 @@ await probe(async ({ browser, open }) => {
         if (jam.words.join() !== words.join()) fail(`${tag} ${scene}: lanes read ${jam.words.join(', ')}, not ${words.join(', ')}`);
         if (jam.lane2Pills.join() !== 'rev,undo,edit') fail(`${tag} ${scene}: lane 2 enables ${jam.lane2Pills.join(', ') || 'no pills'}, not rev, undo, edit`);
         if (jam.ragged) fail(`${tag} ${scene}: ${jam.ragged} of the five pill columns stand at different x on different lanes`);
+        const pairSpread = Math.max(...jam.pairRight) - Math.min(...jam.pairRight);
+        if (!(pairSpread < 0.5)) fail(`${tag} ${scene}: the PLAY/STOP/NOW pills (${jam.pairWords.join(', ')}) end ${pairSpread.toFixed(1)} px apart`);
         if (jam.lane2Fx.join() !== '0,3') fail(`${tag} ${scene}: lane 2 has FX ${jam.lane2Fx.join(', ') || 'none'} engaged, not filter and delay`);
         if (jam.drawerOpen) fail(`${tag} ${scene}: the FX drawer is open`);
 

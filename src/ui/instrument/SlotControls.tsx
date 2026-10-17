@@ -84,10 +84,12 @@ export function LiveButton(props: { slot: 0 | 1 }) {
           void toggleLive(slot);
         }}
       >
-        <Show when={live()}>
-          <i class="tgl__dot" aria-hidden="true" />
-        </Show>
-        {live() ? 'INPUT LIVE' : 'GO LIVE'}
+        <span class="live__face">
+          <Show when={live()}>
+            <i class="tgl__dot" aria-hidden="true" />
+          </Show>
+          {live() ? 'INPUT LIVE' : 'GO LIVE'}
+        </span>
       </button>
       <Show when={liveError(slot)}>
         <span class="pc__err">{liveError(slot)}</span>
