@@ -8,7 +8,9 @@
  *   refuses it (`OpenError::RateChange`, scripted as the native owner answers) and the app's own ask
  *   appears (`src/ui/confirm/`; no native dialog opens): focus on its no button, Space taken from the
  *   transport, Tab wrapping inside; declined (Enter on no, Escape, a click outside), the pick goes back
- *   to the device's rate; accepted (a click on yes), the forced open runs at 48 kHz and the row shows it;
+ *   to the device's rate; B under the ask opens nothing, and a stage view a pedal opens under it takes
+ *   no focus from it (Enter still answers); after a mouse pick declined with a click, a digit still
+ *   reaches the transport; accepted (a click on yes), the forced open runs at 48 kHz and the row shows it;
  * - the pick survives a reload: the first open asks for it and the row shows it;
  * - a rate, buffer, ASIO on/off or output device pick whose open fails (the device that ran keeps
  *   running, or the native owner reopens it): every pick that ran goes back, saved and shown;
@@ -257,6 +259,46 @@ await probe(async ({ open }) => {
     assert.deepEqual(again.opens.map((o) => o.forced), [false, false], `${how}: no forced open`);
     const still = await readRow(page);
     assert.deepEqual({ value: still.value, saved: still.saved, runs: still.runs }, { value: '', saved: null, runs: 44100 }, `${how} declines`);
+  }
+
+  // The stage view under the ask: B is the ask's key (the view stays shut), and a learned pedal that
+  // opens it anyway (its action, run as native MIDI runs it) cannot take the focus: Enter still answers.
+  const staged = await askedPick(page, async (ask) => {
+    await page.keyboard.press('b');
+    assert.equal(await page.getByRole('dialog', { name: 'Stage view', exact: true }).count(), 0, 'B under the ask opened the stage view');
+    await page.evaluate(async () => (await import('/src/app/actions.ts')).runAction('stageView'));
+    await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ timeout: 5000 });
+    await page.waitForTimeout(100); // the view focuses its root in a microtask
+    const focus = await page.evaluate(() => ({ inAsk: !!document.activeElement?.closest('[role="alertdialog"]'), text: document.activeElement?.textContent.trim() }));
+    console.log('focus with the stage view open under the ask', JSON.stringify(focus));
+    assert.deepEqual(focus, { inAsk: true, text: 'Cancel' }, 'the stage view took the focus from the ask');
+    await page.keyboard.press('Enter');
+    await ask.waitFor({ state: 'detached', timeout: 5000 });
+  });
+  assert.deepEqual(staged.opens.map((o) => o.forced), [false, false], 'Enter on Cancel over the stage view: no forced open');
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached', timeout: 5000 });
+
+  // A mouse pick (the select keeps the pointer's focus) declined with a click: the transport keys
+  // still reach the engine after the ask, as the select's pointer mark would have them
+  // (`src/app/transport-keys.ts`).
+  {
+    await page.evaluate(() => window.__lf.ui.openSettings());
+    const select = page.getByRole('combobox', { name: 'Sample rate', exact: true });
+    await select.click();
+    await page.waitForTimeout(150);
+    for (const key of ['ArrowDown', 'ArrowDown', 'Enter']) await page.keyboard.press(key);
+    const ask = page.getByRole('alertdialog', { name: 'Sample rate change', exact: true });
+    await ask.getByRole('button', { name: 'Cancel', exact: true }).click({ timeout: 5000 });
+    await ask.waitFor({ state: 'detached' });
+    await page.waitForFunction(() => document.querySelector('[aria-label="Sample rate"]').value === '', undefined, { timeout: 5000 });
+    const sentAt = await page.evaluate(() => window.__lf.native.sent.length);
+    await page.keyboard.press('3');
+    await page.waitForTimeout(100);
+    const after = await page.evaluate((n) => ({ sent: window.__lf.native.sent.slice(n), focus: document.activeElement?.tagName }), sentAt);
+    console.log('digit after a mouse pick declined', JSON.stringify(after));
+    assert.ok(after.sent.some((c) => c.SelectTrack === 2), 'a digit after a declined mouse pick did not reach the transport');
+    await page.evaluate(() => window.__lf.ui.closeSettings());
   }
 
   // Accepted: the recovery saves first, then the forced open runs at the pick.

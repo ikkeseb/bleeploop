@@ -6,9 +6,19 @@ import './confirm.css';
  * The ask `confirm-store.ts` holds, as a modal alert dialog over the whole window: the native `confirm` it
  * replaces blocked the page, so this one takes every key and click until it is answered. Focus lands on
  * the no button; Escape and a click outside the panel answer no; Enter and Space press the focused
- * button; Tab and Shift+Tab move between the two buttons (the focused one wears a lit face, so Enter's target shows without a key ring) and never leave. Answered, focus goes back to
- * where it was. A key is taken in the window's capture phase, before the transport keys, the note keys
- * and the popovers' Escape see it, so an ask opened from Audio Settings leaves that panel open.
+ * button; Tab and Shift+Tab move between the two buttons (the focused one wears a lit face, so Enter's
+ * target shows without a key ring). A key is taken in the window's capture phase, before the transport
+ * keys (B's stage view among them), the note keys and the popovers' Escape see it, so an ask opened from
+ * Audio Settings leaves that panel open. Focus stays on a button for the ask's whole life: what moves it
+ * elsewhere (a learned pedal opening the stage view, which focuses its own root) is pulled back.
+ *
+ * Answered, focus goes back where it was, except from a <select> (the rate pick's): it goes to the panel
+ * around it (tabindex -1, which keeps no keys) or nowhere. A select the pointer picked carries a mark
+ * that hands the next key to the transport (`src/app/transport-keys.ts`); the ask's focus ended it, and
+ * focused again without it the select would keep the transport's and the note keys. Which hand picked
+ * cannot be read here (the list's own keys make a mouse-opened select match `:focus-visible`, measured
+ * in the sample-rate probe), so every select gives way: a keyboard player is one Tab from the panel's
+ * controls again.
  */
 export function Confirm() {
   return <Show when={pendingConfirm()}>{(ask) => <ConfirmDialog ask={ask()} />}</Show>;
@@ -17,7 +27,14 @@ export function Confirm() {
 function ConfirmDialog(props: { ask: PendingConfirm }) {
   let no!: HTMLButtonElement;
   let yes!: HTMLButtonElement;
-  const back = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const at = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const back = at instanceof HTMLSelectElement ? at.closest<HTMLElement>('[tabindex="-1"]') : at;
+  let held: HTMLButtonElement | undefined; // the button focus belongs on
+  const onFocusIn = (e: FocusEvent) => {
+    if (e.target === yes) held = yes;
+    else if (e.target === no) held = no;
+    else held?.focus();
+  };
   const onKeyDown = (e: KeyboardEvent) => {
     e.stopPropagation();
     if (e.key === 'Escape') {
@@ -30,10 +47,12 @@ function ConfirmDialog(props: { ask: PendingConfirm }) {
   };
   onMount(() => {
     window.addEventListener('keydown', onKeyDown, { capture: true });
+    document.addEventListener('focusin', onFocusIn, { capture: true });
     no.focus();
   });
   onCleanup(() => {
     window.removeEventListener('keydown', onKeyDown, { capture: true });
+    document.removeEventListener('focusin', onFocusIn, { capture: true });
     if (back?.isConnected && back !== document.body) back.focus();
   });
   return (
