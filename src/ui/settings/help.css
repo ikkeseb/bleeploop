@@ -63,7 +63,7 @@
 }
 .help__panel:focus-visible {
   outline: 2px solid var(--cyan); /* the app's keyboard focus ring (app.css); a panel is a Tab stop */
-  outline-offset: 4px;
+  outline-offset: -2px; /* inside the .help scroller, which clips an outside ring (as .audio-settings__page) */
 }
 .help__panel[hidden] {
   display: none; /* the other tab's panel stays mounted (Help.tsx); `hidden` alone loses to the display above */
