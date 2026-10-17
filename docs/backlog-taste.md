@@ -57,8 +57,6 @@ added a line.
   one-line hint per off send) got no word in `bleeploop-push16` r2 (the owner wants to see it in the browser
   or the dev build first); the one-row FX drawer and its tight rung at 1000x700 were his "good" and "Opp til
   deg" (r3). DUB FEEDBACK's slider in the drawer is 80 px at 1000 px wide: widen the dub module?
-- **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
-  log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the
   saved settings are kept): say that they are kept? An import whose slot holds another plugin toasts
   "This session used X in slot B": enough, or offer to load it?

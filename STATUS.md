@@ -109,6 +109,11 @@ it.
   every slider is 214 px long (was about 40), an off send saying in one line what it adds. Does a popover 10 px lower read as its
   pill's, does the note toast still catch the eye when it must, does the in-app ask read as a question to
   answer before playing on, and do the disabled tools still read as present from the chair?
+- A plugin bundle whose scan failed (2026-10-17, machine-verified, no real failed bundle seen yet): it is
+  listed on Audio Settings' PLUGINS page beside the unsupported ones, "N plugins found but not loaded",
+  file name, failed or unsupported, and a host-worded reason (timed out, crashed, report unreadable; never
+  the child's own output); the picker stays clean and the rescan button retries it. The owner chose both
+  shots in `bleeploop-push16` r4 without a word: does the row say enough, or should the picker grey it?
 - SCOPE's beam (2026-10-17, machine-verified, never seen on a device): when the live columns stop while the
   loop moves (the view closed and reopened, a look stepped back to SCOPE, a held feed) the beam moves on with
   the bar instead of freezing at the last column; a column takes the beam only when its own device frame
