@@ -7,7 +7,8 @@
  * - transport, meter, lamp, looper-announcement and toast state carriers: ■ ALL during a first take, the
  *   record meter's dBFS text ("near clipping" from its red, "clipping" at a clip), the lamp's role, "Track 2 take recorded" on the live region, a focused
  *   toast outliving its auto-dismiss and keeping keyboard focus through a repeat of itself and a burst
- *   past the four-toast cap; the lamp across a lost device (amber and "no device open" while
+ *   past the four-toast cap, a toast's severity glyph on its message's first line however far the
+ *   message wraps (a three-line one); the lamp across a lost device (amber and "no device open" while
  *   none runs, neutral and "running" once one runs again);
  * - the refusal carriers: a lane cap's aria-label names its action and its title the refusal, in
  *   sentence case (a STOPPED core, an EMPTY lane's core and PLAY); the transport keys send the engine's
@@ -173,6 +174,28 @@ await probe(async ({ open }) => {
     const { setAutoDismissMsForProbe } = await import('/src/notify.ts');
     for (const item of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(item.id);
     setAutoDismissMsForProbe(8000);
+  });
+  // The severity glyph (the accent's ::after, a lone grid item) sits on the message's first line, not at
+  // the middle of a message that wraps.
+  await page.evaluate(() =>
+    window.__lf.notify.notifyError('Could not open the audio device because another program holds it in exclusive mode and does not let go of it'),
+  );
+  const glyph = await page.locator('.toast').filter({ hasText: 'exclusive mode' }).evaluate((el) => {
+    const accent = el.querySelector('.toast__accent');
+    const msg = el.querySelector('.toast__msg');
+    const a = accent.getBoundingClientRect();
+    const m = msg.getBoundingClientRect();
+    const line = parseFloat(getComputedStyle(msg).lineHeight);
+    const h = parseFloat(getComputedStyle(accent, '::after').lineHeight);
+    const align = getComputedStyle(accent).alignItems;
+    const top = align === 'center' ? a.top + (a.height - h) / 2 : align === 'end' ? a.bottom - h : a.top;
+    return { lines: Math.round(m.height / line), glyphMid: top + h / 2, firstLineMid: m.top + line / 2 };
+  });
+  console.log('toast glyph', JSON.stringify(glyph));
+  assert.equal(glyph.lines, 3, 'the message wraps to three lines');
+  assert.ok(Math.abs(glyph.glyphMid - glyph.firstLineMid) <= 0.5, `the glyph sits on the first line (${glyph.glyphMid} vs ${glyph.firstLineMid})`);
+  await page.evaluate(() => {
+    for (const item of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(item.id);
   });
 
   await emit({ events: [laneEvent(0, committed('Stopped'))] });
