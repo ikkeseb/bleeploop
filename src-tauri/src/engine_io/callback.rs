@@ -144,6 +144,9 @@ pub(crate) struct Run {
     /// Fatal stream errors (`Side` bits) and the first one, for the owner to report.
     pub(crate) fault: AtomicU8,
     pub(crate) error: Mutex<Option<cpal::Error>>,
+    /// WASAPI: the input callback caught a panic and went silent, its stream still running: the owner
+    /// rebuilds the run on the same device (`Owner::recapture`).
+    pub(crate) capture_fault: AtomicBool,
     /// cpal reported an xrun: the next block follows an input gap.
     xrun: AtomicBool,
     /// cpal reported that Windows moved its default endpoint: the owner reads where a default side plays now.
@@ -174,6 +177,7 @@ impl Run {
             faded: AtomicBool::new(false),
             fault: AtomicU8::new(0),
             error: Mutex::new(None),
+            capture_fault: AtomicBool::new(false),
             xrun: AtomicBool::new(false),
             default_moved: AtomicBool::new(false),
             duplex: AtomicBool::new(false),
@@ -553,6 +557,8 @@ impl DuplexInput {
 
 /// WASAPI's input callback, on its own thread and clock: pushes each slot's channel, interleaved, into
 /// the join pipe the output callback pulls from (drop-on-full, counted), and measures the capture's age.
+/// A caught panic leaves its pipe end unusable: the input goes silent and latches `Run::capture_fault`
+/// for the owner, which rebuilds the run (`Owner::recapture`).
 pub(crate) struct JoinInput {
     core: Arc<Core>,
     run: Arc<Run>,
@@ -565,6 +571,9 @@ pub(crate) struct JoinInput {
     probe: Probe,
     /// A caught panic: the input stays silent for the rest of the run.
     dead: bool,
+    /// Test-only: the next callback panics inside its guard.
+    #[cfg(test)]
+    pub(crate) panic_next: bool,
 }
 
 impl JoinInput {
@@ -579,6 +588,8 @@ impl JoinInput {
             scratch: vec![0.0; SCRATCH_FRAMES * SLOT_COUNT],
             probe: Probe::new(),
             dead: false,
+            #[cfg(test)]
+            panic_next: false,
         }
     }
 
@@ -600,10 +611,16 @@ impl JoinInput {
         if self.dead {
             return;
         }
+        #[cfg(test)]
+        let panic_now = std::mem::take(&mut self.panic_next);
         let (channels, picks) = (self.channels, self.run.picks(self.channels));
         let (push, scratch, core) = (&mut self.push, &mut self.scratch, &*self.core);
         let counters = &core.counters;
         let ok = guarded(counters, || {
+            #[cfg(test)]
+            if panic_now {
+                panic!("the capture fails (on purpose)");
+            }
             let (mut dropped, mut clips) = (0, [false; SLOT_COUNT]);
             for chunk in data.chunks(channels * SCRATCH_FRAMES) {
                 let out = &mut scratch[..chunk.len() / channels * SLOT_COUNT];
@@ -620,7 +637,10 @@ impl JoinInput {
                 counters.join_overruns.fetch_add(1, Relaxed);
             }
         });
-        self.dead = !ok;
+        if !ok {
+            self.dead = true;
+            self.run.capture_fault.store(true, Release);
+        }
     }
 }
 

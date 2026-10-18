@@ -4,7 +4,8 @@
 //!
 //! The owner takes the engine lock only while no stream runs, and builds engines here, never on a
 //! callback (`Engine::new` allocates every buffer: ~130 MB and ~100 ms at 60-second lanes). Between
-//! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead Share mirror;
+//! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead input callback,
+//! a dead Share mirror;
 //! and once a `GLITCH_EVERY` it logs the fault counters and glitch diagnostics that moved, or a callback
 //! that ran past its period ([`GlitchWatch`]).
 
@@ -233,6 +234,9 @@ struct Active {
     run: Arc<Run>,
     streams: Streams,
     block: u32,
+    /// Its input callback died and the run was not restarted (`recapture`): an open of the same device
+    /// restarts it.
+    input_dead: bool,
 }
 
 /// The release log's view of the callbacks, which cannot log: once a `GLITCH_EVERY`, the fault counters
@@ -284,6 +288,8 @@ struct Owner<D: Driver> {
     taps: TapHandoff,
     /// When a fault last replaced the engine (`FAULT_HOLDOFF`).
     replaced: Option<Instant>,
+    /// When a dead input callback last restarted the device (`recapture`, `FAULT_HOLDOFF`).
+    recaptured: Option<Instant>,
     glitches: GlitchWatch,
 }
 
@@ -299,7 +305,7 @@ pub(crate) fn spawn<D: Driver>(core: Arc<Core>, config: HostConfig, driver: D) -
         .stack_size(STACK)
         .spawn(move || {
             let glitches = GlitchWatch::new(Instant::now(), core.diag(), core.counters.block_load.snapshot());
-            Owner { core, driver, config, active: None, share: None, mirror: None, taps, replaced: None, glitches }.serve(rx)
+            Owner { core, driver, config, active: None, share: None, mirror: None, taps, replaced: None, recaptured: None, glitches }.serve(rx)
         })?;
     Ok(OwnerLink { tx, join })
 }
@@ -365,14 +371,17 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// What the callbacks latched: a faulted engine, a dead stream (a loss), Windows' default moved, a
-    /// dead Share mirror.
+    /// What the callbacks latched: a faulted engine, a dead stream (a loss), a dead input callback,
+    /// Windows' default moved, a dead Share mirror.
     fn poll(&mut self) {
         if self.core.fault.swap(false, AcqRel) {
             self.replace_faulted();
         }
         if let Some(bits) = self.active.as_ref().map(|a| a.run.fault.load(Acquire)).filter(|&b| b != 0) {
             self.lose(bits);
+        }
+        if self.active.as_ref().is_some_and(|a| a.run.capture_fault.swap(false, AcqRel)) {
+            self.recapture();
         }
         if self.active.as_ref().is_some_and(|a| a.run.default_moved.swap(false, AcqRel)) {
             self.default_moved();
@@ -397,10 +406,11 @@ impl<D: Driver> Owner<D> {
     /// A slot's pick the device lacks opens on auto (`transition::open_channels`). The player's open
     /// (`By::Player`) is refused, before anything stops, when it would build an engine at another rate
     /// while this one holds audio, unless forced; a switch of the player's that fails to start reopens the
-    /// device it replaced. A size the ASIO driver refuses opens at its own (`start_at_own_size`).
+    /// device it replaced. A size the ASIO driver refuses opens at its own (`start_at_own_size`). A run
+    /// whose input died (`recapture`) starts again, even on the same device.
     fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         let driver = self.driver.asio_driver();
-        let running = self.active.as_ref().filter(|a| !a.run.faulted());
+        let running = self.active.as_ref().filter(|a| !a.run.faulted() && !a.input_dead);
         let mut resolved = None;
         if running.is_some_and(|a| transition::same_device(&a.request, &request, (&a.spec.output_name, driver.as_deref()))) {
             match self.track_default(&request) {
@@ -655,7 +665,7 @@ impl<D: Driver> Owner<D> {
             input_frames: 0,
         };
         *self.core.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
-        self.active = Some(Active { request, spec, run, streams: started.streams, block });
+        self.active = Some(Active { request, spec, run, streams: started.streams, block, input_dead: false });
         if let Some(s) = self.status() {
             log::info!(
                 "[engine_io] {:?} running: {} Hz, {block}-frame blocks, in \"{}\" channels {:?} (per slot), out \"{}\", align {} frames (input {})",
@@ -745,6 +755,47 @@ impl<D: Driver> Owner<D> {
             if let Err(error) = self.open(request, By::Owner) {
                 log::error!("[engine_io] the device did not restart after the engine was replaced: {error}");
             }
+        }
+    }
+
+    /// WASAPI's input callback caught a panic and went silent for good (`Run::capture_fault`) while its
+    /// streams run on. The run starts again on the same device at the engine's rate (a new capture and
+    /// join; the fade and the punch-out as at any switch), so the engine, its loops and its slots stay.
+    /// Where it cannot (the device runs another rate now or no longer resolves, or a second fault came
+    /// within `FAULT_HOLDOFF`), the device plays on without its input and the status says so; it never
+    /// switches the rate. A restart that then fails to start is a loss, with no fallback.
+    fn recapture(&mut self) {
+        let Some(active) = self.active.as_mut() else { return };
+        active.input_dead = true;
+        let request = active.request.clone();
+        let again = if self.recaptured.is_some_and(|at| at.elapsed() < FAULT_HOLDOFF) {
+            Err("it failed again within seconds".to_string())
+        } else {
+            match self.driver.resolve(&request) {
+                Ok((spec, device)) if Some(spec.rate) == self.core.rate() => Ok((spec, device)),
+                Ok((spec, _)) => Err(format!("\"{}\" runs at {} Hz now", spec.output_name, spec.rate)),
+                Err(error) => Err(error),
+            }
+        };
+        let (spec, device) = match again {
+            Ok(resolved) => resolved,
+            Err(why) => {
+                log::error!("[engine_io] the input callback panicked; the input stays silent ({why})");
+                if let Some(status) = self.core.device.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    status.input_open = false;
+                    status.input_name.clear();
+                }
+                return;
+            }
+        };
+        self.recaptured = Some(Instant::now());
+        log::error!("[engine_io] the input callback panicked: restarting \"{}\" at {} Hz; the engine and its loops stay", spec.output_name, spec.rate);
+        let channels = open_channels(&spec, request.input_channels);
+        self.stop(true);
+        if let Err(error) = self.start(request, spec.clone(), device, channels) {
+            let reason = format!("the device did not restart after its input failed: {error}");
+            log::error!("[engine_io] {reason}");
+            self.event(DeviceEvent::Lost { backend: spec.backend, reason });
         }
     }
 

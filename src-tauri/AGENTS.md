@@ -341,10 +341,6 @@ plugin-GUI work.
   change does not retry it.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
-- A caught panic in the WASAPI input callback only sets `JoinInput::dead` (`callback.rs` 544): capture
-  goes silent for good while the owner, watching `core.fault` and `run.fault`, never hears of it. Fix:
-  latch a separate capture fault; the owner first rebuilds capture/join on the same device and rate,
-  keeping the engine and its loops, else reports it without a rate switch. Test with an injected panic.
 - The ASIO callback is not lock-free: asio-sys holds `BUFFER_CALLBACK.lock()` around every callback,
   and cpal 0.18.1 takes its `asio_streams` mutex in them (`Start` reads the buffer size before either
   stream plays, so the owner does not contend there). Fix: patched ASIO dependencies, with the L1+L2

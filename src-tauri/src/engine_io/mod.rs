@@ -97,7 +97,10 @@
 //! - **A fault replaces the engine.** A panic caught under the engine lock (a callback, the idle slot
 //!   service, a punch-out) latches `Core::fault`; the owner then builds a new engine at the same rate
 //!   and restarts the device that ran. The loops go with the faulted engine, its units back to their
-//!   owners (`DeviceEvent::EngineFaulted`). A second fault within `FAULT_HOLDOFF` stays silent.
+//!   owners (`DeviceEvent::EngineFaulted`). A second fault within `FAULT_HOLDOFF` stays silent. A
+//!   panic in the WASAPI input callback (outside the engine lock) restarts the device instead, at the
+//!   engine's rate with the engine kept; where it cannot, the input stays silent and the status says
+//!   so (`Owner::recapture`).
 //! - **The callback never allocates, logs, locks (beyond its `try_lock`) or waits.** Counters are
 //!   atomics the owner reads; the owner logs. On a callback's thread the panic hook neither logs nor
 //!   chains (`callback::RtSection`): the panic counter reports it.

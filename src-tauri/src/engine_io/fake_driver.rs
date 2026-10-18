@@ -3,8 +3,8 @@
 //! faster than real time: each cycle the input body, then the output body, entered at the instant a
 //! device at that rate would have entered it. A WASAPI output keeps an endpoint buffer as cpal's does:
 //! each callback fills what the device played since the last one, the first the whole buffer. One-shot
-//! injections (a late wake, an xrun, a missing input, a fatal error, an ASIO input's lead) land on the
-//! next cycle or start. The output's left channel is kept by device frame.
+//! injections (a late wake, an xrun, a missing input, a fatal error, a panic in a WASAPI input callback,
+//! an ASIO input's lead) land on the next cycle or start. The output's left channel is kept by device frame.
 //!
 //! The ASIO device runs i32 samples (as Focusrite's driver does), WASAPI f32, so both conversions run.
 
@@ -123,6 +123,8 @@ pub(crate) struct Fake {
     pub(crate) xrun_dropped: AtomicU8,
     pub(crate) skip_input: AtomicBool,
     pub(crate) fatal: AtomicU8,
+    /// One-shot, WASAPI: the next input callback panics inside its guard.
+    pub(crate) capture_panic: AtomicBool,
     /// One-shot: cpal's non-fatal reports, a default-device change and a refused thread priority, to
     /// both streams' error callbacks.
     pub(crate) notices: AtomicBool,
@@ -161,6 +163,7 @@ impl Fake {
             wake_late: AtomicU32::new(0),
             skip_input: AtomicBool::new(false),
             fatal: AtomicU8::new(0),
+            capture_panic: AtomicBool::new(false),
             notices: AtomicBool::new(false),
             lead_in: AtomicU32::new(0),
             on_start: Mutex::new(None),
@@ -404,6 +407,9 @@ impl Play {
                     if dropped & Side::Output as u8 == 0 {
                         output_error(cpal::Error::new(cpal::ErrorKind::Xrun));
                     }
+                }
+                if let Some(Capture::Join(input)) = self.capture.as_mut() {
+                    input.panic_next |= self.fake.capture_panic.swap(false, Relaxed);
                 }
                 let late = self.fake.gap.swap(0, Relaxed) as usize;
                 t += (late * block) as u64;
