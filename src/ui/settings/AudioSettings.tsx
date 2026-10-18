@@ -331,7 +331,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     // Refresh the device lists + prune any persisted id no longer present (shared with the startup
     // prune), then re-sync the local signals from the pruned persisted settings — catches a device
     // unplugged since this popover last opened. No-op in the web build.
-    await refreshAndPruneDevices();
+    await refreshAndPruneDevices(engineDevice());
     syncPicks();
     if (asioOffered()) await refreshAsioDrivers();
   });

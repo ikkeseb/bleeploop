@@ -9,7 +9,7 @@ import {
   slotPlugins,
 } from '../state/instrument';
 import { inputArmed } from '../state/native-io';
-import { asioDeviceInfo, inputDevices, usingAsio } from '../state/audio-devices';
+import { inputChannelCount } from '../state/audio-devices';
 import { SYNTHS } from '../state/instruments';
 import { volumeDb } from '../looper/shared';
 import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
@@ -23,22 +23,12 @@ import { slotLetter } from '../state/slot-tones';
  * `PluginControls.tsx`.
  */
 
-/** The capture channels the engine's input device offers; 0 = unknown (the pick then offers Auto and
- * the saved channel only). The backend that runs decides, not the ASIO preference: the device owner
- * may have fallen back to WASAPI on its own. Before a device runs, the preferred ASIO driver's. */
-function inputChannelCount(): number {
-  const d = engineDevice();
-  if (!d) return usingAsio() ? (asioDeviceInfo()?.inputChannels ?? 0) : 0;
-  if (d.backend === 'Asio') return asioDeviceInfo()?.inputChannels ?? 0;
-  if (!d.inputOpen) return 0;
-  return inputDevices().find((x) => x.name === d.inputName)?.channels ?? 0;
-}
 
 /** The slot's capture channel ("In 1".."In N", or Auto), switched in place. */
 export function InputPick(props: { slot: 0 | 1 }) {
   const pick = () => engineSlotInputChannels()[props.slot];
   const channels = createMemo(() => {
-    const list = Array.from({ length: inputChannelCount() }, (_, i) => String(i));
+    const list = Array.from({ length: inputChannelCount(engineDevice()) }, (_, i) => String(i));
     // A saved pick the device does not list stays visible rather than reading as Auto.
     if (pick() !== '' && !list.includes(pick())) list.push(pick());
     return list;

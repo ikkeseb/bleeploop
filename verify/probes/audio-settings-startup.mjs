@@ -123,6 +123,8 @@ await probe(async ({ open }) => {
     window.__lf.ui.closeSettings();
 
     await settings.setAsioEnabled(true);
+    // As the ASIO box does: the device reopens, on ASIO (a slot's input pick counts the backend that runs).
+    await (await import('/src/ui/state/engine-store.ts')).openEngineDevice();
     writeAudioDeviceSettings({ inputDeviceId: 'unplugged-windows-endpoint', inputChannel: '1' });
     settings.saveSlotInputChannels(['1', '']);
     await settings.refreshAndPruneDevices();

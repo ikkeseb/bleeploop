@@ -16,7 +16,8 @@
  *   running, or the native owner reopens it): every pick that ran goes back, saved and shown;
  * - a fallback the owner made on its own (ASIO lost, WASAPI at its endpoint's rate, scripted on the
  *   feed): the row shows what runs, and the pick stays saved for the next ASIO open; a slot's input pick
- *   lists the WASAPI input's channels, not the ASIO driver's;
+ *   lists the WASAPI input's channels, not the ASIO driver's, and In 4 picked there survives Audio
+ *   Settings opening (its prune);
  * - a driver that runs only 44.1 kHz: no 48 kHz option, the saved pick kept, the device's rate shown;
  * - WASAPI: the device's rate alone, and the hint says Windows sets it.
  *
@@ -370,6 +371,20 @@ await probe(async ({ open }) => {
   });
   console.log('fallback inputs', JSON.stringify(fallbackInputs));
   assert.deepEqual(fallbackInputs.slice(1), ['In 1', 'In 2', 'In 3', 'In 4'], "after a fallback to WASAPI the input pick lists its input's channels");
+  // In 4 picked there survives Audio Settings opening (its prune counts the input that runs too).
+  const keptPick = await page.evaluate(async () => {
+    const select = document.querySelector('[aria-label="Input for slot A"]');
+    select.value = '3';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const { engineSlotInputChannels } = await import('/src/ui/state/engine-store.ts');
+    for (let t = 0; engineSlotInputChannels()[0] !== '3' && t < 100; t++) await new Promise((resolve) => setTimeout(resolve, 20));
+    window.__lf.ui.openSettings();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    window.__lf.ui.closeSettings();
+    return { pick: engineSlotInputChannels()[0], shown: document.querySelector('[aria-label="Input for slot A"]').value };
+  });
+  console.log('fallback pick after Audio Settings', JSON.stringify(keptPick));
+  assert.deepEqual(keptPick, { pick: '3', shown: '3' }, 'In 4 on the running WASAPI input stays picked when Audio Settings opens');
 
   // 6. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
   // shows, and the player's pick stays saved for a driver that runs it.
