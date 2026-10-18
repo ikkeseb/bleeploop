@@ -118,7 +118,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   with the native baselines in `docs/VERIFY.md`.
 - **Release logging:** `tauri-plugin-log` registers UNCONDITIONALLY → Stdout (the dev grep
   convention) + a rotated file at `%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log` (2 MB,
-  KeepAll). The Rust panic hook chains the default hook and logs location+payload.
+  KeepAll). The Rust panic hook chains the default hook and logs location+payload, except on an
+  audio callback's thread, where it does neither and the callback's panic counter reports it.
 - **The CSP (`tauri.conf.json` `security.csp`) applies to BUILT apps only.** `tauri dev` serves from
   vite and is not covered, so a new asset origin, a CDN font or an `eval` breaks in release alone.
   Violations reach the release log as `[csp]` lines (`src/platform/logging.ts`); after adding a new
