@@ -11,7 +11,11 @@
  *   routes back to the plugin, the retry completes and routes to the new one;
  * - a failed CLEAR keeps the plugin: the slot's built-in is selected while the unload runs, the plugin
  *   target again once it failed; a synth pick whose unload fails does not move the MIDI slot;
- * - a slot switch routes to the other slot's source.
+ * - a slot switch routes to the other slot's source;
+ * - an unload waits until the slot's live-off reached the host, and one the host did not take aborts it
+ *   (a live slot without its plugin passes the input dry): the old plugin kept, no unload call;
+ * - a keypress while a swap's load is in flight (`ensureActive`) keeps the notes going nowhere, never to
+ *   the slot's built-in.
  *
  * What moved to Rust with the router (`src-tauri/src/engine_io/midi/router.rs` tests): the release of
  * held and sustained notes before a new target, the same slot and target changing nothing, host-side
@@ -111,6 +115,35 @@ await probe(async ({ open }) => {
     await instrument.selectPlugin(1, instB);
     out.retrySwap = { slot1: instrument.slotPlugins()[1]?.id, calls: calls.map((c) => c.join(':')), routed: routedDuringUnload, after: await targets() };
 
+    // A live-off the host did not take (the batch lost twice, with its retry) aborts the swap's unload.
+    calls.length = 0; lf.native.failSends = 2;
+    await instrument.selectPlugin(1, instA);
+    out.lostLiveOff = { slot1: instrument.slotPlugins()[1]?.id, calls: calls.map((c) => c.join(':')) };
+    // The unload waits for the live-off's answer.
+    let releaseSend;
+    lf.native.sendHold = new Promise((resolve) => (releaseSend = resolve));
+    calls.length = 0;
+    const heldSwap = instrument.selectPlugin(1, instA);
+    await pause(80);
+    out.heldLiveOff = { during: calls.map((c) => c.join(':')), liveOff: lf.native.sent.some((c) => c.SetSlotLive?.[0] === 1 && c.SetSlotLive[1] === false) };
+    lf.native.sendHold = null; releaseSend();
+    await heldSwap;
+    out.heldLiveOff.after = calls.map((c) => c.join(':'));
+    // A keypress while the swap's load is in flight routes nowhere, never to the slot's built-in.
+    const load = platform.pluginHost.loadPlugin;
+    let releaseLoad = null;
+    platform.pluginHost.loadPlugin = async (...args) => { await new Promise((resolve) => (releaseLoad = resolve)); return load(...args); };
+    const keySwap = instrument.selectPlugin(1, instB);
+    while (!releaseLoad) await pause(5);
+    await targets();
+    instrument.ensureActive();
+    instrument.setActiveSlot(1);
+    out.keyDuringSwap = await targets();
+    releaseLoad();
+    await keySwap;
+    platform.pluginHost.loadPlugin = load;
+    out.keyDuringSwap = { during: out.keyDuringSwap, slot1: instrument.slotPlugins()[1]?.id, after: await targets() };
+
     // A slot switch routes to the other slot's source.
     instrument.setActiveSlot(0);
     out.slotSwitch = await targets();
@@ -144,10 +177,17 @@ await probe(async ({ open }) => {
   }, 'a failed unload keeps the old plugin, makes no load call, raises the toast naming the way out, routes nowhere while it runs and back to the plugin after');
   assert.deepEqual(result.retrySwap, { slot1: 'b', calls: ['unload:1', 'load:1:b'], routed: [off(1)], after: [plugin(1)] },
     'the retry swap completes; neither swap selects a built-in');
+  assert.deepEqual(result.lostLiveOff, { slot1: 'b', calls: [] }, 'a live-off the host did not take keeps the plugin and makes no unload call');
+  assert.deepEqual(result.heldLiveOff, { during: [], liveOff: true, after: ['unload:1', 'load:1:a'] },
+    "the unload waits until the live-off's batch is answered, then the swap completes");
+  assert.deepEqual(result.keyDuringSwap, { during: [off(1), off(1)], slot1: 'b', after: [plugin(1)] },
+    "a keypress and a slot pick during a swap's load route nowhere, never to the slot's built-in");
   assert.deepEqual(result.slotSwitch, [builtin(0, 'organ')], "a slot switch routes to the other slot's source");
   assert.deepEqual(result.failedClear, { slot1: 'b', calls: ['unload:1'], routed: [builtin(1, 'bass')], after: [plugin(1)] },
     'a failed clear keeps the plugin: its built-in while the unload runs, the plugin target again after');
   assert.deepEqual(result.failedPick, { slot1: 'b', active: 0 }, 'a synth pick whose unload fails does not move the MIDI slot');
+  assert.equal(consumeConsoleErrors('[instrument] plugin unload skipped: the live-off did not reach the engine').length, 1, 'the aborted unload reaches the release log');
+  assert.equal(consumeConsoleErrors('[platform] input batch failed').length, 1, 'and so does the lost live-off');
   assert.equal(consumeConsoleErrors('[instrument] plugin unload (swap) failed').length, 1, 'the failed swap reaches the release log');
   assert.equal(consumeConsoleErrors('[instrument] plugin unload failed').length, 2, 'and so do the failed clear and pick');
   assert.equal(result.engineNotes, 0, 'no note or target goes past the router (engine_send)');

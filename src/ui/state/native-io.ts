@@ -144,10 +144,12 @@ export function stopLive(slot: 0 | 1, ownToast = false): Promise<void> {
 
 /**
  * Stop `slot`'s live input from inside an already-serialized slot op (load-swap / clear teardown in
- * `instrument.ts`), so it must NOT re-enter serializeSlot. It does not wait for the submission.
+ * `instrument.ts`), so it must NOT re-enter serializeSlot. Resolves with the batch's submission (false:
+ * it did not reach the host): an unload waits for it, since a slot left live without its plugin passes
+ * the input dry; a source change with no plugin to unload need not.
  */
-export async function disarmInputInternal(slot: 0 | 1): Promise<void> {
-  void setEngineLive(slot, false);
+export function disarmInputInternal(slot: 0 | 1): Promise<boolean> {
+  return setEngineLive(slot, false);
 }
 
 /** Read-only reactive accessor: per-slot live flags. */
