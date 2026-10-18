@@ -371,7 +371,7 @@ fn an_idle_unload_closes_the_gate_before_rendering_resumes() {
         rig.queue(Command::Action(lf_engine::Action::Toggle(lf_engine::Toggle::Live(0))));
         rig.queue(Command::SetSlotLive(0, false));
         if close {
-            rig.engine.close_slot_idle(0);
+            rig.engine.close_slot_idle(0, rig.pushed);
             assert!(!rig.engine.looper().overview().slot_live(0), "the overview shows it off");
         }
         rig.remove(0);
@@ -387,6 +387,47 @@ fn an_idle_unload_closes_the_gate_before_rendering_resumes() {
             assert!(dry > 0.1, "the queued live-off ramps through the emptied slot ({dry})");
         }
     }
+}
+
+/// An idle unload's gate stays shut until its own live-off has applied, however far behind it waits: a
+/// GO LIVE toggle and a live-on queued ahead of it with more than one block's take (64 commands) between
+/// them and it open nothing from the first frame rendered after, heard or recorded. Each still sets the
+/// slot's live flag as asked, so each answers as it would have (the toggle from live), and the slot ends
+/// off.
+#[test]
+fn an_idle_unloads_gate_holds_until_its_live_off_applies_past_a_blocks_take() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.set_inputs(|_| 1.0, |_| 0.0);
+    rig.install(0, Fake::effect(0.0, 0.0, &probe));
+    rig.advance(4800);
+    let toggled = |rig: &Rig| -> Vec<bool> {
+        rig.events.iter().filter_map(|e| match e {
+            lf_engine::Event::Toggled { toggle: lf_engine::Toggle::Live(0), on, .. } => Some(*on),
+            _ => None,
+        }).collect()
+    };
+    let before = toggled(&rig).len();
+    // The device stops. A GO LIVE press and a live-on, then more than a block takes, then the unload.
+    rig.queue(Command::Action(lf_engine::Action::Toggle(lf_engine::Toggle::Live(0))));
+    rig.queue(Command::SetSlotLive(0, true));
+    for _ in 0..64 {
+        rig.queue(Command::SetSlotGain(1, 1.0));
+    }
+    rig.queue(Command::SetSlotLive(0, false));
+    rig.engine.close_slot_idle(0, rig.pushed);
+    assert!(rig.engine.looper().overview().slot_gate_closed(0, 0), "shut at once");
+    rig.remove(0);
+    rig.engine.service_slots_idle();
+    assert!(rig.returned(0).is_some(), "the unit left at once");
+    rig.keep_output();
+    rig.advance(4800);
+    let dry = peak(&rig.monitor).max(peak(&rig.record));
+    assert_eq!(dry, 0.0, "no dry input from the first frame on, heard or recorded");
+    assert_eq!(toggled(&rig)[before..], [false, true, false], "each live command answers as it would have");
+    assert!(!rig.engine.looper().overview().slot_live(0), "the slot ends off");
+    assert!(!rig.engine.toggles()[lf_engine::Toggle::Live(0).index()], "the engine's live flag ends off");
+    assert!(rig.engine.looper().overview().slot_gate_closed(0, rig.pushed), "the live-off is answered");
 }
 
 #[test]

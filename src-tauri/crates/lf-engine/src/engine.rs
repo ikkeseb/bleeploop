@@ -186,6 +186,7 @@ fn scope_chunks(max_block: usize) -> Vec<ScopeChunk> {
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     frame: Frame,
+    /// Its place in the ring: the count of commands taken through it (`Engine::commands_taken`).
     seq: u64,
     command: Command,
     /// Waiting for a block job: every command sent after it waits behind it, so presses keep their order.
@@ -199,8 +200,8 @@ pub struct Engine {
     feed: Feed,
     commands: Consumer<TimedCommand>,
     pending: [Option<Pending>; MAX_PENDING],
-    seq: u64,
-    /// The commands taken off the ring so far (the overview publishes it after each block).
+    /// The commands taken off the ring so far (the overview publishes it after each block), each
+    /// pending command's `seq`.
     commands_taken: u64,
     fx: LaneFx,
     input_fx: InputFx,
@@ -301,7 +302,6 @@ impl Engine {
             },
             commands: cmd_rx,
             pending: [None; MAX_PENDING],
-            seq: 0,
             commands_taken: 0,
             fx: LaneFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             input_fx: InputFx::new(config.sample_rate, [&ir[0], &ir[1]]),
@@ -498,18 +498,25 @@ impl Engine {
         apply(&mut self.looper, &mut cx, &mut at, command) == Applied::Done
     }
 
-    /// While no device runs and the host holds the engine: take slot `slot` off live at once, its gate
-    /// closed with no ramp, as a final unload needs before its unit leaves (`engine_io`'s
-    /// `EngineHost::silence_slot`). The live-off the host sent waits in the ring until a device renders,
-    /// and applied then it would ramp from the old gain through the emptied slot; the commands queued
-    /// ahead of it apply against the closed gate on the same frame and settle with it. No answer: the
-    /// queued live-off answers when it applies.
-    pub fn close_slot_idle(&mut self, slot: usize) {
-        if slot < SLOT_COUNT {
-            self.rack.close_live(slot);
-            self.looper.overview().set_slot_live(slot, false);
-            self.looper.overview().set_slot_gate_open(slot, false);
+    /// While no device runs and the host holds the engine: shut slot `slot`'s live gate at once, with no
+    /// ramp, as a final unload needs before its unit leaves (`engine_io`'s `EngineHost::silence_slot`).
+    /// `live_off` is the unload's live-off, still in the ring: the count of commands pushed onto it
+    /// through that live-off. Applied when a device renders again it would ramp from the old gain
+    /// through the emptied slot, and the commands queued ahead of it (a GO LIVE among them) may take
+    /// more than one block to reach it. So the gate stays shut against them until the live-off has
+    /// applied, settled closed there; they still set the slot's live flag as asked, so each answers
+    /// (`Event::Toggled`) as it would have. A live-off already taken only has its ramp out settled.
+    pub fn close_slot_idle(&mut self, slot: usize, live_off: u64) {
+        if slot >= SLOT_COUNT {
+            return;
         }
+        if live_off > self.commands_taken {
+            self.rack.shut(slot, live_off);
+            self.looper.overview().set_slot_live(slot, false);
+        } else if !self.rack.live(slot) {
+            self.rack.settle_live(slot);
+        }
+        self.looper.overview().set_slot_gate_open(slot, self.rack.gate_open(slot));
     }
 
     /// While no device runs: stop every unit, an install still waiting on its port included, and hand
@@ -807,8 +814,7 @@ impl Engine {
     }
 
     fn hold(&mut self, frame: Frame, command: Command) {
-        self.seq += 1;
-        insert(&mut self.pending, &mut self.commands_dropped, Pending { frame, seq: self.seq, command, held: false });
+        insert(&mut self.pending, &mut self.commands_dropped, Pending { frame, seq: self.commands_taken, command, held: false });
     }
 }
 
@@ -835,6 +841,7 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
             Applied::Held(when, command) => insert(pending, dropped, Pending { frame: when.max(f + 1), command, held: true, ..p }),
             Applied::Done => {}
         }
+        at.rack.reopen(p.seq);
         looper.events(cx);
     }
 }

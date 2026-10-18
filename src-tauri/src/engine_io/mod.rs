@@ -957,9 +957,16 @@ impl EngineHost {
     /// release and a `Press` are dropped (nothing can be held, no CLEAR armed), and any other action
     /// makes it an error.
     pub fn send_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<(), String> {
+        self.push_all(commands).map(|_| ())
+    }
+
+    /// [`EngineHost::send_all`], and where its last command went: the engine generation, that engine's
+    /// overview and the ring's count through the command (`Ends::pushed`); `None` with no engine.
+    fn push_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<Option<(u64, Arc<Overview>, u64)>, String> {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsSend).map_err(|_| "engine settings poisoned".to_string())?;
         let mut ends = lock_at(&self.core.ends, LockSite::EndsSend).map_err(|_| "engine ends poisoned".to_string())?;
         let mut refused = false;
+        let mut mark = None;
         for command in commands {
             match ends.as_mut() {
                 Some(ends) => {
@@ -972,11 +979,13 @@ impl EngineHost {
                     ends.pushed += 1;
                     settings.record(&command.command);
                     settings.pushed(&command.command);
+                    // Under `ends`, which a rebuild raises the generation under.
+                    mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
                 }
                 None => refused |= !settings.record(&command.command) && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff | Command::Press),
             }
         }
-        if refused { Err("no audio device is open".to_string()) } else { Ok(()) }
+        if refused { Err("no audio device is open".to_string()) } else { Ok(mark) }
     }
 
     /// Take slot `slot` off live and wait (≤ `timeout`) until the engine's gate has closed on it: what a
@@ -985,18 +994,18 @@ impl EngineHost {
     /// record path. The live-off is an ordinary setting (`send`), so a rebuild replays it. With a device
     /// running, the answer is a block the engine rendered after it took this live-off (the ring's count
     /// up to it, in the engine generation that took it; a rebuild's replay carries it into the next),
-    /// never a gate the overview showed closed before. With none, the engine's gate is closed here, at
-    /// once and with no ramp, under its lock (`Engine::close_slot_idle`): the live-off waits in the ring,
-    /// and applied when a device starts it would ramp from the old gain through the emptied slot. Err
-    /// when the ring refused it or the gate did not close in time.
+    /// never a gate the overview showed closed before. With none, the engine's gate is shut here, at
+    /// once and with no ramp, under its lock, until the live-off has applied (`Engine::close_slot_idle`):
+    /// it waits in the ring, perhaps more than a block's take behind a GO LIVE, and applied when a device
+    /// starts it would ramp from the old gain through the emptied slot. Err when the ring refused it or
+    /// the gate did not close in time.
     pub(crate) fn silence_slot(&self, slot: u8, timeout: Duration) -> Result<(), String> {
-        self.send(TimedCommand { frame: None, command: Command::SetSlotLive(slot, false) })?;
+        let mark = self.push_all([TimedCommand { frame: None, command: Command::SetSlotLive(slot, false) }])?;
         let deadline = Instant::now() + timeout;
-        // The engine generation and the ring's count the answer must reach: read after the send, so it
-        // covers the live-off (and perhaps a command sent just after it, which only waits a block more).
-        let mut target: Option<(u64, u64)> = None;
+        // The engine generation and the ring's count the answer must reach: the live-off's own.
+        let mut target: Option<(u64, u64)> = mark.as_ref().map(|&(gen, _, pushed)| (gen, pushed));
         loop {
-            if !self.core.running.load(Acquire) && self.close_slot_idle(slot) {
+            if !self.core.running.load(Acquire) && self.close_slot_idle(slot, mark.as_ref().map(|(_, overview, pushed)| (overview, *pushed))) {
                 return Ok(());
             }
             {
@@ -1022,11 +1031,13 @@ impl EngineHost {
         }
     }
 
-    /// While no device runs: close slot `slot`'s live gate in the engine at once (`Engine::close_slot_idle`),
-    /// under the engine lock, as a slot host services its port (`SlotHost::service_if_idle`). False when a
-    /// device started meanwhile (the caller waits on the engine's answer instead). A faulted engine, or
-    /// none, is replaced, and the new one replays the live-off before its first block.
-    fn close_slot_idle(&self, slot: u8) -> bool {
+    /// While no device runs: shut slot `slot`'s live gate in the engine at once until `live_off` (the
+    /// overview of the engine whose ring took the live-off, and the ring's count through it) has applied
+    /// (`Engine::close_slot_idle`), under the engine lock, as a slot host services its port
+    /// (`SlotHost::service_if_idle`). False when a device started meanwhile (the caller waits on the
+    /// engine's answer instead). A faulted engine, none, or another than the one that took the live-off
+    /// is or was replaced, and the new one replays the live-off before its first block.
+    fn close_slot_idle(&self, slot: u8, live_off: Option<(&Arc<Overview>, u64)>) -> bool {
         let mut rt = self.core.rt.lock().unwrap_or_else(|e| e.into_inner());
         // The owner raises `running` under this lock: a device may have started while this waited.
         if self.core.running.load(Acquire) {
@@ -1037,7 +1048,8 @@ impl EngineHost {
             return true;
         }
         let Some(engine) = rt.engine.as_mut() else { return true };
-        if catch_unwind(AssertUnwindSafe(|| engine.close_slot_idle(usize::from(slot)))).is_err() {
+        let Some((_, live_off)) = live_off.filter(|(overview, _)| Arc::ptr_eq(overview, engine.looper().overview())) else { return true };
+        if catch_unwind(AssertUnwindSafe(|| engine.close_slot_idle(usize::from(slot), live_off))).is_err() {
             self.core.counters.panics.fetch_add(1, Relaxed);
             self.core.latch_fault(rt);
         }

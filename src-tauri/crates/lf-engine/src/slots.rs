@@ -126,6 +126,9 @@ struct Slot {
     /// target (1 live, 0 off), which it holds exactly from `live_end` on (`Frame::MIN`: settled).
     live_end: Frame,
     live_gain: f32,
+    /// While not 0: the gate is shut, whatever `live` says, until the command taken at this count (an
+    /// idle unload's live-off: [`Rack::shut`]) has applied.
+    shut: u64,
     /// The gated input over a render call that a ramp touches.
     gated: Vec<f32>,
     gain_target: f64,
@@ -254,6 +257,7 @@ impl Rack {
                 live: false,
                 live_end: Frame::MIN,
                 live_gain: 0.0,
+                shut: 0,
                 gated: vec![0.0; max_block.max(1)],
                 gain_target: 1.0,
                 gain: 1.0,
@@ -385,7 +389,7 @@ impl Rack {
 
     /// The largest latency of a live slot's effect now: what [`Rack::latch_record`] takes while open.
     pub(crate) fn live_latency(&self) -> Frame {
-        self.slots.iter().filter(|s| s.live && s.unit.is_some() && s.kind == SlotKind::Effect).map(|s| s.latency).max().unwrap_or(0)
+        self.slots.iter().filter(|s| s.live && s.shut == 0 && s.unit.is_some() && s.kind == SlotKind::Effect).map(|s| s.latency).max().unwrap_or(0)
     }
 
     /// At a block start: while `open`, the record compensation follows the slots (the live latency, and
@@ -463,7 +467,7 @@ impl Rack {
     /// Whether slot `slot`'s live gate passes input from the cursor on: live, or its ramp out not yet
     /// ended.
     pub(crate) fn gate_open(&self, slot: usize) -> bool {
-        self.slots.get(slot).is_some_and(|s| s.live || self.cursor < s.live_end)
+        self.slots.get(slot).is_some_and(|s| s.shut == 0 && (s.live || self.cursor < s.live_end))
     }
 
     /// GO LIVE on or off at frame `now`: the live gate ramps from where it is to the new target over
@@ -481,10 +485,30 @@ impl Rack {
         (s.live_end, s.live_gain) = if !rendered || from == to { (Frame::MIN, to) } else { (now + n, from) };
     }
 
-    /// Slot `slot` off live at once, its gate settled closed (no ramp): `Engine::close_slot_idle`.
-    pub(crate) fn close_live(&mut self, slot: usize) {
+    /// Shut slot `slot`'s gate at once (no ramp) until the command taken at count `live_off`, a live-off,
+    /// has applied ([`Rack::reopen`]): `Engine::close_slot_idle`. The live flag still follows every
+    /// command meanwhile.
+    pub(crate) fn shut(&mut self, slot: usize, live_off: u64) {
         if let Some(s) = self.slots.get_mut(slot) {
-            (s.live, s.live_end, s.live_gain) = (false, Frame::MIN, 0.0);
+            s.shut = live_off;
+        }
+    }
+
+    /// After the command taken at count `seq` has applied: a gate shut for it opens to its live flag,
+    /// settled (the live-off it waited for leaves it closed, with no ramp from the gain it had before).
+    pub(crate) fn reopen(&mut self, seq: u64) {
+        for slot in 0..self.slots.len() {
+            if self.slots[slot].shut == seq {
+                self.slots[slot].shut = 0;
+                self.settle_live(slot);
+            }
+        }
+    }
+
+    /// Slot `slot`'s live gate at its target at once, a ramp cut short.
+    pub(crate) fn settle_live(&mut self, slot: usize) {
+        if let Some(s) = self.slots.get_mut(slot) {
+            (s.live_end, s.live_gain) = (Frame::MIN, if s.live { 1.0 } else { 0.0 });
         }
     }
 
@@ -512,7 +536,7 @@ impl Rack {
             // The live gate: settled, the input itself or silence; mid-ramp, the input times the gate,
             // frame by frame, into `gated`. It feeds an effect and an empty slot alike, and it is the
             // dry side of the bypass crossfade; an effect's output is never gated, so its tail rings.
-            let (live, end, from) = (s.live, s.live_end, s.live_gain);
+            let (live, end, from) = if s.shut == 0 { (s.live, s.live_end, s.live_gain) } else { (false, Frame::MIN, 0.0) };
             if frame < end {
                 for (k, (g, &x)) in s.gated.iter_mut().zip(input).enumerate() {
                     let f = frame + k as Frame;

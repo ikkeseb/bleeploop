@@ -813,6 +813,33 @@ mod tests {
         assert!(host.settings().contains(&Command::SetSlotLive(0, false)), "a rebuild replays the live-off");
     }
 
+    /// The idle unload's gate holds until its own live-off has applied: a live-on queued ahead of it,
+    /// more than a block's take (64 commands) before it, opens nothing at the reopen, and the slot ends
+    /// off, in the engine and in the settings a rebuild replays.
+    #[test]
+    fn an_idle_unloads_gate_holds_against_a_live_on_more_than_a_take_ahead() {
+        let mut rig = Rig::with_input(|_| 0.5);
+        let host = rig.device.host().clone();
+        host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        rig.play(8);
+        assert!(rig.tail_peak(1024) < 1e-6, "the silent effect is in, live");
+
+        rig.device.stop();
+        host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        for _ in 0..64 {
+            host.send(TimedCommand { frame: None, command: Command::SetSlotGain(1, 1.0) }).unwrap();
+        }
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), Some(&host)), Ok(()));
+        let reopened = rig.played();
+        rig.device.resume();
+        rig.play(8);
+        assert!(rig.peak_from(reopened) < 1e-6, "no dry input from the reopen's first frame: {}", rig.peak_from(reopened));
+        assert!(!host.core.ends.lock().unwrap().as_ref().unwrap().overview.slot_live(0), "the slot ends off");
+        assert!(host.settings().contains(&Command::SetSlotLive(0, false)), "a rebuild replays the live-off");
+    }
+
     /// An unload from a replaced document, delayed past the reload, finds the new document's plugin in
     /// the slot: it is refused, and so is any other change that document asks for; the plugin stays.
     #[test]
