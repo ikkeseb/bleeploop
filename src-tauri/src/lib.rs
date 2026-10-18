@@ -20,6 +20,32 @@ mod share_probe;
 // The app updater's check and install (`update.rs`).
 mod update;
 
+/// A panic hook's type (`std::panic::set_hook`).
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+/// The app's panic hook: routes a panic into the log (`log`; release WebView2 has no console, and a
+/// release panic otherwise vanishes) and chains to `prev`, so dev stderr backtraces are preserved.
+/// On an audio callback's thread it does neither (both allocate, and the log takes locks): the
+/// callback catches the panic and counts it, and the device owner logs the count.
+fn panic_hook(prev: PanicHook, log: fn(&str)) -> PanicHook {
+    Box::new(move |info| {
+        #[cfg(windows)]
+        if engine_io::in_rt_callback() {
+            return;
+        }
+        // The payload is a &str for `panic!("literal")` and a String for formatted panics: try both.
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "<unknown location>".to_string());
+        log(&format!("panic at {location}: {payload}"));
+        prev(info);
+    })
+}
+
 /// A diagnostic sink the frontend invokes once on startup (DEV only) so headless verification can
 /// read WebView2-internal facts (crossOriginIsolated, getUserMedia, MIDI, host kind) from
 /// `tauri dev` stdout — there is no Playwright into WebView2. Plain command; no capability needed.
@@ -252,25 +278,7 @@ pub fn run() {
             // Startup marker — pins the app version at the top of every log/crash report.
             log::info!("BleepLoop v{} starting", env!("CARGO_PKG_VERSION"));
 
-            // Route panics into the log (release WebView2 has no console, and a release panic
-            // otherwise vanishes) while chaining to the previous hook so dev stderr backtraces are
-            // preserved. The payload is a &str for `panic!("literal")` and a String for formatted
-            // panics — try both.
-            let prev = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                let payload = info
-                    .payload()
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| info.payload().downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "<non-string panic payload>".to_string());
-                let location = info
-                    .location()
-                    .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-                    .unwrap_or_else(|| "<unknown location>".to_string());
-                log::error!("panic at {location}: {payload}");
-                prev(info);
-            }));
+            std::panic::set_hook(panic_hook(std::panic::take_hook(), |line| log::error!("{line}")));
 
             #[cfg(windows)]
             {
@@ -387,4 +395,56 @@ pub fn run() {
             #[cfg(not(windows))]
             let _ = event;
         });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe, PanicHookInfo};
+    use std::sync::{Arc, Mutex};
+
+    use crate::engine_io::{in_rt_callback, IoCounters, RtSection};
+
+    /// What the hook under test logged and chained to the hook before it, of this test's panics only:
+    /// the hook is the process's, and other tests may panic while it is in.
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static CHAINED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const TAG: &str = "the panic hook's test";
+
+    fn payload(info: &PanicHookInfo<'_>) -> String {
+        let payload = info.payload();
+        payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_panic_on_an_audio_callback_reaches_neither_the_log_nor_the_previous_hook() {
+        let prev: Arc<dyn Fn(&PanicHookInfo<'_>) + Sync + Send> = Arc::from(take_hook());
+        let others = prev.clone();
+        let chained = move |info: &PanicHookInfo<'_>| {
+            let text = payload(info);
+            if text.contains(TAG) {
+                CHAINED.lock().unwrap().push(text);
+            } else {
+                others(info);
+            }
+        };
+        let log = |line: &str| {
+            if line.contains(TAG) {
+                LOGGED.lock().unwrap().push(line.to_string());
+            }
+        };
+        set_hook(super::panic_hook(Box::new(chained), log));
+        let counters = IoCounters::default();
+        let on = catch_unwind(AssertUnwindSafe(|| {
+            let _rt = RtSection::enter(&counters);
+            panic!("{TAG}: on an audio callback");
+        }));
+        let off = catch_unwind(|| panic!("{TAG}: off it"));
+        let _ = take_hook();
+        set_hook(Box::new(move |info| prev(info)));
+        assert!(on.is_err() && off.is_err());
+        assert!(!in_rt_callback(), "the section ended with the unwind");
+        let logged = LOGGED.lock().unwrap().clone();
+        assert!(matches!(&logged[..], [line] if line.contains("off it")), "only the panic off the callback is logged: {logged:?}");
+        assert_eq!(*CHAINED.lock().unwrap(), [format!("{TAG}: off it")], "and only it reaches the hook before");
+    }
 }

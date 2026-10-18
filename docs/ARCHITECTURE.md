@@ -156,8 +156,10 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
 5. **The RT path (engine callback, plugin process) never allocates, logs, blocks or waits on a
    lock.** The callback only `try_lock`s the engine (a miss plays silence and counts); buffers are
    allocated and touched before the first callback; failures latch counters and fault bits that a
-   non-RT thread reports. Tests run every `process` under `assert_no_alloc`; in DEV builds the device
-   callback counts any allocation (`src-tauri/src/host/rt_alloc.rs`).
+   non-RT thread reports. Tests run every `process` under `assert_no_alloc`; in DEV builds each audio
+   callback (input, output, Share output's) counts every allocation Rust's allocator makes on its
+   thread from its entry to its return, which a plugin's own heap bypasses
+   (`src-tauri/src/host/rt_alloc.rs`).
 6. **No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop.**
    rAF + a plain mutable object only. A capture drain writing a fresh object into a track signal 40×/s
    once cost ~200 full-document layout events per 5 s of recording. The pattern: the feed handler

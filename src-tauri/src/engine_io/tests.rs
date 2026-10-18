@@ -2740,3 +2740,46 @@ fn an_older_toggled_drained_after_a_newer_setter_does_not_overwrite_it() {
         _ => None,
     });
 }
+
+/// A panic caught in the WASAPI input callback leaves its stream running and its input silent: the
+/// owner restarts the device on the same endpoints at the engine's rate, so the loop resumes in place
+/// and the input is heard again. A second within the holdoff leaves the input silent and the status
+/// says so (no rate switch, no engine rebuilt); an open of the same device then restarts it.
+#[test]
+fn a_panic_in_the_wasapi_input_callback_restarts_the_device_and_keeps_the_loop() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(wasapi(None, None));
+    let length = h.record_loop();
+    h.play(2 * length);
+    let engine = h.host.core.engine_gen.load(SeqCst);
+    // Slot 0's input peak over a tenth of a second, after one to let a change settle.
+    let input_peak = |h: &Harness| {
+        h.play(RATE / 10);
+        h.host.take_meter();
+        h.play(RATE / 10);
+        h.host.take_meter().0[0]
+    };
+    assert!(input_peak(&h) > 0.1, "the input is heard");
+
+    h.fake.capture_panic.store(true, SeqCst);
+    until("the device restarts", || h.fake.started.load(SeqCst) == 2);
+    until("the device runs again", || h.host.status().is_some());
+    assert_eq!(h.host.diag().panics, 1);
+    assert_eq!((h.host.rate(), h.host.core.engine_gen.load(SeqCst)), (Some(48_000), engine), "the same engine at the same rate");
+    assert!(h.host.status().unwrap().input_open);
+    h.play(RATE / 5);
+    assert_resumed_in_place(&h, 1, length);
+    assert!(input_peak(&h) > 0.1, "the input is heard again");
+
+    h.fake.capture_panic.store(true, SeqCst);
+    until("the second panic", || h.host.diag().panics == 2);
+    until("the status says the input is gone", || h.host.status().is_some_and(|s| !s.input_open));
+    assert_eq!(h.fake.started.load(SeqCst), 2, "not restarted within the holdoff");
+    assert_eq!(input_peak(&h), 0.0, "the input is silent");
+    assert!(h.open(wasapi(None, None)).input_open, "an open of the same device restarts it");
+    assert_eq!(h.fake.started.load(SeqCst), 3);
+    assert!(input_peak(&h) > 0.1, "the input is heard once more");
+    assert_eq!(h.host.core.engine_gen.load(SeqCst), engine, "the engine throughout");
+    assert!(h.host.take_device_events().is_empty(), "nothing was lost");
+}

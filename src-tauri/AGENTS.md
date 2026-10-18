@@ -118,7 +118,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   with the native baselines in `docs/VERIFY.md`.
 - **Release logging:** `tauri-plugin-log` registers UNCONDITIONALLY → Stdout (the dev grep
   convention) + a rotated file at `%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log` (2 MB,
-  KeepAll). The Rust panic hook chains the default hook and logs location+payload.
+  KeepAll). The Rust panic hook chains the default hook and logs location+payload, except on an
+  audio callback's thread, where it does neither and the callback's panic counter reports it.
 - **The CSP (`tauri.conf.json` `security.csp`) applies to BUILT apps only.** `tauri dev` serves from
   vite and is not covered, so a new asset origin, a CDN font or an `eval` breaks in release alone.
   Violations reach the release log as `[csp]` lines (`src/platform/logging.ts`); after adding a new
@@ -341,23 +342,10 @@ plugin-GUI work.
   change does not retry it.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
-- The panic hook (`lib.rs` 260-272) allocates, logs and calls the previous hook on whatever thread
-  panicked, the audio thread included (`catch_unwind` in `callback::guarded` does not bypass it). Fix: a
-  const-initialised thread-local RT marker set at the callback boundary; the hook skips logging and
-  `prev` there, the existing panic counters report owner-side; the unwind itself stays non-RT.
-- A caught panic in the WASAPI input callback only sets `JoinInput::dead` (`callback.rs` 544): capture
-  goes silent for good while the owner, watching `core.fault` and `run.fault`, never hears of it. Fix:
-  latch a separate capture fault; the owner first rebuilds capture/join on the same device and rate,
-  keeping the engine and its loops, else reports it without a rate switch. Test with an injected panic.
-- The ASIO callback is not lock-free: `Start` reads `output.buffer_size()` (`cpal_driver.rs` 120) after
-  both `play()` calls, and cpal 0.18.1 takes the same `asio_streams` mutex there as in its callbacks;
-  asio-sys also holds `BUFFER_CALLBACK.lock()` around every callback. Small fix: read the buffer size
-  before both plays. Full fix: patched ASIO dependencies, with the L1+L2 latency measurements.
-- The RT allocation count (`callback::guarded`, debug builds) misses parts of the callbacks: the join's
-  `pipe.pull` runs before the guard (`callback.rs` 688 vs 725) and the Share callback's `mirror.render`
-  (`share.rs` 182) has none, so `docs/ARCHITECTURE.md`'s "counts any allocation" overstates it. Fix:
-  split the counting from the panic guard and cover each whole input, output and Share callback
-  (nesting-safe); verify with an allocation injected in each gap.
+- The ASIO callback is not lock-free: asio-sys holds `BUFFER_CALLBACK.lock()` around every callback,
+  and cpal 0.18.1 takes its `asio_streams` mutex in them (`Start` reads the buffer size before either
+  stream plays, so the owner does not contend there). Fix: patched ASIO dependencies, with the L1+L2
+  latency measurements.
 - Two live slots on the same capture channel sum it (+6 dB).
 - An ASIO period the driver drops without its overload report is not flagged as damage (input and
   output stay in step; the take is spliced there). `asio_phase_slips` counts it in the log only (after a run's first
@@ -410,11 +398,6 @@ plugin-GUI work.
   build's `lf.midiLearn` key (`src/app/midi-actions.ts`). Its module briefing (`midi/mod.rs` header)
   restates ARCHITECTURE's subscription/epoch, nothing-is-stamped, no-device and rebuild-needs-no-WebView
   rules: replace only that overlap with pointers, keep its local access, batch, lock and retry detail.
-- ASSIGN can swallow a release: a binding made live (`MidiHost::assign` → `refresh`) while its note or
-  CC64 is already held through the router makes learn consume the release, and `midi/mod.rs` 789 keeps
-  it from the router, so the note or sustain hangs. Fix: release the router's affected holds when a
-  binding goes live (other owners of the same note kept); a tweak of that last `if` alone is not enough,
-  `outcome.fire` already ran at 776. Test note and sustain.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.

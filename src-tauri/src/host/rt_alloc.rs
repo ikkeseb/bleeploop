@@ -1,10 +1,10 @@
 //! DEV-only global-allocator shim (invariant #5: "no allocation in the RT path"). It is a thin
 //! wrapper over `System` that, when a thread-local `rt_guard` is set, bumps that thread's count
 //! ([`allocations`]: guarded code read from its own thread, so tests running side by side never count
-//! each other's) and the process's (`RT_ALLOCS`: guarded threads read from another). The
-//! engine's device callback sets the guard around its body (`engine_io::callback::guarded`), so any
-//! steady-state heap allocation on the RT thread is *measured* (not asserted) and counted in its
-//! `rt_allocs`; the unit and pipe tests assert zero. Const-initialised
+//! each other's) and the process's (`RT_ALLOCS`: guarded threads read from another). Each audio
+//! callback, input, output and Share output's, sets the guard around its whole body
+//! (`engine_io::callback::RtSection`), so any steady-state heap allocation on the RT thread is
+//! *measured* (not asserted) and counted in its `rt_allocs`; the unit and pipe tests assert zero. Const-initialised
 //! thread-local → no lazy alloc/registration inside `alloc()` (safe to read there). Debug builds
 //! only; `tauri dev` is a debug build, so the gate sees real numbers.
 
@@ -31,17 +31,19 @@ fn count() {
     }
 }
 
-/// RAII: sets the per-thread "count allocations" flag for its lifetime.
-pub struct Guard(());
+/// RAII: sets the per-thread "count allocations" flag for its lifetime, and puts back what it found,
+/// so a guard inside another leaves the outer one counting.
+pub struct Guard {
+    was: bool,
+}
 
 pub fn guard() -> Guard {
-    RT_GUARD.with(|g| g.set(true));
-    Guard(())
+    Guard { was: RT_GUARD.with(|g| g.replace(true)) }
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        RT_GUARD.with(|g| g.set(false));
+        RT_GUARD.with(|g| g.set(self.was));
     }
 }
 
