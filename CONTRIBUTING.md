@@ -8,16 +8,17 @@ interface X at buffer Y") and pull requests are welcome.
 1. Fork, branch from `main`, open the PR against `main`.
 2. `pnpm install`, then make `pnpm check` pass (typecheck, lint, the capability-boundary guard and the
    deterministic `verify/` guards). It is also the pre-push hook. The engine's tests are
-   `pnpm test:engine` (`cargo test -p lf-engine`); CI runs them on every push that is not
-   docs-only.
+   `pnpm test:engine` (`cargo test -p lf-engine`); CI runs the Rust tests only on a change that
+   reaches their path filters (mostly `src-tauri/`; the exact lists are in `.github/workflows/ci.yml`
+   and `.github/workflows/rust-test.yml`), so run them yourself for anything they cover.
 3. CI runs the browser probes (`pnpm probe --ci`); `pnpm probe <name>` runs one locally. Both need
    `pnpm exec playwright install chromium` once.
 4. If you touched `src-tauri/`, run `cargo check` in `src-tauri/` (Windows). The ASIO feature is
    optional and needs your own copy of the Steinberg SDK, see `THIRD-PARTY-NOTICES.md`.
 
-Keep changes small and say how you verified them. The final test of audio behaviour is the
-maintainer's ear on real hardware, so a PR that changes timing or latency may sit until it has been
-played.
+Keep changes small and say how you verified them. A change to timing or latency lands on its
+machine measurements (`docs/ARCHITECTURE.md` names the ones a latency change needs), not on a jam:
+what only an ear can judge goes into `STATUS.md` as unheard, and a later "this is off" reopens it.
 
 ## Finding your way around
 

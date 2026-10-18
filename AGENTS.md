@@ -96,20 +96,13 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   `pnpm test:engine` = `cargo test -p lf-engine`, the engine's behaviour rendered offline, frame by
   frame. What each can and cannot see: `verify/README.md`.
 
-## Architecture in one paragraph
+## Architecture: where it lives
 
-The app runs one native audio engine: `src-tauri/crates/lf-engine` (pure, briefing in its `lib.rs`)
-and its device side `src-tauri/src/engine_io` (briefing in its `mod.rs`); the WebView sends commands
-and reads a JSON feed (the wire: `src-tauri/src/engine_io/wire.rs`, mirrored in
-`src/platform/engine-wire.ts`). `src/platform/` is the ONLY place allowed to import `@tauri-apps/*`;
-`session/` and `ui/` depend on its interfaces, never the reverse; UI components reach the engine
-through `src/ui/state/audio.ts`. Live audio never crosses that boundary as PCM; a session save's
-snapshot does, once, off the RT path. Export, import, recovery and autosave live in `src/session/`.
-MIDI is native, the app's only MIDI path: `src-tauri/src/engine_io/midi/` (briefing in its `mod.rs`),
-one note router for every note source; the UI shows its state through `src/ui/state/midi.ts`.
-Frontend `console.error` + uncaught errors feed the release log (`src/platform/logging.ts`): keep
-every `console.error` site. Stack: SolidJS + TypeScript + Vite 8 (rolldown/oxc; esbuild is gone),
-Rust + cpal + the CLAP, VST3 and VST2 hosts.
+`docs/ARCHITECTURE.md` owns the design: one native engine, the wire and its feed, the platform
+boundary, native MIDI, session files and the stack. The briefings: the engine,
+`src-tauri/crates/lf-engine/src/lib.rs`; its device side, `src-tauri/src/engine_io/mod.rs`; native
+MIDI, `src-tauri/src/engine_io/midi/mod.rs`; the UI, `src/ui/AGENTS.md`. **Keep every frontend
+`console.error` site:** with uncaught errors they feed the release log (`src/platform/logging.ts`).
 
 ## Invariants: titles only, `docs/ARCHITECTURE.md` owns the text
 

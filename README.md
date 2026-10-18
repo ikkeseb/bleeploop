@@ -27,8 +27,8 @@ itself.
 
 - Windows 10 or 11, 64-bit. The installer fetches the WebView2 runtime if the machine lacks it.
 - An audio interface with an ASIO driver. WASAPI works as a fallback, but Windows and some drivers add
-  latency they do not report, so WASAPI takes can land late (about 215 ms on the developer's
-  Focusrite).
+  latency they do not report, so WASAPI takes can land late (about 215 ms on the Focusrite the
+  developer measured).
 - Your own plugin for the guitar's sound: CLAP, VST3 or 64-bit VST2. BleepLoop hosts it; it is not an
   amp sim itself.
 - Optional: a MIDI footswitch or keyboard. Without one, the computer keyboard runs the looper.
@@ -125,19 +125,20 @@ itself.
 
 This is an early release from one maintainer, played by the maintainer and a few testers.
 
-What holds, measured on the developer's rig (a Focusrite Scarlett 2i2 3rd gen, ASIO, 44.1 kHz, a cable
-from the output back into the input):
+What held, measured on the developer's previous rig (a Focusrite Scarlett 2i2 3rd gen, ASIO,
+44.1 kHz, a cable from the output back into the input):
 
-- The guitar's round trip through the app and the interface is 8.1 ms at a 64-sample buffer and
+- The guitar's round trip through the app and the interface was 8.1 ms at a 64-sample buffer and
   15.1 ms at 128.
-- A take lands within 0.1 ms of where the driver's own latency report says it should, with no trim
-  setting, and stays put over ten minutes.
+- A take landed within 0.1 ms of where the driver's own latency report says it should, with no trim
+  setting, and stayed put over ten minutes.
 - An amp-sim plugin (Archetype Petrucci X) ran 120 s at buffer 128 and 256 with no dropouts.
 
 What is rough:
 
-- Only that one interface has been measured. Other ASIO drivers have not, and a report of how it runs
-  on yours (interface, buffer size, what you heard) is welcome as an issue.
+- Only that one interface has had its timing and latency measured. The developer's current one (an
+  Audient EVO 4) passes the release's smoke test, input included, but its timing is not measured yet.
+  A report of how it runs on yours (interface, buffer size, what you heard) is welcome as an issue.
 - Much of the feature list is proven by tests but has not yet been played by ear in a real jam.
   `STATUS.md` lists what has and has not.
 - WASAPI takes land late on drivers that hide their latency (see above). ASIO is the path to use.
