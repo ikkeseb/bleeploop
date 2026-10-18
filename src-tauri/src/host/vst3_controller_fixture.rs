@@ -9,6 +9,8 @@ use vst3::Steinberg::{char16, int16, IBStream, TBool};
 
 pub(super) struct FixtureController {
     param_count: AtomicI32,
+    /// The `ParameterInfo.flags` of each index `getParameterInfo` answers.
+    param_flags: [AtomicI32; 16],
     /// The handler the controller currently holds, and how often the host set one.
     pub(super) handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     handler_sets: AtomicUsize,
@@ -27,6 +29,7 @@ impl FixtureController {
     pub(super) fn new(param_count: i32) -> Self {
         Self {
             param_count: AtomicI32::new(param_count),
+            param_flags: Default::default(),
             handler: Mutex::new(None),
             handler_sets: AtomicUsize::new(0),
             set_normalized: Mutex::new(Vec::new()),
@@ -83,7 +86,7 @@ impl IEditControllerTrait for FixtureController {
         let info = &mut *info;
         info.id = 1000 + index as u32;
         info.defaultNormalizedValue = 0.5;
-        info.flags = 0;
+        info.flags = self.param_flags[index as usize].load(Relaxed);
         kResultOk
     }
     unsafe fn getParamStringByValue(
@@ -200,6 +203,19 @@ fn a_malformed_parameter_count_is_an_error_not_an_abort() {
     let params = list_vst3_params(&ctl).expect("a sane count lists");
     assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1000, 1001, 1002]);
     assert!(params.iter().all(|p| p.default_value == 0.5 && p.value == 0.25));
+}
+
+/// A read-only parameter (a meter) and a hidden one are left out of the listing, which is also the
+/// set of ids a host set may use (`ParamIds`, the CLAP fixture's engine test sets one).
+#[test]
+fn read_only_and_hidden_params_are_not_listed() {
+    use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsReadOnly};
+    let (obj, ctl) = controller(4);
+    obj.param_flags[0].store(kIsReadOnly, Relaxed);
+    obj.param_flags[1].store(kCanAutomate, Relaxed);
+    obj.param_flags[2].store(kIsHidden, Relaxed);
+    let params = list_vst3_params(&ctl).expect("it lists");
+    assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1001, 1003]);
 }
 
 /// The owner sets ONE component handler at load. An editor open (here refused at the attach,

@@ -15,8 +15,8 @@ use clap_sys::{
     ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS},
     ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY},
     ext::params::{
-        clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS,
-        CLAP_PARAM_RESCAN_VALUES,
+        clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_HIDDEN,
+        CLAP_PARAM_IS_READONLY, CLAP_PARAM_RESCAN_VALUES,
     },
     ext::state::{clap_host_state, clap_plugin_state, CLAP_EXT_STATE},
     stream::{clap_istream, clap_ostream},
@@ -96,6 +96,8 @@ struct Observed {
     /// What `clap.params` reports as its count; `get_info` answers only the first 16 indices, so
     /// a malformed count stays cheap to walk.
     param_count: AtomicU32,
+    /// The `clap_param_info.flags` of each of those 16.
+    param_flags: [AtomicU32; 16],
     /// What `clap.latency` reports.
     latency: AtomicU32,
     /// The input port's channel count (`clap.audio-ports`); 0 = no input port, an instrument. With
@@ -490,14 +492,15 @@ unsafe extern "C" fn param_info(
     index: u32,
     info: *mut clap_param_info,
 ) -> bool {
-    if index >= unsafe { state(plugin) }.param_count.load(Relaxed).min(16) {
+    let s = unsafe { state(plugin) };
+    if index >= s.param_count.load(Relaxed).min(16) {
         return false;
     }
     // SAFETY: the host passes a writable clap_param_info; every field is written.
     unsafe {
         info.write(clap_param_info {
             id: 100 + index,
-            flags: 0,
+            flags: s.param_flags[index as usize].load(Relaxed),
             cookie: std::ptr::null_mut(),
             name: [0; CLAP_NAME_SIZE],
             module: [0; CLAP_PATH_SIZE],
@@ -976,6 +979,27 @@ mod engine {
         assert!(wait_for(|| obs.param_values.load(Relaxed) == 1), "the param reaches the processor");
         assert_eq!(obs.last_param.load(Relaxed), 101);
         assert_eq!(f64::from_bits(obs.last_param_value.load(Relaxed)), 0.75);
+        handle.unload().unwrap();
+    }
+
+    /// A read-only parameter (a meter, a value the plugin reports) and a hidden one are neither
+    /// listed nor settable: a host-set value would fight the plugin's own.
+    #[test]
+    fn read_only_and_hidden_params_are_not_listed_and_a_set_on_one_is_refused() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let obs = Arc::new(Observed::default());
+        obs.param_count.store(3, Relaxed);
+        obs.param_flags[0].store(CLAP_PARAM_IS_READONLY, Relaxed);
+        obs.param_flags[2].store(CLAP_PARAM_IS_HIDDEN, Relaxed);
+        let (handle, _) = load(&device, 0, &obs);
+        let listed: Vec<u32> = handle.list_params().unwrap().iter().map(|p| p.id).collect();
+        assert_eq!(listed, vec![101]);
+        assert!(handle.set_param(100, 0.5).is_err(), "a read-only parameter");
+        assert!(handle.set_param(102, 0.5).is_err(), "a hidden parameter");
+        handle.set_param(101, 0.75).unwrap();
+        assert!(wait_for(|| obs.param_values.load(Relaxed) == 1), "the writable one reaches the processor");
+        assert_eq!(obs.last_param.load(Relaxed), 101);
         handle.unload().unwrap();
     }
 

@@ -20,7 +20,7 @@ use std::time::Duration;
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamInfoBuffer,
-    ParamRescanFlags, PluginParams,
+    ParamInfoFlags, ParamRescanFlags, PluginParams,
 };
 use clack_extensions::gui::{
     GuiApiType, GuiConfiguration, GuiSize, HostGui, HostGuiImpl, PluginGui, Window,
@@ -143,7 +143,9 @@ fn owner_request_5s(
 }
 
 /// Enumerate the plugin's parameters (host-side `params` ext, a main-thread call): stable ids,
-/// ranges and the live value. Also what refreshes the slot's known-id set (`ParamIds`).
+/// ranges and the live value. Also what refreshes the slot's known-id set (`ParamIds`), so a
+/// parameter left out here is one the host never sets: read-only ones (the plugin's own output, a
+/// meter) and hidden ones (CLAP `params.h`: the host must not show them).
 fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDesc>, String> {
     let mut handle = instance.plugin_handle();
     let params = handle
@@ -154,6 +156,9 @@ fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDe
     let mut buf = ParamInfoBuffer::new();
     for i in 0..count {
         if let Some(info) = params.get_info(&mut handle, i, &mut buf) {
+            if info.flags.intersects(ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_HIDDEN) {
+                continue;
+            }
             let id = info.id;
             let (min_value, max_value, default_value) =
                 (info.min_value, info.max_value, info.default_value);

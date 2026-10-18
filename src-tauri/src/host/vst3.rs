@@ -1146,7 +1146,8 @@ fn string128_to_string(s: &String128) -> String {
 }
 
 /// Enumerate the VST3 plugin's automatable params off the edit controller (owner-thread call —
-/// the controller is `!Send`). Skips hidden params. VST3 param values are always normalised
+/// the controller is `!Send`). Skips hidden and read-only params (a meter, a value the plugin
+/// reports): this listing is also the set of ids the host may set (`ParamIds`). VST3 param values are always normalised
 /// 0..1, so `min/max` are 0.0/1.0 and `default` is `defaultNormalizedValue`. `None` controller
 /// (plugin has no editor controller) → empty list, so the UI degrades gracefully.
 fn list_vst3_params(
@@ -1166,10 +1167,8 @@ fn list_vst3_params(
             if ctl.getParameterInfo(i, &mut info) != kResultOk {
                 continue;
             }
-            if info.flags
-                & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsHidden
-                != 0
-            {
+            use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kIsHidden, kIsReadOnly};
+            if info.flags & (kIsHidden | kIsReadOnly) != 0 {
                 continue;
             }
             out.push(ParamDesc {
