@@ -144,63 +144,34 @@ blocks until the verdict, so an agent harness should run it in the background.
   reaches every plugin (scan, load, the editor host) or a plugin was just installed (survey that one):
   a full sweep opens every installed plugin on the owner's desktop.
   - `native:engine` after a change to the device owner, the callbacks, the pipes or the slot
-    handshake. Baseline (2026-09-25, ASIO 128, Archetype Petrucci X and Pro-Q 3): every check passes,
-    every counter 0 over 224 763 callbacks, 20 switches and 4 swaps; soak block time p99.9 < 33 %, max
-    < 52 %; every ASIO re-open retries its input build once (a BadMode, then fine); unloading
-    Archetype while a second instance ran took 4.8 s, nearly all of it the plugin's own teardown, the
-    slot dry meanwhile. Share output's soak (`--share=`, ASIO 64, no plugins, `--mute=1
-    --seconds=1500`, the mirror into the Scarlett's own Windows endpoint, 2026-10-06): every counter
-    0 over 26 minutes at the 40 ms setpoint; at 20 ms, 37 `share_starves` and 2 trims in two bursts
-    10 min 48 s apart, so soak 25 minutes or more (a shorter run can sit between two bursts).
-    Each soak minute's line carries that minute's block time and the glitch diagnostics
-    (`asio_phase_slips`, `asio_late_finishes`, `clipped_blocks`), which no check fails on: they time a spike.
-    On WASAPI with another app holding the microphone the input can run 0.87 %
-    fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping ~25 ms of
-    input (real time or an artefact: unknown). In the first ~2.5 s after a WASAPI open the join can
-    trim (1–2) or starve (2–4): 9 of 85 WASAPI opens after ASIO had run in the process
-    (`--cycle=asio64,wasapi`) and 1 of 43 with no ASIO in it (`--backend=wasapi --buffer=default
-    --cycle=wasapi`) on the Scarlett at 48 kHz with Signal Desktop and Focusrite Notifier running
-    (2026-10-03); 17 of 100 after ASIO and 2 of 31 without, with both plugins and 2 swaps, at 44.1 kHz
-    with Focusrite Notifier alone (2026-10-05), while the soak, every ASIO phase and the swaps stay 0.
-    `engine.xruns` also counts a block whose input a starve or a trim damaged, and the block after it,
-    so such an open reads two to seven xruns. The counter check forgives the join's trims and starves
-    and their engine xruns in an open's first 3 s (D25) and prints what it forgave (`forgiven in …`);
-    a take that overlaps one still fails `loop`. The mechanism: `src-tauri/AGENTS.md` § Open threads.
+    handshake. Baseline (Scarlett 2i2 3rd gen, ASIO 128, Archetype Petrucci X and Pro-Q 3,
+    2026-09-25): every check passes, every counter 0 over 224 763 callbacks, 20 switches and 4 swaps;
+    soak block time p99.9 < 33 %, max < 52 %; every ASIO re-open retries its input build once (a
+    BadMode, then fine); unloading Archetype while a second instance runs takes ~4.8 s, the plugin's
+    own teardown, the slot dry meanwhile. Share output's soak (`--share=`, ASIO 64, no plugins,
+    `--mute=1 --seconds=1500`, into the Scarlett's own Windows endpoint, 2026-10-06): every counter 0
+    over 26 minutes at the 40 ms setpoint; at 20 ms it ran short in bursts about 10.8 minutes apart, so
+    soak 25 minutes or more. Each soak minute's line carries its block time and the glitch diagnostics
+    (`asio_phase_slips`, `asio_late_finishes`, `clipped_blocks`), which no check fails on: they time a
+    spike. WASAPI (Scarlett, 2026-10-03 and 10-05): in an open's first ~2.5 s the join can trim (1–2)
+    or starve (2–4), in 9 of 85 and 17 of 100 opens after ASIO had run in the process
+    (`--cycle=asio64,wasapi`) and 1 of 43 and 2 of 31 with none (`--backend=wasapi --buffer=default
+    --cycle=wasapi`), while the soak, every ASIO phase and the swaps stay 0. `engine.xruns` also counts
+    a block a starve or a trim damaged and the block after it, so such an open reads two to seven. The
+    counter check forgives those in an open's first 3 s (D25) and prints what it forgave (`forgiven in
+    …`); a take that overlaps one still fails `loop`. With another app holding the microphone the input
+    can run 0.87 % fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping
+    ~25 ms of input (real time or an artefact: unknown). The mechanism: `src-tauri/AGENTS.md` § Open
+    threads.
   - `native:engine-loopback` after a change to the engine's alignment, click, grid, device open or
-    snapshot. Baseline (2026-09-26, Scarlett 2i2 3rd gen, 44.1 kHz, a cable from line out R into
-    input 2; six launches, Pro-Q 3 and MIC): A −0.11..+0.09 ms at ASIO 64, 128 and 256, spread
-    0.001 ms, drift ≤ 0.001 ms/min, B − 2·A ≤ 0.002 ms, C − A and D − B 0.000, the accent on beat 1;
-    no take rejected. Each device open lands a whole number of frames off (−5..+4), the same for every
-    take inside it (cause unknown). With the multiply phases (2026-09-26, Pro-Q, three launches): E − A
-    and F − A 0.000 and lane 1 bit-exact twice at 64, 128 and 256, except once at 128, where the 32 s E
-    take stepped one frame late between its beats 24 and 32 and F kept that frame; two relaunches at
-    128 did not repeat it (a one-frame slip inside an open; cause unknown). With the free-take and TRIM
-    phases (2026-09-27, Pro-Q, one launch): G − A and H − B 0.000 at 64, 128 and 256, H 32/32 beats,
-    lane 1 bit-exact twice after G, the trimmed lane and its UNDO bit-exact; no take rejected. With the
-    FADE phase (2026-09-27, Pro-Q, two launches): at 64, 128 and 256 the fading lanes stopped on the
-    downbeat two bars on, the beats of I read 1.000 0.756 0.556 0.386 0.250 0.139 0.062 0.016 against
-    ((8 − k)/8)² 1 0.766 0.563 0.391 0.250 0.141 0.063 0.016, past the bar line a quarter of the floor
-    bar, and lane 1 came back at 1.000 after PLAY ALL; the first launch failed that last bar once at 256
-    (0.563: a meter read every 20 ms missed the bar's accent, now read every 4 ms over two bars).
-    After the per-slot input and the record-compensation latch (2026-09-28, a guitar cable from line
-    out R into input 2, input gain at 11 o'clock, peak gain 0.33; the cable used before gave no signal
-    on either input): 20/20 bars at 64 and 256; at 128, in two launches, B and D (re-recorded, peak
-    gain 0.106) each read one beat 147–250 ms early, near its window's start (once take A too), which
-    fails spread and drift while every other beat sits within 0.005 ms. v0.1.0's code on the same rig
-    reads the same in B and D, so it predates the change. On the engine-only app (2026-09-29, the same
-    rig): the same B and D reading at 128; one launch at 64 read 149× the floor bar past the fade's bar
-    line in I, its relaunch 0.302. Cause of the B and D reading (2026-10-02, 48 kHz, five launches,
-    every stray logged): sound that is not the click reaches the cable, about 200 Hz decaying over
-    ~1.4 s and a ~400 Hz tone repeating every 6.000 s, mostly in the first take after a device switch
-    (B and D replay A's lane), and the old onset (the first 30 % crossing anywhere before the window's
-    peak) took it for the click; the onset now stays by the peak and such sound fails by name (the stray
-    bar). Its source is unknown: other apps playing through the interface (its driver mixes their audio
-    into the same line outs; Signal Desktop and Focusrite Notifier run on this PC) are the suspect. The I
-    reading is likely the same (not re-observed). At 256 every bar passed; at 64 and 128 every bar but
-    those the sound moved (spread, drift, once the accent), |A| at most 0.125 ms. Silence other apps'
-    sound on the interface before a loopback run. With the stray bar and the input-gap rejection
-    (2026-10-03, 48 kHz, Pro-Q, one launch): 21/21 bars at 64, 128 and 256, no stray sound, no take
-    rejected, A +0.08 ms and B +0.17 ms at every size, spread at most 0.003 ms.
+    snapshot. Baseline (Scarlett 2i2 3rd gen, a cable from line out R into input 2, Pro-Q, 48 kHz,
+    2026-10-03): 21/21 bars at 64, 128 and 256, no stray sound, no take rejected, A +0.08 ms and B
+    +0.17 ms at every size, spread at most 0.003 ms. At 44.1 kHz (2026-09-26 and 27, Pro-Q 3 and MIC):
+    A −0.11..+0.09 ms at each size, spread 0.001 ms, drift ≤ 0.001 ms/min, B − 2·A ≤ 0.002 ms, C − A
+    and D − B 0.000, and the multiply, free-take, TRIM and FADE phases passed (the FADE beats within
+    about 0.01 of ((8 − k)/8)²). Silence other apps' sound on the interface before a run: what they play
+    through its line outs reaches the cable and fails the run as stray sound. The offsets nothing
+    explains yet: `src-tauri/AGENTS.md` § Open threads.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of
@@ -228,7 +199,9 @@ blocks until the verdict, so an agent harness should run it in the background.
 ### The owner's loopback run (`release:smoke` with the cable, EVO 4)
 
 The owner cables and sets the levels; an agent may run step 2 from WSL (the `pnpm` wrapper) while the
-owner watches EVO Control. Passed 7/7 this way on 2026-10-16 (8a18e5ad, ASIO 128 at 44.1 kHz).
+owner watches EVO Control. Last passed 7/7 with an input take for v0.8.6 on 2026-10-17, the owner's
+guitar standing in for the cable (step 1); with the cable on 2026-10-16 (8a18e5ad, ASIO 128 at
+44.1 kHz).
 
 1. **Before.** Close BleepLoop (installed or dev) and anything playing sound; the screen unlocked. Note
    EVO Control's output ring (it also moves Windows' volume for the device), input 1's gain, the
@@ -244,7 +217,7 @@ owner watches EVO Control. Passed 7/7 this way on 2026-10-16 (8a18e5ad, ASIO 128
    The owner's guitar in input 1 stands in for the cable when the cable stays out (v0.8.6): one string
    plucked on the beat through the one bar passed; a steady strum fills the bar and
    reads as run away (475 of 672 columns), since that bar is the click's few peaks.
-2. **Run** (the PC · PowerShell · the repo checkout, clean; or WSL at `/mnt/c/Users/Seb/bleeploop`). The
+2. **Run** (the PC · PowerShell · the repo checkout, clean; or WSL in the same checkout under /mnt/c). The
    exe must be built from the commit checked out; no `BleepLoop-smoke-<sha>` artifact for it yet:
    `gh workflow run build-exe.yml --ref <branch> -f smoke=true`, ~20 min. Check out the commit, not
    the branch: `dev` is often checked out in an agent's worktree, where `git switch dev` refuses.
