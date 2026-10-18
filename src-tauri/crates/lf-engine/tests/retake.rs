@@ -1,4 +1,4 @@
-//! Ports verify/guards/retake.mjs: RETAKE. A take of known length keeps rolling pass after pass; the stop
+//! Ports the removed verify/guards/retake.mjs: RETAKE. A take of known length keeps rolling pass after pass; the stop
 //! gesture keeps the last complete pass, finishes the pass in flight inside the quarter-beat grace, or
 //! is an ordinary stop with nothing kept. The pure stop rule (section A) is tested with the grid
 //! (`src/grid.rs`).

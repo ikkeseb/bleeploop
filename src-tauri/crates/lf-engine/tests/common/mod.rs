@@ -1,7 +1,7 @@
 //! The engine's test rig: one `Engine` driven like the device drives it. Commands carry frames; the
 //! input is a function of the absolute frame (a frame code names exactly which frame landed where);
 //! blocks render at a chosen size; events and, on request, the output are kept for assertions.
-//! The Rust twin of `verify/harness/rig.ts`.
+//! The Rust twin of the removed `verify/harness/rig.ts`.
 #![allow(dead_code)]
 
 pub mod dub;

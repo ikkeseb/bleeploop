@@ -128,11 +128,15 @@ await probe(async ({ open }) => {
       window.Worker = originalWorker;
       const previous = await restores(1.75);
 
-      // Pause at transfer, after the snapshot has been copied but before encoding returns.
+      // Pause at transfer, after the snapshot has been copied but before encoding returns. A flush
+      // that never hands its snapshot to a worker (an encode on the main thread) fails here at once.
       let transferred;
       let started;
       const observeTransfer = () => {
-        started = new Promise((resolve) => { transferred = resolve; });
+        started = Promise.race([
+          new Promise((resolve) => { transferred = resolve; }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('the flush handed no snapshot to the recovery worker within 5 s')), 5000)),
+        ]);
         window.Worker = class extends originalWorker {
           postMessage(...args) { super.postMessage(...args); transferred(); }
         };

@@ -2,15 +2,21 @@
  * Main-thread continuity during real recovery writes (`src/session/autosave.ts`, the encode in its
  * worker): measures the worst setInterval tick gap and any long-task duration while `autosave.flush()`
  * snapshots, encodes and writes a 1-track 1-bar and a 5-track 30-bar session, on the web engine fake
- * (`src/platform/host.web.ts`) whose snapshot answers those loops; the UI's controls must not stall.
+ * (`src/platform/host.web.ts`) whose snapshot answers those loops. Every run requires each flush to
+ * complete its recovery write and prints the timings; `--perf` also holds the worst tick gap under
+ * 100 ms, a local performance bound: a shared CI runner's descheduling is indistinguishable from the
+ * app blocking. That the encode stays off the main thread at all is `verify/probes/recovery-worker.mjs`,
+ * in CI.
  *
  * Cannot see the native engine or its audio during a save (the engine renders on its own thread), the
  * snapshot's cost over Tauri IPC (the fake hands back a copy of bytes already in the page) or WebView2
  * timing.
- * Run: pnpm probe recovery-playback
+ * Run: pnpm probe recovery-playback [--perf]
  */
 import assert from 'node:assert/strict';
-import { probe } from '../harness/probe.ts';
+import { flag, probe } from '../harness/probe.ts';
+
+const perf = flag('perf');
 
 await probe(async ({ open }) => {
   const { page } = await open({ viewport: { width: 1280, height: 820 }, init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
@@ -71,8 +77,9 @@ await probe(async ({ open }) => {
   assert.equal(results.length, 2);
   for (const result of results) {
     assert.ok(result.puts >= 1, 'the flush wrote the jam');
-    // A local performance regression guard, with headroom for scheduling jitter. The old full-size
-    // synchronous encoder blocked this machine for 257 ms; worker runs were below 80 ms.
-    assert.ok(result.maxTickGapMs < 100, `Recovery blocked controls for ${result.maxTickGapMs} ms`);
+    // The local performance bound, with headroom for scheduling jitter. The old full-size synchronous
+    // encoder blocked the dev PC for 257 ms (a planted one, 313 ms); worker runs were below 80 ms.
+    if (perf) assert.ok(result.maxTickGapMs < 100, `Recovery blocked controls for ${result.maxTickGapMs} ms`);
   }
+  if (!perf) console.log('tick-gap bound not held (it is local: pnpm probe recovery-playback --perf)');
 });

@@ -400,8 +400,13 @@ await probe(async ({ browser, open }) => {
   };
   const settle = (ms = 250) => page.waitForTimeout(ms);
   const failures = [];
+  // Every group registers its name, run or not, so a `--case` name no group has fails the probe.
+  const groups = new Set();
+  let ran = 0;
   const group = async (name, body) => {
+    groups.add(name);
     if (only && !only.includes(name)) return;
+    ran++;
     console.log(`── ${name}`);
     try {
       await fresh();
@@ -1848,4 +1853,7 @@ await probe(async ({ browser, open }) => {
 
   assert.deepEqual(consoleErrors, [], 'no console.error');
   assert.deepEqual(failures, [], `red groups: ${failures.join(', ')}`);
+  const unknown = (only ?? []).filter((name) => !groups.has(name));
+  assert.deepEqual(unknown, [], `--case names no group has: ${unknown.join(', ')} (groups: ${[...groups].join(', ')})`);
+  assert.ok(ran > 0, 'at least one group ran');
 });

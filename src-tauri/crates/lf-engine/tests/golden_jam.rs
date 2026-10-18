@@ -1,4 +1,4 @@
-//! Ports verify/probes/golden-jam.mjs: the golden jam, end to end on the engine, at 44.1 and 48 kHz and at
+//! Ports the removed verify/probes/golden-jam.mjs: the golden jam, end to end on the engine, at 44.1 and 48 kHz and at
 //! every block size of the plan (1, 32, 64, 127, 128, 480, 1024). Its assertions 1–6, 8 and 9 are here;
 //! 7 (injected plugin-bridge loss) becomes an injected input gap; 10 (real key presses, the lane cue)
 //! stays a UI probe, while the engine half it relied on, the gates, the refusals and the CLEAR double

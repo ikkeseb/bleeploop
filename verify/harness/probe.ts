@@ -62,7 +62,8 @@ export interface Probe {
 }
 
 export interface ProbeOptions {
-  /** Replaces the default launch options (headless, audio without a user gesture). */
+  /** Replaces the default launch options (headless, audio without a user gesture); `--mute-audio` is
+   *  added to any launch: the browser tier plays nothing, and a probe never may. */
   launch?: LaunchOptions;
 }
 
@@ -81,7 +82,8 @@ export async function probe(body: (p: Probe) => Promise<unknown>, options: Probe
   let ran = false;
   try {
     await empty(join('logs', name));
-    browser = await chromium.launch(options.launch ?? DEFAULT_LAUNCH);
+    const launch = options.launch ?? DEFAULT_LAUNCH;
+    browser = await chromium.launch({ ...launch, args: [...(launch.args ?? []), '--mute-audio'] });
     const b = browser;
     const open = async (o: OpenOptions = {}): Promise<AppPage> => {
       const page = o.context ? await o.context.newPage() : await b.newPage(o.viewport ? { viewport: o.viewport } : {});

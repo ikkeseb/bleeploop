@@ -41,10 +41,13 @@ const CLASSIC = 'scripts/classic-probe.tauri.json';
 const PROBES = {
   'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/, config: CLASSIC },
   'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/, config: CLASSIC },
+  // `failLine`: a probe line that fails the run whatever the verdict says. The probe swaps on when
+  // an editor does not open, so its summary alone would pass an editor-open round that opened none.
   'swap-stress': {
     tag: 'swap',
     end: /^(complete: .*|TIMEOUT .*|ABORTED.*|need at least .*)$/,
     pass: /^complete: \d+ swapped, 0 failed/,
+    failLine: /^open failed /,
     config: CLASSIC,
   },
   // One launch, closed through its window as the close button does; any other frontend `console.error`
@@ -193,6 +196,7 @@ function launch(phase, phaseEnv) {
     let partial = '';
     let recallLines = 0;
     let requiredSeen = false;
+    const failLines = [];
     const webviewErrors = [];
     const rustErrors = [];
     let verdict;
@@ -202,7 +206,7 @@ function launch(phase, phaseEnv) {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
-      resolve({ line, reason, recallLines, requiredSeen, webviewErrors, rustErrors, stopped: stopRun(child) });
+      resolve({ line, reason, recallLines, requiredSeen, failLines, webviewErrors, rustErrors, stopped: stopRun(child) });
     };
     // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
     // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
@@ -249,6 +253,7 @@ function launch(phase, phaseEnv) {
         if (msg === undefined) continue;
         seen = true;
         lastLine = Date.now();
+        if (spec.failLine?.test(msg)) failLines.push(msg);
         if (!/^\s/.test(msg)) console.log(`  [${spec.tag}]${phase.name ? ` ${phase.name}:` : ''} ${msg}`);
         if (verdict === undefined && phase.end.test(msg)) void afterVerdict(msg);
       }
@@ -279,6 +284,12 @@ for (const phase of phases) {
   result = await launch(phase, phaseEnv);
   if (result.stopped.length) console.log(`  stopped ${result.stopped.join(', ')}`);
   ok = result.line !== null && phase.pass.test(result.line);
+  if (ok && result.failLines.length) {
+    ok = false;
+    for (const line of result.failLines) console.log(`  [${spec.tag}] ${line}`);
+    result.reason = `${result.failLines.length} line(s) matching ${spec.failLine}`;
+    result.line = null;
+  }
   if (ok && spec.cleanLog && result.webviewErrors.length) {
     ok = false;
     for (const line of result.webviewErrors) console.log(`  ${line}`);

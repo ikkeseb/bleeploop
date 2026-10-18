@@ -1,4 +1,4 @@
-//! Ports verify/guards/overdub.mjs, undo.mjs and reverse.mjs: the overdub layer, the one-level UNDO/REDO
+//! Ports the removed verify/guards/overdub.mjs, undo.mjs and reverse.mjs: the overdub layer, the one-level UNDO/REDO
 //! toggle and per-lane REVERSE.
 //!
 //! The engine sums an overdub in place, so there is no working copy, no boundary swap
@@ -393,7 +393,7 @@ fn a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin() {
 
 #[test]
 fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
-    // verify/probes/capture-loss.mjs's overdub row: the rejection keeps the press's STOP.
+    // The removed verify/probes/capture-loss.mjs's overdub row: the rejection keeps the press's STOP.
     for align in [0, 4800] {
         let (mut rig, master) = playing_loop();
         let take = rig.pcm(0);
@@ -430,7 +430,7 @@ fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
 
 #[test]
 fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
-    // verify/probes/overdub-window.mjs's stopAll, doubleStop and clear modes: impulses played just
+    // The removed verify/probes/overdub-window.mjs's stopAll, doubleStop and clear modes: impulses played just
     // outside and inside each punch edge (their wet arrives ALIGN later, one inside the window only after
     // the press) are kept exactly inside the window, at their grid position, and playback fades out over
     // 5 ms from the press (D23) while the tail comes in. Inside, the ramps weigh them (D23): the one on the punch frame
