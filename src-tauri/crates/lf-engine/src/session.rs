@@ -5,11 +5,9 @@
 //! and their peaks, built off the audio thread) and takes each back, a load's with the engine's old lane
 //! buffers in them, to free it.
 //!
-//! A session job runs at a block start once every command sent before it is applied (one stamped for a
-//! later frame keeps its frame), however many blocks that takes: one waiting for a block job, or one a
-//! full command table left in the ring. A setting sent before the job is ordered before it, and the
-//! commands sent after it wait for it. With no device running it runs at once, ahead of the commands
-//! still queued ([`crate::Engine::service_session_idle`]; an open thread, the crate briefing).
+//! A session job runs at a block start, after the commands due on that frame, so a setting sent before
+//! the job is ordered before it. With no device running it runs at once, ahead of the commands still
+//! queued ([`crate::Engine::service_session_idle`]; an open thread, the crate briefing).
 //!
 //! A snapshot is the committed loops as they stood on the frame it began (it waits for the looper's
 //! block jobs first), each with its lane's mix as the engine applied it on that frame: an OVERDUBBING
@@ -183,11 +181,14 @@ pub(crate) fn channel() -> (SessionPort, SessionEnd) {
 }
 
 impl SessionEnd {
-    /// At a block start, after the commands sent before the job: take a job the host sent ([`Self::take`]),
-    /// apply a load, begin a snapshot once no block job runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
+    /// At a block start, after the commands due on its frame: take a job the host sent (only while the
+    /// return ring has room, so it can always go back), apply a load, begin a snapshot once no block job
+    /// runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
     /// answers `Changed`.
     pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool) {
-        self.take();
+        if self.job.is_none() && self.tx.slots() > 0 {
+            self.job = self.rx.pop().ok();
+        }
         match self.job.as_deref_mut() {
             Some(SessionJob::Load(load)) if load.result.is_none() => load.result = Some(looper.load(cx, load)),
             Some(SessionJob::Snapshot(s)) if !s.started && !looper.busy() => looper.snapshot_begin(s, cx.fx, cx.clock.bpm(), cx.clock.meter(), rate),
@@ -195,17 +196,6 @@ impl SessionEnd {
             _ => {}
         }
         self.finish();
-    }
-
-    /// Take a job the host sent, only while the return ring has room (so it can always go back): true
-    /// when one was taken now. The engine reads its command ring after this, so every command the host
-    /// sent before the job is counted ahead of it (`Engine::process_inputs`).
-    pub(crate) fn take(&mut self) -> bool {
-        if self.job.is_none() && self.tx.slots() > 0 {
-            self.job = self.rx.pop().ok();
-            return self.job.is_some();
-        }
-        false
     }
 
     /// After `frames` rendered: copy the snapshot's share of them.

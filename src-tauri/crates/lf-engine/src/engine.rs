@@ -200,10 +200,6 @@ pub struct Engine {
     commands: Consumer<TimedCommand>,
     pending: [Option<Pending>; MAX_PENDING],
     seq: u64,
-    /// A session job taken whose commands sent before it are not all applied yet: the `seq` the last
-    /// of them takes. Every command sent after it waits behind the job meanwhile, but for those `due`
-    /// never holds back.
-    session_fence: Option<u64>,
     fx: LaneFx,
     input_fx: InputFx,
     instruments: Instruments,
@@ -304,7 +300,6 @@ impl Engine {
             commands: cmd_rx,
             pending: [None; MAX_PENDING],
             seq: 0,
-            session_fence: None,
             fx: LaneFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             input_fx: InputFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             instruments: Instruments::new(config.sample_rate, config.max_block, &white, &pink),
@@ -433,7 +428,6 @@ impl Engine {
     /// at the frame the next block would start, a snapshot copied whole). It publishes no lane's mix
     /// until the commands queued ahead of the first block are all taken (`replayed`).
     pub fn service_session_idle(&mut self) {
-        self.session_fence = None;
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true);
         self.session.advance(&self.looper, Frame::MAX / crate::session::SNAPSHOT_RATE);
@@ -592,27 +586,12 @@ impl Engine {
                 toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
             };
-            if f == start && self.session.take() {
-                // Read after the job: every command the host sent before it is taken or still in the ring.
-                self.session_fence = Some(self.seq + self.commands.slots() as u64);
-            }
-            let fence = self.session_fence;
-            apply_due(&mut self.pending, &mut self.commands_dropped, fence, &mut self.looper, &mut cx, &mut at);
+            apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
             if f == start {
-                // The session job at a block start once every command sent before it is applied (one
-                // stamped for a later frame keeps its frame), a held one and one the full table left in
-                // the ring included: a setting sent before a snapshot or a load is ordered before it (a
-                // load's mix overrides it). The commands sent after it wait for it, then apply.
-                if fence.is_some_and(|fence| sent_before_applied(&self.pending, self.seq, fence, f)) {
-                    self.session_fence = None;
-                }
-                if self.session_fence.is_none() {
-                    self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
-                    self.looper.events(&mut cx);
-                    if fence.is_some() {
-                        apply_due(&mut self.pending, &mut self.commands_dropped, None, &mut self.looper, &mut cx, &mut at);
-                    }
-                }
+                // The session job after the commands due on the block's first frame: a setting sent
+                // before a snapshot or a load is ordered before it (a load's mix overrides it).
+                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
+                self.looper.events(&mut cx);
             }
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {
                 cx.feed.push(Event::Beat { frame: f, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
@@ -812,11 +791,10 @@ impl Engine {
 }
 
 /// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
-/// for a block job goes back in, held from the next frame on. `fence`: a session job waits for the
-/// commands sent up to this `seq`, and the ones sent after it wait for the job.
-fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, fence: Option<u64>, looper: &mut Looper, cx: &mut Cx, at: &mut Apply) {
+/// for a block job goes back in, held from the next frame on.
+fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, looper: &mut Looper, cx: &mut Cx, at: &mut Apply) {
     let f = cx.now;
-    while let Some(k) = due(pending, f, fence) {
+    while let Some(k) = due(pending, f) {
         let p = pending[k].take().unwrap();
         if let Command::Action(Action::Toggle(t @ Toggle::Send(_))) | Command::ActionOn(_, Action::Toggle(t @ Toggle::Send(_))) = p.command {
             if pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
@@ -846,18 +824,13 @@ fn insert(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, p: Pe
     }
 }
 
-/// The first-sent command due at or before `f`, unless an earlier-sent one waits for a block job, or a
-/// session job sent before it waits (for the commands up to `fence`): then it waits behind that one. Due
-/// commands run in the order they were sent. A command for the instruments, the plugin slots or the
-/// input sends never waits behind the looper: it touches nothing a block job moves, and a note must
-/// sound when it is played (in the web app notes go straight to the synth), an echo when it is switched
-/// on.
-fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame, fence: Option<u64>) -> Option<usize> {
-    let held = pending.iter().flatten().filter(|p| p.held && p.frame > f).map(|p| p.seq).min();
-    let barrier = match (held, fence.map(|s| s + 1)) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
+/// The first-sent command due at or before `f`, unless an earlier-sent one waits for a block job: then
+/// it waits behind that one. Due commands run in the order they were sent. A command for the
+/// instruments, the plugin slots or the input sends never waits behind the looper: it touches nothing a
+/// block job moves, and a note must sound when it is played (in the web app notes go straight to the
+/// synth), an echo when it is switched on.
+fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
+    let barrier = pending.iter().flatten().filter(|p| p.held && p.frame > f).map(|p| p.seq).min();
     pending
         .iter()
         .enumerate()
@@ -866,12 +839,6 @@ fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame, fence: Option<u64>) -
         })
         .min()
         .map(|(_, k)| k)
-}
-
-/// Every command sent up to `fence` is taken (`seq`: the last taken) and none of them is due at `f` or
-/// held for a block job: a session job waiting for them can begin. One stamped for a later frame keeps it.
-fn sent_before_applied(pending: &[Option<Pending>; MAX_PENDING], seq: u64, fence: u64, f: Frame) -> bool {
-    seq >= fence && !pending.iter().flatten().any(|p| p.seq <= fence && (p.held || p.frame <= f))
 }
 
 /// The next frame after `f` a command is stamped for (a command already due but waiting behind a held
