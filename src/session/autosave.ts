@@ -476,24 +476,17 @@ async function flush(): Promise<void> {
  * engine holds now, from its snapshot, whatever its lanes last showed here (the take the player just
  * committed may still read RECORDING on the feed). An engine holding a loop is saved, and a player's
  * clear from before that loop is spent, never deleting it; an engine holding none deletes the jam only
- * for the player's clear that emptied it, as `flush` does. Where the engine cannot answer, it falls back
- * to `flush`'s reading of the lanes. A no-op before `start`, as `flush`.
+ * for the player's clear that emptied it, as `flush` does. A snapshot that fails rejects, whatever the
+ * lanes here read (they may lag a committed take): the engine's state is unknown, so the recovery and the
+ * clear stay as they are and the quit's caller decides (`quitWithSave`). A no-op before `start`, as
+ * `flush`.
  */
 async function quitSave(): Promise<void> {
   if (!started) return;
   await readyPromise;
   await serialized(async () => {
-    const inspected = inspectJam();
     const token = jam().clearToken();
-    let committed: StemSnapshot;
-    try {
-      committed = await jam().exportSnapshot();
-    } catch (error) {
-      if (inspected.committed) throw error;
-      // No engine to ask, and nothing committed here either.
-      await forgetJam();
-      return;
-    }
+    const committed = await jam().exportSnapshot();
     if (committed.tracks.length === 0) {
       await forgetJam();
       return;
