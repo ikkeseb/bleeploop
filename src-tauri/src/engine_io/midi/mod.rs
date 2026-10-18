@@ -35,7 +35,8 @@
 //!   controller set; what a binding fires goes through `actions`; only what learn leaves is played.
 //! - **Every input command goes through the queue:** the router's batches, what a binding fires, and
 //!   the UI's looper presses, `Press`, `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting
-//!   goes straight to `EngineHost::send`; a note, a wheel, the note target or a panic from the UI goes
+//!   goes straight to `EngineHost::send`, and so does GO LIVE's toggle, so it keeps its order with
+//!   every live-off (a source change's, an unload's) and is never applied after one made later; a note, a wheel, the note target or a panic from the UI goes
 //!   through the router's own calls, never past it (a UI batch that holds one is refused whole, before
 //!   any of it runs). Nothing is stamped.
 //! - **While no device runs** (`EngineSide::running`), fresh one-shots are refused: the router records
@@ -1163,7 +1164,9 @@ impl MidiHost {
     /// A batch of the UI's engine commands (`input_send`'s), in order. Its input commands (looper
     /// presses, `Press`, `SelectTrack`, toggles) join the one queue, a run of them as one batch, and while
     /// no device runs they are dropped, as a pedal's are; a setting goes straight to the engine, and may
-    /// overtake input still queued behind a full ring. A note, a wheel, the note target or a panic is
+    /// overtake input still queued behind a full ring. GO LIVE's toggle goes straight there too, so no
+    /// live operation overtakes another (`actions::UiRoute::Live`); dropped while no device runs or the
+    /// ring is full. A note, a wheel, the note target or a panic is
     /// refused, the whole batch with it before any of it runs: those go through [`MidiHost::ui_note`],
     /// [`MidiHost::select_target`] and [`MidiHost::all_notes_off`]. Answers why a command was dropped,
     /// the first one's reason; the rest of the batch ran.
@@ -1174,13 +1177,16 @@ impl MidiHost {
         let mut dropped = None;
         let mut run: Vec<Out> = Vec::new();
         for command in commands {
-            if actions::ui_route(&command) == UiRoute::Queue {
+            let route = actions::ui_route(&command);
+            if route == UiRoute::Queue {
                 run.push(Out::new(command));
                 continue;
             }
             let queued = self.ui_run(&mut run);
             dropped = dropped.or(queued);
-            if self.core.engine.send(TimedCommand { frame: None, command }).is_err() {
+            if route == UiRoute::Live && !self.core.engine.running() {
+                dropped = dropped.or(Some(Dropped::NoDevice));
+            } else if self.core.engine.send(TimedCommand { frame: None, command }).is_err() {
                 dropped = dropped.or(Some(Dropped::Full));
             }
         }
@@ -2374,6 +2380,54 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), [] as [bool; 0], "nothing during the swap");
         midi.core.tick(Instant::now());
         assert_eq!(*calls.lock().unwrap(), [true], "the port thread hands it over afterwards");
+    }
+
+    // Every live operation takes one ordered path into the engine: GO LIVE's toggle goes straight to
+    // the ring as the live setters do. A press the full ring refuses is answered at once and never
+    // applied after a later live-off (a source change's); an accepted one lands before an unload's
+    // live-off. Rendered, the slot stays off and the settings a rebuild replays agree.
+    #[test]
+    fn go_lives_toggle_never_lands_after_a_later_live_off() {
+        let io = Arc::new(super::super::Core::new());
+        let host = EngineHost { core: io.clone() };
+        rebuild(&io);
+        io.clock.publish(Instant::now(), 0, 128, 48_000);
+        let engine = Arc::new(Recorded { host: host.clone(), sent: Mutex::default(), full: AtomicBool::new(false) });
+        let midi = MidiHost { core: hosted(engine.clone(), store::empty(), None, None, None), wake: None, port_thread: None };
+        let press = || midi.ui_commands(vec![Command::Action(Action::Toggle(Toggle::Live(0)))]);
+        let frame = Cell::new(0);
+        // The device's blocks, rendered here (no device runs), then the feed's drain into the settings.
+        let render = || {
+            let mut rt = io.rt.lock().unwrap();
+            let engine = rt.engine.as_mut().expect("an engine");
+            let (x, mut l, mut r) = ([0.0f32; 128], [0.0f32; 128], [0.0f32; 128]);
+            for _ in 0..4 {
+                let ctx = lf_engine::ProcessContext { frame: frame.get(), xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+                engine.process(&ctx, &x, &mut l, &mut r);
+                frame.set(frame.get() + 128);
+            }
+            drop(rt);
+            host.drain_events(&mut Vec::new());
+            let ends = io.ends.lock().unwrap();
+            ends.as_ref().expect("an engine").overview.slot_live(0)
+        };
+        let live_off = Command::SetSlotLive(0, false);
+
+        engine.full.store(true, Relaxed);
+        assert_eq!(press(), Ok(Some(Dropped::Full)), "refused at once, never queued behind the ring");
+        engine.full.store(false, Relaxed);
+        assert_eq!(midi.ui_commands(vec![live_off]), Ok(None), "a source change's live-off");
+        midi.core.tick(Instant::now() + IDLE_RETRY);
+        assert!(!render(), "the refused press never lands");
+
+        assert_eq!(press(), Ok(None));
+        host.silence_slot(0, Duration::ZERO).expect("an unload's live-off");
+        midi.core.tick(Instant::now() + IDLE_RETRY);
+        assert!(!render(), "the press, then the live-off");
+        let toggle = Command::Action(Action::Toggle(Toggle::Live(0)));
+        assert_eq!(*engine.sent.lock().unwrap(), [live_off, toggle], "the unload's live-off goes through the host, after the press");
+        let replay = host.settings();
+        assert!(replay.contains(&live_off) && !replay.contains(&Command::SetSlotLive(0, true)), "{replay:?}");
     }
 
     // A rebuild needs no WebView: an engine rebuild with notes and HOLD held, a refused attack, a HOLD
