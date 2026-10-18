@@ -1,7 +1,7 @@
 import { createSignal } from 'solid-js';
 import { slotPendingCounts, slotTakesInput } from '../state/instrument';
 import { serializeSlot, withAt } from '../state/instrument-slots';
-import { goLive, inputArmed, intendLive, liveIntended, stopLive, takeLiveIntent } from '../state/native-io';
+import { goLive, intendLive, liveIntended, liveToggleBase, stopLive, takeLiveIntent } from '../state/native-io';
 import { notifyError } from '../../notify';
 
 /**
@@ -36,7 +36,8 @@ export function liveShown(slot: 0 | 1): boolean {
  */
 export async function toggleLive(slot: 0 | 1, quiet = false): Promise<void> {
   if (busy()[slot]) return; // single-flight: ignore re-presses while an arm/disarm is pending
-  const wantLive = !inputArmed()[slot];
+  // From the flag last sent, which the feed may not show yet (`liveToggleBase`).
+  const wantLive = !liveToggleBase(slot);
   setBusy((prev) => withAt(prev, slot, true));
   clearLiveError(slot);
   try {
@@ -77,6 +78,6 @@ export function pressGoLive(slot: 0 | 1): boolean {
 async function applyLiveIntent(slot: 0 | 1): Promise<void> {
   await serializeSlot(slot, async () => {});
   const on = takeLiveIntent(slot);
-  if (on === null || on === inputArmed()[slot] || !liveShown(slot)) return;
+  if (on === null || on === liveToggleBase(slot) || !liveShown(slot)) return;
   await toggleLive(slot);
 }

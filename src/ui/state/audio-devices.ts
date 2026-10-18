@@ -5,6 +5,7 @@ import {
   type AsioStatusReport,
   type AudioInputDevice,
   type AudioOutputDevice,
+  type DeviceStatus,
 } from '../../platform';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from './audio-settings';
 import { notifyError, notifyNote } from '../../notify';
@@ -56,9 +57,18 @@ export function saveSlotInputChannels(picks: readonly [string, string]): void {
   writeAudioDeviceSettings({ slotInputChannels: [picks[0], picks[1]] });
 }
 
-/** The input channels the saved (or cached ASIO) input device has; 0 = unknown (the default WASAPI
- * device, or a list not read yet). */
-function savedInputChannelCount(): number {
+/**
+ * The input channels of the device that runs (`running`, the engine's status), else of the saved (or
+ * cached ASIO) input device; 0 = unknown (no capture, the default WASAPI device, or a list not read
+ * yet). The running backend decides, not the ASIO preference: the device owner may have fallen back to
+ * WASAPI on its own.
+ */
+export function inputChannelCount(running: DeviceStatus | null): number {
+  if (running) {
+    if (running.backend === 'Asio') return asioDeviceInfo()?.inputChannels ?? 0;
+    if (!running.inputOpen) return 0;
+    return inputDevices().find((d) => d.name === running.inputName)?.channels ?? 0;
+  }
   if (usingAsio()) return asioDeviceInfo()?.inputChannels ?? 0;
   const id = readAudioDeviceSettings().inputDeviceId;
   return id ? (inputDevices().find((d) => d.id === id)?.channels ?? 0) : 0;
@@ -108,11 +118,11 @@ export async function refreshOutputDevices(): Promise<boolean> {
  * Refresh BOTH native device lists and prune any persisted device id no longer present (an interface
  * unplugged since it was last picked), resetting it to '' so a later arm falls back to the default
  * device instead of failing on a stale id; and each slot's channel pick the device lacks, or both with
- * a pruned input device. Called once at startup — so pruning happens before the user
- * can arm — and again whenever the Audio Settings popover opens (to catch a mid-session unplug). No-op
- * in the web build.
+ * a pruned input device (counted on `running`, the device that runs, if one does: `inputChannelCount`).
+ * Called once at startup — so pruning happens before the user can arm — and again whenever the Audio
+ * Settings popover opens (to catch a mid-session unplug). No-op in the web build.
  */
-export async function refreshAndPruneDevices(): Promise<void> {
+export async function refreshAndPruneDevices(running: DeviceStatus | null = null): Promise<void> {
   if (!platform.pluginHost.available) return;
   const inputRefreshSucceeded = await refreshInputDevices();
   const outputRefreshSucceeded = await refreshOutputDevices();
@@ -127,7 +137,7 @@ export async function refreshAndPruneDevices(): Promise<void> {
     if (!usingAsio()) saveSlotInputChannels(['', '']);
   }
   // A slot pick past the device's inputs (saved on a device with more) is not what the slot reads.
-  const inputs = savedInputChannelCount();
+  const inputs = inputChannelCount(running);
   if (inputs > 0) {
     const picks = slotInputChannels();
     saveSlotInputChannels([

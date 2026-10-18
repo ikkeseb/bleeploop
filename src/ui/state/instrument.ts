@@ -116,13 +116,18 @@ const [synthGains, setSynthGains] = createSignal<Readonly<Record<string, number>
   Object.fromEntries(SYNTHS.map((s) => [s.id, readStoredNumber(synthGainKey(s.id), 1, 0, SLOT_GAIN_MAX)])),
 );
 
-/** Route the notes to slot `i`'s source: its plugin, its instrument or nowhere (Off). Native MIDI's
- * router releases what sounds on the target it leaves, then selects (a target switch), and changes nothing
- * for the same slot and target again, so a click on the active slot cuts no chord. */
+// A plugin swap in flight per slot, from its unload until the next plugin's load settled (a tone reload
+// is one too): the slot reads empty meanwhile, yet its instrument must not play, so it routes nowhere.
+const swapping: [boolean, boolean] = [false, false];
+
+/** Route the notes to slot `i`'s source: its plugin, its instrument or nowhere (Off, or a swap in
+ * flight). Native MIDI's router releases what sounds on the target it leaves, then selects (a target
+ * switch), and changes nothing for the same slot and target again, so a click on the active slot cuts
+ * no chord. */
 function routeEngine(i: 0 | 1): void {
   const target: NoteTarget = slotPlugins()[i]
     ? { Slot: i }
-    : slotOff()[i]
+    : swapping[i] || slotOff()[i]
       ? 'Off'
       : { Builtin: slotIds()[i] as InstrumentId };
   input.selectTarget(i, target);
@@ -200,7 +205,7 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
       // No plugin to unload, but the rig recall may still remember one for this slot (picked before
       // the recall reached it): the synth is the slot's source now. An Off slot's input stops.
       forgetSlotPlugin(slotIndex);
-      await disarmInputInternal(slotIndex);
+      void disarmInputInternal(slotIndex);
     }
     writeSource(slotIndex, id); // saved once it is the slot's source (a failed unload kept the plugin)
     activateSlot(slotIndex);
@@ -224,7 +229,7 @@ export function selectOff(slotIndex: 0 | 1): void {
     }
     writeSource(slotIndex, 'off');
     forgetSlotPlugin(slotIndex);
-    await disarmInputInternal(slotIndex);
+    void disarmInputInternal(slotIndex);
     if (activeSlot() === slotIndex) applyActiveRouting();
   });
 }
@@ -319,13 +324,14 @@ async function doSelectPlugin(
   // on "slot already loaded" while the UI showed the new one.
   if (outgoing && !(await unloadSlotPlugin(slot, outgoing, 'swap'))) return;
   // An Off slot's live input stops before a plugin takes the slot (an effect's pick goes live again).
-  if (!outgoing) await disarmInputInternal(slot);
+  if (!outgoing) void disarmInputInternal(slot);
   let tone: PluginInfo['tone'];
   sourceOps[slot]++;
   try {
     // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
     tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken))?.tone;
   } catch (e) {
+    swapping[slot] = false; // the swap ends on the slot's instrument (or Off)
     console.error('[instrument] plugin load failed', e);
     notifyError('Could not load the plugin. Pick it again, or another source.', e);
     // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`) —
@@ -336,6 +342,7 @@ async function doSelectPlugin(
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the instrument
     return;
   }
+  swapping[slot] = false;
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   rememberSlotPlugin(slot, desc);
   // The host restored the plugin's stored tone inside the load; one it could not restore (the host
@@ -380,21 +387,29 @@ export function reloadPlugin(
       if (wasLive) resumeEngineLive(slot);
       return 'reloaded';
     } finally {
+      swapping[slot] = false; // the load ends the swap; this covers a throw before it
       holdEngineLive(slot, false);
     }
   });
 }
 
 /**
- * Natively unload the plugin in `slot`. The slot reads empty while the unload is in flight: a clear
- * routes an active slot to its instrument at once, a swap leaves it silent until the next plugin lands.
- * On failure the OLD descriptor is restored and routing follows it: the host may still hold that
- * plugin, so the slot keeps saying so and a later swap/clear retries the unload. Returns whether it
- * unloaded.
+ * Natively unload the plugin in `slot`. The slot's live input stops first, and the unload waits until
+ * that reached the host: a slot still live once its plugin is gone passes the input dry, so a live-off
+ * the host did not take aborts the unload (the plugin stays, as at a failed unload). The slot reads
+ * empty while the unload is in flight: a clear routes an active slot to its instrument at once, a swap
+ * (`swapping`) leaves it silent until the next plugin's load settles, whatever routes it meanwhile (a
+ * keypress's `ensureActive`, a slot pick). On failure the OLD descriptor is restored and routing follows
+ * it: the host may still hold that plugin, so the slot keeps saying so and a later swap/clear retries
+ * the unload. Returns whether it unloaded.
  */
 async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: 'swap' | 'clear'): Promise<boolean> {
+  if (!(await disarmInputInternal(slot))) {
+    console.error('[instrument] plugin unload skipped: the live-off did not reach the engine');
+    notifyError('Could not unload the plugin. Choose Off or another source to try again.', 'Its input could not be stopped first.');
+    return false;
+  }
   sourceOps[slot]++;
-  await disarmInputInternal(slot); // the outgoing plugin's live input must stop before its unload
   // The slot reads empty at once, but the engine keeps the outgoing gain until the unload is done: the
   // plugin plays out its removal fade (and any tail) at the level the player set, not at unity.
   const outgoingGain = engineGains()[slot];
@@ -402,13 +417,12 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   setSlotPlugins((prev) => withAt(prev, slot, null));
   // A swap routes nowhere (Off) until the next plugin lands, which releases held notes: the same slot
   // target comes back, so routing there again would not release a note held across the swap.
-  if (activeSlot() === slot) {
-    if (path === 'swap') input.selectTarget(slot, 'Off');
-    else applyActiveRouting(); // back to the slot's instrument immediately
-  }
+  swapping[slot] = path === 'swap';
+  if (activeSlot() === slot) applyActiveRouting(); // a clear: back to the slot's instrument immediately
   try {
     await platform.pluginHost.unloadPlugin(slot);
   } catch (e) {
+    swapping[slot] = false;
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
     notifyError('Could not unload the plugin. Choose Off or another source to try again.', 'It stays in the slot, silent.');
     setSlotPlugins((prev) => withAt(prev, slot, outgoing));
