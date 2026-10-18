@@ -43,7 +43,8 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 Install the latest release (v0.8.6, published 2026-10-17 and CI-built, holds every check below; an
 installed v0.8.5 offers it through the UPDATE pill) rather than `pnpm dev:asio`. Audio Settings:
 the Audient ASIO driver (a saved Focusrite pick toasts as not installed), buffer 128; the guitar's
-slot on In 1; EVO Control's monitor mix fully clockwise. Play a real jam with these in it and say what felt off.
+slot on In 1; EVO Control's monitor mix fully clockwise. Play a real jam with these in it and say
+what felt off.
 After the jam, agents note what it tried under "Last play", drop what it answered and refill this
 list from § Not heard yet: at most five, and the docs guard counts them.
 
@@ -113,8 +114,9 @@ it.
   LIVE" badge: does the meter read from where you stand, and does CLIP light when the interface clips
   and only then?
 - The count-in (1 bar, accent on 1, the tempo locking mid-count-in); FIXED 2 stopping after exactly 2
-  bars; a free record stopped near the downbeat keeping its N bars, an early or mid-bar stop behaving;
-  a PLAY/STOP (or REC/DUB) press while the take's tail is in flight committing it stopped.
+  bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a free record stopped
+  near the downbeat keeping its N bars, an early or mid-bar stop behaving; a PLAY/STOP (or REC/DUB)
+  press while the take's tail is in flight committing it stopped.
 - The click: silent when idle, stopping with STOP ALL, the count-in clicking with CLICK off.
 - Time signatures (machine: `tests/meter.rs`): in 6/8 BPM and TAP count the dotted quarter, the
   count-in reads 2-1 and the eighths click softer between. TAP along a 6/8 song unprompted: on the
@@ -176,12 +178,12 @@ it.
 - The lane delay's repeats land a whole division apart, no longer drifting ~3 ms each: with a high
   feedback over a loop, do they sit on the click and still sound right?
 - Native MIDI through a jam: mod-wheel vibrato, pitch-bend and CC64 sustain on a built-in synth;
-  unplugged mid-note, a toast and the note released; 20 quick replugs with notes held, each releasing
-  them and the bindings firing after each.
+  unplugged mid-note, a toast and the note released; 20 quick replugs (under a second each) with notes
+  held, each releasing them and the bindings firing after each.
 - The MIDI bindings across the update, a restart and a move to another USB socket: they fire with no
   relearn (ASSIGN fixes one listed as "not connected").
-- RETAKE and AUTO REC from a learned pedal: one press, one toggle; refused mid-take with its reason on
-  the lane, as the greyed button is.
+- RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a
+  loop locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
 - The UPDATE pill and its panel (the download in MB with a bar, the signature check, the installer;
   machine: `verify/probes/app-update.mjs`): over a real GitHub download, do the numbers climb at a
   watchable rate, is the pill findable untold, and does the last frame before the app quits read as
