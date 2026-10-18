@@ -349,10 +349,10 @@ plugin-GUI work.
   goes silent for good while the owner, watching `core.fault` and `run.fault`, never hears of it. Fix:
   latch a separate capture fault; the owner first rebuilds capture/join on the same device and rate,
   keeping the engine and its loops, else reports it without a rate switch. Test with an injected panic.
-- The ASIO callback is not lock-free: `Start` reads `output.buffer_size()` (`cpal_driver.rs` 120) after
-  both `play()` calls, and cpal 0.18.1 takes the same `asio_streams` mutex there as in its callbacks;
-  asio-sys also holds `BUFFER_CALLBACK.lock()` around every callback. Small fix: read the buffer size
-  before both plays. Full fix: patched ASIO dependencies, with the L1+L2 latency measurements.
+- The ASIO callback is not lock-free: asio-sys holds `BUFFER_CALLBACK.lock()` around every callback,
+  and cpal 0.18.1 takes its `asio_streams` mutex in them (`Start` reads the buffer size before either
+  stream plays, so the owner does not contend there). Fix: patched ASIO dependencies, with the L1+L2
+  latency measurements.
 - The RT allocation count (`callback::guarded`, debug builds) misses parts of the callbacks: the join's
   `pipe.pull` runs before the guard (`callback.rs` 688 vs 725) and the Share callback's `mirror.render`
   (`share.rs` 182) has none, so `docs/ARCHITECTURE.md`'s "counts any allocation" overstates it. Fix:

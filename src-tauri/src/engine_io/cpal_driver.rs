@@ -108,6 +108,9 @@ impl Driver for CpalDriver {
             None => None,
         };
         let output = retry_on_asio(asio, "output", || output_stream(&device, spec, &mut wiring))?;
+        // Read before either plays: cpal's ASIO stream answers it under the `asio_streams` mutex its
+        // callbacks take, so a read while they run can hold off a bufferSwitch.
+        let block = output.buffer_size().unwrap_or(spec.block);
         let input = match input.map(|stream| stream.play().map(|()| stream)) {
             Some(Err(error)) if !asio => {
                 log::warn!("[engine_io] the WASAPI input did not play ({error}): output only");
@@ -117,7 +120,6 @@ impl Driver for CpalDriver {
             None => None,
         };
         output.play().map_err(|e| format!("cpal output play: {e}"))?;
-        let block = output.buffer_size().unwrap_or(spec.block);
         let input_open = input.is_some();
         let input = input.map(|stream| Box::new(stream) as Box<dyn Send>);
         Ok(Started { streams: Streams::new(input, Box::new(output)), block, input_open })
