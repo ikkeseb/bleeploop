@@ -200,6 +200,8 @@ pub struct Engine {
     commands: Consumer<TimedCommand>,
     pending: [Option<Pending>; MAX_PENDING],
     seq: u64,
+    /// The commands taken off the ring so far (the overview publishes it after each block).
+    commands_taken: u64,
     fx: LaneFx,
     input_fx: InputFx,
     instruments: Instruments,
@@ -300,6 +302,7 @@ impl Engine {
             commands: cmd_rx,
             pending: [None; MAX_PENDING],
             seq: 0,
+            commands_taken: 0,
             fx: LaneFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             input_fx: InputFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             instruments: Instruments::new(config.sample_rate, config.max_block, &white, &pink),
@@ -493,6 +496,20 @@ impl Engine {
             scope: &mut self.scope,
         };
         apply(&mut self.looper, &mut cx, &mut at, command) == Applied::Done
+    }
+
+    /// While no device runs and the host holds the engine: take slot `slot` off live at once, its gate
+    /// closed with no ramp, as a final unload needs before its unit leaves (`engine_io`'s
+    /// `EngineHost::silence_slot`). The live-off the host sent waits in the ring until a device renders,
+    /// and applied then it would ramp from the old gain through the emptied slot; the commands queued
+    /// ahead of it apply against the closed gate on the same frame and settle with it. No answer: the
+    /// queued live-off answers when it applies.
+    pub fn close_slot_idle(&mut self, slot: usize) {
+        if slot < SLOT_COUNT {
+            self.rack.close_live(slot);
+            self.looper.overview().set_slot_live(slot, false);
+            self.looper.overview().set_slot_gate_open(slot, false);
+        }
     }
 
     /// While no device runs: stop every unit, an install still waiting on its port included, and hand
@@ -740,6 +757,7 @@ impl Engine {
         for slot in 0..SLOT_COUNT {
             self.looper.overview().set_slot_gate_open(slot, self.rack.gate_open(slot));
         }
+        self.looper.overview().set_commands_taken(self.commands_taken);
         self.session.advance(&self.looper, n as Frame);
         left.copy_from_slice(mix_l);
         right.copy_from_slice(mix_r);
@@ -783,6 +801,7 @@ impl Engine {
     fn take_commands(&mut self, now: Frame) {
         while self.pending.iter().any(Option::is_none) {
             let Ok(cmd) = self.commands.pop() else { break };
+            self.commands_taken += 1;
             self.hold(cmd.frame.unwrap_or(now).max(now), cmd.command);
         }
     }

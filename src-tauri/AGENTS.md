@@ -46,7 +46,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   passes dry, an instrument slot is silent, loops and click never wait.
 - **Unload order is load-bearing:** the slot goes off live and the engine's gate closes on it
   (`EngineHost::silence_slot`, ≤1 s, else the unload is refused and the plugin stays; a plugin-requested
-  restart skips it and stays live) → `running=false` → `OwnerRequest::Wake` → join the owner, which
+  restart skips it and stays live; answered by a block the engine rendered after taking that live-off,
+  or, with no device running, by closing the gate in the engine at once) → `running=false` → `OwnerRequest::Wake` → join the owner, which
   removes the unit from the engine (crossfade to bypass, `stop` on the audio thread; ≤2 s,
   `REMOVE_TIMEOUT`) → saves the tone if it changed → deactivate → terminate → the module unloads
   LAST. A unit the engine does not hand back leaves the plugin loaded (leaked), never unloaded under a

@@ -481,6 +481,13 @@ impl Rack {
         (s.live_end, s.live_gain) = if !rendered || from == to { (Frame::MIN, to) } else { (now + n, from) };
     }
 
+    /// Slot `slot` off live at once, its gate settled closed (no ramp): `Engine::close_slot_idle`.
+    pub(crate) fn close_live(&mut self, slot: usize) {
+        if let Some(s) = self.slots.get_mut(slot) {
+            (s.live, s.live_end, s.live_gain) = (false, Frame::MIN, 0.0);
+        }
+    }
+
     pub(crate) fn set_gain(&mut self, slot: usize, gain: f32) {
         if let Some(s) = self.slots.get_mut(slot) {
             s.gain_target = if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 };

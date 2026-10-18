@@ -82,6 +82,8 @@ impl SlotProcessor for Delay {
 pub struct Rig {
     pub engine: Engine,
     handle: EngineHandle,
+    /// The commands pushed onto the engine's ring so far, as a host counts them.
+    pub pushed: u64,
     pub sr: u32,
     /// The next frame to render.
     pub frame: Frame,
@@ -165,6 +167,7 @@ impl Rig {
         Rig {
             engine,
             handle,
+            pushed: 1,
             sr: o.sr,
             frame: o.start,
             block: o.block,
@@ -284,11 +287,13 @@ impl Rig {
 
     pub fn send_at(&mut self, frame: Frame, command: Command) {
         self.handle.commands.push(TimedCommand { frame: Some(frame), command }).expect("command ring full");
+        self.pushed += 1;
     }
 
     /// Send `command` unstamped, as the host sends a UI gesture: due at the next block start.
     pub fn queue(&mut self, command: Command) {
         self.handle.commands.push(TimedCommand { frame: None, command }).expect("command ring full");
+        self.pushed += 1;
     }
 
     /// Apply `command` at the current frame, then render that one frame.

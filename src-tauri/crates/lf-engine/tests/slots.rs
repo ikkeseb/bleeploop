@@ -284,10 +284,11 @@ fn a_later_effect_crossfades_in_from_its_dry_input_and_out_again_then_stops_and_
 }
 
 /// A plugin's final unload as the host orders it (`engine_io::EngineHost::silence_slot`): live off, the
-/// overview's gate closed (only once its ramp has ended), then the removal: from there no dry input
-/// reaches the monitor or the record path, behind a record delay (slot B's latent live effect) too.
-/// Removed while live, the unit crossfades to the dry input. After the unload, GO LIVE on the emptied
-/// slot (an Off slot) passes the input dry again.
+/// overview's gate closed (only once its ramp has ended, and only for a count of commands the engine
+/// has taken: a live-off still in the ring never reads as closed), then the removal: from there no dry
+/// input reaches the monitor or the record path, behind a record delay (slot B's latent live effect)
+/// too. Removed while live, the unit crossfades to the dry input. After the unload, GO LIVE on the
+/// emptied slot (an Off slot) passes the input dry again.
 #[test]
 fn an_unload_after_the_gate_closed_passes_no_dry_input_and_go_live_after_it_does() {
     for host_waits in [true, false] {
@@ -298,11 +299,12 @@ fn an_unload_after_the_gate_closed_passes_no_dry_input_and_go_live_after_it_does
         rig.install(1, Box::new(Delay::new(PLUGIN)));
         rig.set(Command::SetSlotLive(1, true));
         rig.advance(4800);
-        let gate = |rig: &Rig| rig.engine.looper().overview().slot_gate_open(0);
+        let gate = |rig: &Rig| !rig.engine.looper().overview().slot_gate_closed(0, rig.pushed);
         assert!(gate(&rig), "slot A is live");
         if host_waits {
             let off = rig.frame;
-            rig.press(Command::SetSlotLive(0, false));
+            rig.queue(Command::SetSlotLive(0, false));
+            rig.advance(1);
             assert!(gate(&rig), "mid-ramp the gate still passes input");
             while gate(&rig) {
                 assert!(rig.frame < off + 10 * LIVE, "the gate closes");
@@ -324,6 +326,65 @@ fn an_unload_after_the_gate_closed_passes_no_dry_input_and_go_live_after_it_does
             assert!(rig.monitor.iter().all(|&x| x == 1.0), "GO LIVE on the emptied slot passes the input dry");
         } else {
             assert!(dry > 0.9, "removed live, the dry input comes through ({dry})");
+        }
+    }
+}
+
+/// The overview answers for a live-off only once the engine has taken it: a gate it showed closed
+/// before (a slot off, then a live-on and a live-off queued behind it) is no answer to the live-off,
+/// which a block must take first. Both apply on that block's first frame and settle closed.
+#[test]
+fn a_closed_gate_answers_only_for_the_commands_the_engine_has_taken() {
+    let mut rig = Rig::new();
+    rig.set_input(|_| 1.0);
+    rig.set(Command::SetSlotLive(0, false));
+    rig.advance(1024);
+    let closed = |rig: &Rig, taken| rig.engine.looper().overview().slot_gate_closed(0, taken);
+    assert!(closed(&rig, rig.pushed), "slot A is off");
+    rig.queue(Command::SetSlotLive(0, true));
+    rig.queue(Command::SetSlotLive(0, false));
+    assert!(!closed(&rig, rig.pushed), "the live-off is still in the ring");
+    rig.keep_output();
+    rig.advance(1);
+    assert!(closed(&rig, rig.pushed), "taken, and closed on the frame it applied");
+    rig.advance(1023);
+    assert_eq!(peak(&rig.monitor).max(peak(&rig.record)), 0.0, "on and off on one frame pass nothing");
+}
+
+/// With no device running, a final unload closes the slot's gate at once (`Engine::close_slot_idle`)
+/// before its unit leaves: the live-off it queued waits in the ring, and applied when the device starts
+/// again it would ramp from the old gain through the emptied slot. From the first frame rendered after,
+/// no dry input reaches the monitor or the record path (behind slot B's record delay too), a GO LIVE
+/// press queued ahead of the live-off included; the overview shows the slot off at once.
+#[test]
+fn an_idle_unload_closes_the_gate_before_rendering_resumes() {
+    for close in [true, false] {
+        let probe = Probe::new();
+        let mut rig = Rig::new();
+        rig.set_inputs(|_| 1.0, |_| 0.0);
+        rig.install(0, Fake::effect(0.0, 0.0, &probe));
+        rig.install(1, Box::new(Delay::new(PLUGIN)));
+        rig.set(Command::SetSlotLive(1, true));
+        rig.advance(4800);
+        assert!(rig.engine.looper().overview().slot_live(0), "slot A is live");
+        // The device stops. A press queued before the unload, then the unload's live-off.
+        rig.queue(Command::Action(lf_engine::Action::Toggle(lf_engine::Toggle::Live(0))));
+        rig.queue(Command::SetSlotLive(0, false));
+        if close {
+            rig.engine.close_slot_idle(0);
+            assert!(!rig.engine.looper().overview().slot_live(0), "the overview shows it off");
+        }
+        rig.remove(0);
+        rig.engine.service_slots_idle();
+        assert!(rig.returned(0).is_some(), "the unit left at once");
+        rig.keep_output();
+        rig.advance(4800);
+        let dry = peak(&rig.monitor).max(peak(&rig.record));
+        if close {
+            assert_eq!(dry, 0.0, "no dry input from the first frame on, heard or recorded");
+            assert!(!rig.engine.looper().overview().slot_live(0));
+        } else {
+            assert!(dry > 0.1, "the queued live-off ramps through the emptied slot ({dry})");
         }
     }
 }

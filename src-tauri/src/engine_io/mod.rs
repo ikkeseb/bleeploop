@@ -548,6 +548,9 @@ pub(crate) struct Rt {
 /// The engine's non-RT ends, replaced with the engine (a sample-rate change builds a new one).
 pub(crate) struct Ends {
     pub(crate) commands: Producer<TimedCommand>,
+    /// The commands `commands` took, in all: the engine's overview counts the ones it has taken
+    /// ([`EngineHost::silence_slot`] waits on a block after its own).
+    pub(crate) pushed: u64,
     pub(crate) events: Consumer<Event>,
     pub(crate) overview: Arc<Overview>,
     /// The session port (`session.rs`), out while a snapshot or load uses it.
@@ -966,6 +969,7 @@ impl EngineHost {
                         self.core.counters.commands_full.fetch_add(1, Relaxed);
                         "the engine's command ring is full".to_string()
                     })?;
+                    ends.pushed += 1;
                     settings.record(&command.command);
                     settings.pushed(&command.command);
                 }
@@ -978,28 +982,66 @@ impl EngineHost {
     /// Take slot `slot` off live and wait (≤ `timeout`) until the engine's gate has closed on it: what a
     /// plugin's final unload does before its unit leaves (`plugins.rs`), since a removal crossfades the
     /// unit toward the gated input and a live slot would pass the dry input on to the monitor and the
-    /// record path. The live-off is an ordinary setting (`send`), so a rebuild replays it. Ok at once
-    /// while no device runs (nothing sounds, and the next engine replays the flag); Err when the ring
-    /// refused it or the gate did not close in time.
+    /// record path. The live-off is an ordinary setting (`send`), so a rebuild replays it. With a device
+    /// running, the answer is a block the engine rendered after it took this live-off (the ring's count
+    /// up to it, in the engine generation that took it; a rebuild's replay carries it into the next),
+    /// never a gate the overview showed closed before. With none, the engine's gate is closed here, at
+    /// once and with no ramp, under its lock (`Engine::close_slot_idle`): the live-off waits in the ring,
+    /// and applied when a device starts it would ramp from the old gain through the emptied slot. Err
+    /// when the ring refused it or the gate did not close in time.
     pub(crate) fn silence_slot(&self, slot: u8, timeout: Duration) -> Result<(), String> {
         self.send(TimedCommand { frame: None, command: Command::SetSlotLive(slot, false) })?;
         let deadline = Instant::now() + timeout;
+        // The engine generation and the ring's count the answer must reach: read after the send, so it
+        // covers the live-off (and perhaps a command sent just after it, which only waits a block more).
+        let mut target: Option<(u64, u64)> = None;
         loop {
-            if !self.core.running.load(Acquire) {
+            if !self.core.running.load(Acquire) && self.close_slot_idle(slot) {
                 return Ok(());
             }
-            let open = lock_at(&self.core.ends, LockSite::Ends)
-                .map_err(|_| "engine ends poisoned".to_string())?
-                .as_ref()
-                .map(|ends| ends.overview.slot_gate_open(usize::from(slot)));
-            if open != Some(true) {
-                return Ok(());
+            {
+                let ends = lock_at(&self.core.ends, LockSite::Ends).map_err(|_| "engine ends poisoned".to_string())?;
+                let gen = self.core.engine_gen.load(Acquire);
+                match ends.as_ref() {
+                    // No engine: the next one replays the live-off before its first block, settled.
+                    None => return Ok(()),
+                    Some(ends) => {
+                        if target.is_none_or(|(g, _)| g != gen) {
+                            target = Some((gen, ends.pushed));
+                        }
+                        if target.is_some_and(|(_, taken)| ends.overview.slot_gate_closed(usize::from(slot), taken)) {
+                            return Ok(());
+                        }
+                    }
+                }
             }
             if Instant::now() >= deadline {
                 return Err(format!("slot {slot}'s live input did not close within {} ms", timeout.as_millis()));
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// While no device runs: close slot `slot`'s live gate in the engine at once (`Engine::close_slot_idle`),
+    /// under the engine lock, as a slot host services its port (`SlotHost::service_if_idle`). False when a
+    /// device started meanwhile (the caller waits on the engine's answer instead). A faulted engine, or
+    /// none, is replaced, and the new one replays the live-off before its first block.
+    fn close_slot_idle(&self, slot: u8) -> bool {
+        let mut rt = self.core.rt.lock().unwrap_or_else(|e| e.into_inner());
+        // The owner raises `running` under this lock: a device may have started while this waited.
+        if self.core.running.load(Acquire) {
+            return false;
+        }
+        let rt = &mut *rt;
+        if rt.faulted {
+            return true;
+        }
+        let Some(engine) = rt.engine.as_mut() else { return true };
+        if catch_unwind(AssertUnwindSafe(|| engine.close_slot_idle(usize::from(slot)))).is_err() {
+            self.core.counters.panics.fetch_add(1, Relaxed);
+            self.core.latch_fault(rt);
+        }
+        true
     }
 
     /// The kept settings, in replay order (a reset frame hands them to the UI).

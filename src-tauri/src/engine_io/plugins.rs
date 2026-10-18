@@ -471,6 +471,7 @@ impl EngineApp {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Release}};
     use std::sync::Barrier;
 
     use lf_engine::grid::Frame;
@@ -498,6 +499,35 @@ mod tests {
         }
     }
 
+    /// An effect for the other slot whose `process` waits while `hold` is up, once it has raised
+    /// `entered`: it holds a block between the engine's command take and its gate publication.
+    struct Held {
+        hold: Arc<AtomicBool>,
+        entered: Arc<AtomicBool>,
+    }
+
+    impl SlotProcessor for Held {
+        fn kind(&self) -> SlotKind {
+            SlotKind::Effect
+        }
+        fn latency(&self) -> Frame {
+            0
+        }
+        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+            if self.hold.load(Acquire) {
+                self.entered.store(true, Release);
+                while self.hold.load(Acquire) {
+                    std::thread::yield_now();
+                }
+            }
+            out.fill(0.0);
+        }
+        fn stop(&mut self) {}
+        fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+            self
+        }
+    }
+
     /// The app's slots, as `EngineApp` holds them, over a test device's engine. Dropped in field
     /// order: a plugin left in a slot unloads while the device still runs.
     struct Rig {
@@ -514,7 +544,7 @@ mod tests {
         }
 
         /// With `input` as the device input.
-        fn with_input(input: impl Fn(Frame) -> f32 + Send + 'static) -> Rig {
+        fn with_input(input: impl Fn(Frame) -> f32 + Send + Sync + 'static) -> Rig {
             let one = engine_slot::one_engine_test_at_a_time();
             Rig {
                 slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
@@ -539,6 +569,16 @@ mod tests {
         fn tail_peak(&self, frames: usize) -> f32 {
             let out = self.device.output.lock().unwrap();
             out[out.len().saturating_sub(frames)..].iter().fold(0.0, |m, x| m.max(x.abs()))
+        }
+
+        /// The frames the device has played so far (its kept output's length).
+        fn played(&self) -> usize {
+            self.device.output.lock().unwrap().len()
+        }
+
+        /// The loudest frame the device played from frame `from` of its kept output on.
+        fn peak_from(&self, from: usize) -> f32 {
+            self.device.output.lock().unwrap()[from..].iter().fold(0.0, |m, x| m.max(x.abs()))
         }
 
         /// A load into slot 0 for the document with `epoch`, opened by `open`, its reservation waiting
@@ -701,6 +741,75 @@ mod tests {
         assert_eq!(rig.slot(), "empty");
         rig.play(8);
         assert!(rig.tail_peak(8 * 256) < 1e-6, "no dry input after the unload: {}", rig.tail_peak(8 * 256));
+        assert!(host.settings().contains(&Command::SetSlotLive(0, false)), "a rebuild replays the live-off");
+    }
+
+    /// The unload's live-off is answered by a block the engine rendered after taking it, never by a gate
+    /// the overview showed closed before it: with a block held between its command take (a live-on)
+    /// and its gate publication, the overview still shows slot A's gate closed, and the live-off gets
+    /// no answer. Released, the gate closes on the live-off and the unload passes no dry input.
+    #[test]
+    fn an_unloads_live_off_is_answered_only_by_a_block_that_took_it() {
+        let rig = Rig::with_input(|_| 0.5);
+        let host = rig.device.host();
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        let (hold, entered) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        // A failed assertion must not leave the render thread held: the device's drop joins it.
+        struct Unhold(Arc<AtomicBool>);
+        impl Drop for Unhold {
+            fn drop(&mut self) {
+                self.0.store(false, Release);
+            }
+        }
+        let _unhold = Unhold(hold.clone());
+        let slot_b = host.slot(1);
+        assert!(slot_b.install(Box::new(Held { hold: hold.clone(), entered: entered.clone() }), 48_000).is_ok());
+        rig.play(8);
+        assert!(!host.core.ends.lock().unwrap().as_ref().unwrap().overview.slot_live(0), "slot A is off");
+
+        // The next block takes a live-on, then holds in slot B's unit before it publishes its gates.
+        {
+            let _no_block = host.core.rt.lock().unwrap();
+            host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+            hold.store(true, Release);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !entered.load(Acquire) {
+            assert!(Instant::now() < deadline, "the held block never came");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let early = host.silence_slot(0, Duration::from_millis(100));
+        assert!(early.is_err(), "no answer before a block that took the live-off has ended: {early:?}");
+
+        hold.store(false, Release);
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), Some(host)), Ok(()));
+        let removed = rig.played();
+        rig.play(8);
+        assert!(rig.peak_from(removed) < 1e-6, "no dry input from the removal on: {}", rig.peak_from(removed));
+        assert!(slot_b.remove(Duration::from_secs(10)).unwrap().is_some(), "slot B's unit comes back");
+    }
+
+    /// With the device stopped, an unload closes its slot's live gate in the engine before the unit
+    /// leaves, a queued live-off being no acknowledgement: a reopen at the same rate (the engine kept,
+    /// no settings replay) plays no dry input from its first frame.
+    #[test]
+    fn an_unload_while_the_device_is_stopped_passes_no_dry_input_at_the_reopen() {
+        let mut rig = Rig::with_input(|_| 0.5);
+        let host = rig.device.host().clone();
+        host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        rig.play(8);
+        assert!(rig.tail_peak(1024) < 1e-6, "the silent effect is in, live");
+
+        rig.device.stop();
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), Some(&host)), Ok(()));
+        assert_eq!(rig.slot(), "empty");
+        let reopened = rig.played();
+        rig.device.resume();
+        rig.play(8);
+        assert!(rig.peak_from(reopened) < 1e-6, "no dry input from the reopen's first frame: {}", rig.peak_from(reopened));
         assert!(host.settings().contains(&Command::SetSlotLive(0, false)), "a rebuild replays the live-off");
     }
 

@@ -27,6 +27,9 @@ pub struct Overview {
     slots_live: [AtomicBool; SLOT_COUNT],
     /// Each slot's live gate passes input (live, or still ramping out), as the last rendered block left it.
     slots_open: [AtomicBool; SLOT_COUNT],
+    /// The commands the engine had taken off its ring when the last rendered block ended, published after
+    /// `slots_open` (release): a reader that sees a count sees the gates of that block or a later one.
+    commands_taken: AtomicU64,
     buffers: Box<[Peaks]>,
     capacity: usize,
 }
@@ -81,6 +84,7 @@ impl Overview {
             lanes: std::array::from_fn(|_| LaneCell::default()),
             slots_live: std::array::from_fn(|_| AtomicBool::new(false)),
             slots_open: std::array::from_fn(|_| AtomicBool::new(false)),
+            commands_taken: AtomicU64::new(0),
             buffers: (0..buffers).map(|_| Peaks::new(bins)).collect(),
             capacity,
         }
@@ -102,17 +106,26 @@ impl Overview {
         }
     }
 
-    /// Whether plugin slot `slot`'s live gate passed any input in the last rendered block (live, or its
-    /// ramp out not yet ended); false out of range. Once false after a live-off, a removal crossfades
-    /// the unit to silence: the host's unload waits for it (`engine_io::EngineHost::silence_slot`).
-    pub fn slot_gate_open(&self, slot: usize) -> bool {
-        self.slots_open.get(slot).is_some_and(|l| l.load(Relaxed))
+    /// Whether plugin slot `slot`'s live gate is closed (not live, its ramp out ended) at the end of a
+    /// block rendered after the engine took the first `taken` commands of its ring, or by an idle
+    /// close ([`Engine::close_slot_idle`](crate::Engine::close_slot_idle)); false out of range. The
+    /// host's unload asks it with the count of commands it had pushed up to its live-off
+    /// (`engine_io::EngineHost::silence_slot`), so a gate closed before that live-off arrived never
+    /// answers for it; once true, a removal crossfades the unit to silence.
+    pub fn slot_gate_closed(&self, slot: usize, taken: u64) -> bool {
+        let seen = self.commands_taken.load(Acquire);
+        seen >= taken && self.slots_open.get(slot).is_some_and(|l| !l.load(Relaxed))
     }
 
     pub(crate) fn set_slot_gate_open(&self, slot: usize, open: bool) {
         if let Some(l) = self.slots_open.get(slot) {
             l.store(open, Relaxed);
         }
+    }
+
+    /// After a block's `set_slot_gate_open`s: the commands taken so far.
+    pub(crate) fn set_commands_taken(&self, taken: u64) {
+        self.commands_taken.store(taken, Release);
     }
 
     pub fn lane(&self, i: usize) -> LaneView {
