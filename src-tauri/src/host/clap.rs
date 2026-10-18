@@ -310,7 +310,11 @@ fn editor_open(
         gui.destroy(&mut handle);
         return Err(format!("gui.show(embedded): {e}"));
     }
-    show_host_window_front(host_win.hwnd);
+    // A test's window stays hidden, as VST2's `show_editor`: nothing appears or takes the focus on
+    // the machine that runs it.
+    if cfg!(not(test)) {
+        show_host_window_front(host_win.hwnd);
+    }
     // From here the plugin's `request_resize` has a window to resize; one left from an earlier
     // editor is forgotten first.
     instance.access_shared_handler(|s| s.pending_resize.store(NO_RESIZE, Release));
