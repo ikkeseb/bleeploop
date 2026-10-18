@@ -37,6 +37,9 @@ const webPluginHost: PluginHost = {
   async scanPlugins() {
     return [];
   },
+  async scanPluginPaths() {
+    return [];
+  },
   async pluginFolders() {
     return { builtin: [], user: [], unsupported: [], failed: [] };
   },

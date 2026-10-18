@@ -384,6 +384,27 @@ fn scan_roots(
     (found, next, stats)
 }
 
+/// The scan of `paths` alone (`scan_paths`), its child runner injected: the bundles the walk over
+/// `roots` yields whose path is spelled as one of `paths` (so the walk's own rules hold: the first
+/// spelling met, each root's format, the 32-bit and shell verdicts), scanned against `previous`, and
+/// the cache to write back: `previous` with their entries added, at this build's version. It never
+/// prunes: what it did not walk to stays for the full scan to judge.
+fn scan_paths_with(
+    roots: &[Root],
+    previous: ScanCache,
+    paths: &[String],
+    scan: impl FnMut(&Path) -> Result<ScanOutcome, ScanError>,
+) -> (Scanned, ScanCache, ScanStats) {
+    let walked = find_bundles(roots);
+    let wanted: Vec<PathBuf> = walked.bundles.into_iter().filter(|p| paths.iter().any(|w| *w == *p.to_string_lossy())).collect();
+    let (found, next, stats) = scan_bundles(&wanted, &previous, false, scan);
+    let mut merged = previous;
+    // A missing or older file loads as an empty cache of version 0, which the next load would discard.
+    merged.version = SCAN_CACHE_VERSION;
+    merged.bundles.extend(next.bundles);
+    (found, merged, stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1150,6 +1171,79 @@ mod tests {
         assert!(cache2.bundles.contains_key(&a.to_string_lossy().to_string()));
     }
 
+    /// Rig recall's scan of the saved paths (`scan_paths_with`): a cached bundle runs no child, an
+    /// uncached one exactly one, which the full scan after it then reuses; a path the walk does not
+    /// yield runs nothing and gives nothing; the merge keeps every other bundle's entry; a failure is
+    /// cached and reused; and what it writes back loads again, from a missing or an older-version file.
+    #[test]
+    fn a_scan_of_the_rigs_paths_runs_only_their_children_and_merges_into_the_cache() {
+        let scratch = Scratch::new("paths");
+        // Spelled as the walk spells them, which is how a saved descriptor's path reaches the scan.
+        let root = scratch.0.join("root");
+        let [amp, other, broken] = ["Amp.clap", "Other.clap", "Broken.clap"].map(|name| {
+            scratch.file(&format!("root/{name}"));
+            root.join(name)
+        });
+        let roots = [builtin(&root, PluginFormat::Clap)];
+        let key = |p: &PathBuf| p.to_string_lossy().to_string();
+        let children = std::sync::Mutex::new(Vec::<PathBuf>::new());
+        let scan = |p: &Path| {
+            children.lock().unwrap().push(p.to_path_buf());
+            if p == broken {
+                Err(ScanError::Bundle("exit=Some(1) stderr=".to_string()))
+            } else {
+                Ok(ScanOutcome::plugins(vec![desc(p, "P")]))
+            }
+        };
+        let ran = || std::mem::take(&mut *children.lock().unwrap());
+
+        // A full scan knew Other only; Amp is new (an update, say).
+        let (_, known, _) = scan_bundles(&[other.clone()], &ScanCache::default(), false, scan);
+        ran();
+        let (found, merged, stats) = scan_paths_with(&roots, known, &[key(&amp)], scan);
+        assert_eq!(ran(), vec![amp.clone()], "an uncached path runs exactly its child");
+        assert_eq!(found.plugins, vec![desc(&amp, "P")]);
+        assert_eq!((stats.scanned, stats.fresh), (1, 1));
+        assert!(merged.bundles.contains_key(&key(&other)), "the merge keeps the other bundles' entries");
+        let (_, _, full) = scan_roots(&roots, &merged, false, scan);
+        assert_eq!(ran(), vec![broken.clone()], "the full scan after it runs no child for the rig's plugin");
+        assert_eq!(full.cached, 2);
+
+        // Cached now: no child.
+        let (found, merged, _) = scan_paths_with(&roots, merged, &[key(&amp)], scan);
+        assert!(ran().is_empty(), "a cached path runs no child");
+        assert_eq!(found.plugins, vec![desc(&amp, "P")]);
+
+        // A path no root yields (a moved plugin, another spelling): nothing.
+        scratch.file("elsewhere/Amp.clap");
+        let elsewhere = scratch.0.join("elsewhere").join("Amp.clap");
+        let (found, merged, stats) = scan_paths_with(&roots, merged, &[key(&elsewhere)], scan);
+        assert!(ran().is_empty() && found.plugins.is_empty() && stats.scanned == 0);
+
+        // A failed child is cached as failed and reused.
+        let (found, merged, _) = scan_paths_with(&roots, merged, &[key(&broken)], scan);
+        assert_eq!(ran(), vec![broken.clone()]);
+        assert!(found.plugins.is_empty() && found.failed.len() == 1);
+        let (found, _, _) = scan_paths_with(&roots, merged, &[key(&broken)], scan);
+        assert!(ran().is_empty(), "the failure is reused, not retried");
+        assert_eq!(found.failed.len(), 1);
+
+        // Written back from a missing file and from an older version's: it loads again.
+        let file = scratch.0.join("plugin-scan.json");
+        for old in [None, Some(SCAN_CACHE_VERSION - 1)] {
+            if let Some(version) = old {
+                std::fs::write(&file, serde_json::to_vec(&ScanCache { version, bundles: BTreeMap::new() }).unwrap()).unwrap();
+            } else {
+                let _ = std::fs::remove_file(&file);
+            }
+            let (_, merged, _) = scan_paths_with(&roots, ScanCache::load(&file), &[key(&amp)], scan);
+            merged.save(&file).unwrap();
+            ran();
+            let loaded = ScanCache::load(&file);
+            assert!(loaded.bundles.contains_key(&key(&amp)), "{old:?}: the fresh entry survives a reload");
+        }
+    }
+
     #[test]
     fn cache_file_round_trips_and_a_foreign_version_or_garbage_is_ignored() {
         let scratch = Scratch::new("file");
@@ -1743,8 +1837,54 @@ fn run_gated_child(
     }
 }
 
-/// At most one `scan_all` runs in the process: two at once would spawn each bundle's child twice and
-/// race their cache writes. Held for the whole scan, so only ever taken on a blocking thread.
+/// The built-in roots, then the player's folders (`folders_path`; None or unusable: the built-in roots
+/// only), as they are now.
+fn scan_roots_now(folders_path: Option<&Path>) -> Vec<Root> {
+    let mut roots = builtin_roots();
+    match folders_path.map(super::folders::load) {
+        Some(Ok(folders)) => roots.extend(folders.into_iter().map(|f| Root { path: PathBuf::from(f), only: None })),
+        Some(Err(e)) => log::warn!("[scan] plugin folder list unusable ({e}); scanning the built-in folders only"),
+        None => {}
+    }
+    roots
+}
+
+/// PARENT side, for rig recall at launch: scan only the bundles at `paths` (the saved rig's) among
+/// what `scan_all`'s walk finds, from the cache where their binaries are unchanged, so the saved
+/// amp-sim never waits for every other new or updated plugin's child. Merges what it learned into the
+/// cache (the full scan after it then spawns no second child for them) and prunes nothing; leaves the
+/// not-listed lists to the full scan. A path the walk does not yield gives nothing.
+pub fn scan_paths(cache_path: Option<&Path>, folders_path: Option<&Path>, paths: &[String]) -> Result<Vec<PluginDescriptor>, String> {
+    let _scan = SCAN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let started = Instant::now();
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let roots = scan_roots_now(folders_path);
+    let previous = cache_path.map(ScanCache::load).unwrap_or_default();
+    let (found, merged, stats) = scan_paths_with(&roots, previous, paths, |path| {
+        let stdout = scan_one_child(&exe, path, SCAN_CHILD_TIMEOUT)?;
+        serde_json::from_slice::<ScanOutcome>(&stdout).map_err(|e| ScanError::Bundle(format!("parse failed: {e}")))
+    });
+    if let Some(p) = cache_path {
+        if let Err(e) = merged.save(p) {
+            log::warn!("[scan] cache not written ({}): {e}", p.display());
+        }
+    }
+    log::info!(
+        "[scan] the rig's {} path(s): {} bundle(s), {} from cache, {} scanned, {} failed, {} plugin(s), {} ms",
+        paths.len(),
+        stats.scanned,
+        stats.cached,
+        stats.fresh,
+        found.failed.len(),
+        found.plugins.len(),
+        started.elapsed().as_millis()
+    );
+    Ok(found.plugins)
+}
+
+/// At most one scan (`scan_all`, `scan_paths`) runs in the process: two at once would spawn each
+/// bundle's child twice and race their cache writes. Held for the whole scan, so only ever taken on a
+/// blocking thread.
 static SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// PARENT side: walk the built-in roots and then the player's folders (`folders_path`, the list in
@@ -1767,12 +1907,7 @@ pub fn scan_all(
     let started = Instant::now();
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     // The roots as they are when this scan starts: a folder added while it runs is the next scan's.
-    let mut roots = builtin_roots();
-    match folders_path.map(super::folders::load) {
-        Some(Ok(folders)) => roots.extend(folders.into_iter().map(|f| Root { path: PathBuf::from(f), only: None })),
-        Some(Err(e)) => log::warn!("[scan] plugin folder list unusable ({e}); scanning the built-in folders only"),
-        None => {}
-    }
+    let roots = scan_roots_now(folders_path);
     let previous = match cache_path {
         Some(p) if !force => ScanCache::load(p),
         _ => ScanCache::default(),

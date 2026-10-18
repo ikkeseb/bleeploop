@@ -106,6 +106,30 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
     }
 }
 
+/// Rig recall's scan at launch (`scan::scan_paths`): the saved rig's `paths` alone, from the cache
+/// where their binaries are unchanged, on a blocking thread, before the full `plugin_scan`. Takes only
+/// paths, which it matches against the scan's own walk: nothing outside the walked folders is read.
+#[tauri::command]
+pub async fn plugin_scan_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<PluginDescriptor>, String> {
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        let data_dir = app.path().app_local_data_dir().ok();
+        tauri::async_runtime::spawn_blocking(move || {
+            let cache_path = data_dir.as_ref().map(|dir| dir.join("plugin-scan.json"));
+            let folders_path = data_dir.as_ref().map(|dir| dir.join(FOLDERS_FILE));
+            super::scan::scan_paths(cache_path.as_deref(), folders_path.as_deref(), &paths)
+        })
+        .await
+        .map_err(|e| format!("plugin scan task: {e}"))?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, paths);
+        Ok(Vec::new())
+    }
+}
+
 /// The player's plugin folder list, beside the scan cache in the app's local data dir.
 #[cfg(windows)]
 const FOLDERS_FILE: &str = "plugin-folders.json";

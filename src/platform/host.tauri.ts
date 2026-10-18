@@ -64,6 +64,9 @@ const tauriPluginHost: PluginHost = {
   scanPlugins(force = false) {
     return invoke<PluginDescriptor[]>('plugin_scan', { force });
   },
+  scanPluginPaths(paths) {
+    return invoke<PluginDescriptor[]>('plugin_scan_paths', { paths });
+  },
   pluginFolders() {
     return invoke<PluginFolders>('plugin_folders');
   },

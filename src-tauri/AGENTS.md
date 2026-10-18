@@ -99,7 +99,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
   `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
-  only to match a stored entry. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
+  only to match a stored entry, and `plugin_scan_paths` (rig recall's scan of the saved plugins at
+  launch) its paths only to match bundles the scan's own walk finds. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
   take only what they need: `input_send` an epoch and the batch's engine commands and note events,
   `midi_subscribe` a channel and the page's age (`performance.timeOrigin`), and the page's epoch to every
   other: `midi_learn` an action id and a track, `midi_cancel_learn` nothing more, `midi_forget` /
@@ -431,9 +432,7 @@ plugin-GUI work.
   unserialized; a CLAP restart can deliver a removed parameter id; a non-discardable VST3 module is
   unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP note port gets CLAP notes; CLAP
   editor edits never reach the drawer.
-- Fixes that wait on a native command: (a) boot awaits the whole plugin scan before rig recall
-  (`src/app/boot.ts` 51-52), so one uncached plugin can hold the saved amp-sim back by the 20 s scan
-  timeout: a scan of given paths first; (b) `app_update_install` downloads and installs in one call
+- Fixes that wait on a native command: (b) `app_update_install` downloads and installs in one call
   (`update.rs` 128-131) after the UI's save, so a take committed during the download is lost: split
   download and install, with a native freeze of jam changes (MIDI included) and a fresh save between.
 - `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`

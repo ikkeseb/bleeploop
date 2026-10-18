@@ -71,6 +71,12 @@ function writeRig(rig: SavedRig): void {
 
 const label = (p: SavedPlugin) => `${p.name} (${p.format.toUpperCase()})`;
 
+/** The bundle paths of the plugins the rig remembers, for boot's scan of them alone
+ * (`PluginHost.scanPluginPaths`) ahead of the full scan. */
+export function savedRigPaths(): string[] {
+  return [...new Set(readRig().flatMap((p) => (p ? [p.path] : [])))];
+}
+
 /** Remember `desc` as slot `slot`'s plugin (its load succeeded). */
 export function rememberSlotPlugin(slot: 0 | 1, desc: PluginDescriptor): void {
   const { format, path, id, name } = desc;
@@ -123,8 +129,8 @@ export function rigRecallOnClose(): void {
 /**
  * Restore each slot's remembered plugin, slot 0 then slot 1, through `load` (`restorePlugin`: the slot
  * chain, the load token and the routing rules all apply, and a slot the player has already chosen a
- * source for keeps that choice), from this launch's scan `available`. Boot runs it once, after the
- * scan. A slot whose plugin is missing from the scan (file gone, plugin changed) is skipped with one
+ * source for keeps that choice), from this launch's scan `available`. Boot runs it once, on the scan of
+ * the saved plugins' own paths (`savedRigPaths`), beside the full scan. A slot whose plugin is missing from the scan (file gone, plugin changed) is skipped with one
  * log line and keeps its record for a launch where the plugin is back. A failed load reports through
  * the load path's own toast.
  *

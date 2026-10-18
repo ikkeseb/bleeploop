@@ -52,8 +52,12 @@ await check("the owner's build restores from the lf. keys", async () => {
   const { m, loads } = await launch(undefined, { 'lf.rigRecall': record(FX, null), 'lf.probe.recall-restart.rigRecall': record(null, SYN) });
   assert.deepEqual(loads, [[0, 'probe.fx']]);
   assert.equal(store.has('lf.rigRecallInFlight'), false, 'the marker is gone after the settle window');
+  assert.deepEqual(m.savedRigPaths(), [FX.path], "boot's scan of the rig's paths reads the owner's record");
   m.rememberSlotPlugin(1, SYN);
   assert.equal(JSON.parse(store.get('lf.rigRecall'))[1].id, 'probe.syn');
+  assert.deepEqual(m.savedRigPaths(), [FX.path, SYN.path]);
+  m.rememberSlotPlugin(1, FX);
+  assert.deepEqual(m.savedRigPaths(), [FX.path], 'one bundle in both slots is scanned once');
   assert.equal(store.get('lf.probe.recall-restart.rigRecall'), record(null, SYN), "the probe's record is untouched");
 });
 
@@ -74,6 +78,7 @@ for (const [probe, other] of [['recall-restart', 'tone-recall'], ['tone-recall',
       [`lf.probe.${other}.rigRecall`]: others,
     });
     assert.deepEqual(loads, [[0, 'probe.fx']]);
+    assert.deepEqual(m.savedRigPaths(), [FX.path], "boot's scan of the rig's paths reads this probe's record");
     m.rememberSlotPlugin(1, SYN);
     m.forgetSlotPlugin(0);
     assert.deepEqual(JSON.parse(store.get(`lf.probe.${probe}.rigRecall`)).map((p) => p?.id ?? null), [null, 'probe.syn']);
@@ -91,6 +96,7 @@ for (const probe of ['editor-smoke', 'restart-survey', 'swap-stress']) {
     };
     const { m, loads } = await launch(probe, seed);
     assert.deepEqual(loads, [], 'nothing restored');
+    assert.deepEqual(m.savedRigPaths(), [], 'and no path to scan');
     assert.equal(m.rigRecallDone(), true);
     assert.equal(m.recallInFlight(), false);
     m.rememberSlotPlugin(0, SYN);
