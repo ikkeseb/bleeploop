@@ -422,32 +422,57 @@ if (shallow) {
 }
 
 // ── 3. invariant titles: AGENTS.md and docs/ARCHITECTURE.md share one numbering ─────────────────────
-// Source comments cite invariants by number. Titles may differ in detail, so the rule is: same count, and
-// at each number one normalised title (backticks, bold, a trailing parenthetical and period dropped) is a
-// prefix of the other. A reorder, an insertion or a reworded title fails.
-/** The numbered items of the first `## ` section whose heading matches `heading`. */
-function numbered(file, heading) {
-  const text = readFileSync(resolve(ROOT, file), 'utf8');
+// Source comments cite invariants by number. Each list's items are read whole (a continuation line is
+// indented under its item) with their own numbers, which must run 1, 2, 3, … in both files; at each
+// number the titles must match once normalised (backticks and bold, a trailing parenthetical and period
+// dropped, whitespace and case folded). ARCHITECTURE's title is its item's bold lead, however many lines
+// it spans. A renumbered item, a reorder, an insertion or a reworded title, on any line, fails.
+/** The numbered items `{ n, text }` of the first `## ` section of `text` whose heading matches `heading`. */
+function numbered(text, heading) {
   const at = text.search(heading);
   if (at === -1) return null;
   const next = text.indexOf('\n## ', at + 1);
-  return text.slice(at, next === -1 ? undefined : next).split('\n').filter((l) => /^\d+\. /.test(l))
-    .map((l) => l.replace(/^\d+\. /, ''));
-}
-const norm = (s) => s.replace(/[`*]/g, '').replace(/\s*\([^)]*\)\s*\.?$/, '').replace(/\.$/, '').trim().toLowerCase();
-const agentsTitles = numbered('AGENTS.md', /^## Invariants/m);
-const archTitles = numbered('docs/ARCHITECTURE.md', /^## Cross-cutting invariants/m)
-  ?.map((l) => l.match(/^\*\*(.+?)\*\*/)?.[1] ?? l);
-check(!!agentsTitles && !!archTitles, 'invariant lists not found (AGENTS.md "## Invariants", ARCHITECTURE "## Cross-cutting invariants")');
-if (agentsTitles && archTitles) {
-  check(agentsTitles.length === archTitles.length,
-    `invariant count differs: AGENTS.md ${agentsTitles.length}, docs/ARCHITECTURE.md ${archTitles.length}`);
-  for (let i = 0; i < Math.min(agentsTitles.length, archTitles.length); i++) {
-    const a = norm(agentsTitles[i]);
-    const b = norm(archTitles[i]);
-    check(a.startsWith(b) || b.startsWith(a),
-      `invariant ${i + 1} differs: AGENTS.md "${agentsTitles[i]}" vs docs/ARCHITECTURE.md "${archTitles[i]}"`);
+  const items = [];
+  for (const line of text.slice(at, next === -1 ? undefined : next).split('\n')) {
+    const m = line.match(/^(\d+)\. (.*)$/);
+    if (m) items.push({ n: Number(m[1]), text: m[2] });
+    else if (items.length && /^\s+\S/.test(line)) items[items.length - 1].text += ` ${line.trim()}`;
   }
+  return items;
+}
+const norm = (s) => s.replace(/[`*]/g, '').replace(/\s+/g, ' ').replace(/\s*\([^)]*\)\s*\.?$/, '').replace(/\.$/, '').trim().toLowerCase();
+/** What differs between the two files' invariant lists; empty when they agree. */
+function invariantDrift(agentsText, archText) {
+  const agents = numbered(agentsText, /^## Invariants/m);
+  const arch = numbered(archText, /^## Cross-cutting invariants/m);
+  if (!agents?.length || !arch?.length) return ['invariant lists not found (AGENTS.md "## Invariants", ARCHITECTURE "## Cross-cutting invariants")'];
+  const drift = [];
+  for (const [file, items] of [['AGENTS.md', agents], ['docs/ARCHITECTURE.md', arch]]) {
+    items.forEach((item, i) => item.n !== i + 1 && drift.push(`${file}: invariant ${i + 1} is numbered ${item.n}`));
+  }
+  if (agents.length !== arch.length) drift.push(`invariant count differs: AGENTS.md ${agents.length}, docs/ARCHITECTURE.md ${arch.length}`);
+  for (let i = 0; i < Math.min(agents.length, arch.length); i++) {
+    const archTitle = arch[i].text.match(/^\*\*(.+?)\*\*/)?.[1];
+    if (!archTitle) drift.push(`docs/ARCHITECTURE.md: invariant ${i + 1} has no bold title`);
+    else if (norm(agents[i].text) !== norm(archTitle)) {
+      drift.push(`invariant ${i + 1} differs: AGENTS.md "${agents[i].text}" vs docs/ARCHITECTURE.md "${archTitle}"`);
+    }
+  }
+  return drift;
+}
+const agentsMd = readFileSync(resolve(ROOT, 'AGENTS.md'), 'utf8');
+const archMd = readFileSync(resolve(ROOT, 'docs/ARCHITECTURE.md'), 'utf8');
+for (const d of invariantDrift(agentsMd, archMd)) check(false, d);
+// The same rule on planted lists: they agree as written, and fail with an item renumbered or a word
+// changed on a title's continuation line.
+const plantAgents = '## Invariants\n\n1. Alpha beta (CI-guarded).\n2. Gamma waits on a lock.\n';
+const plantArch = '## Cross-cutting invariants\n\n1. **Alpha `beta`.** Body.\n2. **Gamma waits on a\n   lock.** Body\n   more.\n\n## Next\n';
+check(invariantDrift(plantAgents, plantArch).length === 0, `the invariant check failed agreeing lists: ${invariantDrift(plantAgents, plantArch).join('; ')}`);
+for (const [why, agents, arch] of [
+  ['an item renumbered', plantAgents.replace('2. ', '3. '), plantArch.replace('2. ', '3. ')],
+  ["a word changed on a title's continuation line", plantAgents, plantArch.replace('   lock.**', '   mutex.**')],
+]) {
+  check(invariantDrift(agents, arch).length > 0, `the invariant check passed ${why}`);
 }
 
 // ── 4. STATUS next-jam cap ──────────────────────────────────────────────────────────────────
