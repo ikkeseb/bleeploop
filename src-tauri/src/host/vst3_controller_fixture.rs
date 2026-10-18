@@ -23,6 +23,8 @@ pub(super) struct FixtureController {
     /// `initialize` fails; a controller that failed it must never be terminated.
     pub(super) refuse_init: AtomicBool,
     pub(super) terminates: AtomicUsize,
+    /// What the views it creates saw, in order (`RefusingView`).
+    view_calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl FixtureController {
@@ -37,6 +39,7 @@ impl FixtureController {
             state_calls: Mutex::new(Vec::new()),
             refuse_init: AtomicBool::new(false),
             terminates: AtomicUsize::new(0),
+            view_calls: Arc::default(),
         }
     }
     fn held_handler(&self) -> Option<usize> {
@@ -125,15 +128,27 @@ impl IEditControllerTrait for FixtureController {
         kResultOk
     }
     unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
-        ComWrapper::new(RefusingView)
+        ComWrapper::new(RefusingView { calls: self.view_calls.clone(), parent: AtomicIsize::new(0) })
             .to_com_ptr::<IPlugView>()
             .map_or(std::ptr::null_mut(), ComPtr::into_raw)
     }
 }
 
 /// A view that refuses `attached`, so an editor open walks every step up to the attach and then
-/// fails before its host window is ever shown.
-struct RefusingView;
+/// fails before its host window is ever shown. It records its frame calls, and on its release
+/// whether the window it was offered still exists.
+struct RefusingView {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    parent: AtomicIsize,
+}
+impl Drop for RefusingView {
+    fn drop(&mut self) {
+        let parent = HWND(self.parent.load(Relaxed) as *mut c_void);
+        // SAFETY: a window-handle query; a destroyed handle answers false.
+        let alive = unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(parent)).as_bool() };
+        self.calls.lock().unwrap().push(if alive { "released, window alive" } else { "released, window gone" });
+    }
+}
 impl Class for RefusingView {
     type Interfaces = (IPlugView,);
 }
@@ -141,7 +156,8 @@ impl IPlugViewTrait for RefusingView {
     unsafe fn isPlatformTypeSupported(&self, _type: FIDString) -> tresult {
         kResultTrue
     }
-    unsafe fn attached(&self, _parent: *mut c_void, _type: FIDString) -> tresult {
+    unsafe fn attached(&self, parent: *mut c_void, _type: FIDString) -> tresult {
+        self.parent.store(parent as isize, Relaxed);
         kResultFalse
     }
     unsafe fn removed(&self) -> tresult {
@@ -171,7 +187,8 @@ impl IPlugViewTrait for RefusingView {
     unsafe fn onFocus(&self, _state: TBool) -> tresult {
         kResultOk
     }
-    unsafe fn setFrame(&self, _frame: *mut IPlugFrame) -> tresult {
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        self.calls.lock().unwrap().push(if frame.is_null() { "setFrame(null)" } else { "setFrame" });
         kResultOk
     }
     unsafe fn canResize(&self) -> tresult {
@@ -246,4 +263,14 @@ fn an_editor_open_leaves_the_load_time_component_handler_in_place() {
         Some(hp.as_ptr() as usize),
         "the controller still holds the load-time handler"
     );
+}
+
+/// A view that fails to attach is cleaned up in the open editor's order: it loses its frame and is
+/// released while the frame and the host window still exist, the window destroyed after it.
+#[test]
+fn a_view_that_fails_to_attach_is_released_before_its_frame_and_window() {
+    let (obj, ctl) = controller(3);
+    let err = vst3_editor_open(&ctl, 0).err().expect("the fixture view refuses to attach");
+    assert!(err.contains("attached"), "{err}");
+    assert_eq!(*obj.view_calls.lock().unwrap(), ["setFrame", "setFrame(null)", "released, window alive"]);
 }

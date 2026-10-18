@@ -869,6 +869,40 @@ enum Vst3Editor {
     },
 }
 
+/// A VST3 editor being opened (`vst3_editor_open`), owner-thread local: a failure before the view
+/// is attached drops it here in `Vst3Editor`'s order, never Rust's reverse order of locals. The
+/// view loses its frame (`setFrame(null)`) and goes first, while the frame and the host window
+/// still live; then the frame; then the window. Only an attached view becomes `Vst3Editor::Open`.
+struct OpeningEditor {
+    view: Option<ComPtr<IPlugView>>,
+    frame: Option<ComWrapper<LfPlugFrame>>,
+    win: Option<HostWindow>,
+}
+impl OpeningEditor {
+    /// The view attached: the open editor takes over the order.
+    fn attached(mut self) -> Vst3Editor {
+        match (self.view.take(), self.frame.take(), self.win.take()) {
+            (Some(view), Some(_frame), Some(win)) => Vst3Editor::Open { view, _frame, win },
+            _ => unreachable!("an editor attaches with its view, frame and window"),
+        }
+    }
+}
+impl Drop for OpeningEditor {
+    fn drop(&mut self) {
+        if let Some(view) = self.view.take() {
+            if self.frame.is_some() {
+                // SAFETY: owner thread; `view` is live, and a null frame is the VST3 way to detach.
+                unsafe {
+                    let _ = view.setFrame(std::ptr::null_mut());
+                }
+            }
+            drop(view);
+        }
+        drop(self.frame.take());
+        drop(self.win.take());
+    }
+}
+
 /// Open the VST3 editor on the owner thread, in an owner-less host window (`create_host_window`).
 /// `controller` is the edit controller the load set up: the component itself, or a separated one
 /// (`obtain_controller`, Surge's case); a plugin with neither has no editor. Mirrors the CLAP
@@ -892,8 +926,12 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
         if view.isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue {
             return Err("VST3 view does not support HWND embedding".to_string());
         }
+        // From here every early return drops the editor in its own order (`OpeningEditor`). It
+        // holds the view's last reference: the local below is declared after it, so drops first.
+        let mut opening = OpeningEditor { view: Some(view), frame: None, win: None };
+        let view = opening.view.clone().expect("the view was just set");
         // 4. Give the plugin our IPlugFrame BEFORE attach (some plugins query it during attach).
-        let frame = ComWrapper::new(LfPlugFrame::new());
+        let frame = opening.frame.insert(ComWrapper::new(LfPlugFrame::new()));
         if let Some(fp) = frame.to_com_ptr::<IPlugFrame>() {
             let _ = view.setFrame(fp.as_ptr());
         }
@@ -908,19 +946,19 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             (900, 600) // mirror the CLAP editor_open fallback
         };
         // 6. Host window (reused rt_host helper; sizes the CLIENT area via AdjustWindowRectEx).
-        let win = create_host_window(w, h)?;
+        let hwnd = create_host_window(w, h).map(|win| opening.win.insert(win).hwnd)?;
         // From here a plugin-initiated `resizeView` has a window to resize.
-        frame.hwnd.store(win.hwnd.0 as isize, Release);
+        frame.hwnd.store(hwnd.0 as isize, Release);
         // 7. Attach the plugin view into our window. windows-crate HWND.0 is already *mut c_void.
         log::info!("[plugin_host] vst3 editor_open slot {slot}: attached…");
-        if view.attached(win.hwnd.0 as *mut c_void, kPlatformTypeHWND) != kResultOk {
+        if view.attached(hwnd.0 as *mut c_void, kPlatformTypeHWND) != kResultOk {
             return Err("IPlugView::attached failed".to_string());
         }
         // 8. Tell the plugin the final size, then show our window. The size is read back from the
         //    window, not reused from step 5: a plugin that calls `resizeView` from inside
         //    `attached()` (its saved zoom/size) has already resized the client area, and repeating
         //    the pre-attach size here would undo that layout.
-        let (w, h) = client_size(win.hwnd);
+        let (w, h) = client_size(hwnd);
         let mut final_rect = ViewRect {
             left: 0,
             top: 0,
@@ -928,13 +966,9 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             bottom: h as i32,
         };
         let _ = view.onSize(&mut final_rect);
-        show_host_window_front(win.hwnd);
+        show_host_window_front(hwnd);
         log::info!("[plugin_host] VST3 editor embedded into host window ({w}x{h})");
-        Ok(Vst3Editor::Open {
-            view,
-            _frame: frame,
-            win,
-        })
+        Ok(opening.attached())
     }
 }
 
