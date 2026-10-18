@@ -1230,20 +1230,26 @@ fn a_listing_asked_right_after_a_layout_report_reads_the_plugin_as_it_is_now() {
 }
 
 /// A program select that changes the plugin's parameter count: the tone's values are checked
-/// against the plugin again before any of them is set, and none is.
+/// against the plugin again before any of them is set, and none is. That instance has its program
+/// selected, so it is not at its defaults: it is closed, never resumed, and a fresh one goes on.
 #[test]
-fn a_tone_whose_program_changes_the_parameter_count_sets_no_parameter() {
+fn a_tone_whose_program_changes_the_parameter_count_loads_a_fresh_instance() {
     let _one = engine_slot::one_engine_test_at_a_time();
     let device = device(48_000);
     let dir = TempDir::new("vst2-program-shrinks");
-    store_state(&dir, &tone::encode_vst2(&Vst2State::Params { program: 1, values: vec![0.5; 3] }));
+    let state = tone::encode_vst2(&Vst2State::Params { program: 1, values: vec![0.5; 3] });
+    store_state(&dir, &state);
     let probe = Probe::new();
     probe.params_on_set_program.store(1, Relaxed);
     let (handle, _) = load_with_tone(&device, 0, Shape { programs: 4, ..instrument(probe) }, Some(dir.binding(0, identity())));
     assert_eq!(handle.tone(), Some(ToneRestore::Failed));
     assert_eq!((probe.set_programs.load(Relaxed), probe.sets.load(Relaxed)), (1, 0), "the program was selected, no value set");
-    assert_eq!(handle.list_params().unwrap().len(), 1, "and the load went on with the plugin as it is");
+    assert_eq!((probe.instances.load(Relaxed), probe.closes.load(Relaxed)), (2, 1), "the half-restored instance was closed");
+    assert_eq!(probe.count(EFF_MAINS_CHANGED, 1), 1, "only the fresh instance resumed");
+    assert_eq!(handle.list_params().unwrap().len(), 3, "the load went on with a fresh instance's parameters");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4), "and it plays");
     handle.unload().unwrap();
+    assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, state, "the stored tone stays");
 }
 
 /// A parameter the plugin adds in a restart (three become five): its own report for a new index
