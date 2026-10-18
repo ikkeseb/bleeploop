@@ -335,10 +335,7 @@ plugin-GUI work.
   `effIdle` is sent once per `audioMasterNeedIdle`, not until it answers 0; a program is selected
   without `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend
   or SysEx) and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
-  answers nothing). A tone `restore_state` refuses after it has already selected the program
-  (`vst2_engine.rs` 560-568) leaves that instance half-restored, and the load resumes it (723) where the
-  `Restore::Refused` contract promises defaults: discard and reopen the instance without the tone
-  (`vst2_engine_tests.rs` pins today's behaviour and changes with it).
+  answers nothing).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
@@ -448,30 +445,6 @@ plugin-GUI work.
   unserialized; a CLAP restart can deliver a removed parameter id; a non-discardable VST3 module is
   unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP note port gets CLAP notes; CLAP
   editor edits never reach the drawer.
-- Plugin-host defects confirmed against the source, each with its fix (none reproduced):
-  a) Two concurrent host edits can reach a VST3's processor and controller in opposite orders:
-     `EngineSlot::set_param` drops the `params_tx` lock between the push and the controller request
-     (`engine_slot.rs` 763-774). Fix: hold the lock through both enqueues; report a send failure.
-  b) A VST3 editor edit into a full ring is dropped while `performEdit` answers `kResultOk`
-     (`vst3.rs` 504-511; the "drops last-wins" comment is backwards: the new value is the one lost).
-     Fix: answer an error and report it; keep tone-dirty; any retry must never overwrite a newer edit.
-  c) Read-only parameters are listed as writable sliders: `clap_param_descs` ignores the flags
-     (`clap.rs` 156) and the VST3 listing filters only `kIsHidden` (`vst3.rs` 1170). Fix: drop them (and
-     CLAP hidden) from the list and the writable id set; test a direct set on such an id.
-  d) An editor open the owner checks as uncancelled (`engine_slot.rs` 459) but answers after the caller's
-     5 s timeout stays open while the caller reports failure (`sync_channel(1)` takes the late reply).
-     Fix: a rendezvous reply, closing the editor this request opened when the reply cannot be delivered.
-  e) A failed VST3 editor attach (`vst3.rs` 911) or host window drops win → frame → view, the reverse of
-     `Vst3Editor`'s field order. Fix: an owner-local guard that keeps frame and window alive through the
-     view's cleanup and hands them to the open editor only after a successful attach.
-  f) CLAP `request_show`/`request_hide` answer Ok and do nothing, and `closed` drops `was_destroyed`
-     (`clap.rs` 597-604); `clap_engine.rs` 500 acts on the flag for floating editors only. Fix: refuse
-     show/hide until handled; on `was_destroyed` call `gui.destroy` with no hide or resize first, for
-     both editor forms, then clean the host window and publish `EditorClosed`.
-  g) The scanner never reads the VST3 factory flags (`scan.rs` goes from the factory straight to
-     `countClasses` at 1439) and reuses entries by fingerprint alone (318), so a `kClassesDiscardable`
-     factory's changed classes are missed. Fix: carry the flag out of the scan child, never cache such a
-     result, and bump the cache version.
 - Fixes that wait on a native command: (a) boot awaits the whole plugin scan before rig recall
   (`src/app/boot.ts` 51-52), so one uncached plugin can hold the saved amp-sim back by the 20 s scan
   timeout: a scan of given paths first; (b) `app_update_install` downloads and installs in one call
