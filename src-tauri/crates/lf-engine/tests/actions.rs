@@ -464,6 +464,34 @@ fn a_pedals_clear_confirms_per_lane() {
 }
 
 /// What the feed last carried of lane `i`: whether it showed CLEAR armed there, and the frame.
+#[test]
+fn a_clear_confirmed_in_its_window_clears_after_a_block_job_that_ends_past_it() {
+    // A FIXED later take past the one-bar master multiplies it on its own: lane 0's extension runs as a
+    // block job from the commit. CLEAR is confirmed on lane 0 inside its window while that job runs, and
+    // the job ends past the window; a press sent behind the confirmation waits for it.
+    let mut rig = looping();
+    rig.idle();
+    let window = (2500 * rig.sr as Frame + 999) / 1000;
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(2.0));
+    rig.press(Command::RecDub(1));
+    let end = rig.end_frame();
+    rig.advance_to(end + 40 - window);
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert!(fed_clear(&rig, 0).0, "armed, its window ending 40 frames past the commit");
+    rig.advance_to(end + 10);
+    assert!(rig.engine.looper().busy(), "the multiply extends lane 0");
+    rig.queue(Command::ActionOn(0, Action::Clear));
+    rig.queue(Command::Press);
+    rig.advance(1);
+    assert!(rig.engine.holding(), "the confirmation waits for lane 0's job");
+    assert!(!fed_clear(&rig, 0).0, "a confirmed arm is spent");
+    rig.idle();
+    assert!(rig.frame > end + 40, "the job ended past the window");
+    assert_eq!(rig.state(0), LaneState::Empty, "the confirmed CLEAR cleared");
+    assert!(!fed_clear(&rig, 0).0, "and nothing is armed again");
+}
+
 fn fed_clear(rig: &Rig, i: usize) -> (bool, Frame) {
     rig.events
         .iter()

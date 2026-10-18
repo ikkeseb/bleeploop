@@ -1227,12 +1227,13 @@ impl Looper {
                 if self.lanes[i].state == LaneState::Empty {
                     refuse(cx, Refusal::NoClear);
                 } else if self.clear_armed.is_some_and(|(lane, until)| lane == i && cx.now < until) {
-                    let wait = self.wait_for(Some(i), false);
-                    if wait != Applied::Done {
-                        return wait;
-                    }
+                    // Confirmed now: the arm is spent, and a CLEAR held for the lane's block job keeps the
+                    // decision, however late the job ends past the window.
                     self.clear_armed = None;
-                    self.clear_now(cx, i);
+                    return match self.clear(cx, i) {
+                        Applied::WaitUntil(at) => Applied::Held(at, Command::Clear(i as u8)),
+                        applied => applied,
+                    };
                 } else {
                     // The window's last frame is the last `f` with `(f - now) * 1000 < CONFIRM_WINDOW_MS * rate`.
                     let window = (CONFIRM_WINDOW_MS * self.sample_rate as Frame + 999) / 1000;
