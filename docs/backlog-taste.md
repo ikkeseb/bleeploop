@@ -14,31 +14,11 @@ added a line.
 - **END STOP reads as a record control:** with END STOP on and FIXED off, a stopped free take keeps
   every whole bar, as built (END STOP only stops playback). The owner asks other players before
   deciding on wording or behaviour.
-- **Stage view (B): SCOPE is built and machine verified, and a taste review says it misses the bar.**
-  The owner found both older looks (Orbit, Strata) primitive; the diagnosis was that each drew the same
-  recorded overview plus a playhead, so nothing on screen knew what was sounding. SCOPE draws the
-  engine's live columns instead, additively, so a pass that lands on the pass before it accumulates
-  light: a locked loop glows, a one-off peaks and dies. That part works, and it is the thing to build
-  the next design around: in `logs/stage-view/1920x1080-scope-rich-b.png` lane 1 has a white-hot core
-  where the loop has landed while lane 2 right under it is a dim grey contour, and which is which reads
-  at any distance with no label.
-  The rest misses. A taste read against the owner's own bar (a show that is striking to watch and
-  impressive, yet considered and polished; less information and more mood, read from across the
-  room) says: polished and legible, but it reads as a dark-mode DAW arrangement view, which is the
-  instrument panel the owner does not want. Named costs, in order: a gutter of OUT/IN/1 to 5 labels,
-  eight vertical gridlines, an inset frame and a 132 px empty band under lane 5 (12 % of the screen);
-  the HERO bay is the largest region and the dimmest, with the guitar a cyan hairline inside a grey
-  shape, and empty in five of eight scenes; and a lane carrying an overdub shows three hues at once
-  rather than one hue at three intensities. Worst of all for the brief: side by side on the contact
-  sheets it is recognisably STRATA with an inset frame, a gutter and an OUT/IN bay added, so whatever
-  the owner disliked about STRATA is still in frame. The reviewer's one change: make the top bay carry
-  the show, the room's output as a full-height additive field with the guitar wide and bright through
-  it, so the largest region on screen is also the brightest.
-  That is a reviewer's read of stills from a scripted engine, not the owner's, and the glow building
-  pass by pass is motion no still shows. The owner's eye settles it (`STATUS.md` next jam, 4). Mockups on the
-  old data were tried and rejected, so a new visual proposal waits for that. The earlier per-look
-  questions are superseded (git history holds them). A hitch the owner saw was under the MIDI
-  benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run yet.
+- **Stage view (B): SCOPE's visual direction.** Its additive live columns are the part to keep (a
+  locked loop glows, a one-off peaks and dies). A taste review of stills read the rest as a dark-mode
+  DAW arrangement view (label gutter, gridlines, a large dim top bay); whether a new design round is
+  wanted waits for the owner's eye on the device (`STATUS.md` next jam, 4). A hitch the owner saw came
+  under the MIDI benchmark's deliberate 250 ms UI stalls, not yet in an ordinary run.
 - **IN FX defaults (unheard, an agent's pick):** echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The
   echo's level is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is
   about ⅓ of the level): does high feedback still feel right? The reverb is summed to mono.
@@ -53,10 +33,9 @@ added a line.
   in the browser rig) below 1080 px and from 1120 to 1160 px while an offer stands (measured 2026-10-17;
   FIXED's stepper keeping its unit down to 1000 px costs the 1040 to 1080 band). The tool icons behind one
   menu, or live with it?
-- **From the designer walk (2026-10-17), small calls:** the IN FX popover's stacked sends (214 px sliders, a
-  one-line hint per off send) got no word in `bleeploop-push16` r2 (the owner wants to see it in the browser
-  or the dev build first); the one-row FX drawer and its tight rung at 1000x700 were his "good" and "Opp til
-  deg" (r3). DUB FEEDBACK's slider in the drawer is 80 px at 1000 px wide: widen the dub module?
+- **From the designer walk, small calls:** the IN FX popover's stacked sends (214 px sliders, a
+  one-line hint per off send): right, once seen in the browser or the dev build? DUB FEEDBACK's slider
+  in the one-row FX drawer is 80 px at 1000 px wide: widen the dub module?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the
   saved settings are kept): say that they are kept? An import whose slot holds another plugin toasts
   "This session used X in slot B": enough, or offer to load it?
