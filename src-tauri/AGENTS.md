@@ -140,7 +140,8 @@ the child), for crash + hang isolation (**20s per-child timeout**: a heavy/licen
 on load in the headless child), but only for bundles whose binary size/mtime changed since the
 cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (a launch spawns
 nothing; a remembered failure is retried only by the picker's rescan button = `plugin_scan`
-`force`). Delete that file to force a cold scan from outside the app. Pipe retention is capped at 1 MiB
+`force`), and for every VST3 factory that declares `kClassesDiscardable`, which is never cached and
+gets a child on every scan. Delete that file to force a cold scan from outside the app. Pipe retention is capped at 1 MiB
 stdout / 64 KiB stderr, and each child process tree sits in a kill-on-close Job Object. DEV probes on
 the debug `app.exe`, each exiting before Tauri starts: `--probe-engine` (`pnpm native:engine`, the
 device side on the rig: `engine_io/probe.rs`), `--probe-engine-spike` and `--probe-share` (`pnpm
@@ -270,8 +271,8 @@ plugin-GUI work.
   on its own thread. No request pushes state into a running plugin. The VST3 load creates the
   controller and sets its handler BEFORE activation (the SDK host's order). A plugin that refuses its
   tone is discarded and created again before it activates (it may have taken half the state; a VST2
-  tone is checked against the plugin before its first call, and its calls answer no verdict, so that
-  instance is never discarded); a
+  tone is checked against the plugin before its first call and its calls answer no verdict, so only
+  a tone refused after a call, a program select that changed the parameter count, discards it); a
   session import goes through its tone's write lock in the store (`ToneStore::import`), never an owner
   request, and its bytes reach only the reload's load that passes the import's reload token
   (`ToneHandoff`). An owner's poll never waits on a lock held across disk I/O; its save of a tone
