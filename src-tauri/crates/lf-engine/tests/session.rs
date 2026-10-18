@@ -591,6 +591,81 @@ fn a_setting_queued_before_a_snapshot_in_its_block_is_in_it() {
     assert_eq!(rig.engine.looper().mix(1, rig.engine.fx()).volume, 0.5);
 }
 
+/// Hand `load` to the engine and render until it comes back: its result.
+fn load_run(rig: &mut Rig, load: Load) -> Option<Result<(), SessionError>> {
+    match run(rig, SessionJob::Load(load)) {
+        SessionJob::Load(load) => load.result,
+        SessionJob::Snapshot(_) => None,
+    }
+}
+
+/// As many faders on `lane` as the engine's command table holds (64): a command queued after them waits
+/// in the ring for the next block.
+fn fill_the_table(rig: &mut Rig, lane: u8) {
+    for k in 0..64 {
+        rig.queue(Command::SetVolume(lane, k as f32 / 64.0));
+    }
+}
+
+#[test]
+fn a_load_waits_for_a_setting_sent_before_it_that_a_full_table_left_in_the_ring() {
+    let (s, _) = one_lane();
+    let mix = LaneMix { volume: 0.5, muted: true, ..LaneMix::default() };
+    let (mut fresh, load) = fresh_load(&s, mix);
+    fill_the_table(&mut fresh, 1);
+    fresh.queue(Command::SetMute(0, false));
+    assert_eq!(load_run(&mut fresh, load), Some(Ok(())));
+    fresh.advance(4800);
+    assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()), mix, "the load's mix over the mute sent before it");
+}
+
+#[test]
+fn a_snapshot_waits_for_a_setting_sent_before_it_that_a_full_table_left_in_the_ring() {
+    let mut rig = three_lanes();
+    let master = rig.master();
+    fill_the_table(&mut rig, 1);
+    rig.queue(Command::SetMute(0, true));
+    let s = snapshot(&mut rig, 5 * master as usize);
+    assert_eq!(s.result, Some(Ok(())));
+    assert!(mixes(&s)[0].1.muted, "the mute sent before the snapshot is in it");
+}
+
+#[test]
+fn a_load_waits_for_a_clear_held_for_a_block_job_and_a_setting_sent_after_it_waits_for_the_load() {
+    let (s, _) = one_lane();
+    let mix = LaneMix { muted: true, ..LaneMix::default() };
+    let (mut fresh, load) = fresh_load(&s, mix);
+    // The fresh engine plays a loop of its own, and a COPY of it runs as a block job.
+    fresh.set(Command::SetBpm(120.0));
+    fresh.set_input(code);
+    fresh.record_first_take(0, 1, 2400);
+    fresh.set_level(0.0);
+    fresh.idle();
+    fresh.press(Command::Copy(0));
+    assert!(fresh.engine.looper().busy(), "the COPY runs as a block job");
+    // CLEAR ALL waits for it; the load, sent after CLEAR ALL, waits for CLEAR ALL.
+    fresh.queue(Command::ClearAll);
+    assert!(fresh.session().send(Box::new(SessionJob::Load(load))).is_ok());
+    fresh.advance(1);
+    assert!(fresh.engine.holding(), "CLEAR ALL is held for the COPY");
+    // Sent after the engine took the load: it waits for the load, even past CLEAR ALL.
+    fresh.queue(Command::SetMute(0, false));
+    let mut result = None;
+    for _ in 0..1000 {
+        fresh.advance(fresh.block as Frame);
+        if let Some(job) = fresh.session().returned() {
+            result = match *job {
+                SessionJob::Load(load) => load.result,
+                SessionJob::Snapshot(_) => None,
+            };
+            break;
+        }
+    }
+    assert_eq!(result, Some(Ok(())), "the load came after CLEAR ALL");
+    fresh.advance(4800);
+    assert!(!fresh.engine.looper().mix(0, fresh.engine.fx()).muted, "the mute sent after the load applies after it");
+}
+
 // ── A load and a CLEAR silence the lane's FX history ────────────────────────────────────────────────
 
 /// A delay on with its top feedback and full mix: what the hot jam below and the loads after it set.
