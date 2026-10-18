@@ -13,7 +13,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::windows::ffi::OsStrExt;
 use std::rc::Rc;
 use std::sync::atomic::{
-    AtomicI32, AtomicIsize, AtomicU32,
+    AtomicBool, AtomicI32, AtomicIsize, AtomicU32,
     Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::{Arc, Mutex};
@@ -477,6 +477,8 @@ impl RestartFlags {
 /// `ParamEvent` (drained next block into the real `RtParamChanges` → the processor's
 /// sound changes — required because Surge is separated-component, so `setParamNormalized` on the
 /// controller alone never reaches the processor), and (b) the web UI via `plugin:param-changed`.
+/// An edit the ring cannot take is refused (an error to the plugin, a warning in the log) and the
+/// web UI is not told; the tone is still marked changed, as the controller holds the value.
 /// Runs on the OWNER/UI-pump thread (NEVER the audio thread), so the `Mutex` lock + `emit` are off
 /// the hot path. The id is the controller's OWN id → valid by construction (no hash-id segfault
 /// risk; that only applies to host-originated `setParameter`). ONE handler per load: the owner
@@ -485,8 +487,10 @@ impl RestartFlags {
 /// and a plugin that keeps a raw pointer never holds a dropped one.
 struct LfComponentHandler {
     event_tx: Arc<Mutex<Producer<ParamEvent>>>,
-    /// Tells the web UI a knob moved (`plugin:param-changed`, `id`, `value`). A closure rather
-    /// than the window, so the handler is testable without one.
+    /// The tone's change flag (`ToneKeeper::edited`): raised by every edit, delivered or not.
+    edited: Arc<AtomicBool>,
+    /// Tells the web UI a knob moved (`plugin:param-changed`, `id`, `value`), for an edit the
+    /// processor got. A closure rather than the window, so the handler is testable without one.
     param_changed: Box<dyn Fn(u32, f64) + Send + Sync>,
     restart: Arc<RestartFlags>,
 }
@@ -499,13 +503,14 @@ impl IComponentHandlerTrait for LfComponentHandler {
     }
     unsafe fn performEdit(&self, id: ParamID, value_normalized: ParamValue) -> tresult {
         // Owner thread: serialise with the command-thread producers through the same Mutex (the
-        // SPSC Producer stays single-logical). A full ring (unreachable at human knob rates,
-        // 1024-deep / 256-drained-per-block) drops last-wins — inaudible.
-        if let Ok(mut prod) = self.event_tx.lock() {
-            let _ = prod.push(ParamEvent {
-                id: id as u32,
-                value: value_normalized,
-            });
+        // SPSC Producer stays single-logical). A full ring (1024-deep, 256 drained per block: a
+        // unit that stopped draining) loses this, the newest value, so the plugin is told.
+        let event = ParamEvent { id: id as u32, value: value_normalized };
+        let pushed = self.event_tx.lock().is_ok_and(|mut prod| prod.push(event).is_ok());
+        self.edited.store(true, Release);
+        if !pushed {
+            log::warn!("[plugin_host] VST3 editor edit of parameter {id} refused: the slot's event queue is full or unavailable");
+            return kResultFalse;
         }
         (self.param_changed)(id as u32, value_normalized);
         kResultOk
@@ -1271,6 +1276,7 @@ mod restart_flag_tests {
         let emits = emitted.clone();
         let handler = ComWrapper::new(LfComponentHandler {
             event_tx: Arc::new(Mutex::new(event_tx)),
+            edited: Arc::new(AtomicBool::new(false)),
             param_changed: Box::new(move |_, _| {
                 emits.fetch_add(1, Relaxed);
             }),
@@ -1308,6 +1314,43 @@ mod restart_flag_tests {
         );
         assert_ne!(notices & RestartFlags::RELIST, 0);
         assert_eq!((restart.take(), restart.take_notify()), (0, 0), "drained once");
+    }
+}
+
+/// An editor edit the ring cannot take is refused to the plugin and never reported to the web UI
+/// as delivered; the tone still counts it as a change (the controller holds it), and the value the
+/// ring took first stays the one the processor gets.
+#[cfg(test)]
+mod perform_edit_tests {
+    use super::*;
+    use rtrb::RingBuffer;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn an_editor_edit_into_a_full_queue_is_refused_and_still_marks_the_tone() {
+        let (event_tx, mut event_rx) = RingBuffer::<ParamEvent>::new(1);
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let edited = Arc::new(AtomicBool::new(false));
+        let emits = emitted.clone();
+        let handler = ComWrapper::new(LfComponentHandler {
+            event_tx: Arc::new(Mutex::new(event_tx)),
+            edited: edited.clone(),
+            param_changed: Box::new(move |_, _| {
+                emits.fetch_add(1, Relaxed);
+            }),
+            restart: Arc::new(RestartFlags::default()),
+        });
+        let hp = handler.to_com_ptr::<IComponentHandler>().expect("IComponentHandler");
+        // SAFETY: `hp` is a live pointer to `handler`, held for every call in this test.
+        assert_eq!(unsafe { hp.performEdit(7, 0.25) }, kResultOk);
+        assert!(edited.swap(false, Relaxed));
+        assert_eq!(emitted.load(Relaxed), 1);
+        // SAFETY: as above.
+        assert_ne!(unsafe { hp.performEdit(7, 0.75) }, kResultOk, "the full queue refuses the edit");
+        assert_eq!(emitted.load(Relaxed), 1, "the web UI is not told of an edit the processor lacks");
+        assert!(edited.load(Relaxed), "the tone still counts the change");
+        assert_eq!(event_rx.pop().map(|e| e.value).ok(), Some(0.25));
+        assert!(event_rx.pop().is_err());
     }
 }
 

@@ -227,6 +227,7 @@ fn an_editor_open_leaves_the_load_time_component_handler_in_place() {
     let (obj, ctl) = controller(3);
     let load_handler = ComWrapper::new(LfComponentHandler {
         event_tx: Arc::new(Mutex::new(rtrb::RingBuffer::<ParamEvent>::new(4).0)),
+        edited: Arc::new(AtomicBool::new(false)),
         param_changed: Box::new(|_, _| {}),
         restart: Arc::new(RestartFlags::default()),
     });
