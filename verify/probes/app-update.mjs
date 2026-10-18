@@ -1,7 +1,7 @@
 /**
  * The updater's UI half (`src/app/update.ts`): what a player sees when a newer release is out, and what
  * the command bar's UPDATE pill and its panel do, on a scripted updater (`window.__lfUpdateFake`,
- * `host.web.ts`) and the web engine fake. Nine pages, each a fresh app:
+ * `host.web.ts`) and the web engine fake. Eleven pages, each a fresh app:
  *
  * - no updater (the browser build): no pill in the command bar, no toast, and nothing about an update
  *   in Help, which is where the offer used to live;
@@ -23,7 +23,10 @@
  *   the recovery the installer leaves behind (a save that read the feed's lanes would have skipped it);
  * - a failed download: no save, no install, the error toast and its line;
  * - a save that fails: no install and no native "close anyway?", the update's own toast, the jam playing
- *   on; a close asked while the update's save runs does not run a second quit sequence.
+ *   on; a close asked while the update's save runs does not run a second quit sequence;
+ * - a snapshot that fails while the engine holds a loop the feed still shows RECORDING: no install, the
+ *   update's toast, the recovery as it was, with or without the player's earlier clear still standing
+ *   (a quit that trusted the lanes would install, and spend that clear on the recovery).
  *
  * Cannot see the native half: GitHub, the real chunk timings, the signature check, the engine's
  * shutdown, the installer and the relaunch (`src-tauri/src/update.rs`; proven on a release,
@@ -66,6 +69,8 @@ function pageScript(script) {
     blank: () => emit({ reset: true, settings: [], anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
       events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
         ...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }))] }),
+    /** The player's CLEAR ALL of the loop on lane 1: the engine's Cleared, then the lane's own event. */
+    emitClearAll: () => emit({ events: [{ Cleared: { frame: 0, lane: 0 } }, { Lane: { frame: 0, lane: 0, info: lane('Empty', 0) } }] }),
     /** A loop committed on lane 1; the snapshot answers it. `feed: false`: the feed's frame showing it
      * has not come in yet, so lane 1 still reads RECORDING; `master`: a master of that many frames (not
      * whole bars: the save then fails). */
@@ -324,6 +329,54 @@ await probe(async ({ open }) => {
     assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'no native "close anyway?" for an update');
     assert.equal(consumeConsoleErrors(/^\[app\] autosave flush before the update failed/).length, 1);
     assert.equal(await panel(page).getByRole('button', { name: 'Update and restart' }).isEnabled(), true, 'the button is back');
+    await page.close();
+  }
+
+  // 10. A snapshot that fails while the feed lags the engine: a saved jam, then (with `cleared`) the
+  //     player's CLEAR ALL, then a take the engine committed while its lane still reads RECORDING here.
+  //     The engine's state is unknown, so nothing installs and the recovery stays as it was.
+  const savedAt = (page) => page.evaluate(() => new Promise((resolve, reject) => {
+    const open = indexedDB.open('bleeploop');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const get = open.result.transaction('recovery').objectStore('recovery').get('latest');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => {
+        open.result.close();
+        resolve(get.result?.savedAt ?? null);
+      };
+    };
+  }));
+  for (const cleared of [false, true]) {
+    const { page, consumeConsoleErrors } = await openApp({ update: OFFER, holdDownload: true });
+    await page.evaluate(async () => {
+      await window.__lf.autosave.ready();
+      await window.__engine.commit();
+      await window.__lf.autosave.flush();
+    });
+    const before = await savedAt(page);
+    assert.notEqual(before, null, 'the jam is in the recovery before the update');
+    await press(page);
+    await page.waitForFunction(() => window.__lfUpdateFake.calls.length === 1, undefined, { timeout: 5000 });
+    const token = await page.evaluate(async (clear) => {
+      const { engineSession } = await import('/src/ui/state/engine-store.ts');
+      if (clear) {
+        window.__engine.emitClearAll();
+      }
+      await window.__engine.commit({ feed: false });
+      const refused = Promise.reject(new Error('probe: the snapshot failed'));
+      refused.catch(() => {});
+      window.__lf.native.snapshotHold = refused;
+      window.__releaseDownload();
+      return engineSession.clearToken() !== null;
+    }, cleared);
+    assert.equal(token, cleared, `a clear token stands: ${token}`);
+    await page.locator('.toast', { hasText: 'Could not save the loops, so the update waits.' }).waitFor({ timeout: 5000 });
+    assert.deepEqual(await calls(page), ['download'], `no install after a failed snapshot (cleared: ${cleared})`);
+    assert.equal(await savedAt(page), before, `the recovery is as it was (cleared: ${cleared})`);
+    const left = await page.evaluate(async () => (await import('/src/ui/state/engine-store.ts')).engineSession.clearToken() !== null);
+    assert.equal(left, cleared, `the clear is not spent (cleared: ${cleared})`);
+    assert.equal(consumeConsoleErrors(/^\[app\] autosave flush before the update failed/).length, 1);
     await page.close();
   }
 });
