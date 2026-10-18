@@ -469,7 +469,7 @@ impl FeedThread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine_io::test_rig::TestDevice;
+    use crate::engine_io::test_rig::{TestDevice, PATIENCE};
     use lf_engine::{Command, TimedCommand};
 
     type Sent = Arc<Mutex<Vec<FeedFrame>>>;
@@ -478,7 +478,7 @@ mod tests {
     /// send: a frame goes out only for a reset or an engine event), once it has reported its start.
     fn engine() -> TestDevice {
         let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
-        assert!(device.wait_blocks(4, Duration::from_secs(5)), "the engine renders");
+        assert!(device.wait_blocks(4), "the engine renders");
         device
     }
 
@@ -496,7 +496,7 @@ mod tests {
     /// Change the tempo and wait until the engine has run the command: its transport event is in the ring.
     fn set_bpm(device: &TestDevice, bpm: f64) {
         device.host().send(TimedCommand { frame: None, command: Command::SetBpm(bpm) }).unwrap();
-        assert!(device.wait_blocks(4, Duration::from_secs(5)), "the engine renders");
+        assert!(device.wait_blocks(4), "the engine renders");
     }
 
     fn tempo(frame: &FeedFrame) -> Option<u32> {
@@ -646,26 +646,26 @@ mod tests {
         // A slow device: a column (192 frames at 48 kHz) takes three blocks, so a tick's batch stays
         // far under the cap however the test machine schedules this thread.
         let device = TestDevice::start(48_000, 64, Duration::from_millis(10), |_| 0.0);
-        assert!(device.wait_blocks(4, Duration::from_secs(5)), "the engine renders");
+        assert!(device.wait_blocks(4), "the engine renders");
         let mut feed = Feed::new(device.host().clone());
         let hold = Arc::new(Hold::default());
         let (mut sub, sent) = subscriber();
         let batches = |sent: &Sent| sent.lock().unwrap().iter().filter_map(|f| f.scope.clone()).collect::<Vec<_>>();
         let columns = |batch: &ScopeUpdate| batch.min[0].len();
         turn(&mut feed, &mut sub, &hold);
-        assert!(device.wait_blocks(12, Duration::from_secs(5)));
+        assert!(device.wait_blocks(12));
         turn(&mut feed, &mut sub, &hold);
         assert!(batches(&sent).is_empty(), "nobody asked for the scope");
 
         device.host().send(TimedCommand { frame: None, command: Command::SetScope(true) }).unwrap();
-        assert!(device.wait_blocks(12, Duration::from_secs(5)));
+        assert!(device.wait_blocks(12));
         turn(&mut feed, &mut sub, &hold);
         let first = batches(&sent).pop().expect("the columns reach the feed");
         assert_eq!((first.bin, first.min.len(), first.max.len()), (192, SCOPE_SOURCES, SCOPE_SOURCES));
         assert!(first.min.iter().chain(&first.max).all(|c| c.len() == columns(&first)), "every array holds the same columns");
         assert!(first.gap, "the first batch has nothing to splice onto");
 
-        assert!(device.wait_blocks(9, Duration::from_secs(5)));
+        assert!(device.wait_blocks(9));
         turn(&mut feed, &mut sub, &hold);
         let next = batches(&sent).pop().expect("a second batch");
         assert!(!next.gap, "it splices onto the one before it");
@@ -675,35 +675,37 @@ mod tests {
         // goes out, and it says the trace broke. Were the whole drain sent, its `frame` would be where
         // the batch above ended and its `bin` would claim the hole never happened.
         let spliced = next.frame + columns(&next) as Frame * next.bin as Frame;
-        assert!(device.wait_blocks(12, Duration::from_secs(5)), "columns before the switch");
+        assert!(device.wait_blocks(12), "columns before the switch");
         device.host().send(TimedCommand { frame: None, command: Command::SetScope(false) }).unwrap();
-        assert!(device.wait_blocks(30, Duration::from_secs(5)), "the hole: frames no column covers");
+        assert!(device.wait_blocks(30), "the hole: frames no column covers");
+        // A block already rendered: the taps switch on at a later frame, whatever the test thread's lag.
+        let (switched_on, _, _) = device.host().core.clock.anchor().expect("the device has rendered");
         device.host().send(TimedCommand { frame: None, command: Command::SetScope(true) }).unwrap();
-        assert!(device.wait_blocks(12, Duration::from_secs(5)), "columns after it");
+        assert!(device.wait_blocks(12), "columns after it");
         turn(&mut feed, &mut sub, &hold);
         let run = batches(&sent).pop().expect("a batch after the hole");
         assert!(run.gap, "a batch that cannot be spliced says so");
         assert!(run.frame > spliced, "it is the run after the hole, not the one before it ({} against {spliced})", run.frame);
-        assert!(columns(&run) < 6, "the run before the hole is not in it ({} columns)", columns(&run));
+        assert!(run.frame >= switched_on, "the run before the hole is not in it ({} against {switched_on})", run.frame);
 
         // Held, the columns are drained and dropped: the hold's reset carries none, and the batch after
         // it says the trace broke.
         let guard = FeedHold::take(&hold);
-        assert!(device.wait_blocks(12, Duration::from_secs(5)));
+        assert!(device.wait_blocks(12));
         for _ in 0..4 {
             turn(&mut feed, &mut sub, &hold);
         }
         let sent_while_held = batches(&sent).len();
         drop(guard);
         // Columns waiting when the hold ends: the resync frame still carries none.
-        assert!(device.wait_blocks(9, Duration::from_secs(5)));
+        assert!(device.wait_blocks(9));
         turn(&mut feed, &mut sub, &hold);
         {
             let frames = sent.lock().unwrap();
             let resync = frames.iter().rposition(|f| f.reset).expect("the hold ends with a reset");
             assert!(frames[resync].scope.is_none(), "a reset frame carries no columns");
         }
-        assert!(device.wait_blocks(9, Duration::from_secs(5)));
+        assert!(device.wait_blocks(9));
         turn(&mut feed, &mut sub, &hold);
         let after = batches(&sent);
         assert_eq!(after.len(), sent_while_held + 1, "the held ticks sent none, and one batch came after");
@@ -715,7 +717,7 @@ mod tests {
     #[test]
     fn the_feed_thread_holds_resyncs_and_still_stops_while_held() {
         let wait_for = |pred: &dyn Fn() -> bool| {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + PATIENCE;
             while !pred() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(2));
             }
@@ -736,7 +738,7 @@ mod tests {
         std::thread::sleep(TICK * 12);
         assert_eq!(sent.lock().unwrap().len(), 1, "held: nothing is sent");
         drop(held);
-        assert!(wait_for(&|| sent.lock().unwrap().len() == 2), "the hold's end sends a frame");
+        assert!(wait_for(&|| sent.lock().unwrap().len() >= 2), "the hold's end sends a frame");
         {
             let sent = sent.lock().unwrap();
             assert!(sent[1].reset && sent[1].seq == 1 && tempo(&sent[1]) == Some(240));
@@ -749,7 +751,7 @@ mod tests {
                 thread.stop();
                 let _ = done.send(());
             });
-            assert!(stopped.recv_timeout(Duration::from_secs(5)).is_ok(), "a held feed thread still stops");
+            assert!(stopped.recv_timeout(PATIENCE).is_ok(), "a held feed thread still stops");
         });
     }
 }

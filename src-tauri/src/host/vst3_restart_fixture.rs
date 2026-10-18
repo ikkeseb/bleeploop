@@ -792,7 +792,7 @@ mod engine {
                 assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
             }
             // A unit left in the engine would be engaged by now.
-            assert!(device.wait_blocks(4, PATIENCE));
+            assert!(device.wait_blocks(4));
             assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
             let s = made.component();
             assert_eq!((s.activations.load(Relaxed), s.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");

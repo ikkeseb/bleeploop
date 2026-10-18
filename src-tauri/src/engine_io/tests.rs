@@ -110,10 +110,20 @@ impl Harness {
     }
 
     fn wait_lane(&mut self, what: &str, lane: u8, want: impl Fn(&LaneInfo) -> bool) -> LaneInfo {
+        self.wait_lane_at(what, lane, want).1
+    }
+
+    /// `wait_lane`, with the engine frame the event was published at.
+    fn wait_lane_at(&mut self, what: &str, lane: u8, want: impl Fn(&LaneInfo) -> bool) -> (Frame, LaneInfo) {
         self.wait_event(what, |e| match e {
-            Event::Lane { lane: l, info, .. } if *l == lane && want(info) => Some(*info),
+            Event::Lane { frame, lane: l, info } if *l == lane && want(info) => Some((*frame, *info)),
             _ => None,
         })
+    }
+
+    /// Send `command` due at engine frame `frame` (one already past is applied at once).
+    fn send_at(&self, frame: Frame, command: Command) {
+        self.host.send(TimedCommand { frame: Some(frame), command }).expect("the command ring takes it");
     }
 
     /// Record a one-bar loop of the input on lane 0 at 240 BPM (a bar is a second) and wait until it
@@ -123,9 +133,11 @@ impl Harness {
         self.send(Command::SetBpm(240.0));
         self.send(Command::SetSlotLive(0, true));
         self.send(Command::RecDub(0));
-        self.wait_lane("the take starts after the count-in", 0, |i| i.state == LaneState::Recording && !i.armed);
-        self.play(RATE * 3 / 2);
-        self.send(Command::RecDub(0));
+        let (start, _) = self.wait_lane_at("the take starts after the count-in", 0, |i| i.state == LaneState::Recording && !i.armed);
+        // The stop is stamped on the engine's frame, not on this thread's wake: the first take's stop
+        // floors to whole bars (with a sixteenth of grace), so a stop that lands late on a loaded machine
+        // would make a two-bar loop.
+        self.send_at(start + RATE * 3 / 2, Command::RecDub(0));
         let length = self.wait_lane("the loop plays", 0, |i| i.state == LaneState::Playing && i.length > 0).length;
         self.send(Command::SetSlotLive(0, false));
         length
@@ -1820,13 +1832,21 @@ fn the_feed_draws_a_take_as_it_records_and_the_whole_loop_on_a_reset() {
     for command in [Command::SetBpm(240.0), Command::SetSlotLive(0, true), Command::RecDub(0)] {
         h.send(command);
     }
-    feed_until(&mut feed, &mut seen, "the take starts", |f| lane0(f, |i| i.state == LaneState::Recording && !i.armed));
+    let started = feed_until(&mut feed, &mut seen, "the take starts", |f| lane0(f, |i| i.state == LaneState::Recording && !i.armed));
+    let start = started
+        .events
+        .iter()
+        .find_map(|e| match e.0 {
+            Event::Lane { frame, lane: 0, info } if info.state == LaneState::Recording && !info.armed => Some(frame),
+            _ => None,
+        })
+        .expect("the frame the take started at");
     let growing = feed_until(&mut feed, &mut seen, "the take draws as it records", |f| f.peaks.iter().any(|p| p.lane == 0 && p.count >= 4));
     let update = growing.peaks.iter().find(|p| p.lane == 0).unwrap();
     // The fake's input 2 carries the tone at 0.2.
     assert!(update.max.iter().all(|&m| (0.0..=0.201).contains(&m)) && update.min.iter().all(|&m| (-0.201..=0.0).contains(&m)), "the tone's peaks: {update:?}");
-    h.play(RATE * 3 / 2);
-    h.send(Command::RecDub(0));
+    // Stamped on the engine's frame: the draw wait above runs on this thread's clock, which a load stretches.
+    h.send_at(start + RATE * 3 / 2, Command::RecDub(0));
     let playing = feed_until(&mut feed, &mut seen, "the loop plays", |f| lane0(f, |i| i.state == LaneState::Playing && i.length > 0));
     let length = playing.events.iter().find_map(|e| match e.0 {
         Event::Lane { lane: 0, info, .. } if info.length > 0 => Some(info.length),

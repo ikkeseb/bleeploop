@@ -1012,8 +1012,8 @@ mod tests {
             let _ = tx.send((saved.is_ok_and(|s| s.not_stored.is_none()), true));
             owner
         });
-        let polled = turns.recv_timeout(Duration::from_secs(2));
-        let other_saved = turns.recv_timeout(Duration::from_secs(2));
+        let polled = turns.recv_timeout(Duration::from_secs(30));
+        let other_saved = turns.recv_timeout(Duration::from_secs(30));
         go.send(()).unwrap();
         assert_eq!(polled.expect("the owner's turn waited on another operation's write"), (true, true), "not counted yet");
         assert_eq!(other_saved.expect("another plugin's save waited on this plugin's write"), (true, true));

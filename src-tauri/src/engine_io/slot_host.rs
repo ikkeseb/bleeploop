@@ -250,7 +250,7 @@ mod tests {
         assert!(slot.install(unit, 48_000).is_ok());
         let again = Box::new(Constant { level: 0.0, calls: calls.clone(), stops: stops.clone() });
         assert!(slot.install(again, 48_000).is_err(), "one unit per slot");
-        assert!(device.wait_blocks(20, Duration::from_secs(5)));
+        assert!(device.wait_blocks(20));
         assert!(calls.load(SeqCst) > 0, "the engine processed the unit");
         let back = slot.remove(Duration::from_secs(2)).expect("comes back").expect("a unit");
         assert_eq!(stops.load(SeqCst), 1, "stopped once, before it left");
@@ -267,7 +267,7 @@ mod tests {
         let stops = Arc::new(AtomicUsize::new(0));
         let unit = Box::new(Constant { level: 0.5, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
         assert!(slot.install(unit, 48_000).is_ok());
-        assert!(device.wait_blocks(20, Duration::from_secs(5)));
+        assert!(device.wait_blocks(20));
         let removed = std::thread::scope(|s| {
             // Port 1 held: the rebuild takes port 0 and waits for port 1, so a removal that has already
             // looked in the empty mailbox waits on port 0 until the rebuild has parked its unit.

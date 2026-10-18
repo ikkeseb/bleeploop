@@ -306,15 +306,15 @@ plugin-GUI work.
 
 ## Open threads (no gate)
 
-- Two host tests timed out once in a local `pnpm rust:check` on 2026-10-16 (8a18e5ad plus a
-  scripts/docs change; the rerun passed 4/4 and CI passed that commit):
-  `clap::resize_tests::a_request_from_another_thread_never_waits_for_the_owner` ("request_resize waited
-  for the window's thread", `clap.rs` 540) and `engine_slot::tests::a_request_its_caller_gave_up_on_during_a_restart_is_not_served_after_it`
-  ("the request waits on the restart's activation", `engine_slot.rs` 1124). Likewise
-  `engine_io::feed::tests::the_feed_thread_holds_resyncs_and_still_stops_while_held` failed once under
-  `rust:check`'s parallel jobs ("the hold's end sends a frame", `feed.rs` 739), green alone and on the
-  rerun. Next check: loop the three under a parallel `cargo build` and read whether their bound is a
-  fixed wait a loaded PC outlasts.
+- Six timing tests failed once each in a loaded local `pnpm rust:check` (2026-10-16), green alone and on rerun:
+  the CLAP `a_request_from_another_thread_never_waits_for_the_owner`, the `engine_slot` give-up-during-a-restart
+  test, the feed thread's hold test, and three `engine_io` tests that record a first loop. The cause was read
+  from the code, never reproduced: short wall bounds a loaded PC outlasts (500 ms to 5 s waits, the test
+  device's `REMOVE_TIMEOUT` 2 s, and `record_loop`'s 1.5-bar stop sent from the test thread's wake, which the
+  first take's floor to whole bars turns into a 2-bar loop when late). Tests now wait up to 10 to 30 s
+  (`cfg(test)` variants of `REMOVE_TIMEOUT`, `CALLBACK_WAIT`, `START_WAIT`, the owner `ask`; `test_rig::PATIENCE`)
+  and stamp the loop's stop on the engine's frame. Next check, only if one fails again: loop it under a
+  parallel `cargo build` and read the failing line against these bounds.
 
 - Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an

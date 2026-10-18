@@ -571,8 +571,9 @@ mod resize_tests {
             let caller = std::thread::spawn(move || {
                 let _ = tx.send(shared.request_resize(GuiSize { width, height }).is_ok());
             });
-            // This thread does not pump: a request that waits for it never answers.
-            let answered = rx.recv_timeout(Duration::from_millis(500));
+            // This thread does not pump: a request that waits for it never answers, so any ceiling tells the
+            // two apart; a long one keeps a loaded machine from failing the caller that did not wait.
+            let answered = rx.recv_timeout(Duration::from_secs(30));
             while !caller.is_finished() {
                 pump_thread_messages(); // release a caller that did wait, so the test fails, not hangs
             }

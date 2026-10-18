@@ -104,8 +104,14 @@ pub(crate) enum EngineSlotEvent {
 pub(crate) type EventSink = Arc<dyn Fn(EngineSlotEvent) + Send + Sync>;
 
 /// How long a teardown, a restart or an undo waits for the engine to hand the unit back: a
-/// crossfade and a block, with room for a slow device.
-pub(super) const REMOVE_TIMEOUT: Duration = Duration::from_secs(2);
+/// crossfade and a block, with room for a slow device. (Tests wait 10 s: the render thread of a
+/// `TestDevice` can starve for 2 s on a loaded machine, and the one test that wants the wait to run
+/// out only takes longer.)
+pub(super) const REMOVE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 2 });
+
+/// How long an owner round trip with a typed reply waits, like the live commands. (Tests wait 30 s, for
+/// the same reason as `REMOVE_TIMEOUT`.)
+const ASK_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 30 } else { 5 });
 
 /// The owner's poll while no hosted editor is open: plugin callbacks, restarts and evictions are
 /// serviced within this.
@@ -856,7 +862,7 @@ impl EngineSlotHandle {
             .send(build(reply_tx))
             .map_err(|_| "owner thread gone".to_string())?;
         reply_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(ASK_TIMEOUT)
             .map_err(|e| format!("{op} timed out: {e}"))?
     }
 }
@@ -1002,7 +1008,7 @@ mod tests {
     use lf_engine::SlotEvent;
 
     use super::*;
-    use crate::engine_io::test_rig::TestDevice;
+    use crate::engine_io::test_rig::{TestDevice, PATIENCE};
 
     /// The fake's unit: a silent instrument.
     struct Silent;
@@ -1040,7 +1046,7 @@ mod tests {
             let armed = self.0.lock().unwrap().take();
             if let Some((there, go)) = armed {
                 let _ = there.send(());
-                let _ = go.recv_timeout(Duration::from_secs(5));
+                let _ = go.recv_timeout(PATIENCE);
             }
         }
     }
@@ -1136,7 +1142,7 @@ mod tests {
         let handle = load_fake(&device, &shared);
         let (reply, answer) = super::super::owner_reply_channel();
         handle.requests.send(OwnerRequest::OpenEditor(Arc::new(AtomicBool::new(false)), reply)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         while !shared.editor_open.load(Relaxed) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1144,7 +1150,7 @@ mod tests {
         // The caller has stopped receiving but its end still exists (between its timeout and the drop).
         std::thread::sleep(Duration::from_millis(100));
         drop(answer);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         while shared.closes.load(Relaxed) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1177,7 +1183,7 @@ mod tests {
         std::thread::scope(|scope| {
             let handle = &handle;
             let first = scope.spawn(move || handle.set_param(7, 0.25));
-            there.recv_timeout(Duration::from_secs(5)).expect("the first set has pushed");
+            there.recv_timeout(PATIENCE).expect("the first set has pushed");
             let second = scope.spawn(move || handle.set_param(7, 0.75));
             // Room for the second to run to its end, if nothing holds it back.
             std::thread::sleep(Duration::from_millis(100));
@@ -1188,7 +1194,7 @@ mod tests {
         let mut ring = shared.ring.lock().unwrap().take().expect("the load kept the ring");
         let processor: Vec<(u32, f64)> = std::iter::from_fn(|| ring.pop().ok()).map(|e| (e.id, e.value)).collect();
         assert_eq!(processor, [(7, 0.25), (7, 0.75)]);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         while shared.controller.lock().unwrap().len() < 2 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1212,14 +1218,14 @@ mod tests {
         // The owner between this turn's restart checks and its wait: the restart and the close
         // arrive there, so the request's own check is the one that meets the restart.
         let (there, go) = shared.before_wait.arm();
-        there.recv_timeout(Duration::from_secs(5)).expect("the owner is before its wait");
+        there.recv_timeout(PATIENCE).expect("the owner is before its wait");
         let (cycling, activated) = shared.reinstalling.arm();
         let cancelled = Arc::new(AtomicBool::new(false));
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         shared.restart.store(true, Relaxed);
         handle.requests.send(OwnerRequest::CloseEditor(cancelled.clone(), reply)).unwrap();
         go.send(()).unwrap();
-        cycling.recv_timeout(Duration::from_secs(5)).expect("the request waits on the restart's activation");
+        cycling.recv_timeout(PATIENCE).expect("the request waits on the restart's activation");
         // The activation outlasts the caller's bound: it gives up.
         cancelled.store(true, Relaxed);
         activated.send(()).unwrap();
@@ -1246,12 +1252,12 @@ mod tests {
         let (ran_out_tx, ran_out) = channel();
         let report_late = move || {
             in_engine_tx.send(()).unwrap();
-            ran_out.recv_timeout(Duration::from_secs(5)).expect("the bound ran out");
+            ran_out.recv_timeout(PATIENCE).expect("the bound ran out");
         };
         let mut cue = Some((in_engine, ran_out_tx));
         let wait = move |ready: &Receiver<Result<Ready, String>>, _bound| match cue.take() {
             Some((in_engine, ran_out_tx)) => {
-                in_engine.recv_timeout(Duration::from_secs(5)).expect("the unit goes in");
+                in_engine.recv_timeout(PATIENCE).expect("the unit goes in");
                 ran_out_tx.send(()).unwrap();
                 Err(RecvTimeoutError::Timeout)
             }
@@ -1283,7 +1289,7 @@ mod tests {
         let bound = |_: &Receiver<Result<Ready, String>>, _| Err(RecvTimeoutError::Timeout);
         let late = spawn_within(bound, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
             let served = serve(ctx, move |setup| {
-                failed.recv_timeout(Duration::from_secs(5)).map_err(|e| format!("the load never failed: {e}"))?;
+                failed.recv_timeout(PATIENCE).map_err(|e| format!("the load never failed: {e}"))?;
                 let rate = setup.slot.rate().ok_or("no audio device is open")?;
                 Ok(Loaded { plugin: Fake(fake), unit: Box::new(Silent), name: "Fake".to_string(), rate, tone: None })
             });
@@ -1292,7 +1298,7 @@ mod tests {
         });
         assert!(late.as_ref().is_err_and(|e| e.contains("timed out")), "{:?}", late.err());
         failed_tx.send(()).unwrap();
-        assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(Ok(())), "the owner ends on its own");
+        assert_eq!(ended.recv_timeout(PATIENCE), Ok(Ok(())), "the owner ends on its own");
         load_fake(&device, &shared).unload().expect("the slot takes the next load");
     }
 }

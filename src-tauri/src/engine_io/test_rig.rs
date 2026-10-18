@@ -14,6 +14,9 @@ use lf_engine::{Engine, EngineConfig, ProcessContext};
 
 use super::{Core, EngineHost, Ends};
 
+/// How long a test waits for something that must happen: far past any loaded machine, never reached by a pass.
+pub(crate) const PATIENCE: Duration = Duration::from_secs(30);
+
 /// Frames of the left channel a [`TestDevice`] keeps (the most recent).
 const KEEP: usize = 1 << 20;
 
@@ -117,10 +120,11 @@ impl TestDevice {
         self.host.core.clock.clear();
     }
 
-    /// Wait until `n` more blocks have rendered (or `timeout` passed): true when they did.
-    pub(crate) fn wait_blocks(&self, n: u64, timeout: Duration) -> bool {
+    /// Wait until `n` more blocks have rendered (or [`PATIENCE`] passed): true when they did. The bound
+    /// is a ceiling a starved render thread on a loaded machine still meets; a pass never waits for it.
+    pub(crate) fn wait_blocks(&self, n: u64) -> bool {
         let target = self.blocks.load(Relaxed) + n;
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + PATIENCE;
         while self.blocks.load(Relaxed) < target {
             if Instant::now() >= deadline {
                 return false;

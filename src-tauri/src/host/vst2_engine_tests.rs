@@ -253,7 +253,7 @@ fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
             assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
         }
         // A unit left in the engine would be engaged by now.
-        assert!(device.wait_blocks(4, PATIENCE));
+        assert!(device.wait_blocks(4));
         assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
         let undone = [load_calls(4096), vec![(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0), (EFF_CLOSE, 0)]].concat();
         assert_eq!(probe.opcodes(), undone, "{gave_up:?}: loaded, then stopped, suspended and closed");
@@ -800,7 +800,7 @@ fn a_unit_the_engine_does_not_hand_back_leaves_the_plugin_loaded_and_uncalled() 
     assert!(!probe.raw().is_null(), "the effect is still there");
     // The engine now finishes the removal it was asked for; the abandoned unit, when it comes back,
     // is leaked and makes no call. The context is still what the plugin's callbacks reach.
-    assert!(device.wait_blocks(40, PATIENCE));
+    assert!(device.wait_blocks(40));
     assert_eq!(plugin_calls_host(probe, AUDIO_MASTER_GET_SAMPLE_RATE, 0, 0, 0.0), 48_000);
     assert_eq!(probe.opcodes(), calls);
     assert_eq!(probe.rt_calls_off_device.load(Relaxed), 0);

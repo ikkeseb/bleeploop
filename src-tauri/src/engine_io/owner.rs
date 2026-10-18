@@ -31,10 +31,11 @@ use crate::audio_output::AudioBackend;
 const POLL: Duration = Duration::from_millis(20);
 /// The longest the owner waits for a fade-out (the ramp plus two silent callbacks: 279 ms at 4096 frames
 /// and 44.1 kHz) or for the callback to take a Share tap: a callback that does not answer by then is not
-/// running.
-const CALLBACK_WAIT: Duration = Duration::from_secs(1);
+/// running. (Tests wait 10 s: the fake device's thread can starve past a second on a loaded machine, and
+/// no test expects the wait to run out.)
+const CALLBACK_WAIT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 1 });
 /// The longest a start waits for the first callbacks and their latency reports.
-const START_WAIT: Duration = Duration::from_secs(2);
+const START_WAIT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 2 });
 /// Device events kept for `EngineHost::take_device_events`; older ones drop.
 const MAX_EVENTS: usize = 64;
 /// The shortest time between two engine replacements after a fault: a unit that panics on every block
