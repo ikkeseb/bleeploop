@@ -24,11 +24,13 @@ import { slotLetter } from '../state/slot-tones';
  */
 
 /** The capture channels the engine's input device offers; 0 = unknown (the pick then offers Auto and
- * the saved channel only). */
+ * the saved channel only). The backend that runs decides, not the ASIO preference: the device owner
+ * may have fallen back to WASAPI on its own. Before a device runs, the preferred ASIO driver's. */
 function inputChannelCount(): number {
-  if (usingAsio()) return asioDeviceInfo()?.inputChannels ?? 0;
   const d = engineDevice();
-  if (!d?.inputOpen) return 0;
+  if (!d) return usingAsio() ? (asioDeviceInfo()?.inputChannels ?? 0) : 0;
+  if (d.backend === 'Asio') return asioDeviceInfo()?.inputChannels ?? 0;
+  if (!d.inputOpen) return 0;
   return inputDevices().find((x) => x.name === d.inputName)?.channels ?? 0;
 }
 

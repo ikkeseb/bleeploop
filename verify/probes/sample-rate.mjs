@@ -15,7 +15,8 @@
  * - a rate, buffer, ASIO on/off or output device pick whose open fails (the device that ran keeps
  *   running, or the native owner reopens it): every pick that ran goes back, saved and shown;
  * - a fallback the owner made on its own (ASIO lost, WASAPI at its endpoint's rate, scripted on the
- *   feed): the row shows what runs, and the pick stays saved for the next ASIO open;
+ *   feed): the row shows what runs, and the pick stays saved for the next ASIO open; a slot's input pick
+ *   lists the WASAPI input's channels, not the ASIO driver's;
  * - a driver that runs only 44.1 kHz: no 48 kHz option, the saved pick kept, the device's rate shown;
  * - WASAPI: the device's rate alone, and the hint says Windows sets it.
  *
@@ -40,6 +41,7 @@ function installDriver() {
       { id: 'out-a', name: 'Probe Output A', channels: 2 },
       { id: 'out-b', name: 'Probe Output B', channels: 2 },
     ],
+    listInputDevices: async () => [{ id: 'in-fake', name: 'Fake input', channels: 4 }],
     asioDeviceInfo: async () => ({
       name: 'Probe ASIO',
       inputChannels: 2,
@@ -359,6 +361,15 @@ await probe(async ({ open }) => {
   assert.equal(consumeConsoleErrors('[engine] fell back to Fake input → Fake output').length, 1, 'the fallback is logged');
   // A switch the player did not make is a note to know, not a finished action.
   assert.deepEqual(await page.evaluate(() => window.__lf.notify.toasts().filter((t) => t.message === 'Switched to another audio device').map((t) => t.kind)), ['note'], 'the fallback toasts as a note');
+  // The slot's input pick lists the channels of the input that runs (WASAPI's four), not ASIO's two.
+  const fallbackInputs = await page.evaluate(async () => {
+    const instrument = await import('/src/ui/state/instrument.ts');
+    instrument.selectOff(0);
+    for (let t = 0; !document.querySelector('[aria-label="Input for slot A"]') && t < 100; t++) await new Promise((resolve) => setTimeout(resolve, 20));
+    return [...document.querySelector('[aria-label="Input for slot A"]').options].map((o) => o.textContent.trim());
+  });
+  console.log('fallback inputs', JSON.stringify(fallbackInputs));
+  assert.deepEqual(fallbackInputs.slice(1), ['In 1', 'In 2', 'In 3', 'In 4'], "after a fallback to WASAPI the input pick lists its input's channels");
 
   // 6. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
   // shows, and the player's pick stays saved for a driver that runs it.
