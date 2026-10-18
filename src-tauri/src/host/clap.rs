@@ -70,7 +70,8 @@ const MAX_EVENTS_PER_BLOCK: usize = 256;
 /// CANCELLATION token. Dropping the reply receiver on a timeout does NOT cancel a queued request,
 /// and a hosted GUI can block this thread past the caller's 5 s wait — so the owner must know the
 /// caller gave up: it skips the not-yet-started request (`take_uncancelled`) and ROLLS BACK a late
-/// success (the `OpenEditor` arms close what they opened). `SaveTone`/`ListParams` carry no token:
+/// success (the `OpenEditor` arm closes what it opened when its reply finds no caller:
+/// `owner_reply_channel`). `SaveTone`/`ListParams` carry no token:
 /// none of them changes what the plugin plays. No request pushes state INTO a running plugin: a tone
 /// is restored only inside a load (`host/tone.rs`).
 pub enum OwnerRequest {
@@ -114,6 +115,14 @@ pub(super) fn publish_param_ids(ids: &ParamIds, params: &[ParamDesc]) {
     }
 }
 
+/// The reply channel of a request the caller waits on with a bound (`owner_request_5s`).
+/// Rendezvous, for `load_ready_channel`'s reason: a reply sent once the caller has stopped waiting
+/// fails at the owner instead of sitting in the channel, so the owner learns it was not delivered
+/// and undoes what it did (the `OpenEditor` arm closes the editor it opened).
+fn owner_reply_channel<T>() -> (std::sync::mpsc::SyncSender<T>, std::sync::mpsc::Receiver<T>) {
+    std::sync::mpsc::sync_channel(0)
+}
+
 /// Command-side path for the REVERSIBLE mutating requests (editor open/close): mint the
 /// cancellation token + reply channel, hand `build`'s request to the owner thread, block ≤5 s. On
 /// expiry the token is stored BEFORE the error returns, because the caller books the operation as
@@ -128,7 +137,7 @@ fn owner_request_5s(
         std::sync::mpsc::SyncSender<Result<(), String>>,
     ) -> OwnerRequest,
 ) -> Result<(), String> {
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    let (reply_tx, reply_rx) = owner_reply_channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     req_tx
         .send(build(cancelled.clone(), reply_tx))
@@ -183,7 +192,7 @@ fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDe
 /// caller's 5 s wait expired before the owner reached this request, so it must not run at all: the
 /// frontend has booked the operation as failed, and the reply drops with the request (an ignored
 /// send is already the norm here). A request that PASSES here can still be cancelled mid-call —
-/// that's the `OpenEditor` arms' rollback, not this gate.
+/// that's the `OpenEditor` arm's rollback, not this gate.
 ///
 /// Gated: `OpenEditor`, which would ADD a window late, and `CloseEditor`, whose caller keeps showing
 /// the editor as OPEN when the close errors (`PluginControls.tsx`), so skipping is what both sides
