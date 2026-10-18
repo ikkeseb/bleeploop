@@ -144,9 +144,12 @@ pub struct Diag {
 /// One chunk the scope still owes its master column: the frames it covered, and every source's
 /// envelope but the master's. The master is the engine's output, which is only final once the block's
 /// limiter has run and the monitor has joined it — both outside the chunk loop — so the chunks wait
-/// here and are folded in order after that ([`Engine::process`]).
+/// here and are folded in order after that ([`Engine::process`]). A switch of the scope waits here too,
+/// in its place among them (`restart`, with no frames), so a switch mid-block folds what came before it.
 #[derive(Clone, Copy)]
 struct ScopeChunk {
+    /// The scope was switched before this point ([`Scope::restart`]): no frames of its own.
+    restart: bool,
     frame: Frame,
     /// The chunk's frames in the block: `k0..k1`.
     k0: usize,
@@ -158,15 +161,17 @@ struct ScopeChunk {
 /// Chunks of one block that list holds. A block splits at every quantum end (`max_block / QUANTUM`),
 /// at every frame the pending table has a command stamped for (`MAX_PENDING`), and at each looper
 /// event, beat and AUTO trigger — those last three fall on far fewer frames than the first two at any
-/// tempo the clock takes, and 32 more are slack. Past the bound a chunk's columns are dropped and
-/// counted, so the UI reads a gap rather than silence; nothing here ever grows (invariant 5).
+/// tempo the clock takes, and 32 more are slack; a switch of the scope takes one more at most per
+/// command frame (`MAX_PENDING`). Past the bound a chunk's columns are dropped and counted, so the UI
+/// reads a gap rather than silence (a switch dropped there is followed by the dropped chunks, a gap the
+/// fold reads as a skip); nothing here ever grows (invariant 5).
 fn scope_chunk_bound(max_block: usize) -> usize {
-    max_block / QUANTUM + MAX_PENDING + 32
+    max_block / QUANTUM + 2 * MAX_PENDING + 32
 }
 
 /// The staging list, its pages touched here and not in the callback (as every buffer is).
 fn scope_chunks(max_block: usize) -> Vec<ScopeChunk> {
-    let empty = ScopeChunk { frame: 0, k0: 0, k1: 0, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
+    let empty = ScopeChunk { restart: false, frame: 0, k0: 0, k1: 0, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
     let mut list = Vec::with_capacity(scope_chunk_bound(max_block));
     list.resize(list.capacity(), empty);
     list.clear();
@@ -713,9 +718,18 @@ impl Engine {
             // FX left them and the monitor are final here, the master is not (the limiter and the
             // monitor sum run per block, below), so the chunk waits in the staging list and its master
             // column is folded there. No allocation (invariant 5): a list that is full drops the chunk
-            // and counts it, and the next column's frame shows the UI the break. Off, none of it runs.
+            // and counts it, and the next column's frame shows the UI the break. Off, none of it runs
+            // but a switch's place (the commands on `f` ran before this chunk).
+            if self.scope.take_switch() {
+                let restart = ScopeChunk { restart: true, frame: f, k0, k1: k0, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
+                if self.scope_chunks.len() < self.scope_chunks.capacity() {
+                    self.scope_chunks.push(restart);
+                } else {
+                    self.scope.lost();
+                }
+            }
             if self.scope.on() {
-                let mut chunk = ScopeChunk { frame: f, k0, k1, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
+                let mut chunk = ScopeChunk { restart: false, frame: f, k0, k1, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
                 for (i, &[min, max]) in self.fx.envelope().iter().enumerate() {
                     (chunk.lo[i], chunk.hi[i]) = (min, max);
                 }
@@ -749,6 +763,10 @@ impl Engine {
         // The scope's master column: what the device takes, now that it is final. Each chunk in the
         // order it played, so the columns stay one sequence (`crate::scope`).
         for chunk in &self.scope_chunks {
+            if chunk.restart {
+                self.scope.restart();
+                continue;
+            }
             let (mut lo, mut hi) = ([0.0f32; SCOPE_SOURCES], [0.0f32; SCOPE_SOURCES]);
             lo[..SCOPE_SOURCES - 1].copy_from_slice(&chunk.lo);
             hi[..SCOPE_SOURCES - 1].copy_from_slice(&chunk.hi);

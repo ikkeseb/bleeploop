@@ -83,7 +83,10 @@ pub struct Scope {
     tx: Producer<ScopeBin>,
     /// Frames a column covers ([`scope_bin_frames`]).
     bin: usize,
+    /// What the UI asked for: the engine stages chunks for the fold only while it is on.
     on: bool,
+    /// `on` changed since the engine last asked ([`Scope::take_switch`]).
+    switched: bool,
     /// The open column. Its envelope starts at zero on both sides and folds from there: a column is
     /// drawn from its min to its max through the baseline anyway, so spanning zero by construction
     /// costs the drawing nothing and removes the "no frames yet" case the reader would have to carry.
@@ -103,7 +106,7 @@ impl Scope {
         let (mut tx, mut rx) = RingBuffer::new(SCOPE_CAPACITY);
         while tx.push(ScopeBin::empty(0)).is_ok() {}
         while rx.pop().is_ok() {}
-        let scope = Scope { tx, bin: scope_bin_frames(sample_rate), on: false, open: ScopeBin::empty(0), filled: 0, next: 0, dropped: 0 };
+        let scope = Scope { tx, bin: scope_bin_frames(sample_rate), on: false, switched: false, open: ScopeBin::empty(0), filled: 0, next: 0, dropped: 0 };
         (scope, rx)
     }
 
@@ -114,14 +117,27 @@ impl Scope {
 
     /// `Command::SetScope`: a view that closes stops the fold at once, and one that opens starts its
     /// trace at the next column (the open column is dropped either way, so no column ever covers
-    /// frames from both sides of the switch). A command that changes nothing does nothing: the value
-    /// is sent again by a settings replay and by a UI that need not track it, and clearing the open
-    /// column on every one of those would mean no column ever finished.
+    /// frames from both sides of the switch). The engine stages the switch in frame order with the
+    /// chunks it folds after the block's limiter ([`Scope::take_switch`], [`Scope::restart`]), so the
+    /// chunks before it fold as they were taken at any block size. A command that changes nothing does
+    /// nothing: the value is sent again by a settings replay and by a UI that need not track it, and
+    /// clearing the open column on every one of those would mean no column ever finished.
     pub(crate) fn set_on(&mut self, on: bool) {
         if on == self.on {
             return;
         }
         self.on = on;
+        self.switched = true;
+    }
+
+    /// Whether `on` changed since the last call: the engine then stages a [`Scope::restart`] before the
+    /// chunk it takes next.
+    pub(crate) fn take_switch(&mut self) -> bool {
+        std::mem::take(&mut self.switched)
+    }
+
+    /// A switch, in its place among the chunks: the open column goes, and the next chunk starts one.
+    pub(crate) fn restart(&mut self) {
         self.filled = 0;
     }
 
@@ -140,9 +156,10 @@ impl Scope {
 
     /// Fold one chunk: `len` frames from device frame `frame`, with each source's min in `lo` and max
     /// in `hi` over them, and push every column it completes. One chunk can complete several columns or
-    /// none. On the audio thread: no allocation, no lock, no wait (invariant 5).
+    /// none. The engine hands it only chunks it took while on. On the audio thread: no allocation, no
+    /// lock, no wait (invariant 5).
     pub(crate) fn chunk(&mut self, frame: Frame, len: usize, lo: &[f32; SCOPE_SOURCES], hi: &[f32; SCOPE_SOURCES]) {
-        if !self.on || len == 0 {
+        if len == 0 {
             return;
         }
         if self.filled > 0 && frame != self.next {
@@ -242,21 +259,22 @@ mod tests {
     }
 
     #[test]
-    fn off_folds_nothing_and_a_switch_leaves_no_column_spanning_it() {
+    fn a_switch_restarts_the_column_and_leaves_none_spanning_it() {
         let bin = scope_bin_frames(48_000);
         let (mut scope, mut rx) = Scope::new(48_000);
         let (lo, hi) = ([-1.0; SCOPE_SOURCES], [1.0; SCOPE_SOURCES]);
-        for k in 0..100 {
-            scope.chunk((k * bin) as Frame, bin, &lo, &hi);
-        }
-        assert!(rx.pop().is_err(), "off: nothing is pushed");
+        assert!(!scope.on() && !scope.take_switch(), "off by default, with no switch owed");
         scope.set_on(true);
-        scope.chunk((100 * bin) as Frame, bin / 2, &lo, &hi);
+        assert!(scope.take_switch() && !scope.take_switch(), "one switch, taken once");
+        scope.restart();
+        scope.chunk(0, bin / 2, &lo, &hi);
         scope.set_on(false);
         scope.set_on(true);
-        scope.chunk((100 * bin + bin / 2) as Frame, bin, &lo, &hi);
+        assert!(scope.take_switch(), "off and on again is a switch");
+        scope.restart();
+        scope.chunk((bin / 2) as Frame, bin, &lo, &hi);
         let first = rx.pop().expect("a column after the switch");
-        assert_eq!(first.frame, (100 * bin + bin / 2) as Frame, "the column open at the switch went with it");
+        assert_eq!(first.frame, (bin / 2) as Frame, "the column open at the switch went with it");
     }
 
     /// The same value sent again changes nothing: a replay or a UI that re-sends it must not keep the
