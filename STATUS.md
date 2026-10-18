@@ -193,7 +193,9 @@ it.
 - The UPDATE pill and its panel (the download in MB with a bar, the signature check, the installer;
   machine: `verify/probes/app-update.mjs`): over a real GitHub download, do the numbers climb at a
   watchable rate, is the pill findable untold, and does the last frame before the app quits read as
-  progress, not a freeze? Only a real install answers.
+  progress, not a freeze? Only a real install answers. The download now runs while the jam plays, and
+  the jam is saved after it: on the update from the release that carries this to the next, commit a
+  take during the download; is it back after the restart?
 - Help in two tabs (Reference unscrolled at every window size, Manual with About this build at its
   foot): can it be read at a glance mid-jam, from playing distance?
 

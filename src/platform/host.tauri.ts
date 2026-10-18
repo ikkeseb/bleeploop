@@ -280,12 +280,15 @@ const tauriLogFolder: LogFolder = {
   },
 };
 
-/** The updater over Tauri IPC: `app_update_check` / `app_update_install` in `update.rs`. A `tauri dev`
+/** The updater over Tauri IPC: `app_update_check` / `app_update_download` / `app_update_install` in `update.rs`. A `tauri dev`
  * build never checks: its version is the next release's, and the probes launch it many times. */
 const tauriUpdates: AppUpdates = {
   available: !import.meta.env.DEV,
   check() {
     return invoke<AppUpdate | null>('app_update_check');
+  },
+  async download() {
+    await invoke('app_update_download');
   },
   async install() {
     await invoke('app_update_install');

@@ -95,8 +95,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 - **Release IPC surface:** `capabilities/default.json` grants only event listen/unlisten. `diag` is
   registered only under `debug_assertions`; keep the handler cfg and frontend `import.meta.env.DEV`
   surface in lockstep. Help's `app_log_dir` / `app_open_log_dir` (`lib.rs`) and the updater's
-  `app_update_check` / `app_update_install` (`update.rs`; the release channel is `plugins.updater` in
-  `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
+  `app_update_check` / `app_update_download` / `app_update_install` (`update.rs`; the release channel
+  is `plugins.updater` in `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
   `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
   only to match a stored entry, and `plugin_scan_paths` (rig recall's scan of the saved plugins at
@@ -432,9 +432,15 @@ plugin-GUI work.
   unserialized; a CLAP restart can deliver a removed parameter id; a non-discardable VST3 module is
   unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP note port gets CLAP notes; CLAP
   editor edits never reach the drawer.
-- Fixes that wait on a native command: (b) `app_update_install` downloads and installs in one call
-  (`update.rs` 128-131) after the UI's save, so a take committed during the download is lost: split
-  download and install, with a native freeze of jam changes (MIDI included) and a fresh save between.
+- The quit window (a close and an update share it: `src/app/close-guard.ts` `quitWithSave`): input
+  stays open from the quit save's snapshot to the engine's shutdown, so a take in flight, or one a
+  pedal or the UI commits in those 1-5 s, is not in the recovery. Next: an engine-owned quiesce through
+  the command ring (stop admitting fresh presses, end captures as a punch-out keeps them, let block jobs
+  finish while the device renders, then answer), after which the quit save reads its snapshot. And an
+  update whose installer fails after the engine's shutdown (`ShellExecuteW` failing, or the installer
+  quitting with an error after it started) leaves the app without an engine or with none open: the
+  first says "restart BleepLoop", the second nothing; a recovery needs a process outside the app that
+  watches the installer. Neither has been seen; only a real update shows them.
 - `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`
   83-97 logs the failure, counts the swap, and the runner accepts "0 failed". Fix: count a failed open
   as a failed scenario and report swaps done with an editor open (the runner's regex follows).

@@ -1,10 +1,11 @@
 //! The app updater (`tauri-plugin-updater`). The release workflow publishes a signed installer and a
 //! `latest.json` beside it (`.github/workflows/build-exe.yml`); `tauri.conf.json` names that manifest
 //! and the public key the signature must match. The frontend asks (`src/app/update.ts`); nothing
-//! installs without the player's press.
+//! installs without the player's press, which downloads (the jam plays on), saves the jam as a close
+//! does, then installs.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::Emitter;
@@ -17,7 +18,7 @@ pub struct UpdateInfo {
     notes: String,
 }
 
-/// How far `app_update_install` has got, over `lf://update-progress` (the UI half:
+/// How far `app_update_download` and `app_update_install` have got, over `lf://update-progress` (the UI half:
 /// `src/platform/host.tauri.ts`). The install has three waits, each long enough to watch, and the
 /// download is the only one with a number: the package comes over the network, then its signature is
 /// checked over the whole of it, then the installer runs and the app quits. A press with no read-out
@@ -67,13 +68,27 @@ pub async fn app_update_check(app: tauri::AppHandle) -> Result<Option<UpdateInfo
     }
 }
 
-/// Download the offered update and check its signature, then shut the engine down as an exit does
-/// (native MIDI's ports closed, tones saved, plugins unloaded, the device closed) and start the
-/// installer, which quits the app and opens the new version (Windows: the plugin exits the process
-/// once the installer runs). Returns only on failure. Each step reports itself over
-/// `lf://update-progress`.
+/// A downloaded update whose signature checked, waiting for `app_update_install`, and whether the
+/// engine's shutdown hook (`on_before_exit`, built in with it) has run.
+struct Downloaded {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
+    engine_closed: Arc<AtomicBool>,
+}
+
+/// The update `app_update_download` fetched this launch, until `app_update_install` takes it.
+#[derive(Default)]
+pub struct UpdateState(Mutex<Option<Downloaded>>);
+
+/// Download the offered update and check its signature while the jam plays on, and keep it for
+/// `app_update_install`; one already kept answers at once. Each step reports itself over
+/// `lf://update-progress`. The UI saves the jam between the two (`src/app/update.ts`), so a take
+/// committed during the download, which can take minutes, is in the recovery the new version restores.
 #[tauri::command]
-pub async fn app_update_install(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn app_update_download(app: tauri::AppHandle, state: tauri::State<'_, UpdateState>) -> Result<(), String> {
+    if state.0.lock().map_err(|_| "update state poisoned".to_string())?.is_some() {
+        return Ok(());
+    }
     // The plugin's own hook runs `cleanup_before_exit`; this one replaces it and shuts the engine down
     // first. `std::process::exit` skips `RunEvent::Exit`, where the engine's shutdown otherwise runs.
     let engine_closed = Arc::new(AtomicBool::new(false));
@@ -86,10 +101,6 @@ pub async fn app_update_install(app: tauri::AppHandle) -> Result<(), String> {
             engine_closed.store(true, Ordering::SeqCst);
             app.cleanup_before_exit();
         }
-    };
-    let failed = |step: &str, e: tauri_plugin_updater::Error| {
-        log::error!("[update] {step} failed: {e}");
-        format!("{step} failed: {e}")
     };
     let updater = app
         .updater_builder()
@@ -126,17 +137,42 @@ pub async fn app_update_install(app: tauri::AppHandle) -> Result<(), String> {
         move || report(&app, Progress::Verifying)
     };
     let bytes = update.download(on_chunk, on_finish).await.map_err(|e| failed("the download", e))?;
-    log::info!("[update] v{}: {} bytes, signature verified; starting the installer", update.version, bytes.len());
+    log::info!("[update] v{}: {} bytes, signature verified", update.version, bytes.len());
+    *state.0.lock().map_err(|_| "update state poisoned".to_string())? = Some(Downloaded { update, bytes, engine_closed });
+    Ok(())
+}
+
+/// Install the update `app_update_download` kept: shut the engine down as an exit does (native MIDI's
+/// ports closed, tones saved, plugins unloaded, the device closed) and start the installer, which quits
+/// the app and opens the new version (Windows: the plugin exits the process once the installer runs).
+/// Returns only on failure: one before the engine's shutdown (the package would not extract) keeps the
+/// download for another press, and the jam plays on; one after it leaves no engine (`src-tauri/AGENTS.md`
+/// § Open threads), and says so.
+#[tauri::command]
+pub async fn app_update_install(app: tauri::AppHandle, state: tauri::State<'_, UpdateState>) -> Result<(), String> {
+    let Downloaded { update, bytes, engine_closed } =
+        state.0.lock().map_err(|_| "update state poisoned".to_string())?.take().ok_or("no update is downloaded")?;
+    log::info!("[update] v{}: starting the installer", update.version);
     report(&app, Progress::Installing);
-    let installed = tauri::async_runtime::spawn_blocking(move || update.install(bytes))
-        .await
-        .map_err(|e| format!("the install did not run: {e}"))?;
-    installed.map_err(|e| {
-        let message = failed("the install", e);
-        if engine_closed.load(Ordering::SeqCst) {
-            format!("{message}. The audio engine is already closed: restart BleepLoop")
-        } else {
-            message
-        }
+    let (installed, update, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        let installed = update.install(&bytes);
+        (installed, update, bytes)
     })
+    .await
+    .map_err(|e| format!("the install did not run: {e}"))?;
+    let Err(e) = installed else { return Ok(()) };
+    let message = failed("the install", e);
+    if engine_closed.load(Ordering::SeqCst) {
+        return Err(format!("{message}. The audio engine is already closed: restart BleepLoop"));
+    }
+    if let Ok(mut kept) = state.0.lock() {
+        *kept = Some(Downloaded { update, bytes, engine_closed });
+    }
+    Err(message)
+}
+
+/// A failed step, logged and worded for the frontend.
+fn failed(step: &str, e: tauri_plugin_updater::Error) -> String {
+    log::error!("[update] {step} failed: {e}");
+    format!("{step} failed: {e}")
 }

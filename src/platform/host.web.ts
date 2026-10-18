@@ -130,10 +130,16 @@ const webLogFolder: LogFolder = {
 interface UpdateScript {
   /** What `check()` answers. */
   update: AppUpdate | null;
-  /** Counts `install()` calls. */
-  installs: number;
+  /** Every `download()` and `install()` call, in order: `'download'`, `'install'`. */
+  calls: string[];
+  /** Set: `download()` rejects with it. */
+  failDownload?: string;
+  /** Set: `download()` waits for it to settle (a download still on its way). */
+  downloadHold?: Promise<void>;
   /** Set: `install()` rejects with it. */
-  fail?: string;
+  failInstall?: string;
+  /** Run as `install()` is called, before it answers: a probe reads what the app did before it. */
+  onInstall?: () => unknown;
   /**
    * Set: `install()` never settles, as the native one does not once the installer runs. The probe
    * drives the read-out through `report` meanwhile.
@@ -157,11 +163,19 @@ const webUpdates: AppUpdates = {
   async check() {
     return updateScript()?.update ?? null;
   },
+  async download() {
+    const script = updateScript();
+    if (!script) throw new Error('The browser build has no updater.');
+    script.calls.push('download');
+    if (script.downloadHold) await script.downloadHold;
+    if (script.failDownload) throw new Error(script.failDownload);
+  },
   async install() {
     const script = updateScript();
     if (!script) throw new Error('The browser build has no updater.');
-    script.installs++;
-    if (script.fail) throw new Error(script.fail);
+    script.calls.push('install');
+    await script.onInstall?.();
+    if (script.failInstall) throw new Error(script.failInstall);
     // The native install returns only on failure: the installer quits the app. A scripted hold lets a
     // probe watch the read-out instead of racing the resolve.
     if (script.hold) await new Promise<never>(() => {});

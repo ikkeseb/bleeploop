@@ -2,15 +2,15 @@ import { createSignal } from 'solid-js';
 import { notifyError, notifyNote } from '../notify';
 import { platform, type AppUpdate, type UpdateProgress } from '../platform';
 import { confirm } from '../ui/confirm/confirm-store';
-import { rigRecallOnClose } from '../ui/state/rig-recall';
-import { jamInProgress, saveForQuit } from './close-guard';
+import { jamInProgress, quitWithSave } from './close-guard';
 
 /**
  * The updater's UI half (the native half: `src-tauri/src/update.rs`). At launch a release build asks
  * for a newer version, quietly when offline; an offer raises the command bar's update pill
  * (`src/app.tsx`, its panel `src/ui/settings/UpdatePanel.tsx`) and one toast. Nothing installs until
- * the player presses it there: the installer quits the app, so the jam is saved for recovery first,
- * as a close saves it. An install is three waits long (download, signature, installer), so each
+ * the player presses it there: the package downloads while the jam plays on, then the jam is saved for
+ * recovery exactly as a close saves it (`quitWithSave`), and only then does the installer quit the app;
+ * a save that fails holds the update back. An install is three waits long (download, signature, installer), so each
  * reports itself and the pill's panel shows where it is: a press with no read-out reads as a hang.
  */
 const [offered, setOffered] = createSignal<AppUpdate | null>(null);
@@ -87,10 +87,10 @@ export async function installUpdate(): Promise<void> {
   }
   setInstalling(true);
   try {
-    if (!(await saveForQuit())) return;
-    // A clean quit: a rig restored this launch comes back in the new version (`rig-recall.ts`).
-    rigRecallOnClose();
-    await platform.updates.install();
+    // The download first, while the jam plays on; then the close's own save and quit, ending in the
+    // installer, so a take committed during the download is in the recovery the new version restores.
+    await platform.updates.download();
+    await quitWithSave('update', () => platform.updates.install());
   } catch (error) {
     console.error('[app] update failed', error);
     notifyError('Could not install the update. Press Update and restart to try again.', error);

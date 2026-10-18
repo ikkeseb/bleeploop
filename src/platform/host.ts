@@ -401,10 +401,12 @@ export interface AppUpdates {
   readonly available: boolean;
   /** A newer release, or null when this build is the latest. Rejects when the check fails (offline). */
   check(): Promise<AppUpdate | null>;
+  /** Download the offered update and verify its signature, the engine playing on; one already
+   * downloaded this launch answers at once. Rejects when a step fails. */
+  download(): Promise<void>;
   /**
-   * Download the offered update and verify its signature, shut the engine down and start the
-   * installer, which quits the app and opens the new version. Never resolves once the installer runs;
-   * rejects when a step fails.
+   * Install what `download` fetched: shut the engine down and start the installer, which quits the app
+   * and opens the new version. Never resolves once the installer runs; rejects when it fails.
    */
   install(): Promise<void>;
   /**
