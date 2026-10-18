@@ -16,6 +16,7 @@ import { setPriority, constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows } from './native-kill.mjs';
+import { spikeRunRows } from './native-spike-rule.mjs';
 
 assertWindows('native:spike');
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -61,7 +62,8 @@ say('native:spike: cargo build --features asio (debug)');
 execFileSync('cargo', ['build', '--features', 'asio'], { cwd: join(root, 'src-tauri'), stdio: 'inherit' });
 const exe = join(root, 'src-tauri', 'target', 'debug', 'app.exe');
 
-/** One probe process: resolves with its parsed JSON phases and verdict lines. */
+/** One probe process: resolves, once its output is read to the end, with its parsed JSON phases,
+ *  verdict lines and how it ended. */
 function probe(label, args, timeoutS) {
   return new Promise((resolve) => {
     say(`--- ${label}: app.exe ${args.join(' ')}`);
@@ -72,16 +74,18 @@ function probe(label, args, timeoutS) {
     } catch (e) {
       say(`${label}: launch kept the shell's priority: ${e instanceof Error ? e.message : String(e)}`);
     }
-    const result = { label, json: [], verdicts: [], invalid: null, exit: null };
+    const result = { label, json: [], verdicts: [], invalid: null, exit: null, signal: null, timedOutS: null };
     const timer = setTimeout(() => {
       say(`${label}: TIMEOUT after ${timeoutS} s`);
+      result.timedOutS = timeoutS;
       child.kill();
     }, timeoutS * 1000);
     let buf = '';
-    const onData = (chunk) => {
+    const onData = (chunk, end = false) => {
       buf += chunk;
       let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
+      while ((nl = buf.indexOf('\n')) >= 0 || (end && buf)) {
+        if (nl < 0) nl = buf.length;
         const line = buf.slice(0, nl).trimEnd();
         buf = buf.slice(nl + 1);
         log.write(`${line}\n`);
@@ -101,9 +105,12 @@ function probe(label, args, timeoutS) {
     };
     child.stdout.on('data', onData);
     child.stderr.on('data', onData);
-    child.on('exit', (code) => {
+    // 'close', not 'exit': both pipes are read to their end before the run is judged.
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
+      onData('', true);
       result.exit = code;
+      result.signal = signal;
       resolve(result);
     });
   });
@@ -112,9 +119,7 @@ function probe(label, args, timeoutS) {
 const rows = [];
 const row = (id, where, pass, value, bar) => rows.push({ id, where, verdict: pass === null ? 'INFO' : pass ? 'PASS' : 'FAIL', value, bar });
 const fromRun = (r, where) => {
-  if (r.invalid) row('INVALID', where, false, r.invalid.replace(/^INVALID /, ''), 'xcorr >= 0.8 (setup fault: fix and rerun)');
-  else if (r.exit !== 0 && !r.verdicts.length) row('ERROR', where, false, `exit ${r.exit}`, 'the probe runs');
-  for (const v of r.verdicts) row(v.id, where, v.pass, v.rest, '');
+  for (const x of spikeRunRows(r, where)) row(x.id, x.where, x.pass, x.value, x.bar);
 };
 
 const longS = Number(opt['long-min']) * 60;
