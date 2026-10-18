@@ -432,7 +432,8 @@ plugin-GUI work.
   at 128 a 32 s multiply take stepped one frame late between its beats 24 and 32 (two relaunches did
   not repeat it). A stray sound reached the cable on 2026-10-02 (about 200 Hz decaying over ~1.4 s and a
   ~400 Hz tone every 6.000 s, mostly in the first take after a device switch), now failed by name as
-  stray sound; its source is unknown, other apps playing through the interface the suspect. Next check:
+  stray sound (likely also the one launch at 64 that read 149 times the floor bar past FADE's bar
+  line); its source is unknown, other apps playing through the interface the suspect. Next check:
   the first EVO 4 loopback run (`--channel=0`), other apps' sound silenced, logging each open's offset.
 - Two session loads the device side drops or applies against the caller's answer, each a red test
   kept `#[ignore]` in `engine_io/tests.rs` until its fix. A load the host gave up on (no answer within
