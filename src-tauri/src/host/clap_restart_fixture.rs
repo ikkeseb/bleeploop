@@ -1108,6 +1108,34 @@ mod engine {
         }
     }
 
+    /// The plugin reports its GUI destroyed (`closed(true)`) and, before an owner turn takes that,
+    /// the player closes the editor or the slot unloads: that close acknowledges with `destroy`
+    /// alone too, never a `hide` on a GUI that is gone.
+    #[test]
+    fn a_gui_destroyed_just_before_a_close_or_an_unload_gets_destroy_alone() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        for floating in [true, false] {
+            for unload in [false, true] {
+                let obs = Arc::new(Observed::default());
+                if floating { &obs.gui_floating } else { &obs.gui_embedded }.store(true, Relaxed);
+                let (handle, _) = load(&device, 0, &obs);
+                assert_eq!(handle.open_editor(), Ok(()));
+                let opened = obs.gui_calls.lock().unwrap().len();
+                let (host, gui) = host_gui(&obs);
+                // The owner waits for its next request: the close comes before any turn of its own.
+                // SAFETY: the host's own callback, called as a plugin calls it (any thread).
+                unsafe { (gui.closed.unwrap())(host, true) };
+                if !unload {
+                    assert_eq!(handle.close_editor(), Ok(()));
+                    assert_eq!(obs.gui_calls.lock().unwrap()[opened..], ["destroy"], "floating: {floating}, closed");
+                }
+                handle.unload().unwrap();
+                assert_eq!(obs.gui_calls.lock().unwrap()[opened..], ["destroy"], "floating: {floating}, unload: {unload}");
+            }
+        }
+    }
+
     /// A read-only parameter (a meter, a value the plugin reports) and a hidden one are neither
     /// listed nor settable: a host-set value would fight the plugin's own.
     #[test]

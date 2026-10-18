@@ -530,12 +530,17 @@ impl OwnedPlugin for Clap {
     }
 
     fn editor_open(&mut self) -> Result<(), String> {
+        // A `closed` from before this editor (none was open) describes nothing it opens.
+        let _ = self.editor_closed.take();
         self.editor = editor_open(&mut self.instance, self.editor_parent, &self.hosted_hwnd)?;
         Ok(())
     }
 
+    /// Every close the owner makes (a request, the rollback of a late open, the unload) takes a
+    /// `closed` the plugin reported since its last turn: a GUI it destroyed gets `destroy` alone.
     fn editor_close(&mut self) {
-        editor_teardown(&mut self.instance, &mut self.editor, &self.hosted_hwnd, false);
+        let destroyed = self.editor_closed.take().unwrap_or(false);
+        editor_teardown(&mut self.instance, &mut self.editor, &self.hosted_hwnd, destroyed);
     }
 
     /// Deactivate (with the stopped processor the unit holds), destroy the instance, unload the
