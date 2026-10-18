@@ -62,6 +62,40 @@ fn the_columns_come_out_contiguous_across_short_chunks() {
     assert!(span(&columns, SCOPE_MASTER) > 0.1, "the master carries it");
 }
 
+/// A switch inside a block folds the chunks before it as a block that ended there would: switched off,
+/// the columns it completed before the switch come out; switched off and on on one frame, no column
+/// spans the switch. The same columns at any block size.
+#[test]
+fn a_switch_mid_block_folds_what_came_before_it_at_any_block_size() {
+    let columns = |block: usize, back_on: bool| {
+        let mut rig = Rig::with(Opts { block, ..Default::default() });
+        rig.set_input(ramp);
+        rig.record_first_take(0, 1, 2400);
+        let on_at = rig.frame;
+        rig.send_at(on_at, Command::SetScope(true));
+        let switch = on_at + 20 * bin(&rig) + 1037;
+        rig.send_at(switch, Command::SetScope(false));
+        if back_on {
+            rig.send_at(switch, Command::SetScope(true));
+        }
+        rig.advance(switch + 10 * bin(&rig) - on_at);
+        // The columns' frames: their envelopes take a chunk crossing a column's edge into both (the
+        // smear the scope's module doc accepts), so those follow the block size.
+        (switch, bin(&rig), rig.read_scope().iter().map(|c| c.frame).collect::<Vec<Frame>>())
+    };
+    for back_on in [false, true] {
+        let (switch, bin, want) = columns(1, back_on);
+        assert!(want.iter().all(|&c| c + bin <= switch || c >= switch), "back on {back_on}: a column spans the switch");
+        let before = want.iter().filter(|&&c| c < switch).count() as Frame;
+        assert_eq!(before, (switch - want[0]) / bin, "back on {back_on}: every column completed before the switch");
+        assert_eq!(want.iter().any(|&c| c >= switch), back_on, "back on {back_on}: columns after the switch");
+        for block in [97, 128, 480, 1024] {
+            let (_, _, got) = columns(block, back_on);
+            assert_eq!(got, want, "back on {back_on}: block {block}");
+        }
+    }
+}
+
 /// Off (the default) the consumer stays empty however long the engine renders, and a view that closes
 /// stops the columns.
 #[test]

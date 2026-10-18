@@ -288,6 +288,34 @@ fn a_hold_release_after_fixed_closed_the_take_starts_nothing() {
 }
 
 #[test]
+fn a_hold_release_after_its_capture_ended_leaves_a_later_overdub_on_the_lane_be() {
+    // FIXED closes the take, or the screen does; the screen then starts an overdub on the same lane while
+    // the pedal stays down. The pedal's release ends nothing.
+    for fixed in [true, false] {
+        let mut rig = two_lanes(1);
+        rig.set(Command::SetFixedLength(fixed));
+        rig.set(Command::SetFixedBars(1.0));
+        rig.set_level(0.25);
+        rig.press(Command::SelectTrack(2));
+        rig.press(Command::Action(Action::Hold(0)));
+        if fixed {
+            rig.advance_to(rig.end_frame() + 100);
+        } else {
+            rig.advance_to(rig.start_frame() + rig.fpb() / 2);
+            rig.press(Command::RecDub(2));
+            rig.advance_to(rig.end_frame() + 100);
+        }
+        assert_eq!(rig.state(2), LaneState::Playing, "the take committed (FIXED: {fixed})");
+        rig.press(Command::RecDub(2));
+        assert_eq!(rig.state(2), LaneState::Overdubbing, "the screen's overdub (FIXED: {fixed})");
+        rig.advance(1000);
+        rig.press(Command::Action(Action::Release(0)));
+        rig.advance(1000);
+        assert_eq!(rig.state(2), LaneState::Overdubbing, "the old pedal's release left the overdub on (FIXED: {fixed})");
+    }
+}
+
+#[test]
 fn a_hold_release_acts_where_its_press_did_whatever_the_selection_since() {
     let mut rig = two_lanes(1);
     rig.set_level(0.25);
@@ -436,6 +464,34 @@ fn a_pedals_clear_confirms_per_lane() {
 }
 
 /// What the feed last carried of lane `i`: whether it showed CLEAR armed there, and the frame.
+#[test]
+fn a_clear_confirmed_in_its_window_clears_after_a_block_job_that_ends_past_it() {
+    // A FIXED later take past the one-bar master multiplies it on its own: lane 0's extension runs as a
+    // block job from the commit. CLEAR is confirmed on lane 0 inside its window while that job runs, and
+    // the job ends past the window; a press sent behind the confirmation waits for it.
+    let mut rig = looping();
+    rig.idle();
+    let window = (2500 * rig.sr as Frame + 999) / 1000;
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(2.0));
+    rig.press(Command::RecDub(1));
+    let end = rig.end_frame();
+    rig.advance_to(end + 40 - window);
+    rig.press(Command::ActionOn(0, Action::Clear));
+    assert!(fed_clear(&rig, 0).0, "armed, its window ending 40 frames past the commit");
+    rig.advance_to(end + 10);
+    assert!(rig.engine.looper().busy(), "the multiply extends lane 0");
+    rig.queue(Command::ActionOn(0, Action::Clear));
+    rig.queue(Command::Press);
+    rig.advance(1);
+    assert!(rig.engine.holding(), "the confirmation waits for lane 0's job");
+    assert!(!fed_clear(&rig, 0).0, "a confirmed arm is spent");
+    rig.idle();
+    assert!(rig.frame > end + 40, "the job ended past the window");
+    assert_eq!(rig.state(0), LaneState::Empty, "the confirmed CLEAR cleared");
+    assert!(!fed_clear(&rig, 0).0, "and nothing is armed again");
+}
+
 fn fed_clear(rig: &Rig, i: usize) -> (bool, Frame) {
     rig.events
         .iter()

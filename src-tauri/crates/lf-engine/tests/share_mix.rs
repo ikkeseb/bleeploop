@@ -25,7 +25,12 @@ fn guitar(f: Frame) -> f32 {
 /// back, CLICK off and on. With `click` false the click volume is 0, so no click sounds (the count-in
 /// included); nothing else changes.
 fn jam(block: usize, click: bool) -> Rig {
-    let mut rig = Rig::with(Opts { block, ..Opts::default() });
+    jam_with(block, click, true)
+}
+
+/// [`jam`], with the engine's looper tap mixed or not (`EngineConfig::looper_tap`).
+fn jam_with(block: usize, click: bool, looper_tap: bool) -> Rig {
+    let mut rig = Rig::with_config(Opts { block, ..Opts::default() }, |config| config.looper_tap = looper_tap);
     rig.keep_output();
     if !click {
         // With the next setting, on the same frame: the jam's frames stay where they are.
@@ -150,6 +155,28 @@ fn the_share_mix_is_the_jam_with_the_click_at_zero_bit_for_bit() {
     assert_eq!(first_difference(&with.share_right, &without.heard_right), None, "right");
     assert_eq!(first_difference(&without.share, &without.heard), None, "with no click, the Share mix is the device output");
     assert!(first_difference(&with.share, &with.share_right).is_some(), "the pan reaches the Share mix");
+}
+
+/// The looper tap is the tests' alone: off, as the host runs the engine, the device output, the Share
+/// mix and every other tap are the same bits, the master volume's moves included, and the tap is empty.
+#[test]
+fn the_looper_tap_changes_nothing_the_device_or_the_share_mix_carries() {
+    for block in [1, 128, 480] {
+        let (on, off) = (jam_with(block, true, true), jam_with(block, true, false));
+        assert!(on.output.as_ref().is_some_and(|(_, out)| !out.is_empty()) && off.output.as_ref().is_some_and(|(_, out)| out.is_empty()), "block {block}: the tap mixed only when on");
+        for (what, a, b) in [
+            ("left", &on.heard, &off.heard),
+            ("right", &on.heard_right, &off.heard_right),
+            ("Share left", &on.share, &off.share),
+            ("Share right", &on.share_right, &off.share_right),
+            ("bus left", &on.bus, &off.bus),
+            ("bus right", &on.bus_right, &off.bus_right),
+            ("monitor", &on.monitor, &off.monitor),
+            ("record", &on.record, &off.record),
+        ] {
+            assert_eq!(first_difference(a, b), None, "block {block}: {what}");
+        }
+    }
 }
 
 /// The same commands give the same Share mix at any block size, bit for bit.
