@@ -146,13 +146,19 @@ impl Rig {
     }
 
     pub fn with(o: Opts) -> Rig {
-        let capacity = EngineConfig::new(o.sr).event_capacity;
-        Rig::with_event_capacity(o, capacity)
+        Rig::with_config(o, |_| {})
     }
 
     /// [`Rig::with`], its event ring `capacity` events long.
     pub fn with_event_capacity(o: Opts, capacity: usize) -> Rig {
-        let config = EngineConfig { max_loop_seconds: o.loop_seconds, event_capacity: capacity, ..EngineConfig::new(o.sr) };
+        Rig::with_config(o, |config| config.event_capacity = capacity)
+    }
+
+    /// [`Rig::with`], its engine's config changed by `configure` first. The rig mixes the looper tap
+    /// ([`EngineConfig::looper_tap`]) unless `configure` turns it off.
+    pub fn with_config(o: Opts, configure: impl FnOnce(&mut EngineConfig)) -> Rig {
+        let mut config = EngineConfig { max_loop_seconds: o.loop_seconds, looper_tap: true, ..EngineConfig::new(o.sr) };
+        configure(&mut config);
         let (engine, mut handle) = Engine::new(config);
         // Slot 0 is live and empty: the input is the wet signal, as a dry GO LIVE.
         handle.commands.push(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).expect("command ring full");

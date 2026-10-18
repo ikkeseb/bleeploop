@@ -147,7 +147,8 @@
 //! `cargo test -p lf-engine` (Linux and Windows CI). `tests/` ports the Web Audio rig guards, one file per
 //! group, each header naming the guard it ports and what it drops; `tests/common` is the rig, and every
 //! `process` call there runs under `assert_no_alloc`. The looper's tests read [`Taps::looper`], the lanes
-//! before their FX (a bypassed chain is not bit-transparent, as in Tone); `tests/sound.rs` holds the
+//! before their FX (a bypassed chain is not bit-transparent, as in Tone), which the rig turns on
+//! ([`EngineConfig::looper_tap`]; the host leaves it off, `tests/share_mix.rs` shows it changes no output bit); `tests/sound.rs` holds the
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
 //! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),

@@ -66,13 +66,17 @@ pub struct EngineConfig {
     pub max_block: usize,
     pub command_capacity: usize,
     pub event_capacity: usize,
+    /// Mix [`Taps::looper`] every block (the lanes before their FX plus the click): what the looper's
+    /// tests read. Nothing the device plays or the Share mix carries depends on it, so the host leaves
+    /// it off (the default) and no frame of it is computed; empty while off.
+    pub looper_tap: bool,
 }
 
 impl EngineConfig {
     /// The command ring holds a new engine's settings replay (about a hundred commands) and the UI's
     /// batch after it with room to spare; the engine takes up to `MAX_PENDING` a block, the rest wait.
     pub fn new(sample_rate: u32) -> Self {
-        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, command_capacity: 1024, event_capacity: 4096 }
+        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, command_capacity: 1024, event_capacity: 4096, looper_tap: false }
     }
 }
 
@@ -120,7 +124,8 @@ pub struct Taps<'a> {
     /// path).
     pub record: &'a [f32],
     /// The lanes before their FX plus the click, under the master volume: what the looper plays,
-    /// without the FX's colour (a bypassed chain is not bit-transparent, as in Tone).
+    /// without the FX's colour (a bypassed chain is not bit-transparent, as in Tone). Empty unless
+    /// [`EngineConfig::looper_tap`].
     pub looper: &'a [f32],
 }
 
@@ -232,7 +237,8 @@ pub struct Engine {
     /// The wet signal and the input sends under the master volume: what joins the output after the
     /// limiter.
     monitor: Vec<f32>,
-    /// The looper's own mix under the master volume: the lanes before their FX, and the click.
+    /// The looper's own mix under the master volume: the lanes before their FX, and the click. Empty
+    /// unless [`EngineConfig::looper_tap`].
     looper_mix: Vec<f32>,
     /// The live scope taps: off until the UI asks for them ([`Command::SetScope`]).
     scope: Scope,
@@ -319,7 +325,7 @@ impl Engine {
             click: [0.0; QUANTUM],
             mix: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
             monitor: vec![0.0; config.max_block],
-            looper_mix: vec![0.0; config.max_block],
+            looper_mix: vec![0.0; if config.looper_tap { config.max_block } else { 0 }],
             scope,
             scope_chunks: scope_chunks(config.max_block),
             rendered: 0,
@@ -379,7 +385,7 @@ impl Engine {
     /// The last block before the limiter. The output is `limiter(bus) + monitor` on each side.
     pub fn taps(&self) -> Taps<'_> {
         let n = self.rendered;
-        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n], record: &self.record[..n] }
+        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n.min(self.looper_mix.len())], record: &self.record[..n] }
     }
 
     /// The last block's Share mix (the header): the device output without the click.
@@ -690,11 +696,19 @@ impl Engine {
             let click = &mut self.click[..len];
             click.fill(0.0);
             self.clock.render_click(f, click);
-            let looper_mix = &mut self.looper_mix[k0..k1];
-            looper_mix.copy_from_slice(click);
-            for lane in &self.lanes {
-                for (m, &x) in looper_mix.iter_mut().zip(&lane[..len]) {
-                    *m += x;
+            if self.config.looper_tap {
+                // The test tap, under the master volume's glide below, frame for frame.
+                let looper_mix = &mut self.looper_mix[k0..k1];
+                looper_mix.copy_from_slice(click);
+                for lane in &self.lanes {
+                    for (m, &x) in looper_mix.iter_mut().zip(&lane[..len]) {
+                        *m += x;
+                    }
+                }
+                let mut g = self.master_gain;
+                for m in looper_mix.iter_mut() {
+                    *m = (g * *m as f64) as f32;
+                    g = crate::glide(g, target, self.master_coef);
                 }
             }
             for ((l, r), &c) in l.iter_mut().zip(r.iter_mut()).zip(click.iter()) {
@@ -703,7 +717,7 @@ impl Engine {
             }
             self.looper.capture(f, &self.record[k0..k1]);
             let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
-            for ((((l, r), o), m), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(looper_mix.iter_mut()).zip(wet.iter().zip(sends)) {
+            for (((l, r), o), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(wet.iter().zip(sends)) {
                 let g = self.master_gain;
                 *l = (g * *l as f64) as f32;
                 *r = (g * *r as f64) as f32;
@@ -711,7 +725,6 @@ impl Engine {
                 if sounded {
                     *o += (g * y as f64) as f32;
                 }
-                *m = (g * *m as f64) as f32;
                 self.master_gain = crate::glide(self.master_gain, target, self.master_coef);
             }
             // The scope taps, at the gains this chunk played at (`crate::scope`): the lanes as their
