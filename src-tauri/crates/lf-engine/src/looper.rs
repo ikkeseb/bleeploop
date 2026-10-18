@@ -1972,6 +1972,13 @@ impl Looper {
     fn release_recorder(&mut self, cx: &mut Cx, i: usize) {
         let Some(rec) = self.rec.filter(|r| r.lane == i) else { return };
         self.rec = None;
+        // A pedal still held over the capture it started has nothing left to end: a later capture on the
+        // lane (a screen press, a handoff) is not its release's.
+        for hold in &mut self.holds {
+            if *hold == Some(i) {
+                *hold = None;
+            }
+        }
         self.lanes[i].auto_armed = false;
         if self.master == 0 {
             cx.clock.set_locked(false);
