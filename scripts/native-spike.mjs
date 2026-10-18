@@ -16,7 +16,7 @@ import { setPriority, constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows } from './native-kill.mjs';
-import { spikeRunRows } from './native-spike-rule.mjs';
+import { spikeRunRows, spikeVerdict } from './native-spike-rule.mjs';
 
 assertWindows('native:spike');
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -93,9 +93,8 @@ function probe(label, args, timeoutS) {
         if (!m) continue;
         const body = m[2];
         if (body.startsWith('{')) result.json.push(JSON.parse(body));
-        else if (/^(PASS|FAIL) /.test(body)) {
-          const [, pass, id, rest] = body.match(/^(PASS|FAIL) (\S+) (.*)$/);
-          result.verdicts.push({ pass: pass === 'PASS', id, rest });
+        else if (spikeVerdict(body)) {
+          result.verdicts.push(spikeVerdict(body));
           say(`  ${body}`);
         } else if (body.startsWith('INVALID')) {
           result.invalid = body;
@@ -118,8 +117,8 @@ function probe(label, args, timeoutS) {
 
 const rows = [];
 const row = (id, where, pass, value, bar) => rows.push({ id, where, verdict: pass === null ? 'INFO' : pass ? 'PASS' : 'FAIL', value, bar });
-const fromRun = (r, where) => {
-  for (const x of spikeRunRows(r, where)) row(x.id, x.where, x.pass, x.value, x.bar);
+const fromRun = (r, where, final) => {
+  for (const x of spikeRunRows(r, where, final)) row(x.id, x.where, x.pass, x.value, x.bar);
 };
 
 const longS = Number(opt['long-min']) * 60;
@@ -167,7 +166,7 @@ if (only.has('wasapi')) {
 }
 if (only.has('share')) {
   const r = await probe('share', ['--probe-share', 'all'], 180);
-  fromRun(r, 'share');
+  fromRun(r, 'share', 'S1'); // `all` ends on its S1 line (src-tauri/src/share_probe.rs `verdict`)
 }
 
 say('\n=== native:spike ===');
