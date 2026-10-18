@@ -13,10 +13,11 @@ use clap_sys::{
         CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE,
     },
     ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS},
+    ext::gui::{clap_gui_resize_hints, clap_host_gui, clap_plugin_gui, clap_window, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32},
     ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY},
     ext::params::{
-        clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS,
-        CLAP_PARAM_RESCAN_VALUES,
+        clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_HIDDEN,
+        CLAP_PARAM_IS_READONLY, CLAP_PARAM_RESCAN_VALUES,
     },
     ext::state::{clap_host_state, clap_plugin_state, CLAP_EXT_STATE},
     stream::{clap_istream, clap_ostream},
@@ -96,6 +97,8 @@ struct Observed {
     /// What `clap.params` reports as its count; `get_info` answers only the first 16 indices, so
     /// a malformed count stays cheap to walk.
     param_count: AtomicU32,
+    /// The `clap_param_info.flags` of each of those 16.
+    param_flags: [AtomicU32; 16],
     /// What `clap.latency` reports.
     latency: AtomicU32,
     /// The input port's channel count (`clap.audio-ports`); 0 = no input port, an instrument. With
@@ -157,6 +160,13 @@ struct Observed {
     #[allow(clippy::type_complexity)]
     on_save: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     marked_dirty: AtomicUsize,
+    /// `clap.gui`: offered (WIN32 only) when either is set, as a floating window or embedded.
+    gui_floating: AtomicBool,
+    gui_embedded: AtomicBool,
+    /// Every GUI call the host made that changes the GUI, in order (main-thread calls only).
+    gui_calls: Mutex<Vec<&'static str>>,
+    /// The window an embedded GUI was given.
+    gui_parent: AtomicIsize,
 }
 
 impl Observed {
@@ -490,14 +500,15 @@ unsafe extern "C" fn param_info(
     index: u32,
     info: *mut clap_param_info,
 ) -> bool {
-    if index >= unsafe { state(plugin) }.param_count.load(Relaxed).min(16) {
+    let s = unsafe { state(plugin) };
+    if index >= s.param_count.load(Relaxed).min(16) {
         return false;
     }
     // SAFETY: the host passes a writable clap_param_info; every field is written.
     unsafe {
         info.write(clap_param_info {
             id: 100 + index,
-            flags: 0,
+            flags: s.param_flags[index as usize].load(Relaxed),
             cookie: std::ptr::null_mut(),
             name: [0; CLAP_NAME_SIZE],
             module: [0; CLAP_PATH_SIZE],
@@ -574,6 +585,78 @@ unsafe extern "C" fn port_get(
 
 static AUDIO_PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports { count: Some(port_count), get: Some(port_get) };
 
+unsafe extern "C" fn gui_supported(plugin: *const clap_plugin, api: *const c_char, is_floating: bool) -> bool {
+    let s = unsafe { state(plugin) };
+    let offered = if is_floating { &s.gui_floating } else { &s.gui_embedded };
+    !api.is_null() && unsafe { CStr::from_ptr(api) } == CLAP_WINDOW_API_WIN32 && offered.load(Relaxed)
+}
+unsafe extern "C" fn gui_preferred(_: *const clap_plugin, _: *mut *const c_char, _: *mut bool) -> bool {
+    false
+}
+fn gui_call(plugin: *const clap_plugin, call: &'static str) -> bool {
+    unsafe { state(plugin) }.gui_calls.lock().unwrap().push(call);
+    true
+}
+unsafe extern "C" fn gui_create(plugin: *const clap_plugin, _: *const c_char, _: bool) -> bool {
+    gui_call(plugin, "create")
+}
+unsafe extern "C" fn gui_destroy(plugin: *const clap_plugin) {
+    gui_call(plugin, "destroy");
+}
+unsafe extern "C" fn gui_set_scale(_: *const clap_plugin, _: f64) -> bool {
+    false
+}
+unsafe extern "C" fn gui_get_size(_: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
+    unsafe { (width.write(320), height.write(200)) };
+    true
+}
+unsafe extern "C" fn gui_can_resize(_: *const clap_plugin) -> bool {
+    false
+}
+unsafe extern "C" fn gui_resize_hints(_: *const clap_plugin, _: *mut clap_gui_resize_hints) -> bool {
+    false
+}
+unsafe extern "C" fn gui_adjust_size(_: *const clap_plugin, _: *mut u32, _: *mut u32) -> bool {
+    false
+}
+unsafe extern "C" fn gui_set_size(plugin: *const clap_plugin, _: u32, _: u32) -> bool {
+    gui_call(plugin, "set_size")
+}
+unsafe extern "C" fn gui_set_parent(plugin: *const clap_plugin, window: *const clap_window) -> bool {
+    // SAFETY: the host passes a WIN32 window, the only API this GUI offers.
+    let hwnd = unsafe { (*window).specific.win32 } as isize;
+    unsafe { state(plugin) }.gui_parent.store(hwnd, Relaxed);
+    gui_call(plugin, "set_parent")
+}
+unsafe extern "C" fn gui_set_transient(_: *const clap_plugin, _: *const clap_window) -> bool {
+    true
+}
+unsafe extern "C" fn gui_suggest_title(_: *const clap_plugin, _: *const c_char) {}
+unsafe extern "C" fn gui_show(plugin: *const clap_plugin) -> bool {
+    gui_call(plugin, "show")
+}
+unsafe extern "C" fn gui_hide(plugin: *const clap_plugin) -> bool {
+    gui_call(plugin, "hide")
+}
+
+static GUI: clap_plugin_gui = clap_plugin_gui {
+    is_api_supported: Some(gui_supported),
+    get_preferred_api: Some(gui_preferred),
+    create: Some(gui_create),
+    destroy: Some(gui_destroy),
+    set_scale: Some(gui_set_scale),
+    get_size: Some(gui_get_size),
+    can_resize: Some(gui_can_resize),
+    get_resize_hints: Some(gui_resize_hints),
+    adjust_size: Some(gui_adjust_size),
+    set_size: Some(gui_set_size),
+    set_parent: Some(gui_set_parent),
+    set_transient: Some(gui_set_transient),
+    suggest_title: Some(gui_suggest_title),
+    show: Some(gui_show),
+    hide: Some(gui_hide),
+};
+
 static PARAMS: clap_plugin_params = clap_plugin_params {
     count: Some(param_count),
     get_info: Some(param_info),
@@ -583,9 +666,13 @@ static PARAMS: clap_plugin_params = clap_plugin_params {
     flush: None,
 };
 
-unsafe extern "C" fn extension(_: *const clap_plugin, id: *const c_char) -> *const c_void {
+unsafe extern "C" fn extension(plugin: *const clap_plugin, id: *const c_char) -> *const c_void {
     let id = unsafe { CStr::from_ptr(id) };
-    if id == CLAP_EXT_PARAMS {
+    if id == CLAP_EXT_GUI {
+        let s = unsafe { state(plugin) };
+        let offered = s.gui_floating.load(Relaxed) || s.gui_embedded.load(Relaxed);
+        if offered { (&GUI as *const clap_plugin_gui).cast() } else { std::ptr::null() }
+    } else if id == CLAP_EXT_PARAMS {
         (&PARAMS as *const clap_plugin_params).cast()
     } else if id == CLAP_EXT_LATENCY {
         (&LATENCY as *const clap_plugin_latency).cast()
@@ -976,6 +1063,69 @@ mod engine {
         assert!(wait_for(|| obs.param_values.load(Relaxed) == 1), "the param reaches the processor");
         assert_eq!(obs.last_param.load(Relaxed), 101);
         assert_eq!(f64::from_bits(obs.last_param_value.load(Relaxed)), 0.75);
+        handle.unload().unwrap();
+    }
+
+    /// The host's `clap.gui`, as the plugin `obs` watches reaches it.
+    fn host_gui(obs: &Observed) -> (*const clap_host, &'static clap_host_gui) {
+        let host = obs.host.load(Relaxed).cast_const();
+        // SAFETY: the host outlives its plugin, and declares `clap.gui` (a `clap_host_gui`).
+        let gui = unsafe { ((*host).get_extension.unwrap())(host, CLAP_EXT_GUI.as_ptr()) }.cast::<clap_host_gui>();
+        (host, unsafe { gui.as_ref() }.expect("the host declares clap.gui"))
+    }
+
+    /// The plugin reports its GUI destroyed (`closed(true)`), floating or embedded: the owner
+    /// acknowledges with `destroy` alone (no hide, no resize first), closes the host window and
+    /// tells the caller. Show and hide requests are refused, as the host does not act on them.
+    #[test]
+    fn a_gui_the_plugin_destroyed_is_acknowledged_with_destroy_alone_for_either_editor_form() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        for floating in [true, false] {
+            let obs = Arc::new(Observed::default());
+            if floating { &obs.gui_floating } else { &obs.gui_embedded }.store(true, Relaxed);
+            let (handle, seen) = load(&device, 0, &obs);
+            assert_eq!(handle.open_editor(), Ok(()), "floating: {floating}");
+            let opened = if floating { vec!["create", "show"] } else { vec!["create", "set_parent", "show"] };
+            assert_eq!(*obs.gui_calls.lock().unwrap(), opened);
+            let (host, gui) = host_gui(&obs);
+            // SAFETY: the host's own callbacks, called as a plugin calls them (any thread for these).
+            unsafe {
+                assert!(!(gui.request_show.unwrap())(host), "show refused");
+                assert!(!(gui.request_hide.unwrap())(host), "hide refused");
+                (gui.closed.unwrap())(host, true);
+            }
+            assert!(wait_for(|| seen.lock().unwrap().contains(&EngineSlotEvent::EditorClosed)), "the caller is told");
+            assert_eq!(obs.gui_calls.lock().unwrap()[opened.len()..], ["destroy"], "floating: {floating}");
+            if !floating {
+                let parent = windows::Win32::Foundation::HWND(obs.gui_parent.load(Relaxed) as *mut c_void);
+                // SAFETY: a window-handle query; a destroyed handle answers false.
+                assert!(!unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(parent)) }.as_bool(), "the host window is gone");
+            }
+            assert_eq!(handle.close_editor(), Ok(()), "nothing left to close");
+            assert_eq!(obs.gui_calls.lock().unwrap().len(), opened.len() + 1);
+            handle.unload().unwrap();
+        }
+    }
+
+    /// A read-only parameter (a meter, a value the plugin reports) and a hidden one are neither
+    /// listed nor settable: a host-set value would fight the plugin's own.
+    #[test]
+    fn read_only_and_hidden_params_are_not_listed_and_a_set_on_one_is_refused() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let obs = Arc::new(Observed::default());
+        obs.param_count.store(3, Relaxed);
+        obs.param_flags[0].store(CLAP_PARAM_IS_READONLY, Relaxed);
+        obs.param_flags[2].store(CLAP_PARAM_IS_HIDDEN, Relaxed);
+        let (handle, _) = load(&device, 0, &obs);
+        let listed: Vec<u32> = handle.list_params().unwrap().iter().map(|p| p.id).collect();
+        assert_eq!(listed, vec![101]);
+        assert!(handle.set_param(100, 0.5).is_err(), "a read-only parameter");
+        assert!(handle.set_param(102, 0.5).is_err(), "a hidden parameter");
+        handle.set_param(101, 0.75).unwrap();
+        assert!(wait_for(|| obs.param_values.load(Relaxed) == 1), "the writable one reaches the processor");
+        assert_eq!(obs.last_param.load(Relaxed), 101);
         handle.unload().unwrap();
     }
 

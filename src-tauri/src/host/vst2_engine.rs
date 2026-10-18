@@ -21,7 +21,7 @@
 //!   effect, its context and its module loaded with it (`engine_slot::serve`'s teardown).
 
 use super::engine_slot::{
-    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Setup,
+    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
     FAULT_EVENTS, FAULT_PARAM,
 };
 use super::super::editor_window::{
@@ -529,8 +529,10 @@ impl Vst2Plugin {
     /// selected after it: a bank chunk restores its own. Parameters go after their program
     /// (`effSetProgram` can replace every parameter, so the other order would lose them), each
     /// finite value clamped to 0..1. Everything is checked against the plugin before its first
-    /// call, so a state this refuses left the instance untouched, at its defaults.
-    fn restore_state(&self, state: &[u8]) -> Result<(), String> {
+    /// call; only a plugin that changes its parameter count while the tone goes in (a program
+    /// select that does) is refused after a call, and `touched` then says the instance is no
+    /// longer at its defaults.
+    fn restore_state(&self, state: &[u8], touched: &mut bool) -> Result<(), String> {
         match tone::decode_vst2(state)? {
             Vst2State::Chunk { chunk, .. } => {
                 if !self.info.program_chunks() {
@@ -539,6 +541,7 @@ impl Vst2Plugin {
                 if chunk.is_empty() {
                     return Err("the tone holds an empty chunk".to_string());
                 }
+                *touched = true;
                 // SAFETY: owner thread; `effSetChunk` (index 0: the bank) reads `value` bytes at
                 // `ptr`, which outlive the call. Its return carries no verdict.
                 unsafe { self.effect.dispatch(EFF_SET_CHUNK, 0, chunk.len() as isize, chunk.as_ptr() as *mut c_void, 0.0) };
@@ -556,6 +559,7 @@ impl Vst2Plugin {
                     return Err(format!("the tone names program {program} and the plugin has {programs}"));
                 }
                 if programs > 0 {
+                    *touched = true;
                     // SAFETY: the opcode reads no pointer; the index is one the effect declared.
                     unsafe { self.call(EFF_SET_PROGRAM, 0, program as isize, 0.0) };
                 }
@@ -568,6 +572,7 @@ impl Vst2Plugin {
                         return Err(format!("the plugin went from {} parameters to {} while its tone was restored", values.len(), now.params));
                     }
                     let Some(set_parameter) = now.set_parameter else { break };
+                    *touched = true;
                     // SAFETY: owner thread, before the plugin processes; an index it declares now.
                     unsafe { set_parameter(self.effect.raw(), index as i32, value.clamp(0.0, 1.0)) };
                 }
@@ -703,7 +708,9 @@ fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost)
 
 /// Create the plugin, tell it the engine's rate and block, restore the stored tone, resume it and
 /// build its unit. A tone this host cannot apply is refused before the plugin is called for it
-/// (`restore_state`), so the instance that goes on is still at its defaults.
+/// (`restore_state`), so the instance that goes on is still at its defaults; one refused after the
+/// plugin took part of it closes that instance, and a fresh one from the same module, without a
+/// tone, goes on.
 fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
@@ -713,13 +720,23 @@ fn load(
     let mut plugin = create(module, entry, id, slot)?;
     // SAFETY: the thread that opened the effect.
     let name = unsafe { plugin.effect.name() }.unwrap_or(file_stem);
-    let (rate, block) = plugin.configure(slot)?;
+    let (mut rate, mut block) = plugin.configure(slot)?;
     // `effOpen` and the two calls above may have changed what the effect declares (`create` read it
     // before any of them): the tone is checked against the counts, flags and calls it has now.
     // SAFETY: the open effect's own structure, read on its owner thread while it is suspended.
     plugin.info = unsafe { validate(plugin.effect.raw()) }?;
     // The stored tone goes in before the plugin resumes: nothing processes it yet.
-    let restored = restore_tone(tone, slot.slot(), &name, |state| plugin.restore_state(state));
+    let mut touched = false;
+    let restored = restore_tone(tone, slot.slot(), &name, |state| plugin.restore_state(state, &mut touched));
+    if restored == Restore::Refused && touched {
+        // Half restored: closed (never resumed) and created again; the module stays loaded across.
+        let module = plugin._module.take();
+        drop(plugin);
+        plugin = create(module, entry, id, slot)?;
+        (rate, block) = plugin.configure(slot)?;
+        // SAFETY: as above, for the fresh instance.
+        plugin.info = unsafe { validate(plugin.effect.raw()) }?;
+    }
     let info = plugin.resume()?;
     // What the plugin reported while it opened, took its tone and resumed describes the state just
     // loaded: the parameters are listed after the load anyway.

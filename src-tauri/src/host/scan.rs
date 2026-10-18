@@ -5,7 +5,9 @@
 //! host — but only for bundles whose binary changed since the last scan: `ScanCache` remembers each
 //! bundle's outcome (or its failure) under a size + mtime fingerprint, so a launch spawns no
 //! foreign code at all until a plugin is installed or updated, and a hung bundle costs its 20 s
-//! timeout once, not once per launch. The picker's rescan button forces a fresh scan.
+//! timeout once, not once per launch. The picker's rescan button forces a fresh scan. A VST3 factory
+//! that declares `kClassesDiscardable` (its classes may change at every load) is never cached: it
+//! is scanned on every launch, as the VST3 SDK asks.
 //!
 //! A VST2 plugin is a `.dll` among other DLLs: the walk reads each one's headers (`pe.rs`, no code
 //! runs) and only a file that exports a VST2 entry becomes a bundle. A plugin this build cannot
@@ -150,11 +152,19 @@ impl Fingerprint {
 pub struct ScanOutcome {
     pub plugins: Vec<PluginDescriptor>,
     pub unsupported: Option<String>,
+    /// The module says its classes may differ at its next load (VST3 `kClassesDiscardable`): the
+    /// outcome holds for this scan only and is never cached. Printed only when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncacheable: bool,
 }
 
 impl ScanOutcome {
     fn plugins(plugins: Vec<PluginDescriptor>) -> Self {
-        Self { plugins, unsupported: None }
+        Self { plugins, unsupported: None, uncacheable: false }
+    }
+
+    fn unsupported(reason: &str) -> Self {
+        Self { plugins: Vec::new(), unsupported: Some(reason.to_string()), uncacheable: false }
     }
 }
 
@@ -172,8 +182,9 @@ struct CacheEntry {
     outcome: Result<ScanOutcome, String>,
 }
 
-/// Bump when the entry shape or the descriptor fields change: an old file is discarded whole.
-const SCAN_CACHE_VERSION: u32 = 2;
+/// Bump when the entry shape or the descriptor fields change: an old file is discarded whole. 3: an
+/// entry from before the scan read `kClassesDiscardable` may hold a factory's stale classes.
+const SCAN_CACHE_VERSION: u32 = 3;
 
 /// The on-disk scan memory, keyed by the bundle's outer path (what the descriptor carries). Only
 /// bundles present in the current walk are written back, so removed plugins prune themselves.
@@ -337,13 +348,15 @@ fn scan_bundles(
                         continue;
                     }
                 };
+                let uncacheable = matches!(&outcome, Ok(outcome) if outcome.uncacheable);
                 match fingerprint {
-                    Some(fingerprint) => CacheEntry {
+                    Some(fingerprint) if !uncacheable => CacheEntry {
                         fingerprint,
                         outcome,
                     },
-                    None => {
-                        // Unstat-able bundle: use the outcome, do not remember it.
+                    _ => {
+                        // Unstat-able bundle, or classes that may change at the next load: use the
+                        // outcome, do not remember it.
                         found.take(&key, &outcome);
                         continue;
                     }
@@ -777,7 +790,7 @@ mod tests {
         let scan = |p: &Path| {
             children.fetch_add(1, Ordering::Relaxed);
             Ok(if p == shell {
-                ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) }
+                ScanOutcome::unsupported(UNSUPPORTED_SHELL)
             } else {
                 ScanOutcome::plugins(vec![desc(p, "Good")])
             })
@@ -819,7 +832,7 @@ mod tests {
         let both = [user(&scratch.0.join("kept")), user(&scratch.0.join("gone"))];
         let scan = |p: &Path| {
             Ok(if p == shell {
-                ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) }
+                ScanOutcome::unsupported(UNSUPPORTED_SHELL)
             } else {
                 ScanOutcome::plugins(vec![desc(p, "Good")])
             })
@@ -880,7 +893,7 @@ mod tests {
 
         // A shell: no descriptor, the reason, and it is closed like any other.
         let (shell, _, calls) = describe(Shape { category: PLUG_CATEGORY_SHELL, ..Shape::default() });
-        assert_eq!(shell, Ok(ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) }));
+        assert_eq!(shell, Ok(ScanOutcome::unsupported(UNSUPPORTED_SHELL)));
         assert_eq!(calls.last().map(|c| c.0), Some(1));
 
         // An effect the host refuses is a scan error, and nothing of it was called.
@@ -923,7 +936,7 @@ mod tests {
         // The outcome a child prints, and the parent reads back.
         let printed = serde_json::to_value(ScanOutcome::plugins(Vec::new())).unwrap();
         assert_eq!(printed, serde_json::json!({ "plugins": [], "unsupported": null }));
-        let shell = ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) };
+        let shell = ScanOutcome::unsupported(UNSUPPORTED_SHELL);
         let printed = serde_json::to_string(&shell).unwrap();
         assert_eq!(printed, r#"{"plugins":[],"unsupported":"shell plugin (several plugins in one file) is not supported"}"#);
         assert_eq!(serde_json::from_str::<ScanOutcome>(&printed).unwrap(), shell);
@@ -987,6 +1000,86 @@ mod tests {
         });
         assert_eq!(children.load(Ordering::Relaxed), 5);
         assert_eq!((stats4.cached, stats4.fresh), (0, 2));
+    }
+
+    /// A bundle whose classes may change at every load (VST3 `kClassesDiscardable`) is listed but
+    /// never remembered: every launch scans it again, though its fingerprint did not change.
+    #[test]
+    fn a_bundle_with_discardable_classes_is_scanned_every_time() {
+        let scratch = Scratch::new("discardable");
+        let shifting = scratch.bundle("shifting.clap", b"v1");
+        let steady = scratch.bundle("steady.clap", b"v1");
+        let files = vec![shifting.clone(), steady.clone()];
+        let children = AtomicUsize::new(0);
+        let scan = |p: &Path| {
+            let n = children.fetch_add(1, Ordering::Relaxed);
+            let mut outcome = ScanOutcome::plugins(vec![desc(p, &format!("class-{n}"))]);
+            outcome.uncacheable = p == shifting;
+            Ok(outcome)
+        };
+        let (found, cache, _) = scan_bundles(&files, &ScanCache::default(), false, scan);
+        assert_eq!(found.plugins.len(), 2, "both are listed");
+        assert!(!cache.bundles.contains_key(&shifting.to_string_lossy().to_string()), "never cached");
+        let (found2, _, stats2) = scan_bundles(&files, &cache, false, scan);
+        assert_eq!(children.load(Ordering::Relaxed), 3, "only the discardable one runs a child again");
+        assert_eq!((stats2.cached, stats2.fresh), (1, 1));
+        assert!(found2.plugins.iter().any(|d| d.name == "class-2"), "its classes as this load reports them");
+    }
+
+    /// The scan child reads the factory's flags: a `kClassesDiscardable` factory's outcome says so,
+    /// and the child prints it; any other factory's outcome prints as before.
+    #[test]
+    fn a_discardable_vst3_factory_is_reported_uncacheable() {
+        use vst3::Steinberg::{
+            int32, kInvalidArgument, kResultFalse, kResultOk, tresult, FIDString, IPluginFactory, IPluginFactoryTrait,
+            PClassInfo, PFactoryInfo, PFactoryInfo_::FactoryFlags_::kClassesDiscardable,
+        };
+        use vst3::{Class, ComWrapper};
+        struct Factory(int32);
+        impl Class for Factory {
+            type Interfaces = (IPluginFactory,);
+        }
+        impl IPluginFactoryTrait for Factory {
+            unsafe fn getFactoryInfo(&self, info: *mut PFactoryInfo) -> tresult {
+                // SAFETY: the scan passes a writable PFactoryInfo.
+                unsafe { (*info).flags = self.0 };
+                kResultOk
+            }
+            unsafe fn countClasses(&self) -> int32 {
+                1
+            }
+            unsafe fn getClassInfo(&self, index: int32, info: *mut PClassInfo) -> tresult {
+                if index != 0 {
+                    return kInvalidArgument;
+                }
+                // SAFETY: the scan passes a writable PClassInfo.
+                let info = unsafe { &mut *info };
+                info.cid = [7; 16];
+                for (dst, byte) in info.category.iter_mut().zip(b"Audio Module Class") {
+                    *dst = *byte as _;
+                }
+                for (dst, byte) in info.name.iter_mut().zip(b"Shifting") {
+                    *dst = *byte as _;
+                }
+                kResultOk
+            }
+            unsafe fn createInstance(&self, _: FIDString, _: FIDString, _: *mut *mut std::ffi::c_void) -> tresult {
+                kResultFalse
+            }
+        }
+        let describe = |flags| {
+            let factory = ComWrapper::new(Factory(flags)).to_com_ptr::<IPluginFactory>().expect("IPluginFactory");
+            // SAFETY: a live in-process factory.
+            unsafe { describe_vst3(&factory, "shifting.vst3") }
+        };
+        let discardable = describe(kClassesDiscardable);
+        assert!(discardable.uncacheable);
+        assert_eq!(discardable.plugins.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Shifting"]);
+        let printed = serde_json::to_string(&discardable).unwrap();
+        assert!(serde_json::from_str::<ScanOutcome>(&printed).unwrap().uncacheable, "the parent reads it back");
+        let steady = describe(0);
+        assert!(!steady.uncacheable);
+        assert!(!serde_json::to_string(&steady).unwrap().contains("uncacheable"), "printed only when set");
     }
 
     #[test]
@@ -1282,7 +1375,7 @@ pub fn resolve_vst3_binary(path: &Path) -> Option<PathBuf> {
 pub fn scan_one(path: &str) -> Result<ScanOutcome, String> {
     match PluginFormat::of_path(Path::new(path)) {
         Some(PluginFormat::Clap) => scan_one_clap(path).map(ScanOutcome::plugins),
-        Some(PluginFormat::Vst3) => scan_one_vst3(path).map(ScanOutcome::plugins),
+        Some(PluginFormat::Vst3) => scan_one_vst3(path),
         Some(PluginFormat::Vst2) => scan_one_vst2(path),
         None => Err(format!("{path}: not a .clap, .vst3 or .dll plugin")),
     }
@@ -1333,7 +1426,7 @@ unsafe fn describe_vst2(
         (category, name)
     };
     if category == PLUG_CATEGORY_SHELL {
-        return Ok(ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) });
+        return Ok(ScanOutcome::unsupported(UNSUPPORTED_SHELL));
     }
     let stem = || Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     Ok(ScanOutcome::plugins(vec![PluginDescriptor {
@@ -1395,16 +1488,12 @@ fn cstr_owned(s: Option<&std::ffi::CStr>) -> String {
 
 /// CHILD side: load ONE `.vst3` (file or bundle) and return its `Audio Module Class` descriptors.
 /// Loads the module with the `windows` loader (the vst3 crate provides no loader), wraps the
-/// `GetPluginFactory()` return in a `ComPtr`, and enumerates the factory's classes. The descriptor
-/// `id` is the class TUID hex-encoded — a stable id `plugin_load` parses back to `createInstance`
-/// the exact class. No `FreeLibrary`: the child process exits right after printing.
-fn scan_one_vst3(path: &str) -> Result<Vec<PluginDescriptor>, String> {
+/// `GetPluginFactory()` return in a `ComPtr`, and describes the factory (`describe_vst3`). No
+/// `FreeLibrary`: the child process exits right after printing.
+fn scan_one_vst3(path: &str) -> Result<ScanOutcome, String> {
     use std::os::windows::ffi::OsStrExt;
     use vst3::ComPtr;
-    use vst3::Steinberg::{
-        kResultOk, IPluginFactory, IPluginFactory2, IPluginFactory2Trait, IPluginFactoryTrait,
-        PClassInfo, PClassInfo2,
-    };
+    use vst3::Steinberg::IPluginFactory;
     use windows::core::{s, PCWSTR};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
@@ -1435,7 +1524,28 @@ fn scan_one_vst3(path: &str) -> Result<Vec<PluginDescriptor>, String> {
             std::mem::transmute(gpf);
         let factory = ComPtr::from_raw(get_factory())
             .ok_or_else(|| "GetPluginFactory returned null".to_string())?;
+        Ok(describe_vst3(&factory, path))
+    }
+}
 
+/// A VST3 factory's `Audio Module Class` descriptors, and whether its classes may change at the
+/// next load (`kClassesDiscardable` in its factory info: the outcome is never cached). The
+/// descriptor `id` is the class TUID hex-encoded — a stable id `plugin_load` parses back to
+/// `createInstance` the exact class.
+///
+/// # Safety
+/// `factory` is a live factory; its calls run the plugin's code (the scan child's isolation).
+unsafe fn describe_vst3(factory: &vst3::ComPtr<vst3::Steinberg::IPluginFactory>, path: &str) -> ScanOutcome {
+    use vst3::ComPtr;
+    use vst3::Steinberg::{
+        kResultOk, PFactoryInfo_::FactoryFlags_::kClassesDiscardable, IPluginFactory2, IPluginFactory2Trait, IPluginFactoryTrait,
+        PClassInfo, PClassInfo2, PFactoryInfo,
+    };
+    // SAFETY: the caller's contract; every out-pointer is a local the call fills.
+    unsafe {
+        let mut factory_info: PFactoryInfo = std::mem::zeroed();
+        let uncacheable = factory.getFactoryInfo(&mut factory_info) == kResultOk
+            && factory_info.flags & kClassesDiscardable != 0;
         let count = factory.countClasses();
         // IPluginFactory2 (when the factory implements it — most modern plugins) carries
         // `subCategories`, which classifies instrument vs Fx. Fall back to PClassInfo (no
@@ -1488,7 +1598,7 @@ fn scan_one_vst3(path: &str) -> Result<Vec<PluginDescriptor>, String> {
                 is_effect,
             });
         }
-        Ok(out)
+        ScanOutcome { plugins: out, unsupported: None, uncacheable }
     }
 }
 

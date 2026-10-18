@@ -452,14 +452,16 @@ pub(super) fn serve<P: OwnedPlugin>(
             }
             if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
                 match request {
-                    OwnerRequest::OpenEditor(cancelled, reply) => {
+                    OwnerRequest::OpenEditor(_, reply) => {
                         let was_closed = plugin.editor() == Editor::Closed;
                         let res = if was_closed { plugin.editor_open() } else { Ok(()) };
-                        // Opened after the caller's 5 s: it reported failure, so close what this opened.
-                        if was_closed && res.is_ok() && cancelled.load(Relaxed) {
+                        let opened = was_closed && res.is_ok();
+                        // The reply is a rendezvous: one that finds no caller came after its 5 s, and
+                        // the caller reported failure, so close what this opened (never an editor that
+                        // was open before it).
+                        if reply.send(res).is_err() && opened {
                             plugin.editor_close();
                         }
-                        let _ = reply.send(res);
                     }
                     OwnerRequest::CloseEditor(_, reply) => {
                         if plugin.editor() != Editor::Closed {
@@ -700,6 +702,8 @@ fn spawn_within(
             params_tx,
             param_ids,
             edited,
+            #[cfg(test)]
+            pushed: None,
         }),
         Ok(Err(e)) => {
             running.store(false, Release);
@@ -732,6 +736,9 @@ pub(crate) struct EngineSlotHandle {
     param_ids: ParamIds,
     /// The owner's `ToneKeeper` flag: a host parameter set is a change to save.
     edited: Arc<AtomicBool>,
+    /// Test-only: runs inside `set_param` between its push and the controller's request.
+    #[cfg(test)]
+    pushed: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl EngineSlotHandle {
@@ -754,24 +761,26 @@ impl EngineSlotHandle {
     /// renders, and a VST3 edit controller is told as well (`src-tauri/AGENTS.md` § Plugin hosting,
     /// "Host-set VST3 params go to BOTH halves"). Err for an id the plugin never listed (an unknown
     /// id can crash a plugin) or a full ring; the controller only hears what the processor got.
+    /// The ring's lock is held through the controller's request too, so two sets from two threads
+    /// reach the processor and the controller in the same order (a VST3's halves agree on the
+    /// last value).
     pub(crate) fn set_param(&self, id: u32, value: f64) -> Result<(), String> {
         let slot = self.slot;
         let known = self.param_ids.read().map(|set| set.contains(&id)).unwrap_or(false);
         if !known {
             return Err(format!("parameter {id} is not one the plugin in slot {slot} listed"));
         }
-        let pushed = self
-            .params_tx
-            .lock()
-            .map_err(|_| format!("slot {slot} event queue is unavailable (lock poisoned)"))?
-            .push(ParamEvent { id, value })
-            .is_ok();
-        if !pushed {
+        let mut ring = self.params_tx.lock().map_err(|_| format!("slot {slot} event queue is unavailable (lock poisoned)"))?;
+        if ring.push(ParamEvent { id, value }).is_err() {
             return Err(format!("slot {slot} event queue is full; parameter {id} change was dropped"));
         }
         self.edited.store(true, Release);
-        if self.format == PluginFormat::Vst3 {
-            let _ = self.requests.send(OwnerRequest::SetParamNormalized(id, value));
+        #[cfg(test)]
+        if let Some(pushed) = &self.pushed {
+            pushed();
+        }
+        if self.format == PluginFormat::Vst3 && self.requests.send(OwnerRequest::SetParamNormalized(id, value)).is_err() {
+            return Err(format!("slot {slot} owner thread gone; parameter {id} reached the processor, not the controller"));
         }
         Ok(())
     }
@@ -1040,6 +1049,10 @@ mod tests {
         before_wait: Hold,
         /// Taken inside the next `reinstall`, the restart's activation.
         reinstalling: Hold,
+        /// The unit's end of the param ring, which no unit drains here: the test reads it.
+        ring: Mutex<Option<Consumer<ParamEvent>>>,
+        /// What a VST3 edit controller would hear (`set_param_normalized`), in order.
+        controller: Mutex<Vec<(u32, f64)>>,
     }
 
     /// A plugin with nothing behind it, as `serve` drives every format: a floating editor that is a
@@ -1082,20 +1095,99 @@ mod tests {
             self.0.editor_open.store(false, Relaxed);
             self.0.closes.fetch_add(1, Relaxed);
         }
+        fn set_param_normalized(&mut self, id: u32, value: f64) {
+            self.0.controller.lock().unwrap().push((id, value));
+        }
         fn release(self, unit: Option<Box<Silent>>) {
             drop(unit);
         }
     }
 
     fn load_fake(device: &TestDevice, shared: &Arc<Shared>) -> EngineSlotHandle {
+        load_fake_as(PluginFormat::Clap, device, shared)
+    }
+
+    fn load_fake_as(format: PluginFormat, device: &TestDevice, shared: &Arc<Shared>) -> EngineSlotHandle {
         let shared = shared.clone();
-        spawn(PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
+        spawn(format, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
             serve(ctx, move |setup| {
                 let rate = setup.slot.rate().ok_or("no audio device is open")?;
+                *shared.ring.lock().unwrap() = Some(setup.params);
                 Ok(Loaded { plugin: Fake(shared), unit: Box::new(Silent), name: "Fake".to_string(), rate, tone: None })
             })
         })
         .expect("the fake loads")
+    }
+
+    /// An editor open whose caller stops waiting after the owner's cancel check (its 5 s run out
+    /// as the editor comes up) was reported as failed: the editor this request opened must not stay
+    /// open behind the player's back.
+    #[test]
+    fn an_editor_opened_for_a_caller_that_stopped_waiting_is_closed_again() {
+        let _one = one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
+        let shared = Arc::new(Shared::default());
+        let handle = load_fake(&device, &shared);
+        let (reply, answer) = super::super::owner_reply_channel();
+        handle.requests.send(OwnerRequest::OpenEditor(Arc::new(AtomicBool::new(false)), reply)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !shared.editor_open.load(Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(shared.editor_open.load(Relaxed), "the owner opens the editor");
+        // The caller has stopped receiving but its end still exists (between its timeout and the drop).
+        std::thread::sleep(Duration::from_millis(100));
+        drop(answer);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shared.closes.load(Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(shared.closes.load(Relaxed), 1, "the owner closes what it opened");
+        assert!(!shared.editor_open.load(Relaxed));
+        // An editor that was open before an undelivered open stays open.
+        assert_eq!(handle.open_editor(), Ok(()));
+        let (reply, answer) = super::super::owner_reply_channel();
+        drop(answer);
+        handle.requests.send(OwnerRequest::OpenEditor(Arc::new(AtomicBool::new(false)), reply)).unwrap();
+        assert_eq!(handle.close_editor(), Ok(()), "served after that open");
+        assert_eq!(shared.closes.load(Relaxed), 2, "closed once more, by the close alone");
+        handle.unload().expect("it unloads");
+    }
+
+    /// Two host sets of one VST3 parameter from two threads, the first paused between its push and
+    /// its controller request: the processor and the controller must hear them in the same order,
+    /// or the halves end on different values.
+    #[test]
+    fn two_concurrent_param_sets_reach_both_halves_in_one_order() {
+        let _one = one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
+        let shared = Arc::new(Shared::default());
+        let mut handle = load_fake_as(PluginFormat::Vst3, &device, &shared);
+        handle.param_ids.write().unwrap().insert(7);
+        let pause = Arc::new(Hold::default());
+        let (there, go) = pause.arm();
+        let paused = pause.clone();
+        handle.pushed = Some(Box::new(move || paused.take()));
+        std::thread::scope(|scope| {
+            let handle = &handle;
+            let first = scope.spawn(move || handle.set_param(7, 0.25));
+            there.recv_timeout(Duration::from_secs(5)).expect("the first set has pushed");
+            let second = scope.spawn(move || handle.set_param(7, 0.75));
+            // Room for the second to run to its end, if nothing holds it back.
+            std::thread::sleep(Duration::from_millis(100));
+            go.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), Ok(()));
+            assert_eq!(second.join().unwrap(), Ok(()));
+        });
+        let mut ring = shared.ring.lock().unwrap().take().expect("the load kept the ring");
+        let processor: Vec<(u32, f64)> = std::iter::from_fn(|| ring.pop().ok()).map(|e| (e.id, e.value)).collect();
+        assert_eq!(processor, [(7, 0.25), (7, 0.75)]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shared.controller.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(*shared.controller.lock().unwrap(), processor, "the controller hears them in the processor's order");
+        handle.unload().expect("it unloads");
     }
 
     /// A close request that waited through a restart whose cycle outlasted its caller's 5 s: the

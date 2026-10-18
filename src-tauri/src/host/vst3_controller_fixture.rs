@@ -9,6 +9,8 @@ use vst3::Steinberg::{char16, int16, IBStream, TBool};
 
 pub(super) struct FixtureController {
     param_count: AtomicI32,
+    /// The `ParameterInfo.flags` of each index `getParameterInfo` answers.
+    param_flags: [AtomicI32; 16],
     /// The handler the controller currently holds, and how often the host set one.
     pub(super) handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     handler_sets: AtomicUsize,
@@ -21,12 +23,15 @@ pub(super) struct FixtureController {
     /// `initialize` fails; a controller that failed it must never be terminated.
     pub(super) refuse_init: AtomicBool,
     pub(super) terminates: AtomicUsize,
+    /// What the views it creates saw, in order (`RefusingView`).
+    view_calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl FixtureController {
     pub(super) fn new(param_count: i32) -> Self {
         Self {
             param_count: AtomicI32::new(param_count),
+            param_flags: Default::default(),
             handler: Mutex::new(None),
             handler_sets: AtomicUsize::new(0),
             set_normalized: Mutex::new(Vec::new()),
@@ -34,6 +39,7 @@ impl FixtureController {
             state_calls: Mutex::new(Vec::new()),
             refuse_init: AtomicBool::new(false),
             terminates: AtomicUsize::new(0),
+            view_calls: Arc::default(),
         }
     }
     fn held_handler(&self) -> Option<usize> {
@@ -83,7 +89,7 @@ impl IEditControllerTrait for FixtureController {
         let info = &mut *info;
         info.id = 1000 + index as u32;
         info.defaultNormalizedValue = 0.5;
-        info.flags = 0;
+        info.flags = self.param_flags[index as usize].load(Relaxed);
         kResultOk
     }
     unsafe fn getParamStringByValue(
@@ -122,15 +128,27 @@ impl IEditControllerTrait for FixtureController {
         kResultOk
     }
     unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
-        ComWrapper::new(RefusingView)
+        ComWrapper::new(RefusingView { calls: self.view_calls.clone(), parent: AtomicIsize::new(0) })
             .to_com_ptr::<IPlugView>()
             .map_or(std::ptr::null_mut(), ComPtr::into_raw)
     }
 }
 
 /// A view that refuses `attached`, so an editor open walks every step up to the attach and then
-/// fails before its host window is ever shown.
-struct RefusingView;
+/// fails before its host window is ever shown. It records its frame calls, and on its release
+/// whether the window it was offered still exists.
+struct RefusingView {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    parent: AtomicIsize,
+}
+impl Drop for RefusingView {
+    fn drop(&mut self) {
+        let parent = HWND(self.parent.load(Relaxed) as *mut c_void);
+        // SAFETY: a window-handle query; a destroyed handle answers false.
+        let alive = unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(parent)).as_bool() };
+        self.calls.lock().unwrap().push(if alive { "released, window alive" } else { "released, window gone" });
+    }
+}
 impl Class for RefusingView {
     type Interfaces = (IPlugView,);
 }
@@ -138,7 +156,8 @@ impl IPlugViewTrait for RefusingView {
     unsafe fn isPlatformTypeSupported(&self, _type: FIDString) -> tresult {
         kResultTrue
     }
-    unsafe fn attached(&self, _parent: *mut c_void, _type: FIDString) -> tresult {
+    unsafe fn attached(&self, parent: *mut c_void, _type: FIDString) -> tresult {
+        self.parent.store(parent as isize, Relaxed);
         kResultFalse
     }
     unsafe fn removed(&self) -> tresult {
@@ -168,7 +187,8 @@ impl IPlugViewTrait for RefusingView {
     unsafe fn onFocus(&self, _state: TBool) -> tresult {
         kResultOk
     }
-    unsafe fn setFrame(&self, _frame: *mut IPlugFrame) -> tresult {
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        self.calls.lock().unwrap().push(if frame.is_null() { "setFrame(null)" } else { "setFrame" });
         kResultOk
     }
     unsafe fn canResize(&self) -> tresult {
@@ -202,6 +222,19 @@ fn a_malformed_parameter_count_is_an_error_not_an_abort() {
     assert!(params.iter().all(|p| p.default_value == 0.5 && p.value == 0.25));
 }
 
+/// A read-only parameter (a meter) and a hidden one are left out of the listing, which is also the
+/// set of ids a host set may use (`ParamIds`, the CLAP fixture's engine test sets one).
+#[test]
+fn read_only_and_hidden_params_are_not_listed() {
+    use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsReadOnly};
+    let (obj, ctl) = controller(4);
+    obj.param_flags[0].store(kIsReadOnly, Relaxed);
+    obj.param_flags[1].store(kCanAutomate, Relaxed);
+    obj.param_flags[2].store(kIsHidden, Relaxed);
+    let params = list_vst3_params(&ctl).expect("it lists");
+    assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1001, 1003]);
+}
+
 /// The owner sets ONE component handler at load. An editor open (here refused at the attach,
 /// after createView, setFrame, getSize and the host window) must leave exactly that handler in
 /// the controller: an editor-owned replacement would be dropped at close while the controller
@@ -211,6 +244,7 @@ fn an_editor_open_leaves_the_load_time_component_handler_in_place() {
     let (obj, ctl) = controller(3);
     let load_handler = ComWrapper::new(LfComponentHandler {
         event_tx: Arc::new(Mutex::new(rtrb::RingBuffer::<ParamEvent>::new(4).0)),
+        edited: Arc::new(AtomicBool::new(false)),
         param_changed: Box::new(|_, _| {}),
         restart: Arc::new(RestartFlags::default()),
     });
@@ -229,4 +263,14 @@ fn an_editor_open_leaves_the_load_time_component_handler_in_place() {
         Some(hp.as_ptr() as usize),
         "the controller still holds the load-time handler"
     );
+}
+
+/// A view that fails to attach is cleaned up in the open editor's order: it loses its frame and is
+/// released while the frame and the host window still exist, the window destroyed after it.
+#[test]
+fn a_view_that_fails_to_attach_is_released_before_its_frame_and_window() {
+    let (obj, ctl) = controller(3);
+    let err = vst3_editor_open(&ctl, 0).err().expect("the fixture view refuses to attach");
+    assert!(err.contains("attached"), "{err}");
+    assert_eq!(*obj.view_calls.lock().unwrap(), ["setFrame", "setFrame(null)", "released, window alive"]);
 }

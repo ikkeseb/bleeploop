@@ -20,7 +20,7 @@ use std::time::Duration;
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamInfoBuffer,
-    ParamRescanFlags, PluginParams,
+    ParamInfoFlags, ParamRescanFlags, PluginParams,
 };
 use clack_extensions::gui::{
     GuiApiType, GuiConfiguration, GuiSize, HostGui, HostGuiImpl, PluginGui, Window,
@@ -70,7 +70,8 @@ const MAX_EVENTS_PER_BLOCK: usize = 256;
 /// CANCELLATION token. Dropping the reply receiver on a timeout does NOT cancel a queued request,
 /// and a hosted GUI can block this thread past the caller's 5 s wait — so the owner must know the
 /// caller gave up: it skips the not-yet-started request (`take_uncancelled`) and ROLLS BACK a late
-/// success (the `OpenEditor` arms close what they opened). `SaveTone`/`ListParams` carry no token:
+/// success (the `OpenEditor` arm closes what it opened when its reply finds no caller:
+/// `owner_reply_channel`). `SaveTone`/`ListParams` carry no token:
 /// none of them changes what the plugin plays. No request pushes state INTO a running plugin: a tone
 /// is restored only inside a load (`host/tone.rs`).
 pub enum OwnerRequest {
@@ -114,6 +115,14 @@ pub(super) fn publish_param_ids(ids: &ParamIds, params: &[ParamDesc]) {
     }
 }
 
+/// The reply channel of a request the caller waits on with a bound (`owner_request_5s`).
+/// Rendezvous, for `load_ready_channel`'s reason: a reply sent once the caller has stopped waiting
+/// fails at the owner instead of sitting in the channel, so the owner learns it was not delivered
+/// and undoes what it did (the `OpenEditor` arm closes the editor it opened).
+fn owner_reply_channel<T>() -> (std::sync::mpsc::SyncSender<T>, std::sync::mpsc::Receiver<T>) {
+    std::sync::mpsc::sync_channel(0)
+}
+
 /// Command-side path for the REVERSIBLE mutating requests (editor open/close): mint the
 /// cancellation token + reply channel, hand `build`'s request to the owner thread, block ≤5 s. On
 /// expiry the token is stored BEFORE the error returns, because the caller books the operation as
@@ -128,7 +137,7 @@ fn owner_request_5s(
         std::sync::mpsc::SyncSender<Result<(), String>>,
     ) -> OwnerRequest,
 ) -> Result<(), String> {
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    let (reply_tx, reply_rx) = owner_reply_channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     req_tx
         .send(build(cancelled.clone(), reply_tx))
@@ -143,7 +152,9 @@ fn owner_request_5s(
 }
 
 /// Enumerate the plugin's parameters (host-side `params` ext, a main-thread call): stable ids,
-/// ranges and the live value. Also what refreshes the slot's known-id set (`ParamIds`).
+/// ranges and the live value. Also what refreshes the slot's known-id set (`ParamIds`), so a
+/// parameter left out here is one the host never sets: read-only ones (the plugin's own output, a
+/// meter) and hidden ones (CLAP `params.h`: the host must not show them).
 fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDesc>, String> {
     let mut handle = instance.plugin_handle();
     let params = handle
@@ -154,6 +165,9 @@ fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDe
     let mut buf = ParamInfoBuffer::new();
     for i in 0..count {
         if let Some(info) = params.get_info(&mut handle, i, &mut buf) {
+            if info.flags.intersects(ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_HIDDEN) {
+                continue;
+            }
             let id = info.id;
             let (min_value, max_value, default_value) =
                 (info.min_value, info.max_value, info.default_value);
@@ -178,7 +192,7 @@ fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDe
 /// caller's 5 s wait expired before the owner reached this request, so it must not run at all: the
 /// frontend has booked the operation as failed, and the reply drops with the request (an ignored
 /// send is already the norm here). A request that PASSES here can still be cancelled mid-call —
-/// that's the `OpenEditor` arms' rollback, not this gate.
+/// that's the `OpenEditor` arm's rollback, not this gate.
 ///
 /// Gated: `OpenEditor`, which would ADD a window late, and `CloseEditor`, whose caller keeps showing
 /// the editor as OPEN when the close errors (`PluginControls.tsx`), so skipping is what both sides
@@ -296,7 +310,11 @@ fn editor_open(
         gui.destroy(&mut handle);
         return Err(format!("gui.show(embedded): {e}"));
     }
-    show_host_window_front(host_win.hwnd);
+    // A test's window stays hidden, as VST2's `show_editor`: nothing appears or takes the focus on
+    // the machine that runs it.
+    if cfg!(not(test)) {
+        show_host_window_front(host_win.hwnd);
+    }
     // From here the plugin's `request_resize` has a window to resize; one left from an earlier
     // editor is forgotten first.
     instance.access_shared_handler(|s| s.pending_resize.store(NO_RESIZE, Release));
@@ -312,25 +330,30 @@ fn editor_open(
 /// Close whatever editor is open, in order: forget the hosted HWND (a late `request_resize` then
 /// finds nothing), the plugin hides + destroys its GUI (removes its child first), our `HostWindow`
 /// drops (DestroyWindow), and the teardown messages are pumped on this owner thread. Every close
-/// path — user close box, floating `closed`, CloseEditor, the timed-out-open rollback, shutdown —
-/// goes through here so none of them can forget a step.
+/// path — user close box, the plugin's `closed`, CloseEditor, the timed-out-open rollback,
+/// shutdown — goes through here so none of them can forget a step. `destroyed`: the plugin reported
+/// its GUI destroyed (`closed(true)`), so it only gets the `destroy` that acknowledges it.
 fn editor_teardown(
     instance: &mut PluginInstance<LfHost>,
     editor: &mut EditorSlot,
     hosted_hwnd: &AtomicIsize,
+    destroyed: bool,
 ) {
     hosted_hwnd.store(0, Release);
-    editor_destroy_gui(instance);
+    editor_destroy_gui(instance, destroyed);
     *editor = EditorSlot::Closed;
     drain_after_editor_teardown();
 }
 
-/// P10.0 owner-thread: tell the plugin to hide + free its GUI. For a hosted editor the caller then
-/// drops the `HostWindow` (DestroyWindow) — do that AFTER, so the plugin removes its child first.
-fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>) {
+/// P10.0 owner-thread: tell the plugin to hide + free its GUI (only free it, `destroyed`: a GUI the
+/// plugin already destroyed). For a hosted editor the caller then drops the `HostWindow`
+/// (DestroyWindow) — do that AFTER, so the plugin removes its child first.
+fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>, destroyed: bool) {
     let mut handle = instance.plugin_handle();
     if let Some(gui) = handle.get_extension::<PluginGui>() {
-        let _ = gui.hide(&mut handle);
+        if !destroyed {
+            let _ = gui.hide(&mut handle);
+        }
         gui.destroy(&mut handle);
     }
 }
@@ -340,10 +363,27 @@ fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>) {
 /// P10.0: cross-thread signal from the plugin's GUI thread → the owner loop. CLAP dispatches
 /// `gui.closed` to the host's `Shared` handler (NOT the main-thread handler), and a JUCE plugin
 /// may call it from its own window thread — so `closed` only sets these flags; the owner loop
-/// swaps `fired` each tick and acks the close (destroy + notify JS) on the main thread.
+/// takes them each tick and acks the close (destroy + notify JS) on the main thread, for a
+/// floating and a hosted editor alike.
 #[derive(Default)]
 struct EditorClosed {
     fired: AtomicBool,
+    /// A `closed` since the last take said `was_destroyed`: the host owes the plugin `destroy`.
+    destroyed: AtomicBool,
+}
+impl EditorClosed {
+    /// [thread-safe] The plugin's `closed`.
+    fn close(&self, was_destroyed: bool) {
+        if was_destroyed {
+            self.destroyed.store(true, Release);
+        }
+        self.fired.store(true, Release);
+    }
+    /// Owner turn: `Some(was_destroyed)` when the plugin reported its editor closed since the last
+    /// take.
+    fn take(&self) -> Option<bool> {
+        self.fired.swap(false, Acquire).then(|| self.destroyed.swap(false, Acquire))
+    }
 }
 
 struct LfShared {
@@ -565,8 +605,9 @@ mod resize_tests {
     }
 }
 /// Host side of the CLAP `gui` extension (P10.0). For a floating editor the plugin manages its own
-/// window, so the only callback that matters is `closed` (user-dismiss → re-sync) and the
-/// resize/show/hide requests don't apply. For a HOSTED editor `request_resize` is real: the plugin
+/// window, so the callback that matters is `closed` (user-dismiss → re-sync, or a GUI the plugin
+/// lost, for either editor form); `request_show`/`request_hide` are refused, as the host does not
+/// act on them. For a HOSTED editor `request_resize` is real: the plugin
 /// wants our window's client area at a new size (its size menu / zoom). On the window's thread a
 /// `true` answer means the host resized and need not call `set_size` back; from another thread it
 /// acknowledges a request the owner applies on its turn, or reverts with `set_size` (CLAP's gui.h
@@ -595,13 +636,15 @@ impl HostGuiImpl for LfShared {
         resize_hosted(hwnd, new_size.width, new_size.height).map_err(HostError::Message)
     }
     fn request_show(&self) -> Result<(), HostError> {
-        Ok(())
+        Err(HostError::Message("the host does not show an editor on the plugin's request"))
     }
     fn request_hide(&self) -> Result<(), HostError> {
-        Ok(())
+        Err(HostError::Message("the host does not hide an editor on the plugin's request"))
     }
-    fn closed(&self, _was_destroyed: bool) {
-        self.editor_closed.fired.store(true, Release);
+    /// [thread-safe] The floating window was closed, or the GUI connection was lost; with
+    /// `was_destroyed` the plugin has destroyed its GUI and the host must acknowledge with `destroy`.
+    fn closed(&self, was_destroyed: bool) {
+        self.editor_closed.close(was_destroyed);
     }
 }
 

@@ -461,13 +461,11 @@ fn load(
     // The load's component handler: an editor's `performEdit` reaches the processor, the caller and
     // the tone (a change to save). It outlives the plugin, whose controller holds it.
     let restart = Arc::new(RestartFlags::default());
-    let (edits, edited) = (sink.clone(), tone.edited());
+    let edits = sink.clone();
     let handler = ComWrapper::new(LfComponentHandler {
         event_tx: params_tx,
-        param_changed: Box::new(move |id, value| {
-            edited.store(true, Release);
-            edits(EngineSlotEvent::ParamChanged { id, value })
-        }),
+        edited: tone.edited(),
+        param_changed: Box::new(move |id, value| edits(EngineSlotEvent::ParamChanged { id, value })),
         restart: restart.clone(),
     });
     let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;

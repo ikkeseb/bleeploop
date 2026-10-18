@@ -13,7 +13,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::windows::ffi::OsStrExt;
 use std::rc::Rc;
 use std::sync::atomic::{
-    AtomicI32, AtomicIsize, AtomicU32,
+    AtomicBool, AtomicI32, AtomicIsize, AtomicU32,
     Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::{Arc, Mutex};
@@ -477,6 +477,8 @@ impl RestartFlags {
 /// `ParamEvent` (drained next block into the real `RtParamChanges` → the processor's
 /// sound changes — required because Surge is separated-component, so `setParamNormalized` on the
 /// controller alone never reaches the processor), and (b) the web UI via `plugin:param-changed`.
+/// An edit the ring cannot take is refused (an error to the plugin, a warning in the log) and the
+/// web UI is not told; the tone is still marked changed, as the controller holds the value.
 /// Runs on the OWNER/UI-pump thread (NEVER the audio thread), so the `Mutex` lock + `emit` are off
 /// the hot path. The id is the controller's OWN id → valid by construction (no hash-id segfault
 /// risk; that only applies to host-originated `setParameter`). ONE handler per load: the owner
@@ -485,8 +487,10 @@ impl RestartFlags {
 /// and a plugin that keeps a raw pointer never holds a dropped one.
 struct LfComponentHandler {
     event_tx: Arc<Mutex<Producer<ParamEvent>>>,
-    /// Tells the web UI a knob moved (`plugin:param-changed`, `id`, `value`). A closure rather
-    /// than the window, so the handler is testable without one.
+    /// The tone's change flag (`ToneKeeper::edited`): raised by every edit, delivered or not.
+    edited: Arc<AtomicBool>,
+    /// Tells the web UI a knob moved (`plugin:param-changed`, `id`, `value`), for an edit the
+    /// processor got. A closure rather than the window, so the handler is testable without one.
     param_changed: Box<dyn Fn(u32, f64) + Send + Sync>,
     restart: Arc<RestartFlags>,
 }
@@ -499,13 +503,14 @@ impl IComponentHandlerTrait for LfComponentHandler {
     }
     unsafe fn performEdit(&self, id: ParamID, value_normalized: ParamValue) -> tresult {
         // Owner thread: serialise with the command-thread producers through the same Mutex (the
-        // SPSC Producer stays single-logical). A full ring (unreachable at human knob rates,
-        // 1024-deep / 256-drained-per-block) drops last-wins — inaudible.
-        if let Ok(mut prod) = self.event_tx.lock() {
-            let _ = prod.push(ParamEvent {
-                id: id as u32,
-                value: value_normalized,
-            });
+        // SPSC Producer stays single-logical). A full ring (1024-deep, 256 drained per block: a
+        // unit that stopped draining) loses this, the newest value, so the plugin is told.
+        let event = ParamEvent { id: id as u32, value: value_normalized };
+        let pushed = self.event_tx.lock().is_ok_and(|mut prod| prod.push(event).is_ok());
+        self.edited.store(true, Release);
+        if !pushed {
+            log::warn!("[plugin_host] VST3 editor edit of parameter {id} refused: the slot's event queue is full or unavailable");
+            return kResultFalse;
         }
         (self.param_changed)(id as u32, value_normalized);
         kResultOk
@@ -864,6 +869,40 @@ enum Vst3Editor {
     },
 }
 
+/// A VST3 editor being opened (`vst3_editor_open`), owner-thread local: a failure before the view
+/// is attached drops it here in `Vst3Editor`'s order, never Rust's reverse order of locals. The
+/// view loses its frame (`setFrame(null)`) and goes first, while the frame and the host window
+/// still live; then the frame; then the window. Only an attached view becomes `Vst3Editor::Open`.
+struct OpeningEditor {
+    view: Option<ComPtr<IPlugView>>,
+    frame: Option<ComWrapper<LfPlugFrame>>,
+    win: Option<HostWindow>,
+}
+impl OpeningEditor {
+    /// The view attached: the open editor takes over the order.
+    fn attached(mut self) -> Vst3Editor {
+        match (self.view.take(), self.frame.take(), self.win.take()) {
+            (Some(view), Some(_frame), Some(win)) => Vst3Editor::Open { view, _frame, win },
+            _ => unreachable!("an editor attaches with its view, frame and window"),
+        }
+    }
+}
+impl Drop for OpeningEditor {
+    fn drop(&mut self) {
+        if let Some(view) = self.view.take() {
+            if self.frame.is_some() {
+                // SAFETY: owner thread; `view` is live, and a null frame is the VST3 way to detach.
+                unsafe {
+                    let _ = view.setFrame(std::ptr::null_mut());
+                }
+            }
+            drop(view);
+        }
+        drop(self.frame.take());
+        drop(self.win.take());
+    }
+}
+
 /// Open the VST3 editor on the owner thread, in an owner-less host window (`create_host_window`).
 /// `controller` is the edit controller the load set up: the component itself, or a separated one
 /// (`obtain_controller`, Surge's case); a plugin with neither has no editor. Mirrors the CLAP
@@ -887,8 +926,12 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
         if view.isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue {
             return Err("VST3 view does not support HWND embedding".to_string());
         }
+        // From here every early return drops the editor in its own order (`OpeningEditor`). It
+        // holds the view's last reference: the local below is declared after it, so drops first.
+        let mut opening = OpeningEditor { view: Some(view), frame: None, win: None };
+        let view = opening.view.clone().expect("the view was just set");
         // 4. Give the plugin our IPlugFrame BEFORE attach (some plugins query it during attach).
-        let frame = ComWrapper::new(LfPlugFrame::new());
+        let frame = opening.frame.insert(ComWrapper::new(LfPlugFrame::new()));
         if let Some(fp) = frame.to_com_ptr::<IPlugFrame>() {
             let _ = view.setFrame(fp.as_ptr());
         }
@@ -903,19 +946,19 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             (900, 600) // mirror the CLAP editor_open fallback
         };
         // 6. Host window (reused rt_host helper; sizes the CLIENT area via AdjustWindowRectEx).
-        let win = create_host_window(w, h)?;
+        let hwnd = create_host_window(w, h).map(|win| opening.win.insert(win).hwnd)?;
         // From here a plugin-initiated `resizeView` has a window to resize.
-        frame.hwnd.store(win.hwnd.0 as isize, Release);
+        frame.hwnd.store(hwnd.0 as isize, Release);
         // 7. Attach the plugin view into our window. windows-crate HWND.0 is already *mut c_void.
         log::info!("[plugin_host] vst3 editor_open slot {slot}: attached…");
-        if view.attached(win.hwnd.0 as *mut c_void, kPlatformTypeHWND) != kResultOk {
+        if view.attached(hwnd.0 as *mut c_void, kPlatformTypeHWND) != kResultOk {
             return Err("IPlugView::attached failed".to_string());
         }
         // 8. Tell the plugin the final size, then show our window. The size is read back from the
         //    window, not reused from step 5: a plugin that calls `resizeView` from inside
         //    `attached()` (its saved zoom/size) has already resized the client area, and repeating
         //    the pre-attach size here would undo that layout.
-        let (w, h) = client_size(win.hwnd);
+        let (w, h) = client_size(hwnd);
         let mut final_rect = ViewRect {
             left: 0,
             top: 0,
@@ -923,13 +966,9 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             bottom: h as i32,
         };
         let _ = view.onSize(&mut final_rect);
-        show_host_window_front(win.hwnd);
+        show_host_window_front(hwnd);
         log::info!("[plugin_host] VST3 editor embedded into host window ({w}x{h})");
-        Ok(Vst3Editor::Open {
-            view,
-            _frame: frame,
-            win,
-        })
+        Ok(opening.attached())
     }
 }
 
@@ -1146,7 +1185,8 @@ fn string128_to_string(s: &String128) -> String {
 }
 
 /// Enumerate the VST3 plugin's automatable params off the edit controller (owner-thread call —
-/// the controller is `!Send`). Skips hidden params. VST3 param values are always normalised
+/// the controller is `!Send`). Skips hidden and read-only params (a meter, a value the plugin
+/// reports): this listing is also the set of ids the host may set (`ParamIds`). VST3 param values are always normalised
 /// 0..1, so `min/max` are 0.0/1.0 and `default` is `defaultNormalizedValue`. `None` controller
 /// (plugin has no editor controller) → empty list, so the UI degrades gracefully.
 fn list_vst3_params(
@@ -1166,10 +1206,8 @@ fn list_vst3_params(
             if ctl.getParameterInfo(i, &mut info) != kResultOk {
                 continue;
             }
-            if info.flags
-                & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsHidden
-                != 0
-            {
+            use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kIsHidden, kIsReadOnly};
+            if info.flags & (kIsHidden | kIsReadOnly) != 0 {
                 continue;
             }
             out.push(ParamDesc {
@@ -1272,6 +1310,7 @@ mod restart_flag_tests {
         let emits = emitted.clone();
         let handler = ComWrapper::new(LfComponentHandler {
             event_tx: Arc::new(Mutex::new(event_tx)),
+            edited: Arc::new(AtomicBool::new(false)),
             param_changed: Box::new(move |_, _| {
                 emits.fetch_add(1, Relaxed);
             }),
@@ -1309,6 +1348,43 @@ mod restart_flag_tests {
         );
         assert_ne!(notices & RestartFlags::RELIST, 0);
         assert_eq!((restart.take(), restart.take_notify()), (0, 0), "drained once");
+    }
+}
+
+/// An editor edit the ring cannot take is refused to the plugin and never reported to the web UI
+/// as delivered; the tone still counts it as a change (the controller holds it), and the value the
+/// ring took first stays the one the processor gets.
+#[cfg(test)]
+mod perform_edit_tests {
+    use super::*;
+    use rtrb::RingBuffer;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn an_editor_edit_into_a_full_queue_is_refused_and_still_marks_the_tone() {
+        let (event_tx, mut event_rx) = RingBuffer::<ParamEvent>::new(1);
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let edited = Arc::new(AtomicBool::new(false));
+        let emits = emitted.clone();
+        let handler = ComWrapper::new(LfComponentHandler {
+            event_tx: Arc::new(Mutex::new(event_tx)),
+            edited: edited.clone(),
+            param_changed: Box::new(move |_, _| {
+                emits.fetch_add(1, Relaxed);
+            }),
+            restart: Arc::new(RestartFlags::default()),
+        });
+        let hp = handler.to_com_ptr::<IComponentHandler>().expect("IComponentHandler");
+        // SAFETY: `hp` is a live pointer to `handler`, held for every call in this test.
+        assert_eq!(unsafe { hp.performEdit(7, 0.25) }, kResultOk);
+        assert!(edited.swap(false, Relaxed));
+        assert_eq!(emitted.load(Relaxed), 1);
+        // SAFETY: as above.
+        assert_ne!(unsafe { hp.performEdit(7, 0.75) }, kResultOk, "the full queue refuses the edit");
+        assert_eq!(emitted.load(Relaxed), 1, "the web UI is not told of an edit the processor lacks");
+        assert!(edited.load(Relaxed), "the tone still counts the change");
+        assert_eq!(event_rx.pop().map(|e| e.value).ok(), Some(0.25));
+        assert!(event_rx.pop().is_err());
     }
 }
 
