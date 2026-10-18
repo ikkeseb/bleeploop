@@ -460,6 +460,12 @@ impl Rack {
         self.slots.get(slot).is_some_and(|s| s.live)
     }
 
+    /// Whether slot `slot`'s live gate passes input from the cursor on: live, or its ramp out not yet
+    /// ended.
+    pub(crate) fn gate_open(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(|s| s.live || self.cursor < s.live_end)
+    }
+
     /// GO LIVE on or off at frame `now`: the live gate ramps from where it is to the new target over
     /// `live_frames` from `now` (a reversal mid-ramp from the gain it reached). The same target again
     /// changes nothing. Before the first rendered frame it sets the starting state, settled.

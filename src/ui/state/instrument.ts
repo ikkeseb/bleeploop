@@ -32,7 +32,7 @@ import {
   slotPlugins,
   withAt,
 } from './instrument-slots';
-import { disarmInputInternal, holdEngineLive, inputArmed, resendEngineLive, resumeEngineLive } from './native-io';
+import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
@@ -147,15 +147,16 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
 
 /**
  * Send what this module and `native-io.ts` keep to an engine that may not have it (a new engine, a
- * WebView reload): the note target, the slot gains, the instrument levels and the live slots. A reload's
- * held notes are native MIDI's to release (the document's epoch), and a new engine gets the target and
- * wheels from the settings replay.
+ * WebView reload): the note target, the slot gains, the instrument levels, and on the page's `first`
+ * reset no live slot (a reload's disarm). A later reset sends no live flag: the engine's settings
+ * replay has them, and the feed's may be older than a live-off in flight (an unload's). A reload's held notes are native MIDI's to release (the document's epoch), and a new
+ * engine gets the target and wheels from the settings replay.
  */
-export function engineResync(): void {
+export function engineResync(first: boolean): void {
   applyActiveRouting();
   for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
   for (const { id } of SYNTHS) sendEngine({ SetInstrumentGain: [id as InstrumentId, synthGains()[id]] });
-  resendEngineLive();
+  if (first) disarmEngineLive();
 }
 
 /** Point the note target at the ACTIVE slot. Idempotent (native MIDI ignores the same slot and target),

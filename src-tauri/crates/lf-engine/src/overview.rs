@@ -25,6 +25,8 @@ pub struct Overview {
     lanes: [LaneCell; TRACK_COUNT],
     /// Each plugin slot's live flag, as the last applied `Command::SetSlotLive` left it.
     slots_live: [AtomicBool; SLOT_COUNT],
+    /// Each slot's live gate passes input (live, or still ramping out), as the last rendered block left it.
+    slots_open: [AtomicBool; SLOT_COUNT],
     buffers: Box<[Peaks]>,
     capacity: usize,
 }
@@ -78,6 +80,7 @@ impl Overview {
             grid: AtomicI64::new(0),
             lanes: std::array::from_fn(|_| LaneCell::default()),
             slots_live: std::array::from_fn(|_| AtomicBool::new(false)),
+            slots_open: std::array::from_fn(|_| AtomicBool::new(false)),
             buffers: (0..buffers).map(|_| Peaks::new(bins)).collect(),
             capacity,
         }
@@ -96,6 +99,19 @@ impl Overview {
     pub(crate) fn set_slot_live(&self, slot: usize, live: bool) {
         if let Some(l) = self.slots_live.get(slot) {
             l.store(live, Relaxed);
+        }
+    }
+
+    /// Whether plugin slot `slot`'s live gate passed any input in the last rendered block (live, or its
+    /// ramp out not yet ended); false out of range. Once false after a live-off, a removal crossfades
+    /// the unit to silence: the host's unload waits for it (`engine_io::EngineHost::silence_slot`).
+    pub fn slot_gate_open(&self, slot: usize) -> bool {
+        self.slots_open.get(slot).is_some_and(|l| l.load(Relaxed))
+    }
+
+    pub(crate) fn set_slot_gate_open(&self, slot: usize, open: bool) {
+        if let Some(l) = self.slots_open.get(slot) {
+            l.store(open, Relaxed);
         }
     }
 

@@ -737,6 +737,9 @@ impl Engine {
             }
             f = next;
         }
+        for slot in 0..SLOT_COUNT {
+            self.looper.overview().set_slot_gate_open(slot, self.rack.gate_open(slot));
+        }
         self.session.advance(&self.looper, n as Frame);
         left.copy_from_slice(mix_l);
         right.copy_from_slice(mix_r);

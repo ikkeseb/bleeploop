@@ -110,6 +110,10 @@ it.
   the keyboard): are the FX keys and the 91 px sliders big enough to hit while playing?
 - Buffer 256 and 64: the take on the click at each size, a short switch gap, and a plugin loaded while
   loops play crossfading in without a click (machine: `tests/slots.rs`).
+- An amp-sim unloaded or swapped while GO LIVE is on: the slot goes off live first, so no dry DI is
+  heard or recorded between the plugins (machine: `tests/slots.rs`, `engine_io/plugins.rs`); a
+  plugin-requested restart (a FabFilter latency-mode change) keeps the slot live. Is the swap a clean
+  gap with no dry flash?
 - An instrument entering or leaving a slot while GO LIVE is on: the dry guitar fades across where it
   stepped before (machine: `tests/slots.rs`). Is the change inaudible mid-note?
 - The input meter on each live slot's card (its own input, a held peak, CLIP), INPUT LIVE and the "A

@@ -44,7 +44,9 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   plugin-requested restart (CLAP `request_restart`, VST3 `restartComponent`, VST2
   `audioMasterIOChanged`) and teardown; an FX slot
   passes dry, an instrument slot is silent, loops and click never wait.
-- **Unload order is load-bearing:** `running=false` → `OwnerRequest::Wake` → join the owner, which
+- **Unload order is load-bearing:** the slot goes off live and the engine's gate closes on it
+  (`EngineHost::silence_slot`, ≤1 s, else the unload is refused and the plugin stays; a plugin-requested
+  restart skips it and stays live) → `running=false` → `OwnerRequest::Wake` → join the owner, which
   removes the unit from the engine (crossfade to bypass, `stop` on the audio thread; ≤2 s,
   `REMOVE_TIMEOUT`) → saves the tone if it changed → deactivate → terminate → the module unloads
   LAST. A unit the engine does not hand back leaves the plugin loaded (leaked), never unloaded under a
@@ -433,10 +435,7 @@ plugin-GUI work.
   (`src/app/boot.ts` 51-52), so one uncached plugin can hold the saved amp-sim back by the 20 s scan
   timeout: a scan of given paths first; (b) `app_update_install` downloads and installs in one call
   (`update.rs` 128-131) after the UI's save, so a take committed during the download is lost: split
-  download and install, with a native freeze of jam changes (MIDI included) and a fresh save between;
-  (c) `SlotHost::remove` runs with the slot still live, so dry input passes to monitor and record
-  (`lf-engine` `slots.rs` 544) if the UI's live-off is late or dropped: force live-off, the input gate
-  ramped to zero, before an unload's removal.
+  download and install, with a native freeze of jam changes (MIDI included) and a fresh save between.
 - `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`
   83-97 logs the failure, counts the swap, and the runner accepts "0 failed". Fix: count a failed open
   as a failed scenario and report swaps done with an editor open (the runner's regex follows).

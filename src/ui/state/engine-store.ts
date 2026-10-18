@@ -798,7 +798,7 @@ function applyFrameNow(f: FeedFrame): void {
   }
   if (f.anchor) plain.clock = f.anchor;
   if (f.reset) adoptSettings(f.settings ?? []);
-  // GO LIVE as the engine applied it, after a reset's resync sent the page's own (`resendEngineLive`).
+  // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
   if (f.live) adoptEngineLive(f.live);
   tookLoop = false;
   for (const ev of f.events) {
@@ -1036,7 +1036,7 @@ function dropMix(i: number, key: MixKey): void {
  * playing session's mix and modes. A lane's mix from here stands only where the frame has no `Mix` for
  * the lane: its Mix events, applied after this, are the mix the engine last applied. The UI still sends what it persists and the engine lacks (the master
  * and click volumes, FADE's bars and the input sends on a first launch) and what it owns: the note
- * target and the slot gains, and the live slots as it last showed them (`engineResync`; the frame's
+ * target and the slot gains, and on the page's first reset no live slot (`engineResync`; the frame's
  * `live` then shows what the engine applied).
  */
 function adoptSettings(settings: readonly EngineCommand[]): void {
@@ -1117,7 +1117,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     if (!sendsKnown.has(id)) lacking.push({ SetInputSend: [id, inputSendOn[id][0]()] });
   }
   sendEngine(...lacking);
-  engineResync();
+  engineResync(plain.resets === 1);
 }
 
 const clampLane = (i: number) => Math.max(0, Math.min(ENGINE_LANES - 1, Math.trunc(i)));

@@ -154,7 +154,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
@@ -973,6 +973,33 @@ impl EngineHost {
             }
         }
         if refused { Err("no audio device is open".to_string()) } else { Ok(()) }
+    }
+
+    /// Take slot `slot` off live and wait (≤ `timeout`) until the engine's gate has closed on it: what a
+    /// plugin's final unload does before its unit leaves (`plugins.rs`), since a removal crossfades the
+    /// unit toward the gated input and a live slot would pass the dry input on to the monitor and the
+    /// record path. The live-off is an ordinary setting (`send`), so a rebuild replays it. Ok at once
+    /// while no device runs (nothing sounds, and the next engine replays the flag); Err when the ring
+    /// refused it or the gate did not close in time.
+    pub(crate) fn silence_slot(&self, slot: u8, timeout: Duration) -> Result<(), String> {
+        self.send(TimedCommand { frame: None, command: Command::SetSlotLive(slot, false) })?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !self.core.running.load(Acquire) {
+                return Ok(());
+            }
+            let open = lock_at(&self.core.ends, LockSite::Ends)
+                .map_err(|_| "engine ends poisoned".to_string())?
+                .as_ref()
+                .map(|ends| ends.overview.slot_gate_open(usize::from(slot)));
+            if open != Some(true) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("slot {slot}'s live input did not close within {} ms", timeout.as_millis()));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// The kept settings, in replay order (a reset frame hands them to the UI).

@@ -283,6 +283,51 @@ fn a_later_effect_crossfades_in_from_its_dry_input_and_out_again_then_stops_and_
     assert!(rig.returned(0).is_none());
 }
 
+/// A plugin's final unload as the host orders it (`engine_io::EngineHost::silence_slot`): live off, the
+/// overview's gate closed (only once its ramp has ended), then the removal: from there no dry input
+/// reaches the monitor or the record path, behind a record delay (slot B's latent live effect) too.
+/// Removed while live, the unit crossfades to the dry input. After the unload, GO LIVE on the emptied
+/// slot (an Off slot) passes the input dry again.
+#[test]
+fn an_unload_after_the_gate_closed_passes_no_dry_input_and_go_live_after_it_does() {
+    for host_waits in [true, false] {
+        let probe = Probe::new();
+        let mut rig = Rig::new();
+        rig.set_inputs(|_| 1.0, |_| 0.0);
+        rig.install(0, Fake::effect(0.0, 0.0, &probe));
+        rig.install(1, Box::new(Delay::new(PLUGIN)));
+        rig.set(Command::SetSlotLive(1, true));
+        rig.advance(4800);
+        let gate = |rig: &Rig| rig.engine.looper().overview().slot_gate_open(0);
+        assert!(gate(&rig), "slot A is live");
+        if host_waits {
+            let off = rig.frame;
+            rig.press(Command::SetSlotLive(0, false));
+            assert!(gate(&rig), "mid-ramp the gate still passes input");
+            while gate(&rig) {
+                assert!(rig.frame < off + 10 * LIVE, "the gate closes");
+                rig.advance(1);
+            }
+            assert!(rig.frame >= off + LIVE, "closed once the ramp has ended");
+        }
+        rig.remove(0);
+        rig.keep_output();
+        rig.advance(4800);
+        let dry = peak(&rig.monitor).max(peak(&rig.record));
+        if host_waits {
+            assert_eq!(dry, 0.0, "no dry input from the removal on, heard or recorded");
+            assert!(rig.returned(0).is_some(), "the unit came back");
+            rig.set(Command::SetSlotLive(0, true));
+            rig.advance(1000);
+            rig.keep_output();
+            rig.advance(1000);
+            assert!(rig.monitor.iter().all(|&x| x == 1.0), "GO LIVE on the emptied slot passes the input dry");
+        } else {
+            assert!(dry > 0.9, "removed live, the dry input comes through ({dry})");
+        }
+    }
+}
+
 #[test]
 fn a_later_instrument_crossfades_in_from_silence_and_out_to_silence() {
     let probe = Probe::new();

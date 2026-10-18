@@ -13,7 +13,8 @@
 //! `frontendEpoch`); only that load moves the slot on. A load that finishes for a replaced document, or
 //! one an unload cancelled meanwhile, unloads what it loaded, and the slot stays out of reach until
 //! the plugin's unit has left the engine; a load for the new document waits for it (≤ `VACATE_WAIT`).
-//! A setup past its bound frees the slot with no unit left in it (`engine_slot::LoadClaim`). An unload
+//! A setup past its bound frees the slot with no unit left in it (`engine_slot::LoadClaim`). A loaded
+//! plugin's unload takes its slot off live first (`silence`), and refuses when it cannot. An unload
 //! that gives up on a shared handle (`unload_handle`) frees it early; `src-tauri/AGENTS.md` § Open
 //! threads.
 //! Every request that changes a slot (load, unload, a parameter, the editor) names its document and is
@@ -35,6 +36,9 @@ use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, Tone
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
 const UNLOAD_WAIT: Duration = Duration::from_secs(6);
+
+/// How long an unload waits for its slot's live gate to close before the unit leaves the engine.
+const LIVE_OFF_WAIT: Duration = Duration::from_secs(1);
 
 /// How long the exit waits, in all, for the slots' tone saves before it unloads them anyway.
 const EXIT_SAVE_WAIT: Duration = Duration::from_secs(2);
@@ -200,8 +204,12 @@ fn loaded(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>) ->
 
 /// Take `slot`'s plugin out of the engine and unload it, for the document `document` names (`None`:
 /// the app's exit). A load still running is cancelled and unloads what it loads; the slot is
-/// `Leaving` until this teardown ends.
-fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>) -> Result<(), String> {
+/// `Leaving` until this teardown ends. With `host`, a loaded plugin's slot goes off live first, its gate
+/// closed (`silence`), and the plugin stays loaded when that fails.
+fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, host: Option<&EngineHost>) -> Result<(), String> {
+    if let Some(host) = host {
+        silence(slots, slot, document, host).map_err(|e| format!("the plugin in slot {slot} stays loaded, as its live input could not be stopped first: {e}"))?;
+    }
     let handle = {
         let mut slots = lock(slots)?;
         if let Some((state, frontend_epoch)) = document {
@@ -223,6 +231,21 @@ fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>) ->
     let unloaded = unload_handle(slot, handle);
     vacate(slots, slot);
     unloaded
+}
+
+/// Before a loaded plugin's final unload: take its slot off live and wait for the engine's gate to close
+/// (`EngineHost::silence_slot`). Removed live, the unit would crossfade toward the gated input, and an
+/// empty live slot passes the dry input on to the monitor and the record path. A plugin-requested
+/// restart removes the unit with the slot still live (`engine_slot::cycle`): it comes back.
+fn silence(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, host: &EngineHost) -> Result<(), String> {
+    let loaded = {
+        let slots = lock(slots)?;
+        if let Some((state, frontend_epoch)) = document {
+            current_document(state, frontend_epoch)?;
+        }
+        matches!(slots[usize::from(slot)], EngineSlot::Loaded { .. })
+    };
+    if loaded { host.silence_slot(slot, LIVE_OFF_WAIT) } else { Ok(()) }
 }
 
 /// A command may still hold the handle for an owner round trip: wait it out (≤ `UNLOAD_WAIT`), then
@@ -312,7 +335,7 @@ impl EngineApp {
     /// `plugin_unload`: take the plugin out of the engine and unload it, for the document with
     /// `frontend_epoch`; a load still running for the slot is cancelled (it unloads what it loads).
     pub(crate) fn plugin_unload(&self, state: &PluginHostState, slot: u8, frontend_epoch: u32) -> Result<(), String> {
-        unload(&self.slots, slot, Some((state, frontend_epoch)))
+        unload(&self.slots, slot, Some((state, frontend_epoch)), self.host().ok().as_ref())
     }
 
     /// On exit, before the unloads: every loaded slot saves its tone at once (each owner on its own
@@ -343,10 +366,15 @@ impl EngineApp {
         }
     }
 
-    /// Every slot's unload, on exit (while the device still plays).
+    /// Every slot's unload, on exit (while the device still plays), each slot off live first; one that
+    /// cannot be is logged and unloads all the same.
     pub(super) fn unload_all(&self) {
+        let host = self.host().ok();
         for slot in 0..lf_engine::SLOT_COUNT as u8 {
-            if let Err(e) = unload(&self.slots, slot, None) {
+            if let Some(Err(e)) = host.as_ref().map(|host| silence(&self.slots, slot, None, host)) {
+                log::error!("[plugin_host] engine slot {slot}: live-off on exit: {e}");
+            }
+            if let Err(e) = unload(&self.slots, slot, None, None) {
                 log::error!("[plugin_host] engine slot {slot}: unload on exit: {e}");
             }
         }
@@ -482,14 +510,35 @@ mod tests {
 
     impl Rig {
         fn new() -> Rig {
+            Rig::with_input(|_| 0.0)
+        }
+
+        /// With `input` as the device input.
+        fn with_input(input: impl Fn(Frame) -> f32 + Send + 'static) -> Rig {
             let one = engine_slot::one_engine_test_at_a_time();
             Rig {
                 slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
                 reload_tones: Mutex::default(),
                 state: PluginHostState::default(),
-                device: TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0),
+                device: TestDevice::start(48_000, 256, Duration::from_millis(5), input),
                 _one: one,
             }
+        }
+
+        /// Wait until the device has rendered `blocks` more blocks.
+        fn play(&self, blocks: u64) {
+            let target = self.device.blocks.load(Relaxed) + blocks;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.device.blocks.load(Relaxed) < target {
+                assert!(Instant::now() < deadline, "the test device stopped rendering");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// The loudest of the last `frames` frames the device played.
+        fn tail_peak(&self, frames: usize) -> f32 {
+            let out = self.device.output.lock().unwrap();
+            out[out.len().saturating_sub(frames)..].iter().fold(0.0, |m, x| m.max(x.abs()))
         }
 
         /// A load into slot 0 for the document with `epoch`, opened by `open`, its reservation waiting
@@ -559,7 +608,7 @@ mod tests {
         assert_eq!(rig.slot(), "empty", "the stale load's reservation is gone");
         let new = reloaded.lock().unwrap().expect("the loader ran");
         assert_eq!(rig.load(r"C:\plugins\Amp.clap", new, Duration::ZERO, &stand_in).as_deref(), Ok("Stand-in"));
-        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, new))), Ok(()));
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, new)), None), Ok(()));
         assert_eq!(rig.slot(), "empty");
     }
 
@@ -624,6 +673,37 @@ mod tests {
         assert_eq!(rig.slot(), "loaded");
     }
 
+    /// A final unload takes its slot off live and waits for the engine's gate before the unit leaves:
+    /// the emptied slot passes no dry input on, and the settings a rebuild replays hold the live-off.
+    /// One whose live-off the engine never applies (no block renders) keeps the plugin loaded.
+    #[test]
+    fn an_unload_takes_its_slot_off_live_before_the_unit_leaves_or_keeps_the_plugin() {
+        let rig = Rig::with_input(|_| 0.5);
+        let host = rig.device.host();
+        host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        rig.play(4);
+        assert!(rig.tail_peak(256) > 0.4, "an empty live slot passes the input dry");
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        rig.play(8);
+        assert!(rig.tail_peak(1024) < 1e-6, "the silent effect is in, live");
+
+        // The engine renders nothing while its lock is held: the live-off is never applied in time.
+        let held = host.core.rt.lock().unwrap();
+        let refused = unload(&rig.slots, 0, Some((&rig.state, epoch)), Some(host)).unwrap_err();
+        drop(held);
+        assert!(refused.contains("stays loaded"), "{refused}");
+        assert_eq!(rig.slot(), "loaded", "the plugin stays");
+
+        host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        rig.play(8);
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), Some(host)), Ok(()));
+        assert_eq!(rig.slot(), "empty");
+        rig.play(8);
+        assert!(rig.tail_peak(8 * 256) < 1e-6, "no dry input after the unload: {}", rig.tail_peak(8 * 256));
+        assert!(host.settings().contains(&Command::SetSlotLive(0, false)), "a rebuild replays the live-off");
+    }
+
     /// An unload from a replaced document, delayed past the reload, finds the new document's plugin in
     /// the slot: it is refused, and so is any other change that document asks for; the plugin stays.
     #[test]
@@ -633,17 +713,17 @@ mod tests {
         assert!(rig.load(r"C:\plugins\Amp.clap", old, Duration::ZERO, &stand_in).is_ok());
         // The reload: the new document clears the slot it found stranded and loads its own plugin.
         let new = rig.state.begin_frontend_session();
-        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, new))), Ok(()));
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, new)), None), Ok(()));
         assert_eq!(rig.slot(), "empty");
         assert!(rig.load(r"C:\plugins\Drive.clap", new, Duration::ZERO, &stand_in).is_ok());
 
-        let late = unload(&rig.slots, 0, Some((&rig.state, old))).unwrap_err();
+        let late = unload(&rig.slots, 0, Some((&rig.state, old)), None).unwrap_err();
         assert!(late.contains("stale frontend epoch"), "{late}");
         let late = loaded(&rig.slots, 0, Some((&rig.state, old))).err().expect("a stale document takes no handle");
         assert!(late.contains("stale frontend epoch"), "{late}");
         assert_eq!(rig.slot(), "loaded");
         assert!(loaded(&rig.slots, 0, Some((&rig.state, new))).unwrap().is_some());
-        assert_eq!(unload(&rig.slots, 0, None), Ok(()), "the app's exit names no document");
+        assert_eq!(unload(&rig.slots, 0, None, None), Ok(()), "the app's exit names no document");
         assert_eq!(rig.slot(), "empty");
     }
 }

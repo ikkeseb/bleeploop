@@ -104,12 +104,10 @@ export async function setEngineInput(on: boolean): Promise<boolean> {
   return setEngineLive(slot, true);
 }
 
-/** On a reset frame, before its flags are adopted: tell a new engine the slots the feed last showed live
- * (the settings replay has them too), and the engine a reloaded page finds that none is (a fresh page
- * shows none). */
-export function resendEngineLive(): void {
-  const [a, b] = inputArmed();
-  sendEngine({ SetSlotLive: [0, a] }, { SetSlotLive: [1, b] });
+/** On the page's first reset frame: no slot is live for a fresh page, so a reloaded one disarms what the
+ * engine still has live. */
+export function disarmEngineLive(): void {
+  sendEngine({ SetSlotLive: [0, false] }, { SetSlotLive: [1, false] });
 }
 
 /** Throw when the engine did not get `slot`'s live flag. `ownToast`: the caller's refusal path tells the

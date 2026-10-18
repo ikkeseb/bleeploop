@@ -9,7 +9,10 @@
  * - two quick presses, the first one's batch still unanswered (`sendHold`), both reach the engine and
  *   end where they started, from the cap and from the pedal's named action alike;
  * - presses made while a source op holds the slot past two seconds (the feed stale meanwhile) apply
- *   once it settles: one press as one toggle, two as none.
+ *   once it settles: one press as one toggle, two as none;
+ * - the page's first reset frame disarms both slots (a reload's disarm), and a later one (a new engine,
+ *   a held feed's resync) sends no live flag: the engine's settings replay is the authority, and the
+ *   feed's flags may be older than an unload's live-off.
  *
  * A tone reload's resume yielding to a press: `slot-sources`. Cannot see the native engine (its command
  * order is the rtrb ring's; `src-tauri/crates/lf-engine/tests/toggles.rs`) or Tauri IPC.
@@ -30,6 +33,19 @@ await probe(async ({ open }) => {
     const { runAction } = await import('/src/app/actions.ts');
     const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const idle = async () => { while (slots.slotPendingCounts().some((n) => n > 0)) await pause(10); };
+    const liveFlags = (from) => lf.native.sent.slice(from).filter((c) => c.SetSlotLive).map((c) => c.SetSlotLive);
+    const out = {};
+    // 0. Reset frames: the page's first, then a later one whose feed shows slot A live.
+    let from = lf.native.sent.length;
+    lf.native.emit({ seq: 1, reset: true, events: [], settings: [], live: [false, false] });
+    await pause(30);
+    out.firstReset = liveFlags(from);
+    from = lf.native.sent.length;
+    lf.native.emit({ seq: 2, reset: true, events: [], settings: [], live: [true, false] });
+    await pause(30);
+    out.laterReset = liveFlags(from);
+    lf.native.emit({ seq: 3, reset: false, events: [], live: [false, false] });
+    await pause(30);
     instrument.selectOff(0);
     instrument.setActiveSlot(0);
     await idle();
@@ -38,10 +54,9 @@ await probe(async ({ open }) => {
     const sentA = (from) =>
       lf.native.sent.slice(from).flatMap((c) =>
         c.Action?.Toggle?.Live === 0 ? ['toggle'] : c.SetSlotLive?.[0] === 0 ? [c.SetSlotLive[1]] : []);
-    const out = {};
 
     // 1. A press sends the toggle.
-    let from = lf.native.sent.length;
+    from = lf.native.sent.length;
     await live.toggleLive(0);
     await pause(30);
     out.press = { sent: sentA(from), live: inputArmed()[0] };
@@ -99,6 +114,8 @@ await probe(async ({ open }) => {
     return out;
   });
   console.log(JSON.stringify(result));
+  assert.deepEqual(result.firstReset, [[0, false], [1, false]], "the page's first reset disarms both slots");
+  assert.deepEqual(result.laterReset, [], 'a later reset sends no live flag');
   assert.deepEqual(result.press, { sent: ['toggle'], live: true }, 'a press sends the toggle, and the engine turns the slot live');
   assert.equal(result.offFirst, false, 'a second press turns it off');
   assert.equal(result.raceWhileHeld, false, 'the feed still shows slot A off');
