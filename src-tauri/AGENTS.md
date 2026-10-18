@@ -410,11 +410,6 @@ plugin-GUI work.
   build's `lf.midiLearn` key (`src/app/midi-actions.ts`). Its module briefing (`midi/mod.rs` header)
   restates ARCHITECTURE's subscription/epoch, nothing-is-stamped, no-device and rebuild-needs-no-WebView
   rules: replace only that overlap with pointers, keep its local access, batch, lock and retry detail.
-- ASSIGN can swallow a release: a binding made live (`MidiHost::assign` → `refresh`) while its note or
-  CC64 is already held through the router makes learn consume the release, and `midi/mod.rs` 789 keeps
-  it from the router, so the note or sustain hangs. Fix: release the router's affected holds when a
-  binding goes live (other owners of the same note kept); a tweak of that last `if` alone is not enough,
-  `outcome.fire` already ran at 776. Test note and sustain.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.

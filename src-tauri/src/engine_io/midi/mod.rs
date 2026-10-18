@@ -792,8 +792,9 @@ impl Core {
     }
 
     /// Which stored bindings are live on the present ports (one snapshot): save the moves resolution
-    /// makes, hand MIDI learn the live ones (a HOLD whose binding left or changed is released), and
-    /// tell the UI when the list changed.
+    /// makes, hand MIDI learn the live ones (a HOLD whose binding left or changed is released, and
+    /// what the router holds under a control that just went live: [`Core::release_bound`]), and tell
+    /// the UI when the list changed.
     fn refresh(&self, st: &mut State) {
         let present: Vec<PortIdentity> = st.ports.iter().map(|p| p.identity.clone()).collect();
         let listed = st.store.listed();
@@ -844,8 +845,10 @@ impl Core {
                 Some(Resolution::Unresolved(Unresolved::SeveralAbsent)) => BindingState::SeveralAbsent,
             });
         }
+        let before = st.learn.bindings().to_vec();
         let fires = st.learn.set_bindings(live.iter().map(|&i| listed[i].binding.clone()).collect());
         st.live = live;
+        self.release_bound(st, &before);
         for fire in fires {
             self.fire(st, fire);
         }
@@ -860,6 +863,34 @@ impl Core {
             st.heard_revision = revision;
             self.emit(MidiEvent::Bindings { bindings, revision });
         }
+    }
+
+    /// The bindings live now that were not (`before`, learn's list before the change): learn consumes
+    /// their messages from now on, so a note or pedal one's port and channel holds through the router
+    /// would never hear its release. The router lets go of it now, for that owner only (another port
+    /// or channel holding the same note keeps it): the note's release, the controller's (a pedal-up
+    /// for CC64, as a learn of it does).
+    fn release_bound(&self, st: &mut State, before: &[Binding]) {
+        let control = |b: &Binding| (b.port_id.clone(), b.channel, b.kind, b.number);
+        let was: Vec<_> = before.iter().map(control).collect();
+        let bound: Vec<(Owner, Kind, u8)> = st
+            .learn
+            .bindings()
+            .iter()
+            .filter(|b| !was.contains(&control(b)))
+            .filter_map(|b| {
+                let conn = st.ports.iter().find(|p| p.id == b.port_id)?.conn?;
+                Some((Owner::Midi { conn, channel: b.channel }, b.kind, b.number))
+            })
+            .collect();
+        let mut out = Vec::new();
+        for (owner, kind, number) in bound {
+            match kind {
+                Kind::Note => st.router.note_off(&owner, number, &mut out),
+                Kind::Cc => st.router.release_controller(&owner, number, &mut out),
+            }
+        }
+        let _ = self.admit(st, &mut out);
     }
 
     /// The port thread's table, after each enumeration (each port registered before it connects).
@@ -2058,6 +2089,33 @@ mod tests {
         assert_eq!(r.take(), [Command::NoteOff(40)], "the pedal's release lets go of what it sustained");
         r.send(A, &[[0x91, 36, 100], [0x81, 36, 0], [0xb0, 64, 127], [0x90, 41, 100], [0x80, 41, 0], [0xb0, 64, 0]]);
         assert_eq!(r.take(), [on(41, 100), Command::NoteOff(41)], "the next press is consumed: no note, no sustain");
+    }
+
+    // A binding made live (here by the player's assignment) while its note or pedal is held through the
+    // router: learn takes the release from now on, so the router lets go then, of that port and
+    // channel's hold only.
+    #[test]
+    fn a_binding_made_live_mid_hold_releases_what_the_router_held_under_it() {
+        let r = Rig::with((store::empty(), None), None, vec![port("Pedal", Some(A)), port("Keys", Some(B))]);
+        // Channel 2's key holds 36, as Keys does; channel 1's pedal sustains 40.
+        r.send(A, &[[0x91, 36, 100], [0xb0, 64, 127], [0x90, 40, 100], [0x80, 40, 0]]);
+        r.send(B, &[[0x91, 36, 100]]);
+        assert_eq!(r.take(), [on(36, 100), on(40, 100)]);
+        let mut note = legacy("input-1", "Pedal (USB MIDI)", 36, "playAll");
+        note["kind"] = "note".into();
+        note["channel"] = 1.into();
+        r.host.import_legacy(r.epoch(), &legacy_list(&[note, legacy("input-1", "Pedal (USB MIDI)", 64, "undo")]));
+        assert!(r.states().iter().all(|s| s.2 == BindingState::NoPort));
+
+        assert_eq!(r.host.assign(r.epoch(), r.revision(), 0, &id("Pedal")), Ok(true));
+        assert_eq!((r.take(), r.held()), (vec![], vec![36]), "Keys still holds 36");
+        r.send(B, &[[0x81, 36, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(36)], "Keys' release is its last");
+        assert_eq!(r.host.assign(r.epoch(), r.revision(), 1, &id("Pedal")), Ok(true));
+        assert_eq!(r.take(), [Command::NoteOff(40)], "the pedal lets go of what it sustained");
+        r.send(A, &[[0x81, 36, 0], [0xb0, 64, 0]]);
+        assert_eq!((r.take(), r.held()), (vec![], vec![]), "learn takes both releases, and nothing hangs");
+        assert_eq!(r.states().iter().map(|s| s.2).collect::<Vec<_>>(), [BindingState::Live; 2]);
     }
 
     // The UI hears why its input did nothing: a fresh note or press while no device runs or the engine
