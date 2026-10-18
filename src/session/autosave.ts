@@ -20,6 +20,7 @@ import { exportBase, snapshotBars, type StemSnapshot } from './stem-archive';
 import { importSession } from './import';
 import type { SessionSource } from './session-source';
 import type { FxState } from '../ui/state/fx-metadata';
+import type { TrackState } from '../ui/state/looper-types';
 import { parseZip } from './unzip';
 
 const DB_NAME = 'bleeploop';
@@ -52,10 +53,17 @@ interface JamFingerprint {
 }
 
 /** A fingerprint's master, and each lane's part before its mix (`loop`: the lane holds one, so a mix
- * follows). */
+ * follows; `length` and `revision` build its head with a state, `laneHead`). */
 interface FingerprintParts {
   master: string;
-  lanes: { index: number; head: string; loop: boolean }[];
+  lanes: { index: number; head: string; loop: boolean; length: number; revision: number }[];
+}
+
+/** A lane's head in a fingerprint: a lane with no loop gives only its revision; one with a loop its
+ * transport state too (mid-overdub reads as the loop it plays, as a save holds it). */
+function laneHead(index: number, state: TrackState, length: number, revision: number): string {
+  if (state === 'EMPTY' || state === 'RECORDING') return `${index}:-:${revision}`;
+  return `${index}:${state === 'OVERDUBBING' ? 'PLAYING' : state}:${length}:${revision}`;
 }
 
 /** A lane's mix in a fingerprint: each effect's params in key order, whatever order they were built in,
@@ -71,12 +79,18 @@ function joinFingerprint(parts: FingerprintParts, mixOf: (i: number) => string):
 }
 
 /**
- * What a save of `snapshot` records as saved: the inspection it was taken for, with each lane's mix as
- * the snapshot carries it (the engine's where it pinned the loops), not the mix inspected before. A mix
- * that changed between the two (A inspected, B pinned) then leaves the jam dirty when it is back at A.
+ * What a save of `snapshot` records as saved: the inspection it was taken for, with each lane's
+ * transport state and mix as the snapshot carries them (the engine's where it pinned the loops), not as
+ * inspected before. A state or mix that changed between the two (PLAYING inspected, STOPPED pinned) then
+ * leaves the jam dirty when it is back where it was inspected. The revision and length stay the
+ * inspection's: a loop that changed after it is dirty by its revision.
  */
 function persistedFingerprint(inspected: JamFingerprint, snapshot: StemSnapshot): string {
-  return joinFingerprint(inspected.parts, (i) => {
+  const lanes = inspected.parts.lanes.map((lane) => {
+    const t = lane.loop ? snapshot.tracks.find((track) => track.index === lane.index) : undefined;
+    return t ? { ...lane, head: laneHead(lane.index, t.state, lane.length, lane.revision) } : lane;
+  });
+  return joinFingerprint({ ...inspected.parts, lanes }, (i) => {
     const t = snapshot.tracks.find((track) => track.index === i);
     return t ? mixPart(t.volume, t.muted, t.dubFeedback ?? 1, t.pan ?? 0, t.fx) : 'none';
   });
@@ -271,13 +285,10 @@ function inspectJam(): JamFingerprint {
     const state = jam().stateOf(i);
     const revision = jam().revision(i);
     if (state !== 'EMPTY') blank = false;
-    if (state === 'EMPTY' || state === 'RECORDING') {
-      lanes.push({ index: i, head: `${i}:-:${revision}`, loop: false });
-      continue;
-    }
-    committed = true;
-    const head = `${i}:${state === 'OVERDUBBING' ? 'PLAYING' : state}:${jam().trackInfo(i).lengthFrames}:${revision}`;
-    lanes.push({ index: i, head, loop: true });
+    const loop = state !== 'EMPTY' && state !== 'RECORDING';
+    const length = loop ? jam().trackInfo(i).lengthFrames : 0;
+    if (loop) committed = true;
+    lanes.push({ index: i, head: laneHead(i, state, length, revision), loop, length, revision });
   }
 
   const parts = { master: committed ? String(master) : '-', lanes };
