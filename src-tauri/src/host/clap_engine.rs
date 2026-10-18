@@ -496,12 +496,17 @@ impl OwnedPlugin for Clap {
     }
 
     fn idle(&mut self) -> bool {
-        // A floating editor's `closed` came from the plugin's own window thread: acked here.
-        let floating_closed = self.editor_closed.fired.swap(false, Acquire) && matches!(self.editor, EditorSlot::Floating);
+        // The plugin's `closed` (maybe from its own window thread), for either editor form: acked
+        // here, a GUI it destroyed with `destroy` alone (no hide, no resize first).
+        let closed_by_plugin = self.editor_closed.take().filter(|_| !matches!(self.editor, EditorSlot::Closed));
+        if let Some(destroyed) = closed_by_plugin {
+            editor_teardown(&mut self.instance, &mut self.editor, &self.hosted_hwnd, destroyed);
+            return true;
+        }
         if matches!(self.editor, EditorSlot::Hosted(_)) {
             deliver_pending_resize(&mut self.instance);
         }
-        let closed = floating_closed || matches!(&self.editor, EditorSlot::Hosted(window) if window.close_requested());
+        let closed = matches!(&self.editor, EditorSlot::Hosted(window) if window.close_requested());
         if closed {
             self.editor_close();
         }
@@ -530,7 +535,7 @@ impl OwnedPlugin for Clap {
     }
 
     fn editor_close(&mut self) {
-        editor_teardown(&mut self.instance, &mut self.editor, &self.hosted_hwnd);
+        editor_teardown(&mut self.instance, &mut self.editor, &self.hosted_hwnd, false);
     }
 
     /// Deactivate (with the stopped processor the unit holds), destroy the instance, unload the

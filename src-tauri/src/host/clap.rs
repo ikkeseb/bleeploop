@@ -326,25 +326,30 @@ fn editor_open(
 /// Close whatever editor is open, in order: forget the hosted HWND (a late `request_resize` then
 /// finds nothing), the plugin hides + destroys its GUI (removes its child first), our `HostWindow`
 /// drops (DestroyWindow), and the teardown messages are pumped on this owner thread. Every close
-/// path — user close box, floating `closed`, CloseEditor, the timed-out-open rollback, shutdown —
-/// goes through here so none of them can forget a step.
+/// path — user close box, the plugin's `closed`, CloseEditor, the timed-out-open rollback,
+/// shutdown — goes through here so none of them can forget a step. `destroyed`: the plugin reported
+/// its GUI destroyed (`closed(true)`), so it only gets the `destroy` that acknowledges it.
 fn editor_teardown(
     instance: &mut PluginInstance<LfHost>,
     editor: &mut EditorSlot,
     hosted_hwnd: &AtomicIsize,
+    destroyed: bool,
 ) {
     hosted_hwnd.store(0, Release);
-    editor_destroy_gui(instance);
+    editor_destroy_gui(instance, destroyed);
     *editor = EditorSlot::Closed;
     drain_after_editor_teardown();
 }
 
-/// P10.0 owner-thread: tell the plugin to hide + free its GUI. For a hosted editor the caller then
-/// drops the `HostWindow` (DestroyWindow) — do that AFTER, so the plugin removes its child first.
-fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>) {
+/// P10.0 owner-thread: tell the plugin to hide + free its GUI (only free it, `destroyed`: a GUI the
+/// plugin already destroyed). For a hosted editor the caller then drops the `HostWindow`
+/// (DestroyWindow) — do that AFTER, so the plugin removes its child first.
+fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>, destroyed: bool) {
     let mut handle = instance.plugin_handle();
     if let Some(gui) = handle.get_extension::<PluginGui>() {
-        let _ = gui.hide(&mut handle);
+        if !destroyed {
+            let _ = gui.hide(&mut handle);
+        }
         gui.destroy(&mut handle);
     }
 }
@@ -354,10 +359,27 @@ fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>) {
 /// P10.0: cross-thread signal from the plugin's GUI thread → the owner loop. CLAP dispatches
 /// `gui.closed` to the host's `Shared` handler (NOT the main-thread handler), and a JUCE plugin
 /// may call it from its own window thread — so `closed` only sets these flags; the owner loop
-/// swaps `fired` each tick and acks the close (destroy + notify JS) on the main thread.
+/// takes them each tick and acks the close (destroy + notify JS) on the main thread, for a
+/// floating and a hosted editor alike.
 #[derive(Default)]
 struct EditorClosed {
     fired: AtomicBool,
+    /// A `closed` since the last take said `was_destroyed`: the host owes the plugin `destroy`.
+    destroyed: AtomicBool,
+}
+impl EditorClosed {
+    /// [thread-safe] The plugin's `closed`.
+    fn close(&self, was_destroyed: bool) {
+        if was_destroyed {
+            self.destroyed.store(true, Release);
+        }
+        self.fired.store(true, Release);
+    }
+    /// Owner turn: `Some(was_destroyed)` when the plugin reported its editor closed since the last
+    /// take.
+    fn take(&self) -> Option<bool> {
+        self.fired.swap(false, Acquire).then(|| self.destroyed.swap(false, Acquire))
+    }
 }
 
 struct LfShared {
@@ -579,8 +601,9 @@ mod resize_tests {
     }
 }
 /// Host side of the CLAP `gui` extension (P10.0). For a floating editor the plugin manages its own
-/// window, so the only callback that matters is `closed` (user-dismiss → re-sync) and the
-/// resize/show/hide requests don't apply. For a HOSTED editor `request_resize` is real: the plugin
+/// window, so the callback that matters is `closed` (user-dismiss → re-sync, or a GUI the plugin
+/// lost, for either editor form); `request_show`/`request_hide` are refused, as the host does not
+/// act on them. For a HOSTED editor `request_resize` is real: the plugin
 /// wants our window's client area at a new size (its size menu / zoom). On the window's thread a
 /// `true` answer means the host resized and need not call `set_size` back; from another thread it
 /// acknowledges a request the owner applies on its turn, or reverts with `set_size` (CLAP's gui.h
@@ -609,13 +632,15 @@ impl HostGuiImpl for LfShared {
         resize_hosted(hwnd, new_size.width, new_size.height).map_err(HostError::Message)
     }
     fn request_show(&self) -> Result<(), HostError> {
-        Ok(())
+        Err(HostError::Message("the host does not show an editor on the plugin's request"))
     }
     fn request_hide(&self) -> Result<(), HostError> {
-        Ok(())
+        Err(HostError::Message("the host does not hide an editor on the plugin's request"))
     }
-    fn closed(&self, _was_destroyed: bool) {
-        self.editor_closed.fired.store(true, Release);
+    /// [thread-safe] The floating window was closed, or the GUI connection was lost; with
+    /// `was_destroyed` the plugin has destroyed its GUI and the host must acknowledge with `destroy`.
+    fn closed(&self, was_destroyed: bool) {
+        self.editor_closed.close(was_destroyed);
     }
 }
 
