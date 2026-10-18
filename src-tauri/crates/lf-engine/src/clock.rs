@@ -263,11 +263,14 @@ impl Clock {
                 return None;
             }
             let n = pulse.next;
-            pulse.next += 1;
             let forced = n < pulse.forced_until;
             if at < frame && !forced {
+                // Every pulse a jump left behind past the count is dropped at once: on to the first at or
+                // after `frame`, however far the device frame jumped.
+                pulse.next = pulse.grid.first_beat_at_or_after(frame).max(n + 1);
                 continue;
             }
+            pulse.next += 1;
             let per_beat = meter.pulses_per_beat();
             let count_left = if forced { (pulse.forced_until - n).div_ceil(per_beat) as u8 } else { 0 };
             let in_bar = n % meter.pulses_per_bar();
@@ -483,6 +486,38 @@ mod tests {
         let (fired, beats) = pulses(&mut clock, next + 48_000, None);
         assert_eq!(fired.iter().map(|p| p.0 - next).collect::<Vec<_>>(), (0..6).map(|k| k * 8000).collect::<Vec<_>>());
         assert_eq!(beats.iter().map(|b| (b.frame - next, b.beat_in_bar)).collect::<Vec<_>>(), [(0, 0), (24_000, 1)]);
+    }
+
+    /// A jump of 2^36 beats (some 2 years of device frames at 120 BPM) costs the next fire a few
+    /// steps, not one per pulse skipped: free-run, a master and a count-in the jump crosses, each lands
+    /// on the first pulse at or after the frame it jumped to, the count's beats first, late.
+    #[test]
+    fn a_jump_drops_the_pulses_it_skipped_without_stepping_through_them() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pulse = 24_000; // 120 BPM in 4/4 at 48 kHz
+            let far = pulse * (1 << 36);
+            let mut free = Clock::new(48_000);
+            free.start_free_run(0);
+            let a = free.fire_due(far + 5, None).map(|b| (b.frame, b.beat_in_bar));
+            let mut master = Clock::new(48_000);
+            master.start_master(0, 4 * pulse, 1, 0);
+            let b = master.fire_due(far, None).map(|b| (b.frame, b.beat_in_bar));
+            let after = master.next_beat_frame();
+            let mut count = Clock::new(48_000);
+            count.start_count_in(0, 0);
+            let mut counted = Vec::new();
+            while let Some(beat) = count.fire_due(far + pulse, None) {
+                counted.push((beat.beat_in_bar, beat.count_left));
+            }
+            tx.send((a, b, after, free.next_beat_frame(), counted, far, pulse)).unwrap();
+        });
+        let (free, master, after, free_next, counted, far, pulse) = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a jump costs one step, not one per pulse it skipped");
+        assert_eq!(free, None, "free-run: no pulse lies between the jump's pulse and its frame");
+        assert_eq!(free_next, Some(far + pulse), "free-run: the next pulse after the frame jumped to");
+        assert_eq!(master, Some((far, 0)), "master: the pulse on the frame jumped to fires, a downbeat");
+        assert_eq!(after, Some(far + pulse));
+        assert_eq!(counted, [(0, 4), (1, 3), (2, 2), (3, 1), (1, 0)], "the count's four beats late, then the pulse on the frame");
     }
 
     #[test]
