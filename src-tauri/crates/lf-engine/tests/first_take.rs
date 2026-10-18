@@ -1,4 +1,4 @@
-//! Ports verify/guards/free-stop.mjs, free-record-cap.mjs, fixed-length.mjs and short-take.mjs: how a
+//! Ports the removed verify/guards/free-stop.mjs, free-record-cap.mjs, fixed-length.mjs and short-take.mjs: how a
 //! first take ends, and how a later FIXED take is sized. short-take.mjs's pure tiling and stop-plan
 //! checks live with the grid (`src/grid.rs` tests); a short later take tiling on the real looper is in
 //! `later_arm.rs`.

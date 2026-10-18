@@ -308,24 +308,8 @@ function clause(text, at) {
   return [from, to];
 }
 
-// Dead citations in engine tests other work was changing when this scan landed (2026-10), one
-// `file  path` each. Each wants its reference marked removed ("Ports the removed `…`", "the removed
-// `…`") and its entry deleted here.
+/** The engine crate, whose tests resolve paths from it. */
 const LF = 'src-tauri/crates/lf-engine/';
-const DEAD_OK = new Set(
-  [
-    // The removed Web Audio guards and probes the engine's tests port.
-    'tests/first_take.rs  verify/guards/free-stop.mjs',
-    'tests/golden_jam.rs  verify/probes/golden-jam.mjs',
-    'tests/overdub_undo_reverse.rs  verify/guards/overdub.mjs',
-    'tests/overdub_undo_reverse.rs  verify/probes/capture-loss.mjs',
-    'tests/overdub_undo_reverse.rs  verify/probes/overdub-window.mjs',
-    'tests/retake.rs  verify/guards/retake.mjs',
-    // The rig the Web Audio guards ran on, removed in Stage 6.
-    'tests/common/mod.rs  verify/harness/rig.ts',
-  ].map((e) => LF + e),
-);
-const deadOkUsed = new Set();
 
 const CODE = /\.(rs|ts|tsx|mjs)$/;
 const codeFiles = [...trackedSet].filter((f) => CODE.test(f) && !f.startsWith('node_modules/'));
@@ -346,10 +330,6 @@ for (const file of codeFiles) {
   for (const [lineNo, text] of comments(readFileSync(resolve(ROOT, file), 'utf8'), file.endsWith('.rs'))) {
     for (const { p } of unmarked(text, citedPaths(text))) {
       if (reported.has(p) || !dead(p, fromDir, false)) continue;
-      if (DEAD_OK.has(`${file}  ${p}`)) {
-        deadOkUsed.add(`${file}  ${p}`);
-        continue;
-      }
       reported.add(p);
       dangling.push(`${file}:${lineNo}  \`${p}\`   ← ${text.trim().slice(0, 110)}`);
     }
@@ -497,7 +477,5 @@ for (const md of mdFiles) {
 }
 
 console.log(`docs: ${mdFiles.length} tracked .md, ${codeFiles.length} code files, ${shaCites.size} shas, ${jam.length}/${NEXT_JAM_CAP} next-jam items`);
-const stale = [...DEAD_OK].filter((e) => !deadOkUsed.has(e));
-if (stale.length) console.log(`docs: DEAD_OK entries no longer needed (delete them):\n  ${stale.join('\n  ')}`);
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
 process.exit(fails === 0 ? 0 : 1);
