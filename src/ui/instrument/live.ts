@@ -1,6 +1,6 @@
 import { createSignal } from 'solid-js';
 import { slotPendingCounts, slotTakesInput } from '../state/instrument';
-import { serializeSlot, withAt } from '../state/instrument-slots';
+import { serializeLive, withAt } from '../state/instrument-slots';
 import { goLive, holdPress, inputArmed, pressEngineLive, takeHeldPresses } from '../state/native-io';
 import { notifyError } from '../../notify';
 
@@ -9,7 +9,8 @@ import { notifyError } from '../../notify';
  * (`src/app/actions.ts`), and a fresh effect pick's auto-start (`PluginControls.tsx`), with their
  * in-flight and error state kept per slot rather than per mounted cap. A press is the engine's toggle
  * (`native-io.ts`): every accepted press reaches the engine in order, and none is dropped while another
- * is in flight (`liveBusy` only shows it).
+ * is in flight (`liveBusy` only shows it: a press op is no source op, so the cap stays pressable and a
+ * press queues behind the one in flight).
  */
 const [busy, setBusy] = createSignal<[number, number]>([0, 0]);
 const [error, setError] = createSignal<[string | null, string | null]>([null, null]);
@@ -57,7 +58,7 @@ async function liveOp(slot: 0 | 1, quiet: boolean, wentLive: boolean, send: (own
  */
 export function toggleLive(slot: 0 | 1): Promise<void> {
   const wentLive = !inputArmed()[slot];
-  return liveOp(slot, false, wentLive, (ownToast) => serializeSlot(slot, () => pressEngineLive(slot, slotTakesInput(slot), ownToast)));
+  return liveOp(slot, false, wentLive, (ownToast) => serializeLive(slot, () => pressEngineLive(slot, slotTakesInput(slot), ownToast)));
 }
 
 /**
@@ -72,10 +73,11 @@ export function startLive(slot: 0 | 1): Promise<void> {
 
 /**
  * Press slot `slot`'s GO LIVE / INPUT LIVE cap, as a click would (the named action's; a pedal can press
- * while the cap is locked). While an op holds the slot (a load, a session's tone reload, a press still
- * in flight) the press is counted and applied once the op settles: an odd count as one toggle against
- * the engine's value then, an even count not at all; a reload that would resume GO LIVE yields to an
- * odd count. False when there is nothing to press: a source that takes no input, or no host to feed it.
+ * while the cap is locked). While a source op holds the slot (a load, a session's tone reload) the press
+ * is counted and applied once the op settles: an odd count as one toggle against the engine's value
+ * then, an even count not at all; a reload that would resume GO LIVE yields to an odd count. A press
+ * made while another is in flight queues behind it. False when there is nothing to press: a source that
+ * takes no input, or no host to feed it.
  */
 export function pressGoLive(slot: 0 | 1): boolean {
   if (slotPendingCounts()[slot] > 0) {
@@ -87,9 +89,9 @@ export function pressGoLive(slot: 0 | 1): boolean {
   return true;
 }
 
-/** Apply the presses counted while an op held `slot`, once it (and what queued behind it) ran. */
+/** Apply the presses counted while a source op held `slot`, once it (and what queued behind it) ran. */
 async function applyHeldPresses(slot: 0 | 1): Promise<void> {
-  await serializeSlot(slot, async () => {});
+  await serializeLive(slot, async () => {});
   if (takeHeldPresses(slot) % 2 === 0 || !liveShown(slot)) return;
   await toggleLive(slot);
 }

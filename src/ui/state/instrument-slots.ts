@@ -29,7 +29,8 @@ export const [activeSlot, setActiveSlotSignal] = createSignal<0 | 1>(0);
 export const [slotOff, setSlotOff] = createSignal<[boolean, boolean]>([false, false]);
 
 // Number of source operations either running or queued for each slot. Incrementing when an operation
-// is enqueued (rather than when it starts) keeps the UI continuously pending between chained swaps.
+// is enqueued (rather than when it starts) keeps the UI continuously pending between chained swaps. A
+// GO LIVE op (`serializeLive`) is no source op and is not counted.
 const [slotPendingCounts, setSlotPendingCounts] = createSignal<[number, number]>([0, 0]);
 export { slotPendingCounts };
 
@@ -41,8 +42,8 @@ export function withAt<T>(arr: readonly [T, T], i: 0 | 1, v: T): [T, T] {
 }
 
 /**
- * Per-slot operation chain. selectPlugin/clearPlugin/goLive/stopLive are async with native-IPC
- * await points; firing two in quick succession (a rapid picker double-click, or picking a synth
+ * Per-slot operation chain. selectPlugin/clearPlugin (source ops) and goLive/stopLive/GO LIVE's press
+ * (live ops, `serializeLive`) are async with native-IPC await points; firing two in quick succession (a rapid picker double-click, or picking a synth
  * mid-load) would otherwise interleave — a second call's synchronous prologue reads slot state the
  * first call's continuation later overwrites, leaving slotPlugins / the Rust slot / the bridge /
  * engines[] disagreeing. Chaining each slot's mutations makes call N+1 start only after call N fully
@@ -50,14 +51,25 @@ export function withAt<T>(arr: readonly [T, T], i: 0 | 1, v: T): [T, T] {
  * tail keeps it from going unhandled).
  */
 const slotOpChain: [Promise<unknown>, Promise<unknown>] = [Promise.resolve(), Promise.resolve()];
-export function serializeSlot<T>(slot: 0 | 1, op: () => Promise<T>): Promise<T> {
-  setSlotPendingCounts((prev) => withAt(prev, slot, prev[slot] + 1));
-  const run = slotOpChain[slot].then(op, op).finally(() => {
-    setSlotPendingCounts((prev) => withAt(prev, slot, Math.max(0, prev[slot] - 1)));
-  });
+function chain<T>(slot: 0 | 1, op: () => Promise<T>): Promise<T> {
+  const run = slotOpChain[slot].then(op, op);
   slotOpChain[slot] = run.then(
     () => {},
     () => {},
   );
   return run;
+}
+
+/** A source op on `slot`'s chain: the slot shows it pending (`slotPendingCounts`) until it settles. */
+export function serializeSlot<T>(slot: 0 | 1, op: () => Promise<T>): Promise<T> {
+  setSlotPendingCounts((prev) => withAt(prev, slot, prev[slot] + 1));
+  return chain(slot, op).finally(() => {
+    setSlotPendingCounts((prev) => withAt(prev, slot, Math.max(0, prev[slot] - 1)));
+  });
+}
+
+/** A GO LIVE op on `slot`'s chain, in order with its source ops but none itself: the slot shows no
+ * pending source, and a press made meanwhile queues behind it (`src/ui/instrument/live.ts`). */
+export function serializeLive<T>(slot: 0 | 1, op: () => Promise<T>): Promise<T> {
+  return chain(slot, op);
 }

@@ -1,7 +1,7 @@
 import { createSignal } from 'solid-js';
 import { sendEngine, sendEngineReported } from '../../platform';
 import { notifyError } from '../../notify';
-import { activeSlot, serializeSlot, slotOff, slotPlugins } from './instrument-slots';
+import { activeSlot, serializeLive, slotOff, slotPlugins } from './instrument-slots';
 
 /**
  * OWNS: which slots hear their own input (GO LIVE, the engine's `Toggle::Live` and `SetSlotLive`; the
@@ -135,19 +135,19 @@ export async function pressEngineLive(slot: 0 | 1, takesInput: boolean, ownToast
  * `ownToast`: the caller toasts that rejection itself (`sendLive`).
  */
 export function goLive(slot: 0 | 1, ownToast = false): Promise<void> {
-  return serializeSlot(slot, async () => {
+  return serializeLive(slot, async () => {
     if (slotPlugins()[slot] || slotOff()[slot]) await sendLive(slot, true, ownToast);
   });
 }
 
 /** Stop LIVE on `slot`. One op on the slot's chain; idempotent; rejects as `goLive` does. */
 export function stopLive(slot: 0 | 1, ownToast = false): Promise<void> {
-  return serializeSlot(slot, () => sendLive(slot, false, ownToast));
+  return serializeLive(slot, () => sendLive(slot, false, ownToast));
 }
 
 /**
  * Stop `slot`'s live input from inside an already-serialized slot op (load-swap / clear teardown in
- * `instrument.ts`), so it must NOT re-enter serializeSlot. Resolves with the batch's submission (false:
+ * `instrument.ts`), so it must NOT re-enter the slot's chain. Resolves with the batch's submission (false:
  * it did not reach the host): an unload waits for it, since a slot left live without its plugin passes
  * the input dry; a source change with no plugin to unload need not.
  */

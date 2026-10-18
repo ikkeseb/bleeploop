@@ -7,7 +7,8 @@
  * - a press made while the engine's flag differs from the feed's (a live-on the fake has not applied,
  *   held by its `holdApply` seam) turns the slot off: it flips the engine's value, not the feed's;
  * - two quick presses, the first one's batch still unanswered (`sendHold`), both reach the engine and
- *   end where they started, from the cap and from the pedal's named action alike;
+ *   end where they started, from the rendered cap (clicked twice: it stays pressable and shows busy)
+ *   and from the pedal's named action alike;
  * - presses made while a source op holds the slot past two seconds (the feed stale meanwhile) apply
  *   once it settles: one press as one toggle, two as none;
  * - the page's first reset frame disarms both slots (a reload's disarm), and a later one (a new engine,
@@ -74,26 +75,29 @@ await probe(async ({ open }) => {
     await pause(30);
     out.race = { sent: sentA(from), live: inputArmed()[0] };
 
-    // 3. Two quick presses, the first one's batch unanswered when the second comes: from the cap...
+    // 3. Two quick presses, the first one's batch unanswered when the second comes: from the rendered
+    // cap (a click on a disabled button does nothing, as a real one)...
     const quick = async (press) => {
       let answer;
       lf.native.sendHold = new Promise((resolve) => (answer = resolve));
       const at = lf.native.sent.length;
-      const first = press();
+      press();
       await pause(20);
-      const second = press();
+      const busy = cap().getAttribute('aria-busy');
+      press();
       await pause(20);
       const whileHeld = sentA(at);
       lf.native.sendHold = null;
       answer();
-      await Promise.all([first, second]);
+      while (live.liveBusy(0)) await pause(10);
       await idle();
       await pause(30);
-      return { whileHeld, sent: sentA(at), live: inputArmed()[0] };
+      return { busy, whileHeld, sent: sentA(at), live: inputArmed()[0] };
     };
-    out.capTwice = await quick(() => live.toggleLive(0));
+    const cap = () => document.querySelector('button[aria-label="Live input for slot A"]');
+    out.capTwice = await quick(() => cap().click());
     // ...and from the pedal's named action (its `Press` first, then GO LIVE).
-    out.pedalTwice = await quick(async () => runAction('goLive'));
+    out.pedalTwice = await quick(() => runAction('goLive'));
 
     // 4. A source op holds slot A past two seconds; the feed shows nothing new meanwhile.
     const held = async (presses) => {
@@ -120,8 +124,8 @@ await probe(async ({ open }) => {
   assert.equal(result.offFirst, false, 'a second press turns it off');
   assert.equal(result.raceWhileHeld, false, 'the feed still shows slot A off');
   assert.deepEqual(result.race, { sent: [true, 'toggle'], live: false }, "a press after a live-on the feed does not show yet turns it off: the engine's value, flipped");
-  assert.deepEqual(result.capTwice, { whileHeld: ['toggle'], sent: ['toggle', 'toggle'], live: false }, 'two cap presses: the second waits for the first, both reach the engine, back off');
-  assert.deepEqual(result.pedalTwice, { whileHeld: ['toggle'], sent: ['toggle', 'toggle'], live: false }, 'two pedal presses alike: none dropped');
+  assert.deepEqual(result.capTwice, { busy: 'true', whileHeld: ['toggle'], sent: ['toggle', 'toggle'], live: false }, 'two clicks on the cap: it shows busy and stays pressable, the second waits for the first, both reach the engine, back off');
+  assert.deepEqual(result.pedalTwice, { busy: 'true', whileHeld: ['toggle'], sent: ['toggle', 'toggle'], live: false }, 'two pedal presses alike: none dropped');
   assert.deepEqual(result.heldOnce, { before: false, whileHeld: [], sent: ['toggle'], live: true }, 'one press during a held op: one toggle once it settles');
   assert.deepEqual(result.heldTwice, { before: true, whileHeld: [], sent: [], live: true }, 'two presses during a held op: none');
 });
