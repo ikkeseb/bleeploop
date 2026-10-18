@@ -1674,12 +1674,12 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     } catch (err) {
       const refused = decodeOpenError(err);
       if (refused.type !== 'RateChange') throw err;
-      const ask =
+      const question =
         `${refused.device} runs at ${kHz(refused.to)}. Your loops were recorded at ${kHz(refused.from)} and ` +
         `cannot play there. They stay in recovery and come back the next time BleepLoop starts at ` +
         `${kHz(refused.from)}.\n\nSwitch anyway?`;
-      if (!(await confirm({ title: 'Sample rate change', body: ask, yes: 'Switch', no: 'Cancel' }))) {
-        putBackPicks();
+      if (!(await confirm({ title: 'Sample rate change', body: question, yes: 'Switch', no: 'Cancel' }))) {
+        putBackPicks(wanted);
         return { status: device(), declined: true };
       }
       runs = await switchDroppingLoops(wanted, restore);
@@ -1696,7 +1696,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     setOpenFailure(errorText(err));
     // The device that ran keeps running, or the owner reopens it (`Owner::open`,
     // `src-tauri/src/engine_io/owner.rs`): its picks go back, saved and shown.
-    putBackPicks();
+    putBackPicks(wanted);
     return { status: null, declined: false };
   }
 }
@@ -1741,9 +1741,13 @@ export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | n
   });
 }
 
-/** Save the picks of the device that runs again (a declined or failed switch): Audio Settings shows them. */
-function putBackPicks(): void {
-  if (!opened) return;
+/**
+ * Save the picks of the device that runs again (a declined or failed switch to `tried`): Audio Settings
+ * shows them. Only while the saved picks are still the ones `tried` read: a pick made while it ran (a
+ * select stays live meanwhile) is the player's latest, and the open it queued reads it.
+ */
+function putBackPicks(tried: DeviceChoice): void {
+  if (!opened || JSON.stringify(picked().picks) !== JSON.stringify(tried.picks)) return;
   const { bufferFrames, sampleRate, asioEnabled, slotInputChannels: slots, ...ids } = opened.picks;
   writeAudioDeviceSettings(ids);
   saveSlotInputChannels(slots);
@@ -1770,7 +1774,7 @@ async function switchDroppingLoops(wanted: DeviceChoice, restore?: () => Promise
     notifyError('Could not switch the audio device. Try again, or export the loops first.', 'The loops could not be saved to recovery first, so they stay here.');
     if (!opened) throw err;
     const ran = opened;
-    putBackPicks();
+    putBackPicks(wanted);
     await restore?.();
     return { ...ran, status: await platform.engine.open(ran.request) };
   }
