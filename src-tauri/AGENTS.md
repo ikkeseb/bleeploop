@@ -341,10 +341,6 @@ plugin-GUI work.
   change does not retry it.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
-- The panic hook (`lib.rs` 260-272) allocates, logs and calls the previous hook on whatever thread
-  panicked, the audio thread included (`catch_unwind` in `callback::guarded` does not bypass it). Fix: a
-  const-initialised thread-local RT marker set at the callback boundary; the hook skips logging and
-  `prev` there, the existing panic counters report owner-side; the unwind itself stays non-RT.
 - A caught panic in the WASAPI input callback only sets `JoinInput::dead` (`callback.rs` 544): capture
   goes silent for good while the owner, watching `core.fault` and `run.fault`, never hears of it. Fix:
   latch a separate capture fault; the owner first rebuilds capture/join on the same device and rate,
@@ -353,11 +349,6 @@ plugin-GUI work.
   and cpal 0.18.1 takes its `asio_streams` mutex in them (`Start` reads the buffer size before either
   stream plays, so the owner does not contend there). Fix: patched ASIO dependencies, with the L1+L2
   latency measurements.
-- The RT allocation count (`callback::guarded`, debug builds) misses parts of the callbacks: the join's
-  `pipe.pull` runs before the guard (`callback.rs` 688 vs 725) and the Share callback's `mirror.render`
-  (`share.rs` 182) has none, so `docs/ARCHITECTURE.md`'s "counts any allocation" overstates it. Fix:
-  split the counting from the panic guard and cover each whole input, output and Share callback
-  (nesting-safe); verify with an allocation injected in each gap.
 - Two live slots on the same capture channel sum it (+6 dB).
 - An ASIO period the driver drops without its overload report is not flagged as damage (input and
   output stay in step; the take is spliced there). `asio_phase_slips` counts it in the log only (after a run's first

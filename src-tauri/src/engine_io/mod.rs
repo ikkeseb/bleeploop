@@ -99,7 +99,8 @@
 //!   and restarts the device that ran. The loops go with the faulted engine, its units back to their
 //!   owners (`DeviceEvent::EngineFaulted`). A second fault within `FAULT_HOLDOFF` stays silent.
 //! - **The callback never allocates, logs, locks (beyond its `try_lock`) or waits.** Counters are
-//!   atomics the owner reads; the owner logs.
+//!   atomics the owner reads; the owner logs. On a callback's thread the panic hook neither logs nor
+//!   chains (`callback::RtSection`): the panic counter reports it.
 //! - **The scope's ring is drained every feed tick, whatever the feed sends** (`lf_engine::scope`,
 //!   `feed.rs`): held, unsubscribed or on a reset frame the columns are dropped and the UI is told its
 //!   trace broke. A ring left to fill would make the next batch a replay of seconds of old sound.
@@ -160,6 +161,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio_output::AudioBackend;
 use callback::{Tap, TapEnd, MAX_DEVICE_BLOCK};
+pub(crate) use callback::in_rt_callback;
+#[cfg(test)]
+pub(crate) use callback::RtSection;
 use driver::Driver;
 use owner::{OwnerLink, Request};
 

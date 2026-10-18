@@ -17,6 +17,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 use lf_engine::grid::Frame;
 
+use super::callback::{guarded, promote_once, RtSection};
 use super::pipes::{self, PipeConfig, PullPipe, PushEnd};
 use super::IoCounters;
 
@@ -123,9 +124,23 @@ impl Mirror {
         Mirror { pipe, stereo: vec![0.0; 2 * MAX_PULL], channels: channels.max(1), largest_pull, first: true }
     }
 
+    /// One device callback, whole, inside an [`RtSection`]. A panic is caught and counted (`panics`),
+    /// and latches `fault`: the owner drops the mirror and reports it, and meanwhile it plays silence.
+    fn callback<T: SizedSample + FromSample<f32>>(&mut self, data: &mut [T], counters: &IoCounters, fault: &AtomicBool) {
+        let _rt = RtSection::enter(counters);
+        promote_once();
+        let _ftz = super::fpu::DenormalsOff::new();
+        if fault.load(Relaxed) || !guarded(counters, || self.render(data, counters)) {
+            data.fill(T::EQUILIBRIUM);
+            fault.store(true, Relaxed);
+        }
+    }
+
     /// Fill one device callback: stereo on channels 0 and 1 (a mono endpoint gets (L + R) / 2), silence
     /// on the rest; a callback the ring could not cover counts one `share_starves`.
     fn render<T: SizedSample + FromSample<f32>>(&mut self, data: &mut [T], counters: &IoCounters) {
+        #[cfg(test)]
+        super::callback::inject::site("share render");
         let ch = self.channels;
         // cpal starts the endpoint empty, so its first callback asks for the whole buffer, more than the
         // setpoint holds: served, it would run the ring short at once and starve again while it
@@ -169,18 +184,11 @@ fn build<T: SizedSample + FromSample<f32>>(
     core: Arc<super::Core>,
     fault: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
-    let mut promoted = false;
+    let died = fault.clone();
     device
         .build_output_stream(
             config,
-            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                if !promoted {
-                    promoted = true;
-                    let _ = super::promote_pro_audio();
-                }
-                let _ftz = super::fpu::DenormalsOff::new();
-                mirror.render(data, &core.counters);
-            },
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| mirror.callback(data, &core.counters, &died),
             move |error| latch(&fault, &error),
             None,
         )
@@ -397,6 +405,27 @@ mod tests {
         mirror.render(&mut data, &counters);
         assert_eq!(counts(&counters).0, 1);
         assert!(data[2 * 1024..].iter().all(|&s| s == 0.0));
+    }
+
+    /// The mirror's callback counts its allocations whole, its render's too (DEV builds).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_allocation_in_the_mirrors_render_is_counted() {
+        super::super::callback::skip_promotion();
+        let (counters, fault) = (IoCounters::default(), AtomicBool::new(false));
+        let (mut tap, pipe) = share_pipe(48_000, 48_000, 256).unwrap();
+        let mut mirror = Mirror::new(pipe, 2);
+        let mut data = vec![0.0f32; 2 * 480];
+        for _ in 0..8 {
+            tap.push(&[0.5; 256], &[0.5; 256], &counters);
+            tap.push(&[0.5; 256], &[0.5; 256], &counters);
+            mirror.callback(&mut data, &counters, &fault);
+        }
+        assert_eq!(counters.rt_allocs.load(Relaxed), 0, "the mirror allocates nothing");
+        super::super::callback::inject::alloc_at("share render");
+        mirror.callback(&mut data, &counters, &fault);
+        assert_eq!(counters.rt_allocs.load(Relaxed), 1, "an allocation in its render counts");
+        assert!(!fault.load(Relaxed), "it plays on");
     }
 
     // The mirror's stream ends as the engine's do: a default-device change, a refused priority and an

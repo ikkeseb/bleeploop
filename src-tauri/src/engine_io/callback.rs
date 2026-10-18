@@ -7,7 +7,8 @@
 //! the driver reported for it), so the fake driver runs them on synthetic time. The engine lock is only
 //! `try_lock`ed, and everything under it runs in [`guarded`]: a panic is caught inside the guard, so the
 //! lock is never poisoned and nothing unwinds into the driver (asio-sys's `extern "C"` bufferSwitch
-//! would abort).
+//! would abort). Each callback runs whole inside an [`RtSection`]: the panic hook neither logs nor
+//! chains there, and DEV builds count its allocations.
 
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -368,10 +369,85 @@ pub(crate) fn finishes_late(behind: f64, took: f64, n: usize) -> bool {
 
 thread_local! {
     static PROMOTED: Cell<bool> = const { Cell::new(false) };
+    /// This thread is inside an audio callback ([`RtSection`]). Const-initialised, so the panic hook
+    /// reads it without allocating.
+    static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether this thread is inside an audio callback: the panic hook then neither logs nor chains (both
+/// allocate, and the log takes locks), and the callback's own panic counter reports it owner-side.
+pub(crate) fn in_rt_callback() -> bool {
+    IN_CALLBACK.with(Cell::get)
+}
+
+/// One audio callback, whole (input, output, Share output's), from its entry to its return: marks the
+/// thread for the panic hook and, in DEV builds, counts the allocations made under it into
+/// `rt_allocs` (`host::rt_alloc`, this thread's). A section entered inside another leaves both to the
+/// outer one, so nothing counts twice.
+pub(crate) struct RtSection<'a> {
+    /// `None` inside another section.
+    counters: Option<&'a IoCounters>,
+    #[cfg(debug_assertions)]
+    before: u64,
+    #[cfg(debug_assertions)]
+    alloc: Option<crate::host::rt_alloc::Guard>,
+}
+
+impl<'a> RtSection<'a> {
+    pub(crate) fn enter(counters: &'a IoCounters) -> RtSection<'a> {
+        let outer = IN_CALLBACK.with(|c| c.replace(true));
+        RtSection {
+            counters: (!outer).then_some(counters),
+            #[cfg(debug_assertions)]
+            before: crate::host::rt_alloc::allocations(),
+            #[cfg(debug_assertions)]
+            alloc: (!outer).then(crate::host::rt_alloc::guard),
+        }
+    }
+}
+
+impl Drop for RtSection<'_> {
+    fn drop(&mut self) {
+        let Some(counters) = self.counters else { return };
+        #[cfg(debug_assertions)]
+        {
+            drop(self.alloc.take());
+            let after = crate::host::rt_alloc::allocations();
+            if after > self.before {
+                counters.rt_allocs.fetch_add(after - self.before, Relaxed);
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = counters;
+        IN_CALLBACK.with(|c| c.set(false));
+    }
+}
+
+/// Test-only: an allocation at a named spot of a callback, asked for by a test on its own thread. The
+/// RT allocation count's reach is checked with these: each sits where a callback once ran uncounted.
+#[cfg(test)]
+pub(crate) mod inject {
+    use std::cell::Cell;
+
+    thread_local! {
+        static AT: Cell<&'static str> = const { Cell::new("") };
+    }
+
+    /// The next time this thread passes `site`, allocate once.
+    pub(crate) fn alloc_at(site: &'static str) {
+        AT.with(|at| at.set(site));
+    }
+
+    pub(crate) fn site(site: &'static str) {
+        if AT.with(|at| at.get() == site) {
+            AT.with(|at| at.set(""));
+            drop(std::hint::black_box(vec![0u8; 16]));
+        }
+    }
 }
 
 /// MMCSS Pro Audio for the calling thread, once (every engine, join and share callback thread).
-fn promote_once() {
+pub(crate) fn promote_once() {
     if !PROMOTED.with(|p| p.replace(true)) {
         let _ = super::promote_pro_audio();
     }
@@ -395,22 +471,10 @@ fn try_rt(core: &Core) -> Option<MutexGuard<'_, Rt>> {
     }
 }
 
-/// Run `body` as a callback's guarded section: a panic is caught and counted (false), and in DEV builds
-/// the allocations inside it are counted (`host::rt_alloc`, this thread's).
+/// Run `body` as a callback's guarded section: a panic is caught and counted (false). Its allocations
+/// count with the rest of the callback's ([`RtSection`]).
 pub(crate) fn guarded(counters: &IoCounters, body: impl FnOnce()) -> bool {
-    #[cfg(debug_assertions)]
-    let before = crate::host::rt_alloc::allocations();
-    #[cfg(debug_assertions)]
-    let alloc_guard = crate::host::rt_alloc::guard();
     let ok = catch_unwind(AssertUnwindSafe(body)).is_ok();
-    #[cfg(debug_assertions)]
-    {
-        drop(alloc_guard);
-        let after = crate::host::rt_alloc::allocations();
-        if after > before {
-            counters.rt_allocs.fetch_add(after - before, Relaxed);
-        }
-    }
     if !ok {
         counters.panics.fetch_add(1, Relaxed);
     }
@@ -454,6 +518,8 @@ impl DuplexInput {
     where
         f32: FromSample<T>,
     {
+        let section = Arc::clone(&self.core);
+        let _rt = RtSection::enter(&section.counters);
         promote_once();
         let _ftz = DenormalsOff::new();
         if let Some(frames) = self.probe.observe(latency, self.rate) {
@@ -504,15 +570,28 @@ pub(crate) struct JoinInput {
 impl JoinInput {
     /// Allocates: build it on the owner thread.
     pub(crate) fn new(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32, push: PushEnd) -> JoinInput {
-        JoinInput { core, run, channels: channels.max(1), rate, push, scratch: vec![0.0; SCRATCH_FRAMES * SLOT_COUNT], probe: Probe::new(), dead: false }
+        JoinInput {
+            core,
+            run,
+            channels: channels.max(1),
+            rate,
+            push,
+            scratch: vec![0.0; SCRATCH_FRAMES * SLOT_COUNT],
+            probe: Probe::new(),
+            dead: false,
+        }
     }
 
     fn capture<T: Rail>(&mut self, data: &[T], latency: Option<Duration>)
     where
         f32: FromSample<T>,
     {
+        let section = Arc::clone(&self.core);
+        let _rt = RtSection::enter(&section.counters);
         promote_once();
         let _ftz = DenormalsOff::new();
+        #[cfg(test)]
+        inject::site("join input");
         #[cfg(debug_assertions)]
         trace::join_push(data.len() / self.channels, latency);
         if let Some(frames) = self.probe.observe(latency, self.rate) {
@@ -632,6 +711,9 @@ impl Render {
     /// One output callback: `data` interleaved at the device's channel count, `entry` when the callback
     /// entered, `latency` the playback delay this stream reported for it.
     pub(crate) fn render<T: SizedSample + FromSample<f32>>(&mut self, data: &mut [T], entry: Instant, latency: Option<Duration>) {
+        let core = Arc::clone(&self.core);
+        let counters = &core.counters;
+        let _rt = RtSection::enter(counters);
         // Its own clock, not `entry`: the fake driver's entries are synthetic.
         let began = Instant::now();
         // DEV: the thread's cycles at entry, read only in a tone run (`tone::cycle_stamp`).
@@ -639,8 +721,6 @@ impl Render {
         let began_cycles = self.core.tone.get().and_then(|_| super::tone::cycle_stamp());
         promote_once();
         let _ftz = DenormalsOff::new();
-        let core = Arc::clone(&self.core);
-        let counters = &core.counters;
         counters.callbacks.fetch_add(1, Relaxed);
         self.run.callbacks.fetch_add(1, Relaxed);
         let n = data.len() / self.channels;
@@ -685,6 +765,8 @@ impl Render {
                 pipe.skip(lost as usize);
                 #[cfg(debug_assertions)]
                 let fill_before = pipe.fill();
+                #[cfg(test)]
+                inject::site("join pull");
                 let zeroed = pipe.pull(&mut x[..m * SLOT_COUNT]) + (n - m);
                 for (s, xs) in xs.iter_mut().enumerate() {
                     for (y, frame) in xs[..m].iter_mut().zip(x.chunks_exact(SLOT_COUNT)) {
@@ -1698,5 +1780,46 @@ mod tests {
             probe.observe(ms(20), 48_000);
         }
         assert_eq!(probe.observe(ms(50), 48_000), None, "frozen after the first reports");
+    }
+
+    /// The RT allocation count covers each callback whole: an allocation where the join's pull runs
+    /// (before the engine lock) and one in the input callback before its guard both count.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_allocation_anywhere_in_a_join_callback_is_counted() {
+        let mut j = Join::new();
+        for _ in 0..20 {
+            j.cycle(1);
+        }
+        let counted = |j: &Join| j.core.counters.rt_allocs.load(Relaxed);
+        assert_eq!(counted(&j), 0, "the join allocates nothing");
+        for site in ["join pull", "join input"] {
+            let before = counted(&j);
+            inject::alloc_at(site);
+            j.cycle(1);
+            assert_eq!(counted(&j), before + 1, "an allocation at the {site} counts");
+        }
+        assert!(!in_rt_callback(), "each callback's section ended with it");
+    }
+
+    /// A section inside another counts nothing twice, and the allocation counter's own guard inside one
+    /// leaves the outer counting.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_section_inside_another_counts_once_and_the_outer_keeps_counting() {
+        let counters = IoCounters::default();
+        let alloc = || drop(std::hint::black_box(vec![0u8; 16]));
+        {
+            let _outer = RtSection::enter(&counters);
+            {
+                let _inner = RtSection::enter(&counters);
+                alloc();
+            }
+            assert!(in_rt_callback(), "still inside the outer section");
+            drop(crate::host::rt_alloc::guard());
+            alloc();
+        }
+        assert!(!in_rt_callback());
+        assert_eq!(counters.rt_allocs.load(Relaxed), 2);
     }
 }
