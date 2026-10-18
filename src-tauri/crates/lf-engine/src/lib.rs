@@ -197,9 +197,10 @@
 //! - **A slot's record-path delay is clipped where the capture's alignment is not.** `latch_record`
 //!   clamps each slot's `dw` to its line (`slots.rs` 401: a second plus a block, 52 095 frames at 48 kHz
 //!   and 4096) while the capture aligns on the full live latency (`engine.rs` `let align`), so beside a
-//!   live plugin over ~1 s of latency a dry slot loses its start. The instruments' clip (`instruments.rs`
-//!   259) is expected (`tests/slots.rs`). Next step: check each delay against its own line and grow the
-//!   lines off RT, or refuse the compensation explicitly; test both sides of the capacity.
+//!   live plugin over ~1 s of latency a dry slot loses its start. The built-in instruments clip the same
+//!   way (`instruments.rs` 259), untested. Next step: check each delay, instruments included, against its
+//!   own line and grow the lines off RT, or refuse the compensation explicitly; test both sides of the
+//!   capacity.
 //! - **The reference null test lets NaN through.** `score()` (`tests/common/refs.rs` 226) takes
 //!   `err.max(1e-300)`, which turns a NaN error into the floor, so a NaN render passes `Class::N` (289).
 //!   Next step: reject non-finite samples in both inputs, with tests for one NaN, all NaN and ±inf.
