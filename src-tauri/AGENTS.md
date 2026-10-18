@@ -308,8 +308,11 @@ plugin-GUI work.
   scripts/docs change; the rerun passed 4/4 and CI passed that commit):
   `clap::resize_tests::a_request_from_another_thread_never_waits_for_the_owner` ("request_resize waited
   for the window's thread", `clap.rs` 540) and `engine_slot::tests::a_request_its_caller_gave_up_on_during_a_restart_is_not_served_after_it`
-  ("the request waits on the restart's activation", `engine_slot.rs` 1124). Next check: loop the two
-  under a parallel `cargo build` and read whether their bound is a fixed wait a loaded PC outlasts.
+  ("the request waits on the restart's activation", `engine_slot.rs` 1124). Likewise
+  `engine_io::feed::tests::the_feed_thread_holds_resyncs_and_still_stops_while_held` failed once under
+  `rust:check`'s parallel jobs ("the hold's end sends a frame", `feed.rs` 739), green alone and on the
+  rerun. Next check: loop the three under a parallel `cargo build` and read whether their bound is a
+  fixed wait a loaded PC outlasts.
 
 - Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
@@ -332,12 +335,31 @@ plugin-GUI work.
   `effIdle` is sent once per `audioMasterNeedIdle`, not until it answers 0; a program is selected
   without `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend
   or SysEx) and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
-  answers nothing).
+  answers nothing). A tone `restore_state` refuses after it has already selected the program
+  (`vst2_engine.rs` 560-568) leaves that instance half-restored, and the load resumes it (723) where the
+  `Restore::Refused` contract promises defaults: discard and reopen the instance without the tone
+  (`vst2_engine_tests.rs` pins today's behaviour and changes with it).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
-- The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
+- The panic hook (`lib.rs` 260-272) allocates, logs and calls the previous hook on whatever thread
+  panicked, the audio thread included (`catch_unwind` in `callback::guarded` does not bypass it). Fix: a
+  const-initialised thread-local RT marker set at the callback boundary; the hook skips logging and
+  `prev` there, the existing panic counters report owner-side; the unwind itself stays non-RT.
+- A caught panic in the WASAPI input callback only sets `JoinInput::dead` (`callback.rs` 544): capture
+  goes silent for good while the owner, watching `core.fault` and `run.fault`, never hears of it. Fix:
+  latch a separate capture fault; the owner first rebuilds capture/join on the same device and rate,
+  keeping the engine and its loops, else reports it without a rate switch. Test with an injected panic.
+- The ASIO callback is not lock-free: `Start` reads `output.buffer_size()` (`cpal_driver.rs` 120) after
+  both `play()` calls, and cpal 0.18.1 takes the same `asio_streams` mutex there as in its callbacks;
+  asio-sys also holds `BUFFER_CALLBACK.lock()` around every callback. Small fix: read the buffer size
+  before both plays. Full fix: patched ASIO dependencies, with the L1+L2 latency measurements.
+- The RT allocation count (`callback::guarded`, debug builds) misses parts of the callbacks: the join's
+  `pipe.pull` runs before the guard (`callback.rs` 688 vs 725) and the Share callback's `mirror.render`
+  (`share.rs` 182) has none, so `docs/ARCHITECTURE.md`'s "counts any allocation" overstates it. Fix:
+  split the counting from the panic guard and cover each whole input, output and Share callback
+  (nesting-safe); verify with an allocation injected in each gap.
 - Two live slots on the same capture channel sum it (+6 dB).
 - An ASIO period the driver drops without its overload report is not flagged as damage (input and
   output stay in step; the take is spliced there). `asio_phase_slips` counts it in the log only (after a run's first
@@ -360,6 +382,11 @@ plugin-GUI work.
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
+- The feed has no backpressure: `turn` (`feed.rs` 396) sends every tick while `Channel.send` succeeds
+  (`mode.rs` 231), and Tauri 2.11.5 queues large payloads unbounded until the page fetches them, so a
+  stalled WebView grows a backlog of stale frames. Fix: a fixed number of outstanding frames with an ACK
+  per subscription and sequence; drain meanwhile, resync on resume without breaking active gestures or
+  session revisions, and keep one-shot events in their own bounded queue.
 - A page that dies for good (a WebView crash, a shutdown) leaves the scope taps on (`Key::Scope`), so
   the engine keeps folding columns the feed drains and drops for nobody. Read from source, not
   reproduced, nothing audible.
@@ -382,7 +409,14 @@ plugin-GUI work.
   device-interface path) is stable across a restart and a replug, which interface class a port
   arrives on (the next check: `src/engine_io/midi/liveness.rs`'s header), and whether WinMM input is
   multi-client under `wdmaud2`. Owed: the release after the first with native MIDI removes the web
-  build's `lf.midiLearn` key (`src/app/midi-actions.ts`).
+  build's `lf.midiLearn` key (`src/app/midi-actions.ts`). Its module briefing (`midi/mod.rs` header)
+  restates ARCHITECTURE's subscription/epoch, nothing-is-stamped, no-device and rebuild-needs-no-WebView
+  rules: replace only that overlap with pointers, keep its local access, batch, lock and retry detail.
+- ASSIGN can swallow a release: a binding made live (`MidiHost::assign` → `refresh`) while its note or
+  CC64 is already held through the router makes learn consume the release, and `midi/mod.rs` 789 keeps
+  it from the router, so the note or sustain hangs. Fix: release the router's affected holds when a
+  binding goes live (other owners of the same note kept); a tweak of that last `if` alone is not enough,
+  `outcome.fire` already ran at 776. Test note and sustain.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.
@@ -410,13 +444,46 @@ plugin-GUI work.
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read
   back, not checked; a tone saved by an export or an unload before the next block has consumed an
-  accepted parameter edit loses that edit; two concurrent edits can leave a VST3's processor and controller at
-  different values. Then: two slots loading one VST3 DLL run its init unserialized; a failed VST3 editor
-  attach drops the frame before the view; a CLAP restart can deliver a removed parameter id; a
-  non-discardable VST3 module is unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP
-  note port gets CLAP notes; CLAP editor edits never reach the drawer; an editor open that succeeds at
-  its timeout stays open; CLAP visibility and connection-loss callbacks do nothing; the scanner caches
-  factories that forbid it.
+  accepted parameter edit loses that edit. Then: two slots loading one VST3 DLL run its init
+  unserialized; a CLAP restart can deliver a removed parameter id; a non-discardable VST3 module is
+  unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP note port gets CLAP notes; CLAP
+  editor edits never reach the drawer.
+- Plugin-host defects confirmed against the source, each with its fix (none reproduced):
+  a) Two concurrent host edits can reach a VST3's processor and controller in opposite orders:
+     `EngineSlot::set_param` drops the `params_tx` lock between the push and the controller request
+     (`engine_slot.rs` 763-774). Fix: hold the lock through both enqueues; report a send failure.
+  b) A VST3 editor edit into a full ring is dropped while `performEdit` answers `kResultOk`
+     (`vst3.rs` 504-511; the "drops last-wins" comment is backwards: the new value is the one lost).
+     Fix: answer an error and report it; keep tone-dirty; any retry must never overwrite a newer edit.
+  c) Read-only parameters are listed as writable sliders: `clap_param_descs` ignores the flags
+     (`clap.rs` 156) and the VST3 listing filters only `kIsHidden` (`vst3.rs` 1170). Fix: drop them (and
+     CLAP hidden) from the list and the writable id set; test a direct set on such an id.
+  d) An editor open the owner checks as uncancelled (`engine_slot.rs` 459) but answers after the caller's
+     5 s timeout stays open while the caller reports failure (`sync_channel(1)` takes the late reply).
+     Fix: a rendezvous reply, closing the editor this request opened when the reply cannot be delivered.
+  e) A failed VST3 editor attach (`vst3.rs` 911) or host window drops win → frame → view, the reverse of
+     `Vst3Editor`'s field order. Fix: an owner-local guard that keeps frame and window alive through the
+     view's cleanup and hands them to the open editor only after a successful attach.
+  f) CLAP `request_show`/`request_hide` answer Ok and do nothing, and `closed` drops `was_destroyed`
+     (`clap.rs` 597-604); `clap_engine.rs` 500 acts on the flag for floating editors only. Fix: refuse
+     show/hide until handled; on `was_destroyed` call `gui.destroy` with no hide or resize first, for
+     both editor forms, then clean the host window and publish `EditorClosed`.
+  g) The scanner never reads the VST3 factory flags (`scan.rs` goes from the factory straight to
+     `countClasses` at 1439) and reuses entries by fingerprint alone (318), so a `kClassesDiscardable`
+     factory's changed classes are missed. Fix: carry the flag out of the scan child, never cache such a
+     result, and bump the cache version.
+- Fixes that wait on a native command: (a) boot awaits the whole plugin scan before rig recall
+  (`src/app/boot.ts` 51-52), so one uncached plugin can hold the saved amp-sim back by the 20 s scan
+  timeout: a scan of given paths first; (b) `app_update_install` downloads and installs in one call
+  (`update.rs` 128-131) after the UI's save, so a take committed during the download is lost: split
+  download and install, with a native freeze of jam changes (MIDI included) and a fresh save between;
+  (c) `SlotHost::remove` runs with the slot still live, so dry input passes to monitor and record
+  (`lf-engine` `slots.rs` 544) if the UI's live-off is late or dropped: force live-off, the input gate
+  ramped to zero, before an unload's removal; (d) GO LIVE inverts the flag the UI last sent, a race with the feed: a
+  `ToggleSlotLive` engine command for button and pedal presses, explicit `SetSlotLive` elsewhere.
+- `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`
+  83-97 logs the failure, counts the swap, and the runner accepts "0 failed". Fix: count a failed open
+  as a failed scenario and report swaps done with an editor open (the runner's regex follows).
 - After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
   rejected (how often: `docs/VERIFY.md`, the `native:engine` baseline). Traced (the join trace in
   `engine_io/callback.rs`): once primed, capture delivers a packet early and a render callback comes a

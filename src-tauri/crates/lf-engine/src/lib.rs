@@ -183,12 +183,28 @@
 //!   Next check: pass the looper both intervals, then un-ignore
 //!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
 //!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
-//! - **With no device running, a session job is served before the commands queued ahead of it.**
+//! - **A session job can be served before the commands queued ahead of it.** With no device running,
 //!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
-//!   it on resume. Applying them in idle is wrong: a capture latches alignment 0, and the 64-entry pending
-//!   table can fill while earlier commands still wait in the ring. Next check: a fix that orders them
-//!   without applying captures in idle, made green by the two ignored `with_no_device_*` tests
-//!   (`tests/session.rs`).
+//!   it on resume (applying them in idle is wrong: a capture latches alignment 0, and the 64-entry
+//!   pending table can fill while earlier commands still wait in the ring). With a device running,
+//!   `take_commands` (`engine.rs` 780) takes at most 64 a block and `session.begin` (593) runs
+//!   regardless, so a `SetMute` sent before a load can apply after it. A fence from the ring's length at
+//!   receipt leaves three holes: a command sent after the job but taken in the same callback lands before
+//!   it, a snapshot waiting on `looper.busy()` lets a later mix change through, and a job submitted
+//!   between the callback's first take and `begin` skips the fence. Next step: order them at send time
+//!   with one sequence number shared by the command ring and the session port, made green by the two
+//!   ignored `with_no_device_*` tests (`tests/session.rs`) and a test with both sent before one callback.
+//! - **A slot's record-path delay is clipped where the capture's alignment is not.** `latch_record`
+//!   clamps each slot's `dw` to its line (`slots.rs` 401: a second plus a block, 52 095 frames at 48 kHz
+//!   and 4096) while the capture aligns on the full live latency (`engine.rs` `let align`), so beside a
+//!   live plugin over ~1 s of latency a dry slot loses its start. The instruments' clip (`instruments.rs`
+//!   259) is expected (`tests/slots.rs`). Next step: check each delay against its own line and grow the
+//!   lines off RT, or refuse the compensation explicitly; test both sides of the capacity.
+//! - **The reference null test lets NaN through.** `score()` (`tests/common/refs.rs` 226) takes
+//!   `err.max(1e-300)`, which turns a NaN error into the floor, so a NaN render passes `Class::N` (289).
+//!   Next step: reject non-finite samples in both inputs, with tests for one NaN, all NaN and ±inf.
+//! - **`tests/perf.rs`'s ignored Stage 2 bar fails on a loaded PC** (11.4 % and 9.1 % against its 10 %).
+//!   Next check: rerun it on a quiet desktop before reading a failure as a regression.
 //!
 //! # Beside this crate
 //!
