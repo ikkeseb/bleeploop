@@ -44,7 +44,10 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   plugin-requested restart (CLAP `request_restart`, VST3 `restartComponent`, VST2
   `audioMasterIOChanged`) and teardown; an FX slot
   passes dry, an instrument slot is silent, loops and click never wait.
-- **Unload order is load-bearing:** `running=false` → `OwnerRequest::Wake` → join the owner, which
+- **Unload order is load-bearing:** the slot goes off live and the engine's gate closes on it
+  (`EngineHost::silence_slot`, ≤1 s, else the unload is refused and the plugin stays; a plugin-requested
+  restart skips it and stays live; answered by a block the engine rendered after taking that live-off,
+  or, with no device running, by closing the gate in the engine at once) → `running=false` → `OwnerRequest::Wake` → join the owner, which
   removes the unit from the engine (crossfade to bypass, `stop` on the audio thread; ≤2 s,
   `REMOVE_TIMEOUT`) → saves the tone if it changed → deactivate → terminate → the module unloads
   LAST. A unit the engine does not hand back leaves the plugin loaded (leaked), never unloaded under a
@@ -93,11 +96,12 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 - **Release IPC surface:** `capabilities/default.json` grants only event listen/unlisten. `diag` is
   registered only under `debug_assertions`; keep the handler cfg and frontend `import.meta.env.DEV`
   surface in lockstep. Help's `app_log_dir` / `app_open_log_dir` (`lib.rs`) and the updater's
-  `app_update_check` / `app_update_install` (`update.rs`; the release channel is `plugins.updater` in
-  `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
+  `app_update_check` / `app_update_download` / `app_update_install` (`update.rs`; the release channel
+  is `plugins.updater` in `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
   `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
-  only to match a stored entry. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
+  only to match a stored entry, and `plugin_scan_paths` (rig recall's scan of the saved plugins at
+  launch) its paths only to match bundles the scan's own walk finds. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
   take only what they need: `input_send` an epoch and the batch's engine commands and note events,
   `midi_subscribe` a channel and the page's age (`performance.timeOrigin`), and the page's epoch to every
   other: `midi_learn` an action id and a track, `midi_cancel_learn` nothing more, `midi_forget` /
@@ -429,15 +433,15 @@ plugin-GUI work.
   unserialized; a CLAP restart can deliver a removed parameter id; a non-discardable VST3 module is
   unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP note port gets CLAP notes; CLAP
   editor edits never reach the drawer.
-- Fixes that wait on a native command: (a) boot awaits the whole plugin scan before rig recall
-  (`src/app/boot.ts` 51-52), so one uncached plugin can hold the saved amp-sim back by the 20 s scan
-  timeout: a scan of given paths first; (b) `app_update_install` downloads and installs in one call
-  (`update.rs` 128-131) after the UI's save, so a take committed during the download is lost: split
-  download and install, with a native freeze of jam changes (MIDI included) and a fresh save between;
-  (c) `SlotHost::remove` runs with the slot still live, so dry input passes to monitor and record
-  (`lf-engine` `slots.rs` 544) if the UI's live-off is late or dropped: force live-off, the input gate
-  ramped to zero, before an unload's removal; (d) GO LIVE inverts the flag the UI last sent, a race with the feed: a
-  `ToggleSlotLive` engine command for button and pedal presses, explicit `SetSlotLive` elsewhere.
+- The quit window (a close and an update share it: `src/app/close-guard.ts` `quitWithSave`): input
+  stays open from the quit save's snapshot to the engine's shutdown, so a take in flight, or one a
+  pedal or the UI commits in those 1-5 s, is not in the recovery. Next: an engine-owned quiesce through
+  the command ring (stop admitting fresh presses, end captures as a punch-out keeps them, let block jobs
+  finish while the device renders, then answer), after which the quit save reads its snapshot. And an
+  update whose installer fails after the engine's shutdown (`ShellExecuteW` failing, or the installer
+  quitting with an error after it started) leaves the app without an engine or with none open: the
+  first says "restart BleepLoop", the second nothing; a recovery needs a process outside the app that
+  watches the installer. Neither has been seen; only a real update shows them.
 - `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`
   83-97 logs the failure, counts the swap, and the runner accepts "0 failed". Fix: count a failed open
   as a failed scenario and report swaps done with an editor open (the runner's regex follows).

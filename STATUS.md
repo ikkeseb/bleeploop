@@ -92,7 +92,9 @@ it.
 - SCOPE's beam moves on with the bar when the live columns stop, and only a fresh column takes it:
   does it ever jump, stutter or lag the bar when the view opens mid-loop?
 - GO LIVE lights only from the engine's live flag, and a lost press toasts once: does the pill ever
-  lag the guitar going live, or light while the dry guitar is silent?
+  lag the guitar going live, or light while the dry guitar is silent? Each press is now the engine's
+  toggle: hammer GO LIVE from a pedal and the cap together, during a plugin load too: one switch per
+  press, none lost?
 - Audio Settings in four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS), a lamp
   and a state word each: does a pedal's port pick take fewer moves, and does the lamp read from the
   chair?
@@ -108,6 +110,10 @@ it.
   the keyboard): are the FX keys and the 91 px sliders big enough to hit while playing?
 - Buffer 256 and 64: the take on the click at each size, a short switch gap, and a plugin loaded while
   loops play crossfading in without a click (machine: `tests/slots.rs`).
+- An amp-sim unloaded or swapped while GO LIVE is on: the slot goes off live first, so no dry DI is
+  heard or recorded between the plugins (machine: `tests/slots.rs`, `engine_io/plugins.rs`); a
+  plugin-requested restart (a FabFilter latency-mode change) keeps the slot live. Is the swap a clean
+  gap with no dry flash?
 - An instrument entering or leaving a slot while GO LIVE is on: the dry guitar fades across where it
   stepped before (machine: `tests/slots.rs`). Is the change inaudible mid-note?
 - The input meter on each live slot's card (its own input, a held peak, CLIP), INPUT LIVE and the "A
@@ -187,7 +193,9 @@ it.
 - The UPDATE pill and its panel (the download in MB with a bar, the signature check, the installer;
   machine: `verify/probes/app-update.mjs`): over a real GitHub download, do the numbers climb at a
   watchable rate, is the pill findable untold, and does the last frame before the app quits read as
-  progress, not a freeze? Only a real install answers.
+  progress, not a freeze? Only a real install answers. The download now runs while the jam plays, and
+  the jam is saved after it: on the update from the release that carries this to the next, commit a
+  take during the download; is it back after the restart?
 - Help in two tabs (Reference unscrolled at every window size, Manual with About this build at its
   foot): can it be read at a glance mid-jam, from playing distance?
 

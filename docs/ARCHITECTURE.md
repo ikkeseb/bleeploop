@@ -294,7 +294,9 @@ input port may be exclusive: the WebView's Web MIDI permission is denied (`src-t
 - **Every toggle has one owner, the engine:** CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input
   sends are engine actions every producer sends as intent (the lf-engine briefing), so a pedal and a
   click never cancel each other. GO LIVE, TAP and the stage view stay the UI's, run on native MIDI's
-  event (`engine_io/midi/actions.rs`); GO LIVE's flag is the engine's, shown from the feed's `live`.
+  event (`engine_io/midi/actions.rs`); GO LIVE's flag is the engine's, shown from the feed's `live`,
+  and its toggle goes straight to the engine's ring with the live setters (a source change's, an
+  unload's), never through the input queue, so every live operation applies in the order it was made.
 
 ## Known fragile piece: plugin editors
 

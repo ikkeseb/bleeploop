@@ -140,11 +140,18 @@ pub(crate) enum UiRoute {
     Router,
     /// A setting: straight to `EngineHost::send`, which keeps it (a rebuild would discard it queued).
     Direct,
+    /// GO LIVE's toggle ([`Toggle::Live`]): straight to `EngineHost::send` as the slot's live setter
+    /// goes, so every live operation (a press, the UI's setters, an unload's live-off) reaches the
+    /// engine in the order it was made; queued, a press waiting behind a full ring could land after a
+    /// later live-off and open the slot again. A press: refused while no device runs, as the queue
+    /// refuses one, and when the ring has no room (never retried).
+    Live,
 }
 
 /// Which way `command` goes when the UI sends it.
 pub(crate) fn ui_route(command: &Command) -> UiRoute {
     match command {
+        Command::Action(Action::Toggle(Toggle::Live(_))) | Command::ActionOn(_, Action::Toggle(Toggle::Live(_))) => UiRoute::Live,
         Command::RecDub(_)
         | Command::PlayStop(_)
         | Command::Stop(_)
@@ -280,8 +287,8 @@ mod tests {
         assert_eq!(classes(Fire::Run { action: ActionId::ClickToggle, target: None }), [Class::Action]);
     }
 
-    // The UI's input commands join the queue; the router's commands are refused there; a setting
-    // goes straight to the engine.
+    // The UI's input commands join the queue; the router's commands are refused there; a setting and
+    // GO LIVE's toggle go straight to the engine.
     #[test]
     fn the_uis_commands_split_into_input_router_and_settings() {
         let input = [
@@ -321,7 +328,8 @@ mod tests {
             Command::SetInputSendParam(InputSendParam::EchoLevel, 0.2),
             Command::SetInstrumentGain(Instrument::Lead, 0.5),
         ];
-        for (commands, route) in [(&input[..], UiRoute::Queue), (&router[..], UiRoute::Router), (&settings[..], UiRoute::Direct)] {
+        let live = [Command::Action(Action::Toggle(Toggle::Live(0))), Command::ActionOn(1, Action::Toggle(Toggle::Live(1)))];
+        for (commands, route) in [(&input[..], UiRoute::Queue), (&router[..], UiRoute::Router), (&settings[..], UiRoute::Direct), (&live[..], UiRoute::Live)] {
             for c in commands {
                 assert_eq!(ui_route(c), route, "{c:?}");
             }

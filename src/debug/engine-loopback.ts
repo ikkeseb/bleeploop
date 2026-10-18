@@ -671,7 +671,7 @@ async function run(): Promise<void> {
       unloaded = `, after ${desc.name} [${desc.format}] was loaded there and unloaded`;
     }
     check(!slotPlugins()[0] || !slotPlugins()[1], 'MIC needs an empty slot');
-    if (!looper.inputArmed()) check(await looper.toggleInput(), 'MIC could not take an empty slot live');
+    if (!looper.inputArmed()) check(await looper.setInput(true), 'MIC could not take an empty slot live');
     await until('the feed to show MIC live', () => looper.inputArmed(), 5);
     short = 'MIC';
     source = `MIC (the input dry through an empty live slot ${inputArmed()[0] ? 1 : 2}${unloaded})`;

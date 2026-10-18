@@ -47,7 +47,7 @@ import {
 import { autosave } from '../../session/autosave';
 import { engineResync } from './instrument';
 import { withAt } from './instrument-slots';
-import { adoptEngineLive, engineInputLive, toggleEngineInput } from './native-io';
+import { adoptEngineLive, engineInputLive, setEngineInput } from './native-io';
 import { notifyError, notifyInfo, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
 import { confirm } from '../confirm/confirm-store';
@@ -619,10 +619,12 @@ function applyEvent(ev: EngineEvent): void {
   }
 }
 
-/** A toggled setting as the engine applied it (`Toggled`): its signal, and an input send's saved value. */
+/** A toggled setting as the engine applied it (`Toggled`): its signal, and an input send's saved value. A
+ * slot's GO LIVE shows the frame's `live` instead (`adoptEngineLive`). */
 function applyToggle(toggle: EngineToggle, on: boolean): void {
-  if (typeof toggle === 'object') adoptInputSend(toggle.Send, on);
-  else if (toggle === 'Click') setMetronomeSignal(on);
+  if (typeof toggle === 'object') {
+    if ('Send' in toggle) adoptInputSend(toggle.Send, on);
+  } else if (toggle === 'Click') setMetronomeSignal(on);
   else if (toggle === 'EndStop') setLoopEndStopSignal(on);
   else if (toggle === 'Fixed') setFixedLengthSignal(on);
   else if (toggle === 'Retake') setRetakeSignal(on);
@@ -796,7 +798,7 @@ function applyFrameNow(f: FeedFrame): void {
   }
   if (f.anchor) plain.clock = f.anchor;
   if (f.reset) adoptSettings(f.settings ?? []);
-  // GO LIVE as the engine applied it, after a reset's resync sent the page's own (`resendEngineLive`).
+  // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
   if (f.live) adoptEngineLive(f.live);
   tookLoop = false;
   for (const ev of f.events) {
@@ -1034,7 +1036,7 @@ function dropMix(i: number, key: MixKey): void {
  * playing session's mix and modes. A lane's mix from here stands only where the frame has no `Mix` for
  * the lane: its Mix events, applied after this, are the mix the engine last applied. The UI still sends what it persists and the engine lacks (the master
  * and click volumes, FADE's bars and the input sends on a first launch) and what it owns: the note
- * target and the slot gains, and the live slots as it last showed them (`engineResync`; the frame's
+ * target and the slot gains, and on the page's first reset no live slot (`engineResync`; the frame's
  * `live` then shows what the engine applied).
  */
 function adoptSettings(settings: readonly EngineCommand[]): void {
@@ -1115,7 +1117,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     if (!sendsKnown.has(id)) lacking.push({ SetInputSend: [id, inputSendOn[id][0]()] });
   }
   sendEngine(...lacking);
-  engineResync();
+  engineResync(plain.resets === 1);
 }
 
 const clampLane = (i: number) => Math.max(0, Math.min(ENGINE_LANES - 1, Math.trunc(i)));
@@ -1253,9 +1255,10 @@ export const engineLooper = {
   trackCounted: (i: number): boolean => counted[i][0](),
   masterLengthFrames: masterFrames,
   /** MIC, reached here only by the native probes (the player sets a slot to Off and goes live): the
-   * device input dry through a slot without a plugin (`toggleEngineInput`). */
+   * device input dry through a slot without a plugin, set outright and true once the host took it
+   * (`setEngineInput`). */
   inputArmed: engineInputLive,
-  toggleInput: async (): Promise<boolean> => toggleEngineInput(),
+  setInput: setEngineInput,
   peaksInto,
   scopeInto,
   /** The live scope taps on or off (`SetScope`). Its one caller is `src/app.tsx`, the always mounted

@@ -49,8 +49,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   shows its gesture's value until the feed's `Mix` has it, and MUTE sends the engine's toggle; the rule
   lives in `state/engine-store.ts` (the lane mix section), the controls' side in `looper/mix-gesture.ts`.
   CLICK, END STOP, FIXED, RETAKE, AUTO REC and the IN FX sends send the engine's toggle too, and show
-  the feed's `Toggled`, never their own flip (`state/engine-store.ts` `toggleSetting`); GO LIVE sends
-  `SetSlotLive` and shows the feed's `live` (`state/native-io.ts`).
+  the feed's `Toggled`, never their own flip (`state/engine-store.ts` `toggleSetting`); GO LIVE's press
+  sends the engine's toggle too, and what means a value (an unload's live-off, a reload's resume, an
+  effect pick's auto-start) `SetSlotLive`; the cap shows the feed's `live` (`state/native-io.ts`).
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.

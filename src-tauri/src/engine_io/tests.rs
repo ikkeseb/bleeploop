@@ -879,6 +879,26 @@ fn a_plugin_owner_installs_removes_and_reinstalls_while_the_engine_renders() {
     assert_eq!(h.host.diag().lock_misses, 0);
 }
 
+/// A plugin-requested restart takes its unit out with the slot still live (`engine_slot::cycle`, which
+/// skips a final unload's live-off: `plugins.rs`): the reinstalled unit hears the input again, and the
+/// settings a rebuild replays keep the slot live.
+#[test]
+fn a_units_removal_for_a_restart_leaves_its_slot_live() {
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.send(Command::SetSlotLive(0, true));
+    let slot = h.host.slot(0);
+    let (unit, calls, _) = Unit::new(0.0);
+    assert!(slot.install(unit, RATE as u32).is_ok());
+    until("the unit renders", || calls.load(SeqCst) > 4);
+    let back = slot.remove(Duration::from_secs(2)).unwrap().expect("the unit comes back");
+    assert!(slot.install(back, RATE as u32).is_ok(), "reinstalled");
+    h.play(RATE / 10);
+    let (_, overview) = h.host.drain_feed(&mut h.events);
+    assert!(overview.expect("an engine").slot_live(0), "the slot is still live");
+    assert!(h.host.settings().contains(&Command::SetSlotLive(0, true)));
+}
+
 #[test]
 fn a_panicking_unit_faults_the_engine_and_the_owner_replaces_it_at_the_same_rate() {
     let h = Harness::new();

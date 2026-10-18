@@ -131,6 +131,12 @@ export interface PluginHost {
    * rescan button) scans everything again, which is also how a previously failed bundle is retried.
    */
   scanPlugins(force?: boolean): Promise<PluginDescriptor[]>;
+  /**
+   * The plugins in the bundles at `paths` alone (rig recall's saved plugins, at launch), found and
+   * cached as `scanPlugins` finds them: an unchanged bundle spawns no scan child, and a path the scan's
+   * folders do not hold yields nothing. Quick where the full scan waits on every new plugin's child.
+   */
+  scanPluginPaths(paths: readonly string[]): Promise<PluginDescriptor[]>;
   /** The folders the scan walks. Rejects when the stored list cannot be read (the host leaves that
    * file as it is). Empty in the web build. */
   pluginFolders(): Promise<PluginFolders>;
@@ -395,10 +401,12 @@ export interface AppUpdates {
   readonly available: boolean;
   /** A newer release, or null when this build is the latest. Rejects when the check fails (offline). */
   check(): Promise<AppUpdate | null>;
+  /** Download the offered update and verify its signature, the engine playing on; one already
+   * downloaded this launch answers at once. Rejects when a step fails. */
+  download(): Promise<void>;
   /**
-   * Download the offered update and verify its signature, shut the engine down and start the
-   * installer, which quits the app and opens the new version. Never resolves once the installer runs;
-   * rejects when a step fails.
+   * Install what `download` fetched: shut the engine down and start the installer, which quits the app
+   * and opens the new version. Never resolves once the installer runs; rejects when it fails.
    */
   install(): Promise<void>;
   /**

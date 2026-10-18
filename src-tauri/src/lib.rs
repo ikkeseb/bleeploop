@@ -248,6 +248,7 @@ pub fn run() {
     tauri::Builder::default()
         // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
+        .manage(update::UpdateState::default())
         // The updater's manifest and public key: `plugins.updater` in `tauri.conf.json`.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -308,9 +309,11 @@ pub fn run() {
             app_open_log_dir,
             app_confirm_close,
             update::app_update_check,
+            update::app_update_download,
             update::app_update_install,
             host::host_init,
             host::plugin_scan,
+            host::plugin_scan_paths,
             // The player's own scan folders (host/folders.rs); the add opens the native dialog itself.
             host::plugin_folders,
             host::plugin_folder_add,

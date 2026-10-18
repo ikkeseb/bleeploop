@@ -472,6 +472,31 @@ async function flush(): Promise<void> {
 }
 
 /**
+ * The save before the app quits (a close, an update's installer: `src/app/close-guard.ts`): what the
+ * engine holds now, from its snapshot, whatever its lanes last showed here (the take the player just
+ * committed may still read RECORDING on the feed). An engine holding a loop is saved, and a player's
+ * clear from before that loop is spent, never deleting it; an engine holding none deletes the jam only
+ * for the player's clear that emptied it, as `flush` does. A snapshot that fails rejects, whatever the
+ * lanes here read (they may lag a committed take): the engine's state is unknown, so the recovery and the
+ * clear stay as they are and the quit's caller decides (`quitWithSave`). A no-op before `start`, as
+ * `flush`.
+ */
+async function quitSave(): Promise<void> {
+  if (!started) return;
+  await readyPromise;
+  await serialized(async () => {
+    const token = jam().clearToken();
+    const committed = await jam().exportSnapshot();
+    if (committed.tracks.length === 0) {
+      await forgetJam();
+      return;
+    }
+    await saveSnapshot(committed);
+    if (token) jam().spendClear(token);
+  });
+}
+
+/**
  * Save what the looper holds now, from its snapshot, whatever its lanes last showed here:
  * before a switch drops the loops. The device's stop may just have committed a take whose lane still
  * reads RECORDING (its feed frame not yet in). Saves a snapshot that holds a loop; never deletes. A no-op
@@ -496,6 +521,7 @@ export const autosave = {
   /** Resolves when the one startup restore attempt has completed. */
   ready: () => readyPromise,
   flush,
+  quitSave,
   saveNow,
   restoreLatest: () => serialized(async () => (await restoreLatestImpl()).restored),
   /** Delete every saved jam, the kept ones too. */

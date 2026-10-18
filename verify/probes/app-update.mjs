@@ -1,7 +1,7 @@
 /**
  * The updater's UI half (`src/app/update.ts`): what a player sees when a newer release is out, and what
  * the command bar's UPDATE pill and its panel do, on a scripted updater (`window.__lfUpdateFake`,
- * `host.web.ts`) and the web engine fake. Five pages, each a fresh app:
+ * `host.web.ts`) and the web engine fake. Eleven pages, each a fresh app:
  *
  * - no updater (the browser build): no pill in the command bar, no toast, and nothing about an update
  *   in Help, which is where the offer used to live;
@@ -16,7 +16,17 @@
  *   panel — a download with a size fills the bar, one without leaves it indeterminate, and the signature
  *   check and the installer each say so;
  * - a failed install: the error toast, its `console.error` line, the read-out cleared, and the button
- *   back for another try.
+ *   back for another try;
+ * - the order: the download, then the jam's save from the engine's own snapshot, then the installer,
+ *   which starts only once the save is in IndexedDB;
+ * - a loop the engine committed during a held download, its lane still RECORDING on the feed: it is in
+ *   the recovery the installer leaves behind (a save that read the feed's lanes would have skipped it);
+ * - a failed download: no save, no install, the error toast and its line;
+ * - a save that fails: no install and no native "close anyway?", the update's own toast, the jam playing
+ *   on; a close asked while the update's save runs does not run a second quit sequence;
+ * - a snapshot that fails while the engine holds a loop the feed still shows RECORDING: no install, the
+ *   update's toast, the recovery as it was, with or without the player's earlier clear still standing
+ *   (a quit that trusted the lanes would install, and spend that clear on the recovery).
  *
  * Cannot see the native half: GitHub, the real chunk timings, the signature check, the engine's
  * shutdown, the installer and the relaunch (`src-tauri/src/update.rs`; proven on a release,
@@ -33,7 +43,15 @@ const TOAST = 'BleepLoop v9.9.9 is ready: press UPDATE in the command bar';
 /** Page helpers: the scripted updater, a recorder of native confirms (the asks are the app's own, so it
  * must stay empty), and the feed frames the engine sends. */
 function pageScript(script) {
-  if (script) window.__lfUpdateFake = { ...script, installs: 0 };
+  if (script) {
+    window.__lfUpdateFake = { ...script, calls: [] };
+    if (script.holdDownload) window.__lfUpdateFake.downloadHold = new Promise((resolve) => (window.__releaseDownload = resolve));
+    // What the app had done when the installer was asked for: the engine snapshots taken and whether
+    // a recovery was in IndexedDB.
+    window.__lfUpdateFake.onInstall = async () => {
+      window.__atInstall = { snapshots: window.__lf.native.snapshots.length, saved: await window.__lf.autosave.hasSaved() };
+    };
+  }
   window.__lfEngineFake = true;
   window.__confirms = [];
   window.confirm = (message) => {
@@ -51,15 +69,23 @@ function pageScript(script) {
     blank: () => emit({ reset: true, settings: [], anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
       events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
         ...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }))] }),
-    /** A loop committed on lane 1; the snapshot answers it. */
-    async commit() {
+    /** The player's CLEAR ALL of the loop on lane 1: the engine's Cleared, then the lane's own event. */
+    emitClearAll: () => emit({ events: [{ Cleared: { frame: 0, lane: 0 } }, { Lane: { frame: 0, lane: 0, info: lane('Empty', 0) } }] }),
+    /** A loop committed on lane 1; the snapshot answers it. `feed: false`: the feed's frame showing it
+     * has not come in yet, so lane 1 still reads RECORDING; `master`: a master of that many frames (not
+     * whole bars: the save then fails). */
+    async commit({ feed = true, master = frames } = {}) {
       const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
-      const pcm = new Float32Array(frames);
+      const pcm = new Float32Array(master);
       pcm[17] = 0.5;
-      window.__lf.native.snapshotBytes = encodeSessionBytes({ rate: RATE, masterLengthFrames: frames, bpm: 120,
-        tracks: [{ index: 0, frames, reversed: false, state: 'Playing' }] }, [pcm]).buffer;
-      emit({ events: [{ Transport: { frame: 0, master: frames, bpm: 120, locked: true } },
-        { Lane: { frame: 0, lane: 0, info: lane('Playing', frames) } }] });
+      window.__lf.native.snapshotBytes = encodeSessionBytes({ rate: RATE, masterLengthFrames: master, bpm: 120,
+        tracks: [{ index: 0, frames: master, reversed: false, state: 'Playing' }] }, [pcm]).buffer;
+      if (feed) {
+        emit({ events: [{ Transport: { frame: 0, master, bpm: 120, locked: true } },
+          { Lane: { frame: 0, lane: 0, info: lane('Playing', master) } }] });
+      } else {
+        emit({ events: [{ Lane: { frame: 0, lane: 0, info: lane('Recording', 0) } }] });
+      }
     },
   };
 }
@@ -73,7 +99,8 @@ await probe(async ({ open }) => {
   };
   const pill = (page) => page.locator('.tool-pill');
   const panel = (page) => page.locator('#lf-update-popover .update');
-  const installs = (page) => page.evaluate(() => window.__lfUpdateFake.installs);
+  const installs = (page) => page.evaluate(() => window.__lfUpdateFake.calls.filter((c) => c === 'install').length);
+  const calls = (page) => page.evaluate(() => window.__lfUpdateFake.calls);
   /** Play a native stage into the page (`lf://update-progress`'s payload shape). */
   const report = (page, stage) => page.evaluate((s) => window.__lfUpdateFake.report(s), stage);
 
@@ -136,7 +163,7 @@ await probe(async ({ open }) => {
     assert.equal(await panel(page).locator('.update__progress').count(), 0, 'a read-out before any press');
     if (shots) await page.screenshot({ path: `${shots}/app-update-panel.png` });
     await panel(page).getByRole('button', { name: 'Update and restart' }).click();
-    await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 5000 });
+    await page.waitForFunction(() => window.__lfUpdateFake.calls.includes('install'), undefined, { timeout: 5000 });
     assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'a native confirm opened');
     assert.equal(await page.getByRole('alertdialog').count(), 0, 'an empty looper was asked');
     await page.close();
@@ -163,7 +190,7 @@ await probe(async ({ open }) => {
     assert.equal(await installs(page), 0, 'installed after a "no"');
     await button.click();
     await ask.getByRole('button', { name: 'Update', exact: true }).click();
-    await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 10_000 });
+    await page.waitForFunction(() => window.__lfUpdateFake.calls.includes('install'), undefined, { timeout: 10_000 });
     assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'a native confirm opened');
     assert.equal(await page.evaluate(() => window.__lf.autosave.hasSaved()), true, 'the jam was not saved for recovery');
     await page.close();
@@ -179,7 +206,7 @@ await probe(async ({ open }) => {
     const width = () => button.evaluate((el) => Math.round(el.getBoundingClientRect().width * 10) / 10);
     const before = await width();
     await button.click();
-    await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 5000 });
+    await page.waitForFunction(() => window.__lfUpdateFake.calls.includes('install'), undefined, { timeout: 5000 });
     assert.equal(await button.isEnabled(), false, 'the button stays pressable during an install');
     // The press changes the words, never the button's box, and the title says what is happening.
     assert.equal(await button.innerText(), 'UPDATING…', 'the button while it installs');
@@ -220,7 +247,7 @@ await probe(async ({ open }) => {
 
   // 5. A failed install.
   {
-    const { page, consumeConsoleErrors } = await openApp({ update: OFFER, fail: 'probe: the installer did not start' });
+    const { page, consumeConsoleErrors } = await openApp({ update: OFFER, failInstall: 'probe: the installer did not start' });
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
     await pill(page).click();
     const button = panel(page).getByRole('button', { name: 'Update and restart' });
@@ -231,6 +258,125 @@ await probe(async ({ open }) => {
     // A stage left on screen under a pressable button would read as an install still running.
     assert.equal(await panel(page).locator('.update__progress').count(), 0, 'the read-out survived the failure');
     assert.equal(consumeConsoleErrors(/^\[app\] update failed/).length, 1, 'the failure line, once');
+    await page.close();
+  }
+
+  /** Press UPDATE AND RESTART on `page` (an empty looper asks nothing; a jam's ask is answered yes). */
+  const press = async (page) => {
+    await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
+    await pill(page).click();
+    await panel(page).getByRole('button', { name: 'Update and restart' }).click();
+    const ask = page.getByRole('alertdialog', { name: 'Update during a jam', exact: true });
+    if (await ask.isVisible()) await ask.getByRole('button', { name: 'Update', exact: true }).click();
+  };
+
+  // 6. The order, and 7. a loop the engine committed during the download that the feed does not show.
+  {
+    const { page } = await openApp({ update: OFFER, holdDownload: true });
+    await page.evaluate(() => window.__lf.autosave.ready());
+    await press(page);
+    await page.waitForFunction(() => window.__lfUpdateFake.calls.length === 1, undefined, { timeout: 5000 });
+    const during = await page.evaluate(() => window.__lf.native.snapshots.length);
+    // The take commits in the engine while the package downloads; its feed frame has not come in.
+    await page.evaluate(() => window.__engine.commit({ feed: false }));
+    await page.evaluate(() => window.__releaseDownload());
+    await page.waitForFunction(() => window.__atInstall !== undefined, undefined, { timeout: 10_000 });
+    assert.deepEqual(await calls(page), ['download', 'install'], 'download, then install');
+    const atInstall = await page.evaluate(() => window.__atInstall);
+    assert.ok(atInstall.snapshots > during, `the save read the engine's snapshot after the download (${during} -> ${atInstall.snapshots})`);
+    assert.equal(atInstall.saved, true, 'the loop the feed did not show yet is in IndexedDB before the installer starts');
+    await page.close();
+  }
+
+  // 8. A failed download.
+  {
+    const { page, consumeConsoleErrors } = await openApp({ update: OFFER, failDownload: 'probe: GitHub is unreachable' });
+    await page.evaluate(() => window.__lf.autosave.ready());
+    await press(page);
+    await page.locator('.toast', { hasText: 'Could not install the update.' }).waitFor({ timeout: 5000 });
+    assert.deepEqual(await calls(page), ['download'], 'no install after a failed download');
+    assert.equal(await page.evaluate(() => window.__lf.native.snapshots.length), 0, 'and no save: nothing quits');
+    assert.equal(consumeConsoleErrors(/^\[app\] update failed/).length, 1);
+    await page.close();
+  }
+
+  // 9. A save that fails holds the update back; a close meanwhile runs no second quit.
+  {
+    const { page, consumeConsoleErrors } = await openApp({ update: OFFER });
+    await page.evaluate(async () => {
+      await window.__lf.autosave.ready();
+      // A loop whose master is not whole bars: the recovery save refuses it.
+      await window.__engine.commit({ master: 2 * 48000 + 1 });
+      let release;
+      window.__lf.native.snapshotHold = new Promise((resolve) => (release = resolve));
+      window.__releaseSnapshot = release;
+    });
+    await press(page);
+    await page.waitForFunction(() => window.__lf.native.snapshots.length === 1, undefined, { timeout: 5000 });
+    const closeMeanwhile = await page.evaluate(async () => {
+      const { quitWithSave } = await import('/src/app/close-guard.ts');
+      let closed = false;
+      const ran = await quitWithSave('close', async () => void (closed = true));
+      return { ran, closed };
+    });
+    assert.deepEqual(closeMeanwhile, { ran: false, closed: false }, "a close during the update's save runs no quit of its own");
+    await page.evaluate(() => {
+      window.__lf.native.snapshotHold = null;
+      window.__releaseSnapshot();
+    });
+    await page.locator('.toast', { hasText: 'Could not save the loops, so the update waits.' }).waitFor({ timeout: 5000 });
+    assert.deepEqual(await calls(page), ['download'], 'no install after a failed save');
+    assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'no native "close anyway?" for an update');
+    assert.equal(consumeConsoleErrors(/^\[app\] autosave flush before the update failed/).length, 1);
+    assert.equal(await panel(page).getByRole('button', { name: 'Update and restart' }).isEnabled(), true, 'the button is back');
+    await page.close();
+  }
+
+  // 10. A snapshot that fails while the feed lags the engine: a saved jam, then (with `cleared`) the
+  //     player's CLEAR ALL, then a take the engine committed while its lane still reads RECORDING here.
+  //     The engine's state is unknown, so nothing installs and the recovery stays as it was.
+  const savedAt = (page) => page.evaluate(() => new Promise((resolve, reject) => {
+    const open = indexedDB.open('bleeploop');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const get = open.result.transaction('recovery').objectStore('recovery').get('latest');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => {
+        open.result.close();
+        resolve(get.result?.savedAt ?? null);
+      };
+    };
+  }));
+  for (const cleared of [false, true]) {
+    const { page, consumeConsoleErrors } = await openApp({ update: OFFER, holdDownload: true });
+    await page.evaluate(async () => {
+      await window.__lf.autosave.ready();
+      await window.__engine.commit();
+      await window.__lf.autosave.flush();
+    });
+    const before = await savedAt(page);
+    assert.notEqual(before, null, 'the jam is in the recovery before the update');
+    await press(page);
+    await page.waitForFunction(() => window.__lfUpdateFake.calls.length === 1, undefined, { timeout: 5000 });
+    const token = await page.evaluate(async (clear) => {
+      const { engineSession } = await import('/src/ui/state/engine-store.ts');
+      if (clear) {
+        window.__engine.emitClearAll();
+      }
+      await window.__engine.commit({ feed: false });
+      const refused = Promise.reject(new Error('probe: the snapshot failed'));
+      refused.catch(() => {});
+      window.__lf.native.snapshotHold = refused;
+      window.__releaseDownload();
+      return engineSession.clearToken() !== null;
+    }, cleared);
+    assert.equal(token, cleared, `a clear token stands: ${token}`);
+    await page.locator('.toast', { hasText: 'Could not save the loops, so the update waits.' }).waitFor({ timeout: 5000 });
+    assert.deepEqual(await calls(page), ['download'], `no install after a failed snapshot (cleared: ${cleared})`);
+    assert.equal(await savedAt(page), before, `the recovery is as it was (cleared: ${cleared})`);
+    const left = await page.evaluate(async () => (await import('/src/ui/state/engine-store.ts')).engineSession.clearToken() !== null);
+    assert.equal(left, cleared, `the clear is not spent (cleared: ${cleared})`);
+    assert.equal(consumeConsoleErrors(/^\[app\] autosave flush before the update failed/).length, 1);
     await page.close();
   }
 });

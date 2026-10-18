@@ -116,7 +116,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             settings.record(command);
         }
         let scope_bin = lf_engine::scope::scope_bin_frames(config.sample_rate) as u32;
-        let ends = ends.insert(Ends { commands, events, overview, session: Some(session), scope, scope_bin });
+        let ends = ends.insert(Ends { commands, pushed: 0, events, overview, session: Some(session), scope, scope_bin });
         let replay: Vec<_> = settings.replay().collect();
         let made = core.engine_gen.fetch_add(1, Release) + 1;
         debug_assert_eq!(made, generation, "another thread raised the engine generation mid-swap");
@@ -125,6 +125,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             if ends.commands.push(TimedCommand { frame: None, command }).is_err() {
                 core.counters.commands_full.fetch_add(1, Relaxed);
             } else {
+                ends.pushed += 1;
                 settings.pushed(&command);
             }
         }

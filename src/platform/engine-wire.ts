@@ -44,10 +44,10 @@ export type Refusal =
   | 'RetakeCapturing'
   | 'AutoRecCapturing'
   | 'AutoRecLocked';
-/** A setting a press switches (Rust `lf_engine::Toggle`): the click, END STOP, FIXED, RETAKE, AUTO REC or an
- * input send. The engine switches it from the value it has when the press lands and reports the value as
- * `Toggled`. */
-export type EngineToggle = 'Click' | 'EndStop' | 'Fixed' | 'Retake' | 'AutoRec' | { Send: InputSendId };
+/** A setting a press switches (Rust `lf_engine::Toggle`): the click, END STOP, FIXED, RETAKE, AUTO REC, an
+ * input send or a slot's GO LIVE. The engine switches it from the value it has when the press lands and
+ * reports the value as `Toggled`. */
+export type EngineToggle = 'Click' | 'EndStop' | 'Fixed' | 'Retake' | 'AutoRec' | { Send: InputSendId } | { Live: 0 | 1 };
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
  * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release, by the number of
  * the control (0..255) whose press the release ends; `FadeAll` is FADE; `Toggle` switches a setting (as
@@ -438,10 +438,11 @@ function decodeTimeSignature(v: unknown, what: string): TimeSignature {
   return meter;
 }
 
-/** A `Toggle`: a unit toggle's name, or `{"Send": key}`. */
+/** A `Toggle`: a unit toggle's name, `{"Send": key}` or `{"Live": slot}`. */
 function decodeToggle(v: unknown, what: string): EngineToggle {
   const [name, send] = tagged(v, what);
   if (name === 'Send') oneOf(send, INPUT_SENDS, `${what}.Send`);
+  else if (name === 'Live') slot(send, `${what}.Live`);
   else if (send !== undefined) fail(`${what} ${name} is a unit variant`, v);
   else oneOf(name, UNIT_TOGGLES, what);
   return v as EngineToggle;

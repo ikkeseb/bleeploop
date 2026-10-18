@@ -45,10 +45,23 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
 
-/// A command as it crosses `input_send` (an [`InputItem::Engine`]).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// A command as it crosses `input_send` (an [`InputItem::Engine`]). A slot's live flag or GO LIVE toggle
+/// for a slot past `SLOT_COUNT` is refused here, as `engine-wire.ts` refuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct WireCommand(#[serde(with = "CommandDef")] pub Command);
+
+impl<'de> Deserialize<'de> for WireCommand {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let command = CommandDef::deserialize(d)?;
+        if let Command::SetSlotLive(slot, _) | Command::Action(Action::Toggle(Toggle::Live(slot))) | Command::ActionOn(_, Action::Toggle(Toggle::Live(slot))) = command {
+            if usize::from(slot) >= SLOT_COUNT {
+                return Err(serde::de::Error::custom(format!("no plugin slot {slot}")));
+            }
+        }
+        Ok(WireCommand(command))
+    }
+}
 
 /// An engine event as the feed carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -158,8 +171,8 @@ enum ActionDef {
     Toggle(#[serde(with = "ToggleDef")] Toggle),
 }
 
-/// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, or `{"Send":"echo"}` (a send
-/// as its key).
+/// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, `{"Send":"echo"}` (a send
+/// as its key), or `{"Live":0}` (a slot's GO LIVE).
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Toggle")]
 enum ToggleDef {
@@ -169,6 +182,7 @@ enum ToggleDef {
     Retake,
     AutoRec,
     Send(#[serde(with = "input_send")] InputSend),
+    Live(u8),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -951,6 +965,16 @@ mod tests {
         assert_eq!(command(r#"{"Action":{"Toggle":"AutoRec"}}"#).unwrap(), Command::Action(Action::Toggle(Toggle::AutoRec)));
         assert_eq!(command(r#"{"Action":{"Toggle":{"Send":"ring"}}}"#).unwrap(), Command::Action(Action::Toggle(Toggle::Send(InputSend::Ring))));
         assert!(command(r#"{"Action":{"Toggle":{"Send":"Ring"}}}"#).is_err(), "a toggled send is its key");
+        assert_eq!(command(r#"{"Action":{"Toggle":{"Live":1}}}"#).unwrap(), Command::Action(Action::Toggle(Toggle::Live(1))));
+        assert_eq!(serde_json::to_value(WireCommand(Command::Action(Action::Toggle(Toggle::Live(1))))).unwrap(), serde_json::json!({"Action":{"Toggle":{"Live":1}}}));
+        for refused in [
+            r#"{"Action":{"Toggle":{"Live":2}}}"#,
+            r#"{"ActionOn":[0,{"Toggle":{"Live":255}}]}"#,
+            r#"{"SetSlotLive":[2,true]}"#,
+            r#"{"SetSlotLive":[255,false]}"#,
+        ] {
+            assert!(command(refused).is_err(), "{refused}: no such slot");
+        }
         let toggled = serde_json::to_value(WireEvent(Event::Toggled { frame: 7, toggle: Toggle::Send(InputSend::Echo), on: true })).unwrap();
         assert_eq!(toggled, serde_json::json!({"Toggled":{"frame":7,"toggle":{"Send":"echo"},"on":true}}));
         assert_eq!(command(r#"{"SetDubFeedback":[2,0.5]}"#).unwrap(), Command::SetDubFeedback(2, 0.5));

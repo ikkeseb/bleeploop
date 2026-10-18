@@ -107,7 +107,8 @@ pub enum Command {
     /// GO LIVE: the slot's own input (its capture channel, picked on the device side) feeds the slot (an
     /// empty slot, or one holding an effect, passes it on as the wet signal; an instrument plugin takes
     /// no input). Off, the slot gets silence. A toggle ramps the slot's input over 5 ms from its frame
-    /// (STATUS D23); the effect's own output is never gated. Both slots may be live at once.
+    /// (STATUS D23); the effect's own output is never gated. Both slots may be live at once. A toggled
+    /// setting ([`Toggle::Live`]): answered by [`Event::Toggled`]; a slot past [`SLOT_COUNT`] is ignored.
     SetSlotLive(u8, bool),
     /// The slot's output level (linear, 0..): the per-plugin gain staging (`plugin-bridge.ts`), on both
     /// what is heard and what is recorded; an empty live slot's is its input's level.
@@ -154,6 +155,8 @@ impl Command {
                 | Command::AllNotesOff
                 | Command::SetSlotLive(..)
                 | Command::SetSlotGain(..)
+                | Command::Action(Action::Toggle(Toggle::Live(_)))
+                | Command::ActionOn(_, Action::Toggle(Toggle::Live(_)))
         )
     }
 
@@ -195,10 +198,10 @@ impl InputSend {
     }
 }
 
-/// A setting a hands-free press switches ([`Action::Toggle`]): the click, END STOP, FIXED, RETAKE, AUTO REC
-/// and each input send. The engine owns each one's value; a press says "switch it" and the engine reads
-/// the value it switches when the press applies, so two producers (a pedal, a click on screen) never undo
-/// each other by sending what each last saw.
+/// A setting a hands-free press switches ([`Action::Toggle`]): the click, END STOP, FIXED, RETAKE, AUTO REC,
+/// each input send and each plugin slot's GO LIVE. The engine owns each one's value; a press says "switch
+/// it" and the engine reads the value it switches when the press applies, so two producers (a pedal, a
+/// click on screen) never undo each other by sending what each last saw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Toggle {
     Click,
@@ -207,10 +210,14 @@ pub enum Toggle {
     Retake,
     AutoRec,
     Send(InputSend),
+    /// A slot's GO LIVE ([`Command::SetSlotLive`]), by slot. It reaches the slots as its setter does
+    /// ([`Command::reaches_slots`]) and disarms no pending CLEAR: GO LIVE's press sends [`Command::Press`]
+    /// for that. A slot past [`SLOT_COUNT`] is no setting: the engine ignores it and answers nothing.
+    Live(u8),
 }
 
 impl Toggle {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 10;
     pub const ALL: [Toggle; Toggle::COUNT] = [
         Toggle::Click,
         Toggle::EndStop,
@@ -220,9 +227,16 @@ impl Toggle {
         Toggle::Send(InputSend::Echo),
         Toggle::Send(InputSend::Reverb),
         Toggle::Send(InputSend::Ring),
+        Toggle::Live(0),
+        Toggle::Live(1),
     ];
 
-    /// Its position in [`Toggle::ALL`].
+    /// Whether it names a setting: every toggle but a slot's past [`SLOT_COUNT`].
+    pub fn exists(self) -> bool {
+        !matches!(self, Toggle::Live(s) if usize::from(s) >= SLOT_COUNT)
+    }
+
+    /// Its position in [`Toggle::ALL`]; only for a toggle that [`exists`](Toggle::exists).
     pub fn index(self) -> usize {
         match self {
             Toggle::Click => 0,
@@ -231,6 +245,7 @@ impl Toggle {
             Toggle::Retake => 3,
             Toggle::AutoRec => 4,
             Toggle::Send(send) => 5 + send as usize,
+            Toggle::Live(slot) => 8 + usize::from(slot),
         }
     }
 
@@ -244,6 +259,7 @@ impl Toggle {
             Toggle::Retake => Command::SetRetake(on),
             Toggle::AutoRec => Command::SetAutoRecord(on),
             Toggle::Send(send) => Command::SetInputSend(send, on),
+            Toggle::Live(slot) => Command::SetSlotLive(slot, on),
         }
     }
 }
@@ -380,7 +396,7 @@ pub enum Action {
     /// refused with a reason (FIXED, RETAKE and AUTO REC while a take records; FIXED while RETAKE rolls over
     /// a loop; AUTO REC once a loop has locked the tempo: `Looper::toggle_gate`), the refusal on the
     /// selected lane and nothing switched. A looper press: it disarms a pending pedal CLEAR, refused or
-    /// not. No lane: as `Command::ActionOn` it acts as `Command::Action` does, its lane ignored. The
+    /// not, but for GO LIVE's ([`Toggle::Live`]). No lane: as `Command::ActionOn` it acts as `Command::Action` does, its lane ignored. The
     /// setters (`Command::SetMetronome` and the rest) stay for initialization and a settings replay.
     Toggle(Toggle),
 }

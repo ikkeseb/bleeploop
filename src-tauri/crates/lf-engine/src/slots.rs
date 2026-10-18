@@ -455,6 +455,17 @@ impl Rack {
         }
     }
 
+    /// Whether slot `slot` is live as asked (the gate's target); false for a slot past the rack.
+    pub(crate) fn live(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(|s| s.live)
+    }
+
+    /// Whether slot `slot`'s live gate passes input from the cursor on: live, or its ramp out not yet
+    /// ended.
+    pub(crate) fn gate_open(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(|s| s.live || self.cursor < s.live_end)
+    }
+
     /// GO LIVE on or off at frame `now`: the live gate ramps from where it is to the new target over
     /// `live_frames` from `now` (a reversal mid-ramp from the gain it reached). The same target again
     /// changes nothing. Before the first rendered frame it sets the starting state, settled.
@@ -468,6 +479,13 @@ impl Rack {
         s.live = live;
         let to = if live { 1.0 } else { 0.0 };
         (s.live_end, s.live_gain) = if !rendered || from == to { (Frame::MIN, to) } else { (now + n, from) };
+    }
+
+    /// Slot `slot` off live at once, its gate settled closed (no ramp): `Engine::close_slot_idle`.
+    pub(crate) fn close_live(&mut self, slot: usize) {
+        if let Some(s) = self.slots.get_mut(slot) {
+            (s.live, s.live_end, s.live_gain) = (false, Frame::MIN, 0.0);
+        }
     }
 
     pub(crate) fn set_gain(&mut self, slot: usize, gain: f32) {

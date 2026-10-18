@@ -16,7 +16,9 @@
  * toast and forget the record, so the launch after that is clean; a close through the close button once
  * the loads are back keeps the rig for the next launch; a synth picked, or a slot activated, while the
  * scan still runs keeps its slot and the MIDI slot, and the synth's slot stays a synth at the launch
- * after. The native load, the scan, the OS close and a real crash are out of reach here:
+ * after; the recall runs on the scan of the saved plugins' own paths (`scanPluginPaths`), so a saved
+ * plugin loads while the full scan still runs, and a failed scan of the paths recalls after the full
+ * scan instead. The native load, the scan, the OS close and a real crash are out of reach here:
  * `pnpm native:recall` covers them on the PC.
  * Run: pnpm probe rig-recall
  */
@@ -36,11 +38,13 @@ const keyOf = (d) => JSON.stringify([d.format, d.path, d.id]);
  * 'resolve' (default), 'reject' (the plugin failed), a key of `hostErrors` (the host failed, in the
  * native host's words, as Tauri rejects: a string), 'hang' (never answers) or 'defer' (answers on
  * `release()`);
- * `holdScan` keeps the scan running until `releaseScan()`.
+ * `holdScan` keeps the full scan running until `releaseScan()`, `holdPaths` the scan of the rig's
+ * paths until `releasePaths()`; `failPaths` fails the latter. The scan of paths answers the descriptors
+ * of `scan` at those paths.
  */
 function installFakeHost() {
-  const { scan = [], loads = {}, holdScan = false } = JSON.parse(sessionStorage.getItem('recallProbe') ?? '{}');
-  const calls = { load: [], editor: [] };
+  const { scan = [], loads = {}, holdScan = false, holdPaths = false, failPaths = false } = JSON.parse(sessionStorage.getItem('recallProbe') ?? '{}');
+  const calls = { load: [], editor: [], paths: [] };
   const pending = [];
   const hostErrors = {
     busy: (slot) => `slot ${slot} is still clearing the plugin before it`,
@@ -49,11 +53,18 @@ function installFakeHost() {
     task: () => 'plugin_load task: task 41 panicked',
   };
   let releaseScan = () => {};
+  let releasePaths = () => {};
   const scanned = holdScan ? new Promise((resolve) => (releaseScan = () => resolve(scan))) : Promise.resolve(scan);
-  window.__recallProbe = { calls, release: () => pending.shift()?.(), releaseScan: () => releaseScan() };
+  window.__recallProbe = { calls, release: () => pending.shift()?.(), releaseScan: () => releaseScan(), releasePaths: () => releasePaths() };
   window.__recallHost = {
     available: true,
     scanPlugins: () => scanned,
+    scanPluginPaths: (paths) => {
+      calls.paths.push([...paths]);
+      if (failPaths) return Promise.reject('plugin scan task: injected failure');
+      const found = scan.filter((d) => paths.includes(d.path));
+      return holdPaths ? new Promise((resolve) => (releasePaths = () => resolve(found))) : Promise.resolve(found);
+    },
     loadPlugin: (slot, path, id) => {
       calls.load.push({ slot, path, id });
       const reply = { slot, descriptor: scan.find((d) => d.path === path && d.id === id) };
@@ -284,13 +295,13 @@ await probe(async ({ open }) => {
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, SYN)], 'a close right after a restore keeps the rig');
   assert.deepEqual(s.toasts, []);
 
-  // 11. A synth picked while the scan still runs: its slot keeps the synth and the MIDI slot stays with
-  // it; the other slot's instrument is restored without taking MIDI. The next launch restores only
-  // that instrument, which then takes MIDI again.
-  await launch({ scan: ALL, holdScan: true });
+  // 11. A synth picked while the scan of the rig's paths still runs: its slot keeps the synth and the
+  // MIDI slot stays with it; the other slot's instrument is restored without taking MIDI. The next
+  // launch restores only that instrument, which then takes MIDI again.
+  await launch({ scan: ALL, holdPaths: true });
   await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption('pad');
   await page.waitForFunction(() => window.__recallProbe.slots.slotPendingCounts().every((n) => n === 0));
-  await page.evaluate(() => window.__recallProbe.releaseScan());
+  await page.evaluate(() => window.__recallProbe.releasePaths());
   s = await settle();
   assert.deepEqual(s.loads, [loadOf(1, SYN)], 'the recall does not load over a synth picked during boot');
   assert.deepEqual({ slots: s.slots, synth: s.synths[0], active: s.active }, { slots: [null, keyOf(SYN)], synth: 'pad', active: 0 },
@@ -301,11 +312,29 @@ await probe(async ({ open }) => {
   assert.deepEqual({ loads: s.loads, active: s.active }, { loads: [loadOf(1, SYN)], active: 1 },
     'a slot the player turned into a synth stays one at the next launch');
 
-  // 12. A slot activated while the scan still runs keeps the MIDI slot over a restored instrument.
-  await launch({ scan: ALL, holdScan: true });
+  // 12. A slot activated while the scan of the rig's paths still runs keeps the MIDI slot over a
+  // restored instrument.
+  await launch({ scan: ALL, holdPaths: true });
   await page.getByRole('button', { name: 'Activate slot A' }).click();
-  await page.evaluate(() => window.__recallProbe.releaseScan());
+  await page.evaluate(() => window.__recallProbe.releasePaths());
   s = await settle();
   assert.deepEqual({ loads: s.loads, active: s.active }, { loads: [loadOf(1, SYN)], active: 0 },
     'a restored instrument does not move a MIDI slot the player chose');
+
+  // 13. The full scan held (a new plugin's scan child running out its 20 s): the saved plugin loads
+  // from the scan of its own path before the full scan answers.
+  await launch({ scan: ALL, holdScan: true });
+  await page.waitForFunction(() => window.__recallProbe.instrument.slotPlugins()[1] !== null);
+  const early = await page.evaluate(() => ({ paths: window.__recallProbe.calls.paths, picker: window.__recallProbe.instrument.availablePlugins().length }));
+  assert.deepEqual(early, { paths: [[SYN.path]], picker: 0 }, "the rig's plugin is in before the full scan answered; only its path was asked for");
+  await page.evaluate(() => window.__recallProbe.releaseScan());
+  s = await settle();
+  assert.deepEqual(s.loads, [loadOf(1, SYN)], 'loaded once');
+
+  // 14. The scan of the paths fails: the recall waits for the full scan and restores from it.
+  await launch({ scan: ALL, failPaths: true });
+  s = await settle();
+  assert.deepEqual(s.loads, [loadOf(1, SYN)], 'restored after the full scan');
+  assert.equal(app.consumeConsoleErrors(/^\[app\] rig plugin scan failed/).length, 1, 'the failed scan of the paths is logged once');
+  assert.deepEqual(s.toasts, [], 'no toast: the recall still ran');
 });

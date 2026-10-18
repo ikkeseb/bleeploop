@@ -4,7 +4,7 @@ import { platform, type PluginDescriptor, type PluginParamDesc } from '../../pla
 import { editorAffinityBlocker, reserveEditor, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
-import { liveShown, toggleLive } from './live';
+import { liveShown, startLive } from './live';
 import './plugin-controls.css';
 
 /**
@@ -114,7 +114,7 @@ export function PluginBar(props: {
     let gone = false; // a swap while going live remounts this bar — the new one runs its own start
     onCleanup(() => (gone = true));
     void (async () => {
-      if (props.descriptor.isEffect === true && liveShown(props.slot)) await toggleLive(props.slot, true);
+      if (props.descriptor.isEffect === true && liveShown(props.slot)) await startLive(props.slot);
       if (!gone) await toggleEditor(true);
     })();
   });

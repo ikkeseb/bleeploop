@@ -120,6 +120,9 @@ await probe(async ({ open }) => {
         return answer;
       };
 
+      // The page's first reset (its subscription's), which disarms GO LIVE, before the rig goes live.
+      native.emit({ seq: 0, reset: true, events: [] });
+      await pause(20);
       // ── A rig: the amp in slot A, live, at 0.6; the synth in slot B; one committed lane ───────────
       await instrument.selectPlugin(0, amp);
       await instrument.selectPlugin(1, synth);

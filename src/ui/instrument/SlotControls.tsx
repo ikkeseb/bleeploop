@@ -56,7 +56,8 @@ export function InputPick(props: { slot: 0 | 1 }) {
 
 /**
  * GO LIVE / INPUT LIVE: the slot hears its own input, through its effect or dry while it is Off, and
- * the engine plays it at low latency. One accessible name; aria-pressed carries the state.
+ * the engine plays it at low latency. One accessible name; aria-pressed carries the state. Locked only
+ * while a source op holds the slot; a press still in flight shows as busy, and the next one queues.
  */
 export function LiveButton(props: { slot: 0 | 1 }) {
   const slot = props.slot;
@@ -70,7 +71,8 @@ export function LiveButton(props: { slot: 0 | 1 }) {
         classList={{ 'on-green': live() }}
         aria-pressed={live()}
         aria-label={`Live input for slot ${slotLetter(slot)}`}
-        disabled={slotPendingCounts()[slot] > 0 || liveBusy(slot)}
+        disabled={slotPendingCounts()[slot] > 0}
+        aria-busy={liveBusy(slot)}
         onClick={(e) => {
           e.stopPropagation();
           void toggleLive(slot);
