@@ -51,8 +51,10 @@ export function liveToggleBase(slot: 0 | 1): boolean {
  * logs it.
  */
 function setEngineLive(slot: 0 | 1, on: boolean, ownToast = false): Promise<boolean> {
+  // Kept even when the feed shows `on` already: an earlier flag still on its way may land on the feed
+  // after it (sent on, then off: the on's answer must not become the base).
   const sent = { on, at: performance.now() };
-  sentLive[slot] = inputArmed()[slot] === on ? null : sent;
+  sentLive[slot] = sent;
   return (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] }).then((took) => {
     if (!took && sentLive[slot] === sent) sentLive[slot] = null;
     return took;
