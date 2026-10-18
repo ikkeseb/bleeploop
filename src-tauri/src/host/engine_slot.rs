@@ -820,6 +820,12 @@ impl EngineSlotHandle {
         self.shutdown()
     }
 
+    /// Test-only: queue a request for the owner as the methods above do, without waiting for it.
+    #[cfg(test)]
+    pub(super) fn queue(&self, request: OwnerRequest) {
+        self.requests.send(request).expect("the owner is serving");
+    }
+
     /// Test-only: an unload's first step alone: the owner's loop ends at its next check, and
     /// `unload` still joins it.
     #[cfg(test)]

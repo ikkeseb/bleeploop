@@ -156,6 +156,11 @@ struct Observed {
     emit_edit: AtomicBool,
     /// The next main-thread callback calls the host's `clap_host_state.mark_dirty`.
     dirty_on_callback: AtomicBool,
+    /// The next main-thread callback calls the host's `request_restart`.
+    restart_on_callback: AtomicBool,
+    /// Armed by a test: the next `activate` tells it it is there, then waits (≤ 5 s) for its go.
+    #[allow(clippy::type_complexity)]
+    park_in_activate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     /// Runs once at the end of the next `save`, its state written, on the thread that called it.
     #[allow(clippy::type_complexity)]
     on_save: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -198,6 +203,11 @@ unsafe extern "C" fn activate(plugin: *const clap_plugin, rate: f64, _: u32, max
     s.activated_max_frames.store(max_frames, Relaxed);
     s.activations.fetch_add(1, Relaxed);
     s.main_thread_calls.lock().unwrap().push(std::thread::current().id());
+    let parked = s.park_in_activate.lock().unwrap().take();
+    if let Some((there, go)) = parked {
+        let _ = there.send(());
+        let _ = go.recv_timeout(Duration::from_secs(5));
+    }
     true
 }
 
@@ -399,6 +409,13 @@ unsafe extern "C" fn on_main_thread(plugin: *const clap_plugin) {
     let s = unsafe { state(plugin) };
     if s.flood_messages.swap(false, Relaxed) {
         flood_window();
+    }
+    if s.restart_on_callback.swap(false, Relaxed) {
+        // SAFETY: the host outlives its plugin; `request_restart` is thread-safe.
+        unsafe {
+            let host = &*s.host;
+            (host.request_restart.unwrap())(host);
+        }
     }
     if !s.dirty_on_callback.swap(false, Relaxed) {
         return;
@@ -1108,9 +1125,11 @@ mod engine {
         }
     }
 
-    /// The plugin reports its GUI destroyed (`closed(true)`) and, before an owner turn takes that,
-    /// the player closes the editor or the slot unloads: that close acknowledges with `destroy`
-    /// alone too, never a `hide` on a GUI that is gone.
+    /// The plugin reports its GUI destroyed (`closed(true)`) after the owner's turn has looked for
+    /// that, and the player's close or the unload comes before its next turn: that close
+    /// acknowledges with `destroy` alone too, never a `hide` on a GUI that is gone. The owner is
+    /// parked past its look: the plugin's main-thread callback (in the turn's `turn`, before `idle`)
+    /// asks for a restart, which the turn cycles after `idle`, and its `activate` waits for the test.
     #[test]
     fn a_gui_destroyed_just_before_a_close_or_an_unload_gets_destroy_alone() {
         let _one = engine_slot::one_engine_test_at_a_time();
@@ -1123,15 +1142,31 @@ mod engine {
                 assert_eq!(handle.open_editor(), Ok(()));
                 let opened = obs.gui_calls.lock().unwrap().len();
                 let (host, gui) = host_gui(&obs);
-                // The owner waits for its next request: the close comes before any turn of its own.
-                // SAFETY: the host's own callback, called as a plugin calls it (any thread).
+                let ((there, parked), (go, wait)) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+                *obs.park_in_activate.lock().unwrap() = Some((there, wait));
+                obs.restart_on_callback.store(true, Relaxed);
+                // SAFETY: the host's own callbacks, called as a plugin calls them (any thread).
+                unsafe {
+                    let raw = &*host;
+                    (raw.request_callback.unwrap())(raw);
+                }
+                parked.recv_timeout(Duration::from_secs(5)).expect("the owner is parked past its turn's idle");
+                // SAFETY: as above.
                 unsafe { (gui.closed.unwrap())(host, true) };
+                let (reply, answer) = std::sync::mpsc::sync_channel(1);
+                if unload {
+                    handle.stop_serving();
+                } else {
+                    handle.queue(OwnerRequest::CloseEditor(Arc::new(AtomicBool::new(false)), reply));
+                }
+                go.send(()).unwrap();
                 if !unload {
-                    assert_eq!(handle.close_editor(), Ok(()));
+                    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(Ok(())), "the close is served");
                     assert_eq!(obs.gui_calls.lock().unwrap()[opened..], ["destroy"], "floating: {floating}, closed");
                 }
                 handle.unload().unwrap();
                 assert_eq!(obs.gui_calls.lock().unwrap()[opened..], ["destroy"], "floating: {floating}, unload: {unload}");
+                assert!(!obs.contract_violation.load(Relaxed));
             }
         }
     }
