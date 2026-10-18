@@ -160,8 +160,8 @@ await probe(async ({ browser, open }) => {
   await live(2).click();
   await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor();
   const liveSent = await sent();
-  assert.deepEqual(liveSent.filter((c) => c.startsWith('{"SetSlotLive"')), ['{"SetSlotLive":[0,true]}', '{"SetSlotLive":[1,true]}'],
-    'going live on slot B leaves slot A live');
+  assert.deepEqual(liveSent.filter((c) => c.startsWith('{"SetSlotLive"') || c.includes('"Live"')), ['{"Action":{"Toggle":{"Live":0}}}', '{"Action":{"Toggle":{"Live":1}}}'],
+    'going live on slot B leaves slot A live: each press toggles its own slot');
   assert.deepEqual(await page.evaluate(async () => (await import('/src/ui/state/native-io.ts')).inputArmed()), [true, true]);
 
   // The volume per source kind.

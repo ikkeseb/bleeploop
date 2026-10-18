@@ -124,12 +124,12 @@
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted
 //!   press's, for that pedal's release) and a pedal MUTE's state are the engine's, and so is the value
-//!   a toggle ([`Action::Toggle`]: CLICK, END STOP, FIXED, RETAKE, AUTO REC, an input send) switches, so
-//!   a pedal and a click never undo each other. CLEAR is one arm for every hand (the lane's CLR, the key
+//!   a toggle ([`Action::Toggle`]: CLICK, END STOP, FIXED, RETAKE, AUTO REC, an input send, a slot's GO
+//!   LIVE) switches, so a pedal and a click never undo each other. CLEAR is one arm for every hand (the lane's CLR, the key
 //!   and a pedal all press [`Action::Clear`]), on the feed as each lane's [`LaneInfo::clear_armed`] until
 //!   its window ends on its frame or the device stops. Every looper press but CLEAR's confirming one
 //!   disarms a pending CLEAR, a toggle too, refused or not (TAP and GO LIVE say they are one with
-//!   [`Command::Press`]); a setting alone does not. An input send's toggle passes a command held for a
+//!   [`Command::Press`], so GO LIVE's own toggle disarms nothing); a setting alone does not. An input send's toggle passes a command held for a
 //!   block job, as its setter does; its disarm keeps its place behind it.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device

@@ -62,7 +62,7 @@ const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'CopyWide',
   'Halve', 'Hold', 'Release', 'FadeAll', 'Toggle',
 ];
-const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring'];
+const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Live:0', 'Live:1'];
 const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
   'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing',
@@ -90,7 +90,7 @@ check('the fixture toggles every toggled setting', () => {
   const toggles = fixture.commands
     .map((c) => c.Action ?? c.ActionOn?.[1])
     .filter((a) => a?.Toggle !== undefined)
-    .map((a) => (typeof a.Toggle === 'string' ? a.Toggle : `Send:${a.Toggle.Send}`));
+    .map((a) => (typeof a.Toggle === 'string' ? a.Toggle : a.Toggle.Send !== undefined ? `Send:${a.Toggle.Send}` : `Live:${a.Toggle.Live}`));
   assert.deepEqual([...new Set(toggles)].sort(), [...TOGGLES].sort());
 });
 
@@ -219,6 +219,8 @@ const refused = {
   'an input send by its Rust name': () => decodeCommand({ SetInputSend: ['Echo', true] }),
   'a toggled send by its Rust name': () => decodeCommand({ Action: { Toggle: { Send: 'Echo' } } }),
   'an unknown toggle': () => decodeCommand({ Action: { Toggle: 'Metronome' } }),
+  'GO LIVE on a third slot': () => decodeCommand({ Action: { Toggle: { Live: 2 } } }),
+  'a live flag on a third slot': () => decodeCommand({ SetSlotLive: [2, true] }),
   'a toggled event with an unknown toggle': () => decodeEvent({ Toggled: { frame: 0, toggle: 'Click ', on: true } }),
   'a snake_case input send param': () => decodeCommand({ SetInputSendParam: ['echo_level', 0.5] }),
   'a lane past the fifth': () => decodeCommand({ RecDub: 5 }),

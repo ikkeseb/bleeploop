@@ -462,14 +462,14 @@ impl Engine {
     /// full the ring was. Not for the audio thread.
     pub fn unsent_toggles(&self) -> impl Iterator<Item = (Toggle, bool)> + '_ {
         Toggle::ALL.into_iter().flat_map(|t| {
-            let on = toggle_value(&self.clock, &self.looper, &self.input_fx, t);
+            let on = toggle_value(&self.clock, &self.looper, &self.input_fx, &self.rack, t);
             std::iter::repeat_n((t, on), self.toggles_owed[t.index()] as usize)
         })
     }
 
     /// Each toggled setting as the engine applies it, in [`Toggle::ALL`] order.
     pub fn toggles(&self) -> [bool; Toggle::COUNT] {
-        Toggle::ALL.map(|t| toggle_value(&self.clock, &self.looper, &self.input_fx, t))
+        Toggle::ALL.map(|t| toggle_value(&self.clock, &self.looper, &self.input_fx, &self.rack, t))
     }
 
     /// The meter the engine applies, once it has taken the commands queued ahead of its first block (a
@@ -597,7 +597,7 @@ impl Engine {
                 cx.feed.push(Event::Beat { frame: f, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
             }
             self.looper.publish(&mut cx, self.replayed);
-            offer_toggles(cx.feed, f, &mut self.toggles_owed, cx.clock, &self.looper, &self.input_fx);
+            offer_toggles(cx.feed, f, &mut self.toggles_owed, cx.clock, &self.looper, &self.input_fx, &self.rack);
             self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), self.clock.meter(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), self.clock.meter(), f);
 
@@ -857,8 +857,8 @@ fn lane(i: u8) -> Option<usize> {
     (i < TRACK_COUNT).then_some(i)
 }
 
-/// Toggled setting `t`'s value as the engine applies it.
-fn toggle_value(clock: &Clock, looper: &Looper, input_fx: &InputFx, t: Toggle) -> bool {
+/// Toggled setting `t`'s value as the engine applies it (`t` [`Toggle::exists`]).
+fn toggle_value(clock: &Clock, looper: &Looper, input_fx: &InputFx, rack: &Rack, t: Toggle) -> bool {
     match t {
         Toggle::Click => clock.metronome(),
         Toggle::EndStop => looper.loop_end_stop(),
@@ -866,21 +866,26 @@ fn toggle_value(clock: &Clock, looper: &Looper, input_fx: &InputFx, t: Toggle) -
         Toggle::Retake => looper.retake(),
         Toggle::AutoRec => looper.auto_record(),
         Toggle::Send(send) => input_fx.is_on(send),
+        Toggle::Live(slot) => rack.live(usize::from(slot)),
     }
 }
 
 /// [`Action::Toggle`]: switch `t` from the value it has now, gated as the UI gates it
 /// (`Looper::toggle_gate`), and say so: `Event::Toggled` with the value it left, or `Event::Refused` on the
-/// selected lane with nothing switched. The caller disarms a pending CLEAR.
+/// selected lane with nothing switched. The caller disarms a pending CLEAR (not for GO LIVE). A toggle that names no
+/// setting ([`Toggle::exists`]) does nothing and is answered by nothing.
 fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
     let now = cx.now;
+    if !t.exists() {
+        return;
+    }
     if let Err(reason) = looper.toggle_gate(t, cx.clock.locked()) {
         if !cx.feed.push(Event::Refused { frame: now, lane: looper.selected() as u8, reason }) {
             at.toggles_owed[t.index()] += 1;
         }
         return;
     }
-    let on = !toggle_value(cx.clock, looper, at.input_fx, t);
+    let on = !toggle_value(cx.clock, looper, at.input_fx, at.rack, t);
     match t {
         Toggle::Click => cx.clock.set_metronome(on),
         Toggle::EndStop => looper.set_loop_end_stop(on),
@@ -888,8 +893,15 @@ fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
         Toggle::Retake => looper.set_retake(on),
         Toggle::AutoRec => looper.set_auto_record(on),
         Toggle::Send(send) => at.input_fx.set_on(send, on, now),
+        Toggle::Live(slot) => set_slot_live(looper, at.rack, usize::from(slot), on, now),
     }
     toggled(cx.feed, now, at.toggles_owed, t, on);
+}
+
+/// GO LIVE on slot `slot` (in range) at `now`: the rack's gate and the overview's flag.
+fn set_slot_live(looper: &Looper, rack: &mut Rack, slot: usize, on: bool, now: Frame) {
+    rack.set_live(slot, on, now);
+    looper.overview().set_slot_live(slot, on);
 }
 
 /// Answer an applied command of toggled setting `t` (its setter, even one that changed nothing, or its
@@ -904,9 +916,9 @@ fn toggled(feed: &mut Feed, now: Frame, owed: &mut [u32; Toggle::COUNT], t: Togg
 /// ring refuses one: as a lane's mix is offered again (`Looper::publish`), so the feed and the host's
 /// settings memory hear one answer per command and converge on the applied value whatever the ring
 /// dropped (a refused toggle's `Refused` comes back as its setting's value, the reason lost).
-fn offer_toggles(feed: &mut Feed, now: Frame, owed: &mut [u32; Toggle::COUNT], clock: &Clock, looper: &Looper, input_fx: &InputFx) {
+fn offer_toggles(feed: &mut Feed, now: Frame, owed: &mut [u32; Toggle::COUNT], clock: &Clock, looper: &Looper, input_fx: &InputFx, rack: &Rack) {
     for t in Toggle::ALL {
-        let on = toggle_value(clock, looper, input_fx, t);
+        let on = toggle_value(clock, looper, input_fx, rack, t);
         while owed[t.index()] > 0 && feed.push(Event::Toggled { frame: now, toggle: t, on }) {
             owed[t.index()] -= 1;
         }
@@ -962,9 +974,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         Command::StopAll => looper.stop_all(cx),
         Command::ClearAll => looper.clear_all(cx),
         // A toggle names no lane (as `ActionOn`, its lane is ignored). A looper press: it disarms a
-        // pending pedal CLEAR before it is judged, as `Looper::action` does for the others.
+        // pending pedal CLEAR before it is judged, as `Looper::action` does for the others. GO LIVE's
+        // does not: its press sends `Press` first, so one press disarms once and a cap click never.
         Command::Action(Action::Toggle(t)) | Command::ActionOn(_, Action::Toggle(t)) => {
-            looper.disarm_clear();
+            if !matches!(t, Toggle::Live(_)) {
+                looper.disarm_clear();
+            }
             toggle(looper, cx, at, t);
             Applied::Done
         }
@@ -1122,8 +1137,10 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             Applied::Done
         }
         Command::SetSlotLive(i, on) => {
-            at.rack.set_live(i as usize, on, now);
-            looper.overview().set_slot_live(i as usize, on);
+            if usize::from(i) < SLOT_COUNT {
+                set_slot_live(looper, at.rack, usize::from(i), on, now);
+                toggled(cx.feed, now, at.toggles_owed, Toggle::Live(i), on);
+            }
             Applied::Done
         }
         Command::SetSlotGain(i, gain) => {

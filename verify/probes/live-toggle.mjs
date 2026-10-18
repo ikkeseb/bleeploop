@@ -1,14 +1,18 @@
 /**
- * GO LIVE pressed twice before the feed shows the first press (`src/ui/instrument/live.ts`,
- * `src/ui/state/native-io.ts` `liveToggleBase`), on the web engine fake (`src/platform/host.web.ts`) with
- * its `holdApply` seam holding the engine's answer: the second press toggles from the flag the first
- * sent, not from the feed's older one.
+ * GO LIVE as the engine's toggle (`src/ui/instrument/live.ts`, `src/ui/state/native-io.ts`), on the web
+ * engine fake (`src/platform/host.web.ts`), which applies `{"Toggle":{"Live":slot}}` against its own
+ * flag as the engine does and shows it on the feed's `live`:
  *
- * - two presses on an Off slot send `SetSlotLive` on, then off (not on twice);
- * - the first press's answer (live) landing on the feed after the second press: a third press sends on;
- * - once the feed shows them, the slot is not live, and the next press sends on again.
+ * - a press sends the toggle, never a `SetSlotLive` the UI worked out;
+ * - a press made while the engine's flag differs from the feed's (a live-on the fake has not applied,
+ *   held by its `holdApply` seam) turns the slot off: it flips the engine's value, not the feed's;
+ * - two quick presses, the first one's batch still unanswered (`sendHold`), both reach the engine and
+ *   end where they started, from the cap and from the pedal's named action alike;
+ * - presses made while a source op holds the slot past two seconds (the feed stale meanwhile) apply
+ *   once it settles: one press as one toggle, two as none.
  *
- * Cannot see the native engine (its command order is the rtrb ring's) or Tauri IPC.
+ * A tone reload's resume yielding to a press: `slot-sources`. Cannot see the native engine (its command
+ * order is the rtrb ring's; `src-tauri/crates/lf-engine/tests/toggles.rs`) or Tauri IPC.
  * Run: pnpm probe live-toggle
  */
 import assert from 'node:assert/strict';
@@ -23,38 +27,84 @@ await probe(async ({ open }) => {
     const slots = await import('/src/ui/state/instrument-slots.ts');
     const live = await import('/src/ui/instrument/live.ts');
     const { inputArmed } = await import('/src/ui/state/native-io.ts');
+    const { runAction } = await import('/src/app/actions.ts');
     const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const idle = async () => { while (slots.slotPendingCounts().some((n) => n > 0)) await pause(10); };
     instrument.selectOff(0);
+    instrument.setActiveSlot(0);
     await idle();
     await pause(50);
-    const sentLive = (from) => lf.native.sent.slice(from).filter((c) => c.SetSlotLive?.[0] === 0).map((c) => c.SetSlotLive[1]);
+    // What the UI sent slot A since `from`: `toggle` for a press, else the flag it set.
+    const sentA = (from) =>
+      lf.native.sent.slice(from).flatMap((c) =>
+        c.Action?.Toggle?.Live === 0 ? ['toggle'] : c.SetSlotLive?.[0] === 0 ? [c.SetSlotLive[1]] : []);
+    const out = {};
 
-    lf.native.holdApply = true; // the engine has not applied them: the feed still shows slot A off
-    const from = lf.native.sent.length;
+    // 1. A press sends the toggle.
+    let from = lf.native.sent.length;
     await live.toggleLive(0);
+    await pause(30);
+    out.press = { sent: sentA(from), live: inputArmed()[0] };
+
+    // 2. The engine's flag ahead of the feed: off on the feed, a live-on queued unapplied, then a press.
     await live.toggleLive(0);
-    const twoPresses = sentLive(from);
-    const armedWhileHeld = inputArmed()[0];
-    // The first press's answer lands late: the feed shows slot A live.
-    lf.native.emit({ seq: 0, reset: false, events: [], live: [true, false] });
-    await pause(20);
-    const lateAnswer = inputArmed()[0];
+    await pause(30);
+    out.offFirst = inputArmed()[0];
+    lf.native.holdApply = true;
+    from = lf.native.sent.length;
+    await live.startLive(0);
     await live.toggleLive(0);
-    const threePresses = sentLive(from);
+    out.raceWhileHeld = inputArmed()[0];
     lf.native.holdApply = false;
-    await pause(50);
-    const settled = inputArmed()[0];
-    const next = lf.native.sent.length;
-    await live.toggleLive(0);
-    await pause(50);
-    return { twoPresses, armedWhileHeld, lateAnswer, threePresses, settled, third: sentLive(next), after: inputArmed()[0] };
+    await pause(30);
+    out.race = { sent: sentA(from), live: inputArmed()[0] };
+
+    // 3. Two quick presses, the first one's batch unanswered when the second comes: from the cap...
+    const quick = async (press) => {
+      let answer;
+      lf.native.sendHold = new Promise((resolve) => (answer = resolve));
+      const at = lf.native.sent.length;
+      const first = press();
+      await pause(20);
+      const second = press();
+      await pause(20);
+      const whileHeld = sentA(at);
+      lf.native.sendHold = null;
+      answer();
+      await Promise.all([first, second]);
+      await idle();
+      await pause(30);
+      return { whileHeld, sent: sentA(at), live: inputArmed()[0] };
+    };
+    out.capTwice = await quick(() => live.toggleLive(0));
+    // ...and from the pedal's named action (its `Press` first, then GO LIVE).
+    out.pedalTwice = await quick(async () => runAction('goLive'));
+
+    // 4. A source op holds slot A past two seconds; the feed shows nothing new meanwhile.
+    const held = async (presses) => {
+      let release;
+      void slots.serializeSlot(0, () => new Promise((resolve) => (release = resolve)));
+      const at = lf.native.sent.length;
+      const before = inputArmed()[0];
+      for (let i = 0; i < presses; i++) runAction('goLive');
+      await pause(2100);
+      const whileHeld = sentA(at);
+      release();
+      await idle();
+      await pause(30);
+      return { before, whileHeld, sent: sentA(at), live: inputArmed()[0] };
+    };
+    out.heldOnce = await held(1);
+    out.heldTwice = await held(2);
+    return out;
   });
   console.log(JSON.stringify(result));
-  assert.equal(result.armedWhileHeld, false, 'the feed has not shown the first press');
-  assert.deepEqual(result.twoPresses, [true, false], 'the second press toggles from the flag the first sent');
-  assert.equal(result.lateAnswer, true, "the feed shows the first press's late answer");
-  assert.deepEqual(result.threePresses, [true, false, true], 'a third press toggles from the flag the second sent, not the late answer');
-  assert.equal(result.settled, true, 'once applied, the slot is live');
-  assert.deepEqual({ third: result.third, after: result.after }, { third: [false], after: false }, 'the next press stops it');
+  assert.deepEqual(result.press, { sent: ['toggle'], live: true }, 'a press sends the toggle, and the engine turns the slot live');
+  assert.equal(result.offFirst, false, 'a second press turns it off');
+  assert.equal(result.raceWhileHeld, false, 'the feed still shows slot A off');
+  assert.deepEqual(result.race, { sent: [true, 'toggle'], live: false }, "a press after a live-on the feed does not show yet turns it off: the engine's value, flipped");
+  assert.deepEqual(result.capTwice, { whileHeld: ['toggle'], sent: ['toggle', 'toggle'], live: false }, 'two cap presses: the second waits for the first, both reach the engine, back off');
+  assert.deepEqual(result.pedalTwice, { whileHeld: ['toggle'], sent: ['toggle', 'toggle'], live: false }, 'two pedal presses alike: none dropped');
+  assert.deepEqual(result.heldOnce, { before: false, whileHeld: [], sent: ['toggle'], live: true }, 'one press during a held op: one toggle once it settles');
+  assert.deepEqual(result.heldTwice, { before: true, whileHeld: [], sent: [], live: true }, 'two presses during a held op: none');
 });

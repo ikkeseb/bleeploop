@@ -438,11 +438,18 @@ function flushEchoes(): void {
   }
 }
 
-// ── The fake's toggles: CLICK, END STOP, FIXED, RETAKE, AUTO REC and each input send, as the engine owns them ──
+// ── The fake's toggles: CLICK, END STOP, FIXED, RETAKE, AUTO REC, each input send and GO LIVE, as the engine owns them ──
 
-/** Each toggled setting as the fake holds it, by `toggleKey`: a setter sets it, a toggle switches it. */
+/** Each toggled setting as the fake holds it, by `toggleKey`: a setter sets it, a toggle switches it. A
+ * slot's GO LIVE is held in `fakeLive` instead. */
 const fakeToggles = new Map<string, boolean>();
-const toggleKey = (t: EngineToggle): string => (typeof t === 'string' ? t : `Send:${t.Send}`);
+const toggleKey = (t: EngineToggle): string => (typeof t === 'string' ? t : 'Send' in t ? `Send:${t.Send}` : `Live:${t.Live}`);
+const toggleValue = (t: EngineToggle): boolean =>
+  typeof t === 'object' && 'Live' in t ? fakeLive[t.Live] : (fakeToggles.get(toggleKey(t)) ?? false);
+function setToggleValue(t: EngineToggle, on: boolean): void {
+  if (typeof t === 'object' && 'Live' in t) setFakeLive(t.Live, on);
+  else fakeToggles.set(toggleKey(t), on);
+}
 /** What the fake knows of the looper for the toggles' gate, as the scripted frames left it: each lane's
  * state, the master, the tempo's lock, the selected lane (a refusal's lane: the scripted `Selected`, not
  * a `SelectTrack` the UI sent, which the fake does not answer). */
@@ -457,6 +464,7 @@ function setterToggle(c: EngineCommand): [EngineToggle, boolean] | null {
   if ('SetRetake' in c) return ['Retake', c.SetRetake];
   if ('SetAutoRecord' in c) return ['AutoRec', c.SetAutoRecord];
   if ('SetInputSend' in c) return [{ Send: c.SetInputSend[0] }, c.SetInputSend[1]];
+  if ('SetSlotLive' in c) return [{ Live: c.SetSlotLive[0] as 0 | 1 }, c.SetSlotLive[1]];
   return null;
 }
 
@@ -484,17 +492,16 @@ function applyToggleCommand(c: EngineCommand): void {
   const set = setterToggle(c);
   const action = set || typeof c !== 'object' ? null : 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
   if (set) {
-    fakeToggles.set(toggleKey(set[0]), set[1]);
+    setToggleValue(set[0], set[1]);
     toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: set[0], on: set[1] });
   } else if (action === null || typeof action !== 'object' || !('Toggle' in action)) {
     return;
   } else {
-    const key = toggleKey(action.Toggle);
-    const reason = toggleRefusal(key);
+    const reason = toggleRefusal(toggleKey(action.Toggle));
     if (reason) toggleAnswers.push({ type: 'Refused', frame: 0, lane: gateView.selected, reason });
     else {
-      const on = !(fakeToggles.get(key) ?? false);
-      fakeToggles.set(key, on);
+      const on = !toggleValue(action.Toggle);
+      setToggleValue(action.Toggle, on);
       toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: action.Toggle, on });
     }
   }
@@ -529,28 +536,26 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
       gateView.master = ev.master;
       gateView.locked = ev.locked;
     } else if (ev.type === 'Selected') gateView.selected = ev.lane;
-    else if (ev.type === 'Toggled') fakeToggles.set(toggleKey(ev.toggle), ev.on);
+    else if (ev.type === 'Toggled' && !(typeof ev.toggle === 'object' && 'Live' in ev.toggle)) fakeToggles.set(toggleKey(ev.toggle), ev.on);
   }
 }
 
-/** A command as the fake applies it: a lane's mix, and the toggles. */
+/** A command as the fake applies it: a lane's mix, and the toggles (GO LIVE's included). */
 function applyCommand(c: EngineCommand): void {
   applyMixCommand(c);
   applyToggleCommand(c);
-  applyLiveCommand(c);
 }
 
 // ── The fake's GO LIVE: each slot's live flag, as the engine's overview holds it ──────────────────────
 
-/** Each slot's live flag as the fake applied it (`SetSlotLive`); a scripted frame's `live` sets it too. */
+/** Each slot's live flag as the fake applied it (`SetSlotLive`, a `Live` toggle); a scripted frame's
+ * `live` sets it too. */
 const fakeLive: [boolean, boolean] = [false, false];
 let liveScheduled = false;
 
-/** Apply a `SetSlotLive` as the engine does; a change is answered on the feed's `live`, a microtask later
- * (never inside the call that sent it), as the engine's feed sends it when it changed. */
-function applyLiveCommand(c: EngineCommand): void {
-  if (typeof c !== 'object' || !('SetSlotLive' in c)) return;
-  const [slot, on] = c.SetSlotLive;
+/** Set slot `slot`'s live flag as the engine does; a change is answered on the feed's `live`, a microtask
+ * later (never inside the call that sent it), as the engine's feed sends it when it changed. */
+function setFakeLive(slot: 0 | 1, on: boolean): void {
   if (fakeLive[slot] === on) return;
   fakeLive[slot] = on;
   if (liveScheduled) return;

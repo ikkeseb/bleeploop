@@ -47,7 +47,7 @@ import {
 import { autosave } from '../../session/autosave';
 import { engineResync } from './instrument';
 import { withAt } from './instrument-slots';
-import { adoptEngineLive, engineInputLive, toggleEngineInput } from './native-io';
+import { adoptEngineLive, engineInputLive, setEngineInput } from './native-io';
 import { notifyError, notifyInfo, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
 import { confirm } from '../confirm/confirm-store';
@@ -619,10 +619,12 @@ function applyEvent(ev: EngineEvent): void {
   }
 }
 
-/** A toggled setting as the engine applied it (`Toggled`): its signal, and an input send's saved value. */
+/** A toggled setting as the engine applied it (`Toggled`): its signal, and an input send's saved value. A
+ * slot's GO LIVE shows the frame's `live` instead (`adoptEngineLive`). */
 function applyToggle(toggle: EngineToggle, on: boolean): void {
-  if (typeof toggle === 'object') adoptInputSend(toggle.Send, on);
-  else if (toggle === 'Click') setMetronomeSignal(on);
+  if (typeof toggle === 'object') {
+    if ('Send' in toggle) adoptInputSend(toggle.Send, on);
+  } else if (toggle === 'Click') setMetronomeSignal(on);
   else if (toggle === 'EndStop') setLoopEndStopSignal(on);
   else if (toggle === 'Fixed') setFixedLengthSignal(on);
   else if (toggle === 'Retake') setRetakeSignal(on);
@@ -1253,9 +1255,10 @@ export const engineLooper = {
   trackCounted: (i: number): boolean => counted[i][0](),
   masterLengthFrames: masterFrames,
   /** MIC, reached here only by the native probes (the player sets a slot to Off and goes live): the
-   * device input dry through a slot without a plugin (`toggleEngineInput`). */
+   * device input dry through a slot without a plugin, set outright and true once the host took it
+   * (`setEngineInput`). */
   inputArmed: engineInputLive,
-  toggleInput: async (): Promise<boolean> => toggleEngineInput(),
+  setInput: setEngineInput,
   peaksInto,
   scopeInto,
   /** The live scope taps on or off (`SetScope`). Its one caller is `src/app.tsx`, the always mounted

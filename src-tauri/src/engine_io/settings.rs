@@ -20,9 +20,9 @@
 //! what its event ring still holds, then each lane's mix read from the engine itself
 //! (`Engine::applied_mixes`), so a mix the full ring refused is not lost.
 //!
-//! A toggled setting (the click, END STOP, FIXED, RETAKE, AUTO REC, each input send: `lf_engine::Toggle`)
-//! is switched by an action (`Action::Toggle`), which the engine judges and applies against its own
-//! value, so the memory takes its value from what the engine applied. Its setter is kept as sent
+//! A toggled setting (the click, END STOP, FIXED, RETAKE, AUTO REC, each input send, each slot's GO LIVE:
+//! `lf_engine::Toggle`) is switched by an action (`Action::Toggle`), which the engine judges and applies
+//! against its own value, so the memory takes its value from what the engine applied. Its setter is kept as sent
 //! (initialization, a replay, a script), and the engine answers every applied command of the setting,
 //! setter or toggle, with exactly one event of it (`Event::Toggled` with the value it left, or a refused
 //! toggle's `Event::Refused`; an answer the full ring refused is owed and comes later, or is read at a
@@ -157,18 +157,21 @@ fn key(command: &Command) -> Option<Key> {
     })
 }
 
-/// The toggled setting `command` sets (a setter: true) or switches (its toggle: false).
+/// The toggled setting `command` sets (a setter: true) or switches (its toggle: false); `None` for a slot
+/// past `SLOT_COUNT`, which the engine ignores and answers nothing.
 fn toggled_by(command: &Command) -> Option<(Toggle, bool)> {
-    Some(match *command {
+    let (toggle, setter) = match *command {
         Command::SetMetronome(_) => (Toggle::Click, true),
         Command::SetLoopEndStop(_) => (Toggle::EndStop, true),
         Command::SetFixedLength(_) => (Toggle::Fixed, true),
         Command::SetRetake(_) => (Toggle::Retake, true),
         Command::SetAutoRecord(_) => (Toggle::AutoRec, true),
         Command::SetInputSend(send, _) => (Toggle::Send(send), true),
+        Command::SetSlotLive(slot, _) => (Toggle::Live(slot), true),
         Command::Action(Action::Toggle(t)) | Command::ActionOn(_, Action::Toggle(t)) => (t, false),
         _ => return None,
-    })
+    };
+    toggle.exists().then_some((toggle, setter))
 }
 
 pub(crate) struct Settings {
@@ -473,6 +476,40 @@ mod tests {
         s.pushed(&toggle);
         assert!(s.toggled(2, Toggle::Click, false), "a new engine counts from nothing");
         assert!(replay(&s).contains(&Command::SetMetronome(false)));
+    }
+
+    #[test]
+    fn go_live_is_a_toggled_setting_kept_as_set_slot_live() {
+        let mut s = Settings::default();
+        s.follow(1);
+        let press = |slot| Command::Action(lf_engine::Action::Toggle(Toggle::Live(slot)));
+        assert!(!s.record(&press(0)), "a press is an action, kept nowhere");
+        assert!(s.toggled(1, Toggle::Live(0), true));
+        assert_eq!(replay(&s), [Command::SetSlotLive(0, true)], "the press's answer, as its setter");
+        // A press in flight, then a live-off: the press's answer is older and never overwrites it.
+        s.pushed(&press(0));
+        assert!(s.record(&Command::SetSlotLive(0, false)));
+        s.pushed(&Command::SetSlotLive(0, false));
+        assert!(s.toggled(1, Toggle::Live(0), true), "the press's answer, older than the live-off");
+        assert_eq!(replay(&s), [Command::SetSlotLive(0, false)], "the live-off in flight stands");
+        assert!(s.toggled(1, Toggle::Live(0), false), "the live-off's own answer");
+        assert_eq!(replay(&s), [Command::SetSlotLive(0, false)]);
+    }
+
+    #[test]
+    fn a_slot_past_the_rack_owes_no_answer_and_panics_nothing() {
+        let mut s = Settings::default();
+        s.follow(1);
+        for slot in [2, 255] {
+            let commands = [Command::SetSlotLive(slot, true), Command::Action(lf_engine::Action::Toggle(Toggle::Live(slot))), Command::ActionOn(0, lf_engine::Action::Toggle(Toggle::Live(slot)))];
+            for command in &commands {
+                assert!(!s.record(command), "{command:?}: no setting");
+                s.pushed(command);
+            }
+        }
+        assert_eq!(s.in_flight, [0; Toggle::COUNT], "nothing in flight");
+        assert_eq!(s.setter_at, [0; Toggle::COUNT]);
+        assert!(replay(&s).is_empty());
     }
 
     #[test]

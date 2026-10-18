@@ -82,13 +82,13 @@ async function save(): Promise<void> {
   clock.setMetronome(true);
   looper.setFixedLengthEnabled(true);
   looper.setFixedLengthBars(1);
-  if (!looper.inputArmed()) check(await looper.toggleInput(), 'MIC could not take an empty slot live');
+  if (!looper.inputArmed()) check(await looper.setInput(true), 'MIC could not take an empty slot live');
   void looper.recDub(0);
   await until('lane 1 PLAYING', () => lane(0).state === 'PLAYING', 12);
   void looper.recDub(1);
   await until('lane 2 PLAYING', () => lane(1).state === 'PLAYING', 8);
   clock.setMetronome(false);
-  if (looper.inputArmed()) await looper.toggleInput();
+  await looper.setInput(false);
   looper.setVolume(0, 0.7);
   looper.setMute(1, true);
   const recorded = await measure();

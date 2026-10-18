@@ -92,7 +92,9 @@ it.
 - SCOPE's beam moves on with the bar when the live columns stop, and only a fresh column takes it:
   does it ever jump, stutter or lag the bar when the view opens mid-loop?
 - GO LIVE lights only from the engine's live flag, and a lost press toasts once: does the pill ever
-  lag the guitar going live, or light while the dry guitar is silent?
+  lag the guitar going live, or light while the dry guitar is silent? Each press is now the engine's
+  toggle: hammer GO LIVE from a pedal and the cap together, during a plugin load too: one switch per
+  press, none lost?
 - Audio Settings in four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS), a lamp
   and a state word each: does a pedal's port pick take fewer moves, and does the lamp read from the
   chair?

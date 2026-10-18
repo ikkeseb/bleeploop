@@ -436,8 +436,7 @@ plugin-GUI work.
   download and install, with a native freeze of jam changes (MIDI included) and a fresh save between;
   (c) `SlotHost::remove` runs with the slot still live, so dry input passes to monitor and record
   (`lf-engine` `slots.rs` 544) if the UI's live-off is late or dropped: force live-off, the input gate
-  ramped to zero, before an unload's removal; (d) GO LIVE inverts the flag the UI last sent, a race with the feed: a
-  `ToggleSlotLive` engine command for button and pedal presses, explicit `SetSlotLive` elsewhere.
+  ramped to zero, before an unload's removal.
 - `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`
   83-97 logs the failure, counts the swap, and the runner accepts "0 failed". Fix: count a failed open
   as a failed scenario and report swaps done with an editor open (the runner's regex follows).
