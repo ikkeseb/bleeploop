@@ -175,7 +175,7 @@ jobs:
         if: env.SMOKE != ''
         run: pnpm exec tauri build --no-bundle --features asio --config scripts/release-smoke.tauri.json
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: env.SMOKE != ''
         with:
           name: BleepLoop-smoke-${{ github.sha }}
@@ -198,7 +198,7 @@ jobs:
           "## $($setup.Name)`n`n- size: $([math]::Round($setup.Length / 1MB, 1)) MB`n- sha256: ``$sha```n- ASIO + WASAPI; this binary is GPLv3 (links the Steinberg ASIO SDK); the installer fetches the WebView2 runtime if it is missing" |
             Out-File -Append $env:GITHUB_STEP_SUMMARY
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: env.SMOKE == ''
         with:
           name: BleepLoop-asio-${{ github.sha }}
@@ -224,7 +224,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: BleepLoop-asio-${{ github.sha }}
 
