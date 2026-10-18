@@ -21,19 +21,42 @@ import { activeSlot, serializeSlot, slotOff, slotPlugins } from './instrument-sl
 // Whether each slot hears its own input, as the engine applied it (the feed's `live`).
 const [inputArmed, setInputArmed] = createSignal<[boolean, boolean]>([false, false]);
 
+// Each slot's live flag last sent and not yet on the feed (null: none), and when: the engine applies the
+// commands in the order they were sent, so a GO LIVE press before the feed shows the last one toggles
+// from it, not from the feed's older value (two quick presses send on, off; not on, on). It lapses after
+// `SENT_LIVE_MS`, so a flag the feed never shows cannot hold the toggle's base for good.
+const sentLive: [{ on: boolean; at: number } | null, { on: boolean; at: number } | null] = [null, null];
+const SENT_LIVE_MS = 2000;
+
 /** The feed's live flags (`engine-store.ts`): the only writer of `inputArmed`. */
 export function adoptEngineLive(live: readonly [boolean, boolean]): void {
+  for (const s of [0, 1] as const) if (sentLive[s]?.on === live[s]) sentLive[s] = null;
   const [a, b] = inputArmed();
   if (a !== live[0] || b !== live[1]) setInputArmed([live[0], live[1]]);
 }
 
+/** What GO LIVE toggles `slot` from: the live flag last sent while the feed does not show it yet, else
+ * the feed's. */
+export function liveToggleBase(slot: 0 | 1): boolean {
+  const sent = sentLive[slot];
+  if (sent && performance.now() - sent.at < SENT_LIVE_MS) return sent.on;
+  sentLive[slot] = null;
+  return inputArmed()[slot];
+}
+
 /**
  * Send `slot`'s live flag. Resolves with the batch's submission (`sendEngine`; false: it did not reach
- * the host). The slot shows it once the feed does. `ownToast`: the caller tells the player of a lost
- * batch (`sendEngineReported`), so the outbox only logs it.
+ * the host, and the toggle's base is the feed's again). The slot shows it once the feed does.
+ * `ownToast`: the caller tells the player of a lost batch (`sendEngineReported`), so the outbox only
+ * logs it.
  */
 function setEngineLive(slot: 0 | 1, on: boolean, ownToast = false): Promise<boolean> {
-  return (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] });
+  const sent = { on, at: performance.now() };
+  sentLive[slot] = inputArmed()[slot] === on ? null : sent;
+  return (ownToast ? sendEngineReported : sendEngine)({ SetSlotLive: [slot, on] }).then((took) => {
+    if (!took && sentLive[slot] === sent) sentLive[slot] = null;
+    return took;
+  });
 }
 
 // A tone reload of a live slot, from its unload to its resume: the slot counts as live meanwhile.
@@ -59,7 +82,7 @@ export function resumeEngineLive(slot: 0 | 1): void {
 /** Whether `slot` is live, or will be once the source op holding it settles: the player's latest press
  * on it, else a reload's resume, else its state. */
 export function liveIntended(slot: 0 | 1): boolean {
-  return liveIntent[slot] ?? (reloading[slot] || inputArmed()[slot]);
+  return liveIntent[slot] ?? (reloading[slot] || liveToggleBase(slot));
 }
 
 /** Whether GO LIVE is in play on `slot`: live, held live by a reload, or pressed while an op holds it
