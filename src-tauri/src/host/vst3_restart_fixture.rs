@@ -67,6 +67,9 @@ struct FixtureComponent {
     on_get_state: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// `setProcessing(1)` answers `kResultFalse` (a plugin that refuses to start processing).
     reject_processing_start: AtomicBool,
+    /// The process call of this number (from 1; 0 = none) writes its outputs, then answers
+    /// `kResultFalse` (a plugin whose call failed partway).
+    fail_process_call: AtomicUsize,
     /// `setState` refuses whatever it is given.
     refuse_state: AtomicBool,
     /// `setState` applies what it is given, then refuses: a plugin that takes the fields it knows
@@ -118,6 +121,7 @@ impl FixtureComponent {
             state: Mutex::new(Vec::new()),
             on_get_state: Mutex::new(None),
             reject_processing_start: AtomicBool::new(false),
+            fail_process_call: AtomicUsize::new(0),
             refuse_state: AtomicBool::new(false),
             half_apply_state: AtomicBool::new(false),
             set_states: AtomicUsize::new(0),
@@ -465,7 +469,10 @@ impl IAudioProcessorTrait for FixtureComponent {
                 std::slice::from_raw_parts_mut(row, data.numSamples as usize).fill(level);
             }
         }
-        self.processes.fetch_add(1, Relaxed);
+        let call = self.processes.fetch_add(1, Relaxed) + 1;
+        if call == self.fail_process_call.load(Relaxed) {
+            return kResultFalse;
+        }
         kResultOk // silent unless a test sets a level: the host zeroes the rows before every call
     }
     unsafe fn getTailSamples(&self) -> uint32 {
@@ -1336,6 +1343,48 @@ fn a_unit_whose_plugin_does_not_implement_set_processing_plays() {
     .unwrap();
     assert_eq!(faults.load(Relaxed), 0, "nothing latched");
     assert_eq!((s.starts.load(Relaxed), s.processes.load(Relaxed), s.stops.load(Relaxed)), (1, 3, 1));
+    drop(unit);
+    unsafe {
+        assert_eq!(component.setActive(0), kResultOk);
+    }
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// The unit on its own, with a plugin whose process call writes its outputs and then fails: the
+/// failure latches `FAULT_PROCESS` and that slice's output is discarded (silent, as a CLAP unit's),
+/// while the slices around it play.
+#[test]
+fn a_unit_discards_the_output_of_a_failed_process_call() {
+    use super::engine::Vst3Unit;
+    use lf_engine::SlotProcessor;
+
+    let fixture = ComWrapper::new(FixtureComponent::new());
+    let s: &FixtureComponent = &fixture;
+    s.output_level.store(0.5f32.to_bits(), Relaxed);
+    // The second slice of the second call: 64 frames, then 200 at 64 max (64 + 64 + 64 + 8).
+    s.fail_process_call.store(3, Relaxed);
+    let component = fixture.to_com_ptr::<IComponent>().unwrap();
+    let processor = component.cast::<IAudioProcessor>().unwrap();
+    let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
+    let (_params, ring) = RingBuffer::<ParamEvent>::new(8);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
+    let (unit, out) = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
+        unit.process(0, &input[..64], &[], &mut out[..64]);
+        assert!(out[..64].iter().all(|&x| x == 0.5), "heard before the failure");
+        unit.process(64, &input, &[], &mut out);
+        unit.stop();
+        (unit, out)
+    })
+    .join()
+    .unwrap();
+    assert!(out[..64].iter().all(|&x| x == 0.5), "the slice before the failed one plays");
+    assert!(out[64..128].iter().all(|&x| x == 0.0), "the failed slice is discarded: {:?}", &out[64..128]);
+    assert!(out[128..].iter().all(|&x| x == 0.5), "the slices after it play");
+    assert_eq!(faults.load(Relaxed), super::super::engine_slot::FAULT_PROCESS, "the failure is latched");
+    assert_eq!(s.processes.load(Relaxed), 5);
     drop(unit);
     unsafe {
         assert_eq!(component.setActive(0), kResultOk);

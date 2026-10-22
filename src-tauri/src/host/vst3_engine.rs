@@ -187,9 +187,11 @@ impl SlotProcessor for Vst3Unit {
                 self.processor.process(&mut pd)
             };
             if status != kResultOk {
+                // A failed call's output is discarded, as CLAP's: the slice stays silent.
                 self.faults.fetch_or(FAULT_PROCESS, Relaxed);
+            } else {
+                sum_to_mono(&self.out_bufs, &mut out[at..at + len], len, chans);
             }
-            sum_to_mono(&self.out_bufs, &mut out[at..at + len], len, chans);
             at += len;
         }
     }
