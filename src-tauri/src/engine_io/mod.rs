@@ -670,14 +670,14 @@ pub trait RebuildHook: Send + Sync {
     fn resume(&self);
 }
 
-/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix`, a `Toggled` and a
-/// toggle's `Refused` are also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
+/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix`, a `Transport`, a
+/// `Toggled` and a toggle's `Refused` are also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
 /// taker keeps), so no rebuild's replay lands between the pop and the projection.
 pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Event>, gen: u64, mut each: impl FnMut(Event)) {
     while let Ok(event) = events.pop() {
         match event {
             Event::Mix { frame, lane, mix } => _ = settings.mixed(gen, frame, lane, &mix),
-            Event::Transport { meter, .. } => _ = settings.transported(gen, meter),
+            Event::Transport { bpm, meter, .. } => _ = settings.transported(gen, bpm, meter),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
             Event::Refused { reason, .. } => settings.refused(gen, reason),
             _ => {}
