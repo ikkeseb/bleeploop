@@ -298,20 +298,19 @@ fn the_wet_master_renders_each_lanes_pan() {
         }
         LoadTrack { index: 1, buf, peaks: Vec::new(), reversed: false, playing: true, mix }
     };
-    let render = |track_mix: LaneMix, mix: LaneMix| {
-        let load = Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master: MASTER as Frame, tracks: vec![track(track_mix)], result: None };
-        wet_master(48_000, load, &[mix], &[]).expect("the render")
+    let render = |pan: f32| {
+        let load = Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master: MASTER as Frame, tracks: vec![track(LaneMix { pan, ..LaneMix::default() })], result: None };
+        wet_master(48_000, load, &[]).expect("the render")
     };
-    let centre = render(LaneMix::default(), LaneMix::default());
+    let centre = render(0.0);
     assert_eq!(centre.left, centre.right);
-    let left = render(LaneMix { pan: -1.0, ..LaneMix::default() }, LaneMix { pan: -1.0, ..LaneMix::default() });
+    let left = render(-1.0);
     assert!(left.right.iter().all(|&x| x == 0.0), "hard left: the right is exactly silent");
     let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     assert!((peak(&left.left) / peak(&centre.left) - SQRT_2 as f32).abs() < 1e-3, "and the left 3 dB up");
-    // The snapshot's mix wins over the load track's: the render glides there inside its warm-up.
-    let moved = render(LaneMix::default(), LaneMix { pan: 1.0, ..LaneMix::default() });
-    assert!(moved.left.iter().all(|&x| x == 0.0), "hard right from the mix: the left is exactly silent");
-    let mirror = moved.right.iter().zip(&left.left).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    let right = render(1.0);
+    assert!(right.left.iter().all(|&x| x == 0.0), "hard right: the left is exactly silent");
+    let mirror = right.right.iter().zip(&left.left).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
     assert!(mirror < 1e-6, "the mirror image ({mirror})");
 }
 

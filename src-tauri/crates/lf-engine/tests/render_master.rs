@@ -37,20 +37,18 @@ fn load(tracks: Vec<LoadTrack>) -> Load {
     Load { bpm: BPM, meter: Meter::FOUR_FOUR, bars: 1, master: MASTER as Frame, tracks, result: None }
 }
 
-/// Every track at the default mix but those in `mixes` (by load position).
-fn mixes_of(tracks: &[LoadTrack], mixes: &[(usize, LaneMix)]) -> Vec<LaneMix> {
-    let mut out = vec![LaneMix::default(); tracks.len()];
-    for &(k, mix) in mixes {
-        out[k] = mix;
-    }
-    out
+/// Track `t` at mix `mix`.
+fn mixed(t: LoadTrack, mix: LaneMix) -> LoadTrack {
+    LoadTrack { mix, ..t }
 }
 
-/// The master of `tracks`, track `k` at mix `mixes[k]` (the default mix when absent), the master's
-/// settings in `settings`.
-fn render(tracks: Vec<LoadTrack>, mixes: &[(usize, LaneMix)], settings: &[Command]) -> WetMaster {
-    let mixes = mixes_of(&tracks, mixes);
-    wet_master(RATE, load(tracks), &mixes, settings).expect("the render")
+/// The master of `tracks`, each `(k, mix)` in `mixes` setting track `k`'s mix (a track not in it keeps
+/// its own, the default), the master's settings in `settings`.
+fn render(mut tracks: Vec<LoadTrack>, mixes: &[(usize, LaneMix)], settings: &[Command]) -> WetMaster {
+    for &(k, mix) in mixes {
+        tracks[k].mix = mix;
+    }
+    wet_master(RATE, load(tracks), settings).expect("the render")
 }
 
 /// A lane's mix with its delay (8n, `feedback`, half wet) and its reverb send on.
@@ -143,11 +141,10 @@ fn the_master_is_exactly_the_loop_long_on_both_channels() {
             .collect::<Vec<_>>()
     };
     let session = |tracks| Load { bpm, meter: Meter::FOUR_FOUR, bars: bars as Frame, master, tracks, result: None };
-    let plain = [LaneMix::default(); 2];
-    let out = wet_master(rate, session(tracks()), &plain, &[]).unwrap();
+    let out = wet_master(rate, session(tracks()), &[]).unwrap();
     assert_eq!((out.left.len(), out.right.len()), (master as usize, master as usize));
     assert_eq!(out.warmup, 1, "no delay, no reverb: one warm-up pass");
-    let more = wet_master_with(rate, session(tracks()), &plain, &[], RenderOptions { extra_warmup: 2, ..RenderOptions::default() }).unwrap();
+    let more = wet_master_with(rate, session(tracks()), &[], RenderOptions { extra_warmup: 2, ..RenderOptions::default() }).unwrap();
     assert_eq!((more.left.len(), more.right.len(), more.warmup), (master as usize, master as usize, 3));
 }
 
@@ -223,13 +220,13 @@ fn a_delay_echo_past_the_loop_end_rings_at_the_head() {
 // f)
 #[test]
 fn one_more_warm_up_pass_moves_the_master_by_less_than_the_threshold() {
-    let mixes = [delay_and_reverb(0.6)];
-    let out = render(vec![busy_lane(0)], &[(0, mixes[0])], &[]);
+    let mix = delay_and_reverb(0.6);
+    let out = render(vec![busy_lane(0)], &[(0, mix)], &[]);
     // 0.6 feedback: 19 echoes of 0.25 s (4.75 s), then the reverb's 2.62 s on the last of them (the
     // lane's reverb send follows its delay): 7.37 s over 2 s passes. The longer of the two alone is 3
     // passes.
     assert_eq!(out.warmup, 4);
-    let more = wet_master_with(RATE, load(vec![busy_lane(0)]), &mixes, &[], RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
+    let more = wet_master_with(RATE, load(vec![mixed(busy_lane(0), mix)]), &[], RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
     let diff = max_diff(&out.left, &more.left).max(max_diff(&out.right, &more.right));
     assert!(diff < 1e-4, "the kept pass moved by {diff}");
     // The tails are in it: the end of the loop rings with the delay and the reverb.
@@ -248,18 +245,19 @@ fn a_delay_at_full_feedback_warms_for_every_echo_and_no_more() {
     let (rate, bpm, bars) = (8_000, 300, 23);
     let master = bars * frames_per_bar(bpm as f64, rate, Meter::FOUR_FOUR);
     // One impulse at the loop's end: its echoes reach furthest into the passes after it.
-    let session = || {
+    // A 4n delay at `feedback`, fully wet.
+    let session = |feedback: f64| {
         let mut buf = vec![0.0f32; master as usize];
         buf[master as usize - 1] = A;
-        Load { bpm, meter: Meter::FOUR_FOUR, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }], result: None }
+        let mix = delay(0.0, feedback, 1.0);
+        Load { bpm, meter: Meter::FOUR_FOUR, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix }], result: None }
     };
-    let quarter = |feedback: f64| [delay(0.0, feedback, 1.0)];
     // The first echo's level in the master: the one the threshold is relative to.
-    let echo = peak(&wet_master(rate, session(), &quarter(0.0), &[]).unwrap().left);
+    let echo = peak(&wet_master(rate, session(0.0), &[]).unwrap().left);
     assert!(echo > 0.3 * A, "the echo is there: {echo}");
-    let out = wet_master(rate, session(), &quarter(MAX_FEEDBACK), &[]).unwrap();
+    let out = wet_master(rate, session(MAX_FEEDBACK), &[]).unwrap();
     assert_eq!(out.warmup, 2);
-    let more = wet_master_with(rate, session(), &quarter(MAX_FEEDBACK), &[], RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
+    let more = wet_master_with(rate, session(MAX_FEEDBACK), &[], RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
     let diff = max_diff(&out.left, &more.left).max(max_diff(&out.right, &more.right));
     let relative = diff / echo;
     assert!(relative < TAIL_THRESHOLD as f32, "one more pass moved the kept pass by {relative} of the echo");
@@ -297,29 +295,27 @@ fn no_click_no_instrument_and_no_lane_mix_whatever_the_settings_say() {
 // h)
 #[test]
 fn the_render_repeats_bit_for_bit_at_any_block_size() {
-    let mixes = [delay_and_reverb(0.6), LaneMix::default()];
-    let reference = render(vec![busy_lane(0), lane(4, &[(7, A)])], &[(0, mixes[0])], &[]);
-    assert!(render(vec![busy_lane(0), lane(4, &[(7, A)])], &[(0, mixes[0])], &[]) == reference, "a second render differs");
+    let mix = delay_and_reverb(0.6);
+    let reference = render(vec![busy_lane(0), lane(4, &[(7, A)])], &[(0, mix)], &[]);
+    assert!(render(vec![busy_lane(0), lane(4, &[(7, A)])], &[(0, mix)], &[]) == reference, "a second render differs");
     for block in [1, 127, 4096] {
-        let out = wet_master_with(RATE, load(vec![busy_lane(0), lane(4, &[(7, A)])]), &mixes, &[], RenderOptions { block, ..RenderOptions::default() }).unwrap();
+        let out = wet_master_with(RATE, load(vec![mixed(busy_lane(0), mix), lane(4, &[(7, A)])]), &[], RenderOptions { block, ..RenderOptions::default() }).unwrap();
         assert!(out == reference, "block {block} differs");
     }
 }
 
 #[test]
 fn every_refusal_is_an_error_with_a_sentence() {
-    let one = [LaneMix::default()];
     let cases: Vec<(&str, Result<WetMaster, String>)> = vec![
-        ("rate 0", wet_master(0, load(vec![lane(0, &[])]), &one, &[])),
-        ("bars and length disagree", wet_master(RATE, Load { bars: 2, ..load(vec![lane(0, &[])]) }, &one, &[])),
-        ("bpm out of range", wet_master(RATE, Load { bpm: 0, ..load(vec![lane(0, &[])]) }, &one, &[])),
-        ("no loop", wet_master(RATE, Load { master: 0, ..load(vec![lane(0, &[])]) }, &one, &[])),
-        ("a short buffer", wet_master(RATE, load(vec![LoadTrack { buf: vec![0.0; 10], ..lane(0, &[]) }]), &one, &[])),
-        ("a NaN sample", wet_master(RATE, load(vec![lane(0, &[(5, f32::NAN)])]), &one, &[])),
-        ("a lane twice", wet_master(RATE, load(vec![lane(0, &[]), lane(0, &[])]), &[LaneMix::default(); 2], &[])),
-        ("a lane out of range", wet_master(RATE, load(vec![lane(9, &[])]), &one, &[])),
-        ("a mix short", wet_master(RATE, load(vec![lane(0, &[]), lane(1, &[])]), &one, &[])),
-        ("block 0", wet_master_with(RATE, load(vec![lane(0, &[])]), &one, &[], RenderOptions { block: 0, ..RenderOptions::default() })),
+        ("rate 0", wet_master(0, load(vec![lane(0, &[])]), &[])),
+        ("bars and length disagree", wet_master(RATE, Load { bars: 2, ..load(vec![lane(0, &[])]) }, &[])),
+        ("bpm out of range", wet_master(RATE, Load { bpm: 0, ..load(vec![lane(0, &[])]) }, &[])),
+        ("no loop", wet_master(RATE, Load { master: 0, ..load(vec![lane(0, &[])]) }, &[])),
+        ("a short buffer", wet_master(RATE, load(vec![LoadTrack { buf: vec![0.0; 10], ..lane(0, &[]) }]), &[])),
+        ("a NaN sample", wet_master(RATE, load(vec![lane(0, &[(5, f32::NAN)])]), &[])),
+        ("a lane twice", wet_master(RATE, load(vec![lane(0, &[]), lane(0, &[])]), &[])),
+        ("a lane out of range", wet_master(RATE, load(vec![lane(9, &[])]), &[])),
+        ("block 0", wet_master_with(RATE, load(vec![lane(0, &[])]), &[], RenderOptions { block: 0, ..RenderOptions::default() })),
     ];
     for (what, result) in cases {
         match result {

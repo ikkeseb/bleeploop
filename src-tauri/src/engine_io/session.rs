@@ -165,12 +165,11 @@ impl EngineHost {
             .enumerate()
             .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true, t.mix))
             .collect();
-        let mixes: Vec<_> = s.tracks[..s.count].iter().flatten().map(|t| t.mix).collect();
         let load = Load { bpm: s.bpm, meter: s.meter, bars: s.master / fpb, master: s.master, tracks, result: None };
         let started = Instant::now();
         let settings = self.settings();
         // A panic is a failed render too: the stems still go out.
-        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, &mixes, &settings)))
+        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, &settings)))
             .unwrap_or_else(|_| Err("export render: the render panicked".to_string()));
         match &wet {
             Ok(m) => log::info!("[engine_io] export master rendered: {} frames, {} warm-up passes, {} ms", s.master, m.warmup, started.elapsed().as_millis()),

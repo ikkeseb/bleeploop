@@ -430,10 +430,10 @@ fn a_mix_moved_while_a_snapshot_copies_leaves_the_mix_at_its_pin() {
     assert!(now.volume == 0.1 && !now.muted && now.fx[FxKind::Filter.index()].bypassed, "the engine took the moves: {now:?}");
 }
 
-/// The wet master of `s` with the snapshot's own mix, the host's `settings` beside it.
+/// The wet master of `s` with the snapshot's own mix (its load's tracks carry it), the host's `settings`
+/// beside it.
 fn master_of(s: &Snapshot, capacity: usize, bars: Frame, settings: &[Command]) -> Vec<f32> {
-    let mixes: Vec<LaneMix> = s.tracks.iter().flatten().map(|t| t.mix).collect();
-    wet_master(s.rate, load_of(s, capacity, bars), &mixes, settings).expect("the render").left
+    wet_master(s.rate, load_of(s, capacity, bars), settings).expect("the render").left
 }
 
 #[test]
