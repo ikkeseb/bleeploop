@@ -9,6 +9,7 @@
 //! and once a `GLITCH_EVERY` it logs the fault counters and glitch diagnostics that moved, or a callback
 //! that ran past its period ([`GlitchWatch`]).
 
+use std::mem::ManuallyDrop;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
@@ -65,18 +66,19 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
     core.max_block.store(config.max_block as u32, Relaxed);
-    let old = {
+    // Never dropped in here: handed back at the end, or leaked when a unit panicked on its way out (`evict`).
+    let mut old = {
         let mut rt = rt(core);
         rt.faulted = false;
         core.fault.store(false, Relaxed);
-        rt.engine.replace(engine)
+        rt.engine.replace(engine).map(ManuallyDrop::new)
     };
     core.rt.clear_poison();
-    // Read before `evict`, which leaks the engine when a unit panics on its way out.
-    let applied = old.as_ref().and_then(Engine::applied_mixes);
-    let meter = old.as_ref().and_then(Engine::applied_meter);
-    let unsent: Vec<_> = old.as_ref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
-    let old = old.and_then(|old| evict(core, &mut ports, old));
+    // What it applied, read as it left the audio thread, before `evict`.
+    let applied = old.as_deref().and_then(Engine::applied_mixes);
+    let transport = old.as_deref().and_then(|e| e.applied_meter().map(|meter| (e.clock().bpm(), meter)));
+    let unsent: Vec<_> = old.as_deref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
+    let clean = old.as_deref_mut().is_none_or(|old| evict(core, &mut ports, old));
     for (port, new) in ports.iter_mut().zip(slots) {
         **port = Some(new);
     }
@@ -94,6 +96,10 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
         // is not all applied). Its other events go with it, as its loops do.
         let mut settings = core.settings.lock().unwrap_or_else(|e| e.into_inner());
         let mut ends = core.ends.lock().unwrap_or_else(|e| e.into_inner());
+        // Its ring is peeked here, under both, in the section that replaces its ends: a send waits for
+        // that and goes to the new ring, so no tempo or meter lands in the old ring unread (`record`
+        // keeps none once a transport was applied).
+        let unapplied: Vec<_> = old.as_deref_mut().map(|e| e.unapplied_transport().collect()).unwrap_or_default();
         let gen = core.engine_gen.load(Acquire);
         if let Some(ends) = ends.as_mut() {
             super::drain(&mut settings, &mut ends.events, gen, |_| {});
@@ -103,9 +109,14 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
                 settings.mixed(gen, frame, lane as u8, mix);
             }
         }
-        // Its meter as applied, which a full ring may have kept from the feed too.
-        if let Some(meter) = meter {
-            settings.transported(gen, meter);
+        // Its tempo and meter as applied, which a full ring may have kept from the feed too.
+        if let Some((bpm, meter)) = transport {
+            settings.transported(gen, bpm, meter);
+        }
+        // A tempo or meter it was sent and never applied (a change while the device was stopped, or
+        // during this swap): kept as sent, for the new engine to weigh.
+        for command in &unapplied {
+            settings.unapplied(command);
         }
         // The answers its full ring refused, owed at each setting's applied value: newer than any it
         // drained.
@@ -133,16 +144,15 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     if let Some(hook) = hook {
         hook.resume();
     }
-    old
+    old.filter(|_| clean).map(ManuallyDrop::into_inner)
 }
 
 /// Hand every unit of `old`, an engine nothing renders any more, to its plugin owner, stopped: into
-/// `Core::evicted`, with whatever its ports (held by the caller) had returned. Returns the engine for
-/// the caller to drop, or `None` when a unit panicked on its way out: the engine is leaked then, with
-/// any unit still in it, rather than dropped here (a drop calls the plugin's DLL off its owner thread).
-/// Such a slot stays held (`Core::holder`), so its owner's teardown leaks the plugin instead of
-/// unloading it.
-fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], mut old: Engine) -> Option<Engine> {
+/// `Core::evicted`, with whatever its ports (held by the caller) had returned. False when a unit
+/// panicked on its way out: the caller leaks the engine then, with any unit still in it, rather than
+/// dropping it (a drop calls the plugin's DLL off its owner thread). Such a slot stays held
+/// (`Core::holder`), so its owner's teardown leaks the plugin instead of unloading it.
+fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], old: &mut Engine) -> bool {
     let clean = catch_unwind(AssertUnwindSafe(|| {
         old.service_slots_idle();
         old.evict_slots();
@@ -159,12 +169,7 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
             }
         }
     }
-    if clean {
-        Some(old)
-    } else {
-        std::mem::forget(old);
-        None
-    }
+    clean
 }
 
 /// Keep an evicted unit for its plugin owner (the slot's holder), and free the slot. A unit its owner
