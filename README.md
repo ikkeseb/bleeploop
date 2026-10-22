@@ -180,8 +180,8 @@ pnpm dev:asio     # the full app on ASIO (needs the ASIO SDK, below)
 ```
 
 The ASIO build needs `LIBCLANG_PATH` set (cpal's `asio-sys` runs bindgen) and `CPAL_ASIO_DIR`
-pointing at your own copy of the Steinberg ASIO SDK, which is not in this repo. A binary built with it
-is GPLv3, see [License](#license).
+pointing at your own copy of the Steinberg ASIO SDK, which is not in this repo (`asio-sdk/` at its root
+is gitignored for it). A binary built with it is GPLv3, see [License](#license).
 
 <details>
 <summary><b>All commands</b></summary>

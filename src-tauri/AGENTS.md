@@ -86,7 +86,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app`/`app_lib` stay opt-level 0.
 - **ASIO SDK env** (`LIBCLANG_PATH`, `CPAL_ASIO_DIR`) is set PERMANENTLY in the User-scope env on
   the dev PC: a fresh shell inherits it, no inline setting needed (`pnpm dev:asio` just works).
-  `CPAL_ASIO_DIR` must hold an EXTRACTED SDK with `common/` and `host/pc/` directly under it; `asio-sys`
+  `CPAL_ASIO_DIR` must hold an EXTRACTED SDK with `common/` and `host/pc/` directly under it (on the dev
+  PC the checkout's gitignored `asio-sdk/`: the `build-exe` workflow's pinned zip, its `ASIOSDK/`); `asio-sys`
   only rebuilds when its fingerprint changes (a `cargo update`, a crate bump), so a green
   `cargo check --features asio` can be a stale `target/` cache over a missing SDK; `pnpm rust:check`
   confirms the SDK directory before its asio step. cpal stays pinned at `=0.18.1` (why: the
