@@ -175,14 +175,30 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   let listing = 0; // the newest `refresh`: an older listing that lands after it is stale
   let alive = true;
   onCleanup(() => (alive = false));
+  // One `setParameter` in flight per drawer, i.e. per loaded plugin (a swap remounts it with a fresh
+  // queue, so a call that never settles cannot hold up the next plugin). Each native call is its own
+  // blocking task, so two sent at once can reach the plugin in either order, leaving it (and the tone
+  // saved from it) one drag step off the slider. Values dragged meanwhile wait, one per param (a newer
+  // drag replaces the waiting one), and go in turn once the call in flight settles. A plugin may echo a
+  // set back (a VST2 can call audioMasterAutomate from inside its setter), and its events arrive in
+  // order, so the echo of the last set always lands last (see `onParamChanged`). Not covered: an edit in
+  // the plugin's own editor to the same param whose event lands after its waiting value was taken can
+  // leave the slider on the editor's value (two controls of one param moved at once, as before the
+  // queue). And a call that never settles stops this plugin's later sets; the native set only queues
+  // on a ring, so a hung one means the host is wedged anyway.
+  const waiting = new Map<number, { value: number; token: number }>();
+  let sending = false;
 
   // (Re)list the plugin's params and seed every rendered slider from its LIVE value — on mount, and
-  // again whenever the plugin reports a wholesale change (preset loaded in its own GUI). A slider
-  // touched while the list was in flight keeps its value and its token: the list predates it. Listings
-  // can overlap (mount, then a preset load; two quick preset loads): only the newest one writes.
+  // again whenever the plugin reports a wholesale change (preset loaded in its own GUI, a param title
+  // changed). A slider touched while the list was in flight keeps its value and its token: the list
+  // predates it. So does a slider whose value waited as the listing started: it is still sent (it may
+  // be by the time the listing lands), so the plugin ends on it. Listings can overlap (mount, then a
+  // preset load; two quick preset loads): only the newest one writes.
   async function refresh() {
     const since = touchTick;
     const mine = ++listing;
+    const held = new Set(waiting.keys());
     let ps: PluginParamDesc[] = [];
     try {
       ps = await platform.pluginHost.listParams(props.slot);
@@ -199,7 +215,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     // editor and count toward "+N more".
     const preview = ps.filter((p) => p.name.trim() !== '').slice(0, PARAM_PREVIEW_COUNT);
     const init: Record<number, number> = {};
-    const newer = new Map([...touched].filter(([, token]) => token > since));
+    const newer = new Map([...touched].filter(([id, token]) => token > since || held.has(id)));
     touched.clear();
     for (const p of preview) {
       const token = newer.get(p.id);
@@ -221,6 +237,9 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   // param not shown yet: a listing in flight predates it, so `refresh` keeps it (`setValues(init)` merges).
   const offParam = platform.pluginHost.onParamChanged((e) => {
     if (e.slot !== props.slot) return;
+    // While a dragged value waits for a param, the drag owns it against plugin events and refreshes: it
+    // is sent next, so plugin and slider end equal.
+    if (waiting.has(e.id)) return;
     setLastEdit({ name: nameById.get(e.id) ?? `#${e.id}`, value: e.value });
     touched.set(e.id, ++touchTick);
     setValues(e.id, e.value);
@@ -232,10 +251,28 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     const token = ++touchTick;
     touched.set(p.id, token);
     setValues(p.id, v);
-    platform.pluginHost.setParameter(props.slot, p.id, v).catch((e) => {
-      console.error(`[PluginControls] setParameter refused (slot ${props.slot + 1}, param ${p.id})`, e);
-      void snapBack(p.id, token);
-    });
+    waiting.set(p.id, { value: v, token });
+    if (!sending) void sendWaiting();
+  }
+
+  async function sendWaiting() {
+    sending = true;
+    try {
+      // A Map's iteration also visits the entries set during it, so a value dragged while one is in
+      // flight is sent by this same loop. A value still waiting at unmount was the old plugin's: dropped.
+      for (const [id, { value, token }] of waiting) {
+        waiting.delete(id);
+        if (!alive) return;
+        try {
+          await platform.pluginHost.setParameter(props.slot, id, value);
+        } catch (e) {
+          console.error(`[PluginControls] setParameter refused (slot ${props.slot + 1}, param ${id})`, e);
+          void snapBack(id, token);
+        }
+      }
+    } finally {
+      sending = false;
+    }
   }
 
   // The host refused a slider's value: show the plugin's real one again, unless the slider was touched
