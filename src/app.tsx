@@ -203,7 +203,7 @@ export function App() {
       // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`, `src/debug/recall-restart.ts`,
       // `src/debug/engine-smoke.ts`, `src/debug/engine-recovery.ts`, `src/debug/engine-loopback.ts`,
       // `src/debug/tone-recall.ts`, `src/debug/export-master.ts`, `src/debug/midi-switch.ts`,
-      // `src/debug/bench-load.ts`.
+      // `src/debug/bench-load.ts`, `src/debug/editor-premise.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-premise') {
