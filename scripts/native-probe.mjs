@@ -39,6 +39,7 @@ import { appRunning, assertWindows, closeAppWindow, killNative, nativeRunning } 
 // plugin tones are never read or written.
 const CLASSIC = 'scripts/classic-probe.tauri.json';
 const PROBES = {
+  'editor-premise': { tag: 'premise', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, config: CLASSIC },
   'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/, config: CLASSIC },
   'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/, config: CLASSIC },
   // `failLine`: a probe line that fails the run whatever the verdict says. The probe swaps on when
