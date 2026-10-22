@@ -53,21 +53,28 @@ export function PluginBar(props: {
   async function toggleEditor(quiet = false) {
     if (editorBusy()) return; // single-flight: ignore re-clicks while an open/close is pending
     const wantOpen = !editorOpen();
-    // Same plugin FILE in both slots shares one GUI runtime whose message thread binds to the FIRST
-    // slot that opens an editor — a second open from the other slot (concurrent OR after close) wedges
-    // inside the plugin, and killing the frozen window kills the app. Refuse it up front. (Another
-    // format of the plugin, e.g. CLAP and VST3, = two modules = fine.) The check and the reservation run
+    // Same plugin FILE in both slots shares one GUI runtime bound to one owner thread; an open from
+    // another wedges inside the plugin, and killing the frozen window kills the app. Refuse it up front
+    // (the rule: `editorAffinity` in `src/ui/state/instrument.ts`). The check and the reservation run
     // before the open is awaited, so two opens racing each other cannot both pass.
     let release = () => {};
     if (wantOpen) {
-      const owner = editorAffinityBlocker(props.slot, props.descriptor.path);
-      if (owner) {
+      const blocked = editorAffinityBlocker(props.slot, props.descriptor.path);
+      if (blocked) {
         if (quiet) return;
-        setEditorError(`editor owned by ${owner}`);
-        notifyError(
-          'Could not open a second editor for this plugin. Load another format of it in this slot.',
-          `Both slots hold the same plugin file, and its GUI serves one slot's editor per load. ${owner} opened it first.`,
-        );
+        const { owner } = blocked;
+        setEditorError(owner ? `editor owned by ${owner}` : 'editor held until restart');
+        if (owner) {
+          notifyError(
+            'Could not open a second editor for this plugin. Load another format of it in this slot.',
+            `Both slots hold the same plugin file, and its GUI serves one slot's editor per load. ${owner} opened it first.`,
+          );
+        } else {
+          notifyError(
+            "Could not open this plugin's editor until BleepLoop restarts. Load another format of it in this slot.",
+            "An earlier load of this plugin file may still be loaded, and its GUI serves only that load's editor.",
+          );
+        }
         return;
       }
       release = reserveEditor(props.slot, props.descriptor.path);
