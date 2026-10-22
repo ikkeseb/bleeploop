@@ -206,6 +206,8 @@ export function App() {
       // `src/debug/bench-load.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
+      } else if (import.meta.env.VITE_LF_PROBE === 'editor-premise') {
+        void import('./debug/editor-premise').then((m) => m.runEditorPremise());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-smoke') {
         void import('./debug/editor-smoke').then((m) => m.runEditorSmoke());
       } else if (import.meta.env.VITE_LF_PROBE === 'swap-stress') {
