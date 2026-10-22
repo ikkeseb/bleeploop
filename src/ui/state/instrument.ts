@@ -251,8 +251,10 @@ export function selectOff(slotIndex: 0 | 1): void {
  * opens the module before it answers) until its native unload succeeded or its load failed. Any native
  * error on a file's load or unload keeps that file a possible holder until restart (`uncertainPaths`):
  * the host may have left its module loaded (a setup past its bound, a teardown that leaked the plugin),
- * and no native answer says when it goes. Real fix (one shared GUI thread for all editors) is a fragile
- * host rework, deliberately deferred.
+ * and no native answer says when it goes. Such a file with no entry is refused in BOTH slots until
+ * restart: its module may be bound to an owner thread this map never saw (a WebView reload empties the
+ * map, and the startup resync's failed unload may leave the module behind, `resyncNativeSlots`). Real
+ * fix (one shared GUI thread for all editors) is a fragile host rework, deliberately deferred.
  */
 // Each path's reservation; the object itself is the reservation's token (`reserveEditor`'s release).
 const editorAffinity = new Map<string, { slot: 0 | 1; orphaned: boolean }>();
@@ -264,15 +266,16 @@ const nativePaths: [string | null, string | null] = [null, null];
 const uncertainPaths = new Set<string>();
 
 /**
- * Non-null = refuse, naming who owns this file's editor: the OTHER slot, or (orphaned) a load of a slot
- * that has since unloaded the file, whichever slot asks.
+ * Non-null = refuse. `owner` names who owns this file's editor: the OTHER slot, or (orphaned) a load of
+ * a slot that has since unloaded the file, whichever slot asks; `owner: null` = no entry, but a load
+ * this map never saw may still hold the file until restart (the rule above).
  */
-export function editorAffinityBlocker(slot: 0 | 1, path: string): string | null {
+export function editorAffinityBlocker(slot: 0 | 1, path: string): { owner: string | null } | null {
   const entry = editorAffinity.get(path);
-  if (!entry) return null;
+  if (!entry) return uncertainPaths.has(path) ? { owner: null } : null;
   const owner = `slot ${entry.slot === 0 ? 'A' : 'B'}`;
-  if (entry.orphaned) return `${owner}'s previous load`;
-  return entry.slot !== slot ? owner : null;
+  if (entry.orphaned) return { owner: `${owner}'s previous load` };
+  return entry.slot !== slot ? { owner } : null;
 }
 
 /**

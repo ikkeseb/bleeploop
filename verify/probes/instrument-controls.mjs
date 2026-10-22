@@ -12,7 +12,9 @@
  * slots' EDITOR until both unload it (also while the other slot's unload or load is in flight), any native
  * load or unload error on the file (a failed or timed-out load, a failed unload, a teardown error whose
  * next clear succeeds) keeps it refused for the rest of the run, and an open that fails late, after its
- * slot unloaded the plugin and reserved its editor again, leaves that newer reservation standing. The plugin host and
+ * slot unloaded the plugin and reserved its editor again, leaves that newer reservation standing, and after a
+ * WebView reload whose startup resync failed to unload a stranded plugin, its file's EDITOR is refused in both
+ * slots although the reloaded page saw no editor open. The plugin host and
  * native MIDI are simulated in the page; no native or hardware claim (which port Windows lets the app open
  * is native MIDI's, `src-tauri/src/engine_io/midi/ports.rs`). Run: pnpm probe instrument-controls
  */
@@ -28,7 +30,18 @@ await probe(async ({ open }) => {
         const response = await route.fetch();
         const body = await response.text();
         if (!body.includes('available: false')) throw new Error('Could not enable simulated native chrome');
-        await route.fulfill({ response, body: body.replace('available: false', 'available: true') });
+        // The reload case's stranded host: `window.__stranded` (set by an init script before the reload) is
+        // what the host says it still holds at boot, and unloading such a slot fails.
+        const hooks = [
+          ['async listLoaded() {', 'async listLoaded() { if (window.__stranded) return window.__stranded;'],
+          ['async unloadPlugin() {', "async unloadPlugin(slot) { if (window.__stranded?.some((s) => s.slot === slot)) throw new Error('the stranded plugin would not unload (probe)');"],
+        ];
+        let patched = body.replace('available: false', 'available: true');
+        for (const [from, to] of hooks) {
+          if (!patched.includes(from)) throw new Error(`Could not hook the simulated plugin host: ${from}`);
+          patched = patched.replace(from, to);
+        }
+        await route.fulfill({ response, body: patched });
       });
     },
   });
@@ -240,10 +253,10 @@ await probe(async ({ open }) => {
       window.__settleUnloadB(ok);
       await window.__clearB;
     }, ok);
-  const expectRefused = async (letter, why) => {
+  const expectRefused = async (letter, why, toast = 'Could not open a second editor for this plugin.') => {
     await dismissToasts();
     await editor(letter, false).click();
-    await page.locator('.toast', { hasText: 'Could not open a second editor for this plugin.' }).waitFor({ timeout: 5000 });
+    await page.locator('.toast', { hasText: toast }).waitFor({ timeout: 5000 });
     assert.equal(await editor(letter).getAttribute('aria-pressed'), 'false', why);
   };
   // A owns the editor (open from the block above); it closes, and B loads the file again.
@@ -448,4 +461,36 @@ await probe(async ({ open }) => {
   await page.locator('.toast', { hasText: 'Could not open a second editor for this plugin.' }).waitFor({ timeout: 5000 });
   assert.equal(await editor('B').getAttribute('aria-pressed'), 'false');
   assert.deepEqual(await page.evaluate(() => window.__opens), [0, 0], "slot B's open never reached the host: A's newer reservation stood");
+
+  // A WebView reload empties the editor affinity while the host keeps its plugins. A owns a file's editor
+  // (opened and closed), the page reloads, and the startup resync's unload of A's stranded plugin fails: the
+  // host may have leaked the module, still bound to A's old owner thread, and vacated the slot anyway. The
+  // file loaded again, in B or in A, has its EDITOR refused until restart, and no open reaches the host.
+  await ownFile('stranded');
+  const stranded = await page.evaluate(() => window.__desc);
+  await page.addInitScript((descriptor) => (window.__stranded = [{ slot: 0, descriptor }]), stranded);
+  await page.reload();
+  await page.waitForFunction(() => '__lf' in window);
+  await page.waitForFunction(async () => {
+    const instrument = await import('/src/ui/state/instrument.ts');
+    return instrument.nativeHostReady() && !instrument.scanning();
+  });
+  assert.equal(consumeConsoleErrors('[instrument] resync: unloading stranded plugin in slot 0').length, 1, 'the resync finds A stranded');
+  assert.equal(consumeConsoleErrors('[instrument] resync: stranded-slot unload failed').length, 1, "the resync's failed unload reaches the release log");
+  assert.equal(consumeConsoleErrors(/^\[rig-recall\] slot 1: .*stranded/).length, 1, "A's remembered file is not in the fake's scan");
+  await page.evaluate(async (descriptor) => {
+    const { platform } = await import('/src/platform/index.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
+    window.__desc = descriptor;
+    window.__opens = [];
+    platform.pluginHost.loadPlugin = async (slot) => ({ slot, descriptor });
+    platform.pluginHost.listParams = async () => [];
+    platform.pluginHost.openEditor = async (slot) => void window.__opens.push(slot);
+    await instrument.selectPlugin(1, descriptor);
+  }, stranded);
+  const heldUntilRestart = "Could not open this plugin's editor until BleepLoop restarts.";
+  await expectRefused('B', "slot B's editor of the stranded file is refused: the module may be bound to A's old thread", heldUntilRestart);
+  await page.evaluate(async () => (await import('/src/ui/state/instrument.ts')).selectPlugin(0, window.__desc));
+  await expectRefused('A', "slot A's new load of the stranded file is refused too: its owner thread is a new one", heldUntilRestart);
+  assert.deepEqual(await page.evaluate(() => window.__opens), [], 'no open of the stranded file reached the host');
 });

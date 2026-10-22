@@ -60,14 +60,22 @@ export function PluginBar(props: {
     // before the open is awaited, so two opens racing each other cannot both pass.
     let release = () => {};
     if (wantOpen) {
-      const owner = editorAffinityBlocker(props.slot, props.descriptor.path);
-      if (owner) {
+      const blocked = editorAffinityBlocker(props.slot, props.descriptor.path);
+      if (blocked) {
         if (quiet) return;
-        setEditorError(`editor owned by ${owner}`);
-        notifyError(
-          'Could not open a second editor for this plugin. Load another format of it in this slot.',
-          `Both slots hold the same plugin file, and its GUI serves one slot's editor per load. ${owner} opened it first.`,
-        );
+        const { owner } = blocked;
+        setEditorError(owner ? `editor owned by ${owner}` : 'editor held until restart');
+        if (owner) {
+          notifyError(
+            'Could not open a second editor for this plugin. Load another format of it in this slot.',
+            `Both slots hold the same plugin file, and its GUI serves one slot's editor per load. ${owner} opened it first.`,
+          );
+        } else {
+          notifyError(
+            "Could not open this plugin's editor until BleepLoop restarts. Load another format of it in this slot.",
+            "An earlier load of this plugin file may still be loaded, and its GUI serves only that load's editor.",
+          );
+        }
         return;
       }
       release = reserveEditor(props.slot, props.descriptor.path);
