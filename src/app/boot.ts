@@ -42,12 +42,12 @@ export function bootEngine(): () => void {
         await refreshAndPruneDevices();
       }
       await openEngineDevice();
-      const status = await whenDevice();
+      await whenDevice();
       if (disposed) return;
       restoreEngineShare();
       stopAutosave = autosave.start(session);
       if (!platform.pluginHost.available) return;
-      await platform.pluginHost.init(status.sampleRate);
+      await platform.pluginHost.init();
       await resyncNativeSlots();
       setNativeHostReady(true);
       const paths = savedRigPaths();

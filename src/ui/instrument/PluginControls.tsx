@@ -76,7 +76,7 @@ export function PluginBar(props: {
     setEditorError(null);
     try {
       if (wantOpen) {
-        await platform.pluginHost.openEditor(props.slot, 'embedded');
+        await platform.pluginHost.openEditor(props.slot);
         setEditorOpen(true);
       } else {
         await platform.pluginHost.closeEditor(props.slot);
