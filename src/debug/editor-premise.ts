@@ -10,7 +10,7 @@
  * Trigger: `VITE_LF_PROBE=editor-premise` at Vite start (DEV only). Knobs:
  *   `VITE_LF_PROBE_FILTER`  name substring of the plugin (default `Archetype`)
  *   `VITE_LF_PROBE_FORMAT`  `clap` | `vst3` | `vst2` (default: the first match)
- *   `VITE_LF_PROBE_CASE`    `reload` | `other`
+ *   `VITE_LF_PROBE_CASE`    `reload` | `other` | `b-first`
  */
 import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
 import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
