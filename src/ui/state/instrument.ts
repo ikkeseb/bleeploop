@@ -243,17 +243,36 @@ export function selectOff(slotIndex: 0 | 1): void {
  * forever → `open_editor` timeout → frozen half-window → closing it kills the app). Mixed formats of
  * the same plugin (CLAP + VST3 = two modules) are fine. So: the first slot to open an editor for a
  * path OWNS that path's editor; the other slot is refused with a toast (guard in
- * `PluginControls.toggleEditor`). The entry dies when the module truly unloads — i.e. when the LAST
- * slot holding the path unloads. Real fix (one shared GUI thread for all editors) is a fragile
+ * `PluginControls.toggleEditor`). Every load runs on its own new owner thread
+ * (`src-tauri/src/host/engine_slot.rs`), so the owning slot's unload ends the bound thread: while the
+ * other slot keeps the module loaded, the entry turns `orphaned` and BOTH slots are refused, the owner's
+ * next load included. The entry dies when the module truly unloads — i.e. when the LAST slot holding
+ * the path lets it go. A slot holds a path (`nativePaths`) from the moment its load STARTS (the host
+ * opens the module before it answers) until its native unload succeeded or its load failed. Any native
+ * error on a file's load or unload keeps that file a possible holder until restart (`uncertainPaths`):
+ * the host may have left its module loaded (a setup past its bound, a teardown that leaked the plugin),
+ * and no native answer says when it goes. Real fix (one shared GUI thread for all editors) is a fragile
  * host rework, deliberately deferred.
  */
 // Each path's reservation; the object itself is the reservation's token (`reserveEditor`'s release).
-const editorAffinity = new Map<string, { slot: 0 | 1 }>();
+const editorAffinity = new Map<string, { slot: 0 | 1; orphaned: boolean }>();
+// The file each slot's native host may hold (the rule above). Not `slotPlugins`: that reads empty while
+// a load or an unload is in flight and comes back on a failed unload.
+const nativePaths: [string | null, string | null] = [null, null];
+// Files a native load or unload error left possibly held for the rest of the run (the rule above); apart
+// from `nativePaths`, so the slot's next load does not overwrite them.
+const uncertainPaths = new Set<string>();
 
-/** Non-null = refuse: the OTHER slot already owns this file's editor (returns its 1-based label). */
+/**
+ * Non-null = refuse, naming who owns this file's editor: the OTHER slot, or (orphaned) a load of a slot
+ * that has since unloaded the file, whichever slot asks.
+ */
 export function editorAffinityBlocker(slot: 0 | 1, path: string): string | null {
-  const owner = editorAffinity.get(path)?.slot;
-  return owner !== undefined && owner !== slot ? `slot ${owner === 0 ? 'A' : 'B'}` : null;
+  const entry = editorAffinity.get(path);
+  if (!entry) return null;
+  const owner = `slot ${entry.slot === 0 ? 'A' : 'B'}`;
+  if (entry.orphaned) return `${owner}'s previous load`;
+  return entry.slot !== slot ? owner : null;
 }
 
 /**
@@ -264,17 +283,24 @@ export function editorAffinityBlocker(slot: 0 | 1, path: string): string | null 
  */
 export function reserveEditor(slot: 0 | 1, path: string): () => void {
   if (editorAffinity.has(path)) return () => {};
-  const mine = { slot };
+  const mine = { slot, orphaned: false };
   editorAffinity.set(path, mine);
   return () => {
     if (editorAffinity.get(path) === mine) editorAffinity.delete(path);
   };
 }
 
-/** Drop a path's affinity when NO slot holds it anymore (the module actually unloaded). */
-function releaseEditorAffinity(outgoingPath: string | undefined): void {
+/**
+ * After `slot` unloaded `outgoingPath`: drop the path's affinity when NO slot's host holds it anymore (the module
+ * actually unloaded); else, if `slot` owned it, its owner thread is gone with the module still bound to it,
+ * so the entry turns orphaned. A new object: a late failed open's release (its token) must not drop it.
+ */
+function releaseEditorAffinity(slot: 0 | 1, outgoingPath: string | undefined): void {
   if (!outgoingPath) return;
-  if (!slotPlugins().some((d) => d?.path === outgoingPath)) editorAffinity.delete(outgoingPath);
+  const entry = editorAffinity.get(outgoingPath);
+  if (!entry) return;
+  if (!nativePaths.includes(outgoingPath) && !uncertainPaths.has(outgoingPath)) editorAffinity.delete(outgoingPath);
+  else if (entry.slot === slot && !entry.orphaned) editorAffinity.set(outgoingPath, { slot, orphaned: true });
 }
 
 /**
@@ -328,12 +354,16 @@ async function doSelectPlugin(
   if (!outgoing) void disarmInputInternal(slot);
   let tone: PluginInfo['tone'];
   sourceOps[slot]++;
+  nativePaths[slot] = desc.path;
   try {
     // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
     tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken))?.tone;
   } catch (e) {
     swapping[slot] = false; // the swap ends on the slot's instrument (or Off)
     console.error('[instrument] plugin load failed', e);
+    uncertainPaths.add(desc.path);
+    nativePaths[slot] = null;
+    releaseEditorAffinity(slot, desc.path);
     notifyError('Could not load the plugin. Pick it again, or another source.', e);
     // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`) —
     // unless the plugin is not at fault: the engine has no device (a load goes into a running engine),
@@ -425,6 +455,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   } catch (e) {
     swapping[slot] = false;
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
+    uncertainPaths.add(outgoing.path);
     notifyError('Could not unload the plugin. Choose Off or another source to try again.', 'It stays in the slot, silent.');
     setSlotPlugins((prev) => withAt(prev, slot, outgoing));
     setEngineGain(slot, outgoingGain ?? savedPluginLevel(slot, outgoing));
@@ -433,7 +464,8 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   }
   if (engineGains()[slot] === null) sendEngine({ SetSlotGain: [slot, inputGains()[slot]] });
   forgetSlotPlugin(slot);
-  releaseEditorAffinity(outgoing.path);
+  nativePaths[slot] = null;
+  releaseEditorAffinity(slot, outgoing.path);
   return true;
 }
 
@@ -487,6 +519,7 @@ export async function resyncNativeSlots(): Promise<void> {
         await platform.pluginHost.unloadPlugin(slot);
       } catch (e) {
         console.error('[instrument] resync: stranded-slot unload failed', e);
+        uncertainPaths.add(descriptor.path);
         notifyError('Could not clear a plugin left in a slot. Restart BleepLoop.', e);
       }
     });
