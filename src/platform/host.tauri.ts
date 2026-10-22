@@ -58,8 +58,8 @@ let frontendEpoch = 0;
 
 const tauriPluginHost: PluginHost = {
   available: true,
-  async init(sampleRate) {
-    frontendEpoch = await invoke<number>('host_init', { sampleRate });
+  async init() {
+    frontendEpoch = await invoke<number>('host_init');
   },
   scanPlugins(force = false) {
     return invoke<PluginDescriptor[]>('plugin_scan', { force });
@@ -86,8 +86,8 @@ const tauriPluginHost: PluginHost = {
   listLoaded() {
     return invoke<PluginInfo[]>('plugin_list_loaded');
   },
-  async openEditor(slot, mode) {
-    await invoke('plugin_open_editor', { slot, mode, frontendEpoch });
+  async openEditor(slot) {
+    await invoke('plugin_open_editor', { slot, frontendEpoch });
   },
   async closeEditor(slot) {
     await invoke('plugin_close_editor', { slot, frontendEpoch });

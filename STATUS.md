@@ -143,6 +143,10 @@ it.
   60 s closes at the cap, mid-bar: fine, or close on the last bar line?
 - Editors: in front; close and reopen with no hang; with FabFilter's open, a drawer slider moves its
   knob and its own size menu resizes the host window.
+- A drawer slider dragged fast, or while a preset loads in the plugin's own editor, ends where the
+  plugin ends (one set in flight per plugin); a tempo or meter changed while the device is stopped or
+  switching is the one the loops play at once it opens (machine: `plugin-param-refused` probe,
+  `engine_io/tests.rs`). Does the amp-sim's knob ever sit off its slider after a quick sweep?
 - A real 64-bit VST2 plugin whose parameters hold a value (so far a fixture, and ReaJS and ReaStream in
   `native:smoke` and `native:swap`): plays live with no click on load, its editor opens and resizes, a
   knob there moves the drawer's slider, and its settings come back after a restart.

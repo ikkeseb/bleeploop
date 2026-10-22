@@ -34,6 +34,10 @@ docs/inspiration/archive/
 # runtime-gate logs (dev-asio, cargo-check, etc.)
 logs/
 
+# Steinberg ASIO SDK, local only (its licence forbids redistributing it): CPAL_ASIO_DIR points here.
+# Fetch the zip and sha256 the build-exe workflow pins; keep ASIOSDK/'s contents directly under it.
+/asio-sdk/
+
 # Tauri (src-tauri/ is added in P7)
 src-tauri/target
 src-tauri/gen

@@ -476,9 +476,36 @@ impl Engine {
     }
 
     /// The meter the engine applies, once it has taken the commands queued ahead of its first block (a
-    /// replay sets it): what a rebuild keeps (`engine_io`'s settings). Not for the audio thread.
+    /// replay sets it): what a rebuild keeps (`engine_io`'s settings) with its clock's tempo, then
+    /// [`Engine::unapplied_transport`] on top. Not for the audio thread.
     pub fn applied_meter(&self) -> Option<crate::grid::Meter> {
         self.replayed.then_some(self.clock.meter())
+    }
+
+    /// The newest `SetBpm` and the newest `SetMeter` sent and not applied yet: still in the table or in
+    /// the command ring, which this peeks at without taking anything. The engine has not weighed them
+    /// against its tempo lock, so a rebuild keeps them as sent, over [`Engine::applied_meter`] and the
+    /// clock's tempo (`engine_io`'s settings), and the new engine weighs them. Consuming the ring here
+    /// instead would apply notes and slot commands to units the rebuild hands on to the new engine. Not
+    /// for the audio thread.
+    pub fn unapplied_transport(&mut self) -> impl Iterator<Item = Command> {
+        let mut table: Vec<_> = self.pending.iter().flatten().map(|p| (p.seq, p.command)).collect();
+        table.sort_by_key(|&(seq, _)| seq);
+        let slots = self.commands.slots();
+        let ring: Vec<_> = self.commands.read_chunk(slots).map(|chunk| {
+            let (a, b) = chunk.as_slices();
+            a.iter().chain(b).map(|c| c.command).collect()
+        }).unwrap_or_default();
+        let (mut bpm, mut meter) = (None, None);
+        // The table holds what the ring gave first, in its order; the ring holds what came after.
+        for command in table.into_iter().map(|(_, c)| c).chain(ring) {
+            match command {
+                Command::SetBpm(_) => bpm = Some(command),
+                Command::SetMeter(_) => meter = Some(command),
+                _ => {}
+            }
+        }
+        bpm.into_iter().chain(meter)
     }
 
     /// While no device runs and the caller holds the engine: apply `command` at once, at the frame the

@@ -1701,6 +1701,88 @@ fn the_kept_meter_is_the_one_the_engine_applied_through_a_rebuild_and_an_import(
 }
 
 #[test]
+fn an_imported_tempo_outlives_a_clear_all_and_reaches_a_rebuilt_engine() {
+    use lf_engine::grid::{frames_per_bar, Meter};
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.send(Command::SetBpm(100.0));
+    h.wait_event("the tempo the player set", |e| matches!(e, Event::Transport { bpm: 100, .. }).then_some(()));
+    // An import sets the tempo with no command; CLEAR ALL unlocks it and leaves it where the load put it.
+    let frames = frames_per_bar(140.0, RATE as u32, Meter::FOUR_FOUR);
+    let load = serde_json::json!({ "bpm": 140, "meter": { "num": 4, "den": 4, "beats": 4 }, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    h.host.load_session(&session_bytes(&load, &vec![0.0; frames as usize])).expect("a 140 BPM load");
+    h.wait_event("the load's transport", |e| matches!(e, Event::Transport { bpm: 140, locked: true, .. }).then_some(()));
+    h.send(Command::ClearAll);
+    h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
+    h.wait_event("the tempo unlocks at the load's", |e| matches!(e, Event::Transport { bpm: 140, locked: false, .. }).then_some(()));
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let rebuilt = h.wait_event("the new engine's transport", |e| match e {
+        Event::Transport { bpm, master: 0, .. } => Some(*bpm),
+        _ => None,
+    });
+    assert_eq!(rebuilt, 140, "the rebuilt engine runs the imported tempo, not the last one sent");
+    assert!(h.host.settings().contains(&Command::SetBpm(140.0)), "{:?}", h.host.settings());
+}
+
+#[test]
+fn a_tempo_and_meter_sent_while_the_device_is_stopped_reach_a_rebuilt_engine() {
+    use lf_engine::grid::Meter;
+    let six = Meter::new(6, 8).unwrap();
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.send(Command::SetBpm(100.0));
+    h.wait_event("the tempo the player set", |e| matches!(e, Event::Transport { bpm: 100, .. }).then_some(()));
+    h.host.close().unwrap();
+    // No device runs: the stopped engine's ring takes these, and no block applies them.
+    h.send(Command::SetBpm(140.0));
+    h.send(Command::SetMeter(six));
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let rebuilt = h.wait_event("the new engine's transport", |e| match e {
+        Event::Transport { bpm, meter, master: 0, .. } => Some((*bpm, *meter)),
+        _ => None,
+    });
+    assert_eq!(rebuilt, (140, six), "the rebuilt engine runs the last tempo and meter sent");
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetBpm(140.0)) && kept.contains(&Command::SetMeter(six)), "{kept:?}");
+}
+
+#[test]
+fn a_tempo_and_meter_sent_while_a_rebuild_swaps_the_engine_reach_the_new_one() {
+    use lf_engine::grid::Meter;
+    use std::sync::Weak;
+    /// The UI's tempo and meter, which bypass the input path's pause: sent from the hook's `rebuild`,
+    /// once the old engine is out and before its ends are replaced (`owner::swap_engine`), once.
+    struct SendsMidSwap(Weak<super::Core>, Mutex<Vec<Command>>);
+    impl super::RebuildHook for SendsMidSwap {
+        fn pause(&self) {}
+        fn rebuild(&self, _generation: u64) -> Vec<Command> {
+            let host = EngineHost { core: self.0.upgrade().expect("the host lives") };
+            for command in std::mem::take(&mut *self.1.lock().unwrap()) {
+                host.send(TimedCommand { frame: None, command }).expect("the old ring takes it");
+            }
+            Vec::new()
+        }
+        fn resume(&self) {}
+    }
+    let six = Meter::new(6, 8).unwrap();
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.send(Command::SetBpm(100.0));
+    h.wait_event("the tempo the player set", |e| matches!(e, Event::Transport { bpm: 100, .. }).then_some(()));
+    let sends = vec![Command::SetBpm(140.0), Command::SetMeter(six)];
+    h.host.set_rebuild_hook(Some(Arc::new(SendsMidSwap(Arc::downgrade(&h.host.core), Mutex::new(sends)))));
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let rebuilt = h.wait_event("the new engine's transport", |e| match e {
+        Event::Transport { bpm, meter, master: 0, .. } => Some((*bpm, *meter)),
+        _ => None,
+    });
+    assert_eq!(rebuilt, (140, six), "a send that lands mid-swap goes to the old ring, which the swap reads after it");
+}
+
+#[test]
 fn the_input_sends_are_kept_before_the_first_open_and_replayed_into_a_new_engine() {
     use lf_engine::{InputSend, InputSendParam};
     let h = Harness::new();
