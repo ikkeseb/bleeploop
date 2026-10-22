@@ -3,7 +3,7 @@
 **This file is the playbook**, for every harness; the root `AGENTS.md` routes here.
 
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
-Static gates first (`pnpm check`, `pnpm build`), then the runtime probe below. The engine's
+Static checks first (the ones the change can reach; root `AGENTS.md`, the `main` line), then the runtime probe below. The engine's
 behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that changes
 native code, not on Markdown alone); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).

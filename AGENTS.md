@@ -65,9 +65,13 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
 - **The running app is the surface a change is verified on:** drive it and measure
   (`docs/VERIFY.md`).
-- **`main` is the live dev line.** Commit and push whenever the gates are green: `pnpm check` (also
-  the pre-push hook), `pnpm build`, `pnpm rust:check` (cargo check asio/no-asio + tests), CI. Never
-  push red. The owner's open checks (`STATUS.md`) live ON `main`.
+- **`main` is the live dev line.** Commit and push whenever the gates are green; each gate runs once
+  per change set. A writer runs only what its change can reach (`pnpm typecheck`, `pnpm lint`, the
+  one guard `node verify/guards/<name>.mjs`, `pnpm test:engine`). On the integrated tree, once:
+  `pnpm rust:check` (cargo check asio/no-asio + tests) when the change can reach the native build or
+  its tests (`src-tauri/`, `verify/fixtures/`, Cargo config or dependencies), never per writer;
+  `pnpm build` when the frontend changed. `pnpm check` is the pre-push hook: never run it by hand
+  before a push. Then CI. Never push red. The owner's open checks (`STATUS.md`) live ON `main`.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.

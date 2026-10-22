@@ -60,7 +60,7 @@ tests hold to the same rule (the lf-engine briefing, `src-tauri/crates/lf-engine
 3. Track checks with a `passed`/`failed` counter, print `=== RESULT: N/N checks passed, M failed ===`
    and `process.exit(failed === 0 ? 0 : 1)`. The runner fails a guard that exits non-zero, prints no RESULT line or more than one, or reports a failure or zero checks in it; a guard still running after 60 s is killed and fails.
 4. Plant realistic bugs in the covered code; each must turn the guard red. Revert them.
-5. Run `pnpm verify`. One guard alone: `node verify/guards/<name>.mjs`.
+5. Run the new guard alone: `node verify/guards/<name>.mjs`. The pre-push hook runs the whole set.
 
 ## Probes
 
