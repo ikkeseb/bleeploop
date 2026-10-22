@@ -237,13 +237,14 @@ export function selectOff(slotIndex: 0 | 1): void {
 
 /**
  * Editor affinity per plugin FILE. The same plugin file loaded in BOTH slots shares ONE OS module →
- * one GUI runtime (JUCE `MessageManager`), whose message thread binds to the FIRST owner thread that
- * opens an editor — and stays bound while the module is loaded (closing the editor does NOT release
- * it; a second concurrent OR serial editor from the other slot wedges inside `attached()`/`gui.create`
- * forever → `open_editor` timeout → frozen half-window → closing it kills the app). Mixed formats of
- * the same plugin (CLAP + VST3 = two modules) are fine. So: the first slot to open an editor for a
- * path OWNS that path's editor; the other slot is refused with a toast (guard in
- * `PluginControls.toggleEditor`). Every load runs on its own new owner thread
+ * one GUI runtime (JUCE `MessageManager`), whose message thread binds to the owner thread of the
+ * module's FIRST load and stays bound while the module is loaded (measured on Archetype VST3: B's
+ * first editor open wedged though only A had loaded before it and A never opened one). An editor from
+ * any other owner thread wedges inside `attached()`/`gui.create` forever → `open_editor` timeout →
+ * frozen half-window → closing it kills the app. Mixed formats of the same plugin (CLAP + VST3 = two
+ * modules) are fine. This guard gives the path's editor to the first slot that OPENS one and refuses
+ * the other slot with a toast (`PluginControls.toggleEditor`), so a later loader that opens first is
+ * still let through (D29). Every load runs on its own new owner thread
  * (`src-tauri/src/host/engine_slot.rs`), so the owning slot's unload ends the bound thread: while the
  * other slot keeps the module loaded, the entry turns `orphaned` and BOTH slots are refused, the owner's
  * next load included. The entry dies when the module truly unloads — i.e. when the LAST slot holding

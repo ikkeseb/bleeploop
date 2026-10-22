@@ -53,10 +53,9 @@ export function PluginBar(props: {
   async function toggleEditor(quiet = false) {
     if (editorBusy()) return; // single-flight: ignore re-clicks while an open/close is pending
     const wantOpen = !editorOpen();
-    // Same plugin FILE in both slots shares one GUI runtime whose message thread binds to the FIRST
-    // slot that opens an editor — a second open from the other slot (concurrent OR after close) wedges
-    // inside the plugin, and killing the frozen window kills the app. Refuse it up front. (Another
-    // format of the plugin, e.g. CLAP and VST3, = two modules = fine.) The check and the reservation run
+    // Same plugin FILE in both slots shares one GUI runtime bound to one owner thread; an open from
+    // another wedges inside the plugin, and killing the frozen window kills the app. Refuse it up front
+    // (the rule: `editorAffinity` in `src/ui/state/instrument.ts`). The check and the reservation run
     // before the open is awaited, so two opens racing each other cannot both pass.
     let release = () => {};
     if (wantOpen) {
