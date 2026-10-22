@@ -184,8 +184,11 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   // order, so the echo of the last set always lands last (see `onParamChanged`). Not covered: an edit in
   // the plugin's own editor to the same param whose event lands after its waiting value was taken can
   // leave the slider on the editor's value (two controls of one param moved at once, as before the
-  // queue). And a call that never settles stops this plugin's later sets; the native set only queues
-  // on a ring, so a hung one means the host is wedged anyway.
+  // queue). A listing that starts while a set is in flight (taken, no longer waiting) can reseed that
+  // slider to the value it listed while the plugin ends on the set, as before the queue; holding the
+  // id in flight too would hide a preset's value that lands after the set. And a call that never
+  // settles stops this plugin's later sets; the native set only queues on a ring, so a hung one means
+  // the host is wedged anyway.
   const waiting = new Map<number, { value: number; token: number }>();
   let sending = false;
 
