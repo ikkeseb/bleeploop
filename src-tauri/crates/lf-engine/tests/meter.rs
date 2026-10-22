@@ -520,6 +520,6 @@ fn four_four_renders() {
     mix.fx[FxKind::Delay.index()].bypassed = false;
     let track = LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix };
     let load = Load { bpm: 100, meter: Meter::FOUR_FOUR, bars: 2, master: master as Frame, tracks: vec![track], result: None };
-    let wet = wet_master(sr, load, &[mix], &[]).expect("the render");
+    let wet = wet_master(sr, load, &[]).expect("the render");
     println!("export out {} warmup {}", sha256_f32(&[&wet.left, &wet.right]), wet.warmup);
 }
