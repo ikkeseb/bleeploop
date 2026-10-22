@@ -4,6 +4,7 @@
  * directly, as editor-smoke does). Loads the plugin into A and B, opens and closes A's editor, then:
  *   `reload` (default)  A goes Off and loads the same file again (a new owner thread), A's editor opens
  *   `other`             B's editor opens
+ *   `b-first`           B's editor opens first, A's never did (is the module bound at load?)
  * Each open races a timer, so a wedge prints `complete: WEDGED ...` instead of a silent stall.
  *
  * Trigger: `VITE_LF_PROBE=editor-premise` at Vite start (DEV only). Knobs:
@@ -33,7 +34,8 @@ async function open(slot: 0 | 1): Promise<string> {
 export async function runEditorPremise(): Promise<void> {
   const filter = ((import.meta.env.VITE_LF_PROBE_FILTER as string | undefined) || 'Archetype').toLowerCase();
   const format = (import.meta.env.VITE_LF_PROBE_FORMAT as string | undefined)?.toLowerCase();
-  const which = (import.meta.env.VITE_LF_PROBE_CASE as string | undefined) === 'other' ? 'other' : 'reload';
+  const knob = import.meta.env.VITE_LF_PROBE_CASE as string | undefined;
+  const which = knob === 'other' || knob === 'b-first' ? knob : 'reload';
   for (let i = 0; i < 600 && !(nativeHostReady() && availablePlugins().length); i++) await sleep(100);
   const desc = availablePlugins().find(
     (d) => d.name.toLowerCase().includes(filter) && (!format || d.format.toLowerCase() === format),
@@ -45,6 +47,10 @@ export async function runEditorPremise(): Promise<void> {
   await selectPlugin(1, desc);
   if (slotPlugins()[0]?.id !== desc.id || slotPlugins()[1]?.id !== desc.id) return log('FAIL load into A and B');
   await sleep(1500);
+  if (which === 'b-first') {
+    const b = await open(1);
+    return log(`complete: ${b.startsWith('opened') ? 'no wedge' : 'WEDGED'} (${which}, ${tag}): ${b}`);
+  }
   const first = await open(0);
   log(`A open: ${first}`);
   if (!first.startsWith('opened')) return log(`FAIL A's first open ${first}`);
