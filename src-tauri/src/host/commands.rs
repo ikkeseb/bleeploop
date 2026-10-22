@@ -59,14 +59,11 @@ async fn off_runtime<T: Send + 'static>(
 /// One call per WebView document: begins its session and answers its `frontendEpoch`, which every
 /// `plugin_load` presents so a load from a replaced document cannot park a slot
 /// (`engine_io::plugins`). (Native MIDI's input epoch is another, its subscribe's:
-/// `engine_io::midi_mode`.) `sample_rate` is the document's `AudioContext` rate, logged only.
+/// `engine_io::midi_mode`.)
 #[tauri::command]
-pub async fn host_init(
-    sample_rate: f64,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<u32, String> {
+pub async fn host_init(state: tauri::State<'_, PluginHostState>) -> Result<u32, String> {
     let frontend_epoch = state.begin_frontend_session();
-    log::info!("[plugin_host] host_init: sample_rate={sample_rate} frontend_epoch={frontend_epoch}");
+    log::info!("[plugin_host] host_init: frontend_epoch={frontend_epoch}");
     Ok(frontend_epoch)
 }
 /// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP, VST3 and VST2 search paths and the
@@ -406,12 +403,10 @@ pub async fn plugin_list_params(slot: u8, app: tauri::AppHandle) -> Result<Vec<P
 }
 /// P10.0: open the slot's plugin editor, on its owner thread: a plugin-owned floating window, else
 /// one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`, the VST2
-/// owner's `embed_editor`), for the document with `frontend_epoch`. `mode` is
-/// accepted for forward-compat and ignored.
+/// owner's `embed_editor`), for the document with `frontend_epoch`.
 #[tauri::command]
-pub async fn plugin_open_editor(slot: u8, mode: String, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn plugin_open_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     validate_slot(slot)?;
-    let _ = mode;
     #[cfg(windows)]
     {
         blocking(app, "plugin_open_editor", move |engine, state| engine.plugin_open_editor(state, frontend_epoch, slot)).await

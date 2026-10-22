@@ -26,7 +26,6 @@ import type { Dropped, ImportReport, InputItem, MidiActionId, MidiEvent } from '
 
 export type PluginSlot = 0 | 1;
 export type PluginFormat = 'clap' | 'vst3' | 'vst2';
-export type EditorMode = 'floating' | 'embedded';
 
 export interface PluginDescriptor {
   id: string;
@@ -121,10 +120,13 @@ export interface PluginHost {
   /** False in the browser build — UI then surfaces the six built-in synths in both slots. */
   readonly available: boolean;
   /**
-   * Tell the native host the engine device's sample rate, so it `activate()`s plugins at the matching
-   * rate. Call once a device runs, before the first `loadPlugin`. No-op in the web build.
+   * Begin this document's session with the native host, which answers the `frontendEpoch` every
+   * slot-changing request carries. Call once per document, before the first `loadPlugin`. No rate
+   * crosses here: each plugin's owner activates it at the engine's running rate (`SlotHost::rate`,
+   * `src-tauri/src/engine_io/slot_host.rs`), and again when the engine is rebuilt at another rate
+   * (`SlotHost::take_evicted`). No-op in the web build.
    */
-  init(sampleRate: number): Promise<void>;
+  init(): Promise<void>;
   /**
    * List installed plugins. The native side remembers each bundle's result under a size + mtime
    * fingerprint, so a launch spawns no scan child for unchanged plugins; `force` (the picker's
@@ -164,7 +166,7 @@ export interface PluginHost {
    * build.
    */
   listLoaded(): Promise<PluginInfo[]>;
-  openEditor(slot: PluginSlot, mode: EditorMode): Promise<void>;
+  openEditor(slot: PluginSlot): Promise<void>;
   closeEditor(slot: PluginSlot): Promise<void>;
   setParameter(slot: PluginSlot, paramId: number, value: number): Promise<void>;
   /** Enumerate the loaded plugin's parameters (stable ids + ranges). Empty in the web build. */

@@ -82,7 +82,7 @@ export async function runSwapStress(): Promise<void> {
           await sleep(1000);
           if (editorOpen) {
             try {
-              await step(`openEditor ${tagOf(from)}`, () => platform.pluginHost.openEditor(0, 'embedded'));
+              await step(`openEditor ${tagOf(from)}`, () => platform.pluginHost.openEditor(0));
             } catch (e) {
               if (e instanceof StepTimeout) throw e;
               log(`open failed (continuing without editor) ${tagOf(from)}: ${String(e)}`);

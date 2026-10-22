@@ -46,7 +46,7 @@ export async function runEditorSmoke(): Promise<void> {
     await sleep(1500);
     const t0 = performance.now();
     try {
-      await platform.pluginHost.openEditor(0, 'embedded');
+      await platform.pluginHost.openEditor(0);
       log(`opened ${tag} in ${Math.round(performance.now() - t0)} ms`);
       opened++;
     } catch (e) {
