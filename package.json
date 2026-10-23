@@ -39,7 +39,7 @@
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {
-    "pre-push": "pnpm check"
+    "pre-push": "node scripts/pre-push.mjs \"$@\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
