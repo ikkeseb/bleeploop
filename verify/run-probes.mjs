@@ -10,11 +10,11 @@
 // and printed a `=== RESULT: … passed ===` line. Output lands in logs/probes/<name>.log. Coverage and
 // categories: verify/README.md.
 
-import { spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runProbe } from './harness/run-probe.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const probesDir = join(here, 'probes');
@@ -81,31 +81,10 @@ if (!baseUrl) {
 const stream = selected.length === 1;
 mkdirSync(logDir, { recursive: true });
 
-function run(name) {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const child = spawn(process.execPath, [join(probesDir, `${name}.mjs`), `--url=${baseUrl}`, ...passThrough], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let out = '';
-    const collect = (sink) => (chunk) => {
-      out += chunk;
-      if (stream) sink.write(chunk);
-    };
-    child.stdout.on('data', collect(process.stdout));
-    child.stderr.on('data', collect(process.stderr));
-    const timer = setTimeout(() => {
-      out += `\n[run-probes] timed out after ${TIMEOUT_MS / 1000} s\n`;
-      child.kill();
-    }, TIMEOUT_MS);
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      writeFileSync(join(logDir, `${name}.log`), out);
-      const result = out.match(/=== RESULT: .*===/g)?.at(-1) ?? '';
-      const ok = code === 0 && /passed/.test(result) && !/FAILED/.test(result);
-      resolve({ name, ok, code, seconds: (Date.now() - started) / 1000, out });
-    });
-  });
+async function run(name) {
+  const row = await runProbe(join(probesDir, `${name}.mjs`), [`--url=${baseUrl}`, ...passThrough], { timeoutMs: TIMEOUT_MS, stream });
+  writeFileSync(join(logDir, `${name}.log`), row.out);
+  return { name, ...row };
 }
 
 const rows = [];
@@ -114,7 +93,7 @@ try {
     if (!stream) process.stdout.write(`  …     ${name}\r`);
     const row = await run(name);
     rows.push(row);
-    console.log(`  ${row.ok ? 'PASS' : 'FAIL'}  ${name}  ${row.seconds.toFixed(1)} s${row.ok ? '' : `  (exit ${row.code})`}`);
+    console.log(`  ${row.ok ? 'PASS' : 'FAIL'}  ${name}  ${row.seconds.toFixed(1)} s${row.ok ? '' : row.timedOut ? '  (timed out)' : `  (exit ${row.code})`}`);
     if (!row.ok && !stream) process.stderr.write(`\n----- FAIL: ${name} -----\n${row.out.trim()}\n\n`);
   }
 } finally {
