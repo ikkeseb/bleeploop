@@ -214,6 +214,7 @@ for (const [name, result] of [
   ['non-zero exit after partial stdout', { status: 128, stdout: 'README.md\n' }],
   ['signal after partial stdout', { status: null, signal: 'SIGTERM', stdout: 'README.md\n' }],
   ['spawn error', { status: null, error: new Error('ENOENT'), stdout: 'README.md\n' }],
+  ['overflowed buffer with status 0', { status: 0, error: new Error('ENOBUFS'), stdout: 'README.md\n' }],
   ['empty successful diff', { status: 0, stdout: '' }],
 ]) {
   check(`diff ${name} fails open`, () => {

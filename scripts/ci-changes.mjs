@@ -26,11 +26,12 @@ export function classifyFiles(files, refType = '') {
   return { docs_only, native };
 }
 
-/** The runner returns spawnSync's status and stdout fields; tests inject git results. */
+/** The runner returns spawnSync's status, error and stdout fields; tests inject git results. */
 export function changedFiles(base, sha, git = (args) => spawnSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 64 * 1024 * 1024 })) {
   if (!base || /^0+$/.test(base)) return [];
-  // spawnSync's status is null on a signal, a spawn error or an overflowed buffer.
-  const succeeded = (result) => result.status === 0;
+  // A failed spawnSync sets `error` (an overflowed buffer can still report status 0) or a non-zero
+  // or null status (a signal).
+  const succeeded = (result) => !result.error && result.status === 0;
   try {
     if (!succeeded(git(['cat-file', '-e', `${base}^{commit}`]))) return [];
     const diff = git(['diff', '--no-renames', '--name-only', base, sha]);

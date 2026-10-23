@@ -1,10 +1,15 @@
 // verify/guards/pre-push.mjs: the hook checks every pushed ref against a clean HEAD and runs one
 // gate. Imports the real decision and runner with injected subprocess results; no git or pnpm needed.
-// Checks Windows spawn options, but cannot prove a Windows .cmd shim launches here.
+// Checks Windows spawn options, but cannot prove a Windows .cmd shim launches here. One check starts
+// the script through a linked directory, as git may: its main block must still run.
 // Run: node verify/guards/pre-push.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { decidePush, runPrePush } from '../../scripts/pre-push.mjs';
 
 let passed = 0;
@@ -36,6 +41,18 @@ function refused(result, detail) {
 check('configured hook runs the script and forwards remote arguments', () => {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg['simple-git-hooks']['pre-push'], 'node scripts/pre-push.mjs "$@"');
+});
+check('the script run through a linked directory still runs its main block', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pre-push-'));
+  try {
+    // A junction on Windows (no privilege needed); the type is ignored elsewhere.
+    symlinkSync(fileURLToPath(new URL('../../scripts', import.meta.url)), join(dir, 'scripts'), 'junction');
+    const run = spawnSync(process.execPath, [join(dir, 'scripts', 'pre-push.mjs')], { input: '', encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /nothing is pushed that needs the gate/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 check('one ref at clean HEAD needs the gate', () => assert.equal(decide(update()).action, 'gate'));
 check('another commit is refused with the ref and commit', () => {
