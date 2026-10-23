@@ -39,46 +39,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # Fails OPEN: an unusable base (first push, force-push, all-zero `event.before`) or a git error
-      # yields an empty list, which classifies as NOT docs-only, so the heavy gates run. `--no-renames`
-      # lists both sides of a move, so a file moved into `docs/` still counts as a source change.
-      # `native` fails open the same way: false only for a readable diff with no file the `rust` and
-      # `engine` jobs read (src-tauri/, a cargo config or toolchain file above it, the engine job's
-      # deny script, this workflow), and never on a tag: a release's call runs every job.
-      - name: Classify changed paths
-        id: changes
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            base='${{ github.event.pull_request.base.sha }}'
-          else
-            base='${{ github.event.before }}'
-          fi
-          files=''
-          case "$base" in
-            ''|0000000000000000000000000000000000000000) ;;
-            *) if git cat-file -e "$base^{commit}" 2>/dev/null; then
-                 files="$(git diff --no-renames --name-only "$base" '${{ github.sha }}' || true)"
-               fi ;;
-          esac
-          docs_only=false
-          native=true
-          if [ -n "$files" ]; then
-            docs_only=true
-            native=false
-            while IFS= read -r file; do
-              case "$file" in
-                *.md|*.MD|docs/*) ;;
-                src-tauri/*|.cargo/*|rust-toolchain*|scripts/engine-deny.mjs|.github/workflows/ci.yml) docs_only=false; native=true ;;
-                *) docs_only=false ;;
-              esac
-            done <<< "$files"
-          fi
-          if [ "${{ github.ref_type }}" = tag ]; then native=true; fi
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "native=$native" >> "$GITHUB_OUTPUT"
-          echo "base=$base docs_only=$docs_only native=$native"
-
       # no version input — pnpm/action-setup@v6 reads the packageManager pin in package.json.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
 
@@ -86,6 +46,15 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      # scripts/ci-changes.mjs owns the fail-open diff and native path rules.
+      - name: Classify changed paths
+        id: changes
+        env:
+          CI_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          CI_SHA: ${{ github.sha }}
+          CI_REF_TYPE: ${{ github.ref_type }}
+        run: node scripts/ci-changes.mjs
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
