@@ -16,8 +16,9 @@ those are verified by running the app and measuring it (`docs/VERIFY.md`, `STATU
 | Sees | the real source's logic, file formats, the engine wire, repository contracts | the running UI through `window.__lf` and the DOM: the commands a gesture sends, the screen a feed frame draws, IndexedDB, the export's archive, rendered layout |
 | Documented in | the header of each guard | the header of each probe: what it drives, what it proves, what it cannot see |
 
-`harness/` holds what both share: the module hooks for guards (`hooks.ts`) and the probe module
-(`probe.ts`). It is TypeScript and typechecked.
+`harness/` holds what both share: the module hooks for guards (`hooks.ts`), the probe module
+(`probe.ts`) and the runner's verdict on one probe run (`run-probe.mjs`). It is TypeScript and
+typechecked, except `run-probe.mjs`, which the probe runner imports in plain Node.
 
 ## Guards
 
@@ -31,7 +32,8 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
 
 Where the UI and the native side must agree, one fixture under `verify/fixtures/` holds both halves to
 it: a guard reads it, and a Rust test reads it through `include_str!` (so `rust-test.yml`'s path filter
-covers `verify/fixtures/**`, which `verify/guards/ci-paths.mjs` checks). Two hold a wire
+covers `verify/fixtures/**` and `ci.yml`'s classifier, `scripts/ci-changes.mjs`, counts it as native;
+`verify/guards/ci-paths.mjs` checks both). Two hold a wire
 (`verify/fixtures/engine-wire.json`, `verify/fixtures/midi-wire.json`); `verify/fixtures/fixed-bars.json`
 holds a rule both compute, FIXED's bar math.
 

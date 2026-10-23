@@ -4,14 +4,18 @@
 
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
 Static checks first (the ones the change can reach; root `AGENTS.md`, the `main` line), then the runtime probe below. The engine's
-behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that changes
-native code, not on Markdown alone); the frontend's
+behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on a push to `main` or a pull
+request into it that changes native code, not on Markdown alone; a `dev` push runs no CI, so there it
+is the writer's own run, root `AGENTS.md`, the `main` line); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
 
 Git hooks are local checkout state. Before relying on the push gate, inspect the file returned by
-`git rev-parse --git-path hooks/pre-push`; it must run `pnpm check`. If absent, install the configured
-hook with `pnpm exec simple-git-hooks`. An existing `node_modules` directory does not prove that the
-package's prepare script installed hooks in this checkout.
+`git rev-parse --git-path hooks/pre-push`; it must run `node scripts/pre-push.mjs`. If absent or
+older, install the configured hook with `pnpm exec simple-git-hooks`. An existing `node_modules`
+directory does not prove that the package's prepare script installed hooks in this checkout. The hook
+gates what is pushed, not the working tree: it refuses a push unless every pushed ref is the checked-out
+HEAD and the tree is clean (untracked files count; deletes need no gate), then runs `pnpm check` once.
+Push any other commit from a clean checkout of it.
 
 ## Browser harness (web build, `pnpm dev` on http://localhost:1420: the UI, silent)
 
