@@ -14,10 +14,10 @@ name: rust-test
 on:
   push:
     branches: [main]
-    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', 'scripts/cargo-test.mjs', '.github/workflows/rust-test.yml']
+    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', '.cargo/**', 'rust-toolchain*', 'scripts/cargo-test.mjs', '.github/workflows/rust-test.yml']
   pull_request:
     branches: [main]
-    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', 'scripts/cargo-test.mjs', '.github/workflows/rust-test.yml']
+    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', '.cargo/**', 'rust-toolchain*', 'scripts/cargo-test.mjs', '.github/workflows/rust-test.yml']
   workflow_dispatch: {}
   # build-exe.yml calls this for the exact commit it builds; the release waits for it.
   workflow_call: {}
