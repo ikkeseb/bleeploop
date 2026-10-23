@@ -13,7 +13,8 @@
 // `--jobs` is how many binaries run at once (default: one per logical processor, so the long ones start
 // at once; on the dev PC's 16 that ran the workspace's 47 binaries in 143 s against cargo's 443; on a
 // 4-core CI runner the gain is small, the long binaries' own threads already fill it);
-// `--jobs 1` is cargo's own order. Exit 0 = every binary and the doc-tests passed.
+// `--jobs 1` is cargo's own order. Exit 0 = every binary and the doc-tests succeeded, with at least
+// one test passed.
 
 import { spawn } from 'node:child_process';
 import { availableParallelism } from 'node:os';
@@ -22,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const cwd = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri');
 
-function run(command, args, options, onChunk) {
+function runProcess(command, args, options, onChunk) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options });
     let [stdout, stderr] = ['', ''];
@@ -42,10 +43,10 @@ function run(command, args, options, onChunk) {
 /**
  * `cargo test <args>` with the test binaries in a pool of `jobs`.
  * @param {string[]} args cargo test's package and feature arguments
- * @param {{ jobs?: number, log?: (text: string) => void }} [options] `log` takes everything cargo and the tests print
+ * @param {{ jobs?: number, run?: typeof runProcess, log?: (text: string) => void }} [options] `log` takes everything cargo and the tests print
  * @returns {Promise<{ code: number, out: string, binaries: number, passed: number }>} `out`: the failed steps' output
  */
-export async function cargoTest(args, { jobs = availableParallelism(), log = () => {} } = {}) {
+export async function cargoTest(args, { jobs = availableParallelism(), log = () => {}, run = runProcess } = {}) {
   if (!(Number.isInteger(jobs) && jobs > 0)) throw new Error(`cargoTest: jobs ${jobs}: expected a whole number above 0`);
   // The build: cargo's messages name each test binary and its package's manifest.
   const build = await run('cargo', ['test', ...args, '--no-run', '--message-format=json-render-diagnostics'], { cwd }, (chunk, stream) => {
@@ -83,6 +84,7 @@ export async function cargoTest(args, { jobs = availableParallelism(), log = () 
   const docs = await run('cargo', ['test', ...args, '--doc'], { cwd }, (chunk) => log(String(chunk)));
   for (const m of docs.stdout.matchAll(/test result: \w+\. (\d+) passed;/g)) passed += Number(m[1]);
   if (docs.code !== 0) failed.push(`\n     Doc-tests\n${docs.stdout}${docs.stderr}`);
+  if (passed === 0 && failed.length === 0) failed.push('cargo test: no test passed\n');
   return { code: failed.length ? 1 : 0, out: failed.join('\n'), binaries: binaries.length, passed };
 }
 
