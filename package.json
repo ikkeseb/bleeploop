@@ -39,7 +39,8 @@
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {
-    "pre-push": "node scripts/pre-push.mjs \"$@\""
+    "pre-push": "node scripts/pre-push.mjs \"$@\"",
+    "preserveUnused": ["pre-commit", "commit-msg"]
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
