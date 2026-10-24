@@ -20,11 +20,15 @@ Push any other commit from a clean checkout of it.
 The owner's clones also run a public-hygiene commit check (`pre-commit`, `commit-msg`) whose script
 and denylist live only beside the hooks, never in the tree. Setup, once per clone (its worktrees share
 the hooks): copy the owner's four local hook files (check.sh, denylist.txt, pre-commit, commit-msg)
-into the folder `git rev-parse --git-common-dir` names, under `hooks/`; leave `core.hooksPath` unset,
-since a relative one resolves per worktree and silently drops every hook in a linked one.
-`preserveUnused` keeps the commit hooks when `pnpm install` rewrites pre-push. Check it with
-`bash "$(git rev-parse --git-path hooks/check.sh)" --self-test`. It does not scan pushed commits made
-elsewhere (cherry-picks, rebases and merges skip it) or binary content.
+into the folder `git rev-parse --git-common-dir` names, under `hooks/`, with `cp -p` or a `chmod +x`
+after (git skips a hook that is not executable); leave `core.hooksPath` unset, since a relative one
+resolves per worktree and silently drops every hook in a linked one. `preserveUnused` keeps the commit
+hooks when `pnpm install` rewrites pre-push. Check it with
+`bash "$(git rev-parse --git-path hooks/check.sh)" --self-test`: it checks the setup too, and prints the
+list's pattern count and id to compare clones. A set-up check fails closed: a missing or broken list
+blocks the commit. It does not see `--no-verify` (the deliberate bypass), commits it did not make
+(`am`, `cherry-pick`, `rebase`, `revert`, merged-in content, an amend of a commit made without it),
+the author identity, tag messages, branch names, or the content of binary and `-diff` files.
 
 ## Browser harness (web build, `pnpm dev` on http://localhost:1420: the UI, silent)
 
