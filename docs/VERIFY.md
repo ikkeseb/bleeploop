@@ -17,6 +17,15 @@ gates what is pushed, not the working tree: it refuses a push unless every pushe
 HEAD and the tree is clean (untracked files count; deletes need no gate), then runs `pnpm check` once.
 Push any other commit from a clean checkout of it.
 
+The owner's clones also run a public-hygiene commit check (`pre-commit`, `commit-msg`) whose script
+and denylist live only beside the hooks, never in the tree. Setup, once per clone (its worktrees share
+the hooks): copy the owner's four local hook files (check.sh, denylist.txt, pre-commit, commit-msg)
+into the folder `git rev-parse --git-common-dir` names, under `hooks/`; leave `core.hooksPath` unset,
+since a relative one resolves per worktree and silently drops every hook in a linked one.
+`preserveUnused` keeps the commit hooks when `pnpm install` rewrites pre-push. Check it with
+`bash "$(git rev-parse --git-path hooks/check.sh)" --self-test`. It does not scan pushed commits made
+elsewhere (cherry-picks, rebases and merges skip it) or binary content.
+
 ## Browser harness (web build, `pnpm dev` on http://localhost:1420: the UI, silent)
 
 - **Drive the browser with Playwright,** which launches its own browser (claude-in-chrome does not
