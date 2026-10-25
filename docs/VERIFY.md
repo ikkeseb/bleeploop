@@ -40,11 +40,14 @@ Run `bash "$(git rev-parse --git-path hooks/check.sh)" --self-test` from each wo
 it checks that worktree's effective configuration and installed hooks, then exercises real commits in
 scratch repositories and a linked worktree. It prints the list's pattern count and id to compare clones.
 A set-up check fails closed on a missing or broken list, parser errors, incomplete normalization reads
-and failed intermediate writes. Matching uses byte locale so invalid UTF-8 cannot hide boundaries.
+and failed intermediate writes. NUL bytes in text input block with an explicit diagnostic. Matching
+uses byte locale and ASCII case folding; non-ASCII case variants must be listed explicitly.
 Raw added paths are checked even with submodule-ignore settings; internal CR separators are preserved,
-and the diff's size-only binary shortcut is disabled so large text files still get scanned. Blobs
-over the 100 MiB (104857600-byte) scan limit block the commit explicitly, including binary files;
-the limit bounds the memory needed to normalize a single long text line.
+and the diff's size-only binary shortcut is disabled so large text files still get scanned. A binary
+old side cannot exempt new text: the entire new text blob is scanned, while files still binary or
+`-diff` remain exempt. Both blob sides of added, modified, copied or renamed files are checked against
+the 100 MiB (104857600-byte) limit, including binary files. This bounds normalization memory and
+prevents an oversized old side from hiding new text.
 It does not see `--no-verify` (the deliberate bypass), commits it did not make
 (`am`, `cherry-pick`, `rebase`, `revert`, merged-in content, an amend of a commit made without it),
 the author identity, tag messages, branch names, or the content of binary and `-diff` files.
