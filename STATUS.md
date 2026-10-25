@@ -4,6 +4,8 @@ The owner's ear, eye or decision on the PC: the next jam's checks, what no jam h
 decisions that block work. Taste: `docs/backlog-taste.md` (not a gate). Non-gate threads: `AGENTS.md`
 § Open threads.
 
+- Open (unverified, macOS): the local public-hygiene binary-to-text check may let BSD awk truncate at a NUL beyond byte 8000 and hide a forbidden suffix; next: run the late-NUL self-tests on macOS; cheap fix: apply the existing NUL check to the raw new blob before awk.
+
 **The rig's interface:** an **Audient EVO 4** (`Audient USB Audio ASIO Driver`) since 2026-10-09. It
 replaced a **Scarlett 2i2 3rd gen** whose Focusrite ASIO driver is uninstalled, and every timing and
 latency baseline in this repo is the Scarlett's (`docs/VERIFY.md`): none can be measured again without
