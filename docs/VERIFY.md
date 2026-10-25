@@ -38,7 +38,8 @@ it checks that worktree's effective configuration and installed hooks, then exer
 scratch repositories and a linked worktree. It prints the list's pattern count and id to compare clones.
 A set-up check fails closed on a missing or broken list, parser errors and failed intermediate writes.
 Raw added paths are checked even with submodule-ignore settings; internal CR separators are preserved,
-and the diff's size-only binary shortcut is disabled so large text files still get scanned.
+and the diff's size-only binary shortcut is disabled so large text files still get scanned. Blobs
+over the portable 2 GiB scan limit block the commit explicitly, including binary files.
 It does not see `--no-verify` (the deliberate bypass), commits it did not make
 (`am`, `cherry-pick`, `rebase`, `revert`, merged-in content, an amend of a commit made without it),
 the author identity, tag messages, branch names, or the content of binary and `-diff` files.
