@@ -22,11 +22,24 @@ and denylist live only beside the hooks, never in the tree. Setup, once per clon
 the hooks): copy the owner's four local hook files (check.sh, denylist.txt, pre-commit, commit-msg)
 into the folder `git rev-parse --git-common-dir` names, under `hooks/`, with `cp -p` or a `chmod +x`
 after (git skips a hook that is not executable); leave `core.hooksPath` unset, since a relative one
-resolves per worktree and silently drops every hook in a linked one. `preserveUnused` keeps the commit
-hooks when `pnpm install` rewrites pre-push. Check it with
-`bash "$(git rev-parse --git-path hooks/check.sh)" --self-test`: it checks the setup too, and prints the
-list's pattern count and id to compare clones. A set-up check fails closed: a missing or broken list
-blocks the commit. It does not see `--no-verify` (the deliberate bypass), commits it did not make
+resolves per worktree and silently drops every hook in a linked one. Set
+`git config --local commit.status false`: the check scans the entire message, including comments and
+scissors tails, because message text cannot establish Git's cleanup mode. Disabling editor status
+keeps unrelated untracked paths out of that scan; manually included comments still get checked.
+`preserveUnused` keeps existing commit hooks when the current revision's installer rewrites pre-push;
+it does not restore missing hooks. Before installing dependencies on a historical revision, including
+in a linked worktree, set `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` for the install. In PowerShell:
+`$env:SKIP_INSTALL_SIMPLE_GIT_HOOKS='1'; try { pnpm install } finally { Remove-Item Env:SKIP_INSTALL_SIMPLE_GIT_HOOKS }`.
+In WSL, forward that variable through `WSLENV` when the pnpm wrapper invokes Windows pnpm.
+After an unprotected historical install, copy the four local files back with executable permissions,
+then restore the current pre-push gate from the current revision with `pnpm exec simple-git-hooks`.
+Run `bash "$(git rev-parse --git-path hooks/check.sh)" --self-test` from each worktree that will commit:
+it checks that worktree's effective configuration and installed hooks, then exercises real commits in
+scratch repositories and a linked worktree. It prints the list's pattern count and id to compare clones.
+A set-up check fails closed on a missing or broken list, parser errors and failed intermediate writes.
+Raw added paths are checked even with submodule-ignore settings; internal CR separators are preserved,
+and the diff's size-only binary shortcut is disabled so large text files still get scanned.
+It does not see `--no-verify` (the deliberate bypass), commits it did not make
 (`am`, `cherry-pick`, `rebase`, `revert`, merged-in content, an amend of a commit made without it),
 the author identity, tag messages, branch names, or the content of binary and `-diff` files.
 
