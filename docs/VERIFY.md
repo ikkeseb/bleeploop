@@ -26,6 +26,9 @@ resolves per worktree and silently drops every hook in a linked one. Set
 `git config --local commit.status false`: the check scans the entire message, including comments and
 scissors tails, because message text cannot establish Git's cleanup mode. Disabling editor status
 keeps unrelated untracked paths out of that scan; manually included comments still get checked.
+With this setting the default editor template is empty, and `git commit -v` adds no diff. Turning
+status on also exposes the verbose diff to scanning: deleting a forbidden line can then block a
+commit because that line still appears below the scissors marker.
 `preserveUnused` keeps existing commit hooks when the current revision's installer rewrites pre-push;
 it does not restore missing hooks. Before installing dependencies on a historical revision, including
 in a linked worktree, set `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` for the install. In PowerShell:
@@ -36,10 +39,12 @@ then restore the current pre-push gate from the current revision with `pnpm exec
 Run `bash "$(git rev-parse --git-path hooks/check.sh)" --self-test` from each worktree that will commit:
 it checks that worktree's effective configuration and installed hooks, then exercises real commits in
 scratch repositories and a linked worktree. It prints the list's pattern count and id to compare clones.
-A set-up check fails closed on a missing or broken list, parser errors and failed intermediate writes.
+A set-up check fails closed on a missing or broken list, parser errors, incomplete normalization reads
+and failed intermediate writes. Matching uses byte locale so invalid UTF-8 cannot hide boundaries.
 Raw added paths are checked even with submodule-ignore settings; internal CR separators are preserved,
 and the diff's size-only binary shortcut is disabled so large text files still get scanned. Blobs
-over the portable 2 GiB scan limit block the commit explicitly, including binary files.
+over the 100 MiB (104857600-byte) scan limit block the commit explicitly, including binary files;
+the limit bounds the memory needed to normalize a single long text line.
 It does not see `--no-verify` (the deliberate bypass), commits it did not make
 (`am`, `cherry-pick`, `rebase`, `revert`, merged-in content, an amend of a commit made without it),
 the author identity, tag messages, branch names, or the content of binary and `-diff` files.
