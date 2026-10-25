@@ -472,7 +472,3 @@ plugin-GUI work.
   `holds_audio` before its stop (`Owner::open`), so a load that lands in the fade-out is dropped with no
   `LoopsDropped` (`d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unasked`);
   the next check is re-reading it after the stop, before the build.
-- Unused items `app` still warns of (`engine_io` has no blanket `allow(dead_code)` any more): in every
-  build `asio_available` (`audio_output.rs`; `engine_io/probe.rs` keeps its own copy) and `plugin_gain`
-  (`engine_io/plugins.rs`, no caller); without `asio` also `asio_startup.rs`'s unbuilt states and
-  coordinator methods and `ASIO_PROBE_TIMEOUT` (`audio_output.rs`). Since when is unknown.

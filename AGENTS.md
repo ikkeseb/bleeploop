@@ -34,8 +34,8 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   as a machine-verified commit, as an open thread in the area briefing with its next diagnostic check
   (a defect not yet understood), as one line in `docs/backlog-taste.md` (taste, not a gate), or as a
   not-heard line when only the owner's ear can settle it. A `D<n>`/`E<n>` tag in a comment is an
-  owner decision (once in `STATUS.md` § Decisions), `F<n>` a tester report (the log
-  `docs/plans/tester-feedback.md` is removed); git history on both holds their text.
+  owner decision (once in `STATUS.md` § Decisions), `F<n>` a tester report; git history holds the
+  text of both.
 - **This is a public repo: keep working documents few and short-lived.** A plan or spec may live
   under `docs/` while the work is open. When it lands, fold what still binds into a briefing,
   `docs/ARCHITECTURE.md`, `STATUS.md`, `docs/backlog-taste.md` or a comment at the call site, and
@@ -44,9 +44,8 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   it can (`STATUS.md` § Not heard yet), and a later "this is off" reopens it. Prefer work a machine
   gate or a probe can settle. Rank unbuilt work by provenance: the owner's ear > the owner's stated
   roadmap > an agent's tier list.
-- **Propose bold changes.** The owner wants the best product it can be: suggest replacing or ripping
-  out a working part when its successor is better in latency, stability, UX or function, however
-  large the change. The owner decides; the change is measured as any other.
+- **A replacement is judged on latency, stability, UX or function,** however large, and measured as
+  any other change.
 - **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
   looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
   its MIDI input is native; PC-keyboard→MIDI is its fallback. By-ear sessions happen on
@@ -65,13 +64,13 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
 - **The running app is the surface a change is verified on:** drive it and measure
   (`docs/VERIFY.md`).
-- **`main` is the live dev line.** Commit and push whenever the gates are green; each gate runs once
-  per change set. A writer runs only what its change can reach (`pnpm typecheck`, `pnpm lint`, the
-  one guard `node verify/guards/<name>.mjs`, `pnpm test:engine`). On the integrated tree, once:
-  `pnpm rust:check` (cargo check asio/no-asio + tests) when the change can reach the native build or
-  its tests (`src-tauri/`, `verify/fixtures/`, Cargo config or dependencies), never per writer;
-  `pnpm build` when the frontend changed. `pnpm check` is the pre-push hook: never run it by hand
-  before a push. Then CI. Never push red. The owner's open checks (`STATUS.md`) live ON `main`.
+- **`main` is the live dev line.** Commit and push whenever the gates are green. A writer runs what
+  its change reaches: `pnpm typecheck`, `pnpm lint`, the one guard `node verify/guards/<name>.mjs`,
+  `pnpm test:engine`. Once on the integrated tree, never per writer: `pnpm rust:check` (cargo check
+  asio/no-asio + tests) when the change reaches the native build or its tests (`src-tauri/`,
+  `verify/fixtures/`, Cargo config or dependencies); `pnpm build` when the frontend changed.
+  `pnpm check` is the pre-push hook: never run it by hand before a push. Then CI. Never push red. The
+  owner's open checks (`STATUS.md`) live ON `main`.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.

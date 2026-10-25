@@ -144,28 +144,20 @@
 //!
 //! # Tests
 //!
-//! `cargo test -p lf-engine` (Linux and Windows CI). `tests/` ports the Web Audio rig guards, one file per
-//! group, each header naming the guard it ports and what it drops; `tests/common` is the rig, and every
-//! `process` call there runs under `assert_no_alloc`. The looper's tests read [`Taps::looper`], the lanes
-//! before their FX (a bypassed chain is not bit-transparent, as in Tone), which the rig turns on
-//! ([`EngineConfig::looper_tap`]; the host leaves it off, `tests/share_mix.rs` shows it changes no output bit); `tests/sound.rs` holds the
-//! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
-//! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
-//! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),
-//! `tests/trim.rs` the TRIM, `tests/meter.rs` every offered meter (and the click WAV per meter, ignored), `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
-//! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
-//! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
-//! the input sends, `tests/scope.rs` the live scope taps (their columns, and that the sound does not
-//! change with them on), `tests/toggles.rs` the toggles, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
-//! a lane's pan (the centre's bits against the render before pan: `effects`' unit test), `tests/share_mix.rs`
-//! the Share mix (no click in it; the jam with the click at 0, bit for bit; the device output's hash from
-//! before it, Windows only). `tests/perf.rs`
-//! holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a multiply's burst, a
-//! TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
-//! sizes 1, 32, 64, 127, 128, 480 and 1024; `tests/gestures.rs` runs proptest gesture scripts (one
-//! recorder; a whole-bar master; every lane one master long; undo twice is identity; undo after an
-//! N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical, with
-//! commands landing mid-block. The Stage 3 ports' references and tolerance classes: [`dsp`].
+//! `cargo test -p lf-engine` (Linux and Windows CI). `tests/` holds one file per group, its header
+//! naming what it covers (for a ported Web Audio rig guard, the guard and what it drops);
+//! `tests/common` is the rig, and every `process` call there runs under `assert_no_alloc`. The looper's
+//! tests read [`Taps::looper`], the lanes before their FX (a bypassed chain is not bit-transparent, as
+//! in Tone), which the rig turns on ([`EngineConfig::looper_tap`]; the host leaves it off,
+//! `tests/share_mix.rs` shows it changes no output bit). `tests/slots.rs`'s fake units record what they
+//! saw in preallocated buffers (never allocating in `process`) and are handed back to the test to drop.
+//! `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a
+//! multiply's burst, a TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the
+//! golden jam at 44.1 and 48 kHz, bit-identical across block sizes 1, 32, 64, 127, 128, 480 and 1024;
+//! `tests/gestures.rs` runs proptest gesture scripts (one recorder; a whole-bar master; every lane one
+//! master long; undo twice is identity; undo after an N-cycle dub gives back the pre-dub loop; finite
+//! output) at two block sizes, bit-identical, with commands landing mid-block. The Stage 3 ports'
+//! references and tolerance classes: [`dsp`].
 //!
 //! Run cargo-mutants on [`grid`] and [`looper`] whenever either changes (the planted-bug rule of
 //! `verify/README.md`; no workflow runs it). Seven survivors are equivalent mutants, named

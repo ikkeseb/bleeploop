@@ -18,39 +18,12 @@ HEAD and the tree is clean (untracked files count; deletes need no gate), then r
 Push any other commit from a clean checkout of it.
 
 The owner's clones also run a public-hygiene commit check (`pre-commit`, `commit-msg`) whose script
-and denylist live only beside the hooks, never in the tree. Setup, once per clone (its worktrees share
-the hooks): copy the owner's four local hook files (check.sh, denylist.txt, pre-commit, commit-msg)
-into the folder `git rev-parse --git-common-dir` names, under `hooks/`, with `cp -p` or a `chmod +x`
-after (git skips a hook that is not executable); leave `core.hooksPath` unset, since a relative one
-resolves per worktree and silently drops every hook in a linked one. Set
-`git config --local commit.status false`: the check scans the entire message, including comments and
-scissors tails, because message text cannot establish Git's cleanup mode. Disabling editor status
-keeps unrelated untracked paths out of that scan; manually included comments still get checked.
-With this setting the default editor template is empty, and `git commit -v` adds no diff. Turning
-status on also exposes the verbose diff to scanning: deleting a forbidden line can then block a
-commit because that line still appears below the scissors marker.
-`preserveUnused` keeps existing commit hooks when the current revision's installer rewrites pre-push;
-it does not restore missing hooks. Before installing dependencies on a historical revision, including
-in a linked worktree, set `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` for the install. In PowerShell:
-`$env:SKIP_INSTALL_SIMPLE_GIT_HOOKS='1'; try { pnpm install } finally { Remove-Item Env:SKIP_INSTALL_SIMPLE_GIT_HOOKS }`.
-In WSL, forward that variable through `WSLENV` when the pnpm wrapper invokes Windows pnpm.
-After an unprotected historical install, copy the four local files back with executable permissions,
-then restore the current pre-push gate from the current revision with `pnpm exec simple-git-hooks`.
-Run `bash "$(git rev-parse --git-path hooks/check.sh)" --self-test` from each worktree that will commit:
-it checks that worktree's effective configuration and installed hooks, then exercises real commits in
-scratch repositories and a linked worktree. It prints the list's pattern count and id to compare clones.
-A set-up check fails closed on a missing or broken list, parser errors, incomplete normalization reads
-and failed intermediate writes. NUL bytes in text input block with an explicit diagnostic. Matching
-uses byte locale and ASCII case folding; non-ASCII case variants must be listed explicitly.
-Raw added paths are checked even with submodule-ignore settings; internal CR separators are preserved,
-and the diff's size-only binary shortcut is disabled so large text files still get scanned. A binary
-old side cannot exempt new text: the entire new text blob is scanned, while files still binary or
-`-diff` remain exempt. Both blob sides of added, modified, copied or renamed files are checked against
-the 100 MiB (104857600-byte) limit, including binary files. This bounds normalization memory and
-prevents an oversized old side from hiding new text.
-It does not see `--no-verify` (the deliberate bypass), commits it did not make
-(`am`, `cherry-pick`, `rebase`, `revert`, merged-in content, an amend of a commit made without it),
-the author identity, tag messages, branch names, or the content of binary and `-diff` files.
+and denylist live only beside the hooks, never in the tree; its setup, limits and open threads are
+in the header of the check script there. From each worktree that will commit, run
+`bash "$(git rev-parse --git-path hooks/check.sh)" --self-test`. It does not see `--no-verify` (the
+deliberate bypass), commits it did not make (`am`, `cherry-pick`, `rebase`, `revert`, merged-in
+content, an amend of a commit made without it), the author identity, tag messages, branch names, or
+the content of binary and `-diff` files.
 
 ## Browser harness (web build, `pnpm dev` on http://localhost:1420: the UI, silent)
 
@@ -158,10 +131,8 @@ blocks until the verdict, so an agent harness should run it in the background.
 - Runtime-gate logs go under gitignored `logs/` (e.g. `logs/dev-asio.log`), not the repo root.
 - `tauri dev` watches ALL of `src-tauri/`: a doc edit there (`AGENTS.md` included) rebuilds and
   relaunches the app mid-probe. Write docs after the run, or outside `src-tauri/`.
-- Background the dev run and poll the log until it prints the line you want, rather than blocking on
-  it. (*Claude Code specifics:* background via the PowerShell `run_in_background` tool, poll with a
-  Bash `run_in_background` `until grep -q … ; do sleep 2; done` loop; that harness blocks foreground
-  `sleep` and PowerShell `Start-Sleep`+chaining.)
+- Background the dev run and poll the log until it prints the line you want, rather than blocking
+  on it.
 - **The app runs at Normal priority class on the rig, as the owner's does.** Windows processes
   started from the rig PC's logon tmux session run at below-normal priority (the scheduled task's
   priority 7), `cargo` included. `native:engine`, `native:spike` and `release:smoke` raise the app
