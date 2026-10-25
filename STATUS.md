@@ -21,7 +21,7 @@ Auto input reads In 2 on a device with two or more inputs (`input_channel` in
 front jack mutes the rear monitor outputs (SmartMuting, no setting). Its Loop-back channels are a
 digital send inside the driver and do not stand in for the rig's cable. EVO Control (system tray) sets
 the ASIO buffer and rate, the handle for a check no device has run: a change there while the app plays
-(`src-tauri/AGENTS.md` § Open threads). Its monitor mix fully clockwise plays only the app's wet
+(`src-tauri/OPEN-THREADS.md`). Its monitor mix fully clockwise plays only the app's wet
 signal. Its main volume is also Windows' volume for the device and scales the ASIO output, so at a
 tolerable Windows volume the guitar plays quieter than on the Scarlett, in Ableton too; the app passes
 a slot's plugin at unity and the master stops at 0 dB, so the gap is loudness, not a lost gain stage

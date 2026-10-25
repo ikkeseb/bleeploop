@@ -70,6 +70,7 @@ const OWNER_TIER = new Set([
   'docs/VERIFY.md',
   'verify/README.md',
   'src-tauri/AGENTS.md',
+  'src-tauri/OPEN-THREADS.md',
   'src/ui/AGENTS.md',
 ]);
 

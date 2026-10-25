@@ -2,7 +2,8 @@
 
 Rules and routers only. **Doc ownership:** AGENTS = what you must not violate · ARCHITECTURE = why ·
 VERIFY = how to prove it · `STATUS.md` = what is open. `CLAUDE.md` is a one-line adapter importing
-this file.
+this file. The maintainer's own sessions also read the local, untracked `maintainer/AGENTS.md` when
+it exists.
 
 **BleepLoop** is a Windows desktop instrument: an instrument host (two CLAP/VST3/VST2 slots + six
 built-in synths) over an RC-505 MK II–style 5-track looper, all in one native audio engine, shipped
@@ -31,11 +32,11 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - **`STATUS.md` holds what the owner's ear still owes:** at most five checks for the next jam (the
   docs guard counts), one line per built feature no jam has heard yet, and the decisions that block
   work. The owner's jam answers them; agents note what it tried and refill the list. A finding lands
-  as a machine-verified commit, as an open thread in the area briefing with its next diagnostic check
-  (a defect not yet understood), as one line in `docs/backlog-taste.md` (taste, not a gate), or as a
-  not-heard line when only the owner's ear can settle it. A `D<n>`/`E<n>` tag in a comment is an
-  owner decision (once in `STATUS.md` § Decisions), `F<n>` a tester report; git history holds the
-  text of both.
+  as a machine-verified commit, as an open thread in its area's briefing (or the file it names) with
+  its next diagnostic check (a defect not yet understood), as one line in `docs/backlog-taste.md`
+  (taste, not a gate), or as a not-heard line when only the owner's ear can settle it. A
+  `D<n>`/`E<n>` tag in a comment is an owner decision (once in `STATUS.md` § Decisions), `F<n>` a
+  tester report; git history holds the text of both.
 - **This is a public repo: keep working documents few and short-lived.** A plan or spec may live
   under `docs/` while the work is open. When it lands, fold what still binds into a briefing,
   `docs/ARCHITECTURE.md`, `STATUS.md`, `docs/backlog-taste.md` or a comment at the call site, and
@@ -64,9 +65,9 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
 - **The running app is the surface a change is verified on:** drive it and measure
   (`docs/VERIFY.md`).
-- **`main` is the live dev line.** Commit and push whenever the gates are green. A writer runs what
-  its change reaches: `pnpm typecheck`, `pnpm lint`, the one guard `node verify/guards/<name>.mjs`,
-  `pnpm test:engine`. Once on the integrated tree, never per writer: `pnpm rust:check` (cargo check
+- **`main` is the live dev line;** `dev` is unused for now but may come back. Commit and push
+  whenever the gates are green. A writer runs what its change reaches: `pnpm typecheck`,
+  `pnpm lint`, the one guard `node verify/guards/<name>.mjs`, `pnpm test:engine`. Once on the integrated tree, never per writer: `pnpm rust:check` (cargo check
   asio/no-asio + tests) when the change reaches the native build or its tests (`src-tauri/`,
   `verify/fixtures/`, Cargo config or dependencies); `pnpm build` when the frontend changed.
   `pnpm check` is the pre-push hook: never run it by hand before a push. Then CI. Never push red. The
@@ -124,5 +125,5 @@ together.
 
 Everything owed an ear/eye/rig check or an owner decision lives in `STATUS.md`. A defect not yet
 understood is an open thread in its area briefing, with its next diagnostic check (no gate): the native
-host and device side, `src-tauri/AGENTS.md` § Open threads; the engine,
+host and device side, `src-tauri/OPEN-THREADS.md`; the engine,
 `src-tauri/crates/lf-engine/src/lib.rs` § Open threads; the UI, `src/ui/AGENTS.md` § Open threads.

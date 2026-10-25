@@ -5,8 +5,7 @@
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
 Static checks first (the ones the change can reach; root `AGENTS.md`, the `main` line), then the runtime probe below. The engine's
 behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on a push to `main` or a pull
-request into it that changes native code, not on Markdown alone; a `dev` push runs no CI, so there it
-is the writer's own run, root `AGENTS.md`, the `main` line); the frontend's
+request into it that changes native code, not on Markdown alone); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
 
 Git hooks are local checkout state. Before relying on the push gate, inspect the file returned by
@@ -17,9 +16,10 @@ gates what is pushed, not the working tree: it refuses a push unless every pushe
 HEAD and the tree is clean (untracked files count; deletes need no gate), then runs `pnpm check` once.
 Push any other commit from a clean checkout of it.
 
-The owner's clones also run a public-hygiene commit check (`pre-commit`, `commit-msg`) whose script
-and denylist live only beside the hooks, never in the tree; its setup, limits and open threads are
-in the header of the check script there. From each worktree that will commit, run
+The owner's clones also run a public-hygiene commit check (`pre-commit`, `commit-msg`). Its script
+and denylist never enter the tree: their master copy, setup and open threads are in the owner's
+private maintainer repo, cloned into the gitignored maintainer/ folder, and the hooks are installed
+from maintainer/hooks/ into the clone's own hooks folder. From each worktree that will commit, run
 `bash "$(git rev-parse --git-path hooks/check.sh)" --self-test`. It does not see `--no-verify` (the
 deliberate bypass), commits it did not make (`am`, `cherry-pick`, `rebase`, `revert`, merged-in
 content, an amend of a commit made without it), the author identity, tag messages, branch names, or
@@ -139,7 +139,7 @@ blocks until the verdict, so an agent harness should run it in the background.
   they spawn to Normal (MMCSS callback threads sit at 24–25 either way); `native:probe` launches
   through `tauri dev` and keeps the shell's class, as does an exe started by hand:
   `cmd.exe /c start /normal /b /wait <exe> …` launches at normal. Whether the class moves a result is
-  not settled (`src-tauri/AGENTS.md` § Open threads, the join).
+  not settled (`src-tauri/OPEN-THREADS.md`, the join).
 - The plugin scan works WITHOUT the full app (`--scan-one`): see `src-tauri/AGENTS.md`
   "Native-host verify ops".
 - **Every rig baseline is bound to the interface that produced it.** The numbers below were measured on
@@ -172,8 +172,7 @@ blocks until the verdict, so an agent harness should run it in the background.
     counter check forgives those in an open's first 3 s (D25) and prints what it forgave (`forgiven in
     …`); a take that overlaps one still fails `loop`. With another app holding the microphone the input
     can run 0.87 % fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping
-    ~25 ms of input (real time or an artefact: unknown). The mechanism: `src-tauri/AGENTS.md` § Open
-    threads.
+    ~25 ms of input (real time or an artefact: unknown). The mechanism: `src-tauri/OPEN-THREADS.md`.
   - `native:engine-loopback` after a change to the engine's alignment, click, grid, device open or
     snapshot. Baseline (Scarlett 2i2 3rd gen, a cable from line out R into input 2, Pro-Q, 48 kHz,
     2026-10-03): 21/21 bars at 64, 128 and 256, no stray sound, no take rejected, A +0.08 ms and B
@@ -182,7 +181,7 @@ blocks until the verdict, so an agent harness should run it in the background.
     and D − B 0.000, and the multiply, free-take, TRIM and FADE phases passed (the FADE beats within
     about 0.01 of ((8 − k)/8)²). Silence other apps' sound on the interface before a run: what they play
     through its line outs reaches the cable and fails the run as stray sound. The offsets nothing
-    explains yet: `src-tauri/AGENTS.md` § Open threads.
+    explains yet: `src-tauri/OPEN-THREADS.md`.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of
@@ -230,10 +229,10 @@ guitar standing in for the cable (step 1); with the cable on 2026-10-16 (8a18e5a
    reads as run away (475 of 672 columns), since that bar is the click's few peaks.
 2. **Run** (the PC · PowerShell · the repo checkout, clean; or WSL in the same checkout under /mnt/c). The
    exe must be built from the commit checked out; no `BleepLoop-smoke-<sha>` artifact for it yet:
-   `gh workflow run build-exe.yml --ref <branch> -f smoke=true`, ~20 min. Check out the commit, not
-   the branch: `dev` is often checked out in an agent's worktree, where `git switch dev` refuses.
+   `gh workflow run build-exe.yml --ref main -f smoke=true`, ~20 min. Check out the commit being
+   released, not a branch (a branch checked out in an agent's worktree refuses `git switch`).
    ```powershell
-   git fetch; git switch --detach origin/dev; git status --short   # must print nothing
+   git fetch; git switch --detach origin/main; git status --short   # must print nothing
    $sha = git rev-parse HEAD
    Remove-Item -Recurse -Force logs/release-smoke/exe -ErrorAction SilentlyContinue
    gh run download -n "BleepLoop-smoke-$sha" -D logs/release-smoke/exe

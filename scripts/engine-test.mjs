@@ -2,7 +2,7 @@
 // --no-default-features` from src-tauri/ (the pure engine crate, no device, no SDK). Not in
 // `pnpm check`: minutes on Windows even warm and side by side (scripts/cargo-test.mjs), so the pre-push
 // hook leaves them to CI's engine job, which runs them on a push to main or a pull request into it that
-// touches native code (scripts/ci-changes.mjs); on a dev push they are the writer's own run. Where cargo is absent (the Mac has no Rust toolchain) it warns and skips; a cargo that is there but
+// touches native code (scripts/ci-changes.mjs). Where cargo is absent (the Mac has no Rust toolchain) it warns and skips; a cargo that is there but
 // fails (a broken toolchain, a refused spawn, a signal) fails the run with its error.
 //
 //   pnpm test:engine

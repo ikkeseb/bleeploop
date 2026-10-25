@@ -15,8 +15,7 @@
 //! the plugin's unit has left the engine; a load for the new document waits for it (≤ `VACATE_WAIT`).
 //! A setup past its bound frees the slot with no unit left in it (`engine_slot::LoadClaim`). A loaded
 //! plugin's unload takes its slot off live first (`silence`), and refuses when it cannot. An unload
-//! that gives up on a shared handle (`unload_handle`) frees it early; `src-tauri/AGENTS.md` § Open
-//! threads.
+//! that gives up on a shared handle (`unload_handle`) frees it early; `src-tauri/OPEN-THREADS.md`.
 //! Every request that changes a slot (load, unload, a parameter, the editor) names its document and is
 //! refused from a replaced one, checked under the slots lock as it takes the slot. Commands clone a
 //! loaded slot's handle out of the lock, so a slow owner round trip on one slot holds up nobody else.
@@ -116,7 +115,7 @@ impl LoadTarget<'_> {
             Err(e) => {
                 // A setup that timed out had not claimed its load, so its owner never installs
                 // (`engine_slot::LoadClaim`); one that had is a load that stands. Only a claimed load
-                // whose report then took 2 s more leaves a unit to undo (`src-tauri/AGENTS.md` § Open threads).
+                // whose report then took 2 s more leaves a unit to undo (`src-tauri/OPEN-THREADS.md`).
                 slots[usize::from(slot)] = EngineSlot::Empty;
                 return Err(e);
             }
@@ -250,7 +249,7 @@ fn silence(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, h
 
 /// A command may still hold the handle for an owner round trip: wait it out (≤ `UNLOAD_WAIT`), then
 /// unload here; past that, the last user unloads it, after the caller has already vacated the slot
-/// (`src-tauri/AGENTS.md` § Open threads).
+/// (`src-tauri/OPEN-THREADS.md`).
 fn unload_handle(slot: u8, mut handle: Arc<EngineSlotHandle>) -> Result<(), String> {
     let deadline = Instant::now() + UNLOAD_WAIT;
     loop {

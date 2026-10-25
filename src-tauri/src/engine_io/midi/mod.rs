@@ -5,7 +5,7 @@
 //! the one ordered queue into the engine ([`Core`]), what the host offers the UI ([`MidiHost`]) and
 //! what it tells it ([`MidiEvent`]). This doc is the module's briefing; the decisions it carries out are
 //! `docs/ARCHITECTURE.md` § Decided: native MIDI's, which comments here cite by their bold titles
-//! (the open threads, and what only a device can settle: `src-tauri/AGENTS.md` § Open threads).
+//! (the open threads, and what only a device can settle: `src-tauri/OPEN-THREADS.md`).
 //!
 //! # Module map
 //!

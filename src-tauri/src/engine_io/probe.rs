@@ -97,14 +97,14 @@ const WAIT: Duration = Duration::from_secs(10);
 /// rig's interface (ASIO 64, 44.1 kHz) a signal added near the tone's frequency beats with the returning
 /// tone about 6.8 s in, fading over some 0.6 s, with any scene, with and without plugins, no callback
 /// long or late; past the thresholds in most runs that watched it, always at half level. Its source is
-/// unknown (`src-tauri/AGENTS.md` § Open threads, the crackle thread); the tone run is about what comes
+/// unknown (`src-tauri/OPEN-THREADS.md`, the crackle thread); the tone run is about what comes
 /// later.
 const TONE_FROM: Duration = Duration::from_secs(10);
 /// The soak's block-load bar, in whole percent of the period.
 const P999_BAR: usize = 50;
 const MAX_BAR: usize = 90;
 /// How long from a WASAPI open's start the counter check forgives the join's trims and starves (D25:
-/// the endpoints' start, `src-tauri/AGENTS.md` § Open threads).
+/// the endpoints' start, `src-tauri/OPEN-THREADS.md`).
 const GRACE: Duration = Duration::from_secs(3);
 
 /// The heavy scene's lane effects, the same on every lane: each processes (a nonzero mix, send, shift).

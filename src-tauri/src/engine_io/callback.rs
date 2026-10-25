@@ -77,7 +77,7 @@ const SLIP_WINDOW_SECONDS: f64 = 0.5;
 /// ASIO output callbacks that finish this many periods or more after the wakes' best phase (their
 /// entry's lag plus their own duration) count in `asio_late_finishes` ([`finishes_late`]), once per
 /// episode: a new one needs [`LATE_FINISH_QUIET`] callbacks under it first. An empirical indicator from
-/// the rig's loopback tone (src-tauri/AGENTS.md, the crackle thread), not proof: at 64 frames every break
+/// the rig's loopback tone (src-tauri/OPEN-THREADS.md, the crackle thread), not proof: at 64 frames every break
 /// had one at 2.52 or more and none away from a break passed 2.47, so near misses count too (4 in a
 /// 10-minute soak beside a build that broke nothing); one break at 256 finished at 2.36 and would not
 /// count. A count is not a heard break, and none is not a clean sound.

@@ -720,7 +720,7 @@ fn spawn_within(
             // Setup hung: the owner never installs once it finds the load abandoned, and releases the
             // plugin when its setup ends. A claimed load whose report outlasted the second wait too is
             // the owner's to undo (its ready send fails once `ready_rx` drops here), its unit still in
-            // the slot this frees (`src-tauri/AGENTS.md` § Open threads).
+            // the slot this frees (`src-tauri/OPEN-THREADS.md`).
             running.store(false, Release);
             Err(format!("plugin setup timed out: {e}"))
         }

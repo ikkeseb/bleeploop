@@ -47,3 +47,6 @@ licenses/SOURCE.txt
 
 # Rust renders written by a failing Stage 3 port test (tests/common/refs.rs), for an ear A/B
 src-tauri/crates/lf-engine/tests/fixtures/tone/out/
+
+# the maintainer's private files: their own repo, cloned here (docs/VERIFY.md, the hygiene check)
+/maintainer/

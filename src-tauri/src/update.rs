@@ -146,8 +146,8 @@ pub async fn app_update_download(app: tauri::AppHandle, state: tauri::State<'_, 
 /// ports closed, tones saved, plugins unloaded, the device closed) and start the installer, which quits
 /// the app and opens the new version (Windows: the plugin exits the process once the installer runs).
 /// Returns only on failure: one before the engine's shutdown (the package would not extract) keeps the
-/// download for another press, and the jam plays on; one after it leaves no engine (`src-tauri/AGENTS.md`
-/// § Open threads), and says so.
+/// download for another press, and the jam plays on; one after it leaves no engine
+/// (`src-tauri/OPEN-THREADS.md`), and says so.
 #[tauri::command]
 pub async fn app_update_install(app: tauri::AppHandle, state: tauri::State<'_, UpdateState>) -> Result<(), String> {
     let Downloaded { update, bytes, engine_closed } =

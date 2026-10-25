@@ -23,7 +23,7 @@
 //!   column it belongs to. Splitting chunks on column boundaries would change the engine's chunking —
 //!   and with it every block-size-identical render — for about three pixels of the stage.
 //! - **A driver period the driver drops without its overload report leaves `ProcessContext::frame`
-//!   contiguous** (`src-tauri/AGENTS.md` § Open threads), so no skip fires and the trace draws straight
+//!   contiguous** (`src-tauri/OPEN-THREADS.md`), so no skip fires and the trace draws straight
 //!   through a break the player heard. The scope can only see the losses the device side reports.
 //!
 //! The master lags the lanes by the limiter's pre-delay: a lane's column covers the frames it was mixed
