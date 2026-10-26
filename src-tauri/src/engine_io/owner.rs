@@ -436,19 +436,36 @@ impl<D: Driver> Owner<D> {
         let previous = self.active.as_ref().map(|a| a.request.clone());
         let healthy = self.active.as_ref().is_some_and(|a| !a.run.faulted());
         let steps = transition::steps(self.core.rate(), self.active.is_some(), healthy, Some(spec.rate));
-        if let (By::Player { force: false }, true, Some(from)) = (by, steps.evict, self.core.rate()) {
-            if self.core.holds_audio() {
-                log::info!("[engine_io] a switch to {} Hz refused: the engine at {from} Hz holds audio", spec.rate);
-                return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
-            }
+        let unasked = (by == By::Player { force: false } && steps.evict).then(|| self.core.rate()).flatten();
+        if let Some(from) = unasked.filter(|_| self.core.holds_audio()) {
+            log::info!("[engine_io] a switch to {} Hz refused: the engine at {from} Hz holds audio", spec.rate);
+            return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
         }
         let channels = open_channels(&spec, request.input_channels);
         if steps.stop {
             self.stop(steps.fade_out);
         }
+        // Read again after the stop: a session load can land while the old device fades out (its streams
+        // still play), or once they stopped (the loader services the engine itself). From here to the
+        // build no session job runs (`session_busy`), so a load that answered Ok is seen here, and the
+        // switch is refused with the device it stopped restarted rather than dropping the loops unasked.
+        let core = self.core.clone();
+        let session = unasked.map(|_| core.session_busy.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some(from) = unasked.filter(|_| self.core.holds_audio()) {
+            drop(session);
+            log::info!("[engine_io] a switch to {} Hz refused after its stop: a load reached the engine at {from} Hz meanwhile", spec.rate);
+            if let Some(previous) = previous {
+                // Unforced: a device that now runs at another rate stays closed, and the loops stay.
+                if let Err(e) = self.open(previous, By::Player { force: false }) {
+                    log::error!("[engine_io] the device the refused switch stopped did not reopen: {e}");
+                }
+            }
+            return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
+        }
         if steps.build {
             self.build(spec.rate, steps.evict);
         }
+        drop(session);
         let started = match self.start(request.clone(), spec, device, channels) {
             Err(StartError::Buffer(refused)) => self.start_at_own_size(request, refused, channels),
             started => started.map_err(String::from),

@@ -2621,7 +2621,6 @@ fn a_lanes_pan_reaches_the_export_and_a_load_and_a_mix_without_it_is_centred() {
 }
 
 #[test]
-#[ignore = "red: a load the host gave up on (did not finish within 10 s) stays in the session port and plays once the callbacks resume"]
 fn d21_a_load_that_timed_out_never_applies_later() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
@@ -2639,7 +2638,6 @@ fn d21_a_load_that_timed_out_never_applies_later() {
 }
 
 #[test]
-#[ignore = "red: an unforced rate switch reads holds_audio before its stop, so a load that lands in the fade-out is dropped without LoopsDropped"]
 fn d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unasked() {
     let mut h = Harness::new();
     h.fake.set_input(tone);

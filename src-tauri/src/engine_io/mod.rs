@@ -87,7 +87,9 @@
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,
-//!   before anything stops) until the UI confirms and opens again with `force`. The owner's own reopens
+//!   before anything stops; read again after the stop, with no session job running until the build, so
+//!   a load that lands in the fade-out refuses it too and the stopped device reopens) until the UI
+//!   confirms and opens again with `force`. The owner's own reopens
 //!   (a loss's recovery or fallback, a replaced engine) go ahead; a loss's fallback that rebuilds the
 //!   engine at another rate reports [`DeviceEvent::LoopsDropped`], whether or not that device then
 //!   starts, and the UI keeps the loops in its recovery (`src/session/autosave.ts`).

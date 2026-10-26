@@ -529,6 +529,24 @@ fn load_now(rig: &mut Rig, load: Load) -> Option<Result<(), SessionError>> {
     }
 }
 
+/// A load the host withdrew before a block took it (it gave up waiting) comes back unrun and loads
+/// nothing; sent again it runs, and once the engine took it a withdrawal no longer stops it.
+#[test]
+fn a_load_withdrawn_before_the_engine_takes_it_comes_back_unrun() {
+    let (s, pcm) = one_lane();
+    let (mut fresh, load) = fresh_load(&s, LaneMix::default());
+    assert!(fresh.session().send(Box::new(SessionJob::Load(load))).is_ok());
+    assert!(fresh.session().withdraw(), "no block took it yet");
+    fresh.advance(fresh.block as Frame);
+    let Some(SessionJob::Load(mut load)) = fresh.session().returned().map(|job| *job) else { panic!("the withdrawn load never came back") };
+    assert_eq!(load.result, Some(Err(SessionError::Withdrawn)));
+    assert!(fresh.master() == 0 && fresh.state(0) == LaneState::Empty, "nothing loaded: {:?}", fresh.lane(0));
+    load.result = None;
+    assert_eq!(load_now(&mut fresh, load), Some(Ok(())), "sent again, it runs");
+    assert!(!fresh.session().withdraw(), "a job the engine took is the engine's");
+    assert_eq!(fresh.pcm(0), pcm);
+}
+
 #[test]
 fn a_loaded_lane_plays_at_its_loaded_mix_from_its_first_frame() {
     // The EMPTY lane it loads into is at the defaults (unmuted, unity): no frame plays at that level.
