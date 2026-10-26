@@ -51,7 +51,10 @@ added a line.
 - **The owner's own ideas, not scheduled:** full panel drag, with plugin editors inline, each filling
   its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). A meter per
   track (one lane in 4/4 over another in 3/4; 2026-10-15): more than passing a lane its meter
-  (`grid.rs` module doc).
+  (`grid.rs` module doc). A BPM change after the loops are recorded (2026-10-26): today the tempo
+  locks at the first take's count-in until CLEAR ALL, so the loops would need a real-time stretch in
+  the engine; candidates, unevaluated: Signalsmith Stretch (MIT, crates `signalsmith-stretch`,
+  `ssstretch`), Bungee (MPL-2.0), Rubber Band (GPL).
 - **Parked by the owner (2026-10-16): a built-in compressor** right after a slot's plugin, one knob, no
   look-ahead (no added latency), recorded with the take: the density OTT gives the guitar in Ableton,
   for the loudness the EVO 4 lacks at a Windows volume the owner tolerates (`STATUS.md`, the EVO 4).
