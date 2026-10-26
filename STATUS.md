@@ -86,6 +86,11 @@ it.
   popover 10 px lower read as its pill's, does the note toast still catch the eye when it must, does
   the in-app ask read as a question to answer before playing on, and do the disabled tools still read
   as present from the chair?
+- The same plugin file in both slots (D29): its editor belongs to the slot whose load came first, so the
+  other slot's editor is refused with a toast even if the first never opened one; loads that overlapped,
+  or the owner unloading while the other slot keeps the file, refuse both until neither holds it
+  (machine: the `instrument-controls` and `rig-recall` probes). Does the toast say what to do, and does
+  Archetype in both slots never hang the app?
 - A plugin bundle whose scan failed is listed on Audio Settings' PLUGINS page with a host-worded
   reason, the picker stays clean and the rescan retries it (no real failed bundle seen yet): does the
   row say enough, or should the picker grey it?
@@ -210,5 +215,4 @@ nothing is said.
 
 | # | Question | Default |
 |---|---|---|
-| D29 | The same plugin file in both slots: its GUI binds to the module's first LOAD (measured on Archetype VST3: B's first editor open hangs although A never opened one), but the editor guard hands ownership to the first slot that OPENS, so a later loader that opens first still hangs the app. Move the guard into the Rust host (it sees load order, leaks and teardown; the frontend's mirrored bookkeeping goes), or move ownership to the first load in the frontend guard? The cross-family read recommends the host. | Frontend: ownership moves to the first load (the ordinary case closed, no `src-tauri/` change); the host guard only on the owner's word. Its proof is a browser probe case: B refused when A loaded first; `editor-premise` (past the frontend guard) measures only the host guard |
 | D30 | Three remote branches, one unlanded commit each, kept as they are: `pw16/heap-probe` (22a2b33d, a candidate: the stage draw's clock and level reads in typed arrays, the allocation probe on the freshness path), `proto11/settings-a` (f6ed7aee, a WIP Audio Settings prototype, ungated), `proto11/bar-c` (297d6acd, a prototype: one TAKE chip holding the five mode pills). Land, rework or delete each? | Kept untouched until the owner says |
