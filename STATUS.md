@@ -10,7 +10,7 @@ latency baseline in this repo is the Scarlett's (`docs/VERIFY.md`): none can be 
 that driver, a result on the EVO 4 answers none of them, and an oddity there is the new driver's until
 shown otherwise, the ASIO preopen written for the Focusrite included (`src-tauri/AGENTS.md`). What the
 EVO 4 has shown: `release:smoke` 7/7 with an input take (2026-10-16 for v0.8.5 through the cable,
-2026-10-17 for v0.8.6 and 2026-10-19 for v0.8.7 with the guitar in its place), so its driver runs and its input reaches a loop.
+2026-10-17 to 10-26 for v0.8.6 to v0.8.8 with the guitar in its place), so its driver runs and its input reaches a loop.
 Not measured on it: where a take lands against the click (`native:engine-loopback`, `--channel=0` for
 input 1) and the round trip. Cabling and EVO Control's settings for a rig run: `docs/VERIFY.md` § The
 owner's loopback run.
@@ -40,8 +40,8 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 
 ## Next jam
 
-Install the latest release (v0.8.7, published 2026-10-19 and CI-built, holds every check below; an
-installed v0.8.6 offers it through the UPDATE pill) rather than `pnpm dev:asio`. Audio Settings:
+Install the latest release (v0.8.8, published 2026-10-26 and CI-built, holds every check below; an
+installed v0.8.7 offers it through the UPDATE pill) rather than `pnpm dev:asio`. Audio Settings:
 the Audient ASIO driver (a saved Focusrite pick toasts as not installed), buffer 128; the guitar's
 slot on In 1; EVO Control's monitor mix fully clockwise. Play a real jam with these in it and say
 what felt off.
