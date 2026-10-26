@@ -24,6 +24,15 @@
 //! loop position 0 there together (the web `loadSession`), each at its loaded level from its first
 //! sample, through an FX chain that holds nothing from before it (`effects::LaneFx::clear_history`);
 //! the lanes and the transport reach the feed at the next publish, as a commit's do.
+//!
+//! A job the host gives up on before the engine took it can be withdrawn ([`SessionPort::withdraw`]):
+//! the engine then hands it back unrun ([`SessionError::Withdrawn`]), so a load answered as failed never
+//! applies later. One atomic decides which side won: the host's withdrawal or the engine's claim as it
+//! takes the job off the ring.
+
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
+use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -44,6 +53,8 @@ pub enum SessionError {
     Changed,
     /// A load that does not fit the engine (its text says why).
     Invalid(&'static str),
+    /// The host withdrew the job before the engine took it ([`SessionPort::withdraw`]): it never ran.
+    Withdrawn,
 }
 
 impl SessionError {
@@ -53,6 +64,7 @@ impl SessionError {
             SessionError::TooSmall(need) => format!("the snapshot needs {need} samples"),
             SessionError::Changed => "the loops changed while the snapshot copied them".to_string(),
             SessionError::Invalid(why) => why.to_string(),
+            SessionError::Withdrawn => "the session job was withdrawn before it ran".to_string(),
         }
     }
 }
@@ -147,23 +159,53 @@ impl SessionJob {
             SessionJob::Load(l) => l.result,
         }
     }
+
+    fn set_result(&mut self, result: Result<(), SessionError>) {
+        match self {
+            SessionJob::Snapshot(s) => s.result = Some(result),
+            SessionJob::Load(l) => l.result = Some(result),
+        }
+    }
 }
+
+/// The last job sent: on the ring, not taken yet (the host may still withdraw it).
+const QUEUED: u8 = 0;
+/// The engine took it off the ring: it runs, whatever the host does.
+const TAKEN: u8 = 1;
+/// The host withdrew it before the engine took it: it comes back unrun.
+const WITHDRAWN: u8 = 2;
 
 /// The host's end (`EngineHandle::session`): one job at a time, handed over and taken back.
 pub struct SessionPort {
     tx: Producer<Box<SessionJob>>,
     rx: Consumer<Box<SessionJob>>,
+    /// The last job sent's `QUEUED` | `TAKEN` | `WITHDRAWN`, shared with the engine's end.
+    claim: Arc<AtomicU8>,
 }
 
 impl SessionPort {
     /// Hand a job to the engine; it comes back on [`SessionPort::returned`] with its result. Gives it
     /// back when one is already on its way in.
     pub fn send(&mut self, job: Box<SessionJob>) -> Result<(), Box<SessionJob>> {
+        // Only this end pushes, so a free slot stays free: the claim is reset only for a job that goes
+        // in, never under one already on the ring (a withdrawn one must stay withdrawn).
+        if self.tx.slots() == 0 {
+            return Err(job);
+        }
+        self.claim.store(QUEUED, Relaxed);
+        // The push publishes the store above to the engine's pop (rtrb: release, acquire).
         self.tx.push(job).map_err(|rtrb::PushError::Full(job)| job)
     }
 
     pub fn returned(&mut self) -> Option<Box<SessionJob>> {
         self.rx.pop().ok()
+    }
+
+    /// Withdraw the job sent last, if the engine has not taken it yet: true, it never runs and comes
+    /// back on [`SessionPort::returned`] unrun ([`SessionError::Withdrawn`]); false, the engine took it
+    /// (it runs, and comes back with its result) or it was withdrawn already.
+    pub fn withdraw(&mut self) -> bool {
+        self.claim.compare_exchange(QUEUED, WITHDRAWN, AcqRel, Acquire).is_ok()
     }
 }
 
@@ -172,12 +214,14 @@ pub(crate) struct SessionEnd {
     rx: Consumer<Box<SessionJob>>,
     tx: Producer<Box<SessionJob>>,
     job: Option<Box<SessionJob>>,
+    claim: Arc<AtomicU8>,
 }
 
 pub(crate) fn channel() -> (SessionPort, SessionEnd) {
     let (in_tx, in_rx) = RingBuffer::new(1);
     let (back_tx, back_rx) = RingBuffer::new(1);
-    (SessionPort { tx: in_tx, rx: back_rx }, SessionEnd { rx: in_rx, tx: back_tx, job: None })
+    let claim = Arc::new(AtomicU8::new(TAKEN));
+    (SessionPort { tx: in_tx, rx: back_rx, claim: claim.clone() }, SessionEnd { rx: in_rx, tx: back_tx, job: None, claim })
 }
 
 impl SessionEnd {
@@ -185,9 +229,17 @@ impl SessionEnd {
     /// return ring has room, so it can always go back), apply a load, begin a snapshot once no block job
     /// runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
     /// answers `Changed`.
+    /// A job the host withdrew before this took it goes straight back unrun.
     pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool) {
         if self.job.is_none() && self.tx.slots() > 0 {
             self.job = self.rx.pop().ok();
+            if let Some(job) = self.job.as_deref_mut() {
+                if self.claim.compare_exchange(QUEUED, TAKEN, AcqRel, Acquire).is_err() {
+                    job.set_result(Err(SessionError::Withdrawn));
+                    self.finish();
+                    return;
+                }
+            }
         }
         match self.job.as_deref_mut() {
             Some(SessionJob::Load(load)) if load.result.is_none() => load.result = Some(looper.load(cx, load)),

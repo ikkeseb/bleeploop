@@ -87,7 +87,10 @@
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,
-//!   before anything stops) until the UI confirms and opens again with `force`. The owner's own reopens
+//!   before anything stops; read again after the stop, with no session job running until the build, so
+//!   a load that lands in the fade-out refuses it too, as does a session job still running after
+//!   `SESSION_WAIT`, and the stopped device reopens, reported [`DeviceEvent::Lost`] if it does not)
+//!   until the UI confirms and opens again with `force`. The owner's own reopens
 //!   (a loss's recovery or fallback, a replaced engine) go ahead; a loss's fallback that rebuilds the
 //!   engine at another rate reports [`DeviceEvent::LoopsDropped`], whether or not that device then
 //!   starts, and the UI keeps the loops in its recovery (`src/session/autosave.ts`).
@@ -260,7 +263,8 @@ pub struct DeviceStatus {
 /// What happened to the device on its own (`EngineHost::take_device_events`; the feed carries them).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DeviceEvent {
-    /// The device stopped (unplugged, a driver reset): the engine, its loops and its slots stay.
+    /// The device stopped (unplugged, a driver reset), or did not start again after a refused switch
+    /// stopped it: the engine, its loops and its slots stay.
     Lost { backend: AudioBackend, reason: String },
     /// The same device came back after a loss (ASIO rebuilt from its cache, the WASAPI default again).
     Recovered(DeviceStatus),

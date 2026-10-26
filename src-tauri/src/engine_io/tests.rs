@@ -2621,7 +2621,6 @@ fn a_lanes_pan_reaches_the_export_and_a_load_and_a_mix_without_it_is_centred() {
 }
 
 #[test]
-#[ignore = "red: a load the host gave up on (did not finish within 10 s) stays in the session port and plays once the callbacks resume"]
 fn d21_a_load_that_timed_out_never_applies_later() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
@@ -2638,29 +2637,99 @@ fn d21_a_load_that_timed_out_never_applies_later() {
     assert!(!h.host.core.holds_audio(), "a load that answered \"{err}\" must not start playing once the callbacks resume");
 }
 
+/// An unforced switch to 44.1 kHz on the fake ASIO driver, whose stop runs `during_stop` while its
+/// fade-out ends (the old device still rendering), the lanes EMPTY when the switch looked: what the
+/// switch answered, and the device events that followed.
+fn switch_with(h: &mut Harness, during_stop: impl FnOnce() + Send + 'static) -> (Result<DeviceStatus, OpenError>, Vec<DeviceEvent>) {
+    *h.fake.on_stop.lock().unwrap() = Some(Box::new(during_stop));
+    let switched = h.host.open(at(44_100, asio(Some(256))), false);
+    (switched, h.host.take_device_events())
+}
+
+/// The previous device runs again, at the engine's rate, and its callbacks render.
+fn assert_previous_runs(h: &Harness) {
+    let status = h.host.status().expect("the device the refused switch stopped runs again");
+    assert_eq!((status.backend, status.sample_rate), (AudioBackend::Asio, 48_000), "{status:?}");
+    h.play(RATE / 10);
+}
+
+/// A switch refused with `RateChange` from 48 kHz to 44.1 kHz.
+fn assert_refused(switched: &Result<DeviceStatus, OpenError>) {
+    assert!(matches!(switched, Err(OpenError::RateChange { from: 48_000, to: 44_100, .. })), "the switch is refused: {switched:?}");
+}
+
 #[test]
-#[ignore = "red: an unforced rate switch reads holds_audio before its stop, so a load that lands in the fade-out is dropped without LoopsDropped"]
 fn d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unasked() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
     h.open(asio(Some(256)));
     let length = h.record_loop();
     let bytes = saved_then_cleared(&mut h, length);
+    let engine = h.host.core.engine_gen.load(SeqCst);
     let loaded = Arc::new(Mutex::new(None));
-    {
-        let (host, loaded) = (h.host.clone(), loaded.clone());
-        // The switch saw EMPTY lanes; the import lands while its fade-out ends, the old device still rendering.
-        *h.fake.on_stop.lock().unwrap() = Some(Box::new(move || *loaded.lock().unwrap() = Some(host.load_session(&bytes))));
-    }
-    let switched = h.host.open(at(44_100, asio(Some(256))), false);
+    let (host, into) = (h.host.clone(), loaded.clone());
+    let (switched, events) = switch_with(&mut h, move || *into.lock().unwrap() = Some(host.load_session(&bytes)));
     let loaded = loaded.lock().unwrap().take().expect("the load ran inside the stop");
-    let events = h.device_events(1);
-    println!("load {loaded:?}, switch {switched:?}, device events {events:?}, the engine holds audio: {}", h.host.core.holds_audio());
+    println!("load {loaded:?}, switch {switched:?}, device events {events:?}");
     assert!(loaded.is_ok(), "the load took: {loaded:?}");
+    assert_refused(&switched);
+    assert!(h.host.core.holds_audio() && h.host.core.engine_gen.load(SeqCst) == engine, "the engine that took the load holds it");
+    assert_previous_runs(&h);
+    assert_eq!(events, [], "the loops stayed and the device came back: nothing to report");
+}
+
+/// A refused switch whose previous device does not start again reports the loss with the start's
+/// reason, so the UI is not left waiting on a device that never comes; the loops stay.
+#[test]
+fn d21_a_refused_switch_whose_previous_device_does_not_reopen_reports_why() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let bytes = saved_then_cleared(&mut h, length);
+    let (host, fake) = (h.host.clone(), h.fake.clone());
+    let (switched, mut events) = switch_with(&mut h, move || {
+        host.load_session(&bytes).expect("the load lands in the fade-out");
+        fake.fail_starts.store(1, SeqCst);
+    });
+    if events.is_empty() {
+        events = h.device_events(1);
+    }
+    println!("switch {switched:?}, device events {events:?}");
+    assert_refused(&switched);
+    assert!(h.host.core.holds_audio(), "the loaded loops stay");
+    assert!(h.host.status().is_none(), "no device runs");
     assert!(
-        matches!(switched, Err(OpenError::RateChange { .. })) || h.host.core.holds_audio(),
-        "the import the load answered Ok is gone: the switch went ahead unasked ({switched:?}) and said nothing ({events:?})"
+        matches!(&events[..], [DeviceEvent::Lost { backend: AudioBackend::Asio, reason }] if reason.contains("fake: the device did not start")),
+        "the loss is reported with its reason, and nothing else (no LoopsDropped): {events:?}"
     );
+}
+
+/// A session job that holds the session lock past the owner's bound refuses the switch as a load
+/// would: the previous device runs again on the same engine, and nothing is dropped.
+#[test]
+fn d21_a_session_job_held_past_the_bound_refuses_the_switch() {
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    let engine = h.host.core.engine_gen.load(SeqCst);
+    let (host, released) = (h.host.clone(), Arc::new(AtomicBool::new(false)));
+    let release = released.clone();
+    let (switched, events) = switch_with(&mut h, move || {
+        let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _busy = host.core.session_busy.lock().unwrap();
+            taken_tx.send(()).unwrap();
+            std::thread::sleep(super::owner::SESSION_WAIT + Duration::from_secs(1));
+            release.store(true, SeqCst);
+        });
+        taken_rx.recv().unwrap();
+    });
+    println!("switch {switched:?}, device events {events:?}");
+    assert!(!released.load(SeqCst), "the owner gave up before the job let go");
+    assert_refused(&switched);
+    assert_eq!(h.host.core.engine_gen.load(SeqCst), engine, "the same engine: nothing it holds was dropped");
+    assert_previous_runs(&h);
+    assert_eq!(events, [], "the device came back: nothing to report");
 }
 
 /// The export renders each lane at the mix its snapshot took from the engine, so a COPY's level is the

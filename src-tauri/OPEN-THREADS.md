@@ -150,11 +150,7 @@
   stray sound (likely also the one launch at 64 that read 149 times the floor bar past FADE's bar
   line); its source is unknown, other apps playing through the interface the suspect. Next check:
   the first EVO 4 loopback run (`--channel=0`), other apps' sound silenced, logging each open's offset.
-- Two session loads the device side drops or applies against the caller's answer, each a red test
-  kept `#[ignore]` in `engine_io/tests.rs` until its fix. A load the host gave up on (no answer within
-  10 s, `engine_io/session.rs`) stays in the session port and plays once the callbacks resume
-  (`d21_a_load_that_timed_out_never_applies_later`); the next check is whether a give-up can withdraw
-  the sent job, or a late return be dropped by its generation. An unforced rate switch reads
-  `holds_audio` before its stop (`Owner::open`), so a load that lands in the fade-out is dropped with no
-  `LoopsDropped` (`d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unasked`);
-  the next check is re-reading it after the stop, before the build.
+- A session load the engine already took off the session port cannot be withdrawn (`engine_io/session.rs`
+  `run_job`): a callback that stalls more than two 10 s waits between taking a load and applying it would
+  apply a load already answered as failed; only the engine's fault path recovers it. Read from source,
+  never seen. Next check, only if a load ever plays after a failed answer: the log's session-job lines.

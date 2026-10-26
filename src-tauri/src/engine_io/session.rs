@@ -240,10 +240,13 @@ impl EngineHost {
         Ok((0..TRACK_COUNT).map(|i| overview.lane(i).frames.max(0) as usize).sum::<usize>().max(1))
     }
 
-    /// Hand `job` to the engine and wait (≤ `WAIT`) for it to come back. While no device runs the
+    /// Hand `job` to the engine and wait for it to come back: ≤ `WAIT`, or up to twice that for a job the
+    /// engine took (`run_job`), all under the caller's `session_busy`. While no device runs the
     /// engine is serviced here, under its lock. The port is out of `Ends` meanwhile; an engine that is
     /// replaced meanwhile takes its job with it. `stale`: jobs earlier calls gave up on, still in the
-    /// engine of that generation; they come back first and are dropped.
+    /// engine of that generation; they come back first and are dropped. A job given up on before the
+    /// engine took it is withdrawn, so its caller's error stands: a load answered as failed never
+    /// plays later (`run_job`).
     fn session_job(&self, stale: &mut (u64, usize), job: SessionJob) -> Result<SessionJob, String> {
         let (mut port, gen) = {
             let mut ends = self.core.ends.lock().map_err(|_| "engine ends poisoned".to_string())?;
@@ -262,7 +265,8 @@ impl EngineHost {
     }
 
     fn run_job(&self, port: &mut SessionPort, gen: u64, stale: &mut usize, job: SessionJob) -> Result<SessionJob, String> {
-        let deadline = Instant::now() + WAIT;
+        let mut deadline = Instant::now() + WAIT;
+        let mut extended = false;
         let mut job = Some(job);
         loop {
             self.service_session_if_idle();
@@ -288,7 +292,19 @@ impl EngineHost {
                 return Err("the engine was replaced during the session job".to_string());
             }
             if Instant::now() >= deadline {
-                // Sent and not back: it comes back to a later call, which drops it.
+                // Sent and not back. Not taken yet (the callbacks stalled): withdrawn, it never runs.
+                // Taken: it runs whatever this answers, so its result is the answer; a load applies in
+                // the block that takes it and comes straight back, so the wait goes on once, as long.
+                if job.is_none() && !extended && !port.withdraw() {
+                    extended = true;
+                    deadline = Instant::now() + WAIT;
+                    continue;
+                }
+                // It comes back to a later call, which drops it: withdrawn, unrun; or taken and still not
+                // back after the second wait (the engine faulted mid-job, and goes with its loops).
+                // Residual: a job the engine took (its claim won) cannot be withdrawn. A callback that
+                // stalls more than two `WAIT`s between taking a load and applying it applies a load this
+                // already answered as failed; nothing recovers that but the engine's fault path.
                 *stale += usize::from(job.is_none());
                 return Err(format!("the session job did not finish within {} s", WAIT.as_secs()));
             }
