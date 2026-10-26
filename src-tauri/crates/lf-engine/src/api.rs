@@ -1,6 +1,7 @@
 //! OWNS: what crosses the RT boundary: the commands the UI (and, from Stage 4, native MIDI) sends, the
 //! events the engine answers with, the per-callback context and I/O, and the plugin seam
-//! ([`SlotProcessor`]). Commands and events travel only over rtrb rings; a full event ring refuses the
+//! ([`SlotProcessor`], with what a slot's port answers: [`SlotReply`]). Commands and events travel only
+//! over rtrb rings; a full event ring refuses the
 //! event and counts it, nothing blocks: a one-off event is lost, a lane's state and mix are offered
 //! again at the next publish (`Looper::publish`).
 
@@ -661,16 +662,17 @@ pub enum SlotEventKind {
 }
 
 /// The plugin seam (Stage 4): one slot's processor, run inside the engine callback. The host builds and
-/// activates it off the audio thread and installs it through the slot's [`crate::SlotPort`]; the
-/// engine crossfades it in, and on removal crossfades it out, calls [`SlotProcessor::stop`] on the
-/// audio thread and hands it back through the same port. The engine never drops a unit: a drop frees
-/// memory and, for a plugin, calls into its DLL.
+/// activates it off the audio thread and sends it, tagged, through the slot's [`crate::SlotPort`] (an
+/// install, or a replace of the unit the slot plays); the engine crossfades it in, and on its way out
+/// crossfades it out, calls [`SlotProcessor::stop`] on the audio thread and hands it back through the
+/// same port ([`Handback`]). The engine never drops a unit: a drop frees memory and, for a plugin,
+/// calls into its DLL.
 pub trait SlotProcessor: Send {
-    /// Read once, at install.
+    /// Read once, when the unit reaches its slot.
     fn kind(&self) -> SlotKind;
     /// Frames the output lags its input (an effect) or a note (an instrument), as the plugin reported it
-    /// when it was activated. Read once, at install: a plugin whose latency changes is restarted, which
-    /// removes and reinstalls it.
+    /// when it was activated. Read once, when the unit reaches its slot: a plugin whose latency changes
+    /// is restarted, which removes and reinstalls it.
     fn latency(&self) -> Frame;
     /// Render `out.len()` frames (= `input.len()`, at most the engine's `max_block`) from device frame
     /// `frame`. `input` is the slot's mono input while the slot is live and silence otherwise (always
@@ -685,6 +687,70 @@ pub trait SlotProcessor: Send {
     /// `stop_processing`, VST3 `setProcessing(0)`); on the audio thread while a device runs, or on the
     /// thread that holds the engine while none does. May come without any `process` before it.
     fn stop(&mut self);
+    /// Whether the unit refused to start processing in a `process` call (CLAP `start_processing`, VST3
+    /// `setProcessing(1)`, both on the unit's first call): it renders silence from then on. Read on the
+    /// audio thread after each call while the unit stages as a replacement ([`crate::SlotPort::replace`]),
+    /// where a refusal sends it back and the unit it was to replace plays on. A unit that cannot refuse
+    /// keeps the default.
+    fn start_refused(&self) -> bool {
+        false
+    }
     /// The host's way back to its concrete unit.
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
+}
+
+/// A unit the engine holds no more, as its slot's port hands it back ([`SlotReply::Handback`]): the tag
+/// it was sent with, why it left, and the unit, stopped if it ever processed.
+pub struct Handback {
+    pub tag: u64,
+    pub reason: HandbackReason,
+    pub unit: Box<dyn SlotProcessor>,
+}
+
+impl std::fmt::Debug for Handback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handback").field("tag", &self.tag).field("reason", &self.reason).finish_non_exhaustive()
+    }
+}
+
+/// Why a unit came back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandbackReason {
+    /// A remove of its tag took it out: its notes released, crossfaded to bypass, stopped.
+    Removed,
+    /// An eviction ([`crate::Engine::evict_slots`]) took the slot's unit out, stopped: its owner
+    /// re-activates it and installs it again.
+    Evicted,
+    /// A replace committed and it faded out under its replacement: its notes released, stopped.
+    ReplacedOut,
+    /// It never became the slot's unit.
+    Rejected(Rejection),
+}
+
+/// Why a slot refused a unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rejection {
+    /// An install into a slot that holds a unit. Counted as a protocol error; never processed.
+    Occupied,
+    /// A replace into a slot already swapping (a candidate staging or fading in) or whose unit is being
+    /// removed. Counted as a protocol error; never processed.
+    Busy,
+    /// It refused to start processing while it staged ([`SlotProcessor::start_refused`]). Stopped.
+    StartRefused,
+    /// A remove of the slot's unit came while it staged: the swap is off. Stopped.
+    Cancelled,
+}
+
+/// What a slot's port answers ([`crate::SlotPort::reply`]), in the order the engine sent it.
+#[derive(Debug)]
+pub enum SlotReply {
+    /// A unit back. Every unit sent comes back exactly once, this way.
+    Handback(Handback),
+    /// The replace tagged `tag` committed: its unit is the slot's from this block on (crossfading in
+    /// over the unit it replaced, which follows as [`HandbackReason::ReplacedOut`] once faded out).
+    /// Every replace is answered once: this, or its unit back as [`HandbackReason::Rejected`].
+    Committed { tag: u64 },
+    /// A remove for `tag`, which is not the unit the slot plays (a later unit took its place, or it has
+    /// left): nothing changed.
+    NotHeld { tag: u64 },
 }
