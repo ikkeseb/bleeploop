@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
-import { editorAffinityBlocker, reserveEditor, slotPendingCounts } from '../state/instrument';
+import { editorAffinityBlocker, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
 import { liveShown, startLive } from './live';
@@ -55,9 +55,8 @@ export function PluginBar(props: {
     const wantOpen = !editorOpen();
     // Same plugin FILE in both slots shares one GUI runtime bound to one owner thread; an open from
     // another wedges inside the plugin, and killing the frozen window kills the app. Refuse it up front
-    // (the rule: `editorAffinity` in `src/ui/state/instrument.ts`). The check and the reservation run
-    // before the open is awaited, so two opens racing each other cannot both pass.
-    let release = () => {};
+    // (the rule: `editorAffinity` in `src/ui/state/instrument.ts`). Ownership is fixed at load, so two
+    // opens racing each other cannot both pass.
     if (wantOpen) {
       const blocked = editorAffinityBlocker(props.slot, props.descriptor.path);
       if (blocked) {
@@ -67,7 +66,7 @@ export function PluginBar(props: {
         if (owner) {
           notifyError(
             'Could not open a second editor for this plugin. Load another format of it in this slot.',
-            `Both slots hold the same plugin file, and its GUI serves one slot's editor per load. ${owner} opened it first.`,
+            `Both slots hold the same plugin file; its GUI serves only the editor of the first load: ${owner}.`,
           );
         } else {
           notifyError(
@@ -77,7 +76,6 @@ export function PluginBar(props: {
         }
         return;
       }
-      release = reserveEditor(props.slot, props.descriptor.path);
     }
     setEditorBusy(true);
     setEditorError(null);
@@ -94,7 +92,6 @@ export function PluginBar(props: {
       // failure means the window is likely still open → keep editorOpen(true) so the toggle doesn't claim
       // it closed (the next click then retries the close, not a second open).
       if (wantOpen) {
-        release();
         setEditorError('no editor');
         setEditorOpen(false);
       } else {

@@ -242,69 +242,83 @@ export function selectOff(slotIndex: 0 | 1): void {
  * first editor open wedged though only A had loaded before it and A never opened one). An editor from
  * any other owner thread wedges inside `attached()`/`gui.create` forever → `open_editor` timeout →
  * frozen half-window → closing it kills the app. Mixed formats of the same plugin (CLAP + VST3 = two
- * modules) are fine. This guard gives the path's editor to the first slot that OPENS one and refuses
- * the other slot with a toast (`PluginControls.toggleEditor`), so a later loader that opens first is
- * still let through (D29). Every load runs on its own new owner thread
+ * modules) are fine.
+ *
+ * The rule (D29): a path's editor belongs to the slot whose LOAD of it came first. A load that starts
+ * while no slot holds the path owns it (`claimEditorAffinity`); the other slot's EDITOR is refused with a
+ * toast (`PluginControls.toggleEditor`), whether or not the owner ever opened one. Rig recall loads slot
+ * A, then slot B, each landed before the next starts (`recallRig`), so A owns a file both remember. A
+ * load that starts while the other slot's load of the same path is still in flight cannot be ordered
+ * here (each runs on its own owner thread, and either may open the module first), so the entry turns
+ * `unordered` and BOTH slots are refused. Every load runs on its own new owner thread
  * (`src-tauri/src/host/engine_slot.rs`), so the owning slot's unload ends the bound thread: while the
  * other slot keeps the module loaded, the entry turns `orphaned` and BOTH slots are refused, the owner's
- * next load included. The entry dies when the module truly unloads — i.e. when the LAST slot holding
- * the path lets it go. A slot holds a path (`nativePaths`) from the moment its load STARTS (the host
- * opens the module before it answers) until its native unload succeeded or its load failed. Any native
- * error on a file's load or unload keeps that file a possible holder until restart (`uncertainPaths`):
- * the host may have left its module loaded (a setup past its bound, a teardown that leaked the plugin),
- * and no native answer says when it goes. Such a file with no entry is refused in BOTH slots until
- * restart: its module may be bound to an owner thread this map never saw (a WebView reload empties the
- * map, and the startup resync's failed unload may leave the module behind, `resyncNativeSlots`). Real
- * fix (one shared GUI thread for all editors) is a fragile host rework, deliberately deferred.
+ * next load included. The entry dies when the module truly unloads, i.e. when the LAST slot holding the
+ * path lets it go; the next load owns it afresh. A slot holds a path (`nativePaths`) from the moment its
+ * load STARTS (the host opens the module before it answers) until its native unload succeeded or its
+ * load failed. Any native error on a file's load or unload keeps that file a possible holder until
+ * restart (`uncertainPaths`): the host may have left its module loaded (a setup past its bound, a
+ * teardown that leaked the plugin), and no native answer says when it goes. Once no slot holds such a
+ * file, it is refused in BOTH slots until restart, and a later load claims nothing: its module may be
+ * bound to an owner thread this map never saw (a WebView reload empties the map, and the startup
+ * resync's failed unload may leave the module behind, `resyncNativeSlots`). Real fix (one shared GUI
+ * thread for all editors) is a fragile host rework, deliberately deferred.
  */
-// Each path's reservation; the object itself is the reservation's token (`reserveEditor`'s release).
-const editorAffinity = new Map<string, { slot: 0 | 1; orphaned: boolean }>();
+const editorAffinity = new Map<string, { slot: 0 | 1; state: 'owned' | 'orphaned' | 'unordered' }>();
 // The file each slot's native host may hold (the rule above). Not `slotPlugins`: that reads empty while
 // a load or an unload is in flight and comes back on a failed unload.
 const nativePaths: [string | null, string | null] = [null, null];
+// Whether each slot's native load is in flight (started, not yet answered): a load of the same path
+// starting meanwhile in the other slot cannot be ordered against it.
+const loadsInFlight: [boolean, boolean] = [false, false];
 // Files a native load or unload error left possibly held for the rest of the run (the rule above); apart
 // from `nativePaths`, so the slot's next load does not overwrite them.
 const uncertainPaths = new Set<string>();
 
 /**
- * Non-null = refuse. `owner` names who owns this file's editor: the OTHER slot, or (orphaned) a load of
- * a slot that has since unloaded the file, whichever slot asks; `owner: null` = no entry, but a load
- * this map never saw may still hold the file until restart (the rule above).
+ * Non-null = refuse. `owner` names whose editor this file's GUI serves: the OTHER slot, a load of a slot
+ * that has since unloaded the file (orphaned), or a slot this module cannot name (unordered), whichever
+ * slot asks; `owner: null` = no entry, but a load this map never saw may still hold the file until
+ * restart (the rule above).
  */
 export function editorAffinityBlocker(slot: 0 | 1, path: string): { owner: string | null } | null {
   const entry = editorAffinity.get(path);
   if (!entry) return uncertainPaths.has(path) ? { owner: null } : null;
   const owner = `slot ${entry.slot === 0 ? 'A' : 'B'}`;
-  if (entry.orphaned) return { owner: `${owner}'s previous load` };
+  if (entry.state === 'orphaned') return { owner: `${owner}'s previous load` };
+  if (entry.state === 'unordered') return { owner: 'an unknown slot (both loaded it at once)' };
   return entry.slot !== slot ? { owner } : null;
 }
 
 /**
- * Reserve `path`'s editor for `slot` before its open is awaited, so a second open racing it (the other
- * slot's, or one during a slot change) is refused by `editorAffinityBlocker`. The first opener becomes the
- * path's editor owner. Returns the release for a failed open: it drops the entry only while the map still
- * holds this very reservation (its token), never a later one the same slot took after an unload.
+ * As `slot`'s native load of `path` starts (before `nativePaths` records it): the first load of a path
+ * no slot holds owns its editor; a load overlapping the other slot's load of it in flight makes the
+ * entry unordered; any other entry stands. A file a native error left uncertain gets no entry.
  */
-export function reserveEditor(slot: 0 | 1, path: string): () => void {
-  if (editorAffinity.has(path)) return () => {};
-  const mine = { slot, orphaned: false };
-  editorAffinity.set(path, mine);
-  return () => {
-    if (editorAffinity.get(path) === mine) editorAffinity.delete(path);
-  };
+function claimEditorAffinity(slot: 0 | 1, path: string): void {
+  const other = slot === 0 ? 1 : 0;
+  const entry = editorAffinity.get(path);
+  if (entry) {
+    const otherLoading = loadsInFlight[other] && nativePaths[other] === path;
+    if (entry.state === 'owned' && entry.slot === other && otherLoading) entry.state = 'unordered';
+    return;
+  }
+  if (uncertainPaths.has(path)) return;
+  editorAffinity.set(path, { slot, state: nativePaths[other] === path ? 'unordered' : 'owned' });
 }
 
 /**
- * After `slot` unloaded `outgoingPath`: drop the path's affinity when NO slot's host holds it anymore (the module
- * actually unloaded); else, if `slot` owned it, its owner thread is gone with the module still bound to it,
- * so the entry turns orphaned. A new object: a late failed open's release (its token) must not drop it.
+ * After `slot` let go of `outgoingPath` (its unload succeeded or its load failed): drop the path's
+ * affinity when NO slot's host holds it anymore (the module unloaded, unless the path is uncertain: then
+ * the uncertain rule refuses it); else, if `slot` owned it, its owner thread is gone with the module
+ * still bound to it, so the entry turns orphaned.
  */
 function releaseEditorAffinity(slot: 0 | 1, outgoingPath: string | undefined): void {
   if (!outgoingPath) return;
   const entry = editorAffinity.get(outgoingPath);
   if (!entry) return;
-  if (!nativePaths.includes(outgoingPath) && !uncertainPaths.has(outgoingPath)) editorAffinity.delete(outgoingPath);
-  else if (entry.slot === slot && !entry.orphaned) editorAffinity.set(outgoingPath, { slot, orphaned: true });
+  if (!nativePaths.includes(outgoingPath)) editorAffinity.delete(outgoingPath);
+  else if (entry.slot === slot && entry.state === 'owned') entry.state = 'orphaned';
 }
 
 /**
@@ -358,11 +372,14 @@ async function doSelectPlugin(
   if (!outgoing) void disarmInputInternal(slot);
   let tone: PluginInfo['tone'];
   sourceOps[slot]++;
+  claimEditorAffinity(slot, desc.path);
   nativePaths[slot] = desc.path;
+  loadsInFlight[slot] = true;
   try {
     // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
     tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken))?.tone;
   } catch (e) {
+    loadsInFlight[slot] = false;
     swapping[slot] = false; // the swap ends on the slot's instrument (or Off)
     console.error('[instrument] plugin load failed', e);
     uncertainPaths.add(desc.path);
@@ -377,6 +394,7 @@ async function doSelectPlugin(
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the instrument
     return;
   }
+  loadsInFlight[slot] = false;
   swapping[slot] = false;
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   rememberSlotPlugin(slot, desc);

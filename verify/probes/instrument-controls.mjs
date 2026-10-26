@@ -7,14 +7,16 @@
  * show the install hint (in sans, as prose), the keyboard's hide cap reads the one close glyph ✕, the keyboard
  * octave survives a placement remount, PARAMS wears the shared SVG caret (turned over open), the slot volume (a
  * plugin's output gain) honors the unity detent under keyboard steps and slider input, and with one
- * plugin file in both slots, a second EDITOR pressed while the first open is in flight is refused (one
- * open reaches the host), the owner slot reloading that file while the other slot keeps it refuses both
- * slots' EDITOR until both unload it (also while the other slot's unload or load is in flight), any native
- * load or unload error on the file (a failed or timed-out load, a failed unload, a teardown error whose
- * next clear succeeds) keeps it refused for the rest of the run, and an open that fails late, after its
- * slot unloaded the plugin and reserved its editor again, leaves that newer reservation standing, and after a
- * WebView reload whose startup resync failed to unload a stranded plugin, its file's EDITOR is refused in both
- * slots although the reloaded page saw no editor open. The plugin host and
+ * plugin file in both slots, its editor belongs to the slot whose load came first (D29): the later loader's
+ * EDITOR is refused though it presses first and the owner never opened one (no open reaches the host),
+ * the owner slot dropping or reloading that file while the other slot keeps it refuses both slots' EDITOR
+ * until both unload it (also while the other slot's unload or load is in flight), after which the next
+ * load owns it afresh, two loads of the file overlapping in flight refuse both slots until both unload it,
+ * any native load or unload error on the file (a failed or timed-out load, a failed unload, a teardown
+ * error whose next clear succeeds) keeps it refused for the rest of the run, an open that fails late,
+ * after its slot unloaded the plugin and loaded it again, leaves the new load's ownership standing, and
+ * after a WebView reload whose startup resync failed to unload a stranded plugin, its file's EDITOR is
+ * refused in both slots although the reloaded page saw no editor open. The plugin host and
  * native MIDI are simulated in the page; no native or hardware claim (which port Windows lets the app open
  * is native MIDI's, `src-tauri/src/engine_io/midi/ports.rs`). Run: pnpm probe instrument-controls
  */
@@ -154,33 +156,27 @@ await probe(async ({ open }) => {
     'approaching unity must retain the soft detent',
   );
 
-  // Two editor opens racing: the same plugin file in both slots shares one GUI runtime, so only the
-  // first open may run. A's open is held in flight while B's EDITOR is pressed: B is refused at once,
-  // the host sees one open, and one editor results once A's lands.
+  // The same plugin file in both slots shares one GUI runtime, bound to the module's first load: A loaded
+  // first and never opened its editor, then B loads the file and presses EDITOR first. B is refused, no
+  // open reaches the host, and A's editor opens.
   await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
     const instrument = await import('/src/ui/state/instrument.ts');
     const descriptor = instrument.slotPlugins()[0];
     await instrument.selectPlugin(1, descriptor);
     window.__opens = [];
-    let land;
-    window.__landOpen = () => land();
-    const held = new Promise((resolve) => (land = resolve));
-    platform.pluginHost.openEditor = async (slot) => {
-      window.__opens.push(slot);
-      await held;
-    };
+    platform.pluginHost.openEditor = async (slot) => void window.__opens.push(slot);
   });
   const editor = (letter, pressed) => page.getByRole('button', { name: `Editor for slot ${letter}`, exact: true, ...(pressed === undefined ? {} : { pressed }) });
   await editor('B').waitFor();
-  await editor('A').click();
-  await page.waitForFunction(() => window.__opens.length === 1);
   await editor('B').click();
   await page.locator('.toast', { hasText: 'Could not open a second editor for this plugin.' }).waitFor({ timeout: 5000 });
-  await page.evaluate(() => window.__landOpen());
+  assert.equal(await editor('B').getAttribute('aria-pressed'), 'false', "slot B, the later loader, is refused though it pressed first");
+  assert.match(await page.locator('.toast', { hasText: 'Could not open a second editor' }).textContent(), /the first load: slot A\./, 'the toast names slot A');
+  assert.deepEqual(await page.evaluate(() => window.__opens), [], "B's refused open never reached the host");
+  await editor('A').click();
   await editor('A', true).waitFor();
-  assert.deepEqual(await page.evaluate(() => window.__opens), [0], 'the host saw one editor open: slot A, which pressed first');
-  assert.equal(await editor('B').getAttribute('aria-pressed'), 'false', "slot B's racing open was refused");
+  assert.deepEqual(await page.evaluate(() => window.__opens), [0], 'the host saw one editor open: slot A, which loaded first');
 
   // The owner reloads while the other slot keeps the module: A closes its editor, then reloads the
   // plugin in place (a session import's tone reload) while B still holds the file. The module's GUI
@@ -272,6 +268,76 @@ await probe(async ({ open }) => {
   await expectRefused('A', "slot A stays refused: its reload never let the module go");
   assert.deepEqual(await page.evaluate(() => window.__opens), [0, 0], 'no open reached the host during the overlap');
 
+  // `fresh`: both slots let go of what they hold, and a new file is the case's (an editor's owner is its
+  // first LOAD, so nothing is opened here). `loadIn` loads it into a slot.
+  const fresh = (name) =>
+    page.evaluate(async (name) => {
+      const instrument = await import('/src/ui/state/instrument.ts');
+      window.__desc = { id: `${name}-probe`, name: `${name} probe`, path: `C:\\probe\\${name}.vst3`, format: 'vst3', isEffect: true };
+      await instrument.clearPlugin(1);
+      await instrument.clearPlugin(0);
+      window.__opens = [];
+    }, name);
+  const loadIn = (slot) => page.evaluate(async (slot) => (await import('/src/ui/state/instrument.ts')).selectPlugin(slot, window.__desc), slot);
+  const clearIn = (slot) => page.evaluate(async (slot) => (await import('/src/ui/state/instrument.ts')).clearPlugin(slot), slot);
+  const expectOpens = async (letter) => {
+    await dismissToasts();
+    await editor(letter, false).click();
+    await editor(letter, true).waitFor();
+    await editor(letter, true).click();
+    await editor(letter, false).waitFor();
+  };
+
+  // The owner drops the file without ever opening its editor while B keeps it: the module stays bound
+  // to A's ended load, so B is refused, and so is A's next load. Once both unload it the module goes,
+  // and the next load (B's this time) owns it; A, loading after, is refused.
+  await fresh('never-opened');
+  await loadIn(0);
+  await loadIn(1);
+  await clearIn(0);
+  await expectRefused('B', "slot B is refused: A's ended load owns the module's GUI");
+  assert.match(await page.locator('.toast', { hasText: 'Could not open a second editor' }).textContent(), /slot A's previous load\./, "the toast names A's previous load");
+  await loadIn(0);
+  await expectRefused('A', "slot A's next load is refused too: the module never unloaded");
+  await clearIn(0);
+  await clearIn(1);
+  await loadIn(1);
+  await expectOpens('B');
+  await loadIn(0);
+  await expectRefused('A', 'slot A, loading after B, is refused');
+  assert.deepEqual(await page.evaluate(() => window.__opens), [1], "only B's fresh load opened its editor");
+
+  // Two loads of one file overlapping in flight: which reached the module first is the host's, so both
+  // slots are refused until both unload it; then a fresh load owns it again.
+  await fresh('overlap');
+  await page.evaluate(async () => {
+    const { platform } = await import('/src/platform/index.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
+    const loadHost = platform.pluginHost.loadPlugin;
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    platform.pluginHost.loadPlugin = async (slot, ...rest) => {
+      if (slot === 0) await held;
+      return loadHost(slot, ...rest);
+    };
+    const loadA = instrument.selectPlugin(0, window.__desc);
+    await instrument.selectPlugin(1, window.__desc);
+    release();
+    await loadA;
+    platform.pluginHost.loadPlugin = loadHost;
+  });
+  await expectRefused('A', 'slot A is refused: its load overlapped B\'s');
+  assert.equal(await page.locator('.slot').first().locator('.pc__err').textContent(), 'editor owned by an unknown slot (both loaded it at once)', "A's bar says why");
+  await expectRefused('B', 'slot B is refused: its load overlapped A\'s');
+  await clearIn(0);
+  await clearIn(1);
+  await loadIn(0);
+  await expectOpens('A');
+  await loadIn(1);
+  await expectRefused('B', "slot B, loading after A's fresh load, is refused");
+  assert.deepEqual(await page.evaluate(() => window.__opens), [0], "only A's fresh load opened its editor");
+
+  const heldUntilRestart = "Could not open this plugin's editor until BleepLoop restarts.";
   // From here on each case takes its own file: an error leaves its file guarded for the rest of the run.
   // `ownFile`: both slots let go of what they hold, A loads a fresh file and opens then closes its editor
   // (A owns it), and the host's open count starts over.
@@ -334,7 +400,7 @@ await probe(async ({ open }) => {
     await instrument.selectPlugin(0, window.__desc);
   });
   assert.equal(consumeConsoleErrors('[instrument] plugin unload failed').length, 1, "B's teardown error reaches the release log");
-  await expectRefused('A', "slot A's fresh load is refused: B's teardown may have left the module loaded");
+  await expectRefused('A', "slot A's fresh load is refused: B's teardown may have left the module loaded", heldUntilRestart);
   assert.deepEqual(await page.evaluate(() => window.__opens), [], "no open reached the host after B's teardown error");
 
   // A load counts as holding the file from the moment it starts: B's native load is held in flight (the
@@ -400,7 +466,7 @@ await probe(async ({ open }) => {
     await instrument.selectPlugin(0, window.__desc);
   });
   assert.equal(consumeConsoleErrors('[instrument] plugin load failed').length, 1, "B's failed load reaches the release log");
-  await expectRefused('A', "slot A's next load is refused: B's failed load may have left the module loaded");
+  await expectRefused('A', "slot A's next load is refused: B's failed load may have left the module loaded", heldUntilRestart);
   assert.deepEqual(await page.evaluate(() => window.__opens), [], "no open reached the host after B's failed load");
 
   // The guard outlives the slot's next load: B's load of A's file times out, B loads another file, A
@@ -420,12 +486,12 @@ await probe(async ({ open }) => {
   });
   assert.equal(consumeConsoleErrors('[instrument] plugin load failed').length, 1, "B's timed-out load reaches the release log");
   assert.equal(await reloadA(), 'reloaded', 'slot A reloads after B moved on from its timed-out load');
-  await expectRefused('A', "slot A's reloaded editor is refused while B's timed-out setup may hold the file");
+  await expectRefused('A', "slot A's reloaded editor is refused while B's timed-out setup may hold the file", heldUntilRestart);
   assert.deepEqual(await page.evaluate(() => window.__opens), [], "no open reached the host after B's timed-out load");
 
-  // A late failure must not drop a newer reservation. Slot A opens another plugin's editor (held), the
-  // plugin unloads (its last holder: the affinity goes), loads again and opens its editor at once; then
-  // the first open fails. Slot B, loading that plugin, must still be refused: A's editor is open.
+  // A late failed open changes no ownership. Slot A opens another plugin's editor (held), the plugin
+  // unloads (its last holder: the affinity goes), loads again (A owns it afresh) and opens its editor at
+  // once; then the first open fails. Slot B, loading that plugin, must still be refused: A loaded first.
   await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
     const instrument = await import('/src/ui/state/instrument.ts');
@@ -460,7 +526,7 @@ await probe(async ({ open }) => {
   await editor('B').click();
   await page.locator('.toast', { hasText: 'Could not open a second editor for this plugin.' }).waitFor({ timeout: 5000 });
   assert.equal(await editor('B').getAttribute('aria-pressed'), 'false');
-  assert.deepEqual(await page.evaluate(() => window.__opens), [0, 0], "slot B's open never reached the host: A's newer reservation stood");
+  assert.deepEqual(await page.evaluate(() => window.__opens), [0, 0], "slot B's open never reached the host: A's new load owns the editor");
 
   // A WebView reload empties the editor affinity while the host keeps its plugins. A owns a file's editor
   // (opened and closed), the page reloads, and the startup resync's unload of A's stranded plugin fails: the
@@ -488,7 +554,6 @@ await probe(async ({ open }) => {
     platform.pluginHost.openEditor = async (slot) => void window.__opens.push(slot);
     await instrument.selectPlugin(1, descriptor);
   }, stranded);
-  const heldUntilRestart = "Could not open this plugin's editor until BleepLoop restarts.";
   await expectRefused('B', "slot B's editor of the stranded file is refused: the module may be bound to A's old thread", heldUntilRestart);
   await page.evaluate(async () => (await import('/src/ui/state/instrument.ts')).selectPlugin(0, window.__desc));
   await expectRefused('A', "slot A's new load of the stranded file is refused too: its owner thread is a new one", heldUntilRestart);

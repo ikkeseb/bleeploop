@@ -18,7 +18,10 @@
  * scan still runs keeps its slot and the MIDI slot, and the synth's slot stays a synth at the launch
  * after; the recall runs on the scan of the saved plugins' own paths (`scanPluginPaths`), so a saved
  * plugin loads while the full scan still runs, and a failed scan of the paths recalls after the full
- * scan instead. The native load, the scan, the OS close and a real crash are out of reach here:
+ * scan instead; one plugin file remembered in both slots comes back with its editor owned by slot A,
+ * whose load lands before slot B's starts (B's EDITOR is refused, A's opens), and the same file picked
+ * in slot B while slot A's recalled load is still in flight refuses both slots' EDITOR, since which load
+ * reached the module first is the host's. The native load, the scan, the OS close and a real crash are out of reach here:
  * `pnpm native:recall` covers them on the PC.
  * Run: pnpm probe rig-recall
  */
@@ -337,4 +340,53 @@ await probe(async ({ open }) => {
   assert.deepEqual(s.loads, [loadOf(1, SYN)], 'restored after the full scan');
   assert.equal(app.consumeConsoleErrors(/^\[app\] rig plugin scan failed/).length, 1, 'the failed scan of the paths is logged once');
   assert.deepEqual(s.toasts, [], 'no toast: the recall still ran');
+
+  // 15. One plugin file remembered in both slots (D29): the recall loads slot A, then slot B once A's
+  // load landed, so A's load came first and owns the file's editor. B's EDITOR, pressed first, is
+  // refused and reaches no host call; A's opens.
+  const editor = (letter, pressed) => page.getByRole('button', { name: `Editor for slot ${letter}`, exact: true, ...(pressed === undefined ? {} : { pressed }) });
+  const refused = async (letter) => {
+    await page.evaluate(() => window.__lf.notify.toasts().forEach((t) => window.__lf.notify.dismissToast(t.id)));
+    await editor(letter, false).click();
+    await page.locator('.toast', { hasText: 'Could not open a second editor for this plugin.' }).waitFor({ timeout: 5000 });
+    assert.equal(await editor(letter).getAttribute('aria-pressed'), 'false', `slot ${letter}'s EDITOR is refused`);
+  };
+  await page.evaluate(async (fx) => {
+    const { rememberSlotPlugin } = await import('/src/ui/state/rig-recall.ts');
+    rememberSlotPlugin(0, fx);
+    rememberSlotPlugin(1, fx);
+  }, FX);
+  await launch({ scan: ALL, loads: { 0: 'defer' } });
+  await page.waitForFunction(() => window.__recallProbe.calls.load.length === 1);
+  await page.waitForTimeout(200);
+  assert.deepEqual(await page.evaluate(() => window.__recallProbe.calls.load), [loadOf(0, FX)], "slot B's recalled load waits for slot A's to land");
+  await page.evaluate(() => window.__recallProbe.release());
+  s = await settle();
+  assert.deepEqual({ loads: s.loads, slots: s.slots }, { loads: [loadOf(0, FX), loadOf(1, FX)], slots: [keyOf(FX), keyOf(FX)] });
+  await refused('B');
+  await editor('A', false).click();
+  await editor('A', true).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__recallProbe.calls.editor), [0], "only slot A's editor reached the host");
+
+  // 16. The same file picked in slot B while slot A's recalled load is in flight: two loads of one file
+  // overlapping, which the frontend cannot order, so both slots are refused.
+  await page.evaluate(async () => {
+    const { forgetSlotPlugin } = await import('/src/ui/state/rig-recall.ts');
+    forgetSlotPlugin(1);
+  });
+  await launch({ scan: ALL, loads: { 0: 'defer' } });
+  await page.waitForFunction(() => window.__recallProbe.calls.load.length === 1);
+  await page.evaluate((fx) => {
+    window.__pickB = window.__recallProbe.instrument.selectPlugin(1, fx);
+  }, FX);
+  await page.waitForFunction(() => window.__recallProbe.calls.load.length === 2);
+  await page.evaluate(async () => {
+    window.__recallProbe.release();
+    await window.__pickB;
+  });
+  s = await settle();
+  assert.deepEqual(s.slots, [keyOf(FX), keyOf(FX)], 'both slots hold the file');
+  await refused('A');
+  await refused('B');
+  assert.deepEqual(await page.evaluate(() => window.__recallProbe.calls.editor), [], 'no editor open reached the host');
 });
