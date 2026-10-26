@@ -149,10 +149,15 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
    judged when it lands, on the engine's state, never on what the UI last saw; the feed carries the
    outcome. Live audio never crosses the platform boundary as PCM (a session save's snapshot does,
    once, off the RT path).
-4. **Plugin lifecycle runs off the RT thread, with the slot bypassed.** Load, activate, restart and
-   teardown run on the slot's owner thread; the callback crossfades a unit in and out and hands it
-   back on a ring, never drops one (a drop frees memory and calls into the plugin's DLL). An effect
-   slot passes dry meanwhile, an instrument slot is silent; loops and click never wait.
+4. **Plugin lifecycle runs on its owner thread, only while the engine does not hold that instance;
+   the engine owns a submitted unit until its tagged handback and never destroys one on the RT
+   thread.** Load, activate, restart and teardown run on the slot's owner thread; a format's
+   processing start and stop (CLAP `start_processing`, VST3 `setProcessing`) stay on the processing
+   thread. The callback crossfades a unit in and out, or from the unit it replaces (a hot swap: the
+   new unit stages muted beside the playing one, so a slot holds at most two), and hands each back
+   tagged on the slot's ring, never dropped (a drop frees memory and calls into the plugin's DLL).
+   While a slot holds no unit an effect slot passes dry and an instrument slot is silent; loops and
+   click never wait.
 5. **The RT path (engine callback, plugin process) never allocates, logs, blocks or waits on a
    lock.** The callback only `try_lock`s the engine (a miss plays silence and counts); buffers are
    allocated and touched before the first callback; failures latch counters and fault bits that a

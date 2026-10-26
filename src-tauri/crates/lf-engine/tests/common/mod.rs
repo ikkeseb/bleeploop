@@ -8,6 +8,7 @@ pub mod dub;
 pub mod edges;
 pub mod fx;
 pub mod refs;
+pub mod units;
 
 use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};

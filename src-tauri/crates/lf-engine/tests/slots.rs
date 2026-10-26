@@ -4,8 +4,9 @@
 //! the whole of it bit-identical at any block size. New with the engine: the web app's slots
 //! (`plugin-bridge.ts`, `instrument-slots.ts`) had no rig guard to port.
 //!
-//! The fakes record what they saw in preallocated buffers and atomics, so every `process` still runs
-//! under the rig's `assert_no_alloc`.
+//! The fakes (`tests/common/units.rs`) record what they saw in preallocated buffers and atomics, so
+//! every `process` still runs under the rig's `assert_no_alloc`. The hot swap's own tests are
+//! `tests/slot_swap.rs`.
 //!
 //! § Continuity under a sustained tone holds GO LIVE, an empty slot's live toggle, and an install and a
 //! removal to `tests/seam_continuity.rs`'s click criterion on what is heard.
@@ -14,9 +15,10 @@ mod common;
 
 use std::f64::consts::PI;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
+use common::units::{fake, Fake, Probe, Seen, LOG};
 use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
@@ -25,161 +27,6 @@ use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteT
 const FADE: usize = 480;
 /// Frames of the live gate's ramp at 48 kHz: 5 ms (STATUS D23).
 const LIVE: Frame = 240;
-/// What a fake logs before it stops logging (a long run at block size 1 would outgrow it).
-const LOG: usize = 1 << 16;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Seen {
-    Call { frame: Frame, len: usize },
-    Event(SlotEvent),
-    Stop,
-}
-
-/// The test's view of a fake while the engine holds it.
-#[derive(Clone)]
-struct Probe {
-    log: Arc<Mutex<Vec<Seen>>>,
-    drops: Arc<AtomicUsize>,
-    /// The largest |input| the fake was given, as f32 bits.
-    input_peak: Arc<AtomicU32>,
-}
-
-impl Probe {
-    fn new() -> Probe {
-        Probe { log: Arc::new(Mutex::new(Vec::with_capacity(LOG))), drops: Arc::new(AtomicUsize::new(0)), input_peak: Arc::new(AtomicU32::new(0)) }
-    }
-
-    fn seen(&self) -> Vec<Seen> {
-        let log = self.log.lock().unwrap();
-        assert!(log.len() < LOG, "the fake's log filled up");
-        log.clone()
-    }
-
-    fn calls(&self) -> Vec<(Frame, usize)> {
-        self.seen().into_iter().filter_map(|s| if let Seen::Call { frame, len } = s { Some((frame, len)) } else { None }).collect()
-    }
-
-    /// Every event: the frame it lands on, its offset into its call, and what it is.
-    fn events(&self) -> Vec<(Frame, u32, SlotEventKind)> {
-        let mut at: (Frame, usize) = (0, 0);
-        let mut out = Vec::new();
-        for s in self.seen() {
-            match s {
-                Seen::Call { frame, len } => at = (frame, len),
-                Seen::Event(e) => {
-                    assert!((e.offset as usize) < at.1, "an event's offset lies inside its call");
-                    out.push((at.0 + e.offset as Frame, e.offset, e.kind));
-                }
-                Seen::Stop => {}
-            }
-        }
-        out
-    }
-
-    fn keys(&self) -> Vec<(bool, u8)> {
-        self.events()
-            .into_iter()
-            .map(|(_, _, k)| match k {
-                SlotEventKind::NoteOn { key, .. } => (true, key),
-                SlotEventKind::NoteOff { key } => (false, key),
-            })
-            .collect()
-    }
-
-    fn stops(&self) -> usize {
-        self.seen().iter().filter(|s| **s == Seen::Stop).count()
-    }
-
-    fn input_peak(&self) -> f32 {
-        f32::from_bits(self.input_peak.load(SeqCst))
-    }
-}
-
-/// A unit stand-in. Its output is `level` plus `through` × its input; an instrument also plays a 1.0
-/// impulse `latency` frames after each NoteOn.
-struct Fake {
-    id: u32,
-    kind: SlotKind,
-    latency: Frame,
-    level: f32,
-    through: f32,
-    impulse: Option<Frame>,
-    /// Added to the last frame of every call (a value gone bad late in an otherwise sound block).
-    last: f32,
-    probe: Probe,
-}
-
-impl Fake {
-    fn effect(level: f32, through: f32, probe: &Probe) -> Box<Fake> {
-        Box::new(Fake { id: 0, kind: SlotKind::Effect, latency: 0, level, through, impulse: None, last: 0.0, probe: probe.clone() })
-    }
-
-    fn instrument(level: f32, latency: Frame, probe: &Probe) -> Box<Fake> {
-        Box::new(Fake { id: 0, kind: SlotKind::Instrument, latency, level, through: 0.0, impulse: None, last: 0.0, probe: probe.clone() })
-    }
-
-    fn with_last(mut self: Box<Self>, last: f32) -> Box<Fake> {
-        self.last = last;
-        self
-    }
-
-    fn with_id(mut self: Box<Self>, id: u32) -> Box<Fake> {
-        self.id = id;
-        self
-    }
-}
-
-impl SlotProcessor for Fake {
-    fn kind(&self) -> SlotKind {
-        self.kind
-    }
-
-    fn latency(&self) -> Frame {
-        self.latency
-    }
-
-    fn process(&mut self, frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
-        let mut log = self.probe.log.lock().unwrap();
-        if log.len() + 1 + events.len() < LOG {
-            log.push(Seen::Call { frame, len: out.len() });
-            log.extend(events.iter().map(|&e| Seen::Event(e)));
-        }
-        let peak = input.iter().fold(self.probe.input_peak(), |m, x| m.max(x.abs()));
-        self.probe.input_peak.store(peak.to_bits(), SeqCst);
-        let mut next = events.iter().peekable();
-        for (k, (y, &x)) in out.iter_mut().zip(input).enumerate() {
-            while let Some(e) = next.next_if(|e| e.offset as usize == k) {
-                if matches!(e.kind, SlotEventKind::NoteOn { .. }) {
-                    self.impulse = Some(frame + k as Frame + self.latency);
-                }
-            }
-            let hit = if self.impulse == Some(frame + k as Frame) { 1.0 } else { 0.0 };
-            *y = self.level + self.through * x + hit;
-        }
-        if let Some(y) = out.last_mut() {
-            *y += self.last;
-        }
-    }
-
-    fn stop(&mut self) {
-        self.probe.log.lock().unwrap().push(Seen::Stop);
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
-        self
-    }
-}
-
-impl Drop for Fake {
-    fn drop(&mut self) {
-        self.probe.drops.fetch_add(1, SeqCst);
-    }
-}
-
-/// A unit the engine handed back, as the fake it is.
-fn fake(unit: Box<dyn SlotProcessor>) -> Box<Fake> {
-    unit.into_any().downcast::<Fake>().ok().expect("the unit is the fake")
-}
 
 fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0.0, |m, v| m.max(v.abs()))

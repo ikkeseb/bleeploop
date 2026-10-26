@@ -116,7 +116,8 @@ together.
 1. The engine's device-frame clock is the single tempo/quantization authority.
 2. Commands and events cross the RT boundary only through rtrb rings.
 3. The engine alone owns musical state: the UI sends commands and reads the feed.
-4. Plugin lifecycle runs off the RT thread, with the slot bypassed.
+4. Plugin lifecycle runs on its owner thread, only while the engine does not hold that instance; the
+   engine owns a submitted unit until its tagged handback and never destroys one on the RT thread.
 5. The RT path (engine callback, plugin process) never allocates, logs, blocks or waits on a lock.
 6. No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop.
 7. All `@tauri-apps/*` confined to `src/platform/` (CI-guarded).

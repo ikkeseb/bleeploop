@@ -40,10 +40,11 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   engine callback, the Share callback and every plugin `process`. A unit latches fault bits
   (`FAULT_START`/`FAULT_PROCESS`/`FAULT_PARAM`/`FAULT_EVENTS`) and the owner reports each once per load; add a new
   RT failure path to that latch, not `log::*`. DEV builds count RT allocations (`host/rt_alloc.rs`).
-- **Plugin lifecycle runs on its owner with the slot bypassed** (invariant 4): load, activate, a
-  plugin-requested restart (CLAP `request_restart`, VST3 `restartComponent`, VST2
-  `audioMasterIOChanged`) and teardown; an FX slot
-  passes dry, an instrument slot is silent, loops and click never wait.
+- **Plugin lifecycle runs on its owner, never on an instance the engine holds** (invariant 4): load,
+  activate, a plugin-requested restart (CLAP `request_restart`, VST3 `restartComponent`, VST2
+  `audioMasterIOChanged`) and teardown. A hot swap loads the next plugin while the current one plays
+  and crossfades between them in the engine; outside one, an empty FX slot passes dry, an empty
+  instrument slot is silent, and loops and click never wait.
 - **Unload order is load-bearing:** the slot goes off live and the engine's gate closes on it
   (`EngineHost::silence_slot`, ≤1 s, else the unload is refused and the plugin stays; a plugin-requested
   restart skips it and stays live; answered by a block the engine rendered after taking that live-off,
