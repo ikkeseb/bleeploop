@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lf_engine::{SlotPort, SlotProcessor};
+use lf_engine::{SlotPort, SlotProcessor, SlotReply};
 
 use super::Core;
 
@@ -30,6 +30,18 @@ const POLL: Duration = Duration::from_millis(1);
 
 /// `Core::holder` for a unit whose owner abandoned it.
 pub(crate) const ORPHAN: u64 = u64::MAX;
+
+/// The next unit the engine handed back on `port`, whatever its reason, past the acknowledgements before
+/// it (`Committed`, `NotHeld`: nothing here waits on one). A unit is sent tagged with its owner's token;
+/// the reply's tag and reason are not read yet (the holder says whose it is).
+pub(crate) fn handed_back(port: &mut SlotPort) -> Option<Box<dyn SlotProcessor>> {
+    while let Some(reply) = port.reply() {
+        if let SlotReply::Handback(back) = reply {
+            return Some(back.unit);
+        }
+    }
+    None
+}
 
 /// One slot's handshake with the engine (`EngineHost::slot`). Cheap to clone (a clone is the same
 /// owner); one plugin owner uses a slot at a time.
@@ -88,7 +100,7 @@ impl SlotHost {
                 *waiting = Some((self.token, unit));
                 return Ok(());
             }
-            if let Err(unit) = port.install(unit) {
+            if let Err(unit) = port.install(self.token, unit) {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
             self.core.holder[self.slot].store(self.token, Release);
@@ -109,7 +121,7 @@ impl SlotHost {
                 return Ok(self.take_evicted());
             }
             let port = port.as_mut().ok_or_else(|| "no engine holds this slot".to_string())?;
-            if !port.remove() {
+            if !port.remove(self.token) {
                 return Err(format!("slot {}'s port is full", self.slot));
             }
         }
@@ -161,7 +173,7 @@ impl SlotHost {
     /// included).
     fn reap(&self, port: &mut SlotPort) {
         if self.core.holder[self.slot].load(Acquire) == ORPHAN {
-            if let Some(unit) = port.returned() {
+            if let Some(unit) = handed_back(port) {
                 log::warn!("[engine_io] slot {}: an abandoned unit came back; leaking it", self.slot);
                 std::mem::forget(unit);
                 self.core.holder[self.slot].store(0, Release);
@@ -175,7 +187,7 @@ impl SlotHost {
         if self.core.holder[self.slot].load(Acquire) != self.token {
             return None;
         }
-        let unit = port.as_mut()?.returned();
+        let unit = handed_back(port.as_mut()?);
         if unit.is_some() {
             self.core.holder[self.slot].store(0, Release);
         }

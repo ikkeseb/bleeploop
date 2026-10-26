@@ -737,7 +737,8 @@ pub enum Rejection {
     Busy,
     /// It refused to start processing while it staged ([`SlotProcessor::start_refused`]). Stopped.
     StartRefused,
-    /// A remove of the slot's unit came while it staged: the swap is off. Stopped.
+    /// A withdraw of its tag ([`crate::SlotPort::withdraw`]), or a remove of the slot's unit, came while
+    /// it staged: the swap is off. Stopped.
     Cancelled,
 }
 
@@ -751,6 +752,6 @@ pub enum SlotReply {
     /// Every replace is answered once: this, or its unit back as [`HandbackReason::Rejected`].
     Committed { tag: u64 },
     /// A remove for `tag`, which is not the unit the slot plays (a later unit took its place, or it has
-    /// left): nothing changed.
+    /// left), or a withdraw for `tag`, which is not a candidate staging: nothing changed.
     NotHeld { tag: u64 },
 }

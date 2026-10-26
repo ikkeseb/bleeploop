@@ -22,17 +22,18 @@
 //! over the frames of `FADE_SECONDS`, counted, so both ends land on an exact frame and are bit-exact. An
 //! instrument's output joins the bus, not the wet, so there it fades in from silence while the gated
 //! input fades out of the wet over the same frames (and back at its removal): a live slot's dry signal
-//! never steps. A removal first releases the notes the slot holds and crossfades to bypass;
+//! never steps. A removal names the unit by the tag it was sent with (any other tag is answered
+//! `NotHeld` and changes nothing), first releases the notes the slot holds and crossfades to bypass;
 //! the slot is empty from the frame the fade ends. The release reaches the unit in the fade's first
-//! `process`, [`SlotProcessor::stop`] follows its last, and the unit goes back on the port's return
-//! ring (a full ring parks it until there is room). With no device running the ports are serviced at
-//! once, without fades, and one silent frame of `process` carries a removed unit's release. Nothing
-//! here drops a unit: an eviction hands back an install still waiting on a port too, and a unit's
-//! methods run only while its slot holds it, so a panic the callback's guard catches unwinds past no
-//! unit held as a local. Installing into an occupied slot is a protocol error: the new unit goes
-//! straight back, counted, never started or stopped. So is a call whose output holds a NaN or an
-//! infinity: that call's output is silenced, so nothing downstream (the mix, the input sends, the
-//! limiter, a capture) ever sees it.
+//! `process`, [`SlotProcessor::stop`] follows its last, and the unit goes back on the port, tagged and
+//! with why (`port`: a full return ring parks it behind the replies before it). With no device running
+//! the ports are serviced at once, without fades, and one silent frame of `process` carries a removed
+//! unit's release. Nothing here drops a unit: an eviction hands back an install still waiting on a port
+//! too, and a unit's methods run only while a seat of its slot holds it, so a panic the callback's guard
+//! catches unwinds past no unit held as a local. Installing into an occupied slot is a protocol error:
+//! the new unit goes straight back `Occupied`, counted, never started or stopped. So is a call whose
+//! output holds a NaN or an infinity: that call's output is silenced, so nothing downstream (the mix,
+//! the input sends, the limiter, a capture) ever sees it.
 //!
 //! The engine renders the slots once per range, not per chunk: from where they stopped up to the next
 //! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
@@ -40,10 +41,15 @@
 //! at the start of a render call (every event offset is 0 in practice); an install or removal applies
 //! at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
 
-use rtrb::{Consumer, Producer, PushError, RingBuffer};
+mod port;
+mod swap;
 
-use crate::api::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SLOT_COUNT};
+pub use port::SlotPort;
+
+use crate::api::{HandbackReason, Rejection, SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SlotReply, SLOT_COUNT};
 use crate::grid::Frame;
+use port::{SlotEnd, SlotMsg};
+use swap::Swap;
 
 /// The crossfade into and out of bypass: 10 ms, the web monitor's declick (`audio_output.rs`).
 const FADE_SECONDS: f64 = 0.010;
@@ -55,71 +61,37 @@ const GAIN_TAU_SECONDS: f64 = 0.012;
 pub const MAX_SLOT_EVENTS: usize = 256;
 /// The longest record-path delay of an instrument slot: a second, as the built-in instruments'.
 const MAX_RECORD_DELAY_SECONDS: usize = 1;
-const MSG_CAPACITY: usize = 4;
-const RETURN_CAPACITY: usize = 4;
 
-enum SlotMsg {
-    Install(Box<dyn SlotProcessor>),
-    Remove,
-}
-
-/// The host's end of one slot (`EngineHandle::slots`). Not real-time: the host blocks on it, the engine
-/// never does.
-pub struct SlotPort {
-    tx: Producer<SlotMsg>,
-    rx: Consumer<Box<dyn SlotProcessor>>,
-}
-
-impl SlotPort {
-    /// Hand an activated unit to the slot; it crossfades in from the next block. Gives the unit back
-    /// when the message ring is full (the engine is not rendering and has not been serviced).
-    pub fn install(&mut self, unit: Box<dyn SlotProcessor>) -> Result<(), Box<dyn SlotProcessor>> {
-        self.tx.push(SlotMsg::Install(unit)).map_err(|PushError::Full(msg)| match msg {
-            SlotMsg::Install(unit) => unit,
-            SlotMsg::Remove => unreachable!(),
-        })
-    }
-
-    /// Ask for the slot's unit back: it releases its notes, crossfades to bypass, stops and arrives on
-    /// [`SlotPort::returned`]. Nothing comes back from an empty slot. False when the ring is full.
-    pub fn remove(&mut self) -> bool {
-        self.tx.push(SlotMsg::Remove).is_ok()
-    }
-
-    /// A unit the engine handed back: removed, evicted ([`crate::Engine::evict_slots`]) or refused.
-    pub fn returned(&mut self) -> Option<Box<dyn SlotProcessor>> {
-        self.rx.pop().ok()
-    }
-}
-
-/// The engine's end of one slot.
-struct SlotEnd {
-    rx: Consumer<SlotMsg>,
-    tx: Producer<Box<dyn SlotProcessor>>,
-}
-
-fn slot_channel() -> (SlotPort, SlotEnd) {
-    let (msg_tx, msg_rx) = RingBuffer::new(MSG_CAPACITY);
-    let (ret_tx, ret_rx) = RingBuffer::new(RETURN_CAPACITY);
-    (SlotPort { tx: msg_tx, rx: ret_rx }, SlotEnd { rx: msg_rx, tx: ret_tx })
+/// One unit's place in a slot: the unit, the tag it was sent with, what it reported as it arrived, the
+/// notes it holds, its event queue and its output. A slot plays the unit in its `seat`; its `side` seat
+/// holds a swap's other unit.
+struct Seat {
+    unit: Option<Box<dyn SlotProcessor>>,
+    tag: u64,
+    /// The unit's kind and latency, read once as it takes the seat. Both outlive its leaving (nothing
+    /// reads them without a unit but the record line, whose offset then holds, so an instrument's
+    /// delayed tail plays out once).
+    kind: SlotKind,
+    latency: Frame,
+    /// The notes the unit holds (bit per key).
+    held: [u64; 2],
+    events: Vec<SlotEvent>,
+    out: Vec<f32>,
 }
 
 struct Slot {
     end: SlotEnd,
-    unit: Option<Box<dyn SlotProcessor>>,
-    /// The unit's kind and latency, read once at install. Both outlive a removal (nothing reads them
-    /// without a unit but the record line, whose offset then holds, so an instrument's delayed tail
-    /// plays out once).
-    kind: SlotKind,
-    latency: Frame,
+    /// The unit the slot plays.
+    seat: Seat,
+    /// A swap's other unit: the candidate while it stages, the unit it replaced while that fades out.
+    side: Seat,
+    swap: Swap,
     /// Frames into the linear bypass (0) ↔ engaged (`Rack::fade_frames`) crossfade, counted so both
     /// ends land on an exact frame; `engaged` is the end it heads for.
     fade: u32,
     engaged: bool,
     /// The unit leaves once the fade reaches bypass.
     removing: bool,
-    /// Units stopped and waiting for room on the return ring, oldest first.
-    parked: [Option<Box<dyn SlotProcessor>>; 2],
     /// GO LIVE as asked: the live gate's target, and what the record latency follows.
     live: bool,
     /// The live gate ramps linearly from `live_gain` at frame `live_end - Rack::live_frames` to the
@@ -133,10 +105,6 @@ struct Slot {
     gated: Vec<f32>,
     gain_target: f64,
     gain: f64,
-    /// The notes this slot's unit holds (bit per key).
-    held: [u64; 2],
-    events: Vec<SlotEvent>,
-    out: Vec<f32>,
     /// An instrument slot's record path: its output, `delay - latency` frames late.
     line: Vec<f32>,
     /// A slot's wet on its way to the record tap, `dw` frames late: the latched record latency less
@@ -170,33 +138,42 @@ fn crossfade(from: f32, to: f32, fade: u32, n: u32) -> f32 {
     }
 }
 
-impl Slot {
+/// A slot gain as the engine applies it: finite and at least 0, anything else silence.
+fn slot_gain(gain: f32) -> f64 {
+    if gain.is_finite() {
+        gain.max(0.0) as f64
+    } else {
+        0.0
+    }
+}
+
+impl Seat {
+    /// Allocates: built in `Rack::new`.
+    fn new(max_block: usize) -> Seat {
+        Seat {
+            unit: None,
+            tag: 0,
+            kind: SlotKind::Effect,
+            latency: 0,
+            held: [0; 2],
+            events: Vec::with_capacity(MAX_SLOT_EVENTS),
+            out: vec![0.0; max_block.max(1)],
+        }
+    }
+
+    /// Seat `unit`, sent tagged `tag`. The seat holds it before any of its methods runs: one that
+    /// panics unwinds with the unit here, never dropped as a local.
+    fn take(&mut self, tag: u64, unit: Box<dyn SlotProcessor>) {
+        self.held = [0; 2];
+        self.events.clear();
+        self.tag = tag;
+        let unit = self.unit.insert(unit);
+        self.kind = unit.kind();
+        self.latency = unit.latency().max(0);
+    }
+
     fn instrument(&self) -> bool {
         self.unit.is_some() && self.kind == SlotKind::Instrument
-    }
-
-    fn park(&mut self, unit: Box<dyn SlotProcessor>, errors: &mut u64) {
-        let Err(PushError::Full(unit)) = self.end.tx.push(unit) else { return };
-        match self.parked.iter_mut().find(|p| p.is_none()) {
-            Some(p) => *p = Some(unit),
-            None => {
-                // Unreachable under the host protocol (one unit per slot in flight, and the host reads
-                // its port). Leak rather than drop: a drop frees memory and calls into the plugin's DLL.
-                *errors += 1;
-                std::mem::forget(unit);
-            }
-        }
-    }
-
-    fn unpark(&mut self) {
-        for p in self.parked.iter_mut() {
-            if let Some(unit) = p.take() {
-                if let Err(PushError::Full(unit)) = self.end.tx.push(unit) {
-                    *p = Some(unit);
-                    return;
-                }
-            }
-        }
     }
 
     fn queue(&mut self, kind: SlotEventKind, offset: u32, dropped: &mut u64) {
@@ -214,6 +191,90 @@ impl Slot {
             }
         }
         self.held = [0; 2];
+    }
+
+    /// The unit renders `x.len()` frames from `frame` into `out` with the queued events, which then
+    /// clear (an empty seat only clears them). An event stamped past the call (never, while slot
+    /// commands bound the ranges) plays late on its last frame rather than breaking the offset contract.
+    /// A non-finite sample would stick in every filter, echo, limiter and loop after it: the whole
+    /// call's output goes silent, counted in `errors`.
+    fn process(&mut self, frame: Frame, x: &[f32], errors: &mut u64) {
+        let m = x.len();
+        for e in self.events.iter_mut() {
+            e.offset = e.offset.min(m.saturating_sub(1) as u32);
+        }
+        if let Some(unit) = self.unit.as_mut() {
+            let out = &mut self.out[..m];
+            unit.process(frame, x, &self.events, out);
+            if !out.iter().all(|y| y.is_finite()) {
+                out.fill(0.0);
+                *errors += 1;
+            }
+        }
+        self.events.clear();
+    }
+
+    /// An idle removal or an eviction: no block will carry the notes the unit was just released from,
+    /// so one silent frame from `frame` (the next the engine would render) does, and a restarted unit
+    /// holds no note. That frame's output is not checked.
+    fn flush(&mut self, frame: Frame, zeros: &[f32]) {
+        if let Some(unit) = self.unit.as_mut().filter(|_| !self.events.is_empty()) {
+            unit.process(frame, &zeros[..1], &self.events, &mut self.out[..1]);
+            self.events.clear();
+        }
+    }
+
+    /// The unit leaves: stopped while the seat still holds it, then handed back on `end` with its tag
+    /// and `reason`. A `stop` that panics unwinds with the unit left in the seat, for the owner's
+    /// eviction (or the engine's drop, off the audio thread).
+    fn hand_back(&mut self, end: &mut SlotEnd, reason: HandbackReason, errors: &mut u64) {
+        if let Some(unit) = self.unit.as_mut() {
+            unit.stop();
+        }
+        if let Some(unit) = self.unit.take() {
+            end.hand_back(self.tag, reason, unit, errors);
+        }
+        self.held = [0; 2];
+        self.events.clear();
+    }
+}
+
+impl Slot {
+    /// Into an empty slot, the unit takes the seat and crossfades in from bypass, `fade` frames already
+    /// done (all of them: engaged at once). Into an occupied one it goes straight back `Occupied`,
+    /// counted, never started or stopped.
+    fn install(&mut self, tag: u64, unit: Box<dyn SlotProcessor>, fade: u32, errors: &mut u64) {
+        if self.seat.unit.is_some() {
+            *errors += 1;
+            self.end.hand_back(tag, HandbackReason::Rejected(Rejection::Occupied), unit, errors);
+            return;
+        }
+        self.removing = false;
+        self.engaged = true;
+        self.fade = fade;
+        self.seat.take(tag, unit);
+    }
+
+    /// A remove for `tag`: the unit the slot plays, if `tag` is its, releases its notes and heads for
+    /// bypass (there at once without `fade`). A unit already being removed gets no second answer; any
+    /// other tag, an empty slot's included, is answered `NotHeld`.
+    fn remove(&mut self, tag: u64, fade: bool, dropped: &mut u64, errors: &mut u64) {
+        if self.seat.unit.is_none() || self.seat.tag != tag {
+            self.end.send(SlotReply::NotHeld { tag }, errors);
+        } else if !self.removing {
+            self.seat.release_all(0, dropped);
+            self.removing = true;
+            self.engaged = false;
+            if !fade {
+                self.fade = 0;
+            }
+        }
+    }
+
+    /// The removal ends: the unit goes back `Removed` and the slot is empty.
+    fn finish_removal(&mut self, errors: &mut u64) {
+        self.seat.hand_back(&mut self.end, HandbackReason::Removed, errors);
+        self.removing = false;
     }
 }
 
@@ -243,17 +304,16 @@ impl Rack {
         let line = sample_rate as usize * MAX_RECORD_DELAY_SECONDS + max_block;
         let mut ports = Vec::with_capacity(SLOT_COUNT);
         let slots = std::array::from_fn(|_| {
-            let (port, end) = slot_channel();
+            let (port, end) = port::channel();
             ports.push(port);
             Slot {
                 end,
-                unit: None,
-                kind: SlotKind::Effect,
-                latency: 0,
+                seat: Seat::new(max_block),
+                side: Seat::new(max_block),
+                swap: Swap::Idle,
                 fade: 0,
                 engaged: false,
                 removing: false,
-                parked: [None, None],
                 live: false,
                 live_end: Frame::MIN,
                 live_gain: 0.0,
@@ -261,9 +321,6 @@ impl Rack {
                 gated: vec![0.0; max_block.max(1)],
                 gain_target: 1.0,
                 gain: 1.0,
-                held: [0; 2],
-                events: Vec::with_capacity(MAX_SLOT_EVENTS),
-                out: vec![0.0; max_block.max(1)],
                 line: vec![0.0; line],
                 wet_line: vec![0.0; line],
                 dw: 0,
@@ -291,47 +348,30 @@ impl Rack {
     }
 
     /// Apply the ports' messages at a block start. `engaged` installs without a fade (nothing has
-    /// sounded yet, or no device runs).
+    /// sounded yet, or no device runs); without `fade` a removal completes here.
     fn service(&mut self, engaged: bool, fade: bool) {
-        let dropped = &mut self.events_dropped;
+        let (dropped, errors) = (&mut self.events_dropped, &mut self.protocol_errors);
+        let fade_in = if engaged { self.fade_frames } else { 0 };
         for s in self.slots.iter_mut() {
-            s.unpark();
-            while let Ok(msg) = s.end.rx.pop() {
+            s.end.unpark();
+            while let Some(msg) = s.end.next() {
                 match msg {
-                    SlotMsg::Install(unit) => {
-                        if s.unit.is_some() {
-                            self.protocol_errors += 1;
-                            s.park(unit, &mut self.protocol_errors);
-                            continue;
-                        }
-                        s.held = [0; 2];
-                        s.events.clear();
-                        s.removing = false;
-                        s.engaged = true;
-                        s.fade = if engaged { self.fade_frames } else { 0 };
-                        // The slot holds the unit before any of its methods runs: one that panics
-                        // unwinds with the unit here, never dropped as a local.
-                        let unit = s.unit.insert(unit);
-                        s.kind = unit.kind();
-                        s.latency = unit.latency().max(0);
+                    SlotMsg::Install { tag, unit } => s.install(tag, unit, fade_in, errors),
+                    // E2: the unit stages beside the playing one; until then every replace is refused.
+                    SlotMsg::Replace { tag, unit, .. } => {
+                        *errors += 1;
+                        s.end.hand_back(tag, HandbackReason::Rejected(Rejection::Busy), unit, errors);
                     }
-                    SlotMsg::Remove => {
-                        if s.unit.is_none() {
-                            continue;
-                        }
-                        s.release_all(0, dropped);
-                        s.removing = true;
-                        s.engaged = false;
-                        if !fade {
-                            s.fade = 0;
-                        }
-                    }
+                    SlotMsg::Remove { tag } => s.remove(tag, fade, dropped, errors),
+                    // E2: a staging candidate goes back `Cancelled`; until then none ever stages.
+                    SlotMsg::Withdraw { tag } => s.end.send(SlotReply::NotHeld { tag }, errors),
                 }
             }
             if !fade && s.removing {
-                Self::flush(s, self.cursor, &self.zeros);
-                Self::finish_removal(s, &mut self.protocol_errors);
+                s.seat.flush(self.cursor, &self.zeros);
+                s.finish_removal(errors);
             }
+            debug_assert_eq!(s.side.unit.is_some(), !matches!(s.swap, Swap::Idle), "the side seat is filled exactly while a swap runs");
         }
     }
 
@@ -347,49 +387,24 @@ impl Rack {
         self.service(true, false);
     }
 
-    /// Stop every unit and hand it back (a sample-rate change: the host re-activates and reinstalls),
-    /// an install still waiting on a port included: nothing is left for the engine's drop.
+    /// Stop every unit and hand it back `Evicted` (a sample-rate change: the host re-activates and
+    /// reinstalls), an install still waiting on a port included: nothing is left for the engine's drop.
     pub(crate) fn evict(&mut self) {
         self.service_idle();
         for s in self.slots.iter_mut() {
-            if s.unit.is_some() {
-                s.release_all(0, &mut self.events_dropped);
+            if s.seat.unit.is_some() {
+                s.seat.release_all(0, &mut self.events_dropped);
                 s.fade = 0;
                 s.engaged = false;
-                Self::flush(s, self.cursor, &self.zeros);
-                Self::finish_removal(s, &mut self.protocol_errors);
+                s.seat.flush(self.cursor, &self.zeros);
+                s.seat.hand_back(&mut s.end, HandbackReason::Evicted, &mut self.protocol_errors);
             }
         }
     }
 
-    /// An idle removal or an eviction: no block will carry the notes the unit was just released from,
-    /// so one silent frame from `frame` (the next the engine would render) does, and a restarted unit
-    /// holds no note.
-    fn flush(s: &mut Slot, frame: Frame, zeros: &[f32]) {
-        if let Some(unit) = s.unit.as_mut().filter(|_| !s.events.is_empty()) {
-            unit.process(frame, &zeros[..1], &s.events, &mut s.out[..1]);
-            s.events.clear();
-        }
-    }
-
-    /// The unit leaves: stopped while the slot still holds it, then handed back. A `stop` that panics
-    /// unwinds with the unit left in the slot, for the owner's eviction (or the engine's drop, off the
-    /// audio thread).
-    fn finish_removal(s: &mut Slot, errors: &mut u64) {
-        if let Some(unit) = s.unit.as_mut() {
-            unit.stop();
-        }
-        if let Some(unit) = s.unit.take() {
-            s.park(unit, errors);
-        }
-        s.removing = false;
-        s.held = [0; 2];
-        s.events.clear();
-    }
-
     /// The largest latency of a live slot's effect now: what [`Rack::latch_record`] takes while open.
     pub(crate) fn live_latency(&self) -> Frame {
-        self.slots.iter().filter(|s| s.live && s.shut == 0 && s.unit.is_some() && s.kind == SlotKind::Effect).map(|s| s.latency).max().unwrap_or(0)
+        self.slots.iter().filter(|s| s.live && s.shut == 0 && s.seat.unit.is_some() && s.seat.kind == SlotKind::Effect).map(|s| s.seat.latency).max().unwrap_or(0)
     }
 
     /// At a block start: while `open`, the record compensation follows the slots (the live latency, and
@@ -401,7 +416,7 @@ impl Rack {
         }
         self.record_latency = self.live_latency();
         for s in self.slots.iter_mut() {
-            let own = if s.unit.is_some() && s.kind == SlotKind::Effect { s.latency } else { 0 };
+            let own = if s.seat.unit.is_some() && s.seat.kind == SlotKind::Effect { s.seat.latency } else { 0 };
             s.dw = (self.record_latency - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
         }
     }
@@ -412,7 +427,7 @@ impl Rack {
     }
 
     pub(crate) fn installed(&self, slot: usize) -> Option<(SlotKind, Frame)> {
-        self.slots.get(slot).and_then(|s| s.unit.as_ref().map(|_| (s.kind, s.latency)))
+        self.slots.get(slot).and_then(|s| s.seat.unit.as_ref().map(|_| (s.seat.kind, s.seat.latency)))
     }
 
     fn offset(&self, now: Frame) -> u32 {
@@ -425,7 +440,7 @@ impl Rack {
         let offset = self.offset(now);
         for i in [self.target, target].into_iter().flatten() {
             if let Some(s) = self.slots.get_mut(i) {
-                s.release_all(offset, &mut self.events_dropped);
+                s.seat.release_all(offset, &mut self.events_dropped);
             }
         }
         self.target = target.filter(|&i| i < SLOT_COUNT);
@@ -434,28 +449,28 @@ impl Rack {
     pub(crate) fn note_on(&mut self, key: u8, velocity: f32, now: Frame) {
         let offset = self.offset(now);
         let Some(s) = self.target.map(|i| &mut self.slots[i]) else { return };
-        if key > 127 || s.unit.is_none() || s.removing {
+        if key > 127 || s.seat.unit.is_none() || s.removing {
             return;
         }
         let velocity = if velocity.is_finite() { velocity.clamp(0.0, 1.0) } else { 0.0 };
-        s.queue(SlotEventKind::NoteOn { key, velocity }, offset, &mut self.events_dropped);
-        s.held[(key / 64) as usize] |= 1 << (key % 64);
+        s.seat.queue(SlotEventKind::NoteOn { key, velocity }, offset, &mut self.events_dropped);
+        s.seat.held[(key / 64) as usize] |= 1 << (key % 64);
     }
 
     pub(crate) fn note_off(&mut self, key: u8, now: Frame) {
         let offset = self.offset(now);
         let Some(s) = self.target.map(|i| &mut self.slots[i]) else { return };
-        if key > 127 || s.held[(key / 64) as usize] & (1 << (key % 64)) == 0 {
+        if key > 127 || s.seat.held[(key / 64) as usize] & (1 << (key % 64)) == 0 {
             return;
         }
-        s.held[(key / 64) as usize] &= !(1 << (key % 64));
-        s.queue(SlotEventKind::NoteOff { key }, offset, &mut self.events_dropped);
+        s.seat.held[(key / 64) as usize] &= !(1 << (key % 64));
+        s.seat.queue(SlotEventKind::NoteOff { key }, offset, &mut self.events_dropped);
     }
 
     pub(crate) fn all_notes_off(&mut self, now: Frame) {
         let offset = self.offset(now);
         if let Some(s) = self.target.map(|i| &mut self.slots[i]) {
-            s.release_all(offset, &mut self.events_dropped);
+            s.seat.release_all(offset, &mut self.events_dropped);
         }
     }
 
@@ -514,7 +529,7 @@ impl Rack {
 
     pub(crate) fn set_gain(&mut self, slot: usize, gain: f32) {
         if let Some(s) = self.slots.get_mut(slot) {
-            s.gain_target = if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 };
+            s.gain_target = slot_gain(gain);
         }
     }
 
@@ -557,26 +572,12 @@ impl Rack {
                 &self.zeros[..m]
             };
             // An instrument takes no input.
-            let x = if s.instrument() { &self.zeros[..m] } else { gated };
-            let has = s.unit.is_some();
-            // An event stamped past this call (never, while slot commands bound the ranges) plays late
-            // on its last frame rather than breaking the offset contract.
-            for e in s.events.iter_mut() {
-                e.offset = e.offset.min(m.saturating_sub(1) as u32);
-            }
-            if let Some(unit) = s.unit.as_mut() {
-                unit.process(frame, x, &s.events, &mut s.out[..m]);
-                // A non-finite sample would stick in every filter, echo, limiter and loop after it: the
-                // whole call's output goes silent, counted.
-                if !s.out[..m].iter().all(|y| y.is_finite()) {
-                    s.out[..m].fill(0.0);
-                    self.protocol_errors += 1;
-                }
-            }
-            s.events.clear();
-            let instrument = s.instrument();
+            let x = if s.seat.instrument() { &self.zeros[..m] } else { gated };
+            let has = s.seat.unit.is_some();
+            s.seat.process(frame, x, &mut self.protocol_errors);
+            let instrument = s.seat.instrument();
             let len = s.line.len();
-            let (d, dw) = ((delay - s.latency).clamp(0, (len - 1) as Frame) as usize, s.dw);
+            let (d, dw) = ((delay - s.seat.latency).clamp(0, (len - 1) as Frame) as usize, s.dw);
             for k in 0..m {
                 // A removal completes on the frame its fade reaches bypass, whatever the call's bounds:
                 // from there the slot is empty and passes what an empty slot does.
@@ -585,7 +586,7 @@ impl Rack {
                 // bypass go different ways (the bus, the wet), so each fades against silence there.
                 let b = gated[k];
                 // Read only mid-fade, which a gone slot never is.
-                let o = if has { s.out[k] } else { b };
+                let o = if has { s.seat.out[k] } else { b };
                 let (y, dry) = if instrument && !gone {
                     (crossfade(0.0, o, s.fade, fade_frames), crossfade(b, 0.0, s.fade, fade_frames))
                 } else {
@@ -613,7 +614,7 @@ impl Rack {
                 s.write = (s.write + 1) % len;
             }
             if s.removing && s.fade == 0 {
-                Self::finish_removal(s, &mut self.protocol_errors);
+                s.finish_removal(&mut self.protocol_errors);
             }
         }
         for (r, &w) in record.iter_mut().zip(aligned.iter()) {
@@ -655,13 +656,13 @@ mod tests {
     #[test]
     fn notes_past_the_event_queue_are_dropped_and_counted() {
         let (mut rack, mut ports) = Rack::new(48000, 64);
-        assert!(ports[0].install(Box::new(Sink)).is_ok());
+        assert!(ports[0].install(0, Box::new(Sink)).is_ok());
         rack.service_idle();
         rack.select(Some(0), 0);
         for k in 0..MAX_SLOT_EVENTS + 3 {
             rack.note_on((k % 128) as u8, 1.0, 0);
         }
         assert_eq!(rack.events_dropped, 3);
-        assert_eq!(rack.slots[0].events.len(), MAX_SLOT_EVENTS);
+        assert_eq!(rack.slots[0].seat.events.len(), MAX_SLOT_EVENTS);
     }
 }

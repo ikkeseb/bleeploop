@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use common::units::{fake, Fake, Probe, Seen, LOG};
 use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{Command, HandbackReason, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, Rejection, SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SlotReply};
 
 /// Frames of the bypass crossfade at 48 kHz: 10 ms.
 const FADE: usize = 480;
@@ -316,11 +316,14 @@ fn the_engine_never_drops_a_unit() {
 fn an_install_into_an_occupied_slot_hands_the_new_unit_back_and_counts_it() {
     let (a, b) = (Probe::new(), Probe::new());
     let mut rig = Rig::new();
-    rig.install(0, Fake::effect(0.1, 0.0, &a).with_id(1));
+    rig.install_tagged(0, 5, Fake::effect(0.1, 0.0, &a).with_id(1));
     rig.advance(128);
-    rig.install(0, Fake::effect(0.2, 0.0, &b).with_id(2));
+    rig.install_tagged(0, 6, Fake::effect(0.2, 0.0, &b).with_id(2));
     rig.advance(128);
-    assert_eq!(fake(rig.returned(0).expect("handed back")).id, 2);
+    let Some(SlotReply::Handback(back)) = rig.reply(0) else { panic!("the new unit is handed back") };
+    assert_eq!((back.tag, back.reason), (6, HandbackReason::Rejected(Rejection::Occupied)), "with its tag, refused");
+    assert_eq!(fake(back.unit).id, 2);
+    assert!(rig.reply(0).is_none(), "nothing else");
     assert_eq!(rig.engine.diag().slot_protocol_errors, 1);
     assert_eq!((b.calls().len(), b.stops()), (0, 0), "the refused unit never ran");
     assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 0)), "the first one stays");

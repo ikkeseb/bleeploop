@@ -14,8 +14,14 @@ const PARKED: usize = 2;
 
 pub(super) enum SlotMsg {
     Install { tag: u64, unit: Box<dyn SlotProcessor> },
-    Replace { tag: u64, unit: Box<dyn SlotProcessor>, gain: f32 },
+    Replace {
+        tag: u64,
+        unit: Box<dyn SlotProcessor>,
+        #[expect(dead_code, reason = "E2: the swap commits at it; until then every replace is refused")]
+        gain: f32,
+    },
     Remove { tag: u64 },
+    Withdraw { tag: u64 },
 }
 
 /// The host's end of one slot (`EngineHandle::slots`). Not real-time: the host blocks on it, the engine
@@ -39,12 +45,19 @@ impl SlotPort {
         self.send_unit(SlotMsg::Replace { tag, unit, gain })
     }
 
-    /// Take out the unit tagged `tag`: the unit the slot plays releases its notes, crossfades to bypass,
-    /// stops and comes back `Removed` (a candidate staging beside it goes back `Cancelled` first); a
-    /// staging candidate alone goes back `Cancelled`; a unit fading out after a swap is already
-    /// leaving and gets no answer; any other tag is answered `NotHeld`. False when the ring is full.
+    /// Take out the unit the slot plays, if `tag` is its: it releases its notes, crossfades to bypass,
+    /// stops and comes back `Removed` (a candidate staging beside it goes back `Cancelled` first). A unit
+    /// fading out after a swap, or already being removed, is leaving and gets no answer; any other tag
+    /// (a staging candidate's included) is answered `NotHeld`. False when the ring is full.
     pub fn remove(&mut self, tag: u64) -> bool {
         self.tx.push(SlotMsg::Remove { tag }).is_ok()
+    }
+
+    /// Call off the replace tagged `tag` while its unit stages: it goes back `Cancelled` and the unit
+    /// the slot plays plays on. Any other tag (committed, fading out, unknown) is answered `NotHeld`, so
+    /// a withdraw that loses the race to a commit never touches the new unit. False when the ring is full.
+    pub fn withdraw(&mut self, tag: u64) -> bool {
+        self.tx.push(SlotMsg::Withdraw { tag }).is_ok()
     }
 
     /// The next reply, in the order the engine sent them.
@@ -55,7 +68,7 @@ impl SlotPort {
     fn send_unit(&mut self, msg: SlotMsg) -> Result<(), Box<dyn SlotProcessor>> {
         self.tx.push(msg).map_err(|PushError::Full(msg)| match msg {
             SlotMsg::Install { unit, .. } | SlotMsg::Replace { unit, .. } => unit,
-            SlotMsg::Remove { .. } => unreachable!(),
+            SlotMsg::Remove { .. } | SlotMsg::Withdraw { .. } => unreachable!(),
         })
     }
 }

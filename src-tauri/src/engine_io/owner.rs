@@ -23,7 +23,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
 use super::driver::{Driver, Endpoints, Mirror, Spec, StartError, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
-use super::slot_host::ORPHAN;
+use super::slot_host::{handed_back, ORPHAN};
 use super::{transition, BlockLoad, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, IoDiag, OpenError, Rt};
 use crate::asio_startup::AsioStatusReport;
 use crate::audio_output::AudioBackend;
@@ -169,7 +169,7 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
     }
     for (slot, port) in ports.iter_mut().enumerate() {
         if let Some(port) = port.as_mut() {
-            while let Some(unit) = port.returned() {
+            while let Some(unit) = handed_back(port) {
                 park(core, slot, unit);
             }
         }

@@ -13,7 +13,7 @@ pub mod units;
 use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::scope::ScopeBin;
-use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
+use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, SlotReply, TimedCommand};
 
 // Every `process` call in every scenario runs under assert_no_alloc: the audio path never allocates.
 // The check runs in debug builds; the crate's default `disable_release` makes it a no-op in release.
@@ -241,21 +241,51 @@ impl Rig {
         self.gap_next = true;
     }
 
-    /// Install `unit` into `slot`: it applies at the next block start (engaged at once before the first
-    /// block, crossfading in after it).
+    /// Install `unit` into `slot`, tagged 0: it applies at the next block start (engaged at once before
+    /// the first block, crossfading in after it).
     pub fn install(&mut self, slot: usize, unit: Box<dyn SlotProcessor>) {
-        if self.handle.slots[slot].install(unit).is_err() {
+        self.install_tagged(slot, 0, unit);
+    }
+
+    pub fn install_tagged(&mut self, slot: usize, tag: u64, unit: Box<dyn SlotProcessor>) {
+        if self.handle.slots[slot].install(tag, unit).is_err() {
             panic!("slot {slot}'s message ring is full");
         }
     }
 
-    /// Ask for `slot`'s unit back; it returns on [`Rig::returned`] once it has crossfaded out.
-    pub fn remove(&mut self, slot: usize) {
-        assert!(self.handle.slots[slot].remove(), "slot {slot}'s message ring is full");
+    /// Replace `slot`'s unit with `unit`, tagged `tag`, crossfading to it at `gain`.
+    pub fn replace(&mut self, slot: usize, tag: u64, unit: Box<dyn SlotProcessor>, gain: f32) {
+        if self.handle.slots[slot].replace(tag, unit, gain).is_err() {
+            panic!("slot {slot}'s message ring is full");
+        }
     }
 
+    /// Ask for `slot`'s unit tagged 0 back; it returns on [`Rig::returned`] once it has crossfaded out.
+    pub fn remove(&mut self, slot: usize) {
+        self.remove_tagged(slot, 0);
+    }
+
+    pub fn remove_tagged(&mut self, slot: usize, tag: u64) {
+        assert!(self.handle.slots[slot].remove(tag), "slot {slot}'s message ring is full");
+    }
+
+    pub fn withdraw(&mut self, slot: usize, tag: u64) {
+        assert!(self.handle.slots[slot].withdraw(tag), "slot {slot}'s message ring is full");
+    }
+
+    /// The next unit `slot` hands back, whatever its reason, past the acknowledgements before it.
     pub fn returned(&mut self, slot: usize) -> Option<Box<dyn SlotProcessor>> {
-        self.handle.slots[slot].returned()
+        while let Some(reply) = self.reply(slot) {
+            if let SlotReply::Handback(back) = reply {
+                return Some(back.unit);
+            }
+        }
+        None
+    }
+
+    /// The next reply on `slot`'s port, in the order the engine sent them.
+    pub fn reply(&mut self, slot: usize) -> Option<SlotReply> {
+        self.handle.slots[slot].reply()
     }
 
     /// The host's end of the session port (`lf_engine::session`).
