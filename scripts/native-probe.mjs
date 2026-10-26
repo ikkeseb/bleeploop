@@ -42,12 +42,13 @@ const PROBES = {
   'editor-premise': { tag: 'premise', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, config: CLASSIC },
   'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/, config: CLASSIC },
   'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/, config: CLASSIC },
-  // `failLine`: a probe line that fails the run whatever the verdict says. The probe swaps on when
-  // an editor does not open, so its summary alone would pass an editor-open round that opened none.
+  // `failLine`: a probe line that fails the run whatever the verdict says. The summary counts a
+  // failed editor open as a failure and the swaps done with an editor open (at least one, or the
+  // editor-open round proved nothing); verify/guards/native-swap-verdict.mjs holds both patterns.
   'swap-stress': {
     tag: 'swap',
     end: /^(complete: .*|TIMEOUT .*|ABORTED.*|need at least .*)$/,
-    pass: /^complete: \d+ swapped, 0 failed/,
+    pass: /^complete: \d+ swapped, 0 failed, [1-9]\d* with an editor open$/,
     failLine: /^open failed /,
     config: CLASSIC,
   },

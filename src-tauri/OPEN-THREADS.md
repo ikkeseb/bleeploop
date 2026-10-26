@@ -132,9 +132,6 @@
   quitting with an error after it started) leaves the app without an engine or with none open: the
   first says "restart BleepLoop", the second nothing; a recovery needs a process outside the app that
   watches the installer. Neither has been seen; only a real update shows them.
-- `native:swap`'s editor-open round passes with every editor open failed: `src/debug/swap-stress.ts`
-  83-97 logs the failure, counts the swap, and the runner accepts "0 failed". Fix: count a failed open
-  as a failed scenario and report swaps done with an editor open (the runner's regex follows).
 - After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
   rejected (how often: `docs/VERIFY.md`, the `native:engine` baseline). Traced (the join trace in
   `engine_io/callback.rs`): once primed, capture delivers a packet early and a render callback comes a

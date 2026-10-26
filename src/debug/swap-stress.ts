@@ -65,6 +65,7 @@ export async function runSwapStress(): Promise<void> {
   const tagOf = (d: PluginDescriptor) => `${d.name} [${d.format}]`;
   log(`start: ${list.length} plugin(s), ${list.length * (list.length - 1) * 2} swap(s)`);
   let swaps = 0;
+  let swapsWithEditor = 0; // swaps done with the editor actually open
   let failed = 0;
   try {
     for (const editorOpen of [false, true]) {
@@ -80,12 +81,15 @@ export async function runSwapStress(): Promise<void> {
             continue;
           }
           await sleep(1000);
+          let opened = false;
           if (editorOpen) {
             try {
               await step(`openEditor ${tagOf(from)}`, () => platform.pluginHost.openEditor(0));
+              opened = true;
             } catch (e) {
               if (e instanceof StepTimeout) throw e;
               log(`open failed (continuing without editor) ${tagOf(from)}: ${String(e)}`);
+              failed++; // the scenario is "swap with the editor open": without it, it failed
             }
             await sleep(800);
           }
@@ -94,14 +98,17 @@ export async function runSwapStress(): Promise<void> {
           if (slotPlugins()[0]?.id !== to.id) {
             log(`SWAP FAILED ${label}`);
             failed++;
-          } else swaps++;
+          } else {
+            swaps++;
+            if (opened) swapsWithEditor++;
+          }
           await sleep(800);
           await step(`unload ${tagOf(to)}`, () => clearPlugin(0));
           await sleep(500);
         }
       }
     }
-    log(`complete: ${swaps} swapped, ${failed} failed`);
+    log(`complete: ${swaps} swapped, ${failed} failed, ${swapsWithEditor} with an editor open`);
   } catch (e) {
     if (e instanceof StepTimeout) log(`TIMEOUT after ${STEP_TIMEOUT_MS} ms in: ${e.message} — probe stopped, ${swaps} swapped before it`);
     else log(`ABORTED: ${String(e)}`);
