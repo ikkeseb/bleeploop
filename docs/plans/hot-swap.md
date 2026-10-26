@@ -1,6 +1,7 @@
-# Plan: hot plugin swap (issue #1), held for the owner
+# Plan: hot plugin swap (issue #1), building on a branch
 
-Open plan, not built. It waits on the owner's word on invariant 4's wording (below). Once built or
+Open plan. The owner approved (2026-10-26) building it on the branch `road1/hot-swap` with invariant 4
+reworded as below; it does not land on `main` until the owner has heard the crossfade. Once landed or
 dropped, what still binds folds into the briefings and this file goes.
 
 ## The ask
@@ -56,7 +57,7 @@ reload re-arms it). Path: `src/ui/state/instrument.ts` (`doSelectPlugin`, `unloa
 
 ## Owner decisions
 
-1. **Invariant 4's wording** (`AGENTS.md` and `docs/ARCHITECTURE.md` together). Proposed: "Plugin
+1. **Invariant 4's wording** (`AGENTS.md` and `docs/ARCHITECTURE.md` together), approved for the branch: "Plugin
    lifecycle runs on its owner thread, only while the engine does not hold that instance; the engine
    owns a submitted unit until its tagged handback and never destroys one on the RT thread."
    Format processing start and stop on the processing thread stay as today.
