@@ -240,7 +240,8 @@ impl EngineHost {
         Ok((0..TRACK_COUNT).map(|i| overview.lane(i).frames.max(0) as usize).sum::<usize>().max(1))
     }
 
-    /// Hand `job` to the engine and wait (≤ `WAIT`) for it to come back. While no device runs the
+    /// Hand `job` to the engine and wait for it to come back: ≤ `WAIT`, or up to twice that for a job the
+    /// engine took (`run_job`), all under the caller's `session_busy`. While no device runs the
     /// engine is serviced here, under its lock. The port is out of `Ends` meanwhile; an engine that is
     /// replaced meanwhile takes its job with it. `stale`: jobs earlier calls gave up on, still in the
     /// engine of that generation; they come back first and are dropped. A job given up on before the
@@ -301,6 +302,9 @@ impl EngineHost {
                 }
                 // It comes back to a later call, which drops it: withdrawn, unrun; or taken and still not
                 // back after the second wait (the engine faulted mid-job, and goes with its loops).
+                // Residual: a job the engine took (its claim won) cannot be withdrawn. A callback that
+                // stalls more than two `WAIT`s between taking a load and applying it applies a load this
+                // already answered as failed; nothing recovers that but the engine's fault path.
                 *stale += usize::from(job.is_none());
                 return Err(format!("the session job did not finish within {} s", WAIT.as_secs()));
             }

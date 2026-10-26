@@ -13,7 +13,7 @@ use std::mem::ManuallyDrop;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,11 @@ const POLL: Duration = Duration::from_millis(20);
 const CALLBACK_WAIT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 1 });
 /// The longest a start waits for the first callbacks and their latency reports.
 const START_WAIT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 2 });
+/// The longest an unasked rate switch waits, after its stop, for a session job to end (`session_busy`):
+/// a taken job may hold it for two of its waits (20 s), past the open's caller (`OPEN_TIMEOUT`, 15 s).
+/// It leaves that caller room for the stop before it (`CALLBACK_WAIT`) and the reopen after it (an ASIO
+/// preopen, `START_WAIT`, a start at the driver's own size). Not acquired by then, the switch is refused.
+pub(crate) const SESSION_WAIT: Duration = Duration::from_secs(5);
 /// Device events kept for `EngineHost::take_device_events`; older ones drop.
 const MAX_EVENTS: usize = 64;
 /// The shortest time between two engine replacements after a fault: a unit that panics on every block
@@ -323,6 +328,20 @@ fn rt(core: &Core) -> std::sync::MutexGuard<'_, Rt> {
     core.rt.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// `lock`, polled for at most `bound` (a poisoned one is taken: its state is a counter); `None` when
+/// another thread held it all along.
+fn lock_within<T>(lock: &Mutex<T>, bound: Duration) -> Option<MutexGuard<'_, T>> {
+    let deadline = Instant::now() + bound;
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() >= deadline => return None,
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+}
+
 impl<D: Driver> Owner<D> {
     fn serve(mut self, rx: Receiver<Request>) {
         loop {
@@ -412,8 +431,9 @@ impl<D: Driver> Owner<D> {
     /// also where Windows moved a default side since and the run follows it (`track_default`).
     /// A slot's pick the device lacks opens on auto (`transition::open_channels`). The player's open
     /// (`By::Player`) is refused, before anything stops, when it would build an engine at another rate
-    /// while this one holds audio, unless forced; a switch of the player's that fails to start reopens the
-    /// device it replaced. A size the ASIO driver refuses opens at its own (`start_at_own_size`). A run
+    /// while this one holds audio, unless forced; and after the stop, when a load landed meanwhile or a
+    /// session job outlasts `SESSION_WAIT` (`reopen_refused`). A switch of the player's that fails to
+    /// start reopens the device it replaced. A size the ASIO driver refuses opens at its own (`start_at_own_size`). A run
     /// whose input died (`recapture`) starts again, even on the same device.
     fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         let driver = self.driver.asio_driver();
@@ -449,18 +469,25 @@ impl<D: Driver> Owner<D> {
         // still play), or once they stopped (the loader services the engine itself). From here to the
         // build no session job runs (`session_busy`), so a load that answered Ok is seen here, and the
         // switch is refused with the device it stopped restarted rather than dropping the loops unasked.
+        // A job that keeps the lock past `SESSION_WAIT` (a load may still land) refuses it the same way.
+        // `session_busy` is the outermost lock: taken here with none held, and by a session job on its
+        // own thread; under it nest `ends` and `rt` (a job, `holds_audio`) and everything the build
+        // takes (the rebuild hook's MIDI lock, the slot ports, `rt`, `settings`, `ends`).
         let core = self.core.clone();
-        let session = unasked.map(|_| core.session_busy.lock().unwrap_or_else(|e| e.into_inner()));
-        if let Some(from) = unasked.filter(|_| self.core.holds_audio()) {
-            drop(session);
-            log::info!("[engine_io] a switch to {} Hz refused after its stop: a load reached the engine at {from} Hz meanwhile", spec.rate);
-            if let Some(previous) = previous {
-                // Unforced: a device that now runs at another rate stays closed, and the loops stay.
-                if let Err(e) = self.open(previous, By::Player { force: false }) {
-                    log::error!("[engine_io] the device the refused switch stopped did not reopen: {e}");
-                }
+        let mut session = None;
+        if let Some(from) = unasked {
+            session = lock_within(&core.session_busy, SESSION_WAIT);
+            let why = match &session {
+                None => Some("a session job still ran"),
+                Some(_) if self.core.holds_audio() => Some("a load reached the engine meanwhile"),
+                Some(_) => None,
+            };
+            if let Some(why) = why {
+                drop(session);
+                log::info!("[engine_io] a switch to {} Hz refused after its stop: {why} (the engine at {from} Hz)", spec.rate);
+                self.reopen_refused(previous);
+                return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
             }
-            return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
         }
         if steps.build {
             self.build(spec.rate, steps.evict);
@@ -482,6 +509,19 @@ impl<D: Driver> Owner<D> {
                 }
                 Err(error.into())
             }
+        }
+    }
+
+    /// After a switch refused past its stop: the device it stopped (`previous`) opens again, unforced, so
+    /// one that now runs at another rate stays closed and the loops stay. One that does not open is
+    /// reported as lost, with why, since the switch's own answer is its refusal.
+    fn reopen_refused(&mut self, previous: Option<DeviceRequest>) {
+        let Some(previous) = previous else { return };
+        let backend = previous.backend;
+        if let Err(error) = self.open(previous, By::Player { force: false }) {
+            let reason = format!("the device a refused switch stopped did not start again: {error}");
+            log::error!("[engine_io] {reason}");
+            self.event(DeviceEvent::Lost { backend, reason });
         }
     }
 
