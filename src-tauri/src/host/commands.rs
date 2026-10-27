@@ -264,6 +264,37 @@ pub async fn plugin_load(
         Err(format!("plugin_load is Windows-only (slot={slot})"))
     }
 }
+/// Hot-swap the slot's plugin for plugin `id` from `path`, for the document with `frontend_epoch`: the
+/// next plugin loads while the current one plays, the engine crossfades to it at `gain` (the UI's
+/// saved level for it), and the replaced one retires (`plugin:retired`). Refused while the slot plays
+/// no plugin, for the file that plays (swap it cold), and with a `busy:` reason while it cannot be now
+/// (`engine_io::plugins::swap`); `tone_token` as `plugin_load`'s.
+#[tauri::command]
+pub async fn plugin_swap(
+    slot: u8,
+    path: String,
+    id: String,
+    gain: f32,
+    frontend_epoch: u32,
+    tone_token: Option<u32>,
+    window: tauri::WebviewWindow,
+) -> Result<PluginInfo, String> {
+    validate_slot(slot)?;
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        let app = window.app_handle().clone();
+        blocking(app, "plugin_swap", move |engine, state| {
+            engine.plugin_swap(state, &window, slot, path, id, gain, frontend_epoch, tone_token)
+        })
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (&window, &path, &id, gain, frontend_epoch, tone_token);
+        Err(format!("plugin_swap is Windows-only (slot={slot})"))
+    }
+}
 /// Unload the slot's plugin, for the document with `frontend_epoch`: it crossfades out of the engine,
 /// then its owner tears it down.
 #[tauri::command]

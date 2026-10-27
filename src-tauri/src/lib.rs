@@ -319,6 +319,7 @@ pub fn run() {
             host::plugin_folder_add,
             host::plugin_folder_remove,
             host::plugin_load,
+            host::plugin_swap,
             host::plugin_unload,
             host::plugin_list_loaded,
             host::plugin_set_param,

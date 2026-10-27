@@ -9,6 +9,7 @@
 //! carries the UI's engine commands too) and the `plugin_*` commands that route to the engine's slots
 //! (`engine()`). Blocking work (an open waits up to 15 s) runs off the IPC thread.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use tauri::{AppHandle, Manager};
 
 use super::feed::{FeedHold, FeedThread};
 use super::midi::MidiHost;
-use super::plugins::EngineSlot;
+use super::plugins::SlotEntry;
 use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::FeedFrame;
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
@@ -54,7 +55,9 @@ pub struct EngineApp {
     /// is held across every call into it ([`EngineApp::with_midi`]), so the shutdown's take waits for a
     /// call in flight and drops it before the host shuts down.
     midi: Mutex<Option<MidiHost>>,
-    pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
+    pub(super) slots: Mutex<[SlotEntry; SLOT_COUNT]>,
+    /// Set as the exit begins: no swap starts from then on, and one in flight is not wanted (`plugins`).
+    pub(super) closing: AtomicBool,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
     pub(super) tones: Option<ToneStore>,
     /// A session import's tone, parked for the reload of the slot that held its plugin (`plugins`).
@@ -107,7 +110,8 @@ impl EngineApp {
         EngineApp {
             engine,
             midi: Mutex::new(midi),
-            slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
+            slots: Mutex::new(std::array::from_fn(|_| SlotEntry::default())),
+            closing: AtomicBool::new(false),
             tones,
             reload_tones: Mutex::default(),
         }

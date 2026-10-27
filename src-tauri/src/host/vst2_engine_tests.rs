@@ -1322,6 +1322,7 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
         editor_parent: 0,
         ready,
         tone: ToneKeeper::new(tone, Arc::new(AtomicBool::new(false))),
+        replaced: Default::default(),
     };
     let run = owner(shape, ID);
     let owner = std::thread::spawn(move || run(ctx));

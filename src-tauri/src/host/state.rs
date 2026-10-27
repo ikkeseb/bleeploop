@@ -38,6 +38,10 @@ pub struct PluginInfo {
     /// was stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<ToneRestore>,
+    /// The instance's generation (`EngineSlotHandle::instance`): new with every load and swap.
+    pub instance: u64,
+    /// The kind the plugin activated as: an effect (it has an audio input), else an instrument.
+    pub effect: bool,
 }
 
 /// A session import's tone, stored (`plugin_tone_import`). Mirrors `ToneImport` in

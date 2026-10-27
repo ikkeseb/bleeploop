@@ -44,7 +44,7 @@ use super::{
     load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
     EVENT_RING_CAP,
 };
-use crate::engine_io::slot_host::Back;
+use crate::engine_io::slot_host::{Back, Standing};
 use crate::engine_io::SlotHost;
 
 #[path = "engine_slot/swap.rs"]
@@ -202,6 +202,8 @@ pub(super) struct OwnerCtx {
     pub(super) ready: SyncSender<Result<Ready, String>>,
     /// The plugin's tone: what the load restores and where the owner saves it.
     pub(super) tone: ToneKeeper,
+    /// Raised once another owner's replace retired this one (`Parked`); the handle reads it (`retired`).
+    pub(super) replaced: Arc<AtomicBool>,
 }
 
 /// An installed load, as the owner reports it.
@@ -391,7 +393,7 @@ pub(super) fn serve<P: OwnedPlugin>(
     ctx: OwnerCtx,
     load: impl FnOnce(Setup<'_>) -> Result<Loaded<P>, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, claim, entry, requests, params, params_tx, param_ids, sink, editor_parent, ready, mut tone } = ctx;
+    let OwnerCtx { slot, running, claim, entry, requests, params, params_tx, param_ids, sink, editor_parent, ready, mut tone, replaced } = ctx;
     let index = slot.slot();
     let faults = Arc::new(AtomicU32::new(0));
     let setup = Setup { slot: &slot, params, params_tx, sink: &sink, editor_parent, faults: faults.clone(), tone: &mut tone };
@@ -435,7 +437,7 @@ pub(super) fn serve<P: OwnedPlugin>(
         return teardown(&slot, plugin, None, None);
     }
 
-    let mut parked = Parked { unit: None, retired: false };
+    let mut parked = Parked { unit: None, retired: replaced };
     let mut reported = 0u32;
     let save = |tone: &mut ToneKeeper, plugin: &mut P, why: &str| keep_tone(tone, index, why, &name, || plugin.state());
     // A panic in the loop must not unwind past a unit the engine still runs (dropping the plugin would
@@ -561,8 +563,8 @@ struct Parked<U> {
     /// `None` while the engine holds it.
     unit: Option<Box<U>>,
     /// Another owner's replace retired this one: its unit never goes in again (the desk forgets the
-    /// owner once its unit is back, so the owner remembers).
-    retired: bool,
+    /// owner once its unit is back, so the owner remembers; its handle reads it too).
+    retired: Arc<AtomicBool>,
 }
 
 impl<U: SlotProcessor + 'static> Parked<U> {
@@ -574,15 +576,19 @@ impl<U: SlotProcessor + 'static> Parked<U> {
             Back::Evicted(unit) => Some(own(unit)),
             Back::Out(unit) => {
                 self.unit = Some(own(unit));
-                self.retired = true;
+                self.retired.store(true, Release);
                 None
             }
         }
     }
 
+    fn retired(&self) -> bool {
+        self.retired.load(Acquire)
+    }
+
     /// The parked unit to put in again: never a retired one.
     fn take(&mut self) -> Option<Box<U>> {
-        if self.retired { None } else { self.unit.take() }
+        if self.retired() { None } else { self.unit.take() }
     }
 }
 
@@ -600,7 +606,7 @@ fn cycle<P: OwnedPlugin>(
     let index = slot.slot();
     let unit = match back.or_else(|| parked.take()) {
         Some(unit) => Some(unit),
-        None if parked.retired => None,
+        None if parked.retired() => None,
         None => match slot.remove_back(REMOVE_TIMEOUT) {
             Ok(Some(back)) => parked.back(back),
             Ok(None) => {
@@ -739,6 +745,8 @@ fn spawn_within(
     let (request_tx, requests) = std::sync::mpsc::channel();
     let (ready, ready_rx) = load_ready_channel();
     let param_ids = ParamIds::default();
+    let replaced = Arc::new(AtomicBool::new(false));
+    let slot_host = slot.clone();
     let ctx = OwnerCtx {
         slot,
         running: running.clone(),
@@ -752,6 +760,7 @@ fn spawn_within(
         editor_parent,
         ready,
         tone: ToneKeeper::new(tone, edited.clone()),
+        replaced: replaced.clone(),
     };
     let owner = std::thread::Builder::new()
         .name(format!("lf-{}-engine-{index}", format.as_str()))
@@ -776,6 +785,8 @@ fn spawn_within(
             kind,
             tone,
             instance,
+            slot_host,
+            replaced,
             running,
             owner: Mutex::new(Some(owner)),
             requests: request_tx,
@@ -810,6 +821,10 @@ pub(crate) struct EngineSlotHandle {
     kind: SlotKind,
     tone: Option<ToneRestore>,
     instance: u64,
+    /// The owner's handshake with the slot, for where it stands (`retired`).
+    slot_host: SlotHost,
+    /// The owner's `Parked::retired`.
+    replaced: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     /// Taken by the one caller that stops and joins the owner (`retire`), through a shared handle.
     owner: Mutex<Option<JoinHandle<Result<(), String>>>>,
@@ -842,6 +857,13 @@ impl EngineSlotHandle {
     /// The instance's generation: its owner's tag on the slot (`SlotHost::tag`), new with every load.
     pub(crate) fn instance(&self) -> u64 {
         self.instance
+    }
+
+    /// Whether another owner's replace retired this instance (it never plays again): its unit fades out
+    /// or waits to be taken back, or the owner has taken it back; or the owner gave the unit up. A unit
+    /// out of the engine for a restart or a re-activation after a device change is not retired.
+    pub(crate) fn retired(&self) -> bool {
+        matches!(self.slot_host.standing(), Some(Standing::Retiring | Standing::Abandoned)) || self.replaced.load(Acquire)
     }
 
     /// Set a parameter the plugin listed: the unit applies it at the start of the next block it
@@ -964,8 +986,8 @@ impl Drop for EngineSlotHandle {
 }
 
 /// Test-only: an owner with no plugin behind it, whose unit is `unit` (`engine_io/plugins.rs`'s slot
-/// tests). `in_engine` runs once the unit is installed, before the owner reports the load; `leaving`
-/// once an unload has asked, before the unit leaves the engine.
+/// tests), installed. `in_engine` runs once the unit is installed, before the owner reports the load;
+/// `leaving` once an unload has asked, before the unit leaves the engine.
 #[cfg(test)]
 pub(crate) fn stand_in(
     slot: SlotHost,
@@ -973,7 +995,20 @@ pub(crate) fn stand_in(
     in_engine: impl FnOnce() + Send + 'static,
     leaving: impl FnOnce() + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
-    spawn(PluginFormat::Clap, slot, 0, Arc::new(|_| {}), None, Entry::Install, stand_in_owner(unit, in_engine, leaving))
+    stand_in_entering(slot, unit, Entry::Install, in_engine, leaving)
+}
+
+/// Test-only: `stand_in`, its unit entering as `entry` says (a swap's replace: `in_engine` runs once it
+/// committed).
+#[cfg(test)]
+pub(crate) fn stand_in_entering(
+    slot: SlotHost,
+    unit: Box<dyn lf_engine::SlotProcessor>,
+    entry: Entry,
+    in_engine: impl FnOnce() + Send + 'static,
+    leaving: impl FnOnce() + Send + 'static,
+) -> Result<EngineSlotHandle, String> {
+    spawn(PluginFormat::Clap, slot, 0, Arc::new(|_| {}), None, entry, stand_in_owner(unit, in_engine, leaving))
 }
 
 /// Test-only: `stand_in`'s owner.
@@ -985,12 +1020,20 @@ fn stand_in_owner(
 ) -> impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static {
     move |ctx| {
         let kind = unit.kind();
-        let installed = match ctx.slot.rate() {
-            _ if !ctx.claim.claim() => Err("plugin load cancelled".to_string()),
-            Some(rate) => ctx.slot.install(unit, rate).map_err(|(_, e)| e),
-            None => Err("no audio device is open".to_string()),
+        let entered = match ctx.slot.rate() {
+            _ if ctx.entry.cancelled() || !ctx.claim.claim() => Entered::Refused(unit, "plugin load cancelled".to_string()),
+            Some(rate) => swap::enter(&ctx.slot, unit, rate, &ctx.entry, "Stand-in", Instant::now()),
+            None => Entered::Refused(unit, "no audio device is open".to_string()),
         };
-        if let Err(e) = installed {
+        let refused = match entered {
+            Entered::Committed => None,
+            Entered::Refused(_, e) => Some(e),
+            Entered::Unresolved => {
+                ctx.slot.abandon();
+                Some("the engine did not answer the swap".to_string())
+            }
+        };
+        if let Some(e) = refused {
             let _ = ctx.ready.send(Err(e));
             return Ok(());
         }
@@ -1049,6 +1092,7 @@ pub(super) fn spawn_given_up(
         editor_parent: 0,
         ready,
         tone: ToneKeeper::new(None, Arc::new(AtomicBool::new(false))),
+        replaced: Arc::default(),
     };
     let ready_rx = (gave_up == GaveUp::Before).then_some(ready_rx);
     let (done_tx, done) = std::sync::mpsc::channel();

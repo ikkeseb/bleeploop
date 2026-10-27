@@ -19,17 +19,23 @@
 //! Every request that changes a slot (load, unload, a parameter, the editor) names its document and is
 //! refused from a replaced one, checked under the slots lock as it takes the slot. Commands clone a
 //! loaded slot's handle out of the lock, so a slow owner round trip on one slot holds up nobody else.
+//!
+//! A hot swap (`swap`) loads the next plugin while the slot's plugin plays (`Swapping`, where requests
+//! reach the playing one), and the plugin it replaced retires on a thread of its own. Until that
+//! retire has ended, no load or swap takes the slot (≤ `VACATE_WAIT`): the next pick starts once the
+//! earlier instance is gone.
 
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, Ordering::{Relaxed, Release}};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lf_engine::{Command, TimedCommand};
+use lf_engine::{Command, SlotKind, TimedCommand};
 use tauri::Emitter;
 
 use super::mode::EngineApp;
 use super::{EngineHost, SlotHost};
-use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
+use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, Entry, EventSink, PluginFormat};
 use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneStore};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
@@ -49,14 +55,51 @@ const VACATE_WAIT: Duration = Duration::from_secs(30);
 /// How often a load waiting for its slot looks again.
 const VACATE_POLL: Duration = Duration::from_millis(10);
 
-type Slots = Mutex<[EngineSlot; lf_engine::SLOT_COUNT]>;
+mod swap;
 
+type Slots = Mutex<[SlotEntry; lf_engine::SLOT_COUNT]>;
+
+/// One slot: what it holds, and the owner a hot swap replaced while that owner still tears down.
+#[derive(Default)]
+pub(crate) struct SlotEntry {
+    state: EngineSlot,
+    /// The replaced owner's retire (`swap::spawn_retire`), until the slot's next reservation reaps it.
+    retiring: Option<Retiring>,
+}
+
+/// A replaced owner's stop and join, on its own thread; `true`: it released its plugin in order.
+struct Retiring {
+    instance: u64,
+    join: JoinHandle<bool>,
+}
+
+impl SlotEntry {
+    /// The instance a swap replaced here while its retire still runs; a finished retire is reaped.
+    fn retiring(&mut self) -> Option<u64> {
+        match &self.retiring {
+            Some(Retiring { instance, join }) if !join.is_finished() => Some(*instance),
+            _ => {
+                if let Some(Retiring { join, .. }) = self.retiring.take() {
+                    let _ = join.join();
+                }
+                None
+            }
+        }
+    }
+}
+
+#[derive(Default)]
 pub(crate) enum EngineSlot {
+    #[default]
     Empty,
     /// A load for the document with this epoch is running. `cancelled`: an unload asked for the slot
     /// meanwhile, so the load unloads what it loads.
     Loading { epoch: u32, cancelled: bool },
     Loaded { handle: Arc<EngineSlotHandle>, info: PluginInfo },
+    /// A hot swap for the document with this epoch loads the next plugin while `playing` plays; `cancel`
+    /// set calls it off (an unload). Only the swap's `finish` moves the slot on, and whoever moves it out
+    /// of `Swapping` owns `playing` from then on.
+    Swapping { epoch: u32, playing: Arc<EngineSlotHandle>, info: PluginInfo, cancel: Arc<AtomicBool> },
     /// A plugin is on its way out (an unload, or a load nobody wants any more): its unit is in the
     /// engine until the teardown ends, so no load may take the slot before that.
     Leaving,
@@ -70,9 +113,9 @@ struct ParamChanged {
     value: f64,
 }
 
-/// What a load runs once its slot is reserved: `engine_slot::load` with the window's parent and
-/// events (`EngineApp::plugin_load`), a test's stand-in owner otherwise.
-type Open<'a> = &'a dyn Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>) -> Result<EngineSlotHandle, String>;
+/// What a load runs once its slot is reserved, its unit entering as the `Entry` says: `engine_slot::load`
+/// with the window's parent and events (`window_open`), a test's stand-in owner otherwise.
+type Open<'a> = &'a dyn Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>, Entry) -> Result<EngineSlotHandle, String>;
 
 /// Where a load lands and how it opens the plugin: the app's slots, tone store and engine.
 struct LoadTarget<'a> {
@@ -96,33 +139,30 @@ impl LoadTarget<'_> {
         tone_token: Option<u32>,
     ) -> Result<PluginInfo, String> {
         // Before the reservation: a path that names no format must leave the slot as it was.
-        let format = PluginFormat::of_path(std::path::Path::new(&path))
-            .ok_or_else(|| format!("{path}: not a .clap, .vst3 or .dll plugin"))?;
+        let format = format_of(&path)?;
         self.reserve(state, slot, frontend_epoch)?;
-        let identity = ToneIdentity { format: format.as_str().to_string(), path: path.clone(), id: id.clone() };
-        // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
-        let imported = self.reload_tones.lock().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
-        let tone = self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported });
+        // Past the reservation, so nothing below may return early.
+        let tone = self.tone(slot, format, &path, &id, tone_token);
         let began = Instant::now();
-        let loaded = (self.open)(format, path.clone(), id.clone(), self.host.slot(usize::from(slot)), tone);
+        let loaded = (self.open)(format, path.clone(), id.clone(), self.host.slot(usize::from(slot)), tone, Entry::Install);
         let mut slots = lock(self.slots)?;
+        let taken = &mut slots[usize::from(slot)].state;
         // The reservation is this load's (nothing else moves a slot out of `Loading`); whether its
         // document still wants the plugin is another question.
-        let wanted = matches!(slots[usize::from(slot)], EngineSlot::Loading { cancelled: false, .. })
-            && state.frontend_epoch.load(Relaxed) == frontend_epoch;
+        let wanted = matches!(taken, EngineSlot::Loading { cancelled: false, .. }) && state.frontend_epoch.load(Relaxed) == frontend_epoch;
         let handle = match loaded {
             Ok(handle) => handle,
             Err(e) => {
                 // A setup that timed out had not claimed its load, so its owner never installs
                 // (`engine_slot::LoadClaim`); one that had is a load that stands. Only a claimed load
                 // whose report then took 2 s more leaves a unit to undo (`src-tauri/OPEN-THREADS.md`).
-                slots[usize::from(slot)] = EngineSlot::Empty;
+                *taken = EngineSlot::Empty;
                 return Err(e);
             }
         };
         if !wanted {
             // Its unit is in the engine until the unload ends: a load for the new document waits.
-            slots[usize::from(slot)] = EngineSlot::Leaving;
+            *taken = EngineSlot::Leaving;
             drop(slots);
             if let Err(e) = handle.unload() {
                 log::error!("[plugin_host] engine slot {slot}: unloading a superseded load: {e}");
@@ -130,50 +170,88 @@ impl LoadTarget<'_> {
             vacate(self.slots, slot);
             return Err(format!("plugin load for slot {slot} was superseded by a frontend reload or an unload"));
         }
-        let descriptor = PluginDescriptor {
-            id,
-            name: handle.name().to_string(),
-            format: format.as_str().to_string(),
-            path,
-            // The frontend keeps the scan's descriptor for gain staging.
-            is_effect: None,
-        };
-        let info = PluginInfo { slot, descriptor, tone: handle.tone() };
+        let info = describe(slot, format, path, id, &handle);
         log::info!("[plugin_host] engine slot {slot}: {} ({:?}) loaded in {} ms", info.descriptor.name, handle.kind(), began.elapsed().as_millis());
-        slots[usize::from(slot)] = EngineSlot::Loaded { handle: Arc::new(handle), info: info.clone() };
+        *taken = EngineSlot::Loaded { handle: Arc::new(handle), info: info.clone() };
         Ok(info)
     }
 
     /// Reserve `slot` for this load: at once when it is empty; after a wait (≤ `vacate_wait`) while a
-    /// replaced document's load, a cancelled load or an unload still clears it. Refused for a replaced
-    /// document, and while the slot holds a plugin or the current document's own load.
+    /// replaced document's load, a cancelled load, an unload or a swapped-out plugin's retire still
+    /// clears it. Refused for a replaced document, and while the slot holds a plugin or the current
+    /// document's own load.
     fn reserve(&self, state: &PluginHostState, slot: u8, frontend_epoch: u32) -> Result<(), String> {
-        let deadline = Instant::now() + self.vacate_wait;
-        loop {
-            {
-                let mut slots = lock(self.slots)?;
-                current_document(state, frontend_epoch)?;
-                match slots[usize::from(slot)] {
-                    EngineSlot::Empty => {
-                        slots[usize::from(slot)] = EngineSlot::Loading { epoch: frontend_epoch, cancelled: false };
-                        return Ok(());
-                    }
-                    EngineSlot::Loading { epoch, cancelled: false } if epoch == frontend_epoch => {
-                        return Err(format!("slot {slot} is already loading a plugin"));
-                    }
-                    EngineSlot::Loaded { .. } => return Err(format!("slot {slot} already has a plugin loaded")),
-                    EngineSlot::Loading { .. } | EngineSlot::Leaving => {}
-                }
+        take_slot(self.slots, slot, (state, frontend_epoch), self.vacate_wait, |taken, retiring| match *taken {
+            EngineSlot::Empty if !retiring => {
+                *taken = EngineSlot::Loading { epoch: frontend_epoch, cancelled: false };
+                Some(Ok(()))
             }
-            if Instant::now() >= deadline {
-                return Err(format!("slot {slot} is still clearing the plugin before it"));
-            }
-            std::thread::sleep(VACATE_POLL);
-        }
+            EngineSlot::Loading { epoch, cancelled: false } if epoch == frontend_epoch => Some(Err(format!("slot {slot} is already loading a plugin"))),
+            EngineSlot::Loaded { .. } | EngineSlot::Swapping { .. } => Some(Err(format!("slot {slot} already has a plugin loaded"))),
+            EngineSlot::Empty | EngineSlot::Loading { .. } | EngineSlot::Leaving => None,
+        })
+    }
+
+    /// The tone binding a load of plugin `id` from `path` into `slot` restores and saves through, with
+    /// the session tone parked under `tone_token` for this reload. A poisoned lock hands nothing over.
+    fn tone(&self, slot: u8, format: PluginFormat, path: &str, id: &str, tone_token: Option<u32>) -> Option<ToneBinding> {
+        let identity = ToneIdentity { format: format.as_str().to_string(), path: path.to_string(), id: id.to_string() };
+        let imported = self.reload_tones.lock().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
+        self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported })
     }
 }
 
-fn lock(slots: &Slots) -> Result<MutexGuard<'_, [EngineSlot; lf_engine::SLOT_COUNT]>, String> {
+/// The plugin format `path` names: refused before any reservation, so the slot stays as it was.
+fn format_of(path: &str) -> Result<PluginFormat, String> {
+    PluginFormat::of_path(std::path::Path::new(path)).ok_or_else(|| format!("{path}: not a .clap, .vst3 or .dll plugin"))
+}
+
+/// What a load answers for `handle`, opened from `path` as `format`.
+fn describe(slot: u8, format: PluginFormat, path: String, id: String, handle: &EngineSlotHandle) -> PluginInfo {
+    let descriptor = PluginDescriptor {
+        id,
+        name: handle.name().to_string(),
+        format: format.as_str().to_string(),
+        path,
+        // The frontend keeps the scan's descriptor for gain staging.
+        is_effect: None,
+    };
+    PluginInfo { slot, descriptor, tone: handle.tone(), instance: handle.instance(), effect: matches!(handle.kind(), SlotKind::Effect) }
+}
+
+/// Look at `slot` under the lock, for the document `document` names, until `take` settles it (`Some`)
+/// from what the slot holds and whether a swapped-out plugin still retires there: every `VACATE_POLL`,
+/// up to `wait`, then refused as still clearing.
+fn take_slot<T>(
+    slots: &Slots,
+    slot: u8,
+    (state, frontend_epoch): (&PluginHostState, u32),
+    wait: Duration,
+    mut take: impl FnMut(&mut EngineSlot, bool) -> Option<Result<T, String>>,
+) -> Result<T, String> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let retiring = {
+            let mut slots = lock(slots)?;
+            current_document(state, frontend_epoch)?;
+            let entry = &mut slots[usize::from(slot)];
+            let retiring = entry.retiring();
+            if let Some(taken) = take(&mut entry.state, retiring.is_some()) {
+                return taken;
+            }
+            retiring
+        };
+        if Instant::now() >= deadline {
+            return Err(match retiring {
+                Some(instance) => format!("slot {slot} is still releasing the plugin it played before (instance {instance})"),
+                None => format!("slot {slot} is still clearing the plugin before it"),
+            });
+        }
+        std::thread::sleep(VACATE_POLL);
+    }
+}
+
+fn lock(slots: &Slots) -> Result<MutexGuard<'_, [SlotEntry; lf_engine::SLOT_COUNT]>, String> {
     slots.lock().map_err(|_| "engine slots poisoned".to_string())
 }
 
@@ -195,16 +273,17 @@ fn loaded(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>) ->
     if let Some((state, frontend_epoch)) = document {
         current_document(state, frontend_epoch)?;
     }
-    Ok(match &slots[usize::from(slot)] {
-        EngineSlot::Loaded { handle, .. } => Some(handle.clone()),
+    Ok(match &slots[usize::from(slot)].state {
+        EngineSlot::Loaded { handle, .. } | EngineSlot::Swapping { playing: handle, .. } => Some(handle.clone()),
         _ => None,
     })
 }
 
 /// Take `slot`'s plugin out of the engine and unload it, for the document `document` names (`None`:
-/// the app's exit). A load still running is cancelled and unloads what it loads; the slot is
-/// `Leaving` until this teardown ends. With `host`, a loaded plugin's slot goes off live first, its gate
-/// closed (`silence`), and the plugin stays loaded when that fails.
+/// the app's exit). A load still running is cancelled and unloads what it loads, a swap is cancelled
+/// and its thread unloads both plugins; the slot is `Leaving` until this teardown ends. With `host`, a
+/// loaded plugin's slot goes off live first, its gate closed (`silence`), and the plugin stays loaded
+/// when that fails.
 fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, host: Option<&EngineHost>) -> Result<(), String> {
     if let Some(host) = host {
         silence(slots, slot, document, host).map_err(|e| format!("the plugin in slot {slot} stays loaded, as its live input could not be stopped first: {e}"))?;
@@ -214,7 +293,7 @@ fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, ho
         if let Some((state, frontend_epoch)) = document {
             current_document(state, frontend_epoch)?;
         }
-        let taken = &mut slots[usize::from(slot)];
+        let taken = &mut slots[usize::from(slot)].state;
         match std::mem::replace(taken, EngineSlot::Leaving) {
             EngineSlot::Loaded { handle, .. } => handle,
             EngineSlot::Loading { epoch, .. } => {
@@ -222,6 +301,9 @@ fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, ho
                 return Ok(());
             }
             other => {
+                if let EngineSlot::Swapping { cancel, .. } = &other {
+                    cancel.store(true, Release);
+                }
                 *taken = other;
                 return Ok(());
             }
@@ -242,7 +324,7 @@ fn silence(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, h
         if let Some((state, frontend_epoch)) = document {
             current_document(state, frontend_epoch)?;
         }
-        matches!(slots[usize::from(slot)], EngineSlot::Loaded { .. })
+        matches!(slots[usize::from(slot)].state, EngineSlot::Loaded { .. } | EngineSlot::Swapping { .. })
     };
     if loaded { host.silence_slot(slot, LIVE_OFF_WAIT) } else { Ok(()) }
 }
@@ -271,14 +353,35 @@ fn unload_handle(slot: u8, mut handle: Arc<EngineSlotHandle>) -> Result<(), Stri
 /// The teardown that made `slot` `Leaving` has ended: a load may take it again.
 fn vacate(slots: &Slots, slot: u8) {
     let mut slots = slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if matches!(slots[usize::from(slot)], EngineSlot::Leaving) {
-        slots[usize::from(slot)] = EngineSlot::Empty;
+    let taken = &mut slots[usize::from(slot)].state;
+    if matches!(taken, EngineSlot::Leaving) {
+        *taken = EngineSlot::Empty;
     }
 }
 
+/// How the app opens a plugin for `window` into `slot`: `engine_slot::load` with the window's events and
+/// its HWND as a floating CLAP editor's transient parent (the editor host window is owner-less).
+fn window_open(window: &tauri::WebviewWindow, slot: u8) -> impl Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>, Entry) -> Result<EngineSlotHandle, String> {
+    let events = window.clone();
+    let sink: EventSink = Arc::new(move |event| {
+        let _ = match event {
+            EngineSlotEvent::ParamChanged { id, value } => events.emit("plugin:param-changed", ParamChanged { slot, id, value }),
+            EngineSlotEvent::ParamsChanged => events.emit("plugin:params-changed", slot),
+            EngineSlotEvent::EditorClosed => events.emit("plugin:editor-closed", slot),
+        };
+    });
+    let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
+    move |format, path, id, slot_host, tone, entry| engine_slot::load(format, path, id, slot_host, parent, sink.clone(), tone, entry)
+}
+
 impl EngineApp {
-    fn slots(&self) -> Result<MutexGuard<'_, [EngineSlot; lf_engine::SLOT_COUNT]>, String> {
+    fn slots(&self) -> Result<MutexGuard<'_, [SlotEntry; lf_engine::SLOT_COUNT]>, String> {
         lock(&self.slots)
+    }
+
+    /// Where a load into the app's slots lands, opened by `open`.
+    fn load_target<'a>(&'a self, host: &'a EngineHost, open: Open<'a>) -> LoadTarget<'a> {
+        LoadTarget { slots: &self.slots, reload_tones: &self.reload_tones, tones: self.tones.clone(), host, open, vacate_wait: VACATE_WAIT }
     }
 
     /// Per slot: the tone a session import stored for the plugin the slot held, parked for the reload
@@ -306,29 +409,8 @@ impl EngineApp {
         tone_token: Option<u32>,
     ) -> Result<PluginInfo, String> {
         let host = self.host()?;
-        let events = window.clone();
-        let sink: EventSink = Arc::new(move |event| {
-            let _ = match event {
-                EngineSlotEvent::ParamChanged { id, value } => events.emit("plugin:param-changed", ParamChanged { slot, id, value }),
-                EngineSlotEvent::ParamsChanged => events.emit("plugin:params-changed", slot),
-                EngineSlotEvent::EditorClosed => events.emit("plugin:editor-closed", slot),
-            };
-        });
-        // The editor host window is owner-less; a floating CLAP editor takes the main window as its
-        // transient parent.
-        let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
-        let open = |format: PluginFormat, path: String, id: String, slot_host: SlotHost, tone: Option<ToneBinding>| {
-            engine_slot::load(format, path, id, slot_host, parent, sink.clone(), tone, engine_slot::Entry::Install)
-        };
-        let target = LoadTarget {
-            slots: &self.slots,
-            reload_tones: &self.reload_tones,
-            tones: self.tones.clone(),
-            host: &host,
-            open: &open,
-            vacate_wait: VACATE_WAIT,
-        };
-        target.load(state, slot, path, id, frontend_epoch, tone_token)
+        let open = window_open(window, slot);
+        self.load_target(&host, &open).load(state, slot, path, id, frontend_epoch, tone_token)
     }
 
     /// `plugin_unload`: take the plugin out of the engine and unload it, for the document with
@@ -344,7 +426,7 @@ impl EngineApp {
         let loaded: Vec<(u8, Arc<EngineSlotHandle>)> = match self.slots() {
             Ok(slots) => (0u8..)
                 .zip(slots.iter())
-                .filter_map(|(slot, s)| match s {
+                .filter_map(|(slot, s)| match &s.state {
                     EngineSlot::Loaded { handle, .. } => Some((slot, handle.clone())),
                     _ => None,
                 })
@@ -384,8 +466,8 @@ impl EngineApp {
         Ok(self
             .slots()?
             .iter()
-            .filter_map(|s| match s {
-                EngineSlot::Loaded { info, .. } => Some(info.clone()),
+            .filter_map(|s| match &s.state {
+                EngineSlot::Loaded { info, .. } | EngineSlot::Swapping { info, .. } => Some(info.clone()),
                 _ => None,
             })
             .collect())
@@ -420,8 +502,8 @@ impl EngineApp {
     pub(crate) fn plugin_tone_import(&self, slot: u8, bytes: &[u8], expected: &ToneIdentity) -> Result<ToneImport, String> {
         let store = self.tones.as_ref().ok_or("no app-local data folder to keep tones in")?;
         let imported = store.import(usize::from(slot), bytes, expected)?;
-        let holds = |s: &EngineSlot| {
-            matches!(s, EngineSlot::Loaded { info, .. } if {
+        let holds = |s: &SlotEntry| {
+            matches!(&s.state, EngineSlot::Loaded { info, .. } if {
                 let d = &info.descriptor;
                 d.format == expected.format && d.path == expected.path && d.id == expected.id
             })
@@ -470,12 +552,14 @@ impl EngineApp {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Release}};
+    use std::sync::atomic::{AtomicU32, Ordering::Acquire};
+    use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Barrier;
 
     use lf_engine::grid::Frame;
-    use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
+    use lf_engine::{SlotEvent, SlotProcessor};
 
+    use super::swap::{Retired, RetiredSink, SwapTarget};
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
 
@@ -527,11 +611,97 @@ mod tests {
         }
     }
 
+    /// A stand-in owner's unit of `kind`; one that `refuses` refuses to start processing as it stages.
+    struct Unit {
+        kind: SlotKind,
+        refuses: bool,
+    }
+
+    impl SlotProcessor for Unit {
+        fn kind(&self) -> SlotKind {
+            self.kind
+        }
+        fn latency(&self) -> Frame {
+            0
+        }
+        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+            out.fill(0.0);
+        }
+        fn stop(&mut self) {}
+        fn start_refused(&self) -> bool {
+            self.refuses
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+            self
+        }
+    }
+
+    fn effect() -> Box<dyn SlotProcessor> {
+        Box::new(Unit { kind: SlotKind::Effect, refuses: false })
+    }
+
+    fn instrument() -> Box<dyn SlotProcessor> {
+        Box::new(Unit { kind: SlotKind::Instrument, refuses: false })
+    }
+
+    fn refuser() -> Box<dyn SlotProcessor> {
+        Box::new(Unit { kind: SlotKind::Effect, refuses: true })
+    }
+
+    /// A pause a stand-in owner takes once, where the test armed it: it tells the test it is there,
+    /// then waits (≤ 10 s) for the go, so a failing test never leaves an owner waiting for good.
+    #[derive(Default)]
+    struct Hold(Mutex<Option<(Sender<()>, Receiver<()>)>>);
+
+    impl Hold {
+        /// The test's ends: told when the owner is there, and the go.
+        fn arm(&self) -> (Receiver<()>, Sender<()>) {
+            let ((there, here), (go, wait)) = (channel(), channel());
+            *self.0.lock().unwrap() = Some((there, wait));
+            (here, go)
+        }
+
+        fn take(&self) {
+            let armed = self.0.lock().unwrap().take();
+            if let Some((there, go)) = armed {
+                let _ = there.send(());
+                let _ = go.recv_timeout(Duration::from_secs(10));
+            }
+        }
+    }
+
+    /// What a test holds of a stand-in plugin: a pause once its unit is the slot's (`in_engine`), one
+    /// as its teardown begins (`leaving`), and how many teardowns began (`ended`).
+    #[derive(Default)]
+    struct Hooks {
+        in_engine: Arc<Hold>,
+        leaving: Arc<Hold>,
+        ended: Arc<AtomicU32>,
+    }
+
+    impl Hooks {
+        /// Opens a stand-in plugin whose unit is `unit()`, entering as the load says, with these hooks.
+        fn open(&self, unit: fn() -> Box<dyn SlotProcessor>) -> impl Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>, Entry) -> Result<EngineSlotHandle, String> {
+            let (in_engine, leaving, ended) = (self.in_engine.clone(), self.leaving.clone(), self.ended.clone());
+            move |_, _, _, slot, _, entry| {
+                let (in_engine, leaving, ended) = (in_engine.clone(), leaving.clone(), ended.clone());
+                let leaving = move || {
+                    ended.fetch_add(1, Relaxed);
+                    leaving.take();
+                };
+                engine_slot::stand_in_entering(slot, unit(), entry, move || in_engine.take(), leaving)
+            }
+        }
+    }
+
     /// The app's slots, as `EngineApp` holds them, over a test device's engine. Dropped in field
     /// order: a plugin left in a slot unloads while the device still runs.
     struct Rig {
         slots: Slots,
         reload_tones: Mutex<ToneHandoff<{ lf_engine::SLOT_COUNT }>>,
+        closing: AtomicBool,
+        /// Each `plugin:retired`: slot, instance, released.
+        retired: Arc<Mutex<Vec<(u8, u64, bool)>>>,
         state: PluginHostState,
         device: TestDevice,
         _one: std::sync::MutexGuard<'static, ()>,
@@ -546,8 +716,10 @@ mod tests {
         fn with_input(input: impl Fn(Frame) -> f32 + Send + Sync + 'static) -> Rig {
             let one = engine_slot::one_engine_test_at_a_time();
             Rig {
-                slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
+                slots: Mutex::new(std::array::from_fn(|_| SlotEntry::default())),
                 reload_tones: Mutex::default(),
+                closing: AtomicBool::new(false),
+                retired: Arc::default(),
                 state: PluginHostState::default(),
                 device: TestDevice::start(48_000, 256, Duration::from_millis(5), input),
                 _one: one,
@@ -587,19 +759,38 @@ mod tests {
             target.load(&self.state, 0, path.to_string(), "some.id".to_string(), epoch, None).map(|info| info.descriptor.name)
         }
 
+        /// A swap of slot 0's plugin for the document with `epoch`, opened by `open`, its reservation
+        /// waiting up to `wait` for the slot; the new plugin's info.
+        fn swap(&self, path: &str, epoch: u32, wait: Duration, open: Open<'_>) -> Result<PluginInfo, String> {
+            let record = self.retired.clone();
+            let retired: RetiredSink = Arc::new(move |r: Retired| record.lock().unwrap().push((r.slot, r.instance, r.released)));
+            let load = LoadTarget { slots: &self.slots, reload_tones: &self.reload_tones, tones: None, host: self.device.host(), open, vacate_wait: wait };
+            SwapTarget { load, closing: &self.closing, retired }.swap(&self.state, 0, path.to_string(), "other.id".to_string(), 1.0, epoch, None)
+        }
+
         fn slot(&self) -> &'static str {
-            match lock(&self.slots).unwrap()[0] {
+            match lock(&self.slots).unwrap()[0].state {
                 EngineSlot::Empty => "empty",
                 EngineSlot::Loading { .. } => "loading",
                 EngineSlot::Loaded { .. } => "loaded",
+                EngineSlot::Swapping { .. } => "swapping",
                 EngineSlot::Leaving => "leaving",
             }
         }
+
+        /// Slot 0's playing handle.
+        fn playing(&self) -> Arc<EngineSlotHandle> {
+            loaded(&self.slots, 0, None).unwrap().expect("slot 0 plays a plugin")
+        }
+
+        fn retired(&self) -> Vec<(u8, u64, bool)> {
+            self.retired.lock().unwrap().clone()
+        }
     }
 
-    /// Opens a stand-in plugin with no hooks.
-    fn stand_in(_: PluginFormat, _: String, _: String, slot: SlotHost, _: Option<ToneBinding>) -> Result<EngineSlotHandle, String> {
-        engine_slot::stand_in(slot, Box::new(Silent), || {}, || {})
+    /// Opens a stand-in plugin with no hooks, entering as the load says.
+    fn stand_in(_: PluginFormat, _: String, _: String, slot: SlotHost, _: Option<ToneBinding>, entry: Entry) -> Result<EngineSlotHandle, String> {
+        engine_slot::stand_in_entering(slot, Box::new(Silent), entry, || {}, || {})
     }
 
     /// A load is refused before it reserves its slot when its path names no format, and a load whose
@@ -608,8 +799,8 @@ mod tests {
     fn a_load_this_host_cannot_start_leaves_the_slot_free_for_the_next() {
         let rig = Rig::new();
         let epoch = rig.state.begin_frontend_session();
-        let open = |format: PluginFormat, path: String, id: String, slot: SlotHost, tone: Option<ToneBinding>| {
-            engine_slot::load(format, path, id, slot, 0, Arc::new(|_| {}), tone, engine_slot::Entry::Install)
+        let open = |format: PluginFormat, path: String, id: String, slot: SlotHost, tone: Option<ToneBinding>, entry: Entry| {
+            engine_slot::load(format, path, id, slot, 0, Arc::new(|_| {}), tone, entry)
         };
         let load = |path: &str| rig.load(path, epoch, Duration::ZERO, &open);
 
@@ -638,7 +829,7 @@ mod tests {
         let rig = Rig::new();
         let old = rig.state.begin_frontend_session();
         let reloaded = Mutex::new(None);
-        let fails_after_a_reload = |_: PluginFormat, _: String, _: String, _: SlotHost, _: Option<ToneBinding>| -> Result<EngineSlotHandle, String> {
+        let fails_after_a_reload = |_: PluginFormat, _: String, _: String, _: SlotHost, _: Option<ToneBinding>, _: Entry| -> Result<EngineSlotHandle, String> {
             *reloaded.lock().unwrap() = Some(rig.state.begin_frontend_session());
             Err("load failed: the plugin is gone".to_string())
         };
@@ -662,7 +853,7 @@ mod tests {
         // Each barrier: the stand-in's owner and this test meet there.
         let (in_engine, go_on) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
         let (leaving, leave) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
-        let held = |_: PluginFormat, _: String, _: String, slot: SlotHost, _: Option<ToneBinding>| {
+        let held = |_: PluginFormat, _: String, _: String, slot: SlotHost, _: Option<ToneBinding>, _: Entry| {
             let (in_engine, go_on, leaving, leave) = (in_engine.clone(), go_on.clone(), leaving.clone(), leave.clone());
             engine_slot::stand_in(
                 slot,
@@ -679,7 +870,7 @@ mod tests {
         };
         // A load that reaches its loader while the slot still clears would install over the unit there.
         let reached = std::sync::atomic::AtomicBool::new(false);
-        let probe = |_: PluginFormat, _: String, _: String, _: SlotHost, _: Option<ToneBinding>| -> Result<EngineSlotHandle, String> {
+        let probe = |_: PluginFormat, _: String, _: String, _: SlotHost, _: Option<ToneBinding>, _: Entry| -> Result<EngineSlotHandle, String> {
             reached.store(true, Relaxed);
             Err("reached its loader".to_string())
         };
@@ -860,5 +1051,158 @@ mod tests {
         assert!(loaded(&rig.slots, 0, Some((&rig.state, new))).unwrap().is_some());
         assert_eq!(unload(&rig.slots, 0, None, None), Ok(()), "the app's exit names no document");
         assert_eq!(rig.slot(), "empty");
+    }
+
+    /// A hot swap commits: it answers the new instance and the kind it activated as, the replaced
+    /// owner is retired, and its retire ends `released`. Until that end, the slot takes no cold load:
+    /// one past its (shortened) wait is refused, one that waits lands after it.
+    #[test]
+    fn a_swap_commits_and_a_cold_load_waits_for_the_replaced_plugins_release() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        let (old, new) = (Hooks::default(), Hooks::default());
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &old.open(effect)).is_ok());
+        let playing = rig.playing();
+        let (tearing_down, go) = old.leaving.arm();
+        let info = rig.swap(r"C:\plugins\Synth.clap", epoch, Duration::ZERO, &new.open(instrument)).unwrap();
+        let swapped = rig.playing();
+        assert_eq!((info.instance, info.effect, info.descriptor.path.as_str()), (swapped.instance(), false, r"C:\plugins\Synth.clap"));
+        assert_ne!(info.instance, playing.instance(), "a new instance");
+        assert!(playing.retired() && !swapped.retired(), "the replaced owner is retired, the new one plays");
+        drop(swapped);
+        assert!(tearing_down.recv_timeout(Duration::from_secs(10)).is_ok(), "the replaced owner tears down");
+
+        // Its teardown is held: the emptied slot takes no cold load until the release has ended.
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), None), Ok(()));
+        assert_eq!(rig.slot(), "empty");
+        let early = rig.load(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &stand_in);
+        let (waited, cold) = std::thread::scope(|s| {
+            let cold = s.spawn(|| rig.load(r"C:\plugins\Drive.clap", epoch, Duration::from_secs(10), &stand_in));
+            std::thread::sleep(Duration::from_millis(100));
+            let waited = !cold.is_finished() && rig.retired().is_empty();
+            let _ = go.send(());
+            (waited, cold.join().unwrap())
+        });
+        assert!(early.as_ref().is_err_and(|e| e.contains("still releasing the plugin it played before")), "{early:?}");
+        assert!(waited, "the cold load waits for the release");
+        assert_eq!(cold.as_deref(), Ok("Stand-in"));
+        assert_eq!(rig.retired(), vec![(0, playing.instance(), true)], "released, before the cold load landed");
+    }
+
+    /// A swap onto the file that plays, spelled in another case or with `/`, is refused before any
+    /// load: the plugin plays on.
+    #[test]
+    fn a_swap_onto_the_file_that_plays_is_refused_and_the_old_plays_on() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        let playing = rig.playing().instance();
+        let reached = AtomicBool::new(false);
+        let probe = |_: PluginFormat, _: String, _: String, _: SlotHost, _: Option<ToneBinding>, _: Entry| -> Result<EngineSlotHandle, String> {
+            reached.store(true, Relaxed);
+            Err("reached its loader".to_string())
+        };
+        for path in [r"c:\PLUGINS\amp.CLAP", "C:/plugins/Amp.clap"] {
+            let refused = rig.swap(path, epoch, Duration::ZERO, &probe).unwrap_err();
+            assert!(refused.contains("same plugin file: swap cold"), "{refused}");
+        }
+        assert!(!reached.load(Relaxed), "no load ran");
+        assert_eq!(rig.slot(), "loaded");
+        let handle = rig.playing();
+        assert!(handle.instance() == playing && !handle.retired(), "the old plugin plays on");
+    }
+
+    /// A candidate that fails to load, or refuses to start processing as it stages: the swap answers
+    /// that error unchanged and the slot goes back to the plugin that plays, which never stopped.
+    #[test]
+    fn a_refused_candidate_answers_its_error_and_the_old_plays_on() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        let (old, refusing) = (Hooks::default(), Hooks::default());
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &old.open(effect)).is_ok());
+        let playing = rig.playing().instance();
+        let fails = |_: PluginFormat, _: String, _: String, _: SlotHost, _: Option<ToneBinding>, _: Entry| -> Result<EngineSlotHandle, String> {
+            Err("load failed: the plugin is gone".to_string())
+        };
+        let failed = rig.swap(r"C:\plugins\Gone.clap", epoch, Duration::ZERO, &fails);
+        assert_eq!(failed.unwrap_err(), "load failed: the plugin is gone");
+        let refused = rig.swap(r"C:\plugins\Stubborn.clap", epoch, Duration::ZERO, &refusing.open(refuser));
+        assert!(refused.as_ref().is_err_and(|e| e.contains("refused to start processing")), "{refused:?}");
+        assert_eq!(rig.slot(), "loaded");
+        let handle = rig.playing();
+        assert!(handle.instance() == playing && !handle.retired(), "the old plugin plays on");
+        assert_eq!(old.ended.load(Relaxed), 0, "its teardown never began");
+        assert!(rig.retired().is_empty());
+    }
+
+    /// A swap `call_off` calls off once its plugin is the slot's, before the swap has heard so: both
+    /// plugins end, neither as a retire, the slot ends empty, and the swap answers that it was superseded.
+    fn a_called_off_swap_ends_both_plugins(call_off: impl FnOnce(&Rig, u32)) {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        let (old, new) = (Hooks::default(), Hooks::default());
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &old.open(effect)).is_ok());
+        let (committed, go) = new.in_engine.arm();
+        let (during, swapped) = std::thread::scope(|s| {
+            let swap = s.spawn(|| rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &new.open(effect)));
+            let _ = committed.recv_timeout(Duration::from_secs(10));
+            let during = rig.slot();
+            call_off(&rig, epoch);
+            let _ = go.send(());
+            (during, swap.join().unwrap())
+        });
+        assert_eq!(during, "swapping");
+        assert!(swapped.as_ref().is_err_and(|e| e.contains("superseded")), "{swapped:?}");
+        assert_eq!(rig.slot(), "empty");
+        assert_eq!((old.ended.load(Relaxed), new.ended.load(Relaxed)), (1, 1), "both plugins ended");
+        assert!(rig.retired().is_empty());
+    }
+
+    #[test]
+    fn an_unload_during_a_swap_ends_both_plugins_and_empties_the_slot() {
+        a_called_off_swap_ends_both_plugins(|rig, epoch| {
+            assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), Some(rig.device.host())), Ok(()));
+        });
+    }
+
+    #[test]
+    fn a_document_change_during_a_swap_ends_both_plugins_and_empties_the_slot() {
+        a_called_off_swap_ends_both_plugins(|rig, _| {
+            rig.state.begin_frontend_session();
+        });
+    }
+
+    /// The next swap starts once the plugin swapped out before it has ended its retire: one past its
+    /// (shortened) wait is refused, one that waits lands after that release.
+    #[test]
+    fn a_swap_waits_for_the_plugin_retiring_before_it_and_one_past_its_wait_is_refused() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        let (first, second) = (Hooks::default(), Hooks::default());
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &first.open(effect)).is_ok());
+        let replaced = rig.playing().instance();
+        let (tearing_down, go) = first.leaving.arm();
+        let swapped = rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &second.open(effect)).unwrap();
+        assert!(tearing_down.recv_timeout(Duration::from_secs(10)).is_ok(), "the replaced owner tears down");
+
+        let early = rig.swap(r"C:\plugins\Fuzz.clap", epoch, Duration::ZERO, &stand_in);
+        let (waited, late) = std::thread::scope(|s| {
+            let late = s.spawn(|| rig.swap(r"C:\plugins\Fuzz.clap", epoch, Duration::from_secs(10), &stand_in));
+            std::thread::sleep(Duration::from_millis(100));
+            let waited = !late.is_finished() && rig.slot() == "loaded";
+            let _ = go.send(());
+            (waited, late.join().unwrap())
+        });
+        assert!(early.as_ref().is_err_and(|e| e.contains("still releasing the plugin it played before")), "{early:?}");
+        assert!(waited, "the second swap waits, the slot untaken");
+        let late = late.unwrap();
+        assert_ne!(late.instance, swapped.instance);
+        assert_eq!(rig.retired().first(), Some(&(0, replaced, true)), "released before the second swap took the slot");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig.retired().len() < 2 {
+            assert!(Instant::now() < deadline, "the second swap's replaced plugin never ended its retire");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(rig.retired()[1], (0, swapped.instance, true));
     }
 }
