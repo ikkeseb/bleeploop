@@ -36,14 +36,16 @@
 //! nothing downstream (the mix, the input sends, the limiter, a capture) ever sees it.
 //!
 //! A replace ([`SlotPort::replace`], `swap`) changes the unit a slot plays without a gap. The candidate
-//! takes the slot's `side` seat and stages there: it processes the slot's input (an instrument
-//! silence), unheard, for its latency plus `STAGE_SECONDS` of frames, while a gain change applies to
-//! the playing unit. At the first block start after that it commits (`Committed`): the playing unit's
-//! notes are released, the two seats trade places, and over the frames of `SWAP_SECONDS`, counted from
-//! the commit frame, the unit it replaced crossfades out at the slot's gain as it stood, under the new
-//! one at the replace's gain, the slot's from then on. Each unit's term stays on its own destination (an
-//! effect's on the wet, an instrument's on the bus), and the slot's bypass crossfade applies over them
-//! as ever. The old unit stops after its last call and goes back `ReplacedOut`, behind the `Committed`.
+//! takes the slot's `side` seat and stages there: it processes the slot's input (an instrument silence),
+//! unheard, for its latency plus `STAGE_SECONDS` of frames, while a gain change applies to the playing
+//! unit. At the first block start after that it commits (`Committed`): the playing unit's notes are
+//! released (a later release of one reaches neither unit), the two seats trade places, and over the frames
+//! of `SWAP_SECONDS`, counted from the commit frame, the unit it replaced crossfades out at the slot's gain
+//! as it stood, under the new one at the replace's gain, the slot's from then on. Each unit's term stays on
+//! its own destination (an effect's on the wet, an instrument's on the bus), and the slot's bypass
+//! crossfade applies over them as ever. A commit that changes the kind (effect ↔ instrument) takes a live
+//! slot off live at its frame, as a GO LIVE off would (`Committed`'s `live_off`). The old unit stops after
+//! its last call and goes back `ReplacedOut`, behind the `Committed`.
 //! While a take captures, a candidate whose latency differs from the playing unit's (an empty slot's
 //! is 0) stays staged until the capture ends, so nothing moves what records mid-take. A candidate that
 //! refuses to start goes back `StartRefused` after the call it refused in, and a withdraw of its tag
@@ -302,6 +304,22 @@ impl Slot {
         }
     }
 
+    /// GO LIVE on or off: the live gate ramps from where it is to the new target over `ramp`'s frames
+    /// from its frame (`Rack::set_live`); with no `ramp` (nothing rendered yet, or no device running) it
+    /// is there at once, settled. The same target again changes nothing.
+    fn set_live(&mut self, live: bool, ramp: Option<(Frame, Frame)>) {
+        if self.live == live {
+            return;
+        }
+        let to = if live { 1.0 } else { 0.0 };
+        let from = ramp.map(|(now, n)| (live_gate(self.live, self.live_end, self.live_gain, now, n), now + n));
+        self.live = live;
+        (self.live_end, self.live_gain) = match from {
+            Some((from, end)) if from != to => (end, from),
+            _ => (Frame::MIN, to),
+        };
+    }
+
     /// The removal ends: a unit still fading out after a swap goes back `ReplacedOut`, then the slot's
     /// `Removed`, and the slot is empty.
     fn finish_removal(&mut self, errors: &mut u64) {
@@ -424,10 +442,10 @@ impl Rack {
     }
 
     /// Apply the ports' messages at a block start, at most a ring's worth per slot (the rest waits for
-    /// the next), then let a staged swap commit (unless `capturing` holds it). `engaged` installs
-    /// without a fade (nothing has sounded yet, or no device runs); without `fade` a swap and a removal
-    /// complete here.
-    fn service(&mut self, engaged: bool, fade: bool, capturing: bool) {
+    /// the next), then let a staged swap commit (unless `capturing` holds it), a live-off it makes
+    /// ramping as `live` says (`Slot::set_live`). `engaged` installs without a fade (nothing has sounded
+    /// yet, or no device runs); without `fade` a swap and a removal complete here.
+    fn service(&mut self, engaged: bool, fade: bool, capturing: bool, live: Option<(Frame, Frame)>) {
         let (dropped, errors, stage) = (&mut self.events_dropped, &mut self.protocol_errors, self.stage_frames);
         let fade_in = if engaged { self.fade_frames } else { 0 };
         for s in self.slots.iter_mut() {
@@ -442,7 +460,7 @@ impl Rack {
                 }
             }
             if fade {
-                s.commit_when_ready(stage, capturing, fade_in, dropped, errors);
+                s.commit_when_ready(stage, capturing, fade_in, live, dropped, errors);
             } else {
                 s.settle_swap(self.cursor, &self.zeros, fade_in, dropped, errors);
             }
@@ -456,14 +474,15 @@ impl Rack {
     /// At a block start: service the ports and start the render cursor. `capturing`: a take's
     /// alignment is fixed over this block, so a swap that changes the latency waits.
     pub(crate) fn begin_block(&mut self, start: Frame, first: bool, capturing: bool) {
-        self.service(first, true, capturing);
+        let live = self.rendered.then_some((start, self.live_frames));
+        self.service(first, true, capturing, live);
         self.cursor = start;
     }
 
     /// With no device running (the host holds the engine): apply the ports' messages at once, no
     /// fades. A removed unit stops here and goes straight back.
     pub(crate) fn service_idle(&mut self) {
-        self.service(true, false, false);
+        self.service(true, false, false, None);
     }
 
     /// Stop every unit and hand it back `Evicted` (a sample-rate change: the host re-activates and
@@ -568,15 +587,10 @@ impl Rack {
     /// `live_frames` from `now` (a reversal mid-ramp from the gain it reached). The same target again
     /// changes nothing. Before the first rendered frame it sets the starting state, settled.
     pub(crate) fn set_live(&mut self, slot: usize, live: bool, now: Frame) {
-        let (n, rendered) = (self.live_frames, self.rendered);
-        let Some(s) = self.slots.get_mut(slot) else { return };
-        if s.live == live {
-            return;
+        let ramp = self.rendered.then_some((now, self.live_frames));
+        if let Some(s) = self.slots.get_mut(slot) {
+            s.set_live(live, ramp);
         }
-        let from = live_gate(s.live, s.live_end, s.live_gain, now, n);
-        s.live = live;
-        let to = if live { 1.0 } else { 0.0 };
-        (s.live_end, s.live_gain) = if !rendered || from == to { (Frame::MIN, to) } else { (now + n, from) };
     }
 
     /// Shut slot `slot`'s gate at once (no ramp) until the command taken at count `live_off`, a live-off,

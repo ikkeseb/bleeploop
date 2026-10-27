@@ -3,8 +3,8 @@
 //! and one `finish` moves the slot on whatever the load did: the new plugin plays and the one it
 //! replaced retires on a thread of its own (`plugin:retired`), or the slot goes back to the plugin
 //! that plays, or every plugin nobody wants any more leaves through `Leaving`, as an unload's would
-//! (whose failed live-off keeps the plugin the engine plays). A commit releases the slot's notes and,
-//! when the plugin's kind changed, takes the slot off live (`on_commit`).
+//! (whose failed live-off keeps the plugin the engine plays). At the commit the engine releases what
+//! sounds on the slot and, when the plugin's kind changed, takes the slot off live (`lf_engine::slots`).
 //!
 //! The exit (`begin_closing`) refuses every swap from then on and calls off one in flight, whose
 //! `finish` ends both its plugins: the exit's `unload_all` starts the playing one's teardown at once,
@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed}};
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 
-use lf_engine::{Command, TimedCommand};
 use tauri::Emitter;
 
 use super::{describe, format_of, lock, take_slot, unload_handle, vacate, window_open, EngineSlot, LoadTarget, Retiring, SlotsGuard, LIVE_OFF_WAIT};
@@ -38,12 +37,10 @@ pub(super) struct Retired {
 /// Where a retire reports its end: the window's `plugin:retired`, a test's record otherwise.
 pub(super) type RetiredSink = Arc<dyn Fn(Retired) + Send + Sync>;
 
-/// Where a swap lands: a load's target (with the app's exit flag), where a retire reports, and what a
-/// commit tells the rest of the app (`on_commit`: the slot, and whether the plugin's kind changed).
+/// Where a swap lands: a load's target (with the app's exit flag), and where a retire reports.
 pub(super) struct SwapTarget<'a> {
     pub(super) load: LoadTarget<'a>,
     pub(super) retired: RetiredSink,
-    pub(super) on_commit: &'a dyn Fn(u8, bool),
 }
 
 impl SwapTarget<'_> {
@@ -148,17 +145,14 @@ impl SwapTarget<'_> {
 
     /// `new` plays in `slot` (`slots`, locked) from here, as `info`, and `old`, the owner it replaced,
     /// retires: on a thread of its own, or on this one once the lock is released, its mark kept until
-    /// that has ended so no swap or cold load takes the slot before. Once the lock is released, and
-    /// before an inline retire, `on_commit` hears it.
+    /// that has ended so no swap or cold load takes the slot before.
     fn play(&self, mut slots: SlotsGuard<'_>, slot: u8, info: PluginInfo, new: EngineSlotHandle, old: Arc<EngineSlotHandle>) {
-        let kind_changed = old.kind() != new.kind();
         let entry = &mut slots[usize::from(slot)];
         entry.state = EngineSlot::Loaded { handle: Arc::new(new), info };
         let retiring = spawn_retire(slot, &old, self.retired.clone());
         let inline = retiring.join.is_none();
         entry.retiring = Some(retiring);
         drop(slots);
-        (self.on_commit)(slot, kind_changed);
         if inline {
             retire(slot, &old, &self.retired);
             // As `vacate` recovers it: the mark must go, or the slot never takes a load again.
@@ -266,8 +260,8 @@ fn same_file(a: &str, b: &str) -> bool {
 impl EngineApp {
     /// `plugin_swap`: swap `slot`'s plugin for plugin `id` from `path` (its load ≤ 15 s, then the
     /// commit), crossfaded to at `gain` (the UI's saved level for it), for the document with
-    /// `frontend_epoch`; `tone_token` as `plugin_load`'s. At the commit, native MIDI releases what sounds
-    /// on the slot, and a plugin of another kind (effect or instrument) takes the slot off live.
+    /// `frontend_epoch`; `tone_token` as `plugin_load`'s. At the commit the engine releases what sounds
+    /// on the slot and, when the plugin's kind changed, takes the slot off live.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn plugin_swap(
         &self,
@@ -286,16 +280,7 @@ impl EngineApp {
         let retired: RetiredSink = Arc::new(move |retired| {
             let _ = events.emit("plugin:retired", retired);
         });
-        let on_commit = |slot: u8, kind_changed: bool| {
-            // Not running only from the shutdown on, which owes no release.
-            let _ = self.with_midi(|midi| midi.release_slot(slot));
-            if kind_changed {
-                if let Err(e) = host.send(TimedCommand { frame: None, command: Command::SetSlotLive(slot, false) }) {
-                    log::error!("[plugin_host] engine slot {slot}: live-off after a swap to another kind: {e}");
-                }
-            }
-        };
-        let target = SwapTarget { load: self.load_target(&host, &open), retired, on_commit: &on_commit };
+        let target = SwapTarget { load: self.load_target(&host, &open), retired };
         target.swap(state, slot, path, id, gain, frontend_epoch, tone_token)
     }
 }

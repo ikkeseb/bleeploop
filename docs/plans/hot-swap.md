@@ -25,9 +25,11 @@ reload re-arms it). Path: `src/ui/state/instrument.ts` (`doSelectPlugin`, `unloa
 - **Engine:** a `Replace` slot message. The slot keeps an `outgoing` unit beside `unit` and crossfades
   `(1−t)·old + t·new` over a counted frame ramp, each side at its own gain and fed by its own kind
   (an instrument gets silence, an effect the gated input), so neither the bypass term nor the dry
-  guitar is heard. The live flag and gate are untouched. Every slot message and handback carries the
-  owner's tag, and the callback answers each `Replace` Accepted or Rejected with its reason; it never
-  drops a unit. Buffers for the second unit are allocated at rack build.
+  guitar is heard. The live flag and gate are untouched, but for a commit that changes the unit's kind
+  (effect ↔ instrument): the slot goes off live at that frame as a GO LIVE off would, and the settings
+  replay records it. Every slot message and handback carries the owner's tag, and the callback answers
+  each `Replace` Accepted or Rejected with its reason; it never drops a unit. Buffers for the second
+  unit are allocated at rack build.
 - **Staging before the fade:** the candidate starts processing muted on the audio thread while the old
   one plays (CLAP `start_processing` and VST3 `setProcessing` run on the first process call), at least
   through its reported latency, and commits only once it started without a fault. A candidate that
@@ -45,8 +47,8 @@ reload re-arms it). Path: `src/ui/state/instrument.ts` (`doSelectPlugin`, `unloa
   take returns the identity it read (`src/ui/state/slot-tones.ts`).
 - **No automatic cold fallback:** a refused or transient hot swap keeps the old plugin and reports
   busy or failed. A cold swap is an explicit path, used for the same plugin file (below).
-- **Notes:** an explicit policy at commit, released in both the router
-  (`src-tauri/src/engine_io/midi/router.rs`) and the rack, or retriggered on the candidate.
+- **Notes:** the engine releases the outgoing unit's notes at commit and drops a release for a key the
+  new unit never got, so native MIDI's router keeps its holds.
 - **GO LIVE** during a swap acts on the logical slot, not queued behind the load
   (`src/ui/state/instrument-slots.ts`); commit keeps the last live intent; a kind change follows the
   activated kind, not the scan's.

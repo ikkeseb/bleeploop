@@ -379,15 +379,6 @@ impl Router {
         self.publish();
     }
 
-    /// A plugin swap committed on `slot`: when the notes go to that slot (the one last selected), every
-    /// note that sounds is released (`release_all`), so the replaced plugin's notes end and the new one
-    /// is owed no release. Another slot's notes stay.
-    pub(crate) fn release_slot(&mut self, slot: u8, out: &mut Vec<Out>) {
-        if self.target.is_some_and(|(picked, _)| picked == Some(slot)) {
-            self.release_all(out);
-        }
-    }
-
     /// The note target last selected.
     #[cfg(test)]
     pub fn target(&self) -> Option<NoteTarget> {
@@ -790,25 +781,6 @@ mod tests {
         msg(&mut r, &a0(), [0x90, 63, 100]);
         assert_eq!(msg(&mut r, &a0(), [0x80, 63, 0]), [], "the pedal survived the switch");
         assert_eq!(msg(&mut r, &a0(), [0xe0, 0x00, 0x60]), [], "and the wheel");
-    }
-
-    // A swap's commit on the slot the notes go to releases what sounds there, held and sustained; with
-    // another slot selected, it releases nothing.
-    #[test]
-    fn a_swap_on_the_target_slot_releases_its_notes_and_one_on_another_slot_none() {
-        let mut r = Router::default();
-        let slot0 = NoteTarget::Slot(0);
-        sent(&mut r, |r, out| r.select_target(Some(0), slot0, out));
-        msg(&mut r, &a0(), [0xb0, 64, 127]);
-        msg(&mut r, &a0(), [0x90, 64, 100]);
-        msg(&mut r, &a0(), [0x80, 64, 0]);
-        msg(&mut r, &b0(), [0x90, 60, 100]);
-        assert_eq!(sent(&mut r, |r, out| r.release_slot(1, out)), [], "another slot's swap");
-        assert_eq!(sent(&mut r, |r, out| r.release_slot(0, out)), [Command::NoteOff(60), Command::NoteOff(64)]);
-        assert!(held(&r).is_empty());
-        sent(&mut r, |r, out| r.select_target(Some(1), NoteTarget::Slot(1), out));
-        msg(&mut r, &b0(), [0x90, 62, 100]);
-        assert_eq!(sent(&mut r, |r, out| r.release_slot(0, out)), [], "the notes go to slot 1");
     }
 
     // A refused attack records no owner: undone, a fresh strike or a re-strike under

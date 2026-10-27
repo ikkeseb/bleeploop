@@ -859,8 +859,6 @@ mod tests {
         closing: AtomicBool,
         /// Each `plugin:retired`: slot, instance, released.
         retired: Arc<Mutex<Vec<(u8, u64, bool)>>>,
-        /// Each commit a swap's `on_commit` heard: slot, whether the kind changed.
-        commits: Mutex<Vec<(u8, bool)>>,
         state: PluginHostState,
         device: TestDevice,
         _one: std::sync::MutexGuard<'static, ()>,
@@ -879,7 +877,6 @@ mod tests {
                 reload_tones: Mutex::default(),
                 closing: AtomicBool::new(false),
                 retired: Arc::default(),
-                commits: Mutex::default(),
                 state: PluginHostState::default(),
                 device: TestDevice::start(48_000, 256, Duration::from_millis(5), input),
                 _one: one,
@@ -930,8 +927,7 @@ mod tests {
         fn swap(&self, path: &str, epoch: u32, wait: Duration, open: Open<'_>) -> Result<PluginInfo, String> {
             let record = self.retired.clone();
             let retired: RetiredSink = Arc::new(move |r: Retired| record.lock().unwrap().push((r.slot, r.instance, r.released)));
-            let on_commit = |slot, kind_changed| self.commits.lock().unwrap().push((slot, kind_changed));
-            SwapTarget { load: self.target(wait, open), retired, on_commit: &on_commit }.swap(&self.state, 0, path.to_string(), "other.id".to_string(), 1.0, epoch, None)
+            SwapTarget { load: self.target(wait, open), retired }.swap(&self.state, 0, path.to_string(), "other.id".to_string(), 1.0, epoch, None)
         }
 
         fn slot(&self) -> &'static str {
@@ -951,10 +947,6 @@ mod tests {
 
         fn retired(&self) -> Vec<(u8, u64, bool)> {
             self.retired.lock().unwrap().clone()
-        }
-
-        fn commits(&self) -> Vec<(u8, bool)> {
-            self.commits.lock().unwrap().clone()
         }
 
         /// The exit's slot work: `begin_closing`, then `unload_all` over the device.
@@ -1245,7 +1237,6 @@ mod tests {
         assert_eq!((info.instance, info.effect, info.descriptor.path.as_str()), (swapped.instance(), false, r"C:\plugins\Synth.clap"));
         assert_ne!(info.instance, playing.instance(), "a new instance");
         assert!(playing.retired() && !swapped.retired(), "the replaced owner is retired, the new one plays");
-        assert_eq!(rig.commits(), vec![(0, true)], "a commit to another kind");
         drop(swapped);
         assert!(tearing_down.recv_timeout(Duration::from_secs(10)).is_ok(), "the replaced owner tears down");
 
@@ -1309,7 +1300,7 @@ mod tests {
         let handle = rig.playing();
         assert!(handle.instance() == playing && !handle.retired(), "the old plugin plays on");
         assert_eq!(old.ended.load(Relaxed), 0, "its teardown never began");
-        assert!(rig.retired().is_empty() && rig.commits().is_empty());
+        assert!(rig.retired().is_empty());
     }
 
     /// A swap `call_off` calls off once its plugin is the slot's, before the swap has heard so: both
@@ -1339,7 +1330,7 @@ mod tests {
         assert!(swapped.as_ref().is_err_and(|e| e.contains("superseded")), "{swapped:?}");
         assert_eq!(rig.slot(), "empty");
         assert_eq!((old.ended.load(Relaxed), new.ended.load(Relaxed)), (1, 1), "both plugins ended");
-        assert!(rig.retired().is_empty() && rig.commits().is_empty());
+        assert!(rig.retired().is_empty());
     }
 
     #[test]
@@ -1407,7 +1398,7 @@ mod tests {
         assert!(waited, "the exit waits for the swap, which still holds the slot");
         assert!(swapped.as_ref().is_err_and(|e| e.contains("cancelled")), "{swapped:?}");
         assert_eq!((rig.slot(), old.ended.load(Relaxed)), ("empty", 1));
-        assert!(rig.retired().is_empty() && rig.commits().is_empty());
+        assert!(rig.retired().is_empty());
     }
 
     /// The exit during a called-off swap whose candidate's release hangs: the swap starts both
@@ -1440,7 +1431,7 @@ mod tests {
         assert_eq!(exited, "empty", "the exit returned once the slot was empty");
         assert!(swapped.as_ref().is_err_and(|e| e.contains("superseded")), "{swapped:?}");
         assert_eq!((old.dropped.load(Acquire), new.dropped.load(Acquire)), (1, 1), "both plugins ended");
-        assert!(rig.retired().is_empty() && rig.commits().is_empty());
+        assert!(rig.retired().is_empty());
     }
 
     /// A cold load waiting behind an unfinished retire, once the exit begins, is refused `busy: closing`
@@ -1542,7 +1533,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(rig.retired()[1], (0, swapped.instance, true));
-        assert_eq!(rig.commits(), vec![(0, false), (0, false)], "commits of the same kind");
     }
     /// Wait (≤ 10 s) until the rig has heard `count` retires end.
     fn retires(rig: &Rig, count: usize) {
@@ -1626,7 +1616,6 @@ mod tests {
         assert!(handle.instance() != playing && !handle.retired(), "the new plugin plays");
         retires(&rig, 1);
         assert_eq!(rig.retired(), vec![(0, playing, true)], "the old one retired");
-        assert_eq!(rig.commits(), vec![(0, false)], "its commit is heard");
         assert_eq!((old.ended.load(Relaxed), new.ended.load(Relaxed)), (1, 0));
     }
 

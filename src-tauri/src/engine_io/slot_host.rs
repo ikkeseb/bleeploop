@@ -355,21 +355,23 @@ mod tests {
         }
     }
 
-    /// An effect that outputs a constant and counts; `refuse` makes it refuse to start processing.
+    /// A unit (an effect unless `kind` says otherwise) that outputs a constant and counts; `refuse`
+    /// makes it refuse to start processing.
     struct Constant {
         level: f32,
+        kind: SlotKind,
         refuse: bool,
         counts: Counts,
     }
 
     fn constant(level: f32) -> (Box<Constant>, Counts) {
         let counts = Counts::default();
-        (Box::new(Constant { level, refuse: false, counts: counts.clone() }), counts)
+        (Box::new(Constant { level, kind: SlotKind::Effect, refuse: false, counts: counts.clone() }), counts)
     }
 
     impl SlotProcessor for Constant {
         fn kind(&self) -> SlotKind {
-            SlotKind::Effect
+            self.kind
         }
         fn latency(&self) -> Frame {
             0
@@ -639,6 +641,19 @@ mod tests {
         assert!(device.wait_blocks(20));
         let rebuilt = heard(&device);
         assert!((rebuilt - swapped).abs() < 0.01, "the new engine plays B at the swap's gain: {rebuilt}, not {swapped}");
+    }
+
+    #[test]
+    fn a_commit_that_takes_the_slot_off_live_enters_the_replay() {
+        let (device, _a, _, b) = playing();
+        device.host().send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        assert!(device.wait_blocks(5), "GO LIVE applies before the swap");
+        let (mut unit, _) = constant(0.5);
+        unit.kind = SlotKind::Instrument;
+        assert!(b.replace(unit, 48_000, 0.7).is_ok(), "an instrument for the live effect");
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed));
+        let replay = device.host().settings();
+        assert!(replay.contains(&Command::SetSlotLive(0, false)) && !replay.contains(&Command::SetSlotLive(0, true)), "{replay:?}");
     }
 
     #[test]

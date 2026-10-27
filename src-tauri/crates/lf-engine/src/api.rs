@@ -750,7 +750,8 @@ pub enum SlotReply {
     /// The replace tagged `tag` committed: its unit is the slot's from this block on (crossfading in
     /// over the unit it replaced, which follows as [`HandbackReason::ReplacedOut`] once faded out).
     /// Every replace is answered once: this, or its unit back as [`HandbackReason::Rejected`].
-    Committed { tag: u64 },
+    /// `live_off`: this commit took the slot off live (its unit changed kind, effect ↔ instrument).
+    Committed { tag: u64, live_off: bool },
     /// A remove for `tag`, which is neither the unit the slot plays nor one fading out after a swap (a
     /// later unit took its place, it has left, or it still stages), or a withdraw for `tag`, which is not
     /// a candidate staging (one already committed included): nothing changed.

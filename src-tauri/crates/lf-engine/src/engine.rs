@@ -425,6 +425,18 @@ impl Engine {
     /// stops here, on the caller's thread).
     pub fn service_slots_idle(&mut self) {
         self.rack.service_idle();
+        self.follow_slots_off();
+    }
+
+    /// A swap's commit takes a live slot whose unit changed kind off live: GO LIVE's flag in the overview
+    /// follows, as the command's own does. Only an off is copied: a gate `close_slot_idle` shut shows off
+    /// while its flag may be on.
+    fn follow_slots_off(&self) {
+        for slot in 0..SLOT_COUNT {
+            if !self.rack.live(slot) {
+                self.looper.overview().set_slot_live(slot, false);
+            }
+        }
     }
 
     /// While no device runs and the host holds the engine: run a session job on the port at once (a load
@@ -551,6 +563,7 @@ impl Engine {
     /// installs it into the new engine).
     pub fn evict_slots(&mut self) {
         self.rack.evict();
+        self.follow_slots_off();
     }
 
     /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out after
@@ -610,6 +623,7 @@ impl Engine {
         // that would change the latency waits for it too, so this block's answer is the rack's.
         let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
         self.rack.begin_block(start, first, !open);
+        self.follow_slots_off();
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;

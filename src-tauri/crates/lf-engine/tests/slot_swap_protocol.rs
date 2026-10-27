@@ -5,7 +5,8 @@
 //! mid-staging and mid-fade does only what its tag names, and a second remove of a unit being removed
 //! gets no answer; an eviction mid-swap leaves nothing, nor one after a candidate panicked as it
 //! arrived; a candidate stages its latency plus the stage, and the unit it replaces releases its notes
-//! in its last calls. (The fade itself: `tests/slot_swap.rs`.)
+//! in its last calls, a later release of one reaching neither unit. (The fade itself:
+//! `tests/slot_swap.rs`.)
 
 mod common;
 
@@ -54,7 +55,7 @@ fn answers(rig: &mut Rig, slot: usize, units: &mut Vec<Box<dyn SlotProcessor>>) 
     let mut got = Vec::new();
     while let Some(reply) = rig.reply(slot) {
         got.push(match reply {
-            SlotReply::Committed { tag } => Committed(tag),
+            SlotReply::Committed { tag, .. } => Committed(tag),
             SlotReply::NotHeld { tag } => NotHeld(tag),
             SlotReply::Handback(back) => {
                 units.push(back.unit);
@@ -481,7 +482,8 @@ fn an_eviction_mid_swap_hands_back_the_old_unit_replaced_out_then_the_new_one_ev
 /// Proof 10: a candidate processes, unheard, from the replace's block for at least its latency plus the
 /// stage, and commits at the first block start after; the notes the old unit holds then (one struck
 /// before the replace, one while the candidate staged) are released on the commit frame, inside its last
-/// calls, and the new unit hears only the notes struck after it.
+/// calls, and the new unit hears only the notes struck after it: their keys' releases after the commit
+/// reach neither unit, so no note hangs in either.
 #[test]
 fn a_candidate_stages_its_latency_plus_the_stage_and_the_old_unit_releases_its_notes_in_its_last_calls() {
     for block in [1, 32, 128, 480] {
@@ -503,7 +505,7 @@ fn a_candidate_stages_its_latency_plus_the_stage_and_the_old_unit_releases_its_n
                 rig.advance(b);
                 match rig.reply(0) {
                     None => assert!(at < s + rig.seconds(1.0), "{what}: no commit"),
-                    Some(SlotReply::Committed { tag: 2 }) => break at,
+                    Some(SlotReply::Committed { tag: 2, .. }) => break at,
                     Some(other) => panic!("{what}: {other:?}"),
                 }
             };
@@ -513,6 +515,8 @@ fn a_candidate_stages_its_latency_plus_the_stage_and_the_old_unit_releases_its_n
             assert!(staged >= need && staged < need + b, "{what}: staged {staged} for {need}");
             assert_eq!(c, s + staged, "{what}: committed at the block start after");
             rig.queue(Command::NoteOn(67, 1.0));
+            rig.queue(Command::NoteOff(60));
+            rig.queue(Command::NoteOff(64));
             rig.advance(whole(SWAP, b) + b);
             assert!(matches!(rig.reply(0), Some(SlotReply::Handback(back)) if (back.tag, back.reason) == (1, ReplacedOut)), "{what}");
             let off: Vec<_> = old.events().into_iter().filter(|(_, _, k)| matches!(k, lf_engine::SlotEventKind::NoteOff { .. })).collect();

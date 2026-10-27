@@ -3,7 +3,8 @@
 //! frame at any block size, each unit on its own destination and no bypass under it; a candidate stages
 //! on the slot's real input; a gain change while it stages moves the playing unit alone; a candidate
 //! that refuses to start goes back and leaves the slot untouched; a swap that changes the latency (an
-//! empty slot's is 0) waits for a take to stop capturing, whatever the kinds.
+//! empty slot's is 0) waits for a take to stop capturing, whatever the kinds; a commit to another kind
+//! takes a live slot off live as GO LIVE off would, and no other commit touches the live flag.
 
 mod common;
 
@@ -13,9 +14,11 @@ use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, HandbackReason, NoteTarget, Rejection, SlotKind, SlotReply};
 
-/// Frames at 48 kHz of a candidate's staging past its latency, and of the swap fade: 10 ms each.
+/// Frames at 48 kHz of a candidate's staging past its latency, and of the swap fade: 10 ms each; of the
+/// live gate's ramp: 5 ms.
 const STAGE: Frame = 480;
 const SWAP: Frame = 480;
+const LIVE: Frame = 240;
 
 /// Two triangle waves, exact in f32: slot 0's input and slot 1's.
 fn input_a(f: Frame) -> f32 {
@@ -121,11 +124,13 @@ fn bits(x: &[f32]) -> Vec<u32> {
 /// A swap on slot 0 at block size `block`, the input at `level`: `old` (tag 1) installed before the
 /// first block, so engaged at once, then `new` (tag 2) replacing it at `gain` from block start S. It
 /// commits at C, the first block start once it has staged its latency plus `STAGE`; checked here:
-/// no answer before C, `Committed` from C's block, the old unit back `ReplacedOut` after the fade. The
-/// rig keeps its output from S and has rendered whole blocks past the fade. Returns the rig, S and C.
+/// no answer before C, `Committed` from C's block (the live slot taken off live exactly when the kind
+/// changes), the old unit back `ReplacedOut` after the fade. The rig keeps its output from S and has
+/// rendered whole blocks past the fade. Returns the rig, S and C.
 fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> (Rig, Frame, Frame) {
     let b = block as Frame;
     let need = new.latency + STAGE;
+    let changed = old.kind != new.kind;
     let mut rig = Rig::with(Opts { block, ..Default::default() });
     rig.set_level(level);
     rig.install_tagged(0, 1, old);
@@ -137,7 +142,9 @@ fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> 
     rig.advance(c - s);
     assert!(rig.reply(0).is_none(), "block {block}: staging until {c}");
     rig.advance(b);
-    assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 2 })), "block {block}: committed at {c}");
+    let reply = rig.reply(0);
+    assert!(matches!(reply, Some(SlotReply::Committed { tag: 2, live_off }) if live_off == changed), "block {block}: committed at {c}: {reply:?}");
+    assert_eq!(rig.engine.looper().overview().slot_live(0), !changed, "block {block}: GO LIVE after the commit");
     rig.advance(whole(SWAP, b));
     match rig.reply(0) {
         Some(SlotReply::Handback(back)) => assert_eq!((back.tag, back.reason), (1, HandbackReason::ReplacedOut), "block {block}"),
@@ -183,6 +190,59 @@ fn mid_swap_each_unit_sounds_on_its_own_destination_and_the_bypass_not_at_all() 
     }
 }
 
+/// The live gate `step` frames into a GO LIVE off from full, as the rack's ramp: silence from its end.
+fn ramped_off(step: Frame) -> f32 {
+    if step < LIVE {
+        1.0 + (0.0 - 1.0) * (step as f32 / LIVE as f32)
+    } else {
+        0.0
+    }
+}
+
+/// A commit to another kind takes a live slot off live as a GO LIVE off at its frame would: an identity
+/// effect on a constant input, replaced by a silent instrument, fades out over the swap fade on its
+/// input ramped from full to silence over the live ramp from the commit frame, frame-exact at a block
+/// size that splits the ramp and one that holds it, and nothing of the input passes after the ramp.
+#[test]
+fn a_commit_to_another_kind_takes_a_live_slot_off_live_as_go_live_off_would() {
+    for block in [128, 480] {
+        let (a, b) = (Probe::new(), Probe::new());
+        let level = 0.5;
+        let (rig, s, c) = swap(block, level, Fake::effect(0.0, 1.0, &a), Fake::instrument(0.0, 0, &b), 1.0);
+        assert_bits(&rig.monitor, s, |f| if f < c { level } else { crossed(level * ramped_off(f - c), 0.0, f - c) }, &format!("block {block}"));
+    }
+}
+
+/// A commit to the same kind leaves the live flag alone, and one into a slot not live leaves it so:
+/// effect → effect stays live, instrument → effect stays off, each `Committed` with no `live_off`.
+#[test]
+fn a_commit_takes_a_slot_off_live_only_when_live_and_only_to_another_kind() {
+    use SlotKind::{Effect, Instrument};
+    for (live, from, to) in [(true, Effect, Effect), (false, Instrument, Effect)] {
+        let what = format!("{from:?} to {to:?}, live {live}");
+        let unit = |kind, probe: &Probe| match kind {
+            Effect => Fake::effect(0.25, 1.0, probe),
+            Instrument => Fake::instrument(0.25, 0, probe),
+        };
+        let (p1, p2) = (Probe::new(), Probe::new());
+        let mut rig = Rig::with(Opts { block: 128, ..Default::default() });
+        rig.queue(Command::SetSlotLive(0, live));
+        rig.install_tagged(0, 1, unit(from, &p1));
+        rig.advance(4 * 128);
+        rig.replace(0, 2, unit(to, &p2), 1.0);
+        let give_up = rig.frame + rig.seconds(1.0);
+        let reply = loop {
+            rig.advance(128);
+            if let Some(reply) = rig.reply(0) {
+                break reply;
+            }
+            assert!(rig.frame < give_up, "{what}: no commit");
+        };
+        assert!(matches!(reply, SlotReply::Committed { tag: 2, live_off: false }), "{what}: {reply:?}");
+        assert_eq!(rig.engine.looper().overview().slot_live(0), live, "{what}");
+    }
+}
+
 /// A candidate stages on the slot's real input: a delay line its latency long, replacing a silent effect
 /// on a frame-coded input, sounds from the commit frame with the input its latency before, frames it
 /// took while it staged unheard (under the swap fade: `crossed`).
@@ -203,7 +263,7 @@ fn a_staging_candidate_takes_the_slots_input_so_it_sounds_from_its_history_at_th
             rig.keep_output();
             rig.advance_to(c + SWAP + latency + b);
             assert_bits(&rig.monitor, s, |f| if f < c { 0.0 } else { crossed(0.0, code(f - latency), f - c) }, &what);
-            assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 2 })), "{what}");
+            assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 2, .. })), "{what}");
             assert!(rig.returned(0).is_some(), "{what}: the old unit back");
         }
     }
@@ -309,7 +369,7 @@ fn a_swap_that_changes_the_latency_waits_while_a_take_captures_and_one_that_keep
             assert!(one_block(&mut rig), "block {block}: still capturing");
             match rig.reply(0) {
                 None => assert!(at < c, "block {block}: the same latency commits at {c}"),
-                Some(SlotReply::Committed { tag: 2 }) => break assert_eq!(at, c, "block {block}"),
+                Some(SlotReply::Committed { tag: 2, .. }) => break assert_eq!(at, c, "block {block}"),
                 other => panic!("block {block}: {other:?}"),
             }
         }
@@ -331,7 +391,7 @@ fn a_swap_that_changes_the_latency_waits_while_a_take_captures_and_one_that_keep
             assert!(rig.frame < give_up, "block {block}: the take never stopped capturing");
         }
         assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 200)), "block {block}: committed at the first block start after the capture");
-        assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 3 })), "block {block}");
+        assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 3, .. })), "block {block}");
     }
 }
 
@@ -392,7 +452,7 @@ fn a_candidate_waits_for_the_capture_exactly_when_the_latency_changes_whatever_t
                         assert!(at < give_up, "{what}: no commit");
                         assert_eq!(rig.engine.slot(0), from, "{what}: staged at {at}");
                     }
-                    Some(SlotReply::Committed { tag: 2 }) => break (at, captured),
+                    Some(SlotReply::Committed { tag: 2, .. }) => break (at, captured),
                     other => panic!("{what}: {other:?}"),
                 }
             };
