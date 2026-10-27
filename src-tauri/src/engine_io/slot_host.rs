@@ -61,7 +61,8 @@ impl Back {
     }
 }
 
-/// One owner's handshake with a slot (`EngineHost::slot`). Cheap to clone (a clone is the same owner).
+/// One owner's handshake with a slot (`EngineHost::slot`). Cheap to clone (a clone is the same owner,
+/// and dropping any clone is the owner dropping: `Drop`).
 #[derive(Clone)]
 pub struct SlotHost {
     core: Arc<Core>,
@@ -94,9 +95,16 @@ impl SlotHost {
         self.core.max_block.load(Relaxed) as usize
     }
 
-    /// Where this owner stands on the slot; `None` once nothing of it is in the engine or on the desk.
+    /// Where this owner stands on the slot; `None` once nothing of it is in the engine or on the desk,
+    /// unless it was retired: that one reads Retiring until it drops.
     pub fn standing(&self) -> Option<Standing> {
         self.desk().standing(self.token)
+    }
+
+    /// Test-only: nothing of this owner's is in the engine or waits on the desk.
+    #[cfg(test)]
+    pub(crate) fn holds_nothing(&self) -> bool {
+        self.desk().holds_nothing(self.token)
     }
 
     /// Hand a unit activated at `rate` to the engine; it crossfades in at the next block (engaged at
@@ -305,6 +313,15 @@ impl SlotHost {
     }
 }
 
+impl Drop for SlotHost {
+    /// The owner is gone: the desk forgets it once nothing of it is left there (a retired owner's
+    /// standing included). The clones are its owner thread's and its handle's, which joins that thread
+    /// before it drops, so none drops while the owner still runs.
+    fn drop(&mut self) {
+        self.desk().forget(self.token);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
@@ -510,7 +527,7 @@ mod tests {
         let Back::Out(out) = eventually("A's unit fades out", || a.take_back()) else { panic!("retired, not evicted") };
         assert_eq!(counts_a.stops(), 1, "stopped once, after its fade");
         assert_eq!(level(out), 0.25);
-        assert_eq!(a.standing(), None, "released once its unit is back");
+        assert_eq!(a.standing(), Some(Standing::Retiring), "still retired once its unit is back");
         assert!(b.take_back().is_none(), "A's unit never reaches B");
         assert!(device.wait_blocks(5));
         assert!(counts_b.calls() > 0, "B's unit plays");
@@ -592,7 +609,9 @@ mod tests {
         assert!(why.contains("replaced"), "{why}");
         let Some(Back::Out(out)) = a.take_back() else { panic!("A's evicted unit comes back retired") };
         assert_eq!(level(out), 0.25);
-        let (_, why) = a.install(again, 48_000).expect_err("B's eviction holds the slot");
+        let (again, why) = a.install(again, 48_000).expect_err("nor once its unit is back");
+        assert!(why.contains("replaced"), "{why}");
+        let (_, why) = device.host().slot(0).install(again, 48_000).expect_err("B's eviction holds the slot");
         assert!(why.contains("already holds"), "{why}");
         let Some(Back::Evicted(back)) = b.take_back() else { panic!("B's unit goes in again") };
         assert!(b.install(back, 48_000).is_ok());
@@ -765,6 +784,29 @@ mod tests {
         });
         let back = removed.expect("comes back").expect("A's own unit");
         assert_eq!((level(back), counts_a.stops()), (0.25, 1));
-        assert_eq!(a.standing(), None);
+        assert_eq!(a.standing(), Some(Standing::Retiring));
+    }
+
+    /// A retired owner reads Retiring once its unit is back, taken back or removed, and never installs
+    /// again; its drop forgets it.
+    #[test]
+    fn a_retired_owner_stays_retiring_once_its_unit_is_back_until_it_drops() {
+        for removed in [false, true] {
+            let (_device, a, _, b) = playing();
+            let (unit, _) = constant(0.5);
+            assert!(b.replace(unit, 48_000, 0.8).is_ok());
+            assert!(matches!(b.answer(PATIENCE), Answer::Committed));
+            let back = if removed { a.remove_back(PATIENCE).unwrap() } else { Some(eventually("A's unit fades out", || a.take_back())) };
+            assert!(matches!(back, Some(Back::Out(_))), "back retired");
+            assert_eq!(a.standing(), Some(Standing::Retiring), "still retired, its unit back");
+            assert!(a.remove_back(Duration::ZERO).unwrap().is_none(), "nothing left to remove");
+            let (again, _) = constant(0.1);
+            let (_, why) = a.install(again, 48_000).expect_err("a retired owner never installs again");
+            assert!(why.contains("replaced"), "{why}");
+            let (core, tag) = (a.core.clone(), a.tag());
+            drop(a);
+            assert_eq!(core.ports[0].lock().unwrap().standing(tag), None, "forgotten once its owner drops");
+            assert!(b.remove(PATIENCE).unwrap().is_some());
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! OWNS: one slot's bookkeeping between its plugin owners and the engine's port ([`Desk`], one per
 //! slot in `Core::ports`, under that lock): each owner's standing, whether its unit is in the engine,
-//! and the replies the engine sent it that it has not read yet (its mail).
+//! and the replies the engine sent it that it has not read yet (its mail). A Retiring owner's entry
+//! outlives its unit's return until the owner drops (`forget`): it reads Retiring from the commit on.
 //!
 //! [`Desk::pump`] reads the port and routes each reply by its tag (the owner's token):
 //! - `Committed { t }`: every other Active owner becomes Retiring, wherever its unit is (in the engine,
@@ -21,12 +22,13 @@ use lf_engine::{Command, Handback, HandbackReason, SlotPort, SlotProcessor, Slot
 use crate::engine_io::settings::Settings;
 
 /// An owner's standing on its slot. An owner with no entry is released: nothing of it is in the engine
-/// or waits in its mail.
+/// or waits in its mail, and it was never retired (or has dropped).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// Its unit plays, stages, or waits to be installed again after an eviction.
     Active,
-    /// Another owner's replace committed: its unit fades out (or waits in mail) and never goes in again.
+    /// Another owner's replace committed: its unit fades out (or waits in mail, or is back) and never goes
+    /// in again.
     Retiring,
     /// It gave up on its unit (and leaks its plugin), or the unit was lost with a leaked engine: whatever
     /// comes back of it leaks here.
@@ -132,7 +134,7 @@ impl Desk {
     }
 
     /// The first unit in `tag`'s mail whose reason `pick` maps to `Some`, with that value. Taking a unit
-    /// whose owner has none left in the engine releases the owner.
+    /// whose owner has none left in the engine releases the owner (`release`).
     pub(super) fn take_unit<T>(&mut self, tag: u64, pick: impl Fn(HandbackReason) -> Option<T>) -> Option<(T, Box<dyn SlotProcessor>)> {
         let (at, value) = self.mail.iter().enumerate().find_map(|(at, r)| match r {
             SlotReply::Handback(back) if back.tag == tag => pick(back.reason).map(|value| (at, value)),
@@ -248,10 +250,24 @@ impl Desk {
         at.and_then(|at| self.mail.remove(at)).is_some()
     }
 
-    /// `tag` has nothing left in the engine or its mail: drop its entry and its unread notes.
+    /// `tag` has nothing left in the engine or its mail: drop its unread notes, and its entry unless it
+    /// is Retiring (kept until the owner drops: `forget`).
     fn release(&mut self, tag: u64) {
-        self.owners.retain(|e| e.tag != tag);
+        self.owners.retain(|e| e.tag != tag || e.standing == Standing::Retiring);
         self.mail.retain(|r| tag_of(r) != tag || matches!(r, SlotReply::Handback(_)));
+    }
+
+    /// `tag`'s owner dropped: its entry goes once nothing of it is in the engine or its mail; otherwise
+    /// it stays, and whatever comes back of it leaks as it would have.
+    pub(super) fn forget(&mut self, tag: u64) {
+        if self.holds_nothing(tag) {
+            self.owners.retain(|e| e.tag != tag);
+        }
+    }
+
+    /// Nothing of `tag`'s is in the engine or waits in its mail.
+    pub(super) fn holds_nothing(&self, tag: u64) -> bool {
+        !self.in_engine(tag) && !self.mail.iter().any(|r| tag_of(r) == tag)
     }
 
     fn entry(&self, tag: u64) -> Option<&OwnerEntry> {
