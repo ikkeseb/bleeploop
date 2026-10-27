@@ -10,13 +10,15 @@ pub(super) const STAGE_SECONDS: f64 = 0.010;
 /// The crossfade from the replaced unit to its replacement.
 pub(super) const SWAP_SECONDS: f64 = 0.010;
 
-/// Where a slot's swap stands. The slot's `side` seat holds a unit exactly when this is not `Idle`.
+/// What the unit in a slot's `side` seat is doing. Set before a unit takes the seat (one that panics as
+/// it arrives is staging already) and `Idle` again once it has left; what a seat holds is the seat's
+/// alone to say, so a hand-back reads the seat, never this.
 pub(super) enum Swap {
     /// No swap: the slot plays its `seat` alone.
     Idle,
-    /// The candidate in `side` has processed `done` frames, unheard; it commits once they reach `need`
-    /// (its latency plus the stage), then plays at `gain`.
-    Staging { done: Frame, need: Frame, gain: f32 },
+    /// The candidate in `side` has processed `done` frames, unheard ([`Slot::commit_when_ready`] says
+    /// how many it needs), then plays at `gain`.
+    Staging { done: Frame, gain: f32 },
     /// The unit in `side` fades out under the one the slot plays, `step` frames into the swap fade, at
     /// the slot's `gain` as it stood at the commit.
     Fading { step: u32, gain: f64 },
@@ -59,21 +61,22 @@ impl Seat {
 }
 
 impl Slot {
-    /// A replace: into an empty slot, an install whose gain glides to `gain`, committed at once; beside a
-    /// playing unit, the candidate stages in the side seat for its latency plus `stage` frames. A slot
-    /// already swapping, or whose unit is being removed, sends it straight back `Busy`, counted, never
-    /// started or stopped.
-    pub(super) fn replace(&mut self, tag: u64, unit: Box<dyn SlotProcessor>, gain: f32, fade: u32, stage: Frame, errors: &mut u64) {
-        if self.seat.unit.is_none() {
-            self.install(tag, unit, fade, errors);
-            self.gain_target = slot_gain(gain);
-            self.end.send(SlotReply::Committed { tag }, errors);
-        } else if self.removing || !matches!(self.swap, Swap::Idle) {
+    /// A replace: the candidate takes the side seat and stages there, for its latency plus `stage`
+    /// frames beside a playing unit; into an empty slot it is ready at once, an install whose gain glides
+    /// to `gain` (held, as any candidate, while a take is `capturing` and its latency is not the slot's).
+    /// A slot already swapping, or whose unit is being removed, sends it straight back `Busy`, counted,
+    /// never started or stopped.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn replace(&mut self, tag: u64, unit: Box<dyn SlotProcessor>, gain: f32, fade: u32, stage: Frame, capturing: bool, dropped: &mut u64, errors: &mut u64) {
+        if self.removing || self.side.unit.is_some() {
             *errors += 1;
             self.end.hand_back(tag, HandbackReason::Rejected(Rejection::Busy), unit, errors);
-        } else {
-            self.side.take(tag, unit);
-            self.swap = Swap::Staging { done: 0, need: self.side.latency + stage, gain };
+            return;
+        }
+        self.swap = Swap::Staging { done: 0, gain };
+        self.side.take(tag, unit);
+        if self.seat.unit.is_none() {
+            self.commit_when_ready(stage, capturing, fade, dropped, errors);
         }
     }
 
@@ -99,40 +102,47 @@ impl Slot {
         matches!(self.swap, Swap::Fading { .. }) && self.side.tag == tag
     }
 
-    /// At a block start, after the messages: a candidate staged long enough commits, unless a take is
-    /// `capturing` and its latency differs from the playing unit's.
-    pub(super) fn commit_when_ready(&mut self, capturing: bool, dropped: &mut u64, errors: &mut u64) {
-        let Swap::Staging { done, need, .. } = self.swap else { return };
+    /// A staging candidate commits once it has processed its latency plus `stage` frames (into an empty
+    /// slot, none: nothing plays to hide its start behind), unless a take is `capturing` and its latency
+    /// differs from the playing unit's. An install into an empty slot starts `fade` frames into its own.
+    pub(super) fn commit_when_ready(&mut self, stage: Frame, capturing: bool, fade: u32, dropped: &mut u64, errors: &mut u64) {
+        let Swap::Staging { done, .. } = self.swap else { return };
+        let need = if self.seat.unit.is_some() { self.side.latency + stage } else { 0 };
         if done >= need && !(capturing && self.side.playing_latency() != self.seat.playing_latency()) {
-            self.commit(dropped, errors);
+            self.commit(fade, dropped, errors);
         }
     }
 
-    /// The candidate becomes the unit the slot plays: the old one's notes are released, the seats trade
-    /// places, the old one fades out at the gain the slot had, and the slot's gain is the replace's at
-    /// once.
-    fn commit(&mut self, dropped: &mut u64, errors: &mut u64) {
+    /// The candidate becomes the unit the slot plays, `Committed`. Into an empty slot that is an install
+    /// (in from bypass, `fade` frames done) whose gain glides to the replace's; beside a playing unit, the
+    /// old one's notes are released, the seats trade places, the old one fades out at the gain the slot
+    /// had, and the slot's gain is the replace's at once.
+    fn commit(&mut self, fade: u32, dropped: &mut u64, errors: &mut u64) {
         let Swap::Staging { gain, .. } = self.swap else { return };
+        let empty = self.seat.unit.is_none();
         self.seat.release_all(0, dropped);
         std::mem::swap(&mut self.seat, &mut self.side);
-        self.swap = Swap::Fading { step: 0, gain: self.gain };
-        self.gain = slot_gain(gain);
-        self.gain_target = self.gain;
+        self.gain_target = slot_gain(gain);
+        if empty {
+            self.swap = Swap::Idle;
+            self.engage(fade);
+        } else {
+            self.swap = Swap::Fading { step: 0, gain: self.gain };
+            self.gain = self.gain_target;
+        }
         self.end.send(SlotReply::Committed { tag: self.seat.tag }, errors);
     }
 
-    /// No block will render the swap (idle servicing, an eviction): a staging candidate commits, and the
-    /// unit it replaced, its released notes carried by one silent frame from `frame`, goes back
-    /// `ReplacedOut`.
-    pub(super) fn settle_swap(&mut self, frame: Frame, zeros: &[f32], dropped: &mut u64, errors: &mut u64) {
-        self.commit(dropped, errors);
-        if matches!(self.swap, Swap::Fading { .. }) {
-            self.side.flush(frame, zeros);
-            self.retire_side(HandbackReason::ReplacedOut, errors);
-        }
+    /// No block will render the swap (idle servicing, an eviction): a staging candidate commits (an
+    /// install into an empty slot `fade` frames in), and whatever the side seat then holds, the unit it
+    /// replaced, goes back `ReplacedOut`, its released notes carried by one silent frame from `frame`.
+    pub(super) fn settle_swap(&mut self, frame: Frame, zeros: &[f32], fade: u32, dropped: &mut u64, errors: &mut u64) {
+        self.commit(fade, dropped, errors);
+        self.side.flush(frame, zeros);
+        self.retire_side(HandbackReason::ReplacedOut, errors);
     }
 
-    /// The side seat's unit goes back, stopped, with `reason`, and the swap is over.
+    /// The side seat's unit, if any, goes back, stopped, with `reason`, and the swap is over.
     pub(super) fn retire_side(&mut self, reason: HandbackReason, errors: &mut u64) {
         self.side.hand_back(&mut self.end, reason, errors);
         self.swap = Swap::Idle;
