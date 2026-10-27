@@ -587,9 +587,11 @@ async function adoptSwapFailure(
     return true;
   }
   if (listed) {
-    // The listing describes no kind (native's `is_effect: None`): the incoming file keeps the scan's
-    // descriptor, another file the kind it activated as: GO LIVE and the rig recall read the kind.
-    const adopted = sameFile(listed.descriptor.path, desc.path) ? desc : { ...listed.descriptor, isEffect: listed.effect };
+    // The listing describes no kind (native's `is_effect: None`): the incoming plugin itself (its id in
+    // its file) keeps the scan's descriptor, any other the kind it activated as, even another id in the
+    // incoming file (one file lists several): GO LIVE and the rig recall read the kind.
+    const incoming = listed.descriptor.id === desc.id && sameFile(listed.descriptor.path, desc.path);
+    const adopted = incoming ? desc : { ...listed.descriptor, isEffect: listed.effect };
     adoptSwapped(slot, adopted, listed, gain, claimMidi, outgoing.path, outgoingInstance);
     notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}.`, e);
     return false;

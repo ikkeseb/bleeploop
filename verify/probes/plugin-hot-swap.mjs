@@ -45,7 +45,8 @@
  * 23. GO LIVE pressed while a failed swap's recovery adopts a plugin waits behind it and is answered for
  *     the adopted plugin, its kind read as native lists it (no descriptor kind, only `effect`): an
  *     effect's press (the named action's) is the engine's toggle, an instrument's (the cap's) a live-off,
- *     the incoming file kept at its scan's kind, a third file at the kind it activated as;
+ *     the incoming plugin kept at its scan's descriptor (its kind and name, against the listing's), a third
+ *     file or another id in the incoming file at the listed descriptor and the kind it activated as;
  * 24. a failed swap's incoming file is let go when its recovery ends: the other slot's later unload of
  *     that file leaves no entry (the uncertain rule refuses it, no orphan of a stale hold);
  * 25. a stranded GO LIVE is carried by a synth pick while the slot stays live (its press a live-off) and
@@ -97,6 +98,8 @@ await probe(async ({ open }) => {
     for (const id of ['fx1', 'fx2', 'fx3']) d[id] = desc(id, true);
     d.u = desc('u', undefined); // unclassified: takes input, activates as whatever the host says
     d.bCase = desc('b-copy', false, 'c:/PROBE/B.vst3'); // the same file as `b`, as native's `same_file` reads it
+    d.fx3i = desc('fx3i', false, d.fx3.path); // another id in `fx3`'s file: an instrument beside its effect
+    d.vocoder = desc('vocoder', false); // an instrument by its scan that activates as an effect (an audio input)
     const all = Object.values(d);
     const find = (path, id) => all.find((x) => x.path === path && x.id === id);
 
@@ -801,13 +804,20 @@ await probe(async ({ open }) => {
   assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, level in recovery').length, 1);
 
   // 23. GO LIVE pressed while a failed swap's recovery adopts a plugin: answered for the adopted plugin.
-  // The incoming file listed keeps its scan's kind; a third file listed takes the kind it activated as.
+  // The incoming plugin listed keeps its scan's descriptor (its kind and name, though its activation and
+  // the listing say otherwise); a third file, or another id in the incoming file, takes the listed
+  // descriptor at the kind it activated as.
   const adopting23 = [
-    { via: 'action', to: 'fx2', listed: 'fx2', instance: 300, after: [['toggle']], stop: true, isEffect: true },
-    { via: 'cap', to: 'x', listed: 'x', instance: 301, after: [['live', false]], stop: false, isEffect: false },
-    { via: 'cap', to: 'fx3', listed: 'k', instance: 302, after: [['live', false]], stop: false, isEffect: false },
+    { via: 'action', to: 'fx2', listed: 'fx2', instance: 300, after: [['toggle']], stop: true, isEffect: true, name: 'Probe FX2' },
+    { via: 'cap', to: 'x', listed: 'x', instance: 301, after: [['live', false]], stop: false, isEffect: false, name: 'Probe X' },
+    { via: 'cap', to: 'fx3', listed: 'k', instance: 302, after: [['live', false]], stop: false, isEffect: false, name: 'Probe K' },
+    { via: 'cap', to: 'fx3', listed: 'fx3i', instance: 303, after: [['live', false]], stop: false, isEffect: false, name: 'Probe FX3I' },
+    {
+      via: 'cap', to: 'vocoder', listed: 'vocoder', listing: { effect: true, name: 'Native VOCODER' }, instance: 304,
+      after: [['live', false]], stop: false, isEffect: false, name: 'Probe VOCODER',
+    },
   ];
-  for (const { via, to, listed, instance, ...expected } of adopting23) {
+  for (const { via, to, listed, listing, instance, ...expected } of adopting23) {
     await page.evaluate(async () => {
       const H = window.__hot;
       if (H.instrument.slotTakesInput(1)) return;
@@ -815,14 +825,17 @@ await probe(async ({ open }) => {
       await H.instrument.selectPlugin(1, H.d.fx1); // cold into the empty slot B
     });
     await goLiveOn(1);
-    const pressed23 = await page.evaluate(async ([by, key, listedKey, adopted]) => {
+    const pressed23 = await page.evaluate(async ([by, key, listedKey, listing, adopted]) => {
       const H = window.__hot;
       const desc = H.d[key];
       const kind = H.d[listedKey];
       let openList;
       H.listGate = new Promise((r) => (openList = r));
       // The commit's answer lost; native's listing describes no kind (`is_effect: None`), only `effect`.
-      H.listed = [{ slot: 1, descriptor: { ...kind, isEffect: null }, instance: adopted, effect: kind.isEffect === true }];
+      H.listed = [{
+        slot: 1, descriptor: { ...kind, name: listing?.name ?? kind.name, isEffect: null }, instance: adopted,
+        effect: listing?.effect ?? kind.isEffect === true,
+      }];
       const calls = H.listCalls;
       const from = H.mark();
       const swap = H.instrument.selectPlugin(1, desc);
@@ -841,11 +854,11 @@ await probe(async ({ open }) => {
       await H.pause(50);
       const out = {
         capDisabled, during, after: H.slotSent(from, 1), shown: H.shown(1), live: H.nativeIo.inputArmed()[1],
-        stop: H.live.liveShown(1), isEffect: H.instrument.slotPlugins()[1]?.isEffect,
+        stop: H.live.liveShown(1), isEffect: H.instrument.slotPlugins()[1]?.isEffect, name: H.instrument.slotPlugins()[1]?.name,
       };
       H.clearToasts();
       return out;
-    }, [via, to, listed, instance]);
+    }, [via, to, listed, listing ?? null, instance]);
     console.log(`23. pressed in an adopting recovery (${via}, ${listed} listed)`, JSON.stringify(pressed23));
     assert.deepEqual(pressed23, { capDisabled: true, during: [], shown: { id: listed, instance }, live: false, ...expected },
       `a ${via} press during a recovery adopting ${listed} waits for it and is the adopted plugin's press`);
