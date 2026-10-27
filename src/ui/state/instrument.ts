@@ -462,13 +462,18 @@ function noteToneFailed(info: PluginInfo | undefined, desc: PluginDescriptor): v
   if (info?.tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
 }
 
+/** Whether two paths name one file, as native's `same_file` reads them: case-insensitive, `/` as `\`. */
+const sameFile = (a: string, b: string): boolean => {
+  const folded = (path: string) => path.toLowerCase().replaceAll('/', '\\');
+  return folded(a) === folded(b);
+};
+
 /** Whether a pick of `desc` swaps `slot`'s plugin hot: a plugin plays there, with a known instance, and
- * `desc` is another file (native's `same_file`: case-insensitive, `/` as `\`). The same file under
- * another id, an empty slot or a reload goes cold. */
+ * `desc` is another file (`sameFile`). The same file under another id, an empty slot or a reload goes
+ * cold. */
 export function swapsHot(slot: 0 | 1, desc: PluginDescriptor): boolean {
   const playing = slotPlugins()[slot];
-  const folded = (path: string) => path.toLowerCase().replaceAll('/', '\\');
-  return !!playing && slotInstances()[slot] !== null && folded(playing.path) !== folded(desc.path);
+  return !!playing && slotInstances()[slot] !== null && !sameFile(playing.path, desc.path);
 }
 
 /**
@@ -582,7 +587,10 @@ async function adoptSwapFailure(
     return true;
   }
   if (listed) {
-    adoptSwapped(slot, listed.descriptor, listed, gain, claimMidi, outgoing.path, outgoingInstance);
+    // The listing describes no kind (native's `is_effect: None`): the incoming file keeps the scan's
+    // descriptor, another file the kind it activated as: GO LIVE and the rig recall read the kind.
+    const adopted = sameFile(listed.descriptor.path, desc.path) ? desc : { ...listed.descriptor, isEffect: listed.effect };
+    adoptSwapped(slot, adopted, listed, gain, claimMidi, outgoing.path, outgoingInstance);
     notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}.`, e);
     return false;
   }

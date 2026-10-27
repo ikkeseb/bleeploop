@@ -43,12 +43,15 @@
  * 22. a level change made while a failed swap's recovery runs (its answer in, its listing awaited) is
  *     held, and sent once when the outgoing plays on;
  * 23. GO LIVE pressed while a failed swap's recovery adopts a plugin waits behind it and is answered for
- *     the adopted plugin: an effect's press (the named action's) is the engine's toggle, an instrument's
- *     (the cap's) a live-off;
+ *     the adopted plugin, its kind read as native lists it (no descriptor kind, only `effect`): an
+ *     effect's press (the named action's) is the engine's toggle, an instrument's (the cap's) a live-off,
+ *     the incoming file kept at its scan's kind, a third file at the kind it activated as;
  * 24. a failed swap's incoming file is let go when its recovery ends: the other slot's later unload of
  *     that file leaves no entry (the uncertain rule refuses it, no orphan of a stale hold);
  * 25. a stranded GO LIVE is carried by a synth pick while the slot stays live (its press a live-off) and
- *     cleared by a plugin landing: an instrument shows no GO LIVE though the feed still says live.
+ *     cleared by a plugin landing: an instrument shows no GO LIVE though the feed still says live; a clear
+ *     of the emptied slot changes nothing (its press a live-off), and an Off pick whose live-off is lost
+ *     keeps the cap pressed, its press the engine's toggle.
  *
  * Cannot see the native swap, its commit, the engine's live-off at a kind change or any timing: the
  * fake answers what the probe scripts.
@@ -798,20 +801,33 @@ await probe(async ({ open }) => {
   assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, level in recovery').length, 1);
 
   // 23. GO LIVE pressed while a failed swap's recovery adopts a plugin: answered for the adopted plugin.
-  await page.evaluate(() => window.__hot.instrument.selectPlugin(1, window.__hot.d.fx1)); // cold into the empty slot B
-  for (const [via, to, adopted] of [['action', 'fx2', 300], ['cap', 'x', 301]]) {
+  // The incoming file listed keeps its scan's kind; a third file listed takes the kind it activated as.
+  const adopting23 = [
+    { via: 'action', to: 'fx2', listed: 'fx2', instance: 300, after: [['toggle']], stop: true, isEffect: true },
+    { via: 'cap', to: 'x', listed: 'x', instance: 301, after: [['live', false]], stop: false, isEffect: false },
+    { via: 'cap', to: 'fx3', listed: 'k', instance: 302, after: [['live', false]], stop: false, isEffect: false },
+  ];
+  for (const { via, to, listed, instance, ...expected } of adopting23) {
+    await page.evaluate(async () => {
+      const H = window.__hot;
+      if (H.instrument.slotTakesInput(1)) return;
+      await H.instrument.clearPlugin(1);
+      await H.instrument.selectPlugin(1, H.d.fx1); // cold into the empty slot B
+    });
     await goLiveOn(1);
-    const pressed23 = await page.evaluate(async ([by, key, instance]) => {
+    const pressed23 = await page.evaluate(async ([by, key, listedKey, adopted]) => {
       const H = window.__hot;
       const desc = H.d[key];
+      const kind = H.d[listedKey];
       let openList;
       H.listGate = new Promise((r) => (openList = r));
-      H.listed = [{ slot: 1, descriptor: desc, instance, effect: desc.isEffect === true }]; // the commit's answer lost
+      // The commit's answer lost; native's listing describes no kind (`is_effect: None`), only `effect`.
+      H.listed = [{ slot: 1, descriptor: { ...kind, isEffect: null }, instance: adopted, effect: kind.isEffect === true }];
       const calls = H.listCalls;
       const from = H.mark();
       const swap = H.instrument.selectPlugin(1, desc);
       await H.held();
-      H.fail(`injected swap failure, adopted, pressed by ${by}`);
+      H.fail(`injected swap failure, adopted ${listedKey}, pressed by ${by}`);
       await H.until(() => H.listCalls > calls, 'the recovery listing');
       const capDisabled = document.querySelector('button[aria-label="Live input for slot B"]')?.disabled ?? null;
       if (by === 'cap') void H.live.toggleLive(1); // the cap's press, as its click runs it
@@ -823,16 +839,17 @@ await probe(async ({ open }) => {
       await swap;
       await H.idle();
       await H.pause(50);
-      const out = { capDisabled, during, after: H.slotSent(from, 1), shown: H.shown(1), live: H.nativeIo.inputArmed()[1], stop: H.live.liveShown(1) };
+      const out = {
+        capDisabled, during, after: H.slotSent(from, 1), shown: H.shown(1), live: H.nativeIo.inputArmed()[1],
+        stop: H.live.liveShown(1), isEffect: H.instrument.slotPlugins()[1]?.isEffect,
+      };
       H.clearToasts();
       return out;
-    }, [via, to, adopted]);
-    console.log(`23. pressed in an adopting recovery (${via})`, JSON.stringify(pressed23));
-    assert.deepEqual(pressed23, via === 'action'
-      ? { capDisabled: true, during: [], after: [['toggle']], shown: { id: 'fx2', instance: 300 }, live: false, stop: true }
-      : { capDisabled: true, during: [], after: [['live', false]], shown: { id: 'x', instance: 301 }, live: false, stop: false },
-    `a ${via} press during an adopting recovery waits for it and is the adopted plugin's press`);
-    assert.equal(consumeConsoleErrors(`[instrument] plugin swap failed Error: injected swap failure, adopted, pressed by ${via}`).length, 1);
+    }, [via, to, listed, instance]);
+    console.log(`23. pressed in an adopting recovery (${via}, ${listed} listed)`, JSON.stringify(pressed23));
+    assert.deepEqual(pressed23, { capDisabled: true, during: [], shown: { id: listed, instance }, live: false, ...expected },
+      `a ${via} press during a recovery adopting ${listed} waits for it and is the adopted plugin's press`);
+    assert.equal(consumeConsoleErrors(`[instrument] plugin swap failed Error: injected swap failure, adopted ${listed}, pressed by ${via}`).length, 1);
   }
 
   // 24. A failed swap's incoming file is let go when its recovery ends: B's later unload of it leaves no entry.
@@ -911,6 +928,43 @@ await probe(async ({ open }) => {
   console.log('25. plugin pick', JSON.stringify(plugin25));
   assert.deepEqual(plugin25, { plugin: 'c', stranded: false, live: true, pressed: null },
     "a plugin landing clears the stranded flag: the instrument shows no GO LIVE though the feed says live");
-  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, stranded again').length, 2);
+  // An unload of the stranded slot: it holds no plugin, so the clear changes nothing and sends nothing.
+  assert.equal(await strand(), true, 'the failed swap strands slot B a third time');
+  const cleared25 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const from = H.mark();
+    await H.instrument.clearPlugin(1);
+    await H.idle();
+    await H.pause(50);
+    H.clearToasts();
+    return { plugin: H.shown(1).id, sent: H.slotSent(from, 1), stranded: H.instrument.liveStranded(1), live: H.nativeIo.inputArmed()[1], pressed: H.capPressed(1) };
+  });
+  console.log('25. clear, still live', JSON.stringify(cleared25));
+  assert.deepEqual(cleared25, { plugin: null, sent: [], stranded: true, live: true, pressed: 'true' },
+    "a clear of the stranded slot keeps GO LIVE as the stop");
+  const fromClear25 = await page.evaluate(() => window.__hot.mark());
+  await cap.click();
+  await cap.waitFor({ state: 'detached' });
+  assert.deepEqual(await page.evaluate((from) => window.__hot.slotSent(from, 1), fromClear25), [['live', false]], "the cleared slot's stop is a live-off");
+  // Off picked on the stranded slot, its live-off lost: an Off slot takes its input, so its GO LIVE is the
+  // engine's toggle, which the live engine turns off; the cap stays, as an Off slot's does.
+  assert.equal(await strand(), true, 'the failed swap strands slot B a fourth time');
+  const off25 = await page.evaluate(async () => {
+    const H = window.__hot;
+    window.__lf.native.failSends = 2; // the Off pick's live-off is lost too
+    H.instrument.selectOff(1);
+    await H.idle();
+    await H.pause(50);
+    H.clearToasts();
+    return { plugin: H.shown(1).id, off: H.instrument.slotOff()[1], live: H.nativeIo.inputArmed()[1], pressed: H.capPressed(1) };
+  });
+  console.log('25. Off pick, still live', JSON.stringify(off25));
+  assert.deepEqual(off25, { plugin: null, off: true, live: true, pressed: 'true' }, 'an Off pick whose live-off is lost keeps GO LIVE pressed');
+  const fromOff25 = await page.evaluate(() => window.__hot.mark());
+  await cap.click();
+  await page.waitForFunction(() => window.__hot.nativeIo.inputArmed()[1] === false);
+  const pressedOff25 = await page.evaluate((from) => ({ sent: window.__hot.slotSent(from, 1), pressed: window.__hot.capPressed(1) }), fromOff25);
+  assert.deepEqual(pressedOff25, { sent: [['toggle']], pressed: 'false' }, "the Off slot's press is the engine's toggle, and its cap stays");
+  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, stranded again').length, 4);
   consumeConsoleErrors(/did not reach|lost the batch/);
 }, { launch: {} });
