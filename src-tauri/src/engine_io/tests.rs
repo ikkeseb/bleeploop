@@ -13,6 +13,7 @@ use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext,
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
 use super::owner::Request;
+use super::slot_host::{Back, SlotHost};
 use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError, LOAD_BINS};
 use crate::asio_startup::{AsioStartupStatus, AsioStatusReport};
 use crate::audio_output::AudioBackend;
@@ -163,6 +164,14 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         self.host.shutdown();
+    }
+}
+
+/// The unit a rebuild (or a rate already replaced) evicted for `slot`'s owner, waiting to go in again.
+fn evicted(slot: &SlotHost) -> Option<Box<dyn SlotProcessor>> {
+    match slot.take_back()? {
+        Back::Evicted(unit) => Some(unit),
+        Back::Out(_) => panic!("a retired unit, not an eviction"),
     }
 }
 
@@ -741,7 +750,7 @@ fn a_new_rate_hands_the_units_to_their_owners_and_the_new_engine_takes_them_back
     let status = h.open(asio(Some(128)));
     assert_eq!(status.sample_rate, 44_100);
     assert_eq!(slot.rate(), Some(44_100), "what the owner re-activates the unit at");
-    let back = slot.take_evicted().expect("the evicted unit waits for its owner");
+    let back = evicted(&slot).expect("the evicted unit waits for its owner");
     assert_eq!(stops.load(SeqCst), 1, "stopped once, before it left");
     let rendered = calls.load(SeqCst);
     assert!(slot.install(back, 44_100).is_ok(), "the new engine takes it");
@@ -911,7 +920,7 @@ fn a_panicking_unit_faults_the_engine_and_the_owner_replaces_it_at_the_same_rate
     until("the unit panics", || h.host.diag().panics == 1);
     let events = h.device_events(1);
     assert!(matches!(events[..], [DeviceEvent::EngineFaulted]), "{events:?}");
-    let back = slot.take_evicted().expect("the unit waits for its owner");
+    let back = evicted(&slot).expect("the unit waits for its owner");
     assert_eq!((calls.load(SeqCst), stops.load(SeqCst)), (50, 1), "not called again; stopped on its way out");
     drop(back);
     until("the device runs again", || h.host.status().is_some());
@@ -952,7 +961,7 @@ fn a_unit_activated_at_a_replaced_rate_comes_back_for_re_activation() {
     let slot = h.host.slot(0);
     let (unit, calls, _) = Unit::new(0.1);
     assert!(slot.install(unit, 44_100).is_ok(), "handed on, not refused");
-    let back = slot.take_evicted().expect("back for re-activation at the engine's rate");
+    let back = evicted(&slot).expect("back for re-activation at the engine's rate");
     assert_eq!(calls.load(SeqCst), 0, "never rendered at the wrong rate");
     assert!(slot.install(back, RATE as u32).is_ok());
     until("the unit renders", || calls.load(SeqCst) > 0);
@@ -1012,7 +1021,7 @@ fn an_abandoned_unit_a_new_rate_evicts_never_reaches_the_next_owner() {
     let next = h.host.slot(0);
     h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
     h.open(asio(Some(128)));
-    assert!(next.take_evicted().is_none(), "the orphan is no one's to take back");
+    assert!(next.take_back().is_none(), "the orphan is no one's to take back");
     let (unit, _, _) = Unit::new(0.3);
     assert!(next.install(unit, 44_100).is_ok(), "the eviction freed the slot");
     assert_eq!(Arc::strong_count(&calls), 2, "the orphan leaked, never dropped");

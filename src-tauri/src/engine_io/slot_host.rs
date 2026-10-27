@@ -1,50 +1,58 @@
-//! OWNS: a plugin owner's handshake with the engine for one slot: install a unit, take it back, and
-//! pick up a unit the device side evicted (a sample-rate change built a new engine).
+//! OWNS: a plugin owner's handshake with the engine for one slot ([`SlotHost`]), over the slot's desk
+//! (`desk`), which routes the engine's replies to their owners by tag.
 //!
-//! The owner thread builds and activates a unit at [`SlotHost::rate`], then [`SlotHost::install`]s it
-//! with that rate (a unit activated for an engine a rebuild has since replaced comes straight back as
-//! an eviction, to be re-activated); lifecycle work
-//! (a restart, a teardown) first [`SlotHost::remove`]s it, which blocks until the engine has
-//! crossfaded it out and stopped it. While a device runs the engine services the slot's port at each
-//! block start. While none runs nothing would, so the host takes the engine lock itself and services
-//! the port at once (no crossfade: nothing is sounding). A unit the device side evicted waits in
-//! [`Core::evicted`] until its owner takes it back ([`SlotHost::take_evicted`]), re-activates it at
-//! the new [`SlotHost::rate`] and installs it again.
+//! Each [`EngineHost::slot`](super::EngineHost::slot) call is one owner with its own tag (a clone is the
+//! same owner). The owner builds and activates a unit at [`SlotHost::rate`] and puts it in:
+//! [`SlotHost::install`] into an empty slot, or [`SlotHost::replace`] beside the unit another owner
+//! plays (staged muted, then crossfaded to); [`SlotHost::answer`] reads a replace's outcome, and
+//! [`SlotHost::withdraw`] calls it off while it stages. Lifecycle work (a restart, a teardown) first
+//! [`SlotHost::remove`]s the unit, which waits until the engine has crossfaded it out and stopped it.
+//! A unit that left the engine on its own waits on the desk for [`SlotHost::take_back`]: an eviction
+//! (a rebuild at another rate, or an install activated at a rate since replaced) is re-activated at the
+//! new [`SlotHost::rate`] and installed again; a unit another owner's replace retired never goes in
+//! again, and nor does its owner. An owner that gives up on its unit ([`SlotHost::abandon`]: a wait
+//! timed out, so it leaks the plugin) leaks whatever comes back of it, and the slot frees.
 //!
-//! Each [`EngineHost::slot`](super::EngineHost::slot) call is one owner's handle, with its own token:
-//! a unit comes back (on the port, or evicted) only to the handle that installed it or a clone. An
-//! owner that gives up on its unit ([`SlotHost::abandon`]: a `remove` timed out, so it leaks the
-//! plugin) orphans it: whenever the unit comes back it leaks too, and the slot frees.
+//! While a device runs the engine services the slot's port at each block start. While none runs nothing
+//! would, so the host takes the engine lock itself and services the port at once (no crossfade and no
+//! staging: nothing is sounding).
+
+mod desk;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use std::sync::Arc;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 
-use lf_engine::{SlotPort, SlotProcessor, SlotReply};
+use lf_engine::{HandbackReason, Rejection, SlotProcessor};
+
+pub(crate) use desk::Desk;
+pub use desk::Standing;
 
 use super::Core;
 
-/// How often `remove` looks for its unit.
+/// How often `answer` and `remove` look for their reply.
 const POLL: Duration = Duration::from_millis(1);
 
-/// `Core::holder` for a unit whose owner abandoned it.
-pub(crate) const ORPHAN: u64 = u64::MAX;
-
-/// The next unit the engine handed back on `port`, whatever its reason, past the acknowledgements before
-/// it (`Committed`, `NotHeld`: nothing here waits on one). A unit is sent tagged with its owner's token;
-/// the reply's tag and reason are not read yet (the holder says whose it is).
-pub(crate) fn handed_back(port: &mut SlotPort) -> Option<Box<dyn SlotProcessor>> {
-    while let Some(reply) = port.reply() {
-        if let SlotReply::Handback(back) = reply {
-            return Some(back.unit);
-        }
-    }
-    None
+/// A replace's outcome ([`SlotHost::answer`]).
+pub enum Answer {
+    /// The new unit is the slot's; the one it replaced comes back to its owner as [`Back::Out`].
+    Committed,
+    /// The unit never became the slot's: back, stopped if it processed. The playing unit plays on.
+    Refused(Box<dyn SlotProcessor>, Rejection),
+    /// No answer yet.
+    Pending,
 }
 
-/// One slot's handshake with the engine (`EngineHost::slot`). Cheap to clone (a clone is the same
-/// owner); one plugin owner uses a slot at a time.
+/// A unit that left the engine on its own ([`SlotHost::take_back`]), stopped.
+pub enum Back {
+    /// Evicted: re-activate it at [`SlotHost::rate`] and install it again.
+    Evicted(Box<dyn SlotProcessor>),
+    /// Retired by another owner's replace: never install it again.
+    Out(Box<dyn SlotProcessor>),
+}
+
+/// One owner's handshake with a slot (`EngineHost::slot`). Cheap to clone (a clone is the same owner).
 #[derive(Clone)]
 pub struct SlotHost {
     core: Arc<Core>,
@@ -62,6 +70,11 @@ impl SlotHost {
         self.slot
     }
 
+    /// This owner's tag: what its units are sent with.
+    pub fn tag(&self) -> u64 {
+        self.token
+    }
+
     /// The engine's sample rate: what a unit is activated at. `None` before a device first opened.
     pub fn rate(&self) -> Option<u32> {
         self.core.rate()
@@ -72,67 +85,156 @@ impl SlotHost {
         self.core.max_block.load(Relaxed) as usize
     }
 
+    /// Where this owner stands on the slot; `None` once nothing of it is in the engine or on the desk.
+    pub fn standing(&self) -> Option<Standing> {
+        self.desk().standing(self.token)
+    }
+
     /// Hand a unit activated at `rate` to the engine; it crossfades in at the next block (engaged at
     /// once while no device runs). An engine at another rate has replaced the one `rate` was read from:
-    /// the unit goes to [`SlotHost::take_evicted`] instead, for its owner to re-activate. Gives the unit
-    /// back with the reason when no engine exists yet, the slot already holds a unit (an orphan still
-    /// in the engine included: try again once it is out), or the port is full.
+    /// the unit waits for [`SlotHost::take_back`] instead, as an eviction. Gives the unit back with the
+    /// reason when no engine exists yet, another owner's replace retired this one, the slot already
+    /// holds a unit (an abandoned one still in the engine included: try again once it is out), or the
+    /// port is full.
     pub fn install(&self, unit: Box<dyn SlotProcessor>, rate: u32) -> Result<(), (Box<dyn SlotProcessor>, String)> {
         {
-            // Under the port lock: a rebuild holds every port while it publishes the new rate and
+            // Under the desk lock: a rebuild holds every desk while it publishes the new rate and
             // replaces the ports, so the rate and the port read here belong to one engine.
-            let mut port = match self.core.ports[self.slot].lock() {
-                Ok(port) => port,
-                Err(_) => return Err((unit, "slot port poisoned".to_string())),
-            };
-            let Some(port) = port.as_mut() else {
+            let mut desk = self.desk();
+            if desk.port.is_none() {
                 return Err((unit, "no audio device is open".to_string()));
-            };
-            self.reap(port);
-            if self.core.holder[self.slot].load(Acquire) != 0 {
+            }
+            if desk.standing(self.token) == Some(Standing::Retiring) {
+                return Err((unit, format!("slot {}: this owner was replaced", self.slot)));
+            }
+            if desk.occupied() {
                 return Err((unit, format!("slot {} already holds a unit", self.slot)));
             }
             if self.core.rate.load(Relaxed) != rate {
-                let mut waiting = self.core.evicted[self.slot].lock().unwrap_or_else(|e| e.into_inner());
-                if waiting.is_some() {
-                    return Err((unit, format!("slot {} already holds a unit", self.slot)));
-                }
-                *waiting = Some((self.token, unit));
+                desk.park(self.token, unit);
                 return Ok(());
             }
-            if let Err(unit) = port.install(self.token, unit) {
+            if let Err(unit) = desk.port.as_mut().expect("checked above").install(self.token, unit) {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
-            self.core.holder[self.slot].store(self.token, Release);
+            desk.enter(self.token, None);
         }
         self.service_if_idle();
         Ok(())
     }
 
-    /// Take the slot's unit back: the engine releases its notes, crossfades it to bypass and stops it.
-    /// `Ok(None)` when the slot holds none; `Err` when it does not come back within `timeout` (the
-    /// unit stays the engine's, and a later `remove` or `take_evicted` can still recover it).
+    /// Stage a unit activated at `rate` beside the one the slot plays, then crossfade to it at `gain`
+    /// (into an empty slot, an install gliding to `gain`). [`SlotHost::answer`] reads the outcome. Gives
+    /// the unit back when no engine exists, this owner already has a unit on the slot, the engine runs at
+    /// another rate (never parked: nothing plays it meanwhile), or the port is full.
+    pub fn replace(&self, unit: Box<dyn SlotProcessor>, rate: u32, gain: f32) -> Result<(), (Box<dyn SlotProcessor>, String)> {
+        {
+            let mut desk = self.desk();
+            if desk.standing(self.token).is_some() {
+                return Err((unit, format!("slot {}: this owner already has a unit here", self.slot)));
+            }
+            if self.core.rate.load(Relaxed) != rate {
+                return Err((unit, "busy: the device rate changed".to_string()));
+            }
+            let Some(port) = desk.port.as_mut() else {
+                return Err((unit, "no audio device is open".to_string()));
+            };
+            if let Err(unit) = port.replace(self.token, unit, gain) {
+                return Err((unit, format!("busy: slot {}'s port is full", self.slot)));
+            }
+            desk.enter(self.token, Some(gain));
+        }
+        self.service_if_idle();
+        Ok(())
+    }
+
+    /// This owner's replace's outcome, waiting up to `timeout` for it. A `NotHeld` its withdraw drew
+    /// (the commit won the race) never reaches here; the commit does.
+    pub fn answer(&self, timeout: Duration) -> Answer {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.service_if_idle();
+            {
+                let mut desk = self.desk();
+                if desk.take_committed(self.token) {
+                    return Answer::Committed;
+                }
+                let rejected = |reason: HandbackReason| match reason {
+                    HandbackReason::Rejected(why) => Some(why),
+                    _ => None,
+                };
+                if let Some((why, unit)) = desk.take_unit(self.token, rejected) {
+                    if why == Rejection::Busy {
+                        log::error!("[engine_io] slot {}: a replace came back Busy; swaps on a slot are serialised", self.slot);
+                    }
+                    return Answer::Refused(unit, why);
+                }
+            }
+            if Instant::now() >= deadline {
+                return Answer::Pending;
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// Call off this owner's replace while its unit stages; read the outcome with [`SlotHost::answer`]
+    /// (`Refused(.., Cancelled)`, or `Committed` when the commit came first). False when no engine exists
+    /// or the port is full.
+    pub fn withdraw(&self) -> bool {
+        let mut desk = self.desk();
+        let sent = desk.port.as_mut().is_some_and(|port| port.withdraw(self.token));
+        if sent {
+            desk.withdrew(self.token);
+        }
+        sent
+    }
+
+    /// This owner's unit, if it left the engine on its own: an eviction, or retired by another owner's
+    /// replace (an eviction of a retired owner's unit included). The plugin owner polls this every turn.
+    pub fn take_back(&self) -> Option<Back> {
+        let mut desk = self.desk();
+        let active = desk.standing(self.token) == Some(Standing::Active);
+        let left = |reason: HandbackReason| matches!(reason, HandbackReason::Evicted | HandbackReason::ReplacedOut).then_some(reason);
+        let (reason, unit) = desk.take_unit(self.token, left)?;
+        Some(if active && reason == HandbackReason::Evicted { Back::Evicted(unit) } else { Back::Out(unit) })
+    }
+
+    /// Take this owner's unit back: the engine releases its notes, crossfades it to bypass and stops it
+    /// (a retired unit fading out is waited for). A unit already back on the desk comes first.
+    /// `Ok(None)` when the owner has none on the slot; `Err` when it does not come back within
+    /// `timeout` (it stays the engine's, and a later `remove` or `take_back` can still recover it).
     pub fn remove(&self, timeout: Duration) -> Result<Option<Box<dyn SlotProcessor>>, String> {
         {
-            let mut port = self.core.ports[self.slot].lock().map_err(|_| "slot port poisoned".to_string())?;
-            if self.core.holder[self.slot].load(Acquire) != self.token {
-                // Looked at under the port lock: a rebuild parks a unit with every port held, so an
-                // eviction is either done here or not begun.
-                return Ok(self.take_evicted());
+            // Under the desk lock: a rebuild hands every unit back with every desk held, so an eviction
+            // is either on the desk here or not begun.
+            let mut desk = self.desk();
+            if let Some(((), unit)) = desk.take_unit(self.token, |_| Some(())) {
+                return Ok(Some(unit));
             }
-            let port = port.as_mut().ok_or_else(|| "no engine holds this slot".to_string())?;
-            if !port.remove(self.token) {
-                return Err(format!("slot {}'s port is full", self.slot));
+            match (desk.standing(self.token), desk.in_engine(self.token)) {
+                (None, _) | (Some(Standing::Active | Standing::Retiring), false) => return Ok(None),
+                (Some(Standing::Abandoned), _) => return Err(format!("slot {}: this owner's unit is lost", self.slot)),
+                // The engine never answers a remove of a unit fading out: it comes back `ReplacedOut`.
+                (Some(Standing::Retiring), true) => {}
+                (Some(Standing::Active), true) => {
+                    let port = desk.port.as_mut().ok_or_else(|| "no engine holds this slot".to_string())?;
+                    if !port.remove(self.token) {
+                        return Err(format!("slot {}'s port is full", self.slot));
+                    }
+                }
             }
         }
         let deadline = Instant::now() + timeout;
         loop {
             self.service_if_idle();
-            if let Some(unit) = self.returned() {
-                return Ok(Some(unit));
-            }
-            if let Some(unit) = self.take_evicted() {
-                return Ok(Some(unit));
+            {
+                let mut desk = self.desk();
+                if let Some(((), unit)) = desk.take_unit(self.token, |_| Some(())) {
+                    return Ok(Some(unit));
+                }
+                if desk.take_not_held(self.token) {
+                    return Ok(None);
+                }
             }
             if Instant::now() >= deadline {
                 return Err(format!("slot {}'s unit did not come back within {} ms", self.slot, timeout.as_millis()));
@@ -141,57 +243,18 @@ impl SlotHost {
         }
     }
 
-    /// This owner's unit, if the device side evicted it (a new engine at another rate): re-activate it
-    /// at [`SlotHost::rate`] and install it again. The plugin owner polls this every turn.
-    pub fn take_evicted(&self) -> Option<Box<dyn SlotProcessor>> {
-        let mut waiting = self.core.evicted[self.slot].lock().ok()?;
-        if waiting.as_ref().is_some_and(|(owner, _)| *owner == self.token) {
-            waiting.take().map(|(_, unit)| unit)
-        } else {
-            None
-        }
-    }
-
-    /// Give up on this owner's unit: a `remove` timed out and the owner leaks its plugin rather than
-    /// unload code the unit may still run. Whenever the unit comes back it leaks too, never reaching
-    /// another owner, and the slot frees ([`SlotHost::install`] or the device side's eviction reaps it).
+    /// Give up on this owner's unit: a wait timed out and the owner leaks its plugin rather than unload
+    /// code the unit may still run. Whatever comes back of it leaks too, never reaching another owner,
+    /// and the slot frees; a replace that commits after this is removed at once.
     pub fn abandon(&self) {
-        let mut port = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
-        if self.core.holder[self.slot].compare_exchange(self.token, ORPHAN, AcqRel, Acquire).is_ok() {
-            if let Some(port) = port.as_mut() {
-                self.reap(port);
-            }
-        }
-        let mut waiting = self.core.evicted[self.slot].lock().unwrap_or_else(|e| e.into_inner());
-        if waiting.as_ref().is_some_and(|(owner, _)| *owner == self.token) {
-            std::mem::forget(waiting.take());
-        }
+        self.desk().abandon(self.token);
     }
 
-    /// Under the slot's port lock: an abandoned unit the engine has handed back leaks, and the slot
-    /// frees. Its plugin stays loaded, leaked by its owner, but nothing may call into it again (a drop
-    /// included).
-    fn reap(&self, port: &mut SlotPort) {
-        if self.core.holder[self.slot].load(Acquire) == ORPHAN {
-            if let Some(unit) = handed_back(port) {
-                log::warn!("[engine_io] slot {}: an abandoned unit came back; leaking it", self.slot);
-                std::mem::forget(unit);
-                self.core.holder[self.slot].store(0, Release);
-            }
-        }
-    }
-
-    /// This owner's unit, if the engine handed it back on the port.
-    fn returned(&self) -> Option<Box<dyn SlotProcessor>> {
-        let mut port = self.core.ports[self.slot].lock().ok()?;
-        if self.core.holder[self.slot].load(Acquire) != self.token {
-            return None;
-        }
-        let unit = handed_back(port.as_mut()?);
-        if unit.is_some() {
-            self.core.holder[self.slot].store(0, Release);
-        }
-        unit
+    /// The slot's desk, locked, with the port's replies routed.
+    fn desk(&self) -> MutexGuard<'_, Desk> {
+        let mut desk = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
+        desk.pump(&self.core.settings);
+        desk
     }
 
     /// With no device running nothing services the port: do it here, under the engine lock. A unit that
@@ -220,18 +283,44 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use lf_engine::grid::Frame;
-    use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
+    use lf_engine::{Command, Rejection, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
-    use crate::engine_io::test_rig::TestDevice;
+    use super::{Answer, Back, SlotHost, Standing};
+    use crate::engine_io::test_rig::{TestDevice, PATIENCE};
 
-    /// An effect that outputs a constant and counts its calls.
-    struct Constant {
-        level: f32,
+    /// What a [`Constant`] counts: its calls, its stops and its drops (a drop the desk made would count).
+    #[derive(Clone, Default)]
+    struct Counts {
         calls: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Counts {
+        fn calls(&self) -> usize {
+            self.calls.load(SeqCst)
+        }
+        fn stops(&self) -> usize {
+            self.stops.load(SeqCst)
+        }
+        fn drops(&self) -> usize {
+            self.drops.load(SeqCst)
+        }
+    }
+
+    /// An effect that outputs a constant and counts; `refuse` makes it refuse to start processing.
+    struct Constant {
+        level: f32,
+        refuse: bool,
+        counts: Counts,
+    }
+
+    fn constant(level: f32) -> (Box<Constant>, Counts) {
+        let counts = Counts::default();
+        (Box::new(Constant { level, refuse: false, counts: counts.clone() }), counts)
     }
 
     impl SlotProcessor for Constant {
@@ -242,52 +331,103 @@ mod tests {
             0
         }
         fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
-            self.calls.fetch_add(1, SeqCst);
-            out.fill(self.level);
+            self.counts.calls.fetch_add(1, SeqCst);
+            out.fill(if self.refuse { 0.0 } else { self.level });
         }
         fn stop(&mut self) {
-            self.stops.fetch_add(1, SeqCst);
+            self.counts.stops.fetch_add(1, SeqCst);
+        }
+        fn start_refused(&self) -> bool {
+            self.refuse
         }
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
             self
         }
     }
 
+    impl Drop for Constant {
+        fn drop(&mut self) {
+            self.counts.drops.fetch_add(1, SeqCst);
+        }
+    }
+
+    fn level(unit: Box<dyn SlotProcessor>) -> f32 {
+        unit.into_any().downcast::<Constant>().expect("the host's own type").level
+    }
+
+    fn eventually<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            if let Some(value) = f() {
+                return value;
+            }
+            assert!(Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Install `unit` once the slot frees.
+    fn install_eventually(slot: &SlotHost, unit: Box<dyn SlotProcessor>, rate: u32) {
+        let mut unit = Some(unit);
+        eventually("the slot frees", || match slot.install(unit.take().expect("kept"), rate) {
+            Ok(()) => Some(()),
+            Err((back, _)) => {
+                unit = Some(back);
+                None
+            }
+        });
+    }
+
+    fn refused(answer: Answer) -> (Box<dyn SlotProcessor>, Rejection) {
+        match answer {
+            Answer::Refused(unit, why) => (unit, why),
+            Answer::Committed => panic!("committed, not refused"),
+            Answer::Pending => panic!("no answer"),
+        }
+    }
+
+    /// A device at 48 kHz with owner A's unit (0.25) playing in slot 0; B is a second owner of slot 0.
+    fn playing() -> (TestDevice, SlotHost, Counts, SlotHost) {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let (a, b) = (device.host().slot(0), device.host().slot(0));
+        let (unit, counts) = constant(0.25);
+        assert!(a.install(unit, 48_000).is_ok());
+        assert!(device.wait_blocks(5));
+        (device, a, counts, b)
+    }
+
     #[test]
     fn a_unit_installs_renders_and_comes_back_stopped_while_the_engine_renders() {
         let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
         let slot = device.host().slot(0);
-        let (calls, stops) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let unit = Box::new(Constant { level: 0.25, calls: calls.clone(), stops: stops.clone() });
+        let (unit, counts) = constant(0.25);
         assert!(slot.install(unit, 48_000).is_ok());
-        let again = Box::new(Constant { level: 0.0, calls: calls.clone(), stops: stops.clone() });
+        let (again, _) = constant(0.0);
         assert!(slot.install(again, 48_000).is_err(), "one unit per slot");
         assert!(device.wait_blocks(20));
-        assert!(calls.load(SeqCst) > 0, "the engine processed the unit");
+        assert!(counts.calls() > 0, "the engine processed the unit");
         let back = slot.remove(Duration::from_secs(2)).expect("comes back").expect("a unit");
-        assert_eq!(stops.load(SeqCst), 1, "stopped once, before it left");
-        let back = back.into_any().downcast::<Constant>().expect("the host's own type");
-        assert_eq!(back.level, 0.25);
+        assert_eq!(counts.stops(), 1, "stopped once, before it left");
+        assert_eq!(level(back), 0.25);
         assert!(slot.remove(Duration::from_millis(10)).unwrap().is_none(), "nothing left in the slot");
     }
 
     #[test]
-    fn a_removal_that_races_a_rebuild_takes_its_unit_from_the_eviction_mailbox() {
+    fn a_removal_that_races_a_rebuild_takes_its_unit_from_the_desk() {
         let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
         let core = &device.host().core;
         let slot = device.host().slot(0);
-        let stops = Arc::new(AtomicUsize::new(0));
-        let unit = Box::new(Constant { level: 0.5, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
+        let (unit, counts) = constant(0.5);
         assert!(slot.install(unit, 48_000).is_ok());
         assert!(device.wait_blocks(20));
         let removed = std::thread::scope(|s| {
-            // Port 1 held: the rebuild takes port 0 and waits for port 1, so a removal that has already
-            // looked in the empty mailbox waits on port 0 until the rebuild has parked its unit.
+            // Desk 1 held: the rebuild takes desk 0 and waits for desk 1, so a removal that has not yet
+            // looked at the desk waits on desk 0 until the rebuild has handed its unit back there.
             let held = core.ports[1].lock().unwrap();
             let rebuild = s.spawn(|| device.rebuild_at(44_100, 512));
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(5);
             while core.ports[0].try_lock().is_ok() {
-                assert!(std::time::Instant::now() < deadline, "the rebuild takes port 0");
+                assert!(Instant::now() < deadline, "the rebuild takes desk 0");
                 std::thread::sleep(Duration::from_millis(1));
             }
             let removal = s.spawn(|| slot.remove(Duration::from_secs(2)));
@@ -297,16 +437,16 @@ mod tests {
             removal.join().unwrap()
         });
         let back = removed.expect("the removal answers").expect("the removal gets the unit the rebuild evicted");
-        assert_eq!(back.into_any().downcast::<Constant>().expect("the host's own type").level, 0.5);
-        assert_eq!(stops.load(SeqCst), 1, "stopped once, as it was evicted");
-        assert!(core.evicted[0].lock().unwrap().is_none(), "no unit left parked");
+        assert_eq!(level(back), 0.5);
+        assert_eq!(counts.stops(), 1, "stopped once, as it was evicted");
+        assert!(slot.take_back().is_none(), "no unit left on the desk");
 
         // The slot works on: the next unit installs, and the next rebuild hands it back.
-        let unit = Box::new(Constant { level: 0.25, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
+        let (unit, _) = constant(0.25);
         assert!(slot.install(unit, 44_100).is_ok());
         device.rebuild_at(48_000, 512);
-        let back = slot.take_evicted().expect("the next eviction reaches its owner");
-        assert_eq!(back.into_any().downcast::<Constant>().unwrap().level, 0.25);
+        let Some(Back::Evicted(back)) = slot.take_back() else { panic!("the next eviction reaches its owner") };
+        assert_eq!(level(back), 0.25);
     }
 
     #[test]
@@ -314,10 +454,166 @@ mod tests {
         let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
         device.stop();
         let slot = device.host().slot(1);
-        let stops = Arc::new(AtomicUsize::new(0));
-        let unit = Box::new(Constant { level: 1.0, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
+        let (unit, counts) = constant(1.0);
         assert!(slot.install(unit, 48_000).is_ok());
         assert!(slot.remove(Duration::from_millis(100)).unwrap().is_some());
-        assert_eq!(stops.load(SeqCst), 1);
+        assert_eq!(counts.stops(), 1);
+    }
+
+    #[test]
+    fn a_replace_commits_to_its_own_owner_and_retires_the_other() {
+        let (device, a, counts_a, b) = playing();
+        assert_ne!(a.tag(), b.tag(), "each handle is its own owner");
+        let (unit, counts_b) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed));
+        assert_eq!(a.standing(), Some(Standing::Retiring), "retired at the commit");
+        assert!(matches!(a.answer(Duration::ZERO), Answer::Pending), "B's commit is not A's");
+        let Back::Out(out) = eventually("A's unit fades out", || a.take_back()) else { panic!("retired, not evicted") };
+        assert_eq!(counts_a.stops(), 1, "stopped once, after its fade");
+        assert_eq!(level(out), 0.25);
+        assert_eq!(a.standing(), None, "released once its unit is back");
+        assert!(b.take_back().is_none(), "A's unit never reaches B");
+        assert!(device.wait_blocks(5));
+        assert!(counts_b.calls() > 0, "B's unit plays");
+        let back = b.remove(PATIENCE).unwrap().expect("B's own unit");
+        assert_eq!(level(back), 0.5);
+    }
+
+    #[test]
+    fn a_replace_whose_unit_refuses_to_start_comes_back_and_the_playing_unit_plays_on() {
+        let (device, a, counts_a, b) = playing();
+        let (mut unit, counts_b) = constant(0.5);
+        unit.refuse = true;
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        let (back, why) = refused(b.answer(PATIENCE));
+        assert_eq!((why, level(back), counts_b.stops()), (Rejection::StartRefused, 0.5, 1));
+        assert_eq!((a.standing(), b.standing()), (Some(Standing::Active), None));
+        let calls = counts_a.calls();
+        assert!(device.wait_blocks(5));
+        assert!(counts_a.calls() > calls, "A plays on");
+        assert_eq!(level(a.remove(PATIENCE).unwrap().expect("A's unit")), 0.25);
+    }
+
+    #[test]
+    fn a_withdraw_before_the_commit_sends_the_unit_back_cancelled() {
+        let (device, a, _, b) = playing();
+        {
+            // No block runs while the engine lock is held: the withdraw lands while the unit stages.
+            let _held = device.host().core.rt.lock().unwrap();
+            let (unit, _) = constant(0.5);
+            assert!(b.replace(unit, 48_000, 0.8).is_ok());
+            assert!(b.withdraw());
+        }
+        let (back, why) = refused(b.answer(PATIENCE));
+        assert_eq!((why, level(back)), (Rejection::Cancelled, 0.5));
+        assert_eq!((a.standing(), b.standing()), (Some(Standing::Active), None));
+        assert_eq!(level(a.remove(PATIENCE).unwrap().expect("A's unit")), 0.25);
+    }
+
+    #[test]
+    fn a_withdraw_after_the_commit_is_answered_committed_and_its_not_held_never_reaches_a_remove() {
+        let (device, a, _, b) = playing();
+        let (unit, _) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        // The engine commits (and answers the withdraw `NotHeld`) before anyone reads the desk.
+        assert!(device.wait_blocks(20));
+        assert!(b.withdraw());
+        assert!(device.wait_blocks(5));
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed));
+        assert_eq!(a.standing(), Some(Standing::Retiring));
+        let back = b.remove(PATIENCE).unwrap().expect("the NotHeld was the withdraw's: B's unit comes back");
+        assert_eq!(level(back), 0.5);
+    }
+
+    #[test]
+    fn a_withdraw_fired_by_the_owners_own_answer_timeout_cancels_the_staging_unit() {
+        let (device, a, _, b) = playing();
+        let held = device.host().core.rt.lock().unwrap();
+        let (unit, _) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        assert!(matches!(b.answer(Duration::from_millis(5)), Answer::Pending), "no block runs");
+        assert!(b.withdraw());
+        drop(held);
+        let (back, why) = refused(b.answer(PATIENCE));
+        assert_eq!((why, level(back)), (Rejection::Cancelled, 0.5));
+        assert_eq!(a.standing(), Some(Standing::Active));
+    }
+
+    #[test]
+    fn an_owner_evicted_then_replaced_is_retired_and_never_goes_in_again() {
+        let (device, a, _, b) = playing();
+        device.rebuild_at(44_100, 512);
+        let (unit, _) = constant(0.5);
+        assert!(b.replace(unit, 44_100, 0.8).is_ok(), "into the slot A's eviction left empty");
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed));
+        assert_eq!(a.standing(), Some(Standing::Retiring), "retired with its unit still on the desk");
+        device.rebuild_at(48_000, 512);
+        let (again, _) = constant(0.1);
+        let (again, why) = a.install(again, 48_000).expect_err("a replaced owner never installs again");
+        assert!(why.contains("replaced"), "{why}");
+        let Some(Back::Out(out)) = a.take_back() else { panic!("A's evicted unit comes back retired") };
+        assert_eq!(level(out), 0.25);
+        let (_, why) = a.install(again, 48_000).expect_err("B's eviction holds the slot");
+        assert!(why.contains("already holds"), "{why}");
+        let Some(Back::Evicted(back)) = b.take_back() else { panic!("B's unit goes in again") };
+        assert!(b.install(back, 48_000).is_ok());
+    }
+
+    #[test]
+    fn a_swaps_gain_enters_the_replay_even_when_a_rebuild_comes_before_the_answer_is_read() {
+        let (device, _a, _, b) = playing();
+        device.host().send(TimedCommand { frame: None, command: Command::SetSlotGain(0, 0.3) }).unwrap();
+        let (unit, _) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.7).is_ok());
+        assert!(device.wait_blocks(20));
+        assert!(device.host().settings().contains(&Command::SetSlotGain(0, 0.3)), "nothing has read the desk yet");
+        device.rebuild_at(44_100, 512);
+        let replay = device.host().settings();
+        assert!(replay.contains(&Command::SetSlotGain(0, 0.7)) && !replay.contains(&Command::SetSlotGain(0, 0.3)), "{replay:?}");
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed), "the answer waits on the desk across the rebuild");
+    }
+
+    #[test]
+    fn an_abandoned_owners_late_unit_leaks_and_the_slot_frees() {
+        let (device, a, counts_a, _) = playing();
+        {
+            let _held = device.host().core.rt.lock().unwrap();
+            assert!(a.remove(Duration::from_millis(20)).is_err(), "no block runs while the lock is held");
+            a.abandon();
+        }
+        assert_eq!(a.standing(), Some(Standing::Abandoned));
+        let (unit, _) = constant(0.5);
+        install_eventually(&device.host().slot(0), unit, 48_000);
+        assert_eq!((counts_a.stops(), counts_a.drops()), (1, 0), "stopped, then leaked: never dropped");
+        assert_eq!(a.standing(), None);
+    }
+
+    #[test]
+    fn a_replace_its_owner_abandoned_before_the_commit_is_removed_and_leaks() {
+        let (device, a, _, b) = playing();
+        let (unit, counts_b) = constant(0.5);
+        {
+            let _held = device.host().core.rt.lock().unwrap();
+            assert!(b.replace(unit, 48_000, 0.8).is_ok());
+            b.abandon();
+        }
+        let Back::Out(out) = eventually("A's unit is retired", || a.take_back()) else { panic!("retired, not evicted") };
+        assert_eq!(level(out), 0.25);
+        let (unit, _) = constant(0.1);
+        install_eventually(&device.host().slot(0), unit, 48_000);
+        assert_eq!((counts_b.stops(), counts_b.drops()), (1, 0), "removed at its commit, then leaked: never dropped");
+        assert_eq!(b.standing(), None);
+    }
+
+    #[test]
+    fn a_replace_at_a_replaced_rate_comes_back_with_its_unit_and_parks_nothing() {
+        let (_device, a, _, b) = playing();
+        let (unit, _) = constant(0.5);
+        let (back, why) = b.replace(unit, 44_100, 0.8).expect_err("activated for another engine");
+        assert!(why.starts_with("busy:"), "{why}");
+        assert_eq!(level(back), 0.5);
+        assert!(b.standing().is_none() && b.take_back().is_none(), "nothing of B's on the desk");
+        assert_eq!(a.standing(), Some(Standing::Active));
     }
 }

@@ -161,7 +161,7 @@ use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
-use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -599,19 +599,14 @@ pub(crate) struct Core {
     pub(crate) settings: Mutex<settings::Settings>,
     /// Bumped whenever the engine is replaced or dropped (the feed resyncs the UI).
     pub(crate) engine_gen: AtomicU64,
-    /// Each slot's port into the current engine (`None` before the first device opens).
-    pub(crate) ports: [Mutex<Option<SlotPort>>; SLOT_COUNT],
-    /// Whose unit is in the engine for this slot: the installing [`SlotHost`]'s token, set by a
-    /// successful install and cleared (0) when the unit comes back; [`slot_host::ORPHAN`] once its owner
-    /// gave up on it (`SlotHost::abandon`).
-    pub(crate) holder: [AtomicU64; SLOT_COUNT],
+    /// Each slot's desk: its port into the current engine (`None` before the first device opens) and its
+    /// owners' bookkeeping, every reply routed by tag ([`slot_host::Desk`]). A rebuild holds them all;
+    /// a desk comes before `settings`.
+    pub(crate) ports: [Mutex<slot_host::Desk>; SLOT_COUNT],
     /// The next [`SlotHost`]'s token (from 1).
     pub(crate) next_token: AtomicU64,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
     pub(crate) fault: AtomicBool,
-    /// Units the device side took out on its own (a rebuild), waiting for their plugin owner, with its
-    /// token: only that owner's [`SlotHost`] takes one back.
-    pub(crate) evicted: [Mutex<Option<(u64, Box<dyn SlotProcessor>)>>; SLOT_COUNT],
     /// A device callback runs or is about to: the owner sets it just before the streams start and
     /// clears it just after they drop. While it is false, a slot host may take the engine lock itself
     /// (`SlotHost`); while it is true, it waits for the callback to service its port.
@@ -710,11 +705,9 @@ impl Core {
             ends: Mutex::new(None),
             settings: Mutex::new(settings::Settings::default()),
             engine_gen: AtomicU64::new(0),
-            ports: std::array::from_fn(|_| Mutex::new(None)),
-            holder: std::array::from_fn(|_| AtomicU64::new(0)),
+            ports: std::array::from_fn(|slot| Mutex::new(slot_host::Desk::new(slot))),
             next_token: AtomicU64::new(1),
             fault: AtomicBool::new(false),
-            evicted: std::array::from_fn(|_| Mutex::new(None)),
             running: AtomicBool::new(false),
             rate: AtomicU32::new(0),
             max_block: AtomicU32::new(0),
@@ -1165,7 +1158,7 @@ impl EngineHost {
     }
 
     /// Close the device and join the owner thread. The engine drops on the owner thread; a plugin unit
-    /// still in it goes back to its owner first, stopped (`SlotHost::remove` / `take_evicted`). Later
+    /// still in it goes back to its owner first, stopped (`SlotHost::remove` / `take_back`). Later
     /// requests fail.
     pub fn shutdown(&self) {
         let link = self.core.owner.lock().ok().and_then(|mut owner| owner.take());

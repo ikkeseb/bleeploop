@@ -74,7 +74,7 @@
 //! that WASAPI render endpoint (the id the release log names, `wasapi:{…}.{…}`) while ASIO plays, so the
 //! soak counts the mirror's starves, overruns and trims too.
 
-use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed}};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -647,7 +647,7 @@ impl Probe {
     fn expect_slots(&mut self, after: &str) {
         let loaded: Vec<usize> = self.slots.iter().filter(|s| s.handle.is_some()).map(|s| s.slot).collect();
         let core = self.host.core.clone();
-        if let Err(e) = self.wait("the plugins are back in their slots", SLOT_WAIT, |_| loaded.iter().all(|&k| core.holder[k].load(Acquire) != 0)) {
+        if let Err(e) = self.wait("the plugins are back in their slots", SLOT_WAIT, |_| loaded.iter().all(|&k| core.ports[k].lock().is_ok_and(|desk| desk.holds_active()))) {
             self.fail("slots", format!("after {after}: {e}"));
         }
     }

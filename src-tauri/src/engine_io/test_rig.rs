@@ -46,8 +46,8 @@ impl TestDevice {
         let config = EngineConfig { max_loop_seconds: 2.0, ..EngineConfig::new(rate) };
         let (engine, handle) = Engine::new(config);
         let [p0, p1] = handle.slots;
-        *core.ports[0].lock().unwrap() = Some(p0);
-        *core.ports[1].lock().unwrap() = Some(p1);
+        core.ports[0].lock().unwrap().port = Some(p0);
+        core.ports[1].lock().unwrap().port = Some(p1);
         let scope_bin = lf_engine::scope::scope_bin_frames(rate) as u32;
         *core.ends.lock().unwrap() =
             Some(Ends { commands: handle.commands, pushed: 0, events: handle.events, overview: handle.overview, session: Some(handle.session), scope: handle.scope, scope_bin });
@@ -131,7 +131,7 @@ impl TestDevice {
     }
 
     /// A device at another rate: a new engine (2-second lanes, `max_block`) replaces the old one, whose
-    /// units go to their slot hosts' eviction mailboxes, while the render thread keeps rendering (it
+    /// units go to their slots' desks as evictions, while the render thread keeps rendering (it
     /// renders nothing during the swap, which counts lock misses).
     pub(crate) fn rebuild_at(&self, rate: u32, max_block: usize) {
         let config = EngineConfig { max_loop_seconds: 2.0, max_block, ..EngineConfig::new(rate) };

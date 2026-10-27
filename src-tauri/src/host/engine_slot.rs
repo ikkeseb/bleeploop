@@ -41,6 +41,7 @@ use super::{
     load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
     EVENT_RING_CAP,
 };
+use crate::engine_io::slot_host::Back;
 use crate::engine_io::SlotHost;
 
 /// The plugin formats this host knows, and the ONE place a format is told from a path or a stored
@@ -425,9 +426,15 @@ pub(super) fn serve<P: OwnedPlugin>(
             if relist || changed {
                 tone.note_change(Instant::now());
             }
-            // A new engine at another rate evicted the unit; it comes back stopped.
-            if let Some(unit) = slot.take_evicted() {
-                cycle(&mut plugin, &slot, &mut parked, Some(own(unit)), "re-activation after a device change");
+            // A new engine at another rate evicted the unit; it comes back stopped. A unit another owner's
+            // replace retired never goes in again: it waits for the teardown.
+            match slot.take_back() {
+                Some(Back::Evicted(unit)) => cycle(&mut plugin, &slot, &mut parked, Some(own(unit)), "re-activation after a device change"),
+                Some(Back::Out(unit)) => {
+                    log::error!("[plugin_host] engine slot {index}: the unit was replaced; kept out until teardown");
+                    parked = Some(own(unit));
+                }
+                None => {}
             }
             // Every turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread here, and its
             // timers and async updates must not wait for the next editor, or its state lags what it plays

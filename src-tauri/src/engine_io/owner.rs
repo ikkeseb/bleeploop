@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Engine, EngineConfig, EngineHandle, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
 use super::driver::{Driver, Endpoints, Mirror, Spec, StartError, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
-use super::slot_host::{handed_back, ORPHAN};
+use super::slot_host::Desk;
 use super::{transition, BlockLoad, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, IoDiag, OpenError, Rt};
 use crate::asio_startup::AsioStatusReport;
 use crate::audio_output::AudioBackend;
@@ -55,10 +55,10 @@ const STACK: usize = 4 << 20;
 /// Put a new engine (built at `config`'s rate) in place of the running one, with no device running,
 /// and hand back the old one for the caller to drop off the audio thread (`None` when there was none,
 /// or when a unit panicked on its way out and the old engine was leaked: `evict`). The old engine's
-/// units go to their plugin owners: pending installs land first, then every unit is evicted into
-/// `Core::evicted` (`SlotHost::take_evicted`). Every port is held across the swap, so a plugin owner
-/// cannot slip an install into the old engine, and the new terms are published before any unit is
-/// handed back, so its owner re-activates it at them. The input path's handshake brackets it
+/// units go to their plugin owners: pending installs land first, then every unit is evicted onto its
+/// slot's desk (`SlotHost::take_back`). Every desk is held across the swap, so a plugin owner cannot
+/// slip an install into the old engine, and the new terms are published before any unit is handed
+/// back, so its owner re-activates it at them. The input path's handshake brackets it
 /// ([`super::RebuildHook`]: paused first, told the new generation before the replay, resumed after it).
 /// The device owner's rebuild, and the test device's.
 pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, config: EngineConfig) -> Option<Engine> {
@@ -84,8 +84,8 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     let transport = old.as_deref().and_then(|e| e.applied_meter().map(|meter| (e.clock().bpm(), meter)));
     let unsent: Vec<_> = old.as_deref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
     let clean = old.as_deref_mut().is_none_or(|old| evict(core, &mut ports, old));
-    for (port, new) in ports.iter_mut().zip(slots) {
-        **port = Some(new);
+    for (desk, new) in ports.iter_mut().zip(slots) {
+        desk.port = Some(new);
     }
     // The generation this swap makes (only the swapping thread raises it). What the input path still
     // meant to send (the note target, the wheels) joins the memory before its replay.
@@ -152,12 +152,12 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     old.filter(|_| clean).map(ManuallyDrop::into_inner)
 }
 
-/// Hand every unit of `old`, an engine nothing renders any more, to its plugin owner, stopped: into
-/// `Core::evicted`, with whatever its ports (held by the caller) had returned. False when a unit
-/// panicked on its way out: the caller leaks the engine then, with any unit still in it, rather than
-/// dropping it (a drop calls the plugin's DLL off its owner thread). Such a slot stays held
-/// (`Core::holder`), so its owner's teardown leaks the plugin instead of unloading it.
-fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], old: &mut Engine) -> bool {
+/// Hand every unit of `old`, an engine nothing renders any more, to its plugin owner, stopped: onto its
+/// slot's desk (held by the caller), routed with whatever its port had returned (`Desk::pump`). False
+/// when a unit panicked on its way out: the caller leaks the engine then, with any unit still in it,
+/// rather than dropping it (a drop calls the plugin's DLL off its owner thread); the desk counts such a
+/// unit lost, so its owner's teardown leaks the plugin instead of unloading it (`Desk::lose`).
+fn evict(core: &Core, desks: &mut [MutexGuard<'_, Desk>; SLOT_COUNT], old: &mut Engine) -> bool {
     let clean = catch_unwind(AssertUnwindSafe(|| {
         old.service_slots_idle();
         old.evict_slots();
@@ -167,33 +167,13 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
         core.counters.panics.fetch_add(1, Relaxed);
         log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
     }
-    for (slot, port) in ports.iter_mut().enumerate() {
-        if let Some(port) = port.as_mut() {
-            while let Some(unit) = handed_back(port) {
-                park(core, slot, unit);
-            }
+    for desk in desks.iter_mut() {
+        desk.pump(&core.settings);
+        if !clean {
+            desk.lose();
         }
     }
     clean
-}
-
-/// Keep an evicted unit for its plugin owner (the slot's holder), and free the slot. A unit its owner
-/// abandoned (`SlotHost::abandon`) leaks, as does a second one, which the slot protocol rules out (one
-/// unit per slot): never a drop here (a drop calls its DLL).
-fn park(core: &Core, slot: usize, unit: Box<dyn SlotProcessor>) {
-    let owner = core.holder[slot].swap(0, AcqRel);
-    if owner == 0 || owner == ORPHAN {
-        log::warn!("[engine_io] slot {slot}: an evicted unit has no owner left; leaking it");
-        std::mem::forget(unit);
-        return;
-    }
-    let mut waiting = core.evicted[slot].lock().unwrap_or_else(|e| e.into_inner());
-    if waiting.is_some() {
-        log::error!("[engine_io] slot {slot}: a second evicted unit came back while one waits; leaking it");
-        std::mem::forget(unit);
-    } else {
-        *waiting = Some((owner, unit));
-    }
 }
 
 /// WASAPI join: the ring's capacity and the fill it holds. The capacity holds the capture that runs
@@ -642,7 +622,7 @@ impl<D: Driver> Owner<D> {
     }
 
     /// Build an engine at `rate`. The one it replaces (`evict`: another rate, or a fault) hands its
-    /// units to their plugin owners (`SlotHost::take_evicted`, re-activated at the new rate) and is
+    /// units to their plugin owners (`SlotHost::take_back`, re-activated at the new rate) and is
     /// dropped here.
     fn build(&mut self, rate: u32, evict: bool) {
         let began = Instant::now();
@@ -1031,8 +1011,8 @@ impl<D: Driver> Owner<D> {
             let mut engine = ManuallyDrop::new(engine);
             evict(&self.core, &mut ports, &mut engine).then(|| ManuallyDrop::into_inner(engine))
         });
-        for port in ports.iter_mut() {
-            **port = None;
+        for desk in ports.iter_mut() {
+            desk.port = None;
         }
         drop(ports);
         {
