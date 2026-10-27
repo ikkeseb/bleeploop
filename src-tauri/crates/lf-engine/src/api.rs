@@ -606,7 +606,8 @@ pub enum Event {
     Mix { frame: Frame, lane: u8, mix: CompactMix },
     /// A toggled setting's value as the engine applies it: the answer to every applied command of that
     /// setting, one each, with the value it left (an accepted [`Action::Toggle`], and its setter, even
-    /// one that changed nothing; a refused toggle answers with its `Refused`). An answer the full ring
+    /// one that changed nothing; a refused toggle answers with its `Refused`), and a swap's commit that
+    /// takes a slot off live, as its GO LIVE off. An answer the full ring
     /// refuses is owed and offered again at the next publish, at the setting's value then. The UI shows
     /// the setting from it; the host's settings memory counts the answers against what it sent, so an
     /// answer older than a setter still in flight never overwrites it (`engine_io/settings.rs`).
@@ -750,10 +751,8 @@ pub enum SlotReply {
     /// The replace tagged `tag` committed: its unit is the slot's from this block on (crossfading in
     /// over the unit it replaced, which follows as [`HandbackReason::ReplacedOut`] once faded out).
     /// Every replace is answered once: this, or its unit back as [`HandbackReason::Rejected`].
-    /// `live_off`: this commit took the slot off live (its unit changed kind, effect ↔ instrument).
-    Committed { tag: u64, live_off: bool },
+    Committed { tag: u64 },
     /// A remove for `tag`, which is neither the unit the slot plays nor one fading out after a swap (a
-    /// later unit took its place, it has left, or it still stages), or a withdraw for `tag`, which is not
-    /// a candidate staging (one already committed included): nothing changed.
+    /// later unit took its place, it has left, or it still stages): nothing changed.
     NotHeld { tag: u64 },
 }

@@ -6,12 +6,12 @@
 //! [`Desk::pump`] reads the port and routes each reply by its tag (the owner's token):
 //! - `Committed { t }`: every other Active owner becomes Retiring, wherever its unit is (in the engine,
 //!   or waiting in mail after an eviction): its role ends at the commit, not when its unit comes back.
-//!   A replace's gain enters the settings replay, and so does the live-off of a commit that took the
-//!   slot off live (`live_off`). The answer is mailed to `t`, unless `t` gave up waiting: then its unit
+//!   A replace's gain enters the settings replay (a live-off the commit made reaches it as GO LIVE's
+//!   answer on the event ring). The answer is mailed to `t`, unless `t` gave up waiting: then its unit
 //!   is removed at once and leaks when it comes back.
 //! - A unit handed back leaves the engine; it is mailed to its owner, or leaked (`mem::forget`) when its
 //!   owner gave up on it or has no entry.
-//! - `NotHeld { t }` answers a withdraw that lost the race to a commit (dropped here) or a remove (mailed).
+//! - `NotHeld { t }` answers a remove of a unit the slot no longer plays: mailed, unless `t` gave up.
 //!
 //! Nothing here drops a unit: a drop frees memory and calls into the plugin's DLL off its owner thread.
 
@@ -43,8 +43,6 @@ struct OwnerEntry {
     in_engine: bool,
     /// A replace's gain, recorded into the settings replay at its commit.
     swap_gain: Option<f32>,
-    /// Withdraws sent whose `NotHeld` has not come back: that answer is dropped, never mailed.
-    withdraws: u32,
     /// Its replace committed after it gave up: the remove the ring had no room for, retried each pump.
     remove_owed: bool,
 }
@@ -115,7 +113,7 @@ impl Desk {
                 entry.in_engine = true;
                 entry.swap_gain = swap_gain;
             }
-            None => self.owners.push(OwnerEntry { tag, standing: Standing::Active, in_engine: true, swap_gain, withdraws: 0, remove_owed: false }),
+            None => self.owners.push(OwnerEntry { tag, standing: Standing::Active, in_engine: true, swap_gain, remove_owed: false }),
         }
     }
 
@@ -125,13 +123,6 @@ impl Desk {
         self.enter(tag, None);
         self.entry_mut(tag).expect("just entered").in_engine = false;
         self.mail.push_back(SlotReply::Handback(Handback { tag, reason: HandbackReason::Evicted, unit }));
-    }
-
-    /// `tag` sent a withdraw.
-    pub(super) fn withdrew(&mut self, tag: u64) {
-        if let Some(entry) = self.entry_mut(tag) {
-            entry.withdraws += 1;
-        }
     }
 
     /// The first unit in `tag`'s mail whose reason `pick` maps to `Some`, with that value. Taking a unit
@@ -189,24 +180,16 @@ impl Desk {
     fn route(&mut self, reply: SlotReply, settings: &Mutex<Settings>) {
         let slot = self.slot;
         match reply {
-            SlotReply::Committed { tag, live_off } => {
+            SlotReply::Committed { tag } => {
                 for entry in self.owners.iter_mut().filter(|e| e.tag != tag && e.standing == Standing::Active) {
                     entry.standing = Standing::Retiring;
                 }
-                let gain = self.entry_mut(tag).and_then(|entry| entry.swap_gain.take());
-                if gain.is_some() || live_off {
+                if let Some(gain) = self.entry_mut(tag).and_then(|entry| entry.swap_gain.take()) {
                     // Lock order: a slot's desk, then `settings`, as `swap_engine` takes them; nothing takes a
                     // desk while it holds `settings`. A `SetSlotGain` sent between the commit and this pump is
                     // overwritten here: at most one answer poll while the owner waits, and the UI sends no gain
-                    // for a slot while its swap is pending. The live-off races a GO LIVE the same way: one sent,
-                    // or answered, between the commit and this pump may end on either side of it.
-                    let mut settings = settings.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(gain) = gain {
-                        settings.record(&Command::SetSlotGain(slot as u8, gain));
-                    }
-                    if live_off {
-                        settings.record(&Command::SetSlotLive(slot as u8, false));
-                    }
+                    // for a slot while its swap is pending.
+                    settings.lock().unwrap_or_else(|e| e.into_inner()).record(&Command::SetSlotGain(slot as u8, gain));
                 }
                 let Some(entry) = self.entry_mut(tag) else {
                     log::error!("[engine_io] slot {slot}: a replace committed for an owner the desk does not know");
@@ -215,14 +198,11 @@ impl Desk {
                 if entry.standing == Standing::Abandoned {
                     entry.remove_owed = true;
                 } else {
-                    self.mail.push_back(SlotReply::Committed { tag, live_off });
+                    self.mail.push_back(SlotReply::Committed { tag });
                 }
             }
             SlotReply::NotHeld { tag } => {
-                let Some(entry) = self.entry_mut(tag) else { return };
-                if entry.withdraws > 0 {
-                    entry.withdraws -= 1;
-                } else if entry.standing != Standing::Abandoned {
+                if self.standing(tag).is_some_and(|s| s != Standing::Abandoned) {
                     self.mail.push_back(SlotReply::NotHeld { tag });
                 }
             }

@@ -44,14 +44,14 @@
 //! as it stood, under the new one at the replace's gain, the slot's from then on. Each unit's term stays on
 //! its own destination (an effect's on the wet, an instrument's on the bus), and the slot's bypass
 //! crossfade applies over them as ever. A commit that changes the kind (effect ↔ instrument) takes a live
-//! slot off live at its frame, as a GO LIVE off would (`Committed`'s `live_off`). The old unit stops after
+//! slot off live at its frame, as a GO LIVE off would, answered as one (`Event::Toggled`). The old unit stops after
 //! its last call and goes back `ReplacedOut`, behind the `Committed`.
 //! While a take captures, a candidate whose latency differs from the playing unit's (an empty slot's
 //! is 0) stays staged until the capture ends, so nothing moves what records mid-take. A candidate that
 //! refuses to start goes back `StartRefused` after the call it refused in, and a withdraw of its tag
 //! (or a remove of the playing unit) sends it back `Cancelled`; the playing unit plays on. A withdraw
-//! names only a staging candidate: any other tag, a committed unit's included, is answered `NotHeld`,
-//! so one that loses the race to the commit never touches the new unit. A replace into an empty slot
+//! names only a staging candidate: any other tag, a committed unit's included, gets no answer and
+//! changes nothing, so one that loses the race to the commit never touches the new unit. A replace into an empty slot
 //! needs no staging: an install gliding to its gain, `Committed` as it arrives unless a capture holds it
 //! as above. One into a slot already swapping, or whose unit is being removed, goes straight back
 //! `Busy`, counted, never started or stopped, so a slot holds at most two units. With no block to render
@@ -118,6 +118,9 @@ struct Slot {
     removing: bool,
     /// GO LIVE as asked: the live gate's target, and what the record latency follows.
     live: bool,
+    /// A swap's commit took the slot off live and the engine has not answered it yet
+    /// ([`Rack::take_live_off`]).
+    live_off: bool,
     /// The live gate ramps linearly from `live_gain` at frame `live_end - Rack::live_frames` to the
     /// target (1 live, 0 off), which it holds exactly from `live_end` on (`Frame::MIN`: settled).
     live_end: Frame,
@@ -407,6 +410,7 @@ impl Rack {
                 engaged: false,
                 removing: false,
                 live: false,
+                live_off: false,
                 live_end: Frame::MIN,
                 live_gain: 0.0,
                 shut: 0,
@@ -570,6 +574,12 @@ impl Rack {
         if let Some(s) = self.target.map(|i| &mut self.slots[i]) {
             s.seat.release_all(offset, &mut self.events_dropped);
         }
+    }
+
+    /// Whether a swap's commit took slot `slot` off live since the last call: the engine answers it as a
+    /// GO LIVE off (`Engine::answer_live_offs`).
+    pub(crate) fn take_live_off(&mut self, slot: usize) -> bool {
+        self.slots.get_mut(slot).is_some_and(|s| std::mem::take(&mut s.live_off))
     }
 
     /// Whether slot `slot` is live as asked (the gate's target); false for a slot past the rack.

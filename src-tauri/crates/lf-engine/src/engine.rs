@@ -260,7 +260,8 @@ pub struct Engine {
     /// Per toggled setting, in [`Toggle::ALL`] order: the events the full ring refused, each owed as a
     /// `Toggled` of the current value (`offer_toggles`). Every applied command of a toggled setting (its
     /// setter, its toggle, a refused toggle) answers with exactly one event of that setting, so the host
-    /// can match the answers to what it sent (`engine_io/settings.rs`).
+    /// can match the answers to what it sent (`engine_io/settings.rs`); a swap's commit that takes a slot
+    /// off live answers as a GO LIVE off ([`Engine::answer_live_offs`]).
     toggles_owed: [u32; Toggle::COUNT],
     /// The commands queued ahead of the first block (a new engine's settings replay) are all taken: the
     /// ring was empty after a block's take ([`Engine::take_commands`] takes at most `MAX_PENDING`). Until
@@ -425,16 +426,17 @@ impl Engine {
     /// stops here, on the caller's thread).
     pub fn service_slots_idle(&mut self) {
         self.rack.service_idle();
-        self.follow_slots_off();
+        self.answer_live_offs(self.next_frame);
     }
 
-    /// A swap's commit takes a live slot whose unit changed kind off live: GO LIVE's flag in the overview
-    /// follows, as the command's own does. Only an off is copied: a gate `close_slot_idle` shut shows off
-    /// while its flag may be on.
-    fn follow_slots_off(&self) {
+    /// A swap's commit took a live slot whose unit changed kind off live: answered at `now` as a GO LIVE
+    /// off is, the overview's flag and an `Event::Toggled` through the same push (owed when the full
+    /// ring refuses it), so the feed hears it in order with every other answer of the slot's GO LIVE.
+    fn answer_live_offs(&mut self, now: Frame) {
         for slot in 0..SLOT_COUNT {
-            if !self.rack.live(slot) {
+            if self.rack.take_live_off(slot) {
                 self.looper.overview().set_slot_live(slot, false);
+                toggled(&mut self.feed, now, &mut self.toggles_owed, Toggle::Live(slot as u8), false);
             }
         }
     }
@@ -563,7 +565,7 @@ impl Engine {
     /// installs it into the new engine).
     pub fn evict_slots(&mut self) {
         self.rack.evict();
-        self.follow_slots_off();
+        self.answer_live_offs(self.next_frame);
     }
 
     /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out after
@@ -623,7 +625,7 @@ impl Engine {
         // that would change the latency waits for it too, so this block's answer is the rack's.
         let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
         self.rack.begin_block(start, first, !open);
-        self.follow_slots_off();
+        self.answer_live_offs(start);
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;

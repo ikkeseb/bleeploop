@@ -4,7 +4,8 @@
 //! on the slot's real input; a gain change while it stages moves the playing unit alone; a candidate
 //! that refuses to start goes back and leaves the slot untouched; a swap that changes the latency (an
 //! empty slot's is 0) waits for a take to stop capturing, whatever the kinds; a commit to another kind
-//! takes a live slot off live as GO LIVE off would, and no other commit touches the live flag.
+//! takes a live slot off live as GO LIVE off would, answered as one, and no other commit touches the
+//! live flag.
 
 mod common;
 
@@ -12,7 +13,7 @@ use common::refs::sha256_f32;
 use common::units::{fake, Fake, Probe, Seen};
 use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, HandbackReason, NoteTarget, Rejection, SlotKind, SlotReply};
+use lf_engine::{Command, Event, HandbackReason, NoteTarget, Rejection, SlotKind, SlotReply, Toggle};
 
 /// Frames at 48 kHz of a candidate's staging past its latency, and of the swap fade: 10 ms each; of the
 /// live gate's ramp: 5 ms.
@@ -121,12 +122,24 @@ fn bits(x: &[f32]) -> Vec<u32> {
     x.iter().map(|y| y.to_bits()).collect()
 }
 
+/// Slot 0's GO LIVE answers (`Event::Toggled`) the rig read from event `mark` on, as (frame, on).
+fn live_answers(rig: &Rig, mark: usize) -> Vec<(Frame, bool)> {
+    rig.events[mark..]
+        .iter()
+        .filter_map(|e| match *e {
+            Event::Toggled { frame, toggle: Toggle::Live(0), on } => Some((frame, on)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A swap on slot 0 at block size `block`, the input at `level`: `old` (tag 1) installed before the
 /// first block, so engaged at once, then `new` (tag 2) replacing it at `gain` from block start S. It
 /// commits at C, the first block start once it has staged its latency plus `STAGE`; checked here:
 /// no answer before C, `Committed` from C's block (the live slot taken off live exactly when the kind
-/// changes), the old unit back `ReplacedOut` after the fade. The rig keeps its output from S and has
-/// rendered whole blocks past the fade. Returns the rig, S and C.
+/// changes, answered by one `Toggled` off at C, and by none when it does not), the old unit back
+/// `ReplacedOut` after the fade. The rig keeps its output from S and has rendered whole blocks past the
+/// fade. Returns the rig, S and C.
 fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> (Rig, Frame, Frame) {
     let b = block as Frame;
     let need = new.latency + STAGE;
@@ -138,18 +151,21 @@ fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> 
     let s = rig.frame;
     rig.replace(0, 2, new, gain);
     rig.keep_output();
+    let mark = rig.events.len();
     let c = s + whole(need, b);
     rig.advance(c - s);
     assert!(rig.reply(0).is_none(), "block {block}: staging until {c}");
     rig.advance(b);
     let reply = rig.reply(0);
-    assert!(matches!(reply, Some(SlotReply::Committed { tag: 2, live_off }) if live_off == changed), "block {block}: committed at {c}: {reply:?}");
+    assert!(matches!(reply, Some(SlotReply::Committed { tag: 2 })), "block {block}: committed at {c}: {reply:?}");
     assert_eq!(rig.engine.looper().overview().slot_live(0), !changed, "block {block}: GO LIVE after the commit");
     rig.advance(whole(SWAP, b));
     match rig.reply(0) {
         Some(SlotReply::Handback(back)) => assert_eq!((back.tag, back.reason), (1, HandbackReason::ReplacedOut), "block {block}"),
         other => panic!("block {block}: the old unit back, not {other:?}"),
     }
+    let answers: &[(Frame, bool)] = if changed { &[(c, false)] } else { &[] };
+    assert_eq!(live_answers(&rig, mark), answers, "block {block}: the commit's GO LIVE answer");
     (rig, s, c)
 }
 
@@ -214,7 +230,7 @@ fn a_commit_to_another_kind_takes_a_live_slot_off_live_as_go_live_off_would() {
 }
 
 /// A commit to the same kind leaves the live flag alone, and one into a slot not live leaves it so:
-/// effect → effect stays live, instrument → effect stays off, each `Committed` with no `live_off`.
+/// effect → effect stays live, instrument → effect stays off, neither answered by a `Toggled`.
 #[test]
 fn a_commit_takes_a_slot_off_live_only_when_live_and_only_to_another_kind() {
     use SlotKind::{Effect, Instrument};
@@ -230,6 +246,7 @@ fn a_commit_takes_a_slot_off_live_only_when_live_and_only_to_another_kind() {
         rig.install_tagged(0, 1, unit(from, &p1));
         rig.advance(4 * 128);
         rig.replace(0, 2, unit(to, &p2), 1.0);
+        let mark = rig.events.len();
         let give_up = rig.frame + rig.seconds(1.0);
         let reply = loop {
             rig.advance(128);
@@ -238,8 +255,9 @@ fn a_commit_takes_a_slot_off_live_only_when_live_and_only_to_another_kind() {
             }
             assert!(rig.frame < give_up, "{what}: no commit");
         };
-        assert!(matches!(reply, SlotReply::Committed { tag: 2, live_off: false }), "{what}: {reply:?}");
+        assert!(matches!(reply, SlotReply::Committed { tag: 2 }), "{what}: {reply:?}");
         assert_eq!(rig.engine.looper().overview().slot_live(0), live, "{what}");
+        assert_eq!(live_answers(&rig, mark), [], "{what}: no GO LIVE answer");
     }
 }
 

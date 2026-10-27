@@ -2,8 +2,8 @@
 //! once, tagged, with why, in send order through a full return ring and through partial reads while
 //! its parked overflow wraps around; a replace into an empty slot is an install at its gain; a slot
 //! swapping or removing refuses a replace, and one playing an install; a withdraw or a remove
-//! mid-staging and mid-fade does only what its tag names, and a second remove of a unit being removed
-//! gets no answer; an eviction mid-swap leaves nothing, nor one after a candidate panicked as it
+//! mid-staging and mid-fade does only what its tag names, a withdraw that names no staging candidate
+//! and a second remove of a unit being removed getting no answer; an eviction mid-swap leaves nothing, nor one after a candidate panicked as it
 //! arrived; a candidate stages its latency plus the stage, and the unit it replaces releases its notes
 //! in its last calls, a later release of one reaching neither unit. (The fade itself:
 //! `tests/slot_swap.rs`.)
@@ -81,7 +81,7 @@ fn unit(kind: SlotKind, level: f32, probe: &Probe) -> Box<Fake> {
     }
 }
 
-/// Proof 4: three replaces, a withdraw of a gone tag and one of a staging candidate, then a remove, the
+/// Proof 4: three replaces, a remove of a gone tag and a withdraw of a staging candidate, then a remove, the
 /// host reading nothing until six replies are out: the ring's four, then the two parked behind them,
 /// each unit back once with its tag and why, `Committed` before the `ReplacedOut` it causes.
 #[test]
@@ -99,7 +99,7 @@ fn every_unit_comes_back_once_tagged_with_why_in_send_order_through_a_full_retur
         rig.advance(through);
         rig.replace(0, 3, Fake::effect(0.3, 0.5, &p[2]), 1.0);
         rig.advance(through);
-        rig.withdraw(0, 2);
+        rig.remove_tagged(0, 2);
         rig.replace(0, 4, Fake::effect(0.4, 0.5, &p[3]), 1.0);
         rig.advance(b);
         rig.withdraw(0, 4);
@@ -126,8 +126,8 @@ fn every_unit_comes_back_once_tagged_with_why_in_send_order_through_a_full_retur
 /// The parked overflow keeps send order through partial reads: the ring full and both parked places
 /// taken, the host reads one or two replies before each block and the block adds as many, so the
 /// oldest parked reply sits at either place in turn (the overflow wraps around) with a newer one parked
-/// behind it. Every reply (a withdraw's `NotHeld`, tagged by its count) arrives in send order, none
-/// leaked.
+/// behind it. Every reply (a remove's `NotHeld` on the empty slot, tagged by its count) arrives in send
+/// order, none leaked.
 #[test]
 fn replies_keep_send_order_through_partial_reads_while_the_parked_overflow_wraps_around() {
     let mut rig = Rig::new();
@@ -137,7 +137,7 @@ fn replies_keep_send_order_through_partial_reads_while_the_parked_overflow_wraps
         Some(SlotReply::NotHeld { tag }) => read.push(tag),
         other => panic!("after {read:?}: {other:?}"),
     };
-    // (replies read, withdraws sent) before each block: the ring's four, the parked two, then the
+    // (replies read, removes sent) before each block: the ring's four, the parked two, then the
     // overflow drained one or two at a time as it refills.
     for (reads, sends) in [(0, 4), (0, 2), (1, 1), (1, 1), (1, 1), (2, 2), (1, 1), (2, 1), (0, 0)] {
         for _ in 0..reads {
@@ -145,7 +145,7 @@ fn replies_keep_send_order_through_partial_reads_while_the_parked_overflow_wraps
         }
         for _ in 0..sends {
             sent += 1;
-            rig.withdraw(0, sent);
+            rig.remove_tagged(0, sent);
         }
         rig.advance(128);
     }
@@ -276,9 +276,9 @@ fn same_output(rig: &Rig, reference: &Rig, what: &str) {
 
 /// Proof 6: mid-staging, a withdraw of the candidate sends it back `Cancelled` and the slot plays on as
 /// if no replace had come; a remove of the playing unit cancels the candidate first, then removes; a
-/// remove of the candidate's tag, and any unknown tag, is `NotHeld` and the swap goes on untouched.
-/// Mid-fade, a withdraw of either tag is `NotHeld`, a remove of the outgoing unit's gets no answer, and
-/// the swap renders as without them.
+/// remove of the candidate's tag, and any unknown tag, is `NotHeld`, a withdraw of an unknown tag gets
+/// no answer, and the swap goes on untouched. Mid-fade, a withdraw of either tag and a remove of the
+/// outgoing unit's get no answer, and the swap renders as without them.
 #[test]
 fn a_withdraw_or_a_remove_mid_swap_does_only_what_its_tag_names() {
     for block in [1, 32, 128, 480] {
@@ -307,11 +307,10 @@ fn a_withdraw_or_a_remove_mid_swap_does_only_what_its_tag_names() {
         });
         assert_eq!(c, c_ref);
         same_output(&rig, &swapped, &format!("block {block}: not held"));
-        // Five replies: the fifth parks behind the ring's four until the host reads.
         let mut got = answers(&mut rig, 0, &mut units);
         rig.advance(b);
         got.extend(answers(&mut rig, 0, &mut units));
-        assert_eq!(got, [NotHeld(2), NotHeld(9), NotHeld(9), Committed(2), Back(1, ReplacedOut)], "block {block}: not held");
+        assert_eq!(got, [NotHeld(2), NotHeld(9), Committed(2), Back(1, ReplacedOut)], "block {block}: not held");
 
         // A block start inside the fade: none at block 480, whose fade is one block.
         if b < SWAP {
@@ -321,7 +320,7 @@ fn a_withdraw_or_a_remove_mid_swap_does_only_what_its_tag_names() {
                 rig.withdraw(0, 1);
                 rig.remove_tagged(0, 1);
             });
-            assert_eq!(answers(&mut rig, 0, &mut units), [Committed(2), NotHeld(2), NotHeld(1), Back(1, ReplacedOut)], "block {block}: mid-fade");
+            assert_eq!(answers(&mut rig, 0, &mut units), [Committed(2), Back(1, ReplacedOut)], "block {block}: mid-fade");
             same_output(&rig, &swapped, &format!("block {block}: mid-fade"));
             assert_eq!(old.calls(), old_ref.calls(), "block {block}: the old unit's calls");
         }

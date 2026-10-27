@@ -55,8 +55,8 @@ impl SlotPort {
     }
 
     /// Call off the replace tagged `tag` while its unit stages: it goes back `Cancelled` and the unit
-    /// the slot plays plays on. Any other tag (committed, fading out, unknown) is answered `NotHeld`, so
-    /// a withdraw that loses the race to a commit never touches the new unit. False when the ring is full.
+    /// the slot plays plays on. Any other tag (committed, fading out, unknown) gets no answer and changes
+    /// nothing. False when the ring is full.
     pub fn withdraw(&mut self, tag: u64) -> bool {
         self.tx.push(SlotMsg::Withdraw { tag }).is_ok()
     }

@@ -82,12 +82,10 @@ impl Slot {
     }
 
     /// A withdraw for `tag`: the candidate staging under it goes back `Cancelled`. Any other tag (a
-    /// committed unit's, an outgoing one's, an unknown one) is answered `NotHeld` and changes nothing.
+    /// committed unit's, an outgoing one's, an unknown one) gets no answer and changes nothing.
     pub(super) fn withdraw(&mut self, tag: u64, errors: &mut u64) {
         if matches!(self.swap, Swap::Staging { .. }) && self.side.tag == tag {
             self.cancel(errors);
-        } else {
-            self.end.send(SlotReply::NotHeld { tag }, errors);
         }
     }
 
@@ -119,7 +117,8 @@ impl Slot {
     /// (in from bypass, `fade` frames done) whose gain glides to the replace's; beside a playing unit, the
     /// old one's notes are released, the seats trade places, the old one fades out at the gain the slot
     /// had, and the slot's gain is the replace's at once. A live slot whose unit changes kind goes off
-    /// live there, as a GO LIVE off would: ramped over `live`'s frames from its frame, settled without.
+    /// live there, as a GO LIVE off would: ramped over `live`'s frames from its frame, settled without,
+    /// and owed its answer (`live_off`).
     fn commit(&mut self, fade: u32, live: Option<(Frame, Frame)>, dropped: &mut u64, errors: &mut u64) {
         let Swap::Staging { gain, .. } = self.swap else { return };
         let empty = self.seat.unit.is_none();
@@ -136,8 +135,9 @@ impl Slot {
         }
         if live_off {
             self.set_live(false, live);
+            self.live_off = true;
         }
-        self.end.send(SlotReply::Committed { tag: self.seat.tag, live_off }, errors);
+        self.end.send(SlotReply::Committed { tag: self.seat.tag }, errors);
     }
 
     /// No block will render the swap (idle servicing, an eviction): a staging candidate commits (an

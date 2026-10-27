@@ -171,8 +171,8 @@ impl SlotHost {
         Ok(())
     }
 
-    /// This owner's replace's outcome, waiting up to `timeout` for it. A `NotHeld` its withdraw drew
-    /// (the commit won the race) never reaches here; the commit does.
+    /// This owner's replace's outcome, waiting up to `timeout` for it: a withdraw the commit beat gets no
+    /// answer, and the commit is the outcome.
     pub fn answer(&self, timeout: Duration) -> Answer {
         let deadline = Instant::now() + timeout;
         loop {
@@ -204,12 +204,7 @@ impl SlotHost {
     /// (`Refused(.., Cancelled)`, or `Committed` when the commit came first). False when no engine exists
     /// or the port is full.
     pub fn withdraw(&self) -> bool {
-        let mut desk = self.desk();
-        let sent = desk.port.as_mut().is_some_and(|port| port.withdraw(self.token));
-        if sent {
-            desk.withdrew(self.token);
-        }
-        sent
+        self.desk().port.as_mut().is_some_and(|port| port.withdraw(self.token))
     }
 
     /// This owner's unit, if it left the engine on its own: an eviction, or retired by another owner's
@@ -569,17 +564,17 @@ mod tests {
     }
 
     #[test]
-    fn a_withdraw_after_the_commit_is_answered_committed_and_its_not_held_never_reaches_a_remove() {
+    fn a_withdraw_after_the_commit_is_answered_committed_and_a_remove_gets_its_unit() {
         let (device, a, _, b) = playing();
         let (unit, _) = constant(0.5);
         assert!(b.replace(unit, 48_000, 0.8).is_ok());
-        // The engine commits (and answers the withdraw `NotHeld`) before anyone reads the desk.
+        // The engine commits before anyone reads the desk; the withdraw that follows gets no answer.
         assert!(device.wait_blocks(20));
         assert!(b.withdraw());
         assert!(device.wait_blocks(5));
         assert!(matches!(b.answer(PATIENCE), Answer::Committed));
         assert_eq!(a.standing(), Some(Standing::Retiring));
-        let back = b.remove(PATIENCE).unwrap().expect("the NotHeld was the withdraw's: B's unit comes back");
+        let back = b.remove(PATIENCE).unwrap().expect("nothing answered the withdraw: B's unit comes back");
         assert_eq!(level(back), 0.5);
     }
 
@@ -643,17 +638,47 @@ mod tests {
         assert!((rebuilt - swapped).abs() < 0.01, "the new engine plays B at the swap's gain: {rebuilt}, not {swapped}");
     }
 
-    #[test]
-    fn a_commit_that_takes_the_slot_off_live_enters_the_replay() {
-        let (device, _a, _, b) = playing();
+    /// Slot 0's GO LIVE in the replay and in the engine the rebuild made, once its first blocks ran.
+    fn live_after_rebuild(device: &TestDevice) -> (Vec<Command>, bool) {
+        device.rebuild_at(44_100, 512);
+        assert!(device.wait_blocks(5));
+        let live = device.host().core.ends.lock().unwrap().as_ref().expect("an engine").overview.slot_live(0);
+        (device.host().settings(), live)
+    }
+
+    /// A live effect's slot, B's instrument replacing A's effect: the commit takes the slot off live.
+    fn live_swap_to_an_instrument(device: &TestDevice, b: &SlotHost) {
         device.host().send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
         assert!(device.wait_blocks(5), "GO LIVE applies before the swap");
         let (mut unit, _) = constant(0.5);
         unit.kind = SlotKind::Instrument;
         assert!(b.replace(unit, 48_000, 0.7).is_ok(), "an instrument for the live effect");
-        assert!(matches!(b.answer(PATIENCE), Answer::Committed));
-        let replay = device.host().settings();
+    }
+
+    #[test]
+    fn a_commits_live_off_lands_after_an_older_unread_go_live_and_survives_a_rebuild() {
+        let (device, _a, _, b) = playing();
+        live_swap_to_an_instrument(&device, &b);
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed), "the desk read the commit; GO LIVE's answer is still unread");
+        device.host().drain_events(&mut Vec::new());
+        let (replay, live) = live_after_rebuild(&device);
         assert!(replay.contains(&Command::SetSlotLive(0, false)) && !replay.contains(&Command::SetSlotLive(0, true)), "{replay:?}");
+        assert!(!live, "the rebuilt engine keeps the slot off live");
+    }
+
+    #[test]
+    fn a_go_live_after_the_commit_answered_before_the_desk_reads_it_survives_a_rebuild() {
+        let (device, _a, _, b) = playing();
+        live_swap_to_an_instrument(&device, &b);
+        let overview = device.host().core.ends.lock().unwrap().as_ref().expect("an engine").overview.clone();
+        eventually("the commit takes the slot off live", || (!overview.slot_live(0)).then_some(()));
+        device.host().send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+        assert!(device.wait_blocks(5));
+        device.host().drain_events(&mut Vec::new());
+        assert!(matches!(b.answer(PATIENCE), Answer::Committed), "the desk reads the commit after GO LIVE's answer");
+        let (replay, live) = live_after_rebuild(&device);
+        assert!(replay.contains(&Command::SetSlotLive(0, true)) && !replay.contains(&Command::SetSlotLive(0, false)), "{replay:?}");
+        assert!(live, "the rebuilt engine keeps the newer GO LIVE");
     }
 
     #[test]
@@ -703,11 +728,13 @@ mod tests {
     fn a_rebuild_over_a_full_reply_ring_still_hands_the_parked_unit_to_its_owner() {
         let (mut device, a, counts_a, _) = playing();
         device.stop();
-        // Four withdraws fill the message ring; the rebuild's service answers each `NotHeld`, which fills
-        // the reply ring, so the eviction parks in the old engine behind them.
-        for _ in 0..4 {
-            assert!(a.withdraw());
+        // Four removes of a tag no owner has fill the message ring; the rebuild's service answers each
+        // `NotHeld`, which fills the reply ring, so the eviction parks in the old engine behind them.
+        let mut desk = device.host().core.ports[0].lock().unwrap();
+        for tag in 0..4 {
+            assert!(desk.port.as_mut().expect("a port").remove(u64::MAX - tag));
         }
+        drop(desk);
         device.rebuild_at(44_100, 512);
         let Some(Back::Evicted(back)) = a.take_back() else { panic!("the parked eviction reaches its owner") };
         assert_eq!((counts_a.stops(), counts_a.drops()), (1, 0), "stopped once; never dropped with the old engine");
