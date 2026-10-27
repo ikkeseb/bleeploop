@@ -932,19 +932,19 @@ impl EngineSlotHandle {
         self.requests.send(request).expect("the owner is serving");
     }
 
-    /// Test-only: an unload's first step alone: the owner's loop ends at its next check, and
-    /// `unload` still joins it.
-    #[cfg(test)]
-    pub(super) fn stop_serving(&self) {
+    /// An unload's first step alone: the owner's loop ends at its next check and it tears down on its
+    /// own thread; `retire` still joins it. Several teardowns started first are joined in turn without
+    /// one plugin's release holding up the others' start.
+    pub(crate) fn stop(&self) {
         self.running.store(false, Release);
+        let _ = self.requests.send(OwnerRequest::Wake);
     }
 
     /// Stop the owner and join it: the teardown's result, `None` when another caller took the join.
     fn stop_owner(&self) -> Option<Result<(), String>> {
         let owner = self.owner.lock().unwrap_or_else(|e| e.into_inner()).take()?;
         let t = Instant::now();
-        self.running.store(false, Release);
-        let _ = self.requests.send(OwnerRequest::Wake);
+        self.stop();
         let result = owner.join().unwrap_or_else(|_| Err("the owner thread panicked".to_string()));
         log::info!("[plugin_host] engine slot {} owner joined in {} ms", self.slot, t.elapsed().as_millis());
         Some(result)

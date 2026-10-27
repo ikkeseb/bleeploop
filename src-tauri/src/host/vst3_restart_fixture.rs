@@ -1158,7 +1158,7 @@ mod engine {
         let reported = unsafe { plugin_side_handler(&made).restartComponent(RestartFlags_::kParamValuesChanged) };
         assert_eq!(reported, kResultOk);
         // The unload is asked for before the owner gets on: its loop ends without another turn.
-        handle.stop_serving();
+        handle.stop();
         release.send(()).unwrap();
         let export = tone::decode(&export.recv_timeout(PATIENCE).unwrap().unwrap()).unwrap();
         let v = framed(b"component v");

@@ -134,7 +134,7 @@ impl EngineApp {
         midi.as_ref().map(f).ok_or_else(|| "native MIDI is not running".to_string())
     }
 
-    /// On exit and before the updater's installer (`update.rs`): begin closing (no swap starts, and
+    /// On exit and before the updater's installer (`update.rs`): begin closing (no load or swap starts, and
     /// loads and swaps in flight are called off: `begin_closing`), stop native MIDI (its ports close, what
     /// they and the UI held is released while the device still plays, a bindings write still due is
     /// made, and its rebuild hook leaves the host), stop the feed, save every slot's tone

@@ -6,8 +6,9 @@
 //! (whose failed live-off keeps the plugin the engine plays). A commit releases the slot's notes and,
 //! when the plugin's kind changed, takes the slot off live (`on_commit`).
 //!
-//! The exit (`begin_closing`) refuses every swap from then on and calls off one in flight: its
-//! `finish` ends the candidate, and the exit's `unload_all` the plugin that played.
+//! The exit (`begin_closing`) refuses every swap from then on and calls off one in flight, whose
+//! `finish` ends both its plugins: the exit's `unload_all` starts the playing one's teardown at once,
+//! and waits for the swap to empty the slot.
 //!
 //! A swap takes a slot that plays a plugin for the asking document, once the plugin swapped out of it
 //! before has ended its retire (`take_slot`). A swap onto the file that plays is refused: that one goes
@@ -37,11 +38,10 @@ pub(super) struct Retired {
 /// Where a retire reports its end: the window's `plugin:retired`, a test's record otherwise.
 pub(super) type RetiredSink = Arc<dyn Fn(Retired) + Send + Sync>;
 
-/// Where a swap lands: a load's target, the app's exit flag, where a retire reports, and what a commit
-/// tells the rest of the app (`on_commit`: the slot, and whether the plugin's kind changed).
+/// Where a swap lands: a load's target (with the app's exit flag), where a retire reports, and what a
+/// commit tells the rest of the app (`on_commit`: the slot, and whether the plugin's kind changed).
 pub(super) struct SwapTarget<'a> {
     pub(super) load: LoadTarget<'a>,
-    pub(super) closing: &'a AtomicBool,
     pub(super) retired: RetiredSink,
     pub(super) on_commit: &'a dyn Fn(u8, bool),
 }
@@ -81,7 +81,7 @@ impl SwapTarget<'_> {
     /// a plugin swapped out of it still retiring is waited for (≤ `vacate_wait`). The swap's cancel.
     fn reserve_swap(&self, state: &PluginHostState, slot: u8, frontend_epoch: u32, path: &str) -> Result<Arc<AtomicBool>, String> {
         take_slot(self.load.slots, slot, (state, frontend_epoch), self.load.vacate_wait, |taken, retiring| {
-            if self.closing.load(Acquire) {
+            if self.load.closing.load(Acquire) {
                 return Some(Err("busy: closing".to_string()));
             }
             let EngineSlot::Loaded { info, .. } = &*taken else {
@@ -123,7 +123,7 @@ impl SwapTarget<'_> {
                 None
             }
         };
-        let wanted = |epoch: u32| !cancel.load(Acquire) && state.frontend_epoch.load(Relaxed) == epoch && !self.closing.load(Acquire);
+        let wanted = |epoch: u32| !cancel.load(Acquire) && state.frontend_epoch.load(Relaxed) == epoch && !self.load.closing.load(Acquire);
         let (old, new, error) = match (ours, loaded) {
             (Some((epoch, old, _)), Ok((info, new))) if wanted(epoch) => {
                 self.play(slots, slot, info.clone(), new, old);
@@ -172,7 +172,8 @@ impl SwapTarget<'_> {
 
     /// Tear down what a called-off swap leaves this thread, `error` saying why: the plugin it was to
     /// replace (`old`, with its info; the slot is this thread's, `Leaving`, while it is held) and the
-    /// new one, each through its owner's ordered teardown, the slot off live first. A live-off that
+    /// new one, each through its owner's ordered teardown, the slot off live first; both teardowns start
+    /// before either is joined, so a release that hangs holds up only its own. A live-off that
     /// fails before the exit keeps the plugin the engine plays loaded, as an unload's does (`unload`),
     /// and only the other leaves; with neither playing, the slot ends empty and may pass its input dry.
     fn call_off(
@@ -193,7 +194,7 @@ impl SwapTarget<'_> {
         };
         let error = match self.load.host.silence_slot(slot, LIVE_OFF_WAIT) {
             Ok(()) => error,
-            Err(e) if self.closing.load(Acquire) => {
+            Err(e) if self.load.closing.load(Acquire) => {
                 log::error!("[plugin_host] engine slot {slot}: live-off before a called-off swap's unloads: {e}");
                 error
             }
@@ -211,6 +212,10 @@ impl SwapTarget<'_> {
                 format!("{error}; slot {slot} is empty and may pass its input dry, as its live input could not be stopped first: {e}")
             }
         };
+        if let Some((_, new)) = &new {
+            new.stop();
+        }
+        old.stop();
         unload_new(new);
         if let Err(e) = unload_handle(slot, old) {
             log::error!("[plugin_host] engine slot {slot}: unloading the plugin a called-off swap was to replace: {e}");
@@ -290,7 +295,7 @@ impl EngineApp {
                 }
             }
         };
-        let target = SwapTarget { load: self.load_target(&host, &open), closing: &self.closing, retired, on_commit: &on_commit };
+        let target = SwapTarget { load: self.load_target(&host, &open), retired, on_commit: &on_commit };
         target.swap(state, slot, path, id, gain, frontend_epoch, tone_token)
     }
 }

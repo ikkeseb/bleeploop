@@ -1156,7 +1156,7 @@ mod engine {
                 unsafe { (gui.closed.unwrap())(host, true) };
                 let (reply, answer) = std::sync::mpsc::sync_channel(1);
                 if unload {
-                    handle.stop_serving();
+                    handle.stop();
                 } else {
                     handle.queue(OwnerRequest::CloseEditor(Arc::new(AtomicBool::new(false)), reply));
                 }
@@ -1313,7 +1313,7 @@ mod engine {
         // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
         unsafe { ((*host).request_callback.unwrap())(host) };
         // The unload is asked for before the owner gets on: its loop ends without another turn.
-        handle.stop_serving();
+        handle.stop();
         release.send(()).unwrap();
         let export = tone::decode(&export.recv_timeout(PATIENCE).unwrap().unwrap()).unwrap();
         assert_eq!(export.state, b"state v", "the export took the state before the change");
