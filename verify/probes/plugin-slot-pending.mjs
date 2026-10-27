@@ -5,7 +5,8 @@
  * the other slot stays usable; two installed copies of one plugin (same id, other path) are two choices
  * and picking the second swaps to its path; a rejected operation still decrements the pending count and
  * restores interaction; programmatic queue callers count at enqueue time (no enabled frame between
- * operations) and slot independence holds; an error thrown inside the queued operation itself still
+ * operations), a pick a newer one overtook in the queue loads nothing, and slot independence holds;
+ * an error thrown inside the queued operation itself still
  * releases its pending count; a load the host rejects leaves the slot empty and a retry after it lands
  * its own plugin; and an effect's automatic GO LIVE runs only once its source load is back
  * (`SetSlotLive` to the engine), then its editor opens and the picker unlocks.
@@ -163,25 +164,28 @@ await probe(async ({ open }) => {
   assert.equal((await slotUi(0)).pickerDisabled, false);
   assert.equal(consumeConsoleErrors('[instrument] plugin load failed injected load failure').length, 1, 'the rejected load is logged');
 
-  // Programmatic callers retain queue semantics. Counting at enqueue time prevents an enabled frame
-  // between operations, and slot 1 remains independent.
+  // Programmatic callers queue, the last pick winning: a pick a newer one overtook before its turn
+  // loads nothing. Counting at enqueue time prevents an enabled frame between operations, and slot 1
+  // remains independent.
   const queued = await page.evaluate(async () => {
     const probe = window.__slotPendingProbe;
-    let releaseFirst;
-    probe.platform.pluginHost.loadPlugin = (_slot, _path, id) => id === 'b'
-      ? new Promise((resolve) => { releaseFirst = resolve; })
-      : Promise.reject(new Error('injected queued failure'));
+    const loaded = [];
+    let rejectSecond;
+    probe.platform.pluginHost.loadPlugin = (_slot, _path, id) => {
+      loaded.push(id);
+      return new Promise((_, reject) => { rejectSecond = () => reject(new Error('injected queued failure')); });
+    };
     const first = probe.instrument.selectPlugin(0, probe.descriptors[1]);
     const second = probe.instrument.selectPlugin(0, probe.descriptors[2]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
     const before = [...probe.slots.slotPendingCounts()];
-    releaseFirst();
     await first;
+    for (let i = 0; i < 100 && !rejectSecond; i++) await new Promise((resolve) => setTimeout(resolve, 0));
     const between = [...probe.slots.slotPendingCounts()];
+    rejectSecond();
     await second;
-    return { before, between, after: [...probe.slots.slotPendingCounts()] };
+    return { before, between, after: [...probe.slots.slotPendingCounts()], loaded };
   });
-  assert.deepEqual(queued, { before: [2, 0], between: [1, 0], after: [0, 0] });
+  assert.deepEqual(queued, { before: [2, 0], between: [1, 0], after: [0, 0], loaded: ['c'] });
   assert.equal(consumeConsoleErrors('[instrument] plugin load failed Error: injected queued failure').length, 1, 'the queued failure is logged');
 
   // Errors that escape the operation itself must also release its pending count and leave the

@@ -28,6 +28,7 @@ import {
   setSlotInstances,
   setSlotPlugins,
   slotIds,
+  slotInstance,
   slotInstances,
   slotOff,
   slotPendingCounts,
@@ -59,6 +60,17 @@ let scanAgain: { force: boolean } | null = null;
 const chosenSource: [boolean, boolean] = [false, false];
 let chosenActive = false;
 const nothingChosen = () => !chosenSource[0] && !chosenSource[1] && !chosenActive;
+
+// Every user source pick per slot, counted at enqueue: the last pick wins, so a pick queued behind a
+// pending one that a newer pick has since overtaken does nothing when its turn comes (`serializePick`).
+const pickGenerations: [number, number] = [0, 0];
+
+/** A user source pick on `slot`'s chain (`selectPlugin`, `selectSynth`, `selectOff`, `clearPlugin`),
+ * skipped when it runs if a newer pick was made meanwhile. */
+function serializePick(slot: 0 | 1, op: () => Promise<void>): Promise<void> {
+  const generation = ++pickGenerations[slot];
+  return serializeSlot(slot, () => (pickGenerations[slot] === generation ? op() : Promise.resolve()));
+}
 
 // Every native load and unload a slot has begun, counted: one plugin instance per value. A tone reload
 // that saw the slot's plugin before a session import runs only while the count is unchanged
@@ -121,6 +133,10 @@ const [synthGains, setSynthGains] = createSignal<Readonly<Record<string, number>
 // A plugin swap in flight per slot, from its unload until the next plugin's load settled (a tone reload
 // is one too): the slot reads empty meanwhile, yet its instrument must not play, so it routes nowhere.
 const swapping: [boolean, boolean] = [false, false];
+// A hot swap in flight per slot (`doSwapPlugin`): the outgoing plugin plays until the native commit, so
+// the slot keeps showing and routing to it, and its gain sends wait for the answer (`gainHeld`).
+const hotSwapping: [boolean, boolean] = [false, false];
+const gainHeld: [boolean, boolean] = [false, false];
 
 /** Route the notes to slot `i`'s source: its plugin, its instrument or nowhere (Off, or a swap in
  * flight). Native MIDI's router releases what sounds on the target it leaves, then selects (a target
@@ -142,9 +158,12 @@ const [engineGains, setEngineGains] = createSignal<[number | null, number | null
  * outgoing plugin's gain on the input an Off slot records). */
 const slotEngineGain = (slot: 0 | 1): number => engineGains()[slot] ?? inputGains()[slot];
 
+/** While a hot swap is pending, a send is held: native's commit records the swap's own gain, so the UI
+ * sends nothing for the slot until the answer (`doSwapPlugin`). */
 function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
   setEngineGains((prev) => withAt(prev, slot, gain));
-  if (send) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
+  if (send && hotSwapping[slot]) gainHeld[slot] = true;
+  else if (send) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
 }
 
 /**
@@ -199,7 +218,7 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
   // Serialize the routing work on the SAME per-slot chain as selectPlugin/clearPlugin, so a synth
   // pick made while a plugin load is in flight isn't clobbered by that load's continuation: the load
   // completes, then this op clears it and reverts to the chosen synth (last action wins).
-  void serializeSlot(slotIndex, async () => {
+  void serializePick(slotIndex, async () => {
     if (slotPlugins()[slotIndex]) {
       await doClearPlugin(slotIndex); // plugin → synth: unload + revert to the now-selected synth id
       // A failed unload restores the (now silent) plugin: leave MIDI where it is rather than move it there.
@@ -224,7 +243,7 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
 export function selectOff(slotIndex: 0 | 1): void {
   chosenSource[slotIndex] = true;
   setSlotOff((prev) => withAt(prev, slotIndex, true));
-  void serializeSlot(slotIndex, async () => {
+  void serializePick(slotIndex, async () => {
     if (slotPlugins()[slotIndex]) {
       await doClearPlugin(slotIndex); // routes an active slot to Off once the plugin is gone
       if (!slotPlugins()[slotIndex]) writeSource(slotIndex, 'off'); // a failed unload kept the plugin
@@ -276,6 +295,9 @@ const loadsInFlight: [boolean, boolean] = [false, false];
 // Files a native load or unload error left possibly held for the rest of the run (the rule above); apart
 // from `nativePaths`, so the slot's next load does not overwrite them.
 const uncertainPaths = new Set<string>();
+// The instances a hot swap replaced, until their `plugin:retired` (instance → path): the outgoing
+// plugin's module may stay loaded while its retire runs, so its file's affinity waits for the event.
+const retiring = new Map<number, string>();
 
 /**
  * Non-null = refuse. `owner` names whose editor this file's GUI serves: the OTHER slot, a load of a slot
@@ -324,14 +346,15 @@ function releaseEditorAffinity(slot: 0 | 1, outgoingPath: string | undefined): v
 }
 
 /**
- * Load native plugin `desc` into `slot`. Tears down any plugin already in the slot first (clean
- * swap), loads it into the running engine through the host, and — if the slot is active — routes notes
- * to it. On load failure the slot is left on its instrument. Serialized per slot (see `serializeSlot`).
+ * Load native plugin `desc` into `slot`: over a plugin of another file, a hot swap (`swapsHot`); else
+ * any plugin already in the slot is unloaded first (clean swap), `desc` loads into the running engine
+ * through the host, and — if the slot is active — notes route to it. On load failure the slot is left on
+ * its instrument. Serialized per slot, the last pick winning (see `serializePick`).
  */
 export function selectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
   if (!nativeHostReady()) return Promise.resolve();
   chosenSource[slot] = true;
-  return serializeSlot(slot, () => doSelectPlugin(slot, desc, () => true));
+  return serializePick(slot, () => doSelectPlugin(slot, desc, () => true));
 }
 
 /**
@@ -366,6 +389,7 @@ async function doSelectPlugin(
 ): Promise<void> {
   const outgoing = slotPlugins()[slot];
   if (samePluginDescriptor(outgoing, desc)) return; // already loaded
+  if (outgoing && swapsHot(slot, desc)) return doSwapPlugin(slot, outgoing, desc, claimMidi, toneToken);
   // Swap: tear down + unload any existing plugin in this slot before loading the new one. A failed
   // unload aborts the swap — the native host may still hold the old plugin, so a load would only fail
   // on "slot already loaded" while the UI showed the new one.
@@ -403,15 +427,166 @@ async function doSelectPlugin(
     setSlotInstances((prev) => withAt(prev, slot, info?.instance ?? null));
   });
   rememberSlotPlugin(slot, desc);
-  // The host restored the plugin's stored tone inside the load; one it could not restore (the host
-  // logged why) leaves the plugin at its defaults, and the player should know.
-  if (info?.tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
+  noteToneFailed(info, desc);
   // The level this plugin last had in this slot, else the scan's kind's default.
   setEngineGain(slot, savedPluginLevel(slot, desc));
   // An instrument plugin makes its slot the MIDI/keys slot (a restored one only while `claimMidi` says
   // so); an effect (amp sim on the guitar) leaves routing where it is.
   if (desc.isEffect !== true && claimMidi()) activateSlot(slot);
   else if (activeSlot() === slot) applyActiveRouting();
+}
+
+/** The host restored the plugin's stored tone inside the load or swap; one it could not restore (the
+ * host logged why) leaves the plugin at its defaults, and the player should know. */
+function noteToneFailed(info: PluginInfo | undefined, desc: PluginDescriptor): void {
+  if (info?.tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
+}
+
+/** Whether a pick of `desc` swaps `slot`'s plugin hot: a plugin plays there, with a known instance, and
+ * `desc` is another file (native's `same_file`: case-insensitive, `/` as `\`). The same file under
+ * another id, an empty slot or a reload goes cold. */
+export function swapsHot(slot: 0 | 1, desc: PluginDescriptor): boolean {
+  const playing = slotPlugins()[slot];
+  const folded = (path: string) => path.toLowerCase().replaceAll('/', '\\');
+  return !!playing && slotInstances()[slot] !== null && folded(playing.path) !== folded(desc.path);
+}
+
+/**
+ * Swap `slot`'s playing plugin `outgoing` for `desc` in one native step (`plugin_swap`): the outgoing
+ * plays until the commit, so the slot never reads empty, its notes never route `'Off'` and its live
+ * input stays as it is (the engine ends a kind change's live itself; the feed's `live` shows it). The
+ * outgoing instance is registered as retiring before the call, so its `plugin:retired` finds it in either
+ * order against the answer (`watchRetiredPlugins`). On failure the slot's truth comes from the host
+ * (`adoptSwapFailure`). A gain change meanwhile is held (`setEngineGain`) and sent only if the old plugin
+ * plays on.
+ */
+async function doSwapPlugin(
+  slot: 0 | 1,
+  outgoing: PluginDescriptor,
+  desc: PluginDescriptor,
+  claimMidi: () => boolean,
+  toneToken?: number,
+): Promise<void> {
+  hotSwapping[slot] = true;
+  sourceOps[slot]++;
+  claimEditorAffinity(slot, desc.path);
+  loadsInFlight[slot] = true;
+  const outgoingInstance = slotInstance(slot);
+  retiring.set(outgoingInstance, outgoing.path);
+  const gain = savedPluginLevel(slot, desc);
+  let oldPlaysOn = false;
+  try {
+    const info = await platform.pluginHost.swapPlugin(slot, desc.path, desc.id, gain, toneToken);
+    adoptSwapped(slot, desc, info, gain, claimMidi, outgoing.path, outgoingInstance);
+  } catch (e) {
+    console.error('[instrument] plugin swap failed', e);
+    oldPlaysOn = await adoptSwapFailure(slot, outgoing, outgoingInstance, desc, gain, claimMidi, e);
+  } finally {
+    loadsInFlight[slot] = false;
+    hotSwapping[slot] = false;
+    // The held change was the outgoing's (`setSlotLevel` stored it): it is owed only while that plays on.
+    if (gainHeld[slot] && oldPlaysOn) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
+    gainHeld[slot] = false;
+  }
+}
+
+/** The slot plays `desc` as instance `info.instance` now (a swap's answer, or the host's listing after a
+ * failed one). Native applied `gain` at the commit, so nothing is sent. The outgoing's affinity waits for
+ * its `plugin:retired`; one that came before this answer found the slot still holding the path, so it is
+ * released again here. */
+function adoptSwapped(
+  slot: 0 | 1,
+  desc: PluginDescriptor,
+  info: PluginInfo,
+  gain: number,
+  claimMidi: () => boolean,
+  outgoingPath: string,
+  outgoingInstance: number,
+): void {
+  batch(() => {
+    setSlotPlugins((prev) => withAt(prev, slot, desc));
+    setSlotInstances((prev) => withAt(prev, slot, info.instance));
+  });
+  nativePaths[slot] = desc.path;
+  if (!retiring.has(outgoingInstance)) releaseEditorAffinity(slot, outgoingPath);
+  rememberSlotPlugin(slot, desc);
+  noteToneFailed(info, desc);
+  setEngineGain(slot, gain, false);
+  // The kind the plugin activated as decides the MIDI claim (`doSelectPlugin`'s rule).
+  if (!info.effect && claimMidi()) activateSlot(slot);
+  else if (activeSlot() === slot) applyActiveRouting();
+}
+
+const SWAP_BUSY = 'Could not swap the plugin now. Pick it again.';
+
+/**
+ * A failed swap, read from the host's listing, never from the error's text (only its `busy:` prefix
+ * picks the toast): the outgoing instance still listed plays on; another instance listed is adopted; a
+ * slot listed empty is cleared as an unload is; a listing that fails keeps the outgoing shown and both
+ * files uncertain. Returns whether the old plugin plays on.
+ */
+async function adoptSwapFailure(
+  slot: 0 | 1,
+  outgoing: PluginDescriptor,
+  outgoingInstance: number,
+  desc: PluginDescriptor,
+  gain: number,
+  claimMidi: () => boolean,
+  e: unknown,
+): Promise<boolean> {
+  const busy = /^(Error: )?busy:/.test(String(e));
+  let listed: PluginInfo | undefined;
+  try {
+    listed = (await platform.pluginHost.listLoaded()).find((p) => p.slot === slot);
+  } catch (listError) {
+    console.error('[instrument] plugin swap failed, and listing the slots failed', listError);
+    uncertainPaths.add(outgoing.path);
+    uncertainPaths.add(desc.path);
+    notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}.`, e);
+    return false;
+  }
+  if (listed?.instance === outgoingInstance) {
+    retiring.delete(outgoingInstance); // nothing was released
+    uncertainPaths.add(desc.path);
+    releaseEditorAffinity(slot, desc.path);
+    notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}. ${outgoing.name} plays on.`, e);
+    return true;
+  }
+  if (listed) {
+    adoptSwapped(slot, listed.descriptor, listed, gain, claimMidi, outgoing.path, outgoingInstance);
+    notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}.`, e);
+    return false;
+  }
+  retiring.delete(outgoingInstance);
+  batch(() => {
+    setSlotPlugins((prev) => withAt(prev, slot, null));
+    setSlotInstances((prev) => withAt(prev, slot, null));
+  });
+  setEngineGain(slot, null, false);
+  slotLetGo(slot);
+  for (const path of [outgoing.path, desc.path]) {
+    uncertainPaths.add(path);
+    releaseEditorAffinity(slot, path);
+  }
+  notifyError(`Could not load ${desc.name}, and the slot is empty now. Pick a source again.`, e);
+  if (activeSlot() === slot) applyActiveRouting(); // back to the slot's instrument (or Off)
+  return false;
+}
+
+/**
+ * Watch the host's `plugin:retired`, once from boot: an instance a hot swap replaced has ended its retire,
+ * so its file's affinity is released (`retiring`); with no proof its plugin was released, the file stays
+ * uncertain. An instance this page did not register is ignored, so either order against the swap's
+ * answer works. Not filtered by `slotInstances`: the retired instance is never the slot's current one.
+ */
+export function watchRetiredPlugins(): () => void {
+  return platform.pluginHost.onRetired((e) => {
+    const path = retiring.get(e.instance);
+    if (path === undefined) return;
+    retiring.delete(e.instance);
+    releaseEditorAffinity(e.slot, path);
+    if (!e.released) uncertainPaths.add(path);
+  });
 }
 
 /**
@@ -496,11 +671,17 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     if (activeSlot() === slot) applyActiveRouting();
     return false;
   }
+  slotLetGo(slot);
+  releaseEditorAffinity(slot, outgoing.path);
+  return true;
+}
+
+/** The slot's host holds no plugin now (an unload done, or a swap that failed empty): the engine's slot
+ * gain goes back to the input level, and the rig recall and `nativePaths` forget the plugin. */
+function slotLetGo(slot: 0 | 1): void {
   if (engineGains()[slot] === null) sendEngine({ SetSlotGain: [slot, inputGains()[slot]] });
   forgetSlotPlugin(slot);
   nativePaths[slot] = null;
-  releaseEditorAffinity(slot, outgoing.path);
-  return true;
 }
 
 /**
@@ -510,7 +691,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
  */
 export function clearPlugin(slot: 0 | 1): Promise<void> {
   chosenSource[slot] = true;
-  return serializeSlot(slot, () => doClearPlugin(slot));
+  return serializePick(slot, () => doClearPlugin(slot));
 }
 
 async function doClearPlugin(slot: 0 | 1): Promise<void> {

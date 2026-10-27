@@ -61,6 +61,8 @@ await probe(async ({ open }) => {
     // Each load is a new instance, which the "plugin" stamps on its events as the native host does.
     host.loadPlugin = async (slot, path, id) =>
       ({ slot, descriptor: descriptors.find((d) => d.path === path && d.id === id), instance: ++state.instance, effect: false });
+    // A pick of another file while a plugin plays swaps hot; the swap answers as a load does.
+    host.swapPlugin = (slot, path, id) => host.loadPlugin(slot, path, id);
     host.unloadPlugin = async () => {};
     host.openEditor = async () => {};
     host.closeEditor = async () => {};

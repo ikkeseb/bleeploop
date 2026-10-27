@@ -1,5 +1,5 @@
 import { initAudioDeviceSettings, refreshAndPruneDevices } from '../ui/state/audio-devices';
-import { availablePlugins, restorePlugin, resyncNativeSlots, scanForPlugins } from '../ui/state/instrument';
+import { availablePlugins, restorePlugin, resyncNativeSlots, scanForPlugins, watchRetiredPlugins } from '../ui/state/instrument';
 import { recallRig, savedRigPaths } from '../ui/state/rig-recall';
 import { setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
@@ -33,6 +33,7 @@ export function bootEngine(): () => void {
     else refuseOnLane(ev.lane, refusalText(ev.reason));
   });
   let stopAutosave: (() => void) | null = null;
+  let stopRetired: (() => void) | null = null;
   let disposed = false;
   if (platform.pluginHost.available) setNativeHostReady(false);
   void (async () => {
@@ -49,6 +50,7 @@ export function bootEngine(): () => void {
       if (!platform.pluginHost.available) return;
       await platform.pluginHost.init();
       await resyncNativeSlots();
+      stopRetired = watchRetiredPlugins();
       setNativeHostReady(true);
       const paths = savedRigPaths();
       const rig = paths.length === 0 ? [] : await platform.pluginHost.scanPluginPaths(paths).catch((e: unknown) => {
@@ -67,6 +69,7 @@ export function bootEngine(): () => void {
   return () => {
     disposed = true;
     stopAutosave?.();
+    stopRetired?.();
     stopFeed();
     stopRefusals();
   };
