@@ -382,6 +382,12 @@ fn begin_closing(slots: &Slots, closing: &AtomicBool) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs once on the exit's thread, just after `unload_all` took its snapshot of the slots.
+    static EXIT_SNAPSHOT: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
 /// The exit's unloads (after `begin_closing`): every slot goes off live (a failure is logged, and the
 /// unload goes on), every loaded plugin leaves through `Leaving`, and a swapping slot stays its swap's,
 /// only its playing plugin's teardown started here. Every teardown starts before any is joined, each
@@ -406,6 +412,8 @@ fn unload_all(slots: &Slots, host: Option<&EngineHost>) {
             }
         })
         .collect();
+    #[cfg(test)]
+    EXIT_SNAPSHOT.with(|hook| hook.take().map(|hook| hook()));
     for (_, handle) in &taken {
         handle.stop();
     }
@@ -1587,10 +1595,15 @@ mod tests {
             let held = rig.device.host().core.rt.lock().unwrap();
             let _ = locked.send(());
             let _ = rolling_back.recv_timeout(Duration::from_secs(10));
-            let exit = s.spawn(|| rig.exit());
-            until(Duration::from_secs(10), || rig.closing.load(Acquire));
-            std::thread::sleep(Duration::from_millis(100));
-            let waited = !exit.is_finished() && rig.slot() == "leaving";
+            // The exit's snapshot holds the slot `Leaving` before the rollback goes on.
+            let (snapshot, snapped) = channel();
+            let exit = s.spawn(|| {
+                EXIT_SNAPSHOT.with(|h| h.set(Some(Box::new(move || {
+                    let _ = snapshot.send(());
+                }))));
+                rig.exit()
+            });
+            let waited = snapped.recv_timeout(Duration::from_secs(10)).is_ok() && !exit.is_finished() && rig.slot() == "leaving";
             drop(held);
             let _ = go.send(());
             let exited = until(Duration::from_secs(10), || exit.is_finished());

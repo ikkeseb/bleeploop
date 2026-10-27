@@ -2934,15 +2934,16 @@ fn an_older_toggled_drained_after_a_newer_setter_does_not_overwrite_it() {
     });
 }
 
-/// A silent instrument: what a swap puts in a live effect's slot, so its commit takes the slot off live.
-struct SilentInstrument;
+/// A silent instrument of the latency it holds: what a swap puts in a live effect's slot, so its commit
+/// takes the slot off live (a candidate stages for its latency first).
+struct SilentInstrument(Frame);
 
 impl SlotProcessor for SilentInstrument {
     fn kind(&self) -> SlotKind {
         SlotKind::Instrument
     }
     fn latency(&self) -> Frame {
-        0
+        self.0
     }
     fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
         out.fill(0.0);
@@ -3002,7 +3003,7 @@ fn a_go_live_still_queued_when_a_commits_live_off_is_read_survives_a_rebuild() {
     let mut h = Harness::new();
     h.open(asio(Some(256)));
     let (_a, b) = (live_effect(&h), h.host.slot(0));
-    swap_off_live(&h, &b, Box::new(SilentInstrument));
+    swap_off_live(&h, &b, Box::new(SilentInstrument(0)));
     h.host.close().unwrap();
     h.send(Command::SetSlotLive(0, true));
     h.host.drain_events(&mut h.events);
@@ -3029,7 +3030,7 @@ fn a_commits_live_off_the_full_event_ring_refused_still_reaches_the_memory() {
 
     // An effect to an instrument; the ring drains, then the next block offers the live-off.
     fill_event_ring(&h);
-    swap_off_live(&h, &owners[0], Box::new(SilentInstrument));
+    swap_off_live(&h, &owners[0], Box::new(SilentInstrument(0)));
     assert_eq!(unsent_live_offs(&h), [0], "the full ring refused it");
     assert!(live(&h, true), "nothing reached the memory yet");
     h.host.drain_events(&mut h.events);
@@ -3056,12 +3057,42 @@ fn a_commits_live_off_the_full_event_ring_refused_still_reaches_the_memory() {
 
     // An effect to an instrument, then a rebuild before the ring drains.
     fill_event_ring(&h);
-    swap_off_live(&h, &owners[2], Box::new(SilentInstrument));
+    swap_off_live(&h, &owners[2], Box::new(SilentInstrument(0)));
     assert_eq!(unsent_live_offs(&h), [0], "the full ring refused it");
     h.host.close().unwrap();
     h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
     h.open(asio(Some(128)));
     assert!(live(&h, false) && !live(&h, true), "read from the old engine: {:?}", h.host.settings());
+    h.play(RATE / 20);
+    assert!(!slot_live(&h), "the rebuilt engine has the slot off live");
+}
+
+/// GO LIVE's answer the full event ring refused is owed when the device stops, a drain then frees the
+/// ring with no block to offer it, and a candidate of the other kind still stages: the eviction commits
+/// it, taking the slot off live, and its live-off fits the ring (the memory passes it over, GO LIVE
+/// being in flight). The owed answer is read after the eviction, at the slot's value then: the rebuild
+/// replays the slot off live, and the rebuilt engine has it so.
+#[test]
+fn an_owed_go_live_answer_is_read_after_the_eviction_commits_a_live_off() {
+    use lf_engine::Toggle;
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    let (_a, b) = (live_effect(&h), h.host.slot(0));
+    h.wait_event("GO LIVE's answer", |e| matches!(e, Event::Toggled { toggle: Toggle::Live(0), on: true, .. }).then_some(()));
+    // An hour's latency: the candidate stages past anything this test plays.
+    assert!(b.replace(Box::new(SilentInstrument(RATE * 3600)), RATE as u32, 1.0).is_ok());
+    fill_event_ring(&h);
+    h.send(Command::SetSlotLive(0, true));
+    let owed = |h: &Harness| h.host.core.rt.lock().unwrap().engine.as_ref().expect("an engine").unsent_toggles().collect::<Vec<_>>();
+    until("GO LIVE's answer is owed", || owed(&h).contains(&(Toggle::Live(0), true)));
+    h.host.close().unwrap();
+    assert!(slot_live(&h), "the candidate still stages");
+    h.host.drain_events(&mut h.events);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetSlotLive(0, false)) && !kept.contains(&Command::SetSlotLive(0, true)), "the commit's off: {kept:?}");
     h.play(RATE / 20);
     assert!(!slot_live(&h), "the rebuilt engine has the slot off live");
 }

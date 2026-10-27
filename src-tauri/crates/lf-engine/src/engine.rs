@@ -489,8 +489,8 @@ impl Engine {
     }
 
     /// The `Toggled` events the engine still owes, one per answer the full ring refused, each at the
-    /// setting's current value. The host reads it from an engine it replaced, after draining its event
-    /// ring (`owner.rs` `swap_engine`), so a toggle accepted just before a rebuild survives it however
+    /// setting's current value. The host reads it from an engine it replaced, after evicting its slots
+    /// (`owner.rs` `swap_engine`; an eviction's commit can change a live value), so a toggle accepted just before a rebuild survives it however
     /// full the ring was. Not for the audio thread.
     pub fn unsent_toggles(&self) -> impl Iterator<Item = (Toggle, bool)> + '_ {
         Toggle::ALL.into_iter().flat_map(|t| {

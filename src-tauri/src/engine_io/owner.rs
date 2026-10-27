@@ -82,9 +82,10 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     // What it applied, read as it left the audio thread, before `evict`.
     let applied = old.as_deref().and_then(Engine::applied_mixes);
     let transport = old.as_deref().and_then(|e| e.applied_meter().map(|meter| (e.clock().bpm(), meter)));
-    let unsent: Vec<_> = old.as_deref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
     let clean = old.as_deref_mut().is_none_or(|old| evict(core, &mut ports, old));
-    // After `evict`, which can commit a staged swap and so take a slot off live.
+    // After `evict`, which can commit a staged swap and so take a slot off live: an owed toggle answer
+    // is re-offered at the value that commit left, and a live-off is owed only if its ring refused it.
+    let unsent: Vec<_> = old.as_deref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
     let live_offs: Vec<_> = old.as_deref().map(|e| e.unsent_live_offs().collect()).unwrap_or_default();
     for (desk, new) in ports.iter_mut().zip(slots) {
         desk.port = Some(new);
