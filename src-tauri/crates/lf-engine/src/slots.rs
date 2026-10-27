@@ -35,11 +35,32 @@
 //! output holds a NaN or an infinity: that call's output is silenced, so nothing downstream (the mix,
 //! the input sends, the limiter, a capture) ever sees it.
 //!
+//! A replace ([`SlotPort::replace`], `swap`) changes the unit a slot plays without a gap. The candidate
+//! takes the slot's `side` seat and stages there: it processes the slot's input (an instrument
+//! silence), unheard, for its latency plus `STAGE_SECONDS` of frames, while a gain change applies to
+//! the playing unit. At the first block start after that it commits (`Committed`): the playing unit's
+//! notes are released, the two seats trade places, and over the frames of `SWAP_SECONDS`, counted from
+//! the commit frame, the unit it replaced crossfades out at the slot's gain as it stood, under the new
+//! one at the replace's gain, the slot's from then on. Each unit's term stays on its own destination (an
+//! effect's on the wet, an instrument's on the bus), and the slot's bypass crossfade applies over them
+//! as ever. The old unit stops after its last call and goes back `ReplacedOut`, behind the `Committed`.
+//! While a take captures, a candidate whose latency differs from the playing unit's (an empty slot's
+//! is 0) stays staged until the capture ends, so nothing moves what records mid-take. A candidate that
+//! refuses to start goes back `StartRefused` after the call it refused in, and a withdraw of its tag
+//! (or a remove of the playing unit) sends it back `Cancelled`; the playing unit plays on. A withdraw
+//! names only a staging candidate: any other tag, a committed unit's included, is answered `NotHeld`,
+//! so one that loses the race to the commit never touches the new unit. A replace into an empty slot is
+//! an install gliding to its gain, `Committed` at once; one into a slot already swapping, or whose unit
+//! is being removed, goes straight back `Busy`, counted, never started or stopped, so a slot holds at
+//! most two units. With no block to render the swap (idle servicing, an eviction), a staging candidate
+//! commits at once and the old unit goes back at once (an eviction then hands back the new one
+//! `Evicted`).
+//!
 //! The engine renders the slots once per range, not per chunk: from where they stopped up to the next
 //! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
 //! one call per device block unless a stamped slot command splits it. Those commands therefore apply
-//! at the start of a render call (every event offset is 0 in practice); an install or removal applies
-//! at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
+//! at the start of a render call (every event offset is 0 in practice); an install, a replace or a
+//! removal applies at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
 
 mod port;
 mod swap;
@@ -329,7 +350,7 @@ pub(crate) struct Rack {
     /// The gated input over a render call that a ramp touches, one slot's at a time.
     gated: Vec<f32>,
     fade_frames: u32,
-    /// A candidate's staging past its latency, and the swap fade, in frames ([`swap`]).
+    /// A candidate's staging past its latency, and the swap fade, in frames.
     stage_frames: Frame,
     swap_frames: u32,
     /// The live gate's ramp in frames: `LIVE_SECONDS` at the rate, at least 1.
@@ -399,7 +420,7 @@ impl Rack {
     }
 
     /// Apply the ports' messages at a block start, then let a staged swap commit (unless `capturing`
-    /// holds it, [`swap`]). `engaged` installs without a fade (nothing has sounded yet, or no device
+    /// holds it). `engaged` installs without a fade (nothing has sounded yet, or no device
     /// runs); without `fade` a swap and a removal complete here.
     fn service(&mut self, engaged: bool, fade: bool, capturing: bool) {
         let (dropped, errors) = (&mut self.events_dropped, &mut self.protocol_errors);

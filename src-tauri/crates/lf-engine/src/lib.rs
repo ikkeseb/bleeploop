@@ -32,7 +32,7 @@
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
-//! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`slots`] | the two plugin slots: install, hot swap and removal through their tagged ports, bypass and swap crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
 //!
@@ -133,10 +133,12 @@
 //!   block job, as its setter does; its disarm keeps its place behind it.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
-//!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,
-//!   crossfades to bypass, stops the unit once and hands it back, and an eviction hands back every unit,
-//!   a waiting install included. The slots render ahead to the next slot command, so a plugin sees one
-//!   call per block unless a stamped note, target, live flag or gain splits it there.
+//!   runs: [`Engine::service_slots_idle`]), and every unit goes back once, tagged, with why: a removal
+//!   releases the slot's notes, crossfades to bypass, stops the unit once and hands it back, an eviction
+//!   hands back every unit, a waiting install included, and a swap holds at most two units per slot (the
+//!   playing one beside its candidate or the one it replaced: [`slots`]). The slots render ahead to the
+//!   next slot command, so a plugin sees one call per block unless a stamped note, target, live flag or
+//!   gain splits it there.
 //! - **A stopped device is a punch-out** (STATUS E3, [`Engine::punch_out`]): what records ends after the
 //!   last rendered frame and commits as usual (a RETAKE roll with a kept pass commits that pass), what
 //!   has retained nothing is cancelled, and rendering resumes on the next frame with loop-end stops and
@@ -186,8 +188,8 @@
 //!   between the callback's first take and `begin` skips the fence. Next step: order them at send time
 //!   with one sequence number shared by the command ring and the session port, made green by the two
 //!   ignored `with_no_device_*` tests (`tests/session.rs`) and a test with both sent before one callback.
-//! - **A slot's record-path delay is clipped where the capture's alignment is not.** `latch_record`
-//!   clamps each slot's `dw` to its line (`slots.rs` 401: a second plus a block, 52 095 frames at 48 kHz
+//! - **A slot's record-path delay is clipped where the capture's alignment is not.** `slots.rs`
+//!   `latch_record` clamps each slot's `dw` to its line (a second plus a block, 52 095 frames at 48 kHz
 //!   and 4096) while the capture aligns on the full live latency (`engine.rs` `let align`), so beside a
 //!   live plugin over ~1 s of latency a dry slot loses its start. The built-in instruments clip the same
 //!   way (`instruments.rs` 259), untested. Next step: check each delay, instruments included, against its

@@ -1,18 +1,5 @@
-//! A slot's hot swap ([`crate::SlotPort::replace`]): its state and the slot's methods that run it.
-//!
-//! The candidate takes the slot's `side` seat and stages there: it processes the slot's input (an
-//! instrument silence) and is not heard, its latency plus `STAGE_SECONDS` of frames. At the first block
-//! start after that it commits (`Committed`): the playing unit's notes are released, the two seats trade
-//! places, and over the frames of `SWAP_SECONDS`, counted from the commit frame, the unit it replaced
-//! crossfades out at the slot's gain as it stood, under the new one at the replace's gain. Each unit's
-//! term stays on its own destination (an effect's on the wet, an instrument's on the bus), and the slot's
-//! bypass crossfade applies over them as ever. The old unit stops after its last call and goes back
-//! `ReplacedOut`. While a take captures, a candidate whose latency differs from the playing unit's
-//! stays staged until the capture ends, so nothing moves what records mid-take. A candidate that refuses
-//! to start goes back `StartRefused` after the call it refused in, a withdraw of its tag (or a remove of
-//! the playing unit) sends it back `Cancelled`, and the playing unit plays on. With no block to render
-//! the swap (idle servicing, an eviction), a staging candidate commits at once and the old unit goes back
-//! at once.
+//! A slot's hot swap ([`crate::SlotPort::replace`]): its state and the slot's methods that run it. The
+//! rules: [`super`]'s module doc.
 
 use super::{crossfade, slot_gain, Seat, Slot};
 use crate::api::{HandbackReason, Rejection, SlotKind, SlotProcessor, SlotReply};
