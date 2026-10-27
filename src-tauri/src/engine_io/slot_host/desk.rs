@@ -5,7 +5,7 @@
 //! [`Desk::pump`] reads the port and routes each reply by its tag (the owner's token):
 //! - `Committed { t }`: every other Active owner becomes Retiring at the commit, wherever its unit is,
 //!   and its entry outlives its unit's return until the owner drops (`forget`). A replace's gain enters
-//!   the settings replay (a live-off the commit made reaches it as GO LIVE's answer on the event ring).
+//!   the settings replay (a live-off the commit made reaches it as `Event::CommitLiveOff`, answering no command).
 //!   The answer is mailed to `t`, unless `t` gave up waiting: then its unit is removed at once.
 //! - A unit handed back leaves the engine: mailed to its owner, or leaked when its owner gave up on it
 //!   or has no entry.
