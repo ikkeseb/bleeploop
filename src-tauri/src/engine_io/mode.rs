@@ -134,7 +134,8 @@ impl EngineApp {
         midi.as_ref().map(f).ok_or_else(|| "native MIDI is not running".to_string())
     }
 
-    /// On exit and before the updater's installer (`update.rs`): stop native MIDI (its ports close, what
+    /// On exit and before the updater's installer (`update.rs`): begin closing (no swap starts, and
+    /// loads and swaps in flight are called off: `begin_closing`), stop native MIDI (its ports close, what
     /// they and the UI held is released while the device still plays, a bindings write still due is
     /// made, and its rebuild hook leaves the host), stop the feed, save every slot's tone
     /// (`save_tones_on_exit`, bounded on its own), unload the plugins while the device still plays (each
@@ -146,6 +147,7 @@ impl EngineApp {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
+                app.begin_closing();
                 // Taken out under its lock (a call in flight finishes first), dropped after it.
                 let midi = app.midi.lock().unwrap_or_else(|e| e.into_inner()).take();
                 drop(midi);

@@ -1161,6 +1161,12 @@ impl MidiHost {
         })
     }
 
+    /// A plugin swap committed on `slot`: what sounds is released when the notes go to that slot
+    /// ([`Router::release_slot`]).
+    pub fn release_slot(&self, slot: u8) {
+        self.core.input(|_, st, out| st.router.release_slot(slot, out));
+    }
+
     /// A batch of the UI's engine commands (`input_send`'s), in order. Its input commands (looper
     /// presses, `Press`, `SelectTrack`, toggles) join the one queue, a run of them as one batch, and while
     /// no device runs they are dropped, as a pedal's are; a setting goes straight to the engine, and may
