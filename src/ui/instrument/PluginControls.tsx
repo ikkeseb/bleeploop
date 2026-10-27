@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
-import { editorAffinityBlocker, slotPendingCounts } from '../state/instrument';
+import { editorAffinityBlocker, isStaleInstance, slotInstance, slotInstances, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
 import { liveShown, startLive } from './live';
@@ -19,7 +19,9 @@ import './plugin-controls.css';
  *                     owning slot, so it never remounts on open/close.
  *
  * Both mount under the slot's `<Show keyed>` on the loaded descriptor, so a plugin swap remounts them
- * (re-fetching params / resetting the editor).
+ * (re-fetching params / resetting the editor). Each request names the slot's playing instance, read at
+ * the call (`slotInstance`), and each plugin event of another instance is dropped (a replaced plugin's).
+ * A `stale instance` refusal is a no-op: the plugin it addressed is gone, so no toast, chip or log.
  */
 const PARAM_PREVIEW_COUNT = 12;
 
@@ -43,8 +45,8 @@ export function PluginBar(props: {
   const [editorError, setEditorError] = createSignal<string | null>(null);
   const sourcePending = () => slotPendingCounts()[props.slot] > 0;
 
-  const offClosed = platform.pluginHost.onEditorClosed((s) => {
-    if (s === props.slot) setEditorOpen(false);
+  const offClosed = platform.pluginHost.onEditorClosed((e) => {
+    if (e.slot === props.slot && e.instance === slotInstances()[e.slot]) setEditorOpen(false);
   });
   onCleanup(offClosed);
 
@@ -81,13 +83,14 @@ export function PluginBar(props: {
     setEditorError(null);
     try {
       if (wantOpen) {
-        await platform.pluginHost.openEditor(props.slot);
+        await platform.pluginHost.openEditor(props.slot, slotInstance(props.slot));
         setEditorOpen(true);
       } else {
-        await platform.pluginHost.closeEditor(props.slot);
+        await platform.pluginHost.closeEditor(props.slot, slotInstance(props.slot));
         setEditorOpen(false);
       }
     } catch (e) {
+      if (isStaleInstance(e)) return;
       // Branch by intent: an OPEN failure means the plugin exposes no editor → reflect closed. A CLOSE
       // failure means the window is likely still open → keep editorOpen(true) so the toggle doesn't claim
       // it closed (the next click then retries the close, not a second open).
@@ -208,8 +211,9 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     const held = new Set(waiting.keys());
     let ps: PluginParamDesc[] = [];
     try {
-      ps = await platform.pluginHost.listParams(props.slot);
+      ps = await platform.pluginHost.listParams(props.slot, slotInstance(props.slot));
     } catch (e) {
+      if (isStaleInstance(e)) return;
       console.error('[PluginControls] listParams failed', e);
       if (alive && mine === listing) notifyError("Could not load the plugin's controls. Choose Off, then load the plugin again.", e);
     }
@@ -233,8 +237,8 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     setParams(preview);
   }
   onMount(() => void refresh());
-  const offParams = platform.pluginHost.onParamsChanged((s) => {
-    if (s === props.slot) void refresh();
+  const offParams = platform.pluginHost.onParamsChanged((e) => {
+    if (e.slot === props.slot && e.instance === slotInstances()[e.slot]) void refresh();
   });
   onCleanup(offParams);
 
@@ -243,7 +247,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   // isn't in the preview slice. Every change is recorded, even before the first listing lands or for a
   // param not shown yet: a listing in flight predates it, so `refresh` keeps it (`setValues(init)` merges).
   const offParam = platform.pluginHost.onParamChanged((e) => {
-    if (e.slot !== props.slot) return;
+    if (e.slot !== props.slot || e.instance !== slotInstances()[e.slot]) return;
     // While a dragged value waits for a param, the drag owns it against plugin events and refreshes: it
     // is sent next, so plugin and slider end equal.
     if (waiting.has(e.id)) return;
@@ -271,8 +275,9 @@ export function PluginParams(props: { slot: 0 | 1 }) {
         waiting.delete(id);
         if (!alive) return;
         try {
-          await platform.pluginHost.setParameter(props.slot, id, value);
+          await platform.pluginHost.setParameter(props.slot, slotInstance(props.slot), id, value);
         } catch (e) {
+          if (isStaleInstance(e)) continue;
           console.error(`[PluginControls] setParameter refused (slot ${props.slot + 1}, param ${id})`, e);
           void snapBack(id, token);
         }
@@ -288,9 +293,10 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     const current = () => alive && touched.get(id) === token;
     if (!current()) return;
     try {
-      const live = (await platform.pluginHost.listParams(props.slot)).find((q) => q.id === id);
+      const live = (await platform.pluginHost.listParams(props.slot, slotInstance(props.slot))).find((q) => q.id === id);
       if (live && current()) setValues(id, live.value);
     } catch (e) {
+      if (isStaleInstance(e)) return;
       console.error(`[PluginControls] reading the live value failed (slot ${props.slot + 1}, param ${id})`, e);
     }
   }

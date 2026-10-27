@@ -25,6 +25,19 @@ export const [slotIds, setSlotIds] = createSignal<[string, string]>([...DEFAULT_
 export const [slotPlugins, setSlotPlugins] = createSignal<
   [PluginDescriptor | null, PluginDescriptor | null]
 >([null, null]);
+// The native instance each slot's plugin is (`PluginInfo.instance`), set and cleared with `slotPlugins`;
+// null while the slot holds no plugin.
+export const [slotInstances, setSlotInstances] = createSignal<[number | null, number | null]>([null, null]);
+
+/** The instance a request for `slot`'s plugin names (`PluginHost.openEditor`, ...). 0, while none is
+ * known (or a probe's stand-in host answered the load without one), is no instance the host has: its
+ * count starts at 1. */
+export const slotInstance = (slot: 0 | 1): number => slotInstances()[slot] ?? 0;
+
+/** The host refused a request because it named an instance the slot no longer plays: the plugin it was
+ * for is gone, so the request is moot, not failed. */
+export const isStaleInstance = (e: unknown): boolean => /stale instance/.test(String(e));
+
 export const [activeSlot, setActiveSlotSignal] = createSignal<0 | 1>(0);
 export const [slotOff, setSlotOff] = createSignal<[boolean, boolean]>([false, false]);
 

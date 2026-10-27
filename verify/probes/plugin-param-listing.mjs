@@ -51,7 +51,7 @@ await probe(async ({ open }) => {
       paramsCbs: new Set(),
     };
     host.scanPlugins = async () => [desc];
-    host.loadPlugin = async (slot) => ({ slot, descriptor: desc });
+    host.loadPlugin = async (slot) => ({ slot, descriptor: desc, instance: 1, effect: false });
     host.unloadPlugin = async () => {};
     host.openEditor = async () => {};
     host.closeEditor = async () => {};
@@ -66,12 +66,12 @@ await probe(async ({ open }) => {
     // The plugin's editor moves a knob / loads a preset: its state changes, then it reports.
     state.editorTurn = (id, value) => {
       state.live[id] = value;
-      for (const cb of state.paramCbs) cb({ slot: 0, id, value });
+      for (const cb of state.paramCbs) cb({ slot: 0, instance: 1, id, value });
     };
     state.presetLoad = (params, live) => {
       state.params = params;
       state.live = live;
-      for (const cb of state.paramsCbs) cb(0);
+      for (const cb of state.paramsCbs) cb({ slot: 0, instance: 1 });
     };
     await instrument.scanForPlugins();
     await instrument.selectPlugin(0, desc);

@@ -13,7 +13,7 @@
  *   `VITE_LF_PROBE_CASE`    `reload` | `other` | `b-first`
  */
 import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
-import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
+import { nativeHostReady, slotInstance, slotPlugins } from '../ui/state/instrument-slots';
 import { platform } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -23,7 +23,7 @@ const OPEN_WAIT_MS = 45_000;
 async function open(slot: 0 | 1): Promise<string> {
   const t0 = performance.now();
   const timer = sleep(OPEN_WAIT_MS).then(() => 'no answer');
-  const answer = platform.pluginHost.openEditor(slot).then(
+  const answer = platform.pluginHost.openEditor(slot, slotInstance(slot)).then(
     () => 'opened',
     (e: unknown) => `refused: ${String(e)}`,
   );
@@ -55,7 +55,7 @@ export async function runEditorPremise(): Promise<void> {
   log(`A open: ${first}`);
   if (!first.startsWith('opened')) return log(`FAIL A's first open ${first}`);
   await sleep(1500);
-  await platform.pluginHost.closeEditor(0);
+  await platform.pluginHost.closeEditor(0, slotInstance(0));
   log('A closed');
   await sleep(1000);
   let slot: 0 | 1 = 1;

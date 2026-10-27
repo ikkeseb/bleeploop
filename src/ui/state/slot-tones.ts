@@ -16,7 +16,7 @@
  */
 import { platform, type PluginFormat, type ToneImport } from '../../platform';
 import { notifyError, notifyNote } from '../../notify';
-import { slotPlugins } from './instrument-slots';
+import { isStaleInstance, slotInstance, slotPlugins } from './instrument-slots';
 import { reloadPlugin, slotSourceGeneration } from './instrument';
 
 /** A slot's tone as a session carries it: the plugin it belongs to and the tone file's bytes. */
@@ -33,8 +33,8 @@ export const slotLetter = (slot: 0 | 1): 'A' | 'B' => (slot === 0 ? 'A' : 'B');
  * Each loaded slot's tone, saved fresh through its owner (the store gets it too). A plugin that keeps no
  * state has none; a slot whose save fails is left out of the export, logged and toasted once, and the
  * export goes on without it. So is a slot whose plugin changed while its tone was taken (a load or an
- * unload began: `slotSourceGeneration`), since the bytes may be another plugin's than the one the file
- * would name.
+ * unload began: `slotSourceGeneration`, or the host refused the take `stale instance`), since the bytes
+ * may be another plugin's than the one the file would name.
  */
 export async function takeSlotTones(): Promise<SlotTone[]> {
   const tones: SlotTone[] = [];
@@ -42,20 +42,27 @@ export async function takeSlotTones(): Promise<SlotTone[]> {
     const desc = slotPlugins()[slot];
     if (!desc) continue;
     const since = slotSourceGeneration(slot);
+    const instance = slotInstance(slot);
+    let bytes: Uint8Array | null = null;
+    let stale = false;
     try {
-      const bytes = await platform.pluginHost.takeTone(slot);
-      if (slotSourceGeneration(slot) !== since) {
-        console.error(`[slot-tones] slot ${slotLetter(slot)}: ${desc.name} changed while its tone was taken for the export; left out`);
-        notifyError('Could not export the tone. The plugin changed while exporting; try again.', `Slot ${slotLetter(slot)} held ${desc.name} when the export began.`);
+      bytes = await platform.pluginHost.takeTone(slot, instance);
+    } catch (e) {
+      stale = isStaleInstance(e);
+      if (!stale) {
+        console.error(`[slot-tones] slot ${slotLetter(slot)}: ${desc.name}'s tone could not be saved for the export`, e);
+        notifyError(`Could not add the settings of ${desc.name} to the export. Export again to retry.`, e);
         continue;
       }
-      if (!bytes) continue;
-      const { format, path, id, name } = desc;
-      tones.push({ slot, plugin: { format, path, id, name }, bytes });
-    } catch (e) {
-      console.error(`[slot-tones] slot ${slotLetter(slot)}: ${desc.name}'s tone could not be saved for the export`, e);
-      notifyError(`Could not add the settings of ${desc.name} to the export. Export again to retry.`, e);
     }
+    if (stale || slotSourceGeneration(slot) !== since) {
+      console.error(`[slot-tones] slot ${slotLetter(slot)}: ${desc.name} changed while its tone was taken for the export; left out`);
+      notifyError('Could not export the tone. The plugin changed while exporting; try again.', `Slot ${slotLetter(slot)} held ${desc.name} when the export began.`);
+      continue;
+    }
+    if (!bytes) continue;
+    const { format, path, id, name } = desc;
+    tones.push({ slot, plugin: { format, path, id, name }, bytes });
   }
   return tones;
 }

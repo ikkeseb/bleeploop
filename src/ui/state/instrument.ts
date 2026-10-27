@@ -6,7 +6,7 @@
  * device lists, buffer size, ASIO tier: `audio-devices.ts`; the slot state cell + per-slot op chain:
  * `instrument-slots.ts`; tones in a session: `slot-tones.ts`.
  */
-import { createSignal } from 'solid-js';
+import { batch, createSignal } from 'solid-js';
 import { SYNTHS } from './instruments';
 import {
   input,
@@ -25,8 +25,10 @@ import {
   setActiveSlotSignal,
   setSlotIds,
   setSlotOff,
+  setSlotInstances,
   setSlotPlugins,
   slotIds,
+  slotInstances,
   slotOff,
   slotPendingCounts,
   slotPlugins,
@@ -370,14 +372,14 @@ async function doSelectPlugin(
   if (outgoing && !(await unloadSlotPlugin(slot, outgoing, 'swap'))) return;
   // An Off slot's live input stops before a plugin takes the slot (an effect's pick goes live again).
   if (!outgoing) void disarmInputInternal(slot);
-  let tone: PluginInfo['tone'];
+  let info: PluginInfo | undefined;
   sourceOps[slot]++;
   claimEditorAffinity(slot, desc.path);
   nativePaths[slot] = desc.path;
   loadsInFlight[slot] = true;
   try {
-    // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
-    tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken))?.tone;
+    // A browser probe's stand-in host may answer nothing, or no instance (`slotInstance`).
+    info = await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken);
   } catch (e) {
     loadsInFlight[slot] = false;
     swapping[slot] = false; // the swap ends on the slot's instrument (or Off)
@@ -396,11 +398,14 @@ async function doSelectPlugin(
   }
   loadsInFlight[slot] = false;
   swapping[slot] = false;
-  setSlotPlugins((prev) => withAt(prev, slot, desc));
+  batch(() => {
+    setSlotPlugins((prev) => withAt(prev, slot, desc));
+    setSlotInstances((prev) => withAt(prev, slot, info?.instance ?? null));
+  });
   rememberSlotPlugin(slot, desc);
   // The host restored the plugin's stored tone inside the load; one it could not restore (the host
   // logged why) leaves the plugin at its defaults, and the player should know.
-  if (tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
+  if (info?.tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
   // The level this plugin last had in this slot, else the scan's kind's default.
   setEngineGain(slot, savedPluginLevel(slot, desc));
   // An instrument plugin makes its slot the MIDI/keys slot (a restored one only while `claimMidi` says
@@ -466,8 +471,12 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   // The slot reads empty at once, but the engine keeps the outgoing gain until the unload is done: the
   // plugin plays out its removal fade (and any tail) at the level the player set, not at unity.
   const outgoingGain = engineGains()[slot];
+  const outgoingInstance = slotInstances()[slot];
   setEngineGain(slot, null, false);
-  setSlotPlugins((prev) => withAt(prev, slot, null));
+  batch(() => {
+    setSlotPlugins((prev) => withAt(prev, slot, null));
+    setSlotInstances((prev) => withAt(prev, slot, null));
+  });
   // A swap routes nowhere (Off) until the next plugin lands, which releases held notes: the same slot
   // target comes back, so routing there again would not release a note held across the swap.
   swapping[slot] = path === 'swap';
@@ -479,7 +488,10 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
     uncertainPaths.add(outgoing.path);
     notifyError('Could not unload the plugin. Choose Off or another source to try again.', 'It stays in the slot, silent.');
-    setSlotPlugins((prev) => withAt(prev, slot, outgoing));
+    batch(() => {
+      setSlotPlugins((prev) => withAt(prev, slot, outgoing));
+      setSlotInstances((prev) => withAt(prev, slot, outgoingInstance));
+    });
     setEngineGain(slot, outgoingGain ?? savedPluginLevel(slot, outgoing));
     if (activeSlot() === slot) applyActiveRouting();
     return false;
@@ -531,10 +543,11 @@ export async function resyncNativeSlots(): Promise<void> {
     notifyError('Could not check which plugins the host holds. Restart BleepLoop if a slot misbehaves.', e);
     return;
   }
-  for (const { slot, descriptor } of loaded) {
+  for (const { slot, descriptor, instance } of loaded) {
     // Log as an error so it reaches the release log (the codebase's log channel) — recovering a
-    // stranded native slot is an abnormal-state event worth a field breadcrumb, not routine.
-    console.error(`[instrument] resync: unloading stranded plugin in slot ${slot} (${descriptor.name})`);
+    // stranded native slot is an abnormal-state event worth a field breadcrumb, not routine. The slot is
+    // unloaded, not adopted, so its instance stays unset (`slotInstances`); the breadcrumb names it.
+    console.error(`[instrument] resync: unloading stranded plugin in slot ${slot} (${descriptor.name}, instance ${instance})`);
     // Serialize on the slot's op chain so the unload can't interleave with any concurrent slot op.
     await serializeSlot(slot, async () => {
       try {
@@ -651,9 +664,10 @@ export function slotTakesInput(slot: 0 | 1): boolean {
 }
 
 /** Read-only reactive accessors: the instrument id per slot, whether a slot is Off, the loaded plugin per
- * slot (null = instrument or Off), the active slot index. (Owned by `instrument-slots.ts`; re-exported as
- * the UI's one path.) */
-export { slotIds, slotOff, slotPendingCounts, slotPlugins, activeSlot };
+ * slot (null = instrument or Off) and its native instance, the active slot index. (Owned by
+ * `instrument-slots.ts`; re-exported as the UI's one path.) */
+export { slotIds, slotInstances, slotOff, slotPendingCounts, slotPlugins, activeSlot };
+export { isStaleInstance, slotInstance } from './instrument-slots';
 
 /**
  * Derived predicate: is the ACTIVE slot playing the built-in GM drum kit (synth id 'drum' AND not

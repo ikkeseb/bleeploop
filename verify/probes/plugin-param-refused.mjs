@@ -55,10 +55,12 @@ await probe(async ({ open }) => {
 
     // The "plugin": its real values, what listParams reports. A set the probe refuses never lands here.
     const live = { 1: 0.25, 2: 0.5 };
-    const state = { live, setCalls: [], listCalls: 0, pendingRefusals: [], refuse: new Set(), paramCb: null, heldSets: [] };
+    const state = { live, setCalls: [], listCalls: 0, pendingRefusals: [], refuse: new Set(), paramCb: null, heldSets: [], instance: 0 };
     const meta = (id, name) => ({ id, name, minValue: 0, maxValue: 1, defaultValue: 0.5, value: live[id] });
     host.scanPlugins = async () => descriptors;
-    host.loadPlugin = async (slot, path, id) => ({ slot, descriptor: descriptors.find((d) => d.path === path && d.id === id) });
+    // Each load is a new instance, which the "plugin" stamps on its events as the native host does.
+    host.loadPlugin = async (slot, path, id) =>
+      ({ slot, descriptor: descriptors.find((d) => d.path === path && d.id === id), instance: ++state.instance, effect: false });
     host.unloadPlugin = async () => {};
     host.openEditor = async () => {};
     host.closeEditor = async () => {};
@@ -70,16 +72,16 @@ await probe(async ({ open }) => {
       return listed;
     };
     host.onParamChanged = (cb) => {
-      state.paramCb = cb;
+      state.paramCb = (e) => cb({ ...e, instance: state.instance });
       return () => { state.paramCb = null; };
     };
     host.onParamsChanged = (cb) => {
-      state.paramsCb = cb;
+      state.paramsCb = (slot) => cb({ slot, instance: state.instance });
       return () => { state.paramsCb = null; };
     };
     // A param in `refuse` rejects, each rejection held until the probe releases it; others land, or with
     // `holdAccepted` set wait in `heldSets` and land when the probe releases them.
-    host.setParameter = (slot, id, value) => {
+    host.setParameter = (slot, _instance, id, value) => {
       state.setCalls.push({ slot, id, value });
       if (!state.refuse.has(id) && state.holdAccepted) {
         return new Promise((resolve) => {

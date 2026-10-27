@@ -11,7 +11,7 @@
  *   `VITE_LF_PROBE_HOLD`    ms the editor stays open (default 1500)
  */
 import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
-import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
+import { nativeHostReady, slotInstance, slotPlugins } from '../ui/state/instrument-slots';
 import { platform } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -46,7 +46,7 @@ export async function runEditorSmoke(): Promise<void> {
     await sleep(1500);
     const t0 = performance.now();
     try {
-      await platform.pluginHost.openEditor(0);
+      await platform.pluginHost.openEditor(0, slotInstance(0));
       log(`opened ${tag} in ${Math.round(performance.now() - t0)} ms`);
       opened++;
     } catch (e) {
@@ -56,7 +56,7 @@ export async function runEditorSmoke(): Promise<void> {
     await sleep(hold);
     const t1 = performance.now();
     try {
-      await platform.pluginHost.closeEditor(0);
+      await platform.pluginHost.closeEditor(0, slotInstance(0));
       log(`closed ${tag} in ${Math.round(performance.now() - t1)} ms`);
     } catch (e) {
       log(`CLOSE FAILED ${tag}: ${String(e)}`);

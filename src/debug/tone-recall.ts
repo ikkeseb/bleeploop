@@ -35,7 +35,7 @@ import { autosave } from '../session/autosave';
 import { buildExportBundle } from '../session/export';
 import { importSession } from '../session/import';
 import { parseZip } from '../session/unzip';
-import { availablePlugins, clearPlugin, nativeHostReady, selectPlugin, slotPendingCounts, slotPlugins } from '../ui/state/instrument';
+import { availablePlugins, clearPlugin, nativeHostReady, selectPlugin, slotInstance, slotPendingCounts, slotPlugins } from '../ui/state/instrument';
 import { goLive, inputArmed } from '../ui/state/native-io';
 import { pluginDescriptorKey } from '../ui/state/plugin-descriptor';
 import { rigRecallDone } from '../ui/state/rig-recall';
@@ -100,7 +100,7 @@ function pickPlugins(): [PluginDescriptor, PluginDescriptor] | string {
 
 /** The plugin's current value of parameter `id`, through the host's list_params. */
 async function read(slot: 0 | 1, id: number): Promise<number> {
-  const param = (await platform.pluginHost.listParams(slot)).find((p) => p.id === id);
+  const param = (await platform.pluginHost.listParams(slot, slotInstance(slot))).find((p) => p.id === id);
   if (!param) throw Error(`slot ${slot === 0 ? 'A' : 'B'} lists no parameter ${id}`);
   return param.value;
 }
@@ -109,7 +109,7 @@ const near = (a: number, b: number, range: number) => Math.abs(a - b) <= 1e-4 * 
 
 /** Set `p` to `fraction` of its range; returns what the plugin reads back. */
 async function set(slot: 0 | 1, p: Probed, fraction: number): Promise<number> {
-  await platform.pluginHost.setParameter(slot, p.id, p.min + fraction * p.range);
+  await platform.pluginHost.setParameter(slot, slotInstance(slot), p.id, p.min + fraction * p.range);
   await sleep(300);
   return read(slot, p.id);
 }
@@ -120,12 +120,12 @@ async function set(slot: 0 | 1, p: Probed, fraction: number): Promise<number> {
  */
 async function moveCandidates(slot: 0 | 1): Promise<Probed[]> {
   const moved: Probed[] = [];
-  for (const param of (await platform.pluginHost.listParams(slot)).slice(0, 8)) {
+  for (const param of (await platform.pluginHost.listParams(slot, slotInstance(slot))).slice(0, 8)) {
     const range = param.maxValue - param.minValue;
     if (!(range > 0)) continue;
     const fraction = Math.abs((param.defaultValue - param.minValue) / range - 0.37) > 0.1 ? 0.37 : 0.71;
     const p: Probed = { id: param.id, name: param.name, min: param.minValue, range, default: param.defaultValue, value: param.minValue + fraction * range };
-    await platform.pluginHost.setParameter(slot, p.id, p.value);
+    await platform.pluginHost.setParameter(slot, slotInstance(slot), p.id, p.value);
     moved.push(p);
   }
   await sleep(300);
@@ -140,7 +140,7 @@ async function moveCandidates(slot: 0 | 1): Promise<Probed[]> {
  * a continuous one reads back what was set.
  */
 async function surviving(slot: 0 | 1, moved: Probed[]): Promise<Probed> {
-  const now = await platform.pluginHost.listParams(slot);
+  const now = await platform.pluginHost.listParams(slot, slotInstance(slot));
   for (const p of moved) {
     const value = now.find((q) => q.id === p.id)?.value;
     if (value !== undefined && near(value, p.value, p.range) && Math.abs(value - p.default) > 1e-2 * p.range) return { ...p, value };

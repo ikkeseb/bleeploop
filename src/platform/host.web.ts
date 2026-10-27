@@ -52,6 +52,9 @@ const webPluginHost: PluginHost = {
   async loadPlugin(_slot, _path, _id, _toneToken) {
     throw new Error(NO_NATIVE_HOST);
   },
+  async swapPlugin(_slot, _path, _id, _gain, _toneToken) {
+    throw new Error(NO_NATIVE_HOST);
+  },
   async unloadPlugin() {
     /* no-op */
   },
@@ -77,6 +80,9 @@ const webPluginHost: PluginHost = {
     return () => {};
   },
   onEditorClosed() {
+    return () => {};
+  },
+  onRetired() {
     return () => {};
   },
   async takeTone() {

@@ -44,6 +44,11 @@ export interface PluginInfo {
   /** The load's answer: what it did with the plugin's stored tone (`src-tauri/src/host/tone.rs`).
    * Absent: nothing was stored. */
   tone?: 'restored' | 'failed';
+  /** The instance's generation, new with every load and swap: what a request for this plugin names
+   * (`openEditor`, `setParameter`, ...) and what its events carry. */
+  instance: number;
+  /** The kind the plugin activated as: an effect (it has an audio input), else an instrument. */
+  effect: boolean;
 }
 
 /** A session import's tone, stored by the native host (`PluginHost.importTone`): the plugin it
@@ -157,6 +162,14 @@ export interface PluginHost {
    * reload token (`ToneImport.reloadToken`) when this load is that reload.
    */
   loadPlugin(slot: PluginSlot, path: string, id: string, toneToken?: number): Promise<PluginInfo>;
+  /**
+   * Hot swap: replace the plugin that plays in `slot` with `path`/`id` (another file) while the slot
+   * plays on, at output level `gain`, which the swap's commit applies. Resolves with the incoming's
+   * `PluginInfo`. Rejects with a string; one starting `busy:` means try again later, nothing changed. A
+   * failure normally leaves the old plugin playing, rarely the slot empty or on the new one: read
+   * `listLoaded` for which, never the error's text. `toneToken` as `loadPlugin`'s.
+   */
+  swapPlugin(slot: PluginSlot, path: string, id: string, gain: number, toneToken?: number): Promise<PluginInfo>;
   unloadPlugin(slot: PluginSlot): Promise<void>;
   /**
    * List the plugins currently loaded in the native slots (frontend-reload wedge resync). A WebView
@@ -166,31 +179,45 @@ export interface PluginHost {
    * build.
    */
   listLoaded(): Promise<PluginInfo[]>;
-  openEditor(slot: PluginSlot): Promise<void>;
-  closeEditor(slot: PluginSlot): Promise<void>;
-  setParameter(slot: PluginSlot, paramId: number, value: number): Promise<void>;
+  /*
+   * The requests below name the plugin they are for by its `instance` (`PluginInfo.instance`). The host
+   * refuses one naming another instance than the slot's playing one with `stale instance`: the plugin
+   * it was meant for is gone (a swap replaced it, or the slot reloaded), and nothing was done. A slot
+   * command that races an unload answers `busy: the plugin in slot N is unloading`.
+   */
+  openEditor(slot: PluginSlot, instance: number): Promise<void>;
+  closeEditor(slot: PluginSlot, instance: number): Promise<void>;
+  setParameter(slot: PluginSlot, instance: number, paramId: number, value: number): Promise<void>;
   /** Enumerate the loaded plugin's parameters (stable ids + ranges). Empty in the web build. */
-  listParams(slot: PluginSlot): Promise<PluginParamDesc[]>;
+  listParams(slot: PluginSlot, instance: number): Promise<PluginParamDesc[]>;
   /**
    * Subscribe to param changes ORIGINATED BY THE PLUGIN'S OWN EDITOR — a knob drag in the
-   * hosted GUI. Fires `{slot, id, value}` where `id` is the same stable param id `setParameter`/
-   * `listParams` use and `value` is the new normalised 0..1 value. Returns an unsubscribe fn. No-op
-   * (returns a no-op unsubscribe) in the web build.
+   * hosted GUI. Fires `{slot, instance, id, value}` where `instance` is the plugin's that moved it, `id`
+   * is the same stable param id `setParameter`/`listParams` use and `value` is the new normalised 0..1
+   * value. Every event below carries its plugin's `instance`: one of an instance the slot no longer
+   * plays is a replaced plugin's. Returns an unsubscribe fn. No-op (returns a no-op unsubscribe) in the
+   * web build.
    */
-  onParamChanged(cb: (e: { slot: PluginSlot; id: number; value: number }) => void): () => void;
+  onParamChanged(cb: (e: { slot: PluginSlot; instance: number; id: number; value: number }) => void): () => void;
   /**
    * Subscribe to a WHOLESALE parameter change reported by the plugin itself — a preset loaded in its
    * own GUI, a program change (CLAP `params.rescan`, VST3 `restartComponent(kParamValuesChanged)`, VST2 `audioMasterUpdateDisplay`).
    * The values the UI holds are stale after this; re-run `listParams`. Returns an unsubscribe fn. No-op
    * in the web build.
    */
-  onParamsChanged(cb: (slot: PluginSlot) => void): () => void;
+  onParamsChanged(cb: (e: { slot: PluginSlot; instance: number }) => void): () => void;
   /**
    * Subscribe to editor-closed events emitted when the user closes a hosted/floating editor (its own
    * close box), so the UI can re-sync an "editor open" toggle. Returns an unsubscribe fn. No-op in the
    * web build.
    */
-  onEditorClosed(cb: (slot: PluginSlot) => void): () => void;
+  onEditorClosed(cb: (e: { slot: PluginSlot; instance: number }) => void): () => void;
+  /**
+   * Subscribe to a swapped-out plugin's end: the `instance` a hot swap replaced in `slot` has ended its
+   * retire, in either order against the swap's answer. `released: false`: no proof its plugin was
+   * released (it may still be loaded). Returns an unsubscribe fn. No-op in the web build.
+   */
+  onRetired(cb: (e: { slot: PluginSlot; instance: number; released: boolean }) => void): () => void;
   /**
    * Tone recall (`src-tauri/src/host/tone.rs`): every load restores the plugin's
    * stored tone by itself (`PluginInfo.tone`). `takeTone` saves the slot's tone now, through its
@@ -201,7 +228,7 @@ export interface PluginHost {
    * tone an import parked under `reloadToken` for a reload that did not happen. All three reject in the
    * browser build.
    */
-  takeTone(slot: PluginSlot): Promise<Uint8Array | null>;
+  takeTone(slot: PluginSlot, instance: number): Promise<Uint8Array | null>;
   importTone(
     slot: PluginSlot,
     bytes: Uint8Array,

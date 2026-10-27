@@ -10,7 +10,7 @@
  *   `VITE_LF_PROBE_SETTLE`  ms to wait after each parameter's three sets (default 0 = fast pass)
  */
 import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
-import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
+import { nativeHostReady, slotInstance, slotPlugins } from '../ui/state/instrument-slots';
 import { platform } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -45,7 +45,7 @@ export async function runRestartSurvey(): Promise<void> {
     await sleep(2500); // load-time flags land within the owner loop's 2 s recv_timeout
     let params: Awaited<ReturnType<typeof platform.pluginHost.listParams>> = [];
     try {
-      params = await platform.pluginHost.listParams(0);
+      params = await platform.pluginHost.listParams(0, slotInstance(0));
     } catch (e) {
       log(`listParams failed ${tag}: ${String(e)}`);
     }
@@ -54,7 +54,7 @@ export async function runRestartSurvey(): Promise<void> {
       log(`  param ${p.id} "${p.name}" [${p.minValue}..${p.maxValue}] def ${p.defaultValue}`);
       for (const v of [p.minValue, p.maxValue, p.defaultValue]) {
         try {
-          await platform.pluginHost.setParameter(0, p.id, v);
+          await platform.pluginHost.setParameter(0, slotInstance(0), p.id, v);
         } catch (e) {
           log(`  setParameter failed ${p.id}=${v}: ${String(e)}`);
         }
@@ -67,7 +67,7 @@ export async function runRestartSurvey(): Promise<void> {
     // reports and what the plugin GUI shows) must agree with what the host just set. Plugins may
     // quantise (stepped params), so count mismatches beyond a coarse tolerance.
     try {
-      const after = await platform.pluginHost.listParams(0);
+      const after = await platform.pluginHost.listParams(0, slotInstance(0));
       const byId = new Map(params.map((p) => [p.id, p]));
       let mismatched = 0;
       let first = '';

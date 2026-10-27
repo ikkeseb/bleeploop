@@ -12,7 +12,7 @@
  *   `VITE_LF_PROBE_PARAMS`  how many params to sweep before a swap (default 8)
  */
 import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
-import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
+import { nativeHostReady, slotInstance, slotPlugins } from '../ui/state/instrument-slots';
 import { platform, type PluginDescriptor } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -38,10 +38,10 @@ async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
 }
 
 async function tweak(tag: string, count: number): Promise<void> {
-  const params = (await step(`listParams ${tag}`, () => platform.pluginHost.listParams(0))).slice(0, count);
+  const params = (await step(`listParams ${tag}`, () => platform.pluginHost.listParams(0, slotInstance(0)))).slice(0, count);
   for (const p of params) {
     for (const v of [p.minValue, p.maxValue, p.value]) {
-      await platform.pluginHost.setParameter(0, p.id, v);
+      await platform.pluginHost.setParameter(0, slotInstance(0), p.id, v);
       await sleep(30);
     }
   }
@@ -84,7 +84,7 @@ export async function runSwapStress(): Promise<void> {
           let opened = false;
           if (editorOpen) {
             try {
-              await step(`openEditor ${tagOf(from)}`, () => platform.pluginHost.openEditor(0));
+              await step(`openEditor ${tagOf(from)}`, () => platform.pluginHost.openEditor(0, slotInstance(0)));
               opened = true;
             } catch (e) {
               if (e instanceof StepTimeout) throw e;

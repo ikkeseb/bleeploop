@@ -14,6 +14,7 @@ import {
   setActiveSlot,
   setPluginGain,
   slotIds,
+  slotInstance,
   slotPlugins,
 } from '../ui/state/instrument';
 import * as midi from '../ui/state/midi';
@@ -70,8 +71,8 @@ export interface LfDebug {
   pluginListParams: (slot?: number) => ReturnType<typeof platform.pluginHost.listParams>;
   /** Subscribe to editor-originated param changes (returns an unsubscribe fn). By-ear:
    * `__lf.onPluginParam(e => console.log(e))` then drag a knob. */
-  onPluginParam: (cb: (e: { slot: 0 | 1; id: number; value: number }) => void) => () => void;
-  onPluginEditorClosed: (cb: (slot: 0 | 1) => void) => () => void;
+  onPluginParam: (cb: (e: { slot: 0 | 1; instance: number; id: number; value: number }) => void) => () => void;
+  onPluginEditorClosed: (cb: (e: { slot: 0 | 1; instance: number }) => void) => () => void;
   pluginPanic: () => void;
   /** Session import/export headless: a probe builds the zip bytes, feeds them back through import,
    * and byte-asserts the round trip without touching <a download> or a file input. */
@@ -130,8 +131,8 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     },
     setPluginGain: (v, slot = 0) => setPluginGain(slot as 0 | 1, v),
     pluginSetParam: (paramId, value, slot = 0) =>
-      platform.pluginHost.setParameter(slot as 0 | 1, paramId, value),
-    pluginListParams: (slot = 0) => platform.pluginHost.listParams(slot as 0 | 1),
+      platform.pluginHost.setParameter(slot as 0 | 1, slotInstance(slot as 0 | 1), paramId, value),
+    pluginListParams: (slot = 0) => platform.pluginHost.listParams(slot as 0 | 1, slotInstance(slot as 0 | 1)),
     onPluginParam: (cb) => platform.pluginHost.onParamChanged(cb),
     onPluginEditorClosed: (cb) => platform.pluginHost.onEditorClosed(cb),
     pluginPanic: () => input.allNotesOff(),

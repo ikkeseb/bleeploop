@@ -72,7 +72,7 @@ function spy(): void {
   const input = platform.input;
   const openEditor = host.openEditor.bind(host);
   const send = input.send.bind(input);
-  host.openEditor = (slot) => (calls.push(`openEditor ${slot}`), openEditor(slot));
+  host.openEditor = (slot, instance) => (calls.push(`openEditor ${slot}`), openEditor(slot, instance));
   input.send = (epoch, items) => {
     for (const item of items) {
       const c = 'engine' in item ? item.engine : null;

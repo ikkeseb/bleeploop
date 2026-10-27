@@ -80,36 +80,43 @@ const tauriPluginHost: PluginHost = {
     if (frontendEpoch === 0) throw new Error('plugin host not initialized');
     return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, toneToken: toneToken ?? null });
   },
+  swapPlugin(slot, path, id, gain, toneToken) {
+    if (frontendEpoch === 0) throw new Error('plugin host not initialized');
+    return invoke<PluginInfo>('plugin_swap', { slot, path, id, gain, frontendEpoch, toneToken: toneToken ?? null });
+  },
   async unloadPlugin(slot) {
     await invoke('plugin_unload', { slot, frontendEpoch });
   },
   listLoaded() {
     return invoke<PluginInfo[]>('plugin_list_loaded');
   },
-  async openEditor(slot) {
-    await invoke('plugin_open_editor', { slot, frontendEpoch });
+  async openEditor(slot, instance) {
+    await invoke('plugin_open_editor', { slot, instance, frontendEpoch });
   },
-  async closeEditor(slot) {
-    await invoke('plugin_close_editor', { slot, frontendEpoch });
+  async closeEditor(slot, instance) {
+    await invoke('plugin_close_editor', { slot, instance, frontendEpoch });
   },
-  async setParameter(slot, paramId, value) {
-    await invoke('plugin_set_param', { slot, paramId, value, frontendEpoch });
+  async setParameter(slot, instance, paramId, value) {
+    await invoke('plugin_set_param', { slot, instance, paramId, value, frontendEpoch });
   },
-  listParams(slot) {
-    return invoke<PluginParamDesc[]>('plugin_list_params', { slot });
+  listParams(slot, instance) {
+    return invoke<PluginParamDesc[]>('plugin_list_params', { slot, instance });
   },
   onParamChanged(cb) {
-    return subscribe<{ slot: PluginSlot; id: number; value: number }>('plugin:param-changed', cb);
+    return subscribe<{ slot: PluginSlot; instance: number; id: number; value: number }>('plugin:param-changed', cb);
   },
   onParamsChanged(cb) {
-    return subscribe<PluginSlot>('plugin:params-changed', (slot) => cb(slot));
+    return subscribe<{ slot: PluginSlot; instance: number }>('plugin:params-changed', cb);
   },
   onEditorClosed(cb) {
-    return subscribe<PluginSlot>('plugin:editor-closed', (slot) => cb(slot));
+    return subscribe<{ slot: PluginSlot; instance: number }>('plugin:editor-closed', cb);
+  },
+  onRetired(cb) {
+    return subscribe<{ slot: PluginSlot; instance: number; released: boolean }>('plugin:retired', cb);
   },
   // A tone moves as raw bytes both ways, as a session does (`engine_snapshot`).
-  async takeTone(slot) {
-    const bytes = await invoke<ArrayBuffer>('plugin_tone_take', { slot });
+  async takeTone(slot, instance) {
+    const bytes = await invoke<ArrayBuffer>('plugin_tone_take', { slot, instance });
     return bytes.byteLength > 0 ? new Uint8Array(bytes) : null;
   },
   importTone(slot, bytes, { format, path, id }) {
