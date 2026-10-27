@@ -44,7 +44,7 @@
 //! as it stood, under the new one at the replace's gain, the slot's from then on. Each unit's term stays on
 //! its own destination (an effect's on the wet, an instrument's on the bus), and the slot's bypass
 //! crossfade applies over them as ever. A commit that changes the kind (effect ↔ instrument) takes a live
-//! slot off live at its frame, as a GO LIVE off would, answered as one (`Event::Toggled`). The old unit stops after
+//! slot off live at its frame, as a GO LIVE off would, answered by `Event::CommitLiveOff`. The old unit stops after
 //! its last call and goes back `ReplacedOut`, behind the `Committed`.
 //! While a take captures, a candidate whose latency differs from the playing unit's (an empty slot's
 //! is 0) stays staged until the capture ends, so nothing moves what records mid-take. A candidate that
@@ -119,7 +119,7 @@ struct Slot {
     /// GO LIVE as asked: the live gate's target, and what the record latency follows.
     live: bool,
     /// A swap's commit took the slot off live and the engine has not answered it yet
-    /// ([`Rack::take_live_off`]).
+    /// ([`Rack::live_off`]).
     live_off: bool,
     /// The live gate ramps linearly from `live_gain` at frame `live_end - Rack::live_frames` to the
     /// target (1 live, 0 off), which it holds exactly from `live_end` on (`Frame::MIN`: settled).
@@ -576,10 +576,17 @@ impl Rack {
         }
     }
 
-    /// Whether a swap's commit took slot `slot` off live since the last call: the engine answers it as a
-    /// GO LIVE off (`Engine::answer_live_offs`).
-    pub(crate) fn take_live_off(&mut self, slot: usize) -> bool {
-        self.slots.get_mut(slot).is_some_and(|s| std::mem::take(&mut s.live_off))
+    /// Whether a swap's commit took slot `slot` off live and the engine has not answered it yet
+    /// (`Engine::answer_live_offs`).
+    pub(crate) fn live_off(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(|s| s.live_off)
+    }
+
+    /// The engine answered slot `slot`'s live-off, or a GO LIVE since stands in for it.
+    pub(crate) fn clear_live_off(&mut self, slot: usize) {
+        if let Some(s) = self.slots.get_mut(slot) {
+            s.live_off = false;
+        }
     }
 
     /// Whether slot `slot` is live as asked (the gate's target); false for a slot past the rack.

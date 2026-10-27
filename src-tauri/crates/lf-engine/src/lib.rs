@@ -103,8 +103,9 @@
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
 //!   one-off event is lost there; each lane's state and mix ([`Event::Mix`], on change only), the
 //!   transport are marked delivered only once the ring takes them, so the next publish offers them
-//!   again (while no device runs, the host's feed asks for it: [`Engine::publish_idle`]); a toggled setting's answer ([`Event::Toggled`], one per applied command of it, and one per live-off a swap's commit makes) is owed until
-//!   the ring takes one at its current value ([`Engine::unsent_toggles`] reads what is still owed).
+//!   again (while no device runs, the host's feed asks for it: [`Engine::publish_idle`]); a toggled setting's answer ([`Event::Toggled`], one per applied command of it) is owed until
+//!   the ring takes one at its current value ([`Engine::unsent_toggles`] reads what is still owed), and a swap's commit's live-off
+//!   ([`Event::CommitLiveOff`], answering no command) until the ring takes it or a GO LIVE sets the slot live ([`Engine::unsent_live_offs`]).
 //!   An engine sends no lane's mix until the commands queued ahead of its first block (a new engine's
 //!   settings replay, which can outrun one block's take) are all taken: an idle session job before
 //!   then reports the lanes' infos only.

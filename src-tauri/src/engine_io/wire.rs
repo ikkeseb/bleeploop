@@ -235,6 +235,9 @@ enum EventDef {
         toggle: Toggle,
         on: bool,
     },
+    /// Never on the wire: the settings memory takes it from the drain (`super::drain`).
+    #[serde(skip)]
+    CommitLiveOff { frame: Frame, slot: u8 },
 }
 
 /// A [`CompactMix`] in the track shape of [`WireLaneMix`].
@@ -730,6 +733,7 @@ mod tests {
             Event::Muted { .. } => 9,
             Event::Mix { .. } => 10,
             Event::Toggled { .. } => 11,
+            Event::CommitLiveOff { .. } => unreachable!("never on the wire"),
         }
     }
 

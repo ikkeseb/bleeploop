@@ -26,8 +26,8 @@ reload re-arms it). Path: `src/ui/state/instrument.ts` (`doSelectPlugin`, `unloa
   `(1−t)·old + t·new` over a counted frame ramp, each side at its own gain and fed by its own kind
   (an instrument gets silence, an effect the gated input), so neither the bypass term nor the dry
   guitar is heard. The live flag and gate are untouched, but for a commit that changes the unit's kind
-  (effect ↔ instrument): the slot goes off live at that frame as a GO LIVE off would, answered by the
-  same `Toggled` off on the event ring, which the settings replay follows. Every slot message and handback carries the owner's tag, and the callback answers
+  (effect ↔ instrument): the slot goes off live at that frame as a GO LIVE off would, answered by an
+  `Event::CommitLiveOff` that answers no command (owed while the ring is full), which the settings replay follows. Every slot message and handback carries the owner's tag, and the callback answers
   each `Replace` Accepted or Rejected with its reason; it never drops a unit. Buffers for the second
   unit are allocated at rack build.
 - **Staging before the fade:** the candidate starts processing muted on the audio thread while the old

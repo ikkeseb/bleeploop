@@ -606,12 +606,16 @@ pub enum Event {
     Mix { frame: Frame, lane: u8, mix: CompactMix },
     /// A toggled setting's value as the engine applies it: the answer to every applied command of that
     /// setting, one each, with the value it left (an accepted [`Action::Toggle`], and its setter, even
-    /// one that changed nothing; a refused toggle answers with its `Refused`), and a swap's commit that
-    /// takes a slot off live, as its GO LIVE off. An answer the full ring
+    /// one that changed nothing; a refused toggle answers with its `Refused`). An answer the full ring
     /// refuses is owed and offered again at the next publish, at the setting's value then. The UI shows
     /// the setting from it; the host's settings memory counts the answers against what it sent, so an
     /// answer older than a setter still in flight never overwrites it (`engine_io/settings.rs`).
     Toggled { frame: Frame, toggle: Toggle, on: bool },
+    /// A swap's commit to another kind took slot `slot` off live: it answers no command, so the host's
+    /// settings memory counts nothing against it. One the full ring refuses is owed and offered again at
+    /// the next block start, until a GO LIVE sets the slot live again (that command's `Toggled` is the
+    /// newer value). Host-side only: the UI follows the feed's `live` instead.
+    CommitLiveOff { frame: Frame, slot: u8 },
 }
 
 /// The callback's view of the device.

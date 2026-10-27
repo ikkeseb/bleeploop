@@ -4,8 +4,8 @@
 //! on the slot's real input; a gain change while it stages moves the playing unit alone; a candidate
 //! that refuses to start goes back and leaves the slot untouched; a swap that changes the latency (an
 //! empty slot's is 0) waits for a take to stop capturing, whatever the kinds; a commit to another kind
-//! takes a live slot off live as GO LIVE off would, answered as one, and no other commit touches the
-//! live flag.
+//! takes a live slot off live as GO LIVE off would, answered by a `CommitLiveOff` (owed while the full
+//! ring refuses it), and no other commit touches the live flag.
 
 mod common;
 
@@ -133,11 +133,22 @@ fn live_answers(rig: &Rig, mark: usize) -> Vec<(Frame, bool)> {
         .collect()
 }
 
+/// The frames of slot 0's commit live-offs (`Event::CommitLiveOff`) the rig read from event `mark` on.
+fn commit_live_offs(rig: &Rig, mark: usize) -> Vec<Frame> {
+    rig.events[mark..]
+        .iter()
+        .filter_map(|e| match *e {
+            Event::CommitLiveOff { frame, slot: 0 } => Some(frame),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A swap on slot 0 at block size `block`, the input at `level`: `old` (tag 1) installed before the
 /// first block, so engaged at once, then `new` (tag 2) replacing it at `gain` from block start S. It
 /// commits at C, the first block start once it has staged its latency plus `STAGE`; checked here:
 /// no answer before C, `Committed` from C's block (the live slot taken off live exactly when the kind
-/// changes, answered by one `Toggled` off at C, and by none when it does not), the old unit back
+/// changes, answered by one `CommitLiveOff` at C and no `Toggled`, and by neither when it does not), the old unit back
 /// `ReplacedOut` after the fade. The rig keeps its output from S and has rendered whole blocks past the
 /// fade. Returns the rig, S and C.
 fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> (Rig, Frame, Frame) {
@@ -164,8 +175,9 @@ fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> 
         Some(SlotReply::Handback(back)) => assert_eq!((back.tag, back.reason), (1, HandbackReason::ReplacedOut), "block {block}"),
         other => panic!("block {block}: the old unit back, not {other:?}"),
     }
-    let answers: &[(Frame, bool)] = if changed { &[(c, false)] } else { &[] };
-    assert_eq!(live_answers(&rig, mark), answers, "block {block}: the commit's GO LIVE answer");
+    let offs: &[Frame] = if changed { &[c] } else { &[] };
+    assert_eq!(commit_live_offs(&rig, mark), offs, "block {block}: the commit's live-off");
+    assert_eq!(live_answers(&rig, mark), [], "block {block}: the commit answers no GO LIVE");
     (rig, s, c)
 }
 
@@ -230,7 +242,8 @@ fn a_commit_to_another_kind_takes_a_live_slot_off_live_as_go_live_off_would() {
 }
 
 /// A commit to the same kind leaves the live flag alone, and one into a slot not live leaves it so:
-/// effect → effect stays live, instrument → effect stays off, neither answered by a `Toggled`.
+/// effect → effect stays live, instrument → effect stays off, neither answered by a `Toggled` or a
+/// `CommitLiveOff`.
 #[test]
 fn a_commit_takes_a_slot_off_live_only_when_live_and_only_to_another_kind() {
     use SlotKind::{Effect, Instrument};
@@ -258,6 +271,60 @@ fn a_commit_takes_a_slot_off_live_only_when_live_and_only_to_another_kind() {
         assert!(matches!(reply, SlotReply::Committed { tag: 2 }), "{what}: {reply:?}");
         assert_eq!(rig.engine.looper().overview().slot_live(0), live, "{what}");
         assert_eq!(live_answers(&rig, mark), [], "{what}: no GO LIVE answer");
+        assert_eq!(commit_live_offs(&rig, mark), Vec::<Frame>::new(), "{what}: no live-off");
+    }
+}
+
+/// A commit's live-off the full event ring refuses is owed (`Engine::unsent_live_offs`): offered once at
+/// the first block start after the ring has room, or, when a GO LIVE sets the slot live first, never
+/// (that command's own `Toggled`, owed in turn, is the newer value).
+#[test]
+fn a_commits_live_off_the_full_ring_refuses_is_owed_until_taken_or_a_go_live_stands_in() {
+    for go_live in [false, true] {
+        let what = format!("GO LIVE after the commit: {go_live}");
+        let (p1, p2) = (Probe::new(), Probe::new());
+        let mut rig = Rig::with_event_capacity(Opts { block: 128, ..Default::default() }, 32);
+        rig.install_tagged(0, 1, Fake::effect(0.25, 1.0, &p1));
+        rig.advance(4 * 128);
+        // Nobody reads the ring from here: a SELECT is one event each, and they fill it.
+        rig.hold_events = true;
+        for i in 0..64 {
+            rig.queue(Command::SelectTrack((i % 5) as u8));
+        }
+        rig.advance(128);
+        rig.replace(0, 2, Fake::instrument(0.0, 0, &p2), 1.0);
+        let give_up = rig.frame + rig.seconds(1.0);
+        let reply = loop {
+            rig.advance(128);
+            if let Some(reply) = rig.reply(0) {
+                break reply;
+            }
+            assert!(rig.frame < give_up, "{what}: no commit");
+        };
+        assert!(matches!(reply, SlotReply::Committed { tag: 2 }), "{what}: {reply:?}");
+        assert!(!rig.engine.looper().overview().slot_live(0), "{what}: off live at the commit");
+        assert_eq!(rig.engine.unsent_live_offs().collect::<Vec<_>>(), [0], "{what}: the full ring refused it");
+        if go_live {
+            rig.queue(Command::SetSlotLive(0, true));
+            rig.advance(128);
+            assert_eq!(rig.engine.unsent_live_offs().count(), 0, "{what}: the GO LIVE stands in for it");
+        }
+        let mark = rig.events.len();
+        rig.read_events();
+        assert_eq!(commit_live_offs(&rig, mark), Vec::<Frame>::new(), "{what}: the ring held only what it took before the commit");
+        let (mark, at) = (rig.events.len(), rig.frame);
+        rig.advance(4 * 128);
+        rig.read_events();
+        if go_live {
+            assert_eq!(commit_live_offs(&rig, mark), Vec::<Frame>::new(), "{what}: never offered");
+            assert_eq!(live_answers(&rig, mark), [(at, true)], "{what}: the GO LIVE's owed answer");
+            assert!(rig.engine.looper().overview().slot_live(0), "{what}");
+        } else {
+            assert_eq!(commit_live_offs(&rig, mark), [at], "{what}: offered once, at the next block start");
+            assert_eq!(live_answers(&rig, mark), [], "{what}: answering no GO LIVE");
+            assert!(!rig.engine.looper().overview().slot_live(0), "{what}");
+        }
+        assert_eq!(rig.engine.unsent_live_offs().count(), 0, "{what}: nothing owed");
     }
 }
 

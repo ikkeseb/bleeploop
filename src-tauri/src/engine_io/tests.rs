@@ -2941,6 +2941,138 @@ fn an_older_toggled_drained_after_a_newer_setter_does_not_overwrite_it() {
     });
 }
 
+/// A silent instrument: what a swap puts in a live effect's slot, so its commit takes the slot off live.
+struct SilentInstrument;
+
+impl SlotProcessor for SilentInstrument {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Instrument
+    }
+    fn latency(&self) -> Frame {
+        0
+    }
+    fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        out.fill(0.0);
+    }
+    fn stop(&mut self) {}
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+/// Slot 0 holds A's effect, live: its owner.
+fn live_effect(h: &Harness) -> SlotHost {
+    let a = h.host.slot(0);
+    let (unit, _, _) = Unit::new(0.25);
+    assert!(a.install(unit, RATE as u32).is_ok());
+    h.send(Command::SetSlotLive(0, true));
+    until("GO LIVE applies", || slot_live(h));
+    a
+}
+
+/// Owner `to` swaps `unit`, of the other kind, into live slot 0: the commit takes the slot off live.
+fn swap_off_live(h: &Harness, to: &SlotHost, unit: Box<dyn SlotProcessor>) {
+    assert!(to.replace(unit, RATE as u32, 1.0).is_ok());
+    assert!(matches!(to.answer(PATIENCE), super::slot_host::Answer::Committed));
+    until("the commit takes the slot off live", || !slot_live(h));
+}
+
+/// Slot 0's GO LIVE as the engine that runs applies it (its overview).
+fn slot_live(h: &Harness) -> bool {
+    h.host.core.ends.lock().unwrap().as_ref().expect("an engine").overview.slot_live(0)
+}
+
+/// The slots whose commit's live-off the engine that runs still owes (`Engine::unsent_live_offs`).
+fn unsent_live_offs(h: &Harness) -> Vec<u8> {
+    h.host.core.rt.lock().unwrap().engine.as_ref().expect("an engine").unsent_live_offs().collect()
+}
+
+/// Fill the event ring, which nobody reads from here, until it refuses more: a SELECT is one event each.
+fn fill_event_ring(h: &Harness) {
+    let refused = h.host.diag().engine.events_dropped;
+    let select = |i: usize| TimedCommand { frame: None, command: Command::SelectTrack((i % 5) as u8) };
+    for _ in 0..40 {
+        h.host.send_all((0..400).map(select)).expect("the command ring takes them");
+        h.play(RATE / 10);
+        if h.host.diag().engine.events_dropped > refused {
+            return;
+        }
+    }
+    panic!("the event ring never filled");
+}
+
+/// A swap's commit to another kind takes the live slot off live, and the owner's GO LIVE is still in the
+/// command ring (the device stopped) when the commit's live-off is read: the live-off answers no command,
+/// so the rebuild that comes before GO LIVE applies replays it, and the slot is live.
+#[test]
+fn a_go_live_still_queued_when_a_commits_live_off_is_read_survives_a_rebuild() {
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    let (_a, b) = (live_effect(&h), h.host.slot(0));
+    swap_off_live(&h, &b, Box::new(SilentInstrument));
+    h.host.close().unwrap();
+    h.send(Command::SetSlotLive(0, true));
+    h.host.drain_events(&mut h.events);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetSlotLive(0, true)) && !kept.contains(&Command::SetSlotLive(0, false)), "the GO LIVE stands: {kept:?}");
+    h.play(RATE / 20);
+    assert!(slot_live(&h), "the rebuilt engine applied it");
+}
+
+/// A commit's live-off the full event ring refused reaches the settings memory all the same: offered
+/// again once the ring drains (the slot kept off live), dropped when a GO LIVE applies after it (kept
+/// live, from that GO LIVE's own answer), and read from the old engine by a rebuild before the ring
+/// drains (kept off live, and the rebuilt engine has it so).
+#[test]
+fn a_commits_live_off_the_full_event_ring_refused_still_reaches_the_memory() {
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    let owners: Vec<_> = (0..3).map(|_| h.host.slot(0)).collect();
+    let _a = live_effect(&h);
+    let live = |h: &Harness, on| h.host.settings().contains(&Command::SetSlotLive(0, on));
+
+    // An effect to an instrument; the ring drains, then the next block offers the live-off.
+    fill_event_ring(&h);
+    swap_off_live(&h, &owners[0], Box::new(SilentInstrument));
+    assert_eq!(unsent_live_offs(&h), [0], "the full ring refused it");
+    assert!(live(&h, true), "nothing reached the memory yet");
+    h.host.drain_events(&mut h.events);
+    h.play(RATE / 10);
+    h.host.drain_events(&mut h.events);
+    assert!(live(&h, false) && !live(&h, true), "the commit's off: {:?}", h.host.settings());
+    assert_eq!(unsent_live_offs(&h), Vec::<u8>::new());
+
+    // An instrument to an effect, then a GO LIVE that applies before the ring drains.
+    h.send(Command::SetSlotLive(0, true));
+    until("GO LIVE applies", || slot_live(&h));
+    h.host.drain_events(&mut h.events);
+    fill_event_ring(&h);
+    let (unit, _, _) = Unit::new(0.25);
+    swap_off_live(&h, &owners[1], unit);
+    assert_eq!(unsent_live_offs(&h), [0], "the full ring refused it");
+    h.send(Command::SetSlotLive(0, true));
+    until("GO LIVE applies", || slot_live(&h));
+    assert_eq!(unsent_live_offs(&h), Vec::<u8>::new(), "the GO LIVE stands in for it");
+    h.host.drain_events(&mut h.events);
+    h.play(RATE / 10);
+    h.host.drain_events(&mut h.events);
+    assert!(live(&h, true) && !live(&h, false), "the later GO LIVE: {:?}", h.host.settings());
+
+    // An effect to an instrument, then a rebuild before the ring drains.
+    fill_event_ring(&h);
+    swap_off_live(&h, &owners[2], Box::new(SilentInstrument));
+    assert_eq!(unsent_live_offs(&h), [0], "the full ring refused it");
+    h.host.close().unwrap();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(live(&h, false) && !live(&h, true), "read from the old engine: {:?}", h.host.settings());
+    h.play(RATE / 20);
+    assert!(!slot_live(&h), "the rebuilt engine has the slot off live");
+}
+
 /// A panic caught in the WASAPI input callback leaves its stream running and its input silent: the
 /// owner restarts the device on the same endpoints at the engine's rate, so the loop resumes in place
 /// and the input is heard again. A second within the holdoff leaves the input silent and the status

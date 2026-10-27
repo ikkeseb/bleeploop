@@ -33,6 +33,7 @@
 //! setter's own answer brings the applied value. A rebuild drains the replaced engine's ring and its owed
 //! answers, so a toggle accepted just before it survives whether or not the feed saw it, and a setter
 //! still queued there stays kept as sent; a toggle still queued there is lost, as every queued action.
+//! A swap's commit that takes a slot off live answers no command (`Event::CommitLiveOff`, `live_off`).
 //!
 //! The tempo and the meter are a projection of what the engine applied too, from its `Event::Transport`:
 //! they lock together, so the engine drops a `SetBpm` or a `SetMeter` while a loop exists, and a session
@@ -310,6 +311,23 @@ impl Settings {
         true
     }
 
+    /// The engine of generation `gen` took slot `slot` off live at a swap's commit (`Event::CommitLiveOff`,
+    /// or one owed read at a rebuild): an answer to no command, so nothing in flight is counted. Kept as
+    /// `SetSlotLive(slot, false)` unless a setter of the slot's GO LIVE is in flight: it applies after the
+    /// commit, so its own answer is the newer value (a toggle in flight answers with its own value too,
+    /// and one a rebuild loses leaves the commit's off as the engine's). False, and nothing kept, for an
+    /// engine this memory no longer follows.
+    pub(crate) fn live_off(&mut self, gen: u64, slot: u8) -> bool {
+        if gen != self.gen {
+            return false;
+        }
+        let toggle = Toggle::Live(slot);
+        if toggle.exists() && self.setter_at[toggle.index()] == 0 {
+            self.insert(Command::SetSlotLive(slot, false));
+        }
+        true
+    }
+
     /// The engine of generation `gen` refused a toggle (`Event::Refused`): the answer to its command, which
     /// changed nothing. Any other refusal is no toggle's.
     pub(crate) fn refused(&mut self, gen: u64, reason: Refusal) {
@@ -516,6 +534,35 @@ mod tests {
         assert_eq!(replay(&s), [Command::SetSlotLive(0, false)], "the live-off in flight stands");
         assert!(s.toggled(1, Toggle::Live(0), false), "the live-off's own answer");
         assert_eq!(replay(&s), [Command::SetSlotLive(0, false)]);
+    }
+
+    #[test]
+    fn a_commits_live_off_answers_no_command_and_yields_to_a_setter_in_flight() {
+        let mut s = Settings::default();
+        s.follow(1);
+        let live = |on| Command::SetSlotLive(0, on);
+        s.record(&live(true));
+        s.pushed(&live(true));
+        assert!(s.toggled(1, Toggle::Live(0), true));
+        assert!(s.live_off(1, 0));
+        assert_eq!(replay(&s), [live(false)], "nothing in flight: the engine's off");
+        // A setter in flight applies after the commit: its own answer is the newer value.
+        s.record(&live(true));
+        s.pushed(&live(true));
+        assert!(s.live_off(1, 0));
+        assert_eq!(replay(&s), [live(true)], "the setter in flight stands");
+        assert!(s.toggled(1, Toggle::Live(0), true), "the setter's answer: the live-off counted nothing");
+        assert_eq!((s.in_flight, s.setter_at), ([0; Toggle::COUNT], [0; Toggle::COUNT]));
+        // A press in flight answers with its own value; until then (or if a rebuild loses it) the off stands.
+        s.pushed(&Command::Action(lf_engine::Action::Toggle(Toggle::Live(0))));
+        assert!(s.live_off(1, 0));
+        assert_eq!(replay(&s), [live(false)]);
+        assert!(s.toggled(1, Toggle::Live(0), true));
+        assert_eq!(replay(&s), [live(true)]);
+        s.follow(2);
+        assert!(!s.live_off(1, 0), "a replaced engine's late live-off");
+        assert!(s.live_off(2, 5), "a slot past the rack");
+        assert_eq!(replay(&s), [live(true)]);
     }
 
     #[test]

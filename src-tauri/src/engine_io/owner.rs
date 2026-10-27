@@ -84,6 +84,8 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     let transport = old.as_deref().and_then(|e| e.applied_meter().map(|meter| (e.clock().bpm(), meter)));
     let unsent: Vec<_> = old.as_deref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
     let clean = old.as_deref_mut().is_none_or(|old| evict(core, &mut ports, old));
+    // After `evict`, which can commit a staged swap and so take a slot off live.
+    let live_offs: Vec<_> = old.as_deref().map(|e| e.unsent_live_offs().collect()).unwrap_or_default();
     for (desk, new) in ports.iter_mut().zip(slots) {
         desk.port = Some(new);
     }
@@ -127,6 +129,10 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
         // drained.
         for (toggle, on) in unsent {
             settings.toggled(gen, toggle, on);
+        }
+        // A commit's live-off its full ring refused: still owed only while the slot stays off live.
+        for slot in live_offs {
+            settings.live_off(gen, slot);
         }
         for command in &unsent_input {
             settings.record(command);

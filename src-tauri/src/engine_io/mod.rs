@@ -671,7 +671,8 @@ pub trait RebuildHook: Send + Sync {
 
 /// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix`, a `Transport`, a
 /// `Toggled` and a toggle's `Refused` are also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
-/// taker keeps), so no rebuild's replay lands between the pop and the projection.
+/// taker keeps), so no rebuild's replay lands between the pop and the projection. A `CommitLiveOff` is
+/// the memory's alone and goes no further (the UI follows the feed's `live`).
 pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Event>, gen: u64, mut each: impl FnMut(Event)) {
     while let Ok(event) = events.pop() {
         match event {
@@ -679,6 +680,10 @@ pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Eve
             Event::Transport { bpm, meter, .. } => _ = settings.transported(gen, bpm, meter),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
             Event::Refused { reason, .. } => settings.refused(gen, reason),
+            Event::CommitLiveOff { slot, .. } => {
+                settings.live_off(gen, slot);
+                continue;
+            }
             _ => {}
         }
         each(event);

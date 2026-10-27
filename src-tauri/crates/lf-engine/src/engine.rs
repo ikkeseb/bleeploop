@@ -261,7 +261,7 @@ pub struct Engine {
     /// `Toggled` of the current value (`offer_toggles`). Every applied command of a toggled setting (its
     /// setter, its toggle, a refused toggle) answers with exactly one event of that setting, so the host
     /// can match the answers to what it sent (`engine_io/settings.rs`); a swap's commit that takes a slot
-    /// off live answers as a GO LIVE off ([`Engine::answer_live_offs`]).
+    /// off live answers no command ([`Engine::answer_live_offs`]).
     toggles_owed: [u32; Toggle::COUNT],
     /// The commands queued ahead of the first block (a new engine's settings replay) are all taken: the
     /// ring was empty after a block's take ([`Engine::take_commands`] takes at most `MAX_PENDING`). Until
@@ -429,16 +429,31 @@ impl Engine {
         self.answer_live_offs(self.next_frame);
     }
 
-    /// A swap's commit took a live slot whose unit changed kind off live: answered at `now` as a GO LIVE
-    /// off is, the overview's flag and an `Event::Toggled` through the same push (owed when the full
-    /// ring refuses it), so the feed hears it in order with every other answer of the slot's GO LIVE.
+    /// A swap's commit took a live slot whose unit changed kind off live: answered at `now` with the
+    /// overview's flag and an `Event::CommitLiveOff`, in order with the slot's GO LIVE answers. The full
+    /// ring refusing it leaves it owed in the rack, offered again here at the next block start, until a
+    /// GO LIVE sets the slot live: that command's own answer is the newer value, so the owed one goes.
     fn answer_live_offs(&mut self, now: Frame) {
         for slot in 0..SLOT_COUNT {
-            if self.rack.take_live_off(slot) {
-                self.looper.overview().set_slot_live(slot, false);
-                toggled(&mut self.feed, now, &mut self.toggles_owed, Toggle::Live(slot as u8), false);
+            if !self.rack.live_off(slot) {
+                continue;
             }
+            if !self.rack.live(slot) {
+                self.looper.overview().set_slot_live(slot, false);
+                if !self.feed.push(Event::CommitLiveOff { frame: now, slot: slot as u8 }) {
+                    continue;
+                }
+            }
+            self.rack.clear_live_off(slot);
         }
+    }
+
+    /// The slots whose commit's live-off ([`Event::CommitLiveOff`]) the full ring refused and that are
+    /// still off live. The host reads it from an engine it replaced, after its eviction (which can
+    /// commit a staged swap), and projects it after what its event ring held (`owner.rs` `swap_engine`).
+    /// Not for the audio thread.
+    pub fn unsent_live_offs(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..SLOT_COUNT).filter(|&slot| self.rack.live_off(slot) && !self.rack.live(slot)).map(|slot| slot as u8)
     }
 
     /// While no device runs and the host holds the engine: run a session job on the port at once (a load
