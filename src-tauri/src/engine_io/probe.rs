@@ -647,7 +647,7 @@ impl Probe {
     fn expect_slots(&mut self, after: &str) {
         let loaded: Vec<usize> = self.slots.iter().filter(|s| s.handle.is_some()).map(|s| s.slot).collect();
         let core = self.host.core.clone();
-        if let Err(e) = self.wait("the plugins are back in their slots", SLOT_WAIT, |_| loaded.iter().all(|&k| core.ports[k].lock().is_ok_and(|desk| desk.holds_active()))) {
+        if let Err(e) = self.wait("the plugins are back in their slots", SLOT_WAIT, |_| loaded.iter().all(|&k| core.ports[k].lock().unwrap_or_else(|e| e.into_inner()).holds_active())) {
             self.fail("slots", format!("after {after}: {e}"));
         }
     }

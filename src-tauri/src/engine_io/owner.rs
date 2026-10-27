@@ -153,23 +153,30 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
 }
 
 /// Hand every unit of `old`, an engine nothing renders any more, to its plugin owner, stopped: onto its
-/// slot's desk (held by the caller), routed with whatever its port had returned (`Desk::pump`). False
-/// when a unit panicked on its way out: the caller leaks the engine then, with any unit still in it,
-/// rather than dropping it (a drop calls the plugin's DLL off its owner thread); the desk counts such a
-/// unit lost, so its owner's teardown leaks the plugin instead of unloading it (`Desk::lose`).
+/// slot's desk (held by the caller), routed with every reply its port still held (`Desk::pump`). False
+/// when a unit panicked on its way out: the caller leaks the engine then, with any unit still in it or
+/// parked on its port, rather than dropping it (a drop calls the plugin's DLL off its owner thread); the
+/// desk counts such a unit lost, so its owner's teardown leaks the plugin instead of unloading it
+/// (`Desk::lose`).
 fn evict(core: &Core, desks: &mut [MutexGuard<'_, Desk>; SLOT_COUNT], old: &mut Engine) -> bool {
-    let clean = catch_unwind(AssertUnwindSafe(|| {
+    let mut clean = catch_unwind(AssertUnwindSafe(|| {
         old.service_slots_idle();
         old.evict_slots();
     }))
     .is_ok();
+    // A reply the full return ring had no room for waits parked in the engine (at most two per slot) and
+    // would go down with it: each pump empties the rings, and a service moves what is parked onto them
+    // (it fits an emptied ring). Replies park only behind a full ring that nothing has read since, so a
+    // pump that routes none found the parked ones gone too. A remove a pump sends (an abandoned commit's)
+    // finds every unit evicted already: answered `NotHeld` or lost with the engine, it changes nothing.
+    while clean && desks.iter_mut().map(|desk| desk.pump(&core.settings)).sum::<usize>() > 0 {
+        clean = catch_unwind(AssertUnwindSafe(|| old.service_slots_idle())).is_ok();
+    }
     if !clean {
         core.counters.panics.fetch_add(1, Relaxed);
         log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
-    }
-    for desk in desks.iter_mut() {
-        desk.pump(&core.settings);
-        if !clean {
+        for desk in desks.iter_mut() {
+            desk.pump(&core.settings);
             desk.lose();
         }
     }

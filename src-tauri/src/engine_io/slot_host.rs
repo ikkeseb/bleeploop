@@ -101,6 +101,12 @@ impl SlotHost {
             // Under the desk lock: a rebuild holds every desk while it publishes the new rate and
             // replaces the ports, so the rate and the port read here belong to one engine.
             let mut desk = self.desk();
+            if desk.occupied() {
+                // A remove queued while no device runs (an abandoned owner's) waits for a service.
+                drop(desk);
+                self.service_if_idle();
+                desk = self.desk();
+            }
             if desk.port.is_none() {
                 return Err((unit, "no audio device is open".to_string()));
             }
@@ -248,6 +254,7 @@ impl SlotHost {
     /// and the slot frees; a replace that commits after this is removed at once.
     pub fn abandon(&self) {
         self.desk().abandon(self.token);
+        self.service_if_idle();
     }
 
     /// The slot's desk, locked, with the port's replies routed.
@@ -286,9 +293,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use lf_engine::grid::Frame;
-    use lf_engine::{Command, Rejection, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
+    use lf_engine::{Command, Engine, EngineConfig, Rejection, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
-    use super::{Answer, Back, SlotHost, Standing};
+    use super::{Answer, Back, Desk, SlotHost, Standing};
     use crate::engine_io::test_rig::{TestDevice, PATIENCE};
 
     /// What a [`Constant`] counts: its calls, its stops and its drops (a drop the desk made would count).
@@ -355,6 +362,12 @@ mod tests {
         unit.into_any().downcast::<Constant>().expect("the host's own type").level
     }
 
+    /// The loudest of the last two blocks the device rendered (a block the engine lock missed is silent).
+    fn heard(device: &TestDevice) -> f32 {
+        let out = device.output.lock().unwrap();
+        out[out.len().saturating_sub(512)..].iter().fold(0.0, |max, s| max.max(s.abs()))
+    }
+
     fn eventually<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -388,7 +401,12 @@ mod tests {
 
     /// A device at 48 kHz with owner A's unit (0.25) playing in slot 0; B is a second owner of slot 0.
     fn playing() -> (TestDevice, SlotHost, Counts, SlotHost) {
-        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        playing_every(Duration::from_millis(1))
+    }
+
+    /// [`playing`] with a 256-frame block rendered every `period`.
+    fn playing_every(period: Duration) -> (TestDevice, SlotHost, Counts, SlotHost) {
+        let device = TestDevice::start(48_000, 256, period, |_| 0.0);
         let (a, b) = (device.host().slot(0), device.host().slot(0));
         let (unit, counts) = constant(0.25);
         assert!(a.install(unit, 48_000).is_ok());
@@ -563,15 +581,25 @@ mod tests {
     #[test]
     fn a_swaps_gain_enters_the_replay_even_when_a_rebuild_comes_before_the_answer_is_read() {
         let (device, _a, _, b) = playing();
-        device.host().send(TimedCommand { frame: None, command: Command::SetSlotGain(0, 0.3) }).unwrap();
+        // Live, so the slot is heard: the rebuilt engine's level is what its replay set.
+        for command in [Command::SetSlotGain(0, 0.3), Command::SetSlotLive(0, true)] {
+            device.host().send(TimedCommand { frame: None, command }).unwrap();
+        }
         let (unit, _) = constant(0.5);
         assert!(b.replace(unit, 48_000, 0.7).is_ok());
         assert!(device.wait_blocks(20));
         assert!(device.host().settings().contains(&Command::SetSlotGain(0, 0.3)), "nothing has read the desk yet");
+        let swapped = heard(&device);
+        assert!(swapped > 0.1, "B plays at the swap's gain: {swapped}");
         device.rebuild_at(44_100, 512);
         let replay = device.host().settings();
         assert!(replay.contains(&Command::SetSlotGain(0, 0.7)) && !replay.contains(&Command::SetSlotGain(0, 0.3)), "{replay:?}");
         assert!(matches!(b.answer(PATIENCE), Answer::Committed), "the answer waits on the desk across the rebuild");
+        let Some(Back::Evicted(unit)) = b.take_back() else { panic!("B's unit was evicted") };
+        assert!(b.install(unit, 44_100).is_ok());
+        assert!(device.wait_blocks(20));
+        let rebuilt = heard(&device);
+        assert!((rebuilt - swapped).abs() < 0.01, "the new engine plays B at the swap's gain: {rebuilt}, not {swapped}");
     }
 
     #[test]
@@ -615,5 +643,108 @@ mod tests {
         assert_eq!(level(back), 0.5);
         assert!(b.standing().is_none() && b.take_back().is_none(), "nothing of B's on the desk");
         assert_eq!(a.standing(), Some(Standing::Active));
+    }
+
+    #[test]
+    fn a_rebuild_over_a_full_reply_ring_still_hands_the_parked_unit_to_its_owner() {
+        let (mut device, a, counts_a, _) = playing();
+        device.stop();
+        // Four withdraws fill the message ring; the rebuild's service answers each `NotHeld`, which fills
+        // the reply ring, so the eviction parks in the old engine behind them.
+        for _ in 0..4 {
+            assert!(a.withdraw());
+        }
+        device.rebuild_at(44_100, 512);
+        let Some(Back::Evicted(back)) = a.take_back() else { panic!("the parked eviction reaches its owner") };
+        assert_eq!((counts_a.stops(), counts_a.drops()), (1, 0), "stopped once; never dropped with the old engine");
+        assert_eq!(level(back), 0.25);
+    }
+
+    #[test]
+    fn a_desk_dropped_with_unread_units_leaks_them() {
+        let (parked, in_mail) = constant(0.5);
+        let (evicted, on_port) = constant(0.25);
+        let (mut engine, handle) = Engine::new(EngineConfig { max_loop_seconds: 2.0, ..EngineConfig::new(48_000) });
+        let [mut port, _] = handle.slots;
+        assert!(port.install(2, evicted).is_ok());
+        engine.service_slots_idle();
+        engine.evict_slots();
+        let mut desk = Desk::new(0);
+        desk.park(1, parked);
+        desk.port = Some(port);
+        drop(desk);
+        drop(engine);
+        assert_eq!((in_mail.drops(), on_port.drops()), (0, 0), "leaked, from the mail and the port alike");
+    }
+
+    #[test]
+    fn an_owner_that_abandons_a_committed_replace_on_a_stopped_device_has_its_unit_removed_and_leaked() {
+        let (mut device, a, _, b) = playing();
+        device.stop();
+        let (unit, counts_b) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok(), "serviced at once: committed");
+        assert_eq!(a.standing(), Some(Standing::Retiring), "A's read routed B's commit to B's mail");
+        b.abandon();
+        assert_eq!(b.standing(), None, "removed at once, nothing waits for a device");
+        assert_eq!((counts_b.stops(), counts_b.drops()), (1, 0), "stopped, then leaked: never dropped");
+        let (unit, _) = constant(0.1);
+        assert!(device.host().slot(0).install(unit, 48_000).is_ok(), "the slot is free");
+    }
+
+    #[test]
+    fn an_owner_that_abandons_a_committed_replace_on_a_running_device_has_its_unit_removed_and_leaked() {
+        let (device, a, _, b) = playing();
+        let (unit, counts_b) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        eventually("A's read routes B's commit to B's mail", || (a.standing() == Some(Standing::Retiring)).then_some(()));
+        b.abandon();
+        let (unit, _) = constant(0.1);
+        install_eventually(&device.host().slot(0), unit, 48_000);
+        assert_eq!((counts_b.stops(), counts_b.drops()), (1, 0), "removed, then leaked: never dropped");
+        assert_eq!(b.standing(), None);
+    }
+
+    #[test]
+    fn an_install_on_a_stopped_device_services_the_remove_an_abandoned_commit_left_queued() {
+        let (mut device, a, _, b) = playing();
+        let core = device.host().core.clone();
+        let held = core.rt.lock().unwrap();
+        let (unit, counts_b) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        b.abandon();
+        // Stopped before any block took the replace: the next service commits it, its read queues the
+        // remove, and only an install looks at the slot after that.
+        device.stop();
+        drop(held);
+        let (unit, _) = constant(0.1);
+        install_eventually(&device.host().slot(0), unit, 48_000);
+        assert_eq!((counts_b.stops(), counts_b.drops()), (1, 0), "removed, then leaked: never dropped");
+        let Some(Back::Out(out)) = a.take_back() else { panic!("A was retired by B's commit") };
+        assert_eq!(level(out), 0.25);
+    }
+
+    #[test]
+    fn a_retired_owners_remove_waits_for_its_unit_to_fade_out() {
+        // 20 ms a block: the fade (480 frames) spans two, which the poll below cannot miss.
+        let (device, a, counts_a, b) = playing_every(Duration::from_millis(20));
+        let core = &device.host().core;
+        let (unit, _) = constant(0.5);
+        assert!(b.replace(unit, 48_000, 0.8).is_ok());
+        // Held from the commit on: no block runs, so A's unit fades until it is released.
+        let held = eventually("B's replace commits", || {
+            let held = core.rt.lock().unwrap();
+            (a.standing() == Some(Standing::Retiring)).then_some(held)
+        });
+        assert!(core.ports[0].lock().unwrap().in_engine(a.tag()), "caught while A's unit fades out");
+        let removed = std::thread::scope(|s| {
+            let removal = s.spawn(|| a.remove(PATIENCE));
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!removal.is_finished(), "the remove waits for the unit fading out");
+            drop(held);
+            removal.join().unwrap()
+        });
+        let back = removed.expect("comes back").expect("A's own unit");
+        assert_eq!((level(back), counts_a.stops()), (0.25, 1));
+        assert_eq!(a.standing(), None);
     }
 }

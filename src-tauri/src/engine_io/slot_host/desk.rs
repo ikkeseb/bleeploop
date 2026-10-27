@@ -65,12 +65,15 @@ impl Desk {
         Desk { slot, port: None, owners: Vec::new(), mail: VecDeque::new() }
     }
 
-    /// Route every reply the port holds to its owner (the header's rules).
-    pub(crate) fn pump(&mut self, settings: &Mutex<Settings>) {
+    /// Route every reply the port holds to its owner (the header's rules): how many it routed.
+    pub(crate) fn pump(&mut self, settings: &Mutex<Settings>) -> usize {
+        let mut routed = 0;
         while let Some(reply) = self.port.as_mut().and_then(SlotPort::reply) {
             self.route(reply, settings);
+            routed += 1;
         }
         self.send_owed_removes();
+        routed
     }
 
     /// The engine this desk's units were in was leaked (a unit panicked on its way out): those still in
@@ -193,7 +196,9 @@ impl Desk {
                 };
                 if let Some(gain) = entry.swap_gain.take() {
                     // Lock order: a slot's desk, then `settings`, as `swap_engine` takes them; nothing takes a
-                    // desk while it holds `settings`.
+                    // desk while it holds `settings`. A `SetSlotGain` sent between the commit and this pump is
+                    // overwritten here: at most one answer poll while the owner waits, and the UI sends no gain
+                    // for a slot while its swap is pending.
                     let mut settings = settings.lock().unwrap_or_else(|e| e.into_inner());
                     settings.record(&Command::SetSlotGain(slot as u8, gain));
                 }
@@ -255,5 +260,22 @@ impl Desk {
 
     fn entry_mut(&mut self, tag: u64) -> Option<&mut OwnerEntry> {
         self.owners.iter_mut().find(|e| e.tag == tag)
+    }
+}
+
+impl Drop for Desk {
+    /// A unit no owner took, from the mail or the port, leaks here (the header).
+    fn drop(&mut self) {
+        let unread = std::iter::from_fn(|| self.port.as_mut()?.reply());
+        let mut leaked = 0;
+        for reply in self.mail.drain(..).chain(unread) {
+            if let SlotReply::Handback(back) = reply {
+                std::mem::forget(back.unit);
+                leaked += 1;
+            }
+        }
+        if leaked > 0 {
+            log::warn!("[engine_io] slot {}: {leaked} unit(s) never reached their owners; leaking them", self.slot);
+        }
     }
 }
