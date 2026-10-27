@@ -206,6 +206,10 @@ impl SlotProcessor for Vst3Unit {
         }
     }
 
+    fn start_refused(&self) -> bool {
+        self.refused
+    }
+
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }

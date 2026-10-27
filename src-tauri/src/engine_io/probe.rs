@@ -623,7 +623,7 @@ impl Probe {
         let (index, spec) = (self.slots[k].slot, self.plugins[plugin].clone());
         let sink: EventSink = Arc::new(move |event: EngineSlotEvent| say(format!("slot {index}: {event:?}")));
         let began = Instant::now();
-        match engine_slot::load(spec.format, spec.path.clone(), spec.id.clone(), self.host.slot(index), 0, sink, None) {
+        match engine_slot::load(spec.format, spec.path.clone(), spec.id.clone(), self.host.slot(index), 0, sink, None, engine_slot::Entry::Install) {
             Ok(handle) => {
                 say(format!("slot {index}: {} ({:?}) loaded in {} ms", handle.name(), handle.kind(), began.elapsed().as_millis()));
                 self.slots[k].handle = Some(handle);

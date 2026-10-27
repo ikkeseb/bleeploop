@@ -318,7 +318,7 @@ impl EngineApp {
         // transient parent.
         let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
         let open = |format: PluginFormat, path: String, id: String, slot_host: SlotHost, tone: Option<ToneBinding>| {
-            engine_slot::load(format, path, id, slot_host, parent, sink.clone(), tone)
+            engine_slot::load(format, path, id, slot_host, parent, sink.clone(), tone, engine_slot::Entry::Install)
         };
         let target = LoadTarget {
             slots: &self.slots,
@@ -609,7 +609,7 @@ mod tests {
         let rig = Rig::new();
         let epoch = rig.state.begin_frontend_session();
         let open = |format: PluginFormat, path: String, id: String, slot: SlotHost, tone: Option<ToneBinding>| {
-            engine_slot::load(format, path, id, slot, 0, Arc::new(|_| {}), tone)
+            engine_slot::load(format, path, id, slot, 0, Arc::new(|_| {}), tone, engine_slot::Entry::Install)
         };
         let load = |path: &str| rig.load(path, epoch, Duration::ZERO, &open);
 

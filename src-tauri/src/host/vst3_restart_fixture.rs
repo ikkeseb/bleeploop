@@ -720,6 +720,7 @@ mod engine {
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
             tone,
+            engine_slot::Entry::Install,
             owner(made.clone(), make),
         );
         (handle, made, seen)

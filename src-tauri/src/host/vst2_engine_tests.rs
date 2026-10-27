@@ -113,6 +113,7 @@ fn try_load(device: &TestDevice, slot: usize, shape: Shape, id: &'static str, to
         0,
         Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
         tone,
+        engine_slot::Entry::Install,
         owner(shape, id),
     );
     (handle, seen)
@@ -1312,6 +1313,7 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
         slot: device.host().slot(slot),
         running: running.clone(),
         claim: Default::default(),
+        entry: engine_slot::Entry::Install,
         requests: owner_requests,
         params,
         params_tx: Arc::new(Mutex::new(params_tx)),

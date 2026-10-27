@@ -900,6 +900,7 @@ mod engine {
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
             tone,
+            engine_slot::Entry::Install,
             owner(obs),
         )
         .expect("the fixture loads into the engine");
