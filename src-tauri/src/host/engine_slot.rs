@@ -814,7 +814,7 @@ pub(crate) struct EngineSlotHandle {
     /// The owner's handshake with the slot, for where it stands (`retired`).
     slot_host: SlotHost,
     running: Arc<AtomicBool>,
-    /// Taken by the one caller that stops and joins the owner (`retire`), through a shared handle.
+    /// Taken by the one caller that stops and joins the owner (`unload`), through a shared handle.
     owner: Mutex<Option<JoinHandle<Result<(), String>>>>,
     requests: Sender<OwnerRequest>,
     params_tx: Arc<Mutex<Producer<ParamEvent>>>,
@@ -878,7 +878,7 @@ impl EngineSlotHandle {
             pushed();
         }
         if self.format == PluginFormat::Vst3 && self.requests.send(OwnerRequest::SetParamNormalized(id, value)).is_err() {
-            return Err(format!("slot {slot} owner thread gone; parameter {id} reached the processor, not the controller"));
+            return self.unless_unloading(|| Err(format!("slot {slot} owner thread gone; parameter {id} reached the processor, not the controller")));
         }
         Ok(())
     }
@@ -897,32 +897,25 @@ impl EngineSlotHandle {
     /// Ask for a tone save without waiting: the app's exit sends one to every slot, then waits on all
     /// the replies under one deadline.
     pub(crate) fn start_tone_save(&self) -> Result<Receiver<Result<Vec<u8>, String>>, String> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        self.requests.send(OwnerRequest::SaveTone(reply_tx)).map_err(|_| "owner thread gone".to_string())?;
-        Ok(reply_rx)
+        self.unless_unloading(|| {
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+            self.requests.send(OwnerRequest::SaveTone(reply_tx)).map_err(|_| "owner thread gone".to_string())?;
+            Ok(reply_rx)
+        })
     }
 
     /// Open the plugin's editor (≤ 5 s; an editor that comes up later is closed again).
     pub(crate) fn open_editor(&self) -> Result<(), String> {
-        owner_request_5s(&self.requests, "open_editor", OwnerRequest::OpenEditor)
+        self.unless_unloading(|| owner_request_5s(&self.requests, "open_editor", OwnerRequest::OpenEditor))
     }
 
     pub(crate) fn close_editor(&self) -> Result<(), String> {
-        owner_request_5s(&self.requests, "close_editor", OwnerRequest::CloseEditor)
+        self.unless_unloading(|| owner_request_5s(&self.requests, "close_editor", OwnerRequest::CloseEditor))
     }
 
-    /// `retire`, for the handle's one holder.
-    pub(crate) fn unload(self) -> Result<(), String> {
-        self.retire()
-    }
-
-    /// Tear the slot down in order (the unit leaves the engine → deactivate → terminate and release
-    /// → the module last) and join the owner, through a handle other threads may still share. Ok once
-    /// the plugin is released in order; Err when the engine did not hand the unit back (the plugin is
-    /// then left loaded rather than unloaded under a running processor), when the owner panicked, or
-    /// when another caller has stopped the owner already. Unbounded: a caller that must not wait for a
-    /// plugin's own release bounds it from outside.
-    pub(crate) fn retire(&self) -> Result<(), String> {
+    /// Tear the slot down in order and join the owner, through a handle others may share; Err when the
+    /// unit stayed in the engine (the plugin is left loaded), the owner panicked or another caller took the join.
+    pub(crate) fn unload(&self) -> Result<(), String> {
         self.stop_owner().unwrap_or_else(|| Err(format!("slot {}: another caller stopped this plugin's owner", self.slot)))
     }
 
@@ -933,7 +926,7 @@ impl EngineSlotHandle {
     }
 
     /// An unload's first step alone: the owner's loop ends at its next check and it tears down on its
-    /// own thread; `retire` still joins it. Several teardowns started first are joined in turn without
+    /// own thread; `unload` still joins it. Several teardowns started first are joined in turn without
     /// one plugin's release holding up the others' start.
     pub(crate) fn stop(&self) {
         self.running.store(false, Release);
@@ -956,13 +949,21 @@ impl EngineSlotHandle {
         op: &str,
         build: impl FnOnce(SyncSender<Result<T, String>>) -> OwnerRequest,
     ) -> Result<T, String> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        self.requests
-            .send(build(reply_tx))
-            .map_err(|_| "owner thread gone".to_string())?;
-        reply_rx
-            .recv_timeout(ASK_TIMEOUT)
-            .map_err(|e| format!("{op} timed out: {e}"))?
+        self.unless_unloading(|| {
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+            self.requests.send(build(reply_tx)).map_err(|_| "owner thread gone".to_string())?;
+            reply_rx.recv_timeout(ASK_TIMEOUT).map_err(|e| format!("{op} timed out: {e}"))?
+        })
+    }
+
+    /// An owner request, refused busy once an unload has stopped the owner (`stop`), before it is sent
+    /// or as it fails: a command racing an unload is answered so, and the unload never waits for it.
+    fn unless_unloading<T>(&self, request: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let unloading = || (!self.running.load(Acquire)).then(|| format!("busy: the plugin in slot {} is unloading", self.slot));
+        if let Some(busy) = unloading() {
+            return Err(busy);
+        }
+        request().map_err(|e| unloading().unwrap_or(e))
     }
 }
 
@@ -1613,7 +1614,7 @@ mod tests {
         let calls = old.calls();
         assert!(device.wait_blocks(5));
         assert_eq!(old.calls(), calls, "the old unit is out of the engine");
-        playing.retire().expect("the old owner releases its plugin");
+        playing.unload().expect("the old owner releases its plugin");
         assert_eq!((old.releases(), old.reinstalls.load(Relaxed)), (vec![true], 0), "released with its unit, never reinstalled");
         let mut order = old.order.lock().unwrap().clone();
         order.dedup();
@@ -1649,7 +1650,7 @@ mod tests {
         let calls = old.calls();
         assert!(device.wait_blocks(5));
         assert_eq!((old.reinstalls.load(Relaxed), old.calls(), old_slot.standing()), (0, calls, Some(Standing::Retiring)), "nor once the slot is empty");
-        playing.retire().expect("the old owner releases its plugin");
+        playing.unload().expect("the old owner releases its plugin");
         assert_eq!(old.releases(), [true]);
     }
 
@@ -1671,7 +1672,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!((old.reinstalls.load(Relaxed), old_slot.standing()), (0, Some(Standing::Retiring)), "never reinstalled");
         assert!(plays(&device, &new), "the new plugin plays on");
-        playing.retire().expect("the old owner releases its plugin");
+        playing.unload().expect("the old owner releases its plugin");
         assert_eq!(old.releases(), [true]);
         swapped.unload().expect("it unloads");
     }
@@ -1785,22 +1786,25 @@ mod tests {
         playing.unload().expect("it unloads");
     }
 
-    /// A retire thread stops and joins the owner through its clone of a shared handle while another
-    /// clone is alive: the plugin is released with its unit; a second retire, while the first still
-    /// joins (the plugin's release held), is refused at once.
+    /// An unload stops and joins the owner through its clone of a shared handle while other clones are
+    /// alive: the plugin is released with its unit; while the first still joins (the plugin's release
+    /// held), a second unload and a command's owner request are refused at once, the request `busy:`.
     #[test]
-    fn a_retire_through_a_shared_handle_releases_the_plugin_and_a_second_one_does_not_wait() {
+    fn an_unload_through_a_shared_handle_releases_the_plugin_and_neither_a_second_one_nor_a_command_waits() {
         let _one = one_engine_test_at_a_time();
         let old = Arc::new(Bench::default());
         let (_device, slot, playing) = swap_rig(&old);
         let shared = Arc::new(playing);
-        let other = shared.clone();
+        let (other, command) = (shared.clone(), shared.clone());
         let (there, go) = old.releasing.arm();
-        let first = std::thread::spawn(move || shared.retire());
-        there.recv_timeout(PATIENCE).expect("the first retire reaches the plugin's release");
-        // On its own thread, so a second retire that waits for the first fails here rather than hangs.
+        let first = std::thread::spawn(move || shared.unload());
+        there.recv_timeout(PATIENCE).expect("the first unload reaches the plugin's release");
+        for refused in [command.list_params().map(drop), command.take_tone().map(drop), command.open_editor()] {
+            assert_eq!(refused, Err("busy: the plugin in slot 0 is unloading".to_string()));
+        }
+        // On its own thread, so a second unload that waits for the first fails here rather than hangs.
         let (again_tx, again) = channel();
-        std::thread::spawn(move || again_tx.send(other.retire()));
+        std::thread::spawn(move || again_tx.send(other.unload()));
         let again = again.recv_timeout(Duration::from_secs(1)).expect("refused while the first still joins");
         assert!(again.as_ref().is_err_and(|e| e.contains("another caller")), "{again:?}");
         assert!(old.releases().is_empty(), "the first is still releasing");

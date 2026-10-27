@@ -14,14 +14,11 @@
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
-  that command's drop of the handle still tears the plugin down (read from source, never run; no
-  command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on
-  "already holds a unit" (rig recall keeps the plugin) or wins the slot first; the late owner's unit
-  may sound for its crossfade. A load whose unit went in as its 15 s bound ran out, and whose report
-  then took 2 s more, frees the slot the same way (`engine_slot::LoadClaim`). Next check: a slot test
-  in `engine_io/plugins.rs` that holds a handle clone past the unload wait, then loads. A fix carries
-  an owner-ended flag in `Leaving`.
+- A load whose unit went in as its 15 s bound ran out, and whose report then took 2 s more, frees the
+  slot while its owner still holds the unit (`engine_slot::LoadClaim`; read from source, never run).
+  A load meanwhile fails on "already holds a unit" (rig recall keeps the plugin) or wins the slot
+  first; the late owner's unit may sound for its crossfade. A fix carries an owner-ended flag in
+  `Leaving`.
 - VST2 host gaps (read from source, none reproduced; the only real plugins tried are ReaJS and
   ReaStream, which load, open their editors and swap, and whose `native:tone-recall` fails because
   neither has a parameter that holds a value):

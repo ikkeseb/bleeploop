@@ -14,15 +14,15 @@
 //! one an unload cancelled meanwhile, unloads what it loaded, and the slot stays out of reach until
 //! the plugin's unit has left the engine; a load for the new document waits for it (≤ `VACATE_WAIT`).
 //! A setup past its bound frees the slot with no unit left in it (`engine_slot::LoadClaim`). A loaded
-//! plugin's unload takes its slot off live first (`silence`), and refuses when it cannot. An unload
-//! that gives up on a shared handle (`unload_handle`) frees it early; `src-tauri/OPEN-THREADS.md`.
+//! plugin's unload takes its slot off live first (`silence`), and refuses when it cannot. It joins the
+//! owner through the handle commands may share: a command whose owner round trip races it is refused busy.
 //! Every request that changes a slot (load, unload, a parameter, the editor) names its document and is
 //! refused from a replaced one, checked under the slots lock as it takes the slot. Commands clone a
 //! loaded slot's handle out of the lock, so a slow owner round trip on one slot holds up nobody else.
 //!
 //! A hot swap (`swap`) loads the next plugin while the slot's plugin plays (`Swapping`, where requests
-//! reach the playing one), and the plugin it replaced retires on a thread of its own (inline, when none
-//! starts). Until that retire has ended, no load or swap takes the slot (≤ `VACATE_WAIT`): the next pick starts once the
+//! reach the playing one), and the plugin it replaced retires on a thread of its own, started before the
+//! swap takes the slot (a swap that cannot start one is refused busy). Until that retire has ended, no load or swap takes the slot (≤ `VACATE_WAIT`): the next pick starts once the
 //! earlier instance is gone.
 
 use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}};
@@ -38,9 +38,6 @@ use super::{EngineHost, SlotHost};
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, Entry, EventSink, PluginFormat};
 use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneStore};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
-
-/// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
-const UNLOAD_WAIT: Duration = Duration::from_secs(6);
 
 /// How long an unload waits for its slot's live gate to close before the unit leaves the engine.
 const LIVE_OFF_WAIT: Duration = Duration::from_secs(1);
@@ -64,26 +61,24 @@ type SlotsGuard<'a> = MutexGuard<'a, [SlotEntry; lf_engine::SLOT_COUNT]>;
 #[derive(Default)]
 pub(crate) struct SlotEntry {
     state: EngineSlot,
-    /// The replaced owner's retire (`swap::spawn_retire`), until the slot's next reservation reaps it,
-    /// or until the swap that retires it inline clears it.
+    /// The replaced owner's retire (`swap::spawn_retire`), until the slot's next reservation reaps it.
     retiring: Option<Retiring>,
 }
 
-/// A replaced owner's stop and join: on its own thread (`join`: `true` once it released its plugin in
-/// order), or, with none started (`None`), inline on the swap's own thread.
+/// A replaced owner's stop and join, on its own thread (`join`: `true` once it released its plugin in
+/// order).
 struct Retiring {
     instance: u64,
-    join: Option<JoinHandle<bool>>,
+    join: JoinHandle<bool>,
 }
 
 impl SlotEntry {
-    /// The instance a swap replaced here while its retire still runs (an inline one runs until its swap
-    /// clears it); a finished retire thread is reaped.
+    /// The instance a swap replaced here while its retire still runs; a finished retire is reaped.
     fn retiring(&mut self) -> Option<u64> {
         match &self.retiring {
-            Some(Retiring { instance, join }) if !join.as_ref().is_some_and(JoinHandle::is_finished) => Some(*instance),
+            Some(Retiring { instance, join }) if !join.is_finished() => Some(*instance),
             _ => {
-                if let Some(Retiring { join: Some(join), .. }) = self.retiring.take() {
+                if let Some(Retiring { join, .. }) = self.retiring.take() {
                     let _ = join.join();
                 }
                 None
@@ -353,7 +348,7 @@ fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, ho
             }
         }
     };
-    let unloaded = unload_handle(slot, handle);
+    let unloaded = handle.unload();
     vacate(slots, slot);
     unloaded
 }
@@ -371,27 +366,6 @@ fn silence(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>, h
         matches!(slots[usize::from(slot)].state, EngineSlot::Loaded { .. } | EngineSlot::Swapping { .. })
     };
     if loaded { host.silence_slot(slot, LIVE_OFF_WAIT) } else { Ok(()) }
-}
-
-/// A command may still hold the handle for an owner round trip: wait it out (≤ `UNLOAD_WAIT`), then
-/// unload here; past that, the last user unloads it, after the caller has already vacated the slot
-/// (`src-tauri/OPEN-THREADS.md`).
-fn unload_handle(slot: u8, mut handle: Arc<EngineSlotHandle>) -> Result<(), String> {
-    let deadline = Instant::now() + UNLOAD_WAIT;
-    loop {
-        match Arc::try_unwrap(handle) {
-            Ok(handle) => return handle.unload(),
-            Err(shared) if Instant::now() >= deadline => {
-                log::warn!("[plugin_host] engine slot {slot}: still in use; the last user unloads it");
-                drop(shared);
-                return Ok(());
-            }
-            Err(shared) => {
-                handle = shared;
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-    }
 }
 
 /// The exit begins (`closing`): from here no load or swap takes a slot, and every load or swap in
@@ -413,7 +387,7 @@ fn begin_closing(slots: &Slots, closing: &AtomicBool) {
 /// unloads all the same). Every loaded plugin leaves through `Leaving`, the exit's from then on; a
 /// swapping slot stays its swap's (called off, it ends both its plugins), and only its playing
 /// plugin's teardown starts here. Every teardown starts before any is joined, and each joins through
-/// the handle commands may still share (never `unload_handle`'s wait for the last holder). Then the
+/// the handle commands may still share. Then the
 /// exit waits for what others end: a load, an unload, a swap, a retire. Unbounded: the shutdown bounds
 /// it (`mode::SHUTDOWN_WAIT`).
 fn unload_all(slots: &Slots, host: Option<&EngineHost>) {
@@ -439,12 +413,12 @@ fn unload_all(slots: &Slots, host: Option<&EngineHost>) {
         handle.stop();
     }
     for (slot, handle) in taken {
-        if let Err(e) = handle.retire() {
+        if let Err(e) = handle.unload() {
             log::error!("[plugin_host] engine slot {slot}: unload on exit: {e}");
         }
         vacate(slots, slot);
     }
-    // `retiring` reaps a finished retire thread; an inline retire's mark is cleared by its swap.
+    // `retiring` reaps a finished retire thread.
     while !slots
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1468,10 +1442,10 @@ mod tests {
         assert_eq!(rig.slot(), "empty");
     }
 
-    /// The exit waits for a swapped-out plugin's retire thread, its slot already vacated, and for an
-    /// inline retire's mark, which only its swap clears: it returns once no retire runs.
+    /// The exit waits for a swapped-out plugin's retire thread, its slot already vacated: it returns
+    /// once no retire runs.
     #[test]
-    fn the_exit_waits_for_an_unfinished_retire_and_an_inline_ones_mark() {
+    fn the_exit_waits_for_an_unfinished_retire() {
         let rig = Rig::new();
         let epoch = rig.state.begin_frontend_session();
         let (old, new) = (Hooks::default(), Hooks::default());
@@ -1480,22 +1454,15 @@ mod tests {
         let (tearing_down, go) = old.leaving.arm();
         assert!(rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &new.open(effect)).is_ok());
         assert!(tearing_down.recv_timeout(Duration::from_secs(10)).is_ok(), "the replaced owner tears down");
-        lock(&rig.slots).unwrap()[1].retiring = Some(Retiring { instance: 7, join: None });
-        let (for_the_thread, for_the_mark) = std::thread::scope(|s| {
+        let for_the_thread = std::thread::scope(|s| {
             let exit = s.spawn(|| rig.exit());
             std::thread::sleep(Duration::from_millis(100));
             let for_the_thread = !exit.is_finished() && rig.slot() == "empty";
             let _ = go.send(());
-            retires(&rig, 1);
-            std::thread::sleep(Duration::from_millis(100));
-            let for_the_mark = !exit.is_finished();
-            // As the swap that runs it inline clears its mark.
-            lock(&rig.slots).unwrap()[1].retiring = None;
             exit.join().unwrap();
-            (for_the_thread, for_the_mark)
+            for_the_thread
         });
         assert!(for_the_thread, "the exit waits for the retire thread, its slot vacated");
-        assert!(for_the_mark, "and for the inline retire's mark");
         assert_eq!(rig.retired(), vec![(0, replaced, true)]);
         assert_eq!((rig.slot(), new.ended.load(Relaxed)), ("empty", 1), "the playing plugin ended");
         assert!(lock(&rig.slots).unwrap().iter().all(|entry| entry.retiring.is_none()));
@@ -1541,32 +1508,6 @@ mod tests {
             assert!(Instant::now() < deadline, "a replaced plugin never ended its retire");
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    /// A retire the swap runs inline (no thread started) holds the slot as a retire thread does: a cold
-    /// load and a swap past their wait are refused as still releasing, and ones that wait land once the
-    /// swap has cleared its mark.
-    #[test]
-    fn an_inline_retire_holds_the_slot_until_its_swap_clears_it() {
-        let rig = Rig::new();
-        let epoch = rig.state.begin_frontend_session();
-        let mark = |set: bool| lock(&rig.slots).unwrap()[0].retiring = set.then_some(Retiring { instance: 7, join: None });
-        let held_until_cleared = |attempt: &(dyn Fn(Duration) -> Result<(), String> + Sync)| {
-            mark(true);
-            let early = attempt(Duration::ZERO);
-            let (waited, late) = std::thread::scope(|s| {
-                let late = s.spawn(|| attempt(Duration::from_secs(10)));
-                std::thread::sleep(Duration::from_millis(100));
-                let waited = !late.is_finished();
-                mark(false);
-                (waited, late.join().unwrap())
-            });
-            assert!(early.as_ref().is_err_and(|e| e.contains("still releasing the plugin it played before (instance 7)")), "{early:?}");
-            assert!(waited, "it waits for the inline retire");
-            assert_eq!(late, Ok(()));
-        };
-        held_until_cleared(&|wait| rig.load(r"C:\plugins\Amp.clap", epoch, wait, &stand_in).map(drop));
-        held_until_cleared(&|wait| rig.swap(r"C:\plugins\Drive.clap", epoch, wait, &stand_in).map(drop));
     }
 
     /// A swap called off by a reload as its load fails, whose live-off cannot apply (no block renders):
@@ -1617,6 +1558,57 @@ mod tests {
         retires(&rig, 1);
         assert_eq!(rig.retired(), vec![(0, playing, true)], "the old one retired");
         assert_eq!((old.ended.load(Relaxed), new.ended.load(Relaxed)), (1, 0));
+    }
+
+    /// The exit begins while a called-off swap's failed live-off is about to roll back, and takes its
+    /// snapshot with the slot `Leaving`: the rollback sees the exit, ends both plugins (neither as a
+    /// retire) and empties the slot, and the exit returns without its bound.
+    #[test]
+    fn the_exit_during_a_failed_live_offs_rollback_ends_both_plugins_and_empties_the_slot() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        let (old, new) = (Hooks::default(), Hooks::default());
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &old.open(effect)).is_ok());
+        let (open_new, staged, rollback) = (new.open(effect), Hold::default(), Arc::new(Hold::default()));
+        let (committed, locked) = staged.arm();
+        let (rolling_back, go) = rollback.arm();
+        let commits_then_reloads = |format: PluginFormat, path: String, id: String, slot: SlotHost, tone: Option<ToneBinding>, entry: Entry| {
+            let loaded = open_new(format, path, id, slot, tone, entry);
+            rig.state.begin_frontend_session();
+            // The test takes the engine lock meanwhile: no block renders the live-off.
+            staged.take();
+            loaded
+        };
+        let (waited, exited, swapped) = std::thread::scope(|s| {
+            let swap = s.spawn(|| {
+                let hook = rollback.clone();
+                swap::ROLLBACK.with(|h| h.set(Some(Box::new(move || hook.take()))));
+                rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &commits_then_reloads)
+            });
+            let _ = committed.recv_timeout(Duration::from_secs(10));
+            let held = rig.device.host().core.rt.lock().unwrap();
+            let _ = locked.send(());
+            let _ = rolling_back.recv_timeout(Duration::from_secs(10));
+            let exit = s.spawn(|| rig.exit());
+            until(Duration::from_secs(10), || rig.closing.load(Acquire));
+            std::thread::sleep(Duration::from_millis(100));
+            let waited = !exit.is_finished() && rig.slot() == "leaving";
+            drop(held);
+            let _ = go.send(());
+            let exited = until(Duration::from_secs(10), || exit.is_finished());
+            if !exited {
+                // A rollback that put a plugin back leaves it to nobody: end it, so the exit returns.
+                let _ = unload(&rig.slots, 0, None, None);
+            }
+            exit.join().unwrap();
+            (waited, exited, swap.join().unwrap())
+        });
+        assert!(waited, "the exit took its snapshot with the slot leaving, and waits");
+        assert!(exited, "the exit returned without its bound");
+        assert!(swapped.as_ref().is_err_and(|e| e.contains("superseded")), "{swapped:?}");
+        assert_eq!(rig.slot(), "empty");
+        assert_eq!((old.dropped.load(Acquire), new.dropped.load(Acquire)), (1, 1), "both plugins ended");
+        assert!(rig.retired().is_empty(), "neither as a retire");
     }
 
     /// While a swap loads the next plugin, the slot still holds the one that plays: a tone import for

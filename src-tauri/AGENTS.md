@@ -167,7 +167,7 @@ plugin-GUI work.
   setup, and only that load moves the slot on: one that finishes for a replaced document, or that an
   unload cancelled, unloads what it loaded, and the slot takes no load until the plugin's unit has
   left the engine (an unload holds it the same way); a load for the new document waits for it
-  (`engine_io/plugins.rs`). An unload that gives up on a handle still in use frees the slot early (`OPEN-THREADS.md`). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
+  (`engine_io/plugins.rs`). A command that races an unload is refused busy; a load whose report runs past its bound frees the slot early (`OPEN-THREADS.md`). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
   shared `PluginHostState` there (`host/commands.rs`).
 - **The `!Send` instance (clack `PluginInstance`, the VST3 component, the VST2 effect) lives on its
   owner thread**, NOT `tauri::State`; only the `Send` unit (`ClapUnit`, `Vst3Unit`, `Vst2Unit`: the

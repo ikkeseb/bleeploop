@@ -1,7 +1,8 @@
 //! OWNS: a slot's hot swap, the transaction behind `plugin_swap`: the slot's plugin plays on while the
 //! next one loads beside it (`engine_slot::Entry::Replace`: staged muted, committed, crossfaded to),
 //! and one `finish` moves the slot on whatever the load did: the new plugin plays and the one it
-//! replaced retires on a thread of its own (`plugin:retired`), or the slot goes back to the plugin
+//! replaced retires on a thread of its own (`plugin:retired`), started before the swap takes the slot
+//! (none starts: refused busy) and handed that plugin at the commit, or the slot goes back to the plugin
 //! that plays, or every plugin nobody wants any more leaves through `Leaving`, as an unload's would
 //! (whose failed live-off keeps the plugin the engine plays). At the commit the engine releases what
 //! sounds on the slot and, when the plugin's kind changed, takes the slot off live (`lf_engine::slots`).
@@ -15,12 +16,14 @@
 //! cold (the UI routes it so; this is the backstop).
 
 use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed}};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use tauri::Emitter;
 
-use super::{describe, format_of, lock, take_slot, unload_handle, vacate, window_open, EngineSlot, LoadTarget, Retiring, SlotsGuard, LIVE_OFF_WAIT};
+use super::{describe, format_of, lock, take_slot, vacate, window_open, EngineSlot, LoadTarget, Retiring, SlotsGuard, LIVE_OFF_WAIT};
 use crate::engine_io::mode::EngineApp;
 use crate::host::engine_slot::{EngineSlotHandle, Entry, SwapBounds};
 use crate::host::{PluginHostState, PluginInfo};
@@ -32,6 +35,13 @@ pub(super) struct Retired {
     pub(super) slot: u8,
     pub(super) instance: u64,
     pub(super) released: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs once on the swap's thread, where a failed live-off's rollback is about to take
+    /// the slots lock.
+    pub(super) static ROLLBACK: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }
 
 /// Where a retire reports its end: the window's `plugin:retired`, a test's record otherwise.
@@ -58,13 +68,15 @@ impl SwapTarget<'_> {
         tone_token: Option<u32>,
     ) -> Result<PluginInfo, String> {
         let format = format_of(&path)?;
+        // Before the reservation: a swap with no thread to retire the plugin it replaces changes nothing.
+        let retirer = spawn_retire(slot, self.retired.clone())?;
         let cancel = self.reserve_swap(state, slot, frontend_epoch, &path)?;
         // Past the reservation, so nothing below may return early: `finish` moves the slot on.
         let tone = self.load.tone(slot, format, &path, &id, tone_token);
         let began = Instant::now();
         let entry = Entry::Replace { gain, cancel: cancel.clone(), bounds: SwapBounds::default() };
         let loaded = (self.load.open)(format, path.clone(), id.clone(), self.load.host.slot(usize::from(slot)), tone, entry);
-        let info = self.finish(state, slot, &cancel, loaded.map(|new| (describe(slot, format, path, id, &new), new)))?;
+        let info = self.finish(state, slot, &cancel, retirer, loaded.map(|new| (describe(slot, format, path, id, &new), new)))?;
         log::info!(
             "[plugin_host] engine slot {slot}: {} swapped in as instance {} in {} ms",
             info.descriptor.name,
@@ -99,15 +111,16 @@ impl SwapTarget<'_> {
 
     /// Move the slot on from the swap `cancel` names, under the lock, whatever its load did (`loaded`:
     /// the new plugin with its info). Wanted (the slot still swaps for it, uncancelled, its document
-    /// current, the exit not begun), the new plugin plays and the one it replaced retires (`play`); a
-    /// failed swap gives the slot back to the plugin that plays, unless that one was retired meanwhile (a
-    /// commit the load never reported). Every plugin this thread owns that nobody wants leaves
-    /// (`call_off`).
+    /// current, the exit not begun), the new plugin plays and the one it replaced retires on `retirer`
+    /// (`play`); a failed swap gives the slot back to the plugin that plays, unless that one was retired
+    /// meanwhile (a commit the load never reported). Every plugin this thread owns that nobody wants
+    /// leaves (`call_off`). A `retirer` handed nothing ends as it drops.
     fn finish(
         &self,
         state: &PluginHostState,
         slot: u8,
         cancel: &Arc<AtomicBool>,
+        retirer: Retirer,
         loaded: Result<(PluginInfo, EngineSlotHandle), String>,
     ) -> Result<PluginInfo, String> {
         let mut slots = lock(self.load.slots)?;
@@ -123,7 +136,7 @@ impl SwapTarget<'_> {
         let wanted = |epoch: u32| !cancel.load(Acquire) && state.frontend_epoch.load(Relaxed) == epoch && !self.load.closing.load(Acquire);
         let (old, new, error) = match (ours, loaded) {
             (Some((epoch, old, _)), Ok((info, new))) if wanted(epoch) => {
-                self.play(slots, slot, info.clone(), new, old);
+                self.play(slots, slot, info.clone(), new, old, retirer);
                 return Ok(info);
             }
             (Some((epoch, old, info)), Err(e)) if wanted(epoch) && !old.retired() => {
@@ -140,42 +153,37 @@ impl SwapTarget<'_> {
             (ours, Err(e)) => (ours.map(|(_, old, info)| (old, info)), None, e),
         };
         drop(slots);
-        self.call_off(slot, old, new, error)
+        self.call_off(slot, old, new, error, retirer)
     }
 
     /// `new` plays in `slot` (`slots`, locked) from here, as `info`, and `old`, the owner it replaced,
-    /// retires: on a thread of its own, or on this one once the lock is released, its mark kept until
-    /// that has ended so no swap or cold load takes the slot before.
-    fn play(&self, mut slots: SlotsGuard<'_>, slot: u8, info: PluginInfo, new: EngineSlotHandle, old: Arc<EngineSlotHandle>) {
+    /// retires on `retirer`'s thread, its mark kept until that has ended so no swap or cold load takes
+    /// the slot before.
+    fn play(&self, mut slots: SlotsGuard<'_>, slot: u8, info: PluginInfo, new: EngineSlotHandle, old: Arc<EngineSlotHandle>, retirer: Retirer) {
         let entry = &mut slots[usize::from(slot)];
         entry.state = EngineSlot::Loaded { handle: Arc::new(new), info };
-        let retiring = spawn_retire(slot, &old, self.retired.clone());
-        let inline = retiring.join.is_none();
-        entry.retiring = Some(retiring);
+        entry.retiring = Some(Retiring { instance: old.instance(), join: retirer.join });
         drop(slots);
-        if inline {
-            retire(slot, &old, &self.retired);
-            // As `vacate` recovers it: the mark must go, or the slot never takes a load again.
-            let mut slots = self.load.slots.lock().unwrap_or_else(PoisonError::into_inner);
-            let entry = &mut slots[usize::from(slot)];
-            if matches!(entry.retiring, Some(Retiring { instance, join: None }) if instance == old.instance()) {
-                entry.retiring = None;
-            }
-        }
+        // Its thread waits on this from its start: the send fails only if it panicked, and then the
+        // handle's drop here tears the owner down.
+        let _ = retirer.old.send(old);
     }
 
     /// Tear down what a called-off swap leaves this thread, `error` saying why: the plugin it was to
     /// replace (`old`, with its info; the slot is this thread's, `Leaving`, while it is held) and the
     /// new one, each through its owner's ordered teardown, the slot off live first; both teardowns start
-    /// before either is joined, so a release that hangs holds up only its own. A live-off that
-    /// fails before the exit keeps the plugin the engine plays loaded, as an unload's does (`unload`),
-    /// and only the other leaves; with neither playing, the slot ends empty and may pass its input dry.
+    /// before either is joined, so a release that hangs holds up only its own. A live-off that fails
+    /// keeps the plugin the engine plays loaded, as an unload's does (`unload`; the one it replaced
+    /// retires on `retirer`), and only the other leaves; with neither playing, the slot ends empty and
+    /// may pass its input dry. Once the exit has begun (seen under the slots lock, so its snapshot may
+    /// hold the slot `Leaving`), nothing is put back: both leave and the slot ends empty.
     fn call_off(
         &self,
         slot: u8,
         old: Option<(Arc<EngineSlotHandle>, PluginInfo)>,
         new: Option<(PluginInfo, EngineSlotHandle)>,
         error: String,
+        retirer: Retirer,
     ) -> Result<PluginInfo, String> {
         let unload_new = |new: Option<(PluginInfo, EngineSlotHandle)>| {
             if let Some(Err(e)) = new.map(|(_, new)| new.unload()) {
@@ -183,35 +191,42 @@ impl SwapTarget<'_> {
             }
         };
         let Some((old, old_info)) = old else {
+            drop(retirer);
             unload_new(new);
             return Err(error);
         };
         let error = match self.load.host.silence_slot(slot, LIVE_OFF_WAIT) {
             Ok(()) => error,
-            Err(e) if self.load.closing.load(Acquire) => {
-                log::error!("[plugin_host] engine slot {slot}: live-off before a called-off swap's unloads: {e}");
-                error
-            }
             Err(e) => {
-                let stays = format!("{error}; the plugin playing in slot {slot} stays loaded, as its live input could not be stopped first: {e}");
+                #[cfg(test)]
+                ROLLBACK.with(|hook| hook.take().map(|hook| hook()));
                 let mut slots = self.load.slots.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some((info, new)) = new {
-                    self.play(slots, slot, info, new, old);
-                    return Err(stays);
+                // `begin_closing` sets the flag before it takes this lock; the exit's snapshot comes after.
+                if self.load.closing.load(Acquire) {
+                    drop(slots);
+                    log::error!("[plugin_host] engine slot {slot}: live-off before a called-off swap's unloads: {e}");
+                    error
+                } else {
+                    let stays = format!("{error}; the plugin playing in slot {slot} stays loaded, as its live input could not be stopped first: {e}");
+                    if let Some((info, new)) = new {
+                        self.play(slots, slot, info, new, old, retirer);
+                        return Err(stays);
+                    }
+                    if !old.retired() {
+                        slots[usize::from(slot)].state = EngineSlot::Loaded { handle: old, info: old_info };
+                        return Err(stays);
+                    }
+                    format!("{error}; slot {slot} is empty and may pass its input dry, as its live input could not be stopped first: {e}")
                 }
-                if !old.retired() {
-                    slots[usize::from(slot)].state = EngineSlot::Loaded { handle: old, info: old_info };
-                    return Err(stays);
-                }
-                format!("{error}; slot {slot} is empty and may pass its input dry, as its live input could not be stopped first: {e}")
             }
         };
+        drop(retirer);
         if let Some((_, new)) = &new {
             new.stop();
         }
         old.stop();
         unload_new(new);
-        if let Err(e) = unload_handle(slot, old) {
+        if let Err(e) = old.unload() {
             log::error!("[plugin_host] engine slot {slot}: unloading the plugin a called-off swap was to replace: {e}");
         }
         vacate(self.load.slots, slot);
@@ -219,25 +234,31 @@ impl SwapTarget<'_> {
     }
 }
 
-/// Retire the owner a swap replaced on a thread of its own (`lf-retire-{slot}`). It touches no slot
-/// state: the slot's next reservation reaps it. With no thread started (`join: None`), the swap retires
-/// it itself (`play`).
-fn spawn_retire(slot: u8, old: &Arc<EngineSlotHandle>, retired: RetiredSink) -> Retiring {
-    let (instance, held) = (old.instance(), old.clone());
+/// A swap's retire thread (`spawn_retire`), started before the swap takes its slot: `old` hands it the
+/// owner the commit replaced. Dropped unhanded (a swap refused or called off), it ends at once, reporting
+/// nothing.
+struct Retirer {
+    old: Sender<Arc<EngineSlotHandle>>,
+    join: JoinHandle<bool>,
+}
+
+/// Start `slot`'s retire thread (`lf-retire-{slot}`), refused busy when none starts. It touches no slot
+/// state: the slot's next reservation reaps it.
+fn spawn_retire(slot: u8, retired: RetiredSink) -> Result<Retirer, String> {
+    let (old, handed) = channel::<Arc<EngineSlotHandle>>();
     let join = std::thread::Builder::new()
         .name(format!("lf-retire-{slot}"))
-        .spawn(move || retire(slot, &held, &retired))
-        .map_err(|e| log::error!("[plugin_host] engine slot {slot}: no retire thread ({e}); the swap retires it"))
-        .ok();
-    Retiring { instance, join }
+        .spawn(move || handed.recv().is_ok_and(|old| retire(slot, &old, &retired)))
+        .map_err(|e| format!("busy: no retire thread for slot {slot}: {e}"))?;
+    Ok(Retirer { old, join })
 }
 
 /// Stop and join the replaced owner through the handle commands may still share (its own ordered
-/// teardown; never `unload_handle`'s wait for the last holder), then report `plugin:retired`. Whether
-/// it released its plugin in order.
+/// teardown, `EngineSlotHandle::unload`), then report `plugin:retired`. Whether it released its
+/// plugin in order.
 fn retire(slot: u8, old: &EngineSlotHandle, retired: &RetiredSink) -> bool {
     let instance = old.instance();
-    let released = match old.retire() {
+    let released = match old.unload() {
         Ok(()) => true,
         Err(e) => {
             log::error!("[plugin_host] engine slot {slot}: retiring instance {instance}: {e}");
