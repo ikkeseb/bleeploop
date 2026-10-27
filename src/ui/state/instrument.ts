@@ -135,10 +135,13 @@ const [synthGains, setSynthGains] = createSignal<Readonly<Record<string, number>
 // is one too): the slot reads empty meanwhile, yet its instrument must not play, so it routes nowhere.
 const swapping: [boolean, boolean] = [false, false];
 // A hot swap in flight per slot (`doSwapPlugin`): the outgoing plugin plays until the native commit, so
-// the slot keeps showing and routing to it, and its gain sends wait for the answer (`gainHeld`).
+// the slot keeps showing and routing to it, and its gain sends wait until it and any recovery ended
+// (`gainHeld`). `hotSwaps` ends at a failed answer: the recovery may empty the slot, so a GO LIVE press
+// meanwhile waits behind it on the slot's chain.
 const [hotSwaps, setHotSwaps] = createSignal<[boolean, boolean]>([false, false]);
-/** Whether a hot swap is pending on `slot` (reactive): its GO LIVE is not held behind it (`live.ts`). */
+/** Whether a hot swap's answer is pending on `slot` (reactive): its GO LIVE is not held behind it (`live.ts`). */
 export const hotSwapPending = (slot: 0 | 1): boolean => hotSwaps()[slot];
+const swapInFlight: [boolean, boolean] = [false, false];
 const gainHeld: [boolean, boolean] = [false, false];
 // A slot a failed swap left empty while its live-off did not reach the host (`adoptSwapFailure`): it may
 // pass its input dry, so its GO LIVE stays (`live.ts`) until the feed says it is off or a plugin lands.
@@ -170,7 +173,7 @@ const slotEngineGain = (slot: 0 | 1): number => engineGains()[slot] ?? inputGain
  * sends nothing for the slot until the answer (`doSwapPlugin`). */
 function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
   setEngineGains((prev) => withAt(prev, slot, gain));
-  if (send && hotSwapPending(slot)) gainHeld[slot] = true;
+  if (send && swapInFlight[slot]) gainHeld[slot] = true;
   else if (send) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
 }
 
@@ -184,7 +187,7 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
  */
 export function engineResync(first: boolean): void {
   applyActiveRouting();
-  for (const slot of [0, 1] as const) if (!hotSwapPending(slot)) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
+  for (const slot of [0, 1] as const) if (!swapInFlight[slot]) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
   for (const { id } of SYNTHS) sendEngine({ SetInstrumentGain: [id as InstrumentId, synthGains()[id]] });
   if (first) disarmEngineLive();
 }
@@ -485,23 +488,24 @@ async function doSwapPlugin(
   toneToken?: number,
 ): Promise<void> {
   setHotSwaps((prev) => withAt(prev, slot, true));
+  swapInFlight[slot] = true;
   sourceOps[slot]++;
   claimEditorAffinity(slot, desc.path);
-  loadingPaths[slot] = desc.path;
+  loadingPaths[slot] = desc.path; // until the incoming's holder moved to `nativePaths` or was let go
   const outgoingInstance = slotInstance(slot);
   retiring.set(outgoingInstance, outgoing.path);
   const gain = savedPluginLevel(slot, desc);
   let oldPlaysOn = false;
   try {
     const info = await platform.pluginHost.swapPlugin(slot, desc.path, desc.id, gain, toneToken);
-    loadingPaths[slot] = null;
     adoptSwapped(slot, desc, info, gain, claimMidi, outgoing.path, outgoingInstance);
   } catch (e) {
-    loadingPaths[slot] = null; // the incoming is held now only where the listing says (`adoptSwapFailure`)
+    setHotSwaps((prev) => withAt(prev, slot, false));
     console.error('[instrument] plugin swap failed', e);
     oldPlaysOn = await adoptSwapFailure(slot, outgoing, outgoingInstance, desc, gain, claimMidi, e);
   } finally {
     setHotSwaps((prev) => withAt(prev, slot, false));
+    swapInFlight[slot] = false;
     // The held change was the outgoing's (`setSlotLevel` stored it): it is owed only while that plays on.
     if (gainHeld[slot] && oldPlaysOn) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
     gainHeld[slot] = false;
@@ -509,7 +513,8 @@ async function doSwapPlugin(
 }
 
 /** The slot plays `desc` as instance `info.instance` now (a swap's answer, or the host's listing after a
- * failed one). Native applied `gain` at the commit, so nothing is sent. The outgoing's affinity waits for
+ * failed one). Native applied `gain` at the commit, so nothing is sent. The incoming's holder moves from
+ * `loadingPaths` to `nativePaths` in one step. The outgoing's affinity waits for
  * its `plugin:retired`; one that came before this answer found the slot still holding the path, so it is
  * released again here. */
 function adoptSwapped(
@@ -527,6 +532,7 @@ function adoptSwapped(
     setStrandedLive((prev) => withAt(prev, slot, false));
   });
   nativePaths[slot] = desc.path;
+  loadingPaths[slot] = null;
   if (!retiring.has(outgoingInstance)) releaseEditorAffinity(slot, outgoingPath);
   rememberSlotPlugin(slot, desc);
   noteToneFailed(info, desc);
@@ -543,7 +549,8 @@ const SWAP_BUSY = 'Could not swap the plugin now. Pick it again.';
  * picks the toast): the outgoing instance still listed plays on; another instance listed is adopted; a
  * slot listed empty is cleared as an unload is, its live input stopped first (a refused live-off keeps
  * its GO LIVE as the stop, `strandedLive`); a listing that fails keeps the outgoing shown and both
- * files uncertain. Returns whether the old plugin plays on.
+ * files uncertain. The incoming file stays held (`loadingPaths`) until its branch adopted it or let it
+ * go, before any affinity release. Returns whether the old plugin plays on.
  */
 async function adoptSwapFailure(
   slot: 0 | 1,
@@ -560,6 +567,7 @@ async function adoptSwapFailure(
     listed = (await platform.pluginHost.listLoaded()).find((p) => p.slot === slot);
   } catch (listError) {
     console.error('[instrument] plugin swap failed, and listing the slots failed', listError);
+    loadingPaths[slot] = null;
     uncertainPaths.add(outgoing.path);
     uncertainPaths.add(desc.path);
     notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}.`, e);
@@ -567,6 +575,7 @@ async function adoptSwapFailure(
   }
   if (listed?.instance === outgoingInstance) {
     retiring.delete(outgoingInstance); // nothing was released
+    loadingPaths[slot] = null;
     uncertainPaths.add(desc.path);
     releaseEditorAffinity(slot, desc.path);
     notifyError(busy ? SWAP_BUSY : `Could not load ${desc.name}. ${outgoing.name} plays on.`, e);
@@ -586,6 +595,7 @@ async function adoptSwapFailure(
   });
   setEngineGain(slot, null, false);
   slotLetGo(slot);
+  loadingPaths[slot] = null;
   for (const path of [outgoing.path, desc.path]) {
     uncertainPaths.add(path);
     releaseEditorAffinity(slot, path);

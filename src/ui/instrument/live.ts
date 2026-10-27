@@ -55,9 +55,10 @@ async function liveOp(slot: 0 | 1, quiet: boolean, wentLive: boolean, send: (own
 /**
  * Press slot `slot`'s GO LIVE / INPUT LIVE: one op on the slot's chain that sends the engine's toggle,
  * or a live-off once the slot's source takes no input. Every call is a press, even one made while
- * another is in flight. During a hot swap the press is sent at once, off the chain the swap holds: the
- * engine owns the flag across the commit, and the outgoing plugin still shows, so the slot takes input
- * as it reads now.
+ * another is in flight. While a hot swap's answer is pending the press is sent at once, off the chain
+ * the swap holds: the engine owns the flag across the commit, and the outgoing plugin still shows, so
+ * the slot takes input as it reads now. A failed answer's recovery holds the press on the chain: it may
+ * empty the slot, and the press then reads what the slot takes.
  */
 export function toggleLive(slot: 0 | 1): Promise<void> {
   const wentLive = !inputArmed()[slot];
@@ -80,7 +81,7 @@ export function startLive(slot: 0 | 1): Promise<void> {
  * while the cap is locked). While a source op holds the slot (a load, a session's tone reload) the press
  * is counted and applied once the op settles: an odd count as one toggle against the engine's value
  * then, an even count not at all; a reload that would resume GO LIVE yields to an odd count. A hot swap
- * holds no press (`toggleLive`). A press
+ * holds no press until its answer, a failed one's recovery does (`toggleLive`). A press
  * made while another is in flight queues behind it. False when there is nothing to press: a source that
  * takes no input, or no host to feed it.
  */

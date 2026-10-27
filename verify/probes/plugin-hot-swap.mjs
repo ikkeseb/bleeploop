@@ -33,7 +33,13 @@
  * 15. that live-off refused: GO LIVE stays (live, as the feed has it), and its press is a live-off;
  * 16. a `busy:` refusal of the param listing keeps the listed controls, with no toast;
  * 17. a failed swap whose listing shows another instance adopts it; a listing that fails keeps the
- *     outgoing shown, toasts once and drops the held level.
+ *     outgoing shown, toasts once and drops the held level;
+ * 18. a failed swap's incoming file stays held while its listing is awaited: the other slot's unload of
+ *     that file meanwhile orphans the entry, so the adopted instance's EDITOR is refused;
+ * 19. GO LIVE pressed (the cap's press, then the named action's) while a failed swap's live-off is in
+ *     flight waits behind the recovery: the slot it emptied ends not live, and the cap is locked;
+ * 20. a `busy:` refusal of an editor open or close keeps the editor as it was: no chip, no toast;
+ * 21. a non-busy editor close error and a non-busy listing error still toast.
  *
  * Cannot see the native swap, its commit, the engine's live-off at a kind change or any timing: the
  * fake answers what the probe scripts.
@@ -60,6 +66,7 @@ await probe(async ({ open }) => {
     const instrument = await import('/src/ui/state/instrument.ts');
     const slots = await import('/src/ui/state/instrument-slots.ts');
     const live = await import('/src/ui/instrument/live.ts');
+    const nativeIo = await import('/src/ui/state/native-io.ts');
     const notify = await import('/src/notify.ts');
     const { pluginDescriptorKey } = await import('/src/ui/state/plugin-descriptor.ts');
     const pause = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -74,14 +81,14 @@ await probe(async ({ open }) => {
     }
     const desc = (id, isEffect, path = `C:\\probe\\${id}.vst3`) => ({ id, name: `Probe ${id.toUpperCase()}`, path, format: 'vst3', isEffect });
     const d = {};
-    for (const id of 'abcdefghijklmnopqrst') d[id] = desc(id, false);
+    for (const id of 'abcdefghijklmnopqrstvwy') d[id] = desc(id, false);
     for (const id of ['fx1', 'fx2', 'fx3']) d[id] = desc(id, true);
     d.u = desc('u', undefined); // unclassified: takes input, activates as whatever the host says
     d.bCase = desc('b-copy', false, 'c:/PROBE/B.vst3'); // the same file as `b`, as native's `same_file` reads it
     const all = Object.values(d);
     const find = (path, id) => all.find((x) => x.path === path && x.id === id);
 
-    const H = { d, calls: [], instance: 0, swapHold: null, listed: [], listFails: false, paramsBusy: false, opened: [], closedCbs: new Set(), paramsCbs: new Set(), retiredCb: null, staleSets: 0 };
+    const H = { d, calls: [], instance: 0, swapHold: null, listed: [], listFails: false, listGate: null, listCalls: 0, paramsError: null, editorError: null, opened: [], closedCbs: new Set(), paramsCbs: new Set(), retiredCb: null, staleSets: 0 };
     const answer = (slot, path, id, effect) => {
       const descriptor = find(path, id);
       return { slot, descriptor, instance: ++H.instance, effect: effect ?? descriptor.isEffect === true };
@@ -100,13 +107,20 @@ await probe(async ({ open }) => {
       });
     };
     host.listLoaded = async () => {
+      H.listCalls++;
+      await H.listGate;
       if (H.listFails) throw new Error('injected listing failure');
       return H.listed;
     };
-    host.openEditor = async (slot, instance) => void H.opened.push([slot, instance]);
-    host.closeEditor = async () => {};
-    host.listParams = async (slot) => {
-      if (H.paramsBusy) throw new Error(`busy: the plugin in slot ${slot + 1} is unloading`);
+    host.openEditor = async (slot, instance) => {
+      if (H.editorError) throw new Error(H.editorError);
+      H.opened.push([slot, instance]);
+    };
+    host.closeEditor = async () => {
+      if (H.editorError) throw new Error(H.editorError);
+    };
+    host.listParams = async () => {
+      if (H.paramsError) throw new Error(H.paramsError);
       return [{ id: 1, name: 'Alpha', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
     };
     host.onParamsChanged = (cb) => {
@@ -128,7 +142,7 @@ await probe(async ({ open }) => {
     instrument.watchRetiredPlugins(); // boot's watcher subscribed to the web stub's no-op
 
     Object.assign(H, {
-      instrument, slots, live, until, pause,
+      instrument, slots, live, nativeIo, until, pause,
       release(effect) {
         const hold = H.swapHold;
         H.swapHold = null;
@@ -582,10 +596,10 @@ await probe(async ({ open }) => {
     H.clearToasts();
     const sliders = () => document.querySelectorAll('#slot-0-params input[aria-label="Alpha"]').length;
     await H.until(() => sliders() === 1, 'slot A to list its controls');
-    H.paramsBusy = true;
+    H.paramsError = 'busy: the plugin in slot 1 is unloading';
     H.paramsChanged(0, H.shown(0).instance);
     await H.pause(50);
-    H.paramsBusy = false;
+    H.paramsError = null;
     return { sliders: sliders(), empty: document.querySelector('#slot-0-params .pc__empty')?.textContent ?? null, toasts: H.toasts() };
   });
   console.log('16. busy listing', JSON.stringify(busy16));
@@ -627,4 +641,114 @@ await probe(async ({ open }) => {
   assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, another listed').length, 1);
   assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, listing fails').length, 1);
   assert.equal(consumeConsoleErrors('listing the slots failed Error: injected listing failure').length, 1);
+
+  // 18. A failed swap's incoming file stays held while its listing is awaited: B's unload of it orphans the entry.
+  const held18 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument, d } = H;
+    await instrument.selectPlugin(1, d.y); // cold into the empty slot B: B owns y's editor
+    let openList;
+    H.listGate = new Promise((r) => (openList = r));
+    H.listed = [{ slot: 0, descriptor: d.y, instance: 200, effect: false }];
+    const calls = H.listCalls;
+    const swap = instrument.selectPlugin(0, d.y); // s (99) → y, refused, though native kept y
+    await H.held();
+    H.fail('injected swap failure, incoming kept');
+    await H.until(() => H.listCalls > calls, 'the recovery listing');
+    await instrument.clearPlugin(1); // B lets y go while A's recovery waits on the listing
+    H.listGate = null;
+    openList();
+    await swap;
+    const out = { shown: H.shown(0), owner: H.blocker(0, d.y.path)?.owner ?? null };
+    H.clearToasts();
+    return out;
+  });
+  console.log('18. incoming held', JSON.stringify(held18));
+  assert.deepEqual(held18, { shown: { id: 'y', instance: 200 }, owner: "slot B's previous load" },
+    "the incoming file keeps its holder through the recovery, so the adopted instance's EDITOR stays refused");
+  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, incoming kept').length, 1);
+
+  // 19. GO LIVE pressed while a failed swap's live-off is in flight waits behind the recovery.
+  for (const via of ['cap', 'action']) {
+    await page.evaluate(() => window.__hot.instrument.selectPlugin(1, window.__hot.d.fx1)); // cold into the empty slot B
+    await goLiveOn(1);
+    const pressed19 = await page.evaluate(async (by) => {
+      const H = window.__hot;
+      const fake = window.__lf.native;
+      const from = H.mark();
+      const swap = H.instrument.selectPlugin(1, H.d.fx2);
+      await H.held();
+      H.listed = [];
+      let answer;
+      fake.sendHold = new Promise((r) => (answer = r));
+      H.fail('injected swap failure, slot emptied, pressed meanwhile');
+      await H.until(() => H.slotSent(from, 1).some(([k, v]) => k === 'live' && v === false), 'the live-off');
+      const capDisabled = document.querySelector('button[aria-label="Live input for slot B"]')?.disabled ?? null;
+      if (by === 'cap') void H.live.toggleLive(1); // the cap's press, as its click runs it
+      else H.live.pressGoLive(1);
+      await H.pause(30);
+      fake.sendHold = null;
+      answer();
+      await swap;
+      await H.idle();
+      await H.pause(50);
+      const out = { capDisabled, shown: H.shown(1), live: H.nativeIo.inputArmed()[1], stop: H.live.liveShown(1) };
+      H.clearToasts();
+      return out;
+    }, via);
+    console.log(`19. pressed in recovery (${via})`, JSON.stringify(pressed19));
+    assert.deepEqual(pressed19, { capDisabled: true, shown: { id: null, instance: null }, live: false, stop: false },
+      `a ${via} press during the recovery leaves the emptied slot not live, and the cap is locked meanwhile`);
+    assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, slot emptied, pressed meanwhile').length, 1);
+  }
+
+  // 20. A `busy:` refusal of an editor open or close keeps the editor as it was.
+  await page.evaluate(async () => {
+    const H = window.__hot;
+    const swap = H.instrument.selectPlugin(0, H.d.v); // y (200) → v: slot A owns v's editor
+    await H.held();
+    H.release(false);
+    await swap;
+    H.clearToasts();
+  });
+  const editorA = page.locator('button[aria-label="Editor for slot A"]');
+  const pressEditor = (error) => page.evaluate(async (message) => {
+    const H = window.__hot;
+    H.editorError = message;
+    document.querySelector('button[aria-label="Editor for slot A"]').click();
+    await H.pause(50);
+    H.editorError = null;
+    const button = document.querySelector('button[aria-label="Editor for slot A"]');
+    return { pressed: button.getAttribute('aria-pressed'), chip: button.parentElement.querySelector('.pc__err')?.textContent ?? null, toasts: H.toasts() };
+  }, error);
+  const BUSY = 'busy: the plugin in slot 1 is swapping';
+  const busyOpen = await pressEditor(BUSY);
+  await editorA.click();
+  await page.waitForFunction(() => document.querySelector('button[aria-label="Editor for slot A"]')?.getAttribute('aria-pressed') === 'true');
+  const busyClose = await pressEditor(BUSY);
+  console.log('20. busy editor', JSON.stringify({ busyOpen, busyClose }));
+  assert.deepEqual({ busyOpen, busyClose }, {
+    busyOpen: { pressed: 'false', chip: null, toasts: [] },
+    busyClose: { pressed: 'true', chip: null, toasts: [] },
+  }, 'a busy editor refusal keeps the editor as it was, with no chip and no toast');
+  assert.equal(consumeConsoleErrors(`[PluginControls] editor toggle failed Error: ${BUSY}`).length, 2, 'each busy refusal is logged');
+
+  // 21. The negative controls: a non-busy close error and a non-busy listing error still toast.
+  const closeFailed = await pressEditor('injected editor close failure');
+  const listFailed21 = await page.evaluate(async () => {
+    const H = window.__hot;
+    H.clearToasts();
+    H.paramsError = 'injected param listing failure';
+    H.paramsChanged(0, H.shown(0).instance);
+    await H.pause(50);
+    H.paramsError = null;
+    return H.toasts();
+  });
+  console.log('21. non-busy errors', JSON.stringify({ closeFailed, listFailed21 }));
+  assert.deepEqual({ closeFailed, listFailed21 }, {
+    closeFailed: { pressed: 'true', chip: 'close failed', toasts: ['Could not close the plugin editor. Press EDITOR again. x1'] },
+    listFailed21: ["Could not load the plugin's controls. Choose Off, then load the plugin again. x1"],
+  }, 'a non-busy editor or listing error toasts');
+  assert.equal(consumeConsoleErrors('[PluginControls] editor toggle failed Error: injected editor close failure').length, 1);
+  assert.equal(consumeConsoleErrors('[PluginControls] listParams failed Error: injected param listing failure').length, 1);
 }, { launch: {} });
