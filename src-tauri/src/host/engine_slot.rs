@@ -44,7 +44,7 @@ use super::{
     load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
     EVENT_RING_CAP,
 };
-use crate::engine_io::slot_host::{Back, Standing};
+use crate::engine_io::slot_host::Back;
 use crate::engine_io::SlotHost;
 
 #[path = "engine_slot/swap.rs"]
@@ -435,11 +435,7 @@ pub(super) fn serve<P: OwnedPlugin>(
         return teardown(&slot, plugin, None, None);
     }
 
-    // The unit while it is out of the engine (a failed restart, or retired); `None` while the engine holds it.
-    let mut parked: Option<Box<P::Unit>> = None;
-    // Another owner's replace retired this one and its unit is back: it never goes in again (the desk
-    // forgets the owner once its unit is back, so this owner remembers).
-    let mut retired = false;
+    let mut parked = Parked { unit: None, retired: false };
     let mut reported = 0u32;
     let save = |tone: &mut ToneKeeper, plugin: &mut P, why: &str| keep_tone(tone, index, why, &name, || plugin.state());
     // A panic in the loop must not unwind past a unit the engine still runs (dropping the plugin would
@@ -449,7 +445,7 @@ pub(super) fn serve<P: OwnedPlugin>(
         while running.load(Acquire) {
             // A restart the plugin asked for only raised a flag (maybe on a foreign thread); the cycle
             // runs here, before anything reads the plugin, so a re-list it raised lands this turn.
-            settle(&mut plugin, &slot, &mut parked, retired);
+            settle(&mut plugin, &slot, &mut parked);
             let Reported { relist, changed } = plugin.turn(&sink);
             if relist {
                 publish_param_ids(&param_ids, &plugin.params().unwrap_or_default());
@@ -459,14 +455,9 @@ pub(super) fn serve<P: OwnedPlugin>(
                 tone.note_change(Instant::now());
             }
             // A new engine at another rate evicted the unit; it comes back stopped. A unit another owner's
-            // replace retired never goes in again: it waits for the teardown.
-            match slot.take_back() {
-                Some(Back::Evicted(unit)) => cycle(&mut plugin, &slot, &mut parked, Some(own(unit)), "re-activation after a device change"),
-                Some(Back::Out(unit)) => {
-                    parked = Some(own(unit));
-                    retired = true;
-                }
-                None => {}
+            // replace retired stays parked for the teardown.
+            if let Some(unit) = slot.take_back().and_then(|back| parked.back(back)) {
+                cycle(&mut plugin, &slot, &mut parked, Some(unit), "re-activation after a device change");
             }
             // Every turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread here, and its
             // timers and async updates must not wait for the next editor, or its state lags what it plays
@@ -474,7 +465,7 @@ pub(super) fn serve<P: OwnedPlugin>(
             pump_thread_messages();
             let closed = plugin.idle();
             // The pump ran the plugin's own code.
-            settle(&mut plugin, &slot, &mut parked, retired);
+            settle(&mut plugin, &slot, &mut parked);
             if closed {
                 sink(EngineSlotEvent::EditorClosed);
                 let _ = save(&mut tone, &mut plugin, "editor closed");
@@ -493,7 +484,7 @@ pub(super) fn serve<P: OwnedPlugin>(
             // A request may have waited through a restart report: the cycle runs first, and only then
             // is the request's caller asked whether it still waits (a slow cycle can outlast its 5 s).
             if request.is_some() {
-                settle(&mut plugin, &slot, &mut parked, retired);
+                settle(&mut plugin, &slot, &mut parked);
             }
             if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
                 match request {
@@ -553,38 +544,65 @@ pub(super) fn serve<P: OwnedPlugin>(
         }
     }
     let keep = served.is_ok() && (editor_open || tone.dirty());
-    let result = teardown(&slot, plugin, parked, keep.then_some((&mut tone, name.as_str())));
+    let result = teardown(&slot, plugin, parked.unit, keep.then_some((&mut tone, name.as_str())));
     report_faults(&faults, index, &mut reported);
     result
 }
 
-/// Owner turn: cycle the plugin now if it asked for a restart, so what comes next reads it as it is. An
-/// owner another's replace retired (`retired`, or Retiring while its unit fades out) drops the request:
-/// its unit never goes in again.
-fn settle<P: OwnedPlugin>(plugin: &mut P, slot: &SlotHost, parked: &mut Option<Box<P::Unit>>, retired: bool) {
-    let Some(why) = plugin.take_restart() else { return };
-    if retired || slot.standing() == Some(Standing::Retiring) {
-        log::info!("[plugin_host] engine slot {} {why}: the plugin was replaced; it stays out", slot.slot());
-        return;
+/// Owner turn: cycle the plugin now if it asked for a restart, so what comes next reads it as it is.
+fn settle<P: OwnedPlugin>(plugin: &mut P, slot: &SlotHost, parked: &mut Parked<P::Unit>) {
+    if let Some(why) = plugin.take_restart() {
+        cycle(plugin, slot, parked, None, &why);
     }
-    cycle(plugin, slot, parked, None, &why);
+}
+
+/// An owner's unit while it is out of the engine: from a failed cycle, or retired.
+struct Parked<U> {
+    /// `None` while the engine holds it.
+    unit: Option<Box<U>>,
+    /// Another owner's replace retired this one: its unit never goes in again (the desk forgets the
+    /// owner once its unit is back, so the owner remembers).
+    retired: bool,
+}
+
+impl<U: SlotProcessor + 'static> Parked<U> {
+    /// The owner's unit came back from the engine, by whichever call took it: a unit that came back
+    /// retired marks its owner retired and waits here for the teardown; any other is the caller's to
+    /// put in again.
+    fn back(&mut self, back: Back) -> Option<Box<U>> {
+        match back {
+            Back::Evicted(unit) => Some(own(unit)),
+            Back::Out(unit) => {
+                self.unit = Some(own(unit));
+                self.retired = true;
+                None
+            }
+        }
+    }
+
+    /// The parked unit to put in again: never a retired one.
+    fn take(&mut self) -> Option<Box<U>> {
+        if self.retired { None } else { self.unit.take() }
+    }
 }
 
 /// A restart or an eviction: get the unit back (it came from the engine, the owner still holds it
 /// from a failed cycle, or the engine hands it back now) and reinstall it. A failed cycle parks the
-/// unit, the slot bypassed, until the next one.
+/// unit, the slot bypassed, until the next one. An owner another's replace retired drops the cycle:
+/// its unit never goes in again.
 fn cycle<P: OwnedPlugin>(
     plugin: &mut P,
     slot: &SlotHost,
-    parked: &mut Option<Box<P::Unit>>,
+    parked: &mut Parked<P::Unit>,
     back: Option<Box<P::Unit>>,
     why: &str,
 ) {
     let index = slot.slot();
     let unit = match back.or_else(|| parked.take()) {
-        Some(unit) => unit,
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(Some(unit)) => own(unit),
+        Some(unit) => Some(unit),
+        None if parked.retired => None,
+        None => match slot.remove_back(REMOVE_TIMEOUT) {
+            Ok(Some(back)) => parked.back(back),
             Ok(None) => {
                 log::error!("[plugin_host] engine slot {index} {why}: no unit to cycle");
                 return;
@@ -595,11 +613,15 @@ fn cycle<P: OwnedPlugin>(
             }
         },
     };
+    let Some(unit) = unit else {
+        log::info!("[plugin_host] engine slot {index} {why}: the plugin was replaced; it stays out");
+        return;
+    };
     match plugin.reinstall(unit, slot) {
         Ok(()) => log::info!("[plugin_host] engine slot {index} {why}: deactivated → activated → reinstalled"),
         Err((unit, e)) => {
             log::error!("[plugin_host] engine slot {index} {why} failed, the slot stays bypassed: {e}");
-            *parked = Some(unit);
+            parked.unit = Some(unit);
         }
     }
 }
@@ -1075,6 +1097,7 @@ mod tests {
     use lf_engine::SlotEvent;
 
     use super::*;
+    use crate::engine_io::slot_host::Standing;
     use crate::engine_io::test_rig::{TestDevice, PATIENCE};
 
     /// The fake's unit: a silent instrument.
@@ -1377,11 +1400,17 @@ mod tests {
         refuse: bool,
         calls: Arc<AtomicU32>,
         restart: AtomicBool,
+        /// Taken inside the `take_restart` that takes a restart, before it returns.
+        restarting: Hold,
         reinstalls: AtomicU32,
         /// Each `release`: whether the unit came back with it.
         releases: Mutex<Vec<bool>>,
         /// Taken inside `release`, before it counts.
         releasing: Hold,
+        /// The plugin's drops: a `release` ends in one.
+        drops: AtomicU32,
+        /// The unit's stops, the plugin's quiesce and its release, in order.
+        order: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl Bench {
@@ -1399,6 +1428,7 @@ mod tests {
         latency: Frame,
         refuse: bool,
         calls: Arc<AtomicU32>,
+        order: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl SlotProcessor for Probe {
@@ -1412,7 +1442,9 @@ mod tests {
             self.calls.fetch_add(1, Relaxed);
             out.fill(0.0);
         }
-        fn stop(&mut self) {}
+        fn stop(&mut self) {
+            self.order.lock().unwrap().push("stop");
+        }
         fn start_refused(&self) -> bool {
             self.refuse
         }
@@ -1423,12 +1455,22 @@ mod tests {
 
     struct Benched(Arc<Bench>);
 
+    impl Drop for Benched {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Relaxed);
+        }
+    }
+
     impl OwnedPlugin for Benched {
         type Unit = Probe;
         const FORMAT: &'static str = "bench";
 
         fn take_restart(&mut self) -> Option<String> {
-            self.0.restart.swap(false, Relaxed).then(|| "restart".to_string())
+            let restart = self.0.restart.swap(false, Relaxed);
+            if restart {
+                self.0.restarting.take();
+            }
+            restart.then(|| "restart".to_string())
         }
         fn reinstall(&mut self, unit: Box<Probe>, slot: &SlotHost) -> Result<(), (Box<Probe>, String)> {
             self.0.reinstalls.fetch_add(1, Relaxed);
@@ -1454,8 +1496,12 @@ mod tests {
             Ok(())
         }
         fn editor_close(&mut self) {}
+        fn quiesce(&mut self) {
+            self.0.order.lock().unwrap().push("quiesce");
+        }
         fn release(self, unit: Option<Box<Probe>>) {
             self.0.releasing.take();
+            self.0.order.lock().unwrap().push("release");
             self.0.releases.lock().unwrap().push(unit.is_some());
         }
     }
@@ -1474,7 +1520,7 @@ mod tests {
         spawn_within(wait, PluginFormat::Clap, slot.clone(), 0, Arc::new(|_| {}), None, entry, move |ctx| {
             serve(ctx, move |setup| {
                 let rate = setup.slot.rate().ok_or("no audio device is open")?;
-                let unit = Box::new(Probe { latency: bench.latency, refuse: bench.refuse, calls: bench.calls.clone() });
+                let unit = Box::new(Probe { latency: bench.latency, refuse: bench.refuse, calls: bench.calls.clone(), order: bench.order.clone() });
                 Ok(Loaded { plugin: Benched(bench), unit, name: "Bench".to_string(), rate, tone: None })
             })
         })
@@ -1514,7 +1560,7 @@ mod tests {
 
     /// A swap commits: the new plugin plays as its own instance, the old owner is retired at the commit,
     /// its unit comes back out of the engine, and stopping it releases the plugin with its unit, which
-    /// never went in again.
+    /// never went in again, in the teardown's order: the unit stopped, the plugin quiesced, released.
     #[test]
     fn a_swap_commits_and_the_replaced_owner_retires_without_reinstalling() {
         let _one = one_engine_test_at_a_time();
@@ -1532,9 +1578,42 @@ mod tests {
         assert_eq!(old.calls(), calls, "the old unit is out of the engine");
         playing.retire().expect("the old owner releases its plugin");
         assert_eq!((old.releases(), old.reinstalls.load(Relaxed)), (vec![true], 0), "released with its unit, never reinstalled");
+        let mut order = old.order.lock().unwrap().clone();
+        order.dedup();
+        assert_eq!(order, ["stop", "quiesce", "release"], "the teardown's order");
         assert!(plays(&device, &new), "the new plugin plays on");
         swapped.unload().expect("it unloads");
         assert_eq!(new.releases(), [true]);
+    }
+
+    /// The replaced plugin's restart is taken before the swap commits and its cycle's remove runs after
+    /// (the fake holds the owner between the two, as the commit lands): the remove takes the unit back
+    /// retired, so the owner never reinstalls it, nor at a restart once the new plugin has left the slot.
+    #[test]
+    fn a_restart_taken_as_the_swap_commits_never_reinstalls_the_replaced_plugin() {
+        let _one = one_engine_test_at_a_time();
+        let (old, new) = (Arc::new(Bench::default()), Arc::new(Bench::default()));
+        let (device, old_slot, playing) = swap_rig(&old);
+        let (there, go) = old.restarting.arm();
+        old.restart.store(true, Relaxed);
+        there.recv_timeout(PATIENCE).expect("the old owner takes the restart");
+        assert_eq!(old_slot.standing(), Some(Standing::Active), "taken before the commit");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let swapped = bench_in(&device.host().slot(0), &new, swap_entry(&cancel, SwapBounds::default())).expect("the swap commits");
+        go.send(()).unwrap();
+        eventually("the old owner's remove takes its unit back", || old_slot.standing().is_none());
+        // A few owner turns (20 ms each), for a reinstall to show.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(old.reinstalls.load(Relaxed), 0, "never reinstalled");
+        swapped.unload().expect("the new plugin unloads");
+        old.restart.store(true, Relaxed);
+        eventually("the old owner takes the second restart", || !old.restart.load(Relaxed));
+        std::thread::sleep(Duration::from_millis(100));
+        let calls = old.calls();
+        assert!(device.wait_blocks(5));
+        assert_eq!((old.reinstalls.load(Relaxed), old.calls(), old_slot.standing()), (0, calls, None), "nor once the slot is empty");
+        playing.retire().expect("the old owner releases its plugin");
+        assert_eq!(old.releases(), [true]);
     }
 
     /// The replaced plugin asks for a restart after the commit, then again once its unit is back (when
@@ -1645,8 +1724,9 @@ mod tests {
     }
 
     /// The engine answers neither the replace nor its withdraw by the settle deadline (no block runs while
-    /// the test holds the engine lock): the owner abandons its unit and leaves its plugin loaded; once the
-    /// engine runs again the unit comes back and leaks on the desk, and the old plugin plays on.
+    /// the test holds the engine lock): the owner abandons its unit and leaves its plugin loaded (never
+    /// released nor dropped, also once the owner has ended); once the engine runs again the unit comes
+    /// back and leaks on the desk, and the old plugin plays on.
     #[test]
     fn a_swap_the_engine_never_answers_is_abandoned_and_its_plugin_left_loaded() {
         let _one = one_engine_test_at_a_time();
@@ -1657,17 +1737,20 @@ mod tests {
         let held = device.host().core.rt.lock().unwrap();
         let refused = bench_in(&new_slot, &new, swap_entry(&Arc::new(AtomicBool::new(false)), bounds)).err();
         assert_eq!(refused.as_deref(), Some("the engine did not answer the swap; the plugin is left loaded"));
+        // The owner has ended: a load that reports an error is joined before it returns.
+        assert_eq!(new.drops.load(Relaxed), 0, "the plugin is never dropped");
         assert_eq!(new_slot.standing(), Some(Standing::Abandoned));
         drop(held);
         eventually("the withdrawn unit comes back and leaks", || new_slot.standing().is_none());
-        assert!(new.releases().is_empty(), "never released");
+        assert_eq!((new.releases(), new.drops.load(Relaxed)), (vec![], 0), "never released nor dropped");
         assert_eq!(old_slot.standing(), Some(Standing::Active));
         assert!(plays(&device, &old), "the old plugin plays on");
         playing.unload().expect("it unloads");
     }
 
     /// A retire thread stops and joins the owner through its clone of a shared handle while another
-    /// clone is alive: the plugin is released with its unit; a second retire is refused at once.
+    /// clone is alive: the plugin is released with its unit; a second retire, while the first still
+    /// joins (the plugin's release held), is refused at once.
     #[test]
     fn a_retire_through_a_shared_handle_releases_the_plugin_and_a_second_one_does_not_wait() {
         let _one = one_engine_test_at_a_time();
@@ -1675,11 +1758,17 @@ mod tests {
         let (_device, slot, playing) = swap_rig(&old);
         let shared = Arc::new(playing);
         let other = shared.clone();
-        std::thread::spawn(move || shared.retire()).join().unwrap().expect("released in order");
+        let (there, go) = old.releasing.arm();
+        let first = std::thread::spawn(move || shared.retire());
+        there.recv_timeout(PATIENCE).expect("the first retire reaches the plugin's release");
+        // On its own thread, so a second retire that waits for the first fails here rather than hangs.
+        let (again_tx, again) = channel();
+        std::thread::spawn(move || again_tx.send(other.retire()));
+        let again = again.recv_timeout(Duration::from_secs(1)).expect("refused while the first still joins");
+        assert!(again.as_ref().is_err_and(|e| e.contains("another caller")), "{again:?}");
+        assert!(old.releases().is_empty(), "the first is still releasing");
+        go.send(()).unwrap();
+        first.join().unwrap().expect("released in order");
         assert_eq!((old.releases(), slot.standing()), (vec![true], None));
-        let t = Instant::now();
-        let again = other.retire().expect_err("the owner is stopped already");
-        assert!(again.contains("another caller"), "{again}");
-        assert!(t.elapsed() < Duration::from_secs(1), "refused without waiting");
     }
 }

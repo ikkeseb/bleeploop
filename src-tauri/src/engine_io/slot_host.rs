@@ -44,12 +44,21 @@ pub enum Answer {
     Pending,
 }
 
-/// A unit that left the engine on its own ([`SlotHost::take_back`]), stopped.
+/// A unit of this owner's back from the engine, stopped: on its own ([`SlotHost::take_back`]), or
+/// removed ([`SlotHost::remove_back`]).
 pub enum Back {
-    /// Evicted: re-activate it at [`SlotHost::rate`] and install it again.
+    /// Evicted, or removed: re-activate it at [`SlotHost::rate`] and install it again.
     Evicted(Box<dyn SlotProcessor>),
     /// Retired by another owner's replace: never install it again.
     Out(Box<dyn SlotProcessor>),
+}
+
+impl Back {
+    pub fn into_unit(self) -> Box<dyn SlotProcessor> {
+        match self {
+            Back::Evicted(unit) | Back::Out(unit) => unit,
+        }
+    }
 }
 
 /// One owner's handshake with a slot (`EngineHost::slot`). Cheap to clone (a clone is the same owner).
@@ -198,11 +207,7 @@ impl SlotHost {
     /// This owner's unit, if it left the engine on its own: an eviction, or retired by another owner's
     /// replace (an eviction of a retired owner's unit included). The plugin owner polls this every turn.
     pub fn take_back(&self) -> Option<Back> {
-        let mut desk = self.desk();
-        let active = desk.standing(self.token) == Some(Standing::Active);
-        let left = |reason: HandbackReason| matches!(reason, HandbackReason::Evicted | HandbackReason::ReplacedOut).then_some(reason);
-        let (reason, unit) = desk.take_unit(self.token, left)?;
-        Some(if active && reason == HandbackReason::Evicted { Back::Evicted(unit) } else { Back::Out(unit) })
+        self.take(&mut self.desk(), |reason| matches!(reason, HandbackReason::Evicted | HandbackReason::ReplacedOut))
     }
 
     /// Take this owner's unit back: the engine releases its notes, crossfades it to bypass and stops it
@@ -210,12 +215,18 @@ impl SlotHost {
     /// `Ok(None)` when the owner has none on the slot; `Err` when it does not come back within
     /// `timeout` (it stays the engine's, and a later `remove` or `take_back` can still recover it).
     pub fn remove(&self, timeout: Duration) -> Result<Option<Box<dyn SlotProcessor>>, String> {
+        self.remove_back(timeout).map(|back| back.map(Back::into_unit))
+    }
+
+    /// [`SlotHost::remove`], telling what may become of the unit: [`Back::Out`] when another owner's
+    /// replace retired this one, whether its commit came before the remove or while it waited.
+    pub fn remove_back(&self, timeout: Duration) -> Result<Option<Back>, String> {
         {
             // Under the desk lock: a rebuild hands every unit back with every desk held, so an eviction
             // is either on the desk here or not begun.
             let mut desk = self.desk();
-            if let Some(((), unit)) = desk.take_unit(self.token, |_| Some(())) {
-                return Ok(Some(unit));
+            if let Some(back) = self.take(&mut desk, |_| true) {
+                return Ok(Some(back));
             }
             match (desk.standing(self.token), desk.in_engine(self.token)) {
                 (None, _) | (Some(Standing::Active | Standing::Retiring), false) => return Ok(None),
@@ -235,8 +246,8 @@ impl SlotHost {
             self.service_if_idle();
             {
                 let mut desk = self.desk();
-                if let Some(((), unit)) = desk.take_unit(self.token, |_| Some(())) {
-                    return Ok(Some(unit));
+                if let Some(back) = self.take(&mut desk, |_| true) {
+                    return Ok(Some(back));
                 }
                 if desk.take_not_held(self.token) {
                     return Ok(None);
@@ -255,6 +266,15 @@ impl SlotHost {
     pub fn abandon(&self) {
         self.desk().abandon(self.token);
         self.service_if_idle();
+    }
+
+    /// The first unit of this owner's on `desk` whose reason `pick` takes, as what may become of it: one
+    /// that came back `ReplacedOut`, or to an owner no longer Active, never goes in again.
+    fn take(&self, desk: &mut Desk, pick: impl Fn(HandbackReason) -> bool) -> Option<Back> {
+        // Read before the take, which releases an owner with nothing left in the engine.
+        let active = desk.standing(self.token) == Some(Standing::Active);
+        let (reason, unit) = desk.take_unit(self.token, |reason| pick(reason).then_some(reason))?;
+        Some(if active && reason != HandbackReason::ReplacedOut { Back::Evicted(unit) } else { Back::Out(unit) })
     }
 
     /// The slot's desk, locked, with the port's replies routed.
