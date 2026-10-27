@@ -1,13 +1,20 @@
-//! The hot plugin swap (`src/slots.rs`, `SlotPort::replace`) driven through the engine. So far only its
-//! guard on everything outside a swap: the slots render bit for bit as they did before it.
+//! The hot plugin swap (`src/slots/swap.rs`, `SlotPort::replace`) driven through the engine: the slots
+//! render bit for bit as they did before it outside a swap; the swap fade is exact from the commit
+//! frame at any block size, each unit on its own destination and no bypass under it; a candidate that
+//! refuses to start goes back and leaves the slot untouched; a swap that changes the latency waits for
+//! a take to stop capturing.
 
 mod common;
 
 use common::refs::sha256_f32;
-use common::units::{Fake, Probe};
+use common::units::{fake, Fake, Probe, Seen};
 use common::{Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, NoteTarget};
+use lf_engine::{Command, HandbackReason, NoteTarget, Rejection, SlotKind, SlotReply};
+
+/// Frames at 48 kHz of a candidate's staging past its latency, and of the swap fade: 10 ms each.
+const STAGE: Frame = 480;
+const SWAP: Frame = 480;
 
 /// Two triangle waves, exact in f32: slot 0's input and slot 1's.
 fn input_a(f: Frame) -> f32 {
@@ -80,5 +87,195 @@ const BEFORE: [(usize, &str); 4] = [
 fn outside_a_swap_the_slots_render_as_before_it() {
     for (block, hash) in BEFORE {
         assert_eq!(plain_session(block), hash, "block {block}");
+    }
+}
+
+/// The swap fade `step` frames into its `SWAP` from `from` (the outgoing unit) towards `to`, as the
+/// rack's crossfade: exactly either at its ends.
+fn crossed(from: f32, to: f32, step: Frame) -> f32 {
+    match step {
+        ..=0 => from,
+        SWAP.. => to,
+        k => from + (k as f32 / SWAP as f32) * (to - from),
+    }
+}
+
+/// `got` holds the frames from `first` on: each one's bits are `want`'s for its frame.
+fn assert_bits(got: &[f32], first: Frame, want: impl Fn(Frame) -> f32, what: &str) {
+    for (k, &y) in got.iter().enumerate() {
+        let f = first + k as Frame;
+        assert_eq!(y.to_bits(), want(f).to_bits(), "{what}: frame {f}: {y} vs {}", want(f));
+    }
+}
+
+/// `frames` rounded up to whole blocks of `b`.
+fn whole(frames: Frame, b: Frame) -> Frame {
+    (frames + b - 1) / b * b
+}
+
+fn bits(x: &[f32]) -> Vec<u32> {
+    x.iter().map(|y| y.to_bits()).collect()
+}
+
+/// A swap on slot 0 at block size `block`, the input at `level`: `old` (tag 1) installed before the
+/// first block, so engaged at once, then `new` (tag 2) replacing it at `gain` from block start S. It
+/// commits at C, the first block start once it has staged its latency plus `STAGE`; checked here:
+/// no answer before C, `Committed` from C's block, the old unit back `ReplacedOut` after the fade. The
+/// rig keeps its output from S and has rendered whole blocks past the fade. Returns the rig, S and C.
+fn swap(block: usize, level: f32, old: Box<Fake>, new: Box<Fake>, gain: f32) -> (Rig, Frame, Frame) {
+    let b = block as Frame;
+    let need = new.latency + STAGE;
+    let mut rig = Rig::with(Opts { block, ..Default::default() });
+    rig.set_level(level);
+    rig.install_tagged(0, 1, old);
+    rig.advance(4 * b);
+    let s = rig.frame;
+    rig.replace(0, 2, new, gain);
+    rig.keep_output();
+    let c = s + whole(need, b);
+    rig.advance(c - s);
+    assert!(rig.reply(0).is_none(), "block {block}: staging until {c}");
+    rig.advance(b);
+    assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 2 })), "block {block}: committed at {c}");
+    rig.advance(whole(SWAP, b));
+    match rig.reply(0) {
+        Some(SlotReply::Handback(back)) => assert_eq!((back.tag, back.reason), (1, HandbackReason::ReplacedOut), "block {block}"),
+        other => panic!("block {block}: the old unit back, not {other:?}"),
+    }
+    (rig, s, c)
+}
+
+/// Proof 1: the swap fade lands on the same frames at any block size, counted from the commit frame C
+/// = S + ceil(need / B)·B, the old unit at the slot's gain as it stood and the new one at the replace's.
+#[test]
+fn the_swap_fade_is_bit_exact_from_the_commit_frame_at_any_block_size() {
+    for block in [1, 32, 128, 480] {
+        let (a, b) = (Probe::new(), Probe::new());
+        let (rig, s, c) = swap(block, 0.0, Fake::effect(0.25, 0.0, &a), Fake::effect(-1.0, 0.0, &b).with_latency(100), 0.5);
+        // The new unit at 0.5: -0.5 exactly.
+        assert_bits(&rig.monitor, s, |f| crossed(0.25, -0.5, f - c), &format!("block {block}"));
+        assert!(rig.bus.iter().all(|&x| x == 0.0), "block {block}: an effect swap leaves the bus alone");
+        assert_eq!(b.calls()[0].0, s, "block {block}: the candidate processes from S, unheard");
+        let (frame, len) = *a.calls().last().unwrap();
+        assert!(frame < c + SWAP && c + SWAP <= frame + len as Frame, "block {block}: the old unit's last call ends the fade");
+        assert_eq!((a.stops(), a.seen().last()), (1, Some(&Seen::Stop)), "block {block}: stopped once, after its last call");
+    }
+}
+
+/// Proof 2: mid-swap, each unit's term stays on its own destination (an effect's on the wet, an
+/// instrument's on the bus), and the input, live at full scale, is nowhere under the swap.
+#[test]
+fn mid_swap_each_unit_sounds_on_its_own_destination_and_the_bypass_not_at_all() {
+    use SlotKind::{Effect, Instrument};
+    let unit = |kind, level, probe: &Probe| match kind {
+        Effect => Fake::effect(level, 0.0, probe),
+        Instrument => Fake::instrument(level, 0, probe),
+    };
+    // A unit's level as (wet, bus).
+    let on = |kind, y: f32| if kind == Instrument { (0.0, y) } else { (y, 0.0) };
+    for (from, to) in [(Effect, Effect), (Instrument, Instrument), (Effect, Instrument), (Instrument, Effect)] {
+        let (a, b) = (Probe::new(), Probe::new());
+        let (rig, s, c) = swap(128, 1.0, unit(from, 0.25, &a), unit(to, -0.5, &b), 1.0);
+        let ((old_wet, old_bus), (wet, bus)) = (on(from, 0.25), on(to, -0.5));
+        assert_bits(&rig.monitor, s, |f| crossed(old_wet, wet, f - c), &format!("{from:?} to {to:?}: the wet"));
+        assert_bits(&rig.bus, s, |f| crossed(old_bus, bus, f - c), &format!("{from:?} to {to:?}: the bus"));
+    }
+}
+
+/// Proof 8: a candidate that refuses to start goes back `StartRefused` after its one call, stopped, and
+/// the slot renders bit for bit as a rig that never had the replace.
+#[test]
+fn a_candidate_that_refuses_to_start_goes_back_stopped_and_the_slot_plays_on_untouched() {
+    for block in [1, 32, 128, 480] {
+        let run = |candidate: Option<&Probe>| {
+            let a = Probe::new();
+            let mut rig = Rig::with(Opts { block, ..Default::default() });
+            rig.set_input(input_a);
+            rig.install_tagged(0, 1, Fake::effect(0.1, 0.5, &a));
+            rig.keep_output();
+            rig.advance(4 * block as Frame);
+            if let Some(probe) = candidate {
+                rig.replace(0, 2, Fake::effect(0.3, 1.0, probe).refusing(), 0.5);
+            }
+            rig.advance(2_000);
+            (rig, a)
+        };
+        let refused = Probe::new();
+        let (mut rig, a) = run(Some(&refused));
+        let (reference, a_ref) = run(None);
+        for (got, want, what) in [(&rig.monitor, &reference.monitor, "monitor"), (&rig.bus, &reference.bus, "bus"), (&rig.record, &reference.record, "record")] {
+            assert_eq!(bits(got), bits(want), "block {block}: the {what}");
+        }
+        assert_eq!(a.calls(), a_ref.calls(), "block {block}: the old unit's calls");
+        let back = match rig.reply(0) {
+            Some(SlotReply::Handback(back)) => back,
+            other => panic!("block {block}: the candidate back, not {other:?}"),
+        };
+        assert_eq!((back.tag, back.reason), (2, HandbackReason::Rejected(Rejection::StartRefused)), "block {block}");
+        assert!(rig.reply(0).is_none(), "block {block}: no other answer");
+        assert_eq!(refused.calls().len(), 1, "block {block}: back after the call it refused in");
+        assert_eq!((refused.stops(), refused.seen().last()), (1, Some(&Seen::Stop)), "block {block}: stopped");
+        drop(fake(back.unit));
+    }
+}
+
+/// Whether a take captures at the next block start, as the engine decides it (its alignment fixed).
+fn capturing(rig: &Rig) -> bool {
+    rig.window().is_some_and(|(_, start, _)| start.is_some())
+}
+
+/// Render one block; whether a take captured at its start.
+fn one_block(rig: &mut Rig) -> bool {
+    let captured = capturing(rig);
+    rig.advance(rig.block as Frame);
+    captured
+}
+
+/// Proof 9: while a take captures, a candidate with the playing unit's latency commits once staged, and
+/// one whose latency differs stays staged (the slot's latency holds) until the first block start after
+/// the capture ends.
+#[test]
+fn a_swap_that_changes_the_latency_waits_while_a_take_captures_and_one_that_keeps_it_does_not() {
+    for block in [1, 128, 480] {
+        let b = block as Frame;
+        let (p1, p2, p3) = (Probe::new(), Probe::new(), Probe::new());
+        let mut rig = Rig::with(Opts { block, ..Default::default() });
+        rig.install_tagged(0, 1, Fake::effect(0.0, 1.0, &p1).with_latency(64));
+        rig.advance(4 * b);
+        rig.queue(Command::RecDub(0));
+        rig.advance(b);
+        assert!(capturing(&rig), "block {block}: the take's alignment is fixed from its arm");
+
+        let s = rig.frame;
+        rig.replace(0, 2, Fake::effect(0.0, 1.0, &p2).with_latency(64), 1.0);
+        let c = s + whole(64 + STAGE, b);
+        loop {
+            let at = rig.frame;
+            assert!(one_block(&mut rig), "block {block}: still capturing");
+            match rig.reply(0) {
+                None => assert!(at < c, "block {block}: the same latency commits at {c}"),
+                Some(SlotReply::Committed { tag: 2 }) => break assert_eq!(at, c, "block {block}"),
+                other => panic!("block {block}: {other:?}"),
+            }
+        }
+        while rig.returned(0).is_none() {
+            assert!(one_block(&mut rig), "block {block}: still capturing");
+        }
+
+        rig.replace(0, 3, Fake::effect(0.0, 1.0, &p3).with_latency(200), 1.0);
+        let stop_at = rig.start_frame() + rig.seconds(0.5);
+        while rig.frame < stop_at {
+            assert!(one_block(&mut rig), "block {block}: still capturing");
+            assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 64)), "block {block}: staged while the take captures");
+        }
+        assert!(rig.reply(0).is_none(), "block {block}: no answer while it waits");
+        rig.queue(Command::RecDub(0));
+        let give_up = rig.frame + rig.seconds(10.0);
+        while one_block(&mut rig) {
+            assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 64)), "block {block}: staged while the take captures");
+            assert!(rig.frame < give_up, "block {block}: the take never stopped capturing");
+        }
+        assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 200)), "block {block}: committed at the first block start after the capture");
+        assert!(matches!(rig.reply(0), Some(SlotReply::Committed { tag: 3 })), "block {block}");
     }
 }

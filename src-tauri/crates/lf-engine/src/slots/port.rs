@@ -17,7 +17,6 @@ pub(super) enum SlotMsg {
     Replace {
         tag: u64,
         unit: Box<dyn SlotProcessor>,
-        #[expect(dead_code, reason = "E2: the swap commits at it; until then every replace is refused")]
         gain: f32,
     },
     Remove { tag: u64 },

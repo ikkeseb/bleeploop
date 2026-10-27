@@ -49,7 +49,7 @@ pub use port::SlotPort;
 use crate::api::{HandbackReason, Rejection, SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SlotReply, SLOT_COUNT};
 use crate::grid::Frame;
 use port::{SlotEnd, SlotMsg};
-use swap::Swap;
+use swap::{Swap, STAGE_SECONDS, SWAP_SECONDS};
 
 /// The crossfade into and out of bypass: 10 ms, the web monitor's declick (`audio_output.rs`).
 const FADE_SECONDS: f64 = 0.010;
@@ -101,8 +101,6 @@ struct Slot {
     /// While not 0: the gate is shut, whatever `live` says, until the command taken at this count (an
     /// idle unload's live-off: [`Rack::shut`]) has applied.
     shut: u64,
-    /// The gated input over a render call that a ramp touches.
-    gated: Vec<f32>,
     gain_target: f64,
     gain: f64,
     /// An instrument slot's record path: its output, `delay - latency` frames late.
@@ -193,13 +191,15 @@ impl Seat {
         self.held = [0; 2];
     }
 
-    /// The unit renders `x.len()` frames from `frame` into `out` with the queued events, which then
-    /// clear (an empty seat only clears them). An event stamped past the call (never, while slot
-    /// commands bound the ranges) plays late on its last frame rather than breaking the offset contract.
-    /// A non-finite sample would stick in every filter, echo, limiter and loop after it: the whole
-    /// call's output goes silent, counted in `errors`.
-    fn process(&mut self, frame: Frame, x: &[f32], errors: &mut u64) {
-        let m = x.len();
+    /// The unit renders `gated.len()` frames from `frame` into `out` with the queued events, which then
+    /// clear (an empty seat only clears them): an effect from `gated`, the slot's gated input, an
+    /// instrument from `zeros`. An event stamped past the call (never, while slot commands bound the
+    /// ranges) plays late on its last frame rather than breaking the offset contract. A non-finite
+    /// sample would stick in every filter, echo, limiter and loop after it: the whole call's output goes
+    /// silent, counted in `errors`.
+    fn process(&mut self, frame: Frame, gated: &[f32], zeros: &[f32], errors: &mut u64) {
+        let m = gated.len();
+        let x = if self.instrument() { &zeros[..m] } else { gated };
         for e in self.events.iter_mut() {
             e.offset = e.offset.min(m.saturating_sub(1) as u32);
         }
@@ -256,12 +256,16 @@ impl Slot {
     }
 
     /// A remove for `tag`: the unit the slot plays, if `tag` is its, releases its notes and heads for
-    /// bypass (there at once without `fade`). A unit already being removed gets no second answer; any
-    /// other tag, an empty slot's included, is answered `NotHeld`.
+    /// bypass (there at once without `fade`), a candidate staging beside it sent back `Cancelled` first.
+    /// A unit already leaving (being removed, or fading out after a swap) gets no answer; any other tag,
+    /// an empty slot's and a staging candidate's included, is answered `NotHeld`.
     fn remove(&mut self, tag: u64, fade: bool, dropped: &mut u64, errors: &mut u64) {
         if self.seat.unit.is_none() || self.seat.tag != tag {
-            self.end.send(SlotReply::NotHeld { tag }, errors);
+            if !self.fading_out(tag) {
+                self.end.send(SlotReply::NotHeld { tag }, errors);
+            }
         } else if !self.removing {
+            self.cancel(errors);
             self.seat.release_all(0, dropped);
             self.removing = true;
             self.engaged = false;
@@ -271,10 +275,50 @@ impl Slot {
         }
     }
 
-    /// The removal ends: the unit goes back `Removed` and the slot is empty.
+    /// The removal ends: a unit still fading out after a swap goes back `ReplacedOut`, then the slot's
+    /// `Removed`, and the slot is empty.
     fn finish_removal(&mut self, errors: &mut u64) {
+        if !matches!(self.swap, Swap::Idle) {
+            self.retire_side(HandbackReason::ReplacedOut, errors);
+        }
         self.seat.hand_back(&mut self.end, HandbackReason::Removed, errors);
         self.removing = false;
+    }
+
+    /// Frame `k` of a render call, `b` its bypass (the gated input): what the slot adds to the wet and to
+    /// the bus (`None`: nothing, so an effect's slot leaves the bus's bits alone). The bypass fade and
+    /// the swap fade step on, and the gain glides.
+    fn mix(&mut self, k: usize, b: f32, fade_frames: u32, swap_frames: u32, gain_coef: f64) -> (f32, Option<f32>) {
+        // A removal completes on the frame its fade reaches bypass, whatever the call's bounds: from
+        // there the slot is empty and passes what an empty slot does.
+        let gone = self.removing && self.fade == 0;
+        let fade = self.fade;
+        if self.engaged && self.fade < fade_frames {
+            self.fade += 1;
+        } else if !self.engaged && self.fade > 0 {
+            self.fade -= 1;
+        }
+        let swap = self.swap.step(swap_frames);
+        self.gain = crate::glide(self.gain, self.gain_target, gain_coef);
+        let Some(at) = swap else { return self.plain(k, b, fade, fade_frames, gone) };
+        // Mid-swap the bypass crossfade runs over both units' terms, the bypass at the slot's gain.
+        let (wet, bus) = self.crossing(k, at, swap_frames);
+        let bypass = (self.gain * b as f64) as f32;
+        (crossfade(bypass, wet, fade, fade_frames), Some(crossfade(0.0, bus, fade, fade_frames)))
+    }
+
+    /// Frame `k` outside a swap fade: the bypass crossfade `fade` frames (of `n`) from the bypass `b`
+    /// towards the unit the slot plays (an empty seat passes `b`), then the gain. An instrument's output
+    /// and its bypass go different ways (the bus, the wet), so each fades against silence there.
+    fn plain(&self, k: usize, b: f32, fade: u32, n: u32, gone: bool) -> (f32, Option<f32>) {
+        let o = if self.seat.unit.is_some() { self.seat.out[k] } else { b };
+        let g = self.gain;
+        let gained = |y: f32| if g == 1.0 { y } else { (g * y as f64) as f32 };
+        if self.seat.instrument() && !gone {
+            (gained(crossfade(b, 0.0, fade, n)), Some(gained(crossfade(0.0, o, fade, n))))
+        } else {
+            (gained(crossfade(b, o, fade, n)), None)
+        }
     }
 }
 
@@ -282,7 +326,12 @@ impl Slot {
 pub(crate) struct Rack {
     slots: [Slot; SLOT_COUNT],
     zeros: Vec<f32>,
+    /// The gated input over a render call that a ramp touches, one slot's at a time.
+    gated: Vec<f32>,
     fade_frames: u32,
+    /// A candidate's staging past its latency, and the swap fade, in frames ([`swap`]).
+    stage_frames: Frame,
+    swap_frames: u32,
     /// The live gate's ramp in frames: `LIVE_SECONDS` at the rate, at least 1.
     live_frames: Frame,
     /// A render call has run: from here a live toggle ramps (before it, it sets the starting state).
@@ -318,7 +367,6 @@ impl Rack {
                 live_end: Frame::MIN,
                 live_gain: 0.0,
                 shut: 0,
-                gated: vec![0.0; max_block.max(1)],
                 gain_target: 1.0,
                 gain: 1.0,
                 line: vec![0.0; line],
@@ -334,7 +382,10 @@ impl Rack {
         let rack = Rack {
             slots,
             zeros: vec![0.0; max_block.max(1)],
+            gated: vec![0.0; max_block.max(1)],
             fade_frames: (FADE_SECONDS * sample_rate as f64).round().max(1.0) as u32,
+            stage_frames: (STAGE_SECONDS * sample_rate as f64).round().max(1.0) as Frame,
+            swap_frames: (SWAP_SECONDS * sample_rate as f64).round().max(1.0) as u32,
             live_frames: (LIVE_SECONDS * sample_rate as f64).round().max(1.0) as Frame,
             rendered: false,
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
@@ -347,9 +398,10 @@ impl Rack {
         (rack, ports)
     }
 
-    /// Apply the ports' messages at a block start. `engaged` installs without a fade (nothing has
-    /// sounded yet, or no device runs); without `fade` a removal completes here.
-    fn service(&mut self, engaged: bool, fade: bool) {
+    /// Apply the ports' messages at a block start, then let a staged swap commit (unless `capturing`
+    /// holds it, [`swap`]). `engaged` installs without a fade (nothing has sounded yet, or no device
+    /// runs); without `fade` a swap and a removal complete here.
+    fn service(&mut self, engaged: bool, fade: bool, capturing: bool) {
         let (dropped, errors) = (&mut self.events_dropped, &mut self.protocol_errors);
         let fade_in = if engaged { self.fade_frames } else { 0 };
         for s in self.slots.iter_mut() {
@@ -357,15 +409,15 @@ impl Rack {
             while let Some(msg) = s.end.next() {
                 match msg {
                     SlotMsg::Install { tag, unit } => s.install(tag, unit, fade_in, errors),
-                    // E2: the unit stages beside the playing one; until then every replace is refused.
-                    SlotMsg::Replace { tag, unit, .. } => {
-                        *errors += 1;
-                        s.end.hand_back(tag, HandbackReason::Rejected(Rejection::Busy), unit, errors);
-                    }
+                    SlotMsg::Replace { tag, unit, gain } => s.replace(tag, unit, gain, fade_in, self.stage_frames, errors),
                     SlotMsg::Remove { tag } => s.remove(tag, fade, dropped, errors),
-                    // E2: a staging candidate goes back `Cancelled`; until then none ever stages.
-                    SlotMsg::Withdraw { tag } => s.end.send(SlotReply::NotHeld { tag }, errors),
+                    SlotMsg::Withdraw { tag } => s.withdraw(tag, errors),
                 }
+            }
+            if fade {
+                s.commit_when_ready(capturing, dropped, errors);
+            } else {
+                s.settle_swap(self.cursor, &self.zeros, dropped, errors);
             }
             if !fade && s.removing {
                 s.seat.flush(self.cursor, &self.zeros);
@@ -375,16 +427,17 @@ impl Rack {
         }
     }
 
-    /// At a block start: service the ports and start the render cursor.
-    pub(crate) fn begin_block(&mut self, start: Frame, first: bool) {
-        self.service(first, true);
+    /// At a block start: service the ports and start the render cursor. `capturing`: a take's
+    /// alignment is fixed over this block, so a swap that changes the latency waits.
+    pub(crate) fn begin_block(&mut self, start: Frame, first: bool, capturing: bool) {
+        self.service(first, true, capturing);
         self.cursor = start;
     }
 
     /// With no device running (the host holds the engine): apply the ports' messages at once, no
     /// fades. A removed unit stops here and goes straight back.
     pub(crate) fn service_idle(&mut self) {
-        self.service(true, false);
+        self.service(true, false, false);
     }
 
     /// Stop every unit and hand it back `Evicted` (a sample-rate change: the host re-activates and
@@ -544,7 +597,7 @@ impl Rack {
         aligned.fill(0.0);
         bus.fill(0.0);
         record.fill(0.0);
-        let (frame, fade_frames, n) = (self.cursor, self.fade_frames, self.live_frames);
+        let (frame, fade_frames, swap_frames, n) = (self.cursor, self.fade_frames, self.swap_frames, self.live_frames);
         self.rendered |= m > 0;
         for (s, input) in self.slots.iter_mut().zip(inputs) {
             let input = &input[..m];
@@ -553,7 +606,7 @@ impl Rack {
             // dry side of the bypass crossfade; an effect's output is never gated, so its tail rings.
             let (live, end, from) = if s.shut == 0 { (s.live, s.live_end, s.live_gain) } else { (false, Frame::MIN, 0.0) };
             if frame < end {
-                for (k, (g, &x)) in s.gated.iter_mut().zip(input).enumerate() {
+                for (k, (g, &x)) in self.gated.iter_mut().zip(input).enumerate() {
                     let f = frame + k as Frame;
                     *g = if f < end {
                         x * live_gate(live, end, from, f, n)
@@ -565,54 +618,30 @@ impl Rack {
                 }
             }
             let gated = if frame < end {
-                &s.gated[..m]
+                &self.gated[..m]
             } else if live {
                 input
             } else {
                 &self.zeros[..m]
             };
-            // An instrument takes no input.
-            let x = if s.seat.instrument() { &self.zeros[..m] } else { gated };
-            let has = s.seat.unit.is_some();
-            s.seat.process(frame, x, &mut self.protocol_errors);
-            let instrument = s.seat.instrument();
+            // A swap's other unit renders beside the one the slot plays (an empty seat renders nothing).
+            s.seat.process(frame, gated, &self.zeros, &mut self.protocol_errors);
+            s.side.process(frame, gated, &self.zeros, &mut self.protocol_errors);
             let len = s.line.len();
             let (d, dw) = ((delay - s.seat.latency).clamp(0, (len - 1) as Frame) as usize, s.dw);
-            for k in 0..m {
-                // A removal completes on the frame its fade reaches bypass, whatever the call's bounds:
-                // from there the slot is empty and passes what an empty slot does.
-                let gone = s.removing && s.fade == 0;
-                // The bypass is the gated input, an instrument's too. An instrument's output and its
-                // bypass go different ways (the bus, the wet), so each fades against silence there.
-                let b = gated[k];
-                // Read only mid-fade, which a gone slot never is.
-                let o = if has { s.seat.out[k] } else { b };
-                let (y, dry) = if instrument && !gone {
-                    (crossfade(0.0, o, s.fade, fade_frames), crossfade(b, 0.0, s.fade, fade_frames))
-                } else {
-                    (crossfade(b, o, s.fade, fade_frames), 0.0)
-                };
-                if s.engaged && s.fade < fade_frames {
-                    s.fade += 1;
-                } else if !s.engaged && s.fade > 0 {
-                    s.fade -= 1;
+            for (k, &b) in gated.iter().enumerate() {
+                let (w, v) = s.mix(k, b, fade_frames, swap_frames, self.gain_coef);
+                wet[k] += w;
+                if let Some(v) = v {
+                    bus[k] += v;
                 }
-                s.gain = crate::glide(s.gain, s.gain_target, self.gain_coef);
-                let (y, dry) = if s.gain == 1.0 { (y, dry) } else { ((s.gain * y as f64) as f32, (s.gain * dry as f64) as f32) };
-                if instrument && !gone {
-                    bus[k] += y;
-                    wet[k] += dry;
-                    s.line[s.write] = y;
-                    s.wet_line[s.write] = dry;
-                } else {
-                    wet[k] += y;
-                    s.line[s.write] = 0.0;
-                    s.wet_line[s.write] = y;
-                }
+                s.line[s.write] = v.unwrap_or(0.0);
+                s.wet_line[s.write] = w;
                 record[k] += s.line[(s.write + len - d) % len];
                 aligned[k] += s.wet_line[(s.write + len - dw) % len];
                 s.write = (s.write + 1) % len;
             }
+            s.swap_after_call(m, swap_frames, &mut self.protocol_errors);
             if s.removing && s.fade == 0 {
                 s.finish_removal(&mut self.protocol_errors);
             }

@@ -604,11 +604,12 @@ impl Engine {
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish. An atomic read.
         self.replayed |= self.commands.is_empty();
-        self.rack.begin_block(start, first);
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
         // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
-        // records (a skip or a repeat), and a change reaches both once nothing captures.
+        // records (a skip or a repeat), and a change reaches both once nothing captures. A plugin swap
+        // that would change the latency waits for it too, so this block's answer is the rack's.
         let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
+        self.rack.begin_block(start, first, !open);
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
