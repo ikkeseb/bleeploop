@@ -13,6 +13,7 @@ use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext,
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
 use super::owner::Request;
+use super::slot_host::SlotHost;
 use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError, LOAD_BINS};
 use crate::asio_startup::{AsioStartupStatus, AsioStatusReport};
 use crate::audio_output::AudioBackend;
