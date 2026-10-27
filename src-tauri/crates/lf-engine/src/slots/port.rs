@@ -7,7 +7,8 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use crate::api::{Handback, HandbackReason, SlotProcessor, SlotReply};
 
-const MSG_CAPACITY: usize = 4;
+/// Messages a slot's ring holds: also what a block takes from it at most.
+pub(super) const MSG_CAPACITY: usize = 4;
 const RETURN_CAPACITY: usize = 4;
 /// Replies waiting for room on the return ring.
 const PARKED: usize = 2;
@@ -38,8 +39,9 @@ impl SlotPort {
     }
 
     /// Stage `unit` beside the unit the slot plays, then crossfade to it at `gain` (`crate::slots`'
-    /// swap rules); into an empty slot, an install gliding to `gain`. Answered once: `Committed`, or
-    /// the unit back `Rejected`. Gives the unit back when the message ring is full.
+    /// swap rules); into an empty slot, an install gliding to `gain` (a latent one held while a take
+    /// captures). Answered once: `Committed`, or the unit back `Rejected`. Gives the unit back when the
+    /// message ring is full.
     pub fn replace(&mut self, tag: u64, unit: Box<dyn SlotProcessor>, gain: f32) -> Result<(), Box<dyn SlotProcessor>> {
         self.send_unit(SlotMsg::Replace { tag, unit, gain })
     }

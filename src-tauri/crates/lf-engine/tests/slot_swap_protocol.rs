@@ -1,21 +1,24 @@
 //! The hot swap's protocol driven through the engine (the rules: `src/slots.rs`): every unit comes back
-//! once, tagged, with why, in send order through a full return ring; a replace into an empty slot is an
-//! install at its gain; a slot swapping or removing refuses a replace, and one playing an install; a
-//! withdraw or a remove mid-staging and mid-fade does only what its tag names; an eviction mid-swap
-//! leaves nothing; a candidate stages its latency plus the stage, and the unit it replaces releases its
-//! notes in its last calls. (The fade itself: `tests/slot_swap.rs`.)
+//! once, tagged, with why, in send order through a full return ring and through partial reads while
+//! its parked overflow wraps around; a replace into an empty slot is an install at its gain; a slot
+//! swapping or removing refuses a replace, and one playing an install; a withdraw or a remove
+//! mid-staging and mid-fade does only what its tag names, and a second remove of a unit being removed
+//! gets no answer; an eviction mid-swap leaves nothing, nor one after a candidate panicked as it
+//! arrived; a candidate stages its latency plus the stage, and the unit it replaces releases its notes
+//! in its last calls. (The fade itself: `tests/slot_swap.rs`.)
 
 mod common;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering::SeqCst;
 
-use common::units::{Fake, Probe, Seen};
+use common::units::{Fake, PanicIn, Probe, Seen};
 use common::{Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::HandbackReason::{Evicted, Rejected, Removed, ReplacedOut};
 use lf_engine::Rejection::{Busy, Cancelled, Occupied};
 use lf_engine::SlotKind::{Effect, Instrument};
-use lf_engine::{Command, HandbackReason, NoteTarget, SlotKind, SlotProcessor, SlotReply};
+use lf_engine::{Command, HandbackReason, NoteTarget, ProcessContext, SlotKind, SlotProcessor, SlotReply};
 
 /// Frames at 48 kHz of a candidate's staging past its latency, of the swap fade, and of the bypass fade.
 const STAGE: Frame = 480;
@@ -117,6 +120,41 @@ fn every_unit_comes_back_once_tagged_with_why_in_send_order_through_a_full_retur
         drop(units);
         assert_eq!(drops(&[&p[0], &p[1], &p[2], &p[3]]), [1; 4], "block {block}: each back once");
     }
+}
+
+/// The parked overflow keeps send order through partial reads: the ring full and both parked places
+/// taken, the host reads one or two replies before each block and the block adds as many, so the
+/// oldest parked reply sits at either place in turn (the overflow wraps around) with a newer one parked
+/// behind it. Every reply (a withdraw's `NotHeld`, tagged by its count) arrives in send order, none
+/// leaked.
+#[test]
+fn replies_keep_send_order_through_partial_reads_while_the_parked_overflow_wraps_around() {
+    let mut rig = Rig::new();
+    rig.advance(128);
+    let (mut sent, mut read) = (0, Vec::new());
+    let take = |rig: &mut Rig, read: &mut Vec<u64>| match rig.reply(0) {
+        Some(SlotReply::NotHeld { tag }) => read.push(tag),
+        other => panic!("after {read:?}: {other:?}"),
+    };
+    // (replies read, withdraws sent) before each block: the ring's four, the parked two, then the
+    // overflow drained one or two at a time as it refills.
+    for (reads, sends) in [(0, 4), (0, 2), (1, 1), (1, 1), (1, 1), (2, 2), (1, 1), (2, 1), (0, 0)] {
+        for _ in 0..reads {
+            take(&mut rig, &mut read);
+        }
+        for _ in 0..sends {
+            sent += 1;
+            rig.withdraw(0, sent);
+        }
+        rig.advance(128);
+    }
+    while read.len() < sent as usize {
+        take(&mut rig, &mut read);
+        rig.advance(128);
+    }
+    assert!(rig.reply(0).is_none(), "nothing more");
+    assert_eq!(read, (1..=sent).collect::<Vec<_>>(), "in send order");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "nothing leaked");
 }
 
 /// Proof 5a: a replace into an empty slot renders bit for bit as an install with a `SetSlotGain` on the
@@ -323,6 +361,91 @@ fn the_new_unit_removed_just_after_its_commit_fades_out_within_the_two_units_ter
                 assert!(peak <= 0.7, "{what}: the {tap} reaches {peak} at frame {}", c + k as Frame - whole(STAGE, b));
             }
         }
+    }
+}
+
+/// Rule 5: a remove of a unit already being removed gets no answer of its own, whether it comes in the
+/// batch that started the removal or in a later block of its fade, and changes nothing: one `Removed`,
+/// and the slot renders as with a single remove.
+#[test]
+fn a_second_remove_of_a_unit_being_removed_gets_no_answer_and_changes_nothing() {
+    for block in [1, 128, 480] {
+        let b = block as Frame;
+        let run = |again: bool| {
+            let p = Probe::new();
+            let mut rig = Rig::with(Opts { block, ..Default::default() });
+            rig.set_input(tri);
+            rig.install_tagged(0, 1, Fake::effect(0.1, 0.5, &p));
+            rig.advance(4 * b);
+            rig.keep_output();
+            let r = rig.frame;
+            rig.remove_tagged(0, 1);
+            if again {
+                rig.remove_tagged(0, 1);
+                rig.remove_tagged(0, 1);
+            }
+            rig.advance(b);
+            // Every later block start inside the fade, which ends on frame R + FADE.
+            while rig.frame < r + FADE {
+                if again {
+                    rig.remove_tagged(0, 1);
+                }
+                rig.advance(b);
+            }
+            rig.advance(2 * b);
+            let mut units = Vec::new();
+            let got = answers(&mut rig, 0, &mut units);
+            (rig, p, got)
+        };
+        let ((rig, p, got), (reference, p_ref, _)) = (run(true), run(false));
+        assert_eq!(got, [Back(1, Removed)], "block {block}: one answer");
+        assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "block {block}");
+        same_output(&rig, &reference, &format!("block {block}"));
+        assert_eq!(p.calls(), p_ref.calls(), "block {block}: the unit's calls");
+        assert!(stopped_once(&p), "block {block}");
+    }
+}
+
+/// One block as the device callback renders it, under `catch_unwind`, its guard: false on a panic.
+fn guarded_block(rig: &mut Rig) -> bool {
+    let n = rig.block;
+    let ctx = ProcessContext { frame: rig.frame, xrun: false, damaged: false, align_frames: rig.align - rig.engine.limiter_latency(), input_frames: 0 };
+    let (input, mut left, mut right) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let engine = &mut rig.engine;
+    let ok = catch_unwind(AssertUnwindSafe(|| engine.process(&ctx, &input, &mut left, &mut right))).is_ok();
+    rig.frame += n as Frame;
+    ok
+}
+
+/// A candidate that panics as it takes the side seat (in `kind` or `latency`) faults the block that
+/// took the replace, under the callback's guard; the device side's owner then evicts the engine under
+/// its own (`engine_io/owner.rs`: idle servicing, then the eviction), and both units come back once,
+/// none dropped: the candidate as a staging one, `Committed`, the old unit `ReplacedOut`, then the
+/// candidate `Evicted`.
+#[test]
+fn a_candidate_that_panics_as_it_arrives_comes_back_with_the_old_unit_at_the_eviction() {
+    for at in [PanicIn::Kind, PanicIn::Latency] {
+        let (old, new) = (Probe::new(), Probe::new());
+        let mut rig = Rig::new();
+        rig.install_tagged(0, 1, Fake::effect(0.1, 0.0, &old));
+        rig.advance(4 * 128);
+        rig.replace(0, 2, Fake::effect(0.2, 0.0, &new).panicking_in(at), 1.0);
+        assert!(!guarded_block(&mut rig), "{at:?}: the block that took the replace panicked");
+        assert_eq!(drops(&[&old, &new]), [0, 0], "{at:?}: the unwind dropped nothing");
+        let engine = &mut rig.engine;
+        let evicted = catch_unwind(AssertUnwindSafe(|| {
+            engine.service_slots_idle();
+            engine.evict_slots();
+        }));
+        assert!(evicted.is_ok(), "{at:?}: the eviction ran through");
+        let mut units = Vec::new();
+        assert_eq!(answers(&mut rig, 0, &mut units), [Committed(2), Back(1, ReplacedOut), Back(2, Evicted)], "{at:?}");
+        assert!(stopped_once(&old) && stopped_once(&new), "{at:?}");
+        assert_eq!(rig.engine.slot(0), None, "{at:?}: nothing left");
+        assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "{at:?}");
+        assert_eq!(drops(&[&old, &new]), [0, 0], "{at:?}: none dropped by the engine");
+        drop(units);
+        assert_eq!(drops(&[&old, &new]), [1, 1], "{at:?}: each back once");
     }
 }
 

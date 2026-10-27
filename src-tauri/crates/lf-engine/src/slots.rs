@@ -28,12 +28,12 @@
 //! `process`, [`SlotProcessor::stop`] follows its last, and the unit goes back on the port, tagged and
 //! with why (`port`: a full return ring parks it behind the replies before it). With no device running
 //! the ports are serviced at once, without fades, and one silent frame of `process` carries a removed
-//! unit's release. Nothing here drops a unit: an eviction hands back an install still waiting on a port
-//! too, and a unit's methods run only while a seat of its slot holds it, so a panic the callback's guard
-//! catches unwinds past no unit held as a local. Installing into an occupied slot is a protocol error:
-//! the new unit goes straight back `Occupied`, counted, never started or stopped. So is a call whose
-//! output holds a NaN or an infinity: that call's output is silenced, so nothing downstream (the mix,
-//! the input sends, the limiter, a capture) ever sees it.
+//! unit's release. Nothing here drops a unit: an eviction hands back whatever either seat holds and an
+//! install still waiting on a port, and a unit's methods run only while a seat of its slot holds it, so
+//! a panic the callback's guard catches unwinds past no unit held as a local. Installing into an
+//! occupied slot is a protocol error: the new unit goes straight back `Occupied`, counted, never started
+//! or stopped. So is a call whose output holds a NaN or an infinity: that call's output is silenced, so
+//! nothing downstream (the mix, the input sends, the limiter, a capture) ever sees it.
 //!
 //! A replace ([`SlotPort::replace`], `swap`) changes the unit a slot plays without a gap. The candidate
 //! takes the slot's `side` seat and stages there: it processes the slot's input (an instrument
@@ -49,18 +49,19 @@
 //! refuses to start goes back `StartRefused` after the call it refused in, and a withdraw of its tag
 //! (or a remove of the playing unit) sends it back `Cancelled`; the playing unit plays on. A withdraw
 //! names only a staging candidate: any other tag, a committed unit's included, is answered `NotHeld`,
-//! so one that loses the race to the commit never touches the new unit. A replace into an empty slot is
-//! an install gliding to its gain, `Committed` at once; one into a slot already swapping, or whose unit
-//! is being removed, goes straight back `Busy`, counted, never started or stopped, so a slot holds at
-//! most two units. With no block to render the swap (idle servicing, an eviction), a staging candidate
-//! commits at once and the old unit goes back at once (an eviction then hands back the new one
-//! `Evicted`).
+//! so one that loses the race to the commit never touches the new unit. A replace into an empty slot
+//! needs no staging: an install gliding to its gain, `Committed` as it arrives unless a capture holds it
+//! as above. One into a slot already swapping, or whose unit is being removed, goes straight back
+//! `Busy`, counted, never started or stopped, so a slot holds at most two units. With no block to render
+//! the swap (idle servicing, an eviction), a staging candidate commits at once and the old unit goes back
+//! at once (an eviction then hands back the new one `Evicted`).
 //!
 //! The engine renders the slots once per range, not per chunk: from where they stopped up to the next
 //! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
 //! one call per device block unless a stamped slot command splits it. Those commands therefore apply
 //! at the start of a render call (every event offset is 0 in practice); an install, a replace or a
-//! removal applies at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
+//! removal applies at the next block start, which takes at most a message ring's worth per slot (the
+//! rest waits for the one after). A live ramp's end splits nothing: the gate is evaluated per frame.
 
 mod port;
 mod swap;
@@ -270,10 +271,15 @@ impl Slot {
             self.end.hand_back(tag, HandbackReason::Rejected(Rejection::Occupied), unit, errors);
             return;
         }
+        self.engage(fade);
+        self.seat.take(tag, unit);
+    }
+
+    /// The seat's unit is new: it heads in from bypass, `fade` frames of the way already done.
+    fn engage(&mut self, fade: u32) {
         self.removing = false;
         self.engaged = true;
         self.fade = fade;
-        self.seat.take(tag, unit);
     }
 
     /// A remove for `tag`: the unit the slot plays, if `tag` is its, releases its notes and heads for
@@ -299,9 +305,7 @@ impl Slot {
     /// The removal ends: a unit still fading out after a swap goes back `ReplacedOut`, then the slot's
     /// `Removed`, and the slot is empty.
     fn finish_removal(&mut self, errors: &mut u64) {
-        if !matches!(self.swap, Swap::Idle) {
-            self.retire_side(HandbackReason::ReplacedOut, errors);
-        }
+        self.retire_side(HandbackReason::ReplacedOut, errors);
         self.seat.hand_back(&mut self.end, HandbackReason::Removed, errors);
         self.removing = false;
     }
@@ -419,32 +423,33 @@ impl Rack {
         (rack, ports)
     }
 
-    /// Apply the ports' messages at a block start, then let a staged swap commit (unless `capturing`
-    /// holds it). `engaged` installs without a fade (nothing has sounded yet, or no device
-    /// runs); without `fade` a swap and a removal complete here.
+    /// Apply the ports' messages at a block start, at most a ring's worth per slot (the rest waits for
+    /// the next), then let a staged swap commit (unless `capturing` holds it). `engaged` installs
+    /// without a fade (nothing has sounded yet, or no device runs); without `fade` a swap and a removal
+    /// complete here.
     fn service(&mut self, engaged: bool, fade: bool, capturing: bool) {
-        let (dropped, errors) = (&mut self.events_dropped, &mut self.protocol_errors);
+        let (dropped, errors, stage) = (&mut self.events_dropped, &mut self.protocol_errors, self.stage_frames);
         let fade_in = if engaged { self.fade_frames } else { 0 };
         for s in self.slots.iter_mut() {
             s.end.unpark();
-            while let Some(msg) = s.end.next() {
+            for _ in 0..port::MSG_CAPACITY {
+                let Some(msg) = s.end.next() else { break };
                 match msg {
                     SlotMsg::Install { tag, unit } => s.install(tag, unit, fade_in, errors),
-                    SlotMsg::Replace { tag, unit, gain } => s.replace(tag, unit, gain, fade_in, self.stage_frames, errors),
+                    SlotMsg::Replace { tag, unit, gain } => s.replace(tag, unit, gain, fade_in, stage, capturing, dropped, errors),
                     SlotMsg::Remove { tag } => s.remove(tag, fade, dropped, errors),
                     SlotMsg::Withdraw { tag } => s.withdraw(tag, errors),
                 }
             }
             if fade {
-                s.commit_when_ready(capturing, dropped, errors);
+                s.commit_when_ready(stage, capturing, fade_in, dropped, errors);
             } else {
-                s.settle_swap(self.cursor, &self.zeros, dropped, errors);
+                s.settle_swap(self.cursor, &self.zeros, fade_in, dropped, errors);
             }
             if !fade && s.removing {
                 s.seat.flush(self.cursor, &self.zeros);
                 s.finish_removal(errors);
             }
-            debug_assert_eq!(s.side.unit.is_some(), !matches!(s.swap, Swap::Idle), "the side seat is filled exactly while a swap runs");
         }
     }
 

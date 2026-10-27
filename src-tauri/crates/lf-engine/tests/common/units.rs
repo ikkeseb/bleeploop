@@ -1,4 +1,4 @@
-//! The plugin unit fakes the slot tests hand the engine (`tests/slots.rs`, `tests/slot_swap.rs`). A fake
+//! The plugin unit fakes the slot tests hand the engine (`tests/slots.rs`, `tests/slot_swap*.rs`). A fake
 //! records what it saw in preallocated buffers and atomics, so every `process` still runs under the
 //! rig's `assert_no_alloc`, and counts its drops, so a test sees the engine never dropped it.
 
@@ -78,6 +78,13 @@ impl Probe {
     }
 }
 
+/// A method a [`Fake`] panics in, as a plugin can.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PanicIn {
+    Kind,
+    Latency,
+}
+
 /// A unit stand-in. Its output is `level` plus `through` × its input; an instrument also plays a 1.0
 /// impulse `latency` frames after each NoteOn.
 pub struct Fake {
@@ -91,17 +98,18 @@ pub struct Fake {
     last: f32,
     /// It refuses to start processing in its first call ([`SlotProcessor::start_refused`]).
     refuses: bool,
+    panics: Option<PanicIn>,
     called: bool,
     probe: Probe,
 }
 
 impl Fake {
     pub fn effect(level: f32, through: f32, probe: &Probe) -> Box<Fake> {
-        Box::new(Fake { id: 0, kind: SlotKind::Effect, latency: 0, level, through, impulse: None, last: 0.0, refuses: false, called: false, probe: probe.clone() })
+        Box::new(Fake { id: 0, kind: SlotKind::Effect, latency: 0, level, through, impulse: None, last: 0.0, refuses: false, panics: None, called: false, probe: probe.clone() })
     }
 
     pub fn instrument(level: f32, latency: Frame, probe: &Probe) -> Box<Fake> {
-        Box::new(Fake { id: 0, kind: SlotKind::Instrument, latency, level, through: 0.0, impulse: None, last: 0.0, refuses: false, called: false, probe: probe.clone() })
+        Box::new(Fake { id: 0, kind: SlotKind::Instrument, latency, level, through: 0.0, impulse: None, last: 0.0, refuses: false, panics: None, called: false, probe: probe.clone() })
     }
 
     pub fn with_last(mut self: Box<Self>, last: f32) -> Box<Fake> {
@@ -123,14 +131,21 @@ impl Fake {
         self.refuses = true;
         self
     }
+
+    pub fn panicking_in(mut self: Box<Self>, method: PanicIn) -> Box<Fake> {
+        self.panics = Some(method);
+        self
+    }
 }
 
 impl SlotProcessor for Fake {
     fn kind(&self) -> SlotKind {
+        assert_ne!(self.panics, Some(PanicIn::Kind), "the unit panics in kind()");
         self.kind
     }
 
     fn latency(&self) -> Frame {
+        assert_ne!(self.panics, Some(PanicIn::Latency), "the unit panics in latency()");
         self.latency
     }
 
