@@ -117,12 +117,20 @@ pub(crate) enum EngineSlot {
     Leaving,
 }
 
-/// The `plugin:param-changed` payload.
+/// The `plugin:param-changed` payload: the instance (`EngineSlotHandle::instance`) whose plugin moved it.
 #[derive(Clone, serde::Serialize)]
 struct ParamChanged {
     slot: u8,
+    instance: u64,
     id: u32,
     value: f64,
+}
+
+/// The `plugin:params-changed` and `plugin:editor-closed` payload: the instance it happened to.
+#[derive(Clone, serde::Serialize)]
+struct SlotInstance {
+    slot: u8,
+    instance: u64,
 }
 
 /// What a load runs once its slot is reserved, its unit entering as the `Entry` says: `engine_slot::load`
@@ -291,6 +299,16 @@ fn loaded(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>) ->
     })
 }
 
+/// The slot's handle (`loaded`) for a request naming `instance`: refused `stale instance` while the
+/// slot plays another (a swap replaced the one named, or the slot reloaded), so the request never
+/// reaches a plugin it was not meant for.
+fn playing(slots: &Slots, slot: u8, instance: u64, document: Option<(&PluginHostState, u32)>) -> Result<Option<Arc<EngineSlotHandle>>, String> {
+    match loaded(slots, slot, document)? {
+        Some(handle) if handle.instance() != instance => Err("stale instance".to_string()),
+        handle => Ok(handle),
+    }
+}
+
 /// Take `slot`'s plugin out of the engine and unload it, for the document `document` names (`None`:
 /// the app's exit). A load still running is cancelled and unloads what it loads, a swap is cancelled
 /// and its thread unloads both plugins; the slot is `Leaving` until this teardown ends. With `host`, a
@@ -371,19 +389,23 @@ fn vacate(slots: &Slots, slot: u8) {
     }
 }
 
-/// How the app opens a plugin for `window` into `slot`: `engine_slot::load` with the window's events and
-/// its HWND as a floating CLAP editor's transient parent (the editor host window is owner-less).
+/// How the app opens a plugin for `window` into `slot`: `engine_slot::load` with the window's events,
+/// each naming the instance this load makes (its owner's tag), and its HWND as a floating CLAP
+/// editor's transient parent (the editor host window is owner-less).
 fn window_open(window: &tauri::WebviewWindow, slot: u8) -> impl Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>, Entry) -> Result<EngineSlotHandle, String> {
-    let events = window.clone();
-    let sink: EventSink = Arc::new(move |event| {
-        let _ = match event {
-            EngineSlotEvent::ParamChanged { id, value } => events.emit("plugin:param-changed", ParamChanged { slot, id, value }),
-            EngineSlotEvent::ParamsChanged => events.emit("plugin:params-changed", slot),
-            EngineSlotEvent::EditorClosed => events.emit("plugin:editor-closed", slot),
-        };
-    });
+    let window = window.clone();
     let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
-    move |format, path, id, slot_host, tone, entry| engine_slot::load(format, path, id, slot_host, parent, sink.clone(), tone, entry)
+    move |format, path, id, slot_host, tone, entry| {
+        let (events, instance) = (window.clone(), slot_host.tag());
+        let sink: EventSink = Arc::new(move |event| {
+            let _ = match event {
+                EngineSlotEvent::ParamChanged { id, value } => events.emit("plugin:param-changed", ParamChanged { slot, instance, id, value }),
+                EngineSlotEvent::ParamsChanged => events.emit("plugin:params-changed", SlotInstance { slot, instance }),
+                EngineSlotEvent::EditorClosed => events.emit("plugin:editor-closed", SlotInstance { slot, instance }),
+            };
+        });
+        engine_slot::load(format, path, id, slot_host, parent, sink, tone, entry)
+    }
 }
 
 impl EngineApp {
@@ -402,9 +424,10 @@ impl EngineApp {
         self.reload_tones.lock().map_err(|_| "engine reload tones poisoned".to_string())
     }
 
-    /// The slot's handle; with `document`, for a request from the current document only (`loaded`).
-    fn handle(&self, slot: u8, document: Option<(&PluginHostState, u32)>) -> Result<Arc<EngineSlotHandle>, String> {
-        loaded(&self.slots, slot, document)?.ok_or_else(|| format!("no plugin loaded in slot {slot}"))
+    /// The slot's handle for a request naming `instance` (`playing`); with `document`, for a request
+    /// from the current document only (`loaded`).
+    fn handle(&self, slot: u8, instance: u64, document: Option<(&PluginHostState, u32)>) -> Result<Arc<EngineSlotHandle>, String> {
+        playing(&self.slots, slot, instance, document)?.ok_or_else(|| format!("no plugin loaded in slot {slot}"))
     }
 
     /// `plugin_load`: load plugin `id` from `path` into the engine's `slot` (≤ 15 s) for the document
@@ -485,23 +508,24 @@ impl EngineApp {
             .collect())
     }
 
-    /// `plugin_set_param`, for the document with `frontend_epoch`: an empty slot is a no-op (a set
-    /// racing an unload).
-    pub(crate) fn plugin_set_param(&self, state: &PluginHostState, frontend_epoch: u32, slot: u8, id: u32, value: f64) -> Result<(), String> {
-        match loaded(&self.slots, slot, Some((state, frontend_epoch)))? {
+    /// `plugin_set_param`, for the document with `frontend_epoch` and the slot's `instance`: an empty
+    /// slot is a no-op (a set racing an unload).
+    pub(crate) fn plugin_set_param(&self, state: &PluginHostState, frontend_epoch: u32, slot: u8, instance: u64, id: u32, value: f64) -> Result<(), String> {
+        match playing(&self.slots, slot, instance, Some((state, frontend_epoch)))? {
             Some(handle) => handle.set_param(id, value),
             None => Ok(()),
         }
     }
 
-    pub(crate) fn plugin_list_params(&self, slot: u8) -> Result<Vec<ParamDesc>, String> {
-        self.handle(slot, None)?.list_params()
+    /// `plugin_list_params`, of the slot's `instance`.
+    pub(crate) fn plugin_list_params(&self, slot: u8, instance: u64) -> Result<Vec<ParamDesc>, String> {
+        self.handle(slot, instance, None)?.list_params()
     }
 
-    /// `plugin_tone_take`: the slot's tone, saved fresh through its owner (it lands in the store too);
-    /// the tone file's bytes, empty when the plugin keeps no state.
-    pub(crate) fn plugin_tone_take(&self, slot: u8) -> Result<Vec<u8>, String> {
-        self.handle(slot, None)?.take_tone()
+    /// `plugin_tone_take`: the tone of the slot's `instance`, saved fresh through its owner (it lands in
+    /// the store too); the tone file's bytes, empty when the plugin keeps no state.
+    pub(crate) fn plugin_tone_take(&self, slot: u8, instance: u64) -> Result<Vec<u8>, String> {
+        self.handle(slot, instance, None)?.take_tone()
     }
 
     /// `plugin_tone_import`: a session's tone for `slot`, which session.json says belongs to `expected`
@@ -536,14 +560,15 @@ impl EngineApp {
         Ok(())
     }
 
-    /// `plugin_open_editor`, for the document with `frontend_epoch`.
-    pub(crate) fn plugin_open_editor(&self, state: &PluginHostState, frontend_epoch: u32, slot: u8) -> Result<(), String> {
-        self.handle(slot, Some((state, frontend_epoch)))?.open_editor()
+    /// `plugin_open_editor`, for the document with `frontend_epoch` and the slot's `instance`.
+    pub(crate) fn plugin_open_editor(&self, state: &PluginHostState, frontend_epoch: u32, slot: u8, instance: u64) -> Result<(), String> {
+        self.handle(slot, instance, Some((state, frontend_epoch)))?.open_editor()
     }
 
-    /// `plugin_close_editor`, for the document with `frontend_epoch`. Idempotent.
-    pub(crate) fn plugin_close_editor(&self, state: &PluginHostState, frontend_epoch: u32, slot: u8) -> Result<(), String> {
-        match loaded(&self.slots, slot, Some((state, frontend_epoch)))? {
+    /// `plugin_close_editor`, for the document with `frontend_epoch` and the slot's `instance`.
+    /// Idempotent: an empty slot is a no-op.
+    pub(crate) fn plugin_close_editor(&self, state: &PluginHostState, frontend_epoch: u32, slot: u8, instance: u64) -> Result<(), String> {
+        match playing(&self.slots, slot, instance, Some((state, frontend_epoch)))? {
             Some(handle) => handle.close_editor(),
             None => Ok(()),
         }
@@ -1314,6 +1339,40 @@ mod tests {
         };
         assert!(rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &looks).is_err());
         assert_eq!(seen.get(), Some((true, false)));
+    }
+
+    /// Once a swap commits, a request naming the replaced instance is refused `stale instance` and one
+    /// naming the new instance reaches it (`playing`); with the slot empty, any instance finds no plugin.
+    #[test]
+    fn a_request_for_the_instance_a_swap_replaced_is_refused_stale() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        let old = rig.playing().instance();
+        let new = rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &stand_in).unwrap().instance;
+        let ask = |instance| playing(&rig.slots, 0, instance, Some((&rig.state, epoch))).map(|h| h.map(|h| h.instance()));
+        assert_eq!(ask(old), Err("stale instance".to_string()));
+        assert_eq!(ask(new), Ok(Some(new)));
+        assert_eq!(unload(&rig.slots, 0, Some((&rig.state, epoch)), None), Ok(()));
+        assert_eq!((ask(old), ask(new)), (Ok(None), Ok(None)), "an empty slot keeps each request's own answer");
+    }
+
+    /// While a swap loads the next plugin, a request naming the playing instance reaches it, and one
+    /// naming the instance still loading is refused `stale instance`: it is not the slot's yet.
+    #[test]
+    fn a_request_during_a_swap_reaches_the_playing_instance_only() {
+        let rig = Rig::new();
+        let epoch = rig.state.begin_frontend_session();
+        assert!(rig.load(r"C:\plugins\Amp.clap", epoch, Duration::ZERO, &stand_in).is_ok());
+        let old = rig.playing().instance();
+        let ask = |instance| playing(&rig.slots, 0, instance, Some((&rig.state, epoch))).map(|h| h.map(|h| h.instance()));
+        let seen = RefCell::new(None);
+        let looks = |_: PluginFormat, _: String, _: String, slot: SlotHost, _: Option<ToneBinding>, _: Entry| -> Result<EngineSlotHandle, String> {
+            *seen.borrow_mut() = Some((rig.slot(), ask(old), ask(slot.tag())));
+            Err("load failed".to_string())
+        };
+        assert!(rig.swap(r"C:\plugins\Drive.clap", epoch, Duration::ZERO, &looks).is_err());
+        assert_eq!(seen.take(), Some(("swapping", Ok(Some(old)), Err("stale instance".to_string()))));
     }
 
     /// A swap whose load fails after an unload called it off: the plugin it was to replace ends with it

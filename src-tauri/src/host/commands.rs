@@ -325,12 +325,14 @@ pub async fn plugin_list_loaded() -> Result<Vec<PluginInfo>, String> {
         Ok(Vec::new())
     }
 }
-/// P9.5: set a parameter, for the document with `frontend_epoch`. `param_id` must be one the plugin
+/// P9.5: set a parameter of the slot's `instance` (refused `stale instance` once the slot plays
+/// another), for the document with `frontend_epoch`. `param_id` must be one the plugin
 /// listed (`listParams`) — an unknown id is an `Err` here and never reaches the plugin, because a
 /// plugin may crash on it.
 #[tauri::command]
 pub async fn plugin_set_param(
     slot: u8,
+    instance: u64,
     param_id: u32,
     value: f64,
     frontend_epoch: u32,
@@ -340,30 +342,30 @@ pub async fn plugin_set_param(
     #[cfg(windows)]
     {
         blocking(app, "plugin_set_param", move |engine, state| {
-            engine.plugin_set_param(state, frontend_epoch, slot, param_id, value)
+            engine.plugin_set_param(state, frontend_epoch, slot, instance, param_id, value)
         })
         .await
     }
     #[cfg(not(windows))]
     {
-        let _ = (param_id, value, frontend_epoch, app);
+        let _ = (instance, param_id, value, frontend_epoch, app);
         Ok(())
     }
 }
-/// Tone recall (`host/tone.rs`): save the slot's plugin tone now, through its owner, into the store,
-/// and answer the tone file's bytes as the raw response (empty: the plugin keeps no state). A session
-/// export takes each loaded slot's tone this way.
+/// Tone recall (`host/tone.rs`): save the tone of the slot's plugin `instance` now, through its owner,
+/// into the store, and answer the tone file's bytes as the raw response (empty: the plugin keeps no
+/// state). A session export takes each loaded slot's tone this way.
 #[tauri::command]
-pub async fn plugin_tone_take(slot: u8, app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
+pub async fn plugin_tone_take(slot: u8, instance: u64, app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        let bytes = blocking(app, "plugin_tone_take", move |engine, _| engine.plugin_tone_take(slot)).await?;
+        let bytes = blocking(app, "plugin_tone_take", move |engine, _| engine.plugin_tone_take(slot, instance)).await?;
         Ok(tauri::ipc::Response::new(bytes))
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (instance, app);
         Err(format!("plugin_tone_take is Windows-only (slot={slot})"))
     }
 }
@@ -417,49 +419,49 @@ pub async fn plugin_tone_forget(slot: u8, token: u32) -> Result<(), String> {
         Err(format!("plugin_tone_forget is Windows-only (slot={slot})"))
     }
 }
-/// P9.5: enumerate the loaded plugin's parameters (stable ids + ranges + live values), so a caller
-/// can set a real param id (an owner-thread query).
+/// P9.5: enumerate the parameters of the slot's plugin `instance` (stable ids + ranges + live values),
+/// so a caller can set a real param id (an owner-thread query).
 #[tauri::command]
-pub async fn plugin_list_params(slot: u8, app: tauri::AppHandle) -> Result<Vec<ParamDesc>, String> {
+pub async fn plugin_list_params(slot: u8, instance: u64, app: tauri::AppHandle) -> Result<Vec<ParamDesc>, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        blocking(app, "plugin_list_params", move |engine, _| engine.plugin_list_params(slot)).await
+        blocking(app, "plugin_list_params", move |engine, _| engine.plugin_list_params(slot, instance)).await
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (instance, app);
         Ok(Vec::new())
     }
 }
-/// P10.0: open the slot's plugin editor, on its owner thread: a plugin-owned floating window, else
-/// one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`, the VST2
-/// owner's `embed_editor`), for the document with `frontend_epoch`.
+/// P10.0: open the editor of the slot's plugin `instance`, on its owner thread: a plugin-owned floating
+/// window, else one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`, the
+/// VST2 owner's `embed_editor`), for the document with `frontend_epoch`.
 #[tauri::command]
-pub async fn plugin_open_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn plugin_open_editor(slot: u8, instance: u64, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        blocking(app, "plugin_open_editor", move |engine, state| engine.plugin_open_editor(state, frontend_epoch, slot)).await
+        blocking(app, "plugin_open_editor", move |engine, state| engine.plugin_open_editor(state, frontend_epoch, slot, instance)).await
     }
     #[cfg(not(windows))]
     {
-        let _ = (frontend_epoch, app);
+        let _ = (instance, frontend_epoch, app);
         Err(format!("plugin_open_editor is Windows-only (slot={slot})"))
     }
 }
-/// P10.0: hide + destroy the slot's plugin editor (owner thread), for the document with
-/// `frontend_epoch`. Idempotent — closing a non-open editor is a harmless no-op.
+/// P10.0: hide + destroy the editor of the slot's plugin `instance` (owner thread), for the document
+/// with `frontend_epoch`. Idempotent — closing a non-open editor is a harmless no-op.
 #[tauri::command]
-pub async fn plugin_close_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn plugin_close_editor(slot: u8, instance: u64, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        blocking(app, "plugin_close_editor", move |engine, state| engine.plugin_close_editor(state, frontend_epoch, slot)).await
+        blocking(app, "plugin_close_editor", move |engine, state| engine.plugin_close_editor(state, frontend_epoch, slot, instance)).await
     }
     #[cfg(not(windows))]
     {
-        let _ = (frontend_epoch, app);
+        let _ = (instance, frontend_epoch, app);
         Ok(())
     }
 }
