@@ -25,7 +25,15 @@
  *    opens the new plugin's editor;
  * 9. a hot swap that activates another kind sends no live-off and shows GO LIVE on until the feed's
  *    `live` says off, then off with no event;
- * 10. two picks queued behind a pending swap: only the newest runs.
+ * 10. two picks queued behind a pending swap: only the newest runs;
+ * 11. a swap's incoming file is held from its start: the other slot's load of it meanwhile is unordered;
+ * 12. a file retiring in one slot keeps its affinity after the same file's retire in the other slot ends;
+ * 13. a device rebuild's resync sends no gain for a slot with a swap pending (the other slot's it sends);
+ * 14. a failed swap that leaves a live slot empty sends its live-off first;
+ * 15. that live-off refused: GO LIVE stays (live, as the feed has it), and its press is a live-off;
+ * 16. a `busy:` refusal of the param listing keeps the listed controls, with no toast;
+ * 17. a failed swap whose listing shows another instance adopts it; a listing that fails keeps the
+ *     outgoing shown, toasts once and drops the held level.
  *
  * Cannot see the native swap, its commit, the engine's live-off at a kind change or any timing: the
  * fake answers what the probe scripts.
@@ -66,14 +74,14 @@ await probe(async ({ open }) => {
     }
     const desc = (id, isEffect, path = `C:\\probe\\${id}.vst3`) => ({ id, name: `Probe ${id.toUpperCase()}`, path, format: 'vst3', isEffect });
     const d = {};
-    for (const id of 'abcdefghijklmn') d[id] = desc(id, false);
+    for (const id of 'abcdefghijklmnopqrst') d[id] = desc(id, false);
     for (const id of ['fx1', 'fx2', 'fx3']) d[id] = desc(id, true);
     d.u = desc('u', undefined); // unclassified: takes input, activates as whatever the host says
     d.bCase = desc('b-copy', false, 'c:/PROBE/B.vst3'); // the same file as `b`, as native's `same_file` reads it
     const all = Object.values(d);
     const find = (path, id) => all.find((x) => x.path === path && x.id === id);
 
-    const H = { d, calls: [], instance: 0, swapHold: null, listed: [], opened: [], closedCbs: new Set(), retiredCb: null, staleSets: 0 };
+    const H = { d, calls: [], instance: 0, swapHold: null, listed: [], listFails: false, paramsBusy: false, opened: [], closedCbs: new Set(), paramsCbs: new Set(), retiredCb: null, staleSets: 0 };
     const answer = (slot, path, id, effect) => {
       const descriptor = find(path, id);
       return { slot, descriptor, instance: ++H.instance, effect: effect ?? descriptor.isEffect === true };
@@ -91,10 +99,20 @@ await probe(async ({ open }) => {
         H.swapHold = { resolve: (effect) => resolve(answer(slot, path, id, effect)), reject };
       });
     };
-    host.listLoaded = async () => H.listed;
+    host.listLoaded = async () => {
+      if (H.listFails) throw new Error('injected listing failure');
+      return H.listed;
+    };
     host.openEditor = async (slot, instance) => void H.opened.push([slot, instance]);
     host.closeEditor = async () => {};
-    host.listParams = async () => [{ id: 1, name: 'Alpha', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
+    host.listParams = async (slot) => {
+      if (H.paramsBusy) throw new Error(`busy: the plugin in slot ${slot + 1} is unloading`);
+      return [{ id: 1, name: 'Alpha', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
+    };
+    host.onParamsChanged = (cb) => {
+      H.paramsCbs.add(cb);
+      return () => H.paramsCbs.delete(cb);
+    };
     host.setParameter = async () => {
       H.staleSets++;
       throw new Error('stale instance: slot 1 plays another instance');
@@ -136,6 +154,8 @@ await probe(async ({ open }) => {
       blocker: (slot, path) => instrument.editorAffinityBlocker(slot, path),
       retire: (slot, instance, released) => H.retiredCb({ slot, instance, released }),
       editorClosed: (slot, instance) => H.closedCbs.forEach((cb) => cb({ slot, instance })),
+      paramsChanged: (slot, instance) => H.paramsCbs.forEach((cb) => cb({ slot, instance })),
+      capPressed: (slot) => document.querySelector(`button[aria-label="Live input for slot ${'AB'[slot]}"]`)?.getAttribute('aria-pressed') ?? null,
     });
     window.__hot = H;
     await instrument.scanForPlugins();
@@ -317,9 +337,9 @@ await probe(async ({ open }) => {
   console.log('5. emptied', JSON.stringify(emptied5));
   assert.deepEqual(emptied5, {
     shown: { id: null, instance: null },
-    sent: [['gain', 1]],
+    sent: [['live', false], ['gain', 1]],
     toasts: ['Could not load Probe I, and the slot is empty now. Pick a source again. x1'],
-  }, 'a slot listed empty is cleared, its gain back at the input level');
+  }, 'a slot listed empty is cleared, its live input stopped and its gain back at the input level');
   assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, slot emptied').length, 1, 'the failed swap is logged');
 
   // 6. The replaced instance's events are dropped; a stale refusal is silent.
@@ -436,4 +456,175 @@ await probe(async ({ open }) => {
     swaps: ['swap C:\\probe\\l.vst3', 'swap C:\\probe\\n.vst3'],
     shown: { id: 'n', instance: 17 },
   }, 'a pick a newer one overtook in the queue does nothing');
+
+  // 11. A swap's incoming file is held from its start: the other slot's load of it meanwhile is unordered.
+  const UNORDERED = 'an unknown slot (both loaded it at once)';
+  const incoming11 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument, d } = H;
+    await instrument.clearPlugin(1);
+    const swap = instrument.selectPlugin(0, d.o); // k (13) → o
+    await H.held();
+    await instrument.selectPlugin(1, d.o); // cold into the empty slot B while A's swap is pending
+    const overlap = H.blocker(0, d.o.path)?.owner ?? null;
+    H.release(false);
+    await swap;
+    return { overlap, shown: [H.shown(0).id, H.shown(1).id] };
+  });
+  console.log('11. incoming', JSON.stringify(incoming11));
+  assert.deepEqual(incoming11, { overlap: UNORDERED, shown: ['o', 'o'] },
+    "a load overlapping the other slot's swap to the same file cannot be ordered");
+
+  // 12. Both slots hold o; each swaps away. B's retire ends first: A's o still retires, so the entry stays.
+  const retire12 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument, d } = H;
+    const owner = () => H.blocker(0, d.o.path)?.owner ?? null;
+    const [a, b] = [H.shown(0).instance, H.shown(1).instance];
+    for (const [slot, to] of [[0, d.p], [1, d.q]]) {
+      const swap = instrument.selectPlugin(slot, to);
+      await H.held();
+      H.release(false);
+      await swap;
+    }
+    H.retire(1, b, true);
+    const oneRetiring = owner();
+    H.retire(0, a, true);
+    return { oneRetiring, noneLeft: owner() };
+  });
+  console.log('12. retiring', JSON.stringify(retire12));
+  assert.deepEqual(retire12, { oneRetiring: UNORDERED, noneLeft: null },
+    'a file retiring in one slot keeps its affinity until its last holder lets go');
+
+  // 13. A rebuild's resync while a swap is pending sends the other slot's gain, not the swapping slot's.
+  const resync13 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const swap = H.instrument.selectPlugin(0, H.d.r); // p → r
+    await H.held();
+    const from = H.mark();
+    H.instrument.engineResync(false);
+    await H.pause(30);
+    const sent = { swapping: H.slotSent(from, 0), other: H.slotSent(from, 1).length };
+    H.release(false);
+    await swap;
+    return sent;
+  });
+  console.log('13. resync', JSON.stringify(resync13));
+  assert.deepEqual(resync13, { swapping: [], other: 1 }, "a resync leaves a pending swap's gain to native's replay");
+
+  // 14. A failed swap that leaves a live slot empty stops its input first.
+  const goLiveOn = (slot) => page.evaluate(async (s) => {
+    const H = window.__hot;
+    await H.live.toggleLive(s);
+    await H.until(() => H.capPressed(s) === 'true', 'the slot to go live');
+  }, slot);
+  await page.evaluate(async () => {
+    const H = window.__hot;
+    const swap = H.instrument.selectPlugin(1, H.d.fx1); // q → fx1
+    await H.held();
+    H.release(true);
+    await swap;
+  });
+  await goLiveOn(1);
+  const failSwapEmpty = (to) => page.evaluate(async (key) => {
+    const H = window.__hot;
+    const from = H.mark();
+    const swap = H.instrument.selectPlugin(1, H.d[key]);
+    await H.held();
+    H.listed = [];
+    H.fail('injected swap failure, slot emptied');
+    await swap;
+    await H.pause(50);
+    const out = { shown: H.shown(1), sent: H.slotSent(from, 1), cap: H.capPressed(1) };
+    H.clearToasts();
+    return out;
+  }, to);
+  const emptied14 = await failSwapEmpty('fx2');
+  console.log('14. emptied live', JSON.stringify(emptied14));
+  assert.deepEqual(emptied14, { shown: { id: null, instance: null }, sent: [['live', false], ['gain', 1]], cap: null },
+    'the emptied slot is taken off live before it reads empty');
+  consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, slot emptied');
+
+  // 15. The same with the live-off lost on its way: GO LIVE stays as the stop, the feed's live its state.
+  await page.evaluate(() => window.__hot.instrument.selectPlugin(1, window.__hot.d.fx1)); // cold
+  await goLiveOn(1);
+  await page.evaluate(async () => {
+    const H = window.__hot;
+    const swap = H.instrument.selectPlugin(1, H.d.fx2);
+    await H.held();
+    H.listed = [];
+    window.__lf.native.failSends = 2; // the live-off's batch and its one resend
+    H.fail('injected swap failure, slot emptied, live-off lost');
+    await swap;
+    await H.idle();
+  });
+  const stranded15 = await page.evaluate(() => ({
+    shown: window.__hot.shown(1),
+    pressed: window.__hot.capPressed(1),
+    disabled: document.querySelector('button[aria-label="Live input for slot B"]')?.disabled ?? null,
+  }));
+  console.log('15. stranded', JSON.stringify(stranded15));
+  assert.deepEqual(stranded15, { shown: { id: null, instance: null }, pressed: 'true', disabled: false },
+    'a refused live-off keeps GO LIVE reachable, live as the feed has it');
+  const from15 = await page.evaluate(() => {
+    window.__hot.clearToasts();
+    return window.__hot.mark();
+  });
+  await cap.click();
+  await cap.waitFor({ state: 'detached' });
+  assert.deepEqual(await page.evaluate((from) => window.__hot.slotSent(from, 1), from15), [['live', false]], 'its press is a live-off');
+  consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, slot emptied, live-off lost');
+  consumeConsoleErrors(/did not reach|lost the batch/);
+
+  // 16. A `busy:` refusal of the param listing keeps the listed controls, with no toast.
+  const busy16 = await page.evaluate(async () => {
+    const H = window.__hot;
+    H.clearToasts();
+    const sliders = () => document.querySelectorAll('#slot-0-params input[aria-label="Alpha"]').length;
+    await H.until(() => sliders() === 1, 'slot A to list its controls');
+    H.paramsBusy = true;
+    H.paramsChanged(0, H.shown(0).instance);
+    await H.pause(50);
+    H.paramsBusy = false;
+    return { sliders: sliders(), empty: document.querySelector('#slot-0-params .pc__empty')?.textContent ?? null, toasts: H.toasts() };
+  });
+  console.log('16. busy listing', JSON.stringify(busy16));
+  assert.deepEqual(busy16, { sliders: 1, empty: null, toasts: [] }, 'a busy listing keeps the controls and raises no toast');
+  assert.equal(consumeConsoleErrors('[PluginControls] listParams failed Error: busy:').length, 1, 'the busy refusal is logged');
+
+  // 17. The two recovery branches left: another instance listed is adopted; a failed listing keeps the outgoing.
+  const recovery17 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument, d } = H;
+    const from = H.mark();
+    let swap = instrument.selectPlugin(0, d.s); // r → s, which the host lists after all
+    await H.held();
+    instrument.setSlotLevel(0, 0.3);
+    H.listed = [{ slot: 0, descriptor: d.s, instance: 99, effect: false }];
+    H.fail('injected swap failure, another listed');
+    await swap;
+    await H.pause(30);
+    const adopted = { shown: H.shown(0), sent: H.slotSent(from, 0), toasts: H.toasts() };
+    H.clearToasts();
+    const from2 = H.mark();
+    swap = instrument.selectPlugin(0, d.t); // s (99) → t, the listing fails too
+    await H.held();
+    instrument.setSlotLevel(0, 0.2);
+    H.listFails = true;
+    H.fail('injected swap failure, listing fails');
+    await swap;
+    H.listFails = false;
+    await H.pause(30);
+    const unlisted = { shown: H.shown(0), sent: H.slotSent(from2, 0), toasts: H.toasts() };
+    H.clearToasts();
+    return { adopted, unlisted };
+  });
+  console.log('17. recovery', JSON.stringify(recovery17));
+  assert.deepEqual(recovery17, {
+    adopted: { shown: { id: 's', instance: 99 }, sent: [], toasts: ['Could not load Probe S. x1'] },
+    unlisted: { shown: { id: 's', instance: 99 }, sent: [], toasts: ['Could not load Probe T. x1'] },
+  }, 'another listed instance is adopted; a failed listing keeps the outgoing; neither sends the held level');
+  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, another listed').length, 1);
+  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, listing fails').length, 1);
+  assert.equal(consumeConsoleErrors('listing the slots failed Error: injected listing failure').length, 1);
 }, { launch: {} });

@@ -1,5 +1,5 @@
 import { createSignal } from 'solid-js';
-import { hotSwapPending, slotPendingCounts, slotTakesInput } from '../state/instrument';
+import { hotSwapPending, liveStranded, slotPendingCounts, slotTakesInput } from '../state/instrument';
 import { serializeLive, withAt } from '../state/instrument-slots';
 import { goLive, holdPress, inputArmed, pressEngineLive, takeHeldPresses } from '../state/native-io';
 import { notifyError } from '../../notify';
@@ -26,9 +26,10 @@ export function clearLiveError(slot: 0 | 1): void {
   setError((prev) => withAt(prev, slot, null));
 }
 
-/** Whether slot `slot` shows a GO LIVE cap: its source takes input. */
+/** Whether slot `slot` shows a GO LIVE cap: its source takes input, or a failed swap left it empty and
+ * live (`liveStranded`): its press is a live-off then (`pressEngineLive`). */
 export function liveShown(slot: 0 | 1): boolean {
-  return slotTakesInput(slot);
+  return slotTakesInput(slot) || (liveStranded(slot) && inputArmed()[slot]);
 }
 
 /** Run `send` as slot `slot`'s GO LIVE op, its failure told unless `quiet` (`wentLive`: the chip's and

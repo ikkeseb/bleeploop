@@ -20,6 +20,7 @@ import {
 import { notifyError } from '../../notify';
 import {
   activeSlot,
+  isBusyRefusal,
   nativeHostReady,
   serializeSlot,
   setActiveSlotSignal,
@@ -139,6 +140,11 @@ const [hotSwaps, setHotSwaps] = createSignal<[boolean, boolean]>([false, false])
 /** Whether a hot swap is pending on `slot` (reactive): its GO LIVE is not held behind it (`live.ts`). */
 export const hotSwapPending = (slot: 0 | 1): boolean => hotSwaps()[slot];
 const gainHeld: [boolean, boolean] = [false, false];
+// A slot a failed swap left empty while its live-off did not reach the host (`adoptSwapFailure`): it may
+// pass its input dry, so its GO LIVE stays (`live.ts`) until the feed says it is off or a plugin lands.
+const [strandedLive, setStrandedLive] = createSignal<[boolean, boolean]>([false, false]);
+/** Whether `slot` keeps GO LIVE as the stop for a live-off a failed swap's recovery could not send. */
+export const liveStranded = (slot: 0 | 1): boolean => strandedLive()[slot];
 
 /** Route the notes to slot `i`'s source: its plugin, its instrument or nowhere (Off, or a swap in
  * flight). Native MIDI's router releases what sounds on the target it leaves, then selects (a target
@@ -173,11 +179,12 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
  * WebView reload): the note target, the slot gains, the instrument levels, and on the page's `first`
  * reset no live slot (a reload's disarm). A later reset sends no live flag: the engine's settings
  * replay has them, and the feed's may be older than a live-off in flight (an unload's). A reload's held notes are native MIDI's to release (the document's epoch), and a new
- * engine gets the target and wheels from the settings replay.
+ * engine gets the target and wheels from the settings replay. A slot with a hot swap pending gets no
+ * gain: the replay has the commit's, and the UI's may still be the outgoing's (`setEngineGain`).
  */
 export function engineResync(first: boolean): void {
   applyActiveRouting();
-  for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
+  for (const slot of [0, 1] as const) if (!hotSwapPending(slot)) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
   for (const { id } of SYNTHS) sendEngine({ SetInstrumentGain: [id as InstrumentId, synthGains()[id]] });
   if (first) disarmEngineLive();
 }
@@ -277,9 +284,11 @@ export function selectOff(slotIndex: 0 | 1): void {
  * (`src-tauri/src/host/engine_slot.rs`), so the owning slot's unload ends the bound thread: while the
  * other slot keeps the module loaded, the entry turns `orphaned` and BOTH slots are refused, the owner's
  * next load included. The entry dies when the module truly unloads, i.e. when the LAST slot holding the
- * path lets it go; the next load owns it afresh. A slot holds a path (`nativePaths`) from the moment its
- * load STARTS (the host opens the module before it answers) until its native unload succeeded or its
- * load failed. Any native error on a file's load or unload keeps that file a possible holder until
+ * path lets it go; the next load owns it afresh. A path's holders (`pathHeld`) are its playing, loading
+ * and retiring instances: a slot holds a path (`nativePaths`) from the moment its load STARTS (the host
+ * opens the module before it answers) until its native unload succeeded or its load failed; a hot swap's
+ * incoming file is held from the swap's start (`loadingPaths`), and the plugin it replaced until its
+ * retire ended (`retiring`). Any native error on a file's load or unload keeps that file a possible holder until
  * restart (`uncertainPaths`): the host may have left its module loaded (a setup past its bound, a
  * teardown that leaked the plugin), and no native answer says when it goes. Once no slot holds such a
  * file, it is refused in BOTH slots until restart, and a later load claims nothing: its module may be
@@ -291,15 +300,20 @@ const editorAffinity = new Map<string, { slot: 0 | 1; state: 'owned' | 'orphaned
 // The file each slot's native host may hold (the rule above). Not `slotPlugins`: that reads empty while
 // a load or an unload is in flight and comes back on a failed unload.
 const nativePaths: [string | null, string | null] = [null, null];
-// Whether each slot's native load is in flight (started, not yet answered): a load of the same path
-// starting meanwhile in the other slot cannot be ordered against it.
-const loadsInFlight: [boolean, boolean] = [false, false];
+// The file each slot's native load or hot swap in flight (started, not yet answered) brings in: a load of
+// the same path starting meanwhile in the other slot cannot be ordered against it.
+const loadingPaths: [string | null, string | null] = [null, null];
 // Files a native load or unload error left possibly held for the rest of the run (the rule above); apart
 // from `nativePaths`, so the slot's next load does not overwrite them.
 const uncertainPaths = new Set<string>();
 // The instances a hot swap replaced, until their `plugin:retired` (instance → path): the outgoing
 // plugin's module may stay loaded while its retire runs, so its file's affinity waits for the event.
 const retiring = new Map<number, string>();
+
+/** Whether any holder of `path` is left: a slot's playing or loading plugin, or a replaced one still
+ * retiring (the rule above). */
+const pathHeld = (path: string): boolean =>
+  nativePaths.includes(path) || loadingPaths.includes(path) || [...retiring.values()].includes(path);
 
 /**
  * Non-null = refuse. `owner` names whose editor this file's GUI serves: the OTHER slot, a load of a slot
@@ -325,25 +339,25 @@ function claimEditorAffinity(slot: 0 | 1, path: string): void {
   const other = slot === 0 ? 1 : 0;
   const entry = editorAffinity.get(path);
   if (entry) {
-    const otherLoading = loadsInFlight[other] && nativePaths[other] === path;
+    const otherLoading = loadingPaths[other] === path;
     if (entry.state === 'owned' && entry.slot === other && otherLoading) entry.state = 'unordered';
     return;
   }
   if (uncertainPaths.has(path)) return;
-  editorAffinity.set(path, { slot, state: nativePaths[other] === path ? 'unordered' : 'owned' });
+  editorAffinity.set(path, { slot, state: pathHeld(path) ? 'unordered' : 'owned' });
 }
 
 /**
- * After `slot` let go of `outgoingPath` (its unload succeeded or its load failed): drop the path's
- * affinity when NO slot's host holds it anymore (the module unloaded, unless the path is uncertain: then
- * the uncertain rule refuses it); else, if `slot` owned it, its owner thread is gone with the module
- * still bound to it, so the entry turns orphaned.
+ * After `slot` let go of `outgoingPath` (its unload succeeded, its load failed or its retire ended):
+ * drop the path's affinity when no holder of it is left (`pathHeld`: the module unloaded, unless the
+ * path is uncertain: then the uncertain rule refuses it); else, if `slot` owned it, its owner thread is
+ * gone with the module still bound to it, so the entry turns orphaned.
  */
 function releaseEditorAffinity(slot: 0 | 1, outgoingPath: string | undefined): void {
   if (!outgoingPath) return;
   const entry = editorAffinity.get(outgoingPath);
   if (!entry) return;
-  if (!nativePaths.includes(outgoingPath)) editorAffinity.delete(outgoingPath);
+  if (!pathHeld(outgoingPath)) editorAffinity.delete(outgoingPath);
   else if (entry.slot === slot && entry.state === 'owned') entry.state = 'orphaned';
 }
 
@@ -402,12 +416,12 @@ async function doSelectPlugin(
   sourceOps[slot]++;
   claimEditorAffinity(slot, desc.path);
   nativePaths[slot] = desc.path;
-  loadsInFlight[slot] = true;
+  loadingPaths[slot] = desc.path;
   try {
     // A browser probe's stand-in host may answer nothing, or no instance (`slotInstance`).
     info = await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken);
   } catch (e) {
-    loadsInFlight[slot] = false;
+    loadingPaths[slot] = null;
     swapping[slot] = false; // the swap ends on the slot's instrument (or Off)
     console.error('[instrument] plugin load failed', e);
     uncertainPaths.add(desc.path);
@@ -422,11 +436,12 @@ async function doSelectPlugin(
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the instrument
     return;
   }
-  loadsInFlight[slot] = false;
+  loadingPaths[slot] = null;
   swapping[slot] = false;
   batch(() => {
     setSlotPlugins((prev) => withAt(prev, slot, desc));
     setSlotInstances((prev) => withAt(prev, slot, info?.instance ?? null));
+    setStrandedLive((prev) => withAt(prev, slot, false));
   });
   rememberSlotPlugin(slot, desc);
   noteToneFailed(info, desc);
@@ -472,19 +487,20 @@ async function doSwapPlugin(
   setHotSwaps((prev) => withAt(prev, slot, true));
   sourceOps[slot]++;
   claimEditorAffinity(slot, desc.path);
-  loadsInFlight[slot] = true;
+  loadingPaths[slot] = desc.path;
   const outgoingInstance = slotInstance(slot);
   retiring.set(outgoingInstance, outgoing.path);
   const gain = savedPluginLevel(slot, desc);
   let oldPlaysOn = false;
   try {
     const info = await platform.pluginHost.swapPlugin(slot, desc.path, desc.id, gain, toneToken);
+    loadingPaths[slot] = null;
     adoptSwapped(slot, desc, info, gain, claimMidi, outgoing.path, outgoingInstance);
   } catch (e) {
+    loadingPaths[slot] = null; // the incoming is held now only where the listing says (`adoptSwapFailure`)
     console.error('[instrument] plugin swap failed', e);
     oldPlaysOn = await adoptSwapFailure(slot, outgoing, outgoingInstance, desc, gain, claimMidi, e);
   } finally {
-    loadsInFlight[slot] = false;
     setHotSwaps((prev) => withAt(prev, slot, false));
     // The held change was the outgoing's (`setSlotLevel` stored it): it is owed only while that plays on.
     if (gainHeld[slot] && oldPlaysOn) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
@@ -508,6 +524,7 @@ function adoptSwapped(
   batch(() => {
     setSlotPlugins((prev) => withAt(prev, slot, desc));
     setSlotInstances((prev) => withAt(prev, slot, info.instance));
+    setStrandedLive((prev) => withAt(prev, slot, false));
   });
   nativePaths[slot] = desc.path;
   if (!retiring.has(outgoingInstance)) releaseEditorAffinity(slot, outgoingPath);
@@ -524,7 +541,8 @@ const SWAP_BUSY = 'Could not swap the plugin now. Pick it again.';
 /**
  * A failed swap, read from the host's listing, never from the error's text (only its `busy:` prefix
  * picks the toast): the outgoing instance still listed plays on; another instance listed is adopted; a
- * slot listed empty is cleared as an unload is; a listing that fails keeps the outgoing shown and both
+ * slot listed empty is cleared as an unload is, its live input stopped first (a refused live-off keeps
+ * its GO LIVE as the stop, `strandedLive`); a listing that fails keeps the outgoing shown and both
  * files uncertain. Returns whether the old plugin plays on.
  */
 async function adoptSwapFailure(
@@ -536,7 +554,7 @@ async function adoptSwapFailure(
   claimMidi: () => boolean,
   e: unknown,
 ): Promise<boolean> {
-  const busy = /^(Error: )?busy:/.test(String(e));
+  const busy = isBusyRefusal(e);
   let listed: PluginInfo | undefined;
   try {
     listed = (await platform.pluginHost.listLoaded()).find((p) => p.slot === slot);
@@ -560,9 +578,11 @@ async function adoptSwapFailure(
     return false;
   }
   retiring.delete(outgoingInstance);
+  const disarmed = await disarmInputInternal(slot); // an empty live slot passes its input dry
   batch(() => {
     setSlotPlugins((prev) => withAt(prev, slot, null));
     setSlotInstances((prev) => withAt(prev, slot, null));
+    setStrandedLive((prev) => withAt(prev, slot, !disarmed));
   });
   setEngineGain(slot, null, false);
   slotLetGo(slot);
@@ -850,7 +870,7 @@ export function slotTakesInput(slot: 0 | 1): boolean {
  * slot (null = instrument or Off) and its native instance, the active slot index. (Owned by
  * `instrument-slots.ts`; re-exported as the UI's one path.) */
 export { slotIds, slotInstances, slotOff, slotPendingCounts, slotPlugins, activeSlot };
-export { isStaleInstance, slotInstance } from './instrument-slots';
+export { isBusyRefusal, isStaleInstance, slotInstance } from './instrument-slots';
 
 /**
  * Derived predicate: is the ACTIVE slot playing the built-in GM drum kit (synth id 'drum' AND not

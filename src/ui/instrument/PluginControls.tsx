@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
-import { editorAffinityBlocker, isStaleInstance, slotInstance, slotInstances, slotPendingCounts } from '../state/instrument';
+import { editorAffinityBlocker, isBusyRefusal, isStaleInstance, slotInstance, slotInstances, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
 import { liveShown, startLive } from './live';
@@ -21,7 +21,8 @@ import './plugin-controls.css';
  * Both mount under the slot's `<Show keyed>` on the loaded descriptor, so a plugin swap remounts them
  * (re-fetching params / resetting the editor). Each request names the slot's playing instance, read at
  * the call (`slotInstance`), and each plugin event of another instance is dropped (a replaced plugin's).
- * A `stale instance` refusal is a no-op: the plugin it addressed is gone, so no toast, chip or log.
+ * A `stale instance` refusal is a no-op: the plugin it addressed is gone, so no toast, chip or log. A
+ * `busy:` one (the plugin is unloading) is logged and keeps the view as it is: no toast or chip.
  */
 const PARAM_PREVIEW_COUNT = 12;
 
@@ -93,6 +94,8 @@ export function PluginBar(props: {
       }
     } catch (e) {
       if (isStaleInstance(e)) return;
+      console.error('[PluginControls] editor toggle failed', e);
+      if (isBusyRefusal(e)) return; // the editor stays as it was
       // Branch by intent: an OPEN failure means the plugin exposes no editor → reflect closed. A CLOSE
       // failure means the window is likely still open → keep editorOpen(true) so the toggle doesn't claim
       // it closed (the next click then retries the close, not a second open).
@@ -102,7 +105,6 @@ export function PluginBar(props: {
       } else {
         setEditorError('close failed');
       }
-      console.error('[PluginControls] editor toggle failed', e);
       if (!quiet) {
         notifyError(
           wantOpen ? 'Could not open the plugin editor. Press EDITOR again.' : 'Could not close the plugin editor. Press EDITOR again.',
@@ -218,6 +220,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     } catch (e) {
       if (isStaleInstance(e)) return;
       console.error('[PluginControls] listParams failed', e);
+      if (isBusyRefusal(e)) return; // the listed controls stay
       if (alive && mine === listing) notifyError("Could not load the plugin's controls. Choose Off, then load the plugin again.", e);
     }
     if (!alive || mine !== listing) return;

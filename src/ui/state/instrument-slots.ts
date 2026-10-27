@@ -38,6 +38,10 @@ export const slotInstance = (slot: 0 | 1): number => slotInstances()[slot] ?? 0;
  * for is gone, so the request is moot, not failed. */
 export const isStaleInstance = (e: unknown): boolean => /stale instance/.test(String(e));
 
+/** The host refused a request for now (`busy:`: a swap or an unload holds the slot), nothing changed: no
+ * error state, the player tries again. */
+export const isBusyRefusal = (e: unknown): boolean => /^(Error: )?busy:/.test(String(e));
+
 export const [activeSlot, setActiveSlotSignal] = createSignal<0 | 1>(0);
 export const [slotOff, setSlotOff] = createSignal<[boolean, boolean]>([false, false]);
 
