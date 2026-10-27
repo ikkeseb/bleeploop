@@ -1,19 +1,18 @@
 //! OWNS: one slot's bookkeeping between its plugin owners and the engine's port ([`Desk`], one per
 //! slot in `Core::ports`, under that lock): each owner's standing, whether its unit is in the engine,
-//! and the replies the engine sent it that it has not read yet (its mail). A Retiring owner's entry
-//! outlives its unit's return until the owner drops (`forget`): it reads Retiring from the commit on.
+//! and the replies the engine sent it that it has not read yet (its mail).
 //!
 //! [`Desk::pump`] reads the port and routes each reply by its tag (the owner's token):
-//! - `Committed { t }`: every other Active owner becomes Retiring, wherever its unit is (in the engine,
-//!   or waiting in mail after an eviction): its role ends at the commit, not when its unit comes back.
-//!   A replace's gain enters the settings replay (a live-off the commit made reaches it as GO LIVE's
-//!   answer on the event ring). The answer is mailed to `t`, unless `t` gave up waiting: then its unit
-//!   is removed at once and leaks when it comes back.
-//! - A unit handed back leaves the engine; it is mailed to its owner, or leaked (`mem::forget`) when its
-//!   owner gave up on it or has no entry.
+//! - `Committed { t }`: every other Active owner becomes Retiring at the commit, wherever its unit is,
+//!   and its entry outlives its unit's return until the owner drops (`forget`). A replace's gain enters
+//!   the settings replay (a live-off the commit made reaches it as GO LIVE's answer on the event ring).
+//!   The answer is mailed to `t`, unless `t` gave up waiting: then its unit is removed at once.
+//! - A unit handed back leaves the engine: mailed to its owner, or leaked when its owner gave up on it
+//!   or has no entry.
 //! - `NotHeld { t }` answers a remove of a unit the slot no longer plays: mailed, unless `t` gave up.
 //!
-//! Nothing here drops a unit: a drop frees memory and calls into the plugin's DLL off its owner thread.
+//! Nothing here drops a unit (it leaks, `mem::forget`): a drop frees memory and calls into the plugin's
+//! DLL off its owner thread.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -66,7 +65,7 @@ impl Desk {
         Desk { slot, port: None, owners: Vec::new(), mail: VecDeque::new() }
     }
 
-    /// Route every reply the port holds to its owner (the header's rules): how many it routed.
+    /// Route every reply the port holds to its owner (the header): how many it routed.
     pub(crate) fn pump(&mut self, settings: &Mutex<Settings>) -> usize {
         let mut routed = 0;
         while let Some(reply) = self.port.as_mut().and_then(SlotPort::reply) {
@@ -139,14 +138,14 @@ impl Desk {
         Some((value, back.unit))
     }
 
-    /// Take `tag`'s `Committed` from its mail.
-    pub(super) fn take_committed(&mut self, tag: u64) -> bool {
-        self.take_note(|r| matches!(r, SlotReply::Committed { tag: t, .. } if *t == tag))
-    }
-
-    /// Take a `NotHeld` for `tag` from its mail.
-    pub(super) fn take_not_held(&mut self, tag: u64) -> bool {
-        self.take_note(|r| matches!(r, SlotReply::NotHeld { tag: t } if *t == tag))
+    /// Take `tag`'s `Committed` (`committed`) or a `NotHeld` for it from its mail.
+    pub(super) fn take_note(&mut self, tag: u64, committed: bool) -> bool {
+        let at = self.mail.iter().position(|r| match *r {
+            SlotReply::Committed { tag: t } => committed && t == tag,
+            SlotReply::NotHeld { tag: t } => !committed && t == tag,
+            SlotReply::Handback(_) => false,
+        });
+        at.and_then(|at| self.mail.remove(at)).is_some()
     }
 
     /// `tag` gives up on its unit: what waits in its mail leaks, an owner with nothing in the engine is
@@ -233,11 +232,6 @@ impl Desk {
         }
     }
 
-    fn take_note(&mut self, pick: impl Fn(&SlotReply) -> bool) -> bool {
-        let at = self.mail.iter().position(|r| !matches!(r, SlotReply::Handback(_)) && pick(r));
-        at.and_then(|at| self.mail.remove(at)).is_some()
-    }
-
     /// `tag` has nothing left in the engine or its mail: drop its unread notes, and its entry unless it
     /// is Retiring (kept until the owner drops: `forget`).
     fn release(&mut self, tag: u64) {
@@ -254,7 +248,7 @@ impl Desk {
     }
 
     /// Nothing of `tag`'s is in the engine or waits in its mail.
-    pub(super) fn holds_nothing(&self, tag: u64) -> bool {
+    pub(crate) fn holds_nothing(&self, tag: u64) -> bool {
         !self.in_engine(tag) && !self.mail.iter().any(|r| tag_of(r) == tag)
     }
 

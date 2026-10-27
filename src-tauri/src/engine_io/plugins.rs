@@ -382,14 +382,11 @@ fn begin_closing(slots: &Slots, closing: &AtomicBool) {
     }
 }
 
-/// The exit's unloads (after `begin_closing`), under one rule: a slot is the exit's to wait for until
-/// it is `Empty` with no retire running. Every slot goes off live (one that cannot is logged and
-/// unloads all the same). Every loaded plugin leaves through `Leaving`, the exit's from then on; a
-/// swapping slot stays its swap's (called off, it ends both its plugins), and only its playing
-/// plugin's teardown starts here. Every teardown starts before any is joined, and each joins through
-/// the handle commands may still share. Then the
-/// exit waits for what others end: a load, an unload, a swap, a retire. Unbounded: the shutdown bounds
-/// it (`mode::SHUTDOWN_WAIT`).
+/// The exit's unloads (after `begin_closing`): every slot goes off live (a failure is logged, and the
+/// unload goes on), every loaded plugin leaves through `Leaving`, and a swapping slot stays its swap's,
+/// only its playing plugin's teardown started here. Every teardown starts before any is joined, each
+/// through the handle commands may still share. Then the exit waits until every slot is `Empty` with no
+/// retire running. Unbounded: the shutdown bounds it (`mode::SHUTDOWN_WAIT`).
 fn unload_all(slots: &Slots, host: Option<&EngineHost>) {
     for slot in 0..lf_engine::SLOT_COUNT as u8 {
         if let Some(Err(e)) = host.map(|host| silence(slots, slot, None, host)) {
@@ -808,7 +805,7 @@ mod tests {
                     leaving.take();
                 };
                 let unit = Box::new(Counted { unit: unit(), dropped: dropped.clone() });
-                engine_slot::stand_in_entering(slot, unit, entry, move || in_engine.take(), leaving)
+                engine_slot::stand_in(slot, unit, entry, move || in_engine.take(), leaving)
             }
         }
     }
@@ -932,7 +929,7 @@ mod tests {
 
     /// Opens a stand-in plugin with no hooks, entering as the load says.
     fn stand_in(_: PluginFormat, _: String, _: String, slot: SlotHost, _: Option<ToneBinding>, entry: Entry) -> Result<EngineSlotHandle, String> {
-        engine_slot::stand_in_entering(slot, Box::new(Silent), entry, || {}, || {})
+        engine_slot::stand_in(slot, Box::new(Silent), entry, || {}, || {})
     }
 
     /// A load is refused before it reserves its slot when its path names no format, and a load whose
@@ -1000,6 +997,7 @@ mod tests {
             engine_slot::stand_in(
                 slot,
                 Box::new(Silent),
+                Entry::Install,
                 move || {
                     in_engine.wait();
                     go_on.wait();

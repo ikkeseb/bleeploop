@@ -39,24 +39,19 @@ impl SlotPort {
     }
 
     /// Stage `unit` beside the unit the slot plays, then crossfade to it at `gain` (`crate::slots`'
-    /// swap rules); into an empty slot, an install gliding to `gain` (a latent one held while a take
-    /// captures). Answered once: `Committed`, or the unit back `Rejected`. Gives the unit back when the
-    /// message ring is full.
+    /// rules). Gives the unit back when the message ring is full.
     pub fn replace(&mut self, tag: u64, unit: Box<dyn SlotProcessor>, gain: f32) -> Result<(), Box<dyn SlotProcessor>> {
         self.send_unit(SlotMsg::Replace { tag, unit, gain })
     }
 
-    /// Take out the unit the slot plays, if `tag` is its: it releases its notes, crossfades to bypass,
-    /// stops and comes back `Removed` (a candidate staging beside it goes back `Cancelled` first). A unit
-    /// fading out after a swap, or already being removed, is leaving and gets no answer; any other tag
-    /// (a staging candidate's included) is answered `NotHeld`. False when the ring is full.
+    /// Take out the unit the slot plays, if `tag` is its: it comes back `Removed` (`crate::slots`'
+    /// rules). False when the ring is full.
     pub fn remove(&mut self, tag: u64) -> bool {
         self.tx.push(SlotMsg::Remove { tag }).is_ok()
     }
 
-    /// Call off the replace tagged `tag` while its unit stages: it goes back `Cancelled` and the unit
-    /// the slot plays plays on. Any other tag (committed, fading out, unknown) gets no answer and changes
-    /// nothing. False when the ring is full.
+    /// Call off the replace tagged `tag` while its unit stages (`crate::slots`' rules). False when the
+    /// ring is full.
     pub fn withdraw(&mut self, tag: u64) -> bool {
         self.tx.push(SlotMsg::Withdraw { tag }).is_ok()
     }

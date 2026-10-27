@@ -1,19 +1,14 @@
 //! OWNS: a slot's hot swap, the transaction behind `plugin_swap`: the slot's plugin plays on while the
 //! next one loads beside it (`engine_slot::Entry::Replace`: staged muted, committed, crossfaded to),
-//! and one `finish` moves the slot on whatever the load did: the new plugin plays and the one it
-//! replaced retires on a thread of its own (`plugin:retired`), started before the swap takes the slot
-//! (none starts: refused busy) and handed that plugin at the commit, or the slot goes back to the plugin
-//! that plays, or every plugin nobody wants any more leaves through `Leaving`, as an unload's would
-//! (whose failed live-off keeps the plugin the engine plays). At the commit the engine releases what
-//! sounds on the slot and, when the plugin's kind changed, takes the slot off live (`lf_engine::slots`).
+//! and one `finish` moves the slot on whatever the load did (`play`, `call_off`). The plugin it replaced
+//! retires on a thread of its own (`plugin:retired`). At the commit the engine releases what sounds on
+//! the slot and, when the plugin's kind changed, takes the slot off live (`lf_engine::slots`).
 //!
-//! The exit (`begin_closing`) refuses every swap from then on and calls off one in flight, whose
-//! `finish` ends both its plugins: the exit's `unload_all` starts the playing one's teardown at once,
-//! and waits for the swap to empty the slot.
+//! The exit (`begin_closing`) refuses every swap from then on and calls off one in flight: `call_off`
+//! ends both its plugins, and the exit's `unload_all` waits for it to empty the slot.
 //!
-//! A swap takes a slot that plays a plugin for the asking document, once the plugin swapped out of it
-//! before has ended its retire (`take_slot`). A swap onto the file that plays is refused: that one goes
-//! cold (the UI routes it so; this is the backstop).
+//! A swap onto the file that plays is refused (`reserve_swap`): that one goes cold (the UI routes it
+//! so; this is the backstop).
 
 use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed}};
 use std::sync::mpsc::{channel, Sender};
@@ -281,8 +276,7 @@ fn same_file(a: &str, b: &str) -> bool {
 impl EngineApp {
     /// `plugin_swap`: swap `slot`'s plugin for plugin `id` from `path` (its load ≤ 15 s, then the
     /// commit), crossfaded to at `gain` (the UI's saved level for it), for the document with
-    /// `frontend_epoch`; `tone_token` as `plugin_load`'s. At the commit the engine releases what sounds
-    /// on the slot and, when the plugin's kind changed, takes the slot off live.
+    /// `frontend_epoch`; `tone_token` as `plugin_load`'s.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn plugin_swap(
         &self,

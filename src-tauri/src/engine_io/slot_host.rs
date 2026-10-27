@@ -2,16 +2,11 @@
 //! (`desk`), which routes the engine's replies to their owners by tag.
 //!
 //! Each [`EngineHost::slot`](super::EngineHost::slot) call is one owner with its own tag (a clone is the
-//! same owner). The owner builds and activates a unit at [`SlotHost::rate`] and puts it in:
-//! [`SlotHost::install`] into an empty slot, or [`SlotHost::replace`] beside the unit another owner
-//! plays (staged muted, then crossfaded to); [`SlotHost::answer`] reads a replace's outcome, and
-//! [`SlotHost::withdraw`] calls it off while it stages. Lifecycle work (a restart, a teardown) first
-//! [`SlotHost::remove`]s the unit, which waits until the engine has crossfaded it out and stopped it.
-//! A unit that left the engine on its own waits on the desk for [`SlotHost::take_back`]: an eviction
-//! (a rebuild at another rate, or an install activated at a rate since replaced) is re-activated at the
-//! new [`SlotHost::rate`] and installed again; a unit another owner's replace retired never goes in
-//! again, and nor does its owner. An owner that gives up on its unit ([`SlotHost::abandon`]: a wait
-//! timed out, so it leaks the plugin) leaks whatever comes back of it, and the slot frees.
+//! same owner). Its unit, activated at [`SlotHost::rate`], goes in by [`SlotHost::install`] or
+//! [`SlotHost::replace`] and comes out by [`SlotHost::remove`]; one that left the engine on its own
+//! waits on the desk for [`SlotHost::take_back`]. An eviction is re-activated at the new rate and goes
+//! in again; a retired owner's unit never does, nor does its owner ([`SlotHost::retired`]). An owner
+//! that gives up ([`SlotHost::abandon`]) leaks whatever comes back of its unit, and the slot frees.
 //!
 //! While a device runs the engine services the slot's port at each block start. While none runs nothing
 //! would, so the host takes the engine lock itself and services the port at once (no crossfade and no
@@ -36,29 +31,12 @@ const POLL: Duration = Duration::from_millis(1);
 
 /// A replace's outcome ([`SlotHost::answer`]).
 pub enum Answer {
-    /// The new unit is the slot's; the one it replaced comes back to its owner as [`Back::Out`].
+    /// The new unit is the slot's; the one it replaced comes back to its owner, retired.
     Committed,
     /// The unit never became the slot's: back, stopped if it processed. The playing unit plays on.
     Refused(Box<dyn SlotProcessor>, Rejection),
     /// No answer yet.
     Pending,
-}
-
-/// A unit of this owner's back from the engine, stopped: on its own ([`SlotHost::take_back`]), or
-/// removed ([`SlotHost::remove_back`]).
-pub enum Back {
-    /// Evicted, or removed: re-activate it at [`SlotHost::rate`] and install it again.
-    Evicted(Box<dyn SlotProcessor>),
-    /// Retired by another owner's replace: never install it again.
-    Out(Box<dyn SlotProcessor>),
-}
-
-impl Back {
-    pub fn into_unit(self) -> Box<dyn SlotProcessor> {
-        match self {
-            Back::Evicted(unit) | Back::Out(unit) => unit,
-        }
-    }
 }
 
 /// One owner's handshake with a slot (`EngineHost::slot`). Cheap to clone (a clone is the same owner,
@@ -101,10 +79,10 @@ impl SlotHost {
         self.desk().standing(self.token)
     }
 
-    /// Test-only: nothing of this owner's is in the engine or waits on the desk.
-    #[cfg(test)]
-    pub(crate) fn holds_nothing(&self) -> bool {
-        self.desk().holds_nothing(self.token)
+    /// Another owner's replace retired this one (from its commit on), or it gave its unit up: a unit of
+    /// its that comes back never goes in again.
+    pub fn retired(&self) -> bool {
+        matches!(self.standing(), Some(Standing::Retiring | Standing::Abandoned))
     }
 
     /// Hand a unit activated at `rate` to the engine; it crossfades in at the next block (engaged at
@@ -179,7 +157,7 @@ impl SlotHost {
             self.service_if_idle();
             {
                 let mut desk = self.desk();
-                if desk.take_committed(self.token) {
+                if desk.take_note(self.token, true) {
                     return Answer::Committed;
                 }
                 let rejected = |reason: HandbackReason| match reason {
@@ -188,7 +166,7 @@ impl SlotHost {
                 };
                 if let Some((why, unit)) = desk.take_unit(self.token, rejected) {
                     if why == Rejection::Busy {
-                        log::error!("[engine_io] slot {}: a replace came back Busy; swaps on a slot are serialised", self.slot);
+                        log::warn!("[engine_io] slot {}: a replace came back busy: the slot is swapping or its plugin is being removed", self.slot);
                     }
                     return Answer::Refused(unit, why);
                 }
@@ -208,8 +186,8 @@ impl SlotHost {
     }
 
     /// This owner's unit, if it left the engine on its own: an eviction, or retired by another owner's
-    /// replace (an eviction of a retired owner's unit included). The plugin owner polls this every turn.
-    pub fn take_back(&self) -> Option<Back> {
+    /// replace ([`SlotHost::retired`] tells which). The plugin owner polls this every turn.
+    pub fn take_back(&self) -> Option<Box<dyn SlotProcessor>> {
         self.take(&mut self.desk(), |reason| matches!(reason, HandbackReason::Evicted | HandbackReason::ReplacedOut))
     }
 
@@ -218,18 +196,12 @@ impl SlotHost {
     /// `Ok(None)` when the owner has none on the slot; `Err` when it does not come back within
     /// `timeout` (it stays the engine's, and a later `remove` or `take_back` can still recover it).
     pub fn remove(&self, timeout: Duration) -> Result<Option<Box<dyn SlotProcessor>>, String> {
-        self.remove_back(timeout).map(|back| back.map(Back::into_unit))
-    }
-
-    /// [`SlotHost::remove`], telling what may become of the unit: [`Back::Out`] when another owner's
-    /// replace retired this one, whether its commit came before the remove or while it waited.
-    pub fn remove_back(&self, timeout: Duration) -> Result<Option<Back>, String> {
         {
             // Under the desk lock: a rebuild hands every unit back with every desk held, so an eviction
             // is either on the desk here or not begun.
             let mut desk = self.desk();
-            if let Some(back) = self.take(&mut desk, |_| true) {
-                return Ok(Some(back));
+            if let Some(unit) = self.take(&mut desk, |_| true) {
+                return Ok(Some(unit));
             }
             match (desk.standing(self.token), desk.in_engine(self.token)) {
                 (None, _) | (Some(Standing::Active | Standing::Retiring), false) => return Ok(None),
@@ -249,10 +221,10 @@ impl SlotHost {
             self.service_if_idle();
             {
                 let mut desk = self.desk();
-                if let Some(back) = self.take(&mut desk, |_| true) {
-                    return Ok(Some(back));
+                if let Some(unit) = self.take(&mut desk, |_| true) {
+                    return Ok(Some(unit));
                 }
-                if desk.take_not_held(self.token) {
+                if desk.take_note(self.token, false) {
                     return Ok(None);
                 }
             }
@@ -271,13 +243,9 @@ impl SlotHost {
         self.service_if_idle();
     }
 
-    /// The first unit of this owner's on `desk` whose reason `pick` takes, as what may become of it: one
-    /// that came back `ReplacedOut`, or to an owner no longer Active, never goes in again.
-    fn take(&self, desk: &mut Desk, pick: impl Fn(HandbackReason) -> bool) -> Option<Back> {
-        // Read before the take, which releases an owner with nothing left in the engine.
-        let active = desk.standing(self.token) == Some(Standing::Active);
-        let (reason, unit) = desk.take_unit(self.token, |reason| pick(reason).then_some(reason))?;
-        Some(if active && reason != HandbackReason::ReplacedOut { Back::Evicted(unit) } else { Back::Out(unit) })
+    /// The first unit of this owner's on `desk` whose reason `pick` takes.
+    fn take(&self, desk: &mut Desk, pick: impl Fn(HandbackReason) -> bool) -> Option<Box<dyn SlotProcessor>> {
+        desk.take_unit(self.token, |reason| pick(reason).then_some(())).map(|((), unit)| unit)
     }
 
     /// The slot's desk, locked, with the port's replies routed.
@@ -327,7 +295,7 @@ mod tests {
     use lf_engine::grid::Frame;
     use lf_engine::{Command, Engine, EngineConfig, Rejection, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
-    use super::{Answer, Back, Desk, SlotHost, Standing};
+    use super::{Answer, Desk, SlotHost, Standing};
     use crate::engine_io::test_rig::{TestDevice, PATIENCE};
 
     /// What a [`Constant`] counts: its calls, its stops and its drops (a drop the desk made would count).
@@ -497,7 +465,8 @@ mod tests {
         let (unit, _) = constant(0.25);
         assert!(slot.install(unit, 44_100).is_ok());
         device.rebuild_at(48_000, 512);
-        let Some(Back::Evicted(back)) = slot.take_back() else { panic!("the next eviction reaches its owner") };
+        let back = slot.take_back().expect("the next eviction reaches its owner");
+        assert!(!slot.retired(), "evicted, not retired");
         assert_eq!(level(back), 0.25);
     }
 
@@ -521,7 +490,7 @@ mod tests {
         assert!(matches!(b.answer(PATIENCE), Answer::Committed));
         assert_eq!(a.standing(), Some(Standing::Retiring), "retired at the commit");
         assert!(matches!(a.answer(Duration::ZERO), Answer::Pending), "B's commit is not A's");
-        let Back::Out(out) = eventually("A's unit fades out", || a.take_back()) else { panic!("retired, not evicted") };
+        let out = eventually("A's unit fades out", || a.take_back());
         assert_eq!(counts_a.stops(), 1, "stopped once, after its fade");
         assert_eq!(level(out), 0.25);
         assert_eq!(a.standing(), Some(Standing::Retiring), "still retired once its unit is back");
@@ -604,13 +573,15 @@ mod tests {
         let (again, _) = constant(0.1);
         let (again, why) = a.install(again, 48_000).expect_err("a replaced owner never installs again");
         assert!(why.contains("replaced"), "{why}");
-        let Some(Back::Out(out)) = a.take_back() else { panic!("A's evicted unit comes back retired") };
+        let out = a.take_back().expect("A's evicted unit comes back");
+        assert!(a.retired(), "retired, not evicted");
         assert_eq!(level(out), 0.25);
         let (again, why) = a.install(again, 48_000).expect_err("nor once its unit is back");
         assert!(why.contains("replaced"), "{why}");
         let (_, why) = device.host().slot(0).install(again, 48_000).expect_err("B's eviction holds the slot");
         assert!(why.contains("already holds"), "{why}");
-        let Some(Back::Evicted(back)) = b.take_back() else { panic!("B's unit goes in again") };
+        let back = b.take_back().expect("B's evicted unit comes back");
+        assert!(!b.retired(), "B's unit goes in again");
         assert!(b.install(back, 48_000).is_ok());
     }
 
@@ -631,7 +602,7 @@ mod tests {
         let replay = device.host().settings();
         assert!(replay.contains(&Command::SetSlotGain(0, 0.7)) && !replay.contains(&Command::SetSlotGain(0, 0.3)), "{replay:?}");
         assert!(matches!(b.answer(PATIENCE), Answer::Committed), "the answer waits on the desk across the rebuild");
-        let Some(Back::Evicted(unit)) = b.take_back() else { panic!("B's unit was evicted") };
+        let unit = b.take_back().expect("B's unit was evicted");
         assert!(b.install(unit, 44_100).is_ok());
         assert!(device.wait_blocks(20));
         let rebuilt = heard(&device);
@@ -705,7 +676,8 @@ mod tests {
             assert!(b.replace(unit, 48_000, 0.8).is_ok());
             b.abandon();
         }
-        let Back::Out(out) = eventually("A's unit is retired", || a.take_back()) else { panic!("retired, not evicted") };
+        let out = eventually("A's unit is retired", || a.take_back());
+        assert!(a.retired(), "retired, not evicted");
         assert_eq!(level(out), 0.25);
         let (unit, _) = constant(0.1);
         install_eventually(&device.host().slot(0), unit, 48_000);
@@ -736,7 +708,8 @@ mod tests {
         }
         drop(desk);
         device.rebuild_at(44_100, 512);
-        let Some(Back::Evicted(back)) = a.take_back() else { panic!("the parked eviction reaches its owner") };
+        let back = a.take_back().expect("the parked eviction reaches its owner");
+        assert!(!a.retired(), "evicted, not retired");
         assert_eq!((counts_a.stops(), counts_a.drops()), (1, 0), "stopped once; never dropped with the old engine");
         assert_eq!(level(back), 0.25);
     }
@@ -800,7 +773,8 @@ mod tests {
         let (unit, _) = constant(0.1);
         install_eventually(&device.host().slot(0), unit, 48_000);
         assert_eq!((counts_b.stops(), counts_b.drops()), (1, 0), "removed, then leaked: never dropped");
-        let Some(Back::Out(out)) = a.take_back() else { panic!("A was retired by B's commit") };
+        let out = a.take_back().expect("A's unit comes back");
+        assert!(a.retired(), "A was retired by B's commit");
         assert_eq!(level(out), 0.25);
     }
 
@@ -838,10 +812,10 @@ mod tests {
             let (unit, _) = constant(0.5);
             assert!(b.replace(unit, 48_000, 0.8).is_ok());
             assert!(matches!(b.answer(PATIENCE), Answer::Committed));
-            let back = if removed { a.remove_back(PATIENCE).unwrap() } else { Some(eventually("A's unit fades out", || a.take_back())) };
-            assert!(matches!(back, Some(Back::Out(_))), "back retired");
+            let back = if removed { a.remove(PATIENCE).unwrap() } else { Some(eventually("A's unit fades out", || a.take_back())) };
+            assert!(back.is_some(), "back");
             assert_eq!(a.standing(), Some(Standing::Retiring), "still retired, its unit back");
-            assert!(a.remove_back(Duration::ZERO).unwrap().is_none(), "nothing left to remove");
+            assert!(a.remove(Duration::ZERO).unwrap().is_none(), "nothing left to remove");
             let (again, _) = constant(0.1);
             let (_, why) = a.install(again, 48_000).expect_err("a retired owner never installs again");
             assert!(why.contains("replaced"), "{why}");

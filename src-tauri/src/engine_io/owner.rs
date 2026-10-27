@@ -160,10 +160,8 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
 
 /// Hand every unit of `old`, an engine nothing renders any more, to its plugin owner, stopped: onto its
 /// slot's desk (held by the caller), routed with every reply its port still held (`Desk::pump`). False
-/// when a unit panicked on its way out: the caller leaks the engine then, with any unit still in it or
-/// parked on its port, rather than dropping it (a drop calls the plugin's DLL off its owner thread); the
-/// desk counts such a unit lost, so its owner's teardown leaks the plugin instead of unloading it
-/// (`Desk::lose`).
+/// when a unit panicked on its way out: the caller leaks the engine then, rather than drop a unit with
+/// it, and the desk counts what is still in it lost (`Desk::lose`).
 fn evict(core: &Core, desks: &mut [MutexGuard<'_, Desk>; SLOT_COUNT], old: &mut Engine) -> bool {
     let mut clean = catch_unwind(AssertUnwindSafe(|| {
         old.service_slots_idle();

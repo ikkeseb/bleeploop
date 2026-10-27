@@ -737,13 +737,11 @@ pub enum HandbackReason {
 pub enum Rejection {
     /// An install into a slot that holds a unit. Counted as a protocol error; never processed.
     Occupied,
-    /// A replace into a slot already swapping (a candidate staging or fading in) or whose unit is being
-    /// removed. Counted as a protocol error; never processed.
+    /// A replace into a slot already swapping or whose unit is being removed. Counted; never processed.
     Busy,
     /// It refused to start processing while it staged ([`SlotProcessor::start_refused`]). Stopped.
     StartRefused,
-    /// A withdraw of its tag ([`crate::SlotPort::withdraw`]), or a remove of the slot's unit, came while
-    /// it staged: the swap is off. Stopped.
+    /// A withdraw of its tag, or a remove of the slot's unit, came while it staged. Stopped.
     Cancelled,
 }
 
@@ -752,11 +750,9 @@ pub enum Rejection {
 pub enum SlotReply {
     /// A unit back. Every unit sent comes back exactly once, this way.
     Handback(Handback),
-    /// The replace tagged `tag` committed: its unit is the slot's from this block on (crossfading in
-    /// over the unit it replaced, which follows as [`HandbackReason::ReplacedOut`] once faded out).
-    /// Every replace is answered once: this, or its unit back as [`HandbackReason::Rejected`].
+    /// The replace tagged `tag` committed; the unit it replaced follows, `ReplacedOut`. Every replace is
+    /// answered once: this, or its unit back `Rejected`.
     Committed { tag: u64 },
-    /// A remove for `tag`, which is neither the unit the slot plays nor one fading out after a swap (a
-    /// later unit took its place, it has left, or it still stages): nothing changed.
+    /// A remove for `tag`, which the slot neither plays nor is taking out: nothing changed.
     NotHeld { tag: u64 },
 }

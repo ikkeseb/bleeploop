@@ -22,8 +22,9 @@
 //! over the frames of `FADE_SECONDS`, counted, so both ends land on an exact frame and are bit-exact. An
 //! instrument's output joins the bus, not the wet, so there it fades in from silence while the gated
 //! input fades out of the wet over the same frames (and back at its removal): a live slot's dry signal
-//! never steps. A removal names the unit by the tag it was sent with (any other tag is answered
-//! `NotHeld` and changes nothing), first releases the notes the slot holds and crossfades to bypass;
+//! never steps. A removal names the unit by the tag it was sent with (a unit already leaving, being
+//! removed or fading out after a swap, gets no answer; any other tag is answered `NotHeld` and changes
+//! nothing), first releases the notes the slot holds and crossfades to bypass;
 //! the slot is empty from the frame the fade ends. The release reaches the unit in the fade's first
 //! `process`, [`SlotProcessor::stop`] follows its last, and the unit goes back on the port, tagged and
 //! with why (`port`: a full return ring parks it behind the replies before it). With no device running

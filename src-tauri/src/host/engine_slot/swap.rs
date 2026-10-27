@@ -2,11 +2,9 @@
 //! hot swap's replace beside the unit another owner plays (the engine stages it muted, commits and
 //! crossfades: `lf_engine`'s slots doc), with the swap's own withdraw and the report each refusal gives.
 //!
-//! A replace's answer is read until one deadline after the claim: the commit's wait first
-//! ([`SwapBounds::commit`]: a take recording at another latency holds the candidate staged), then, once
-//! the swap is called off (that deadline, or the caller's `cancel`), the withdraw's answer
-//! ([`SwapBounds::settle`]). A commit that wins the race against the withdraw stands. No answer by then
-//! leaves the unit's whereabouts unknown: [`Entered::Unresolved`], and the owner abandons it.
+//! A replace's answer is read until [`SwapBounds`]' deadlines (a take recording at another latency
+//! holds the candidate staged); called off (past `commit`, or by the caller's `cancel`), it is
+//! withdrawn, and a commit that wins the race against the withdraw stands.
 
 use std::sync::atomic::{AtomicBool, Ordering::Acquire};
 use std::sync::Arc;
@@ -108,8 +106,8 @@ fn refusal(why: Rejection, name: &str, cancelled: bool, withdrew: bool) -> Strin
         Rejection::Cancelled if cancelled => "plugin load cancelled".to_string(),
         Rejection::Cancelled if withdrew => "busy: a take is recording at another latency; swap after it".to_string(),
         Rejection::Cancelled => "busy: the playing plugin restarted".to_string(),
-        // `SlotHost::answer` logs it: swaps on a slot are serialised.
-        Rejection::Busy => "busy: the slot is already swapping".to_string(),
+        // `SlotHost::answer` logs it.
+        Rejection::Busy => "busy: the slot is swapping or its plugin is being removed".to_string(),
         why => format!("{name} could not enter the slot ({why:?})"),
     }
 }
