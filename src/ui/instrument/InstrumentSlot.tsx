@@ -12,6 +12,7 @@ import {
   slotOff,
   slotPendingCounts,
   slotPlugins,
+  swapsHot,
 } from '../state/instrument';
 import {
   pluginDescriptorKey,
@@ -47,16 +48,17 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
   // Per-slot accordion disclosure for the plugin params drawer. Created once (the component mounts once
   // per slot); a sibling of the looper region, so opening it never remounts the looper.
   const [paramsOpen, setParamsOpen] = createSignal(false);
-  // One-shot: the descriptor key the user just picked in the picker. The PluginBar that mounts for it
-  // auto-starts (live + editor) and clears this; a reload resync never sets it, so it never reopens
-  // windows. Plain variable — it is read once at PluginBar mount, nothing renders from it.
-  let freshPickKey: string | null = null;
+  // One-shot: the descriptor key the user just picked in the picker, and whether it goes live on its own.
+  // The PluginBar that mounts for it auto-starts (live if `live`, the editor) and clears this; a hot
+  // swap's pick (`swapsHot`, read at the pick) opens the editor only. A reload resync never sets it, so it
+  // never reopens windows. Plain variable — it is read once at PluginBar mount, nothing renders from it.
+  let freshPick: { key: string; live: boolean } | null = null;
   // The picker's value: '' (its hidden "Updating…" entry) while a source change is queued.
   const source = () =>
     pending() ? '' : plugin() ? pluginDescriptorKey(plugin()!) : slotOff()[slotIdx] ? 'off' : slotIds()[slotIdx];
   const pick = (value: string) => {
     if (value === 'off' || SYNTHS.some((s) => s.id === value)) {
-      freshPickKey = null;
+      freshPick = null;
       // selectSynth activates the slot itself once its queued work lands (not when a failed unload
       // keeps the plugin); Off leaves the MIDI slot where it is.
       if (value === 'off') selectOff(slotIdx);
@@ -65,10 +67,10 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
     }
     const desc = availablePlugins().find((p) => pluginDescriptorKey(p) === value);
     if (!desc) return;
-    freshPickKey = value;
+    freshPick = { key: value, live: !swapsHot(slotIdx, desc) };
     // A failed load mounts no PluginBar — drop the flag so a later resync can't inherit it.
     void selectPlugin(slotIdx, desc).then(() => {
-      if (!samePluginDescriptor(slotPlugins()[slotIdx], desc)) freshPickKey = null;
+      if (!samePluginDescriptor(slotPlugins()[slotIdx], desc)) freshPick = null;
     });
   };
   return (
@@ -155,8 +157,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                   paramsOpen={paramsOpen()}
                   onToggleParams={() => setParamsOpen((v) => !v)}
                   drawerId={drawerId}
-                  autoStart={freshPickKey === pluginDescriptorKey(desc)}
-                  onAutoStartDone={() => (freshPickKey = null)}
+                  autoLive={freshPick?.key === pluginDescriptorKey(desc) && freshPick.live}
+                  autoEditor={freshPick?.key === pluginDescriptorKey(desc)}
+                  onAutoStartDone={() => (freshPick = null)}
                 />
               )}
             </Show>

@@ -135,7 +135,9 @@ const [synthGains, setSynthGains] = createSignal<Readonly<Record<string, number>
 const swapping: [boolean, boolean] = [false, false];
 // A hot swap in flight per slot (`doSwapPlugin`): the outgoing plugin plays until the native commit, so
 // the slot keeps showing and routing to it, and its gain sends wait for the answer (`gainHeld`).
-const hotSwapping: [boolean, boolean] = [false, false];
+const [hotSwaps, setHotSwaps] = createSignal<[boolean, boolean]>([false, false]);
+/** Whether a hot swap is pending on `slot` (reactive): its GO LIVE is not held behind it (`live.ts`). */
+export const hotSwapPending = (slot: 0 | 1): boolean => hotSwaps()[slot];
 const gainHeld: [boolean, boolean] = [false, false];
 
 /** Route the notes to slot `i`'s source: its plugin, its instrument or nowhere (Off, or a swap in
@@ -162,7 +164,7 @@ const slotEngineGain = (slot: 0 | 1): number => engineGains()[slot] ?? inputGain
  * sends nothing for the slot until the answer (`doSwapPlugin`). */
 function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
   setEngineGains((prev) => withAt(prev, slot, gain));
-  if (send && hotSwapping[slot]) gainHeld[slot] = true;
+  if (send && hotSwapPending(slot)) gainHeld[slot] = true;
   else if (send) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
 }
 
@@ -467,7 +469,7 @@ async function doSwapPlugin(
   claimMidi: () => boolean,
   toneToken?: number,
 ): Promise<void> {
-  hotSwapping[slot] = true;
+  setHotSwaps((prev) => withAt(prev, slot, true));
   sourceOps[slot]++;
   claimEditorAffinity(slot, desc.path);
   loadsInFlight[slot] = true;
@@ -483,7 +485,7 @@ async function doSwapPlugin(
     oldPlaysOn = await adoptSwapFailure(slot, outgoing, outgoingInstance, desc, gain, claimMidi, e);
   } finally {
     loadsInFlight[slot] = false;
-    hotSwapping[slot] = false;
+    setHotSwaps((prev) => withAt(prev, slot, false));
     // The held change was the outgoing's (`setSlotLevel` stored it): it is owed only while that plays on.
     if (gainHeld[slot] && oldPlaysOn) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
     gainHeld[slot] = false;

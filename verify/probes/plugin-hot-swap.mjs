@@ -1,0 +1,439 @@
+/**
+ * Hot plugin swap in the UI, on the web engine fake (`src/platform/host.web.ts`, the engine-seam
+ * pattern) with the native slot chrome on (host.web.ts served with `available: true`) and the plugin
+ * host substituted in the page: every load answers a new instance, `swapPlugin` is held until the probe
+ * answers it, `listLoaded` answers what the probe scripts, and the probe fires `plugin:editor-closed` and
+ * `plugin:retired` itself. Engine commands are read from `__lf.native.sent`.
+ *
+ * Proves, per group:
+ * 1. a pick of another file while a plugin plays calls `swapPlugin` with the saved level and never
+ *    unloads or loads; while it is pending the slot keeps the outgoing plugin and sends no live-off and
+ *    no gain; the same file (another id, its path in other case and slashes) goes cold;
+ * 2. the answer is adopted (plugin and instance), and its activated kind decides the MIDI claim: an
+ *    instrument takes the active slot, an effect does not;
+ * 3. a level change while a swap is pending sends nothing, and nothing after a successful swap;
+ * 4. `plugin:retired` releases the outgoing file's editor affinity (seen through the other slot's
+ *    `editorAffinityBlocker`), after the answer and before it (released once, at the answer), a
+ *    duplicate is ignored, and `released: false` leaves the file uncertain;
+ * 5. a failed swap reads the host's listing: the outgoing listed plays on, with one toast, the provoked
+ *    `console.error` and the held level sent once; the slot listed empty is cleared;
+ * 6. an event of the replaced instance is dropped (its `editor-closed` leaves the new bar's editor
+ *    open), and a `stale instance` refusal of a param set raises no toast and no log;
+ * 7. GO LIVE pressed during a pending swap (the cap, then the named action's press) sends its toggle at
+ *    once, before the swap answers, and the cap is not locked by it;
+ * 8. an effect → effect hot pick sends no `SetSlotLive` after it (live stays as the engine has it) and
+ *    opens the new plugin's editor;
+ * 9. a hot swap that activates another kind sends no live-off and shows GO LIVE on until the feed's
+ *    `live` says off, then off with no event;
+ * 10. two picks queued behind a pending swap: only the newest runs.
+ *
+ * Cannot see the native swap, its commit, the engine's live-off at a kind change or any timing: the
+ * fake answers what the probe scripts.
+ * Run: pnpm probe plugin-hot-swap
+ */
+import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
+
+await probe(async ({ open }) => {
+  const { page, consumeConsoleErrors } = await open({
+    viewport: { width: 1280, height: 820 },
+    init: async (p) => {
+      await p.route('**/src/platform/host.web.ts', async (route) => {
+        const response = await route.fetch();
+        const body = (await response.text()).replace('available: false', 'available: true');
+        await route.fulfill({ response, body });
+      });
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
+    },
+  });
+
+  const keys = await page.evaluate(async () => {
+    const { platform } = await import('/src/platform/index.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
+    const slots = await import('/src/ui/state/instrument-slots.ts');
+    const live = await import('/src/ui/instrument/live.ts');
+    const notify = await import('/src/notify.ts');
+    const { pluginDescriptorKey } = await import('/src/ui/state/plugin-descriptor.ts');
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (read, what) => {
+      for (let i = 0; i < 300 && !read(); i++) await pause(10);
+      if (!read()) throw new Error(`timed out waiting for ${what}`);
+    };
+    const deadline = Date.now() + 10000;
+    while (!instrument.nativeHostReady() || instrument.scanning()) {
+      if (Date.now() > deadline) throw new Error('native host boot did not finish');
+      await pause(20);
+    }
+    const desc = (id, isEffect, path = `C:\\probe\\${id}.vst3`) => ({ id, name: `Probe ${id.toUpperCase()}`, path, format: 'vst3', isEffect });
+    const d = {};
+    for (const id of 'abcdefghijklmn') d[id] = desc(id, false);
+    for (const id of ['fx1', 'fx2', 'fx3']) d[id] = desc(id, true);
+    d.u = desc('u', undefined); // unclassified: takes input, activates as whatever the host says
+    d.bCase = desc('b-copy', false, 'c:/PROBE/B.vst3'); // the same file as `b`, as native's `same_file` reads it
+    const all = Object.values(d);
+    const find = (path, id) => all.find((x) => x.path === path && x.id === id);
+
+    const H = { d, calls: [], instance: 0, swapHold: null, listed: [], opened: [], closedCbs: new Set(), retiredCb: null, staleSets: 0 };
+    const answer = (slot, path, id, effect) => {
+      const descriptor = find(path, id);
+      return { slot, descriptor, instance: ++H.instance, effect: effect ?? descriptor.isEffect === true };
+    };
+    const host = platform.pluginHost;
+    host.scanPlugins = async () => all;
+    host.loadPlugin = async (slot, path, id) => {
+      H.calls.push(['load', slot, path]);
+      return answer(slot, path, id);
+    };
+    host.unloadPlugin = async (slot) => void H.calls.push(['unload', slot]);
+    host.swapPlugin = (slot, path, id, gain) => {
+      H.calls.push(['swap', slot, path, gain]);
+      return new Promise((resolve, reject) => {
+        H.swapHold = { resolve: (effect) => resolve(answer(slot, path, id, effect)), reject };
+      });
+    };
+    host.listLoaded = async () => H.listed;
+    host.openEditor = async (slot, instance) => void H.opened.push([slot, instance]);
+    host.closeEditor = async () => {};
+    host.listParams = async () => [{ id: 1, name: 'Alpha', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
+    host.setParameter = async () => {
+      H.staleSets++;
+      throw new Error('stale instance: slot 1 plays another instance');
+    };
+    host.onEditorClosed = (cb) => {
+      H.closedCbs.add(cb);
+      return () => H.closedCbs.delete(cb);
+    };
+    host.onRetired = (cb) => {
+      H.retiredCb = cb;
+      return () => {};
+    };
+    instrument.watchRetiredPlugins(); // boot's watcher subscribed to the web stub's no-op
+
+    Object.assign(H, {
+      instrument, slots, live, until, pause,
+      release(effect) {
+        const hold = H.swapHold;
+        H.swapHold = null;
+        hold.resolve(effect);
+      },
+      fail(message) {
+        const hold = H.swapHold;
+        H.swapHold = null;
+        hold.reject(new Error(message));
+      },
+      idle: () => until(() => slots.slotPendingCounts().every((n) => n === 0), 'the slots to settle'),
+      held: () => until(() => H.swapHold !== null, 'a swap call'),
+      mark: () => window.__lf.native.sent.length,
+      // The slot commands the UI sent since `from`: live flags, GO LIVE toggles and gains.
+      slotSent: (from, slot) =>
+        window.__lf.native.sent.slice(from).flatMap((c) =>
+          c.SetSlotLive?.[0] === slot ? [['live', c.SetSlotLive[1]]]
+            : c.Action?.Toggle?.Live === slot ? [['toggle']]
+              : c.SetSlotGain?.[0] === slot ? [['gain', Math.round(c.SetSlotGain[1] * 100) / 100]] : []),
+      shown: (slot) => ({ id: instrument.slotPlugins()[slot]?.id ?? null, instance: instrument.slotInstances()[slot] }),
+      toasts: () => notify.toasts().map((t) => `${t.message} x${t.count}`),
+      clearToasts: () => notify.toasts().forEach((t) => notify.dismissToast(t.id)),
+      blocker: (slot, path) => instrument.editorAffinityBlocker(slot, path),
+      retire: (slot, instance, released) => H.retiredCb({ slot, instance, released }),
+      editorClosed: (slot, instance) => H.closedCbs.forEach((cb) => cb({ slot, instance })),
+    });
+    window.__hot = H;
+    await instrument.scanForPlugins();
+    await instrument.selectPlugin(0, d.a);
+    return Object.fromEntries(Object.entries(d).map(([k, v]) => [k, pluginDescriptorKey(v)]));
+  });
+  await page.waitForSelector('.slot__source');
+  const picker = (slot) => page.locator('.slot__source').nth(slot);
+  const cap = page.locator('button[aria-label="Live input for slot B"]');
+
+  // 1. A hot pick: one swap at the saved level, the outgoing plugin kept meanwhile; the same file goes cold.
+  await page.evaluate((key) => localStorage.setItem(`lf.pluginGain.0.${key}`, '0.7'), keys.b);
+  const from1 = await page.evaluate(() => {
+    window.__hot.calls.length = 0;
+    return window.__hot.mark();
+  });
+  await picker(0).selectOption(keys.b, { noWaitAfter: true });
+  const pending1 = await page.evaluate(async (from) => {
+    const H = window.__hot;
+    await H.held();
+    await H.pause(30); // the outbox drains on a microtask
+    return {
+      calls: [...H.calls],
+      shown: H.shown(0),
+      editorBar: document.querySelectorAll('button[aria-label="Editor for slot A"]').length,
+      sent: H.slotSent(from, 0),
+    };
+  }, from1);
+  console.log('1. pending', JSON.stringify(pending1));
+  assert.deepEqual(pending1, {
+    calls: [['swap', 0, 'C:\\probe\\b.vst3', 0.7]],
+    shown: { id: 'a', instance: 1 },
+    editorBar: 1,
+    sent: [],
+  }, 'a hot pick swaps at the saved level and keeps the outgoing plugin, with no live-off and no gain');
+  const cold1 = await page.evaluate(async () => {
+    const H = window.__hot;
+    H.release(false);
+    await H.idle();
+    const adopted = H.shown(0);
+    H.calls.length = 0;
+    const cold = H.instrument.selectPlugin(0, H.d.bCase);
+    await H.until(() => H.calls.length >= 2 || H.swapHold, 'the same-file pick');
+    if (H.swapHold) H.release(false); // a wrongly hot pick, answered so the assertion shows it
+    await cold;
+    return { adopted, calls: [...H.calls], after: H.shown(0) };
+  });
+  console.log('1. same file', JSON.stringify(cold1));
+  assert.deepEqual(cold1, {
+    adopted: { id: 'b', instance: 2 },
+    calls: [['unload', 0], ['load', 0, 'c:/PROBE/B.vst3']],
+    after: { id: 'b-copy', instance: 3 },
+  }, 'the same file under another id goes cold');
+
+  // 2. The answer is adopted, and the activated kind decides the MIDI claim.
+  const claim2 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument } = H;
+    instrument.setActiveSlot(0);
+    await instrument.selectPlugin(1, H.d.fx1); // cold, into the empty slot
+    const toInstrument = instrument.selectPlugin(1, H.d.c);
+    await H.held();
+    H.release(false);
+    await toInstrument;
+    const instrumentSwap = { shown: H.shown(1), active: instrument.activeSlot() };
+    instrument.setActiveSlot(0);
+    const toEffect = instrument.selectPlugin(1, H.d.fx2);
+    await H.held();
+    H.release(true);
+    await toEffect;
+    return { instrumentSwap, effectSwap: { shown: H.shown(1), active: instrument.activeSlot() } };
+  });
+  console.log('2. claim', JSON.stringify(claim2));
+  assert.deepEqual(claim2, {
+    instrumentSwap: { shown: { id: 'c', instance: 5 }, active: 1 },
+    effectSwap: { shown: { id: 'fx2', instance: 6 }, active: 0 },
+  }, 'an instrument answer claims MIDI, an effect answer does not');
+
+  // 3. A level change while a swap is pending is held; a successful swap sends none.
+  const held3 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const from = H.mark();
+    const swap = H.instrument.selectPlugin(0, H.d.d);
+    await H.held();
+    H.instrument.setSlotLevel(0, 0.4);
+    await H.pause(30);
+    const pending = H.slotSent(from, 0);
+    H.release(false);
+    await swap;
+    await H.pause(30);
+    return { pending, after: H.slotSent(from, 0), shown: H.shown(0) };
+  });
+  console.log('3. held level', JSON.stringify(held3));
+  assert.deepEqual(held3, { pending: [], after: [], shown: { id: 'd', instance: 7 } },
+    'no gain is sent while the swap is pending, nor after it succeeded');
+
+  // 4. `plugin:retired` releases the outgoing file's affinity, after the answer or before it.
+  const retired4 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument, d } = H;
+    const owner = () => H.blocker(1, d.d.path)?.owner ?? null;
+    const out = {};
+    let swap = instrument.selectPlugin(0, d.e); // d (7) → e
+    await H.held();
+    out.pending = owner();
+    H.release(false);
+    await swap;
+    out.answered = owner();
+    H.retire(0, 7, true);
+    out.retiredAfter = owner();
+    swap = instrument.selectPlugin(0, d.d); // e (8) → d again: slot A owns d's file afresh
+    await H.held();
+    H.release(false);
+    await swap;
+    H.retire(0, 7, true); // the same event again
+    out.duplicate = owner();
+    swap = instrument.selectPlugin(0, d.f); // d (9) → f, retired before the answer
+    await H.held();
+    H.retire(0, 9, true);
+    out.retiredBefore = owner();
+    H.release(false);
+    await swap;
+    out.answeredAfterRetired = owner();
+    swap = instrument.selectPlugin(0, d.g); // f (10) → g, its retire unproven
+    await H.held();
+    H.release(false);
+    await swap;
+    H.retire(0, 10, false);
+    out.unreleased = H.blocker(1, d.f.path);
+    return out;
+  });
+  console.log('4. retired', JSON.stringify(retired4));
+  assert.deepEqual(retired4, {
+    pending: 'slot A',
+    answered: 'slot A',
+    retiredAfter: null,
+    duplicate: 'slot A',
+    retiredBefore: "slot A's previous load",
+    answeredAfterRetired: null,
+    unreleased: { owner: null },
+  }, 'the outgoing affinity is released once, at its retire or at the answer after it; released: false stays uncertain');
+
+  // 5. A failed swap reads the slot's truth from the host's listing.
+  await page.evaluate(() => window.__hot.clearToasts());
+  const playsOn5 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const from = H.mark();
+    const swap = H.instrument.selectPlugin(0, H.d.h); // g (11) → h, refused
+    await H.held();
+    H.instrument.setSlotLevel(0, 0.6);
+    H.listed = [{ slot: 0, descriptor: H.d.g, instance: 11, effect: false }];
+    H.fail('injected swap failure');
+    await swap;
+    await H.pause(30);
+    const out = { shown: H.shown(0), sent: H.slotSent(from, 0), toasts: H.toasts() };
+    H.clearToasts();
+    return out;
+  });
+  console.log('5. plays on', JSON.stringify(playsOn5));
+  assert.deepEqual(playsOn5, {
+    shown: { id: 'g', instance: 11 },
+    sent: [['gain', 0.6]],
+    toasts: ['Could not load Probe H. Probe G plays on. x1'],
+  }, 'the outgoing listed plays on, with one toast and the held level sent once');
+  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure').length, 1, 'the failed swap is logged');
+  const emptied5 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const from = H.mark();
+    const swap = H.instrument.selectPlugin(0, H.d.i); // g (11) → i, the slot ends empty
+    await H.held();
+    H.listed = [{ slot: 1, descriptor: H.d.fx2, instance: 6, effect: true }];
+    H.fail('injected swap failure, slot emptied');
+    await swap;
+    await H.pause(30);
+    const out = { shown: H.shown(0), sent: H.slotSent(from, 0), toasts: H.toasts() };
+    H.clearToasts();
+    return out;
+  });
+  console.log('5. emptied', JSON.stringify(emptied5));
+  assert.deepEqual(emptied5, {
+    shown: { id: null, instance: null },
+    sent: [['gain', 1]],
+    toasts: ['Could not load Probe I, and the slot is empty now. Pick a source again. x1'],
+  }, 'a slot listed empty is cleared, its gain back at the input level');
+  assert.equal(consumeConsoleErrors('[instrument] plugin swap failed Error: injected swap failure, slot emptied').length, 1, 'the failed swap is logged');
+
+  // 6. The replaced instance's events are dropped; a stale refusal is silent.
+  await page.evaluate(() => window.__hot.instrument.selectPlugin(0, window.__hot.d.j)); // cold (12)
+  await picker(0).selectOption(keys.k, { noWaitAfter: true });
+  await page.evaluate(async () => {
+    const H = window.__hot;
+    await H.held();
+    H.release(false); // k (13)
+    await H.idle();
+  });
+  await page.waitForFunction(() => document.querySelector('button[aria-label="Editor for slot A"]')?.getAttribute('aria-pressed') === 'true');
+  const closed6 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const pressed = () => document.querySelector('button[aria-label="Editor for slot A"]').getAttribute('aria-pressed');
+    H.editorClosed(0, 12);
+    await H.pause(30);
+    const oldInstance = pressed();
+    H.editorClosed(0, 13);
+    await H.pause(30);
+    return { opened: H.opened.at(-1), oldInstance, newInstance: pressed() };
+  });
+  console.log('6. editor-closed', JSON.stringify(closed6));
+  assert.deepEqual(closed6, { opened: [0, 13], oldInstance: 'true', newInstance: 'false' },
+    "the replaced instance's editor-closed leaves the new bar's editor open; its own closes it");
+  await page.getByRole('button', { name: /Plugin parameters for slot A/ }).click();
+  await page.locator('#slot-0-params input[aria-label="Alpha"]').fill('0.8');
+  const stale6 = await page.evaluate(async () => {
+    const H = window.__hot;
+    await H.until(() => H.staleSets > 0, 'the param set');
+    await H.pause(50);
+    return { sets: H.staleSets, toasts: H.toasts() };
+  });
+  console.log('6. stale set', JSON.stringify(stale6));
+  assert.deepEqual(stale6, { sets: 1, toasts: [] }, 'a stale instance refusal raises no toast (and no log: the harness fails on one)');
+
+  // 7. GO LIVE during a pending hot swap is pressed at once (slot B holds the effect fx2).
+  const from7 = await page.evaluate(() => window.__hot.mark());
+  await picker(1).selectOption(keys.fx3, { noWaitAfter: true });
+  await page.evaluate(() => window.__hot.held());
+  assert.equal(await cap.isDisabled(), false, 'the GO LIVE cap is not locked by a hot swap');
+  const pressed = (on) => page.waitForFunction((v) => document.querySelector('button[aria-label="Live input for slot B"]')?.getAttribute('aria-pressed') === v, String(on));
+  await cap.click();
+  await pressed(true);
+  assert.equal(await page.evaluate(() => window.__hot.live.pressGoLive(1)), true, 'the named action presses');
+  await pressed(false);
+  await cap.click();
+  await pressed(true);
+  const live7 = await page.evaluate((from) => {
+    const H = window.__hot;
+    return { sent: H.slotSent(from, 1), shown: H.shown(1), swapHeld: H.swapHold !== null };
+  }, from7);
+  console.log('7. presses', JSON.stringify(live7));
+  assert.deepEqual(live7, {
+    sent: [['toggle'], ['toggle'], ['toggle']],
+    shown: { id: 'fx2', instance: 6 },
+    swapHeld: true,
+  }, 'each press sends its toggle before the swap answers');
+
+  // 8. Effect → effect: no live flag sent after it, the editor opens.
+  const effect8 = await page.evaluate(async (from) => {
+    const H = window.__hot;
+    H.release(true); // fx3 (14)
+    await H.idle();
+    await H.until(() => H.opened.some(([s, i]) => s === 1 && i === 14), 'the editor to open');
+    await H.pause(30);
+    return { sent: H.slotSent(from, 1), shown: H.shown(1) };
+  }, from7);
+  console.log('8. effect to effect', JSON.stringify(effect8));
+  assert.deepEqual(effect8, { sent: [['toggle'], ['toggle'], ['toggle']], shown: { id: 'fx3', instance: 14 } },
+    'an effect hot pick sends no SetSlotLive and opens its editor');
+  assert.equal(await cap.getAttribute('aria-pressed'), 'true', 'the slot stays live as the feed has it');
+
+  // 9. A swap to another kind: the UI sends no live-off; GO LIVE follows the feed's `live` alone.
+  const kind9 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const from = H.mark();
+    const swap = H.instrument.selectPlugin(1, H.d.u); // fx3 (14) → u, activated as an instrument
+    await H.held();
+    H.release(false);
+    await swap;
+    await H.pause(30);
+    return { sent: H.slotSent(from, 1), shown: H.shown(1) };
+  });
+  console.log('9. kind change', JSON.stringify(kind9));
+  assert.deepEqual(kind9, { sent: [], shown: { id: 'u', instance: 15 } }, 'a kind change sends nothing for the live flag');
+  assert.equal(await cap.getAttribute('aria-pressed'), 'true', 'GO LIVE stays on until the feed says off');
+  await page.evaluate(() => window.__lf.native.emit({ seq: 9000, reset: false, events: [], live: [false, false] }));
+  await pressed(false);
+  assert.match(await cap.innerText(), /GO LIVE/, 'GO LIVE shows off once the feed says so, with no event');
+
+  // 10. Two picks queued behind a pending swap: only the newest runs.
+  const queued10 = await page.evaluate(async () => {
+    const H = window.__hot;
+    const { instrument, d } = H;
+    H.calls.length = 0;
+    const first = instrument.selectPlugin(1, d.l);
+    await H.held();
+    const overtaken = instrument.selectPlugin(1, d.m);
+    const newest = instrument.selectPlugin(1, d.n);
+    H.release(false);
+    await first;
+    let settled = false;
+    const rest = Promise.all([overtaken, newest]).then(() => (settled = true));
+    while (!settled) {
+      await H.until(() => settled || H.swapHold, 'the queued picks');
+      if (H.swapHold) H.release(false);
+    }
+    await rest;
+    return { swaps: H.calls.map(([kind, , path]) => `${kind} ${path}`), shown: H.shown(1) };
+  });
+  console.log('10. queued', JSON.stringify(queued10));
+  assert.deepEqual(queued10, {
+    swaps: ['swap C:\\probe\\l.vst3', 'swap C:\\probe\\n.vst3'],
+    shown: { id: 'n', instance: 17 },
+  }, 'a pick a newer one overtook in the queue does nothing');
+}, { launch: {} });

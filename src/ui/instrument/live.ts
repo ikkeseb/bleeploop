@@ -1,5 +1,5 @@
 import { createSignal } from 'solid-js';
-import { slotPendingCounts, slotTakesInput } from '../state/instrument';
+import { hotSwapPending, slotPendingCounts, slotTakesInput } from '../state/instrument';
 import { serializeLive, withAt } from '../state/instrument-slots';
 import { goLive, holdPress, inputArmed, pressEngineLive, takeHeldPresses } from '../state/native-io';
 import { notifyError } from '../../notify';
@@ -54,11 +54,14 @@ async function liveOp(slot: 0 | 1, quiet: boolean, wentLive: boolean, send: (own
 /**
  * Press slot `slot`'s GO LIVE / INPUT LIVE: one op on the slot's chain that sends the engine's toggle,
  * or a live-off once the slot's source takes no input. Every call is a press, even one made while
- * another is in flight.
+ * another is in flight. During a hot swap the press is sent at once, off the chain the swap holds: the
+ * engine owns the flag across the commit, and the outgoing plugin still shows, so the slot takes input
+ * as it reads now.
  */
 export function toggleLive(slot: 0 | 1): Promise<void> {
   const wentLive = !inputArmed()[slot];
-  return liveOp(slot, false, wentLive, (ownToast) => serializeLive(slot, () => pressEngineLive(slot, slotTakesInput(slot), ownToast)));
+  const press = (ownToast: boolean) => pressEngineLive(slot, slotTakesInput(slot), ownToast);
+  return liveOp(slot, false, wentLive, (ownToast) => (hotSwapPending(slot) ? press(ownToast) : serializeLive(slot, () => press(ownToast))));
 }
 
 /**
@@ -75,12 +78,13 @@ export function startLive(slot: 0 | 1): Promise<void> {
  * Press slot `slot`'s GO LIVE / INPUT LIVE cap, as a click would (the named action's; a pedal can press
  * while the cap is locked). While a source op holds the slot (a load, a session's tone reload) the press
  * is counted and applied once the op settles: an odd count as one toggle against the engine's value
- * then, an even count not at all; a reload that would resume GO LIVE yields to an odd count. A press
+ * then, an even count not at all; a reload that would resume GO LIVE yields to an odd count. A hot swap
+ * holds no press (`toggleLive`). A press
  * made while another is in flight queues behind it. False when there is nothing to press: a source that
  * takes no input, or no host to feed it.
  */
 export function pressGoLive(slot: 0 | 1): boolean {
-  if (slotPendingCounts()[slot] > 0) {
+  if (slotPendingCounts()[slot] > 0 && !hotSwapPending(slot)) {
     if (holdPress(slot)) void applyHeldPresses(slot);
     return true;
   }

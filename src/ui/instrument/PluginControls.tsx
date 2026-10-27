@@ -35,9 +35,11 @@ export function PluginBar(props: {
   paramsOpen: boolean;
   onToggleParams: () => void;
   drawerId: string;
-  /** True when the user just picked this plugin in the slot dropdown (not a reload resync): an effect
-   * goes live and the editor opens on its own. `onAutoStartDone` clears the owner's one-shot flag. */
-  autoStart: boolean;
+  /** The user just picked this plugin in the slot dropdown (not a reload resync): `autoLive`, an effect
+   * goes live on its own (a cold pick only: a hot swap leaves live to the engine); `autoEditor`, its
+   * editor opens. `onAutoStartDone` clears the owner's one-shot flag. */
+  autoLive: boolean;
+  autoEditor: boolean;
   onAutoStartDone: () => void;
 }) {
   const [editorOpen, setEditorOpen] = createSignal(false);
@@ -116,13 +118,14 @@ export function PluginBar(props: {
   // one, so a scanned EFFECT goes live first (a synth or an unclassified plugin is left alone — going
   // live on a plugin with no input bus only yields an error), then the editor opens.
   onMount(() => {
-    if (!props.autoStart) return;
+    const { autoLive, autoEditor } = props;
+    if (!autoLive && !autoEditor) return;
     props.onAutoStartDone();
     let gone = false; // a swap while going live remounts this bar — the new one runs its own start
     onCleanup(() => (gone = true));
     void (async () => {
-      if (props.descriptor.isEffect === true && liveShown(props.slot)) await startLive(props.slot);
-      if (!gone) await toggleEditor(true);
+      if (autoLive && props.descriptor.isEffect === true && liveShown(props.slot)) await startLive(props.slot);
+      if (!gone && autoEditor) await toggleEditor(true);
     })();
   });
 
