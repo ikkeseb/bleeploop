@@ -203,10 +203,11 @@ function adoptFadeBars(n: number): void {
   writeStoredNumber(FADE_BARS_KEY, bars);
 }
 /** The meter outlives a restart as FADE's bars do, kept as its index in `TIME_SIGNATURES`: written from
- * the meter the engine APPLIED (its `Transport`), so a request a loop locked out is never kept, and sent
+ * a pick until its matching `Transport` or a reset, then from the meter the engine applied, and sent
  * to an engine whose settings lack it (a fresh one runs 4/4). */
 const METER_KEY = 'lf.meter';
 const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_KEY, 0, 0, TIME_SIGNATURES.length - 1)] ?? FOUR_FOUR;
+let pendingMeter: TimeSignature | null = null;
 /** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
  * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
 let meterAsked = false;
@@ -556,7 +557,8 @@ function applyEvent(ev: EngineEvent): void {
       setMasterFrames(ev.master);
       setBpmSignal(ev.bpm);
       setMeterSignal(ev.meter);
-      if (!meterAsked) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
+      if (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den) pendingMeter = null;
+      if (!meterAsked && pendingMeter === null) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
       setBpmLocked(ev.locked);
       break;
     case 'Beat': {
@@ -799,7 +801,11 @@ function applyFrameNow(f: FeedFrame): void {
     if (f.status && moved) dropLackingPicks(slotInputChannels().map(channelOf), f.status.inputChannels);
   }
   if (f.anchor) plain.clock = f.anchor;
-  if (f.reset) adoptSettings(f.settings ?? []);
+  if (f.reset) {
+    adoptSettings(f.settings ?? []);
+    // Keep the pick through adoption, then let the reset end even a pick the engine locked out.
+    pendingMeter = null;
+  }
   // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
   if (f.live) adoptEngineLive(f.live);
   tookLoop = false;
@@ -1466,6 +1472,7 @@ function setBpm(n: number): void {
  * the engine took. */
 function setMeter(m: TimeSignature): void {
   if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
+  pendingMeter = m;
   writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(m));
   sendEngine({ SetMeter: [m.num, m.den] });
 }

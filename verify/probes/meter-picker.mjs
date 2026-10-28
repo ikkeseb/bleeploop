@@ -18,7 +18,7 @@
  *   clock correction back over a beat line and on again pulses nothing early and nothing twice.
  * - The kept meter: the meter the engine applied is kept (`lf.meter`), a fresh engine that lacks it gets
  *   a `SetMeter`, its reset frame's 4/4 does not overwrite the kept one, and an engine that has it gets
- *   none.
+ *   none. A pending 4/4 pick survives an older 6/8 Transport and a reset without sending 6/8 back.
  * - The transport keys after a pointer pick in the picker (new value, same value, dismissed): Space and
  *   ArrowDown reach the looper (`src/app/transport-keys.ts`; the picker has no <label>, its name is its
  *   aria-label, so the label case of `transport-focus` does not arise here).
@@ -299,6 +299,17 @@ await probe(async ({ open }) => {
   await reset([transport(0, false, 120, SIX), ...empties(0, 1, 2, 3, 4)], [{ SetMeter: [6, 8] }]);
   await settle();
   assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'an engine that keeps the meter gets no SetMeter');
+  // A queued Transport predates the pick; a reset loses the pick's echo, with no SetMeter for 4/4.
+  await picker.selectOption('4/4');
+  await settle();
+  await emit({ events: [transport(0, false, 121, SIX)] });
+  await settle();
+  await clearSent();
+  await reset([transport(0, false, 121, FOUR), ...empties(0, 1, 2, 3, 4)]);
+  await settle();
+  console.log('sent after a stale Transport and reset', JSON.stringify((await sent()).filter((c) => 'SetMeter' in c)), 'kept', await kept());
+  assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'a stale Transport before a reset sends no SetMeter over the pending 4/4 pick');
+  assert.equal(await kept(), '0', 'the pending 4/4 pick stays kept across a stale Transport and reset');
   // An engine whose loop locked a 3/4 import: that is the meter kept.
   await emit({ events: [transport(3 * 72000, true, 120, THREE)] });
   await settle();

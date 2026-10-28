@@ -146,6 +146,9 @@ const tauriPluginHost: PluginHost = {
   },
 };
 
+// The native feed has one subscriber; replacing it retires this document's previous one too.
+let stopEngineFeed: (() => void) | null = null;
+
 /**
  * The native engine over Tauri IPC: each method maps to an `engine_*` command in Rust
  * (`src-tauri/src/engine_io`); the feed arrives on a Tauri Channel. Payloads: `engine-wire.ts`.
@@ -177,6 +180,7 @@ const tauriEngineHost: EngineHost = {
     await invoke('engine_load_session', bytes);
   },
   subscribe(onFrame) {
+    stopEngineFeed?.();
     let live = true;
     let reported = false;
     let generation = 0;
@@ -185,6 +189,7 @@ const tauriEngineHost: EngineHost = {
     let subscribing = false;
 
     const ack = () => {
+      if (!live) return;
       const gen = generation;
       void invoke<boolean>('engine_feed_ack', { seq: newest }).then((stuck) => {
         if (live && gen === generation && stuck && !subscribing) connect();
@@ -231,14 +236,18 @@ const tauriEngineHost: EngineHost = {
         if (gen === generation) subscribing = false;
       });
     };
-    connect();
     const heartbeat = setInterval(ack, 1000);
-    return () => {
+    const unsubscribe = () => {
+      if (!live) return;
       live = false;
       generation++;
       if (ackTimer !== null) clearTimeout(ackTimer);
       clearInterval(heartbeat);
+      if (stopEngineFeed === unsubscribe) stopEngineFeed = null;
     };
+    stopEngineFeed = unsubscribe;
+    connect();
+    return unsubscribe;
   },
 };
 
