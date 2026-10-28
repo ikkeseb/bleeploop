@@ -65,7 +65,7 @@
   box-shadow: var(--pressed);
 }
 .fxp-mod__toggle--on,
-.fxp-mod__toggle--on:hover {
+.fxp-mod__toggle--on:hover:not(:active) {
   background-color: var(--key-on);
   color: var(--engaged);
 }

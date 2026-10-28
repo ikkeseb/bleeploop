@@ -289,7 +289,7 @@
    record mode reads on or off from the guitar; it outranks hover, so the face never drops under the
    pointer. ALL lit (something plays) is a sound state: its LED is the play colour. */
 .transport__tgl.is-on,
-.transport__tgl.is-on:hover:not(:disabled) {
+.transport__tgl.is-on:hover:not(:disabled):not(:active) {
   color: var(--engaged);
   background-color: var(--key-on);
 }
@@ -351,10 +351,14 @@
 /* two-step confirm (✕ SURE?) and a fade under way (FADING) = the dub-amber legend and corner LED on an
    amber-tinted engaged face (a fade is a sound state) */
 .transport__tgl.is-armed,
-.transport__tgl.is-armed:hover:not(:disabled) {
+.transport__tgl.is-armed:hover:not(:disabled):not(:active) {
   --led: var(--dub);
   color: var(--dub);
   background-color: color-mix(in srgb, var(--dub) 11%, transparent);
+}
+/* pressed: the sunk face (.transport__tgl:active) wins, the amber legend stays */
+.transport__tgl.is-armed:active:not(:disabled) {
+  color: var(--dub);
 }
 
 /* FIXED and FADE pair a key with its bars: one split key, as CLICK | 70 (the key, then its stepper on a
