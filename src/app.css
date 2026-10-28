@@ -35,9 +35,19 @@
      changing numbers in Geist Mono with tabular figures (a lane's dB and pan 12 px), the lane number and
      the BPM in a light display weight. Radii come from one scale (--r-*). Motion: --motion on colour,
      face, border and opacity of controls and chrome; a lane's SOUND state lands on the frame the feed
-     switches it (a hardware REC LED), and reduced motion turns transitions off. The wave well is a sunk
-     floor darker than its card, its wave a translucent body over a fainter outer envelope. --cyan
-     survives for LISTEN, focus and key-down. ===== */
+     switches it (a hardware REC LED), and reduced motion turns transitions off. --cyan survives for
+     LISTEN, focus and key-down.
+     THE DISPLAY — the looper is one machine: its five lanes are rows of one matte body (no gaps, no
+     card per lane, a faint --row-line between rows), and their wave wells are one true-black glass pane
+     (--glass) down the wave column, the heads on the body to its left and the mix to its right. Inside
+     the pane a hairline (--glass-line) divides the rows; only the pane's outer corners round (--r-well),
+     its one light is a 1 px inner top highlight (--glass-top) and a barely-there sheen (--glass-sheen):
+     no reflection, no glow, no motion. Where the FX drawer opens the pane parts, each part rounded, and
+     the drawer sits on the body between them. A selected row lifts a tone (its body --surf-sel, its glass
+     --glass-sel) and draws a warm-white hairline (--sel-line) round its glass. The waves are drawn as on
+     an instrument display: a low-alpha body inside a faint outer envelope, the envelope's contour a fine
+     brighter line, and one crisp playhead per row, so equal-length loops line up into one line down the
+     pane. ===== */
   --bg: #0a0b0e;
   --surf-1: #121419; /* card */
   --surf-2: #171a20; /* control face (the lane core, a popover's fields) */
@@ -62,6 +72,12 @@
   --edge: rgba(255, 255, 255, 0.07); /* card + control border */
   --line-2: rgba(255, 255, 255, 0.12); /* hover border */
   --well: var(--sunk);
+  --glass: #030304; /* the looper's display: one true-black glass pane under the five waves, darker than --sunk */
+  --glass-sel: #0a0b0e; /* the selected row's glass: a faint lift under its wave */
+  --glass-line: rgba(255, 255, 255, 0.06); /* the hairline between two rows inside the pane */
+  --glass-top: rgba(255, 255, 255, 0.075); /* the pane's one inner top highlight */
+  --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 62%); /* the pane's barely-there sheen, top to bottom */
+  --row-line: rgba(255, 255, 255, 0.04); /* the faint divider between two looper rows on the body */
   --text: #eef1f8;
   --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
   --faint: #7d818d; /* the floor for read text: 4.5:1 on a card and on a key's resting face (contact-sheet pins it) */

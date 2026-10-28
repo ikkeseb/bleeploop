@@ -1,9 +1,12 @@
-/* Looper UI. Five full-width horizontal LANES stacked in the looper zone. The surface language is
-   the "Instrument" token set in src/app.css (matte tone steps, no blur, no glow; every lane button a key
-   of the one family, the header's KEYS). Colour is state, and a lane spends it in three places only: the
-   per-lane `--sc` token drives the state word with its dot (a filled badge while it captures) and the
-   core's ring (a flat filled disc while it captures); the waveform canvas is coloured by waveform.ts
-   (global --rec/--dub/--play tokens). The lane head carries no wash. Everything is scoped under .lp. */
+/* Looper UI. Five full-width horizontal LANES stacked in the looper zone, as the rows of one machine:
+   one matte body (no gap, no card per lane, a faint divider between rows) whose wave wells join into
+   one true-black glass display down the wave column (the app.css header's THE DISPLAY). The surface
+   language is the "Instrument" token set in src/app.css (matte tone steps, no blur, no glow; every lane
+   button a key of the one family, the header's KEYS). Colour is state, and a lane spends it in three
+   places only: the per-lane `--sc` token drives the state word with its dot (a filled badge while it
+   captures) and the core's ring (a flat filled disc while it captures); the waveform canvas is coloured
+   by waveform.ts (global --rec/--dub/--play tokens). The lane head carries no wash. Everything is scoped
+   under .lp. */
 
 .lp {
   height: 100%;
@@ -33,35 +36,45 @@
 
 /* ============ THE LANE STACK ============
    The core button sizes to the lanes-area HEIGHT (cqh, container `lp` on .lp) — it shrinks when the
-   stage splitter makes the looper zone short. */
+   stage splitter makes the looper zone short. No gap: the lanes (and an open FX drawer) are the rows of
+   one body, rounded only at its outer corners. */
 .lp__lanes {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: clamp(6px, 1vh, 10px);
   overflow-y: auto;
   scrollbar-width: thin;
 }
+.lp__lanes > :first-child {
+  border-top-left-radius: var(--r-card);
+  border-top-right-radius: var(--r-card);
+  box-shadow: inset 0 1px 0 var(--hair); /* the body's one top light */
+}
+.lp__lanes > :last-child {
+  border-bottom-left-radius: var(--r-card);
+  border-bottom-right-radius: var(--r-card);
+}
 
-/* ============ ONE LANE ============ */
+/* ============ ONE LANE: a row of the body ============
+   --lane-pad-y is the row's vertical inset; the wave well spans it (a negative margin of the same), so
+   the five wells meet edge to edge as one pane. */
 .lp-lane {
+  --lane-pad-y: clamp(6px, 1vh, 9px);
   flex: 1 1 0;
   min-height: calc(55px + 2 * clamp(6px, 1vh, 9px));
   display: flex;
   align-items: stretch;
   gap: clamp(9px, 1vw, 14px);
-  padding: clamp(6px, 1vh, 9px) clamp(10px, 1vw, 14px);
-  border-radius: var(--r-card);
+  padding: var(--lane-pad-y) clamp(10px, 1vw, 14px);
   background: var(--card);
-  border: 1px solid transparent; /* lanes part by space and tone; the edge lights only for a selection */
-  box-shadow: inset 0 1px 0 var(--hair);
+  box-shadow: inset 0 1px 0 var(--row-line); /* rows part by a faint divider, never a gap or a card edge */
   position: relative;
   overflow: hidden;
   --sc: var(--faint);
   /* the selection (chrome) eases; a state colour does not: on the core's face, its ring and the state
      word it lands on the frame the feed switches it, like a hardware REC LED */
-  transition: background-color var(--motion), border-color var(--motion);
+  transition: background-color var(--motion);
 }
 .lp-lane[data-state='play'] { --sc: var(--play); }
 .lp-lane[data-state='rec'] { --sc: var(--rec); }
@@ -87,17 +100,15 @@
   color: var(--dub);
 }
 
-/* Keyboard/MIDI-selected lane — a warm-white hairline and one tone up, so "which track will
-   Space/Enter hit" is glanceable without competing with the state colour (--sc). No rail (owner,
-   2026-09-23), no tint: a live capture keeps the same card, its colour is in the wave, the word and the
-   core. The doubled class outranks the EMPTY lane's tone below, so the selection never disappears. */
+/* Keyboard/MIDI-selected lane — the row lifts one tone (its body here, its glass in the well section
+   below) and a warm-white hairline rings its glass, so "which track will Space/Enter hit" is glanceable
+   without competing with the state colour (--sc). No rail (owner, 2026-09-23), no tint, no card: a live
+   capture keeps the same row, its colour is in the wave, the word and the core. */
 .lp-lane.is-selected.is-selected {
-  border-color: var(--sel-line);
   background: var(--surf-sel);
 }
+/* EMPTY: the row keeps the body's tone (one machine); the EMPTY word + unlit LED carry the cue */
 .lp-lane[data-state='empty'] {
-  background: #0f1115; /* one tone below a lane holding a take; the EMPTY word + unlit LED carry the cue */
-  box-shadow: none;
   --sc: #8a8e99;
 }
 
@@ -397,22 +408,64 @@
   background: color-mix(in srgb, var(--dub) 12%, transparent);
 }
 
-/* ---- the WAVE WELL — recessed canvas surface (waveform + playhead drawn by waveform.ts) ----
-   A size container (its size comes from the lane, never its content), so the count-in numeral can
-   scale with the well's height (cqh). */
+/* ---- the WAVE WELL — this row's strip of the one glass display (waveform + playhead drawn by
+   waveform.ts) ----
+   The well spans the row's full height (the negative margin eats --lane-pad-y), so the five wells meet
+   as one true-black pane; its lines are inset shadows UNDER the canvas, so a playhead crosses them and
+   equal-length loops draw one unbroken line down the pane. The sheen is one gradient over the whole
+   pane: each row shows its fifth of it (--row). A size container (its size comes from the lane, never
+   its content), so the count-in numeral can scale with the well's height (cqh). */
 .lp-lane__well {
   container: well / size;
   flex: 1 1 auto;
   min-width: 0;
+  margin-block: calc(-1 * var(--lane-pad-y));
   position: relative;
   overflow: hidden;
-  border-radius: var(--r-well);
-  background: var(--well); /* sunk: a darker floor than its card, edged by one dark hairline */
-  border: 1px solid rgba(0, 0, 0, 0.5);
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: no-repeat;
+  background-size: 100% 500%;
+  background-position: 0 calc(var(--row, 0) * 25%);
+  box-shadow: inset 0 1px 0 var(--glass-line); /* the hairline between this row and the one above */
   z-index: 1;
+  transition: background-color var(--motion), box-shadow var(--motion);
 }
-.lp-lane[data-state='empty'] .lp-lane__well {
-  background: #0d0e12;
+.lp-lane:nth-child(2 of .lp-lane) { --row: 1; }
+.lp-lane:nth-child(3 of .lp-lane) { --row: 2; }
+.lp-lane:nth-child(4 of .lp-lane) { --row: 3; }
+.lp-lane:nth-child(5 of .lp-lane) { --row: 4; }
+/* the pane sits in the body: the rows at its ends double their outer inset, so the body frames the
+   glass on all four sides while every row's strip keeps one height. Its outer corners round, and its top
+   row carries the one top highlight. An open FX drawer parts the pane: the row above it closes one
+   part, the row under it opens the next, and the drawer sits on the body between them. */
+.lp__lanes > .lp-lane:first-child,
+.lp__lanes > .lp-drawer + .lp-lane {
+  padding-top: calc(2 * var(--lane-pad-y));
+}
+.lp__lanes > .lp-lane:last-child,
+.lp__lanes > .lp-lane:has(+ .lp-drawer) {
+  padding-bottom: calc(2 * var(--lane-pad-y));
+}
+.lp__lanes > .lp-lane:first-child .lp-lane__well,
+.lp__lanes > .lp-drawer + .lp-lane .lp-lane__well {
+  border-top-left-radius: var(--r-well);
+  border-top-right-radius: var(--r-well);
+  box-shadow: inset 0 1px 0 var(--glass-top);
+}
+.lp__lanes > .lp-lane:last-child .lp-lane__well,
+.lp__lanes > .lp-lane:has(+ .lp-drawer) .lp-lane__well {
+  border-bottom-left-radius: var(--r-well);
+  border-bottom-right-radius: var(--r-well);
+}
+/* the selected row: its glass lifts a tone and a warm-white hairline rings it (the row under it drops
+   its divider, so the ring's lower edge is the one line there) */
+.lp__lanes .lp-lane.is-selected .lp-lane__well {
+  background-color: var(--glass-sel);
+  box-shadow: inset 0 0 0 1px var(--sel-line);
+}
+.lp__lanes .lp-lane.is-selected + .lp-lane .lp-lane__well {
+  box-shadow: none;
 }
 .lp-lane__well canvas {
   position: absolute;
@@ -469,8 +522,8 @@
   color: color-mix(in srgb, var(--cyan) 70%, var(--faint));
 }
 /* A refused transport key (gates.ts refuseOnLane): its reason sits in the cue's box, amber like the
-   armed CLR, and the lane edge turns amber until the cue times out. The sighted twin of the
-   screen-reader announcement; after the state rules above so it wins on any lane. */
+   armed CLR, and the row's glass is ringed amber until the cue times out. The sighted twin of the
+   screen-reader announcement; after the state and selection rules above so it wins on any lane. */
 .lp-lane .lp-lane__wellmsg.is-cue {
   color: var(--dub);
   text-transform: uppercase;
@@ -479,8 +532,8 @@
 .lp-lane__wellmsg.is-cue .lp-lane__cue {
   border-color: var(--dub);
 }
-.lp-lane.is-cued.is-cued {
-  border-color: var(--dub);
+.lp__lanes .lp-lane.is-cued.is-cued .lp-lane__well {
+  box-shadow: inset 0 0 0 1px var(--dub);
 }
 @keyframes lp-cue-in {
   from {
@@ -610,36 +663,36 @@
 /* ---- SHORT regime: the splitter shrinks the lanes-area (the container), so these track it ---- */
 @container lp (max-height: 400px) {
   .lp-lane {
-    min-height: 57px; /* two 20px transport buttons + 5px gap + padding + border */
+    --lane-pad-y: 5px;
+    min-height: 57px; /* two 20px transport buttons + 5px gap + padding */
     gap: 10px;
-    padding: 5px 10px;
+    padding-inline: 10px;
   }
 }
 /* FX drawer open: the drawer (flex 0 0 auto) is a sibling INSIDE this container, so the lanes get
    container − drawer. At rest it is one key row (~50px) and the 57px rung holds all five lanes in the
    ~380px container of 1000x700 with the keyboard shown; each engaged FX adds its params' height (up to
    the drawer's 46 % cap), so the rung reaches up to 540px, where the full floor (5 × (55px + 2 × 1vh
-   pad) + 5 gaps + a drawer with FX engaged) fits. Past what the rung holds, the lanes scroll. */
+   pad) + a drawer with FX engaged; the rows meet, no gaps) fits. Past what the rung holds, the lanes
+   scroll. */
 @container lp (max-height: 540px) {
   .lp__lanes:has(.lp-drawer) .lp-lane {
+    --lane-pad-y: 5px;
     min-height: 57px;
     gap: 10px;
-    padding: 5px 10px;
+    padding-inline: 10px;
   }
 }
 /* The tight rung: with FX params open (the drawer 105px: one key row + one params row) the 57px rung
-   needs 5 × 57 + 105 + 5 gaps of up to 10px = 440px. Below that the whole stack steps down one notch
-   together: lanes pad 3px (53px: the two 20px pills + their 5px gap + 3px pad + border), one 4px gap
-   between every lane and the drawer, and the drawer's top pad 3px like the lanes' (its key row keeps
-   its own 5px margin, so the keys sit 8px from the edge, the params 6px). That floor is 387px, under the
-   ~390px stack of 1000x700 with the keyboard shown. Only heights change, so no slider loses width. */
+   needs 5 × 57 + 105 = 390px, the whole of the ~390px stack of 1000x700 with the keyboard shown. Below
+   440px the whole stack steps down one notch together: lanes pad 3px (53px: the two 20px pills + their
+   5px gap + 3px pad) and the drawer's top pad 3px like the lanes' (its key row keeps its own 5px margin,
+   so the keys sit 8px from the edge, the params 6px). That floor is 368px. Only heights change, so no
+   slider loses width. */
 @container lp (max-height: 440px) {
-  .lp__lanes:has(.lp-drawer .fxp-params) {
-    gap: 4px;
-  }
   .lp__lanes:has(.lp-drawer .fxp-params) .lp-lane {
+    --lane-pad-y: 3px;
     min-height: 53px;
-    padding-block: 3px;
   }
   .lp__lanes:has(.lp-drawer .fxp-params) .lp-drawer {
     padding-top: 3px;
@@ -661,7 +714,7 @@
   .lp-lane[data-state='armed'] .lp-lane__state::before,
   .lp-lane[data-state='listening'] .lp-lane__state::before,
   .lp-lane .lp-lane__wellmsg.is-cue,
-  .lp-drawer {
+  .lp-drawer > * {
     animation: none !important;
   }
 }
@@ -675,7 +728,8 @@
    scrolls. FxPanel internals are styled in
    fxpanel.css; here it is positioned, framed and given the row's insets. --drawer-key is the key
    height, --drawer-inset the module pane's border + padding, so the title and the close key sit on
-   the key row whatever the row's height. */
+   the key row whatever the row's height. The drawer is a row of the body: where it opens the glass
+   display parts round it (the well section), and it carries no divider above, so it reads as its lane's. */
 .lp-drawer {
   --drawer-key: 26px;
   --drawer-inset: 5px;
@@ -685,14 +739,14 @@
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  border-radius: var(--r-card);
   padding: 6px 11px 6px 14px;
   background: var(--card);
-  border: 1px solid transparent;
-  box-shadow: inset 0 1px 0 var(--hair);
   overflow: hidden;
-  /* the open eases in place: opacity and a 4 px drop, never height, so the lanes beside it settle at
-     once and nothing reflows per frame */
+}
+/* the open eases in place: the drawer's contents fade and drop 4 px (the row's body is there at once, so
+   the parted pane never shows the ground through it), never height, so the lanes beside it settle at
+   once and nothing reflows per frame */
+.lp-drawer > * {
   animation: lp-drawer-in 160ms cubic-bezier(0.2, 0.7, 0.3, 1);
 }
 @keyframes lp-drawer-in {
