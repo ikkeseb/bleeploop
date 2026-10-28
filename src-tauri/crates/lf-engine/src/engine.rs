@@ -595,11 +595,6 @@ impl Engine {
         self.fx.set_offset(self.skipped);
         self.input_fx.set_offset(self.skipped);
         self.instruments.set_offset(self.skipped);
-        if ctx.xrun || ctx.damaged {
-            self.xruns += 1;
-            // A damaged block's own input frames are lost too.
-            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start });
-        }
         self.take_commands(start);
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish. An atomic read.
@@ -611,6 +606,12 @@ impl Engine {
         let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
+        if ctx.xrun || ctx.damaged {
+            self.xruns += 1;
+            // Use the tap's latched latency: live changes cannot move a capture's alignment.
+            // A damaged block's own input frames are lost too.
+            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start }, live_latency);
+        }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
         self.rendered = n;
