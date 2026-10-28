@@ -203,10 +203,14 @@ function adoptFadeBars(n: number): void {
   writeStoredNumber(FADE_BARS_KEY, bars);
 }
 /** The meter outlives a restart as FADE's bars do, kept as its index in `TIME_SIGNATURES`: written from
- * a pick until its matching `Transport` or a reset, then from the meter the engine applied, and sent
+ * the meter the engine APPLIED (its `Transport`), so a request a loop locked out is never kept, and sent
  * to an engine whose settings lack it (a fresh one runs 4/4). */
 const METER_KEY = 'lf.meter';
 const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_KEY, 0, 0, TIME_SIGNATURES.length - 1)] ?? FOUR_FOUR;
+/** The meter picked and not yet echoed. Until its own `Transport` or a reset, an older `Transport` (a page
+ * behind the feed) writes nothing over the kept meter, and a reset's adoption asks this one, so a reset
+ * that lost the echo does not send the meter from before the pick back. A pick a lock refused is dropped
+ * by the engine if a reset asks it again, and was never kept. */
 let pendingMeter: TimeSignature | null = null;
 /** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
  * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
@@ -557,8 +561,7 @@ function applyEvent(ev: EngineEvent): void {
       setMasterFrames(ev.master);
       setBpmSignal(ev.bpm);
       setMeterSignal(ev.meter);
-      // Its echo ends a pick, and so does a lock: a locked engine takes no meter, so the pick is void.
-      if (ev.locked || (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den)) pendingMeter = null;
+      if (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den) pendingMeter = null;
       if (!meterAsked && pendingMeter === null) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
       setBpmLocked(ev.locked);
       break;
@@ -804,7 +807,7 @@ function applyFrameNow(f: FeedFrame): void {
   if (f.anchor) plain.clock = f.anchor;
   if (f.reset) {
     adoptSettings(f.settings ?? []);
-    // Keep the pick through adoption, then let the reset end even a pick the engine locked out.
+    // The reset's own `Transport` is the engine's meter from here on.
     pendingMeter = null;
   }
   // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
@@ -1115,7 +1118,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
   if (!fadeKnown) lacking.push({ SetFadeBars: fadeBars() });
-  const kept = storedMeter();
+  const kept = pendingMeter ?? storedMeter();
   meterAsked = !meterKnown && kept !== FOUR_FOUR;
   if (meterAsked) lacking.push({ SetMeter: [kept.num, kept.den] });
   // The input sends the engine lacks: values first, so a send that comes on comes on with them.
@@ -1474,7 +1477,6 @@ function setBpm(n: number): void {
 function setMeter(m: TimeSignature): void {
   if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
   pendingMeter = m;
-  writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(m));
   sendEngine({ SetMeter: [m.num, m.den] });
 }
 

@@ -95,8 +95,8 @@ it.
   reason, the picker stays clean and the rescan retries it (no real failed bundle seen yet): does the
   row say enough, or should the picker grey it?
 - The feed's bound (machine: the `feed.rs` tests, `engine-seam` and `meter-picker`): a stalled page
-  lags at most half a second, then takes one step to now, and the plugin folder dialog ends the same
-  way instead of redrawing the view. With loops playing, close that dialog after a minute open, with a
+  lags at most 30 frames (about half a second of them), then takes one step to now once it reads
+  again, and the plugin folder dialog ends the same way instead of redrawing the view. With loops playing, close that dialog after a minute open, with a
   pedal's CLEAR or a rejected take while it was open: do the waveforms, the count and the toasts land
   without a jump, and does a gesture held across it keep its value?
 - SCOPE's beam moves on with the bar when the live columns stop, and only a fresh column takes it:

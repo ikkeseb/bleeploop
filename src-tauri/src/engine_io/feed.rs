@@ -28,9 +28,9 @@
 //! The feed can also be HELD (`FeedThread::hold`) while the UI thread cannot read (the native folder
 //! dialog is modal on it). Held, withheld or unsubscribed, a tick drains the ring into the mirror and
 //! keeps the drained events in order, beats excepted (`WITHHELD_EVENTS`; `Lane`, `Mix` and
-//! `Transport` publish only on change, so the stream grows with the player's actions, not with time),
-//! builds and sends nothing, leaves the waveform dirty bits alone and keeps device events
-//! (`HELD_DEVICE_EVENTS`). `seq` counts frames built, so it does not move meanwhile. The first frame
+//! `Transport` publish only on change, so the stream grows with the player's actions and RETAKE's
+//! passes, not with time), builds and sends nothing, leaves the waveform dirty bits alone and keeps
+//! device events (`HELD_DEVICE_EVENTS`). `seq` counts frames built, so it does not move meanwhile. The first frame
 //! after is a CATCH-UP (`catch_up`, not a reset): the kept stream, the count's latest beat and downbeat
 //! while a lane is armed, then this tick's events; the peaks changed since the last frame sent; scope
 //! with `gap`. The page applies it as it would have live (`applyFrameNow`,
