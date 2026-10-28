@@ -639,7 +639,8 @@ function createEmber(): ViewDraw {
       }
       c.fillStyle = pal.text;
       c.globalAlpha = A[(0.1 * dim * move * 255) | 0];
-      c.fillRect(r[LANES - 1] - sw, -(hair >> 1), R - r[LANES - 1] + 2 * sw, hair);
+      // `0 -`, not a unary minus: a one-px hairline would pass -0, a double boxed every frame.
+      c.fillRect(r[LANES - 1] - sw, 0 - (hair >> 1), R - r[LANES - 1] + 2 * sw, hair);
       for (let i = 0; i < LANES; i++) {
         const kind = feed.kind[i];
         if (kind !== 'play' && kind !== 'dub') continue;
