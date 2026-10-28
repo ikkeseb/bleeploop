@@ -557,7 +557,8 @@ function applyEvent(ev: EngineEvent): void {
       setMasterFrames(ev.master);
       setBpmSignal(ev.bpm);
       setMeterSignal(ev.meter);
-      if (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den) pendingMeter = null;
+      // Its echo ends a pick, and so does a lock: a locked engine takes no meter, so the pick is void.
+      if (ev.locked || (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den)) pendingMeter = null;
       if (!meterAsked && pendingMeter === null) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
       setBpmLocked(ev.locked);
       break;

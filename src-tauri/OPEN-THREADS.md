@@ -61,11 +61,10 @@
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
-- The feed has no backpressure: `turn` (`feed.rs` 396) sends every tick while `Channel.send` succeeds
-  (`mode.rs` 231), and Tauri 2.11.5 queues large payloads unbounded until the page fetches them, so a
-  stalled WebView grows a backlog of stale frames. Fix: a fixed number of outstanding frames with an ACK
-  per subscription and sequence; drain meanwhile, resync on resume without breaking active gestures or
-  session revisions, and keep one-shot events in their own bounded queue.
+- The feed's bound is per subscription (`feed.rs` module doc): Tauri 2.11.5 frees a large payload
+  only when a page fetches it (in the tauri crate's ipc channel), so a document that goes away
+  before fetching leaves up to 30 frames' payloads behind per reload. A Tauri internal, left; next
+  check if memory grows across reloads: the app's private bytes over twenty reloads with the stage view open.
 - A page that dies for good (a WebView crash, a shutdown) leaves the scope taps on (`Key::Scope`), so
   the engine keeps folding columns the feed drains and drops for nobody. Read from source, not
   reproduced, nothing audible.

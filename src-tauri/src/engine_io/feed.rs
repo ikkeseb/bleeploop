@@ -18,16 +18,33 @@
 //! ticks as a held feed does (below): no frame is built, and the device events wait for the next
 //! subscriber's reset.
 //!
-//! The feed can be HELD (`FeedThread::hold`): while the UI thread cannot read (the native folder
-//! dialog is modal on it), every frame sent would wait in the channel, with no bound, and arrive in
-//! one burst. A held feed keeps ticking, so the ring is drained and the mirror stays true, but builds
-//! and sends nothing; its first tick after the hold is one `reset` frame, which carries the whole
-//! state. `seq` counts frames built, so it does not move while held. The UI reads `seq` for nothing
-//! and replaces its view on a reset (`applyFrameNow`, `src/ui/state/engine-store.ts`), so the resync
-//! is no fault to it. The count's latest beat and its downbeat survive while a lane is armed;
-//! a lane leaving armed ends the count it held, dropping beats older than that lane event. Other
-//! past one-shots (an ordinary beat, a refusal) are not replayed, as for a WebView reload; device events
-//! are kept and go out with the reset.
+//! `Channel::send` succeeds once Tauri has queued a frame, not once the page read it, so the page acks
+//! (`engine_feed_ack`, from `src/platform/host.tauri.ts`): the newest `seq` its channel handed on, 100 ms
+//! after a frame and every second, `null` before its first. Acks are cumulative and fenced by the
+//! subscriber's own range (`seq` rises across subscribers), so an older channel's ack covers nothing.
+//! `MAX_IN_FLIGHT` frames unacked WITHHOLD the subscriber until every frame sent is acked: a stalled
+//! or slow page lags at most that many frames, never without bound.
+//!
+//! The feed can also be HELD (`FeedThread::hold`) while the UI thread cannot read (the native folder
+//! dialog is modal on it). Held, withheld or unsubscribed, a tick drains the ring into the mirror and
+//! keeps the drained events in order, beats excepted (`WITHHELD_EVENTS`; `Lane`, `Mix` and
+//! `Transport` publish only on change, so the stream grows with the player's actions, not with time),
+//! builds and sends nothing, leaves the waveform dirty bits alone and keeps device events
+//! (`HELD_DEVICE_EVENTS`). `seq` counts frames built, so it does not move meanwhile. The first frame
+//! after is a CATCH-UP (`catch_up`, not a reset): the kept stream, the count's latest beat and downbeat
+//! while a lane is armed, then this tick's events; the peaks changed since the last frame sent; scope
+//! with `gap`. The page applies it as it would have live (`applyFrameNow`,
+//! `src/ui/state/engine-store.ts`), so overlays, revisions and the clear token survive. A RESET instead
+//! when the subscriber is new, another engine came meanwhile (latched by the held tick) or the stream
+//! passed `WITHHELD_EVENTS`; every reset carries the notices kept meanwhile (`TakeRejected`,
+//! `PassDropped`, `Refused`, the newest `KEPT_NOTICES`), so a notice outlives another engine or an
+//! overflow. Late is still late: a catch-up's events read the page's state as it is when they arrive.
+//!
+//! A frame lost before the page's handler (a failed payload fetch, which Tauri only logs) parks every
+//! later one. The watchdog judges ack progress, not a frame's age: acks that do not advance while frames
+//! are in flight answer `true` after `STUCK`, and the page retires that channel (its late frames and
+//! answers fenced by a generation) and subscribes again. A new subscriber takes over the notices of
+//! the last one's unacked frames, and its reset carries them.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{
@@ -48,9 +65,13 @@ use super::{DeviceEvent, DeviceStatus, EngineHost};
 
 /// The device events an unsent feed keeps for its next frame; older ones go first.
 const HELD_DEVICE_EVENTS: usize = 64;
+/// The frames a subscriber may leave unacked before it is withheld: about half a second of them.
 const MAX_IN_FLIGHT: usize = 30;
+/// The events an unsent stream keeps for its catch-up; past it the next frame resets instead.
 const WITHHELD_EVENTS: usize = 256;
+/// The notices a reset carries from the frames the page missed; older ones go first.
 const KEPT_NOTICES: usize = 32;
+/// How long acks may stand still while frames are in flight before the page is told to resubscribe.
 const STUCK: Duration = Duration::from_secs(5);
 
 /// The most scope columns one frame carries: a tick is about four 4 ms columns, so this is a quarter
