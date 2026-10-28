@@ -153,8 +153,9 @@ it.
   switching is the one the loops play at once it opens (machine: `plugin-param-refused` probe,
   `engine_io/tests.rs`). Does the amp-sim's knob ever sit off its slider after a quick sweep?
 - A real 64-bit VST2 plugin whose parameters hold a value (so far a fixture, and ReaJS and ReaStream in
-  `native:smoke` and `native:swap`): plays live with no click on load, its editor opens and resizes, a
-  knob there moves the drawer's slider, and its settings come back after a restart.
+  `native:smoke` and `native:swap`): plays live with no click on load, its editor opens, resizes and
+  keeps redrawing (`effIdle` runs each owner turn until it answers 0), a knob there moves the drawer's
+  slider, and its settings come back after a restart.
 - Yank the interface while loops play: a toast, the loops and the plugin stay; reconnect: the device
   comes back (or WASAPI takes over) and the loops play on (fake driver only); at a WASAPI rate unlike
   ASIO's the loops come back from recovery after a relaunch. With no device, is the command bar's
