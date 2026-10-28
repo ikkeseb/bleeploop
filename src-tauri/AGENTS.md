@@ -5,9 +5,9 @@ Everything Rust/native lives here: the native audio engine (`crates/lf-engine`) 
 `AGENTS.md` routes here: read this before any work in this subtree (`CLAUDE.md` beside it is a
 one-line adapter). It holds the router-level gotchas and operational bits; the engine's rules live in
 its two briefings (the crate doc of `crates/lf-engine/src/lib.rs`, the module doc of
-`src/engine_io/mod.rs`). The gate is `pnpm rust:check` (Windows, also from WSL); `tauri dev`, the
-`native:*` probes and `native:kill` are in `docs/VERIFY.md` § Native / Tauri verification. Only the
-by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
+`src/engine_io/mod.rs`). Which gate a change runs: root `AGENTS.md` (the `main` line);
+`pnpm rust:check` runs on Windows and from WSL. `tauri dev`, the `native:*` probes and `native:kill`
+are in `docs/VERIFY.md` § Native / Tauri verification. Only the by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
 (CI runs the no-asio half).
 
 ## Thread & ownership map
@@ -77,7 +77,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   links the same `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one
   worktree can run another's build of `app` or `lf-engine`. From WSL, Windows cargo does not see a
   `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it). Each target grows to 12–16 GB, so
-  at most two worktrees hold a build at a time (the integration tree on `main` and one feature tree), and
+  at most two worktrees hold a build at a time (the integration tree, on `main` or `dev`, and one feature tree), and
   a feature tree is cleaned when its branch is merged: `cargo clean --manifest-path
   <absolute path>/src-tauri/Cargo.toml`, an absolute path, never `cd` then delete.
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
