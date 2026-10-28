@@ -698,7 +698,7 @@ export function whenDevice(): Promise<DeviceStatus> {
   return running ? Promise.resolve(running) : new Promise((resolve) => deviceWaiters.push(resolve));
 }
 
-function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[]): void {
+function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[], catchUp: boolean): void {
   const p = plain.peaks[lane];
   const need = Math.max(count, start + min.length);
   if (p.min.length < need) {
@@ -714,7 +714,7 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
   p.max.set(max, start);
   p.count = count;
   p.version++;
-  if (!capturing(plain.state[lane])) plain.revision[lane]++;
+  if (catchUp || !capturing(plain.state[lane])) plain.revision[lane]++;
 }
 
 /**
@@ -769,6 +769,10 @@ function applyFrame(f: FeedFrame): void {
 }
 
 function applyFrameNow(f: FeedFrame): void {
+  if (f.reset || f.catchUp) {
+    for (const timer of beatTimers) clearTimeout(timer);
+    beatTimers.clear();
+  }
   if (f.reset) {
     for (const p of plain.peaks) {
       p.count = 0;
@@ -779,8 +783,6 @@ function applyFrameNow(f: FeedFrame): void {
     plain.resets++;
     setFeedResets(plain.resets);
     plain.clearing.fill(false);
-    for (const timer of beatTimers) clearTimeout(timer);
-    beatTimers.clear();
     plain.counting = false;
     for (const [, setCounted] of counted) setCounted(false);
     setCountLeft(0);
@@ -825,7 +827,7 @@ function applyFrameNow(f: FeedFrame): void {
     plain.clip[s] = f.meter?.clip[s] ?? false;
     if (plain.clip[s]) plain.clips[s]++;
   }
-  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
+  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max, f.catchUp);
   if (f.scope) applyScope(f.scope);
 }
 
@@ -1464,6 +1466,7 @@ function setBpm(n: number): void {
  * the engine took. */
 function setMeter(m: TimeSignature): void {
   if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
+  writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(m));
   sendEngine({ SetMeter: [m.num, m.den] });
 }
 

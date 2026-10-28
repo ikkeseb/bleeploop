@@ -159,11 +159,11 @@ for (const s of fixture.deviceStatuses) {
 for (const f of fixture.feed) {
   check(`feed frame ${f.seq}`, () => {
     const decoded = decodeFeedFrame(structuredClone(f));
-    // `scope` is absent on the wire when the stage view sent no columns and always present decoded
-    // (null then), as `status` mirrors its own absence.
-    assert.deepEqual(keys(decoded), keys('scope' in f ? f : { ...f, scope: null }), 'the same top-level fields');
+    // `scope` and `catchUp` have decoded defaults; `status` mirrors its own absence.
+    assert.deepEqual(keys(decoded), keys({ scope: null, catchUp: false, ...f }), 'the same top-level fields');
     assert.equal(decoded.seq, f.seq);
     assert.equal(decoded.reset, f.reset);
+    assert.equal(decoded.catchUp, f.catchUp ?? false);
     assert.deepEqual(decoded.events.map(rewire), f.events);
     assert.equal(decoded.device.length, f.device.length);
     if ('status' in f) assert.deepEqual(decoded.status, f.status);

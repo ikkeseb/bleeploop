@@ -177,27 +177,67 @@ const tauriEngineHost: EngineHost = {
     await invoke('engine_load_session', bytes);
   },
   subscribe(onFrame) {
-    const channel = new Channel<unknown>();
     let live = true;
     let reported = false;
-    channel.onmessage = (raw) => {
-      if (!live) return;
-      try {
-        onFrame(decodeFeedFrame(raw));
-      } catch (err) {
-        // One report per subscription: a wire drift would otherwise log 60 times a second.
-        if (reported) return;
-        reported = true;
-        console.error('[host.tauri] engine feed frame rejected', err);
-        notifyError('Could not read an update from the audio engine. Restart BleepLoop if the screen stops following it.', err);
-      }
+    let generation = 0;
+    let newest: number | null = null;
+    let ackTimer: ReturnType<typeof setTimeout> | null = null;
+    let subscribing = false;
+
+    const ack = () => {
+      const gen = generation;
+      void invoke<boolean>('engine_feed_ack', { seq: newest }).then((stuck) => {
+        if (live && gen === generation && stuck && !subscribing) connect();
+      }).catch(() => {
+        // The next frame's timer or heartbeat retries a failed ack.
+      });
     };
-    invoke('engine_feed', { channel }).catch((err: unknown) => {
-      console.error('[host.tauri] engine feed subscribe failed', err);
-      notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
-    });
+
+    const connect = () => {
+      // Retire the old handler and every pending ack answer before the replacement subscribes.
+      const gen = ++generation;
+      newest = null;
+      if (ackTimer !== null) clearTimeout(ackTimer);
+      ackTimer = null;
+      subscribing = true;
+      const channel = new Channel<unknown>();
+      channel.onmessage = (raw) => {
+        if (!live || gen !== generation) return;
+        // Even a rejected frame was handed on by this channel: it must not fill the native window.
+        if (typeof raw === 'object' && raw !== null && 'seq' in raw && typeof raw.seq === 'number' && Number.isSafeInteger(raw.seq) && raw.seq >= 0) {
+          newest = raw.seq;
+        }
+        if (ackTimer === null) {
+          ackTimer = setTimeout(() => {
+            ackTimer = null;
+            if (live && gen === generation) ack();
+          }, 100);
+        }
+        try {
+          onFrame(decodeFeedFrame(raw));
+        } catch (err) {
+          // One report per subscription: a wire drift would otherwise log 60 times a second.
+          if (reported) return;
+          reported = true;
+          console.error('[host.tauri] engine feed frame rejected', err);
+          notifyError('Could not read an update from the audio engine. Restart BleepLoop if the screen stops following it.', err);
+        }
+      };
+      void invoke('engine_feed', { channel }).catch((err: unknown) => {
+        if (!live || gen !== generation) return;
+        console.error('[host.tauri] engine feed subscribe failed', err);
+        notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
+      }).finally(() => {
+        if (gen === generation) subscribing = false;
+      });
+    };
+    connect();
+    const heartbeat = setInterval(ack, 1000);
     return () => {
       live = false;
+      generation++;
+      if (ackTimer !== null) clearTimeout(ackTimer);
+      clearInterval(heartbeat);
     };
   },
 };
