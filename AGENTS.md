@@ -65,8 +65,8 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
 - **The running app is the surface a change is verified on:** drive it and measure
   (`docs/VERIFY.md`).
-- **`main` is the live dev line;** while agents work with the owner away, they integrate on `dev`, and
-  the owner's word moves it to `main`. Commit and push
+- **`main` is the live dev line;** while agents work with the owner away, they integrate on `dev`
+  (CI runs there too), and the owner's word fast-forwards `main` to it. Commit and push
   whenever the gates are green. A writer runs what its change reaches: `pnpm typecheck`,
   `pnpm lint`, the one guard `node verify/guards/<name>.mjs`, `pnpm test:engine`. Once on the integrated tree, never per writer: `pnpm rust:check` (cargo check
   asio/no-asio + tests) when the change reaches the native build or its tests (`src-tauri/`,
