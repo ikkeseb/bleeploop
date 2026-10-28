@@ -107,6 +107,9 @@ for (let k = 0; k < 512; k++) ALPHAS[k] = k >= 255 ? 1 : k / 255; // an index pa
 export const TURN_STEPS = 8192;
 const TURNS = [null as unknown as number];
 for (let k = 0; k <= TURN_STEPS; k++) TURNS[k] = (Math.PI * 2 * k) / TURN_STEPS - Math.PI / 2;
+/** `k` / TURN_STEPS of a turn in radians, for an arc's span: `ctx.arc(0, 0, r, 0, SPANS[k])`. */
+export const SPANS = [null as unknown as number];
+for (let k = 0; k <= TURN_STEPS; k++) SPANS[k] = (Math.PI * 2 * k) / TURN_STEPS;
 
 /** Move the origin to (cx, cy) and point +x along loop phase `step` / TURN_STEPS (0 = twelve o'clock). */
 export function turnTo(c: CanvasRenderingContext2D, cx: number, cy: number, step: number): void {

@@ -1787,6 +1787,7 @@ await probe(async ({ browser, open }) => {
   });
 
   await group('shots', async () => {
+    const GUITAR = { meter: { peak: [0.32, 0], clip: [false, false] } };
     await setOpen(true);
     for (const v of VIEWS) {
       await showView(v.id);
@@ -1798,6 +1799,7 @@ await probe(async ({ browser, open }) => {
           // The settle is inside the scene, before its columns: the shot must catch the live trace
           // while the stream still counts as alive (the look fades a stale one out after 250 ms).
           await rich(at, 450);
+          await emit(GUITAR); // the scope columns' frames carry no meter, so the input read silent: play on
           await shoot(name);
         }
         await page.evaluate(() => window.__lf.looper.setMute(1, false));
@@ -1805,6 +1807,7 @@ await probe(async ({ browser, open }) => {
         await settle(1000);
         await shoot('rest');
         await laterTake(true, 2.6 * BAR);
+        await emit(GUITAR); // a take is played: the input at a working level, for the looks that draw it
         await settle(450);
         await shoot('later-take');
         await laterTake(false, 5.3 * BAR);
@@ -1828,6 +1831,7 @@ await probe(async ({ browser, open }) => {
       await page.setViewportSize({ width: 960, height: 600 });
       await page.mouse.move(480, 300);
       await rich(2.9 * BAR, 450);
+      await emit(GUITAR); // as in the rich scenes above
       await shoot('rich-b');
       await boot(page);
     }

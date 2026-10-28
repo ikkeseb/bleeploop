@@ -331,6 +331,7 @@ await probe(async ({ browser, open }) => {
       scene = '12-stage';
       await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
       await page.evaluate(() => window.__lf.looper.setMute(3, true));
+      await emit({ meter: { peak: [0.25, 0], clip: [false, false] } }); // a guitar played along: the looks that draw the input show it
       await page.getByRole('button', { name: 'Stage view', exact: true }).click();
       await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
       // One scene per look, in the order V steps them (a fresh context opens on the first).
