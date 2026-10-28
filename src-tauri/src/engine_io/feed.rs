@@ -24,7 +24,8 @@
 //! and sends nothing; its first tick after the hold is one `reset` frame, which carries the whole
 //! state. `seq` counts frames built, so it does not move while held. The UI reads `seq` for nothing
 //! and replaces its view on a reset (`applyFrameNow`, `src/ui/state/engine-store.ts`), so the resync
-//! is no fault to it. The count's latest beat and its downbeat survive while a lane is armed. Other
+//! is no fault to it. The count's latest beat and its downbeat survive while a lane is armed;
+//! a lane leaving armed ends the count it held, dropping beats older than that lane event. Other
 //! past one-shots (an ordinary beat, a refusal) are not replayed, as for a WebView reload; device events
 //! are kept and go out with the reset.
 
@@ -91,7 +92,8 @@ pub(crate) struct Feed {
     lanes: [Option<(Frame, LaneInfo)>; TRACK_COUNT],
     transport: Option<Event>,
     selected: (Frame, u8),
-    /// The count's latest positive beat and its first downbeat, until no lane is armed.
+    /// The count's latest positive beat and its first downbeat, until no lane is armed;
+    /// a lane leaving armed ends the count it held, dropping beats older than that lane event.
     count_beat: Option<Event>,
     count_downbeat: Option<Event>,
     /// What the last frames said.
@@ -175,7 +177,19 @@ impl Feed {
         }
         for event in &self.drained {
             match *event {
-                Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => self.lanes[usize::from(lane)] = Some((frame, info)),
+                Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => {
+                    let lane = usize::from(lane);
+                    if self.lanes[lane].is_some_and(|(_, previous)| previous.armed) && !info.armed {
+                        // Beats precede the lane publish: a beat at this frame belongs to a new count.
+                        if matches!(self.count_beat, Some(Event::Beat { frame: beat_frame, .. }) if beat_frame < frame) {
+                            self.count_beat = None;
+                        }
+                        if matches!(self.count_downbeat, Some(Event::Beat { frame: beat_frame, .. }) if beat_frame < frame) {
+                            self.count_downbeat = None;
+                        }
+                    }
+                    self.lanes[lane] = Some((frame, info));
+                }
                 Event::Transport { .. } => self.transport = Some(*event),
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
                 Event::Beat { count_left, .. } if count_left > 0 => {
@@ -544,8 +558,8 @@ mod tests {
         Event::Beat { frame, beat_in_bar: (4 - count_left) % 4, count_left, clicked: count_left > 0 }
     }
 
-    fn count_lane(frame: Frame, state: LaneState, armed: bool) -> Event {
-        Event::Lane { frame, lane: (TRACK_COUNT - 1) as u8, info: LaneInfo { state, armed, ..EMPTY_LANE } }
+    fn count_lane(frame: Frame, lane: u8, state: LaneState, armed: bool) -> Event {
+        Event::Lane { frame, lane, info: LaneInfo { state, armed, ..EMPTY_LANE } }
     }
 
     /// A scripted drain on the real mirror, without an engine, device or rendering thread.
@@ -558,7 +572,7 @@ mod tests {
     fn counting_feed() -> Feed {
         let mut feed = Feed::new(EngineHost { core: Arc::new(super::super::Core::new()) });
         // The engine's first count beat precedes its lane's arm.
-        mirror_tick(&mut feed, &[beat(100, 4), count_lane(100, LaneState::Recording, true)]);
+        mirror_tick(&mut feed, &[beat(100, 4), count_lane(100, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)]);
         feed
     }
 
@@ -598,7 +612,7 @@ mod tests {
     #[test]
     fn a_reset_after_the_take_started_replays_no_count() {
         let mut feed = counting_feed();
-        mirror_tick(&mut feed, &[beat(200, 0), count_lane(210, LaneState::Recording, false)]);
+        mirror_tick(&mut feed, &[beat(200, 0), count_lane(210, (TRACK_COUNT - 1) as u8, LaneState::Recording, false)]);
         mirror_tick(&mut feed, &[]);
         assert_count_reset(&feed, &[]);
     }
@@ -607,10 +621,47 @@ mod tests {
     fn a_cancelled_count_leaves_nothing_for_a_reset_or_a_later_arm() {
         let mut feed = counting_feed();
         // No downbeat: the lane leaving ARMED alone ends the count.
-        mirror_tick(&mut feed, &[count_lane(150, LaneState::Empty, false)]);
+        mirror_tick(&mut feed, &[count_lane(150, (TRACK_COUNT - 1) as u8, LaneState::Empty, false)]);
         mirror_tick(&mut feed, &[]);
         assert_count_reset(&feed, &[]);
-        mirror_tick(&mut feed, &[count_lane(200, LaneState::Recording, true)]);
+        mirror_tick(&mut feed, &[count_lane(200, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_cancelled_count_is_not_replayed_for_another_lanes_ordinary_arm_in_the_same_drain() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[
+            count_lane(300, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(300, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_new_count_at_the_cancel_frame_survives_the_old_lanes_disarm() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[
+            beat(300, 4),
+            count_lane(300, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(300, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(300, 4)]);
+    }
+
+    #[test]
+    fn a_cancelled_count_downbeat_is_not_replayed_for_another_lanes_ordinary_arm() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 1), beat(300, 0)]);
+        mirror_tick(&mut feed, &[
+            count_lane(400, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(400, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
         assert_count_reset(&feed, &[]);
     }
 
@@ -639,7 +690,7 @@ mod tests {
     fn another_engine_drops_the_count_even_if_it_reports_an_armed_lane() {
         let mut feed = counting_feed();
         mirror_tick(&mut feed, &[beat(200, 0)]);
-        feed.drained = vec![count_lane(0, LaneState::Recording, true)];
+        feed.drained = vec![count_lane(0, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)];
         assert!(feed.update_mirror(1), "a new engine resets the feed");
         assert_count_reset(&feed, &[]);
         assert!(feed.count_beat.is_none() && feed.count_downbeat.is_none());
