@@ -396,6 +396,8 @@ export interface FeedFrame {
   seq: number;
   /** The first frame after a subscribe or a new engine: the UI replaces its state with this one. */
   reset: boolean;
+  /** Ordered missed events and changed peaks after a hold or withhold, without replacing the view. */
+  catchUp: boolean;
   /** Reset frames only: the settings the engine remembers, in replay order, as the UI sent them; a
    * lane's mix as the engine last applied it (its `Mix`, also among the reset's events), or as sent
    * while no engine has reported the lane yet. A setting missing from it is at the engine's default. */
@@ -642,6 +644,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
   const out: FeedFrame = {
     seq: int(o.seq, 'feed.seq'),
     reset: bool(o.reset, 'feed.reset'),
+    catchUp: o.catchUp === undefined ? false : bool(o.catchUp, 'feed.catchUp'),
     events: array(o.events, 'feed.events').map(decodeEvent),
     device: device.map(decodeDeviceEvent),
     anchor: nullable(o.anchor, (v) => {

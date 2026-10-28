@@ -207,6 +207,14 @@ function adoptFadeBars(n: number): void {
  * to an engine whose settings lack it (a fresh one runs 4/4). */
 const METER_KEY = 'lf.meter';
 const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_KEY, 0, 0, TIME_SIGNATURES.length - 1)] ?? FOUR_FOUR;
+/** The meter picked and not yet echoed. Until its own `Transport` or a reset, an older `Transport` (a page
+ * behind the feed) writes nothing over the kept meter, and a reset's adoption asks this one, so a reset
+ * that lost the echo does not send the meter from before the pick back. A pick a lock refused is dropped
+ * by the engine if a reset asks it again, and was never kept. Residuals, both from the host keeping no
+ * `SetMeter` for 4/4 (`settings.rs` `transported`: that is how a fresh engine asks for the kept meter): a
+ * pick a lock refused waits until a reset, so one after a later CLEAR ALL applies it; a reload between
+ * a pick and its echo sends the kept meter from before the pick. */
+let pendingMeter: TimeSignature | null = null;
 /** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
  * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
 let meterAsked = false;
@@ -556,7 +564,8 @@ function applyEvent(ev: EngineEvent): void {
       setMasterFrames(ev.master);
       setBpmSignal(ev.bpm);
       setMeterSignal(ev.meter);
-      if (!meterAsked) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
+      if (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den) pendingMeter = null;
+      if (!meterAsked && pendingMeter === null) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
       setBpmLocked(ev.locked);
       break;
     case 'Beat': {
@@ -698,7 +707,7 @@ export function whenDevice(): Promise<DeviceStatus> {
   return running ? Promise.resolve(running) : new Promise((resolve) => deviceWaiters.push(resolve));
 }
 
-function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[]): void {
+function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[], catchUp: boolean): void {
   const p = plain.peaks[lane];
   const need = Math.max(count, start + min.length);
   if (p.min.length < need) {
@@ -714,7 +723,7 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
   p.max.set(max, start);
   p.count = count;
   p.version++;
-  if (!capturing(plain.state[lane])) plain.revision[lane]++;
+  if (catchUp || !capturing(plain.state[lane])) plain.revision[lane]++;
 }
 
 /**
@@ -769,6 +778,10 @@ function applyFrame(f: FeedFrame): void {
 }
 
 function applyFrameNow(f: FeedFrame): void {
+  if (f.reset || f.catchUp) {
+    for (const timer of beatTimers) clearTimeout(timer);
+    beatTimers.clear();
+  }
   if (f.reset) {
     for (const p of plain.peaks) {
       p.count = 0;
@@ -779,8 +792,6 @@ function applyFrameNow(f: FeedFrame): void {
     plain.resets++;
     setFeedResets(plain.resets);
     plain.clearing.fill(false);
-    for (const timer of beatTimers) clearTimeout(timer);
-    beatTimers.clear();
     plain.counting = false;
     for (const [, setCounted] of counted) setCounted(false);
     setCountLeft(0);
@@ -797,7 +808,11 @@ function applyFrameNow(f: FeedFrame): void {
     if (f.status && moved) dropLackingPicks(slotInputChannels().map(channelOf), f.status.inputChannels);
   }
   if (f.anchor) plain.clock = f.anchor;
-  if (f.reset) adoptSettings(f.settings ?? []);
+  if (f.reset) {
+    adoptSettings(f.settings ?? []);
+    // The reset's own `Transport` is the engine's meter from here on.
+    pendingMeter = null;
+  }
   // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
   if (f.live) adoptEngineLive(f.live);
   tookLoop = false;
@@ -825,7 +840,7 @@ function applyFrameNow(f: FeedFrame): void {
     plain.clip[s] = f.meter?.clip[s] ?? false;
     if (plain.clip[s]) plain.clips[s]++;
   }
-  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
+  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max, f.catchUp);
   if (f.scope) applyScope(f.scope);
 }
 
@@ -1106,7 +1121,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
   if (!fadeKnown) lacking.push({ SetFadeBars: fadeBars() });
-  const kept = storedMeter();
+  const kept = pendingMeter ?? storedMeter();
   meterAsked = !meterKnown && kept !== FOUR_FOUR;
   if (meterAsked) lacking.push({ SetMeter: [kept.num, kept.den] });
   // The input sends the engine lacks: values first, so a send that comes on comes on with them.
@@ -1464,6 +1479,7 @@ function setBpm(n: number): void {
  * the engine took. */
 function setMeter(m: TimeSignature): void {
   if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
+  pendingMeter = m;
   sendEngine({ SetMeter: [m.num, m.den] });
 }
 

@@ -426,6 +426,7 @@
     {
       "seq": 3,
       "reset": false,
+      "catchUp": true,
       "events": [],
       "device": [],
       "anchor": { "frame": 1240000, "atMs": 1790000000243.5, "rate": 48000, "grid": 96666 },
