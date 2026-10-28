@@ -406,10 +406,12 @@ option {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  /* the main screen's control transitions (--motion) land at once */
-  :where(.cmd, .stage) *,
-  :where(.cmd, .stage) *::before,
-  :where(.cmd, .stage) *::after {
+  /* every control transition (--motion) lands at once, app-wide: the portals (IN FX, EDIT, TRIM) mount
+     on document.body, outside .cmd and .stage. Animations (the ARMED / LISTEN pulse, the rescan spinner)
+     keep their own rules. */
+  *,
+  *::before,
+  *::after {
     transition: none !important;
   }
   .tool--rescan.scanning svg {
@@ -614,7 +616,7 @@ option {
   color: var(--faint);
 }
 .tgl.on,
-.tgl.on:hover:not(:disabled) {
+.tgl.on:hover:not(:disabled):not(:active) {
   color: var(--engaged);
   background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
