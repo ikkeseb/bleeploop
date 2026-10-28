@@ -35,10 +35,11 @@ import { masterBars } from './shared';
 const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
 const GRID_NUM = 'rgba(148,168,215,.26)'; //   engraved bar numbers, top-left of each bar
-// The wave's two layers (alpha of the state colour): colour on black, not a block of paint. The outer
+// The wave's two layers (alpha of the state colour): colour on black, not a block of paint; the body
+// over the outer lands near .54, the outer envelope a fainter rim around it. The outer
 // peak stays at or over .18 so a take's rec-red reads in the outer envelope alone (wave-steady probe).
 const WAVE_OUTER = 0.2;
-const WAVE_BODY = 0.6;
+const WAVE_BODY = 0.42;
 /** The centre line's alpha in --faint: a guide under the wave, quieter than any wave. */
 const MID_ALPHA = 0.45;
 /** The meter's counted beats a bar (`setGridBeats`): the grid's beat lines, a bar line every `gridBeats`. */

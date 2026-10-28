@@ -13,25 +13,38 @@
 
 :root {
   /* ===== Token system — "Instrument", refined (owner-approved base 2026-09-23). Matte and flat:
-     surfaces separate by TONE, one step per level (ground --bg → card --surf-1 → control face
-     --surf-2/3), with at most one hairline per edge (a card's is its top light, --hair); never bevels,
-     drop shadows (the floating panels' --panel-drop excepted), backdrop blur or glow. The main screen
-     carries NO halo of any kind: a lit LED is a solid dot, a lit control a lit legend.
+     surfaces separate by TONE, one step per level (ground --bg → card --surf-1 → key face --key), with at
+     most one hairline per edge (a card's is its top light, --hair); never bevels, drop shadows (the
+     floating panels' --panel-drop excepted), backdrop blur or glow. The main screen carries NO halo of any
+     kind: a lit LED is a solid dot, a lit control a lit legend.
      Colour is spent only on sound, and a lane spends it in three places: its wave, its state word with
-     its dot, and its main button's ring (a flat filled disc while it captures). Chrome "engaged" is a
-     lit warm-white legend (--engaged) on a face; a selection is a warm-white hairline and one tone up.
-     Controls are caps TEXT buttons: no face at rest, a face on hover, press or engaged, the cyan
-     focus-visible ring always. Every state word is coloured caps text with a dot, never a filled pill;
-     CLIP is the one filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em, changing numbers
-     in Geist Mono with tabular figures, the lane number and the BPM in a light display weight. Radii
-     come from one scale (--r-*). Motion: --motion on colour, face, border and opacity of controls and
-     chrome; a lane's SOUND state lands on the frame the feed switches it (a hardware REC LED), and
-     reduced motion turns transitions off. The wave well is a sunk floor darker than its card.
-     --cyan survives for LISTEN, focus and key-down. ===== */
+     its dot, and its main button's ring (a flat filled disc while it captures). A selection is a
+     warm-white hairline and one tone up.
+     KEYS — every pressable word (the command bar's toggles and steppers, the slot's keys and pickers, a
+     lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family: a caps legend on a very
+     quiet face (--key: a tone barely off its surface, no border), the same height and radius as its
+     row's neighbours (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Hover lifts the
+     face (--key-hover); press sinks it (--pressed); engaged lights the legend warm-white (--engaged) on a
+     face one step lighter (--key-on), plus the state colour where the state is a sound; disabled keeps
+     the resting face with a --faint legend (tone, never an opacity fade), so a row never mixes keys and
+     bare words. A split key (CLICK | 70, FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon
+     tools stay bare glyphs; engaged, they wear --key-on like a key. The cyan focus-visible ring always.
+     STATE WORDS are coloured caps with a dot; the two live-capture words, REC and OVERDUB, are a FILLED
+     flat badge (STATUS D14: a carrier that survives greyscale and every colour-vision type), and CLIP is
+     the one other filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em (state words 11 px),
+     changing numbers in Geist Mono with tabular figures (a lane's dB and pan 12 px), the lane number and
+     the BPM in a light display weight. Radii come from one scale (--r-*). Motion: --motion on colour,
+     face, border and opacity of controls and chrome; a lane's SOUND state lands on the frame the feed
+     switches it (a hardware REC LED), and reduced motion turns transitions off. The wave well is a sunk
+     floor darker than its card, its wave a translucent body over a fainter outer envelope. --cyan
+     survives for LISTEN, focus and key-down. ===== */
   --bg: #0a0b0e;
   --surf-1: #121419; /* card */
-  --surf-2: #171a20; /* control face */
-  --surf-3: #1d2028; /* hover / engaged face */
+  --surf-2: #171a20; /* control face (the lane core, a popover's fields) */
+  --surf-3: #1d2028; /* a solid lifted face (a popover's hover) */
+  --key: rgba(255, 255, 255, 0.022); /* a key at rest: a tone barely off any card, no border (--faint holds 4.5:1 on it) */
+  --key-hover: rgba(255, 255, 255, 0.055); /* a key under the pointer */
+  --key-on: rgba(255, 255, 255, 0.085); /* an engaged key: one step lighter, under the lit legend */
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: var(--surf-1); /* card fill: flat, one tone over the ground */
   --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
@@ -51,7 +64,7 @@
   --well: var(--sunk);
   --text: #eef1f8;
   --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
-  --faint: #7d818d;
+  --faint: #7d818d; /* the floor for read text: 4.5:1 on a card and on a key's resting face (contact-sheet pins it) */
   --engaged: #f4efe6; /* warm white: engaged / selected chrome */
   /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they are
      a solid dot in their colour, no halo) */
@@ -330,7 +343,7 @@ option {
 }
 .tool:hover:not(:disabled) {
   color: var(--text);
-  background: var(--surf-3);
+  background: var(--key-hover);
 }
 .tool:active {
   transform: translateY(1px);
@@ -359,24 +372,26 @@ option {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--engaged);
-  background: var(--surf-3);
+  background: var(--key-on);
   cursor: pointer;
   white-space: nowrap;
   transition: background-color var(--motion), transform 0.08s;
 }
 .tool-pill:hover {
-  background: color-mix(in srgb, var(--engaged) 8%, var(--surf-3));
+  background: var(--key-hover);
 }
 .tool-pill:active {
   transform: translateY(1px);
 }
 .tool-pill--on {
-  background: var(--surf-3);
+  background: var(--key-on);
 }
-/* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = lit legend + a face */
-.tool--on {
+/* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = an engaged key's lit legend on
+   its face (--key-on), never a solid tile */
+.tool--on,
+.tool--on:hover:not(:disabled) {
   color: var(--engaged);
-  background: var(--surf-3);
+  background: var(--key-on);
 }
 /* gear open — the same lit legend */
 .tool--gear.tool--on {
@@ -567,9 +582,9 @@ option {
   flex-wrap: wrap;
 }
 
-/* toggle — a caps TEXT button: no face at rest, a face on hover; engaged = the legend lights warm-white
-   on a face one tone up. Pressed = the face sinks. Disabled = a legible --faint legend and nothing else
-   (tone, never an opacity fade). Explicit background so no UA face bleeds through. */
+/* toggle — a key (the header's KEYS): a caps legend on the quiet resting face, lifted on hover; engaged =
+   the legend lights warm-white on the face one step lighter. Pressed = the face sinks. Disabled = the
+   resting face with a legible --faint legend (tone, never an opacity fade). */
 .tgl {
   font-size: 10.5px;
   line-height: 13px; /* pinned: the slot row keeps its measured height */
@@ -578,7 +593,7 @@ option {
   padding: 7px 12px;
   border: 1px solid transparent;
   border-radius: var(--r-ctl);
-  background: transparent;
+  background: var(--key);
   color: var(--dim);
   cursor: pointer;
   white-space: nowrap;
@@ -586,7 +601,7 @@ option {
 }
 .tgl:hover:not(:disabled) {
   color: var(--text);
-  background: var(--surf-3);
+  background: var(--key-hover);
 }
 .tgl:active:not(:disabled) {
   background: var(--sunk);
@@ -594,18 +609,19 @@ option {
 }
 .tgl:disabled {
   cursor: default;
-  background: transparent;
+  background: var(--key);
   box-shadow: none;
   color: var(--faint);
 }
-.tgl.on {
+.tgl.on,
+.tgl.on:hover:not(:disabled) {
   color: var(--engaged);
-  background: var(--surf-3);
+  background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
-/* live input stays a sound colour (it IS sound): its legend and dot, on the engaged face */
+/* live input stays a sound colour (it IS sound): its dot and a soft play legend, on the engaged face
+   (plugin-controls.css sets the legend) */
 .tgl.on-green {
-  color: var(--play);
-  background: var(--surf-3);
+  background: var(--key-on);
 }
 
 /* ---- range sliders — ONE skin ----
@@ -680,7 +696,7 @@ option {
   font-family: inherit;
   cursor: pointer;
   background-image: var(--caret-svg);
-  background-color: transparent;
+  background-color: var(--key); /* a picker is a key: the resting face (the header's KEYS) */
   background-repeat: no-repeat;
   background-position: right 9px center;
   background-size: 12px 12px;
@@ -706,7 +722,7 @@ option {
 .slot__source:hover:not(:disabled),
 .slot__in:hover {
   color: var(--text);
-  background-color: var(--surf-3);
+  background-color: var(--key-hover);
 }
 .slot__source:disabled {
   cursor: default;

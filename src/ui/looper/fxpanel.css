@@ -1,8 +1,9 @@
 /* Per-track FX panel — "Instrument". It docks inside the lane's FX drawer (.lp-drawer, see
    looper.css, which flattens .fxp's own frame to transparent). Each FX module is a flat pane one tone
-   off the drawer card with a hairline of top light; its toggle is a caps text key (no face at rest;
-   engaged = the lit warm-white legend on a face, the app-wide chrome "engaged", never cyan) + thin
-   flat sliders. Colour is spent only on sound, so the chrome here stays monochrome. No audio runs here. */
+   off the drawer card with a hairline of top light; its toggle is a key of the one family (the app.css
+   header's KEYS: the quiet resting face; engaged = the lit warm-white legend on the face one step up,
+   never cyan) + thin flat sliders. In the lane drawer DUB FEEDBACK is a key-shaped pane on the same face.
+   Colour is spent only on sound, so the chrome here stays monochrome. No audio runs here. */
 
 .fxp {
   display: flex;
@@ -36,10 +37,10 @@
   box-shadow: inset 0 1px 0 var(--hair);
 }
 
-/* toggle = a caps text key (see `.tgl` in app.css); engaged = the warm-white legend on a face one tone
-   up. Explicit background on BOTH states so no UA dark-mode button face bleeds through. */
+/* toggle = a key (see `.tgl` in app.css); engaged = the warm-white legend on the face one step up.
+   Explicit background on BOTH states so no UA dark-mode button face bleeds through. */
 .fxp-mod__toggle {
-  background: transparent;
+  background: var(--key);
   border: 1px solid transparent;
   color: var(--dim);
   border-radius: var(--r-ctl);
@@ -54,22 +55,27 @@
 }
 .fxp-mod__toggle:hover {
   color: var(--text);
-  background: var(--surf-3);
+  background: var(--key-hover);
 }
 .fxp-mod__toggle:active {
   background: var(--sunk);
   box-shadow: var(--pressed);
 }
-.fxp-mod__toggle--on {
-  background: var(--surf-3);
+.fxp-mod__toggle--on,
+.fxp-mod__toggle--on:hover {
+  background: var(--key-on);
   color: var(--engaged);
 }
 
-/* a module that is a setting, not an effect (DUB FEEDBACK): a heading where the key face would be,
-   and its one param on the same line */
+/* a module that is a setting, not an effect (DUB FEEDBACK): its heading and its one param on one line,
+   on the keys' resting face with no rim, so it sits in the key row as one of the family */
 .fxp-dub {
   flex-direction: row;
   align-items: center;
+  border-color: transparent;
+  border-radius: var(--r-ctl);
+  background: var(--key);
+  box-shadow: none;
 }
 .fxp-dub .fxp-mod__params {
   flex: 1 1 auto;
@@ -131,7 +137,7 @@
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
-  background-color: var(--surf-2);
+  background-color: var(--key);
   background-image: var(--caret-svg);
   background-repeat: no-repeat;
   background-position: right 8px center;
@@ -147,7 +153,7 @@
 }
 .fxp-param__select:hover {
   color: var(--text);
-  background-color: var(--surf-3);
+  background-color: var(--key-hover);
 }
 .fxp-param__select:focus-visible {
   outline-offset: 1px;

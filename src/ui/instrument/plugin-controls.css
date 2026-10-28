@@ -51,9 +51,10 @@
   background: var(--play);
 }
 /* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so its legend
-   carries the play colour before it is armed — armed lights the dot on the engaged face (`.on-green`). */
+   carries a hint of the play colour before it is armed — armed lights the dot on the engaged face
+   (`.on-green`). */
 .tgl.live:not(.on-green) {
-  color: color-mix(in srgb, var(--play) 80%, var(--dim));
+  color: color-mix(in srgb, var(--play) 55%, var(--dim));
 }
 .tgl.live:not(.on-green):hover:not(:disabled) {
   color: var(--play);
@@ -174,10 +175,11 @@
 }
 
 /* ---- live and hot, readable from where the guitarist stands ----
-   INPUT LIVE is the one coloured word in a live slot's card: the badge language (the play colour as caps
-   with a solid dot) on the engaged face, a size up from the row's other caps, and larger again on a
-   large window. GO LIVE holds INPUT LIVE's box (its dot, gap and word in the hero type, unseen in the
-   same grid cell), so going live moves nothing beside it in the row. */
+   INPUT LIVE is the one coloured word in a live slot's card: the badge language (a solid play dot before
+   a soft play legend, a medium weight, so it is read, not shouted) on the engaged face, a size up from
+   the row's other caps (the live-meter probe holds its floor: 12 px, 13 px on a large window). GO LIVE
+   holds INPUT LIVE's box (its dot, gap and word in the same type, unseen in the same grid cell), so going
+   live moves nothing beside it in the row. */
 .tgl.live {
   display: inline-grid;
   place-items: center;
@@ -185,10 +187,13 @@
 }
 .tgl.live::after,
 .tgl.live.on-green {
-  font-size: clamp(12px, 0.75vw, 14px);
+  font-size: clamp(12px, 0.68vw, 13px);
   line-height: 1.17;
   letter-spacing: 0.06em;
-  font-weight: 600;
+  font-weight: 500;
+}
+.tgl.live.on-green {
+  color: color-mix(in srgb, var(--play) 72%, var(--dim));
 }
 .tgl.live::after {
   content: 'INPUT LIVE';
@@ -204,7 +209,7 @@
 }
 .tgl.live.on-green:hover:not(:disabled) {
   color: var(--play);
-  background: color-mix(in srgb, var(--play) 6%, var(--surf-3));
+  background: var(--key-on);
 }
 
 /* The slot's input meter along its card's foot (`SlotMeter`; the waveform rAF loop writes --lvl, --pk and
