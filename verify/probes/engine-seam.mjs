@@ -27,7 +27,8 @@
  *   and fill read from computed style); a cancelled count leaving no numeral behind, a beat still to be shown included; a
  *   cancel and a re-arm in one frame; COUNT-IN and no head from the frame the count's first beat
  *   arrives, the numeral when it is heard; a cancelled count's late beat leaving a newer numeral up; a
- *   reset frame's replayed count leaving the next arm uncounted),
+ *   reset frame restoring COUNT-IN and its numeral mid-count, keeping COUNT-IN without a numeral
+ *   after the downbeat, and leaving the next arm uncounted once the take starts),
  *   and a reload's reset frame whose remembered settings are adopted (the input sends it lacks are sent
  *   from what the UI kept).
  *
@@ -599,6 +600,59 @@ await probe(async ({ open }) => {
   assert.equal(await count(2).count(), 0, "no numeral after a reset frame's replayed count");
   assert.equal(await amberHeadSeen(2), true, "the amber head rides the loop phase after a reset frame's replayed count");
   await emit({ events: [laneEvent(1, lane('Empty'), at), laneEvent(2, lane('Empty'), at)] });
+
+  // (h) A reset between count beats replays the mirror's latest beat after the lanes and selection.
+  // The beats are already heard (the anchor is beyond the output latency): no next live beat is needed.
+  at = 56 * BAR;
+  await emit({ events: [laneEvent(0, stopped, at), beat(at, 4), laneEvent(1, armed, at)], anchor: anchorAt(at + 9600) });
+  assert.equal(await count(1).textContent(), '4');
+  at += BAR / 4;
+  await emit({
+    reset: true,
+    settings: [],
+    events: [
+      transport(BAR, true, 120),
+      laneEvent(0, stopped, at),
+      laneEvent(1, armed, at),
+      ...[2, 3, 4].map((i) => laneEvent(i, lane('Empty'), at)),
+      { Selected: { frame: at, lane: 1 } },
+      beat(at, 3),
+    ],
+    anchor: anchorAt(at + 9600),
+    meter: { peak: [0, 0], clip: [false, false] },
+  });
+  console.log('reset mid-count:', JSON.stringify(await well(1).textContent()));
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'armed');
+  assert.match(await well(1).textContent(), /COUNT-IN/, 'a reset restores the counted arm');
+  assert.equal(await count(1).textContent(), '3', 'a reset restores the latest numeral without another beat');
+
+  // The count has ended but alignment still holds the arm: replay its latest positive beat and downbeat.
+  at += 3 * BAR / 4;
+  await emit({
+    reset: true,
+    settings: [],
+    events: [
+      transport(BAR, true, 120),
+      laneEvent(0, committed, at),
+      laneEvent(1, armed, at),
+      ...[2, 3, 4].map((i) => laneEvent(i, lane('Empty'), at)),
+      { Selected: { frame: at, lane: 1 } },
+      beat(at - BAR / 4, 1),
+      beat(at, 0),
+    ],
+    anchor: anchorAt(at + 9600),
+    meter: { peak: [0, 0], clip: [false, false] },
+  });
+  console.log('reset after the count downbeat:', JSON.stringify(await well(1).textContent()));
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'armed');
+  assert.match(await well(1).textContent(), /COUNT-IN/, 'a reset keeps COUNT-IN through alignment');
+  assert.equal(await count(1).count(), 0, 'a reset after the downbeat restores no numeral');
+  await emit({ events: [laneEvent(1, lane('Recording'), at + 9600)] });
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'rec');
+  await emit({ events: [laneEvent(2, armed, at + 10000)] });
+  assert.match(await well(2).textContent(), /WAITING FOR DOWNBEAT/, 'the next ordinary arm is uncounted after the restored count ends');
+  assert.equal(await count(2).count(), 0, 'the restored count leaves no numeral on the next arm');
+  await emit({ events: [laneEvent(1, lane('Empty'), at + 11000), laneEvent(2, lane('Empty'), at + 11000)] });
 
   // The app never builds an AudioContext: the engine plays everything.
   const contexts = await page.evaluate(() => window.__audioContexts);

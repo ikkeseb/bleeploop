@@ -72,9 +72,9 @@
   reproduced, nothing audible.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
-- The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until
-  the next count beat arrives, and after the last one a later take reads WAITING FOR DOWNBEAT until
-  its take starts.
+- The feed cannot see a counted take's cancel, transport start and ordinary re-arm of the same lane
+  within one block split: unchanged lane info publishes no event, so a reset can replay the old count.
+  Next check: a feed test for that split once `LaneInfo` reports the counted arm.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`

@@ -11,8 +11,8 @@
 //!
 //! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
 //! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
-//! keeps a mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and
-//! a new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
+//! keeps a mirror of the lanes, the transport, the selection and the current count-in: a new subscriber
+//! (a WebView reload) and a new engine (another sample rate, a fault) get a `reset` frame carrying it, with the
 //! settings the host keeps and each lane's last `Mix` (`settings.rs`, which every drain feeds), so the
 //! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills; it then
 //! ticks as a held feed does (below): no frame is built, and the device events wait for the next
@@ -24,8 +24,10 @@
 //! and sends nothing; its first tick after the hold is one `reset` frame, which carries the whole
 //! state. `seq` counts frames built, so it does not move while held. The UI reads `seq` for nothing
 //! and replaces its view on a reset (`applyFrameNow`, `src/ui/state/engine-store.ts`), so the resync
-//! is no fault to it. What only an ordinary frame carries (a beat, a refusal) is not replayed, as
-//! for a WebView reload; device events are kept and go out with the reset.
+//! is no fault to it. The count's latest beat and its downbeat survive while a lane is armed;
+//! a lane leaving armed ends the count it held, dropping beats older than that lane event. Other
+//! past one-shots (an ordinary beat, a refusal) are not replayed, as for a WebView reload; device events
+//! are kept and go out with the reset.
 
 use std::sync::atomic::{
     AtomicBool, AtomicUsize,
@@ -90,6 +92,10 @@ pub(crate) struct Feed {
     lanes: [Option<(Frame, LaneInfo)>; TRACK_COUNT],
     transport: Option<Event>,
     selected: (Frame, u8),
+    /// The count's latest positive beat and its first downbeat, until no lane is armed;
+    /// a lane leaving armed ends the count it held, dropping beats older than that lane event.
+    count_beat: Option<Event>,
+    count_downbeat: Option<Event>,
     /// What the last frames said.
     status: Option<DeviceStatus>,
     meter: Option<Meter>,
@@ -124,6 +130,8 @@ impl Feed {
             lanes: [None; TRACK_COUNT],
             transport: None,
             selected: (0, 0),
+            count_beat: None,
+            count_downbeat: None,
             status: None,
             meter: None,
             live: [false; SLOT_COUNT],
@@ -142,7 +150,6 @@ impl Feed {
     /// Drain the engine's events into the mirror. True when another engine replaced the one the
     /// mirror followed: the UI must reset.
     fn drain(&mut self) -> bool {
-        let mut replaced = false;
         self.drained.clear();
         self.columns.clear();
         // The events and the columns in one acquisition, so this tick's columns are the engine whose
@@ -150,21 +157,53 @@ impl Feed {
         let (gen, overview, bin) = self.host.drain_feed_scope(&mut self.drained, Some(&mut self.columns));
         self.scope_bin = bin;
         if self.gen != Some(gen) {
+            self.overview = overview;
+        }
+        self.update_mirror(gen)
+    }
+
+    /// Apply one drain without reading a device. A generation change drops the old engine's mirror.
+    fn update_mirror(&mut self, gen: u64) -> bool {
+        let mut replaced = false;
+        if self.gen != Some(gen) {
             // A new engine (or none): what it reports starts from EMPTY lanes and no transport.
             replaced = self.gen.is_some();
             self.gen = Some(gen);
-            self.overview = overview;
             self.lanes = [None; TRACK_COUNT];
             self.transport = None;
             self.selected = (0, 0);
+            self.count_beat = None;
+            self.count_downbeat = None;
         }
         for event in &self.drained {
             match *event {
-                Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => self.lanes[usize::from(lane)] = Some((frame, info)),
+                Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => {
+                    let lane = usize::from(lane);
+                    if self.lanes[lane].is_some_and(|(_, previous)| previous.armed) && !info.armed {
+                        // Beats precede the lane publish: a beat at this frame belongs to a new count.
+                        if matches!(self.count_beat, Some(Event::Beat { frame: beat_frame, .. }) if beat_frame < frame) {
+                            self.count_beat = None;
+                        }
+                        if matches!(self.count_downbeat, Some(Event::Beat { frame: beat_frame, .. }) if beat_frame < frame) {
+                            self.count_downbeat = None;
+                        }
+                    }
+                    self.lanes[lane] = Some((frame, info));
+                }
                 Event::Transport { .. } => self.transport = Some(*event),
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
+                Event::Beat { count_left, .. } if count_left > 0 => {
+                    self.count_beat = Some(*event);
+                    self.count_downbeat = None;
+                }
+                Event::Beat { count_left: 0, .. } if self.count_beat.is_some() && self.count_downbeat.is_none() => self.count_downbeat = Some(*event),
                 _ => {}
             }
+        }
+        // A count beat can precede its lane's arm in the drain: judge after every lane was applied.
+        if !self.lanes.iter().flatten().any(|(_, info)| info.armed) {
+            self.count_beat = None;
+            self.count_downbeat = None;
         }
         replaced
     }
@@ -335,16 +374,19 @@ impl Feed {
     }
 
     /// A reset frame's events: the transport (once an engine reported it), every lane, each lane's last
-    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, then what else this
-    /// tick drained (a beat, a refusal, a copy).
+    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, the current count's
+    /// latest beat and downbeat, then what else this tick drained (a beat, a refusal, a copy).
     fn state_events(&self) -> Vec<WireEvent> {
         let lanes = self.lanes.iter().enumerate().map(|(i, lane)| {
             let (frame, info) = lane.unwrap_or((0, EMPTY_LANE));
             Event::Lane { frame, lane: i as u8, info }
         });
         let selected = Event::Selected { frame: self.selected.0, lane: self.selected.1 };
+        // Beats drained this tick are already in `rest`. Replaying a past count beat leaves the beat
+        // LED on its beat_in_bar until the next live beat; that is acceptable on a reset.
+        let count = self.count_beat.into_iter().chain(self.count_downbeat).filter(|e| !self.drained.contains(e));
         let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. } | Event::Mix { .. }));
-        self.transport.into_iter().chain(lanes).chain(self.host.mixes()).chain([selected]).chain(rest).map(WireEvent).collect()
+        self.transport.into_iter().chain(lanes).chain(self.host.mixes()).chain([selected]).chain(count).chain(rest).map(WireEvent).collect()
     }
 }
 
@@ -510,6 +552,148 @@ mod tests {
     fn counts(sent: &Sent) -> (usize, usize) {
         let sent = sent.lock().unwrap();
         (sent.len(), sent.iter().filter(|frame| frame.reset).count())
+    }
+
+    fn beat(frame: Frame, count_left: u8) -> Event {
+        Event::Beat { frame, beat_in_bar: (4 - count_left) % 4, count_left, clicked: count_left > 0 }
+    }
+
+    fn count_lane(frame: Frame, lane: u8, state: LaneState, armed: bool) -> Event {
+        Event::Lane { frame, lane, info: LaneInfo { state, armed, ..EMPTY_LANE } }
+    }
+
+    /// A scripted drain on the real mirror, without an engine, device or rendering thread.
+    fn mirror_tick(feed: &mut Feed, events: &[Event]) {
+        feed.drained.clear();
+        feed.drained.extend_from_slice(events);
+        assert!(!feed.update_mirror(0));
+    }
+
+    fn counting_feed() -> Feed {
+        let mut feed = Feed::new(EngineHost { core: Arc::new(super::super::Core::new()) });
+        // The engine's first count beat precedes its lane's arm.
+        mirror_tick(&mut feed, &[beat(100, 4), count_lane(100, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)]);
+        feed
+    }
+
+    /// The count follows every lane and the selection, before the drain's other one-shots.
+    fn assert_count_reset(feed: &Feed, rest: &[Event]) {
+        let events: Vec<_> = feed.state_events().into_iter().map(|e| e.0).collect();
+        assert_eq!(events.len(), TRACK_COUNT + 1 + rest.len());
+        for (i, event) in events[..TRACK_COUNT].iter().enumerate() {
+            assert!(matches!(event, Event::Lane { lane, .. } if usize::from(*lane) == i));
+        }
+        assert_eq!(events[TRACK_COUNT], Event::Selected { frame: 0, lane: 0 });
+        assert_eq!(&events[TRACK_COUNT + 1..], rest);
+    }
+
+    #[test]
+    fn a_reset_between_count_beats_replays_only_the_latest() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(200, 3)]);
+    }
+
+    #[test]
+    fn a_reset_after_the_count_downbeat_keeps_both_beats_while_armed() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 1)]);
+        mirror_tick(&mut feed, &[beat(300, 0)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(200, 1), beat(300, 0)]);
+        // An ordinary beat does not replace the count's downbeat, or precede its replay.
+        mirror_tick(&mut feed, &[beat(400, 0)]);
+        assert_count_reset(&feed, &[beat(200, 1), beat(300, 0), beat(400, 0)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(200, 1), beat(300, 0)]);
+    }
+
+    #[test]
+    fn a_reset_after_the_take_started_replays_no_count() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 0), count_lane(210, (TRACK_COUNT - 1) as u8, LaneState::Recording, false)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_cancelled_count_leaves_nothing_for_a_reset_or_a_later_arm() {
+        let mut feed = counting_feed();
+        // No downbeat: the lane leaving ARMED alone ends the count.
+        mirror_tick(&mut feed, &[count_lane(150, (TRACK_COUNT - 1) as u8, LaneState::Empty, false)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+        mirror_tick(&mut feed, &[count_lane(200, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_cancelled_count_is_not_replayed_for_another_lanes_ordinary_arm_in_the_same_drain() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[
+            count_lane(300, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(300, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_new_count_at_the_cancel_frame_survives_the_old_lanes_disarm() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[
+            beat(300, 4),
+            count_lane(300, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(300, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(300, 4)]);
+    }
+
+    #[test]
+    fn a_cancelled_count_downbeat_is_not_replayed_for_another_lanes_ordinary_arm() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 1), beat(300, 0)]);
+        mirror_tick(&mut feed, &[
+            count_lane(400, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(400, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn count_beats_drained_in_the_reset_tick_are_sent_once() {
+        let mut feed = counting_feed();
+        assert_count_reset(&feed, &[beat(100, 4)]);
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        assert_count_reset(&feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[beat(300, 0)]);
+        assert_count_reset(&feed, &[beat(200, 3), beat(300, 0)]);
+        mirror_tick(&mut feed, &[beat(400, 1), beat(500, 0)]);
+        assert_count_reset(&feed, &[beat(400, 1), beat(500, 0)]);
+    }
+
+    #[test]
+    fn a_later_count_replaces_the_old_beat_and_downbeat() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 0)]);
+        mirror_tick(&mut feed, &[beat(300, 4)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(300, 4)]);
+    }
+
+    #[test]
+    fn another_engine_drops_the_count_even_if_it_reports_an_armed_lane() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 0)]);
+        feed.drained = vec![count_lane(0, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)];
+        assert!(feed.update_mirror(1), "a new engine resets the feed");
+        assert_count_reset(&feed, &[]);
+        assert!(feed.count_beat.is_none() && feed.count_downbeat.is_none());
     }
 
     #[test]
