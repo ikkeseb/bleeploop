@@ -89,9 +89,7 @@
   device-interface path) is stable across a restart and a replug, which interface class a port
   arrives on (the next check: `src/engine_io/midi/liveness.rs`'s header), and whether WinMM input is
   multi-client under `wdmaud2`. Owed: the release after the first with native MIDI removes the web
-  build's `lf.midiLearn` key (`src/app/midi-actions.ts`). Its module briefing (`midi/mod.rs` header)
-  restates ARCHITECTURE's subscription/epoch, nothing-is-stamped, no-device and rebuild-needs-no-WebView
-  rules: replace only that overlap with pointers, keep its local access, batch, lock and retry detail.
+  build's `lf.midiLearn` key (`src/app/midi-actions.ts`).
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.
