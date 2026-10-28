@@ -32,9 +32,15 @@ import { masterBars } from './shared';
  */
 
 // Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
-const GRID_BEAT = 'rgba(148,168,215,.085)'; // beat lines — a whisper (bumped from .055: the --well lift to .04 same-hue was swallowing them)
-const GRID_BAR = 'rgba(148,168,215,.13)'; //   bar lines — readable
-const GRID_NUM = 'rgba(148,168,215,.28)'; //   engraved bar numbers, top-left of each bar
+const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
+const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
+const GRID_NUM = 'rgba(148,168,215,.26)'; //   engraved bar numbers, top-left of each bar
+// The wave's two layers (alpha of the state colour): colour on black, not a block of paint. The outer
+// peak stays at or over .18 so a take's rec-red reads in the outer envelope alone (wave-steady probe).
+const WAVE_OUTER = 0.2;
+const WAVE_BODY = 0.6;
+/** The centre line's alpha in --faint: a guide under the wave, quieter than any wave. */
+const MID_ALPHA = 0.45;
 /** The meter's counted beats a bar (`setGridBeats`): the grid's beat lines, a bar line every `gridBeats`. */
 let gridBeats = 4;
 
@@ -364,8 +370,8 @@ function drawGrid(lane: Lane, bars: number): void {
  * Rasterise the bar grid + two-layer waveform envelope into the off-screen bitmap. All of this is the
  * CACHED-BITMAP path — it runs only on a dirty frame, never in the per-frame steady state.
  *
- * The envelope is drawn per device-pixel column: a translucent OUTER min/max peak (globalAlpha .34)
- * plus a solid INNER body (globalAlpha .95) whose height is a one-pole-smoothed mean-|peak| — the
+ * The envelope is drawn per device-pixel column: a translucent OUTER min/max peak (`WAVE_OUTER`)
+ * plus a denser INNER body (`WAVE_BODY`) whose height is a one-pole-smoothed mean-|peak| — the
  * RMS-ish core, mirrored around mid. We only have min/max bins, so the per-column mean is approximated
  * as (|min|+|max|)/2. While a take records (`span` > 0, its `recSpanFrames`) each bin sits at its frame
  * over the span, so the recorded region covers `cols` columns and, on a later take, the remainder gets
@@ -411,7 +417,9 @@ function rasterise(
 
   if (!hasTape) {
     wctx.fillStyle = lane.colors.mid;
+    wctx.globalAlpha = MID_ALPHA;
     wctx.fillRect(0, Math.round(midY), dw, 1);
+    wctx.globalAlpha = 1;
   }
 
   // Two-layer envelope. Down-samples the peak bins across `cols` device columns: with more bins than
@@ -446,12 +454,12 @@ function rasterise(
       let y2 = midY - mnc * A;
       if (y1 < 0) y1 = 0;
       if (y2 > dh) y2 = dh;
-      wctx.globalAlpha = 0.34 * dimMul;
+      wctx.globalAlpha = WAVE_OUTER * dimMul;
       wctx.fillRect(x, y1, 1, Math.max(1, y2 - y1));
 
       // Inner body (solid), mirrored around mid.
       const hb = Math.max(1, Math.min(1, body * 1.7) * A);
-      wctx.globalAlpha = 0.95 * dimMul;
+      wctx.globalAlpha = WAVE_BODY * dimMul;
       wctx.fillRect(x, midY - hb, 1, hb * 2);
     }
     wctx.globalAlpha = 1;
@@ -501,12 +509,8 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
   if (x < 0) return;
   const coreW = lane.dpr < 1 ? 1 : Math.round(lane.dpr);
   const px = Math.round(x);
+  // One crisp solid line, one CSS px wide: no glow columns.
   ctx.fillStyle = color;
-  // Soft glow: one column each side at ~25% alpha (no shadowBlur in the frame loop). Then the solid core.
-  ctx.globalAlpha = 0.25;
-  ctx.fillRect(px - coreW, 0, coreW, dh);
-  ctx.fillRect(px + coreW, 0, coreW, dh);
-  ctx.globalAlpha = 1;
   ctx.fillRect(px, 0, coreW, dh);
 }
 

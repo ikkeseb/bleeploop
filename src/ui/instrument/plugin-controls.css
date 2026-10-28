@@ -1,7 +1,7 @@
 /* The slot header's controls ("Instrument": `SlotControls.tsx`, `PluginControls.tsx`). The caps reuse
-   the shared matte key-face `.tgl` rules in app.css; this file styles the bits specific to a slot: GO
-   LIVE, the PARAMS disclosure, the slot volume, and the accordion drawer body (PluginParams) — a
-   preview grid of the plugin's first params, all on the one `.lf-range` skin. */
+   the shared caps text `.tgl` rules in app.css; this file styles the bits specific to a slot: GO
+   LIVE, the PARAMS disclosure, the slot volume, the input meter, and the accordion drawer body
+   (PluginParams) — a preview grid of the plugin's first params, all on the one `.lf-range` skin. */
 
 /* ---- the slot volume — the lane fader's parts at header size: a unity tick and a dB read-out ---- */
 .slot__vol {
@@ -38,28 +38,25 @@
   min-width: 52px;
   text-align: right;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
-/* live monitor "on" dot — the only steady colour in the row, and only while armed */
+/* live monitor "on" dot — the only steady colour in the row, and only while armed: a solid dot */
 .tgl__dot {
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--play);
-  box-shadow: 0 0 6px var(--play);
 }
-/* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so it carries the
-   play colour before it is armed — armed lights the face + dot via the shared `.on-green`. */
+/* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so its legend
+   carries the play colour before it is armed — armed lights the dot on the engaged face (`.on-green`). */
 .tgl.live:not(.on-green) {
   color: color-mix(in srgb, var(--play) 80%, var(--dim));
-  border-color: color-mix(in srgb, var(--play) 35%, transparent);
 }
 .tgl.live:not(.on-green):hover:not(:disabled) {
   color: var(--play);
-  border-color: color-mix(in srgb, var(--play) 60%, transparent);
 }
 /* the PARAMS drawer-disclosure pill: the app's one caret (--caret-svg as a mask, so it takes the
    legend's colour in every state, as the lane's EDIT pill wears it), turned over while open */
@@ -76,7 +73,7 @@
   mask: var(--caret-svg) center / contain no-repeat;
   /* Forced colours (Windows high contrast) would paint the mask with Canvas: keep currentColor. */
   forced-color-adjust: none;
-  transition: transform 0.18s;
+  transition: transform var(--motion);
 }
 .slot__params.on::after {
   transform: rotate(180deg);
@@ -177,10 +174,10 @@
 }
 
 /* ---- live and hot, readable from where the guitarist stands ----
-   INPUT LIVE is the brightest object in a live slot's card: the play colour as a filled face with a dark
-   legend (the lane's REC badge idiom), a size up from the row's other caps, and larger again on a large
-   window. GO LIVE holds INPUT LIVE's box (its dot, gap and word in the hero type, unseen in the same grid
-   cell), so going live moves nothing beside it in the row. */
+   INPUT LIVE is the one coloured word in a live slot's card: the badge language (the play colour as caps
+   with a solid dot) on the engaged face, a size up from the row's other caps, and larger again on a
+   large window. GO LIVE holds INPUT LIVE's box (its dot, gap and word in the hero type, unseen in the
+   same grid cell), so going live moves nothing beside it in the row. */
 .tgl.live {
   display: inline-grid;
   place-items: center;
@@ -191,7 +188,7 @@
   font-size: clamp(12px, 0.75vw, 14px);
   line-height: 1.17;
   letter-spacing: 0.06em;
-  font-weight: 700;
+  font-weight: 600;
 }
 .tgl.live::after {
   content: 'INPUT LIVE';
@@ -205,26 +202,16 @@
   align-items: center;
   gap: 6px;
 }
-.tgl.live.on-green {
-  color: #0b0b0d;
-  background: var(--play);
-  border-color: var(--play);
-  text-shadow: none;
-  box-shadow: 0 0 18px -2px color-mix(in srgb, var(--play) 60%, transparent);
-}
 .tgl.live.on-green:hover:not(:disabled) {
-  color: #0b0b0d;
-  background: color-mix(in srgb, var(--play) 88%, #fff);
-}
-.tgl.live.on-green .tgl__dot {
-  background: #0b0b0d;
-  box-shadow: none;
+  color: var(--play);
+  background: color-mix(in srgb, var(--play) 6%, var(--surf-3));
 }
 
 /* The slot's input meter along its card's foot (`SlotMeter`; the waveform rAF loop writes --lvl, --pk and
-   is-clip). The level over −60..0 dBFS, as the command bar's meter: --play, --dub from −6 dB, --rec from
-   −1 dB (where that meter turns red); a held peak tick; a CLIP lamp lit ~1.5 s after the input reached
-   full scale. Dark while the slot is not live. */
+   is-clip): a thin line, not a bar. The level over −60..0 dBFS, as the command bar's meter: --play, --dub
+   from −6 dB, --rec from −1 dB (where that meter turns red); a held peak tick; a CLIP lamp lit ~1.5 s
+   after the input reached full scale, the one filled flag on the screen (an alarm). Dark while the slot
+   is not live. */
 .slot__meter {
   --lvl: 0;
   --pk: 0;
@@ -242,10 +229,9 @@
 .slot__meter-track {
   position: relative;
   flex: 1 1 auto;
-  height: clamp(8px, 0.6vw, 12px);
-  border-radius: 3px;
-  background: var(--sunk);
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.7), 0 1px 0 var(--hair);
+  height: clamp(3px, 0.2vw, 4px);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
   overflow: hidden;
 }
 .slot__meter-fill {
@@ -258,29 +244,27 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 3px;
-  left: calc(var(--pk) * 100% - 3px);
+  width: 2px;
+  left: calc(var(--pk) * 100% - 2px);
   background: var(--text);
 }
 .slot__meter.is-clip .slot__meter-pk {
   background: var(--rec);
-  box-shadow: 0 0 6px var(--rec);
 }
 .slot__meter-clip {
   flex: 0 0 auto;
   font-size: clamp(10.5px, 0.7vw, 13px);
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.08em;
   line-height: 1;
   padding: 3px 6px;
   border-radius: 4px;
   color: var(--faint);
-  background: var(--surf-2);
+  background: transparent;
 }
 .slot__meter.is-clip .slot__meter-clip {
   color: #0b0b0d;
   background: var(--rec);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--rec) 70%, transparent);
 }
 .slot__meter:not(.is-live) .slot__meter-track,
 .slot__meter:not(.is-live) .slot__meter-clip {

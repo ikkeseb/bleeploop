@@ -12,18 +12,36 @@
 }
 
 :root {
-  /* ===== Token system — "Instrument" (owner-approved 2026-09-23). Matte, flat, anodised: surfaces
-     separate by TONE plus one hairline of top light, never by bevels, drop shadows or backdrop blur.
-     Colour is spent only on sound (lane state: --rec/--dub/--play); chrome "engaged" is a lit
-     warm-white legend (--engaged), not cyan. The wave well is a sunk floor darker than its card: the
-     recess reads through tone + a lit bottom lip. --cyan survives for LISTEN, focus and key-down. ===== */
+  /* ===== Token system — "Instrument", refined (owner-approved base 2026-09-23). Matte and flat:
+     surfaces separate by TONE, one step per level (ground --bg → card --surf-1 → control face
+     --surf-2/3), with at most one hairline per edge (a card's is its top light, --hair); never bevels,
+     drop shadows (the floating panels' --panel-drop excepted), backdrop blur or glow. The main screen
+     carries NO halo of any kind: a lit LED is a solid dot, a lit control a lit legend.
+     Colour is spent only on sound, and a lane spends it in three places: its wave, its state word with
+     its dot, and its main button's ring (a flat filled disc while it captures). Chrome "engaged" is a
+     lit warm-white legend (--engaged) on a face; a selection is a warm-white hairline and one tone up.
+     Controls are caps TEXT buttons: no face at rest, a face on hover, press or engaged, the cyan
+     focus-visible ring always. Every state word is coloured caps text with a dot, never a filled pill;
+     CLIP is the one filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em, changing numbers
+     in Geist Mono with tabular figures, the lane number and the BPM in a light display weight. Radii
+     come from one scale (--r-*). Motion: --motion on colour, face, border and opacity of controls and
+     chrome; a lane's SOUND state lands on the frame the feed switches it (a hardware REC LED), and
+     reduced motion turns transitions off. The wave well is a sunk floor darker than its card.
+     --cyan survives for LISTEN, focus and key-down. ===== */
   --bg: #0a0b0e;
   --surf-1: #121419; /* card */
   --surf-2: #171a20; /* control face */
   --surf-3: #1d2028; /* hover / engaged face */
   --sunk: #0c0d11; /* the well floor and the display window */
-  --card: linear-gradient(180deg, #14161b, #111317 70%); /* card fill: a faint top-lit tone ramp */
-  --hair: rgba(255, 255, 255, 0.055); /* the top edge light */
+  --card: var(--surf-1); /* card fill: flat, one tone over the ground */
+  --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
+  --sel-line: rgba(244, 239, 230, 0.2); /* the selection hairline (a lane, a slot): warm white, no hue */
+  --surf-sel: #16181d; /* the selected lane's card: one tone over --surf-1, --faint still 4.5:1 on it */
+  --r-sm: 6px; /* radius: a control 24 px tall or less (lane keys, steppers, cue, badges) */
+  --r-ctl: 8px; /* radius: a control 26-34 px tall (bar toggles, selects, slot and drawer keys) */
+  --r-well: 10px; /* radius: a sunk well or display window */
+  --r-card: 14px; /* radius: a card (the command bar, a slot, a lane, the FX drawer) */
+  --motion: 150ms cubic-bezier(0.2, 0.7, 0.3, 1); /* the one control transition: short, ease-out */
   --panel: #101216; /* floating panel (popovers, toasts): opaque, a lane never reads through it */
   --panel-drop: 0 20px 48px -14px rgba(0, 0, 0, 0.72); /* the one drop shadow: a floating panel over the lanes */
   --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6); /* :active — the control face sinks into --sunk */
@@ -35,16 +53,16 @@
   --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
   --faint: #7d818d;
   --engaged: #f4efe6; /* warm white: engaged / selected chrome */
-  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they glow
-     in their colour: 0 0 6px) */
+  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they are
+     a solid dot in their colour, no halo) */
   --led-socket: #23262e;
   --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.8);
   /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
      below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
   --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23b9bcc6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
-  --rec: #ff3b52;
-  --dub: #ffae2a;
-  --play: #36e39a;
+  --rec: #ff3b52; /* stays alarming */
+  --dub: #ffae2a; /* kept: the stage view's dub census (stage-view probe) needs its red-blue spread */
+  --play: #45d295; /* green, a step off neon (was #36e39a); 10:1 on --bg */
   --cyan: #46d4e8;
   --violet: #7f6bff;
 
@@ -165,9 +183,9 @@ option {
   gap: clamp(10px, 1.2vw, 18px);
   margin: clamp(10px, 1.3vh, 15px) clamp(16px, 2vw, 28px) 0;
   padding: 9px 18px;
-  border-radius: 16px;
-  background: #101216;
-  border: 1px solid var(--edge);
+  border-radius: var(--r-card);
+  background: var(--surf-1);
+  border: 1px solid transparent; /* kept for the measured height; the card's one hairline is its top light */
   box-shadow: inset 0 1px 0 var(--hair);
   min-width: 0;
   anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
@@ -224,14 +242,14 @@ option {
   align-items: center;
   gap: 10px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.16em;
   white-space: nowrap;
-  color: var(--dim);
+  color: var(--faint);
 }
 .brand b {
-  color: var(--text);
-  font-weight: 700;
+  color: var(--dim);
+  font-weight: 600;
 }
 .brand__dot {
   width: 11px;
@@ -246,7 +264,6 @@ option {
     var(--violet),
     var(--rec)
   );
-  box-shadow: 0 0 10px -2px rgba(127, 107, 255, 0.8);
 }
 /* Last rung (app/cmd-fit.ts): when row 1 still overflows with everything movable on row 2, the wordmark
    folds and the dot stays. The brand collapses to the dot while the hidden wordmark keeps its box, so the
@@ -266,7 +283,6 @@ option {
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--play);
-  box-shadow: 0 0 8px -1px var(--play);
 }
 .cmd__lamp--warn {
   background: var(--dub);
@@ -299,13 +315,13 @@ option {
   width: 34px;
   height: 34px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--r-ctl);
   display: grid;
   place-items: center;
   color: var(--dim);
   cursor: pointer;
   background: none;
-  transition: color 0.15s, transform 0.08s, background 0.15s, box-shadow 0.12s;
+  transition: color var(--motion), background-color var(--motion), transform 0.08s;
 }
 .tool svg {
   width: 16px;
@@ -334,23 +350,22 @@ option {
 .tool-pill {
   height: 30px;
   padding: 0 11px;
-  border: 1px solid var(--line-2);
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-ctl);
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--engaged);
-  background: var(--surf-2);
-  box-shadow: inset 0 1px 0 var(--hair);
+  background: var(--surf-3);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s, transform 0.08s;
+  transition: background-color var(--motion), transform 0.08s;
 }
 .tool-pill:hover {
-  background: var(--surf-3);
+  background: color-mix(in srgb, var(--engaged) 8%, var(--surf-3));
 }
 .tool-pill:active {
   transform: translateY(1px);
@@ -376,6 +391,12 @@ option {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  /* the main screen's control transitions (--motion) land at once */
+  :where(.cmd, .stage) *,
+  :where(.cmd, .stage) *::before,
+  :where(.cmd, .stage) *::after {
+    transition: none !important;
+  }
   .tool--rescan.scanning svg {
     animation: none;
   }
@@ -473,22 +494,22 @@ option {
   flex: 1 1 0; /* two equal columns */
   max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
   min-width: 0;
-  border-radius: 14px;
+  border-radius: var(--r-card);
   background: var(--card);
-  border: 1px solid var(--edge);
+  border: 1px solid transparent;
   box-shadow: inset 0 1px 0 var(--hair);
   display: flex;
   flex-direction: column;
   cursor: pointer;
   container: slot / inline-size; /* the header's one-line form keys on the card's width */
-  transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
+  transition: background-color var(--motion), border-color var(--motion);
 }
 .slot:hover {
   background: #14161c;
 }
-/* ACTIVE = a lit warm-white rim (selection is chrome, not sound, so it carries no hue) */
+/* ACTIVE = the selection hairline (selection is chrome, not sound, so it carries no hue) */
 .slot--active {
-  border-color: rgba(244, 239, 230, 0.2);
+  border-color: var(--sel-line);
 }
 /* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
    EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
@@ -517,14 +538,14 @@ option {
 .slot__id {
   grid-area: id;
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 1;
   color: var(--faint);
   background: none;
   border: 0;
   padding: 0 2px;
   cursor: pointer;
-  transition: color 0.2s, text-shadow 0.2s;
+  transition: color var(--motion);
 }
 .slot__id:hover {
   color: var(--dim);
@@ -546,23 +567,22 @@ option {
   flex-wrap: wrap;
 }
 
-/* toggle pill — a matte key face without an outline; engaged = the legend lights warm-white and the
-   face lifts one tone. Pressed = the face sinks. Disabled = no face, a hairline edge and a legible
-   --faint legend (tone, never an opacity fade). Explicit background so no UA face bleeds through. */
+/* toggle — a caps TEXT button: no face at rest, a face on hover; engaged = the legend lights warm-white
+   on a face one tone up. Pressed = the face sinks. Disabled = a legible --faint legend and nothing else
+   (tone, never an opacity fade). Explicit background so no UA face bleeds through. */
 .tgl {
-  font-size: 11px;
+  font-size: 10.5px;
   line-height: 13px; /* pinned: the slot row keeps its measured height */
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   font-weight: 600;
   padding: 7px 12px;
   border: 1px solid transparent;
-  border-radius: 8px;
-  background: var(--surf-2);
-  box-shadow: inset 0 1px 0 var(--hair);
+  border-radius: var(--r-ctl);
+  background: transparent;
   color: var(--dim);
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+  transition: color var(--motion), background-color var(--motion), border-color var(--motion);
 }
 .tgl:hover:not(:disabled) {
   color: var(--text);
@@ -576,21 +596,16 @@ option {
   cursor: default;
   background: transparent;
   box-shadow: none;
-  border-color: rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
 .tgl.on {
   color: var(--engaged);
   background: var(--surf-3);
-  border-color: rgba(244, 239, 230, 0.28);
-  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
-/* live input stays a sound colour (it IS sound) */
+/* live input stays a sound colour (it IS sound): its legend and dot, on the engaged face */
 .tgl.on-green {
   color: var(--play);
-  background: color-mix(in srgb, var(--play) 8%, var(--surf-2));
-  border-color: color-mix(in srgb, var(--play) 40%, transparent);
-  text-shadow: 0 0 10px color-mix(in srgb, var(--play) 45%, transparent);
+  background: var(--surf-3);
 }
 
 /* ---- range sliders — ONE skin ----
@@ -640,7 +655,6 @@ option {
   margin-top: -4px;
   border-radius: 999px;
   background: var(--text);
-  box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
 }
 :where(.lf-range)::-moz-range-thumb {
   width: 11px;
@@ -648,11 +662,11 @@ option {
   border: 0;
   border-radius: 999px;
   background: var(--text);
-  box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
 }
 
-/* the source picker and the input pick — flat selects on the control face. The picker names the slot's
-   source, so it reads at the slot name's size and weight. Explicit background-color so no UA face shows. */
+/* the source picker and the input pick — flat selects: no face at rest (the caret says "opens"), the
+   control face on hover. The picker names the slot's source, so it reads at the slot name's size and
+   weight. Explicit background-color so no UA face shows. */
 .slot__source,
 .slot__in {
   height: 30px;
@@ -661,17 +675,16 @@ option {
   -webkit-appearance: none;
   color-scheme: dark;
   padding: 0 28px 0 11px;
-  border-radius: 8px;
+  border-radius: var(--r-ctl);
   border: 1px solid transparent;
-  box-shadow: inset 0 1px 0 var(--hair);
   font-family: inherit;
   cursor: pointer;
   background-image: var(--caret-svg);
-  background-color: var(--surf-2);
+  background-color: transparent;
   background-repeat: no-repeat;
   background-position: right 9px center;
   background-size: 12px 12px;
-  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+  transition: color var(--motion), background-color var(--motion);
 }
 .slot__source {
   grid-area: source;
@@ -685,9 +698,9 @@ option {
   text-overflow: ellipsis;
 }
 .slot__in {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--dim);
 }
 .slot__source:hover:not(:disabled),

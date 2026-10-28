@@ -1,17 +1,17 @@
 /* Command-bar transport clusters — colour is state. These render as direct
    flex items of the `.cmd` header (Transport returns a Fragment); the `.cmd` card + brand/lamp/tools
-   live in app.css. Styled to the "Instrument" tokens (src/app.css):
-   matte key faces, sans labels, a sunk display window for BPM + loop; colour rationed to state
-   (--engaged on, --play record level/loop, --dub two-step confirm). */
+   live in app.css. Styled to the "Instrument" tokens (src/app.css): caps text toggles (a face only on
+   hover, press or engaged), a sunk display window for BPM + loop; colour rationed to state (--engaged
+   on, --play record level/loop, --dub two-step confirm). No glow. */
 
 /* ---- BPM group — big numeral, ± steppers, unit + beat dots. It and the loop readout sit in a sunk
    display window: the one "screen" on the panel. ---- */
 .transport__bpm-group,
 .transport__loop {
   background: var(--sunk);
-  /* edge + recess as shadows only: the window adds no height to the command bar (layout probes) */
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 2px 5px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
-  border-radius: 10px;
+  /* its one dark hairline as a shadow: the window adds no height to the command bar (layout probes) */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.5);
+  border-radius: var(--r-well);
   padding: 0 6px;
 }
 .transport__bpm-group {
@@ -28,13 +28,13 @@
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border-radius: 7px;
-  background: var(--surf-2);
+  border-radius: var(--r-sm);
+  background: transparent;
   color: var(--dim);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color var(--motion), background-color var(--motion);
 }
 /* the 22px face stays (the display window's row height is pinned); the hit area is 24x24 (WCAG 2.2 target size) */
 .transport__step::before {
@@ -54,21 +54,19 @@
 .transport__step:disabled {
   cursor: not-allowed;
   background: transparent;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
 
-/* the 34px numeral — a click-to-edit button, lit like a display readout. It and its editor share one
-   fixed 64px box (three tabular digits; the tempo is a whole 40..300), so typing a tempo neither
-   widens the bar nor makes it re-measure its rows (app/cmd-fit.ts). */
+/* the 34px numeral — a click-to-edit button in a light display weight, the screen's second read after
+   the waves. It and its editor share one fixed 64px box (three tabular digits; the tempo is a whole
+   40..300), so typing a tempo neither widens the bar nor makes it re-measure its rows (app/cmd-fit.ts). */
 .transport__bpm-num {
   font-size: 34px;
-  font-weight: 600;
+  font-weight: 300;
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
-  color: #f6f1e7;
-  text-shadow: 0 0 14px rgba(246, 241, 231, 0.18);
+  color: var(--engaged);
   background: none;
   border: 0;
   padding: 0 2px;
@@ -77,7 +75,7 @@
   text-align: center;
 }
 .transport__bpm-num:hover:not(:disabled) {
-  color: var(--engaged);
+  color: #fff;
 }
 .transport__bpm-num:disabled {
   cursor: default;
@@ -88,9 +86,9 @@
 .transport__bpm-input {
   font-family: inherit;
   font-size: 34px;
-  font-weight: 600;
+  font-weight: 300;
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
   color: var(--engaged);
   background: none;
@@ -118,9 +116,9 @@
   gap: 5px;
 }
 .transport__bpm-unit {
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   color: var(--faint);
 }
 /* the meter picker — a small key face with the themed caret beside the unit; locked, it reads as a
@@ -129,20 +127,20 @@
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
-  background-color: var(--surf-2);
+  background-color: transparent;
   background-image: var(--caret-svg);
   background-repeat: no-repeat;
   background-position: right 3px center;
   background-size: 9px 9px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 4px;
   color: var(--dim);
   font-family: var(--mono);
   font-size: 10px;
   line-height: 1;
   padding: 2px 14px 2px 5px;
   cursor: pointer;
-  transition: color 0.12s, background-color 0.12s;
+  transition: color var(--motion), background-color var(--motion);
 }
 .transport__meter:hover:not(:disabled) {
   color: var(--text);
@@ -166,11 +164,10 @@
   height: 7px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.12);
-  transition: background 0.06s, box-shadow 0.06s;
+  transition: background-color 0.06s;
 }
 .transport__beat.on {
-  background: var(--text);
-  box-shadow: 0 0 8px rgba(238, 241, 248, 0.8);
+  background: var(--engaged);
 }
 
 /* lock glyph leading the group when tempo is frozen */
@@ -199,7 +196,7 @@
   }
 }
 
-/* ---- toggle pills — TAP / CLICK / FIXED / RETAKE / AUTO REC / END STOP / ALL / FADE / ✕ ALL / IN FX */
+/* ---- caps text toggles — TAP / CLICK / FIXED / RETAKE / AUTO REC / END STOP / ALL / FADE / ✕ ALL / IN FX */
 .transport__modes,
 .transport__global {
   display: flex;
@@ -228,7 +225,6 @@
 }
 .transport__inmeter.is-hot {
   --meter-c: var(--rec);
-  box-shadow: 0 0 0 1px var(--rec);
 }
 .transport__inmeter.has-thr::after {
   content: '';
@@ -247,18 +243,17 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  font-size: 11px;
-  line-height: 12px; /* pinned: the pill keeps the command bar's measured row height */
+  font-size: 10.5px;
+  line-height: 12px; /* pinned: the toggle keeps the command bar's measured row height */
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   padding: 8px 13px;
   border: 1px solid transparent;
-  border-radius: 8px;
-  background: var(--surf-2);
-  box-shadow: inset 0 1px 0 var(--hair);
+  border-radius: var(--r-ctl);
+  background: transparent;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+  transition: color var(--motion), background-color var(--motion), border-color var(--motion);
 }
 .transport__tgl:hover:not(:disabled) {
   color: var(--text);
@@ -272,7 +267,6 @@
   cursor: not-allowed;
   background: transparent;
   box-shadow: none;
-  border-color: rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
 /* A pill whose word changes (▶ ALL / ■ ALL / ■ NOW, FADE / FADING) holds the width of its widest
@@ -287,18 +281,15 @@
   overflow: hidden;
   visibility: hidden;
 }
-/* engaged = the lit warm-white legend (selection/mode on) */
+/* engaged = the lit warm-white legend on the engaged face (selection/mode on) */
 .transport__tgl.is-on {
   color: var(--engaged);
   background: var(--surf-3);
-  border-color: rgba(244, 239, 230, 0.28);
-  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
 /* on but greyed out (FIXED under RETAKE over a loop): the disabled face, its dim lamp alone says "set" */
 .transport__tgl.is-on:disabled {
   color: var(--faint);
   background: transparent;
-  border-color: rgba(255, 255, 255, 0.06);
   text-shadow: none;
 }
 /* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an unlit socket
@@ -316,19 +307,20 @@
   border-radius: 999px;
   background: var(--led-socket);
   box-shadow: var(--led-socket-shade);
-  transition: background-color 0.12s, box-shadow 0.12s;
+  transition: background-color var(--motion), box-shadow var(--motion);
 }
 .transport__tgl--led.is-on::before {
   background: var(--engaged);
-  box-shadow: 0 0 6px var(--engaged);
+  box-shadow: none;
 }
 .transport__tgl--led.is-on:disabled::before {
   background: color-mix(in srgb, var(--engaged) 35%, var(--led-socket));
   box-shadow: none;
 }
-/* A split pill: the mode's toggle and, joined to it, the read-out of its one setting, which opens that
-   setting's popover (Transport.tsx, BarPopover.tsx). The read-out wears the toggle's state. One rim runs
-   round both halves; the 1px gap between them is the divider, and each half lifts on its own hover. */
+/* A split toggle: the mode's toggle and, joined to it, the read-out of its one setting, which opens that
+   setting's popover (Transport.tsx, BarPopover.tsx). The read-out wears the toggle's state. Engaged, one
+   face runs round both halves; the 1px gap between them is the divider, and each half lifts on its own
+   hover. */
 .transport__split {
   display: flex;
   align-items: center;
@@ -369,11 +361,10 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-/* two-step confirm (✕ SURE?) = dub-amber warn */
+/* two-step confirm (✕ SURE?) and a fade under way (FADING) = the dub-amber legend on a face */
 .transport__tgl.is-armed {
   color: var(--dub);
   background: color-mix(in srgb, var(--dub) 10%, var(--surf-2));
-  border-color: color-mix(in srgb, var(--dub) 55%, transparent);
 }
 
 /* FIXED and FADE pair a pill with its bars. FADE's stay beside it: a fade's length is set before the
@@ -398,15 +389,18 @@
   gap: 3px;
   min-width: 44px;
   text-align: center;
+  font-family: var(--mono);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   color: var(--text);
   line-height: 1;
 }
 .transport__bars-unit {
+  font-family: var(--sans);
   font-size: 9px;
-  letter-spacing: 0.1em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--faint);
 }
@@ -437,15 +431,15 @@
   visibility: hidden;
 }
 .transport__loop-k {
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   color: var(--faint);
 }
 .transport__loop-v,
 .transport__loop-fit {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -481,11 +475,11 @@
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-ctl);
   background: none;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.12s, background 0.12s;
+  transition: color var(--motion), background-color var(--motion);
 }
 .transport__master-mute:hover {
   color: var(--text);
@@ -501,7 +495,7 @@
 }
 .transport__volume-val {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--dim);
   min-width: 24px;
