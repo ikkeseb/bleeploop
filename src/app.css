@@ -487,14 +487,16 @@ option {
   min-height: 0;
 }
 
-/* ---- range sliders — ONE skin ----
+/* ---- range sliders: ONE skin, the hairline ----
    Every <input type=range> (master / click / auto volume, the lane fader, FX + plugin params) wears
-   `.lf-range`: a 3px flat track with an optional --fill left portion + an 11px round --text cap.
-   Consumers set only width / hit-area height / margin (and drive --fill if they show a filled part).
+   `.lf-range`: a 1px --line track, a lit run up to --fill in the context's light (--lit, an "r, g, b"
+   triplet; warm white by default) and one 2px x 12px handle. Consumers set only width / hit-area
+   height / margin, drive --fill if they show a filled part, and set --lit where the slider belongs to
+   a sound (a playing lane's volume: --lit: var(--play-rgb)).
    `:where` = zero specificity, so a consumer's own `.x { height }` always wins regardless of CSS order
    (app.css loads AFTER the component sheets). The box is the hit area: 24px tall (WCAG 2.2 target size)
-   folded into the 16px margin box a 12px input with the UA's 2px margin took, so the track (centred in
-   the box) sits where it did. A consumer that sets its own height/margin keeps its margin-box height. */
+   folded into the 16px margin box a 12px input with the UA's 2px margin took. A consumer that sets its
+   own height/margin keeps its margin-box height. */
 :where(.lf-range) {
   -webkit-appearance: none;
   appearance: none;
@@ -503,44 +505,48 @@ option {
   background: transparent;
   cursor: pointer;
   --fill: 0%;
+  --lit: 238, 241, 245;
 }
 :where(.lf-range):focus-visible {
+  outline: 1px solid var(--focus);
   outline-offset: 3px;
-  border-radius: 4px;
+  border-radius: 2px;
 }
 :where(.lf-range):disabled {
   cursor: not-allowed;
+  --lit: 95, 100, 109;
 }
 :where(.lf-range)::-webkit-slider-runnable-track {
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(to right, var(--dim) var(--fill), rgba(255, 255, 255, 0.12) var(--fill));
+  height: 1px;
+  background: linear-gradient(to right, rgba(var(--lit), 0.8) var(--fill), var(--line) var(--fill));
 }
 :where(.lf-range)::-moz-range-track {
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  height: 1px;
+  background: var(--line);
 }
 :where(.lf-range)::-moz-range-progress {
-  height: 3px;
-  border-radius: 999px;
-  background: var(--dim);
+  height: 1px;
+  background: rgba(var(--lit), 0.8);
 }
 :where(.lf-range)::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 11px;
-  height: 11px;
-  margin-top: -4px;
-  border-radius: 999px;
+  width: 2px;
+  height: 12px;
+  margin-top: -5.5px;
+  border-radius: 1px;
   background: var(--text);
-  box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
+}
+:where(.lf-range):disabled::-webkit-slider-thumb {
+  background: var(--ghost);
+  box-shadow: none;
 }
 :where(.lf-range)::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
+  width: 2px;
+  height: 12px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 1px;
   background: var(--text);
-  box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
 }
