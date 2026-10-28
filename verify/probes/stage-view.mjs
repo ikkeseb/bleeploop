@@ -826,7 +826,8 @@ await probe(async ({ browser, open }) => {
       const fourth = await census();
       console.log(JSON.stringify({ view: v.id, selection: { first: [first.warm, first.warmDist, first.warmY], fourth: [fourth.warm, fourth.warmDist, fourth.warmY] } }));
       assert.ok(first.warm > 200 && fourth.warm > 200, 'the selected lane carries a warm-white mark');
-      if (v.id === 'orbit') assert.ok(fourth.warmDist < first.warmDist - 20, `orbit: the selection circle moves inward for lane 4 (${first.warmDist} to ${fourth.warmDist} px)`);
+      // The ring looks (orbit, ember) mark the selection with a circle round the centre: it moves inward, not down.
+      if (v.id === 'orbit' || v.id === 'ember') assert.ok(fourth.warmDist < first.warmDist - 20, `${v.id}: the selection circle moves inward for lane 4 (${first.warmDist} to ${fourth.warmDist} px)`);
       else assert.ok(fourth.warmY > first.warmY + 40, `${v.id}: the selection mark moves down for lane 4 (${first.warmY} to ${fourth.warmY} px)`);
     });
   }
