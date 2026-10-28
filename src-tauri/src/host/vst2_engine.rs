@@ -359,6 +359,8 @@ struct Vst2Plugin {
     stale: bool,
     /// Between `effMainsChanged(1)` + `effStartProcess` and their counterparts.
     running: bool,
+    /// `effIdle` was requested and has not yet answered 0.
+    idling: bool,
     /// The open editor's host window.
     editor: Option<HostWindow>,
     ctx: Arc<HostContext>,
@@ -694,7 +696,7 @@ fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost)
     };
     let info = *effect.info();
     // From here every early return drops `plugin`, which closes the effect before its module goes.
-    let plugin = Vst2Plugin { effect, info, stale: false, running: false, editor: None, ctx, _module: module };
+    let plugin = Vst2Plugin { effect, info, stale: false, running: false, idling: false, editor: None, ctx, _module: module };
     let found = format!("{:08x}", info.unique_id as u32);
     if found != id {
         return Err(format!("the file holds VST2 plugin {found}, not {id}"));
@@ -798,10 +800,13 @@ impl OwnedPlugin for Vst2Plugin {
         Reported { relist: self.ctx.take_relist(), changed }
     }
 
+    /// While the plugin asks for idle, one `effIdle` per turn until it answers 0 (one call, so the owner
+    /// stays free for its requests, saves and unload); then the open editor.
     fn idle(&mut self) -> bool {
-        if self.ctx.take_need_idle() {
+        self.idling |= self.ctx.take_need_idle();
+        if self.idling {
             // SAFETY: the opcode reads no pointer.
-            unsafe { self.call(EFF_IDLE, 0, 0, 0.0) };
+            self.idling = unsafe { self.call(EFF_IDLE, 0, 0, 0.0) } != 0;
         }
         let Some(window) = &self.editor else {
             // With no editor open there is nothing to size: a size asked for meanwhile is dropped.

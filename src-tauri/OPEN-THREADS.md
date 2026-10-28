@@ -27,10 +27,9 @@
   neither has a parameter that holds a value):
   a restart whose unit the engine does not hand back within 2 s leaves the unit silent until the
   plugin's next `audioMasterIOChanged`; `effSetChunk` answers no verdict, so a chunk the plugin
-  could not use is reported as restored;
-  `effIdle` is sent once per `audioMasterNeedIdle`, not until it answers 0; a program is selected
-  without `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend
-  or SysEx) and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
+  could not use is reported as restored; a program is selected without
+  `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend or SysEx)
+  and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
   answers nothing).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
