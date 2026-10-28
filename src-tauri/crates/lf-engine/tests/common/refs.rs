@@ -216,9 +216,11 @@ pub struct Score {
 pub fn score(reference: &[Vec<f32>], render: &[Vec<f32>], rate: u32) -> Score {
     assert_eq!(reference.len(), render.len(), "channel count");
     let (mut sig, mut err) = (0.0f64, 0.0f64);
-    for (a, b) in reference.iter().zip(render) {
+    for (channel, (a, b)) in reference.iter().zip(render).enumerate() {
         assert_eq!(a.len(), b.len(), "frame count");
-        for (&x, &y) in a.iter().zip(b) {
+        for (frame, (&x, &y)) in a.iter().zip(b).enumerate() {
+            assert!(x.is_finite(), "non-finite sample in reference: channel {channel}, frame {frame}");
+            assert!(y.is_finite(), "non-finite sample in render: channel {channel}, frame {frame}");
             sig += (x as f64).powi(2);
             err += (x as f64 - y as f64).powi(2);
         }

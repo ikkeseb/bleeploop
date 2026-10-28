@@ -193,9 +193,6 @@
 //!   way (`instruments.rs` 259), untested. Next step: check each delay, instruments included, against its
 //!   own line and grow the lines off RT, or refuse the compensation explicitly; test both sides of the
 //!   capacity.
-//! - **The reference null test lets NaN through.** `score()` (`tests/common/refs.rs` 226) takes
-//!   `err.max(1e-300)`, which turns a NaN error into the floor, so a NaN render passes `Class::N` (289).
-//!   Next step: reject non-finite samples in both inputs, with tests for one NaN, all NaN and ±inf.
 //! - **`tests/perf.rs`'s ignored Stage 2 bar fails on a loaded PC** (11.4 % and 9.1 % against its 10 %).
 //!   Next check: rerun it on a quiet desktop before reading a failure as a regression.
 //!
