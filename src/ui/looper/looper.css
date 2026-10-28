@@ -210,8 +210,10 @@
   display: none;
 }
 
-/* the CORE — the REC/DUB gesture: a flat matte key with one hairline rim, ringed by state; REC/DUB
-   light the whole face (a flat filled disc, no bloom) */
+/* the CORE — the REC/DUB gesture, the lane's FOOTSWITCH (the app.css header): a raised round key, its
+   matte face one tone over the card with a top-light hairline over a dark foot, standing on its short
+   contact shadow (the main screen's one drop shadow), inside a thin LED ring. No border: the face's tone
+   and its edge draw it. */
 .lp-core {
   flex: 0 0 auto;
   width: clamp(38px, 8.5cqh, 52px);
@@ -220,37 +222,41 @@
   display: grid;
   place-items: center;
   color: var(--text);
-  background: var(--surf-2);
-  border: 1px solid var(--edge);
-  box-shadow: inset 0 1px 0 var(--hair);
+  background: var(--cap);
+  border: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.35), var(--key-contact);
   position: relative;
+  top: 0;
   cursor: pointer;
-  transition: border-color var(--motion); /* the hover's rim only: the face and ring are state colour */
 }
-/* A hardware REC button: hover lifts the rim's tone, a press darkens the face and sinks the glyph, and
-   the release is instant. No transform on the core itself: a scale() on this rounded gradient face with
-   its shadows rasterises with hairline seams through the centre while it animates (the owner saw them
-   on hover and release). The pointer-press probe (verify/probes/transport-focus.mjs) holds this. */
+/* A hardware footswitch: hover lifts the face a tone; a press sinks the key, instantly, as the release
+   is: the contact shadow collapses into a shade under the face's top edge, the face darkens and the key
+   drops 1 px (`top`, never a transform: a scale() on this round face rasterised hairline seams through
+   its centre while it animated, which the owner saw; the pointer-press probe in
+   verify/probes/transport-focus.mjs holds the core untransformed). Its LED ring is the panel's, not the
+   key's, so it stays where it is (the ::before's inset gives the drop back). */
 .lp-core:hover:not(:disabled) {
-  border-color: var(--dim);
+  background: var(--cap-hover);
 }
 .lp-core:active:not(:disabled) {
-  filter: brightness(0.8);
+  top: 1px;
+  background: var(--cap-down);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
 }
-.lp-core:active:not(:disabled) svg {
-  transform: translateY(1px);
+.lp-core:active:not(:disabled)::before {
+  inset: -6px -5px -4px;
 }
 .lp-core:focus-visible {
   outline-offset: 3px;
 }
-/* disabled = no face, a hairline rim in the bezel, a --faint glyph: tone, never an opacity fade (the
-   .lp-pb:disabled block below). [data-state] outranks the state glyph colours below (EMPTY's red ●); the
-   state ring is the lane's, not the control's, and stays. */
+/* disabled = the key lies flat: its face held down (--cap-down), no top light, no contact shadow, a
+   --faint glyph (4.5:1 on that face): tone, never an opacity fade (the .lp-pb:disabled block below).
+   [data-state] outranks the state glyph colours below (EMPTY's red ●); the LED ring is the lane's, not
+   the control's, and stays. */
 .lp-lane[data-state] .lp-core:disabled {
   cursor: not-allowed;
   color: var(--faint);
-  background: transparent;
-  border-color: var(--edge);
+  background: var(--cap-down);
   box-shadow: none;
 }
 .lp-core svg {
@@ -258,26 +264,25 @@
   height: 38%;
   position: relative;
 }
-/* the state ring around the cap, a dark gap from its rim */
+/* the LED ring around the key, a dark gap from its face: an unlit socket at rest, lit solid in the state
+   colour (no glow) while the lane plays, captures or waits for its start */
 .lp-core::before {
   content: '';
   position: absolute;
   inset: -5px;
   border-radius: 999px;
-  border: 2px solid var(--sc);
-  opacity: 0;
+  border: 2px solid var(--led-socket);
 }
-.lp-lane[data-state='play'] .lp-core::before {
-  opacity: 1;
+.lp-lane[data-state='play'] .lp-core::before,
+.lp-lane[data-state='rec'] .lp-core::before,
+.lp-lane[data-state='dub'] .lp-core::before {
+  border-color: var(--sc);
 }
-/* REC / OVERDUB: the whole face lights, like the hardware REC button: a flat disc in the state colour
-   with a dark glyph, and no ring (the disc is the ring's colour, at full size) */
+/* REC / OVERDUB: the ring lights in the capture colour and so does the glyph (the stop the next press
+   sends); the key stays a key, its face matte */
 .lp-lane[data-state='rec'] .lp-core,
 .lp-lane[data-state='dub'] .lp-core {
-  color: #0b0b0d;
-  background: var(--sc);
-  border-color: var(--sc);
-  box-shadow: none;
+  color: var(--sc);
 }
 .lp-lane[data-state='empty'] .lp-core {
   color: var(--rec); /* the bright ● invites the first take */
@@ -288,7 +293,7 @@
   color: var(--dub);
 }
 .lp-lane[data-state='armed'] .lp-core::before {
-  opacity: 1;
+  border-color: var(--sc);
   border-style: dashed;
   animation: lp-armed-ring 1.4s ease-in-out infinite;
 }
@@ -296,7 +301,7 @@
   color: var(--cyan);
 }
 .lp-lane[data-state='listening'] .lp-core::before {
-  opacity: 1;
+  border-color: var(--sc);
   border-style: dashed;
   animation: lp-armed-ring 1.4s ease-in-out infinite;
 }
@@ -324,15 +329,18 @@
   padding: 0 8px;
 }
 
-/* ---- lane key (STOP/PLAY/CLR + FX/MUTE/REV/UNDO/EDIT): a key of the one family (the app.css header's
-   KEYS) — the quiet resting face, lifted on hover, sunk on press, one step lighter when engaged ---- */
+/* ---- lane key (STOP/PLAY/CLR + FX/MUTE/REV/UNDO/EDIT): a small raised key of the one family (the
+   app.css header's KEYS) — the low-contrast face with a key's edge, lifted on hover, sunk on press, one
+   step lighter with its corner LED lit when engaged. Only background-color here, so the LED (a
+   background image, app.css) survives hover and press ---- */
 .lp-pb {
   height: clamp(20px, 4.2cqh, 24px);
   min-width: 58px;
   padding: 0 10px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
-  background: var(--key);
+  background-color: var(--key);
+  box-shadow: var(--key-edge);
   color: var(--dim);
   font-size: 10.5px;
   font-weight: 600;
@@ -345,10 +353,10 @@
 }
 .lp-pb:hover:not(:disabled) {
   color: var(--text);
-  background: var(--key-hover);
+  background-color: var(--key-hover);
 }
 .lp-pb:active:not(:disabled) {
-  background: var(--sunk);
+  background-color: var(--sunk);
   box-shadow: var(--pressed);
 }
 /* disabled = the resting face, a legible --faint legend: tone, never an opacity fade, so an EMPTY lane's
@@ -356,37 +364,18 @@
    grey-on-grey) and a row of keys never mixes faces with bare words. */
 .lp-pb:disabled {
   cursor: not-allowed;
-  background: var(--key);
-  box-shadow: none;
+  background-color: var(--key);
   color: var(--faint);
 }
-/* engaged (FX / MUTE / REV) = the lit warm-white legend of every engaged key, on the face one step up */
+/* engaged (MUTE / REV) = the lit warm-white legend of every engaged key, on the face one step up, and its
+   corner LED (app.css KEYS LED) */
 .lp-pb.is-on,
 .lp-pb.is-on:hover:not(:disabled) {
   color: var(--engaged);
-  background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
+  background-color: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
-/* FX's lamp, the lane LED's vocabulary: an unlit socket before the legend, lit warm-white while any of
-   the lane's effects is engaged (Looper.tsx `fxEngaged`). Always in the row, so lighting it never moves
-   the legend or resizes the pill; the lit legend (.is-on) stays the drawer's. */
-.lp-pb--fx {
-  grid-auto-flow: column;
-  column-gap: 4px;
-  justify-content: center;
-}
-.lp-pb--fx::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--led-socket);
-  box-shadow: var(--led-socket-shade);
-  transition: background-color var(--motion), box-shadow var(--motion);
-}
-.lp-pb--fx.has-fx::before {
-  background: var(--engaged);
-  box-shadow: none;
-}
+/* FX splits the two: its lit legend (.is-on) says its drawer is open, its corner LED (app.css KEYS LED)
+   that one of the lane's effects is engaged (Looper.tsx `fxEngaged`), drawer open or not. */
 .lp-pb--play:not(:disabled):hover {
   color: var(--play);
 }
@@ -394,7 +383,7 @@
 .lp-pb--clr.is-armed,
 .lp-pb--clr.is-armed:hover {
   color: var(--dub);
-  background: color-mix(in srgb, var(--dub) 12%, transparent);
+  background-color: color-mix(in srgb, var(--dub) 12%, transparent);
 }
 
 /* ---- the WAVE WELL — recessed canvas surface (waveform + playhead drawn by waveform.ts) ----
@@ -516,7 +505,7 @@
 }
 .lp-lane__mods .lp-pb {
   min-width: 0;
-  padding: 0;
+  padding: 0 5px 0 0; /* the legends sit 2.5 px left of centre, clear of the corner LED (app.css KEYS LED) */
 }
 
 /* the mix row: the volume fader takes what the pan (a fixed 44px range and its read-out) leaves */
@@ -544,20 +533,22 @@
   position: relative; /* over the absolute unity tick so the thumb reads on top of it */
   width: 100%;
   margin: -2px 2px; /* inline: pin the UA default — the unity tick's inset-travel calc below folds this in */
-  height: 24px; /* the drag/keyboard hit area (a 20px margin box, as before); the visible 3px track is the `.lf-range` skin (app.css) */
+  height: 24px; /* the drag/keyboard hit area (a 20px margin box, as before); the visible slot and cap are the `.lf-range` skin (app.css) */
 }
-/* unity (0 dB) tick — production volume runs 0..1.5, so unity (1.0) sits at 1/1.5 = 66.7% of travel */
+/* unity (0 dB) detent tick — production volume runs 0..1.5, so unity (1.0) sits at 1/1.5 = 66.7% of
+   travel. Behind the input, so the slot covers its middle: a scale mark above and below the slot, under
+   the cap at 0 dB. */
 .lp-vbar__unity {
   position: absolute;
   /* the tick positions against .lp-vbar-wrap, but the thumb travels inside the input, which sits
      2px inset (the pinned margin above). Thumb centre relative to the wrap at fraction f:
-     2px + thumbW/2 + f·(wrapW − 4px − thumbW); at f=2/3 with the 11px thumb (same on -webkit and
-     -moz) that's 66.667% − 2.5px, minus the 1px tick's half-width → −3px. */
-  left: calc(66.667% - 3px);
+     2px + thumbW/2 + f·(wrapW − 4px − thumbW); at f=2/3 with the 9px cap (same on -webkit and -moz)
+     that's 66.667% − 2.167px, minus the 1px tick's half-width → −2.667px. */
+  left: calc(66.667% - 2.667px);
   top: 50%;
   transform: translateY(-50%);
   width: 1px;
-  height: 11px;
+  height: 12px;
   background: var(--faint);
   pointer-events: none;
 }
@@ -594,7 +585,7 @@
   top: 50%;
   transform: translateY(-50%);
   width: 1px;
-  height: 11px;
+  height: 12px;
   background: var(--faint);
   pointer-events: none;
 }
@@ -724,6 +715,7 @@
   border-radius: var(--r-ctl);
   border: 0;
   background: var(--key);
+  box-shadow: var(--key-edge);
   color: var(--dim);
   font-size: 12px;
   line-height: 1;

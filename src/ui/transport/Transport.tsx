@@ -310,14 +310,14 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
       </button>
 
       {/* Record modes: how the next take records and how a stop lands. They take the wrapping row together,
-          leaving global transport beside the loop dial. Each lights its lamp while on (`transport__tgl--led`). Every
+          leaving global transport beside the loop dial. Each lights its corner LED while on (app.css KEYS LED). Every
           toggle here, TAP and master mute keep ONE aria-label and say on/off through aria-pressed alone; a
           label that flips as well reads "Click off, pressed". */}
       <div class="transport__modes">
         {/* CLICK and its volume read-out: one split pill, the read-out opens the volume. */}
         <div class="transport__split" role="group" aria-label="Metronome">
           <button
-            class="transport__tgl transport__tgl--led"
+            class="transport__tgl"
             classList={{ 'is-on': clock.metronomeOn() }}
             aria-label="Metronome click"
             aria-pressed={clock.metronomeOn()}
@@ -369,7 +369,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             is on: off, a take has no length to show. */}
         <div class="transport__fixed" role="group" aria-label="Take length in bars">
           <button
-            class="transport__tgl transport__tgl--led"
+            class="transport__tgl"
             classList={{ 'is-on': looper.fixedLengthEnabled() }}
             aria-label="Fixed take length"
             aria-pressed={looper.fixedLengthEnabled()}
@@ -409,7 +409,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         {/* RETAKE — a take with a known length (FIXED first take, any later take) keeps rolling; the stop
             gesture keeps the last complete pass. Read at arm, so it is locked while a capture is live. */}
         <button
-          class="transport__tgl transport__tgl--led"
+          class="transport__tgl"
           classList={{ 'is-on': looper.retakeEnabled() }}
           aria-label="Retake"
           aria-pressed={looper.retakeEnabled()}
@@ -426,7 +426,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             a noisy guitar chain can be tuned without cancelling the arm. */}
         <div class="transport__split" role="group" aria-label="Automatic record start">
           <button
-            class="transport__tgl transport__tgl--led"
+            class="transport__tgl"
             classList={{ 'is-on': looper.autoRecordEnabled() }}
             aria-label="Auto record"
             aria-pressed={looper.autoRecordEnabled()}
@@ -475,7 +475,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
 
         {/* END STOP — how every stop lands: the last mode, so all five lamps read as one row. */}
         <button
-          class="transport__tgl transport__tgl--led"
+          class="transport__tgl"
           classList={{ 'is-on': looper.loopEndStopEnabled() }}
           aria-label="Stop playing loops at loop end"
           aria-pressed={looper.loopEndStopEnabled()}
@@ -530,7 +530,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           moves when the word does; ✕ ALL does not (its ✕ SURE? would fold the brand at 1280 px). */}
       <div class="transport__global">
         <button
-          class="transport__tgl transport__tgl--fit"
+          class="transport__tgl transport__tgl--fit transport__all"
           data-fit="■ NOW"
           classList={{ 'is-on': anyLive() }}
           disabled={!hasMaster() && !anyLive()}

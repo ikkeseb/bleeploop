@@ -1,8 +1,9 @@
 /* Per-track FX panel — "Instrument". It docks inside the lane's FX drawer (.lp-drawer, see
    looper.css, which flattens .fxp's own frame to transparent). Each FX module is a flat pane one tone
-   off the drawer card with a hairline of top light; its toggle is a key of the one family (the app.css
-   header's KEYS: the quiet resting face; engaged = the lit warm-white legend on the face one step up,
-   never cyan) + thin flat sliders. In the lane drawer DUB FEEDBACK is a key-shaped pane on the same face.
+   off the drawer card with a hairline of top light; its toggle is a small raised key of the one family
+   (the app.css header's KEYS: the low-contrast face with a key's edge; engaged = the lit warm-white legend
+   on the face one step up with its corner LED, never cyan) + the faders' slot and cap (`.lf-range`). In
+   the lane drawer DUB FEEDBACK is a key-shaped pane on the same face and edge.
    Colour is spent only on sound, so the chrome here stays monochrome. No audio runs here. */
 
 .fxp {
@@ -37,10 +38,12 @@
   box-shadow: inset 0 1px 0 var(--hair);
 }
 
-/* toggle = a key (see `.tgl` in app.css); engaged = the warm-white legend on the face one step up.
-   Explicit background on BOTH states so no UA dark-mode button face bleeds through. */
+/* toggle = a key (see `.tgl` in app.css); engaged = the warm-white legend on the face one step up and its
+   corner LED (app.css KEYS LED). Explicit background-color on BOTH states so no UA dark-mode button face
+   bleeds through, and only the colour, so the LED survives hover and press. */
 .fxp-mod__toggle {
-  background: var(--key);
+  background-color: var(--key);
+  box-shadow: var(--key-edge);
   border: 1px solid transparent;
   color: var(--dim);
   border-radius: var(--r-ctl);
@@ -55,15 +58,15 @@
 }
 .fxp-mod__toggle:hover {
   color: var(--text);
-  background: var(--key-hover);
+  background-color: var(--key-hover);
 }
 .fxp-mod__toggle:active {
-  background: var(--sunk);
+  background-color: var(--sunk);
   box-shadow: var(--pressed);
 }
 .fxp-mod__toggle--on,
 .fxp-mod__toggle--on:hover {
-  background: var(--key-on);
+  background-color: var(--key-on);
   color: var(--engaged);
 }
 
@@ -75,7 +78,7 @@
   border-color: transparent;
   border-radius: var(--r-ctl);
   background: var(--key);
-  box-shadow: none;
+  box-shadow: var(--key-edge);
 }
 .fxp-dub .fxp-mod__params {
   flex: 1 1 auto;
@@ -142,6 +145,7 @@
   background-repeat: no-repeat;
   background-position: right 8px center;
   background-size: 12px 12px;
+  box-shadow: var(--key-edge);
   color: var(--dim);
   border: 1px solid transparent;
   border-radius: var(--r-sm);

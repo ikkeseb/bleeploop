@@ -12,23 +12,33 @@
 }
 
 :root {
-  /* ===== Token system — "Instrument", refined (owner-approved base 2026-09-23). Matte and flat:
-     surfaces separate by TONE, one step per level (ground --bg → card --surf-1 → key face --key), with at
-     most one hairline per edge (a card's is its top light, --hair); never bevels, drop shadows (the
-     floating panels' --panel-drop excepted), backdrop blur or glow. The main screen carries NO halo of any
-     kind: a lit LED is a solid dot, a lit control a lit legend.
+  /* ===== Token system — "Instrument", keys (on the owner-approved base of 2026-09-23): a black machine
+     of quiet hardware keys. Matte: surfaces separate by TONE, one step per level (ground --bg → card
+     --surf-1 → key face), with at most one hairline per edge (a card's is its top light, --hair); no
+     backdrop blur, no glow. The main screen carries NO halo of any kind: a lit LED is a solid dot or ring,
+     a lit control a lit legend. It carries ONE drop shadow: the footswitch's short contact shadow
+     (--key-contact); the floating panels' --panel-drop sits over the screen, not on it.
      Colour is spent only on sound, and a lane spends it in three places: its wave, its state word with
-     its dot, and its main button's ring (a flat filled disc while it captures). A selection is a
-     warm-white hairline and one tone up.
-     KEYS — every pressable word (the command bar's toggles and steppers, the slot's keys and pickers, a
-     lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family: a caps legend on a very
-     quiet face (--key: a tone barely off its surface, no border), the same height and radius as its
-     row's neighbours (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Hover lifts the
-     face (--key-hover); press sinks it (--pressed); engaged lights the legend warm-white (--engaged) on a
-     face one step lighter (--key-on), plus the state colour where the state is a sound; disabled keeps
-     the resting face with a --faint legend (tone, never an opacity fade), so a row never mixes keys and
-     bare words. A split key (CLICK | 70, FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon
-     tools stay bare glyphs; engaged, they wear --key-on like a key. The cyan focus-visible ring always.
+     its dot, and its footswitch's LED ring. A selection is a warm-white hairline and one tone up.
+     THE FOOTSWITCH — a lane's main button (.lp-core, looper.css) is the instrument's key: a raised round
+     key with a matte face one tone over the card (--cap), a top-light hairline and the contact shadow
+     under it, inside a thin LED ring: an unlit socket (--led-socket) until the lane's state lights it
+     solid in the state colour (while it captures, the glyph lights too). Pressed it sinks: the shadow
+     collapses, the face darkens (--cap-down), the key drops 1 px and its ring stays. Disabled it lies
+     flat: no face, no shadow, a rim.
+     KEYS — every other pressable word (the command bar's toggles and steppers, the slot's keys and
+     pickers, a lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family of small raised
+     keys: a caps legend on a low-contrast matte face (--key) with a key's edge (--key-edge: a top-light
+     hairline over a dark foot), no border, no shadow, the same height and radius as its row's neighbours
+     (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Hover lifts the face (--key-hover);
+     press sinks it (--pressed); engaged lights the legend warm-white (--engaged) on a face one step lighter
+     (--key-on) with a solid LED dot in the key's top-right corner (the KEYS LED rule below): warm-white,
+     or the state colour where the state is a sound (the key's --led). Disabled keeps the resting face with
+     a --faint legend (tone, never an opacity fade), so a row never mixes keys and bare words. A split key
+     (CLICK | 70, FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon tools stay bare glyphs;
+     engaged, they wear --key-on like a key. The cyan focus-visible ring always.
+     FADERS — every range (.lf-range) is a recessed slot (--fader-slot) holding a small rectangular cap
+     (--fader) with a centre line; a 0 dB detent or a centre shows as a tick across the slot.
      STATE WORDS are coloured caps with a dot; the two live-capture words, REC and OVERDUB, are a FILLED
      flat badge (STATUS D14: a carrier that survives greyscale and every colour-vision type), and CLIP is
      the one other filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em (state words 11 px),
@@ -45,6 +55,13 @@
   --key: rgba(255, 255, 255, 0.022); /* a key at rest: a tone barely off any card, no border (--faint holds 4.5:1 on it) */
   --key-hover: rgba(255, 255, 255, 0.055); /* a key under the pointer */
   --key-on: rgba(255, 255, 255, 0.085); /* an engaged key: one step lighter, under the lit legend */
+  --key-edge: inset 0 1px 0 rgba(255, 255, 255, 0.05), inset 0 -1px 0 rgba(0, 0, 0, 0.3); /* a raised key's edge: top light over a dark foot */
+  --cap: #1c1f26; /* the footswitch's matte face: one tone over a card, selected or not */
+  --cap-hover: #21242c; /* the footswitch under the pointer */
+  --cap-down: #15171c; /* the footswitch held down: the face darkens as it sinks */
+  --key-contact: 0 1px 1px rgba(0, 0, 0, 0.5), 0 2px 5px -1px rgba(0, 0, 0, 0.55); /* the footswitch's contact shadow: the main screen's one drop shadow */
+  --fader-slot: #08090c; /* a fader's recessed slot, darker than any card or well */
+  --fader: #343842; /* a fader cap's matte face (its centre line is --dim) */
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: var(--surf-1); /* card fill: flat, one tone over the ground */
   --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
@@ -66,8 +83,8 @@
   --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
   --faint: #7d818d; /* the floor for read text: 4.5:1 on a card and on a key's resting face (contact-sheet pins it) */
   --engaged: #f4efe6; /* warm white: engaged / selected chrome */
-  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they are
-     a solid dot in their colour, no halo) */
+  /* an LED's unlit socket: the lane's state LED and its footswitch's ring (lit, they are solid in their
+     colour, no halo). A key's corner LED has no socket: it shows only lit. */
   --led-socket: #23262e;
   --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.8);
   /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
@@ -593,7 +610,8 @@ option {
   padding: 7px 12px;
   border: 1px solid transparent;
   border-radius: var(--r-ctl);
-  background: var(--key);
+  background-color: var(--key);
+  box-shadow: var(--key-edge);
   color: var(--dim);
   cursor: pointer;
   white-space: nowrap;
@@ -601,32 +619,50 @@ option {
 }
 .tgl:hover:not(:disabled) {
   color: var(--text);
-  background: var(--key-hover);
+  background-color: var(--key-hover);
 }
 .tgl:active:not(:disabled) {
-  background: var(--sunk);
+  background-color: var(--sunk);
   box-shadow: var(--pressed);
 }
 .tgl:disabled {
   cursor: default;
-  background: var(--key);
-  box-shadow: none;
+  background-color: var(--key);
   color: var(--faint);
 }
 .tgl.on,
 .tgl.on:hover:not(:disabled) {
   color: var(--engaged);
-  background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
+  background-color: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
-/* live input stays a sound colour (it IS sound): its dot and a soft play legend, on the engaged face
+/* live input stays a sound colour (it IS sound): its own dot and a soft play legend, on the engaged face
    (plugin-controls.css sets the legend) */
 .tgl.on-green {
-  background: var(--key-on);
+  background-color: var(--key-on);
+}
+
+/* ---- KEYS LED — an engaged key's lamp: a solid dot in its top-right corner, no socket and no halo.
+   Drawn as the face's background image, so lighting it never moves the legend or resizes the key, and
+   every key rule sets only background-color so the lamp survives hover and press. Its colour is the
+   key's --led: warm-white, or the state colour where the state is a sound. Not on a split key's
+   read-out (its toggle carries it), a disclosure (PARAMS, EDIT: their caret turns) or INPUT LIVE (its
+   own play dot). ---- */
+.lp-pb.is-on:not(.lp-pb--fx),
+.lp-pb--fx.has-fx,
+.transport__tgl.is-on:not(.transport__readout),
+.transport__tgl.is-armed,
+.tgl.on:not(.slot__params),
+.fxp-mod__toggle--on {
+  background-image: radial-gradient(circle at calc(100% - 4.5px) 4.5px, var(--led, var(--engaged)) 1.6px, transparent 2.2px);
 }
 
 /* ---- range sliders — ONE skin ----
-   Every <input type=range> (master / click / auto volume, the lane fader, FX + plugin params) wears
-   `.lf-range`: a 3px flat track with an optional --fill left portion + an 11px round --text cap.
+   Every <input type=range> (master / click / auto volume, the lane fader and pan, the slot gain, FX +
+   plugin params) wears `.lf-range`: a hardware fader. A 4px recessed slot (--fader-slot, shaded from
+   above), its travel up to the cap a step lighter where a consumer drives --fill, and a 9x16 rectangular
+   cap (--fader) with a top-light hairline and a --dim centre line, no shadow (the footswitch's is the
+   screen's one). A consumer's detent tick (the lane's 0 dB, the pan's centre) sits behind the input, so
+   the slot covers its middle and it reads as a scale mark across the slot, under the cap at the detent.
    Consumers set only width / hit-area height / margin (and drive --fill if they show a filled part).
    `:where` = zero specificity, so a consumer's own `.x { height }` always wins regardless of CSS order
    (app.css loads AFTER the component sheets). The box is the hit area: 24px tall (WCAG 2.2 target size)
@@ -649,39 +685,45 @@ option {
   cursor: not-allowed;
 }
 :where(.lf-range)::-webkit-slider-runnable-track {
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(to right, var(--dim) var(--fill), rgba(255, 255, 255, 0.12) var(--fill));
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.1) var(--fill), transparent var(--fill)), var(--fader-slot);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.8);
 }
 :where(.lf-range)::-moz-range-track {
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  height: 4px;
+  border-radius: 2px;
+  background: var(--fader-slot);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.8);
 }
 :where(.lf-range)::-moz-range-progress {
-  height: 3px;
-  border-radius: 999px;
-  background: var(--dim);
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
 }
+/* the cap: 9 px wide so its 1 px centre line sits on a whole pixel; the travel calcs of the unity ticks
+   (looper.css `.lp-vbar__unity`, plugin-controls.css `.slot__vbar-unity`) fold its width in */
 :where(.lf-range)::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 11px;
-  height: 11px;
-  margin-top: -4px;
-  border-radius: 999px;
-  background: var(--text);
+  width: 9px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 2px;
+  background: linear-gradient(to right, transparent 4px, var(--dim) 4px 5px, transparent 5px), var(--fader);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 :where(.lf-range)::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
+  width: 9px;
+  height: 16px;
   border: 0;
-  border-radius: 999px;
-  background: var(--text);
+  border-radius: 2px;
+  background: linear-gradient(to right, transparent 4px, var(--dim) 4px 5px, transparent 5px), var(--fader);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
-/* the source picker and the input pick — flat selects: no face at rest (the caret says "opens"), the
-   control face on hover. The picker names the slot's source, so it reads at the slot name's size and
+/* the source picker and the input pick — selects on a key's face and edge (the caret says "opens"),
+   lifted on hover. The picker names the slot's source, so it reads at the slot name's size and
    weight. Explicit background-color so no UA face shows. */
 .slot__source,
 .slot__in {
@@ -696,7 +738,8 @@ option {
   font-family: inherit;
   cursor: pointer;
   background-image: var(--caret-svg);
-  background-color: var(--key); /* a picker is a key: the resting face (the header's KEYS) */
+  background-color: var(--key); /* a picker is a key: the resting face and edge (the header's KEYS) */
+  box-shadow: var(--key-edge);
   background-repeat: no-repeat;
   background-position: right 9px center;
   background-size: 12px 12px;

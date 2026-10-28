@@ -1,9 +1,10 @@
 /* Command-bar transport clusters — colour is state. These render as direct
    flex items of the `.cmd` header (Transport returns a Fragment); the `.cmd` card + brand/lamp/tools
-   live in app.css. Styled to the "Instrument" tokens (src/app.css): every toggle and stepper is a key of
-   the one family (the app.css header's KEYS: a quiet resting face, lifted on hover, one step lighter and
-   a lit legend when engaged), a sunk display window for BPM + loop; colour rationed to state (--engaged
-   on, --play record level/loop, --dub two-step confirm and a fade). No glow. */
+   live in app.css. Styled to the "Instrument" tokens (src/app.css): every toggle and stepper is a small
+   raised key of the one family (the app.css header's KEYS: a low-contrast face with a key's edge, lifted
+   on hover, one step lighter with a lit legend and a corner LED when engaged), a sunk display window for
+   BPM + loop; colour rationed to state (--engaged on, --play record level/loop and ALL's LED, --dub
+   two-step confirm and a fade). No glow. */
 
 /* ---- BPM group — big numeral, ± steppers, unit + beat dots. It and the loop readout sit in a sunk
    display window: the one "screen" on the panel. ---- */
@@ -252,24 +253,24 @@
   padding: 8px 13px;
   border: 1px solid transparent;
   border-radius: var(--r-ctl);
-  background: var(--key);
+  background-color: var(--key);
+  box-shadow: var(--key-edge);
   color: var(--dim);
   cursor: pointer;
   transition: color var(--motion), background-color var(--motion), border-color var(--motion);
 }
 .transport__tgl:hover:not(:disabled) {
   color: var(--text);
-  background: var(--key-hover);
+  background-color: var(--key-hover);
 }
 .transport__tgl:active:not(:disabled) {
-  background: var(--sunk);
+  background-color: var(--sunk);
   box-shadow: var(--pressed);
 }
 /* disabled = the resting face, a --faint legend: still a key in its row, just not lit */
 .transport__tgl:disabled {
   cursor: not-allowed;
-  background: var(--key);
-  box-shadow: none;
+  background-color: var(--key);
   color: var(--faint);
 }
 /* A pill whose word changes (▶ ALL / ■ ALL / ■ NOW, FADE / FADING) holds the width of its widest
@@ -284,43 +285,24 @@
   overflow: hidden;
   visibility: hidden;
 }
-/* engaged = the lit warm-white legend on the engaged face (selection/mode on); it outranks hover, so the
-   face never drops under the pointer */
+/* engaged = the lit warm-white legend on the engaged face with its corner LED (app.css KEYS LED), so a
+   record mode reads on or off from the guitar; it outranks hover, so the face never drops under the
+   pointer. ALL lit (something plays) is a sound state: its LED is the play colour. */
 .transport__tgl.is-on,
 .transport__tgl.is-on:hover:not(:disabled) {
   color: var(--engaged);
-  background: var(--key-on);
+  background-color: var(--key-on);
 }
-/* on but greyed out (FIXED under RETAKE over a loop): the disabled face, its dim lamp alone says "set" */
+.transport__all.is-on {
+  --led: var(--play);
+}
+/* on but greyed out (FIXED under RETAKE over a loop): the disabled face, its dim LED alone says "set,
+   not in effect" */
 .transport__tgl.is-on:disabled {
+  --led: color-mix(in srgb, var(--engaged) 35%, var(--led-socket));
   color: var(--faint);
-  background: var(--key);
+  background-color: var(--key);
   text-shadow: none;
-}
-/* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an unlit socket
-   before the legend, lit warm-white while the mode is on, so a mode reads on or off from the guitar.
-   Always in the row, so lighting it never moves the legend or resizes the pill. A mode that is on but
-   greyed out (FIXED under RETAKE over a loop) keeps a dim lamp: set, not in effect. */
-.transport__tgl--led {
-  padding-left: 10px;
-}
-.transport__tgl--led::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--led-socket);
-  box-shadow: var(--led-socket-shade);
-  transition: background-color var(--motion), box-shadow var(--motion);
-}
-.transport__tgl--led.is-on::before {
-  background: var(--engaged);
-  box-shadow: none;
-}
-.transport__tgl--led.is-on:disabled::before {
-  background: color-mix(in srgb, var(--engaged) 35%, var(--led-socket));
-  box-shadow: none;
 }
 /* A split toggle: the mode's toggle and, joined to it, the read-out of its one setting, which opens that
    setting's popover (Transport.tsx, BarPopover.tsx). The read-out wears the toggle's state. Engaged, one
@@ -332,7 +314,7 @@
   gap: 1px;
 }
 .transport__split > .transport__tgl:first-child {
-  padding-right: 10px;
+  padding-right: 12px; /* clear of its corner LED (app.css KEYS LED) */
   border-right-color: transparent;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
@@ -366,12 +348,13 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-/* two-step confirm (✕ SURE?) and a fade under way (FADING) = the dub-amber legend on an amber-tinted
-   engaged face (a fade is a sound state) */
+/* two-step confirm (✕ SURE?) and a fade under way (FADING) = the dub-amber legend and corner LED on an
+   amber-tinted engaged face (a fade is a sound state) */
 .transport__tgl.is-armed,
 .transport__tgl.is-armed:hover:not(:disabled) {
+  --led: var(--dub);
   color: var(--dub);
-  background: color-mix(in srgb, var(--dub) 11%, transparent);
+  background-color: color-mix(in srgb, var(--dub) 11%, transparent);
 }
 
 /* FIXED and FADE pair a key with its bars: one split key, as CLICK | 70 (the key, then its stepper on a
@@ -399,6 +382,7 @@
   padding: 0 4px;
   border-radius: 0 var(--r-ctl) var(--r-ctl) 0;
   background: var(--key);
+  box-shadow: var(--key-edge);
 }
 .transport__bars-val {
   display: flex;
@@ -582,10 +566,6 @@
   .transport__modes .transport__tgl {
     padding-left: 9px;
     padding-right: 9px;
-  }
-  .transport__modes .transport__tgl--led {
-    gap: 5px;
-    padding-left: 8px;
   }
   .transport__modes .transport__split > .transport__tgl:first-child {
     padding-right: 8px;
