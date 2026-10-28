@@ -93,10 +93,11 @@ itself.
   Each one bypasses without a click.
 - IN FX: a tempo-synced echo, a reverb and a ring modulator on the live input, heard and recorded,
   while the dry signal and a take's timing stay untouched.
-- Stage view (B, or a learned pedal): a full-window visualizer of the loops in three looks,
+- Stage view (B, or a learned pedal): a full-window visualizer of the loops in four looks,
   switched with V. Scope, the first, draws what the engine plays: the whole output with the guitar
   over it and each track after its FX. Orbit wraps each track's loop into a ring around the live
-  input; Strata scrolls five ribbons past a now line. The selected track, the bar, the beat and the count-in stay readable from where you
+  input; Strata scrolls five ribbons past a now line; Ember draws the loops as five rings of light,
+  with the guitar streaming into the one it writes. The selected track, the bar, the beat and the count-in stay readable from where you
   stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3/VST2 plugin slots with floating plugin editors; each slot reloads its last

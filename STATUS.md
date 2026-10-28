@@ -79,6 +79,11 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 Built, and proven by machine where a probe reaches, but never played. A line leaves when a jam answers
 it.
 
+- EMBER, a fourth stage look (V steps to it after STRATA): five rings of the lanes' loops round one
+  centre, ice plays, amber writes, red records, grey is muted or stopped, a white-hot star at each
+  sounding ring's head, and the guitar a braid of light landing on the ring it writes (machine: the
+  stage-view probe's per-look groups). Does a state read from where you stand, does the braid follow
+  the guitar without lag, and does the app stay tight on ASIO 128 with it open?
 - The designer walk's fixes: the command-bar popovers (CLICK, SENS, IN FX) open under the bar, not
   their pill; a toast that is neither an error nor a finished action reads as a dim note; the 48 kHz
   switch and the mid-jam update ask are the app's own dialog (Esc declines); a disabled control fades
