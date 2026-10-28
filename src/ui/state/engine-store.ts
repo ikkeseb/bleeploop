@@ -213,7 +213,11 @@ const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_
  * by the engine if a reset asks it again, and was never kept. Residuals, both from the host keeping no
  * `SetMeter` for 4/4 (`settings.rs` `transported`: that is how a fresh engine asks for the kept meter): a
  * pick a lock refused waits until a reset, so one after a later CLEAR ALL applies it; a reload between
- * a pick and its echo sends the kept meter from before the pick. */
+ * a pick and its echo sends the kept meter from before the pick. Two more: the echo is matched by value
+ * alone, so picks 4/4, 3/4, 4/4 inside the feed's lag let the first 4/4's Transport end the wait and 3/4
+ * is kept, which a reset that lost the last echo (its settings then hold no `SetMeter`) sends back; and
+ * `setMeter` ignores the send's result, so a pick the command ring refused waits until a reset too. Next
+ * check for both: a meter-picker case each, the three picks then a reset, a refused send then a reset. */
 let pendingMeter: TimeSignature | null = null;
 /** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
  * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */

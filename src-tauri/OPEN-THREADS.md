@@ -65,6 +65,9 @@
   only when a page fetches it (in the tauri crate's ipc channel), so a document that goes away
   before fetching leaves up to 30 frames' payloads behind per reload. A Tauri internal, left; next
   check if memory grows across reloads: the app's private bytes over twenty reloads with the stage view open.
+  Within one page the same holds per watchdog resubscribe after a payload never fetched: the old JS
+  `Channel` (`@tauri-apps/api` 2.11.1) unregisters its callback only once every index up to its end
+  arrived, so it keeps up to 30 parked frames. Read from source; the same check, with a fetch failed.
 - A page that dies for good (a WebView crash, a shutdown) leaves the scope taps on (`Key::Scope`), so
   the engine keeps folding columns the feed drains and drops for nobody. Read from source, not
   reproduced, nothing audible.
@@ -72,7 +75,12 @@
   rounds up (owner's call).
 - The feed cannot see a counted take's cancel, transport start and ordinary re-arm of the same lane
   within one block split: unchanged lane info publishes no event, so a reset can replay the old count.
-  Next check: a feed test for that split once `LaneInfo` reports the counted arm.
+  Next check: a feed test for that split once `LaneInfo` reports the counted arm. Read from source
+  beside it: a count's first beat drained before its lane's arm event is dropped (no lane armed yet), so a
+  reload before the second beat shows a first take's COUNT-IN without its numeral for a beat (a later
+  counted take, WAITING FOR DOWNBEAT until the next count beat); and a grid beat on a
+  cancel's frame can stay mirrored as a lone downbeat while another lane stays armed (the UI shows only
+  the beat). Next check for both: an engine-backed feed test (`manual_engine()`) of a count-in reset mid-count.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`
