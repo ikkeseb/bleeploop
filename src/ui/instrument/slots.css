@@ -1,0 +1,228 @@
+/* The instrument slots (the sources) and their source row. Moved out of app.css so the slot area has
+   one owner; the tokens stay in the app.css header. */
+
+/* ---- source row — two equal compact slot cards side by side. The plugin params drawer expands DOWN
+   as an accordion. When the drawer outgrows the (autoSize-clamped) instrument region, the drawer scrolls
+   INSIDE the card — the card shell (rounded lit top edge, header row) stays anchored, and the looper
+   never moves. Flex, not grid: a flex item's max-height:100% resolves against the container's definite
+   height, but a grid item's resolves against its auto row track (content-sized — circular, so the cap
+   never bites). Grid also lets the card's decorative top edge scroll under the clip boundary (the
+   "top-sheen drift"), taking the slot header along. ---- */
+.src {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start; /* an expanded drawer doesn't stretch its sibling card */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto; /* belt only — cards cap at 100%, so this should never engage */
+  scrollbar-width: thin;
+  padding: 1px; /* keep the active glow from clipping against the region edge */
+}
+/* no drawer open: the two cards stretch to one band (a live card's meter row would otherwise leave
+   a hole under its sibling). The region hugs its content: the band is the taller card's height. */
+.src:not(:has(.slot__drawer--open)) {
+  align-items: stretch;
+}
+.slot {
+  flex: 1 1 0; /* two equal columns */
+  max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
+  min-width: 0;
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair);
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  container: slot / inline-size; /* the header's one-line form keys on the card's width */
+  transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
+}
+.slot:hover {
+  background: #14161c;
+}
+/* ACTIVE = a lit warm-white rim (selection is chrome, not sound, so it carries no hue) */
+.slot--active {
+  border-color: rgba(244, 239, 230, 0.2);
+}
+/* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
+   EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
+   enough for one line */
+.slot__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'id source vol';
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 8px;
+  padding: 10px 18px;
+  min-width: 0;
+  flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
+}
+.slot__row:has(> .slot__acts) {
+  grid-template-areas: 'id source vol' '. acts acts';
+}
+@container slot (min-width: 760px) {
+  .slot__row:has(> .slot__acts) {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: 'id source acts vol';
+  }
+}
+/* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
+.slot__id {
+  grid-area: id;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color 0.2s, text-shadow 0.2s;
+}
+.slot__id:hover {
+  color: var(--dim);
+}
+.slot--active .slot__id {
+  color: var(--engaged);
+}
+.slot__id:focus-visible {
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+/* the source's own controls: they wrap inside their line rather than push the card wider */
+.slot__acts {
+  grid-area: acts;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+/* toggle pill — a matte key face without an outline; engaged = the legend lights warm-white and the
+   face lifts one tone. Pressed = the face sinks. Disabled = no face, a hairline edge and a legible
+   --faint legend (tone, never an opacity fade). Explicit background so no UA face bleeds through. */
+.tgl {
+  font-size: 11px;
+  line-height: 13px; /* pinned: the slot row keeps its measured height */
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+.tgl:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.tgl:active:not(:disabled) {
+  background: var(--sunk);
+  box-shadow: var(--pressed);
+}
+.tgl:disabled {
+  cursor: default;
+  background: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
+}
+.tgl.on {
+  color: var(--engaged);
+  background: var(--surf-3);
+  border-color: rgba(244, 239, 230, 0.28);
+  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
+}
+/* live input stays a sound colour (it IS sound) */
+.tgl.on-green {
+  color: var(--play);
+  background: color-mix(in srgb, var(--play) 8%, var(--surf-2));
+  border-color: color-mix(in srgb, var(--play) 40%, transparent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--play) 45%, transparent);
+}
+
+/* the source picker and the input pick — flat selects on the control face. The picker names the slot's
+   source, so it reads at the slot name's size and weight. Explicit background-color so no UA face shows. */
+.slot__source,
+.slot__in {
+  height: 30px;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+  padding: 0 28px 0 11px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 var(--hair);
+  font-family: inherit;
+  cursor: pointer;
+  background-image: var(--caret-svg);
+  background-color: var(--surf-2);
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px 12px;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.slot__source {
+  grid-area: source;
+  justify-self: start;
+  width: 100%;
+  max-width: 300px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+.slot__in {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+.slot__source:hover:not(:disabled),
+.slot__in:hover {
+  color: var(--text);
+  background-color: var(--surf-3);
+}
+.slot__source:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+.slot__source:focus-visible,
+.slot__in:focus-visible {
+  outline-offset: 1px;
+}
+.slot__source option,
+.slot__in option {
+  background: var(--option);
+  color: var(--text);
+  font-weight: 500;
+}
+.slot__source option:checked,
+.slot__in option:checked {
+  background: #2a2d35;
+  color: #fff;
+}
+
+/* the params drawer (accordion) — a sub-panel that expands the slot card downward. Rendered
+   whenever a plugin is loaded (so its subscriptions stay live); open/close is CSS-only, no remount.
+   The drawer is the card's scroll region: when it outgrows the instrument region it scrolls under the
+   pinned header row, keeping the card's top edge anchored. */
+.slot__drawer {
+  display: none;
+}
+.slot__drawer--open {
+  display: block;
+  border-top: 1px solid var(--edge);
+  padding: 12px 18px 14px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}

@@ -12,44 +12,84 @@
 }
 
 :root {
-  /* ===== Token system — "Instrument" (owner-approved 2026-09-23). Matte, flat, anodised: surfaces
-     separate by TONE plus one hairline of top light, never by bevels, drop shadows or backdrop blur.
-     Colour is spent only on sound (lane state: --rec/--dub/--play); chrome "engaged" is a lit
-     warm-white legend (--engaged), not cyan. The wave well is a sunk floor darker than its card: the
-     recess reads through tone + a lit bottom lip. --cyan survives for LISTEN, focus and key-down. ===== */
-  --bg: #0a0b0e;
-  --surf-1: #121419; /* card */
-  --surf-2: #171a20; /* control face */
-  --surf-3: #1d2028; /* hover / engaged face */
-  --sunk: #0c0d11; /* the well floor and the display window */
-  --card: linear-gradient(180deg, #14161b, #111317 70%); /* card fill: a faint top-lit tone ramp */
-  --hair: rgba(255, 255, 255, 0.055); /* the top edge light */
-  --panel: #101216; /* floating panel (popovers, toasts): opaque, a lane never reads through it */
-  --panel-drop: 0 20px 48px -14px rgba(0, 0, 0, 0.72); /* the one drop shadow: a floating panel over the lanes */
-  --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6); /* :active — the control face sinks into --sunk */
-  --option: #14171d; /* a themed <select>'s open option list */
-  --edge: rgba(255, 255, 255, 0.07); /* card + control border */
-  --line-2: rgba(255, 255, 255, 0.12); /* hover border */
-  --well: var(--sunk);
-  --text: #eef1f8;
-  --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
-  --faint: #7d818d;
+  /* ===== Surface language: "Light" (design/peak, 2026-10-28; replaces "Instrument"). A loop is light
+     passing through time; everything else is quiet type on black.
+     - GROUND: one black field. No cards, bevels, faces or drop shadows on the main screen; regions
+       separate by space and alignment, and at most one hairline (--line). A floating panel (popover,
+       toast, menu) is the one surface that keeps a fill (--panel) and its one shadow (--panel-drop).
+     - CONTROLS ARE WORDS: a control rests as an uppercase tracked label in --faint, lights to --text on
+       hover/focus, and reads ENGAGED as --engaged with a faint glow; a lamp (5px dot) carries on/off.
+       No pills, no boxed keys. A slider is a hairline (--line) with a lit run in its context's light
+       (--lit, an "r, g, b" triplet) and one precise 2px handle.
+     - LIGHT IS SOUND: hue only for lane state. Cold light plays (--play, ice), warm light writes (--dub,
+       ember gold; --rec, red), white is the live input (--input). Muted is ice at a tenth of its light,
+       so unmuting is the same light returning; FADING dims along its length. Glows use the *-rgb
+       triplets: rgba(var(--play-rgb), a).
+     - COLUMNS: the main screen aligns to three columns, the lane head (--col-head), the light
+       (the rest) and the mix (--col-mix), inside the page inset (--px). The lanes, the bar ruler, the
+       FX drawer, the command bar's second row and the source row all sit on them.
+     - TYPE: Geist for words, Geist Mono only for changing numeric read-outs; big numerals (BPM, lane
+       numbers) are thin Geist (weight 110-220). Labels are --fs-label at --label-track; read-outs
+       --fs-read. Nothing that must be read sits under 4.5:1: --faint is the floor (5.0:1 on --bg).
+     The lane canvas reads the colour tokens once per mount (looper/waveform.ts): reload after a token
+     edit. ===== */
+  --bg: #030304;
+  --text: #eef1f5; /* lit: a hovered or focused label, values that must read */
+  --dim: #a7acb5; /* secondary read-outs. INVARIANT: --caret-svg bakes this hex (%23a7acb5): retune BOTH */
+  --faint: #7b8089; /* a label at rest; the contrast floor */
+  --ghost: #5f646d; /* an icon at rest, a disabled label (never text that must be read) */
   --engaged: #f4efe6; /* warm white: engaged / selected chrome */
-  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they glow
-     in their colour: 0 0 6px) */
-  --led-socket: #23262e;
-  --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.8);
-  /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
-     below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
-  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23b9bcc6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
-  --rec: #ff3b52;
-  --dub: #ffae2a;
-  --play: #36e39a;
-  --cyan: #46d4e8;
+  --line: rgba(255, 255, 255, 0.16); /* a hairline: slider tracks, the ruler, a separator */
+  --line-soft: rgba(255, 255, 255, 0.08);
+  --focus: rgba(255, 255, 255, 0.72); /* the keyboard focus mark */
+
+  /* State light. The *-rgb triplets feed glows; --dub-text is the dub hue at reading weight on black. */
+  --play: #8cc8ff;
+  --play-rgb: 140, 200, 255;
+  --dub: #ff8e28;
+  --dub-rgb: 255, 142, 40;
+  --dub-text: #ffb066;
+  --rec: #ff2c38;
+  --rec-rgb: 255, 44, 56;
+  --mute-text: #7e8996;
+  --input: #f4f8ff; /* the live input (A LIVE, INPUT LIVE): white light */
+  --input-rgb: 244, 248, 255;
+  --cyan: #46d4e8; /* AUTO REC's listen (LISTENING) only */
   --violet: #7f6bff;
 
-  /* Geist + Geist Mono (OFL-1.1, vendored in src/assets/fonts; licence in licenses/). Sans for words,
-     mono only for changing numeric read-outs (dB, gain, meters). */
+  /* The three columns and the page inset. */
+  --px: clamp(16px, 2.1vw, 40px);
+  --col-head: clamp(148px, 12.8vw, 246px);
+  --col-mix: clamp(196px, 14.2vw, 272px);
+
+  /* Type scale. */
+  --fs-label: clamp(10px, 0.57vw, 11px);
+  --fs-read: clamp(10.5px, 0.6vw, 11.5px);
+  --label-track: 0.15em;
+
+  /* Floating surfaces (popovers, toasts, menus, the settings panel) and the few controls that keep a
+     face there. Legacy names kept so the panels follow the new ground without a rewrite. */
+  --panel: #0b0c0f; /* opaque: a lane never reads through it */
+  --panel-drop: 0 24px 60px -16px rgba(0, 0, 0, 0.85);
+  --surf-1: #0e0f12;
+  --surf-2: #14161a; /* a control face inside a panel */
+  --surf-3: #1b1d22; /* its hover / engaged face */
+  --sunk: #060708;
+  --card: #0b0c0f;
+  --hair: rgba(255, 255, 255, 0.06); /* a panel's top edge light */
+  --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+  --option: #101114; /* a themed <select>'s open option list */
+  --edge: rgba(255, 255, 255, 0.08); /* a panel's border */
+  --line-2: rgba(255, 255, 255, 0.14); /* its hover border */
+  --well: var(--sunk);
+  /* an LED's unlit socket: a lamp at rest */
+  --led-socket: #1c1e23;
+  --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.8);
+  /* dropdown caret: a data-URI cannot use var(), so the --dim hex is baked in here. INVARIANT: %23a7acb5
+     below IS --dim; retune both together. */
+  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23a7acb5' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
+
+  /* Geist + Geist Mono (OFL-1.1, vendored in src/assets/fonts; licence in licenses/). */
   --mono: 'Geist Mono', ui-monospace, Consolas, monospace;
   --sans: 'Geist', system-ui, 'Segoe UI', sans-serif;
 
@@ -447,152 +487,6 @@ option {
   min-height: 0;
 }
 
-/* ---- source row — two equal compact slot cards side by side. The plugin params drawer expands DOWN
-   as an accordion. When the drawer outgrows the (autoSize-clamped) instrument region, the drawer scrolls
-   INSIDE the card — the card shell (rounded lit top edge, header row) stays anchored, and the looper
-   never moves. Flex, not grid: a flex item's max-height:100% resolves against the container's definite
-   height, but a grid item's resolves against its auto row track (content-sized — circular, so the cap
-   never bites). Grid also lets the card's decorative top edge scroll under the clip boundary (the
-   "top-sheen drift"), taking the slot header along. ---- */
-.src {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start; /* an expanded drawer doesn't stretch its sibling card */
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto; /* belt only — cards cap at 100%, so this should never engage */
-  scrollbar-width: thin;
-  padding: 1px; /* keep the active glow from clipping against the region edge */
-}
-/* no drawer open: the two cards stretch to one band (a live card's meter row would otherwise leave
-   a hole under its sibling). The region hugs its content: the band is the taller card's height. */
-.src:not(:has(.slot__drawer--open)) {
-  align-items: stretch;
-}
-.slot {
-  flex: 1 1 0; /* two equal columns */
-  max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
-  min-width: 0;
-  border-radius: 14px;
-  background: var(--card);
-  border: 1px solid var(--edge);
-  box-shadow: inset 0 1px 0 var(--hair);
-  display: flex;
-  flex-direction: column;
-  cursor: pointer;
-  container: slot / inline-size; /* the header's one-line form keys on the card's width */
-  transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
-}
-.slot:hover {
-  background: #14161c;
-}
-/* ACTIVE = a lit warm-white rim (selection is chrome, not sound, so it carries no hue) */
-.slot--active {
-  border-color: rgba(244, 239, 230, 0.2);
-}
-/* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
-   EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
-   enough for one line */
-.slot__row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: 'id source vol';
-  align-items: center;
-  column-gap: 12px;
-  row-gap: 8px;
-  padding: 10px 18px;
-  min-width: 0;
-  flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
-}
-.slot__row:has(> .slot__acts) {
-  grid-template-areas: 'id source vol' '. acts acts';
-}
-@container slot (min-width: 760px) {
-  .slot__row:has(> .slot__acts) {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: 'id source acts vol';
-  }
-}
-/* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
-.slot__id {
-  grid-area: id;
-  font-size: 20px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--faint);
-  background: none;
-  border: 0;
-  padding: 0 2px;
-  cursor: pointer;
-  transition: color 0.2s, text-shadow 0.2s;
-}
-.slot__id:hover {
-  color: var(--dim);
-}
-.slot--active .slot__id {
-  color: var(--engaged);
-}
-.slot__id:focus-visible {
-  outline-offset: 3px;
-  border-radius: 4px;
-}
-/* the source's own controls: they wrap inside their line rather than push the card wider */
-.slot__acts {
-  grid-area: acts;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-/* toggle pill — a matte key face without an outline; engaged = the legend lights warm-white and the
-   face lifts one tone. Pressed = the face sinks. Disabled = no face, a hairline edge and a legible
-   --faint legend (tone, never an opacity fade). Explicit background so no UA face bleeds through. */
-.tgl {
-  font-size: 11px;
-  line-height: 13px; /* pinned: the slot row keeps its measured height */
-  letter-spacing: 0.06em;
-  font-weight: 600;
-  padding: 7px 12px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: var(--surf-2);
-  box-shadow: inset 0 1px 0 var(--hair);
-  color: var(--dim);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
-}
-.tgl:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--surf-3);
-}
-.tgl:active:not(:disabled) {
-  background: var(--sunk);
-  box-shadow: var(--pressed);
-}
-.tgl:disabled {
-  cursor: default;
-  background: transparent;
-  box-shadow: none;
-  border-color: rgba(255, 255, 255, 0.06);
-  color: var(--faint);
-}
-.tgl.on {
-  color: var(--engaged);
-  background: var(--surf-3);
-  border-color: rgba(244, 239, 230, 0.28);
-  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
-}
-/* live input stays a sound colour (it IS sound) */
-.tgl.on-green {
-  color: var(--play);
-  background: color-mix(in srgb, var(--play) 8%, var(--surf-2));
-  border-color: color-mix(in srgb, var(--play) 40%, transparent);
-  text-shadow: 0 0 10px color-mix(in srgb, var(--play) 45%, transparent);
-}
-
 /* ---- range sliders — ONE skin ----
    Every <input type=range> (master / click / auto volume, the lane fader, FX + plugin params) wears
    `.lf-range`: a 3px flat track with an optional --fill left portion + an 11px round --text cap.
@@ -649,84 +543,4 @@ option {
   border-radius: 999px;
   background: var(--text);
   box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
-}
-
-/* the source picker and the input pick — flat selects on the control face. The picker names the slot's
-   source, so it reads at the slot name's size and weight. Explicit background-color so no UA face shows. */
-.slot__source,
-.slot__in {
-  height: 30px;
-  min-width: 0;
-  appearance: none;
-  -webkit-appearance: none;
-  color-scheme: dark;
-  padding: 0 28px 0 11px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  box-shadow: inset 0 1px 0 var(--hair);
-  font-family: inherit;
-  cursor: pointer;
-  background-image: var(--caret-svg);
-  background-color: var(--surf-2);
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 12px 12px;
-  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
-}
-.slot__source {
-  grid-area: source;
-  justify-self: start;
-  width: 100%;
-  max-width: 300px;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text);
-  text-overflow: ellipsis;
-}
-.slot__in {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--dim);
-}
-.slot__source:hover:not(:disabled),
-.slot__in:hover {
-  color: var(--text);
-  background-color: var(--surf-3);
-}
-.slot__source:disabled {
-  cursor: default;
-  color: var(--faint);
-}
-.slot__source:focus-visible,
-.slot__in:focus-visible {
-  outline-offset: 1px;
-}
-.slot__source option,
-.slot__in option {
-  background: var(--option);
-  color: var(--text);
-  font-weight: 500;
-}
-.slot__source option:checked,
-.slot__in option:checked {
-  background: #2a2d35;
-  color: #fff;
-}
-
-/* the params drawer (accordion) — a sub-panel that expands the slot card downward. Rendered
-   whenever a plugin is loaded (so its subscriptions stay live); open/close is CSS-only, no remount.
-   The drawer is the card's scroll region: when it outgrows the instrument region it scrolls under the
-   pinned header row, keeping the card's top edge anchored. */
-.slot__drawer {
-  display: none;
-}
-.slot__drawer--open {
-  display: block;
-  border-top: 1px solid var(--edge);
-  padding: 12px 18px 14px;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
 }

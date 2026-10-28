@@ -25,6 +25,7 @@ import { PluginBar, PluginParams } from './PluginControls';
 import { InputPick, LiveButton, SlotMeter, SlotVolume } from './SlotControls';
 import { liveShown } from './live';
 import { openSettings, type SettingsPage } from '../../settings-opener';
+import './slots.css';
 
 /**
  * One instrument slot (A / B) — a compact card. Its header: the A/B identity button, the source picker

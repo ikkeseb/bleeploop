@@ -5,8 +5,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 `state/` excepted (the root `AGENTS.md` rule).
 
 - **Type and tokens:** Geist for words, Geist Mono only for changing numeric read-outs (both vendored,
-  `src/assets/fonts/`); no display or retro font. The surface language ("Instrument": matte tone steps,
-  colour only for sound, warm-white = engaged) and its tokens live in the `src/app.css` header; use
+  `src/assets/fonts/`); no display or retro font. The surface language ("Light": one black ground,
+  controls as quiet words, hue only for sound with cold light playing and warm light writing,
+  warm-white = engaged, three shared columns) and its tokens live in the `src/app.css` header; use
   the tokens. `looper/waveform.ts` reads the colour tokens once per lane mount: a token edit over
   HMR shows stale canvas colours until a page reload.
 - **The rendered app is the looper-UI spec.** Before looper-UI work, run `pnpm probe contact-sheet`

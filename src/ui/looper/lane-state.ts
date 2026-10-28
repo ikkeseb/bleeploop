@@ -1,6 +1,8 @@
 import { createMemo, type Accessor } from 'solid-js';
 import { clock, looper, type TrackState } from '../state/audio';
-import { laneCue, refusalText } from './gates';
+import { laneCue, recDubGate, refusalText } from './gates';
+import { KEY_ACTIONS } from '../../app/transport-keys';
+import type { ActionId } from '../../app/actions';
 
 /**
  * OWNS: what a lane shows — its display state, the word it reads as, its well message and its count-in
@@ -56,6 +58,21 @@ interface LaneView {
   wellMsg: Accessor<string>;
   /** The count-in numeral (4-3-2-1) of an armed take that is counted in; 0 otherwise. */
   wellCount: Accessor<number>;
+  /** What a press does next on this lane, as the RC-505's ring says it: the transport key that does it
+   * and the outcome in one word ("SPACE" + "DUB"). Null while a press would do nothing visible (a take
+   * waiting for its downbeat, a refused press). A pedal learned to the same action does the same. */
+  nextPress: Accessor<NextPress | null>;
+}
+
+export interface NextPress {
+  key: string;
+  verb: string;
+}
+
+/** The key the transport binds to `action` (`src/app/transport-keys.ts` KEY_ACTIONS), as a cap reads it. */
+function keyName(action: ActionId): string {
+  const k = Object.keys(KEY_ACTIONS).find((key) => KEY_ACTIONS[key] === action) ?? '';
+  return k === ' ' ? 'SPACE' : k.toUpperCase();
 }
 
 /** The shared view of lane `i`. */
@@ -111,5 +128,16 @@ export function createLaneView(i: number): LaneView {
     return '';
   };
   const wellCount = () => (!cue() && countedIn() ? clock.countLeft() : 0);
-  return { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount };
+  // REC/DUB (recDub) walks EMPTY → RECORDING → PLAYING → OVERDUBBING → PLAYING (the engine's
+  // `Looper::rec_dub`); a STOPPED lane or a pending stop takes no REC/DUB, so the hint names
+  // PLAY/STOP's key instead.
+  const nextPress = createMemo((): NextPress | null => {
+    if (stopping()) return { key: keyName('playStop'), verb: 'STOP NOW' };
+    const d = displayState();
+    if (d === 'STOPPED') return { key: keyName('playStop'), verb: 'PLAY' };
+    if (d === 'ARMED' || !recDubGate(i).ok) return null;
+    const verb = d === 'EMPTY' ? 'REC' : d === 'LISTENING' ? 'CANCEL' : d === 'PLAYING' ? 'DUB' : 'PLAY';
+    return { key: keyName('recDub'), verb };
+  });
+  return { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount, nextPress };
 }
