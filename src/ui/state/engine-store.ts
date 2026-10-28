@@ -210,7 +210,10 @@ const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_
 /** The meter picked and not yet echoed. Until its own `Transport` or a reset, an older `Transport` (a page
  * behind the feed) writes nothing over the kept meter, and a reset's adoption asks this one, so a reset
  * that lost the echo does not send the meter from before the pick back. A pick a lock refused is dropped
- * by the engine if a reset asks it again, and was never kept. */
+ * by the engine if a reset asks it again, and was never kept. Residuals, both from the host keeping no
+ * `SetMeter` for 4/4 (`settings.rs` `transported`: that is how a fresh engine asks for the kept meter): a
+ * pick a lock refused waits until a reset, so one after a later CLEAR ALL applies it; a reload between
+ * a pick and its echo sends the kept meter from before the pick. */
 let pendingMeter: TimeSignature | null = null;
 /** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
  * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
