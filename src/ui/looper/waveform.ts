@@ -34,7 +34,7 @@ import { masterBars } from './shared';
 // Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
 const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
-const GRID_NUM = 'rgba(148,168,215,.26)'; //   engraved bar numbers, top-left of each bar
+const GRID_NUM = 'rgba(148,168,215,.28)'; //   engraved bar numbers, top-left of each bar
 // The wave as on an instrument display (alpha of the state colour): a low-alpha body (over the outer it
 // lands near .36) inside a faint outer envelope, and the envelope's contour a fine line a step brighter,
 // so the take reads by its edge, not as a block of paint. The outer fill stays at or over .18 so a take's

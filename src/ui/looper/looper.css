@@ -373,7 +373,7 @@
 }
 /* engaged (FX / MUTE / REV) = the lit warm-white legend of every engaged key, on the face one step up */
 .lp-pb.is-on,
-.lp-pb.is-on:hover:not(:disabled) {
+.lp-pb.is-on:hover:not(:disabled):not(:active) {
   color: var(--engaged);
   background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
@@ -403,9 +403,13 @@
 }
 /* CLR armed → SURE?: amber warn (a take is irreversible): the amber legend on a face */
 .lp-pb--clr.is-armed,
-.lp-pb--clr.is-armed:hover {
+.lp-pb--clr.is-armed:hover:not(:active) {
   color: var(--dub);
   background: color-mix(in srgb, var(--dub) 12%, transparent);
+}
+/* pressed: the sunk face (.lp-pb:active) wins, the amber legend stays */
+.lp-pb--clr.is-armed:active:not(:disabled) {
+  color: var(--dub);
 }
 
 /* ---- the WAVE WELL — this row's strip of the one glass display (waveform + playhead drawn by
@@ -499,7 +503,7 @@
   padding: 5px 10px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
-  background: rgba(10, 11, 14, 0.78);
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
   letter-spacing: 0.14em;
 }
 .lp-lane[data-state='armed'] .lp-lane__wellmsg {
