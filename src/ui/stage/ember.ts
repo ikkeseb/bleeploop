@@ -26,27 +26,30 @@ import {
 } from './visual';
 
 /**
- * EMBER: five rings of light on black, each lane's loop wrapped once around as a continuous waveform
- * band (lane 1 outermost, twelve o'clock is the loop start), its state in one hue: ice plays (a pale,
- * glacial take on the play colour), amber writes (an overdub's band, the loop's ice a thread inside
- * it), red records, a ghost grey is stopped (silver) or muted (darker). A white-hot star rides each
- * sounding ring at the playhead, and the instrument streams in from beyond the window as a braided
- * filament trailing dust that lands on the pen: the write head while a lane overdubs or records
- * (amber, red), else the selected lane's place under the playhead (steel). It is as bright as the input
- * meter, and a silent input draws no stream.
+ * EMBER: five rings of light on black, each lane's loop wrapped once around as a waveform (lane 1
+ * outermost, twelve o'clock is the loop start): fine needles of light, one per column at its own share
+ * of the peak, over a smooth body. Its state is one hue: ice plays (a pale, glacial take on the play
+ * colour), amber writes (an overdub's band, the loop's ice a thread inside it), red records, a stopped
+ * ring is a silver band and a muted one a thin ghost line. A white-hot star rides each sounding ring at
+ * the playhead, and the instrument streams in from beyond the window as a braided filament in a cloud of
+ * dust that lands on the pen: the write head while a lane overdubs or records (amber, red; a take's head
+ * is held to the end of its drawn band), else the lane about to write (armed, listening), else the
+ * selected lane, under the playhead (steel). It is as bright as the input meter, and a silent input
+ * draws no stream. The selected ring carries a warm-white rail at its band's inner fringe.
  *
  * Baked, and redrawn only when a lane's form changes (`laneChanged`) or on layout: the ground (the
- * floor, its haze and dust), one window-sized bitmap of the ground under every ring's band (a change
- * redraws only that ring's annulus, from the ground), and a quarter-scale atlas of each ring's bloom,
- * blurred once (a take in flight re-bakes its bloom at most every GLOW_MS). A frame is blits plus the
- * moving light: each sounding ring's bloom at its own level, blitted only over its annulus (tiles laid
- * out on layout; a muted or stopped ring has none), a wake behind the playhead, the stars (sprites made
- * on layout, their white-hot cores laid over the light rather than added), the filament and its sparks
- * (a few strokes and rects), an overdub's thread and the selected ring's warm-white spine. No
- * blur, shadow or gradient is made in a frame; every size passed to the canvas is whole device px (the
- * filament's whole quarter px under a fixed scale), every alpha, rotation and arc span comes from
- * `visual.ts`'s tables, and the frame's own fractions live in a typed array, so this module's frame
- * code allocates nothing in steady playback (the stage-view probe's budget case).
+ * floor, its haze, rays from the centre and dust, all under the census floor), one window-sized bitmap
+ * of the ground under every ring's band (a change redraws only that ring's annulus, from the ground),
+ * and a quarter-scale atlas of each sounding ring's bloom, blurred once, its band widened before the far
+ * blur into a halo (a take in flight re-bakes its bloom at most every GLOW_MS; a muted or stopped ring
+ * has none). A frame is blits plus the moving light: each sounding ring's bloom at its own level,
+ * blitted only over its annulus (tiles laid out on layout), a wake behind the playhead, the stars
+ * (sprites made on layout, their white-hot cores laid over the light rather than added), the filament
+ * and its dust (a few strokes and rects), an overdub's thread and the selection's rail. No blur, shadow
+ * or gradient is made in a frame; every size passed to the canvas is whole device px (the filament's
+ * whole quarter px under a fixed scale), every alpha, rotation and arc span comes from `visual.ts`'s
+ * tables, and the frame's own fractions live in a typed array, so this module's frame code allocates
+ * nothing in steady playback (the stage-view probe's budget case).
  *
  * The additive light stays under warm white (SELECTED): ice keeps its red under its blue and the hot
  * cores that land on it carry little red, amber and red keep their blue low.
@@ -70,38 +73,50 @@ const WAVE = Float64Array.of(2.3, 3.4, 5.2, 1.6);
 const SPEED = Float64Array.of(4.6, 6.3, 8.1, 3.4);
 const PHASE = Float64Array.of(0, 2.2, 4.1, 1.2);
 const SHARE = Float64Array.of(1, 0.7, 0.48, 0.85);
-// Sparks drift in along the filament: where each starts, its speed (filaments a second) and its offset.
-const SPARKS = 48;
+// The dust the filament trails: where each mote starts, its speed in (filaments a second), its offset
+// from the stream (most close in, a few far out: a cloud, densest at the pen) and whether it is a speck.
+const SPARKS = 180;
 const SPARK_U = new Float64Array(SPARKS);
 const SPARK_V = new Float64Array(SPARKS);
 const SPARK_J = new Float64Array(SPARKS);
+const SPARK_BIG = new Uint8Array(SPARKS);
 {
   let seed = 11;
   const rnd = (): number => (seed = (seed * 16807) % 2147483647) / 2147483647;
   for (let k = 0; k < SPARKS; k++) {
     SPARK_U[k] = rnd();
-    SPARK_V[k] = 0.2 + 0.32 * rnd();
-    SPARK_J[k] = rnd() * 2 - 1;
+    SPARK_V[k] = 0.12 + 0.3 * rnd();
+    const j = rnd() * 2 - 1;
+    SPARK_J[k] = j * Math.abs(j);
+    SPARK_BIG[k] = rnd() < 0.3 ? 1 : 0;
   }
 }
-// The needles a band's peaks are drawn as: per column a share of the peak, fixed, so a burst reads as a
-// spray of fine spikes over the smooth body rather than a solid shape.
+// The needles a band's peaks are drawn as: per column a share of the peak, fixed and widely spread, so a
+// burst reads as a spray of fine spikes of many heights over the smooth body, never a filled shape.
 const NEEDLE = new Float32Array(MAX_N + 1);
 {
   let seed = 3;
-  for (let j = 0; j <= MAX_N; j++) NEEDLE[j] = 0.42 + 0.58 * (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let j = 0; j <= MAX_N; j++) NEEDLE[j] = 0.14 + 0.86 * ((seed = (seed * 16807) % 2147483647) / 2147483647) ** 1.3;
 }
 const DUST = 460; // baked specks round the rings, at 1920x1080 (fewer on a smaller window)
-// A ring's tone, and per tone its band's alpha, its body's and its core line's.
+const RAYS = 56; // baked rays from the centre
+// A ring's tone, and per tone: its needles' alpha and reach (a share of the band's), its body's alpha,
+// its core line's, and a soft band under it all (a stopped ring's, which a muted ring's ghost line lacks).
 const NONE = 0;
 const ICE = 1;
 const EMBER = 2;
 const REC = 3;
 const MUTED = 4;
 const STOPPED = 5;
-const BAND_A = Float64Array.of(0, 0.6, 0.62, 0.6, 0.36, 0.5);
-const BODY_A = Float64Array.of(0, 0.78, 0.86, 0.86, 0.36, 0.72);
-const CORE_A = Float64Array.of(0, 0.75, 0.9, 0.9, 0, 0.45);
+const NEEDLE_A = Float64Array.of(0, 0.86, 0.92, 0.9, 0.5, 0.6);
+const NEEDLE_K = Float64Array.of(0, 1, 1, 1, 0.3, 0.9);
+const BODY_A = Float64Array.of(0, 0.8, 0.86, 0.86, 0, 0.66);
+const CORE_A = Float64Array.of(0, 0.75, 0.9, 0.9, 0.45, 0.45);
+const SOFT_A = Float64Array.of(0, 0, 0, 0, 0, 0.36);
+// A band's shapes (`band`).
+const ENVELOPE = 0;
+const BODY = 1;
+const TIPS = 2;
 // The frame's fractions, read by the helpers it calls (a double passed to a call is boxed).
 const SEC = 0; // the frame's time in seconds
 const SWAY = 1; // the filament's swing, device px
@@ -223,6 +238,7 @@ function createEmber(): ViewDraw {
   const tileAt = new Int32Array(LANES + 1);
   const fx = new Int32Array(STRANDS * (K + 1)); // the filament, quarter device px
   const fy = new Int32Array(STRANDS * (K + 1));
+  const recAt = new Int32Array(LANES); // a take in flight's head this frame, in turn steps (held to its band, `draw`)
   let dpr = 1;
   let cx = 0;
   let cy = 0;
@@ -242,6 +258,8 @@ function createEmber(): ViewDraw {
   let mid4 = 4;
   let core4 = 4;
   let spark4 = 4;
+  let mote4 = 4;
+  let haloW = 2; // the halo's widening of a band before its far blur, atlas px
   let wakeSteps = TURN_STEPS >> 4; // a wake's span: a beat, in turn steps
   let dirty = true;
   let full = true;
@@ -297,9 +315,11 @@ function createEmber(): ViewDraw {
     ground.height = base.height = s.dh;
     reach = Math.ceil(Math.hypot(Math.max(cx, s.dw - cx), Math.max(cy, s.dh - cy)) + 40 * dpr);
 
-    // The bloom atlas: a cell per ring, wide enough for its far blur, and the tiles that cover the
-    // ring's annulus in it (a row of TILE atlas px: one span across, or two where it passes the hole).
-    const margin = Math.round(52 * dpr);
+    // The bloom atlas: a cell per ring, wide enough for its widened far blur (the halo), and the tiles
+    // that cover the ring's annulus in it (a row of TILE atlas px: one span across, or two where it
+    // passes the hole).
+    haloW = Math.max(2, Math.round(2.5 * dpr));
+    const margin = Math.round(48 * dpr) + DS * haloW;
     let x = 0;
     for (let i = 0; i < LANES; i++) {
       cell[i] = 2 * Math.ceil((r[i] + sw + margin) / DS);
@@ -340,15 +360,16 @@ function createEmber(): ViewDraw {
     blurFar = `blur(${(4.4 * dpr).toFixed(2)}px)`;
     blurSoft = `blur(${(1.2 * dpr).toFixed(2)}px)`;
 
-    // Ice is the play colour paled toward glacier, still play green to the eye that counts it; its hot
-    // core carries less red than its blue, so the light summed on it whitens and never reaches warm white.
-    ice = mix(pal.play, '#ffffff', 0.62);
+    // Ice is the play colour paled toward glacier, still play green to the eye that counts it (the
+    // needles palest, the body a shade greener under them); its hot core carries less red than its blue,
+    // so the light summed on it whitens and never reaches warm white.
+    ice = mix(pal.play, '#ffffff', 0.74);
     amber = pal.dub;
-    const steel = mix(pal.dim, pal.cyan, 0.5);
+    const steel = mix(pal.text, pal.cyan, 0.45);
     const cold = mix(pal.play, '#38fff0', 0.55); // the light's white-hot core over ice: next to no red
     bandC = ['', ice, amber, pal.rec, pal.faint, pal.dim];
-    bodyC = ['', mix(pal.play, '#ffffff', 0.7), mix(amber, '#ffe08a', 0.35), mix(pal.rec, '#ff8a7a', 0.3), pal.faint, pal.dim];
-    coreC = ['', mix(pal.play, '#cafff0', 0.85), mix(amber, '#fff2c0', 0.6), mix(pal.rec, '#ffffff', 0.1), '', pal.text];
+    bodyC = ['', mix(pal.play, '#ffffff', 0.64), mix(amber, '#ffe08a', 0.35), mix(pal.rec, '#ff8a7a', 0.3), pal.faint, pal.dim];
+    coreC = ['', mix(pal.play, '#cafff0', 0.85), mix(amber, '#fff2c0', 0.6), mix(pal.rec, '#ffffff', 0.1), pal.faint, pal.text];
     glowC = ['', ice, amber, pal.rec, pal.faint, pal.dim];
     zs = Math.max(10, Math.round(1.1 * S));
     zf = Math.max(14, Math.round(1.7 * S));
@@ -370,32 +391,66 @@ function createEmber(): ViewDraw {
     glow4 = 4 * Math.max(4, Math.round(18 * dpr));
     mid4 = 4 * Math.max(2, Math.round(5 * dpr));
     core4 = 4 * Math.max(1, Math.round(1.6 * dpr));
-    spark4 = 4 * Math.max(1, Math.round(1.6 * dpr));
+    spark4 = 4 * Math.max(2, Math.round(2.6 * dpr));
+    mote4 = 4 * Math.max(1, Math.round(1.6 * dpr));
 
-    // The ground: the token background, a faint cool haze round the rings, the corners sinking to
-    // black, and dust: specks mostly just outside ring 1, a few between the rings and in the field.
+    // The ground: the token background, a faint cool haze round the rings and rays from the centre (all
+    // of it under the census floor of 40, so it lights no state), the corners sinking to black, and dust:
+    // specks mostly just outside ring 1, a few between the rings and in the field.
     const gc = gctx;
     if (gc) {
+      let seed = 7;
+      const rnd = (): number => (seed = (seed * 16807) % 2147483647) / 2147483647;
       gc.setTransform(1, 0, 0, 1, 0, 0);
       gc.globalCompositeOperation = 'source-over';
       gc.globalAlpha = 1;
       gc.fillStyle = pal.bg;
       gc.fillRect(0, 0, s.dw, s.dh);
       const air = mix(pal.text, ice, 0.3);
-      const haze = gc.createRadialGradient(cx, cy, 0.25 * R, cx, cy, 1.45 * R);
+      const haze = gc.createRadialGradient(cx, cy, 0.25 * R, cx, cy, 1.5 * R);
       haze.addColorStop(0, withAlpha(air, 0));
-      haze.addColorStop(0.55, withAlpha(air, 0.05));
-      haze.addColorStop(0.8, withAlpha(air, 0.03));
+      haze.addColorStop(0.5, withAlpha(air, 0.06));
+      haze.addColorStop(0.75, withAlpha(air, 0.045));
       haze.addColorStop(1, withAlpha(air, 0));
       gc.fillStyle = haze;
       gc.fillRect(0, 0, s.dw, s.dh);
+      // The rays, drawn at the atlas's quarter scale and laid in stretched, which softens them.
+      const q = document.createElement('canvas');
+      q.width = Math.ceil(s.dw / DS);
+      q.height = Math.ceil(s.dh / DS);
+      const qc = q.getContext('2d');
+      if (qc) {
+        const qx = cx / DS;
+        const qy = cy / DS;
+        const qR = R / DS;
+        const fade = qc.createRadialGradient(qx, qy, 0.3 * qR, qx, qy, 1.9 * qR);
+        fade.addColorStop(0, withAlpha(air, 0));
+        fade.addColorStop(0.45, withAlpha(air, 1));
+        fade.addColorStop(0.7, withAlpha(air, 0.5));
+        fade.addColorStop(1, withAlpha(air, 0));
+        qc.fillStyle = fade;
+        for (let k = 0; k < RAYS; k++) {
+          const a = TAU * rnd();
+          const w = 0.003 + 0.014 * rnd();
+          const len = qR * (1.15 + 0.75 * rnd());
+          qc.globalAlpha = 0.006 + 0.022 * rnd() ** 2;
+          qc.beginPath();
+          qc.moveTo(qx, qy);
+          qc.lineTo(qx + Math.cos(a - w) * len, qy + Math.sin(a - w) * len);
+          qc.lineTo(qx + Math.cos(a + w) * len, qy + Math.sin(a + w) * len);
+          qc.closePath();
+          qc.fill();
+        }
+        gc.globalCompositeOperation = 'lighter';
+        gc.drawImage(q, 0, 0, q.width * DS, q.height * DS);
+        gc.globalCompositeOperation = 'source-over';
+      }
+      q.width = q.height = 0;
       const vignette = gc.createRadialGradient(cx, cy, 0.5 * Math.max(cx, cy), cx, cy, reach);
       vignette.addColorStop(0, 'rgba(0,0,0,0)');
       vignette.addColorStop(1, 'rgba(0,0,0,0.6)');
       gc.fillStyle = vignette;
       gc.fillRect(0, 0, s.dw, s.dh);
-      let seed = 7;
-      const rnd = (): number => (seed = (seed * 16807) % 2147483647) / 2147483647;
       const pale = mix(pal.text, ice, 0.35);
       const warm = mix(amber, pal.text, 0.3);
       const count = Math.round((DUST * s.w * s.h) / (1920 * 1080));
@@ -452,11 +507,12 @@ function createEmber(): ViewDraw {
   }
 
   /**
-   * Lane `i`'s band round (x0, y0) at `radius` as the current path: its outer edge out by the peak (or
-   * the body), its inner edge in by the trough (or most of the body), at least `least` each way. A loop
-   * that fills its ring closes into an annulus (two loops, opposite ways), so it has no seam. Bake only.
+   * Lane `i`'s band round (x0, y0) at `radius` as the current path, by `shape`: its ENVELOPE (out by the
+   * peak, in by the trough), its BODY (out and in by the smoothed level) or its TIPS (where its needles
+   * end), at least `floor` each way. A loop that fills its ring closes into an annulus (two loops,
+   * opposite ways), so it has no seam. Bake only.
    */
-  function band(c: CanvasRenderingContext2D, x0: number, y0: number, radius: number, reachPx: number, i: number, ofBody: boolean, floor: number): void {
+  function band(c: CanvasRenderingContext2D, x0: number, y0: number, radius: number, reachPx: number, i: number, shape: number, floor: number): void {
     const N = n[i];
     const k = cols[i];
     const h = hi[i];
@@ -466,22 +522,43 @@ function createEmber(): ViewDraw {
     c.beginPath();
     for (let j = 0; j < k; j++) {
       const a = TOP + (TAU * (j + 0.5)) / N;
-      const out = radius + Math.max(floor, reachPx * (ofBody ? 0.8 * b[j] : h[j] * NEEDLE[j]));
+      const out = radius + Math.max(floor, reachPx * (shape === BODY ? 0.5 * b[j] : shape === TIPS ? h[j] * NEEDLE[j] : h[j]));
       if (j === 0) c.moveTo(x0 + Math.cos(a) * out, y0 + Math.sin(a) * out);
       else c.lineTo(x0 + Math.cos(a) * out, y0 + Math.sin(a) * out);
     }
     if (ring) c.closePath();
     for (let j = k - 1; j >= 0; j--) {
       const a = TOP + (TAU * (j + 0.5)) / N;
-      const inn = radius - Math.max(floor, reachPx * (ofBody ? 0.65 * b[j] : -l[j] * NEEDLE[MAX_N - j]));
+      const inn = radius - Math.max(floor, reachPx * (shape === BODY ? 0.42 * b[j] : shape === TIPS ? -l[j] * NEEDLE[MAX_N - j] : -l[j]));
       if (ring && j === k - 1) c.moveTo(x0 + Math.cos(a) * inn, y0 + Math.sin(a) * inn);
       else c.lineTo(x0 + Math.cos(a) * inn, y0 + Math.sin(a) * inn);
     }
     c.closePath();
   }
 
-  /** Sample lane `i` again: its envelope, the loop's end eased into its start where it fills the ring
-   * (no cut at twelve o'clock), a take's start eased in from silence (no cap). */
+  /** Lane `i`'s peaks as the current path: per column one radial needle from its trough to its peak,
+   * each its own share of them (`NEEDLE`), at least `least` each way. Bake only. */
+  function needles(c: CanvasRenderingContext2D, reachPx: number, i: number): void {
+    const N = n[i];
+    const k = cols[i];
+    const h = hi[i];
+    const l = lo[i];
+    const radius = r[i];
+    c.beginPath();
+    for (let j = 0; j < k; j++) {
+      const a = TOP + (TAU * (j + 0.5)) / N;
+      const co = Math.cos(a);
+      const si = Math.sin(a);
+      const out = radius + Math.max(least, reachPx * h[j] * NEEDLE[j]);
+      const inn = radius - Math.max(least, reachPx * -l[j] * NEEDLE[MAX_N - j]);
+      c.moveTo(cx + co * inn, cy + si * inn);
+      c.lineTo(cx + co * out, cy + si * out);
+    }
+  }
+
+  /** Sample lane `i` again: its envelope, its body smoothed both ways (a level that swells and ebbs, no
+   * attack's edge), the loop's end eased into its start where it fills the ring (no cut at twelve
+   * o'clock), a take's start eased in from silence over a long stretch (a taper, no cap or lump). */
   function sample(i: number): void {
     looper.peaksInto(i, peaks);
     const span = stamp.span[i];
@@ -496,10 +573,12 @@ function createEmber(): ViewDraw {
       l[k] = -Math.pow(-env.lo[k], 0.7);
       b[k] = Math.pow(env.body[k], 0.7);
     }
+    for (let k = 1; k < held; k++) b[k] = 0.18 * b[k] + 0.82 * b[k - 1];
+    for (let k = held - 2; k >= 0; k--) b[k] = 0.18 * b[k] + 0.82 * b[k + 1];
     cols[i] = held;
     stale[i] = 0;
-    const m = Math.min(40, held >> 3);
     if (held === N) {
+      const m = Math.min(40, held >> 3);
       for (let q = 0; q < m; q++) {
         const w = 0.5 * (1 - q / m);
         const e = N - 1 - q;
@@ -510,8 +589,9 @@ function createEmber(): ViewDraw {
         }
       }
     } else {
+      const m = Math.min(80, held >> 2);
       for (let q = 0; q < m; q++) {
-        const f = (q + 1) / (m + 1);
+        const f = ((q + 1) / (m + 1)) ** 2;
         h[q] *= f;
         l[q] *= f;
         b[q] *= f;
@@ -519,8 +599,9 @@ function createEmber(): ViewDraw {
     }
   }
 
-  /** Lane `i` on the bitmap: the hairline or the tape where it holds no audio, and its band: the peaks,
-   * the body over them, a core line. */
+  /** Lane `i` on the bitmap: the hairline or the tape where it holds no audio, and its band: a stopped
+   * ring's soft envelope, the needles, the body over them, a core line (a muted ring: short needles and
+   * its line, a ghost). */
   function paintLane(c: CanvasRenderingContext2D, pal: Palette, i: number, master: number): void {
     const kind = feed.kind[i];
     if (stale[i]) sample(i);
@@ -541,27 +622,31 @@ function createEmber(): ViewDraw {
     }
     if (k > 0) {
       const t = toneOf(i);
-      // A ghost ring has no bloom: its peaks are softened here instead (a take in flight, redrawn each
-      // frame, is not).
-      const soft = t === MUTED || t === STOPPED;
-      c.fillStyle = bandC[t];
-      c.globalAlpha = BAND_A[t];
-      if (soft) c.filter = blurSoft;
-      band(c, cx, cy, r[i], sw, i, false, least);
-      c.fill();
-      c.filter = 'none';
-      c.fillStyle = bodyC[t];
-      c.globalAlpha = BODY_A[t];
-      band(c, cx, cy, r[i], sw, i, true, least);
-      c.fill();
-      if (CORE_A[t] > 0) {
-        c.strokeStyle = coreC[t];
-        c.globalAlpha = CORE_A[t];
-        c.lineWidth = hair;
-        c.beginPath();
-        c.arc(cx, cy, r[i], TOP, end);
-        c.stroke();
+      if (SOFT_A[t] > 0) {
+        c.fillStyle = bandC[t];
+        c.globalAlpha = SOFT_A[t];
+        c.filter = blurSoft;
+        band(c, cx, cy, r[i], 0.8 * sw, i, ENVELOPE, least);
+        c.fill();
+        c.filter = 'none';
       }
+      c.strokeStyle = bandC[t];
+      c.globalAlpha = NEEDLE_A[t];
+      c.lineWidth = hair;
+      needles(c, NEEDLE_K[t] * sw, i);
+      c.stroke();
+      if (BODY_A[t] > 0) {
+        c.fillStyle = bodyC[t];
+        c.globalAlpha = BODY_A[t];
+        band(c, cx, cy, r[i], sw, i, BODY, least);
+        c.fill();
+      }
+      c.strokeStyle = coreC[t];
+      c.globalAlpha = CORE_A[t];
+      c.lineWidth = hair;
+      c.beginPath();
+      c.arc(cx, cy, r[i], TOP, end);
+      c.stroke();
     }
   }
 
@@ -599,15 +684,18 @@ function createEmber(): ViewDraw {
     c.globalAlpha = 1;
   }
 
-  /** Lane `i`'s bloom cell: its band at a quarter scale in its tone's colour, blurred near and far, then
-   * cut back where the band itself lies, so the bloom glows round the band and does not wash it white. */
+  /** Lane `i`'s bloom cell: its envelope at a quarter scale in its tone's colour, blurred near, then
+   * widened and blurred far (the halo), then cut back where the needles stand, so the bloom glows round
+   * the band and does not wash it white. A ghost ring (muted, stopped) has none: never blitted,
+   * never baked. */
   function bakeGlow(i: number): void {
     const a = actx;
     const x = sctx;
     glowDue[i] = 0;
     glowKind[i] = feed.kind[i];
     glowMuted[i] = feed.muted[i];
-    if (!a || !x) return;
+    const t = toneOf(i);
+    if (!a || !x || t === MUTED || t === STOPPED) return;
     const g = cell[i];
     const m = g / 2;
     a.save();
@@ -619,20 +707,25 @@ function createEmber(): ViewDraw {
       x.setTransform(1, 0, 0, 1, 0, 0);
       x.globalAlpha = 1;
       x.clearRect(0, 0, g, g);
-      x.fillStyle = glowC[toneOf(i)];
-      band(x, m, m, r[i] / DS, sw / DS, i, false, 0.5 * dpr);
+      x.fillStyle = glowC[t];
+      band(x, m, m, r[i] / DS, sw / DS, i, ENVELOPE, 0.5 * dpr);
       x.fill();
       a.filter = blurNear;
       a.globalAlpha = 0.7;
       a.drawImage(scratch, 0, 0, g, g, cellX[i], 0, g, g);
+      x.strokeStyle = glowC[t];
+      x.lineWidth = haloW;
+      x.lineJoin = 'round';
+      x.stroke();
       a.filter = blurFar;
       a.globalCompositeOperation = 'lighter';
       a.globalAlpha = 1;
       a.drawImage(scratch, 0, 0, g, g, cellX[i], 0, g, g);
-      // The cut: the band just inside its own edge, so no dark seam opens between band and bloom.
+      // The cut: where the needles stand, just inside their tips (at this scale their spread, so the
+      // bloom thins in among the tips and opens no dark wedge round a burst, nor a seam at its edge).
       x.clearRect(0, 0, g, g);
       x.fillStyle = '#000';
-      band(x, m, m, r[i] / DS, (0.92 * sw) / DS, i, false, 0.3 * dpr);
+      band(x, m, m, r[i] / DS, (0.92 * sw) / DS, i, TIPS, 0.3 * dpr);
       x.fill();
       a.filter = 'none';
       a.globalCompositeOperation = 'destination-out';
@@ -678,8 +771,8 @@ function createEmber(): ViewDraw {
     c.stroke();
   }
 
-  /** The sparks, drifting in along the filament to ring `p`'s pen at `step` (quarter px), brightest
-   * near it. */
+  /** The dust, drifting in along the filament to ring `p`'s pen at `step` (quarter px): a cloud round
+   * the stream, slowing and gathering as it nears the pen, brightest there. */
   function sparks(c: CanvasRenderingContext2D, p: number, step: number): void {
     const t = mem[SEC];
     const sway = mem[SWAY];
@@ -687,19 +780,20 @@ function createEmber(): ViewDraw {
     const th = TOP + (TAU * step) / TURN_STEPS;
     const r0 = r[p];
     const span = reach - r0;
-    const h = spark4 >> 1;
     for (let k = 0; k < SPARKS; k++) {
-      let u = SPARK_U[k] - t * SPARK_V[k];
-      u -= Math.floor(u);
+      let w = SPARK_U[k] - t * SPARK_V[k];
+      w -= Math.floor(w);
+      const u = w * w;
       const j = k % STRANDS;
       const rho = r0 + span * u;
       const phi = th - SWEEP * u * u;
       const co = Math.cos(phi);
       const si = Math.sin(phi);
       const taper = (u < 0.16 ? u / 0.16 : 1) * sway;
-      const d = taper * (0.55 * Math.sin(3.1 * u + 0.9 * t) + SHARE[j] * Math.sin(TAU * WAVE[j] * u + SPEED[j] * t + PHASE[j])) + SPARK_J[k] * (3 + 30 * u) * dpr;
-      c.globalAlpha = A[(v * (1 - 0.75 * u) * 255) | 0];
-      c.fillRect((((cx + co * rho - si * d) * 4) | 0) - h, (((cy + si * rho + co * d) * 4) | 0) - h, spark4, spark4);
+      const d = taper * (0.55 * Math.sin(3.1 * u + 0.9 * t) + SHARE[j] * Math.sin(TAU * WAVE[j] * u + SPEED[j] * t + PHASE[j])) + SPARK_J[k] * (4 + 150 * u) * dpr;
+      const z = SPARK_BIG[k] ? spark4 : mote4;
+      c.globalAlpha = A[(v * (1.2 - 0.8 * u) * 255) | 0];
+      c.fillRect((((cx + co * rho - si * d) * 4) | 0) - (z >> 1), (((cy + si * rho + co * d) * 4) | 0) - (z >> 1), z, z);
     }
   }
 
@@ -746,6 +840,16 @@ function createEmber(): ViewDraw {
     const turn = (light.phase * TURN_STEPS) | 0;
     const beat = still ? 0 : decay(now, light.beatAt, 280) * (light.beatBar ? 1 : 0.6);
     mem[SEC] = now / 1000;
+    // A take in flight's head: the engine's, held to the end of the band drawn for it (the take's
+    // newest peaks come in deliveries and the head runs on between them), so its star and the pen sit
+    // on the take, never past it.
+    for (let i = 0; i < LANES; i++) {
+      if (feed.kind[i] !== 'rec') continue;
+      const at = looper.recHeadFrac(i);
+      const head = at >= 0 ? (at * TURN_STEPS) | 0 : master > 0 ? turn : 0;
+      const end = ((cols[i] * TURN_STEPS) / n[i]) | 0;
+      recAt[i] = head < end ? head : end;
+    }
 
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.globalCompositeOperation = 'source-over';
@@ -806,15 +910,14 @@ function createEmber(): ViewDraw {
     // A take in flight has its own head, where its band ends (a first take's runs around its ring).
     for (let i = 0; i < LANES; i++) {
       if (feed.kind[i] !== 'rec') continue;
-      const at = looper.recHeadFrac(i);
-      turnTo(c, cx, cy, at >= 0 ? (at * TURN_STEPS) | 0 : master > 0 ? turn : 0);
+      turnTo(c, cx, cy, recAt[i]);
       c.globalAlpha = A[(dim * (0.75 + 0.25 * beat) * 255) | 0];
       c.drawImage(starRec, r[i] - zs, -zs);
       c.setTransform(1, 0, 0, 1, 0, 0);
     }
 
-    // The instrument: the filament to the pen (the write head, else the selected lane under the
-    // playhead), as bright as the input; red for a moment on a clip.
+    // The instrument: the filament to the pen (the write head, else the lane about to write, else the
+    // selected lane, under the playhead), as bright as the input; red for a moment on a clip.
     const v0 = still ? 0 : dim * Math.pow(light.input, 0.7);
     let pen = -1; // the ring the filament lands on, its tone, where, and how bright
     let penTone = NONE;
@@ -834,14 +937,22 @@ function createEmber(): ViewDraw {
         }
       }
       const writes = p >= 0;
-      if (!writes) p = feed.selected;
-      const kind = feed.kind[p];
-      let step = turn;
-      if (kind === 'rec') {
-        const at = looper.recHeadFrac(p);
-        step = at >= 0 ? (at * TURN_STEPS) | 0 : master > 0 ? turn : 0;
+      if (!writes) {
+        if (own === 'armed' || own === 'listening') p = feed.selected;
+        else {
+          for (let i = 0; i < LANES; i++) {
+            const kind = feed.kind[i];
+            if (kind === 'armed' || kind === 'listening') {
+              p = i;
+              break;
+            }
+          }
+        }
+        if (p < 0) p = feed.selected;
       }
-      const v1 = (writes ? 1.6 : 1.1) * v0;
+      const kind = feed.kind[p];
+      const step = kind === 'rec' ? recAt[p] : turn;
+      const v1 = (writes ? 1.6 : kind === 'armed' || kind === 'listening' ? 1.5 : 1.2) * v0;
       const v = v1 > 1 ? 1 : v1;
       mem[SWAY] = (0.3 + 0.7 * light.inputGeo) * 0.85 * S;
       const red = light.clip || kind === 'rec';
@@ -869,7 +980,7 @@ function createEmber(): ViewDraw {
         strandStroke(c, j);
       }
       c.lineJoin = 'miter';
-      mem[GLOW] = 0.9 * v;
+      mem[GLOW] = v;
       sparks(c, p, step);
       turnTo(c, cx, cy, step);
       penA = v * (0.75 + 0.25 * beat);
@@ -895,8 +1006,7 @@ function createEmber(): ViewDraw {
     }
     for (let i = 0; i < LANES; i++) {
       if (feed.kind[i] !== 'rec') continue;
-      const at = looper.recHeadFrac(i);
-      turnTo(c, cx, cy, at >= 0 ? (at * TURN_STEPS) | 0 : master > 0 ? turn : 0);
+      turnTo(c, cx, cy, recAt[i]);
       c.globalAlpha = A[(dim * 255) | 0];
       c.drawImage(dots[REC], r[i] - zd, -zd, 2 * zd, 2 * zd);
       c.setTransform(1, 0, 0, 1, 0, 0);
@@ -908,12 +1018,12 @@ function createEmber(): ViewDraw {
       c.setTransform(1, 0, 0, 1, 0, 0);
     }
 
-    // Per lane: an overdub's thread (the loop's ice, inside the selection spine's place), the armed or
+    // Per lane: an overdub's thread (the loop's ice, just inside its band's middle), the armed or
     // listening ring, a pending loop-end stop, a refusal's flash.
     for (let i = 0; i < LANES; i++) {
       const kind = feed.kind[i];
       if (kind === 'dub') {
-        c.strokeStyle = ice;
+        c.strokeStyle = bodyC[ICE];
         c.globalAlpha = A[(0.85 * dim * 255) | 0];
         c.lineWidth = line;
         ring(c, r[i] - bold - line);
@@ -945,11 +1055,12 @@ function createEmber(): ViewDraw {
       }
     }
 
-    // The selected lane: a warm-white spine through its ring, moved with no transition.
+    // The selected lane: a warm-white rail at its band's inner fringe (off its middle, whose light it
+    // would wash), moved with no transition.
     c.strokeStyle = pal.engaged;
-    c.globalAlpha = 0.85;
-    c.lineWidth = bold;
-    ring(c, r[feed.selected]);
+    c.globalAlpha = 0.9;
+    c.lineWidth = line;
+    ring(c, r[feed.selected] - (sw >> 1));
     c.globalAlpha = 1;
   }
 

@@ -1811,6 +1811,7 @@ await probe(async ({ browser, open }) => {
         await settle(450);
         await shoot('later-take');
         await laterTake(false, 5.3 * BAR);
+        await emit(GUITAR); // the guitar played into the wait: the looks that draw the input show where it lands
         await settle(450);
         await shoot('armed');
         await boot(page);
@@ -1818,6 +1819,7 @@ await probe(async ({ browser, open }) => {
         await settle(250);
         await shoot('count-in');
         await firstTake(3);
+        await emit(GUITAR); // a first take is played too (boot left the input silent)
         await settle(450);
         await shoot('first-take');
         await boot(page);
