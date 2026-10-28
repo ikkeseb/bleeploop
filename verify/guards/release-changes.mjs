@@ -39,6 +39,9 @@ function check(name, fn) {
 const tmp = mkdtempSync(join(tmpdir(), 'bleeploop-release-changes-'));
 const repo = join(tmp, 'repo');
 writeFileSync(join(tmp, 'gitconfig'), '');
+// A hook runs with git's per-repo variables set (GIT_DIR among them), and git's own list of them
+// (`git rev-parse --local-env-vars`) holds config injection too: the scratch repository takes none.
+for (const key of Object.keys(process.env)) if (key.toUpperCase().startsWith('GIT_')) delete process.env[key];
 Object.assign(process.env, {
   GIT_CONFIG_GLOBAL: join(tmp, 'gitconfig'),
   GIT_CONFIG_NOSYSTEM: '1',
@@ -47,7 +50,6 @@ Object.assign(process.env, {
   GIT_COMMITTER_NAME: 'guard',
   GIT_COMMITTER_EMAIL: 'guard@example.invalid',
 });
-for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) delete process.env[key]; // a hook's own repository
 
 const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const write = (path, text) => {
