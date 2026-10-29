@@ -70,10 +70,12 @@ export interface ProbeOptions {
 
 const DEFAULT_LAUNCH: LaunchOptions = { args: ['--autoplay-policy=no-user-gesture-required'] };
 
-/** Added to every launch: Chromium renders through SwiftShader on the CPU, never the real GPU, as the
- * owner's other repos' gate browsers do (parallel real-GPU Chromium under WSL is the one lead on a host
- * hard reboot), and plays no sound. */
-const MACHINE_SAFE_ARGS = ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--mute-audio'];
+/** Added to every launch: Chromium renders on the CPU, never the real GPU (parallel real-GPU Chromium
+ * under WSL is the one lead on a host hard reboot), and plays no sound. `--disable-gpu`, not the
+ * SwiftShader GL flags WebGL repos use: the app draws no WebGL, and Windows Chromium rasterising Canvas
+ * and SVG through ANGLE SwiftShader moved the pixel probes off what CI's Linux renders (the gear's
+ * symmetry, the overdub's amber). WebGL, if asked for, still reads SwiftShader. */
+const MACHINE_SAFE_ARGS = ['--disable-gpu', '--mute-audio'];
 
 /** Empties `dir` when it exists, keeping the folder: a probe may have created it already. */
 async function empty(dir: string): Promise<void> {
