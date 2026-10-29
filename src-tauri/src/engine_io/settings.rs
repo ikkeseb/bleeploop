@@ -43,7 +43,10 @@
 //! the engine refused never reaches a new engine, and an imported tempo and meter do. One the replaced
 //! engine was sent and never applied (still in its ring or its table: a change while the device was
 //! stopped) is kept as sent over that projection (`unapplied`), for the new engine to weigh against its
-//! own lock; that engine's first transport then says what it applied.
+//! own lock; that engine's first transport then says what it applied. A transport at the default tempo
+//! keeps no tempo. At 4/4 it keeps no meter until a `SetMeter` has been recorded in this run (`meter_sent`),
+//! so a fresh run asks the UI for its kept meter. From then on every applied meter is kept, including
+//! 4/4, across rebuilds: a reset never asks the UI to replace a known 4/4.
 //!
 //! The note target and the wheels native MIDI's queue still held at a rebuild, sent to no engine yet,
 //! are kept before the replay too (`super::RebuildHook::rebuild`), so the new engine gets the player's
@@ -196,11 +199,13 @@ pub(crate) struct Settings {
     /// An engine has reported its transport (`transported`): `last` holds the applied tempo and meter
     /// from then on.
     transport_applied: bool,
+    /// A `SetMeter` was recorded in this run: keep an applied 4/4 too, across engine generations.
+    meter_sent: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT], transport_applied: false }
+        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT], transport_applied: false, meter_sent: false }
     }
 }
 
@@ -209,6 +214,9 @@ impl Settings {
     /// the tempo or the meter once an engine has reported a transport.
     pub(crate) fn record(&mut self, command: &Command) -> bool {
         let Some(key) = key(command) else { return false };
+        if key == Key::Meter {
+            self.meter_sent = true;
+        }
         let applied = match key {
             Key::Bpm | Key::Meter => self.transport_applied,
             _ => key.lane().is_some_and(|lane| self.applied[usize::from(lane)].is_some()),
@@ -220,8 +228,9 @@ impl Settings {
     }
 
     /// The engine of generation `gen` applies `bpm` and `meter` (its `Event::Transport`, or a replaced
-    /// engine's read at a rebuild): the kept tempo and meter are those from here on, none at a fresh
-    /// engine's. False, and nothing kept, for an engine this memory no longer follows.
+    /// engine's read at a rebuild): the kept tempo and meter are those from here on. No tempo at the
+    /// default; no meter at 4/4 only until a `SetMeter` was recorded in this run. False, and nothing
+    /// kept, for an engine this memory no longer follows.
     pub(crate) fn transported(&mut self, gen: u64, bpm: u32, meter: Meter) -> bool {
         if gen != self.gen {
             return false;
@@ -232,7 +241,7 @@ impl Settings {
         } else {
             self.last.insert(Key::Bpm, Command::SetBpm(f64::from(bpm)));
         }
-        if meter == Meter::FOUR_FOUR {
+        if meter == Meter::FOUR_FOUR && !self.meter_sent {
             self.last.remove(&Key::Meter);
         } else {
             self.last.insert(Key::Meter, Command::SetMeter(meter));
@@ -549,21 +558,56 @@ mod tests {
         assert!(s.transported(1, 140, three), "a load's, or an accepted request's");
         assert_eq!(replay(&s), [Command::SetBpm(140.0), Command::SetMeter(three)]);
         assert!(s.transported(1, 140, Meter::FOUR_FOUR));
-        assert_eq!(replay(&s), [Command::SetBpm(140.0)], "4/4 is the default: no meter kept");
+        assert_eq!(replay(&s), [Command::SetBpm(140.0), Command::SetMeter(Meter::FOUR_FOUR)], "a meter was sent: 4/4 is kept too");
         s.follow(2);
         assert!(!s.transported(1, 90, six), "a replaced engine's late Transport");
         assert!(s.record(&Command::SetMeter(six)));
-        assert_eq!(replay(&s), [Command::SetBpm(140.0)], "the new engine's transport will say");
+        assert_eq!(replay(&s), [Command::SetBpm(140.0), Command::SetMeter(Meter::FOUR_FOUR)], "the new engine's transport will say");
         assert!(s.transported(2, 140, six));
         assert_eq!(replay(&s), [Command::SetBpm(140.0), Command::SetMeter(six)]);
         assert!(s.transported(2, DEFAULT_BPM, Meter::FOUR_FOUR));
-        assert!(replay(&s).is_empty(), "a fresh engine's tempo and meter: nothing kept");
+        assert_eq!(replay(&s), [Command::SetMeter(Meter::FOUR_FOUR)], "the default tempo is omitted; the known meter stays");
         s.unapplied(&Command::SetBpm(150.0));
         s.unapplied(&Command::Press);
-        assert_eq!(replay(&s), [Command::SetBpm(150.0)], "a rebuild keeps a tempo its engine never applied, as sent");
+        assert_eq!(replay(&s), [Command::SetBpm(150.0), Command::SetMeter(Meter::FOUR_FOUR)], "a rebuild keeps a tempo its engine never applied, as sent");
         assert!(s.transported(2, 150, Meter::FOUR_FOUR));
-        assert_eq!(replay(&s), [Command::SetBpm(150.0)]);
+        assert_eq!(replay(&s), [Command::SetBpm(150.0), Command::SetMeter(Meter::FOUR_FOUR)]);
         assert_eq!(lf_engine::clock::Clock::new(48_000).bpm(), DEFAULT_BPM, "a fresh engine's tempo");
+    }
+
+    #[test]
+    fn four_four_before_any_set_meter_keeps_no_meter() {
+        let mut s = Settings::default();
+        s.follow(1);
+        assert!(s.transported(1, DEFAULT_BPM, Meter::FOUR_FOUR));
+        assert!(replay(&s).is_empty(), "4/4 is the default: no meter kept before any SetMeter");
+        assert!(s.transported(1, DEFAULT_BPM, Meter::new(6, 8).unwrap()));
+        assert!(s.transported(1, DEFAULT_BPM, Meter::FOUR_FOUR));
+        s.follow(2);
+        assert!(s.transported(2, DEFAULT_BPM, Meter::FOUR_FOUR));
+        assert!(replay(&s).is_empty(), "a transport alone does not mark a meter as sent");
+    }
+
+    #[test]
+    fn four_four_after_recorded_meter_picks_stays_in_replay_across_rebuilds() {
+        let mut s = Settings::default();
+        s.follow(1);
+        assert!(s.transported(1, DEFAULT_BPM, Meter::FOUR_FOUR));
+        let six = Meter::new(6, 8).unwrap();
+        assert!(s.record(&Command::SetMeter(six)));
+        assert!(s.transported(1, DEFAULT_BPM, six));
+        let picks = [Meter::FOUR_FOUR, Meter::new(3, 4).unwrap(), Meter::FOUR_FOUR];
+        for meter in picks {
+            assert!(s.record(&Command::SetMeter(meter)));
+        }
+        assert_eq!(replay(&s), [Command::SetMeter(six)], "the picks wait for the engine's transport");
+        for meter in picks {
+            assert!(s.transported(1, DEFAULT_BPM, meter));
+            assert_eq!(replay(&s), [Command::SetMeter(meter)], "every applied meter is kept, including 4/4");
+        }
+        s.follow(2);
+        assert!(s.transported(2, DEFAULT_BPM, Meter::FOUR_FOUR));
+        assert_eq!(replay(&s), [Command::SetMeter(Meter::FOUR_FOUR)], "a rebuild keeps the known 4/4");
     }
 
     #[test]

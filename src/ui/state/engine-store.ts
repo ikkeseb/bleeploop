@@ -202,25 +202,12 @@ function adoptFadeBars(n: number): void {
   setFadeBarsSignal(bars);
   writeStoredNumber(FADE_BARS_KEY, bars);
 }
-/** The meter outlives a restart as FADE's bars do, kept as its index in `TIME_SIGNATURES`: written from
- * the meter the engine APPLIED (its `Transport`), so a request a loop locked out is never kept, and sent
- * to an engine whose settings lack it (a fresh one runs 4/4). */
+/** The applied meter outlives a restart, kept as its index in `TIME_SIGNATURES` from the feed's
+ * `Transport`. An engine whose settings lack it gets this kept meter; a known 4/4 is kept by the host too. */
 const METER_KEY = 'lf.meter';
 const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_KEY, 0, 0, TIME_SIGNATURES.length - 1)] ?? FOUR_FOUR;
-/** The meter picked and not yet echoed. Until its own `Transport` or a reset, an older `Transport` (a page
- * behind the feed) writes nothing over the kept meter, and a reset's adoption asks this one, so a reset
- * that lost the echo does not send the meter from before the pick back. A pick a lock refused is dropped
- * by the engine if a reset asks it again, and was never kept. Residuals, both from the host keeping no
- * `SetMeter` for 4/4 (`settings.rs` `transported`: that is how a fresh engine asks for the kept meter): a
- * pick a lock refused waits until a reset, so one after a later CLEAR ALL applies it; a reload between
- * a pick and its echo sends the kept meter from before the pick. Two more: the echo is matched by value
- * alone, so picks 4/4, 3/4, 4/4 inside the feed's lag let the first 4/4's Transport end the wait and 3/4
- * is kept, which a reset that lost the last echo (its settings then hold no `SetMeter`) sends back; and
- * `setMeter` ignores the send's result, so a pick the command ring refused waits until a reset too. Next
- * check for both: a meter-picker case each, the three picks then a reset, a refused send then a reset. */
-let pendingMeter: TimeSignature | null = null;
-/** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
- * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
+/** This reset asks for the kept meter: its own `Transport` still shows the engine's default and must
+ * not overwrite it. Cleared after the reset; later Transports keep what the engine applied. */
 let meterAsked = false;
 const [retake, setRetakeSignal] = createSignal(false);
 const [autoRecord, setAutoRecordSignal] = createSignal(false);
@@ -568,8 +555,7 @@ function applyEvent(ev: EngineEvent): void {
       setMasterFrames(ev.master);
       setBpmSignal(ev.bpm);
       setMeterSignal(ev.meter);
-      if (pendingMeter?.num === ev.meter.num && pendingMeter.den === ev.meter.den) pendingMeter = null;
-      if (!meterAsked && pendingMeter === null) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
+      if (!meterAsked) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
       setBpmLocked(ev.locked);
       break;
     case 'Beat': {
@@ -812,11 +798,7 @@ function applyFrameNow(f: FeedFrame): void {
     if (f.status && moved) dropLackingPicks(slotInputChannels().map(channelOf), f.status.inputChannels);
   }
   if (f.anchor) plain.clock = f.anchor;
-  if (f.reset) {
-    adoptSettings(f.settings ?? []);
-    // The reset's own `Transport` is the engine's meter from here on.
-    pendingMeter = null;
-  }
+  if (f.reset) adoptSettings(f.settings ?? []);
   // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
   if (f.live) adoptEngineLive(f.live);
   tookLoop = false;
@@ -1072,8 +1054,8 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   let masterKnown = false;
   let clickKnown = false;
   let fadeKnown = false;
-  // The engine's memory keeps a meter other than 4/4 (`settings.rs`); the meter itself comes on the
-  // frame's `Transport`.
+  // The host keeps a known meter, including 4/4 after a SetMeter (`settings.rs`); its value comes on
+  // the frame's `Transport`.
   let meterKnown = false;
   const sendsKnown = new Set<string>();
   for (const c of settings) {
@@ -1125,7 +1107,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
   if (!fadeKnown) lacking.push({ SetFadeBars: fadeBars() });
-  const kept = pendingMeter ?? storedMeter();
+  const kept = storedMeter();
   meterAsked = !meterKnown && kept !== FOUR_FOUR;
   if (meterAsked) lacking.push({ SetMeter: [kept.num, kept.den] });
   // The input sends the engine lacks: values first, so a send that comes on comes on with them.
@@ -1479,11 +1461,10 @@ function setBpm(n: number): void {
   if (clamped !== bpm()) sendEngine({ SetBpm: clamped });
 }
 
-/** SetMeter, unless the tempo (and with it the meter) is locked. The feed's Transport echoes the meter
- * the engine took. */
+/** Send SetMeter unless the tempo (and meter) is locked. Only the feed's Transport shows and keeps
+ * the meter the engine applied. */
 function setMeter(m: TimeSignature): void {
   if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
-  pendingMeter = m;
   sendEngine({ SetMeter: [m.num, m.den] });
 }
 
