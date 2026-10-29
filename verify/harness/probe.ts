@@ -62,12 +62,18 @@ export interface Probe {
 }
 
 export interface ProbeOptions {
-  /** Replaces the default launch options (headless, audio without a user gesture); `--mute-audio` is
-   *  added to any launch: the browser tier plays nothing, and a probe never may. */
+  /** Replaces the default launch options (audio without a user gesture). Every launch is headless, renders
+   *  in software and is muted whatever this says: the browser tier plays nothing, and a probe never
+   *  touches the GPU (`MACHINE_SAFE_ARGS`). */
   launch?: LaunchOptions;
 }
 
-const DEFAULT_LAUNCH: LaunchOptions = { headless: true, args: ['--autoplay-policy=no-user-gesture-required'] };
+const DEFAULT_LAUNCH: LaunchOptions = { args: ['--autoplay-policy=no-user-gesture-required'] };
+
+/** Added to every launch: Chromium renders through SwiftShader on the CPU, never the real GPU, as the
+ * owner's other repos' gate browsers do (parallel real-GPU Chromium under WSL is the one lead on a host
+ * hard reboot), and plays no sound. */
+const MACHINE_SAFE_ARGS = ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--mute-audio'];
 
 /** Empties `dir` when it exists, keeping the folder: a probe may have created it already. */
 async function empty(dir: string): Promise<void> {
@@ -83,7 +89,7 @@ export async function probe(body: (p: Probe) => Promise<unknown>, options: Probe
   try {
     await empty(join('logs', name));
     const launch = options.launch ?? DEFAULT_LAUNCH;
-    browser = await chromium.launch({ ...launch, args: [...(launch.args ?? []), '--mute-audio'] });
+    browser = await chromium.launch({ ...launch, headless: true, args: [...(launch.args ?? []), ...MACHINE_SAFE_ARGS] });
     const b = browser;
     const open = async (o: OpenOptions = {}): Promise<AppPage> => {
       const page = o.context ? await o.context.newPage() : await b.newPage(o.viewport ? { viewport: o.viewport } : {});
