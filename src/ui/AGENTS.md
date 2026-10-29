@@ -68,4 +68,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 
 ## Open threads (non-gate)
 
-None open.
+- A reset that asks for the kept meter (`engine-store.ts` `meterAsked`) guards only its own frame: a
+  later Transport that lands before the asked `SetMeter` applies writes the engine's 4/4 to `lf.meter`
+  until that `SetMeter`'s own Transport writes the kept meter back. It is lost for good only when the
+  reset's batch is refused (`adoptSettings` ignores `sendEngine`'s result), which loses the volumes and
+  sends it carried too. Read from source, not reproduced. Next check: a meter-picker case with a
+  non-reset Transport between the reset and the asked meter's echo, and one whose reset batch the fake
+  refuses.
