@@ -44,9 +44,10 @@
 //! engine was sent and never applied (still in its ring or its table: a change while the device was
 //! stopped) is kept as sent over that projection (`unapplied`), for the new engine to weigh against its
 //! own lock; that engine's first transport then says what it applied. A transport at the default tempo
-//! keeps no tempo. At 4/4 it keeps no meter until a `SetMeter` has been recorded in this run (`meter_sent`),
-//! so a fresh run asks the UI for its kept meter. From then on every applied meter is kept, including
-//! 4/4, across rebuilds: a reset never asks the UI to replace a known 4/4.
+//! keeps no tempo. At 4/4 it keeps no meter until the meter is known in this run (`meter_known`: a
+//! `SetMeter` was recorded, or an engine applied a meter other than 4/4, a session's load included), so
+//! a fresh run asks the UI for its kept meter. From then on every applied meter is kept, including 4/4,
+//! across rebuilds: a reset never asks the UI to replace a known 4/4.
 //!
 //! The note target and the wheels native MIDI's queue still held at a rebuild, sent to no engine yet,
 //! are kept before the replay too (`super::RebuildHook::rebuild`), so the new engine gets the player's
@@ -199,13 +200,14 @@ pub(crate) struct Settings {
     /// An engine has reported its transport (`transported`): `last` holds the applied tempo and meter
     /// from then on.
     transport_applied: bool,
-    /// A `SetMeter` was recorded in this run: keep an applied 4/4 too, across engine generations.
-    meter_sent: bool,
+    /// A `SetMeter` was recorded, or an engine applied a meter other than 4/4, in this run: keep an
+    /// applied 4/4 too, across engine generations.
+    meter_known: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT], transport_applied: false, meter_sent: false }
+        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT], transport_applied: false, meter_known: false }
     }
 }
 
@@ -215,7 +217,7 @@ impl Settings {
     pub(crate) fn record(&mut self, command: &Command) -> bool {
         let Some(key) = key(command) else { return false };
         if key == Key::Meter {
-            self.meter_sent = true;
+            self.meter_known = true;
         }
         let applied = match key {
             Key::Bpm | Key::Meter => self.transport_applied,
@@ -229,7 +231,7 @@ impl Settings {
 
     /// The engine of generation `gen` applies `bpm` and `meter` (its `Event::Transport`, or a replaced
     /// engine's read at a rebuild): the kept tempo and meter are those from here on. No tempo at the
-    /// default; no meter at 4/4 only until a `SetMeter` was recorded in this run. False, and nothing
+    /// default; no meter at 4/4 only until the meter is known in this run. False, and nothing
     /// kept, for an engine this memory no longer follows.
     pub(crate) fn transported(&mut self, gen: u64, bpm: u32, meter: Meter) -> bool {
         if gen != self.gen {
@@ -241,7 +243,10 @@ impl Settings {
         } else {
             self.last.insert(Key::Bpm, Command::SetBpm(f64::from(bpm)));
         }
-        if meter == Meter::FOUR_FOUR && !self.meter_sent {
+        if meter != Meter::FOUR_FOUR {
+            self.meter_known = true;
+        }
+        if meter == Meter::FOUR_FOUR && !self.meter_known {
             self.last.remove(&Key::Meter);
         } else {
             self.last.insert(Key::Meter, Command::SetMeter(meter));
@@ -576,16 +581,21 @@ mod tests {
     }
 
     #[test]
-    fn four_four_before_any_set_meter_keeps_no_meter() {
+    fn four_four_keeps_no_meter_until_the_meter_is_known() {
         let mut s = Settings::default();
         s.follow(1);
         assert!(s.transported(1, DEFAULT_BPM, Meter::FOUR_FOUR));
-        assert!(replay(&s).is_empty(), "4/4 is the default: no meter kept before any SetMeter");
-        assert!(s.transported(1, DEFAULT_BPM, Meter::new(6, 8).unwrap()));
-        assert!(s.transported(1, DEFAULT_BPM, Meter::FOUR_FOUR));
+        assert!(replay(&s).is_empty(), "4/4 is the default: no meter kept before the meter is known");
         s.follow(2);
         assert!(s.transported(2, DEFAULT_BPM, Meter::FOUR_FOUR));
-        assert!(replay(&s).is_empty(), "a transport alone does not mark a meter as sent");
+        assert!(replay(&s).is_empty(), "a fresh engine's 4/4 still asks the UI for its kept meter");
+        // A session load sends no SetMeter: its 3/4, then another session's 4/4.
+        assert!(s.transported(2, DEFAULT_BPM, Meter::new(3, 4).unwrap()));
+        assert!(s.transported(2, DEFAULT_BPM, Meter::FOUR_FOUR));
+        assert_eq!(replay(&s), [Command::SetMeter(Meter::FOUR_FOUR)], "a 4/4 after a loaded 3/4 is known: a reset must not ask the UI's older 3/4");
+        s.follow(3);
+        assert!(s.transported(3, DEFAULT_BPM, Meter::FOUR_FOUR));
+        assert_eq!(replay(&s), [Command::SetMeter(Meter::FOUR_FOUR)], "and stays known across a rebuild");
     }
 
     #[test]

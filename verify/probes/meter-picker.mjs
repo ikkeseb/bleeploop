@@ -351,7 +351,9 @@ await probe(async ({ open }) => {
   assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'an older lock and unlock before a reset send no SetMeter over the 4/4 pick');
   assert.equal(await kept(), '0', 'the 4/4 pick is kept across an older lock and unlock and a reset');
 
-  // A-B-A inside the feed's lag: every echo is kept, and the host's known 4/4 needs no setter.
+  // A-B-A inside the feed's lag, the last echo lost to a reset: the host keeps the applied 4/4 once a
+  // SetMeter was recorded (`settings.rs`, whose test is the red/green for this race), so the reset's
+  // settings carry it and the store asks nothing over it, whatever its older Transports kept.
   await emit({ events: [transport(0, false, 121, SIX)] });
   await settle();
   await clearSent();
@@ -361,7 +363,7 @@ await probe(async ({ open }) => {
   }
   assert.deepEqual(await sent(), [{ SetMeter: [4, 4] }, { SetMeter: [3, 4] }, { SetMeter: [4, 4] }], 'A-B-A: all three picks were sent before their echoes');
   assert.equal(await kept(), '2', 'A-B-A: only the applied 6/8 is kept before the echoes');
-  for (const [meter, index] of [[FOUR, '0'], [THREE, '1'], [FOUR, '0']]) {
+  for (const [meter, index] of [[FOUR, '0'], [THREE, '1']]) {
     await emit({ events: [transport(0, false, 121, meter)] });
     await settle();
     assert.equal(await kept(), index, 'A-B-A: each Transport keeps its applied meter');
@@ -371,8 +373,8 @@ await probe(async ({ open }) => {
   await settle();
   const afterAba = (await sent()).filter((c) => 'SetMeter' in c);
   console.log('A-B-A: sent after reset', JSON.stringify(afterAba), 'kept', await kept());
-  assert.deepEqual(afterAba, [], 'A-B-A: the known 4/4 gets no SetMeter on reset');
-  assert.equal(await kept(), '0', 'A-B-A: the applied 4/4 stays kept');
+  assert.deepEqual(afterAba, [], 'A-B-A: the known 4/4 gets no SetMeter on reset, though 3/4 was kept last');
+  assert.equal(await kept(), '0', "A-B-A: the reset's Transport keeps the applied 4/4");
   assert.equal(await picker.inputValue(), '4/4', 'A-B-A: the picker shows the applied 4/4');
 
   // A pick the engine never takes, since a loop locked the tempo first: it is never kept.
