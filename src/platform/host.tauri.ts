@@ -149,6 +149,16 @@ const tauriPluginHost: PluginHost = {
 // The native feed has one subscriber; replacing it retires this document's previous one too.
 let stopEngineFeed: (() => void) | null = null;
 
+function retireFeedChannel(channel: Channel<unknown> | null): void {
+  if (channel === null) return;
+  // Read against @tauri-apps/api 2.11.1: Channel's private cleanupCallback does this,
+  // but an index gap prevents its end message from reaching that cleanup.
+  const internals = (window as Window & {
+    __TAURI_INTERNALS__?: { unregisterCallback?: (id: number) => void };
+  }).__TAURI_INTERNALS__;
+  internals?.unregisterCallback?.(channel.id);
+}
+
 /**
  * The native engine over Tauri IPC: each method maps to an `engine_*` command in Rust
  * (`src-tauri/src/engine_io`); the feed arrives on a Tauri Channel. Payloads: `engine-wire.ts`.
@@ -187,6 +197,7 @@ const tauriEngineHost: EngineHost = {
     let newest: number | null = null;
     let ackTimer: ReturnType<typeof setTimeout> | null = null;
     let subscribing = false;
+    let liveChannel: Channel<unknown> | null = null;
 
     const ack = () => {
       if (!live) return;
@@ -201,11 +212,13 @@ const tauriEngineHost: EngineHost = {
     const connect = () => {
       // Retire the old handler and every pending ack answer before the replacement subscribes.
       const gen = ++generation;
+      retireFeedChannel(liveChannel);
       newest = null;
       if (ackTimer !== null) clearTimeout(ackTimer);
       ackTimer = null;
       subscribing = true;
       const channel = new Channel<unknown>();
+      liveChannel = channel;
       channel.onmessage = (raw) => {
         if (!live || gen !== generation) return;
         // Even a rejected frame was handed on by this channel: it must not fill the native window.
@@ -229,6 +242,8 @@ const tauriEngineHost: EngineHost = {
         }
       };
       void invoke('engine_feed', { channel }).catch((err: unknown) => {
+        retireFeedChannel(channel);
+        if (liveChannel === channel) liveChannel = null;
         if (!live || gen !== generation) return;
         console.error('[host.tauri] engine feed subscribe failed', err);
         notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
@@ -241,6 +256,8 @@ const tauriEngineHost: EngineHost = {
       if (!live) return;
       live = false;
       generation++;
+      retireFeedChannel(liveChannel);
+      liveChannel = null;
       if (ackTimer !== null) clearTimeout(ackTimer);
       clearInterval(heartbeat);
       if (stopEngineFeed === unsubscribe) stopEngineFeed = null;
