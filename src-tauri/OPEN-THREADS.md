@@ -74,12 +74,8 @@
   rounds up (owner's call).
 - The feed cannot see a counted take's cancel, transport start and ordinary re-arm of the same lane
   within one block split: unchanged lane info publishes no event, so a reset can replay the old count.
-  Next check: a feed test for that split once `LaneInfo` reports the counted arm. Read from source
-  beside it: a count's first beat drained before its lane's arm event is dropped (no lane armed yet), so a
-  reload before the second beat shows a first take's COUNT-IN without its numeral for a beat (a later
-  counted take, WAITING FOR DOWNBEAT until the next count beat); and a grid beat on a
-  cancel's frame can stay mirrored as a lone downbeat while another lane stays armed (the UI shows only
-  the beat). Next check for both: an engine-backed feed test (`manual_engine()`) of a count-in reset mid-count.
+  Next check: an engine-backed feed test of that split (the count-in tests in `engine_io/feed.rs`
+  drive a real engine) once `LaneInfo` reports the counted arm.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`
