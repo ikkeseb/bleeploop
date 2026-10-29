@@ -72,10 +72,14 @@
   reproduced, nothing audible.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
-- The feed cannot see a counted take's cancel, transport start and ordinary re-arm of the same lane
-  within one block split: unchanged lane info publishes no event, so a reset can replay the old count.
-  Next check: an engine-backed feed test of that split (the count-in tests in `engine_io/feed.rs`
-  drive a real engine) once `LaneInfo` reports the counted arm.
+- The feed's count-in mirror infers which count a lane event ends from arming and frames alone, so two
+  splits stay: a counted take's cancel, transport start and ordinary re-arm of the same lane within one
+  block publish no lane event (unchanged info), and a reset can replay the old count; and a full event
+  ring that takes a new count's beat but not the lane events after it republishes them at a later frame
+  (`Looper::publish`), where the old lane's disarm reads as the end of the new count, so a reset before
+  the next beat shows none. Read from source, not reproduced. Next check: an engine-backed feed test of
+  each (the count-in tests in `engine_io/feed.rs` drive a real engine) once `LaneInfo` reports the
+  counted arm.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`

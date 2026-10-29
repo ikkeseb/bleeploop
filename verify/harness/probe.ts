@@ -74,7 +74,8 @@ const DEFAULT_LAUNCH: LaunchOptions = { args: ['--autoplay-policy=no-user-gestur
  * under WSL is the one lead on a host hard reboot), and plays no sound. `--disable-gpu`, not the
  * SwiftShader GL flags WebGL repos use: the app draws no WebGL, and Windows Chromium rasterising Canvas
  * and SVG through ANGLE SwiftShader moved the pixel probes off what CI's Linux renders (the gear's
- * symmetry, the overdub's amber). WebGL, if asked for, still reads SwiftShader. */
+ * symmetry, the overdub's amber). Measured over CDP `SystemInfo.getInfo` on Windows Chromium: every
+ * feature reads software or off, and the one GPU device is SwiftShader. */
 const MACHINE_SAFE_ARGS = ['--disable-gpu', '--mute-audio'];
 
 /** Empties `dir` when it exists, keeping the folder: a probe may have created it already. */
