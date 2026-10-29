@@ -32,7 +32,7 @@
 //! passes, not with time), builds and sends nothing, leaves the waveform dirty bits alone and keeps
 //! device events (`HELD_DEVICE_EVENTS`). `seq` counts frames built, so it does not move meanwhile. The first frame
 //! after is a CATCH-UP (`catch_up`, not a reset): the kept stream, the count's latest beat and downbeat
-//! while a lane is armed, then this tick's events; the peaks changed since the last frame sent; scope
+//! while a lane is armed or its arm is owed, then this tick's events; the peaks changed since the last frame sent; scope
 //! with `gap`. The page applies it as it would have live (`applyFrameNow`,
 //! `src/ui/state/engine-store.ts`), so overlays, revisions and the clear token survive. A RESET instead
 //! when the subscriber is new, another engine came meanwhile (latched by the held tick) or the stream
@@ -118,11 +118,15 @@ pub(crate) struct Feed {
     lanes: [Option<(Frame, LaneInfo)>; TRACK_COUNT],
     transport: Option<Event>,
     selected: (Frame, u8),
-    /// The count's latest positive beat and its first downbeat, until no lane is armed (a count's
-    /// first beat can drain before its lane's arm); a lane leaving armed ends the count it held,
-    /// dropping a count beat older than that lane event, and that beat's downbeat with it.
+    /// The count's latest positive beat and its first downbeat, until no lane is armed and no arm is
+    /// owed; a lane leaving armed ends the count it held, dropping a count beat older than that lane
+    /// event, and that beat's downbeat with it.
     count_beat: Option<Event>,
     count_downbeat: Option<Event>,
+    /// No armed lane has been seen since `count_beat`: its lane's arm is owed, a later push than a drain
+    /// reached (the ring is read while the callback writes it, and a new count's beat precedes the old
+    /// lane's disarm as well as its own lane's arm).
+    count_unarmed: bool,
     /// What the last frames said.
     status: Option<DeviceStatus>,
     meter: Option<Meter>,
@@ -167,6 +171,7 @@ impl Feed {
             selected: (0, 0),
             count_beat: None,
             count_downbeat: None,
+            count_unarmed: false,
             status: None,
             meter: None,
             live: [false; SLOT_COUNT],
@@ -214,22 +219,24 @@ impl Feed {
             self.selected = (0, 0);
             self.count_beat = None;
             self.count_downbeat = None;
+            self.count_unarmed = false;
         }
-        // A count beat no disarm followed in this drain: its lane's arm may be the next push, which this
-        // drain did not reach (the ring is read while the callback writes it).
-        let mut count_unended = false;
         for event in &self.drained {
             match *event {
                 Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => {
                     let lane = usize::from(lane);
                     if self.lanes[lane].is_some_and(|(_, previous)| previous.armed) && !info.armed {
-                        count_unended = false;
-                        // Beats precede the lane publish: a count beat at this frame belongs to a new count.
-                        // The old count's downbeat goes with its beat, though it fell on this frame.
+                        // Beats precede the lane publish: a count beat at this frame belongs to a new count,
+                        // whose arm is still owed. The old count's downbeat goes with its beat, though it
+                        // fell on this frame.
                         if matches!(self.count_beat, Some(Event::Beat { frame: beat_frame, .. }) if beat_frame < frame) {
                             self.count_beat = None;
                             self.count_downbeat = None;
+                            self.count_unarmed = false;
                         }
+                    }
+                    if info.armed {
+                        self.count_unarmed = false;
                     }
                     self.lanes[lane] = Some((frame, info));
                 }
@@ -238,14 +245,14 @@ impl Feed {
                 Event::Beat { count_left, .. } if count_left > 0 => {
                     self.count_beat = Some(*event);
                     self.count_downbeat = None;
-                    count_unended = true;
+                    self.count_unarmed = true;
                 }
                 Event::Beat { count_left: 0, .. } if self.count_beat.is_some() && self.count_downbeat.is_none() => self.count_downbeat = Some(*event),
                 _ => {}
             }
         }
-        // A count beat precedes its lane's arm, in this drain or the next: judge after every lane was applied.
-        if !count_unended && !self.lanes.iter().flatten().any(|(_, info)| info.armed) {
+        // A count beat precedes its lane's arm, in this drain or a later one: judge after every lane was applied.
+        if !self.count_unarmed && !self.lanes.iter().flatten().any(|(_, info)| info.armed) {
             self.count_beat = None;
             self.count_downbeat = None;
         }
@@ -787,24 +794,31 @@ mod tests {
     }
 
     /// A feed tick that drains while the device callback sits between two of its pushes (the ring is
-    /// read without the engine lock): only the events up to the first count beat, into the mirror.
-    fn drain_through_count_beat(feed: &mut Feed) -> (Frame, u8) {
+    /// read without the engine lock): only the events up to the first that `last` matches, into the
+    /// mirror; none at all when `last` is `None` (the callback's next push not made yet).
+    fn drain_through(feed: &mut Feed, last: Option<&dyn Fn(&Event) -> bool>) -> Option<Event> {
         let gen = feed.host.core.engine_gen.load(Acquire);
         feed.drained.clear();
         let mut ends = feed.host.core.ends.lock().unwrap();
         let events = &mut ends.as_mut().unwrap().events;
-        let beat = loop {
-            let event = events.pop().expect("the block pushed a count beat");
+        let end = last.map(|last| loop {
+            let event = events.pop().expect("the block pushed the awaited event");
             feed.drained.push(event);
-            if let Event::Beat { frame, count_left, .. } = event {
-                if count_left > 0 {
-                    break (frame, count_left);
-                }
+            if last(&event) {
+                break event;
             }
-        };
+        });
         drop(ends);
         feed.update_mirror(gen);
-        beat
+        end
+    }
+
+    /// [`drain_through`] the first count beat.
+    fn drain_through_count_beat(feed: &mut Feed) -> (Frame, u8) {
+        match drain_through(feed, Some(&|e| matches!(*e, Event::Beat { count_left, .. } if count_left > 0))) {
+            Some(Event::Beat { frame, count_left, .. }) => (frame, count_left),
+            _ => unreachable!(),
+        }
     }
 
     /// A committed take on lane 0, stopped: the transport idle over a master, the commit's jobs done.
@@ -1373,6 +1387,106 @@ mod tests {
         turn(&mut feed, &mut page, &hold);
         assert!(feed.drained.iter().any(|e| matches!(*e, Event::Beat { frame, count_left: 0, .. } if frame == cancel)), "a beat on the cancel's frame");
         assert_eq!(replayed_count(&reload(&mut feed)), (vec![], vec![2]));
+    }
+
+    #[test]
+    fn a_new_count_drained_with_the_old_lanes_disarm_but_not_its_own_arm_is_still_replayed() {
+        for later in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            let (old, new) = if later {
+                idle_master(&mut engine, &mut feed, &mut page, &mut at);
+                (1, 2)
+            } else {
+                (0, 1)
+            };
+            send(&feed, [Command::RecDub(old)]);
+            render(&mut engine, &mut at, 20);
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)).1, vec![old], "later take: {later}");
+            // One block cancels the count and counts in another lane: its beat, the old lane's disarm, then
+            // its own arm. The drain ends after the disarm.
+            send(&feed, [Command::Stop(old), Command::RecDub(new)]);
+            render(&mut engine, &mut at, 1);
+            let press = at - 128;
+            drain_through(&mut feed, Some(&|e| matches!(*e, Event::Lane { lane, info, .. } if lane == old && !info.armed)));
+            assert!(feed.drained.iter().any(|e| matches!(*e, Event::Beat { frame, count_left: 4, .. } if frame == press)), "the new count's beat came first");
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![(press, 4)], vec![new]), "later take: {later}");
+        }
+    }
+
+    #[test]
+    fn a_counts_first_beat_survives_an_empty_drain_before_its_lanes_arm() {
+        for later in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            let lane = if later {
+                idle_master(&mut engine, &mut feed, &mut page, &mut at);
+                1
+            } else {
+                0
+            };
+            send(&feed, [Command::RecDub(lane)]);
+            render(&mut engine, &mut at, 1);
+            let first = drain_through_count_beat(&mut feed);
+            // The next tick finds the ring empty: the callback has not pushed the arm yet.
+            drain_through(&mut feed, None);
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![first], vec![lane]), "later take: {later}");
+        }
+    }
+
+    #[test]
+    fn a_later_takes_cancel_on_a_master_grid_beat_leaves_no_count_without_play_all() {
+        for split in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            idle_master(&mut engine, &mut feed, &mut page, &mut at);
+            // The idle master's grid, from its last two beats.
+            let grid: Vec<Frame> = feed.drained.iter().filter_map(|e| match *e {
+                Event::Beat { frame, count_left: 0, .. } => Some(frame),
+                _ => None,
+            }).collect();
+            let (last, step) = (grid[grid.len() - 1], grid[grid.len() - 1] - grid[grid.len() - 2]);
+            send(&feed, [Command::RecDub(1)]);
+            render(&mut engine, &mut at, 20);
+            let press = at - 20 * 128;
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)).1, vec![1], "split: {split}");
+            // A grid beat ahead, before the count's downbeat and off its beats: the cancel lands on it.
+            let cancel = (1..).map(|k| last + k * step).find(|&f| f > at && (f - press) % 2000 != 0).unwrap();
+            assert!(cancel < press + 8000, "the count still runs at the cancel");
+            feed.host.send(TimedCommand { frame: Some(cancel), command: Command::Stop(1) }).unwrap();
+            while at <= cancel {
+                render(&mut engine, &mut at, 1);
+            }
+            let on_cancel = |e: &Event| matches!(*e, Event::Beat { frame, count_left: 0, .. } if frame == cancel);
+            if split {
+                drain_through(&mut feed, Some(&on_cancel));
+            }
+            turn(&mut feed, &mut page, &hold);
+            if !split {
+                assert!(feed.drained.iter().any(on_cancel), "a grid beat on the cancel's frame");
+            }
+            assert!(!feed.lanes[1].unwrap().1.armed);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![], vec![]), "split: {split}");
+        }
     }
 
     #[test]
