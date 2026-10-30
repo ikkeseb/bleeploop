@@ -32,13 +32,14 @@ export function SessionTools() {
   const [importing, setImporting] = createSignal(false);
 
   // Async since v1 (the offline master render); render failures inside fall back to the dry mix — this
-  // catch is the net for anything else (snapshot/zip/download), so a rejection never goes unhandled.
+  // catch is the net for anything else (snapshot/zip/save), so a rejection never goes unhandled. The
+  // success toast waits for the save's answer: a CLEAR ALL after it also deletes the recovery.
   const onExport = async () => {
     if (exporting() || !anyCommitted() || anyCapturing()) return;
     setExporting(true);
     try {
-      const filename = await exportLoops(session);
-      if (filename) notifyInfo(`Exported ${filename}`, 'One .zip with every track + the master as WAV. Look in your Downloads folder.');
+      const landed = await exportLoops(session);
+      if (landed) notifyInfo(`Exported ${landed.split(/[\\/]/).pop()}`, `One .zip with every track + the master as WAV. ${landed}`);
     } catch (err) {
       console.error('[transport] export failed', err);
       notifyError('Could not export the loops. Export again to retry.', err);

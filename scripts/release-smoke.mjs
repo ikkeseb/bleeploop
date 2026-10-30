@@ -47,6 +47,9 @@
 //                lane-1 playhead. The meter reads the device input, and before the first take the
 //                click is silent (it sounds on a count-in or while the transport runs: lf-engine
 //                `clock.rs` `fire_due`), so it stays still until the count-in even with CLICK on
+//   export       a press on Export ends in the success toast, and the file at the path it names (the
+//                Downloads folder, a free name) starts with `PK`; that file is deleted. The PASS line
+//                names the file, never the path: it holds the user name
 //   exit         CLEAR ALL empties the lanes, the OS close (as the close button does, through the app's
 //                close guard) ends the process within 60 s, and this run's release log holds no ERROR line
 // A screenshot after the take and this run's slice of the release log land in logs/release-smoke/.
@@ -76,7 +79,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { setPriority, constants } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { appRunning, assertWindows } from './native-kill.mjs';
@@ -672,6 +675,25 @@ try {
     });
   }
 
+  // ── export ────────────────────────────────────────────────────────────────────────────────────
+  if (taken) {
+    await check('export', async () => {
+      await page.locator('button[aria-label="Export loops as a zip of WAV files"]').click();
+      const toast = page.locator('.toast', { hasText: /Exported |Could not export/ }).first();
+      await toast.waitFor({ state: 'visible', timeout: 60_000 });
+      const said = await toast.innerText();
+      must(said.includes('Exported '), `the failure toast: ${said}`);
+      const file = (await toast.locator('.toast__detail').innerText()).split('as WAV. ')[1] ?? '';
+      const name = basename(file);
+      must(name.endsWith('.zip'), `the toast names no .zip: ${name}`);
+      must(existsSync(file), `no file at the path the toast names: ${name}`);
+      const zip = readFileSync(file);
+      must(zip.subarray(0, 2).toString('latin1') === 'PK', `${name} does not start with PK`);
+      rmSync(file);
+      return [`${name}: ${zip.length} bytes, starts with PK, deleted`];
+    });
+  }
+
   // ── exit ──────────────────────────────────────────────────────────────────────────────────────
   await check('exit', async () => {
     const clearAll = page.locator('button[aria-label="Clear all tracks"]');
@@ -720,6 +742,6 @@ try {
   console.log(`  this run's release log: ${join(out, 'release.log')} (${logFile}, from line ${linesBefore + 1})`);
 }
 
-const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'exit'].every((n) => results.some((r) => r.name === n));
+const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'export', 'exit'].every((n) => results.some((r) => r.name === n));
 console.log(`\n=== release-smoke: ${ok ? 'PASS' : 'FAIL'}: ${results.filter((r) => r.ok).length}/${results.length} checks passed (${Math.round((Date.now() - t0) / 1000)} s) ===`);
 process.exit(ok ? 0 : 1);

@@ -157,6 +157,3 @@
   `run_job`): a callback that stalls more than two 10 s waits between taking a load and applying it would
   apply a load already answered as failed; only the engine's fault path recovers it. Read from source,
   never seen. Next check, only if a load ever plays after a failed answer: the log's session-job lines.
-- Export toasts success before the file exists (`src/session/export.ts`, `<a download>`), and a CLEAR ALL
-  then also deletes the recovery. Read from source. Next check: a native save command answering the path.
-  Unmeasured first: an export's largest body over raw IPC in the real app.
