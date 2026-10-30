@@ -145,8 +145,8 @@ names without loading it: a 64-bit DLL that names `VSTPluginMain` or `main` gets
 one is reported as unsupported with no child, any other DLL is ignored, and one it cannot read goes to
 the child), for crash + hang isolation (**20s per-child timeout**: a heavy/licensed VST3 like Neural DSP can hang
 on load in the headless child), but only for bundles whose binary size/mtime changed since the
-cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (a launch spawns
-nothing; a remembered failure is retried only by the picker's rescan button = `plugin_scan`
+cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (an unchanged cached bundle spawns
+nothing; a remembered failure is retried when its binary changes or by the picker's rescan button = `plugin_scan`
 `force`), and for every VST3 factory that declares `kClassesDiscardable`, which is never cached and
 gets a child on every scan. Delete that file to force a cold scan from outside the app. Pipe retention is capped at 1 MiB
 stdout / 64 KiB stderr, and each child process tree sits in a kill-on-close Job Object. DEV probes on

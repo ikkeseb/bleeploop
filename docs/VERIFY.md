@@ -136,7 +136,7 @@ blocks until the verdict, so an agent harness should run it in the background.
 - **The app runs at Normal priority class on the rig, as the owner's does.** Windows processes
   started from the rig PC's logon tmux session run at below-normal priority (the scheduled task's
   priority 7), `cargo` included. `native:engine`, `native:spike` and `release:smoke` raise the app
-  they spawn to Normal (MMCSS callback threads sit at 24–25 either way); `native:probe` launches
+  they spawn to Normal (MMCSS callback threads sit at 24–25 either way); `scripts/native-probe.mjs` launches
   through `tauri dev` and keeps the shell's class, as does an exe started by hand:
   `cmd.exe /c start /normal /b /wait <exe> …` launches at normal. Whether the class moves a result is
   not settled (`src-tauri/OPEN-THREADS.md`, the join).
