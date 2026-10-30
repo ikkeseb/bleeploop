@@ -678,10 +678,11 @@ function emitMidi(raw: unknown): void {
 /**
  * Pre-boot probe seams, read when the boot reaches them (an init script sets them before the app loads):
  * `__lfMidiSubscribeHold`, a promise the subscribe's epoch waits for (input queued meanwhile waits with it),
- * and `__lfMidiImportAnswer`, what the boot's `importLegacy` answers (`'fail'`: it rejects).
+ * `__lfMidiImportAnswer`, what the boot's `importLegacy` answers (`'fail'`: it rejects), and `__lfLoadHold`, a
+ * promise a `loadSession`'s answer waits for (the startup restore's load, recorded at once).
  */
 const preBoot = () =>
-  globalThis as { __lfMidiSubscribeHold?: Promise<void>; __lfMidiImportAnswer?: ImportReport | 'fail' };
+  globalThis as { __lfMidiSubscribeHold?: Promise<void>; __lfMidiImportAnswer?: ImportReport | 'fail'; __lfLoadHold?: Promise<void> };
 
 /** Record a native MIDI call at once; its answer waits for `midiHold` while a probe holds it. */
 async function midiCall<T>(call: [string, ...unknown[]], answer: () => T): Promise<T> {
@@ -860,6 +861,8 @@ export const webEngineFake: EngineFake = {
   async loadSession(bytes) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.loadedSessions.push(bytes.slice());
+    const hold = preBoot().__lfLoadHold;
+    if (hold) await hold;
     // The engine refuses a header it cannot read, and sets each lane's mix with its loop.
     applyMixLoad(decodeLoadSession(bytes.slice().buffer).header);
     echoChanges();

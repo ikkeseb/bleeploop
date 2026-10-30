@@ -16,7 +16,7 @@
  */
 import { notifyError, notifyNote } from '../notify';
 import { encodeRecovery } from './recovery-encode';
-import { exportBase, snapshotBars, type StemSnapshot } from './stem-archive';
+import { exportBase, prepareStemArchive, snapshotBars, type StemSnapshot } from './stem-archive';
 import { importSession } from './import';
 import type { SessionSource } from './session-source';
 import type { FxState } from '../ui/state/fx-metadata';
@@ -120,6 +120,8 @@ let started = false;
 let failedRestoreFingerprint = '';
 /** The rate of the jam in `LATEST`: null when there is none, undefined until read (or unreadable). */
 let latestRate: number | null | undefined;
+/** `LATEST` is the jam a restore loaded, and no save has yet compared it with what the engine holds. */
+let restoredUnchecked = false;
 
 function openDatabase(): Promise<IDBDatabase> {
   if (database) return database;
@@ -325,8 +327,43 @@ async function persistCurrent(snapshot = inspectJam()): Promise<string> {
     await forgetJam();
     return snapshot.value;
   }
-  await saveSnapshot(committed);
+  // The first save after a restore keeps the archive when the jam did not move, and only then.
+  const held = restoredUnchecked && (await latestHolds(committed));
+  restoredUnchecked = false;
+  if (!held) await saveSnapshot(committed);
   return persistedFingerprint(snapshot, committed);
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** `LATEST` holds `committed`: the stems to the byte, and the session but for when it was written, every
+ * number as an f32 holds it (`mixPart`). Anything unreadable answers no: a needless save costs less than a
+ * lost take. */
+async function latestHolds(committed: StemSnapshot): Promise<boolean> {
+  try {
+    const latest = await readRecord(LATEST);
+    if (!latest) return false;
+    const entries = parseZip(new Uint8Array(latest.bytes));
+    const json = entries.find((e) => e.name.endsWith('-session.json'));
+    if (!json) return false;
+    const base = json.name.slice(0, -'-session.json'.length);
+    const meta = { bpm: committed.bpm, bars: snapshotBars(committed) };
+    const { entries: stems, session } = prepareStemArchive(committed, meta, base, 'float32');
+    const shape = (value: unknown) =>
+      JSON.stringify(value, (key, v: unknown) => (key === 'exported' ? '' : typeof v === 'number' ? Math.fround(v) : v));
+    if (entries.length !== stems.length + 1) return false;
+    if (shape(JSON.parse(new TextDecoder().decode(json.data))) !== shape(session)) return false;
+    return stems.every((stem) => {
+      const entry = entries.find((e) => e.name === stem.name);
+      return entry !== undefined && sameBytes(entry.data, stem.data);
+    });
+  } catch {
+    return false;
+  }
 }
 
 /** Save `committed` (it holds a loop) as the latest jam at its rate. */
@@ -361,6 +398,7 @@ async function restoreLatestImpl(): Promise<Restore> {
     }
     await importSession(saved.bytes, jam());
     if (saved === kept) await promote(kept, rate, latest);
+    restoredUnchecked = true;
     failedRestoreFingerprint = '';
     console.info(`[autosave] restored local recovery from ${new Date(saved.savedAt).toISOString()}`);
     return { restored: true, keptAt: null };
@@ -409,7 +447,9 @@ function start(from: SessionSource): () => void {
     .then(({ restored, keptAt }) => {
       // If a user-created/imported jam beat restore to the all-empty precondition, make that live
       // state the next autosave candidate instead of assuming the older IndexedDB record matches it.
-      saveInitial = !restored && !inspectJam().blank;
+      // So too after a restore: a take can commit while its load waits, and the feed can show the loops
+      // after it answered, so what inspects now is not known to be the archive (`latestHolds` decides).
+      saveInitial = restored || !inspectJam().blank;
       if (keptAt !== null) reportKept(keptAt);
     })
     .catch((error) => {

@@ -23,6 +23,8 @@
  * - first-take: confirmed during a first take whose commit (the device's stop) has not reached the feed
  *   yet, the take is saved from the engine's snapshot before the forced open;
  * - failed: a switch whose recovery save fails reopens the device that runs, and so does a second one.
+ * - held: a take committed while the startup restore waits on the engine is saved on the next quiet window;
+ * - unchanged: a restored jam that did not move leaves the archive alone, and the next change saves.
  *
  * Cannot see the native engine or Tauri: the refusal, the rates and every lane are scripted (the Rust
  * side: `src-tauri/src/engine_io/tests.rs`). `--case=<name>[,<name>]` runs some.
@@ -55,6 +57,8 @@ const init = (p) =>
     window.__lfEngineFake = true;
     // Pages of one context share it, so a relaunch meets the rate the page before set.
     window.__lfEngineFakeRate = Number(localStorage.getItem('probe.rate') ?? 48000);
+    // Set by the page before: this launch's restore waits in the engine for `__releaseLoad()`.
+    if (localStorage.getItem('probe.holdLoad')) window.__lfLoadHold = new Promise((resolve) => (window.__releaseLoad = resolve));
     /** A Float32Array's identity: its length and an FNV-1a hash of its bits. */
     const sig = (pcm) => {
       const bits = new Uint32Array(pcm.buffer, pcm.byteOffset, pcm.length);
@@ -603,6 +607,50 @@ const cases = {
     console.log('failed saves logged', failures.length);
     assert.equal(failures.length, others.length, 'each failed save reaches the release log');
     await context.close();
+  },
+
+  async held({ browser, open }) {
+    const first = await boot(browser, open);
+    await emptyEngine(first.page, 48000);
+    await saved(first.page, await commitJam(first.page, 48000, 20), 'the jam');
+    await first.page.evaluate(() => localStorage.setItem('probe.holdLoad', '1'));
+    await first.page.close();
+
+    // The next launch's restore reaches the engine and waits there; the player's take commits meanwhile.
+    const { page, context } = await boot(browser, open, first.context);
+    await page.waitForFunction(() => window.__lf.native.loadedSessions.length === 1, undefined, { timeout: 15000 });
+    await emptyEngine(page, 48000);
+    const take = await commitJam(page, 48000, 21);
+    await page.evaluate(() => window.__releaseLoad());
+    await page.evaluate(() => window.__lf.autosave.ready());
+    const latest = await saved(page, take, 'the take committed while the restore waited');
+    console.log('after the held restore', JSON.stringify(latest));
+    await context.close();
+  },
+
+  async unchanged({ browser, open }) {
+    const first = await boot(browser, open);
+    await emptyEngine(first.page, 48000);
+    const jam = await commitJam(first.page, 48000, 22);
+    const before = await saved(first.page, jam, 'the jam');
+
+    // The launch's restore answers before the feed shows the loops: the jam on the feed is the archive's.
+    const second = await relaunch(browser, open, first, 48000);
+    assert.equal(await second.page.evaluate(() => window.__lf.native.loadedSessions.length), 1, 'the jam was restored');
+    await emptyEngine(second.page, 48000);
+    await second.page.evaluate(() => (window.__lf.native.snapshots.length = 0));
+    await commitJam(second.page, 48000, 22);
+    // The quiet window's save, not a flush: that is a close's, and saves whatever it finds.
+    await second.page.waitForFunction(() => window.__lf.native.snapshots.length >= 1, undefined, { timeout: 10000 });
+    await second.page.waitForTimeout(500);
+    const after = await slot(second.page, 'latest');
+    console.log('after a restored launch', JSON.stringify(after));
+    assert.deepEqual(after, before, 'a jam equal to the restored one does not rewrite the archive');
+
+    // That check is spent: the next change saves as any other.
+    const next = await commitJam(second.page, 48000, 23);
+    await saved(second.page, next, 'the next take');
+    await second.context.close();
   },
 };
 
