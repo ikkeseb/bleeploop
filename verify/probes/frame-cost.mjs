@@ -148,7 +148,7 @@ async function feedRig(o) {
   const CAP = 1 << 13;
   const f = (window.__feed = {
     run: false, split: false, stat: false, n: 0, ticks: 0, seq: o.seq, batches: 0,
-    ages: new Float64Array(1 << 10), nAges: 0, sampleAges: false,
+    ages: new Float64Array(1 << 10), agesIn: new Uint8Array(1 << 10), nAges: 0, sampleAges: false, ageWindow: 0,
     bytes: new Float64Array(CAP), parse: new Float64Array(CAP), decode: new Float64Array(CAP), emit: new Float64Array(CAP),
   });
   const t0Wall = Date.now();
@@ -167,18 +167,20 @@ async function feedRig(o) {
     beat = beatNow;
     let peaks = '';
     if (o.take) {
-      // Every bin due, as one update, as the native feed sends the bins that changed since its last frame.
-      const total = Math.floor((frame - o.at) / o.peakFrames) + o.takeBins;
-      if (total > bins) {
-        const start = bins;
+      // As the native feed: the count rounds up, and one update holds the bins that changed since the last
+      // frame, the unfinished last bin among them while it fills.
+      const total = Math.ceil((frame - o.at) / o.peakFrames) + o.takeBins;
+      if (total > 0) {
+        const start = Math.max(0, Math.min(bins, total) - 1);
         const lo = [];
         const hi = [];
-        for (; bins < total; bins++) {
-          const a = 0.3 + 0.2 * Math.sin(bins / 3);
+        for (let b = start; b < total; b++) {
+          const a = 0.3 + 0.2 * Math.sin(b / 3);
           lo.push((-a).toFixed(3));
           hi.push(a.toFixed(3));
         }
         peaks = `{"lane":4,"start":${start},"count":${total},"min":[${lo}],"max":[${hi}]}`;
+        bins = total;
       }
     }
     let scope = '';
@@ -220,6 +222,7 @@ async function feedRig(o) {
     setInterval(() => {
       if (!f.sampleAges || f.nAges >= f.ages.length) return;
       looper.scopeInto(v);
+      f.agesIn[f.nAges] = f.ageWindow;
       f.ages[f.nAges++] = v.frame - looper.heardFrameValue();
     }, 250);
   }
@@ -417,23 +420,28 @@ async function scene(browser, open, base, s) {
   await page.waitForTimeout(WARM_S * 1000);
 
   const ticks = () => page.evaluate(() => window.__feed.ticks);
+  const nextWindow = () => page.evaluate(() => void window.__feed.ageWindow++);
   await page.evaluate(() => void (window.__feed.sampleAges = true));
   const ticks0 = await ticks();
   const time = await timed(page);
   const ticks1 = await ticks();
+  await nextWindow();
   const trace = await traced(browser, page);
+  await nextWindow();
   const heap = await heaped(page);
+  await nextWindow();
   const cpu = await profiled(page);
   await page.evaluate(() => void (window.__feed.sampleAges = false));
   await page.screenshot({ path: `${outDir}/${s.id}.png` });
   const after = await page.evaluate(() => {
-    return { batches: window.__feed.batches, ages: Array.from(window.__feed.ages.subarray(0, window.__feed.nAges)), sent: window.__lf.native.sent.filter((c) => c.SetScope !== undefined) };
+    return { batches: window.__feed.batches, ages: Array.from(window.__feed.ages.subarray(0, window.__feed.nAges)), agesIn: Array.from(window.__feed.agesIn.subarray(0, window.__feed.nAges)), sent: window.__lf.native.sent.filter((c) => c.SetScope !== undefined) };
   });
   await page.evaluate(() => void (window.__feed.run = false));
   app.consumeConsoleErrors(/WebSocket connection to|failed to connect to websocket/);
   await page.close();
 
   const ages = sorted(after.ages);
+  const windowAges = [0, 1, 2, 3].map((w) => sorted(after.ages.filter((_, i) => after.agesIn[i] === w)));
   const seconds = time.spanMs / 1000;
   const total = time.lanes.map((v, i) => v + time.stage[i]);
   const gaps = time.at.slice(1).map((v, i) => v - time.at[i]);
@@ -450,22 +458,23 @@ async function scene(browser, open, base, s) {
   const out = {
     scene: s.id, isolated: time.isolated, frames: time.frames, fps: +(time.frames / seconds).toFixed(1), intervalP99: ms(pct(sorted(gaps), 99)),
     script: spread(total), lanes: spread(time.lanes), stage: spread(time.stage), feed, trace, heap, cpu,
-    // Reported, not gated: the batches sent, and how far ahead of the clock the newest column stood
-    // (frames), sampled every 250 ms through all four windows.
-    scope: s.columns && !NO_FEED ? { batches: after.batches, ageFrames: { n: ages.length, min: ages[0] ?? 0, median: pct(ages, 50), max: ages.at(-1) ?? 0 } } : null,
+    // The batches sent over the whole scene, warm-up included, and how far ahead of the clock the newest
+    // column stood (frames), sampled every 250 ms through the four windows, with each window's median.
+    scope: s.columns && !NO_FEED ? { batches: after.batches, ageFrames: { n: ages.length, min: ages[0] ?? 0, median: pct(ages, 50), max: ages.at(-1) ?? 0, windows: windowAges.map((v) => pct(v, 50)) } } : null,
   };
   console.log(JSON.stringify(out));
   // Rates are reported (`fps`, `feed.perSecond`), never asserted: a correct scene can run slow on a loaded
   // machine. What is checked is that the scene ran as scripted.
   assert.ok(time.isolated, 'the page is cross-origin isolated, so its clock reads fine enough');
-  assert.ok(time.frames > 0, `${s.id}: the loops ran (${time.frames} frames in ${WINDOW_S} s)`);
+  assert.ok(time.frames >= 2, `${s.id}: the loops ran (${time.frames} frames in ${WINDOW_S} s)`);
   assert.ok(NO_FEED || ticks1 - ticks0 > 0, `${s.id}: the feed ran (${ticks1 - ticks0} ticks in ${WINDOW_S} s)`);
   if (s.columns && !NO_FEED) {
     assert.deepEqual(after.sent.at(-1), { SetScope: true }, 'SCOPE asked for its columns');
     assert.ok(after.batches > 0, `columns flowed (${after.batches} batches)`);
-    // The median, so a stall under load does not fail a correct run; a negative or far-ahead median means
-    // the look's freshness path (`age > 0 && age <= LEAD_COLUMNS * bin`) was not the one exercised.
-    assert.ok(ages.length > 0 && out.scope.ageFrames.median > 0 && out.scope.ageFrames.median <= 50 * BIN, `the newest column is fresh by the clock through the windows (median ${out.scope.ageFrames.median} frames ahead, ${ages.length} samples)`);
+    // Each window's median, so a stall under load does not fail a correct run; a negative or far-ahead one
+    // means the look's freshness path (`age > 0 && age <= LEAD_COLUMNS * bin`) was not the one exercised.
+    const fresh = windowAges.every((v) => v.length > 0 && pct(v, 50) > 0 && pct(v, 50) <= 50 * BIN);
+    assert.ok(fresh, `the newest column is fresh by the clock in every window (medians ${out.scope.ageFrames.windows} frames ahead, ${ages.length} samples)`);
   }
   return out;
 }
