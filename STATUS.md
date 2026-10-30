@@ -192,9 +192,11 @@ it.
 - Share output without the click: a stream hears the loops, the plugins and the guitar but no count-in
   or CLICK while the headphones click (ASIO only; `src-tauri/crates/lf-engine/tests/share_mix.rs`). On
   a loud mix the stream may sound a touch louder on the beat than the headphones.
-- SCOPE on a device: no eye has seen it draw a live pixel, and the frame cost with columns flowing is
-  unmeasured (next jam's 4; machine: `src-tauri/crates/lf-engine/tests/scope.rs`,
-  `verify/probes/scope-mirror.mjs`, the stage-view probe's `scope` group).
+- SCOPE on a device: no eye has seen it draw a live pixel. Its frame cost with columns flowing is
+  measured on the browser rig (`pnpm probe frame-cost`: script p99 under 0.5 ms, a feed frame about
+  30 µs, 635-byte JSON); paint and real WebView2 are not (next jam's 4; machine:
+  `src-tauri/crates/lf-engine/tests/scope.rs`, `verify/probes/scope-mirror.mjs`, the stage-view probe's
+  `scope` group).
 - The six synths and the lane FX by ear.
 - The lane delay's repeats land a whole division apart, no longer drifting ~3 ms each: with a high
   feedback over a loop, do they sit on the click and still sound right?
