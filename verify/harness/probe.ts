@@ -67,7 +67,7 @@ export interface ProbeOptions {
   launch?: LaunchOptions;
 }
 
-const DEFAULT_LAUNCH: LaunchOptions = { headless: true, args: ['--autoplay-policy=no-user-gesture-required'] };
+const DEFAULT_LAUNCH: LaunchOptions = { headless: true, args: ['--autoplay-policy=no-user-gesture-required', '--disable-gpu'] };
 
 /** Empties `dir` when it exists, keeping the folder: a probe may have created it already. */
 async function empty(dir: string): Promise<void> {
