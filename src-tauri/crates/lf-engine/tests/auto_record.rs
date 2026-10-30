@@ -107,6 +107,58 @@ fn a_gap_while_listening_drops_the_history_before_it() {
 }
 
 #[test]
+fn a_silent_block_drops_the_history_where_it_leaves_a_live_plugins_tap() {
+    // The live slot delays its input 1024 frames to the record tap: the silent block [d, d + 256)
+    // reaches it over [d + 1024, d + 1280). The onset 100 frames after the block reaches it on
+    // d + 1380, and a history kept from before d + 1280 would retain the silent frames.
+    const LATENCY: Frame = 1024;
+    let mut rig = Rig::with(common::Opts { block: 256, ..Default::default() });
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetAutoRecord(true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.press(Command::RecDub(0));
+    assert!(rig.lane(0).auto_armed);
+    let d = rig.frame + 9600;
+    let at = d + 356;
+    rig.set_input(onset_at(at));
+    rig.advance_to(d);
+    rig.damage();
+    rig.advance(256);
+    rig.advance_to(at + LATENCY + 600);
+    let start = rig.start_frame();
+    assert!(start >= d + 256 + LATENCY, "nothing from before the silent block left the tap: start {start}");
+    rig.advance_to(start + rig.fpb() + 1);
+    assert_eq!(rig.rejected(), 0);
+    assert!(rig.state(0) == LaneState::Playing && rig.master() == rig.fpb());
+    let input = onset_at(at);
+    assert!(rig.pcm(0)[..1024].iter().enumerate().all(|(k, &x)| x == input(start + k as Frame - LATENCY)), "one contiguous run from the start");
+}
+
+#[test]
+fn a_trigger_on_the_frames_before_a_gap_leaves_the_tap_keeps_it_and_the_gap_rejects_the_take() {
+    // The point gap at d leaves the tap on d + 1000, late in the render chunk the trigger lands in: the
+    // onset played just before d reaches it first, so the take holds the gap.
+    const LATENCY: Frame = 1000;
+    let mut rig = Rig::with(common::Opts { block: 256, ..Default::default() });
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetAutoRecord(true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.press(Command::RecDub(0));
+    let d = rig.frame + 9600;
+    rig.set_input(move |f| if f < d - 60 { 0.0 } else { 0.2 });
+    rig.advance_to(d);
+    rig.gap();
+    rig.advance(1256);
+    let start = rig.start_frame();
+    assert!(start < d + LATENCY, "the take began before the gap: start {start}");
+    rig.advance_to(start + rig.fpb() + 1);
+    assert_eq!(rig.rejected(), 1);
+    assert_eq!(rig.state(0), LaneState::Empty);
+}
+
+#[test]
 fn the_sensitivity_sets_what_level_triggers() {
     for (sensitivity, triggers) in [(1.0, false), (100.0, true)] {
         let mut rig = listening(0);

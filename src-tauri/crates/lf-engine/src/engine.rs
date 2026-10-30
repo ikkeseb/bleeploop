@@ -610,7 +610,7 @@ impl Engine {
             self.xruns += 1;
             // Use the tap's latched latency: live changes cannot move a capture's alignment.
             // A damaged block's own input frames are lost too.
-            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start }, live_latency);
+            self.looper.input_gap(lost_from, start, if ctx.damaged { end } else { start }, live_latency);
         }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
