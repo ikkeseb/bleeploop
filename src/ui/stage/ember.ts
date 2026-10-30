@@ -146,7 +146,7 @@ function star(color: string, hot: string, size: number, glow: number): HTMLCanva
   const x = cv.getContext('2d');
   if (!x) return cv;
   const m = size / 2;
-  x.globalCompositeOperation = 'lighter';
+  x.globalCompositeOperation = 'screen';
   const halo = x.createRadialGradient(m, m, 0, m, m, m);
   halo.addColorStop(0, withAlpha(color, 0.4 * glow));
   halo.addColorStop(0.1, withAlpha(color, 0.22 * glow));
@@ -718,7 +718,7 @@ function createEmber(): ViewDraw {
       x.lineJoin = 'round';
       x.stroke();
       a.filter = blurFar;
-      a.globalCompositeOperation = 'lighter';
+      a.globalCompositeOperation = 'screen';
       a.globalAlpha = 1;
       a.drawImage(scratch, 0, 0, g, g, cellX[i], 0, g, g);
       // The cut: where the needles stand, just inside their tips (at this scale their spread, so the
@@ -863,7 +863,7 @@ function createEmber(): ViewDraw {
 
     // Light: each sounding ring's bloom at its own level (a fixed share of it under reduced motion),
     // over its annulus only.
-    c.globalCompositeOperation = 'lighter';
+    c.globalCompositeOperation = 'screen';
     for (let i = 0; i < LANES; i++) {
       const g = dim * light.lit[i];
       // A ring that goes silent (muted, stopped) loses its bloom at once: a ghost does not glow.
