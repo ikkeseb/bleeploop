@@ -173,6 +173,16 @@
 //!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
 //!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
 //!   block with no jump keeps the device interval at all.
+//! - **A later take pressed just after a loop boundary starts a whole loop late** (read from source, not
+//!   rendered). `start_recording` takes `next_boundary` with no tolerance, as END STOP's `stop_at` and
+//!   UNDO and REVERSE's `switch_at` do; the free-stop grace is in the stop plans alone. A press on the
+//!   loop's 1 that lands a frame late waits for the next pass. Whether such a press snaps back is the
+//!   owner's call. Next check: a frame-rendered test at block sizes 1 and 128 that a press 64 frames past
+//!   the boundary starts at `anchor + 2 * master + align`.
+//! - **COPY in RETAKE's grace can land on the lane the handoff records to** (read from source, not
+//!   rendered). `Looper::copy` skips the recorder but not `handoff`, so the take inherits the copy's
+//!   REVERSE, mix and FX. Next check: a test with COPY a quarter beat before the pass edge, then exclude
+//!   the handoff's lane.
 //! - **A session job can be served before the commands queued ahead of it.** With no device running,
 //!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
 //!   it on resume (applying them in idle is wrong: a capture latches alignment 0, and the 64-entry

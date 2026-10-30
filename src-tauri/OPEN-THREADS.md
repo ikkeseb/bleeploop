@@ -157,3 +157,11 @@
   `run_job`): a callback that stalls more than two 10 s waits between taking a load and applying it would
   apply a load already answered as failed; only the engine's fault path recovers it. Read from source,
   never seen. Next check, only if a load ever plays after a failed answer: the log's session-job lines.
+- Three ways a jam can be lost (read from source; the second and third reproduced only in a simulation of
+  the real module). Export toasts success before the file exists (`src/session/export.ts`, `<a download>`),
+  and a CLEAR ALL then also deletes the recovery. Two running instances share one IndexedDB and tone folder,
+  so one's CLEAR ALL can delete the other's recovery (`src/session/autosave.ts`; no single-instance guard).
+  A take committed while startup restore waits is marked saved and never autosaved (`autosave.ts`, `saved`).
+  Next check: a native save command answering the path, `tauri-plugin-single-instance` at `=2.4.5` (2.5
+  needs tauri 2.12), and a held-load case in `verify/probes/engine-recovery-keep.mjs`. Unmeasured first: an
+  export's largest body over raw IPC in the real app.
