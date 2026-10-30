@@ -169,7 +169,7 @@ async function feedRig(o) {
     if (o.take) {
       // As the native feed: the count rounds up, and one update holds the bins that changed since the last
       // frame, the unfinished last bin among them while it fills.
-      const total = Math.ceil((frame - o.at) / o.peakFrames) + o.takeBins;
+      const total = Math.ceil((frame - o.at + o.takeFrames) / o.peakFrames);
       if (total > 0) {
         const start = Math.max(0, Math.min(bins, total) - 1);
         const lo = [];
@@ -415,7 +415,7 @@ async function scene(browser, open, base, s) {
     assert.equal(await page.evaluate(() => document.querySelector('.sv').dataset.view), s.look, `the stage shows ${s.look}`);
   }
   await page.mouse.move(900, 500);
-  await page.evaluate(feedRig, { seq, rate: RATE, at, bin: BIN, sources: SOURCES, lead: LEAD, columns: !!s.columns, take: !!s.take, takeBins, peakFrames: PEAK_FRAMES, scopeBatch: SCOPE_BATCH });
+  await page.evaluate(feedRig, { seq, rate: RATE, at, bin: BIN, sources: SOURCES, lead: LEAD, columns: !!s.columns, take: !!s.take, takeBins, takeFrames: s.take ? BAR : 0, peakFrames: PEAK_FRAMES, scopeBatch: SCOPE_BATCH });
   if (!NO_FEED) await page.evaluate(() => window.__feed.start());
   await page.waitForTimeout(WARM_S * 1000);
 
