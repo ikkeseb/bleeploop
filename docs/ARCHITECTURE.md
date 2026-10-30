@@ -49,7 +49,8 @@ path (`EngineHost.snapshot` / `loadSession`).
   (one `requestAnimationFrame` loop reading a plain mutable state object); signals are
   reserved for low-frequency chrome (transport mode, track LEDs, tempo, FX labels).
 - **Rust:** lf-engine (rtrb rings; the synths, FX, reverb and limiter ported from Tone 15.1.22 on
-  Blink and null-tested against its renders, `src-tauri/crates/lf-engine/src/dsp/mod.rs`; RustFFT),
+  Blink and null-tested against its renders, the feedback delay excepted, which its own timing and
+  decay tests pin, `src-tauri/crates/lf-engine/src/dsp/mod.rs`; RustFFT),
   cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP, `vst3` for VST3, the
   project's own interface declarations for VST2, and midir for native MIDI input.
 
@@ -88,7 +89,7 @@ staging remains necessary, and a true ceiling needs an explicit distortion/laten
 latency measurement. The live wet signal joins after the limiter and is not limited.
 
 **Session files** (`src/session/`): export writes a zip of Float32 WAV stems, a PCM16 wet master and
-`session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
+`<base>-session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`), each lane with
 its mix, which the engine sets on the frame the loop goes in (the first loaded sample plays at it) and
 the host keeps as its replayed settings; a session job runs after the commands due on its block's first
@@ -161,7 +162,7 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
    thread from its entry to its return, which a plugin's own heap bypasses
    (`src-tauri/src/host/rt_alloc.rs`).
 6. **No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop.**
-   rAF + a plain mutable object only. A capture drain writing a fresh object into a track signal 40×/s
+   rAF + a plain mutable object only (one exception, the bar grid's cache: `src/ui/AGENTS.md`). A capture drain writing a fresh object into a track signal 40×/s
    once cost ~200 full-document layout events per 5 s of recording. The pattern: the feed handler
    writes one plain mirror and writes a signal only when its value changed; the waveform rAF reads the
    mirror (`src/ui/state/engine-store.ts`).
@@ -176,7 +177,8 @@ engine lap.
 
 Why the earlier rejection no longer held:
 
-- The synths and FX moved too, null-tested against reference renders of the Tone code, so no
+- The synths and FX moved too, null-tested against reference renders of the Tone code (the feedback
+  delay by its own timing and decay tests), so no
   compensation moved to a synth ingress.
 - No `AudioContext` has to be clocked from outside: the engine owns the device callback.
 - The looper state machine has one owner in Rust and is verified offline by `cargo test -p lf-engine`
@@ -243,8 +245,8 @@ input port may be exclusive: the WebView's Web MIDI permission is denied (`src-t
   engine commands and its note sources' events leave in one `input_send` batch at a time, the next
   once that one settled, since Tauri's IPC does not keep two calls in order (a round trip per batch,
   unmeasured; MIDI ports do not take this path). No native call stalls the UI: one unanswered for 2 s
-  is given up (never sent twice, as it may still run), and while one is out the waiting batch holds at
-  most 256 items (past them presses are dropped, never a release). A batch native code refused ran
+  is given up (never sent twice, as it may still run), and while one is out, a batch waiting at 256
+  items drops new presses and engine commands, never a release. A batch native code refused ran
   nothing and is sent once more; one lost twice is told, and a blur follows it when it held a release
   (a blur lost too rides at the head of the next batch). What native MIDI dropped of a batch (a press
   with no device running) is its answer, told to the player once until a press goes through.
