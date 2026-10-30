@@ -53,9 +53,6 @@ tauri-plugin-updater = { version = "~2.12", default-features = false, features =
 # deny the WebView2 Web MIDI permission (`lib.rs`) — already transitive via tauri; pinned to the resolved
 # versions so the ICoreWebView2 types unify with Tauri's.
 webview2-com = "0.38.2"
-# One running app per identifier (`lib.rs`): two share the recovery's IndexedDB and the tone folder.
-# 2.5 wants tauri 2.12; 3.x is alpha. Windows only: on Linux it pulls zbus.
-tauri-plugin-single-instance = "=2.4.5"
 # Win32_System_Com + Win32_Media_Audio: the DEV engine and share probes' raw WASAPI endpoint queries;
 # Win32_System_Threading: AvSetMmThreadCharacteristicsW — promote the device callbacks to "Pro Audio"
 # MMCSS ourselves, so cpal's `realtime` feature stays off.

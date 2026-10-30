@@ -17,6 +17,10 @@ mod chirp_lag;
 // Stage 1 silent-share probe (docs/ARCHITECTURE.md § Measured premise, S1).
 #[cfg(all(windows, debug_assertions))]
 mod share_probe;
+// One running app, in release builds (`single_instance.rs`): `run()` is its one caller.
+#[cfg(windows)]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+mod single_instance;
 // The app updater's check and install (`update.rs`).
 mod update;
 
@@ -189,19 +193,6 @@ fn register_midi_permission_deny(window: &tauri::WebviewWindow) {
     });
 }
 
-/// A second launch of the release app: the first window comes to the front, restored if it was
-/// minimised, and the second process exits (`tauri-plugin-single-instance`, `run()`). No toast. Compiled
-/// in debug too, where nothing calls it, so a debug `cargo check` still reads it.
-#[cfg(windows)]
-#[cfg_attr(debug_assertions, allow(dead_code))]
-fn front_main_window(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    let Some(window) = app.get_webview_window("main") else { return };
-    if let Err(e) = window.unminimize().and_then(|()| window.show()).and_then(|()| window.set_focus()) {
-        log::warn!("a second launch could not bring the window to the front: {e}");
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // P9.1: out-of-process plugin scan child mode. `app.exe --scan-one <path>` loads ONE bundle
@@ -258,14 +249,16 @@ pub fn run() {
         }
     }
 
-    let builder = tauri::Builder::default();
-    // One running app: two would share the recovery's IndexedDB and the tone folder, each with its own
-    // cache. First, so a refused launch starts nothing; here, so the scan and probe children above keep
-    // running beside the app. Release only, so `tauri dev` still runs beside an installed app. The
-    // identifier names the lock, so the release-smoke exe does not meet the owner's.
+    let context = tauri::generate_context!();
+    // One running app (`single_instance.rs`). Before the builder, so a refused launch starts nothing;
+    // after the dispatches above, so the scan and probe children keep running beside the app. Release
+    // only, so `tauri dev` still runs beside an installed app. The identifier names the lock, so the
+    // release-smoke exe does not meet the owner's.
     #[cfg(all(windows, not(debug_assertions)))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| front_main_window(app)));
-    builder
+    if let single_instance::Claim::Exit = single_instance::first_launch(&context.config().identifier) {
+        std::process::exit(0);
+    }
+    tauri::Builder::default()
         // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
         .manage(update::UpdateState::default())
@@ -408,7 +401,7 @@ pub fn run() {
             #[cfg(all(windows, debug_assertions))]
             engine_io::midi_bench::midi_bench_clock_sync,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             // The engine closes its device and drops the engine on its own threads, not in a destructor.

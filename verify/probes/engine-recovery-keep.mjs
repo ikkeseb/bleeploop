@@ -642,7 +642,9 @@ const cases = {
     await commitJam(second.page, 48000, 22);
     // The quiet window's save, not a flush: that is a close's, and saves whatever it finds.
     await second.page.waitForFunction(() => window.__lf.native.snapshots.length >= 1, undefined, { timeout: 10000 });
-    await second.page.waitForTimeout(500);
+    // That save's compare and any rewrite run on autosave's queue, so a restore queued behind them
+    // answers when they have ended; it restores nothing into a looper that holds a loop.
+    assert.equal(await second.page.evaluate(() => window.__lf.autosave.restoreLatest()), false, 'the queued restore loads nothing');
     const after = await slot(second.page, 'latest');
     console.log('after a restored launch', JSON.stringify(after));
     assert.deepEqual(after, before, 'a jam equal to the restored one does not rewrite the archive');
