@@ -189,6 +189,19 @@ fn register_midi_permission_deny(window: &tauri::WebviewWindow) {
     });
 }
 
+/// A second launch of the release app: the first window comes to the front, restored if it was
+/// minimised, and the second process exits (`tauri-plugin-single-instance`, `run()`). No toast. Compiled
+/// in debug too, where nothing calls it, so a debug `cargo check` still reads it.
+#[cfg(windows)]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn front_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window("main") else { return };
+    if let Err(e) = window.unminimize().and_then(|()| window.show()).and_then(|()| window.set_focus()) {
+        log::warn!("a second launch could not bring the window to the front: {e}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // P9.1: out-of-process plugin scan child mode. `app.exe --scan-one <path>` loads ONE bundle
@@ -245,7 +258,14 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // One running app: two would share the recovery's IndexedDB and the tone folder, each with its own
+    // cache. First, so a refused launch starts nothing; here, so the scan and probe children above keep
+    // running beside the app. Release only, so `tauri dev` still runs beside an installed app. The
+    // identifier names the lock, so the release-smoke exe does not meet the owner's.
+    #[cfg(all(windows, not(debug_assertions)))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| front_main_window(app)));
+    builder
         // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
         .manage(update::UpdateState::default())

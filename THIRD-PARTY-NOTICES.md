@@ -40,6 +40,7 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 |---|---|---|
 | tauri | 2.11.5 | Apache-2.0 OR MIT |
 | tauri-plugin-log | 2.9.1 | Apache-2.0 OR MIT |
+| tauri-plugin-single-instance | 2.4.5 | Apache-2.0 OR MIT |
 | tauri-plugin-updater | 2.12.0 | Apache-2.0 OR MIT |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
