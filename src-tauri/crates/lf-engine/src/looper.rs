@@ -457,7 +457,7 @@ pub struct Looper {
     /// Every buffer position the block jobs have moved.
     job_work: Frame,
     /// The input gaps a window not yet checked may still overlap (`Looper::input_gap`): a window whose
-    /// edge runs after them may lie in them.
+    /// edge runs after them may lie in them. The device frames first, then the frames of the record tap.
     gap: [(Frame, Frame); 2],
     detector: Detector,
     gain_coef: f64,
@@ -2280,26 +2280,27 @@ impl Looper {
 
     // ── Audio ──────────────────────────────────────────────────────────────────────────────────────
 
-    /// The device lost input frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`):
-    /// a capture whose window they fall inside is damaged; AUTO drops the history it can no longer join.
+    /// The device lost input frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`) and
+    /// rendering resumed on `resumed`: a capture whose window they fall inside is damaged.
     /// Check both the device interval (lost tap frames) and its shift by the tap's latched live latency.
+    /// The tap's delays count rendered frames, so past a jump (`from < resumed`) it carries the input
+    /// before the jump, late by the jump, until the input after it arrives: the shift starts on the first
+    /// of those frames, `resumed`, when the latency outlasts the jump.
     /// Every window checks the last gap as it opens, so a gap past a window's end damages the windows
     /// that follow too (a RETAKE pass, a handoff's take), and a press in a damaged block damages the
     /// window it opens there. A recorder still behind the last gap (a jump skipped RETAKE passes,
     /// and `events` catches up four edges at a time) has windows left to check against it: the new gap
-    /// joins it, so a later xrun never makes a skipped pass clean. The frames between the two count as
-    /// lost too, which only matters to a window wholly between them that the recorder has not reached.
-    pub fn input_gap(&mut self, from: Frame, to: Frame, live_latency: Frame) {
-        for (gap, delay) in self.gap.iter_mut().zip([0, live_latency]) {
+    /// joins it from the earlier start of the two (a jump's shift can start before a point gap's), so a
+    /// later xrun never makes a skipped pass clean. The frames between the two count as lost too, which
+    /// only matters to a window wholly between them that the recorder has not reached.
+    pub fn input_gap(&mut self, from: Frame, resumed: Frame, to: Frame, live_latency: Frame) {
+        let shifted = from + live_latency;
+        let shifted = if from < resumed { shifted.min(resumed) } else { shifted };
+        for (gap, (from, to)) in self.gap.iter_mut().zip([(from, to), (shifted, to + live_latency)]) {
             let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < gap.1));
-            *gap = (if behind { gap.0 } else { from + delay }, to + delay);
+            *gap = (if behind { gap.0.min(from) } else { from }, to);
         }
-        let Some(rec) = self.rec else { return };
-        if self.lanes[rec.lane].auto_armed {
-            self.detector.reset();
-        } else {
-            self.damage_from_gap();
-        }
+        self.damage_from_gap();
     }
 
     fn damage_from_gap(&mut self) {
@@ -2310,14 +2311,23 @@ impl Looper {
     }
 
     /// AUTO listening: scan `input` (from frame `f0`). On a trigger, the take begins and the frames
-    /// before the returned index are the last ones rendered under the listening state.
+    /// before the returned index are the last ones rendered under the listening state. The history drops
+    /// what it can no longer join on the frame the last input gap leaves the tap, not on the device's.
     pub fn scan_auto(&mut self, cx: &mut Cx, f0: Frame, input: &[f32]) -> Option<usize> {
         let rec = self.rec?;
         if !self.lanes[rec.lane].auto_armed {
             return None;
         }
         let live = self.lanes[rec.lane].live;
-        let at = self.detector.scan(input, autorec::threshold(self.auto_sensitivity), &mut self.bufs[live])?;
+        let threshold = autorec::threshold(self.auto_sensitivity);
+        let gap_end = self.gap[1].1;
+        let split = if (f0..f0 + input.len() as Frame).contains(&gap_end) { (gap_end - f0) as usize } else { input.len() };
+        let mut at = self.detector.scan(&input[..split], threshold, &mut self.bufs[live]);
+        if at.is_none() && split < input.len() {
+            self.detector.reset();
+            at = self.detector.scan(&input[split..], threshold, &mut self.bufs[live]).map(|k| split + k);
+        }
+        let at = at?;
         let copied = self.detector.copied();
         let onset = f0 + at as Frame - copied as Frame;
         self.lanes[rec.lane].written = copied as Frame;
