@@ -222,3 +222,4 @@ nothing is said.
 | # | Question | Default |
 |---|---|---|
 | D30 | Three remote branches, one unlanded commit each, kept as they are: `pw16/heap-probe` (22a2b33d, a candidate: the stage draw's clock and level reads in typed arrays, the allocation probe on the freshness path), `proto11/settings-a` (f6ed7aee, a WIP Audio Settings prototype, ungated), `proto11/bar-c` (297d6acd, a prototype: one TAKE chip holding the five mode pills). Land, rework or delete each? | Kept untouched until the owner says |
+| D31 | A press just past the loop's 1 waits for the next pass: a later take starts a whole loop late (rendered: `tests/later_arm.rs`, the ignored test; 8 s on 4 bars at 120, up to 60 s), and END STOP, UNDO and REVERSE share that boundary (read from source). Snap a press within a grace back to the 1, or keep waiting a loop? It changes how the looper plays. | Keeps waiting a loop until the owner says |

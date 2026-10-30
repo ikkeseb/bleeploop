@@ -173,12 +173,11 @@
 //!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
 //!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
 //!   block with no jump keeps the device interval at all.
-//! - **A later take pressed just after a loop boundary starts a whole loop late** (read from source, not
-//!   rendered). `start_recording` takes `next_boundary` with no tolerance, as END STOP's `stop_at` and
-//!   UNDO and REVERSE's `switch_at` do; the free-stop grace is in the stop plans alone. A press on the
-//!   loop's 1 that lands a frame late waits for the next pass. Whether such a press snaps back is the
-//!   owner's call. Next check: a frame-rendered test at block sizes 1 and 128 that a press 64 frames past
-//!   the boundary starts at `anchor + 2 * master + align`.
+//! - **A later take pressed just after a loop boundary starts a whole loop late.** `start_recording`
+//!   takes `next_boundary` with no tolerance, as END STOP's `stop_at` and UNDO and REVERSE's `switch_at`
+//!   do (those two read from source, not rendered); the free-stop grace is in the stop plans alone. A
+//!   press on the loop's 1 that lands a frame late waits for the next pass: rendered at block sizes 1
+//!   and 128 by the ignored test in `tests/later_arm.rs`. Whether such a press snaps back is D31.
 //! - **COPY in RETAKE's grace can land on the lane the handoff records to** (read from source, not
 //!   rendered). `Looper::copy` skips the recorder but not `handoff`, so the take inherits the copy's
 //!   REVERSE, mix and FX. Next check: a test with COPY a quarter beat before the pass edge, then exclude
