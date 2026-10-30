@@ -153,6 +153,19 @@ const tauriPluginHost: PluginHost = {
   },
 };
 
+// The native feed has one subscriber; replacing it retires this document's previous one too.
+let stopEngineFeed: (() => void) | null = null;
+
+function retireFeedChannel(channel: Channel<unknown> | null): void {
+  if (channel === null) return;
+  // Read against @tauri-apps/api 2.11.1: Channel's private cleanupCallback does this,
+  // but an index gap prevents its end message from reaching that cleanup.
+  const internals = (window as Window & {
+    __TAURI_INTERNALS__?: { unregisterCallback?: (id: number) => void };
+  }).__TAURI_INTERNALS__;
+  internals?.unregisterCallback?.(channel.id);
+}
+
 /**
  * The native engine over Tauri IPC: each method maps to an `engine_*` command in Rust
  * (`src-tauri/src/engine_io`); the feed arrives on a Tauri Channel. Payloads: `engine-wire.ts`.
@@ -184,28 +197,81 @@ const tauriEngineHost: EngineHost = {
     await invoke('engine_load_session', bytes);
   },
   subscribe(onFrame) {
-    const channel = new Channel<unknown>();
+    stopEngineFeed?.();
     let live = true;
     let reported = false;
-    channel.onmessage = (raw) => {
+    let generation = 0;
+    let newest: number | null = null;
+    let ackTimer: ReturnType<typeof setTimeout> | null = null;
+    let subscribing = false;
+    let liveChannel: Channel<unknown> | null = null;
+
+    const ack = () => {
       if (!live) return;
-      try {
-        onFrame(decodeFeedFrame(raw));
-      } catch (err) {
-        // One report per subscription: a wire drift would otherwise log 60 times a second.
-        if (reported) return;
-        reported = true;
-        console.error('[host.tauri] engine feed frame rejected', err);
-        notifyError('Could not read an update from the audio engine. Restart BleepLoop if the screen stops following it.', err);
-      }
+      const gen = generation;
+      void invoke<boolean>('engine_feed_ack', { seq: newest }).then((stuck) => {
+        if (live && gen === generation && stuck && !subscribing) connect();
+      }).catch(() => {
+        // The next frame's timer or heartbeat retries a failed ack.
+      });
     };
-    invoke('engine_feed', { channel }).catch((err: unknown) => {
-      console.error('[host.tauri] engine feed subscribe failed', err);
-      notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
-    });
-    return () => {
+
+    const connect = () => {
+      // Retire the old handler and every pending ack answer before the replacement subscribes.
+      const gen = ++generation;
+      retireFeedChannel(liveChannel);
+      newest = null;
+      if (ackTimer !== null) clearTimeout(ackTimer);
+      ackTimer = null;
+      subscribing = true;
+      const channel = new Channel<unknown>();
+      liveChannel = channel;
+      channel.onmessage = (raw) => {
+        if (!live || gen !== generation) return;
+        // Even a rejected frame was handed on by this channel: it must not fill the native window.
+        if (typeof raw === 'object' && raw !== null && 'seq' in raw && typeof raw.seq === 'number' && Number.isSafeInteger(raw.seq) && raw.seq >= 0) {
+          newest = raw.seq;
+        }
+        if (ackTimer === null) {
+          ackTimer = setTimeout(() => {
+            ackTimer = null;
+            if (live && gen === generation) ack();
+          }, 100);
+        }
+        try {
+          onFrame(decodeFeedFrame(raw));
+        } catch (err) {
+          // One report per subscription: a wire drift would otherwise log 60 times a second.
+          if (reported) return;
+          reported = true;
+          console.error('[host.tauri] engine feed frame rejected', err);
+          notifyError('Could not read an update from the audio engine. Restart BleepLoop if the screen stops following it.', err);
+        }
+      };
+      void invoke('engine_feed', { channel }).catch((err: unknown) => {
+        retireFeedChannel(channel);
+        if (liveChannel === channel) liveChannel = null;
+        if (!live || gen !== generation) return;
+        console.error('[host.tauri] engine feed subscribe failed', err);
+        notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
+      }).finally(() => {
+        if (gen === generation) subscribing = false;
+      });
+    };
+    const heartbeat = setInterval(ack, 1000);
+    const unsubscribe = () => {
+      if (!live) return;
       live = false;
+      generation++;
+      retireFeedChannel(liveChannel);
+      liveChannel = null;
+      if (ackTimer !== null) clearTimeout(ackTimer);
+      clearInterval(heartbeat);
+      if (stopEngineFeed === unsubscribe) stopEngineFeed = null;
     };
+    stopEngineFeed = unsubscribe;
+    connect();
+    return unsubscribe;
   },
 };
 

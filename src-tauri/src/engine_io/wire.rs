@@ -486,6 +486,10 @@ pub struct FeedFrame {
     /// carries every lane, the transport and the selected lane (a lane or transport a new engine has
     /// not reported yet is at its default: EMPTY, no master), and each lane's last `Mix` the host kept.
     pub reset: bool,
+    /// The end of a hold or withhold without a reset: ordered missed events and changed peaks.
+    /// Absent on ordinary frames and resets.
+    #[serde(default, rename = "catchUp", skip_serializing_if = "std::ops::Not::not")]
+    pub catch_up: bool,
     pub events: Vec<WireEvent>,
     pub device: Vec<DeviceEvent>,
     /// Absent: unchanged; `null`: no device runs; else the device that runs.

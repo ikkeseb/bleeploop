@@ -18,7 +18,9 @@
  *   clock correction back over a beat line and on again pulses nothing early and nothing twice.
  * - The kept meter: the meter the engine applied is kept (`lf.meter`), a fresh engine that lacks it gets
  *   a `SetMeter`, its reset frame's 4/4 does not overwrite the kept one, and an engine that has it gets
- *   none.
+ *   none, including a known 4/4 after older 6/8 Transports (a lock and an unlock among them) or picks
+ *   4/4, 3/4, 4/4 inside the feed's lag. Each Transport is kept; a reset with a known meter sends none
+ *   back. A pick a full command ring or a loop lock refused is never kept or sent again on a reset.
  * - The transport keys after a pointer pick in the picker (new value, same value, dismissed): Space and
  *   ArrowDown reach the looper (`src/app/transport-keys.ts`; the picker has no <label>, its name is its
  *   aria-label, so the label case of `transport-focus` does not arise here).
@@ -59,7 +61,7 @@ const anchorAt = (frame, rate = RATE) => ({ frame, atMs: Date.now(), rate, grid:
 
 await probe(async ({ open }) => {
   await mkdir(outDir, { recursive: true });
-  const { page, consoleErrors } = await open({
+  const { page, consoleErrors, consumeConsoleErrors } = await open({
     viewport: { width: 1280, height: 820 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -299,6 +301,93 @@ await probe(async ({ open }) => {
   await reset([transport(0, false, 120, SIX), ...empties(0, 1, 2, 3, 4)], [{ SetMeter: [6, 8] }]);
   await settle();
   assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'an engine that keeps the meter gets no SetMeter');
+  // A full command ring refuses a pick: a reset asks only the kept meter.
+  await clearSent();
+  await page.evaluate(() => void (window.__lf.native.dropped = 'full'));
+  try {
+    await picker.selectOption('3/4');
+    await settle();
+    assert.deepEqual(await sent(), [{ SetMeter: [3, 4] }], 'the refused pick was sent');
+    assert.deepEqual(consumeConsoleErrors('[platform] native MIDI dropped input: full'),
+      ['[platform] native MIDI dropped input: full'], 'the batch was answered as full');
+  } finally {
+    await page.evaluate(() => void (window.__lf.native.dropped = null));
+  }
+  assert.equal(await picker.inputValue(), '6/8', 'a refused pick does not change the picker');
+  assert.equal(await kept(), '2', 'a refused pick does not change the kept meter');
+  await clearSent();
+  await reset([transport(0, false, 120, FOUR), ...empties(0, 1, 2, 3, 4)]);
+  await settle();
+  const afterFull = (await sent()).filter((c) => 'SetMeter' in c);
+  console.log('full command ring: sent after reset', JSON.stringify(afterFull), 'kept', await kept());
+  assert.deepEqual(afterFull, [{ SetMeter: [6, 8] }], 'the reset sends the kept meter, never the refused pick');
+  assert.equal(await kept(), '2', 'the reset keeps 6/8');
+  await emit({ events: [transport(0, false, 120, SIX)] });
+  await settle();
+
+  // A queued Transport predates the pick; a reset loses its echo but the host keeps the applied 4/4.
+  await picker.selectOption('4/4');
+  await settle();
+  await emit({ events: [transport(0, false, 121, SIX)] });
+  await settle();
+  assert.equal(await kept(), '2', 'the queued Transport keeps the applied 6/8');
+  await clearSent();
+  await reset([transport(0, false, 121, FOUR), ...empties(0, 1, 2, 3, 4)], [{ SetMeter: [4, 4] }]);
+  await settle();
+  console.log('sent after a stale Transport and reset', JSON.stringify((await sent()).filter((c) => 'SetMeter' in c)), 'kept', await kept());
+  assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'a reset with known 4/4 sends no SetMeter after a stale Transport');
+  assert.equal(await kept(), '0', "the reset's Transport keeps the applied 4/4");
+  // Older frames still queued: a take locked the tempo in 6/8 and a clear unlocked it, then the 4/4 pick.
+  await emit({ events: [transport(0, false, 121, SIX)] });
+  await settle();
+  await picker.selectOption('4/4');
+  await settle();
+  await emit({ events: [transport(0, true, 121, SIX)] });
+  await emit({ events: [transport(0, false, 121, SIX)] });
+  await settle();
+  await clearSent();
+  await reset([transport(0, false, 121, FOUR), ...empties(0, 1, 2, 3, 4)], [{ SetMeter: [4, 4] }]);
+  await settle();
+  assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'an older lock and unlock before a reset send no SetMeter over the 4/4 pick');
+  assert.equal(await kept(), '0', 'the 4/4 pick is kept across an older lock and unlock and a reset');
+
+  // A-B-A inside the feed's lag, the last echo lost to a reset: the host keeps the applied 4/4 once a
+  // SetMeter was recorded (`settings.rs`, whose test is the red/green for this race), so the reset's
+  // settings carry it and the store asks nothing over it, whatever its older Transports kept.
+  await emit({ events: [transport(0, false, 121, SIX)] });
+  await settle();
+  await clearSent();
+  for (const pick of ['4/4', '3/4', '4/4']) {
+    await picker.selectOption(pick);
+    await settle();
+  }
+  assert.deepEqual(await sent(), [{ SetMeter: [4, 4] }, { SetMeter: [3, 4] }, { SetMeter: [4, 4] }], 'A-B-A: all three picks were sent before their echoes');
+  assert.equal(await kept(), '2', 'A-B-A: only the applied 6/8 is kept before the echoes');
+  for (const [meter, index] of [[FOUR, '0'], [THREE, '1']]) {
+    await emit({ events: [transport(0, false, 121, meter)] });
+    await settle();
+    assert.equal(await kept(), index, 'A-B-A: each Transport keeps its applied meter');
+  }
+  await clearSent();
+  await reset([transport(0, false, 121, FOUR), ...empties(0, 1, 2, 3, 4)], [{ SetMeter: [4, 4] }]);
+  await settle();
+  const afterAba = (await sent()).filter((c) => 'SetMeter' in c);
+  console.log('A-B-A: sent after reset', JSON.stringify(afterAba), 'kept', await kept());
+  assert.deepEqual(afterAba, [], 'A-B-A: the known 4/4 gets no SetMeter on reset, though 3/4 was kept last');
+  assert.equal(await kept(), '0', "A-B-A: the reset's Transport keeps the applied 4/4");
+  assert.equal(await picker.inputValue(), '4/4', 'A-B-A: the picker shows the applied 4/4');
+
+  // A pick the engine never takes, since a loop locked the tempo first: it is never kept.
+  await picker.selectOption('3/4');
+  await settle();
+  await emit({ events: [transport(0, true, 121, FOUR)] });
+  await settle();
+  assert.equal(await kept(), '0', 'a pick a lock refused leaves the applied meter kept');
+  await clearSent();
+  await reset([transport(0, true, 121, FOUR), ...empties(0, 1, 2, 3, 4)], [{ SetMeter: [4, 4] }]);
+  await settle();
+  assert.ok(!(await sent()).some((c) => 'SetMeter' in c), 'a reset sends no SetMeter after a lock refused the pick');
+  assert.equal(await kept(), '0', 'a pick a lock refused is not kept for the next launch');
   // An engine whose loop locked a 3/4 import: that is the meter kept.
   await emit({ events: [transport(3 * 72000, true, 120, THREE)] });
   await settle();

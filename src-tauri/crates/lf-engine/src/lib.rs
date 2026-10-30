@@ -172,12 +172,15 @@
 //!
 //! # Open threads
 //!
-//! - **A gap the live plugin's latency carries into a window is missed.** The tap carries input frame
-//!   `x` at `x + live latency`, but `input_gap` gets the device frames, which must stay (a jump in a
-//!   window's closing tail loses those tap frames): a silent block just before a layer commits it clean.
-//!   Next check: pass the looper both intervals, then un-ignore
-//!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
-//!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
+//! - **`input_gap`'s two intervals leave two narrow cases behind a live plugin** (read from source, not
+//!   rendered). A jump of `J` frames under a record latency `L > J` leaves tap frames
+//!   `[start, lost_from + L)` carrying pre-jump input `J` frames late, and neither interval covers them,
+//!   so a window wholly inside commits shifted audio. And AUTO's `detector.reset()` runs on the device
+//!   block, `L` frames before the lost frames reach the tap, so its lookback can still take them and
+//!   `begin_auto` then rejects a take a reset at the tap's time would have kept. A damaged block (no
+//!   jump) still rejects on its unshifted interval too, which the tap carries clean: conservative, as
+//!   before. Next check: a frame-rendered test for each first case, then shift the jump's interval start
+//!   to `min(from + L, start)` and the AUTO reset to the tap's frame.
 //! - **A session job can be served before the commands queued ahead of it.** With no device running,
 //!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
 //!   it on resume (applying them in idle is wrong: a capture latches alignment 0, and the 64-entry
@@ -196,9 +199,6 @@
 //!   way (`instruments.rs` 259), untested. Next step: check each delay, instruments included, against its
 //!   own line and grow the lines off RT, or refuse the compensation explicitly; test both sides of the
 //!   capacity.
-//! - **The reference null test lets NaN through.** `score()` (`tests/common/refs.rs` 226) takes
-//!   `err.max(1e-300)`, which turns a NaN error into the floor, so a NaN render passes `Class::N` (289).
-//!   Next step: reject non-finite samples in both inputs, with tests for one NaN, all NaN and ±inf.
 //! - **`tests/perf.rs`'s ignored Stage 2 bar fails on a loaded PC** (11.4 % and 9.1 % against its 10 %).
 //!   Next check: rerun it on a quiet desktop before reading a failure as a regression.
 //!

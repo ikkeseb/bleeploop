@@ -362,6 +362,58 @@ fn plugin_automation_reaches_the_caller_with_its_value_and_is_never_echoed() {
 }
 
 #[test]
+fn need_idle_continues_on_the_owner_until_zero_and_a_fresh_request_restarts_it() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let probe = Probe::new();
+    probe.idle_answers.store(3, Relaxed);
+    let (handle, _) = load(&device, 0, instrument(probe));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
+
+    *probe.on_idle.lock().unwrap() = Some(Box::new(|effect| {
+        // SAFETY: the live instance, inside its own `effIdle`; need-idle reads no pointer.
+        assert_eq!(unsafe { host_callback(effect, AUDIO_MASTER_NEED_IDLE, 0, 0, NULL, 0.0) }, 1);
+    }));
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
+    assert!(wait_for(|| probe.idles.load(Relaxed) >= 4));
+    std::thread::sleep(Duration::from_millis(100)); // a few more owner turns
+    assert_eq!(probe.idles.load(Relaxed), 4, "three answers of 1, then 0 stops servicing");
+
+    probe.idle_answers.store(1, Relaxed);
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
+    assert!(wait_for(|| probe.idles.load(Relaxed) >= 6));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(probe.idles.load(Relaxed), 6, "a fresh request restarts servicing until the next 0");
+
+    handle.unload().unwrap();
+    assert_eq!(probe.count(EFF_IDLE, 0), 6);
+    assert_lifecycle_on_the_owner(probe);
+}
+
+#[test]
+fn unload_stays_responsive_while_idle_keeps_answering_one() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let probe = Probe::new();
+    probe.idle_answers.store(1_000_000, Relaxed);
+    let (handle, _) = load(&device, 0, instrument(probe));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
+
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
+    assert!(wait_for(|| probe.idles.load(Relaxed) >= 2));
+    let started = Instant::now();
+    handle.unload().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2), "idle servicing must not hold up unload");
+    assert!(probe.idle_answers.load(Relaxed) > 0, "unloaded before idle answered 0");
+    assert_lifecycle_on_the_owner(probe);
+    let calls = probe.calls.lock().unwrap();
+    let closed = calls.iter().position(|call| call.opcode == EFF_CLOSE).expect("the plugin closed");
+    assert!(calls[closed + 1..].iter().all(|call| call.opcode != EFF_IDLE), "no idle after effClose");
+    let stopped = calls.iter().position(|call| call.opcode == EFF_STOP_PROCESS).unwrap();
+    assert!(calls[stopped..].iter().all(|call| call.opcode != EFF_IDLE), "no idle during teardown");
+}
+
+#[test]
 fn an_io_change_inside_process_silences_the_unit_until_the_owner_has_cycled_it() {
     let _one = engine_slot::one_engine_test_at_a_time();
     let device = device(48_000);

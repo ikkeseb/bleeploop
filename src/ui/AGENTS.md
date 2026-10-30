@@ -68,4 +68,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 
 ## Open threads (non-gate)
 
-None open.
+- A reset that asks for the kept meter (`engine-store.ts` `meterAsked`) guards only its own frame: a
+  later Transport that lands before the asked `SetMeter` applies writes the engine's 4/4 to `lf.meter`
+  until that `SetMeter`'s own Transport writes the kept meter back. It is lost for good when the
+  command ring refuses that `SetMeter` (`adoptSettings` ignores `sendEngine`'s result; native MIDI's
+  queue sends the batch one command at a time, so the volumes before it can still land). A fix keeps
+  the ask through later Transports until its echo, a refusal or the player's own pick ends it. Read
+  from source, not reproduced. Next check: a meter-picker case with a non-reset Transport between the
+  reset and the asked meter's echo, and one whose `SetMeter` the fake refuses.

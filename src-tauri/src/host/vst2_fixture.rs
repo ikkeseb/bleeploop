@@ -157,6 +157,8 @@ pub(crate) struct Probe {
     /// Runs once inside the next `effIdle`, on the thread that called it, with the effect.
     #[allow(clippy::type_complexity)]
     pub(crate) on_idle: Mutex<Option<Box<dyn FnOnce(*mut AEffect) + Send>>>,
+    /// How many more `effIdle` calls answer 1 before answering 0.
+    pub(crate) idle_answers: AtomicUsize,
 
     // ── The plugin's state ───────────────────────────────────────────────────────────────────
     pub(crate) values: [AtomicU32; PROBE_PARAMS],
@@ -732,7 +734,7 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
             if let Some(run) = queued {
                 run(effect);
             }
-            Some(0)
+            Some(probe.idle_answers.fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1)).is_ok() as isize)
         }
         _ => None,
     }

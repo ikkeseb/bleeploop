@@ -450,6 +450,7 @@ function flushEchoes(): void {
     const frame: FeedFrame = {
       seq: 0,
       reset: false,
+      catchUp: false,
       events: [{ type: 'Mix', frame: 0, lane, mix: copyMix(mix) }],
       device: [],
       anchor: null,
@@ -538,7 +539,7 @@ function flushToggles(): void {
   togglesScheduled = false;
   const events = toggleAnswers.splice(0);
   if (events.length === 0) return;
-  const frame: FeedFrame = { seq: 0, reset: false, events, device: [], anchor: null, meter: lastMeter, peaks: [], scope: null };
+  const frame: FeedFrame = { seq: 0, reset: false, catchUp: false, events, device: [], anchor: null, meter: lastMeter, peaks: [], scope: null };
   for (const onFrame of engineSubscribers) onFrame(frame);
 }
 
@@ -585,7 +586,7 @@ function setFakeLive(slot: 0 | 1, on: boolean): void {
   liveScheduled = true;
   queueMicrotask(() => {
     liveScheduled = false;
-    const frame: FeedFrame = { seq: 0, reset: false, events: [], device: [], anchor: null, meter: lastMeter, live: [fakeLive[0], fakeLive[1]], peaks: [], scope: null };
+    const frame: FeedFrame = { seq: 0, reset: false, catchUp: false, events: [], device: [], anchor: null, meter: lastMeter, live: [fakeLive[0], fakeLive[1]], peaks: [], scope: null };
     for (const onFrame of engineSubscribers) onFrame(frame);
   });
 }

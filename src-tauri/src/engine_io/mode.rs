@@ -11,7 +11,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lf_engine::SLOT_COUNT;
 use tauri::ipc::Channel;
@@ -236,4 +236,11 @@ pub async fn engine_feed(channel: Channel<FeedFrame>) -> Result<(), String> {
     let (_, feed) = app()?.engine.as_ref().ok_or("the native engine is not running")?;
     feed.subscribe(move |frame| channel.send(frame).is_ok());
     Ok(())
+}
+
+/// Ack the newest frame the page handled; true asks it to replace a channel making no progress.
+#[tauri::command]
+pub async fn engine_feed_ack(seq: Option<u64>) -> Result<bool, String> {
+    let (_, feed) = app()?.engine.as_ref().ok_or("the native engine is not running")?;
+    Ok(feed.ack(seq, Instant::now()))
 }

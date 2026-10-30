@@ -202,13 +202,12 @@ function adoptFadeBars(n: number): void {
   setFadeBarsSignal(bars);
   writeStoredNumber(FADE_BARS_KEY, bars);
 }
-/** The meter outlives a restart as FADE's bars do, kept as its index in `TIME_SIGNATURES`: written from
- * the meter the engine APPLIED (its `Transport`), so a request a loop locked out is never kept, and sent
- * to an engine whose settings lack it (a fresh one runs 4/4). */
+/** The applied meter outlives a restart, kept as its index in `TIME_SIGNATURES` from the feed's
+ * `Transport`. An engine whose settings lack it gets this kept meter; a known 4/4 is kept by the host too. */
 const METER_KEY = 'lf.meter';
 const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_KEY, 0, 0, TIME_SIGNATURES.length - 1)] ?? FOUR_FOUR;
-/** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
- * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
+/** This reset asks for the kept meter: its own `Transport` still shows the engine's default and must
+ * not overwrite it. Cleared after the reset; later Transports keep what the engine applied. */
 let meterAsked = false;
 const [retake, setRetakeSignal] = createSignal(false);
 const [autoRecord, setAutoRecordSignal] = createSignal(false);
@@ -698,7 +697,7 @@ export function whenDevice(): Promise<DeviceStatus> {
   return running ? Promise.resolve(running) : new Promise((resolve) => deviceWaiters.push(resolve));
 }
 
-function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[]): void {
+function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[], catchUp: boolean): void {
   const p = plain.peaks[lane];
   const need = Math.max(count, start + min.length);
   if (p.min.length < need) {
@@ -714,7 +713,7 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
   p.max.set(max, start);
   p.count = count;
   p.version++;
-  if (!capturing(plain.state[lane])) plain.revision[lane]++;
+  if (catchUp || !capturing(plain.state[lane])) plain.revision[lane]++;
 }
 
 /**
@@ -769,6 +768,10 @@ function applyFrame(f: FeedFrame): void {
 }
 
 function applyFrameNow(f: FeedFrame): void {
+  if (f.reset || f.catchUp) {
+    for (const timer of beatTimers) clearTimeout(timer);
+    beatTimers.clear();
+  }
   if (f.reset) {
     for (const p of plain.peaks) {
       p.count = 0;
@@ -779,8 +782,6 @@ function applyFrameNow(f: FeedFrame): void {
     plain.resets++;
     setFeedResets(plain.resets);
     plain.clearing.fill(false);
-    for (const timer of beatTimers) clearTimeout(timer);
-    beatTimers.clear();
     plain.counting = false;
     for (const [, setCounted] of counted) setCounted(false);
     setCountLeft(0);
@@ -825,7 +826,7 @@ function applyFrameNow(f: FeedFrame): void {
     plain.clip[s] = f.meter?.clip[s] ?? false;
     if (plain.clip[s]) plain.clips[s]++;
   }
-  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
+  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max, f.catchUp);
   if (f.scope) applyScope(f.scope);
 }
 
@@ -1053,8 +1054,8 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   let masterKnown = false;
   let clickKnown = false;
   let fadeKnown = false;
-  // The engine's memory keeps a meter other than 4/4 (`settings.rs`); the meter itself comes on the
-  // frame's `Transport`.
+  // The host keeps a known meter, including 4/4 after a SetMeter (`settings.rs`); its value comes on
+  // the frame's `Transport`.
   let meterKnown = false;
   const sendsKnown = new Set<string>();
   for (const c of settings) {
@@ -1460,8 +1461,8 @@ function setBpm(n: number): void {
   if (clamped !== bpm()) sendEngine({ SetBpm: clamped });
 }
 
-/** SetMeter, unless the tempo (and with it the meter) is locked. The feed's Transport echoes the meter
- * the engine took. */
+/** Send SetMeter unless the tempo (and meter) is locked. Only the feed's Transport shows and keeps
+ * the meter the engine applied. */
 function setMeter(m: TimeSignature): void {
   if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
   sendEngine({ SetMeter: [m.num, m.den] });

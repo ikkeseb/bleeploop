@@ -353,6 +353,8 @@ pub fn run() {
             #[cfg(windows)]
             engine_io::mode::engine_feed,
             #[cfg(windows)]
+            engine_io::mode::engine_feed_ack,
+            #[cfg(windows)]
             engine_io::mode::engine_snapshot,
             #[cfg(windows)]
             engine_io::mode::engine_load_session,

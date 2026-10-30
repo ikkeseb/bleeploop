@@ -24,10 +24,9 @@
   neither has a parameter that holds a value):
   a restart whose unit the engine does not hand back within 2 s leaves the unit silent until the
   plugin's next `audioMasterIOChanged`; `effSetChunk` answers no verdict, so a chunk the plugin
-  could not use is reported as restored;
-  `effIdle` is sent once per `audioMasterNeedIdle`, not until it answers 0; a program is selected
-  without `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend
-  or SysEx) and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
+  could not use is reported as restored; a program is selected without
+  `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend or SysEx)
+  and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
   answers nothing).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
@@ -59,19 +58,25 @@
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
-- The feed has no backpressure: `turn` (`feed.rs` 396) sends every tick while `Channel.send` succeeds
-  (`mode.rs` 231), and Tauri 2.11.5 queues large payloads unbounded until the page fetches them, so a
-  stalled WebView grows a backlog of stale frames. Fix: a fixed number of outstanding frames with an ACK
-  per subscription and sequence; drain meanwhile, resync on resume without breaking active gestures or
-  session revisions, and keep one-shot events in their own bounded queue.
+- The feed's bound is per subscription (`feed.rs` module doc): within-page JS callbacks are retired
+  in `src/platform/host.tauri.ts` (guard: `verify/guards/feed-channel.mjs`). Tauri 2.11.5 still keeps
+  a large payload in its map until a page fetches it; dropping the channel does not clear it
+  (upstream `ipc/channel.rs`). Unfetched payloads remain per reload and per watchdog resubscribe
+  after a gap, up to 30 frames' payloads per subscription. Read from source; next check if memory
+  grows: the app's private bytes over twenty reloads with the stage view open, then with a fetch failed.
 - A page that dies for good (a WebView crash, a shutdown) leaves the scope taps on (`Key::Scope`), so
   the engine keeps folding columns the feed drains and drops for nobody. Read from source, not
   reproduced, nothing audible.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
-- The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until
-  the next count beat arrives, and after the last one a later take reads WAITING FOR DOWNBEAT until
-  its take starts.
+- The feed's count-in mirror infers which count a lane event ends from arming and frames alone, so two
+  splits stay: a counted take's cancel, transport start and ordinary re-arm of the same lane within one
+  block publish no lane event (unchanged info), and a reset can replay the old count; and a full event
+  ring that takes a new count's beat but not the lane events after it republishes them at a later frame
+  (`Looper::publish`), where the old lane's disarm reads as the end of the new count, so a reset before
+  the next beat shows none. Read from source, not reproduced. Next check: an engine-backed feed test of
+  each (the count-in tests in `engine_io/feed.rs` drive a real engine) once `LaneInfo` reports the
+  counted arm.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`
@@ -86,9 +91,7 @@
   device-interface path) is stable across a restart and a replug, which interface class a port
   arrives on (the next check: `src/engine_io/midi/liveness.rs`'s header), and whether WinMM input is
   multi-client under `wdmaud2`. Owed: the release after the first with native MIDI removes the web
-  build's `lf.midiLearn` key (`src/app/midi-actions.ts`). Its module briefing (`midi/mod.rs` header)
-  restates ARCHITECTURE's subscription/epoch, nothing-is-stamped, no-device and rebuild-needs-no-WebView
-  rules: replace only that overlap with pointers, keep its local access, batch, lock and retry detail.
+  build's `lf.midiLearn` key (`src/app/midi-actions.ts`).
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.

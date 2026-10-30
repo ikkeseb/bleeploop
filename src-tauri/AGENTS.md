@@ -5,9 +5,9 @@ Everything Rust/native lives here: the native audio engine (`crates/lf-engine`) 
 `AGENTS.md` routes here: read this before any work in this subtree (`CLAUDE.md` beside it is a
 one-line adapter). It holds the router-level gotchas and operational bits; the engine's rules live in
 its two briefings (the crate doc of `crates/lf-engine/src/lib.rs`, the module doc of
-`src/engine_io/mod.rs`). The gate is `pnpm rust:check` (Windows, also from WSL); `tauri dev`, the
-`native:*` probes and `native:kill` are in `docs/VERIFY.md` § Native / Tauri verification. Only the
-by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
+`src/engine_io/mod.rs`). Which gate a change runs: root `AGENTS.md` (the `main` line);
+`pnpm rust:check` runs on Windows and from WSL. `tauri dev`, the `native:*` probes and `native:kill`
+are in `docs/VERIFY.md` § Native / Tauri verification. Only the by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
 (CI runs the no-asio half).
 
 ## Thread & ownership map
@@ -21,7 +21,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry and runs with flush-to-zero on (`engine_io/fpu.rs`) | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
-| **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM. Held (`FeedThread::hold`, an RAII guard) while the plugin folder dialog is open, since the UI thread reads no frame then: it keeps ticking, so the event ring is drained and the mirror stays true, sends nothing, and the close resyncs the page with one `reset` frame |
+| **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM. The page acks (`engine_feed_ack`), and 30 frames unacked withhold the subscriber; held (`FeedThread::hold`, an RAII guard) while the plugin folder dialog is open, since the UI thread reads no frame then. Held or withheld it keeps ticking, so the event ring is drained and the mirror stays true, sends nothing, and ends with one catch-up frame (a reset after another engine or an overflow); a channel whose acks stand still is told to resubscribe (`feed.rs` module doc) |
 | **Plugin owner, per instance** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}` / `lf-vst2-engine-{slot}`, `host/engine_slot.rs`; during a hot swap a slot has two, the playing one and the candidate, `host/engine_slot/swap.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller / VST2 effect, with its `effStartProcess` and `effStopProcess`), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown. An owner whose plugin a swap replaced never puts its unit in again (no restart, no re-activation): it waits for its teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
 | **Shutdown** (`lf-engine-shutdown`, on exit, and before the updater's installer: `update.rs`) | Drops native MIDI first (its ports close, its holds are released), stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
 | **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | One driver-resolving probe at a time, requested by the frontend after the UI is up (a retry after a failure and a driver switch probe again) | Its status report |
@@ -78,7 +78,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   links the same `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one
   worktree can run another's build of `app` or `lf-engine`. From WSL, Windows cargo does not see a
   `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it). Each target grows to 12–16 GB, so
-  at most two worktrees hold a build at a time (the integration tree on `main` and one feature tree), and
+  at most two worktrees hold a build at a time (the integration tree, on `main` or `dev`, and one feature tree), and
   a feature tree is cleaned when its branch is merged: `cargo clean --manifest-path
   <absolute path>/src-tauri/Cargo.toml`, an absolute path, never `cd` then delete.
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
@@ -109,7 +109,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   other: `midi_learn` an action id and a track, `midi_cancel_learn` nothing more, `midi_forget` /
   `midi_set_momentary` / `midi_set_hold` a list revision and a listed index (and a flag), `midi_assign`
   those and a present port's id (no path is opened from it), `midi_import_legacy` the old list's text,
-  parsed and never run as anything else.
+  parsed and never run as anything else. The feed's `engine_feed_ack` takes a frame `seq` or `null`
+  only, and answers whether the page should subscribe again.
 - **Sample-rate pick:** 44.1/48 kHz or the device's own (Audio Settings); the rules,
   and why WASAPI keeps its endpoint's rate on cpal 0.18.1, live in the engine_io briefing
   (`src/engine_io/mod.rs` § Rules).

@@ -11,22 +11,42 @@
 //!
 //! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
 //! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
-//! keeps a mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and
-//! a new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
+//! keeps a mirror of the lanes, the transport, the selection and the current count-in: a new subscriber
+//! (a WebView reload) and a new engine (another sample rate, a fault) get a `reset` frame carrying it, with the
 //! settings the host keeps and each lane's last `Mix` (`settings.rs`, which every drain feeds), so the
 //! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills; it then
 //! ticks as a held feed does (below): no frame is built, and the device events wait for the next
 //! subscriber's reset.
 //!
-//! The feed can be HELD (`FeedThread::hold`): while the UI thread cannot read (the native folder
-//! dialog is modal on it), every frame sent would wait in the channel, with no bound, and arrive in
-//! one burst. A held feed keeps ticking, so the ring is drained and the mirror stays true, but builds
-//! and sends nothing; its first tick after the hold is one `reset` frame, which carries the whole
-//! state. `seq` counts frames built, so it does not move while held. The UI reads `seq` for nothing
-//! and replaces its view on a reset (`applyFrameNow`, `src/ui/state/engine-store.ts`), so the resync
-//! is no fault to it. What only an ordinary frame carries (a beat, a refusal) is not replayed, as
-//! for a WebView reload; device events are kept and go out with the reset.
+//! `Channel::send` succeeds once Tauri has queued a frame, not once the page read it, so the page acks
+//! (`engine_feed_ack`, from `src/platform/host.tauri.ts`): the newest `seq` its channel handed on, 100 ms
+//! after a frame and every second, `null` before its first. Acks are cumulative and fenced by the
+//! subscriber's own range (`seq` rises across subscribers), so an older channel's ack covers nothing.
+//! `MAX_IN_FLIGHT` frames unacked WITHHOLD the subscriber until every frame sent is acked: a stalled
+//! or slow page lags at most that many frames, never without bound.
+//!
+//! The feed can also be HELD (`FeedThread::hold`) while the UI thread cannot read (the native folder
+//! dialog is modal on it). Held, withheld or unsubscribed, a tick drains the ring into the mirror and
+//! keeps the drained events in order, beats excepted (`WITHHELD_EVENTS`; `Lane`, `Mix` and
+//! `Transport` publish only on change, so the stream grows with the player's actions and RETAKE's
+//! passes, not with time), builds and sends nothing, leaves the waveform dirty bits alone and keeps
+//! device events (`HELD_DEVICE_EVENTS`). `seq` counts frames built, so it does not move meanwhile. The first frame
+//! after is a CATCH-UP (`catch_up`, not a reset): the kept stream, the count's latest beat and downbeat
+//! while a lane is armed or its arm is owed, then this tick's events; the peaks changed since the last frame sent; scope
+//! with `gap`. The page applies it as it would have live (`applyFrameNow`,
+//! `src/ui/state/engine-store.ts`), so overlays, revisions and the clear token survive. A RESET instead
+//! when the subscriber is new, another engine came meanwhile (latched by the held tick) or the stream
+//! passed `WITHHELD_EVENTS`; every reset carries the notices kept meanwhile (`TakeRejected`,
+//! `PassDropped`, `Refused`, the newest `KEPT_NOTICES`), so a notice outlives another engine or an
+//! overflow. Late is still late: a catch-up's events read the page's state as it is when they arrive.
+//!
+//! A frame lost before the page's handler (a failed payload fetch, which Tauri only logs) parks every
+//! later one. The watchdog judges ack progress, not a frame's age: acks that do not advance while frames
+//! are in flight answer `true` after `STUCK`, and the page retires that channel (its late frames and
+//! answers fenced by a generation) and subscribes again. A new subscriber takes over the notices of
+//! the last one's unacked frames, and its reset carries them.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{
     AtomicBool, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
@@ -43,8 +63,16 @@ use lf_engine::{Event, LaneInfo, LaneState, Overview, SLOT_COUNT, TRACK_COUNT};
 use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, WireCommand, WireEvent};
 use super::{DeviceEvent, DeviceStatus, EngineHost};
 
-/// The device events a held feed keeps for its reset frame; older ones go first.
+/// The device events an unsent feed keeps for its next frame; older ones go first.
 const HELD_DEVICE_EVENTS: usize = 64;
+/// The frames a subscriber may leave unacked before it is withheld: about half a second of them.
+const MAX_IN_FLIGHT: usize = 30;
+/// The events an unsent stream keeps for its catch-up; past it the next frame resets instead.
+const WITHHELD_EVENTS: usize = 256;
+/// The notices a reset carries from the frames the page missed; older ones go first.
+const KEPT_NOTICES: usize = 32;
+/// How long acks may stand still while frames are in flight before the page is told to resubscribe.
+const STUCK: Duration = Duration::from_secs(5);
 
 /// The most scope columns one frame carries: a tick is about four 4 ms columns, so this is a quarter
 /// second of them — slack for a tick that ran late or a device that woke in bursts. Past it the oldest
@@ -90,6 +118,15 @@ pub(crate) struct Feed {
     lanes: [Option<(Frame, LaneInfo)>; TRACK_COUNT],
     transport: Option<Event>,
     selected: (Frame, u8),
+    /// The count's latest positive beat and its first downbeat, until no lane is armed and no arm is
+    /// owed; a lane leaving armed ends the count it held, dropping a count beat older than that lane
+    /// event, and that beat's downbeat with it.
+    count_beat: Option<Event>,
+    count_downbeat: Option<Event>,
+    /// No armed lane has been seen since `count_beat`: its lane's arm is owed, a later push than a drain
+    /// reached (the ring is read while the callback writes it, and a new count's beat precedes the old
+    /// lane's disarm as well as its own lane's arm).
+    count_unarmed: bool,
     /// What the last frames said.
     status: Option<DeviceStatus>,
     meter: Option<Meter>,
@@ -97,6 +134,14 @@ pub(crate) struct Feed {
     live: [bool; SLOT_COUNT],
     sent: Option<Instant>,
     drained: Vec<Event>,
+    /// A hold, a full subscriber or nobody subscribed missed ticks: the next frame ends the stream.
+    withheld: bool,
+    withheld_events: Vec<Event>,
+    overflowed: bool,
+    /// Another engine arrived during an unsent tick: the next frame must reset.
+    replaced: bool,
+    /// Notices survive a reset even when its engine or the bounded stream no longer does.
+    kept_notices: Vec<Event>,
     /// Each lane's waveform as last sent (`None`: nothing yet, or a reset since).
     drawn: [Option<Drawn>; TRACK_COUNT],
     bins: Vec<u32>,
@@ -124,11 +169,19 @@ impl Feed {
             lanes: [None; TRACK_COUNT],
             transport: None,
             selected: (0, 0),
+            count_beat: None,
+            count_downbeat: None,
+            count_unarmed: false,
             status: None,
             meter: None,
             live: [false; SLOT_COUNT],
             sent: None,
             drained: Vec::with_capacity(256),
+            withheld: false,
+            withheld_events: Vec::new(),
+            overflowed: false,
+            replaced: false,
+            kept_notices: Vec::new(),
             drawn: [None; TRACK_COUNT],
             bins: Vec::new(),
             held_device: Vec::new(),
@@ -142,7 +195,6 @@ impl Feed {
     /// Drain the engine's events into the mirror. True when another engine replaced the one the
     /// mirror followed: the UI must reset.
     fn drain(&mut self) -> bool {
-        let mut replaced = false;
         self.drained.clear();
         self.columns.clear();
         // The events and the columns in one acquisition, so this tick's columns are the engine whose
@@ -150,32 +202,90 @@ impl Feed {
         let (gen, overview, bin) = self.host.drain_feed_scope(&mut self.drained, Some(&mut self.columns));
         self.scope_bin = bin;
         if self.gen != Some(gen) {
+            self.overview = overview;
+        }
+        self.update_mirror(gen)
+    }
+
+    /// Apply one drain without reading a device. A generation change drops the old engine's mirror.
+    fn update_mirror(&mut self, gen: u64) -> bool {
+        let mut replaced = false;
+        if self.gen != Some(gen) {
             // A new engine (or none): what it reports starts from EMPTY lanes and no transport.
             replaced = self.gen.is_some();
             self.gen = Some(gen);
-            self.overview = overview;
             self.lanes = [None; TRACK_COUNT];
             self.transport = None;
             self.selected = (0, 0);
+            self.count_beat = None;
+            self.count_downbeat = None;
+            self.count_unarmed = false;
         }
         for event in &self.drained {
             match *event {
-                Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => self.lanes[usize::from(lane)] = Some((frame, info)),
+                Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => {
+                    let lane = usize::from(lane);
+                    if self.lanes[lane].is_some_and(|(_, previous)| previous.armed) && !info.armed {
+                        // Beats precede the lane publish: a count beat at this frame belongs to a new count,
+                        // whose arm is still owed. The old count's downbeat goes with its beat, though it
+                        // fell on this frame.
+                        if matches!(self.count_beat, Some(Event::Beat { frame: beat_frame, .. }) if beat_frame < frame) {
+                            self.count_beat = None;
+                            self.count_downbeat = None;
+                            self.count_unarmed = false;
+                        }
+                    }
+                    if info.armed {
+                        self.count_unarmed = false;
+                    }
+                    self.lanes[lane] = Some((frame, info));
+                }
                 Event::Transport { .. } => self.transport = Some(*event),
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
+                Event::Beat { count_left, .. } if count_left > 0 => {
+                    self.count_beat = Some(*event);
+                    self.count_downbeat = None;
+                    self.count_unarmed = true;
+                }
+                Event::Beat { count_left: 0, .. } if self.count_beat.is_some() && self.count_downbeat.is_none() => self.count_downbeat = Some(*event),
                 _ => {}
             }
+        }
+        // A count beat precedes its lane's arm, in this drain or a later one: judge after every lane was applied.
+        if !self.count_unarmed && !self.lanes.iter().flatten().any(|(_, info)| info.armed) {
+            self.count_beat = None;
+            self.count_downbeat = None;
         }
         replaced
     }
 
-    /// A tick of a held feed, or of one nobody subscribed to: the ring is drained and the mirror follows
-    /// it, the device events are kept for the next frame (the latest `HELD_DEVICE_EVENTS`), and no frame
-    /// is built (`seq` stays). The reset that ends the hold, or a new subscriber's, reads the status, the
-    /// meter and the waveforms afresh.
+    /// Keep an unsent drain in order, without beats. Past the bound only the notices survive: the
+    /// next frame resets from the mirror instead of replaying an incomplete stream.
+    fn keep_drained(&mut self) {
+        self.withheld = true;
+        for &event in &self.drained {
+            if is_notice(&event) {
+                self.kept_notices.push(event);
+            }
+            if !matches!(event, Event::Beat { .. }) && !self.overflowed {
+                if self.withheld_events.len() == WITHHELD_EVENTS {
+                    self.overflowed = true;
+                    self.withheld_events.clear();
+                } else {
+                    self.withheld_events.push(event);
+                }
+            }
+        }
+        keep_newest(&mut self.kept_notices);
+    }
+
+    /// A held, withheld or unsubscribed tick drains the ring into the mirror and keeps the events
+    /// for its next frame. It leaves waveform dirty bits and last-sent status, live and meter alone.
     pub(crate) fn tick_held(&mut self) {
         self.host.publish_if_idle();
-        self.drain();
+        let replaced = self.drain();
+        self.replaced |= replaced;
+        self.keep_drained();
         self.scope(false);
         self.held_device.extend(self.host.take_device_events());
         // A device that keeps failing behind a dialog left open: the latest are what the page needs.
@@ -184,11 +294,13 @@ impl Feed {
     }
 
     /// Read everything once; the frame to send, if anything changed or the anchor is due. `reset`: a
-    /// new subscriber or the end of a hold: the frame carries the whole state.
+    /// new subscriber: the frame carries the whole state. An unsent stream ends with a catch-up,
+    /// unless another engine or an overflow requires a reset.
     pub(crate) fn tick(&mut self, mut reset: bool) -> Option<FeedFrame> {
         // A stopped engine renders no block that would offer again what its full ring refused.
         self.host.publish_if_idle();
-        reset |= self.drain();
+        reset |= self.drain() || self.replaced || self.overflowed;
+        let catch_up = self.withheld && !reset;
         let mut device = std::mem::take(&mut self.held_device);
         device.extend(self.host.take_device_events());
         let now = self.host.status();
@@ -207,17 +319,29 @@ impl Feed {
         self.live = now_live;
         let peaks = self.peaks(reset);
         // A reset carries no scope: the UI replaces its view with this frame, so the trace starts over.
+        self.scope_gap |= catch_up;
         let scope = self.scope(!reset);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
         // A batch of columns is itself a reason to send: a tick that built one never drops it.
-        if !(reset || due || metered || live.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some()) {
+        if !(reset || catch_up || due || metered || live.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some()) {
             return None;
         }
-        let events = if reset { self.state_events() } else { self.drained.iter().copied().map(WireEvent).collect() };
+        let events = if reset {
+            self.state_events()
+        } else if catch_up {
+            self.withheld_events.iter().copied().chain(self.count_events()).chain(self.drained.iter().copied()).map(WireEvent).collect()
+        } else {
+            self.drained.iter().copied().map(WireEvent).collect()
+        };
         let settings = reset.then(|| self.host.settings().into_iter().map(WireCommand).collect());
+        self.withheld = false;
+        self.withheld_events.clear();
+        self.overflowed = false;
+        self.replaced = false;
+        self.kept_notices.clear();
         self.sent = Some(Instant::now());
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, live, peaks, scope, settings })
+        Some(FeedFrame { seq: self.seq - 1, reset, catch_up, events, device, status, anchor, meter, live, peaks, scope, settings })
     }
 
     /// Build this frame's batch from the columns `drain` took. `send` false — held, nobody subscribed,
@@ -335,17 +459,33 @@ impl Feed {
     }
 
     /// A reset frame's events: the transport (once an engine reported it), every lane, each lane's last
-    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, then what else this
-    /// tick drained (a beat, a refusal, a copy).
+    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, the current count's
+    /// latest beat and downbeat, the kept notices, then this tick's other one-shots.
     fn state_events(&self) -> Vec<WireEvent> {
         let lanes = self.lanes.iter().enumerate().map(|(i, lane)| {
             let (frame, info) = lane.unwrap_or((0, EMPTY_LANE));
             Event::Lane { frame, lane: i as u8, info }
         });
         let selected = Event::Selected { frame: self.selected.0, lane: self.selected.1 };
+        // Beats drained this tick are already in `rest`. Replaying a past count beat leaves the beat
+        // LED on its beat_in_bar until the next live beat; that is acceptable on a reset.
         let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. } | Event::Mix { .. }));
-        self.transport.into_iter().chain(lanes).chain(self.host.mixes()).chain([selected]).chain(rest).map(WireEvent).collect()
+        self.transport.into_iter().chain(lanes).chain(self.host.mixes()).chain([selected]).chain(self.count_events()).chain(self.kept_notices.iter().copied()).chain(rest).map(WireEvent).collect()
     }
+
+    /// The mirror's count, except beats this tick already carries.
+    fn count_events(&self) -> impl Iterator<Item = Event> + '_ {
+        self.count_beat.into_iter().chain(self.count_downbeat).filter(move |e| !self.drained.contains(e))
+    }
+}
+
+fn is_notice(event: &Event) -> bool {
+    matches!(event, Event::TakeRejected { .. } | Event::PassDropped { .. } | Event::Refused { .. })
+}
+
+fn keep_newest(notices: &mut Vec<Event>) {
+    let over = notices.len().saturating_sub(KEPT_NOTICES);
+    notices.drain(..over);
 }
 
 /// A bin's value as sent: three decimals are plenty for a waveform and keep the JSON short.
@@ -360,10 +500,69 @@ struct Subscriber {
     send: Sink,
     /// Has not had its reset frame yet.
     fresh: bool,
+    in_flight: VecDeque<InFlight>,
+    first: Option<u64>,
+    last: Option<u64>,
+    newest_ack: Option<u64>,
+    withheld: bool,
+    behind_since: Option<Instant>,
+    /// An old channel's unacked notices, waiting for this subscriber's first reset.
+    notices: Vec<Event>,
+}
+
+struct InFlight {
+    seq: u64,
+    sent: Instant,
+    notices: Vec<Event>,
+}
+
+impl Subscriber {
+    fn new(send: Sink, previous: Option<Subscriber>) -> Subscriber {
+        let notices = previous.map_or_else(Vec::new, Subscriber::unacked_notices);
+        Subscriber {
+            send, fresh: true, in_flight: VecDeque::new(), first: None, last: None,
+            newest_ack: None, withheld: false, behind_since: None, notices,
+        }
+    }
+
+    fn unacked_notices(self) -> Vec<Event> {
+        let mut notices = self.notices;
+        notices.extend(self.in_flight.into_iter().flat_map(|f| f.notices));
+        keep_newest(&mut notices);
+        notices
+    }
+
+    fn record(&mut self, frame: &FeedFrame, now: Instant) {
+        self.first.get_or_insert(frame.seq);
+        self.last = Some(frame.seq);
+        let notices = frame.events.iter().map(|e| e.0).filter(is_notice).collect();
+        self.in_flight.push_back(InFlight { seq: frame.seq, sent: now, notices });
+    }
+
+    /// Cumulative ack, fenced by this subscriber's frame range. Only progress restarts the watchdog;
+    /// a first heartbeat after a long page stall starts it now, never at the oldest frame's age.
+    fn ack(&mut self, seq: Option<u64>, now: Instant) -> bool {
+        if let Some(seq) = seq.filter(|&seq| self.first.is_some_and(|first| seq >= first) && self.last.is_some_and(|last| seq <= last)) {
+            if self.newest_ack.is_none_or(|ack| seq > ack) {
+                self.newest_ack = Some(seq);
+                while self.in_flight.front().is_some_and(|f| f.seq <= seq) {
+                    self.in_flight.pop_front();
+                }
+                self.behind_since = None;
+                return false;
+            }
+        }
+        let Some(first) = self.in_flight.front() else {
+            self.behind_since = None;
+            return false;
+        };
+        let since = *self.behind_since.get_or_insert(now.max(first.sent));
+        now.saturating_duration_since(since) >= STUCK
+    }
 }
 
 /// What holds the feed's sends: how many guards are out, and that one was dropped since the thread
-/// last sent (the UI missed frames, or could have: it gets a reset).
+/// last sent (the UI missed frames, or could have: it gets a catch-up).
 #[derive(Default)]
 struct Hold {
     holders: AtomicUsize,
@@ -371,7 +570,7 @@ struct Hold {
 }
 
 /// The feed sends nothing while one of these lives (`FeedThread::hold`). Its drop ends the hold on
-/// every path out of its scope, and the feed's next tick sends one reset frame.
+/// every path out of its scope, and the feed's next unblocked tick sends one catch-up frame.
 pub(crate) struct FeedHold(Arc<Hold>);
 
 impl FeedHold {
@@ -391,19 +590,33 @@ impl Drop for FeedHold {
 
 /// One tick of the feed thread, under the subscriber's lock. Held, or with nobody subscribed: the feed
 /// ticks as a held one and builds nothing (a subscriber that came while held gets nothing either: its
-/// reset waits for the hold's end). Else one frame at most goes out, a reset when the subscriber is new
-/// or a hold has ended since the last tick.
+/// reset waits for the hold's end). A full subscriber stays withheld until every frame is acked.
+/// Else one frame at most goes out, a new subscriber's reset taking precedence over a catch-up.
 fn turn(feed: &mut Feed, subscriber: &mut Option<Subscriber>, hold: &Hold) {
-    if hold.holders.load(Acquire) > 0 || subscriber.is_none() {
+    if let Some(s) = subscriber.as_mut() {
+        if s.in_flight.len() >= MAX_IN_FLIGHT {
+            s.withheld = true;
+        } else if s.in_flight.is_empty() {
+            s.withheld = false;
+        }
+    }
+    if hold.holders.load(Acquire) > 0 || subscriber.as_ref().is_none_or(|s| s.withheld) {
         feed.tick_held();
         return;
     }
-    let resync = hold.resync.swap(false, AcqRel);
+    feed.withheld |= hold.resync.swap(false, AcqRel);
     let fresh = subscriber.as_mut().is_some_and(|s| std::mem::take(&mut s.fresh));
-    if let (Some(frame), Some(s)) = (feed.tick(fresh || resync), subscriber.as_mut()) {
+    if let Some(s) = subscriber.as_mut() {
+        let mut notices = std::mem::take(&mut s.notices);
+        notices.append(&mut feed.kept_notices);
+        keep_newest(&mut notices);
+        feed.kept_notices = notices;
+    }
+    if let (Some(frame), Some(s)) = (feed.tick(fresh), subscriber.as_mut()) {
+        s.record(&frame, Instant::now());
         if !(s.send)(frame) {
             log::warn!("[engine_io] the feed's subscriber is gone");
-            *subscriber = None;
+            feed.kept_notices = subscriber.take().unwrap().unacked_notices();
         }
     }
 }
@@ -446,7 +659,12 @@ impl FeedThread {
 
     /// Send every frame to `send` from now on (its first is a reset), instead of the last subscriber.
     pub(crate) fn subscribe(&self, send: impl FnMut(FeedFrame) -> bool + Send + 'static) {
-        *self.subscriber.lock().unwrap_or_else(|e| e.into_inner()) = Some(Subscriber { send: Box::new(send), fresh: true });
+        let mut sub = self.subscriber.lock().unwrap_or_else(|e| e.into_inner());
+        *sub = Some(Subscriber::new(Box::new(send), sub.take()));
+    }
+
+    pub(crate) fn ack(&self, seq: Option<u64>, now: Instant) -> bool {
+        self.subscriber.lock().unwrap_or_else(|e| e.into_inner()).as_mut().is_some_and(|s| s.ack(seq, now))
     }
 
     /// Hold the feed's sends until the guard drops (the module doc says why and what the UI gets
@@ -490,7 +708,7 @@ mod tests {
             sink.lock().unwrap().push(frame);
             true
         });
-        (Some(Subscriber { send, fresh: true }), sent)
+        (Some(Subscriber::new(send, None)), sent)
     }
 
     /// Change the tempo and wait until the engine has run the command: its transport event is in the ring.
@@ -512,8 +730,767 @@ mod tests {
         (sent.len(), sent.iter().filter(|frame| frame.reset).count())
     }
 
+    fn beat(frame: Frame, count_left: u8) -> Event {
+        Event::Beat { frame, beat_in_bar: (4 - count_left) % 4, count_left, clicked: count_left > 0 }
+    }
+
+    fn count_lane(frame: Frame, lane: u8, state: LaneState, armed: bool) -> Event {
+        Event::Lane { frame, lane, info: LaneInfo { state, armed, ..EMPTY_LANE } }
+    }
+
+    /// A scripted drain on the real mirror, without an engine, device or rendering thread.
+    fn mirror_tick(feed: &mut Feed, events: &[Event]) {
+        feed.drained.clear();
+        feed.drained.extend_from_slice(events);
+        assert!(!feed.update_mirror(0));
+    }
+
+    /// A real engine and its feed, rendered only when the test asks. No device or thread.
+    fn manual_engine() -> (lf_engine::Engine, Feed) {
+        let core = Arc::new(super::super::Core::new());
+        let config = lf_engine::EngineConfig { max_loop_seconds: 2.0, ..lf_engine::EngineConfig::new(8_000) };
+        let (engine, handle) = lf_engine::Engine::new(config);
+        *core.ends.lock().unwrap() = Some(super::super::Ends {
+            commands: handle.commands, pushed: 0, events: handle.events, overview: handle.overview,
+            session: Some(handle.session), scope: handle.scope, scope_bin: 32,
+        });
+        (engine, Feed::new(EngineHost { core }))
+    }
+
+    /// Render `blocks` blocks of 128 frames from `at`, as a device would, its input a constant.
+    fn render(engine: &mut lf_engine::Engine, at: &mut Frame, blocks: usize) {
+        for _ in 0..blocks {
+            let ctx = lf_engine::ProcessContext { frame: *at, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+            engine.process(&ctx, &[0.25; 128], &mut [0.0; 128], &mut [0.0; 128]);
+            *at += 128;
+        }
+    }
+
+    /// Queue commands for the engine's next block.
+    fn send(feed: &Feed, commands: impl IntoIterator<Item = Command>) {
+        feed.host.send_all(commands.into_iter().map(|command| TimedCommand { frame: None, command })).unwrap();
+    }
+
+    /// A page reload now: a new subscriber's first frame, its reset, as events.
+    fn reload(feed: &mut Feed) -> Vec<Event> {
+        let (mut sub, sent) = subscriber();
+        turn(feed, &mut sub, &Hold::default());
+        let frames = sent.lock().unwrap();
+        assert!(frames[0].reset);
+        frames[0].events.iter().map(|e| e.0).collect()
+    }
+
+    /// The beats a reset replays, as (frame, count_left), and the lanes it shows armed.
+    fn replayed_count(events: &[Event]) -> (Vec<(Frame, u8)>, Vec<u8>) {
+        let beats = events.iter().filter_map(|e| match *e {
+            Event::Beat { frame, count_left, .. } => Some((frame, count_left)),
+            _ => None,
+        });
+        let armed = events.iter().filter_map(|e| match *e {
+            Event::Lane { lane, info, .. } if info.armed => Some(lane),
+            _ => None,
+        });
+        (beats.collect(), armed.collect())
+    }
+
+    /// A feed tick that drains while the device callback sits between two of its pushes (the ring is
+    /// read without the engine lock): only the events up to the first that `last` matches, into the
+    /// mirror; none at all when `last` is `None` (the callback's next push not made yet).
+    fn drain_through(feed: &mut Feed, last: Option<&dyn Fn(&Event) -> bool>) -> Option<Event> {
+        let gen = feed.host.core.engine_gen.load(Acquire);
+        feed.drained.clear();
+        let mut ends = feed.host.core.ends.lock().unwrap();
+        let events = &mut ends.as_mut().unwrap().events;
+        let end = last.map(|last| loop {
+            let event = events.pop().expect("the block pushed the awaited event");
+            feed.drained.push(event);
+            if last(&event) {
+                break event;
+            }
+        });
+        drop(ends);
+        feed.update_mirror(gen);
+        end
+    }
+
+    /// [`drain_through`] the first count beat.
+    fn drain_through_count_beat(feed: &mut Feed) -> (Frame, u8) {
+        match drain_through(feed, Some(&|e| matches!(*e, Event::Beat { count_left, .. } if count_left > 0))) {
+            Some(Event::Beat { frame, count_left, .. }) => (frame, count_left),
+            _ => unreachable!(),
+        }
+    }
+
+    /// A committed take on lane 0, stopped: the transport idle over a master, the commit's jobs done.
+    fn idle_master(engine: &mut lf_engine::Engine, feed: &mut Feed, page: &mut Option<Subscriber>, at: &mut Frame) {
+        send(feed, [Command::RecDub(0)]);
+        render(engine, at, 100);
+        send(feed, [Command::PlayStop(0)]);
+        render(engine, at, 200);
+        turn(feed, page, &Hold::default());
+        assert_eq!(feed.lanes[0].unwrap().1.state, LaneState::Stopped);
+    }
+
+    /// Script the event ring itself: `turn` still drains through the host, mirrors and builds frames.
+    fn scripted_feed() -> (Feed, rtrb::Producer<Event>) {
+        let (_, feed) = manual_engine();
+        let (events, reader) = rtrb::RingBuffer::new(512);
+        feed.host.core.ends.lock().unwrap().as_mut().unwrap().events = reader;
+        (feed, events)
+    }
+
+    fn fill_window(feed: &mut Feed, sub: &mut Option<Subscriber>, hold: &Hold, events: &mut rtrb::Producer<Event>) {
+        for n in 0..MAX_IN_FLIGHT {
+            events.push(Event::Selected { frame: n as Frame, lane: (n % TRACK_COUNT) as u8 }).unwrap();
+            turn(feed, sub, hold);
+        }
+        assert_eq!(sub.as_ref().unwrap().in_flight.len(), MAX_IN_FLIGHT);
+    }
+
+    fn rejected(frame: Frame) -> Event {
+        Event::TakeRejected { frame, lane: 0, overdub: true }
+    }
+
     #[test]
-    fn a_held_feed_sends_nothing_keeps_its_mirror_and_ends_with_one_reset() {
+    fn unacked_frames_reach_the_bound_but_the_ring_still_drains_into_the_mirror() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Hold::default();
+        let (mut sub, sent) = subscriber();
+        fill_window(&mut feed, &mut sub, &hold, &mut events);
+        let lane = count_lane(100, 0, LaneState::Recording, false);
+        events.push(lane).unwrap();
+        for _ in 0..100 {
+            turn(&mut feed, &mut sub, &hold);
+        }
+        assert_eq!(counts(&sent), (MAX_IN_FLIGHT, 1));
+        assert_eq!(feed.seq, MAX_IN_FLIGHT as u64, "withheld ticks build no frame");
+        assert_eq!(feed.lanes[0].unwrap().1.state, LaneState::Recording);
+        assert_eq!(feed.withheld_events, [lane]);
+        let mut left = Vec::new();
+        feed.host.drain_feed(&mut left);
+        assert!(left.is_empty(), "the withheld ticks drained the ring");
+
+        let s = sub.as_mut().unwrap();
+        assert!(!s.ack(Some(MAX_IN_FLIGHT as u64 - 2), Instant::now()));
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().len(), MAX_IN_FLIGHT, "one unacked frame still withholds");
+        assert!(!sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now()));
+        turn(&mut feed, &mut sub, &hold);
+        turn(&mut feed, &mut sub, &hold);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), MAX_IN_FLIGHT + 1, "exactly one catch-up ends the withhold");
+        assert!(sent.last().unwrap().catch_up && !sent.last().unwrap().reset);
+    }
+
+    #[test]
+    fn a_catch_up_keeps_commits_clears_and_overdubs_in_order_and_the_count_once() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Hold::default();
+        let (mut sub, sent) = subscriber();
+        fill_window(&mut feed, &mut sub, &hold, &mut events);
+        let stream = [
+            count_lane(100, 0, LaneState::Recording, false),
+            count_lane(200, 0, LaneState::Playing, false),
+            Event::Cleared { frame: 300, lane: 0 },
+            count_lane(300, 0, LaneState::Empty, false),
+            count_lane(400, 1, LaneState::Overdubbing, false),
+            count_lane(500, 1, LaneState::Playing, false),
+            count_lane(600, 1, LaneState::Overdubbing, false),
+            rejected(650),
+            count_lane(700, 4, LaneState::Recording, true),
+        ];
+        for event in stream {
+            events.push(event).unwrap();
+            events.push(beat(700, 4)).unwrap();
+            turn(&mut feed, &mut sub, &hold);
+        }
+        events.push(beat(800, 1)).unwrap();
+        events.push(beat(900, 0)).unwrap();
+        turn(&mut feed, &mut sub, &hold);
+        let current = Event::Selected { frame: 1000, lane: 1 };
+        events.push(current).unwrap();
+        sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now());
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        let catch_up = frames.last().unwrap();
+        let expected: Vec<_> = stream.into_iter().chain([beat(800, 1), beat(900, 0), current]).collect();
+        assert_eq!(catch_up.events.iter().map(|e| e.0).collect::<Vec<_>>(), expected);
+        assert!(catch_up.catch_up && !catch_up.reset && catch_up.settings.is_none());
+        assert!(catch_up.status.is_none() && catch_up.live.is_none() && catch_up.peaks.is_empty(), "unchanged values stay absent");
+        drop(frames);
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().len(), MAX_IN_FLIGHT + 1);
+    }
+
+    #[test]
+    fn a_catch_up_carries_only_changed_peak_bins() {
+        let (mut engine, mut feed) = manual_engine();
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        send(&feed, [Command::SetBpm(240.0), Command::SetSlotLive(0, true), Command::RecDub(0)]);
+        let mut at = 0;
+        // The count is 8000 frames; leave several bins drawn while the take still records.
+        render(&mut engine, &mut at, 100);
+        turn(&mut feed, &mut sub, &hold);
+        let overview = feed.overview.clone().unwrap();
+        let before = overview.lane(0);
+        assert_eq!(before.state, LaneState::Recording);
+        assert!(before.frames > (3 * PEAK_FRAMES) as Frame);
+        let first = sent.lock().unwrap()[0].peaks.clone();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].start, 0);
+        // Fill the window without rendering or consuming any new waveform writes.
+        for _ in 1..MAX_IN_FLIGHT {
+            drop(FeedHold::take(&hold));
+            turn(&mut feed, &mut sub, &hold);
+        }
+        render(&mut engine, &mut at, 4);
+        turn(&mut feed, &mut sub, &hold);
+        render(&mut engine, &mut at, 4);
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().len(), MAX_IN_FLIGHT);
+        sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now());
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        let catch_up = frames.last().unwrap();
+        assert!(catch_up.catch_up && !catch_up.reset);
+        assert_eq!(catch_up.peaks.len(), 1);
+        let p = &catch_up.peaks[0];
+        let after = overview.lane(0);
+        assert_eq!((p.lane, p.start, p.count), (0, before.frames as u32 / PEAK_FRAMES as u32, (after.frames as usize).div_ceil(PEAK_FRAMES) as u32));
+        assert_eq!(p.min.len(), (p.count - p.start) as usize, "only the bins written since the last send");
+        for (offset, (&min, &max)) in p.min.iter().zip(&p.max).enumerate() {
+            let (lo, hi) = overview.bin(after.buf, p.start as usize + offset);
+            assert_eq!((min, max), (round(lo), round(hi)));
+        }
+    }
+
+    #[test]
+    fn count_beats_drained_in_the_catch_up_tick_are_sent_once() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        let guard = FeedHold::take(&hold);
+        let armed = count_lane(100, 4, LaneState::Recording, true);
+        events.push(beat(100, 4)).unwrap();
+        events.push(armed).unwrap();
+        turn(&mut feed, &mut sub, &hold);
+        drop(guard);
+        events.push(beat(200, 1)).unwrap();
+        events.push(beat(300, 0)).unwrap();
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        assert!(frames[1].catch_up && !frames[1].reset);
+        assert_eq!(frames[1].events.iter().map(|e| e.0).collect::<Vec<_>>(), [armed, beat(200, 1), beat(300, 0)]);
+    }
+
+    #[test]
+    fn an_ack_before_the_first_frame_null_or_past_the_last_covers_nothing() {
+        let (mut feed, _) = scripted_feed();
+        feed.seq = 10;
+        let hold = Hold::default();
+        let (mut sub, _) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        let s = sub.as_mut().unwrap();
+        for seq in [None, Some(0), Some(9), Some(11)] {
+            assert!(!s.ack(seq, Instant::now()));
+            assert_eq!(s.in_flight.len(), 1);
+            assert_eq!(s.newest_ack, None);
+        }
+        assert!(!s.ack(Some(10), Instant::now()));
+        assert!(s.in_flight.is_empty());
+        assert_eq!(s.newest_ack, Some(10));
+    }
+
+    #[test]
+    fn another_engine_during_a_hold_or_withhold_latches_a_reset_with_its_notices() {
+        for held in [false, true] {
+            let (mut feed, mut events) = scripted_feed();
+            let hold = Arc::new(Hold::default());
+            let (mut sub, sent) = subscriber();
+            fill_window(&mut feed, &mut sub, &hold, &mut events);
+            let guard = held.then(|| FeedHold::take(&hold));
+            if held {
+                sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now());
+            }
+            events.push(rejected(100)).unwrap();
+            turn(&mut feed, &mut sub, &hold);
+            feed.host.core.engine_gen.fetch_add(1, AcqRel);
+            turn(&mut feed, &mut sub, &hold);
+            turn(&mut feed, &mut sub, &hold);
+            drop(guard);
+            sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now());
+            let current = Event::PassDropped { frame: 200, lane: 1, pass: 2 };
+            events.push(current).unwrap();
+            turn(&mut feed, &mut sub, &hold);
+            let frames = sent.lock().unwrap();
+            let reset = frames.last().unwrap();
+            assert!(reset.reset && !reset.catch_up && reset.settings.is_some());
+            let events: Vec<_> = reset.events.iter().map(|e| e.0).collect();
+            assert_eq!(&events[events.len() - 2..], &[rejected(100), current], "kept notices follow the new mirror and precede this tick's");
+        }
+    }
+
+    #[test]
+    fn past_256_withheld_events_a_reset_keeps_take_rejected_and_refused() {
+        for total in [WITHHELD_EVENTS, WITHHELD_EVENTS + 1] {
+            let (mut feed, mut events) = scripted_feed();
+            let hold = Hold::default();
+            let (mut sub, sent) = subscriber();
+            fill_window(&mut feed, &mut sub, &hold, &mut events);
+            let refused = Event::Refused { frame: 101, lane: 0, reason: lf_engine::Refusal::Empty };
+            events.push(rejected(100)).unwrap();
+            events.push(refused).unwrap();
+            for n in 2..total {
+                events.push(Event::Selected { frame: n as Frame, lane: 0 }).unwrap();
+                events.push(beat(n as Frame, 0)).unwrap();
+                turn(&mut feed, &mut sub, &hold);
+            }
+            sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now());
+            turn(&mut feed, &mut sub, &hold);
+            let frames = sent.lock().unwrap();
+            let last = frames.last().unwrap();
+            assert_eq!((last.reset, last.catch_up), (total > WITHHELD_EVENTS, total == WITHHELD_EVENTS));
+            assert_eq!(last.events.iter().map(|e| e.0).filter(is_notice).collect::<Vec<_>>(), [rejected(100), refused]);
+            assert!(feed.withheld_events.is_empty() && feed.kept_notices.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_withhold_and_a_hold_overlap_until_both_end_even_without_new_events() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        fill_window(&mut feed, &mut sub, &hold, &mut events);
+        turn(&mut feed, &mut sub, &hold);
+        let guard = FeedHold::take(&hold);
+        sub.as_mut().unwrap().ack(Some(MAX_IN_FLIGHT as u64 - 1), Instant::now());
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().len(), MAX_IN_FLIGHT);
+        drop(guard);
+        turn(&mut feed, &mut sub, &hold);
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        assert_eq!(frames.len(), MAX_IN_FLIGHT + 1);
+        let last = frames.last().unwrap();
+        assert!(last.catch_up && !last.reset && last.events.is_empty());
+    }
+
+    #[test]
+    fn the_watchdog_measures_ack_progress_not_the_age_of_a_frame() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Hold::default();
+        let (mut sub, _) = subscriber();
+        fill_window(&mut feed, &mut sub, &hold, &mut events);
+        let s = sub.as_mut().unwrap();
+        let now = Instant::now() + Duration::from_secs(60);
+        assert!(!s.ack(None, now), "the first heartbeat after a long stall only starts the watch");
+        assert!(!s.ack(None, now + STUCK - Duration::from_millis(1)));
+        assert!(s.ack(None, now + STUCK));
+        assert!(!s.ack(Some(0), now + Duration::from_secs(6)), "frame zero is progress");
+        assert_eq!(s.behind_since, None);
+        let later = now + Duration::from_secs(60);
+        assert!(!s.ack(Some(0), later));
+        assert!(s.ack(Some(0), later + STUCK));
+        assert!(!s.ack(Some(1), later + STUCK), "a slow page still advances");
+        assert!(!s.ack(Some(0), later + STUCK), "an older ack starts a new watch");
+        assert!(s.ack(Some(0), later + STUCK * 2));
+        assert!(!s.ack(Some(MAX_IN_FLIGHT as u64 - 1), later + STUCK * 2));
+        assert!(s.in_flight.is_empty());
+        assert!(!s.ack(None, later + STUCK * 4), "nothing in flight needs no watchdog");
+        assert_eq!(s.behind_since, None);
+    }
+
+    #[test]
+    fn a_new_subscribe_takes_over_unacked_notices_and_its_reset_wins_over_a_hold() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Arc::new(Hold::default());
+        let (sub, _) = subscriber();
+        let thread = FeedThread {
+            subscriber: Arc::new(Mutex::new(sub)), hold: hold.clone(), stop: Arc::new(AtomicBool::new(false)), join: Mutex::new(None),
+        };
+        events.push(rejected(1)).unwrap();
+        turn(&mut feed, &mut thread.subscriber.lock().unwrap(), &hold);
+        assert!(!thread.ack(Some(0), Instant::now()));
+        let refused = Event::Refused { frame: 3, lane: 1, reason: lf_engine::Refusal::Empty };
+        let dropped = Event::PassDropped { frame: 4, lane: 1, pass: 7 };
+        for event in [rejected(2), refused, dropped] {
+            events.push(event).unwrap();
+            turn(&mut feed, &mut thread.subscriber.lock().unwrap(), &hold);
+        }
+        let guard = thread.hold();
+        let sent = Sent::default();
+        let sink = sent.clone();
+        thread.subscribe(move |frame| { sink.lock().unwrap().push(frame); true });
+        events.push(rejected(5)).unwrap();
+        turn(&mut feed, &mut thread.subscriber.lock().unwrap(), &hold);
+        assert!(sent.lock().unwrap().is_empty());
+        drop(guard);
+        turn(&mut feed, &mut thread.subscriber.lock().unwrap(), &hold);
+        turn(&mut feed, &mut thread.subscriber.lock().unwrap(), &hold);
+        let frames = sent.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        let reset = &frames[0];
+        assert!(reset.reset && !reset.catch_up && reset.seq == 4);
+        assert_eq!(reset.events.iter().map(|e| e.0).filter(is_notice).collect::<Vec<_>>(), [rejected(2), refused, dropped, rejected(5)]);
+        assert!(!thread.ack(Some(3), Instant::now()), "the old channel cannot ack the replacement's reset");
+        assert_eq!(thread.subscriber.lock().unwrap().as_ref().unwrap().in_flight.len(), 1);
+    }
+
+    #[test]
+    fn resets_keep_only_the_newest_32_notices_without_a_subscriber() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Hold::default();
+        let mut nobody = None;
+        for n in 0..KEPT_NOTICES + 5 {
+            events.push(rejected(n as Frame)).unwrap();
+            turn(&mut feed, &mut nobody, &hold);
+        }
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        assert!(frames[0].reset && !frames[0].catch_up);
+        assert_eq!(frames[0].events.iter().map(|e| e.0).filter(is_notice).collect::<Vec<_>>(), (5..KEPT_NOTICES + 5).map(|n| rejected(n as Frame)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn repeated_subscribes_keep_only_the_newest_32_unacked_notices() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Hold::default();
+        let (mut sub, _) = subscriber();
+        for n in 0..KEPT_NOTICES + 5 {
+            events.push(rejected(n as Frame)).unwrap();
+        }
+        turn(&mut feed, &mut sub, &hold);
+        // A second replacement before either got a frame must keep the pending takeover too.
+        sub = Some(Subscriber::new(Box::new(|_| true), sub.take()));
+        let (replacement, sent) = subscriber();
+        sub = Some(Subscriber::new(replacement.unwrap().send, sub.take()));
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        assert!(frames[0].reset && !frames[0].catch_up);
+        assert_eq!(frames[0].events.iter().map(|e| e.0).filter(is_notice).collect::<Vec<_>>(), (5..KEPT_NOTICES + 5).map(|n| rejected(n as Frame)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_failed_send_keeps_the_unacked_notices_for_the_next_subscriber() {
+        let (mut feed, mut events) = scripted_feed();
+        let hold = Hold::default();
+        let mut sub = Some(Subscriber::new(Box::new(|_| false), None));
+        events.push(rejected(100)).unwrap();
+        turn(&mut feed, &mut sub, &hold);
+        assert!(sub.is_none());
+        events.push(rejected(200)).unwrap();
+        turn(&mut feed, &mut sub, &hold);
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        let frames = sent.lock().unwrap();
+        assert_eq!(frames[0].events.iter().map(|e| e.0).filter(is_notice).collect::<Vec<_>>(), [rejected(100), rejected(200)]);
+    }
+
+    fn counting_feed() -> Feed {
+        let mut feed = Feed::new(EngineHost { core: Arc::new(super::super::Core::new()) });
+        // The engine's first count beat precedes its lane's arm.
+        mirror_tick(&mut feed, &[beat(100, 4), count_lane(100, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)]);
+        feed
+    }
+
+    /// The count follows every lane and the selection, before the drain's other one-shots.
+    fn assert_count_reset(feed: &Feed, rest: &[Event]) {
+        let events: Vec<_> = feed.state_events().into_iter().map(|e| e.0).collect();
+        assert_eq!(events.len(), TRACK_COUNT + 1 + rest.len());
+        for (i, event) in events[..TRACK_COUNT].iter().enumerate() {
+            assert!(matches!(event, Event::Lane { lane, .. } if usize::from(*lane) == i));
+        }
+        assert_eq!(events[TRACK_COUNT], Event::Selected { frame: 0, lane: 0 });
+        assert_eq!(&events[TRACK_COUNT + 1..], rest);
+    }
+
+    #[test]
+    fn a_reset_between_count_beats_replays_only_the_latest() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(200, 3)]);
+    }
+
+    #[test]
+    fn a_reset_after_the_count_downbeat_keeps_both_beats_while_armed() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 1)]);
+        mirror_tick(&mut feed, &[beat(300, 0)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(200, 1), beat(300, 0)]);
+        // An ordinary beat does not replace the count's downbeat, or precede its replay.
+        mirror_tick(&mut feed, &[beat(400, 0)]);
+        assert_count_reset(&feed, &[beat(200, 1), beat(300, 0), beat(400, 0)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(200, 1), beat(300, 0)]);
+    }
+
+    #[test]
+    fn a_reset_after_the_take_started_replays_no_count() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 0), count_lane(210, (TRACK_COUNT - 1) as u8, LaneState::Recording, false)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_cancelled_count_leaves_nothing_for_a_reset_or_a_later_arm() {
+        let mut feed = counting_feed();
+        // No downbeat: the lane leaving ARMED alone ends the count.
+        mirror_tick(&mut feed, &[count_lane(150, (TRACK_COUNT - 1) as u8, LaneState::Empty, false)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+        mirror_tick(&mut feed, &[count_lane(200, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_cancelled_count_is_not_replayed_for_another_lanes_ordinary_arm_in_the_same_drain() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[
+            count_lane(300, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(300, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn a_new_count_at_the_cancel_frame_survives_the_old_lanes_disarm() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[
+            beat(300, 4),
+            count_lane(300, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(300, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(300, 4)]);
+    }
+
+    #[test]
+    fn a_cancelled_count_downbeat_is_not_replayed_for_another_lanes_ordinary_arm() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 1), beat(300, 0)]);
+        mirror_tick(&mut feed, &[
+            count_lane(400, (TRACK_COUNT - 1) as u8, LaneState::Empty, false),
+            count_lane(400, 0, LaneState::Recording, true),
+        ]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[]);
+    }
+
+    #[test]
+    fn count_beats_drained_in_the_reset_tick_are_sent_once() {
+        let mut feed = counting_feed();
+        assert_count_reset(&feed, &[beat(100, 4)]);
+        mirror_tick(&mut feed, &[beat(200, 3)]);
+        assert_count_reset(&feed, &[beat(200, 3)]);
+        mirror_tick(&mut feed, &[beat(300, 0)]);
+        assert_count_reset(&feed, &[beat(200, 3), beat(300, 0)]);
+        mirror_tick(&mut feed, &[beat(400, 1), beat(500, 0)]);
+        assert_count_reset(&feed, &[beat(400, 1), beat(500, 0)]);
+    }
+
+    #[test]
+    fn a_later_count_replaces_the_old_beat_and_downbeat() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 0)]);
+        mirror_tick(&mut feed, &[beat(300, 4)]);
+        mirror_tick(&mut feed, &[]);
+        assert_count_reset(&feed, &[beat(300, 4)]);
+    }
+
+    #[test]
+    fn another_engine_drops_the_count_even_if_it_reports_an_armed_lane() {
+        let mut feed = counting_feed();
+        mirror_tick(&mut feed, &[beat(200, 0)]);
+        feed.drained = vec![count_lane(0, (TRACK_COUNT - 1) as u8, LaneState::Recording, true)];
+        assert!(feed.update_mirror(1), "a new engine resets the feed");
+        assert_count_reset(&feed, &[]);
+        assert!(feed.count_beat.is_none() && feed.count_downbeat.is_none());
+    }
+
+    #[test]
+    fn a_reload_mid_count_replays_the_counted_lanes_arm_and_the_counts_latest_beat() {
+        let (mut engine, mut feed) = manual_engine();
+        let (mut page, _) = subscriber();
+        let hold = Hold::default();
+        let mut at = 0;
+        // A beat is 2000 frames: the count beats on 0, 2000, 4000 and 6000, its downbeat on 8000.
+        send(&feed, [Command::SetBpm(240.0), Command::RecDub(0)]);
+        render(&mut engine, &mut at, 1);
+        turn(&mut feed, &mut page, &hold);
+        assert_eq!(replayed_count(&reload(&mut feed)), (vec![(0, 4)], vec![0]), "before the second beat");
+        render(&mut engine, &mut at, 15);
+        turn(&mut feed, &mut page, &hold);
+        assert_eq!(replayed_count(&reload(&mut feed)), (vec![(2000, 3)], vec![0]), "after it");
+        render(&mut engine, &mut at, 70);
+        turn(&mut feed, &mut page, &hold);
+        assert_eq!(replayed_count(&reload(&mut feed)), (vec![], vec![]), "the take records: no count");
+    }
+
+    #[test]
+    fn a_counts_first_beat_drained_before_its_lanes_arm_is_still_replayed() {
+        for later in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            let lane = if later {
+                idle_master(&mut engine, &mut feed, &mut page, &mut at);
+                1
+            } else {
+                0
+            };
+            send(&feed, [Command::RecDub(lane)]);
+            render(&mut engine, &mut at, 1);
+            // The beat is pushed before the publish of its lane's arm, in the same chunk.
+            let first = drain_through_count_beat(&mut feed);
+            assert_eq!(first, (at - 128, 4), "the count starts at the press");
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![first], vec![lane]), "later take: {later}");
+        }
+    }
+
+    #[test]
+    fn a_beat_on_a_cancels_frame_is_not_replayed_as_a_lone_downbeat_for_another_lanes_arm() {
+        let (mut engine, mut feed) = manual_engine();
+        let (mut page, _) = subscriber();
+        let hold = Hold::default();
+        let mut at = 0;
+        send(&feed, [Command::SetBpm(240.0)]);
+        render(&mut engine, &mut at, 1);
+        turn(&mut feed, &mut page, &hold);
+        idle_master(&mut engine, &mut feed, &mut page, &mut at);
+        // A later take counted in from the idle transport, past its second beat.
+        send(&feed, [Command::RecDub(1)]);
+        render(&mut engine, &mut at, 20);
+        turn(&mut feed, &mut page, &hold);
+        let (beats, armed) = replayed_count(&reload(&mut feed));
+        assert_eq!((beats.len(), beats[0].1, armed), (1, 3, vec![1]));
+        // The count cancelled and the transport started in one block (its grid re-anchors on the press,
+        // so a beat lands there), then another lane armed for the next boundary: one drain takes both.
+        send(&feed, [Command::Stop(1), Command::PlayAll]);
+        render(&mut engine, &mut at, 1);
+        let cancel = at - 128;
+        send(&feed, [Command::RecDub(2)]);
+        render(&mut engine, &mut at, 1);
+        turn(&mut feed, &mut page, &hold);
+        assert!(feed.drained.iter().any(|e| matches!(*e, Event::Beat { frame, count_left: 0, .. } if frame == cancel)), "a beat on the cancel's frame");
+        assert_eq!(replayed_count(&reload(&mut feed)), (vec![], vec![2]));
+    }
+
+    #[test]
+    fn a_new_count_drained_with_the_old_lanes_disarm_but_not_its_own_arm_is_still_replayed() {
+        for later in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            let (old, new) = if later {
+                idle_master(&mut engine, &mut feed, &mut page, &mut at);
+                (1, 2)
+            } else {
+                (0, 1)
+            };
+            send(&feed, [Command::RecDub(old)]);
+            render(&mut engine, &mut at, 20);
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)).1, vec![old], "later take: {later}");
+            // One block cancels the count and counts in another lane: its beat, the old lane's disarm, then
+            // its own arm. The drain ends after the disarm.
+            send(&feed, [Command::Stop(old), Command::RecDub(new)]);
+            render(&mut engine, &mut at, 1);
+            let press = at - 128;
+            drain_through(&mut feed, Some(&|e| matches!(*e, Event::Lane { lane, info, .. } if lane == old && !info.armed)));
+            assert!(feed.drained.iter().any(|e| matches!(*e, Event::Beat { frame, count_left: 4, .. } if frame == press)), "the new count's beat came first");
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![(press, 4)], vec![new]), "later take: {later}");
+        }
+    }
+
+    #[test]
+    fn a_counts_first_beat_survives_an_empty_drain_before_its_lanes_arm() {
+        for later in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            let lane = if later {
+                idle_master(&mut engine, &mut feed, &mut page, &mut at);
+                1
+            } else {
+                0
+            };
+            send(&feed, [Command::RecDub(lane)]);
+            render(&mut engine, &mut at, 1);
+            let first = drain_through_count_beat(&mut feed);
+            // The next tick finds the ring empty: the callback has not pushed the arm yet.
+            drain_through(&mut feed, None);
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![first], vec![lane]), "later take: {later}");
+        }
+    }
+
+    #[test]
+    fn a_later_takes_cancel_on_a_master_grid_beat_leaves_no_count_without_play_all() {
+        for split in [false, true] {
+            let (mut engine, mut feed) = manual_engine();
+            let (mut page, _) = subscriber();
+            let hold = Hold::default();
+            let mut at = 0;
+            send(&feed, [Command::SetBpm(240.0)]);
+            render(&mut engine, &mut at, 1);
+            turn(&mut feed, &mut page, &hold);
+            idle_master(&mut engine, &mut feed, &mut page, &mut at);
+            // The idle master's grid, from its last two beats.
+            let grid: Vec<Frame> = feed.drained.iter().filter_map(|e| match *e {
+                Event::Beat { frame, count_left: 0, .. } => Some(frame),
+                _ => None,
+            }).collect();
+            let (last, step) = (grid[grid.len() - 1], grid[grid.len() - 1] - grid[grid.len() - 2]);
+            send(&feed, [Command::RecDub(1)]);
+            render(&mut engine, &mut at, 20);
+            let press = at - 20 * 128;
+            turn(&mut feed, &mut page, &hold);
+            assert_eq!(replayed_count(&reload(&mut feed)).1, vec![1], "split: {split}");
+            // A grid beat ahead, before the count's downbeat and off its beats: the cancel lands on it.
+            let cancel = (1..).map(|k| last + k * step).find(|&f| f > at && (f - press) % 2000 != 0).unwrap();
+            assert!(cancel < press + 8000, "the count still runs at the cancel");
+            feed.host.send(TimedCommand { frame: Some(cancel), command: Command::Stop(1) }).unwrap();
+            while at <= cancel {
+                render(&mut engine, &mut at, 1);
+            }
+            let on_cancel = |e: &Event| matches!(*e, Event::Beat { frame, count_left: 0, .. } if frame == cancel);
+            if split {
+                drain_through(&mut feed, Some(&on_cancel));
+            }
+            turn(&mut feed, &mut page, &hold);
+            if !split {
+                assert!(feed.drained.iter().any(on_cancel), "a grid beat on the cancel's frame");
+            }
+            assert!(!feed.lanes[1].unwrap().1.armed);
+            assert_eq!(replayed_count(&reload(&mut feed)), (vec![], vec![]), "split: {split}");
+        }
+    }
+
+    #[test]
+    fn a_held_feed_sends_nothing_keeps_its_mirror_and_ends_with_one_catch_up() {
         let device = engine();
         let mut feed = Feed::new(device.host().clone());
         let hold = Arc::new(Hold::default());
@@ -536,30 +1513,23 @@ mod tests {
         let mut left = Vec::new();
         device.host().drain_feed(&mut left);
         assert!(left.is_empty(), "the held ticks drained the ring: {} events were still in it", left.len());
-        // A document that subscribes meanwhile waits for its reset too.
-        let (mut sub, sent) = subscriber();
-        for _ in 0..500 {
-            turn(&mut feed, &mut sub, &hold);
-        }
-        assert_eq!(sent.lock().unwrap().len(), 0, "a subscriber that came while held gets nothing yet");
-
         drop(guard);
         turn(&mut feed, &mut sub, &hold);
         {
             let sent = sent.lock().unwrap();
-            assert_eq!(sent.len(), 1, "one frame ends the hold");
-            let frame = &sent[0];
-            assert!(frame.reset && frame.settings.is_some(), "a reset, as a fresh subscriber gets");
+            assert_eq!(sent.len(), 3, "one frame ends the hold");
+            let frame = &sent[2];
+            assert!(frame.catch_up && !frame.reset && frame.settings.is_none(), "the hold ends with a catch-up");
             assert_eq!(frame.seq, 2, "the held ticks built no frame: the count goes on where it stopped");
-            assert_eq!(tempo(frame), Some(240), "the event drained while held is in the mirror the reset carries");
+            assert_eq!(tempo(frame), Some(240), "the event drained while held is replayed");
         }
         set_bpm(&device, 120.0);
         for _ in 0..10 {
             turn(&mut feed, &mut sub, &hold);
         }
         let sent = sent.lock().unwrap();
-        assert_eq!((sent.len(), sent.iter().filter(|f| f.reset).count()), (2, 1), "then ordinary frames again, and no second reset");
-        assert_eq!((sent[1].seq, tempo(&sent[1])), (3, Some(120)));
+        assert_eq!((sent.len(), sent.iter().filter(|f| f.catch_up).count()), (4, 1), "then ordinary frames again, and no second catch-up");
+        assert_eq!((sent[3].seq, tempo(&sent[3])), (3, Some(120)));
     }
 
     // Nobody subscribed (before the first page, or after a page died): the feed ticks as a held one
@@ -591,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_released_at_once_sends_exactly_one_reset() {
+    fn a_hold_released_at_once_sends_exactly_one_catch_up() {
         let device = engine();
         let mut feed = Feed::new(device.host().clone());
         let hold = Arc::new(Hold::default());
@@ -605,13 +1575,13 @@ mod tests {
         }
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2, "one frame, and nothing after it while nothing changes");
-        assert!(sent[1].reset && sent[1].seq == 1);
+        assert!(sent[1].catch_up && !sent[1].reset && sent[1].seq == 1);
     }
 
     /// Two overlapping holds end when the last one drops; a guard dropped by an early return (an
     /// error on its way out with `?`) releases like any other.
     #[test]
-    fn the_guard_releases_on_an_early_return_and_the_last_of_two_ends_the_hold() {
+    fn the_guard_releases_on_an_early_return_and_the_last_of_two_sends_a_catch_up() {
         fn fails_while_holding(hold: &Arc<Hold>) -> Result<(), String> {
             let _held = FeedHold::take(hold);
             Err("the dialog did not run".to_string())?;
@@ -626,7 +1596,8 @@ mod tests {
         assert!(fails_while_holding(&hold).is_err());
         assert_eq!(hold.holders.load(Acquire), 0, "the early return dropped the guard");
         turn(&mut feed, &mut sub, &hold);
-        assert_eq!(counts(&sent), (2, 2), "and the feed resyncs");
+        assert_eq!(counts(&sent), (2, 1), "and the feed catches up");
+        assert!(sent.lock().unwrap()[1].catch_up);
 
         let (first, second) = (FeedHold::take(&hold), FeedHold::take(&hold));
         drop(first);
@@ -635,7 +1606,8 @@ mod tests {
         assert_eq!(sent.lock().unwrap().len(), 2, "still held by the second");
         drop(second);
         turn(&mut feed, &mut sub, &hold);
-        assert_eq!(counts(&sent), (3, 3));
+        assert_eq!(counts(&sent), (3, 1));
+        assert!(sent.lock().unwrap()[2].catch_up);
     }
 
     /// The scope taps on the feed (`lf_engine::scope`): nothing until the UI asks for them, then
@@ -688,8 +1660,7 @@ mod tests {
         assert!(run.frame > spliced, "it is the run after the hole, not the one before it ({} against {spliced})", run.frame);
         assert!(run.frame >= switched_on, "the run before the hole is not in it ({} against {switched_on})", run.frame);
 
-        // Held, the columns are drained and dropped: the hold's reset carries none, and the batch after
-        // it says the trace broke.
+        // Held, the columns are drained and dropped: the catch-up's batch says the trace broke.
         let guard = FeedHold::take(&hold);
         assert!(device.wait_blocks(12));
         for _ in 0..4 {
@@ -697,25 +1668,26 @@ mod tests {
         }
         let sent_while_held = batches(&sent).len();
         drop(guard);
-        // Columns waiting when the hold ends: the resync frame still carries none.
+        // Columns waiting when the hold ends reach the catch-up with a gap.
         assert!(device.wait_blocks(9));
         turn(&mut feed, &mut sub, &hold);
         {
             let frames = sent.lock().unwrap();
-            let resync = frames.iter().rposition(|f| f.reset).expect("the hold ends with a reset");
-            assert!(frames[resync].scope.is_none(), "a reset frame carries no columns");
+            let catch_up = frames.last().expect("the hold ends with a catch-up");
+            assert!(catch_up.catch_up && !catch_up.reset);
+            assert!(catch_up.scope.as_ref().is_some_and(|s| s.gap), "the columns the hold dropped broke the trace");
         }
         assert!(device.wait_blocks(9));
         turn(&mut feed, &mut sub, &hold);
         let after = batches(&sent);
-        assert_eq!(after.len(), sent_while_held + 1, "the held ticks sent none, and one batch came after");
-        assert!(after[after.len() - 1].gap, "the columns the hold dropped broke the trace");
+        assert_eq!(after.len(), sent_while_held + 2, "the catch-up and the following tick each carry a batch");
+        assert!(!after[after.len() - 1].gap, "the following batch splices onto the catch-up");
     }
 
     /// The thread itself: held, it sends nothing while the engine reports; released, its next frame
-    /// is a reset; and `stop` ends it while it is held.
+    /// is a catch-up; and `stop` ends it while it is held.
     #[test]
-    fn the_feed_thread_holds_resyncs_and_still_stops_while_held() {
+    fn the_feed_thread_holds_catches_up_and_still_stops_while_held() {
         let wait_for = |pred: &dyn Fn() -> bool| {
             let deadline = Instant::now() + PATIENCE;
             while !pred() && Instant::now() < deadline {
@@ -741,7 +1713,7 @@ mod tests {
         assert!(wait_for(&|| sent.lock().unwrap().len() >= 2), "the hold's end sends a frame");
         {
             let sent = sent.lock().unwrap();
-            assert!(sent[1].reset && sent[1].seq == 1 && tempo(&sent[1]) == Some(240));
+            assert!(sent[1].catch_up && !sent[1].reset && sent[1].seq == 1 && tempo(&sent[1]) == Some(240));
         }
 
         let _held = thread.hold();
@@ -752,6 +1724,33 @@ mod tests {
                 let _ = done.send(());
             });
             assert!(stopped.recv_timeout(PATIENCE).is_ok(), "a held feed thread still stops");
+        });
+    }
+
+    #[test]
+    fn the_feed_thread_still_stops_while_withheld() {
+        let (feed, mut events) = scripted_feed();
+        let thread = FeedThread::spawn(feed.host.clone()).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        thread.subscribe(move |frame| sent.send(frame).is_ok());
+        assert!(received.recv_timeout(PATIENCE).unwrap().reset);
+        for n in 1..MAX_IN_FLIGHT {
+            events.push(Event::Selected { frame: n as Frame, lane: 0 }).unwrap();
+            assert_eq!(received.recv_timeout(PATIENCE).unwrap().seq, n as u64);
+        }
+        let deadline = Instant::now() + PATIENCE;
+        while !thread.subscriber.lock().unwrap().as_ref().unwrap().withheld && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(thread.subscriber.lock().unwrap().as_ref().unwrap().withheld);
+        assert!(received.try_recv().is_err(), "the full window sent no extra frame");
+        let (done, stopped) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                thread.stop();
+                let _ = done.send(());
+            });
+            assert!(stopped.recv_timeout(PATIENCE).is_ok(), "a withheld feed thread still stops");
         });
     }
 }

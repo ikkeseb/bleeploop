@@ -458,7 +458,7 @@ pub struct Looper {
     job_work: Frame,
     /// The input gaps a window not yet checked may still overlap (`Looper::input_gap`): a window whose
     /// edge runs after them may lie in them.
-    gap: (Frame, Frame),
+    gap: [(Frame, Frame); 2],
     detector: Detector,
     gain_coef: f64,
     loop_end_stop: bool,
@@ -516,7 +516,7 @@ impl Looper {
             jobs: [None; MAX_JOBS],
             job_step_max: 0,
             job_work: 0,
-            gap: (Frame::MIN, Frame::MIN),
+            gap: [(Frame::MIN, Frame::MIN); 2],
             detector: Detector::new(sample_rate),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
@@ -2282,15 +2282,18 @@ impl Looper {
 
     /// The device lost input frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`):
     /// a capture whose window they fall inside is damaged; AUTO drops the history it can no longer join.
+    /// Check both the device interval (lost tap frames) and its shift by the tap's latched live latency.
     /// Every window checks the last gap as it opens, so a gap past a window's end damages the windows
     /// that follow too (a RETAKE pass, a handoff's take), and a press in a damaged block damages the
     /// window it opens there. A recorder still behind the last gap (a jump skipped RETAKE passes,
     /// and `events` catches up four edges at a time) has windows left to check against it: the new gap
     /// joins it, so a later xrun never makes a skipped pass clean. The frames between the two count as
     /// lost too, which only matters to a window wholly between them that the recorder has not reached.
-    pub fn input_gap(&mut self, from: Frame, to: Frame) {
-        let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < self.gap.1));
-        self.gap = (if behind { self.gap.0 } else { from }, to);
+    pub fn input_gap(&mut self, from: Frame, to: Frame, live_latency: Frame) {
+        for (gap, delay) in self.gap.iter_mut().zip([0, live_latency]) {
+            let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < gap.1));
+            *gap = (if behind { gap.0 } else { from + delay }, to + delay);
+        }
         let Some(rec) = self.rec else { return };
         if self.lanes[rec.lane].auto_armed {
             self.detector.reset();
@@ -2301,7 +2304,7 @@ impl Looper {
 
     fn damage_from_gap(&mut self) {
         let gap = self.gap;
-        if let Some(rec) = self.rec.as_mut().filter(|r| r.hit(gap)) {
+        if let Some(rec) = self.rec.as_mut().filter(|r| gap.iter().any(|&g| r.hit(g))) {
             rec.damaged = true;
         }
     }

@@ -329,7 +329,6 @@ fn a_layer_opened_and_closed_inside_a_silent_block_is_rejected() {
 }
 
 #[test]
-#[ignore = "red: damage through a live plugin's latency, open thread (lf-engine briefing)"]
 fn a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin() {
     // The live slot delays its input 512 frames to the record tap: the silent block [b, b + 512) is
     // what the tap carries over [b + 512, b + 1024), the layer's whole window.
@@ -340,6 +339,8 @@ fn a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin() {
     rig.set_input(code);
     let master = rig.record_first_take(0, 1, 2400);
     rig.set_level(0.0);
+    let take = rig.pcm(0);
+    overdub_session(&mut rig, master, 0, DUB);
     rig.idle();
     let before = rig.pcm(0);
     rig.set(Command::SetDubFeedback(0, 0.5));
@@ -358,6 +359,89 @@ fn a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin() {
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
+}
+
+#[test]
+fn a_silent_block_before_a_layer_without_a_plugin_does_not_damage_it() {
+    let (mut rig, master) = playing_loop();
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 64;
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b);
+    rig.block = 512;
+    rig.send_at(b + 448, Command::RecDub(0)); // window [b + 512, b + 1024)
+    rig.send_at(b + 960, Command::RecDub(0));
+    rig.damage(); // [b, b + 512): no plugin, so no shift
+    rig.advance(512);
+    assert_eq!(rig.window(), Some((0, Some(b + 512), None)));
+    rig.advance(1024);
+    rig.idle();
+    assert_eq!(rig.rejected(), 0);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let mut want = before.clone();
+    common::dub::dub(&mut want, (b + 512, b + 1024), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, rig.align), |_| 0.0);
+    assert_ne!(want, before, "the clean layer changes the loop");
+    assert_eq!(rig.pcm(0), want);
+    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), before);
+}
+
+#[test]
+fn a_silent_block_shifted_past_a_layers_end_does_not_damage_it() {
+    const LATENCY: Frame = 512;
+    let (mut rig, master) = playing_loop();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 64;
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b - 512);
+    rig.block = 128;
+    rig.send_at(b - 64, Command::RecDub(0)); // window [b + 512, b + 768)
+    rig.send_at(b + 192, Command::RecDub(0));
+    rig.advance_to(b + 320);
+    assert_eq!(rig.window(), Some((0, Some(b + 512), Some(b + 768))));
+    rig.damage(); // [b + 320, b + 448) shifts to [b + 832, b + 960), past the end
+    rig.advance(1024);
+    rig.idle();
+    assert_eq!(rig.rejected(), 0);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let mut want = before.clone();
+    common::dub::dub(&mut want, (b + 512, b + 768), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, rig.align + LATENCY), |_| 0.0);
+    assert_ne!(want, before, "the clean layer changes the loop");
+    assert_eq!(rig.pcm(0), want);
+    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), before);
+}
+
+#[test]
+fn a_shifted_silent_blocks_end_at_a_layers_start_does_not_damage_it() {
+    const LATENCY: Frame = 512;
+    let (mut rig, master) = playing_loop();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 576;
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b - 512);
+    rig.block = 512;
+    rig.send_at(b - 64, Command::RecDub(0)); // window [b + 1024, b + 1536)
+    rig.send_at(b + 448, Command::RecDub(0));
+    rig.advance(512);
+    assert_eq!(rig.window(), Some((0, Some(b + 1024), None)));
+    rig.damage(); // [b, b + 512) shifts to [b + 512, b + 1024): the end is exclusive
+    rig.advance(2048);
+    rig.idle();
+    assert_eq!(rig.rejected(), 0);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let mut want = before.clone();
+    common::dub::dub(&mut want, (b + 1024, b + 1536), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, rig.align + LATENCY), |_| 0.0);
+    assert_ne!(want, before, "the clean layer changes the loop");
+    assert_eq!(rig.pcm(0), want);
+    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), before);
 }
 
 #[test]
@@ -371,6 +455,8 @@ fn a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin() {
     rig.set_input(code);
     let master = rig.record_first_take(0, 1, 2400);
     rig.set_level(0.0);
+    let take = rig.pcm(0);
+    overdub_session(&mut rig, master, 0, DUB);
     rig.idle();
     let before = rig.pcm(0);
     rig.set(Command::SetDubFeedback(0, 0.5));
@@ -389,6 +475,7 @@ fn a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin() {
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
 }
 
 #[test]

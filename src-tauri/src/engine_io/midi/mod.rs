@@ -33,22 +33,23 @@
 //! - **A message passes MIDI learn first.** A learned or bound message is consumed there and never
 //!   reaches the router (a learned CC64 never sustains); learning a CC lets go of what that owner's
 //!   controller set; what a binding fires goes through `actions`; only what learn leaves is played.
-//! - **Every input command goes through the queue:** the router's batches, what a binding fires, and
-//!   the UI's looper presses, `Press`, `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting
-//!   goes straight to `EngineHost::send`, and so does GO LIVE's toggle, so it keeps its order with
-//!   every live-off (a source change's, an unload's) and is never applied after one made later; a note, a wheel, the note target or a panic from the UI goes
-//!   through the router's own calls, never past it (a UI batch that holds one is refused whole, before
-//!   any of it runs). Nothing is stamped.
-//! - **While no device runs** (`EngineSide::running`), fresh one-shots are refused: the router records
+//! - **What joins the queue** (the rules: **One ordered path into the engine**, **Nothing is
+//!   stamped**): the router's batches, what a binding fires, and the UI's looper presses, `Press`,
+//!   `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting and GO LIVE's toggle go straight
+//!   to `EngineHost::send` (**Every toggle has one owner, the engine**); a note, a wheel, the note
+//!   target or a panic from the UI goes through the router's own calls, never past it (a UI batch that
+//!   holds one is refused whole, before any of it runs).
+//! - **No device here** (the rule: **The no-device rule**, `EngineSide::running`): the router records
 //!   no owner for a refused attack, learn no HOLD for a refused press. Releases, pedals, wheels and the
-//!   target wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and
-//!   every `RETRY` after a drain the engine's full ring refused. A refusal of the UI's input is answered
-//!   ([`Dropped`]: the player hears why a press did nothing); a pedal's is counted only.
-//! - **An engine rebuild needs no WebView** ([`super::RebuildHook`], registered at start): the queue
-//!   pauses, folds its target and wheels into the settings memory before the replay and drops the old
-//!   engine's one-shots and their releases; the router forgets what the old engine sounded, learn its
-//!   HOLD presses; the queue resumes after the replay. The handshake itself sends nothing and calls no
-//!   UI sink (its caller holds every slot port): the port thread, woken, does both afterwards.
+//!   target wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and every `RETRY` after a
+//!   drain the engine's full ring refused. A refusal of the UI's input is answered ([`Dropped`]: the
+//!   player hears why a press did nothing); a pedal's is counted only.
+//! - **The rebuild handshake** (the rule: **A rebuild needs no WebView**; [`super::RebuildHook`],
+//!   registered at start): the queue pauses, folds its target and wheels into the settings memory
+//!   before the replay and drops the old engine's one-shots and their releases; the router forgets
+//!   what the old engine sounded, learn its HOLD presses; the queue resumes after the replay. The
+//!   handshake itself sends nothing and calls no UI sink (its caller holds every slot port): the port
+//!   thread, woken, does both afterwards.
 //! - **Which stored bindings are live** is decided on one port snapshot (`ports::resolve`) at every
 //!   change of the port list or the bindings: exact ids first, by name only where it is unambiguous,
 //!   every ordinal (legacy) record of one name counting as one identity (the import never guesses). A
@@ -69,15 +70,13 @@
 //!   never a panic; a failed one is tried again on a bounded backoff, and a later success clears it. Without the app's data folder nothing is written, and the UI hears it as read-only.
 //! - **A port that goes away releases what it held:** its notes, its pedal, its wheels and its HOLD
 //!   presses; the UI hears [`MidiEvent::Gone`] (the toast).
-//! - **A WebView document is its subscription** ([`MidiHost::subscribe`], first thing in its boot): it
-//!   names its own age (`performance.timeOrigin`, so a late subscribe of an older page is told apart
-//!   from a newer page's), and in one locked step a page no older than every page before it gets a
-//!   fresh input epoch, the older pages' holds are released, a pending learn is cancelled (an unloaded
-//!   page ran no cleanup of its own) and the event sink is replaced. An older page's subscribe changes
-//!   nothing and gets an epoch that is never current. Every input event of the UI (a note, a blur, a
-//!   slot pick, a panic) and every learn call presents its epoch and is refused under any other (an
-//!   input event's refusal is answered, [`Dropped::Stale`]); its engine commands carry none. A blur
-//!   releases the page's holds; MIDI holds stay through both.
+//! - **The subscription's locked step** (the rule: **A page is its subscription**;
+//!   [`MidiHost::subscribe`]): the new epoch, the older pages' released holds, the cancelled learn (an
+//!   unloaded page ran no cleanup of its own) and the replaced event sink happen under the one lock; an
+//!   older page's subscribe gets an epoch that is never current. The epoch checks the UI's input
+//!   events (a note, a blur, a slot pick, a panic) and learn calls; a refused input event is answered
+//!   ([`Dropped::Stale`]), and the UI's engine commands carry no epoch. MIDI holds stay through a
+//!   resubscribe and a blur.
 
 mod actions;
 pub mod bindings;
