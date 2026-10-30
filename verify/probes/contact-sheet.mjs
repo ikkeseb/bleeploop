@@ -46,7 +46,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { probe } from '../harness/probe.ts';
 
 const outDir = 'logs/contact-sheet';
-const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
+const viewports = process.env.CS_VIEWPORTS ? process.env.CS_VIEWPORTS.split(',').map((v) => v.split('x').map(Number)) : [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
   '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13b-jam-edit', '14-modes-on'];
