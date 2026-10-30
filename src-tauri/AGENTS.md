@@ -101,7 +101,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   is `plugins.updater` in `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
   `export_save_part` (`export_save.rs`) takes a session export's bytes, a file name, an offset and a
-  total, and no path: it writes only `<name>.part` and a free final name in the Downloads folder,
+  total, and no path: it writes only `<name>.<total>.part` and a free final name in the Downloads folder,
   replaces no finished file, refuses a name with `/`, `\`, `:`, `..` or a control character or one not
   ending in `.zip` before it touches the disk, and answers the full path to the WebView alone (never a
   log or an error string).

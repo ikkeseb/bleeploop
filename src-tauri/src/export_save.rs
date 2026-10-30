@@ -1,11 +1,11 @@
 //! A session export's .zip, written here so the player hears "Exported" only once the file is on disk
 //! (an `<a download>` returns before it exists). The WebView sends the archive in parts
 //! (`src/platform/host.tauri.ts`) and this side holds no state between them: all it knows is on disk,
-//! in `<name>.part`. The last part closes that file and renames it onto a free name in the player's
-//! Downloads folder. Any failure removes the part file. The full path goes only into the answer to the
-//! WebView: the release log hides the user name (`app_log_dir`), so no error string carries it.
+//! in `<name>.<total>.part`, so a part with another total meets no file. The last part closes that file
+//! and renames it onto a free name in the player's Downloads folder. Any failure removes the part file.
+//! The full path goes only into the answer to the WebView: the release log hides the user name (`app_log_dir`), so no error string carries it.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -64,8 +64,14 @@ fn write_part(dir: &Path, stem: &str, part: &Path, offset: u64, total: u64, byte
     if total == 0 || (bytes.is_empty() && end < total) {
         return Err("A part of the export was empty.".to_string());
     }
-    // File::create replaces what a crashed export left; a later part only ever continues.
-    let opened = if offset == 0 { File::create(part) } else { OpenOptions::new().write(true).open(part) };
+    // What a crashed export left goes first, and a new file follows no link that name might be; a later
+    // part only ever continues.
+    let opened = if offset == 0 {
+        let _ = fs::remove_file(part);
+        OpenOptions::new().write(true).create_new(true).open(part)
+    } else {
+        OpenOptions::new().write(true).open(part)
+    };
     let mut file = opened.map_err(io_failure)?;
     if file.metadata().map_err(io_failure)?.len() != offset {
         return Err("A part of the export arrived out of order.".to_string());
@@ -84,7 +90,7 @@ fn write_part(dir: &Path, stem: &str, part: &Path, offset: u64, total: u64, byte
 /// answer is where the file landed for the part that ends at `total`, null for an earlier one.
 pub fn save_part(dir: &Path, name: &str, offset: u64, total: u64, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
     let stem = zip_stem(name)?;
-    let part = dir.join(format!("{name}.part"));
+    let part = dir.join(format!("{name}.{total}.part"));
     write_part(dir, stem, &part, offset, total, bytes).inspect_err(|_| {
         let _ = fs::remove_file(&part);
     })
@@ -158,7 +164,7 @@ mod tests {
     fn parts_land_as_one_file_at_the_last_one() {
         let dir = Dir::new("parts");
         assert_eq!(save(&dir, 0, 9, b"abc"), Ok(None));
-        assert_eq!(dir.names(), [format!("{NAME}.part")]);
+        assert_eq!(dir.names(), [format!("{NAME}.9.part")]);
         assert_eq!(save(&dir, 3, 9, b"def"), Ok(None));
         assert_eq!(save(&dir, 6, 9, b"ghi"), Ok(Some(dir.path(NAME))));
         assert_eq!(dir.names(), [NAME]);
@@ -266,8 +272,24 @@ mod tests {
     #[test]
     fn a_leftover_part_is_replaced_at_offset_zero() {
         let dir = Dir::new("leftover");
-        fs::write(dir.path(&format!("{NAME}.part")), b"a crashed export's bytes").unwrap();
+        fs::write(dir.path(&format!("{NAME}.3.part")), b"a crashed export's bytes").unwrap();
         assert_eq!(save(&dir, 0, 3, b"abc"), Ok(Some(dir.path(NAME))));
         assert_eq!(fs::read(dir.path(NAME)).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn a_link_at_the_part_name_keeps_its_file() {
+        let dir = Dir::new("link");
+        fs::write(dir.path("take.wav"), b"a take").unwrap();
+        fs::hard_link(dir.path("take.wav"), dir.path(&format!("{NAME}.3.part"))).unwrap();
+        assert_eq!(save(&dir, 0, 3, b"abc"), Ok(Some(dir.path(NAME))));
+        assert_eq!(fs::read(dir.path("take.wav")).unwrap(), b"a take");
+    }
+
+    #[test]
+    fn a_part_with_another_total_lands_nothing() {
+        let dir = Dir::new("total");
+        assert_eq!(save(&dir, 0, 9, b"abc"), Ok(None));
+        dir.failed(save(&dir, 3, 6, b"def"), &[&format!("{NAME}.9.part")]);
     }
 }

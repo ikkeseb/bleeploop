@@ -48,7 +48,8 @@
 //                click is silent (it sounds on a count-in or while the transport runs: lf-engine
 //                `clock.rs` `fire_due`), so it stays still until the count-in even with CLICK on
 //   export       a press on Export ends in the success toast, and the file at the path it names (the
-//                Downloads folder, a free name) starts with `PK`; that file is deleted. The PASS line
+//                Downloads folder, a free name) is newer than the press and opens and ends as a zip;
+//                that file is deleted, and a file older than the press never is. The PASS line
 //                names the file, never the path: it holds the user name
 //   exit         CLEAR ALL empties the lanes, the OS close (as the close button does, through the app's
 //                close guard) ends the process within 60 s, and this run's release log holds no ERROR line
@@ -678,6 +679,7 @@ try {
   // ── export ────────────────────────────────────────────────────────────────────────────────────
   if (taken) {
     await check('export', async () => {
+      const pressed = Date.now();
       await page.locator('button[aria-label="Export loops as a zip of WAV files"]').click();
       const toast = page.locator('.toast', { hasText: /Exported |Could not export/ }).first();
       await toast.waitFor({ state: 'visible', timeout: 60_000 });
@@ -687,10 +689,12 @@ try {
       const name = basename(file);
       must(name.endsWith('.zip'), `the toast names no .zip: ${name}`);
       must(existsSync(file), `no file at the path the toast names: ${name}`);
+      must(statSync(file).mtimeMs >= pressed - 2000, `${name} is older than this press: left alone`);
       const zip = readFileSync(file);
       must(zip.subarray(0, 2).toString('latin1') === 'PK', `${name} does not start with PK`);
+      must(zip.subarray(-22, -18).toString('latin1') === 'PK\x05\x06', `${name} does not end as a whole zip`);
       rmSync(file);
-      return [`${name}: ${zip.length} bytes, starts with PK, deleted`];
+      return [`${name}: ${zip.length} bytes, a whole zip, deleted`];
     });
   }
 
