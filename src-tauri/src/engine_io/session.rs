@@ -242,9 +242,10 @@ impl EngineHost {
 
     /// Hand `job` to the engine and wait for it to come back: ≤ `WAIT`, or up to twice that for a job the
     /// engine took (`run_job`), all under the caller's `session_busy`. While no device runs the
-    /// engine is serviced here, under its lock. The port is out of `Ends` meanwhile; an engine that is
-    /// replaced meanwhile takes its job with it. `stale`: jobs earlier calls gave up on, still in the
-    /// engine of that generation; they come back first and are dropped. A job given up on before the
+    /// engine is serviced here, under its lock (a load behind queued commands waits for a device, and
+    /// is withdrawn at the deadline like any job not taken). The port is out of `Ends` meanwhile; an
+    /// engine that is replaced meanwhile takes its job with it. `stale`: jobs earlier calls gave up on,
+    /// still in the engine of that generation; they come back first and are dropped. A job given up on before the
     /// engine took it is withdrawn, so its caller's error stands: a load answered as failed never
     /// plays later (`run_job`).
     fn session_job(&self, stale: &mut (u64, usize), job: SessionJob) -> Result<SessionJob, String> {
@@ -279,7 +280,15 @@ impl EngineHost {
             }
             if *stale == 0 {
                 if let Some(next) = job.take() {
-                    match port.send(Box::new(next)) {
+                    // Under `ends`, as every command is pushed: `pushed` orders the job among them all.
+                    let sent = {
+                        let ends = self.core.ends.lock().unwrap_or_else(|e| e.into_inner());
+                        match ends.as_ref().filter(|_| self.core.engine_gen.load(Acquire) == gen) {
+                            Some(ends) => port.send(Box::new(next), ends.pushed),
+                            None => return Err("the engine was replaced during the session job".to_string()),
+                        }
+                    };
+                    match sent {
                         Err(back) => job = Some(*back),
                         Ok(()) => {
                             #[cfg(test)]

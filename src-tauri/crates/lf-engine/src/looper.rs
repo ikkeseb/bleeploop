@@ -1006,7 +1006,8 @@ impl Looper {
         Applied::Done
     }
 
-    /// COPY lane `i` into the first EMPTY lane (not the recorder's), as a block job. `wide` (WIDE COPY):
+    /// COPY lane `i` into the first EMPTY lane (not the recorder's, nor the one a RETAKE handoff records
+    /// to), as a block job. `wide` (WIDE COPY):
     /// the copy's loop is its source's shifted circularly by [`WIDE_MS`], so it plays that far behind in
     /// heard order, seamless across the loop edge, and its pan is the mirror of the source's; a source
     /// within 0.1 of the centre glides to half left and the copy sits half right (`LaneFx::widen`). A
@@ -1023,8 +1024,8 @@ impl Looper {
         if wait != Applied::Done {
             return wait;
         }
-        let recorder = self.rec.map(|r| r.lane);
-        let Some(j) = (0..TRACK_COUNT).find(|&k| self.lanes[k].state == LaneState::Empty && Some(k) != recorder) else {
+        let (recorder, handoff) = self.rec.map_or((None, None), |r| (Some(r.lane), r.handoff));
+        let Some(j) = (0..TRACK_COUNT).find(|&k| self.lanes[k].state == LaneState::Empty && Some(k) != recorder && Some(k) != handoff) else {
             return Applied::Done;
         };
         let offset = (self.sample_rate as Frame * WIDE_MS + 500) / 1000;

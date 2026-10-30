@@ -5,9 +5,16 @@
 //! and their peaks, built off the audio thread) and takes each back, a load's with the engine's old lane
 //! buffers in them, to free it.
 //!
-//! A session job runs at a block start, after the commands due on that frame, so a setting sent before
-//! the job is ordered before it. With no device running it runs at once, ahead of the commands still
-//! queued ([`crate::Engine::service_session_idle`]; an open thread, the crate briefing).
+//! A session job comes after every command sent before it (one stamped for a later frame lands on its
+//! frame, by the stamp). The host hands it over with the count of
+//! commands it has pushed so far, and [`SessionPort::send`] and those pushes share one lock, so the
+//! ring's own count orders both, for every sender (`engine_io`'s `Ends::pushed`). The job leaves the
+//! port at a block start, after the commands due on that frame, once the engine has taken that many. A
+//! load also waits for those a block job holds, and no command sent after it is taken until it has run;
+//! a snapshot holds nothing back (a later change may reach its pin: [`SnapshotTrack::mix`]). With no
+//! device running a snapshot runs at once on what is applied, and a load waits for the next block: only
+//! a block may apply the commands ahead of it, with the device's alignment and a table that can drain
+//! ([`crate::Engine::service_session_idle`]).
 //!
 //! A snapshot is the committed loops as they stood on the frame it began (it waits for the looper's
 //! block jobs first), each with its lane's mix as the engine applied it on that frame: an OVERDUBBING
@@ -175,18 +182,22 @@ const TAKEN: u8 = 1;
 /// The host withdrew it before the engine took it: it comes back unrun.
 const WITHDRAWN: u8 = 2;
 
+/// A job on its way in, with the commands it comes after ([`SessionPort::send`]).
+type Sent = (u64, Box<SessionJob>);
+
 /// The host's end (`EngineHandle::session`): one job at a time, handed over and taken back.
 pub struct SessionPort {
-    tx: Producer<Box<SessionJob>>,
+    tx: Producer<Sent>,
     rx: Consumer<Box<SessionJob>>,
     /// The last job sent's `QUEUED` | `TAKEN` | `WITHDRAWN`, shared with the engine's end.
     claim: Arc<AtomicU8>,
 }
 
 impl SessionPort {
-    /// Hand a job to the engine; it comes back on [`SessionPort::returned`] with its result. Gives it
-    /// back when one is already on its way in.
-    pub fn send(&mut self, job: Box<SessionJob>) -> Result<(), Box<SessionJob>> {
+    /// Hand a job to the engine, after the first `pushed` commands of the ring (all a sender has pushed
+    /// so far, read under the lock those pushes take); it comes back on [`SessionPort::returned`] with
+    /// its result. Gives it back when one is already on its way in.
+    pub fn send(&mut self, job: Box<SessionJob>, pushed: u64) -> Result<(), Box<SessionJob>> {
         // Only this end pushes, so a free slot stays free: the claim is reset only for a job that goes
         // in, never under one already on the ring (a withdrawn one must stay withdrawn).
         if self.tx.slots() == 0 {
@@ -194,7 +205,7 @@ impl SessionPort {
         }
         self.claim.store(QUEUED, Relaxed);
         // The push publishes the store above to the engine's pop (rtrb: release, acquire).
-        self.tx.push(job).map_err(|rtrb::PushError::Full(job)| job)
+        self.tx.push((pushed, job)).map_err(|rtrb::PushError::Full((_, job))| job)
     }
 
     pub fn returned(&mut self) -> Option<Box<SessionJob>> {
@@ -202,7 +213,8 @@ impl SessionPort {
     }
 
     /// Withdraw the job sent last, if the engine has not taken it yet: true, it never runs and comes
-    /// back on [`SessionPort::returned`] unrun ([`SessionError::Withdrawn`]); false, the engine took it
+    /// back on [`SessionPort::returned`] unrun ([`SessionError::Withdrawn`]), waiting for its commands
+    /// or not; false, the engine took it
     /// (it runs, and comes back with its result) or it was withdrawn already.
     pub fn withdraw(&mut self) -> bool {
         self.claim.compare_exchange(QUEUED, WITHDRAWN, AcqRel, Acquire).is_ok()
@@ -211,7 +223,7 @@ impl SessionPort {
 
 /// The engine's end: the job it holds, and the rings.
 pub(crate) struct SessionEnd {
-    rx: Consumer<Box<SessionJob>>,
+    rx: Consumer<Sent>,
     tx: Producer<Box<SessionJob>>,
     job: Option<Box<SessionJob>>,
     claim: Arc<AtomicU8>,
@@ -225,14 +237,34 @@ pub(crate) fn channel() -> (SessionPort, SessionEnd) {
 }
 
 impl SessionEnd {
-    /// At a block start, after the commands due on its frame: take a job the host sent (only while the
-    /// return ring has room, so it can always go back), apply a load, begin a snapshot once no block job
-    /// runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
-    /// answers `Changed`.
+    /// The commands of the ring a load waiting on the port comes after: none past them may be taken
+    /// before it runs.
+    pub(crate) fn load_fence(&self) -> Option<u64> {
+        self.rx.peek().ok().filter(|(_, job)| matches!(**job, SessionJob::Load(_))).map(|&(fence, _)| fence)
+    }
+
+    /// The job on the port may leave it: its commands are `taken`, a load's `settled` too (a snapshot
+    /// waits out the block jobs anyway, holding nothing back). With no device a snapshot does not wait:
+    /// it reads what is applied. One the host withdrew leaves at once.
+    fn ready(&self, idle: bool, taken: u64, settled: u64) -> bool {
+        self.rx.peek().is_ok_and(|(fence, job)| {
+            self.claim.load(Acquire) == WITHDRAWN
+                || match **job {
+                    SessionJob::Snapshot(_) => idle || *fence <= taken,
+                    SessionJob::Load(_) => *fence <= settled,
+                }
+        })
+    }
+
+    /// At a block start, after the commands due on its frame: take a job the host sent once it is
+    /// [`ready`](Self::ready) (only while the return ring has room, so it can always go back), apply a
+    /// load, begin a snapshot once no block job runs. `idle`: no device runs, so a block job cannot
+    /// finish either and a snapshot waiting for one answers `Changed`. `taken`: the commands taken off
+    /// the ring so far; `settled`: how many of them lead up to the first one a block job holds.
     /// A job the host withdrew before this took it goes straight back unrun.
-    pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool) {
-        if self.job.is_none() && self.tx.slots() > 0 {
-            self.job = self.rx.pop().ok();
+    pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool, taken: u64, settled: u64) {
+        if self.job.is_none() && self.tx.slots() > 0 && self.ready(idle, taken, settled) {
+            self.job = self.rx.pop().ok().map(|(_, job)| job);
             if let Some(job) = self.job.as_deref_mut() {
                 if self.claim.compare_exchange(QUEUED, TAKEN, AcqRel, Acquire).is_err() {
                     job.set_result(Err(SessionError::Withdrawn));

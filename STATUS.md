@@ -192,9 +192,11 @@ it.
 - Share output without the click: a stream hears the loops, the plugins and the guitar but no count-in
   or CLICK while the headphones click (ASIO only; `src-tauri/crates/lf-engine/tests/share_mix.rs`). On
   a loud mix the stream may sound a touch louder on the beat than the headphones.
-- SCOPE on a device: no eye has seen it draw a live pixel, and the frame cost with columns flowing is
-  unmeasured (next jam's 4; machine: `src-tauri/crates/lf-engine/tests/scope.rs`,
-  `verify/probes/scope-mirror.mjs`, the stage-view probe's `scope` group).
+- SCOPE on a device: no eye has seen it draw a live pixel. Its frame cost with columns flowing is
+  measured on the browser rig (`pnpm probe frame-cost`: script p99 under 0.5 ms, a feed frame about
+  30 µs, 635-byte JSON); paint and real WebView2 are not (next jam's 4; machine:
+  `src-tauri/crates/lf-engine/tests/scope.rs`, `verify/probes/scope-mirror.mjs`, the stage-view probe's
+  `scope` group).
 - The six synths and the lane FX by ear.
 - The lane delay's repeats land a whole division apart, no longer drifting ~3 ms each: with a high
   feedback over a loop, do they sit on the click and still sound right?
@@ -222,3 +224,4 @@ nothing is said.
 | # | Question | Default |
 |---|---|---|
 | D30 | Three remote branches, one unlanded commit each, kept as they are: `pw16/heap-probe` (22a2b33d, a candidate: the stage draw's clock and level reads in typed arrays, the allocation probe on the freshness path), `proto11/settings-a` (f6ed7aee, a WIP Audio Settings prototype, ungated), `proto11/bar-c` (297d6acd, a prototype: one TAKE chip holding the five mode pills). Land, rework or delete each? | Kept untouched until the owner says |
+| D31 | A press just past the loop's 1 waits for the next pass: a later take starts a whole loop late (rendered: `tests/later_arm.rs`, the ignored test; 8 s on 4 bars at 120, up to 60 s), and END STOP, UNDO and REVERSE share that boundary (read from source). Snap a press within a grace back to the 1, or keep waiting a loop? It changes how the looper plays. | Keeps waiting a loop until the owner says |

@@ -92,9 +92,11 @@ latency measurement. The live wet signal joins after the limiter and is not limi
 `<base>-session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`), each lane with
 its mix, which the engine sets on the frame the loop goes in (the first loaded sample plays at it) and
-the host keeps as its replayed settings; a session job runs after the commands due on its block's first
-frame, so a setting sent before it is ordered before it (with no device running it runs at once, ahead
-of them: an open thread in the lf-engine briefing). The wet master
+the host keeps as its replayed settings; a session job comes after every command sent before it, by
+the command ring's own count. A load also waits for those a block job holds, and no command sent after
+it is taken until it has run; a snapshot holds nothing back, so a later change may reach its pin. With
+no device running a snapshot runs at once on what is applied, and a load behind queued commands waits
+for the next block or is withdrawn at its deadline. The wet master
 is the engine's: an export's snapshot asks for it, and the host renders it right after the copy, off
 the audio thread, in a fresh engine the session's size (`src-tauri/crates/lf-engine/src/render.rs`)
 from those same loops, each with the mix the engine applied where the snapshot pinned it (lane volume,

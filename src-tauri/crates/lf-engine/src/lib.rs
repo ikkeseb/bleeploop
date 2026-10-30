@@ -173,27 +173,11 @@
 //!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
 //!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
 //!   block with no jump keeps the device interval at all.
-//! - **A later take pressed just after a loop boundary starts a whole loop late** (read from source, not
-//!   rendered). `start_recording` takes `next_boundary` with no tolerance, as END STOP's `stop_at` and
-//!   UNDO and REVERSE's `switch_at` do; the free-stop grace is in the stop plans alone. A press on the
-//!   loop's 1 that lands a frame late waits for the next pass. Whether such a press snaps back is the
-//!   owner's call. Next check: a frame-rendered test at block sizes 1 and 128 that a press 64 frames past
-//!   the boundary starts at `anchor + 2 * master + align`.
-//! - **COPY in RETAKE's grace can land on the lane the handoff records to** (read from source, not
-//!   rendered). `Looper::copy` skips the recorder but not `handoff`, so the take inherits the copy's
-//!   REVERSE, mix and FX. Next check: a test with COPY a quarter beat before the pass edge, then exclude
-//!   the handoff's lane.
-//! - **A session job can be served before the commands queued ahead of it.** With no device running,
-//!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
-//!   it on resume (applying them in idle is wrong: a capture latches alignment 0, and the 64-entry
-//!   pending table can fill while earlier commands still wait in the ring). With a device running,
-//!   `take_commands` (`engine.rs` 780) takes at most 64 a block and `session.begin` (593) runs
-//!   regardless, so a `SetMute` sent before a load can apply after it. A fence from the ring's length at
-//!   receipt leaves three holes: a command sent after the job but taken in the same callback lands before
-//!   it, a snapshot waiting on `looper.busy()` lets a later mix change through, and a job submitted
-//!   between the callback's first take and `begin` skips the fence. Next step: order them at send time
-//!   with one sequence number shared by the command ring and the session port, made green by the two
-//!   ignored `with_no_device_*` tests (`tests/session.rs`) and a test with both sent before one callback.
+//! - **A later take pressed just after a loop boundary starts a whole loop late.** `start_recording`
+//!   takes `next_boundary` with no tolerance, as END STOP's `stop_at` and UNDO and REVERSE's `switch_at`
+//!   do (those two read from source, not rendered); the free-stop grace is in the stop plans alone. A
+//!   press on the loop's 1 that lands a frame late waits for the next pass: rendered at block sizes 1
+//!   and 128 by the ignored test in `tests/later_arm.rs`. Whether such a press snaps back is D31.
 //! - **A slot's record-path delay is clipped where the capture's alignment is not.** `latch_record`
 //!   clamps each slot's `dw` to its line (`slots.rs` 401: a second plus a block, 52 095 frames at 48 kHz
 //!   and 4096) while the capture aligns on the full live latency (`engine.rs` `let align`), so beside a
