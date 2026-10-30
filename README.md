@@ -115,7 +115,7 @@ itself.
   runs the transport (1-5 or the arrow keys to select a track, Space to record, Enter to play and
   stop, Backspace to undo; Help lists every key).
 - Session export and import as one `.zip`: a WAV stem per track, a wet stereo master render and a
-  `session.json`.
+  `<name>-session.json`.
 - Help → Manual → About this build names the version and commit, copies a diagnostics block for a bug
   report and opens the log folder.
 

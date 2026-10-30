@@ -97,7 +97,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - `pnpm dlx knip` finds unused files/exports/deps; an export kept only for a browser probe carries
   `@public` in its JSDoc. The browser probes need `pnpm exec playwright install chromium` once.
 - There is no JS unit-test runner. `pnpm verify` = the guards (real source in plain Node + the docs
-  guard); `pnpm probe <name>|--ci` = the browser probes (the UI on the engine fake), each on its own Vite;
+  guard); `pnpm probe <name>|--ci` = the browser probes (the UI on the engine fake), each in its own process on the run's one Vite;
   `pnpm test:engine` = `cargo test -p lf-engine`, the engine's behaviour rendered offline, frame by
   frame. What each can and cannot see: `verify/README.md`.
 
