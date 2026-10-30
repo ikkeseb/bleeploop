@@ -2,7 +2,8 @@
 //! loops in play order, copied a budget per rendered frame, and a load into an empty engine that plays
 //! them back sample-exact on a fresh grid, each lane at its loaded mix from its first sample, over an FX
 //! chain that holds nothing from before the load (nor, after a CLEAR, from before it). Both run after
-//! the commands due on their block's first frame, with no device running too. Every `process` runs under the rig's `assert_no_alloc`, so the
+//! every command sent before them; with no device running a snapshot runs at once on what is applied, and
+//! a load behind queued commands waits for the next block. Every `process` runs under the rig's `assert_no_alloc`, so the
 //! engine side of both allocates nothing; the buffers are the test's (the host's), built outside it.
 //! A snapshot in flight leaves the rendered output bit for bit as it was (the Web Audio probe
 //! recovery-playback.mjs's continuity). Each track carries its lane's mix as the engine applied it at the
@@ -680,10 +681,11 @@ fn a_delay_loaded_after_a_clear_echoes_its_own_loop_as_a_new_one_does() {
     assert!((bus[24_000] / bus[12_000] - MAX_FEEDBACK as f32).abs() < 1e-2, "the second echo ({})", bus[24_000]);
 }
 
-// ── With no device running, a session job should come after the commands queued before it ────────
+// ── With no device running, a load comes after the commands queued before it, on the next block ────
 
 /// The device stops after `fresh_load`'s first frames; `queue` reaches the ring, then `load` the port,
-/// and the host services the engine idle (`Engine::service_session_idle`). The load's result.
+/// and the host services the engine idle (`Engine::service_session_idle`): only a block applies a
+/// command, so the load waits. The device resumes for a block: the load's result.
 fn load_idle(rig: &mut Rig, queue: &[Command], load: Load) -> Option<Result<(), SessionError>> {
     rig.punch_out();
     for &command in queue {
@@ -691,6 +693,8 @@ fn load_idle(rig: &mut Rig, queue: &[Command], load: Load) -> Option<Result<(), 
     }
     assert!(rig.session().send(Box::new(SessionJob::Load(load))).is_ok());
     rig.engine.service_session_idle();
+    assert!(rig.session().returned().is_none(), "the load waits behind the queued commands");
+    rig.advance(rig.block as Frame);
     match rig.session().returned().map(|job| *job) {
         Some(SessionJob::Load(load)) => load.result,
         _ => None,
@@ -698,7 +702,23 @@ fn load_idle(rig: &mut Rig, queue: &[Command], load: Load) -> Option<Result<(), 
 }
 
 #[test]
-#[ignore = "red: with no device running, a session job is served before the commands queued ahead of it, open thread (lf-engine briefing)"]
+fn with_no_device_a_load_behind_queued_commands_comes_back_unrun_when_withdrawn() {
+    // What the host does at its deadline: the commands stay queued for the next device.
+    let (s, _) = one_lane();
+    let (mut fresh, load) = fresh_load(&s, LaneMix::default());
+    fresh.punch_out();
+    fresh.queue(Command::SetMute(0, true));
+    assert!(fresh.session().send(Box::new(SessionJob::Load(load))).is_ok());
+    fresh.engine.service_session_idle();
+    assert!(fresh.session().returned().is_none() && fresh.session().withdraw());
+    fresh.engine.service_session_idle();
+    let Some(SessionJob::Load(load)) = fresh.session().returned().map(|job| *job) else { panic!("the withdrawn load never came back") };
+    assert_eq!(load.result, Some(Err(SessionError::Withdrawn)));
+    fresh.advance(fresh.block as Frame);
+    assert!(fresh.master() == 0 && fresh.engine.looper().mix(0, fresh.engine.fx()).muted, "nothing loaded, the command applied");
+}
+
+#[test]
 fn with_no_device_a_load_takes_its_mix_over_a_setting_queued_before_it() {
     let (s, _) = one_lane();
     let mix = LaneMix { volume: 0.5, muted: true, ..LaneMix::default() };
@@ -715,11 +735,77 @@ fn with_no_device_a_load_takes_its_mix_over_a_setting_queued_before_it() {
 }
 
 #[test]
-#[ignore = "red: with no device running, a session job is served before the commands queued ahead of it, open thread (lf-engine briefing)"]
 fn with_no_device_a_take_queued_before_a_load_refuses_it() {
     let (s, _) = one_lane();
     let (mut fresh, load) = fresh_load(&s, LaneMix::default());
     assert_eq!(load_idle(&mut fresh, &[Command::RecDub(0)], load), Some(Err(SessionError::NotEmpty)));
     fresh.advance(4800);
     assert!(fresh.master() == 0 && fresh.state(0) != LaneState::Playing, "nothing loaded: {:?}", fresh.lane(0));
+}
+
+// ── With a device running, a session job comes after the commands sent before it ────────────────────
+
+/// More commands than one block takes (`MAX_PENDING`): the last of them lands blocks after the first.
+fn more_than_a_block_takes(rig: &mut Rig) {
+    for _ in 0..70 {
+        rig.queue(Command::SetVolume(4, 0.5));
+    }
+}
+
+#[test]
+fn a_load_comes_after_every_command_sent_before_it_and_before_every_one_sent_after() {
+    let (s, _) = one_lane();
+    // A setting past the first block's take: the load's mix wins.
+    let mix = LaneMix { volume: 0.5, muted: true, ..LaneMix::default() };
+    let (mut fresh, load) = fresh_load(&s, mix);
+    more_than_a_block_takes(&mut fresh);
+    fresh.queue(Command::SetMute(0, false));
+    let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load)) else { unreachable!() };
+    assert_eq!(load.result, Some(Ok(())));
+    fresh.advance(4800);
+    assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()), mix, "the load's mix over the setting sent before it");
+
+    // A take past the first block's take: it refuses the load.
+    let (mut fresh, load) = fresh_load(&s, LaneMix::default());
+    more_than_a_block_takes(&mut fresh);
+    fresh.queue(Command::RecDub(0));
+    let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load)) else { unreachable!() };
+    assert_eq!(load.result, Some(Err(SessionError::NotEmpty)));
+    assert!(fresh.master() == 0 && fresh.state(0) != LaneState::Playing, "nothing loaded: {:?}", fresh.lane(0));
+
+    // A setting sent after the load, before the same callback: it lands on the loaded lane.
+    let (mut fresh, load) = fresh_load(&s, LaneMix::default());
+    assert!(fresh.session().send(Box::new(SessionJob::Load(load))).is_ok());
+    fresh.queue(Command::SetMute(0, true));
+    fresh.advance(4800);
+    assert_eq!(fresh.state(0), LaneState::Playing, "loaded");
+    assert!(fresh.engine.looper().mix(0, fresh.engine.fx()).muted, "the setting sent after the load holds over its mix");
+}
+
+#[test]
+fn a_load_waits_for_the_commands_a_block_job_holds_ahead_of_it() {
+    let (s, _) = one_lane();
+    let (_, load) = fresh_load(&s, LaneMix::default());
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(120.0));
+    rig.set_input(code);
+    rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.press(Command::Copy(0));
+    rig.press(Command::Clear(0));
+    rig.press(Command::Clear(1));
+    assert!(rig.engine.holding(), "the CLEARs wait for the copy");
+    let SessionJob::Load(load) = run(&mut rig, SessionJob::Load(load)) else { unreachable!() };
+    assert_eq!(load.result, Some(Ok(())), "it found the lanes cleared");
+}
+
+#[test]
+fn a_snapshot_comes_after_every_command_sent_before_it() {
+    let mut rig = three_lanes();
+    let master = rig.master();
+    more_than_a_block_takes(&mut rig);
+    rig.queue(Command::SetMute(0, true));
+    let s = snapshot(&mut rig, 5 * master as usize);
+    assert_eq!(s.result, Some(Ok(())));
+    assert!(mixes(&s)[0].1.muted, "the mute sent before the snapshot is in it");
 }
