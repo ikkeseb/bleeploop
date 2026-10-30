@@ -523,6 +523,51 @@ fn a_layer_wholly_in_a_jumps_late_frames_is_rejected_through_a_live_plugin() {
 }
 
 #[test]
+fn a_jumps_late_frames_reach_back_past_a_gap_the_recorder_is_behind() {
+    // As above, with a point gap first. It leaves the tap on b + 2024, past the window [b + 1540,
+    // b + 1800), so the recorder is behind it when the jump [b + 1256, b + 1512) lands: the merged
+    // interval must still start where the jump's late frames do, b + 1512, before the point gap's.
+    const LATENCY: Frame = 1024;
+    const JUMP: Frame = 256;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    let take = rig.pcm(0);
+    overdub_session(&mut rig, master, 0, DUB);
+    rig.advance(LATENCY);
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 64; // with the plugin's latency: a window opens 1088 frames after its press
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b);
+    rig.block = 256;
+    rig.set_input(code);
+    rig.send_at(b + 452, Command::RecDub(0));
+    rig.send_at(b + 712, Command::RecDub(0));
+    rig.advance_to(b + 1000);
+    assert_eq!(rig.window(), Some((0, Some(b + 1540), Some(b + 1800))));
+    rig.gap();
+    rig.advance(256);
+    rig.skip(JUMP);
+    rig.keep_output();
+    rig.advance(1024);
+    for f in b + 1540..b + 1800 {
+        assert_eq!(rig.record[(f - b - 1512) as usize], code(f - LATENCY - JUMP), "the tap carries the input before the jump: frame {f}");
+    }
+    rig.set_level(0.0);
+    rig.advance(1024);
+    rig.idle();
+    assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
+    assert!(rig.state(0) == LaneState::Playing);
+    assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
+}
+
+#[test]
 fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
     // The removed verify/probes/capture-loss.mjs's overdub row: the rejection keeps the press's STOP.
     for align in [0, 4800] {

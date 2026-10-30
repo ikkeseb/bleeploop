@@ -2290,14 +2290,15 @@ impl Looper {
     /// that follow too (a RETAKE pass, a handoff's take), and a press in a damaged block damages the
     /// window it opens there. A recorder still behind the last gap (a jump skipped RETAKE passes,
     /// and `events` catches up four edges at a time) has windows left to check against it: the new gap
-    /// joins it, so a later xrun never makes a skipped pass clean. The frames between the two count as
-    /// lost too, which only matters to a window wholly between them that the recorder has not reached.
+    /// joins it from the earlier start of the two (a jump's shift can start before a point gap's), so a
+    /// later xrun never makes a skipped pass clean. The frames between the two count as lost too, which
+    /// only matters to a window wholly between them that the recorder has not reached.
     pub fn input_gap(&mut self, from: Frame, resumed: Frame, to: Frame, live_latency: Frame) {
         let shifted = from + live_latency;
         let shifted = if from < resumed { shifted.min(resumed) } else { shifted };
         for (gap, (from, to)) in self.gap.iter_mut().zip([(from, to), (shifted, to + live_latency)]) {
             let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < gap.1));
-            *gap = (if behind { gap.0 } else { from }, to);
+            *gap = (if behind { gap.0.min(from) } else { from }, to);
         }
         self.damage_from_gap();
     }
