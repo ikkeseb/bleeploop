@@ -5,7 +5,8 @@
 //! and their peaks, built off the audio thread) and takes each back, a load's with the engine's old lane
 //! buffers in them, to free it.
 //!
-//! A session job comes after every command sent before it. The host hands it over with the count of
+//! A session job comes after every command sent before it (one stamped for a later frame lands on its
+//! frame, by the stamp). The host hands it over with the count of
 //! commands it has pushed so far, and [`SessionPort::send`] and those pushes share one lock, so the
 //! ring's own count orders both, for every sender (`engine_io`'s `Ends::pushed`). The job leaves the
 //! port at a block start, after the commands due on that frame, once the engine has taken that many. A
