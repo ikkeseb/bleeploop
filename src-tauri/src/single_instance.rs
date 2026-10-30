@@ -7,6 +7,12 @@
 //! crash can never lock the player out. A process that quits shows no window while it shuts down, so a
 //! later launch tells it from a running app by looking for the main window (its class is fixed in
 //! `tauri.conf.json`). A hung first must not hang the launch: nothing here sends the first a message.
+//! A holder with no window to the bound is a leftover, and one launch takes over from it, under a second
+//! name, so one leftover can never lock the player out.
+//!
+//! Two gaps stand, accepted. The lookup finds any window of the class, so a dev or smoke build beside the
+//! release app can take the focus; the launch is still right to exit, and only the owner's machine meets
+//! it. And a first that takes over 10 s to show its window can end up beside the launch that took over.
 //!
 //! `verify/guards/single-instance.mjs` holds the wiring. Runs before logging exists, so it logs nothing.
 
@@ -67,11 +73,12 @@ fn close(handle: Option<HANDLE>) {
     }
 }
 
-/// Decide this launch: `name` is the lock, `find` looks for the holder's window every `poll`, for `bound`,
-/// and `focus` brings a visible one forward. Waiters converge: one makes the mutex once the holder is
-/// gone, and the others then meet it and its window.
+/// Decide this launch: `name` is the lock, `takeover` the one takeover from a leftover, `find` looks for
+/// the holder's window every `poll`, for `bound`, and `focus` brings a visible one forward. Waiters
+/// converge: one makes the mutex once the holder is gone, and the others then meet it and its window.
 pub fn claim<W>(
     name: &HSTRING,
+    takeover: &HSTRING,
     bound: Duration,
     poll: Duration,
     mut find: impl FnMut() -> Found<W>,
@@ -96,9 +103,18 @@ pub fn claim<W>(
                 return Claim::Exit;
             }
             // A holder stuck with no window. A launch is never locked out by a leftover process:
-            // availability beats exclusivity here. Keeping this handle keeps the name once the leftover
-            // dies, so a later launch still meets this one.
-            Found::Nothing if waited => return Claim::Run,
+            // availability beats exclusivity here, for one launch after the bound, the one that makes
+            // `takeover`. Keeping both handles keeps the name once the leftover dies, so a later launch
+            // still meets this one; the rest end here. A failed open comes here the same way.
+            Found::Nothing if waited => {
+                let (second, made) = open(takeover);
+                if made {
+                    return Claim::Run; // Both handles stay open to the process's end.
+                }
+                close(second);
+                close(handle);
+                return Claim::Exit;
+            }
             // Closed before the wait: an open handle here would keep the name alive past the holder.
             _ => {
                 close(handle);
@@ -134,7 +150,8 @@ fn focus_window(window: HWND) {
 /// This launch of the app named `identifier`.
 pub fn first_launch(identifier: &str) -> Claim {
     let name = HSTRING::from(format!("Local\\{identifier}.single-instance"));
-    claim(&name, QUIT_WAIT, POLL, find_window, focus_window)
+    let takeover = HSTRING::from(format!("Local\\{identifier}.single-instance.takeover"));
+    claim(&name, &takeover, QUIT_WAIT, POLL, find_window, focus_window)
 }
 
 #[cfg(all(test, windows))]
@@ -155,6 +172,11 @@ mod tests {
         HSTRING::from(format!("Local\\bleeploop-test-{}-{test}", std::process::id()))
     }
 
+    /// The takeover name beside `name`.
+    fn takeover(name: &HSTRING) -> HSTRING {
+        HSTRING::from(format!("{name}.takeover"))
+    }
+
     /// The first's hold on `name`.
     fn hold(name: &HSTRING) -> HANDLE {
         let (handle, made) = open(name);
@@ -169,15 +191,40 @@ mod tests {
         !made
     }
 
+    /// How many handles on `name` the kernel counts, this look's own left out.
+    fn handles(name: &HSTRING) -> u32 {
+        /// `PUBLIC_OBJECT_BASIC_INFORMATION`, class 0; the crate's binding sits behind a feature off here.
+        #[repr(C)]
+        #[derive(Default)]
+        struct Basic {
+            attributes: u32,
+            access: u32,
+            handles: u32,
+            rest: [u32; 11],
+        }
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtQueryObject(handle: HANDLE, class: u32, info: *mut Basic, size: u32, written: *mut u32) -> i32;
+        }
+        let (handle, _) = open(name);
+        let mut info = Basic::default();
+        let size = size_of::<Basic>() as u32;
+        // SAFETY: `info` is that class's buffer, of `size` bytes, and the handle is open.
+        let status = unsafe { NtQueryObject(handle.unwrap(), 0, &mut info, size, std::ptr::null_mut()) };
+        close(handle);
+        assert_eq!(status, 0, "the kernel answers");
+        info.handles - 1
+    }
+
     /// `claim` where nothing may be focused.
     fn unfocused(name: &HSTRING, bound: Duration, find: impl FnMut() -> Found<()>) -> Claim {
-        claim(name, bound, TICK, find, |()| panic!("nothing to focus"))
+        claim(name, &takeover(name), bound, TICK, find, |()| panic!("nothing to focus"))
     }
 
     /// `claim`'s answer with `find`, and how many times it focused.
     fn focused(name: &HSTRING, find: impl FnMut() -> Found<()>) -> (Claim, u32) {
         let times = Cell::new(0);
-        let claim = claim(name, LONG, TICK, find, |()| times.set(times.get() + 1));
+        let claim = claim(name, &takeover(name), LONG, TICK, find, |()| times.set(times.get() + 1));
         (claim, times.get())
     }
 
@@ -274,7 +321,7 @@ mod tests {
         let won = AtomicBool::new(false);
         let waiter = || {
             let find = || if won.load(SeqCst) { Found::Visible(()) } else { Found::Nothing };
-            let claim = claim(&name, LONG, TICK, find, |()| {});
+            let claim = claim(&name, &takeover(&name), LONG, TICK, find, |()| {});
             if claim == Claim::Run {
                 won.store(true, SeqCst);
             }
@@ -287,5 +334,22 @@ mod tests {
             [one.join().unwrap(), other.join().unwrap()]
         });
         assert_eq!(claims.iter().filter(|claim| **claim == Claim::Run).count(), 1, "{claims:?}");
+    }
+
+    #[test]
+    fn launches_at_the_bound_with_a_holder_that_stays_leave_one_winner() {
+        let name = name("takeover");
+        let takeover = takeover(&name);
+        let leftover = hold(&name);
+        let claims: Vec<Claim> = std::thread::scope(|scope| {
+            let launch = || unfocused(&name, SHORT, || Found::Nothing);
+            let launches: Vec<_> = (0..4).map(|_| scope.spawn(launch)).collect();
+            launches.into_iter().map(|launch| launch.join().unwrap()).collect()
+        });
+        assert_eq!(claims.iter().filter(|claim| **claim == Claim::Run).count(), 1, "{claims:?}");
+        assert_eq!(handles(&takeover), 1, "the winner alone holds the takeover");
+        assert_eq!(handles(&name), 2, "the leftover and the winner hold the name");
+        close(Some(leftover));
+        assert_eq!(handles(&name), 1, "the name outlives the leftover, on the winner's handle alone");
     }
 }

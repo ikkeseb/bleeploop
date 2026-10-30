@@ -63,6 +63,19 @@ const leaves = (dispatch) =>
     ? /Ok\(\(\)\) => std::process::exit\(0\),/.test(dispatch) && /std::process::exit\(1\);\s*\}\s*\}\s*\}$/.test(dispatch)
     : /std::process::exit\([^;]*;\s*\}$/.test(dispatch);
 
+/** Whether a `cfg` predicate can hold in a release build, every other option set. */
+function holdsInRelease(cfg) {
+  let p = cfg.replace(/\s/g, '').replace(/\bdebug_assertions\b/g, 'F').replace(/\b(?!all\(|any\(|not\(|F\b)\w+(="[^"]*")?/g, 'T');
+  for (let was; was !== p; ) {
+    was = p;
+    p = p.replace(/(all|any|not)\(([TF,]*)\)/g, (_, op, args) => {
+      if (op === 'not') return args.includes('T') ? 'F' : 'T';
+      return (op === 'all' ? !args.includes('F') : args.includes('T')) ? 'T' : 'F';
+    });
+  }
+  return p !== 'F';
+}
+
 /** What is wrong with `run()`'s wiring of the lock, one line each. */
 function runFaults(lib) {
   const source = code(lib);
@@ -101,7 +114,8 @@ function runFaults(lib) {
   for (const m of run.matchAll(/"--(?:scan-[a-z-]+|probe-[a-z-]+)"/g)) {
     if (call !== -1 && m.index > call) faults.push(`${m[0]} dispatches after the lock`);
   }
-  if (/#\[cfg\(debug_assertions\)\]\s*if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--scan-one"\)/.test(run)) {
+  const scan = run.match(/((?:#\[[^\]]*\]\s*)*)if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--scan-one"\)/);
+  if ([...(scan?.[1] ?? '').matchAll(/#\[cfg\(([^\]]*)\)\]/g)].some((attr) => !holdsInRelease(attr[1]))) {
     faults.push('--scan-one dispatches in debug alone: a release scan child would meet the lock');
   }
   return faults;
@@ -114,12 +128,15 @@ function moduleFaults(module) {
   if (tests === -1) return ['the module has no unit tests under #[cfg(all(test, windows))]'];
   const prod = source.slice(0, tests);
   const faults = [];
-  if (!/fn first_launch[^]*claim\(&name, QUIT_WAIT, POLL, find_window, focus_window\)/.test(prod)) {
+  if (!/fn first_launch[^]*claim\(&name, &takeover, QUIT_WAIT, POLL, find_window, focus_window\)/.test(prod)) {
     faults.push('first_launch does not pass the Win32 lookup and focus to claim');
   }
   const focus = fnBody(prod, 'fn focus_window(');
   for (const call of ['IsIconic(window)', 'ShowWindowAsync(window, SW_RESTORE)', 'SetForegroundWindow(window)']) {
     if (!focus.includes(call)) faults.push(`focus_window does not reach ${call}`);
+  }
+  if (!/if IsIconic\(window\)\.as_bool\(\) \{\s*let _ = ShowWindowAsync\(window, SW_RESTORE\);/.test(focus)) {
+    faults.push('focus_window does not restore a minimised window, and only that');
   }
   const find = fnBody(prod, 'fn find_window(');
   for (const call of ['FindWindowW(WINDOW_CLASS', 'IsWindowVisible(window)']) {
@@ -127,6 +144,12 @@ function moduleFaults(module) {
   }
   if (!/Found::Visible\(window\) => \{\s*close\(handle\);\s*focus\(window\);\s*return Claim::Exit;/.test(fnBody(prod, 'pub fn claim<W>('))) {
     faults.push('claim does not focus a visible window and exit');
+  }
+  if (!/Found::Nothing if waited => \{\s*let \(second, made\) = open\(takeover\);\s*if made \{\s*return Claim::Run;\s*\}\s*close\(second\);\s*close\(handle\);\s*return Claim::Exit;/.test(fnBody(prod, 'pub fn claim<W>('))) {
+    faults.push('claim does not let one launch alone take over at the bound');
+  }
+  if (!/let takeover = HSTRING::from\(format!\("Local\\\\\{identifier\}\.single-instance\.takeover"\)\);/.test(prod)) {
+    faults.push('the takeover is not a Local name of its own beside the lock');
   }
   for (const call of prod.matchAll(/\b(SendMessage\w*|ShowWindow)\(/g)) {
     faults.push(`${call[1]} waits on the first's thread: a hung first would hang the launch`);
@@ -183,6 +206,7 @@ check('the lock is wired, the children leave first, the plugin is gone', () => {
 const CALL = repo.lib.match(/ *if let single_instance::Claim::Exit[^]*?\n {4}\}\n/)?.[0] ?? '';
 const SCAN = repo.lib.match(/ *if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--scan-one"\) \{[^]*?\n {8}\}\n/)?.[0] ?? '';
 const ENGINE = repo.lib.match(/ *#\[cfg\(debug_assertions\)\]\n *if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--probe-engine"\) \{[^]*?\n {8}\}\n/)?.[0] ?? '';
+const TAKEOVER = repo.module.match(/ *Found::Nothing if waited => \{[^]*?\n {12}\}\n/)?.[0] ?? '';
 const swap = (key, from, to) => (t) => {
   assert.ok(from && t[key].includes(from), `the mutation's text is in ${key}: ${from}`);
   return { ...t, [key]: t[key].replace(from, to) };
@@ -208,6 +232,10 @@ const MUTATIONS = {
   ],
   'a removed probe dispatch': [swap('lib', ENGINE, ''), /no --probe-engine dispatch/],
   'a --scan-one dispatch in debug alone': [swap('lib', SCAN, `        #[cfg(debug_assertions)]\n${SCAN}`), /in debug alone/],
+  'a --scan-one dispatch under a compound debug cfg': [swap('lib', SCAN, `        #[cfg(all(windows, debug_assertions))]\n${SCAN}`), /in debug alone/],
+  'a negated minimised test': [swap('module', 'if IsIconic(window).as_bool()', 'if !IsIconic(window).as_bool()'), /does not restore a minimised window/],
+  'every launch at the bound runs': [swap('module', TAKEOVER, '            Found::Nothing if waited => return Claim::Run,\n'), /one launch alone take over/],
+  'a takeover under the lock\'s own name': [swap('module', '.single-instance.takeover', '.single-instance'), /a Local name of its own/],
   'a call before the dispatches': [
     (t) => swap('lib', 'pub fn run() {\n', `pub fn run() {\n${RELEASE_CFG}\n${CALL}`)(swap('lib', `    ${RELEASE_CFG}\n${CALL}`, '')(t)),
     /dispatches after the lock/,
@@ -222,6 +250,11 @@ const MUTATIONS = {
 };
 for (const [name, [mutate, expected]] of Object.entries(MUTATIONS)) {
   check(`${name} is flagged`, () => assert.match(faultsIn(mutate(repo)).join('\n'), expected));
+}
+
+for (const cfg of ['not(debug_assertions)', 'all(windows, not(debug_assertions))', 'not(all(windows, debug_assertions))', 'any(windows, debug_assertions)']) {
+  check(`--scan-one under ${cfg} is not debug alone`, () =>
+    assert.doesNotMatch(faultsIn(swap('lib', SCAN, `        #[cfg(${cfg})]\n${SCAN}`)(repo)).join('\n'), /in debug alone/));
 }
 
 console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
