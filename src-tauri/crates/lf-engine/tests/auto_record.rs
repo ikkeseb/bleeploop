@@ -159,6 +159,40 @@ fn a_trigger_on_the_frames_before_a_gap_leaves_the_tap_keeps_it_and_the_gap_reje
 }
 
 #[test]
+fn a_trigger_after_a_gap_leaves_the_tap_in_the_same_quantum_starts_the_take_there() {
+    // At 8 kHz the detector's RMS window is 32 frames, so a trigger fits in the 128-frame quantum after
+    // the frame the last gap leaves the tap (at 44.1 and 48 kHz the window, 176 and 192 frames, never
+    // does). The live slot delays its input 320 frames: the point gap at d, on a quantum start, leaves
+    // the tap on d + 320, 64 frames into its quantum, and the onset reaches it 5 frames later. The
+    // history starts there, so the take does, and triggers 32 frames in, at d + 352.
+    const LATENCY: Frame = 320;
+    for block in [1, 128] {
+        let mut rig = Rig::with(common::Opts { sr: 8000, start: 8000, block, ..Default::default() });
+        rig.install(0, Box::new(common::Delay::new(LATENCY)));
+        rig.set(Command::SetAutoRecord(true));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(1.0));
+        rig.press(Command::RecDub(0));
+        assert!(rig.lane(0).auto_armed);
+        let d = 8000 + 40 * 128;
+        let input = move |f: Frame| if f < d + 5 { 0.0 } else { 0.2 + code(f) / 16.0 };
+        rig.set_input(input);
+        rig.advance_to(d);
+        rig.gap();
+        rig.advance(LATENCY + 64);
+        assert!(!rig.lane(0).auto_armed, "block {block}: triggered");
+        let start = rig.start_frame();
+        assert_eq!(start, d + LATENCY, "block {block}: the take starts where the gap left the tap");
+        let take = rig.engine.looper().take_pcm(0);
+        assert_eq!(take.len() as Frame, rig.frame - start, "block {block}: everything from the start");
+        assert!(take.iter().enumerate().all(|(k, &x)| x == input(start + k as Frame - LATENCY)), "block {block}: one contiguous run from the start");
+        rig.advance_to(start + rig.fpb() + 1);
+        assert_eq!(rig.rejected(), 0, "block {block}: no gap inside the take");
+        assert!(rig.state(0) == LaneState::Playing && rig.master() == rig.fpb());
+    }
+}
+
+#[test]
 fn the_sensitivity_sets_what_level_triggers() {
     for (sensitivity, triggers) in [(1.0, false), (100.0, true)] {
         let mut rig = listening(0);

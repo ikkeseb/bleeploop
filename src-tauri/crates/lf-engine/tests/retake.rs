@@ -184,6 +184,66 @@ fn f_a_jump_over_many_passes_then_another_gap_keeps_none_of_them() {
     assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(13)), 0, "the first clean pass after the jump is kept");
 }
 
+#[test]
+fn f_a_gap_while_the_roll_is_still_behind_a_jump_keeps_every_skipped_pass_dropped() {
+    // As above, with a jump too long for the roll to catch up in one block (`events` takes four edges
+    // at a time): the next block's xrun lands while it is still behind, and joins the jump's gap.
+    for block in [1, 128] {
+        let mut r = rolling_first_take(48000, 120, 1.0, 0);
+        r.rig.advance_to(r.pass_start(3) - 64);
+        r.rig.block = block;
+        r.rig.skip(r.pass_start(40) + 64 - r.rig.frame); // passes 3 to 39 never arrive, nor pass 40's first 64 frames
+        r.rig.advance(block as Frame);
+        assert!(r.rig.end_frame() < r.rig.frame, "block {block}: the roll is still behind the jump");
+        r.rig.gap();
+        r.rig.advance(block as Frame);
+        r.rig.block = 128;
+        r.rig.advance(r.len / 4);
+        let dropped: Vec<u32> = r.rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+        assert_eq!(dropped, (2..=39).collect::<Vec<u32>>(), "block {block}: every pass the jump cut is dropped");
+        r.rig.advance_to(r.pass_start(42) + r.len / 4);
+        r.rig.press(Command::RecDub(0));
+        assert!(r.rig.master() == r.len && r.rig.rejected() == 0);
+        assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(41)), 0, "block {block}: the first clean pass after the jump is kept");
+    }
+}
+
+#[test]
+fn f_a_pass_wholly_between_two_gaps_through_a_live_plugin_is_kept() {
+    // The live slot delays its input 8000 frames to the record tap, longer than the 6400-frame pass
+    // (one bar at 300 BPM, 8 kHz). A point gap leaves the tap exactly on pass 3's start, so it reaches
+    // neither pass 2 nor pass 3; the next xrun comes while the roll is still in pass 2, whose window
+    // ends where the first gap does (the recorder is not behind it), and leaves the tap inside pass 4.
+    // Pass 3, wholly between the two, is clean: kept, and a punch-out in pass 4 commits it.
+    const LATENCY: Frame = 8000;
+    for block in [1, 128] {
+        let mut rig = Rig::with(common::Opts { sr: 8000, start: 8000, block, ..Default::default() });
+        rig.install(0, Box::new(common::Delay::new(LATENCY)));
+        rig.set(Command::SetBpm(300.0));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(1.0));
+        rig.set(Command::SetRetake(true));
+        rig.set_input(code);
+        rig.press(Command::RecDub(0));
+        let (start, len) = (rig.start_frame(), rig.fpb());
+        assert_eq!((len, rig.end_frame()), (6400, start + len));
+        let pass = |p: Frame| start + (p - 1) * len;
+        rig.advance_to(pass(3) - LATENCY); // in pass 1: its device frame damages it
+        rig.gap();
+        rig.advance_to(pass(3) - 800); // in pass 2: the device frame damages it, the tap's lies in pass 4
+        assert_eq!(rig.window(), Some((0, Some(pass(2)), Some(pass(3)))), "block {block}: the roll is in pass 2");
+        rig.gap();
+        rig.advance_to(pass(4) + len / 4);
+        let dropped: Vec<u32> = rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+        assert_eq!(dropped, [1, 2], "block {block}: pass 3 is kept");
+        rig.punch_out();
+        rig.advance(len);
+        rig.idle();
+        assert!(rig.state(0) == LaneState::Playing && rig.master() == len && rig.rejected() == 0, "block {block}");
+        assert_eq!(mismatches(&rig.pcm(0), pass(3) - LATENCY), 0, "block {block}: pass 3, as the tap carried it");
+    }
+}
+
 /// A two-bar first take on lane 0, then a RETAKE rolling on lane 1 in pass 3.
 fn rolling_later_take(fixed: bool) -> (Rig, Frame, Frame) {
     let mut rig = Rig::new();

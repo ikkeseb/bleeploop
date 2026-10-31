@@ -160,12 +160,17 @@
 //! references and tolerance classes: [`dsp`].
 //!
 //! Run cargo-mutants on [`grid`] and [`looper`] whenever either changes (the planted-bug rule of
-//! `verify/README.md`; no workflow runs it). Seven survivors are equivalent mutants, named
-//! here so a rerun can tell them from new ones: the keep-last `written` and the commit's `raw` minimum
-//! (the committed length does not move), an empty fill job at `lo == master`, a restore offset at
-//! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), `pair`'s
-//! ordering (guarded by `assert_ne`), and `idle`'s `master > 0` as `>=` (with no master no lane is
-//! STOPPED, and `start_recording` tests `master == 0` first).
+//! `verify/README.md`; no workflow runs it), from `src-tauri`: `cargo mutants --in-place -p lf-engine
+//! -f crates/lf-engine/src/looper.rs --in-diff <the file's diff since the last run's base>`. In place,
+//! because `tests/fixed_bars.rs` includes a file outside `src-tauri`, so a copied tree fails its
+//! baseline; on the diff, because the whole file is about 1180 mutants, over a day. Eight survivors
+//! are equivalent mutants, named here so a rerun can tell them from new ones: the keep-last `written`
+//! and the commit's `raw` minimum (the committed length does not move), an empty fill job at
+//! `lo == master`, a restore offset at exactly the span's end, `plan_later_stop`'s bar clamp (the
+//! window end bounds it), `pair`'s ordering (guarded by `assert_ne`), `idle`'s `master > 0` as `>=`
+//! (with no master no lane is STOPPED, and `start_recording` tests `master == 0` first), and a
+//! confirming CLEAR's `cx.now < until` as `<=` (`events` drops the arm on `until <= now` before any
+//! command on that frame applies, and an arm made on it ends later).
 //!
 //! # Open threads
 //!
