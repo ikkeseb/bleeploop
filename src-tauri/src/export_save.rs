@@ -1,8 +1,13 @@
 //! A session export's .zip, written here so the player hears "Exported" only once the file is on disk
 //! (an `<a download>` returns before it exists). The WebView sends the archive in parts
 //! (`src/platform/host.tauri.ts`) and this side holds no state between them: all it knows is on disk,
-//! in `<name>.<total>.part`, so a part with another total meets no file. The last part closes that file
-//! and renames it onto a free name in the player's Downloads folder. Any failure removes the part file.
+//! in `<name>.<total>.part`, so a part with another total looks for another file. The last part closes
+//! that file and renames it onto a free name in the player's Downloads folder. Any failure removes the
+//! part file. This side trusts its one caller to keep one total for all parts and to send well-formed
+//! headers: a part with a changed total, or a bad header, can leave a part file behind or reuse one a
+//! crashed export left. A link placed at a part name while an export runs is followed by a later part:
+//! only offset 0 refuses links, since only a process of the same user can place one, and it could write
+//! the file directly.
 //! The full path goes only into the answer to the WebView: the release log hides the user name
 //! (`app_log_dir`), so no error string carries it.
 
