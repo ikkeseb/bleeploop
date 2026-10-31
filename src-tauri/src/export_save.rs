@@ -3,7 +3,8 @@
 //! (`src/platform/host.tauri.ts`) and this side holds no state between them: all it knows is on disk,
 //! in `<name>.<total>.part`, so a part with another total meets no file. The last part closes that file
 //! and renames it onto a free name in the player's Downloads folder. Any failure removes the part file.
-//! The full path goes only into the answer to the WebView: the release log hides the user name (`app_log_dir`), so no error string carries it.
+//! The full path goes only into the answer to the WebView: the release log hides the user name
+//! (`app_log_dir`), so no error string carries it.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
