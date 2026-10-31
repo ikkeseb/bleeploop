@@ -14,6 +14,8 @@ mod engine_io;
 // DEV: the loopback chirp analysis the spike and the engine probe share.
 #[cfg(all(windows, debug_assertions))]
 mod chirp_lag;
+// A session export's .zip, written in parts into the player's Downloads folder.
+mod export_save;
 // Stage 1 silent-share probe (docs/ARCHITECTURE.md § Measured premise, S1).
 #[cfg(all(windows, debug_assertions))]
 mod share_probe;
@@ -321,6 +323,7 @@ pub fn run() {
             app_log_dir,
             app_open_log_dir,
             app_confirm_close,
+            export_save::export_save_part,
             update::app_update_check,
             update::app_update_download,
             update::app_update_install,

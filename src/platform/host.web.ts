@@ -2,7 +2,7 @@
  * Browser implementation of the capability boundary. Zero Tauri/Rust dependency.
  * This is what `pnpm dev` runs against.
  */
-import type { AppUpdate, AppUpdates, EngineHost, InputHost, LogFolder, MidiHost, Platform, PluginHost, UpdateProgress } from './host';
+import type { AppUpdate, AppUpdates, EngineHost, ExportFiles, InputHost, LogFolder, MidiHost, Platform, PluginHost, UpdateProgress } from './host';
 import {
   ENGINE_LANES,
   FOUR_FOUR,
@@ -122,6 +122,49 @@ const webLogFolder: LogFolder = {
   },
   async open() {
     throw new Error(NO_LOG_FILE);
+  },
+};
+
+/** A DEV probe's scripted export save (`verify/probes/export-context.mjs`), set as `window.__lfExportFake`. */
+interface ExportScript {
+  /** Every `save()`'s filename, in order. */
+  calls: string[];
+  /** Set: `save()` waits for it to settle (a file still on its way to the disk). */
+  hold?: Promise<void>;
+  /** Set: `save()` rejects with it, after the hold, and delivers nothing. */
+  fail?: string;
+  /** Set: what `save()` answers instead of the filename (where a native save landed). */
+  landed?: string;
+}
+
+/** Read when asked, never at module load: Node guards import this file without Vite's env. */
+function exportScript(): ExportScript | null {
+  if (!import.meta.env.DEV) return null;
+  return (globalThis as { __lfExportFake?: ExportScript }).__lfExportFake ?? null;
+}
+
+function download(bytes: Uint8Array<ArrayBuffer>, filename: string): void {
+  const blob = new Blob([bytes], { type: 'application/zip' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoke on the next tick so the click's navigation has consumed the URL.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** The browser rig's save: an `<a download>`, which says nothing of the file's fate. */
+const webExports: ExportFiles = {
+  async save(bytes, filename) {
+    const script = exportScript();
+    script?.calls.push(filename);
+    if (script?.hold) await script.hold;
+    if (script?.fail) throw new Error(script.fail);
+    download(bytes, filename);
+    return script?.landed ?? filename;
   },
 };
 
@@ -896,6 +939,7 @@ export const webPlatform: Platform = {
   kind: 'web',
   pluginHost: webPluginHost,
   engine: webEngineFake,
+  exports: webExports,
   logs: webLogFolder,
   updates: webUpdates,
   midi: webMidi,

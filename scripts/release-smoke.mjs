@@ -47,6 +47,11 @@
 //                lane-1 playhead. The meter reads the device input, and before the first take the
 //                click is silent (it sounds on a count-in or while the transport runs: lf-engine
 //                `clock.rs` `fire_due`), so it stays still until the count-in even with CLICK on
+//   export       a press on Export ends in the success toast, and the file at the path it names opens and
+//                ends as a zip; that file sits in the Downloads folder (the profile's, listed before the
+//                press) under a name that folder did not hold before the press, and is then deleted. A
+//                file that was there before the press is left alone. The PASS line names the file,
+//                never the path: it holds the user name
 //   exit         CLEAR ALL empties the lanes, the OS close (as the close button does, through the app's
 //                close guard) ends the process within 60 s, and this run's release log holds no ERROR line
 // A screenshot after the take and this run's slice of the release log land in logs/release-smoke/.
@@ -74,9 +79,9 @@
 // while an `app` process runs. Stops only the app.exe it launched. Windows node only.
 
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { setPriority, constants } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, setPriority, constants } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { appRunning, assertWindows } from './native-kill.mjs';
@@ -672,6 +677,32 @@ try {
     });
   }
 
+  // ── export ────────────────────────────────────────────────────────────────────────────────────
+  if (taken) {
+    await check('export', async () => {
+      // The app asks Windows for the Downloads folder; node cannot, so the profile's own stands in and
+      // the toast's folder must be it. Windows names compare without case.
+      const downloads = join(homedir(), 'Downloads');
+      const before = new Set(existsSync(downloads) ? readdirSync(downloads).map((n) => n.toLowerCase()) : []);
+      await page.locator('button[aria-label="Export loops as a zip of WAV files"]').click();
+      const toast = page.locator('.toast', { hasText: /Exported |Could not export/ }).first();
+      await toast.waitFor({ state: 'visible', timeout: 60_000 });
+      const said = await toast.innerText();
+      must(said.includes('Exported '), `the failure toast: ${said}`);
+      const file = (await toast.locator('.toast__detail').innerText()).split('as WAV. ')[1] ?? '';
+      const name = basename(file);
+      must(name.endsWith('.zip'), `the toast names no .zip: ${name}`);
+      must(resolve(dirname(file)).toLowerCase() === resolve(downloads).toLowerCase(), `${name} is not in the Downloads folder of this profile: left alone`);
+      must(!before.has(name.toLowerCase()), `${name} was in the folder before the press: left alone`);
+      must(existsSync(file), `no file at the path the toast names: ${name}`);
+      const zip = readFileSync(file);
+      must(zip.subarray(0, 2).toString('latin1') === 'PK', `${name} does not start with PK`);
+      must(zip.subarray(-22, -18).toString('latin1') === 'PK\x05\x06', `${name} does not end as a whole zip`);
+      rmSync(file);
+      return [`${name}: ${zip.length} bytes, a whole zip, deleted`];
+    });
+  }
+
   // ── exit ──────────────────────────────────────────────────────────────────────────────────────
   await check('exit', async () => {
     const clearAll = page.locator('button[aria-label="Clear all tracks"]');
@@ -720,6 +751,6 @@ try {
   console.log(`  this run's release log: ${join(out, 'release.log')} (${logFile}, from line ${linesBefore + 1})`);
 }
 
-const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'exit'].every((n) => results.some((r) => r.name === n));
+const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'export', 'exit'].every((n) => results.some((r) => r.name === n));
 console.log(`\n=== release-smoke: ${ok ? 'PASS' : 'FAIL'}: ${results.filter((r) => r.ok).length}/${results.length} checks passed (${Math.round((Date.now() - t0) / 1000)} s) ===`);
 process.exit(ok ? 0 : 1);

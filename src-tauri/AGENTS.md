@@ -100,6 +100,11 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app_update_check` / `app_update_download` / `app_update_install` (`update.rs`; the release channel
   is `plugins.updater` in `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
+  `export_save_part` (`export_save.rs`) takes a session export's bytes, a file name, an offset and a
+  total, and no path: it writes only `<name>.<total>.part` and a free final name in the Downloads folder,
+  replaces no finished file, refuses a name with `/`, `\`, `:`, `..` or a control character or one not
+  ending in `.zip` before it touches the disk, and answers the full path to the WebView alone (never a
+  log or an error string).
   `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
   only to match a stored entry, and `plugin_scan_paths` (rig recall's scan of the saved plugins at
   launch) its paths only to match bundles the scan's own walk finds. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
