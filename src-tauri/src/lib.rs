@@ -17,6 +17,10 @@ mod chirp_lag;
 // Stage 1 silent-share probe (docs/ARCHITECTURE.md § Measured premise, S1).
 #[cfg(all(windows, debug_assertions))]
 mod share_probe;
+// One running app, in release builds (`single_instance.rs`): `run()` is its one caller.
+#[cfg(windows)]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+mod single_instance;
 // The app updater's check and install (`update.rs`).
 mod update;
 
@@ -245,6 +249,15 @@ pub fn run() {
         }
     }
 
+    let context = tauri::generate_context!();
+    // One running app (`single_instance.rs`). Before the builder, so a refused launch starts nothing;
+    // after the dispatches above, so the scan and probe children keep running beside the app. Release
+    // only, so `tauri dev` still runs beside an installed app. The identifier names the lock, so the
+    // release-smoke exe does not meet the owner's.
+    #[cfg(all(windows, not(debug_assertions)))]
+    if let single_instance::Claim::Exit = single_instance::first_launch(&context.config().identifier) {
+        std::process::exit(0);
+    }
     tauri::Builder::default()
         // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
@@ -388,7 +401,7 @@ pub fn run() {
             #[cfg(all(windows, debug_assertions))]
             engine_io::midi_bench::midi_bench_clock_sync,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             // The engine closes its device and drops the engine on its own threads, not in a destructor.
