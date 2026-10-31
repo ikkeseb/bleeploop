@@ -172,26 +172,15 @@
 //!
 //! # Open threads
 //!
-//! - **`input_gap`'s two intervals leave two narrow cases behind a live plugin** (read from source, not
-//!   rendered). A jump of `J` frames under a record latency `L > J` leaves tap frames
-//!   `[start, lost_from + L)` carrying pre-jump input `J` frames late, and neither interval covers them,
-//!   so a window wholly inside commits shifted audio. And AUTO's `detector.reset()` runs on the device
-//!   block, `L` frames before the lost frames reach the tap, so its lookback can still take them and
-//!   `begin_auto` then rejects a take a reset at the tap's time would have kept. A damaged block (no
-//!   jump) still rejects on its unshifted interval too, which the tap carries clean: conservative, as
-//!   before. Next check: a frame-rendered test for each first case, then shift the jump's interval start
-//!   to `min(from + L, start)` and the AUTO reset to the tap's frame.
-//! - **A session job can be served before the commands queued ahead of it.** With no device running,
-//!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
-//!   it on resume (applying them in idle is wrong: a capture latches alignment 0, and the 64-entry
-//!   pending table can fill while earlier commands still wait in the ring). With a device running,
-//!   `take_commands` (`engine.rs` 780) takes at most 64 a block and `session.begin` (593) runs
-//!   regardless, so a `SetMute` sent before a load can apply after it. A fence from the ring's length at
-//!   receipt leaves three holes: a command sent after the job but taken in the same callback lands before
-//!   it, a snapshot waiting on `looper.busy()` lets a later mix change through, and a job submitted
-//!   between the callback's first take and `begin` skips the fence. Next step: order them at send time
-//!   with one sequence number shared by the command ring and the session port, made green by the two
-//!   ignored `with_no_device_*` tests (`tests/session.rs`) and a test with both sent before one callback.
+//! - **A damaged block rejects on its unshifted interval too, behind a live plugin** (read from source,
+//!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
+//!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
+//!   block with no jump keeps the device interval at all.
+//! - **A later take pressed just after a loop boundary starts a whole loop late.** `start_recording`
+//!   takes `next_boundary` with no tolerance, as END STOP's `stop_at` and UNDO and REVERSE's `switch_at`
+//!   do (those two read from source, not rendered); the free-stop grace is in the stop plans alone. A
+//!   press on the loop's 1 that lands a frame late waits for the next pass: rendered at block sizes 1
+//!   and 128 by the ignored test in `tests/later_arm.rs`. Whether such a press snaps back is D31.
 //! - **A slot's record-path delay is clipped where the capture's alignment is not.** `slots.rs`
 //!   `latch_record` clamps each slot's `dw` to its line (a second plus a block, 52 095 frames at 48 kHz
 //!   and 4096) while the capture aligns on the full live latency (`engine.rs` `let align`), so beside a

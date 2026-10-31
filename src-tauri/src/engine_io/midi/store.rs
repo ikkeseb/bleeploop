@@ -19,7 +19,7 @@
 //! skipped: two writers racing never leave an older list over a newer one. A write is
 //! `host::tone::write_atomic` (temp file, `sync_all`, rename), the folder list's.
 //!
-//! The app is not single-instance, and an older build may run beside a newer one, so a write first reads
+//! A dev build runs beside a release one, and an older build beside a newer one, so a write first reads
 //! the file again. One this build cannot read, or of another version, makes the store read-only (the
 //! file is kept); one whose document `revision` is not the one this store last loaded or wrote is a
 //! conflict: another instance wrote it, and nothing is written over it (the caller reports it; this

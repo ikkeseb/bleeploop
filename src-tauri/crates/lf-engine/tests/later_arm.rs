@@ -757,3 +757,22 @@ fn idle_13_a_command_on_the_downbeats_own_frame_finds_the_loops_restarted() {
     assert!(beats_on_master_grid(&rig, mark, 2) >= 16);
     assert!(rig.state(0) == LaneState::Playing && rig.state(1) == LaneState::Empty);
 }
+
+#[test]
+#[ignore = "red, D31: a press just past the boundary waits a whole loop, and whether it should snap back is the owner's call (lf-engine briefing)"]
+fn a_later_take_pressed_just_past_the_boundary_starts_on_it() {
+    let mut waits = Vec::new();
+    for block in [1, 128] {
+        for late in [1, 64] {
+            let mut rig = Rig::with(Opts { block, ..Default::default() });
+            rig.set(Command::SetBpm(120.0));
+            rig.set_level(0.5);
+            rig.record_first_take(0, 4, 1000);
+            let boundary = rig.next_boundary();
+            rig.advance_to(boundary + late);
+            rig.press(Command::RecDub(1));
+            waits.push((block, late, rig.start_frame() - boundary));
+        }
+    }
+    assert!(waits.iter().all(|&(.., wait)| wait == 0), "(block, frames late, frames waited): {waits:?}");
+}

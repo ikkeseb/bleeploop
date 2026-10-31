@@ -15,6 +15,7 @@
  *                    of `src/`): WinMM input ports are exclusive, and native MIDI keeps them.
  *   - InputHost    — the UI's one ordered path to the engine's commands and native MIDI's one note
  *                    router (`input_send`), which `index.ts`'s outbox alone calls.
+ *   - ExportFiles  — where a session export's .zip lands (tauri: written natively; web: the rig's download).
  *   - LogFolder    — the release log's folder, for Help's diagnostics (web: none).
  *   - AppUpdates   — the app updater, release builds only (web: none, or a probe's script).
  *
@@ -390,6 +391,16 @@ export interface EngineHost {
   subscribe(onFrame: (frame: FeedFrame) => void): () => void;
 }
 
+/** A session export's one .zip, handed over for keeping. */
+export interface ExportFiles {
+  /**
+   * Natively, write the archive into the player's Downloads folder (`src-tauri/src/export_save.rs`) under
+   * `filename` or the next free name; it resolves with the full path once the file is on disk and rejects
+   * when it could not be written. The browser rig hands it to an `<a download>` and resolves with `filename`.
+   */
+  save(bytes: Uint8Array<ArrayBuffer>, filename: string): Promise<string>;
+}
+
 /**
  * The release log's folder (tauri-plugin-log's rotated file, `src-tauri/src/lib.rs`). Help's "About
  * this build" names it in the copied diagnostics and opens it, so a tester can attach the log to a
@@ -451,6 +462,7 @@ export interface Platform {
   readonly kind: PlatformKind;
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
+  readonly exports: ExportFiles;
   readonly logs: LogFolder;
   readonly updates: AppUpdates;
   readonly midi: MidiHost;

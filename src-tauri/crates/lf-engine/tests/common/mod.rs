@@ -125,6 +125,26 @@ pub struct Rig {
     right: Vec<f32>,
 }
 
+/// The session port as a host holds it: a job goes in after the commands pushed so far.
+pub struct Session<'a> {
+    port: &'a mut lf_engine::SessionPort,
+    pushed: u64,
+}
+
+impl Session<'_> {
+    pub fn send(&mut self, job: Box<lf_engine::SessionJob>) -> Result<(), Box<lf_engine::SessionJob>> {
+        self.port.send(job, self.pushed)
+    }
+
+    pub fn returned(&mut self) -> Option<Box<lf_engine::SessionJob>> {
+        self.port.returned()
+    }
+
+    pub fn withdraw(&mut self) -> bool {
+        self.port.withdraw()
+    }
+}
+
 pub struct Opts {
     pub sr: u32,
     pub start: Frame,
@@ -289,8 +309,8 @@ impl Rig {
     }
 
     /// The host's end of the session port (`lf_engine::session`).
-    pub fn session(&mut self) -> &mut lf_engine::SessionPort {
-        &mut self.handle.session
+    pub fn session(&mut self) -> Session<'_> {
+        Session { port: &mut self.handle.session, pushed: self.pushed }
     }
 
     /// Take the scope columns the engine has pushed, oldest first (the feed's `drain_scope`).

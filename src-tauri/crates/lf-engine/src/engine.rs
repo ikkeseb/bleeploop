@@ -457,11 +457,14 @@ impl Engine {
     }
 
     /// While no device runs and the host holds the engine: run a session job on the port at once (a load
-    /// at the frame the next block would start, a snapshot copied whole). It publishes no lane's mix
+    /// at the frame the next block would start, a snapshot copied whole). A load with commands ahead of
+    /// it stays on the port until a block has applied them: this applies none (a capture would latch
+    /// alignment 0, and the table can fill with the rest still in the ring). It publishes no lane's mix
     /// until the commands queued ahead of the first block are all taken (`replayed`).
     pub fn service_session_idle(&mut self) {
+        let settled = settled(&self.pending, self.commands_taken);
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
-        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true);
+        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true, self.commands_taken, settled);
         self.session.advance(&self.looper, Frame::MAX / crate::session::SNAPSHOT_RATE);
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.publish(&mut cx, self.replayed);
@@ -642,7 +645,7 @@ impl Engine {
             self.xruns += 1;
             // Use the tap's latched latency: live changes cannot move a capture's alignment.
             // A damaged block's own input frames are lost too.
-            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start }, live_latency);
+            self.looper.input_gap(lost_from, start, if ctx.damaged { end } else { start }, live_latency);
         }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
@@ -674,7 +677,8 @@ impl Engine {
             if f == start {
                 // The session job after the commands due on the block's first frame: a setting sent
                 // before a snapshot or a load is ordered before it (a load's mix overrides it).
-                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
+                let settled = settled(&self.pending, self.commands_taken);
+                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false, self.commands_taken, settled);
                 self.looper.events(&mut cx);
             }
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {
@@ -864,10 +868,17 @@ impl Engine {
 
     /// Move the ring's commands into the table, an unstamped or late one due at `now`. Take no more than
     /// the table holds: the rest waits in the ring for the next block, late but never dropped (a lost
-    /// NoteOff would hang its note).
+    /// NoteOff would hang its note). Nor past a load on the port ([`crate::session`]). The ring is counted
+    /// before the port is read: a command sent after a job follows it under the host's one lock, so a
+    /// count that holds the command is read after the job's send, and the port then shows the job.
     fn take_commands(&mut self, now: Frame) {
-        while self.pending.iter().any(Option::is_none) {
+        let mut ready = self.commands.slots() as u64;
+        if let Some(fence) = self.session.load_fence() {
+            ready = ready.min(fence.saturating_sub(self.commands_taken));
+        }
+        while ready > 0 && self.pending.iter().any(Option::is_none) {
             let Ok(cmd) = self.commands.pop() else { break };
+            ready -= 1;
             self.commands_taken += 1;
             self.hold(cmd.frame.unwrap_or(now).max(now), cmd.command);
         }
@@ -928,6 +939,12 @@ fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
         })
         .min()
         .map(|(_, k)| k)
+}
+
+/// How many of the `taken` commands lead up to the first one held for a block job: a load comes after
+/// them only ([`crate::session`]).
+fn settled(pending: &[Option<Pending>; MAX_PENDING], taken: u64) -> u64 {
+    pending.iter().flatten().filter(|p| p.held).map(|p| p.seq - 1).min().unwrap_or(taken)
 }
 
 /// The next frame after `f` a command is stamped for (a command already due but waiting behind a held

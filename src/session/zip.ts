@@ -1,10 +1,9 @@
 // src/session/zip.ts
 // Minimal store-only (no compression) ZIP container writer. PURE — no Web Audio / DOM / Tauri imports,
 // so a Node verify guard can import it directly (verify/guards/zip.mjs) and it builds/verifies on the
-// Mac half. Exists to bundle the WAV-export deliverable into ONE file: browsers (and WebView2) gate more
-// than one programmatic download per user gesture, so firing N+2 separate <a download> clicks silently
-// drops every file after the first. Packing the stems + master + session.json into a single .zip is one
-// download, one gesture — the whole export always reaches the user. Store method (0) avoids a DEFLATE
+// Mac half. Exists to bundle the WAV-export deliverable into ONE file: the stems + master + session.json land
+// and move together, the native save writes one file (`src-tauri/src/export_save.rs`), and the browser
+// rig's <a download> stays one gesture. Store method (0) avoids a DEFLATE
 // dependency; WAV/JSON are already effectively incompressible-enough for a v0 export.
 
 /** Precomputed CRC-32 (IEEE 802.3, polynomial 0xEDB88320) lookup table. */

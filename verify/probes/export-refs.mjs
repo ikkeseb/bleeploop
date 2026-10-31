@@ -18,7 +18,7 @@
  * and the record's `savedAt`. Stems and every session field the fixtures hold must match exactly (a
  * field added since is not a difference). The master can no longer be captured again (its Tone render
  * is gone): the compare holds its length and leaves out its samples and `master.kind`. With `--write` it
- * replaces the fixtures and the manifest, master and all, so a write is no longer v0.1.0's capture. Cannot see the native engine, WebView2's download or anything audible.
+ * replaces the fixtures and the manifest, master and all, so a write is no longer v0.1.0's capture. Cannot see the native engine, the native save or anything audible.
  * @no-ci capture tool for committed fixtures; CI's Chromium may differ from the capture's
  * Run: pnpm probe export-refs [--write]
  */

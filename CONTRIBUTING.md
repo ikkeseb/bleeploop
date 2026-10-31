@@ -27,7 +27,7 @@ what only an ear can judge goes into `STATUS.md` as unheard, and a later "this i
 numbered invariants the code comments cite. `docs/VERIFY.md` explains how to drive and measure the
 running app. `AGENTS.md`, the nested `AGENTS.md` briefings and `STATUS.md` are the
 maintainer's working notes, written for the AI coding agents used on this project. They give
-context, and you can skip them. The "direct push to `main`" rule in there applies to the maintainer only.
+context, and you can skip them. The rule there on pushing to `dev` and `main` applies to the maintainer only.
 
 ## Licence
 
