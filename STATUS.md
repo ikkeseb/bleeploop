@@ -215,6 +215,10 @@ it.
   take during the download; is it back after the restart?
 - Help in two tabs (Reference unscrolled at every window size, Manual with About this build at its
   foot): can it be read at a glance mid-jam, from playing distance?
+- One running app (`src-tauri/src/single_instance.rs`, machine: its unit tests on the real kernel
+  mutex, with no window): a second launch comes to the front and restores a minimized window, a
+  reopen during a quit waits and starts, and an installer's relaunch starts. Only a release launch
+  shows them: does the window come up on top, and does nothing ever open twice?
 
 ## Decisions
 
