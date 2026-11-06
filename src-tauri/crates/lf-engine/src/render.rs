@@ -127,7 +127,8 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
         track.playing = true;
     }
     load.result = None;
-    if handle.session.send(Box::new(SessionJob::Load(load))).is_err() {
+    // Nothing went onto this engine's command ring: the settings apply below, after the load.
+    if handle.session.send(Box::new(SessionJob::Load(load)), 0).is_err() {
         return Err("export render: the engine refused the load".to_string());
     }
     engine.service_session_idle();

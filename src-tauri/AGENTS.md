@@ -5,9 +5,9 @@ Everything Rust/native lives here: the native audio engine (`crates/lf-engine`) 
 `AGENTS.md` routes here: read this before any work in this subtree (`CLAUDE.md` beside it is a
 one-line adapter). It holds the router-level gotchas and operational bits; the engine's rules live in
 its two briefings (the crate doc of `crates/lf-engine/src/lib.rs`, the module doc of
-`src/engine_io/mod.rs`). The gate is `pnpm rust:check` (Windows, also from WSL); `tauri dev`, the
-`native:*` probes and `native:kill` are in `docs/VERIFY.md` § Native / Tauri verification. Only the
-by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
+`src/engine_io/mod.rs`). Which gate a change runs: root `AGENTS.md` (the `main` line);
+`pnpm rust:check` runs on Windows and from WSL. `tauri dev`, the `native:*` probes and `native:kill`
+are in `docs/VERIFY.md` § Native / Tauri verification. Only the by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
 (CI runs the no-asio half).
 
 ## Thread & ownership map
@@ -77,7 +77,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   links the same `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one
   worktree can run another's build of `app` or `lf-engine`. From WSL, Windows cargo does not see a
   `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it). Each target grows to 12–16 GB, so
-  at most two worktrees hold a build at a time (the integration tree on `main` and one feature tree), and
+  at most two worktrees hold a build at a time (the integration tree, on `main` or `dev`, and one feature tree), and
   a feature tree is cleaned when its branch is merged: `cargo clean --manifest-path
   <absolute path>/src-tauri/Cargo.toml`, an absolute path, never `cd` then delete.
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
@@ -100,6 +100,11 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app_update_check` / `app_update_download` / `app_update_install` (`update.rs`; the release channel
   is `plugins.updater` in `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
+  `export_save_part` (`export_save.rs`) takes a session export's bytes, a file name, an offset and a
+  total, and no path: it writes only `<name>.<total>.part` and a free final name in the Downloads folder,
+  replaces no finished file, refuses a name with `/`, `\`, `:`, `..` or a control character or one not
+  ending in `.zip` before it touches the disk, and answers the full path to the WebView alone (never a
+  log or an error string).
   `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
   only to match a stored entry, and `plugin_scan_paths` (rig recall's scan of the saved plugins at
   launch) its paths only to match bundles the scan's own walk finds. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
@@ -145,8 +150,8 @@ names without loading it: a 64-bit DLL that names `VSTPluginMain` or `main` gets
 one is reported as unsupported with no child, any other DLL is ignored, and one it cannot read goes to
 the child), for crash + hang isolation (**20s per-child timeout**: a heavy/licensed VST3 like Neural DSP can hang
 on load in the headless child), but only for bundles whose binary size/mtime changed since the
-cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (a launch spawns
-nothing; a remembered failure is retried only by the picker's rescan button = `plugin_scan`
+cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (an unchanged cached bundle spawns
+nothing; a remembered failure is retried when its binary changes or by the picker's rescan button = `plugin_scan`
 `force`), and for every VST3 factory that declares `kClassesDiscardable`, which is never cached and
 gets a child on every scan. Delete that file to force a cold scan from outside the app. Pipe retention is capped at 1 MiB
 stdout / 64 KiB stderr, and each child process tree sits in a kill-on-close Job Object. DEV probes on

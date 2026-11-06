@@ -1,15 +1,11 @@
 // src/session/export.ts
-// WAV-export coordinator: pulls a read-only snapshot of the committed looper tracks and drops
-// ONE .zip (per-track mono WAVs + a stereo master mix + session.json, and each loaded plugin slot's
-// tone, `src/ui/state/slot-tones.ts`) via blob + <a download>. The master is the engine's: the same
+// WAV-export coordinator: pulls a read-only snapshot of the committed looper tracks and saves ONE
+// .zip (per-track mono WAVs + a stereo master mix + session.json, and each loaded plugin slot's tone,
+// `src/ui/state/slot-tones.ts`) through `platform.exports`. The master is the engine's: the same
 // snapshot carries it, rendered offline by lf-engine from those loops and the engine's mix (no Web Audio
 // render remains); a dry mixdown stands in when that render fails (`buildExportBundle`).
-// Everything is bundled into a single archive on purpose: browsers (and WebView2) gate more than one
-// programmatic download per user gesture, so firing a separate <a>.click() per file silently delivers
-// only the first — one zip is one gesture, so the whole export always reaches the user (see zip.ts).
-// Boundary-clean (no @tauri-apps/* import, no src/platform/ seam) so it builds and verifies on the Mac
-// half; the actual file-drop behavior under WebView2 is a PC gate.
 import { notifyError } from '../notify';
+import { platform } from '../platform';
 import type { SessionMasterKind } from './session-schema';
 import type { SessionSource } from './session-source';
 import { encodeWav, mixStereo } from './wav';
@@ -17,31 +13,18 @@ import { makeZip } from './zip';
 import { prepareStemArchive, exportBase, snapshotBars } from './stem-archive';
 import { slotLetter, takeSlotTones } from '../ui/state/slot-tones';
 
-function download(bytes: Uint8Array<ArrayBuffer> | string, filename: string, mime: string): void {
-  const blob = new Blob([bytes], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  // Revoke on the next tick so the click's navigation has consumed the URL.
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 export interface BuildExportOptions {
   /** False for recovery snapshots: stems + session.json only; the snapshot never asks the engine for
    *  its (expensive) master render. */
   includeMaster?: boolean;
-  /** Float32 for lossless local recovery; downloads also preserve editable stem headroom. */
+  /** Float32 for lossless local recovery; exports also preserve editable stem headroom. */
   stemFormat?: 'pcm16' | 'float32';
 }
 
 /**
  * Build the export bundle: every committed track as a mono WAV + session.json, optionally with the
  * stereo master mix, packed into a single timestamped .zip — everything exportLoops does EXCEPT the
- * download itself (the seam that lets a headless probe byte-parse the archive without touching
+ * save itself (the seam that lets a headless probe byte-parse the archive without touching
  * <a download>).
  * session.json's tempo and bars are the snapshot's own (the engine's device-frame clock is the
  * authority): a grid that changed while the export waited cannot pair with its loops. Per-track WAVs
@@ -126,13 +109,11 @@ export async function buildExportBundle(
   return { zipBytes: makeZip(entries), base };
 }
 
-/** Export = build the bundle + drop it as ONE .zip download (one file, one gesture — see header).
- * Returns the archive's filename so the caller can name it to the user, or null when nothing was
- * exported. The download is handed to the WebView; where it lands is the WebView's call. */
+/** Export = build the bundle + save it as ONE .zip. Resolves with where the file landed once it is
+ * there (`ExportFiles.save`), rejects when it could not be saved, and answers null when nothing was
+ * exported. */
 export async function exportLoops(source: SessionSource): Promise<string | null> {
   const bundle = await buildExportBundle(source);
   if (!bundle) return null; // nothing committed — button should already guard this
-  const filename = `${bundle.base}.zip`;
-  download(bundle.zipBytes, filename, 'application/zip');
-  return filename;
+  return platform.exports.save(bundle.zipBytes, `${bundle.base}.zip`);
 }
