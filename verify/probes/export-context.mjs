@@ -14,14 +14,17 @@
  * - A lane's volume and the master's moved while the engine renders the master (the fake holds its
  *   snapshot answer) land in neither: session.json keeps the mix from when the export asked.
  * - A 3/4 and a 6/8 snapshot export session.json v2 with the meter and its bars, and import in it.
+ * - The success toast waits for the save (the fake's `__lfExportFake`): none while it is held, then the
+ *   name and the path it landed at, a long Windows path wrapped inside the toast; a rejected save shows the
+ *   failure toast and no success toast.
  * - A 44.1 kHz engine's eight-bar loop reads eight bars and 16 s in the command bar, and still does after
  *   its device stops (a `status: null` frame: the engine stays at its rate).
  *
  * The master here is the fake's stand-in (a dry sum under volume and mute), NOT the engine's sound: what
  * the master holds (FX, a STOPPED lane in it, a muted one out, alignment) is lf-engine's
  * `tests/render_master.rs` and engine_io's snapshot tests, and `pnpm native:export-master` in the app.
- * Cannot see the native snapshot and load (the fake answers them), download delivery in WebView2, or
- * anything audible.
+ * Cannot see the native snapshot and load (the fake answers them), the native save (its rules are
+ * `src-tauri/src/export_save.rs`'s tests, the real toast `release:smoke`'s `export`), or anything audible.
  * Run: pnpm probe export-context
  */
 import assert from 'node:assert/strict';
@@ -272,6 +275,47 @@ await probe(async ({ open }) => {
     return { name: 'That archive round-trips with the snapshot grid', imported, header: header && { bpm: header.bpm, bars: header.bars, master: header.masterLengthFrames },
       pass: imported === 'ok' && header?.bars === 1 && header?.masterLengthFrames === 96000 };
   }, gridZip));
+
+  // ── "Exported" waits for the save ─────────────────────────────────────────────────────────────────
+  // 93 characters and no space to break at inside its folders, the longest path a toast shows whole.
+  const LANDED = `C:\\Users\\${'a'.repeat(40)}\\Downloads\\bleeploop-2026-10-31-1234 (2).zip`;
+  const successToasts = () => page.locator('.toast--info .toast__msg', { hasText: 'Exported' }).allTextContents();
+  await engineHolds(editable, 'Playing');
+  await page.evaluate((landed) => {
+    for (const close of document.querySelectorAll('.toast__close')) close.click();
+    window.__lfExportFake = { calls: [], hold: new Promise((resolve) => (window.__releaseSave = resolve)), landed };
+  }, LANDED);
+  await page.locator('.tool--export').click();
+  await page.waitForFunction(() => window.__lfExportFake.calls.length === 1, undefined, { timeout: 10000 });
+  await page.waitForTimeout(200);
+  assert.deepEqual(await successToasts(), [], 'no success toast while held');
+  await page.evaluate(() => window.__releaseSave());
+  const success = page.locator('.toast--info', { hasText: 'Exported' });
+  await success.waitFor({ timeout: 10000 });
+  const landedToast = await success.evaluate((toast) => {
+    const detail = toast.querySelector('.toast__detail');
+    const box = toast.getBoundingClientRect();
+    return { message: toast.querySelector('.toast__msg').textContent, detail: detail.textContent, width: box.width, right: box.right, viewport: innerWidth,
+      overflow: detail.scrollWidth - detail.clientWidth, lines: Math.round(detail.getBoundingClientRect().height / parseFloat(getComputedStyle(detail).lineHeight)) };
+  });
+  results.push({ name: 'After the save the toast names the file and its path, wrapped inside the toast', ...landedToast,
+    pass: landedToast.message === 'Exported bleeploop-2026-10-31-1234 (2).zip'
+      && landedToast.detail === `One .zip with every track + the master as WAV. ${LANDED}`
+      && landedToast.overflow <= 0 && landedToast.lines >= 2 && landedToast.width <= 340 && landedToast.right <= landedToast.viewport });
+  await page.evaluate(() => {
+    for (const close of document.querySelectorAll('.toast__close')) close.click();
+    window.__lfExportFake = { calls: [], fail: 'The disk is full.' };
+  });
+  await page.locator('.tool--export').click();
+  const failure = page.locator('.toast:not(.toast--info):not(.toast--note)', { hasText: 'Could not export the loops' });
+  await failure.waitFor({ timeout: 10000 });
+  results.push({ name: 'A rejected save shows the failure toast and no success toast', success: await successToasts(), detail: await failure.locator('.toast__detail').textContent(),
+    pass: (await successToasts()).length === 0 && (await failure.locator('.toast__detail').textContent()) === 'The disk is full.' });
+  assert.equal(consumeConsoleErrors('[transport] export failed').length, 1, 'the failure logs once');
+  await page.evaluate(() => {
+    for (const close of document.querySelectorAll('.toast__close')) close.click();
+    delete window.__lfExportFake;
+  });
 
   // ── A meter other than 4/4 ────────────────────────────────────────────────────────────────────────
   // The snapshot's meter writes session.json v2 with the meter and its bars (3 bars of 3/4 at 120 are

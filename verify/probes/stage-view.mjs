@@ -80,7 +80,8 @@
  * the frame time is headless Chromium's script time, not a frame on the rig. The scope columns are
  * scripted too: nothing here says the engine folds what it claims to fold (`lf-engine`'s scope tests
  * and `verify/probes/scope-mirror.mjs` own that), and the `budget` case still runs the look with no
- * column at all, so what the fold and the per-column strips cost a frame is unmeasured.
+ * column at all: what the fold and the per-column strips cost a frame is `verify/probes/frame-cost.mjs`'s
+ * report, under no bar.
  * Run: pnpm probe stage-view
  */
 import assert from 'node:assert/strict';

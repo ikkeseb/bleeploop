@@ -1,12 +1,13 @@
-//! COPY (`machine.ts` copy): the whole lane into the first EMPTY lane, never the recorder's, as a block
-//! job; the copy plays when its source played on, else it lands STOPPED, as it does when a STOP or a
-//! STOP ALL reaches it before it is done. The golden jam copies a playing lane; these are the guards
-//! around it. WIDE COPY (engine only) is COPY with the copy's loop 20 ms behind its source's, circularly,
+//! COPY (`machine.ts` copy): the whole lane into the first EMPTY lane, never the recorder's nor the one a
+//! RETAKE handoff records to, as a block job; the copy plays when its source played on, else it lands
+//! STOPPED, as it does when a STOP or a STOP ALL reaches it before it is done. The golden jam copies a
+//! playing lane; these are the guards around it. WIDE COPY (engine only) is COPY with the copy's loop 20 ms behind its source's, circularly,
 //! and its pan the source's mirror.
 
 mod common;
 
 use common::{code, Rig};
+use lf_engine::grid::Frame;
 use lf_engine::{Action, Command, Event, LaneState, Refusal};
 
 fn copies(rig: &Rig) -> usize {
@@ -178,4 +179,63 @@ fn a_wide_copy_is_gated_and_refused_as_copy_is() {
     rig.idle();
     assert_eq!((copies(&rig), rig.state(1)), (1, LaneState::Playing), "a named lane");
     assert_ne!(rig.pcm(1), rig.pcm(0), "the action copies wide");
+}
+
+/// A reversed one-bar loop on lane 0 at 120 BPM, `fill` copies of it, then RETAKE rolling on `roller` past
+/// its first pass, REC on `next` approving it inside the grace (it finishes its second pass and `next`
+/// records from that edge), and `presses` 100 frames before the edge. Frame code as the input, so the
+/// frames a lane holds name themselves. The rig, the edge and the master.
+fn copy_in_retakes_grace(fill: u8, roller: u8, next: u8, presses: &[Command]) -> (Rig, Frame, Frame) {
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(120.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.press(Command::Reverse(0));
+    rig.advance(master);
+    rig.idle();
+    assert!(rig.lane(0).reversed);
+    for _ in 0..fill {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    rig.set(Command::SetRetake(true));
+    rig.press(Command::RecDub(roller));
+    let edge = rig.start_frame() + 2 * master;
+    rig.advance_to(edge - 3000);
+    rig.press(Command::RecDub(next));
+    rig.advance_to(edge - 100);
+    for &command in presses {
+        rig.press(command);
+    }
+    rig.advance_to(edge + 2 * master + master / 2);
+    // Still rolling: the stop keeps its last whole pass, the one from a master past the edge.
+    rig.press(Command::RecDub(next));
+    rig.idle();
+    (rig, edge, master)
+}
+
+/// `lane` holds what the input played over `[from, from + master)`, forwards.
+fn holds_the_input(rig: &Rig, lane: usize, from: Frame, master: Frame) {
+    assert!(!rig.lane(lane).reversed, "lane {lane} takes nothing of the copy's REVERSE");
+    assert_eq!(rig.state(lane), LaneState::Playing);
+    let want: Vec<f32> = (from..from + master).map(code).collect();
+    assert!(rig.pcm(lane) == want, "lane {lane} holds the input over its window");
+}
+
+#[test]
+fn a_copy_in_retakes_grace_skips_the_lane_the_handoff_records_to() {
+    let (rig, edge, master) = copy_in_retakes_grace(0, 1, 2, &[Command::Copy(0)]);
+    holds_the_input(&rig, 2, edge + master, master);
+    assert_eq!(copies(&rig), 1);
+    assert!(rig.lane(3).reversed && rig.state(3) == LaneState::Playing && rig.pcm(3) == rig.pcm(0), "the copy took the next EMPTY lane");
+}
+
+#[test]
+fn a_copy_in_retakes_grace_with_only_the_handoffs_lane_empty_does_nothing_and_says_nothing() {
+    // `Looper::copy` finds no lane; `Action::Copy`'s NoFreeLane counts the handoff's lane as free, as it
+    // does a lane armed for its boundary, so neither way answers.
+    let (rig, edge, master) = copy_in_retakes_grace(2, 3, 4, &[Command::Copy(0), Command::ActionOn(0, Action::Copy)]);
+    holds_the_input(&rig, 4, edge + master, master);
+    assert_eq!(copies(&rig), 2, "only the two before the roll");
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::Refused { .. })), "{:?}", rig.events);
 }

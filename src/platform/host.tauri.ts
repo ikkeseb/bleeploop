@@ -8,6 +8,7 @@ import type {
   AudioInputDevice,
   AudioOutputDevice,
   EngineHost,
+  ExportFiles,
   InputHost,
   LogFolder,
   MidiHost,
@@ -149,6 +150,16 @@ const tauriPluginHost: PluginHost = {
 // The native feed has one subscriber; replacing it retires this document's previous one too.
 let stopEngineFeed: (() => void) | null = null;
 
+function retireFeedChannel(channel: Channel<unknown> | null): void {
+  if (channel === null) return;
+  // Read against @tauri-apps/api 2.11.1: Channel's private cleanupCallback does this,
+  // but an index gap prevents its end message from reaching that cleanup.
+  const internals = (window as Window & {
+    __TAURI_INTERNALS__?: { unregisterCallback?: (id: number) => void };
+  }).__TAURI_INTERNALS__;
+  internals?.unregisterCallback?.(channel.id);
+}
+
 /**
  * The native engine over Tauri IPC: each method maps to an `engine_*` command in Rust
  * (`src-tauri/src/engine_io`); the feed arrives on a Tauri Channel. Payloads: `engine-wire.ts`.
@@ -187,6 +198,7 @@ const tauriEngineHost: EngineHost = {
     let newest: number | null = null;
     let ackTimer: ReturnType<typeof setTimeout> | null = null;
     let subscribing = false;
+    let liveChannel: Channel<unknown> | null = null;
 
     const ack = () => {
       if (!live) return;
@@ -201,11 +213,13 @@ const tauriEngineHost: EngineHost = {
     const connect = () => {
       // Retire the old handler and every pending ack answer before the replacement subscribes.
       const gen = ++generation;
+      retireFeedChannel(liveChannel);
       newest = null;
       if (ackTimer !== null) clearTimeout(ackTimer);
       ackTimer = null;
       subscribing = true;
       const channel = new Channel<unknown>();
+      liveChannel = channel;
       channel.onmessage = (raw) => {
         if (!live || gen !== generation) return;
         // Even a rejected frame was handed on by this channel: it must not fill the native window.
@@ -229,6 +243,8 @@ const tauriEngineHost: EngineHost = {
         }
       };
       void invoke('engine_feed', { channel }).catch((err: unknown) => {
+        retireFeedChannel(channel);
+        if (liveChannel === channel) liveChannel = null;
         if (!live || gen !== generation) return;
         console.error('[host.tauri] engine feed subscribe failed', err);
         notifyError('Could not reach the audio engine. Restart BleepLoop.', err);
@@ -241,6 +257,8 @@ const tauriEngineHost: EngineHost = {
       if (!live) return;
       live = false;
       generation++;
+      retireFeedChannel(liveChannel);
+      liveChannel = null;
       if (ackTimer !== null) clearTimeout(ackTimer);
       clearInterval(heartbeat);
       if (stopEngineFeed === unsubscribe) stopEngineFeed = null;
@@ -318,6 +336,24 @@ const tauriInput: InputHost = {
   },
 };
 
+/** One `export_save_part` call's bytes: an export reaches ~691 MB at 48 kHz, more than one body should. */
+const EXPORT_PART_BYTES = 8 * 1024 * 1024;
+
+/** The export over Tauri IPC, in parts, each awaited before the next (`src-tauri/src/export_save.rs`). */
+const tauriExports: ExportFiles = {
+  async save(bytes, filename) {
+    const total = bytes.byteLength;
+    for (let offset = 0; ; offset += EXPORT_PART_BYTES) {
+      const part = bytes.slice(offset, offset + EXPORT_PART_BYTES);
+      const headers = { name: filename, offset: String(offset), total: String(total) };
+      const landed = await invoke<string | null>('export_save_part', part, { headers });
+      if (offset + part.byteLength < total) continue;
+      if (landed === null) throw new Error('The last part of the export was not answered with its file.');
+      return landed;
+    }
+  },
+};
+
 /** The release log's folder over Tauri IPC: `app_log_dir` / `app_open_log_dir` in `lib.rs`. */
 const tauriLogFolder: LogFolder = {
   available: true,
@@ -350,7 +386,7 @@ const tauriUpdates: AppUpdates = {
 
 /**
  * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, native `midi` and `input`,
- * the release log's folder (`logs`) and the updater (`updates`).
+ * the export's save (`exports`), the release log's folder (`logs`) and the updater (`updates`).
  */
 export const tauriPlatform: Platform = {
   kind: 'tauri',
@@ -358,6 +394,7 @@ export const tauriPlatform: Platform = {
   engine: tauriEngineHost,
   midi: tauriMidi,
   input: tauriInput,
+  exports: tauriExports,
   logs: tauriLogFolder,
   updates: tauriUpdates,
 };

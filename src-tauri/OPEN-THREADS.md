@@ -61,18 +61,25 @@
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
-- The feed's bound is per subscription (`feed.rs` module doc): Tauri 2.11.5 frees a large payload
-  only when a page fetches it (in the tauri crate's ipc channel), so a document that goes away
-  before fetching leaves up to 30 frames' payloads behind per reload. A Tauri internal, left; next
-  check if memory grows across reloads: the app's private bytes over twenty reloads with the stage view open.
+- The feed's bound is per subscription (`feed.rs` module doc): within-page JS callbacks are retired
+  in `src/platform/host.tauri.ts` (guard: `verify/guards/feed-channel.mjs`). Tauri 2.11.5 still keeps
+  a large payload in its map until a page fetches it; dropping the channel does not clear it
+  (upstream `ipc/channel.rs`). Unfetched payloads remain per reload and per watchdog resubscribe
+  after a gap, up to 30 frames' payloads per subscription. Read from source; next check if memory
+  grows: the app's private bytes over twenty reloads with the stage view open, then with a fetch failed.
 - A page that dies for good (a WebView crash, a shutdown) leaves the scope taps on (`Key::Scope`), so
   the engine keeps folding columns the feed drains and drops for nobody. Read from source, not
   reproduced, nothing audible.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
-- The feed cannot see a counted take's cancel, transport start and ordinary re-arm of the same lane
-  within one block split: unchanged lane info publishes no event, so a reset can replay the old count.
-  Next check: a feed test for that split once `LaneInfo` reports the counted arm.
+- The feed's count-in mirror infers which count a lane event ends from arming and frames alone, so two
+  splits stay: a counted take's cancel, transport start and ordinary re-arm of the same lane within one
+  block publish no lane event (unchanged info), and a reset can replay the old count; and a full event
+  ring that takes a new count's beat but not the lane events after it republishes them at a later frame
+  (`Looper::publish`), where the old lane's disarm reads as the end of the new count, so a reset before
+  the next beat shows none. Read from source, not reproduced. Next check: an engine-backed feed test of
+  each (the count-in tests in `engine_io/feed.rs` drive a real engine) once `LaneInfo` reports the
+  counted arm.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`

@@ -65,13 +65,14 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
 - **The running app is the surface a change is verified on:** drive it and measure
   (`docs/VERIFY.md`).
-- **`main` is the live dev line;** `dev` is unused for now but may come back. Commit and push
+- **`main` is the live dev line;** while agents work with the owner away, they integrate on `dev`
+  (CI runs there too), and the owner's word fast-forwards `main` to it. Commit and push
   whenever the gates are green. A writer runs what its change reaches: `pnpm typecheck`,
   `pnpm lint`, the one guard `node verify/guards/<name>.mjs`, `pnpm test:engine`. Once on the integrated tree, never per writer: `pnpm rust:check` (cargo check
   asio/no-asio + tests) when the change reaches the native build or its tests (`src-tauri/`,
   `verify/fixtures/`, Cargo config or dependencies); `pnpm build` when the frontend changed.
   `pnpm check` is the pre-push hook: never run it by hand before a push. Then CI. Never push red. The
-  owner's open checks (`STATUS.md`) live ON `main`.
+  owner's open checks (`STATUS.md`) live ON `main`; a batch on `dev` brings its own when it lands.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.
@@ -96,7 +97,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - `pnpm dlx knip` finds unused files/exports/deps; an export kept only for a browser probe carries
   `@public` in its JSDoc. The browser probes need `pnpm exec playwright install chromium` once.
 - There is no JS unit-test runner. `pnpm verify` = the guards (real source in plain Node + the docs
-  guard); `pnpm probe <name>|--ci` = the browser probes (the UI on the engine fake), each on its own Vite;
+  guard); `pnpm probe <name>|--ci` = the browser probes (the UI on the engine fake), each in its own process on the run's one Vite;
   `pnpm test:engine` = `cargo test -p lf-engine`, the engine's behaviour rendered offline, frame by
   frame. What each can and cannot see: `verify/README.md`.
 
