@@ -32,9 +32,21 @@ import { masterBars } from './shared';
  */
 
 // Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
-const GRID_BEAT = 'rgba(148,168,215,.085)'; // beat lines — a whisper (bumped from .055: the --well lift to .04 same-hue was swallowing them)
-const GRID_BAR = 'rgba(148,168,215,.13)'; //   bar lines — readable
+const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
+const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
 const GRID_NUM = 'rgba(148,168,215,.28)'; //   engraved bar numbers, top-left of each bar
+// The wave as on an instrument display (alpha of the state colour): a low-alpha body (over the outer it
+// lands near .36) inside a faint outer envelope, and the envelope's contour a fine line a step brighter,
+// so the take reads by its edge, not as a block of paint. The outer fill stays at or over .18 so a take's
+// rec-red reads in the outer envelope alone (wave-steady probe).
+const WAVE_OUTER = 0.18;
+const WAVE_BODY = 0.22;
+const WAVE_EDGE = 0.66;
+/** The loudest peak's reach, as a share of half the well's height: the rows of the glass display meet
+ * edge to edge, so the wave keeps clear air above and below it. */
+const WAVE_REACH = 0.74;
+/** The centre line's alpha in --faint: a guide under the wave, quieter than any wave. */
+const MID_ALPHA = 0.45;
 /** The meter's counted beats a bar (`setGridBeats`): the grid's beat lines, a bar line every `gridBeats`. */
 let gridBeats = 4;
 
@@ -364,9 +376,10 @@ function drawGrid(lane: Lane, bars: number): void {
  * Rasterise the bar grid + two-layer waveform envelope into the off-screen bitmap. All of this is the
  * CACHED-BITMAP path — it runs only on a dirty frame, never in the per-frame steady state.
  *
- * The envelope is drawn per device-pixel column: a translucent OUTER min/max peak (globalAlpha .34)
- * plus a solid INNER body (globalAlpha .95) whose height is a one-pole-smoothed mean-|peak| — the
- * RMS-ish core, mirrored around mid. We only have min/max bins, so the per-column mean is approximated
+ * The envelope is drawn per device-pixel column: a translucent OUTER min/max peak (`WAVE_OUTER`)
+ * plus an INNER body (`WAVE_BODY`) whose height is a one-pole-smoothed mean-|peak| — the RMS-ish
+ * core, mirrored around mid — and the silhouette of the two as a fine contour (`WAVE_EDGE`), joined
+ * column to column. We only have min/max bins, so the per-column mean is approximated
  * as (|min|+|max|)/2. While a take records (`span` > 0, its `recSpanFrames`) each bin sits at its frame
  * over the span, so the recorded region covers `cols` columns and, on a later take, the remainder gets
  * the dotted rec-red "tape to fill" guide.
@@ -386,7 +399,7 @@ function rasterise(
   wctx.globalAlpha = 1;
 
   const midY = dh / 2;
-  const A = midY * 0.86; // peak amplitude in px — 14% headroom so loud transients don't kiss the edge
+  const A = midY * WAVE_REACH; // peak amplitude in px — headroom so loud transients never reach the row's edge
 
   // Bar grid, UNDER the wave. Bar count comes from the shared Looper.tsx helper; it (and the one
   // bpm signal read) is cached and only recomputed when the master loop length changes.
@@ -411,7 +424,9 @@ function rasterise(
 
   if (!hasTape) {
     wctx.fillStyle = lane.colors.mid;
+    wctx.globalAlpha = MID_ALPHA;
     wctx.fillRect(0, Math.round(midY), dw, 1);
+    wctx.globalAlpha = 1;
   }
 
   // Two-layer envelope. Down-samples the peak bins across `cols` device columns: with more bins than
@@ -422,6 +437,9 @@ function rasterise(
     const dimMul = muted ? 0.3 : state === 'STOPPED' ? 0.55 : 1;
     wctx.fillStyle = waveColor(lane.colors, state);
     let body = 0;
+    // The contour's previous column (device px), so each column's edge joins the last into one line.
+    let top0 = -1;
+    let bot0 = -1;
     for (let x = 0; x < cols; x++) {
       const p0 = Math.floor((x / dw) * across);
       if (p0 >= count) break;
@@ -446,13 +464,27 @@ function rasterise(
       let y2 = midY - mnc * A;
       if (y1 < 0) y1 = 0;
       if (y2 > dh) y2 = dh;
-      wctx.globalAlpha = 0.34 * dimMul;
+      wctx.globalAlpha = WAVE_OUTER * dimMul;
       wctx.fillRect(x, y1, 1, Math.max(1, y2 - y1));
 
-      // Inner body (solid), mirrored around mid.
+      // Inner body (translucent), mirrored around mid.
       const hb = Math.max(1, Math.min(1, body * 1.7) * A);
-      wctx.globalAlpha = 0.95 * dimMul;
+      wctx.globalAlpha = WAVE_BODY * dimMul;
       wctx.fillRect(x, midY - hb, 1, hb * 2);
+
+      // The envelope's contour, top and bottom: the wave's silhouette (the outer peak, or the body where
+      // a dense take's body reaches past it), one device px, joined to the previous column's.
+      const top = Math.round(Math.max(0, Math.min(y1, midY - hb)));
+      const bot = Math.round(Math.min(dh, Math.max(y2, midY + hb))) - 1;
+      if (top0 < 0) {
+        top0 = top;
+        bot0 = bot;
+      }
+      wctx.globalAlpha = WAVE_EDGE * dimMul;
+      wctx.fillRect(x, top < top0 ? top : top0, 1, (top < top0 ? top0 - top : top - top0) + 1);
+      wctx.fillRect(x, bot < bot0 ? bot : bot0, 1, (bot < bot0 ? bot0 - bot : bot - bot0) + 1);
+      top0 = top;
+      bot0 = bot;
     }
     wctx.globalAlpha = 1;
   }
@@ -501,12 +533,8 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
   if (x < 0) return;
   const coreW = lane.dpr < 1 ? 1 : Math.round(lane.dpr);
   const px = Math.round(x);
+  // One crisp solid line, one CSS px wide: no glow columns.
   ctx.fillStyle = color;
-  // Soft glow: one column each side at ~25% alpha (no shadowBlur in the frame loop). Then the solid core.
-  ctx.globalAlpha = 0.25;
-  ctx.fillRect(px - coreW, 0, coreW, dh);
-  ctx.fillRect(px + coreW, 0, coreW, dh);
-  ctx.globalAlpha = 1;
   ctx.fillRect(px, 0, coreW, dh);
 }
 
