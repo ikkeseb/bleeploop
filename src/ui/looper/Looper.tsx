@@ -19,8 +19,8 @@ import './looper.css';
  * fixed pill columns, FX · MUTE · REV · UNDO · EDIT (COPY, WIDE and TRIM), over a mix row (a horizontal
  * volume slider and the pan).
  *
- * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
- * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
+ * A presentation layer: the audio engine and the per-track state machine live elsewhere, and the
+ * waveform.ts rAF renderer draws each <canvas> by reading non-reactive looper getters.
  * State colour is rationed to the lane's state token `--sc` (the state word with its LED, the core's
  * ring); the waveform is coloured independently by waveform.ts via the global --rec/--dub/--play
  * tokens. The selection is chrome: the lane number lights warm-white (looper.css).
