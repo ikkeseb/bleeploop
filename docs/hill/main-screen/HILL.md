@@ -75,3 +75,10 @@ One row per round. Overall is the council's weighted mean in that round's packet
 
 | Round | Commit | Dev | Incumbent | Candidate | Gain | Kept | Tokens (k) per model | Wall |
 |---|---|---:|---:|---:|---:|---|---|---|
+| 1 | f3dbbfe1 | 5.2 | 5.2 (dev) | 7.8 | +2.6 | yes | build: opus 726 (four stages); council: opus 155, sol 120, astra 95, argon 80 | ~2 h |
+
+Round 1 notes: the packet held dev, the r3 B variant as it stood and the candidate. B fell from 7.7
+(r3, six categories) to 5.2 here; its wave scored 3.1 against dev's 4.9, as the owner's note on r3 said.
+Every delegate ranked the candidate first. Open for round 2 (all four agree): a bigger wave body, fading
+legible without words, a 2 px playhead at 2560, the last non-sound hues in chrome (A LIVE, INPUT LIVE,
+the status dot), larger lane and drawer type at 2560, a quieter keyboard, the selection's full outline.
