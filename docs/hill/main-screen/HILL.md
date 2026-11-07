@@ -77,6 +77,7 @@ One row per round. Overall is the council's weighted mean in that round's packet
 |---|---|---:|---:|---:|---:|---|---|---|
 | 1 | f3dbbfe1 | 5.2 | 5.2 (dev) | 7.8 | +2.6 | yes | build: opus 726 (four stages); council: opus 155, sol 120, astra 95, argon 80 | ~2 h |
 | 2 | 65103a53 | 4.5 | 7.4 (r1) | 7.9 | +0.47 | yes | build: opus 412 (two stages); council: opus 163, sol 575, astra 222, argon 47 | ~1 h 15 m |
+| 3 | f4d80d6a | 4.5 | 7.6 (r2) | 8.1 | +0.49 | yes | build: opus 338 (two stages); council: opus 170, sol 790, astra 250, argon 58 | ~1 h 15 m |
 
 Round 1 notes: the packet held dev, the r3 B variant as it stood and the candidate. B fell from 7.7
 (r3, six categories) to 5.2 here; its wave scored 3.1 against dev's 4.9, as the owner's note on r3 said.
@@ -92,3 +93,12 @@ read from the whole body, not as a played/unplayed split; muted needs a body or 
 thin edge instead of the dark rim; FIXED and AUTO REC show their remembered "on" beside the lock; the
 LOOP ring neutral while nothing plays; larger FX drawer type at 2560; the 1920 command bar's half-empty
 second row; the lane number crowding A LIVE; selection that reads in the empty state.
+
+Round 3 notes: the packet held dev, round 2 and the candidate; all four delegates ranked the candidate
+first (its wave 8.6 against round 2's 7.3, calm 8.7). The gain is under 0.5 for the second round in a
+row, so the climb stops here by its rule, round 3 the result. Left open (two or more delegates): the
+1920 command bar (round 3 moved the global transport to row 2's right end, which three delegates read as
+detached from the loop read-out; round 2's half-empty row was flagged before it), fading still leaning
+on its FADING OUT word while the fade has barely begun, small type in the mix column and the drawer
+values from the chair, enabled-but-off keys close to unavailable ones, and AUTO REC's locked look in
+14-modes (the app locks it once a loop exists; the packet's caption named only FIXED).
