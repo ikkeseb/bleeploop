@@ -127,12 +127,15 @@ export function SlotMeter(props: { slot: 0 | 1 }) {
 /**
  * The slot's one volume (`slotLevel`): its plugin's output, an Off slot's input level or its synth's
  * level, 0..1.5 with unity at the lane faders' tick and read-out. The unity detent snaps only while the
- * thumb approaches it, so a keyboard step can leave it; double-click resets to unity.
+ * thumb approaches it, so a keyboard step can leave it; double-click resets to unity. At home (the
+ * read-out says 0.0 dB) the read-out hides until the control is hovered or focused, as the lanes' do
+ * (`data-home`, plugin-controls.css): the thumb on its unity tick says it; `aria-valuetext` still does.
  */
 export function SlotVolume(props: { slot: 0 | 1 }) {
   const slot = props.slot;
   const level = () => slotLevel(slot) ?? 1;
   const db = () => volumeDb(level());
+  const home = () => db().slice(1) === '0.0 dB'; // +0.0 or −0.0: the shown value, not the raw level
   const what = () =>
     slotPlugins()[slot]
       ? 'Plugin output'
@@ -151,7 +154,7 @@ export function SlotVolume(props: { slot: 0 | 1 }) {
     input.value = String(v);
   }
   return (
-    <div class="slot__vol" title={what()} onClick={(e) => e.stopPropagation()}>
+    <div class="slot__vol" data-home={home() ? '' : undefined} title={what()} onClick={(e) => e.stopPropagation()}>
       <div class="slot__vbar-wrap">
         {/* unity (0 dB) tick behind the thumb, as on the lane faders */}
         <div class="slot__vbar-unity" />

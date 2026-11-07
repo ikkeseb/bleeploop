@@ -171,12 +171,13 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 55%, transparent);
 }
 
-/* octave markers (C keys only) — mono at the --dim floor, seated at the key's foot */
+/* octave markers (C keys only) — mono, seated at the key's foot: readable (11 px, scaled with the chair's
+   --ui) yet --faint, so the fallback keyboard stays the quietest thing on screen */
 .kb__label {
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: calc(11px * var(--ui));
   letter-spacing: 0.02em;
-  color: var(--dim);
+  color: var(--faint);
   pointer-events: none;
 }
 
@@ -238,9 +239,9 @@
 }
 .kb__pad-key {
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: calc(11px * var(--ui));
   letter-spacing: 0.04em;
-  color: var(--dim);
+  color: var(--faint);
   pointer-events: none;
 }
 /* HIT — cyan-tinted fill + rim + lit lamp (matches the key press idiom) */

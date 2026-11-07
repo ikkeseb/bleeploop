@@ -12,6 +12,8 @@
  * - The bar math counts the meter: the loop readout of a 6/8 loop, and the waveform grid of a lane over
  *   one master length that is one 4/4 bar and then two 6/8 bars (the same 96000 frames at 120): the
  *   middle line turns into a bar line, read from the canvas pixels (the grid's cache must not keep 4/4).
+ *   The bar numbers are one ruler: on two bars only the top row draws them (an EMPTY top row included),
+ *   and a one-bar loop draws none, read from the canvases' top band.
  * - The stage view: a one-bar 6/8 loop (two beats) pulses on its beats and its downbeat (the beat check
  *   read a two-beat loop's every forward step as a step back), and the HUD shows two dots and bar 1 / 1.
  *   The beat check alone (`stepLight` on a scripted phase), in loops of four and two beats: a wrap pulses the downbeat, and a
@@ -205,6 +207,41 @@ await probe(async ({ open }) => {
   assert.ok(four.quarter > four.between && four.half > four.between, '4/4: the beat lines show');
   assert.ok(Math.abs(four.half - four.quarter) <= 3, '4/4: the middle line is a beat line like its neighbours');
   assert.ok(six.half > six.quarter + 3 && six.half > six.threeQuarters + 3, "6/8: the middle line is a bar line (the grid's cache kept 4/4)");
+
+  // ── The bar ruler: once, along the pane's top row, and none on a one-bar loop ──────────────────────
+  // Every row draws the master's grid, so its numbers would repeat five times. Lane 1 is EMPTY here (an
+  // empty row still draws the grid, so the ruler stands whenever a loop exists) and lane 2 holds a
+  // stopped take (no playhead crosses the band). Ruler ink is what the grid lines cannot reach: the
+  // numbers' tint (alpha ~143) against the lines' (28 at most), in the band the numbers hang in.
+  const rulerInk = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('.lp-lane canvas')].map((c) => {
+        const band = Math.min(c.height, Math.round(28 * devicePixelRatio));
+        const px = c.getContext('2d').getImageData(0, 0, c.width, band).data;
+        const near = Math.round(30 * devicePixelRatio);
+        const ink = { all: 0, bar1: 0, bar2: 0 };
+        for (let i = 3; i < px.length; i += 4) {
+          if (px[i] <= 60) continue;
+          const x = ((i - 3) / 4) % c.width;
+          ink.all++;
+          if (x < near) ink.bar1++;
+          else if (x >= c.width / 2 && x < c.width / 2 + near) ink.bar2++;
+        }
+        return ink;
+      }),
+    );
+  const stopped = lane('Stopped', { length: 2 * RATE, canReverse: true });
+  await emit({ events: [transport(2 * RATE, true, 120, SIX), laneEvent(0, lane('Empty')), laneEvent(1, stopped)] });
+  await page.waitForTimeout(250);
+  const twoBars = await rulerInk();
+  await emit({ events: [transport(2 * RATE, true, 120, FOUR)] });
+  await page.waitForTimeout(250);
+  const oneBar = await rulerInk();
+  console.log('ruler ink per row, two 6/8 bars', JSON.stringify(twoBars), 'one 4/4 bar', JSON.stringify(oneBar.map((r) => r.all)));
+  assert.ok(twoBars[0].bar1 > 0 && twoBars[0].bar2 > 0, 'two bars: the top row (an EMPTY lane) numbers both bars');
+  assert.deepEqual(twoBars.slice(1).map((r) => r.all), [0, 0, 0, 0], 'two bars: rows 2-5 carry no ruler (one ruler, not five)');
+  assert.deepEqual(oneBar.map((r) => r.all), [0, 0, 0, 0, 0], 'a one-bar loop carries no ruler (a lone 1 says nothing)');
+  await emit({ events: [laneEvent(1, lane('Empty'))] });
 
   // ── The stage view: a one-bar 6/8 loop pulses (two beats a loop) ──────────────────────────────────
   // A dotted 120: one bar is 48000 frames, a second; the clock runs from now.

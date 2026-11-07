@@ -381,11 +381,17 @@ await probe(async ({ open }) => {
     anchor: { frame: 0, atMs: Date.now(), rate: 44100, grid: 0 },
     meter: { peak: [0, 0], clip: [false, false] },
   });
-  const readout = () => slow.page.locator('.transport__loop-v').textContent();
+  // LOOP shows the bars; the seconds, which a wrong rate would bend, live in its title.
+  const readout = async () => {
+    const text = (await slow.page.locator('.transport__loop-v').textContent()).trim();
+    const title = await slow.page.locator('.transport__loop').getAttribute('title');
+    return `${text} | ${title}`;
+  };
   const running = await readout();
   await slowEmit({ status: null });
   const stopped = await readout();
   console.log(JSON.stringify({ scene: '44.1 kHz loop readout', running, stopped }));
-  assert.match(running, /^8 BARS · 16\.0 s$/, 'a running 44.1 kHz device reads its eight-bar loop');
-  assert.match(stopped, /^8 BARS · 16\.0 s$/, 'the stopped device leaves the engine at 44.1 kHz: the loop still reads eight bars');
+  const eight = /^8 BARS \| Master loop length: 8 bars, 16\.0 s$/;
+  assert.match(running, eight, 'a running 44.1 kHz device reads its eight-bar loop');
+  assert.match(stopped, eight, 'the stopped device leaves the engine at 44.1 kHz: the loop still reads eight bars');
 });

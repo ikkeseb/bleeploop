@@ -23,8 +23,10 @@
  * EDIT enabled) with FILTER and DELAY engaged and the drawer closed, lane 3 OVERDUB in flight (selected,
  * "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about -12 dBFS; its right clusters keep five
  * fixed columns (FX, MUTE, REV, UNDO, EDIT) at one x on every lane, and its PLAY/STOP/NOW pills end at
- * one x whichever word they show; in 14-modes-on, FIXED greyed out wears the disabled face, no lit
- * legend. 13b-jam-edit is the same jam with lane
+ * one x whichever word they show, lane 3's number alone lit (warm-white, a weight up; the numbers 1-5),
+ * no edge on its row and the selected slot under a card's top light; 13c-jam-forced-colours is the same
+ * under forced colours, one system outline on the selected lane and slot; in 14-modes-on, FIXED greyed
+ * out wears the disabled face, no lit legend. 13b-jam-edit is the same jam with lane
  * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
@@ -49,7 +51,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = process.env.CS_VIEWPORTS ? process.env.CS_VIEWPORTS.split(',').map((v) => v.split('x').map(Number)) : [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13b-jam-edit', '14-modes-on'];
+  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -483,6 +485,38 @@ await probe(async ({ browser, open }) => {
         if (!(pairSpread < 0.5)) fail(`${tag} ${scene}: the PLAY/STOP/NOW pills (${jam.pairWords.join(', ')}) end ${pairSpread.toFixed(1)} px apart`);
         if (jam.lane2Fx.join() !== '0,3') fail(`${tag} ${scene}: lane 2 has FX ${jam.lane2Fx.join(', ') || 'none'} engaged, not filter and delay`);
         if (jam.drawerOpen) fail(`${tag} ${scene}: the FX drawer is open`);
+
+        // The selection: lane 3's number lights warm-white a weight up and every other rests --faint and
+        // light whatever its state (playing, muted, fading); no edge on the row, and the selected slot
+        // keeps a card's top light. Forced colours flatten that, so there one system outline marks the
+        // lane (on its overlay, over the glass) and the slot.
+        const sel = await page.evaluate(() => {
+          const lanes = [...document.querySelectorAll('.lp-lane')];
+          const look = (el) => { const cs = getComputedStyle(el); return `${cs.color} ${cs.fontWeight}`; };
+          const shadow = (q) => { const el = document.querySelector(q); return el ? getComputedStyle(el).boxShadow : null; };
+          return {
+            nums: lanes.map((l) => look(l.querySelector('.lp-lane__num'))),
+            labels: lanes.map((l) => l.querySelector('.lp-lane__num').textContent),
+            edge: getComputedStyle(lanes[2], '::after').content,
+            slotTop: [shadow('.slot--active'), shadow('.slot:not(.slot--active)')],
+          };
+        });
+        const LIT = 'rgb(244, 239, 230) 500', REST = 'rgb(125, 129, 141) 300';
+        const nums = [REST, REST, LIT, REST, REST];
+        if (sel.nums.join() !== nums.join()) fail(`${tag} ${scene}: the lane numbers read ${sel.nums.join(' | ')}, not ${nums.join(' | ')}`);
+        if (sel.labels.join() !== '1,2,3,4,5') fail(`${tag} ${scene}: the lane numbers are ${sel.labels.join(', ')}, not 1-5`);
+        if (sel.edge !== 'none') fail(`${tag} ${scene}: the selected lane draws an edge (::after ${sel.edge})`);
+        if (sel.slotTop[0] !== sel.slotTop[1]) fail(`${tag} ${scene}: the selected slot's top light (${sel.slotTop[0]}) is not a card's (${sel.slotTop[1]})`);
+        scene = '13c-jam-forced-colours';
+        await page.emulateMedia({ forcedColors: 'active' });
+        await page.waitForTimeout(150);
+        const forced = await page.evaluate(() => {
+          const o = (el, pseudo) => getComputedStyle(el, pseudo).outlineStyle;
+          return { lane: o(document.querySelector('.lp-lane.is-selected'), '::after'), other: o(document.querySelector('.lp-lane:not(.is-selected)'), '::after'), slot: o(document.querySelector('.slot--active')) };
+        });
+        await shoot(scene);
+        await page.emulateMedia({ forcedColors: 'none' });
+        if (forced.lane !== 'solid' || forced.other !== 'none' || forced.slot !== 'solid') fail(`${tag} ${scene}: forced colours outline the selected lane ${forced.lane}, another ${forced.other}, the selected slot ${forced.slot} (solid, none, solid)`);
 
         // The same jam with lane 2's EDIT menu open over the lanes.
         scene = '13b-jam-edit';

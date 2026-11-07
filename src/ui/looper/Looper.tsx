@@ -14,16 +14,16 @@ import './looper.css';
 /**
  * The looper UI: five full-width horizontal LANES stacked in the looper zone (composition binding:
  * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
- * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
+ * (the lane number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
  * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of five
  * fixed pill columns, FX · MUTE · REV · UNDO · EDIT (COPY, WIDE and TRIM), over a mix row (a horizontal
  * volume slider and the pan).
  *
  * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
  * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
- * State colour is rationed to the lane's state token `--sc` (identity word, core ring/glow, left-edge
- * bleed); the waveform is coloured independently by waveform.ts via the global --rec/--dub/--play
- * tokens.
+ * State colour is rationed to the lane's state token `--sc` (the state word with its LED, the core's
+ * ring); the waveform is coloured independently by waveform.ts via the global --rec/--dub/--play
+ * tokens. The selection is chrome: the lane number lights warm-white (looper.css).
  */
 
 /** The lane identity-box word for each `LaneWord` (a rolling RETAKE's TAKE adds its pass count). */
@@ -66,11 +66,14 @@ function Fader(props: { index: number; disabled: boolean }) {
   // A styled native <input type=range> (same idiom as the command bar's master/click sliders) over a
   // 0..150 integer domain (= vol × 100); the unity tick + dB read-out are the per-track additions.
   // It shows its gesture's value until the engine has it (`mixGesture`), and builds on what it shows.
-  // A double-click resets it to 0 dB, as the slot fader and the pan do.
+  // A double-click resets it to 0 dB, as the slot fader and the pan do. At home (the read-out says
+  // 0.0 dB) the read-out hides until the control is hovered or focused (`data-home`, looper.css): the
+  // thumb on its unity tick says it, and `aria-valuetext` still does.
   const vol = () => looper.mixShown(props.index, 'volume');
   const gesture = mixGesture(props.index, 'volume');
   const frac = () => Math.max(0, Math.min(1, vol() / 1.5));
   const dbStr = () => volumeDb(vol());
+  const home = () => dbStr().slice(1) === '0.0 dB'; // +0.0 or −0.0: the shown value, not the raw volume
 
   const onInput = (e: Event) => {
     const input = e.target as HTMLInputElement;
@@ -97,7 +100,7 @@ function Fader(props: { index: number; disabled: boolean }) {
   };
 
   return (
-    <div class="lp-lane__vol">
+    <div class="lp-lane__vol" data-home={home() ? '' : undefined}>
       <div class="lp-vbar-wrap">
         {/* unity (0 dB) tick sits behind the thumb (declared first) so the thumb reads over it at unity */}
         <div class="lp-vbar__unity" />
@@ -146,7 +149,8 @@ const PAN_DETENT = 2;
  * The lane's pan beside its volume fader: a native range over -100..100 (percent of the way to a side).
  * A drag snaps to the centre inside the detent; the arrow keys step by 1 and Page Up/Down by 10 (no
  * detent), Home and End go hard left and right, and 0 (while focused), a double-click or an Alt-click
- * centre it. It shows its gesture's value until the engine has it (`mixGesture`), as the fader does.
+ * centre it. It shows its gesture's value until the engine has it (`mixGesture`), as the fader does, and
+ * hides its `C` at home as the fader hides its 0.0 dB.
  */
 function Pan(props: { index: number; disabled: boolean }) {
   const pan = () => looper.mixShown(props.index, 'pan');
@@ -189,7 +193,7 @@ function Pan(props: { index: number; disabled: boolean }) {
   };
 
   return (
-    <div class="lp-lane__pan">
+    <div class="lp-lane__pan" data-home={pct() === 0 ? '' : undefined}>
       <div class="lp-pan-wrap">
         {/* the centre tick sits behind the thumb (declared first), as the fader's unity tick */}
         <div class="lp-pan__centre" />
@@ -397,7 +401,7 @@ function TrackLane(props: {
       <div class="lp-lane__left">
         <div class="lp-lane__idbox">
           <span class="lp-lane__head">
-            <span class="lp-lane__num">{String(props.index + 1).padStart(2, '0')}</span>
+            <span class="lp-lane__num">{String(props.index + 1)}</span>
             <Show when={source()}>
               <span class="lp-lane__src" title="What a take on this lane hears: the slots with live input">
                 {source()}

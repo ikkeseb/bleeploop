@@ -34,7 +34,7 @@ import { masterBars } from './shared';
 // Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
 const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
-const GRID_NUM = 'rgba(148,168,215,.56)'; //   bar numbers, top-left of each bar: read from the chair, never brighter than a wave
+const GRID_NUM = 'rgba(148,168,215,.56)'; //   the ruler's bar numbers (the top row's only): read from the chair, never brighter than a wave
 /**
  * The wave is one filled, anti-aliased BODY in its colour, the take's level, its own edge the only edge
  * (no second silhouette around it). Alpha per look (of the colour): a sounding take is saturated; a
@@ -146,10 +146,10 @@ interface Fade {
 }
 
 /** The bar-number font at a given device-pixel ratio and row height (CSS px): Geist Mono, the `--mono`
- * token's stack (`src/app.css`), 9.5 px in a short row up to 14 px in a tall one (a 2560 display), so a
- * number reads from the chair without shouting over the take. */
+ * token's stack (`src/app.css`), 11 px in a short row up to 14 px in a tall one (a 2560 display), so the
+ * pane's one ruler reads from the chair without shouting over the take. */
 function gridFontFor(dpr: number, cssH: number): string {
-  const px = Math.min(14, Math.max(9.5, cssH * 0.075));
+  const px = Math.min(14, Math.max(11, cssH * 0.075));
   return `500 ${(px * dpr).toFixed(1)}px 'Geist Mono', ui-monospace, Consolas, monospace`;
 }
 
@@ -410,7 +410,8 @@ function syncSize(lane: Lane): boolean {
   return true;
 }
 
-/** Draw the bar/beat grid + engraved bar numbers UNDER the wave. `bars` from the shared bar-math. */
+/** Draw the bar/beat grid UNDER the wave, and on the pane's top row its one ruler. `bars` from the shared
+ * bar-math. */
 function drawGrid(lane: Lane, bars: number): void {
   if (bars <= 0) return;
   const { wctx, dw, dh, dpr } = lane;
@@ -420,8 +421,12 @@ function drawGrid(lane: Lane, bars: number): void {
     wctx.fillStyle = i % gridBeats === 0 ? GRID_BAR : GRID_BEAT;
     wctx.fillRect(gx, 0, 1, dh);
   }
-  // Each number hangs off the top of the bar line it names, as on a ruler: its left edge a hair right
-  // of the line (Geist Mono: every figure one width, so 9 and 10 line up as tabular figures do).
+  // The bar numbers: every row draws the master loop's grid, so they would be one ruler five times over.
+  // They go once, on the top row (an EMPTY one draws its grid too, so the ruler stands over the pane
+  // whenever a loop exists), and not at all on a one-bar loop, where a lone 1 says nothing. Each number
+  // hangs off the top of the bar line it names, as on a ruler: its left edge a hair right of the line
+  // (Geist Mono: every figure one width, so 9 and 10 line up as tabular figures do).
+  if (lane.index !== 0 || bars < 2) return;
   wctx.fillStyle = GRID_NUM;
   wctx.font = lane.gridFont;
   wctx.textBaseline = 'top';

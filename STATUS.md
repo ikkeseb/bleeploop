@@ -81,9 +81,10 @@ it.
 
 - The main screen's restyle (2026-11-07; the principles in `src/ui/AGENTS.md`, the look in the
   `src/app.css` header): the waves as smooth bodies with a grey for silent and a FADE that sinks,
-  the selected lane's warm-white hairlines, a mode that is on but locked, the lanes a step larger at
-  2560. From the chair on the 27": does every lane's state read at a glance, does a FADE read as the
-  loop sinking in motion, and is the selected lane findable?
+  the selected lane marked by its lit number alone, a mode that is on but locked, the lanes a step
+  larger at 2560, and fewer numbers (one bar ruler over the pane, mix read-outs hidden at 0 dB and
+  centre, the loop's length in bars only). From the chair on the 27": does every lane's state read at a
+  glance, does a FADE read as the loop sinking in motion, and is the selected lane findable?
 - The designer walk's fixes: the command-bar popovers (CLICK, SENS, IN FX) open under the bar, not
   their pill; a toast that is neither an error nor a finished action reads as a dim note; the 48 kHz
   switch and the mid-jam update ask are the app's own dialog (Esc declines); a disabled control fades

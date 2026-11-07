@@ -6,7 +6,8 @@
  * another program holds says so, and LEARN is enabled only while a port is open; both empty native slots
  * show the install hint (in sans, as prose), the keyboard's hide cap reads the one close glyph ✕, the keyboard
  * octave survives a placement remount, PARAMS wears the shared SVG caret (turned over open), the slot volume (a
- * plugin's output gain) honors the unity detent under keyboard steps and slider input, and with one
+ * plugin's output gain) honors the unity detent under keyboard steps and slider input and hides its dB
+ * read-out at home (0.0 dB) until it is hovered or focused, and with one
  * plugin file in both slots, its editor belongs to the slot whose load came first (D29): the later loader's
  * EDITOR is refused though it presses first and the owner never opened one (no open reaches the host),
  * the owner slot dropping or reloading that file while the other slot keeps it refuses both slots' EDITOR
@@ -134,7 +135,19 @@ await probe(async ({ open }) => {
   const output = page.getByRole('slider', { name: 'Volume for slot A', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
   await page.waitForFunction(() => window.__gain() === 1);
+  // At home (0.0 dB) the read-out hides, its box kept so the fader holds its x, until the control is
+  // hovered or focused; off home it shows untouched. The slider still speaks its dB.
+  const vdb = page.locator('.slot__vol', { has: output }).locator('.slot__vdb');
+  const readout = () =>
+    vdb.evaluate((el) => ({ text: el.textContent, visibility: getComputedStyle(el).visibility, width: el.getBoundingClientRect().width }));
+  await page.mouse.move(1, 1);
+  const atHome = await readout();
+  assert.equal(atHome.text, '+0.0 dB', 'the read-out keeps its text at home');
+  assert.equal(atHome.visibility, 'hidden', `the read-out hides at home while untouched: ${JSON.stringify(atHome)}`);
+  assert.ok(atHome.width > 0, 'the hidden read-out keeps its width');
+  assert.equal(await output.getAttribute('aria-valuetext'), '+0.0 dB', 'the slider still speaks its dB at home');
   await output.focus();
+  assert.equal((await readout()).visibility, 'visible', 'the read-out shows while the control is focused');
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
@@ -142,6 +155,9 @@ await probe(async ({ open }) => {
     await page.evaluate(() => window.__gain() > 1),
     'keyboard steps must leave the unity detent',
   );
+  await output.blur();
+  assert.equal((await readout()).visibility, 'visible', 'off home the read-out shows untouched');
+  await output.focus();
 
   await output.evaluate((element) => {
     element.value = '1.05';
@@ -155,6 +171,8 @@ await probe(async ({ open }) => {
     1,
     'approaching unity must retain the soft detent',
   );
+  await output.blur();
+  assert.equal((await readout()).visibility, 'hidden', 'back at home and untouched, the read-out hides again');
 
   // The same plugin file in both slots shares one GUI runtime, bound to the module's first load: A loaded
   // first and never opened its editor, then B loads the file and presses EDITOR first. B is refused, no
