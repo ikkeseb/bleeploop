@@ -61,6 +61,7 @@
    --lane-pad-y is the row's vertical inset; the wave well spans it (a negative margin of the same), so
    the five wells meet edge to edge as one pane. */
 .lp-lane {
+  --ui: var(--ui-lane); /* the lanes' own size step (the app.css header's SIZE) */
   --lane-pad-y: clamp(6px, 1vh, 9px);
   flex: 1 1 0;
   min-height: calc(55px + 2 * clamp(6px, 1vh, 9px));
@@ -106,47 +107,24 @@
   background: var(--key-on);
 }
 
-/* Keyboard/MIDI-selected lane — the whole row reads as one: its body lifts one tone (the glass stays the
-   display's one material) and one warm-white hairline rings the row, head, glass and mix, over the
-   glass, so "which track will Space/Enter hit" is glanceable without competing with the state colour
-   (--sc). No rail (owner, 2026-09-23), no tint, no card: a live capture keeps the same row, its colour is
-   in the wave, the word and the core. */
-.lp-lane.is-selected.is-selected {
+/* Keyboard/MIDI-selected lane — selection by tone, never a box (the app.css header's THE DISPLAY): the
+   whole row lifts a tone end to end, its body (--surf-sel) and its strip of the glass (--glass-sel, below
+   in the well section), under one warm-white hairline along its top across head, glass and mix, so
+   "which track will Space/Enter hit" is glanceable without competing with the state colour (--sc). No
+   rail (owner, 2026-09-23), no tint, no card: a live capture keeps the same row, its colour is in the
+   wave, the word and the core. Its FX drawer open under it shares the lifted body. */
+.lp-lane.is-selected.is-selected,
+.lp-lane.is-selected + .lp-drawer {
   background: var(--surf-sel);
 }
 .lp-lane.is-selected::after {
   content: '';
   position: absolute;
-  inset: 0;
+  inset: 0 0 auto;
+  height: 1px;
   z-index: 3;
-  border: 1px solid var(--sel-line);
-  border-radius: inherit;
+  background: var(--sel-line);
   pointer-events: none;
-}
-/* the row under it drops its divider: the ring's lower edge is the one line there */
-.lp-lane.is-selected + .lp-lane {
-  box-shadow: none;
-}
-/* its FX drawer open under it: lane and drawer are one selected row, the ring open at the seam (the lane
-   ring's sides and top, the drawer's sides and foot) and the drawer on the same lifted body */
-.lp-lane.is-selected:has(+ .lp-drawer)::after {
-  border-bottom: 0;
-}
-.lp-lane.is-selected + .lp-drawer {
-  position: relative;
-  background: var(--surf-sel);
-}
-.lp-lane.is-selected + .lp-drawer::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  border: 1px solid var(--sel-line);
-  border-top: 0;
-  pointer-events: none;
-}
-.lp-lane.is-selected + .lp-drawer + .lp-lane {
-  box-shadow: none;
 }
 /* EMPTY: the row keeps the body's tone (one machine); the EMPTY word + unlit LED carry the cue */
 .lp-lane[data-state='empty'] {
@@ -170,6 +148,13 @@
   gap: 6px;
   width: clamp(80px, 6.6vw, calc(108px * var(--ui))); /* the number and, on the selected lane, "A+B LIVE" beside it */
 }
+/* the wide display's lane step (--ui-lane 1.3) sets "A+B LIVE" at 17 px beside a 31 px number: about
+   150 px, so the box takes the room the left cluster has spare there (333 px holds 156 + core + pair) */
+@media (min-width: 2200px) {
+  .lp-lane__idbox {
+    width: calc(120px * var(--ui));
+  }
+}
 /* the number's row: the number, and on the selected lane the live source a take there would hear */
 /* the gap grows with the window, so the source never crowds the number (at 1280 "A+B LIVE" must still
    end clear of the REC core: the live-meter probe) */
@@ -179,7 +164,7 @@
   gap: clamp(5px, 0.45vw, 10px);
   min-width: 0;
 }
-/* the live source: the badge language (coloured caps with a dot), at the size read from the guitar */
+/* the live source: the badge language (caps with a dot), at the size read from the guitar */
 .lp-lane__src {
   flex: 0 0 auto;
   display: inline-flex;
@@ -189,16 +174,16 @@
   font-weight: 600;
   letter-spacing: 0.06em;
   line-height: 1;
-  color: var(--play);
+  color: var(--engaged); /* the routing is chrome, lit warm-white; the live signal's green is its dot */
   white-space: nowrap;
 }
 .lp-lane__src::before {
   content: '';
-  width: 5px;
-  height: 5px;
+  width: calc(5px * var(--ui));
+  height: calc(5px * var(--ui));
   flex: 0 0 auto;
   border-radius: 999px;
-  background: currentColor;
+  background: var(--play);
 }
 .lp-lane__num {
   font-size: clamp(19px, 1.7vw, calc(24px * var(--ui)));
@@ -284,6 +269,11 @@
    the release is instant. No transform on the core itself: a scale() on this rounded gradient face with
    its shadows rasterises with hairline seams through the centre while it animates (the owner saw them
    on hover and release). The pointer-press probe (verify/probes/transport-focus.mjs) holds this. */
+/* a record key that can act (empty or stopped included) wears a clear neutral rim, so it reads as a
+   footswitch target from the chair; a disabled one keeps the bezel's quiet --edge (below) */
+.lp-core:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.2);
+}
 .lp-core:hover:not(:disabled) {
   border-color: var(--dim);
 }
@@ -410,7 +400,7 @@
    grey-on-grey) and a row of keys never mixes faces with bare words. */
 .lp-pb:disabled {
   cursor: not-allowed;
-  background: var(--key);
+  background: var(--key-off);
   box-shadow: none;
   color: var(--faint);
 }
@@ -420,15 +410,20 @@
   color: var(--engaged);
   background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
-/* FX's lamp, the lane LED's vocabulary: an unlit socket before the legend, lit warm-white while any of
-   the lane's effects is engaged (Looper.tsx `fxEngaged`). Always in the row, so lighting it never moves
-   the legend or resizes the pill; the lit legend (.is-on) stays the drawer's. */
-.lp-pb--fx {
+/* FX's and MUTE's lamps, the lane LED's vocabulary: an unlit socket before the legend, lit with the
+   engaged recipe of every key with a lamp (the record modes, the drawer's effects): lamp, warm-white
+   legend, the face a step up. FX is engaged while any of the lane's effects is (Looper.tsx `fxEngaged`);
+   its drawer open (.is-on) lights the legend and face alone, the lamp staying the effects'. Always in the
+   row, so lighting a lamp never moves the legend or resizes the pill. */
+.lp-pb--fx,
+.lp-pb--mute {
   grid-auto-flow: column;
-  column-gap: 4px;
+  column-gap: calc(5px * var(--ui));
   justify-content: center;
+  align-items: center;
 }
-.lp-pb--fx::before {
+.lp-pb--fx::before,
+.lp-pb--mute::before {
   content: '';
   width: calc(5px * var(--ui));
   height: calc(5px * var(--ui));
@@ -437,12 +432,14 @@
   box-shadow: var(--led-socket-shade);
   transition: background-color var(--motion), box-shadow var(--motion);
 }
-.lp-pb--fx.has-fx::before {
+.lp-pb--fx.has-fx::before,
+.lp-pb--mute.is-on::before {
   background: var(--engaged);
   box-shadow: none;
 }
-.lp-pb--play:not(:disabled):hover {
-  color: var(--play);
+.lp-pb--fx.has-fx:not(:disabled):not(:active) {
+  color: var(--engaged);
+  background: var(--key-on);
 }
 /* CLR armed → SURE?: a confirm is chrome (amber is the overdub's), so the engaged recipe: the lit
    legend on the face a step up; the word says what the next press does */
@@ -506,9 +503,9 @@
   border-bottom-left-radius: var(--r-well);
   border-bottom-right-radius: var(--r-well);
 }
-/* the row under the selected one drops its glass divider too: the row's ring is the one line there */
-.lp__lanes .lp-lane.is-selected + .lp-lane .lp-lane__well {
-  box-shadow: none;
+/* the selected row's strip of the pane lifts a tone with its body (the selection above) */
+.lp-lane.is-selected .lp-lane__well {
+  background-color: var(--glass-sel);
 }
 .lp-lane__well canvas {
   position: absolute;
@@ -545,12 +542,10 @@
   background: color-mix(in srgb, var(--bg) 78%, transparent);
   letter-spacing: 0.14em;
 }
-.lp-lane[data-state='armed'] .lp-lane__wellmsg {
-  color: color-mix(in srgb, var(--rec) 70%, var(--faint));
-}
-/* the count-in numeral (a counted-in take): big enough to read from the guitar, in the rec colour it
-   is counting toward. Its box is trimmed to the digit (cap height to baseline), so 80cqh draws a digit
-   about 58 % of the well's height at every window size. */
+/* the count-in numeral (a counted-in take): big enough to read from the guitar, lit warm-white (the
+   count is chrome; the dashed red ring on the core and the ARMED word carry the take it counts toward, so
+   no large red field fills the well before a note is recorded). Its box is trimmed to the digit (cap
+   height to baseline), so 80cqh draws a digit about 58 % of the well's height at every window size. */
 .lp-lane__count {
   display: block;
   font-size: max(20px, 80cqh);
@@ -558,7 +553,7 @@
   line-height: 1;
   text-box: trim-both cap alphabetic;
   letter-spacing: -0.04em;
-  color: var(--rec);
+  color: var(--engaged);
   font-variant-numeric: tabular-nums;
 }
 .lp-lane[data-state='listening'] .lp-lane__wellmsg {
@@ -774,6 +769,7 @@
    the key row whatever the row's height. The drawer is a row of the body: where it opens the glass
    display parts round it (the well section), and it carries no divider above, so it reads as its lane's. */
 .lp-drawer {
+  --ui: var(--ui-lane); /* its lane's size step (the app.css header's SIZE) */
   --drawer-key: calc(26px * var(--ui));
   --drawer-inset: 5px;
   container: drawer / inline-size; /* the FxPanel's aligned rows key on its width (fxpanel.css) */

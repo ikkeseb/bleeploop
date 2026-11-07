@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
-import { registerLane, setGridBeats, unregisterLane } from './waveform';
+import { registerLane, setGridBeats, setLaneFade, unregisterLane } from './waveform';
 import { masterBars, noEnterRepeat, volumeDb } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate, reverseGate, sentence, undoGate, why } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
@@ -352,6 +352,8 @@ function TrackLane(props: {
   onCleanup(() => {
     if (canvasEl) unregisterLane(canvasEl);
   });
+  // A FADE reaches the wave plain (invariant 6): the frame its stop lands on while the lane fades.
+  createEffect(() => setLaneFade(props.index, fading() ? track().stopAt : null));
 
   // A lane a key or a footswitch selects comes into view: at small windows the stack scrolls, and a
   // selected lane below its fold hid its refusal cue too. Not on this lane's own pointer press: it is on

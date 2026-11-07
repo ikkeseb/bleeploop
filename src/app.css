@@ -22,14 +22,16 @@
      warm-white hairline and one tone up.
      KEYS — every pressable word (the command bar's toggles and steppers, the slot's keys and pickers, a
      lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family: a caps legend on a very
-     quiet face (--key: a tone barely off its surface, no border), the same height and radius as its
+     quiet face (--key: a tone off its surface, no border, so a key reads as pressable from the chair), the same height and radius as its
      row's neighbours (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Three legend
      levels, so a glance tells them apart: at rest --legend (quieter than --dim), engaged --engaged (lit
-     warm-white) on a face a step up (--key-on), disabled --faint on the resting face (tone, never an
-     opacity fade), so a row never mixes keys and bare words. Hover lifts the face (--key-hover); press
-     sinks it (--pressed). A key with a lamp (the record modes, a lane's FX) lights it warm-white while its
-     setting is on, even when the key is greyed out (on, not in effect: a lit lamp over a --faint
-     legend); an unlit lamp is an empty socket ring (--led-socket-shade), never a grey dot. A two-step
+     warm-white) on a face a step up (--key-on), disabled --faint on the quieter off face (--key-off; tone,
+     never an opacity fade), so a row never mixes keys and bare words. Hover lifts the face (--key-hover);
+     press sinks it (--pressed). A key with a lamp (the record modes, a lane's FX and MUTE, the drawer's
+     effects) lights it warm-white while its setting is on: one engaged recipe, lamp + lit legend + the
+     face a step up. On but locked (a mode that is on and cannot act now) is its own third look: the lamp
+     becomes a lit padlock and the face an engaged rim with no fill, over the --faint legend; an unlit
+     lamp is an empty socket ring (--led-socket-shade), never a grey dot. A two-step
      confirm (SURE?) and a fade under way are chrome, so they take the engaged recipe, never a hue. A split
      key (CLICK | 70, FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon tools stay bare glyphs;
      engaged, they wear --key-on like a key. The cyan focus-visible ring always.
@@ -47,27 +49,31 @@
      the pane a hairline (--glass-line) divides the rows; only the pane's outer corners round (--r-well),
      its one light is a 1 px inner top highlight (--glass-top) and a barely-there sheen (--glass-sheen):
      no reflection, no glow, no motion. Where the FX drawer opens the pane parts, each part rounded, and
-     the drawer sits on the body between them. The glass is one material whatever the selection; a selected row
-     lifts its body a tone (--surf-sel) and one warm-white hairline (--sel-line) rings the whole row,
-     head, glass and mix. A wave is drawn as sound (`looper/waveform.ts`): smooth anti-aliased paths, a
-     solid body inside a translucent peak envelope, in its state colour while it sounds and grey when
-     stopped or muted (muted quieter still), and one crisp playhead per row, so equal-length loops line
-     up into one line down the pane.
-     SIZE — the chrome is sized for the chair: --ui scales the main screen's type, key heights and the
-     lane head and mix one step up on a wide display (2200 px and over, a 27" 2560 screen read from
-     1.5 m), and is 1 everywhere else. A size that should follow it is written calc(N * var(--ui)). ===== */
+     the drawer sits on the body between them. A selection is tone, never a box: the selected row lifts a
+     tone end to end (its body --surf-sel, its strip of glass --glass-sel) under one warm-white top
+     hairline (--sel-line) across head, glass and mix; a selected slot card the same. A wave is drawn
+     as sound (`looper/waveform.ts`): smooth anti-aliased paths, a solid body inside a thin peak rim,
+     in its state colour while it sounds; stopped, a solid grey body; muted, the same shape hollow (a
+     grey edge over a faint fill); fading, the colour draining toward the stop point; and one crisp
+     playhead per row, so equal-length loops line up into one line down the pane.
+     SIZE — the chrome is sized for the chair: --ui scales the main screen's type and key heights one step
+     up on a wide display (2200 px and over, a 27" 2560 screen read from 1.5 m), and is 1 everywhere else.
+     A size that should follow it is written calc(N * var(--ui)). The lanes and their FX drawer take a
+     larger step (--ui-lane, which they set as their --ui): they have the room the command bar lacks, and
+     their legends are the ones read from the guitar. ===== */
   --bg: #0a0b0e;
   --surf-1: #121419; /* card */
   --surf-2: #171a20; /* control face (the lane core, a popover's fields) */
   --surf-3: #1d2028; /* a solid lifted face (a popover's hover) */
-  --key: rgba(255, 255, 255, 0.022); /* a key at rest: a tone barely off any card, no border (--faint holds 4.5:1 on it) */
+  --key: rgba(255, 255, 255, 0.042); /* a key at rest: a face that reads as pressable from the chair, no border */
+  --key-off: rgba(255, 255, 255, 0.022); /* a disabled key's face: quieter than at rest (--faint holds 4.5:1 on it) */
   --key-hover: rgba(255, 255, 255, 0.055); /* a key under the pointer */
   --key-on: rgba(255, 246, 232, 0.12); /* an engaged key: a clear step up, faintly warm, under the lit legend */
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: var(--surf-1); /* card fill: flat, one tone over the ground */
   --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
-  --sel-line: rgba(244, 239, 230, 0.3); /* the selection hairline (a lane's whole row, a slot): warm white, no hue */
-  --surf-sel: #16181d; /* the selected lane's card: one tone over --surf-1, --faint still 4.5:1 on it */
+  --sel-line: rgba(244, 239, 230, 0.34); /* the selection's top hairline (a lane's whole row, a slot): warm white, no hue */
+  --surf-sel: #17191f; /* the selected lane's body and slot card: one tone over --surf-1, --faint still 4.5:1 on it */
   --r-sm: 6px; /* radius: a control 24 px tall or less (lane keys, steppers, cue, badges) */
   --r-ctl: 8px; /* radius: a control 26-34 px tall (bar toggles, selects, slot and drawer keys) */
   --r-well: 10px; /* radius: a sunk well or display window */
@@ -81,6 +87,7 @@
   --line-2: rgba(255, 255, 255, 0.12); /* hover border */
   --well: var(--sunk);
   --glass: #030304; /* the looper's display: one true-black glass pane under the five waves, darker than --sunk */
+  --glass-sel: #0b0c0f; /* the selected row's strip of the pane: a tone up, still darker than any body */
   --glass-line: rgba(255, 255, 255, 0.06); /* the hairline between two rows inside the pane */
   --glass-top: rgba(255, 255, 255, 0.075); /* the pane's one inner top highlight */
   --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 62%); /* the pane's barely-there sheen, top to bottom */
@@ -110,6 +117,7 @@
   --sans: 'Geist', system-ui, 'Segoe UI', sans-serif;
 
   --ui: 1; /* the chrome's size step (SIZE above) */
+  --ui-lane: 1; /* the lanes' and the FX drawer's size step (SIZE above) */
 
   font-synthesis: none;
   color-scheme: dark;
@@ -120,6 +128,8 @@
     /* 1.15: at 2560 the bar keeps one row with FIXED's bars showing, ~70 px to spare (1.2 needed 6 px more
        than the bar has, and cmd-fit.ts stacked it) */
     --ui: 1.15;
+    /* 1.3: a lane key's legend 13.7 px, its read-outs 15.6 px, the drawer's labels 12.4 px */
+    --ui-lane: 1.3;
   }
 }
 
@@ -324,13 +334,14 @@ option {
 }
 
 /* system lamp — the at-a-glance aggregate of host/engine/plugin/midi (detail in its title + the
-   Audio Settings diagnostics block). Green ok, amber when the engine could not open an audio device. */
+   Audio Settings diagnostics block). All well, it is chrome and spends no hue (green is a sound): a quiet
+   neutral dot; amber when the engine could not open an audio device. */
 .cmd__lamp {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: var(--play);
+  background: var(--faint);
 }
 .cmd__lamp--warn {
   background: var(--dub);
@@ -559,9 +570,12 @@ option {
 .slot:hover {
   background: #14161c;
 }
-/* ACTIVE = the selection hairline (selection is chrome, not sound, so it carries no hue) */
-.slot--active {
-  border-color: var(--sel-line);
+/* ACTIVE = the selection recipe (the header's THE DISPLAY): the card a tone up under one warm-white top
+   hairline, never a box (selection is chrome, not sound, so it carries no hue) */
+.slot--active,
+.slot--active:hover {
+  background: var(--surf-sel);
+  box-shadow: inset 0 1px 0 var(--sel-line);
 }
 /* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
    EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
@@ -646,7 +660,7 @@ option {
 }
 .tgl:disabled {
   cursor: default;
-  background: var(--key);
+  background: var(--key-off);
   box-shadow: none;
   color: var(--faint);
 }
@@ -655,8 +669,7 @@ option {
   color: var(--engaged);
   background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
 }
-/* live input stays a sound colour (it IS sound): its dot and a soft play legend, on the engaged face
-   (plugin-controls.css sets the legend) */
+/* live input: the engaged face; its green dot is the live signal (plugin-controls.css sets the legend) */
 .tgl.on-green {
   background: var(--key-on);
 }

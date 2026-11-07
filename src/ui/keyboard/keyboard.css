@@ -130,19 +130,19 @@
   box-sizing: border-box;
 }
 
-/* WHITE keys — one flat tone with a hairline seam on the right. The tone sits well above the
+/* WHITE keys — one flat tone with a hairline seam on the right. The tone sits plainly above the
    near-black well and the black keys (2026-07-05 eye check: at .06 the "light" keys read fully dark), so
-   the piano geography reads at a glance, yet under the lanes' chrome: the keyboard is the fallback and
-   recedes (no gradient, no shadow). */
+   the piano geography reads at a glance, yet never the largest light surface on the screen: the keyboard
+   is the fallback and recedes under the lanes (no gradient, no shadow). */
 .kb__key--white {
-  background: #23262d;
+  background: #1c1e24;
   border-right: 1px solid var(--bg);
   border-radius: 0 0 3px 3px;
   z-index: 1;
   transition: background 0.05s, box-shadow 0.05s;
 }
 .kb__key--white:hover {
-  background: #2b2e36;
+  background: #24272e;
 }
 .kb__key--white.kb__key--down {
   /* pressed = a cyan face with a flat 1 px rim (no halo; matches the drum-pad hit idiom), NOT a hard

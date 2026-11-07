@@ -42,7 +42,8 @@
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
-/* live monitor "on" dot — the only steady colour in the row, and only while armed: a solid dot */
+/* live monitor "on" dot — the only steady colour in the row (the live signal's green), and only while
+   live: a solid dot */
 .tgl__dot {
   width: 7px;
   height: 7px;
@@ -51,13 +52,9 @@
   background: var(--play);
 }
 /* GO LIVE at rest is chrome, so it spends no hue (colour is sound): the resting legend of every key,
-   a size up as the row's primary action; armed, the dot and the soft play legend say the input sounds
-   (`.on-green`). */
+   a size up as the row's primary action; live, the engaged recipe with the green dot (`.on-green`). */
 .tgl.live:not(.on-green) {
   color: var(--legend);
-}
-.tgl.live:not(.on-green):hover:not(:disabled) {
-  color: var(--play);
 }
 /* the PARAMS drawer-disclosure pill: the app's one caret (--caret-svg as a mask, so it takes the
    legend's colour in every state, as the lane's EDIT pill wears it), turned over while open */
@@ -175,9 +172,10 @@
 }
 
 /* ---- live and hot, readable from where the guitarist stands ----
-   INPUT LIVE is the one coloured word in a live slot's card: the badge language (a solid play dot before
-   a soft play legend, a medium weight, so it is read, not shouted) on the engaged face, a size up from
-   the row's other caps (the live-meter probe holds its floor: 12 px, 13 px on a large window). GO LIVE
+   INPUT LIVE is an engaged key: the lit warm-white legend on the face a step up, its one hue the solid
+   play dot before it (the live signal, as the meter along the card's foot), a medium weight, so it is
+   read, not shouted, a size up from the row's other caps (the live-meter probe holds its floor: 12 px,
+   13 px on a large window). GO LIVE
    holds INPUT LIVE's box (its dot, gap and word in the same type, unseen in the same grid cell), so going
    live moves nothing beside it in the row. */
 .tgl.live {
@@ -193,7 +191,7 @@
   font-weight: 500;
 }
 .tgl.live.on-green {
-  color: color-mix(in srgb, var(--play) 72%, var(--dim));
+  color: var(--engaged);
 }
 .tgl.live::after {
   content: 'INPUT LIVE';
@@ -208,7 +206,7 @@
   gap: 6px;
 }
 .tgl.live.on-green:hover:not(:disabled) {
-  color: var(--play);
+  color: var(--engaged);
   background: var(--key-on);
 }
 
