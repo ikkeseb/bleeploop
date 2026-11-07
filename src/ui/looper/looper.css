@@ -701,14 +701,6 @@
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
-/* a read-out at home (0.0 dB, the pan's C: `data-home`, Looper.tsx) keeps its width but hides until its
-   control is hovered or focused, as a hardware display shows a value while its knob is touched: the thumb
-   on its tick says it, so a value off home is the one figure in its column (the slots' rule,
-   plugin-controls.css) */
-.lp-lane__vol[data-home]:not(:hover, :focus-within) > .lp-vdb,
-.lp-lane__pan[data-home]:not(:hover, :focus-within) > .lp-pan__val {
-  visibility: hidden;
-}
 
 /* ---- SHORT regime: the splitter shrinks the lanes-area (the container), so these track it ---- */
 @container lp (max-height: 400px) {

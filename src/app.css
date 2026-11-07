@@ -39,8 +39,7 @@
      flat badge (STATUS D14: a carrier that survives greyscale and every colour-vision type), and CLIP is
      the one other filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em (state words 11 px),
      changing numbers in Geist Mono with tabular figures (a lane's dB and pan 12 px), the lane number and
-     the BPM in a light display weight; a mix read-out at home (0.0 dB, the pan's C) hides until its
-     control is hovered or focused, the thumb on its tick saying it. Radii come from one scale (--r-*). Motion: --motion on colour,
+     the BPM in a light display weight. Radii come from one scale (--r-*). Motion: --motion on colour,
      face, border and opacity of controls and chrome; a lane's SOUND state lands on the frame the feed
      switches it (a hardware REC LED), and reduced motion turns transitions off. --cyan survives for
      LISTEN, focus and key-down.

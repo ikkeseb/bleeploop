@@ -42,11 +42,6 @@
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
-/* at home (0.0 dB) the read-out keeps its width but hides until the control is touched: the thumb on the
-   unity tick says it (the lanes' rule, looper.css) */
-.slot__vol[data-home]:not(:hover, :focus-within) > .slot__vdb {
-  visibility: hidden;
-}
 /* live monitor "on" dot — the only steady colour in the row (the live signal's green), and only while
    live: a solid dot */
 .tgl__dot {

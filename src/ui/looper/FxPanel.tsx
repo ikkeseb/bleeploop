@@ -21,9 +21,9 @@ import './fxpanel.css';
  * A param's read-out, with its unit, formatted from the definition's `unit` and range (`fx-metadata.ts`):
  * Hz, kHz from 1000 (one decimal below 10 kHz); semitones signed (`+3 st`, `−3 st`, as the dB read-outs
  * sign); a unitless 0..1 amount in percent, as DUB FEEDBACK beside it; any other unitless value (the
- * filter's Reso) with two decimals.
+ * filter's Reso) with two decimals. IN FX's sends read through it too (`src/ui/transport/InputFx.tsx`).
  */
-function formatVal(v: number, def: FxParamDef): string {
+export function formatVal(v: number, def: FxParamDef): string {
   if (def.choices) return def.choices[Math.round(v)] ?? String(v);
   if (def.unit === 'Hz') {
     if (v < 1000) return `${Math.round(v)} Hz`;

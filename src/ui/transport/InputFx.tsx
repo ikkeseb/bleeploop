@@ -1,5 +1,6 @@
 import { For, Show } from 'solid-js';
 import type { InputSendId } from '../../platform';
+import { formatVal } from '../looper/FxPanel';
 import { engineInputSends, type InputSendParamDef } from '../state/engine-store';
 import { BarPopoverPanel, createBarPopover } from './BarPopover';
 import '../looper/fxpanel.css';
@@ -14,7 +15,8 @@ import './input-fx.css';
  * The command-bar pill opens its popover (`BarPopover.tsx`) with the three sends stacked as rows in FxPanel's
  * faces (the same key-face toggle, sliders and division select; the layout is `input-fx.css`'s); a send that
  * is off shows what it adds instead of its params. The pill reads engaged (warm white) while any send is
- * on. The ring's frequency reads in whole Hz with its unit.
+ * on. A param reads and speaks its value as the drawer's do (FxPanel.tsx `formatVal`): a level in percent,
+ * the ring's frequency in Hz or kHz.
  */
 
 const SENDS: readonly { id: InputSendId; label: string; blurb: string }[] = [
@@ -22,12 +24,6 @@ const SENDS: readonly { id: InputSendId; label: string; blurb: string }[] = [
   { id: 'reverb', label: 'Reverb', blurb: 'A room around the note' },
   { id: 'ring', label: 'Ring mod', blurb: 'Metallic, bell-like overtones' },
 ];
-
-function formatValue(v: number, def: InputSendParamDef): string {
-  if (def.choices) return def.choices[Math.round(v)] ?? String(v);
-  if (def.unit === 'Hz') return `${Math.round(v)} Hz`;
-  return v.toFixed(2);
-}
 
 function SendParam(props: { def: InputSendParamDef; send: string }) {
   const sends = engineInputSends;
@@ -47,6 +43,7 @@ function SendParam(props: { def: InputSendParamDef; send: string }) {
             step={props.def.step}
             value={value()}
             aria-label={name()}
+            aria-valuetext={formatVal(value(), props.def)}
             onInput={(e) => sends.setValue(props.def.key, Number(e.currentTarget.value))}
           />
         }
@@ -61,7 +58,7 @@ function SendParam(props: { def: InputSendParamDef; send: string }) {
         </select>
       </Show>
       <Show when={!props.def.choices}>
-        <span class="fxp-param__val">{formatValue(value(), props.def)}</span>
+        <span class="fxp-param__val">{formatVal(value(), props.def)}</span>
       </Show>
     </label>
   );

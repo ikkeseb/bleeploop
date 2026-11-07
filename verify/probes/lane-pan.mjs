@@ -18,8 +18,8 @@
  *   read-out, disabled on an EMPTY lane as the volume is;
  * - (e) autosave: a jam saved and clean saves again when only a lane's pan changes (its fingerprint
  *   holds the pan), once (the archive's pan: `engine-session`);
- * - (f) the mix row's read-outs at home (`+0.0 dB`, `C`) are hidden on every lane, their width kept, and
- *   show while their control is focused or hovered, and unfocused once the value leaves home.
+ * - (f) the mix row's read-outs always show (the owner's call): at home and untouched, the mouse parked
+ *   and nothing focused, every lane shows `+0.0 dB` and `C`, visible and with a width.
  *
  * Cannot see the native engine (the pan's sound, its glide: lf-engine `tests/pan.rs`), WebView2's pointer
  * handling or the feel of the detent: the owner's hand and ear judge that. Run: pnpm probe lane-pan
@@ -106,47 +106,16 @@ await probe(async ({ open }) => {
       'a range over -100..100',
     );
 
-    // (f) The mix row's read-outs at home: hidden (their width kept) until the control is hovered or
-    // focused; off home they show.
-    const volume = (i) => page.getByRole('slider', { name: `Track ${i + 1} volume`, exact: true });
+    // (f) The mix row's read-outs always show, at home too (the owner's call): untouched, every lane
+    // reads `+0.0 dB` and `C`.
     const dbOut = (i) => page.locator('.lp-lane').nth(i).locator('.lp-vdb');
     const seen = (el) => el.evaluate((n) => (getComputedStyle(n).visibility === 'visible' && n.getBoundingClientRect().width > 0 ? n.textContent : null));
-    const both = async (i) => [await seen(dbOut(i)), await seen(readout(i))];
     await blur();
     await page.mouse.move(0, 0);
     const atHome = [];
-    for (let i = 0; i < 5; i++) atHome.push(await both(i));
-    await pan(0).focus();
-    const panFocused = await seen(readout(0));
-    await page.keyboard.press('ArrowRight');
-    await engineHas(0, 0.01);
-    await blur();
-    const panOff = await seen(readout(0));
-    await pan(0).focus();
-    await page.keyboard.press('0');
-    await engineHas(0, 0);
-    await blur();
-    const panBack = await seen(readout(0));
-    await pan(0).hover();
-    const panHovered = await seen(readout(0));
-    await page.mouse.move(0, 0);
-    await volume(0).focus();
-    const volFocused = await seen(dbOut(0));
-    await page.keyboard.press('ArrowRight');
-    await blur();
-    await page.waitForTimeout(150);
-    const volOff = await seen(dbOut(0));
-    await volume(0).focus();
-    await page.keyboard.press('ArrowLeft');
-    await blur();
-    await page.waitForTimeout(150);
-    const volBack = await seen(dbOut(0));
-    await clearSent();
-    console.log('(f) read-outs at home', JSON.stringify({ atHome, panFocused, panOff, panBack, panHovered, volFocused, volOff, volBack }));
-    assert.deepEqual(atHome, Array(5).fill([null, null]), 'at home (0.0 dB, C) no lane shows its read-outs, the EMPTY lanes included');
-    assert.deepEqual([panFocused, panHovered, volFocused], ['C', 'C', '+0.0 dB'], 'a focused or hovered control shows its read-out at home');
-    assert.deepEqual([panOff, volOff], ['R 1', '+0.4 dB'], 'off home a read-out shows unfocused');
-    assert.deepEqual([panBack, volBack], [null, null], 'back home it hides again');
+    for (let i = 0; i < 5; i++) atHome.push([await seen(dbOut(i)), await seen(readout(i))]);
+    console.log('(f) read-outs at home', JSON.stringify(atHome));
+    assert.deepEqual(atHome, Array(5).fill(['+0.0 dB', 'C']), 'at home and untouched every lane shows its read-outs, the EMPTY lanes included');
 
     // (a) A drag to the right sends its pan; the read-out and the valuetext follow.
     const box = await pan(0).boundingBox();
