@@ -17,7 +17,9 @@
  * - (d) accessibility: each lane's pan is a slider named `Track N pan` whose `aria-valuetext` is its
  *   read-out, disabled on an EMPTY lane as the volume is;
  * - (e) autosave: a jam saved and clean saves again when only a lane's pan changes (its fingerprint
- *   holds the pan), once (the archive's pan: `engine-session`).
+ *   holds the pan), once (the archive's pan: `engine-session`);
+ * - (f) the mix row's read-outs always show (the owner's call): at home and untouched, the mouse parked
+ *   and nothing focused, every lane shows `+0.0 dB` and `C`, visible and with a width.
  *
  * Cannot see the native engine (the pan's sound, its glide: lf-engine `tests/pan.rs`), WebView2's pointer
  * handling or the feel of the detent: the owner's hand and ear judge that. Run: pnpm probe lane-pan
@@ -103,6 +105,17 @@ await probe(async ({ open }) => {
       ['-100', '100', '1', 'range'],
       'a range over -100..100',
     );
+
+    // (f) The mix row's read-outs always show, at home too (the owner's call): untouched, every lane
+    // reads `+0.0 dB` and `C`.
+    const dbOut = (i) => page.locator('.lp-lane').nth(i).locator('.lp-vdb');
+    const seen = (el) => el.evaluate((n) => (getComputedStyle(n).visibility === 'visible' && n.getBoundingClientRect().width > 0 ? n.textContent : null));
+    await blur();
+    await page.mouse.move(0, 0);
+    const atHome = [];
+    for (let i = 0; i < 5; i++) atHome.push([await seen(dbOut(i)), await seen(readout(i))]);
+    console.log('(f) read-outs at home', JSON.stringify(atHome));
+    assert.deepEqual(atHome, Array(5).fill(['+0.0 dB', 'C']), 'at home and untouched every lane shows its read-outs, the EMPTY lanes included');
 
     // (a) A drag to the right sends its pan; the read-out and the valuetext follow.
     const box = await pan(0).boundingBox();

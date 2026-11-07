@@ -23,8 +23,10 @@
  * EDIT enabled) with FILTER and DELAY engaged and the drawer closed, lane 3 OVERDUB in flight (selected,
  * "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about -12 dBFS; its right clusters keep five
  * fixed columns (FX, MUTE, REV, UNDO, EDIT) at one x on every lane, and its PLAY/STOP/NOW pills end at
- * one x whichever word they show; in 14-modes-on, FIXED greyed out wears the disabled face, no lit
- * legend. 13b-jam-edit is the same jam with lane
+ * one x whichever word they show, lane 3's number alone lit (warm-white, a weight up; the numbers 1-5),
+ * no edge on its row and the selected slot under a card's top light; 13c-jam-forced-colours is the same
+ * under forced colours, one system outline on the selected lane and slot; in 14-modes-on, FIXED greyed
+ * out wears the disabled face, no lit legend. 13b-jam-edit is the same jam with lane
  * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
@@ -49,7 +51,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = process.env.CS_VIEWPORTS ? process.env.CS_VIEWPORTS.split(',').map((v) => v.split('x').map(Number)) : [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13b-jam-edit', '14-modes-on'];
+  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -140,11 +142,67 @@ await probe(async ({ browser, open }) => {
         shots.push({ file, viewport: `${width}x${height}`, kbd, scene: name });
       };
       const tag = `${width}x${height}-${kbd}`;
+      /** The BPM numeral's colour, with --dim resolved in its place and whether the tempo is locked. */
+      const bpmLook = () => page.evaluate(() => {
+        const el = document.querySelector('.transport__bpm-num');
+        if (!el) return { shown: false };
+        const t = el.parentElement.appendChild(document.createElement('span'));
+        t.style.color = 'var(--dim)';
+        const dim = getComputedStyle(t).color;
+        t.remove();
+        return { shown: true, text: el.textContent, color: getComputedStyle(el).color, dim, locked: !!el.closest('.transport__bpm-group--locked') };
+      });
+      /** Every `sel`'s font size against 11 px × the --ui its element resolves. */
+      const sized = (sel) => page.evaluate((sel) => [...document.querySelectorAll(sel)].map((el) => {
+        const cs = getComputedStyle(el), size = parseFloat(cs.fontSize), want = 11 * parseFloat(cs.getPropertyValue('--ui'));
+        return { text: el.textContent, size, want, ok: Math.abs(size - want) < 0.01 };
+      }), sel);
+      /** Each param read-out under `root` against the unit its definition implies, and whether it fits its
+       * box. `defs` maps a slider's or select's accessible name to its definition; DUB FEEDBACK is not one. */
+      const readouts = (root, defs) => page.evaluate(([root, defs]) => [...document.querySelectorAll(`${root} .fxp-param:not(.fxp-dub .fxp-param)`)].map((p) => {
+        const control = p.querySelector('.fxp-param__range, .fxp-param__select');
+        const val = p.querySelector('.fxp-param__val');
+        // an auto-sized read-out never overflows itself, so it must also sit inside its param, clear of its label,
+        // and its param inside its group (the drawer's effect, the IN FX popover)
+        const outside = (el, box) => { const a = el.getBoundingClientRect(), b = box.getBoundingClientRect(); return a.left < b.left - 0.5 || a.right > b.right + 0.5 ? { el: [a.left, a.right], box: [b.left, b.right] } : null; };
+        const overlaps = (a, b) => { if (!a) return false; const x = a.getBoundingClientRect(), y = b.getBoundingClientRect(); return x.right > y.left + 0.5 && y.right > x.left + 0.5 && x.bottom > y.top + 0.5 && y.bottom > x.top + 0.5; };
+        const name = control?.getAttribute('aria-label');
+        const def = defs[name];
+        if (!def) return { name, problem: 'no definition for this control' };
+        if (def.choices) {
+          const word = control.selectedOptions[0]?.textContent;
+          return { name, text: word, problem: val ? 'a choice wears a read-out' : def.choices.includes(word) ? null : 'not a choice word' };
+        }
+        const text = val?.textContent ?? '';
+        const unit = def.unit === 'Hz' ? /^(?:\d{1,3} Hz|\d\.\d kHz|\d{2,} kHz)$/
+          : def.unit === 'st' ? /^(?:0|[+−][1-9]\d*) st$/
+          : def.unit ? null
+          : def.min >= 0 && def.max <= 1 ? /^\d{1,3} %$/
+          : /^-?\d+\.\d\d$/;
+        const problem = !val ? 'no read-out'
+          : !unit ? `no rule for unit ${def.unit}`
+          : !unit.test(text) ? 'not in its unit'
+          : control.getAttribute('aria-valuetext') !== text ? `speaks ${control.getAttribute('aria-valuetext')}`
+          : val.scrollWidth > val.clientWidth + 0.5 ? `overflows (${val.scrollWidth} > ${val.clientWidth})`
+          : outside(val, p) ? `spills out of its param (${JSON.stringify(outside(val, p))})`
+          : outside(p, p.closest('.fxp-group, .infx-popover')) ? `its param spills out of its group (${JSON.stringify(outside(p, p.closest('.fxp-group, .infx-popover')))})`
+          : overlaps(p.querySelector('.fxp-param__label'), val) ? 'runs into its label'
+          : null;
+        return { name, text, problem };
+      }), [root, defs]);
 
       scene = '1-empty';
       await reset();
       await page.waitForTimeout(200);
       await shoot(scene);
+      // The tempo is free before a loop: its numeral is not dimmed (13-jam holds the locked side).
+      const freeBpm = await bpmLook();
+      if (!freeBpm.shown || freeBpm.locked || freeBpm.color === freeBpm.dim) fail(`${tag} ${scene}: the free BPM numeral reads ${JSON.stringify(freeBpm)} (not locked, not --dim)`);
+      // The piano ribbon's octave labels read 11 px at the chrome's size step.
+      if (kbd === 'bottom') {
+        const labels = await sized('.kb__label');
+        if (!labels.length || labels.some((l) => !l.ok)) fail(`${tag} ${scene}: the keyboard's octave labels are not 11 px × --ui: ${JSON.stringify(labels)}`);
+      }
 
       // The first take counts in one bar (4 beats), then records from the counted downbeat.
       scene = '4-count-in';
@@ -258,6 +316,27 @@ await probe(async ({ browser, open }) => {
       for (const [name, w] of allFx.ranges) if (!(w >= 91)) fail(`${tag} ${scene}: ${name} is ${w} px wide (at least 91 px)`);
       const hidden = allFx.inside.flatMap((ok, i) => (ok ? [] : [i + 1]));
       if (allFx.scrollTop !== 0 || hidden.length) fail(`${tag} ${scene}: lane ${hidden.join(', ') || '(none)'} not wholly inside the lane stack (scrollTop ${allFx.scrollTop}; lanes ${JSON.stringify(allFx.lanes)} in ${allFx.stack} px)`);
+      // Every param read-out carries the unit its definition implies (FxPanel.tsx `formatVal`), speaks it,
+      // and fits its box: at the defaults shot, then at each param's widest read-out.
+      const drawerDefs = await page.evaluate(() => import('/src/ui/state/fx-metadata.ts').then(({ FX_META, FX_PARAM_DEFS }) =>
+        Object.fromEntries(FX_META.flatMap((m) => FX_PARAM_DEFS[m.kind].map((d) => [`Track 1 ${m.label.toLowerCase()} ${d.label.toLowerCase()}`, d])))));
+      const DRAWER_WIDEST = [[0, 'cutoff', 9900], [0, 'q', 14], [1, 'semitones', -12], [3, 'feedback', 0.95], [3, 'mix', 1], [4, 'amount', 1]];
+      const drawerVals = { shot: await readouts('.lp-drawer', drawerDefs) };
+      const dubVal = await page.locator('.lp-drawer .fxp-dub .fxp-param__val').evaluate((el) => ({ text: el.textContent, fits: el.scrollWidth <= el.clientWidth + 0.5 }));
+      const setFx = (values) => page.evaluate(async (values) => {
+        const { looper } = await import('/src/ui/state/audio.ts');
+        for (const [fx, key, v] of values) looper.setFxParam(0, fx, key, v);
+      }, values);
+      await setFx(DRAWER_WIDEST);
+      await page.waitForTimeout(200);
+      drawerVals.widest = await readouts('.lp-drawer', drawerDefs);
+      await setFx(DRAWER_WIDEST.map(([fx, key]) => [fx, key, Object.values(drawerDefs).find((d) => d.key === key).default]));
+      console.log(JSON.stringify({ tag, scene, drawerVals, dubVal }));
+      for (const [when, vals] of Object.entries(drawerVals)) {
+        if (vals.length !== 8) fail(`${tag} ${scene}: ${vals.length} FX params in the drawer (${when}), not 8`);
+        for (const v of vals) if (v.problem) fail(`${tag} ${scene}: ${v.name} reads ${JSON.stringify(v.text)} (${when}): ${v.problem}`);
+      }
+      if (!/^(?:REPLACE|\d{1,3} %)$/.test(dubVal.text) || !dubVal.fits) fail(`${tag} ${scene}: DUB FEEDBACK reads ${JSON.stringify(dubVal)}`);
       for (const key of fxKeys) await key.click();
       await page.waitForFunction(() => !document.querySelector('.lp-drawer .fxp-params'));
       await emit(loopFrame({ count: 5, playing: [] }));
@@ -373,6 +452,34 @@ await probe(async ({ browser, open }) => {
       await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
+      // The sends' read-outs follow the drawer's units (InputFx.tsx shares FxPanel.tsx `formatVal`), at the
+      // defaults shot and at their widest.
+      const sendDefs = await page.evaluate(() => import('/src/ui/state/engine-store.ts').then(({ engineInputSends }) => {
+        const sends = { echo: 'Echo', reverb: 'Reverb', ring: 'Ring mod' };
+        return Object.fromEntries(engineInputSends.params.map((d) => [`${sends[d.send]} ${d.label.toLowerCase()}`, d]));
+      }));
+      const SEND_WIDEST = [['echoFeedback', 0.95], ['echoLevel', 1], ['reverbLevel', 1], ['ringFreq', 1500], ['ringLevel', 1]];
+      const setSends = (values) => page.evaluate(async (values) => {
+        const { engineInputSends } = await import('/src/ui/state/engine-store.ts');
+        for (const [key, v] of values) engineInputSends.setValue(key, v);
+      }, values);
+      const sendVals = { shot: await readouts('.infx', sendDefs) };
+      await setSends(SEND_WIDEST);
+      await page.waitForTimeout(200);
+      sendVals.widest = await readouts('.infx', sendDefs);
+      await setSends(SEND_WIDEST.map(([key]) => [key, Object.values(sendDefs).find((d) => d.key === key).default]));
+      console.log(JSON.stringify({ tag, scene, sendVals }));
+      for (const [when, vals] of Object.entries(sendVals)) {
+        if (vals.length !== 6) fail(`${tag} ${scene}: ${vals.length} send params in IN FX (${when}), not 6`);
+        for (const v of vals) if (v.problem) fail(`${tag} ${scene}: ${v.name} reads ${JSON.stringify(v.text)} (${when}): ${v.problem}`);
+      }
+      // The drum ribbon's pad keys read 11 px at the chrome's size step (no scene shoots the drum synth).
+      if (kbd === 'bottom') {
+        await page.evaluate(() => window.__lf.selectSynth(window.__lf.activeSlot(), 'drum'));
+        await page.waitForSelector('.kb__pads');
+        const padKeys = await sized('.kb__pad-key');
+        if (padKeys.length !== 16 || padKeys.some((l) => !l.ok)) fail(`${tag} ${scene}: the drum pads' key labels are not 11 px × --ui: ${JSON.stringify(padKeys)}`);
+      }
       await context.close();
 
       scene = '8-native-first-launch';
@@ -483,6 +590,53 @@ await probe(async ({ browser, open }) => {
         if (!(pairSpread < 0.5)) fail(`${tag} ${scene}: the PLAY/STOP/NOW pills (${jam.pairWords.join(', ')}) end ${pairSpread.toFixed(1)} px apart`);
         if (jam.lane2Fx.join() !== '0,3') fail(`${tag} ${scene}: lane 2 has FX ${jam.lane2Fx.join(', ') || 'none'} engaged, not filter and delay`);
         if (jam.drawerOpen) fail(`${tag} ${scene}: the FX drawer is open`);
+
+        // The selection: lane 3's number lights warm-white a weight up and every other rests --faint and
+        // light whatever its state (playing, muted, fading); no edge on the row, and the selected slot
+        // keeps a card's top light. Forced colours flatten that, so there one system outline marks the
+        // lane (on its overlay, over the glass) and the slot.
+        const sel = await page.evaluate(() => {
+          const lanes = [...document.querySelectorAll('.lp-lane')];
+          const look = (el) => { const cs = getComputedStyle(el); return `${cs.color} ${cs.fontWeight}`; };
+          const shadow = (q) => { const el = document.querySelector(q); return el ? getComputedStyle(el).boxShadow : null; };
+          const edges = (el, pseudo) => { const cs = getComputedStyle(el, pseudo); return `${cs.borderTopWidth} ${cs.borderRightWidth} ${cs.borderBottomWidth} ${cs.borderLeftWidth} ${cs.outlineStyle}`; };
+          return {
+            nums: lanes.map((l) => look(l.querySelector('.lp-lane__num'))),
+            labels: lanes.map((l) => l.querySelector('.lp-lane__num').textContent),
+            edge: getComputedStyle(lanes[2], '::after').content,
+            // The row and its overlay draw no border on any side (no edge, no rail) or outline; its one light is
+            // any row's divider.
+            borders: [edges(lanes[2]), edges(lanes[2], '::after')],
+            rowShadow: [getComputedStyle(lanes[2]).boxShadow, getComputedStyle(lanes[1]).boxShadow],
+            slotTop: [shadow('.slot--active'), shadow('.slot:not(.slot--active)')],
+          };
+        });
+        const LIT = 'rgb(244, 239, 230) 500', REST = 'rgb(125, 129, 141) 300';
+        const nums = [REST, REST, LIT, REST, REST];
+        if (sel.nums.join() !== nums.join()) fail(`${tag} ${scene}: the lane numbers read ${sel.nums.join(' | ')}, not ${nums.join(' | ')}`);
+        if (sel.labels.join() !== '1,2,3,4,5') fail(`${tag} ${scene}: the lane numbers are ${sel.labels.join(', ')}, not 1-5`);
+        if (sel.edge !== 'none') fail(`${tag} ${scene}: the selected lane draws an edge (::after ${sel.edge})`);
+        if (sel.borders.some((b) => b !== '0px 0px 0px 0px none')) fail(`${tag} ${scene}: the selected lane draws an edge (row, ::after: ${sel.borders.join(' | ')})`);
+        if (sel.rowShadow[0] !== sel.rowShadow[1]) fail(`${tag} ${scene}: the selected lane's shadow (${sel.rowShadow[0]}) is not another row's (${sel.rowShadow[1]})`);
+        if (sel.slotTop[0] !== sel.slotTop[1] || !sel.slotTop[0] || sel.slotTop[0] === 'none') fail(`${tag} ${scene}: the selected slot's top light (${sel.slotTop[0]}) is not a card's (${sel.slotTop[1]}), or a card has none`);
+        // The tempo is locked under a loop: its numeral reads --dim (1-empty holds the free side).
+        const lockedBpm = await bpmLook();
+        if (!lockedBpm.locked || lockedBpm.color !== lockedBpm.dim) fail(`${tag} ${scene}: the locked BPM numeral reads ${JSON.stringify(lockedBpm)} (locked, --dim)`);
+        scene = '13c-jam-forced-colours';
+        await page.emulateMedia({ forcedColors: 'active' });
+        await page.waitForTimeout(150);
+        // The lane's outline is on a generated overlay over the whole row; another lane has none.
+        const forced = await page.evaluate(() => {
+          const o = (el, pseudo) => {
+            const cs = getComputedStyle(el, pseudo);
+            return { content: cs.content, position: cs.position, inset: `${cs.top} ${cs.right} ${cs.bottom} ${cs.left}`, outline: `${cs.outlineWidth} ${cs.outlineStyle}`, z: Number(cs.zIndex) };
+          };
+          return { well: Number(getComputedStyle(document.querySelector('.lp-lane.is-selected .lp-lane__well')).zIndex), lane: o(document.querySelector('.lp-lane.is-selected'), '::after'), other: o(document.querySelector('.lp-lane:not(.is-selected)'), '::after'), slot: o(document.querySelector('.slot--active')) };
+        });
+        await shoot(scene);
+        await page.emulateMedia({ forcedColors: 'none' });
+        const laneOk = forced.lane.content !== 'none' && forced.lane.position === 'absolute' && forced.lane.inset === '0px 0px 0px 0px' && forced.lane.outline === '2px solid' && forced.lane.z > forced.well;
+        if (!laneOk || !forced.other.outline.endsWith(' none') || forced.slot.outline !== '2px solid') fail(`${tag} ${scene}: forced colours outline the selected lane ${JSON.stringify(forced.lane)}, another ${forced.other.outline}, the selected slot ${forced.slot.outline} (an absolute overlay at 0px with 2px solid above the well's z-index ${forced.well}, none, 2px solid)`);
 
         // The same jam with lane 2's EDIT menu open over the lanes.
         scene = '13b-jam-edit';

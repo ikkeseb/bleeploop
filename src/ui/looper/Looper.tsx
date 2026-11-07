@@ -14,16 +14,16 @@ import './looper.css';
 /**
  * The looper UI: five full-width horizontal LANES stacked in the looper zone (composition binding:
  * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
- * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
+ * (the lane number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
  * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of five
  * fixed pill columns, FX · MUTE · REV · UNDO · EDIT (COPY, WIDE and TRIM), over a mix row (a horizontal
  * volume slider and the pan).
  *
- * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
- * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
- * State colour is rationed to the lane's state token `--sc` (identity word, core ring/glow, left-edge
- * bleed); the waveform is coloured independently by waveform.ts via the global --rec/--dub/--play
- * tokens.
+ * A presentation layer: the audio engine and the per-track state machine live elsewhere, and the
+ * waveform.ts rAF renderer draws each <canvas> by reading non-reactive looper getters.
+ * State colour is rationed to the lane's state token `--sc` (the state word with its LED, the core's
+ * ring); the waveform is coloured independently by waveform.ts via the global --rec/--dub/--play
+ * tokens. The selection is chrome: the lane number lights warm-white (looper.css).
  */
 
 /** The lane identity-box word for each `LaneWord` (a rolling RETAKE's TAKE adds its pass count). */
@@ -397,7 +397,7 @@ function TrackLane(props: {
       <div class="lp-lane__left">
         <div class="lp-lane__idbox">
           <span class="lp-lane__head">
-            <span class="lp-lane__num">{String(props.index + 1).padStart(2, '0')}</span>
+            <span class="lp-lane__num">{String(props.index + 1)}</span>
             <Show when={source()}>
               <span class="lp-lane__src" title="What a take on this lane hears: the slots with live input">
                 {source()}

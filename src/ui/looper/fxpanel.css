@@ -143,6 +143,7 @@
   font-variant-numeric: tabular-nums;
   min-width: 30px;
   text-align: right;
+  white-space: nowrap; /* a value and its unit stay one word (`1.2 kHz`) */
 }
 
 /* the param range wears the app-wide `.lf-range` skin (app.css); no --fill = a plain track */

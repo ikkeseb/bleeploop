@@ -18,8 +18,8 @@
      floating panels' --panel-drop excepted), backdrop blur or glow. The main screen carries NO halo of any
      kind: a lit LED is a solid dot, a lit control a lit legend.
      Colour is spent only on sound, and a lane spends it in three places: its wave, its state word with
-     its dot, and its main button's ring (a flat filled disc while it captures). A selection is a
-     warm-white hairline and one tone up.
+     its dot, and its main button's ring (a flat filled disc while it captures). A selection is its
+     identity glyph lit warm-white and its body one tone up.
      KEYS — every pressable word (the command bar's toggles and steppers, the slot's keys and pickers, a
      lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family: a caps legend on a very
      quiet face (--key: a tone off its surface, no border, so a key reads as pressable from the chair), the same height and radius as its
@@ -49,11 +49,12 @@
      the pane a hairline (--glass-line) divides the rows; only the pane's outer corners round (--r-well),
      its one light is a 1 px inner top highlight (--glass-top) and a barely-there sheen (--glass-sheen):
      no reflection, no glow, no motion. Where the FX drawer opens the pane parts, each part rounded, and
-     the drawer sits on the body between them. A selection lights its edge, never a box or a rail: one
-     warm-white hairline (--sel-line) along the selected row's top and bottom (under its drawer while one is
-     open) across head, glass and mix,
-     its number lit --engaged, its body a quiet tone up (--surf-sel; the glass stays --glass); a selected
-     slot card lifts its tone under the same top hairline. A wave is drawn
+     the drawer sits on the body between them. A selection lights its identity glyph, never an edge, a
+     box, a rail, a hue or a glow: every lane number rests --faint in a light weight whatever the lane's
+     state, and the selected lane's turns --engaged a weight up, as a selected slot's letter does; the
+     selected row's body (and its open drawer's) and a selected slot card lift one quiet tone (--surf-sel;
+     the glass stays --glass). Every row draws the loop's bar and beat lines under its wave; the bar
+     numbers stand once, along the pane's top row, and not on a one-bar loop. A wave is drawn
      as sound (`looper/waveform.ts`): one smooth anti-aliased filled body, no rim, in its state colour
      while it sounds; stopped, a solid grey body; muted, a darker grey body under a crisp grey contour;
      fading, the take's grey shape with the sounding colour, a step down, sinking into it on the
@@ -75,7 +76,6 @@
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: var(--surf-1); /* card fill: flat, one tone over the ground */
   --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
-  --sel-line: rgba(244, 239, 230, 0.38); /* the selection's lit edge (a lane row's top and bottom, a slot's top): warm white, no hue */
   --surf-sel: #17191f; /* the selected lane's body and slot card: one tone over --surf-1, --faint still 4.5:1 on it */
   --r-sm: 6px; /* radius: a control 24 px tall or less (lane keys, steppers, cue, badges) */
   --r-ctl: 8px; /* radius: a control 26-34 px tall (bar toggles, selects, slot and drawer keys) */
@@ -572,12 +572,11 @@ option {
 .slot:hover {
   background: #14161c;
 }
-/* ACTIVE = the selection recipe (the header's THE DISPLAY): the card a tone up under one warm-white top
-   hairline, never a box (selection is chrome, not sound, so it carries no hue) */
+/* ACTIVE = the selection recipe (the header's THE DISPLAY): the letter lights (.slot__id below) and the
+   card lifts a tone under its usual top light, never a box (selection is chrome, not sound, so no hue) */
 .slot--active,
 .slot--active:hover {
   background: var(--surf-sel);
-  box-shadow: inset 0 1px 0 var(--sel-line);
 }
 /* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
    EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
@@ -830,17 +829,26 @@ option {
 }
 
 /* FORCED COLORS (Windows high contrast): the engaged recipe (a lit legend on a face a step up) and the
-   selected slot's tone and top hairline are colours and box-shadows, which forced colours flatten, so
-   on and off would look alike. One system outline marks every engaged key and the selected slot there.
-   (The selected lane draws real borders on its ::after, which survive.) */
+   selection's (a lit number or letter, a tone up) are colours, which forced colours flatten, so on and
+   off would look alike. One system outline marks every engaged key, the selected slot and the selected
+   lane there; the lane's sits on an overlay, since its glass well (a raised layer) would cover the row's
+   own outline across the wave column. */
 @media (forced-colors: active) {
   .lp-pb.is-on,
   .transport__tgl.is-on,
   .tgl.on-green,
   .fxp-mod__toggle--on,
   .audio-settings__chip.is-on,
-  .slot--active {
+  .slot--active,
+  .lp-lane.is-selected::after {
     outline: 2px solid Highlight;
     outline-offset: -2px;
+  }
+  .lp-lane.is-selected::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
   }
 }

@@ -17,10 +17,25 @@ import './fxpanel.css';
  * an overdub keeps of the layers under it (`lf_engine::looper`), so a heading instead of a bypass key.
  */
 
-function formatVal(v: number, def: FxParamDef): string {
+/**
+ * A param's read-out, with its unit, formatted from the definition's `unit` and range (`fx-metadata.ts`):
+ * Hz, kHz from 1000 (one decimal below 10 kHz); semitones signed (`+3 st`, `−3 st`, as the dB read-outs
+ * sign); a unitless 0..1 amount in percent, as DUB FEEDBACK beside it; any other unitless value (the
+ * filter's Reso) with two decimals. IN FX's sends read through it too (`src/ui/transport/InputFx.tsx`).
+ */
+export function formatVal(v: number, def: FxParamDef): string {
   if (def.choices) return def.choices[Math.round(v)] ?? String(v);
-  if (def.unit === 'Hz') return `${Math.round(v)}`;
-  if (def.unit === 'st') return `${v > 0 ? '+' : ''}${Math.round(v)}`;
+  if (def.unit === 'Hz') {
+    if (v < 1000) return `${Math.round(v)} Hz`;
+    const k = v / 1000;
+    return `${k < 9.95 ? k.toFixed(1) : Math.round(k)} kHz`;
+  }
+  if (def.unit === 'st') {
+    const n = Math.round(v);
+    return `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n)} st`;
+  }
+  if (def.unit) return `${def.step >= 1 ? Math.round(v) : v.toFixed(2)} ${def.unit}`;
+  if (def.min >= 0 && def.max <= 1) return `${Math.round(v * 100)} %`;
   if (def.step >= 1) return `${Math.round(v)}`;
   return v.toFixed(2);
 }
@@ -50,6 +65,7 @@ function ParamControl(props: { index: number; fxIndex: number; fx: string; def: 
             step={props.def.step}
             value={value()}
             aria-label={name}
+            aria-valuetext={formatVal(value(), props.def)}
             onInput={(e) => set(Number(e.currentTarget.value))}
             onPointerDown={gesture?.onPointerDown}
             onLostPointerCapture={gesture?.onLostPointerCapture}

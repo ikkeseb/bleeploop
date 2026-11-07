@@ -177,7 +177,10 @@ await probe(async ({ open }) => {
   assert.equal(await lanes.nth(0).locator('.lp-lane__state').textContent(), 'PLAYING');
   const readout = (await page.locator('.transport__loop-v').textContent()).replace(/\s+/g, ' ').trim();
   console.log('loop readout', readout);
-  assert.match(readout, /^1 BAR · 2\.0 s$/);
+  assert.match(readout, /^1 BAR$/, 'LOOP reads the bars only');
+  const loopTitle = await page.locator('.transport__loop').getAttribute('title');
+  console.log('loop title', loopTitle);
+  assert.equal(loopTitle, 'Master loop length: 1 bar, 2.0 s', "the seconds live in the read-out's title");
   const dial = page.locator('.transport__dial circle[stroke-dashoffset]');
   const offsetAt = async () => Number(await dial.getAttribute('stroke-dashoffset'));
   const first = await offsetAt();

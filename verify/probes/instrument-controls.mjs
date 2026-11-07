@@ -6,7 +6,8 @@
  * another program holds says so, and LEARN is enabled only while a port is open; both empty native slots
  * show the install hint (in sans, as prose), the keyboard's hide cap reads the one close glyph ✕, the keyboard
  * octave survives a placement remount, PARAMS wears the shared SVG caret (turned over open), the slot volume (a
- * plugin's output gain) honors the unity detent under keyboard steps and slider input, and with one
+ * plugin's output gain) honors the unity detent under keyboard steps and slider input and shows its dB
+ * read-out at home (0.0 dB) untouched (the owner's call), and with one
  * plugin file in both slots, its editor belongs to the slot whose load came first (D29): the later loader's
  * EDITOR is refused though it presses first and the owner never opened one (no open reaches the host),
  * the owner slot dropping or reloading that file while the other slot keeps it refuses both slots' EDITOR
@@ -134,6 +135,14 @@ await probe(async ({ open }) => {
   const output = page.getByRole('slider', { name: 'Volume for slot A', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
   await page.waitForFunction(() => window.__gain() === 1);
+  // The read-out always shows (the owner's call): at home (0.0 dB) and untouched it reads `+0.0 dB`.
+  const vdb = page.locator('.slot__vol', { has: output }).locator('.slot__vdb');
+  await page.mouse.move(1, 1);
+  const atHome = await vdb.evaluate((el) => ({ text: el.textContent, visibility: getComputedStyle(el).visibility, width: el.getBoundingClientRect().width }));
+  assert.ok(
+    atHome.text === '+0.0 dB' && atHome.visibility === 'visible' && atHome.width > 0,
+    `the read-out shows +0.0 dB at home while untouched: ${JSON.stringify(atHome)}`,
+  );
   await output.focus();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');

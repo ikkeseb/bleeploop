@@ -486,9 +486,18 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </button>
       </div>
 
-      {/* Loop readout — the mini ring-dial (progress = loopPhase) + N BARS · S.S s. The arc is green only
-          while a lane sounds or records (`anyLive`); over a stopped loop it is tone (transport.css). */}
-      <div class="transport__loop" title="Master loop length">
+      {/* Loop readout — the mini ring-dial (progress = loopPhase) + N BARS, the unit the player counts in.
+          The seconds follow from bars and tempo, so they live in the title (they matter only near the 60 s
+          buffer). The arc is green only while a lane sounds or records (`anyLive`); over a stopped loop it
+          is tone (transport.css). */}
+      <div
+        class="transport__loop"
+        title={
+          hasMaster()
+            ? `Master loop length: ${loopBars()} ${loopBars() === 1 ? 'bar' : 'bars'}, ${loopSecs().toFixed(1)} s`
+            : 'Master loop length'
+        }
+      >
         <svg class="transport__dial" viewBox="0 0 40 40" aria-hidden="true">
           <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(148,168,215,.15)" stroke-width="3" />
           <Show when={hasMaster()}>
@@ -517,11 +526,11 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
               60 s buffer), so the window keeps one width from the empty "—" on and the controls beside
               it never move when a take lands. */}
           <span class="transport__loop-fit" aria-hidden="true">
-            000 BARS <small>· 00.0 s</small>
+            000 BARS
           </span>
           <span class="transport__loop-v">
             <Show when={hasMaster()} fallback="—">
-              {loopBars()} {loopBars() === 1 ? 'BAR' : 'BARS'} <small>· {loopSecs().toFixed(1)} s</small>
+              {loopBars()} {loopBars() === 1 ? 'BAR' : 'BARS'}
             </Show>
           </span>
         </div>

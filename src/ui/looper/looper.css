@@ -15,7 +15,7 @@
   flex-direction: column;
   min-height: 0;
   position: relative;
-  padding: 1px 1px 0; /* hairline so the selected lane's edge isn't clipped by the zone edge */
+  padding: 1px 1px 0; /* the body's 1 px inset from the zone's edge */
   overflow: hidden; /* the lanes stay inside the looper zone (the parent .zone also clips) */
   /* The lanes-area size container. The lane stack is its only in-flow child and fills its content box,
      so `lp`'s height and cqh ARE the lane stack's; it sits here, not on the stack, so a query can style
@@ -93,9 +93,6 @@
 .lp-lane[data-muted][data-state='play'] .lp-core::before {
   opacity: 0.35;
 }
-.lp-lane[data-muted][data-state='play'] .lp-lane__num {
-  color: var(--dim);
-}
 /* A fade or a pending loop-end stop is chrome, not a sound (the lane still plays green): the word and
    its lit LED, NOW and the well's word light warm-white, NOW on the engaged face */
 .lp-lane.is-stopping .lp-lane__state,
@@ -107,33 +104,16 @@
   background: var(--key-on);
 }
 
-/* Keyboard/MIDI-selected lane — its edge lights, never a box or a rail (owner, 2026-09-23; the app.css
-   header's THE DISPLAY): one warm-white hairline along its top AND its bottom across head, glass and mix,
-   so the row reads as picked in every state (empty included) without competing with the state colour
-   (--sc); its number lights warm-white (engaged chrome), and its body lifts one quiet tone. The glass
-   strip does not lift: a lighter well read as a state. A live capture keeps the same row, its colour is
-   in the wave, the word and the core. Its FX drawer open under it shares the lifted body, and the bottom
-   line moves to the drawer's foot, so lane and drawer read as one picked block. */
+/* Keyboard/MIDI-selected lane — its number lights, as a selected slot's letter does (the app.css header's
+   THE DISPLAY): never a box, a rail, a hue or a glow. The number turns --engaged and a weight up
+   (.lp-lane__num below), so the row reads as picked in every state (empty included) without competing
+   with the state colour (--sc), and its body lifts one quiet tone. The glass strip does not lift: a
+   lighter well read as a state. Its FX drawer open under it shares the lifted body, so lane and drawer
+   read as one picked block. Forced colours flatten all of it: the app.css forced-colours block outlines
+   the row there. */
 .lp-lane.is-selected.is-selected,
 .lp-lane.is-selected + .lp-drawer {
   background: var(--surf-sel);
-}
-.lp-lane.is-selected::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  border-block: 1px solid var(--sel-line);
-  pointer-events: none;
-}
-.lp-lane.is-selected:has(+ .lp-drawer)::after {
-  border-bottom-color: transparent;
-}
-.lp-lane.is-selected + .lp-drawer {
-  box-shadow: inset 0 -1px 0 var(--sel-line);
-}
-.lp-lane.is-selected .lp-lane__num.lp-lane__num {
-  color: var(--engaged);
 }
 /* EMPTY: the row keeps the body's tone (one machine); the EMPTY word + unlit LED carry the cue */
 .lp-lane[data-state='empty'] {
@@ -198,20 +178,21 @@
   border-radius: 999px;
   background: var(--play);
 }
+/* the lane number: identity and the selection, never the sound (the wave, the state word with its LED
+   and the core's ring carry that). Every number at rest is a quiet --faint light figure; the selected
+   lane's lights --engaged a weight up, the step a slot's letter takes */
 .lp-lane__num {
   font-size: clamp(19px, 1.7vw, calc(24px * var(--ui)));
   font-weight: 300;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   line-height: 1;
-  color: var(--dim);
+  color: var(--faint);
+  transition: color var(--motion), font-weight var(--motion);
 }
-.lp-lane[data-state='play'] .lp-lane__num,
-.lp-lane[data-state='rec'] .lp-lane__num,
-.lp-lane[data-state='dub'] .lp-lane__num,
-.lp-lane[data-state='armed'] .lp-lane__num,
-.lp-lane[data-state='listening'] .lp-lane__num {
-  color: var(--text);
+.lp-lane.is-selected .lp-lane__num {
+  color: var(--engaged);
+  font-weight: 500;
 }
 /* the state word with an LED: lit (a solid dot in the word's colour) for a sounding or waiting lane
    (PLAYING / ARMED / LISTEN; FADING and ENDING lit warm-white, .is-stopping above), dark otherwise. A live capture (REC /
