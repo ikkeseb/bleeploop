@@ -10,7 +10,7 @@ import { masterBars } from './shared';
  * A SINGLE requestAnimationFrame loop drives every registered track canvas. It reads the looper's
  * pre-computed peak arrays through non-reactive getters (`looper.peaksInto` / `phaseValue` / `stateOf`
  * / `recHeadFrac` / `recSpanFrames` / `masterFramesValue` — NO Solid signals in the per-frame path, per
- * invariant 6) and never scans raw PCM. Per track the waveform (two-layer envelope) AND its bar grid are
+ * invariant 6) and never scans raw PCM. Per track the waveform (one filled body) AND its bar grid are
  * rasterised into an off-screen canvas and cached; the bitmap is re-rasterised ONLY when the peaks change
  * (version bump), the track state changes (colour), the master loop length changes (grid geometry), a
  * recording take's span changes (bin placement), or the element resizes. Every frame the loop just
@@ -801,7 +801,8 @@ function rasterise(
     wctx.globalAlpha = 1;
   }
 
-  // The wave: the outer envelope and the body per device column (`envelope`), each filled as one path.
+  // The wave: the body per device column (`envelope`), filled as one path (a muted take's contour traces
+  // the same rows).
   if (hasTake && min && max) {
     // Where the recorded region ends (device px): the take's last bin, a crisp cut while it records.
     const end = span > 0 ? Math.min(dw, (count / across) * dw) : dw;
@@ -867,7 +868,7 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
   let color = lane.colors.playhead;
 
   if (state === 'RECORDING' && waiting) {
-    // Armed for the downbeat: an amber (--dub, the lane's ARMED --sc) head rides the master phase in
+    // Armed for the downbeat: an amber (--dub; the lane's ARMED --sc is red, which an armed take never draws) head rides the master phase in
     // sync with the other lanes. A count-in (a first take's, or a later take's from stopped loops, which
     // restart from the top on its downbeat) and AUTO LISTEN have no phase to ride → no head at all.
     if (looper.masterFramesValue() > 0 && !looper.countingValue()) {

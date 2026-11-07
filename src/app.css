@@ -827,3 +827,19 @@ option {
   overflow-y: auto;
   scrollbar-width: thin;
 }
+
+/* FORCED COLORS (Windows high contrast): the engaged recipe (a lit legend on a face a step up) and the
+   selected slot's tone and top hairline are colours and box-shadows, which forced colours flatten, so
+   on and off would look alike. One system outline marks every engaged key and the selected slot there.
+   (The selected lane draws real borders on its ::after, which survive.) */
+@media (forced-colors: active) {
+  .lp-pb.is-on,
+  .transport__tgl.is-on,
+  .tgl.on-green,
+  .fxp-mod__toggle--on,
+  .audio-settings__chip.is-on,
+  .slot--active {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
