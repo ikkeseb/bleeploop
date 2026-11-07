@@ -35,10 +35,10 @@
 }
 .slot__vdb {
   flex: 0 0 auto;
-  min-width: 52px;
+  min-width: calc(52px * var(--ui));
   text-align: right;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--ui));
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
@@ -50,11 +50,11 @@
   border-radius: 999px;
   background: var(--play);
 }
-/* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so its legend
-   carries a hint of the play colour before it is armed — armed lights the dot on the engaged face
+/* GO LIVE at rest is chrome, so it spends no hue (colour is sound): the resting legend of every key,
+   a size up as the row's primary action; armed, the dot and the soft play legend say the input sounds
    (`.on-green`). */
 .tgl.live:not(.on-green) {
-  color: color-mix(in srgb, var(--play) 55%, var(--dim));
+  color: var(--legend);
 }
 .tgl.live:not(.on-green):hover:not(:disabled) {
   color: var(--play);
@@ -183,11 +183,11 @@
 .tgl.live {
   display: inline-grid;
   place-items: center;
-  padding: 8px 13px;
+  padding: calc(8px * var(--ui)) calc(13px * var(--ui));
 }
 .tgl.live::after,
 .tgl.live.on-green {
-  font-size: clamp(12px, 0.68vw, 13px);
+  font-size: clamp(12px, 0.68vw, calc(13px * var(--ui)));
   line-height: 1.17;
   letter-spacing: 0.06em;
   font-weight: 500;

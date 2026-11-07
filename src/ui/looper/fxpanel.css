@@ -37,16 +37,21 @@
   box-shadow: inset 0 1px 0 var(--hair);
 }
 
-/* toggle = a key (see `.tgl` in app.css); engaged = the warm-white legend on the face one step up.
+/* toggle = a key with a lamp, the record modes' recipe (transport.css `--led`): engaged = the lit lamp
+   and the warm-white legend on the face a step up; at rest an empty socket and the --legend legend.
    Explicit background on BOTH states so no UA dark-mode button face bleeds through. */
 .fxp-mod__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(6px * var(--ui));
   background: var(--key);
   border: 1px solid transparent;
-  color: var(--dim);
+  color: var(--legend);
   border-radius: var(--r-ctl);
   padding: 6px 7px;
   font-family: var(--sans);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui));
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -65,6 +70,20 @@
 .fxp-mod__toggle--on:hover:not(:active) {
   background: var(--key-on);
   color: var(--engaged);
+}
+.fxp-mod__toggle::before {
+  content: '';
+  width: calc(6px * var(--ui));
+  height: calc(6px * var(--ui));
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
+  transition: background-color var(--motion), box-shadow var(--motion);
+}
+.fxp-mod__toggle--on::before {
+  background: var(--engaged);
+  box-shadow: none;
 }
 
 /* a module that is a setting, not an effect (DUB FEEDBACK): its heading and its one param on one line,
@@ -87,8 +106,8 @@
 .fxp-mod__title {
   padding: 6px 7px;
   border: 1px solid transparent;
-  color: var(--dim);
-  font-size: 10.5px;
+  color: var(--legend);
+  font-size: calc(10.5px * var(--ui));
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -109,7 +128,7 @@
 }
 
 .fxp-param__label {
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui));
   font-weight: 500;
   color: var(--dim);
   text-transform: uppercase;
@@ -119,7 +138,7 @@
 /* the changing value is the only mono text here (tabular so it never jitters while dragging) */
 .fxp-param__val {
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--ui));
   color: var(--dim);
   font-variant-numeric: tabular-nums;
   min-width: 30px;
@@ -146,7 +165,7 @@
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--ui));
   padding: 4px 24px 4px 9px;
   cursor: pointer;
   transition: color var(--motion), background-color var(--motion);
@@ -218,4 +237,45 @@
 .fxp-group .fxp-param__range,
 .fxp-group .fxp-param__select {
   grid-area: 2 / 1 / 3 / -1;
+}
+
+/* The aligned rows, wherever the drawer is wide enough for every param column at a readable width (the
+   drawer is the `drawer` container, looper.css): one grid for both rows, a column per param in chain
+   order and one for DUB FEEDBACK. Each FX key spans its own params' columns (FxPanel.tsx `--col`,
+   `--span`) and its group sits under it, so the key is its group's heading and the tags go; a bypassed
+   FX leaves its columns empty, so engaging one never moves another. One column gap parts the keys and
+   every param, so a read-out never runs into the next label; a group's params sit flush with its key's
+   edges. 1360 px is where all eight columns still give a range 91 px beside DUB FEEDBACK. Narrower, the
+   rows above flow. */
+@container drawer (min-width: 1360px) {
+  .lp-drawer .fxp {
+    display: grid;
+    grid-template-columns: repeat(var(--cols), minmax(0, 1fr)) auto;
+    column-gap: calc(16px * var(--ui));
+    align-content: start;
+  }
+  .lp-drawer .fxp-keys,
+  .lp-drawer .fxp-params {
+    display: contents;
+  }
+  .lp-drawer .fxp .fxp-mod__toggle {
+    grid-row: 1;
+    grid-column: var(--col) / span var(--span);
+    min-width: 0;
+    margin-inline: 0;
+  }
+  .lp-drawer .fxp .fxp-dub {
+    grid-row: 1;
+    grid-column: -2;
+    margin-inline: 0;
+  }
+  .lp-drawer .fxp-group {
+    grid-row: 2;
+    grid-column: var(--col) / span var(--params);
+    grid-template-rows: auto;
+    padding-top: 1px;
+  }
+  .lp-drawer .fxp-group__tag {
+    display: none;
+  }
 }

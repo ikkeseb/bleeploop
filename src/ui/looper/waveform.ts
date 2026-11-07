@@ -34,17 +34,28 @@ import { masterBars } from './shared';
 // Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
 const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
-const GRID_NUM = 'rgba(148,168,215,.28)'; //   engraved bar numbers, top-left of each bar
-// The wave as on an instrument display (alpha of the state colour): a low-alpha body (over the outer it
-// lands near .36) inside a faint outer envelope, and the envelope's contour a fine line a step brighter,
-// so the take reads by its edge, not as a block of paint. The outer fill stays at or over .18 so a take's
-// rec-red reads in the outer envelope alone (wave-steady probe).
-const WAVE_OUTER = 0.18;
-const WAVE_BODY = 0.22;
-const WAVE_EDGE = 0.66;
+const GRID_NUM = 'rgba(148,168,215,.56)'; //   bar numbers, top-left of each bar: read from the chair, never brighter than a wave
+/**
+ * The wave is two filled, anti-aliased shapes in its colour: a translucent OUTER peak envelope (each
+ * bin's min/max) and inside it a solid BODY, the take's sustained level. Alpha per look (of the colour):
+ * a sounding take is saturated; a stopped one is grey (--dim) and quieter than any sounding take; a muted
+ * one quieter still, and plainly there. The outer stays at or over .18 while a take records so its
+ * rec-red reads in the outer envelope alone (wave-steady probe).
+ */
+const LOOK_SOUNDING = { outer: 0.34, body: 0.94 };
+const LOOK_STOPPED = { outer: 0.15, body: 0.38 };
+const LOOK_MUTED = { outer: 0.1, body: 0.22 };
+/** A muted lane that captures keeps its capture colour, a step down (its word says REC/OVERDUB). */
+const MUTED_CAPTURE = 0.6;
+/** The body's height as a share of the bins' mean |peak|, smoothed over a bin each side: a sine's RMS
+ * (1/√2), so a steady tone draws a solid core with a rim of peak, and a transient stands out of the
+ * body in the outer alone. Never past the outer envelope. */
+const BODY_K = 0.71;
 /** The loudest peak's reach, as a share of half the well's height: the rows of the glass display meet
  * edge to edge, so the wave keeps clear air above and below it. */
-const WAVE_REACH = 0.74;
+const WAVE_REACH = 0.9;
+/** A lane this many device px wide or wider draws its playhead 2 device px wide (`drawPlayhead`). */
+const PLAYHEAD_WIDE = 1800;
 /** The centre line's alpha in --faint: a guide under the wave, quieter than any wave. */
 const MID_ALPHA = 0.45;
 /** The meter's counted beats a bar (`setGridBeats`): the grid's beat lines, a bar line every `gridBeats`. */
@@ -88,14 +99,23 @@ interface Lane {
   /** Grid cache: the bar count for `gridMaster`, recomputed (reading bpm) only when master changes. */
   gridMaster: number;
   gridBars: number;
-  /** Cached bar-number font string (depends only on dpr) — so rasterise allocates nothing. */
+  /** Cached bar-number font string (depends on dpr and the row's height) — so rasterise allocates nothing. */
   gridFont: string;
+  /** The wave's per-column scratch, 4 × `dw` (set on resize, reused by every rasterise): the outer
+   * envelope's top and bottom and the body's, as signed amplitudes. */
+  cols: Float32Array;
+  /** The body's level per bin (`level`), filled once per rasterise ahead of `envelope`; grows with the
+   * take, never shrinks. Computed once per bin rather than per column and per knot, and read from an
+   * array, so no double crosses a call that might not inline (a boxed return was ~1.4 MB/s in a take). */
+  levels: Float64Array;
 }
 
-/** The bar-number font at a given device-pixel ratio (7.5px CSS): Geist Mono, the `--mono` token's
- * stack (`src/app.css`). */
-function gridFontFor(dpr: number): string {
-  return `${(7.5 * dpr).toFixed(1)}px 'Geist Mono', ui-monospace, Consolas, monospace`;
+/** The bar-number font at a given device-pixel ratio and row height (CSS px): Geist Mono, the `--mono`
+ * token's stack (`src/app.css`), 9 px in a short row up to 13 px in a tall one (a 2560 display), so a
+ * number reads from the chair without shouting over the take. */
+function gridFontFor(dpr: number, cssH: number): string {
+  const px = Math.min(13, Math.max(9, cssH * 0.068));
+  return `500 ${(px * dpr).toFixed(1)}px 'Geist Mono', ui-monospace, Consolas, monospace`;
 }
 
 /**
@@ -317,8 +337,10 @@ function readColors(el: HTMLElement): LaneColors {
   };
 }
 
-/** Pick the waveform colour for a track state. */
-function waveColor(c: LaneColors, state: TrackState): string {
+/** Pick the waveform colour for a track state: a muted take that plays or stops is silent, so grey (the
+ * lane's word says MUTED, `lane-state.ts`); a muted lane that captures keeps its capture colour. */
+function waveColor(c: LaneColors, state: TrackState, muted: boolean): string {
+  if (muted && (state === 'PLAYING' || state === 'STOPPED')) return c.stopped;
   switch (state) {
     case 'RECORDING':
       return c.recording;
@@ -344,7 +366,8 @@ function syncSize(lane: Lane): boolean {
   lane.dpr = dpr;
   lane.dw = Math.max(1, Math.round(cssW * dpr));
   lane.dh = Math.max(1, Math.round(cssH * dpr));
-  lane.gridFont = gridFontFor(dpr);
+  lane.gridFont = gridFontFor(dpr, cssH);
+  lane.cols = new Float32Array(4 * lane.dw);
   lane.canvas.width = lane.dw;
   lane.canvas.height = lane.dh;
   lane.wave.width = lane.dw;
@@ -365,24 +388,194 @@ function drawGrid(lane: Lane, bars: number): void {
   wctx.fillStyle = GRID_NUM;
   wctx.font = lane.gridFont;
   wctx.textBaseline = 'top';
-  const pad = Math.round(5 * dpr);
-  const top = Math.round(3 * dpr);
+  const pad = Math.round(6 * dpr);
+  const top = Math.round(4 * dpr);
   for (let b = 0; b < bars; b++) {
     wctx.fillText(String(b + 1), Math.round((b / bars) * dw) + pad, top);
   }
+}
+
+/** A knot's tangent from the secants either side of it: zero at a local extreme (or a flat side), else
+ * their harmonic mean, which keeps the cubic monotone between knots (Fritsch–Butland): no overshoot. */
+function tangent(a: number, b: number): number {
+  return a * b <= 0 ? 0 : (2 * a * b) / (a + b);
+}
+
+/** The monotone cubic between knots `y1` (f = 0) and `y2` (f = 1), its neighbours `y0` and `y3`. */
+function hermite(y0: number, y1: number, y2: number, y3: number, f: number): number {
+  const d = y2 - y1;
+  const m1 = tangent(y1 - y0, d);
+  const m2 = tangent(d, y3 - y2);
+  const f2 = f * f;
+  const f3 = f2 * f;
+  return (2 * f3 - 3 * f2 + 1) * y1 + (f3 - 2 * f2 + f) * m1 + (3 * f2 - 2 * f3) * y2 + (f3 - f2) * m2;
+}
+
+/** Bin `p`'s value in `a`, the index held to the take (its first and last bins hold past its ends). */
+function at(a: Float32Array, p: number, last: number): number {
+  return a[p < 0 ? 0 : p > last ? last : p];
+}
+
+/** Bin `p`'s mean |peak|, (|min| + |max|) / 2: we only have min/max bins. */
+function meanPeak(min: Float32Array, max: Float32Array, p: number, last: number): number {
+  const lo = at(min, p, last);
+  const hi = at(max, p, last);
+  return ((lo < 0 ? -lo : lo) + (hi < 0 ? -hi : hi)) / 2;
+}
+
+/** The body's level at bin `p`: its mean |peak| smoothed over a bin each side (1-2-1, centred, so the
+ * body neither lags nor leads the take), and never above the bin's own: smoothing pulls a spike down
+ * into the outer, it never swells the body ahead of an attack. */
+function level(min: Float32Array, max: Float32Array, p: number, last: number): number {
+  const own = meanPeak(min, max, p, last);
+  const smooth = (meanPeak(min, max, p - 1, last) + 2 * own + meanPeak(min, max, p + 1, last)) / 4;
+  return smooth < own ? smooth : own;
+}
+
+/**
+ * Sample the take once per device column into `out` (4 × `dw`, signed amplitudes in [-1, 1]): the outer
+ * envelope's top at [0, dw), its bottom at [dw, 2dw), the body's top at [2dw, 3dw) and its bottom at
+ * [3dw, 4dw). `across` bins span the width; the first `cols` columns hold the take. A column narrower
+ * than a bin takes the monotone cubic through the bin centres at its own centre; a column wider than a
+ * bin takes its bins' extremes (and their mean level for the body, from `lv`, `level` per bin).
+ * O(cols + count), no allocation.
+ * Returns the columns written.
+ */
+function envelope(
+  out: Float32Array,
+  dw: number,
+  cols: number,
+  count: number,
+  across: number,
+  min: Float32Array,
+  max: Float32Array,
+  lv: Float64Array,
+): number {
+  const per = across / dw; // bins per column
+  const last = count - 1;
+  let n = 0;
+  for (let x = 0; x < cols; x++) {
+    let hi: number;
+    let lo: number;
+    let body: number;
+    if (per >= 1) {
+      const p0 = Math.floor(x * per);
+      if (p0 > last) break;
+      let p1 = Math.floor((x + 1) * per);
+      if (p1 <= p0) p1 = p0 + 1;
+      if (p1 > count) p1 = count;
+      hi = max[p0];
+      lo = min[p0];
+      body = 0;
+      for (let p = p0; p < p1; p++) {
+        if (max[p] > hi) hi = max[p];
+        if (min[p] < lo) lo = min[p];
+        body += lv[p];
+      }
+      body /= p1 - p0;
+    } else if (last === 0) {
+      hi = max[0];
+      lo = min[0];
+      body = lv[0];
+    } else {
+      // The column's centre in bin-centre units (bin b's knot sits at b + 0.5 bins), held to the take.
+      let t = (x + 0.5) * per - 0.5;
+      if (t < 0) t = 0;
+      else if (t > last) t = last;
+      const i = t >= last ? last - 1 : Math.floor(t);
+      const f = t - i;
+      hi = hermite(at(max, i - 1, last), max[i], max[i + 1], at(max, i + 2, last), f);
+      lo = hermite(at(min, i - 1, last), min[i], min[i + 1], at(min, i + 2, last), f);
+      body = hermite(lv[i > 0 ? i - 1 : 0], lv[i], lv[i + 1], lv[i + 2 > last ? last : i + 2], f);
+    }
+    // Clamp to full scale so a loud transient stays on the canvas; the body never passes the outer.
+    if (hi > 1) hi = 1;
+    if (lo < -1) lo = -1;
+    body *= BODY_K;
+    const capHi = hi > 0 ? hi : 0;
+    const capLo = lo < 0 ? lo : 0;
+    out[x] = hi;
+    out[dw + x] = lo;
+    out[2 * dw + x] = body < capHi ? body : capHi;
+    out[3 * dw + x] = -body > capLo ? -body : capLo;
+    n = x + 1;
+  }
+  return n;
+}
+
+/** Path coordinates go to the canvas in 1/`SUB` device px, as integers, under a 1/`SUB` scale: the
+ * edge keeps its sub-pixel placement (the anti-aliasing sees the same shape to 1/16 px), and every
+ * `lineTo` argument is a small integer, so V8 passes it unboxed. A fractional double argument is boxed
+ * into a fresh heap number per call: ~7000 calls a rasterise were ~5 MB/s of garbage while a take
+ * records. */
+const SUB = 16;
+
+/** `v` (device px, >= 0) in 1/`SUB` px, rounded to an integer. */
+function sub(v: number): number {
+  return (v * SUB + 0.5) | 0;
+}
+
+/**
+ * Fill the band between two of `envelope`'s rows (`upper` above, `lower` below, offsets into `buf`) over
+ * its first `n` columns as one anti-aliased path, a vertex at each column's centre, cut square at `end`
+ * (device px). The band is at least `minHalf` px either side of the centre line.
+ */
+function fillBand(
+  ctx: CanvasRenderingContext2D,
+  buf: Float32Array,
+  upper: number,
+  lower: number,
+  n: number,
+  end: number,
+  midY: number,
+  A: number,
+  minHalf: number,
+  step: number,
+): void {
+  if (n < 1) return;
+  // Each row's y, held clear of the centre by `minHalf` (no closures: rasterise allocates nothing).
+  const top = sub(midY - minHalf);
+  const bot = sub(midY + minHalf);
+  const e = sub(end);
+  const half = SUB >> 1;
+  ctx.setTransform(1 / SUB, 0, 0, 1 / SUB, 0, 0);
+  ctx.beginPath();
+  let y = sub(midY - buf[upper] * A);
+  ctx.moveTo(0, y > top ? top : y);
+  // Every `step`th column and the last one, out along the top and back along the bottom.
+  for (let x = 0; ; x = x + step < n - 1 ? x + step : n - 1) {
+    y = sub(midY - buf[upper + x] * A);
+    const cx = x * SUB + half;
+    ctx.lineTo(cx < e ? cx : e, y > top ? top : y);
+    if (x === n - 1) break;
+  }
+  ctx.lineTo(e, y > top ? top : y);
+  for (let x = n - 1; ; x = x === n - 1 ? Math.floor((n - 2) / step) * step : x - step) {
+    y = sub(midY - buf[lower + x] * A);
+    const cx = x * SUB + half;
+    if (x === n - 1) ctx.lineTo(e, y < bot ? bot : y);
+    ctx.lineTo(cx < e ? cx : e, y < bot ? bot : y);
+    if (x === 0) break;
+  }
+  ctx.lineTo(0, y < bot ? bot : y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
 /**
  * Rasterise the bar grid + two-layer waveform envelope into the off-screen bitmap. All of this is the
  * CACHED-BITMAP path — it runs only on a dirty frame, never in the per-frame steady state.
  *
- * The envelope is drawn per device-pixel column: a translucent OUTER min/max peak (`WAVE_OUTER`)
- * plus an INNER body (`WAVE_BODY`) whose height is a one-pole-smoothed mean-|peak| — the RMS-ish
- * core, mirrored around mid — and the silhouette of the two as a fine contour (`WAVE_EDGE`), joined
- * column to column. We only have min/max bins, so the per-column mean is approximated
- * as (|min|+|max|)/2. While a take records (`span` > 0, its `recSpanFrames`) each bin sits at its frame
- * over the span, so the recorded region covers `cols` columns and, on a later take, the remainder gets
- * the dotted rec-red "tape to fill" guide.
+ * The wave is two filled paths (`fillBand`), anti-aliased by the canvas: the translucent OUTER peak
+ * envelope (each bin's max over its min) and inside it the solid BODY (`BODY_K` of the bins' mean |peak|,
+ * smoothed over a bin each side, mirrored around mid and clipped to the outer). Each is sampled once per
+ * device column (`envelope`): where a bin spans several columns the column takes a monotone cubic through
+ * the bin centres (`hermite`), which passes through every bin's value and never past its neighbours, so
+ * a peak keeps its height and an attack rises within its bin, with no stair-steps and no invented shape;
+ * where a column spans several bins it takes their extremes. While a take records (`span` > 0, its
+ * `recSpanFrames`) each bin sits at its frame over the span, so the recorded region ends at `end` and, on
+ * a later take, the remainder gets the dotted rec-red "tape to fill" guide.
  */
 function rasterise(
   lane: Lane,
@@ -422,70 +615,37 @@ function rasterise(
   // listening is not a take yet (span 0): plain line, no tape (the chrome says ARMED).
   const hasTape = span > 0 && masterFrames > 0;
 
-  if (!hasTape) {
+  // The centre line runs where no take is drawn (a take carries its own 1 px trace through silence), so
+  // it never strikes through a quiet grey take.
+  const hasTake = count > 0 && min !== null && max !== null && cols >= 1;
+  const from = hasTake ? cols : 0;
+  if (!hasTape && from < dw) {
     wctx.fillStyle = lane.colors.mid;
     wctx.globalAlpha = MID_ALPHA;
-    wctx.fillRect(0, Math.round(midY), dw, 1);
+    wctx.fillRect(from, Math.round(midY), dw - from, 1);
     wctx.globalAlpha = 1;
   }
 
-  // Two-layer envelope. Down-samples the peak bins across `cols` device columns: with more bins than
-  // columns we take the extremes per column group, with fewer we stretch. O(cols + count).
-  if (count > 0 && min && max && cols >= 1) {
-    // STOPPED reads as a dimmed take; MUTED dims further so a silent lane is never mistaken for a
-    // sounding one (the state word says MUTED, the lane's --sc goes grey — this is the wave's half).
-    const dimMul = muted ? 0.3 : state === 'STOPPED' ? 0.55 : 1;
-    wctx.fillStyle = waveColor(lane.colors, state);
-    let body = 0;
-    // The contour's previous column (device px), so each column's edge joins the last into one line.
-    let top0 = -1;
-    let bot0 = -1;
-    for (let x = 0; x < cols; x++) {
-      const p0 = Math.floor((x / dw) * across);
-      if (p0 >= count) break;
-      let p1 = Math.floor(((x + 1) / dw) * across);
-      if (p1 <= p0) p1 = p0 + 1;
-      if (p1 > count) p1 = count;
-      let mn = min[p0];
-      let mx = max[p0];
-      for (let p = p0 + 1; p < p1; p++) {
-        if (min[p] < mn) mn = min[p];
-        if (max[p] > mx) mx = max[p];
-      }
-      // One-pole-smoothed mean-|peak| → the inner body track (RMS-ish core).
-      const absMn = mn < 0 ? -mn : mn;
-      const absMx = mx < 0 ? -mx : mx;
-      body = body * 0.72 + ((absMn + absMx) / 2) * 0.28;
-
-      // Outer peak envelope (translucent). Clamp sample range to [-1,1] so loud transients stay on-canvas.
-      const mxc = mx > 1 ? 1 : mx;
-      const mnc = mn < -1 ? -1 : mn;
-      let y1 = midY - mxc * A;
-      let y2 = midY - mnc * A;
-      if (y1 < 0) y1 = 0;
-      if (y2 > dh) y2 = dh;
-      wctx.globalAlpha = WAVE_OUTER * dimMul;
-      wctx.fillRect(x, y1, 1, Math.max(1, y2 - y1));
-
-      // Inner body (translucent), mirrored around mid.
-      const hb = Math.max(1, Math.min(1, body * 1.7) * A);
-      wctx.globalAlpha = WAVE_BODY * dimMul;
-      wctx.fillRect(x, midY - hb, 1, hb * 2);
-
-      // The envelope's contour, top and bottom: the wave's silhouette (the outer peak, or the body where
-      // a dense take's body reaches past it), one device px, joined to the previous column's.
-      const top = Math.round(Math.max(0, Math.min(y1, midY - hb)));
-      const bot = Math.round(Math.min(dh, Math.max(y2, midY + hb))) - 1;
-      if (top0 < 0) {
-        top0 = top;
-        bot0 = bot;
-      }
-      wctx.globalAlpha = WAVE_EDGE * dimMul;
-      wctx.fillRect(x, top < top0 ? top : top0, 1, (top < top0 ? top0 - top : top - top0) + 1);
-      wctx.fillRect(x, bot < bot0 ? bot : bot0, 1, (bot < bot0 ? bot0 - bot : bot - bot0) + 1);
-      top0 = top;
-      bot0 = bot;
-    }
+  // The wave: the outer envelope and the body per device column (`envelope`), each filled as one path.
+  if (hasTake && min && max) {
+    // Where the recorded region ends (device px): the take's last bin, a crisp cut while it records.
+    const end = span > 0 ? Math.min(dw, (count / across) * dw) : dw;
+    if (lane.levels.length < count) lane.levels = new Float64Array(Math.max(256, count, 2 * lane.levels.length));
+    const lv = lane.levels;
+    for (let p = 0; p < count; p++) lv[p] = level(min, max, p, count - 1);
+    const n = envelope(lane.cols, dw, cols, count, across, min, max, lv);
+    // A vertex every 2 device px where a bin spans 4 or more (the cubic is near-straight over 2 px),
+    // else one per column, which keeps every bin's extremes.
+    const step = across * 4 <= dw ? 2 : 1;
+    const capturing = state === 'RECORDING' || state === 'OVERDUBBING';
+    const look = muted && !capturing ? LOOK_MUTED : state === 'STOPPED' ? LOOK_STOPPED : LOOK_SOUNDING;
+    const mul = muted && capturing ? MUTED_CAPTURE : 1;
+    wctx.fillStyle = waveColor(lane.colors, state, muted);
+    // The outer keeps a 1 px trace through a silent stretch, so a take reads as one line in its colour.
+    wctx.globalAlpha = look.outer * mul;
+    fillBand(wctx, lane.cols, 0, dw, n, end, midY, A, 0.5, step);
+    wctx.globalAlpha = look.body * mul;
+    fillBand(wctx, lane.cols, 2 * dw, 3 * dw, n, end, midY, A, 0, step);
     wctx.globalAlpha = 1;
   }
 
@@ -525,17 +685,20 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
     x = frac < 0 ? dw - lane.dpr : frac * dw;
     color = lane.colors.rec;
   } else if (state === 'PLAYING' || state === 'OVERDUBBING') {
+    // An overdub's head stays warm white like a playing one: the take is amber already, an amber head
+    // would vanish inside its body, and the heads line up down the display as one line.
     x = looper.phaseValue() * dw;
-    if (state === 'OVERDUBBING') color = lane.colors.overdubbing;
   }
   // STOPPED / EMPTY: no playhead.
 
   if (x < 0) return;
-  const coreW = lane.dpr < 1 ? 1 : Math.round(lane.dpr);
-  const px = Math.round(x);
-  // One crisp solid line, one CSS px wide: no glow columns.
+  // One crisp solid line, no glow columns: one CSS px, and at least 2 device px on a lane 1800 device px
+  // or wider (a 2560 display at 100 %), where one px is too fine to find from the chair.
+  const css = lane.dpr < 1 ? 1 : Math.round(lane.dpr);
+  const coreW = dw >= PLAYHEAD_WIDE && css < 2 ? 2 : css;
+  const px = Math.round(x - coreW / 2);
   ctx.fillStyle = color;
-  ctx.fillRect(px, 0, coreW, dh);
+  ctx.fillRect(px < 0 ? 0 : px > dw - coreW ? dw - coreW : px, 0, coreW, dh);
 }
 
 /** The single rAF loop: draw every registered lane, then schedule the next frame. */
@@ -619,7 +782,9 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     lastSpan: 0,
     gridMaster: -1,
     gridBars: 0,
-    gridFont: gridFontFor(self.devicePixelRatio || 1),
+    gridFont: gridFontFor(self.devicePixelRatio || 1, canvas.clientHeight),
+    cols: new Float32Array(0),
+    levels: new Float64Array(0),
   };
   syncSize(lane);
   lanes.set(canvas, lane);

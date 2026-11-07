@@ -23,12 +23,16 @@
      KEYS — every pressable word (the command bar's toggles and steppers, the slot's keys and pickers, a
      lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family: a caps legend on a very
      quiet face (--key: a tone barely off its surface, no border), the same height and radius as its
-     row's neighbours (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Hover lifts the
-     face (--key-hover); press sinks it (--pressed); engaged lights the legend warm-white (--engaged) on a
-     face one step lighter (--key-on), plus the state colour where the state is a sound; disabled keeps
-     the resting face with a --faint legend (tone, never an opacity fade), so a row never mixes keys and
-     bare words. A split key (CLICK | 70, FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon
-     tools stay bare glyphs; engaged, they wear --key-on like a key. The cyan focus-visible ring always.
+     row's neighbours (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Three legend
+     levels, so a glance tells them apart: at rest --legend (quieter than --dim), engaged --engaged (lit
+     warm-white) on a face a step up (--key-on), disabled --faint on the resting face (tone, never an
+     opacity fade), so a row never mixes keys and bare words. Hover lifts the face (--key-hover); press
+     sinks it (--pressed). A key with a lamp (the record modes, a lane's FX) lights it warm-white while its
+     setting is on, even when the key is greyed out (on, not in effect: a lit lamp over a --faint
+     legend); an unlit lamp is an empty socket ring (--led-socket-shade), never a grey dot. A two-step
+     confirm (SURE?) and a fade under way are chrome, so they take the engaged recipe, never a hue. A split
+     key (CLICK | 70, FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon tools stay bare glyphs;
+     engaged, they wear --key-on like a key. The cyan focus-visible ring always.
      STATE WORDS are coloured caps with a dot; the two live-capture words, REC and OVERDUB, are a FILLED
      flat badge (STATUS D14: a carrier that survives greyscale and every colour-vision type), and CLIP is
      the one other filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em (state words 11 px),
@@ -43,22 +47,26 @@
      the pane a hairline (--glass-line) divides the rows; only the pane's outer corners round (--r-well),
      its one light is a 1 px inner top highlight (--glass-top) and a barely-there sheen (--glass-sheen):
      no reflection, no glow, no motion. Where the FX drawer opens the pane parts, each part rounded, and
-     the drawer sits on the body between them. A selected row lifts a tone (its body --surf-sel, its glass
-     --glass-sel) and draws a warm-white hairline (--sel-line) round its glass. The waves are drawn as on
-     an instrument display: a low-alpha body inside a faint outer envelope, the envelope's contour a fine
-     brighter line, and one crisp playhead per row, so equal-length loops line up into one line down the
-     pane. ===== */
+     the drawer sits on the body between them. The glass is one material whatever the selection; a selected row
+     lifts its body a tone (--surf-sel) and one warm-white hairline (--sel-line) rings the whole row,
+     head, glass and mix. A wave is drawn as sound (`looper/waveform.ts`): smooth anti-aliased paths, a
+     solid body inside a translucent peak envelope, in its state colour while it sounds and grey when
+     stopped or muted (muted quieter still), and one crisp playhead per row, so equal-length loops line
+     up into one line down the pane.
+     SIZE — the chrome is sized for the chair: --ui scales the main screen's type, key heights and the
+     lane head and mix one step up on a wide display (2200 px and over, a 27" 2560 screen read from
+     1.5 m), and is 1 everywhere else. A size that should follow it is written calc(N * var(--ui)). ===== */
   --bg: #0a0b0e;
   --surf-1: #121419; /* card */
   --surf-2: #171a20; /* control face (the lane core, a popover's fields) */
   --surf-3: #1d2028; /* a solid lifted face (a popover's hover) */
   --key: rgba(255, 255, 255, 0.022); /* a key at rest: a tone barely off any card, no border (--faint holds 4.5:1 on it) */
   --key-hover: rgba(255, 255, 255, 0.055); /* a key under the pointer */
-  --key-on: rgba(255, 255, 255, 0.085); /* an engaged key: one step lighter, under the lit legend */
+  --key-on: rgba(255, 246, 232, 0.12); /* an engaged key: a clear step up, faintly warm, under the lit legend */
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: var(--surf-1); /* card fill: flat, one tone over the ground */
   --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
-  --sel-line: rgba(244, 239, 230, 0.2); /* the selection hairline (a lane, a slot): warm white, no hue */
+  --sel-line: rgba(244, 239, 230, 0.3); /* the selection hairline (a lane's whole row, a slot): warm white, no hue */
   --surf-sel: #16181d; /* the selected lane's card: one tone over --surf-1, --faint still 4.5:1 on it */
   --r-sm: 6px; /* radius: a control 24 px tall or less (lane keys, steppers, cue, badges) */
   --r-ctl: 8px; /* radius: a control 26-34 px tall (bar toggles, selects, slot and drawer keys) */
@@ -73,7 +81,6 @@
   --line-2: rgba(255, 255, 255, 0.12); /* hover border */
   --well: var(--sunk);
   --glass: #030304; /* the looper's display: one true-black glass pane under the five waves, darker than --sunk */
-  --glass-sel: #0a0b0e; /* the selected row's glass: a faint lift under its wave */
   --glass-line: rgba(255, 255, 255, 0.06); /* the hairline between two rows inside the pane */
   --glass-top: rgba(255, 255, 255, 0.075); /* the pane's one inner top highlight */
   --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 62%); /* the pane's barely-there sheen, top to bottom */
@@ -81,11 +88,13 @@
   --text: #eef1f8;
   --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
   --faint: #7d818d; /* the floor for read text: 4.5:1 on a card and on a key's resting face (contact-sheet pins it) */
+  --legend: #a4a8b3; /* a key's legend at rest: a step under --dim, plainly over --faint, far under --engaged */
   --engaged: #f4efe6; /* warm white: engaged / selected chrome */
-  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps (lit, they are
-     a solid dot in their colour, no halo) */
-  --led-socket: #23262e;
-  --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.8);
+  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps. Unlit it is an
+     empty ring, quiet enough to vanish from the chair and never a grey dot that reads as dust; lit, a
+     solid dot in its colour, no halo */
+  --led-socket: transparent;
+  --led-socket-shade: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
   /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
      below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
   --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23b9bcc6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
@@ -100,8 +109,18 @@
   --mono: 'Geist Mono', ui-monospace, Consolas, monospace;
   --sans: 'Geist', system-ui, 'Segoe UI', sans-serif;
 
+  --ui: 1; /* the chrome's size step (SIZE above) */
+
   font-synthesis: none;
   color-scheme: dark;
+}
+/* the wide display: one size step for the chair (SIZE in the header); 1920 and under stay as they are */
+@media (min-width: 2200px) {
+  :root {
+    /* 1.15: at 2560 the bar keeps one row with FIXED's bars showing, ~70 px to spare (1.2 needed 6 px more
+       than the bar has, and cmd-fit.ts stacked it) */
+    --ui: 1.15;
+  }
 }
 
 * {
@@ -270,7 +289,7 @@ option {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui));
   font-weight: 600;
   letter-spacing: 0.16em;
   white-space: nowrap;
@@ -341,8 +360,8 @@ option {
   flex: 0 0 auto; /* the far-right cluster never yields width — it holds the keyboard restore + help */
 }
 .tool {
-  width: 34px;
-  height: 34px;
+  width: calc(34px * var(--ui));
+  height: calc(34px * var(--ui));
   border: 0;
   border-radius: var(--r-ctl);
   display: grid;
@@ -353,8 +372,8 @@ option {
   transition: color var(--motion), background-color var(--motion), transform 0.08s;
 }
 .tool svg {
-  width: 16px;
-  height: 16px;
+  width: calc(16px * var(--ui));
+  height: calc(16px * var(--ui));
   transition: transform 0.35s;
 }
 .tool:hover:not(:disabled) {
@@ -377,13 +396,13 @@ option {
    here" signal the Help cap's corner dot used to carry. Its height, corner and type are a mode pill's
    (`.transport__tgl`, transport.css), so it stands in the bar as one of them (app-update probe). */
 .tool-pill {
-  height: 30px;
-  padding: 0 11px;
+  height: calc(28px * var(--ui) + 2px); /* a mode pill's: its 12 px line and 8 px pads scale, its 1 px rims do not */
+  padding: 0 calc(11px * var(--ui));
   border: 1px solid transparent;
   border-radius: var(--r-ctl);
   display: grid;
   place-items: center;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui));
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -554,7 +573,7 @@ option {
   align-items: center;
   column-gap: 12px;
   row-gap: 8px;
-  padding: 10px 18px;
+  padding: calc(10px * var(--ui)) 18px;
   min-width: 0;
   flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
 }
@@ -570,7 +589,7 @@ option {
 /* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
 .slot__id {
   grid-area: id;
-  font-size: 20px;
+  font-size: calc(20px * var(--ui));
   font-weight: 400;
   line-height: 1;
   color: var(--faint);
@@ -600,19 +619,19 @@ option {
   flex-wrap: wrap;
 }
 
-/* toggle — a key (the header's KEYS): a caps legend on the quiet resting face, lifted on hover; engaged =
-   the legend lights warm-white on the face one step lighter. Pressed = the face sinks. Disabled = the
+/* toggle — a key (the header's KEYS): a --legend caps legend on the quiet resting face, lifted on hover;
+   engaged = the legend lights warm-white on the face a step up. Pressed = the face sinks. Disabled = the
    resting face with a legible --faint legend (tone, never an opacity fade). */
 .tgl {
-  font-size: 10.5px;
-  line-height: 13px; /* pinned: the slot row keeps its measured height */
+  font-size: calc(10.5px * var(--ui));
+  line-height: calc(13px * var(--ui)); /* pinned: the slot row keeps its measured height */
   letter-spacing: 0.08em;
   font-weight: 600;
-  padding: 7px 12px;
+  padding: calc(7px * var(--ui)) calc(12px * var(--ui));
   border: 1px solid transparent;
   border-radius: var(--r-ctl);
   background: var(--key);
-  color: var(--dim);
+  color: var(--legend);
   cursor: pointer;
   white-space: nowrap;
   transition: color var(--motion), background-color var(--motion), border-color var(--motion);
@@ -697,13 +716,30 @@ option {
   border-radius: 999px;
   background: var(--text);
 }
+/* disabled = the KEYS disabled recipe on a range: a --faint cap over a quieter track, still present
+   (tone, never an opacity fade) */
+:where(.lf-range):disabled::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.14) var(--fill), rgba(255, 255, 255, 0.07) var(--fill));
+}
+:where(.lf-range):disabled::-moz-range-track {
+  background: rgba(255, 255, 255, 0.07);
+}
+:where(.lf-range):disabled::-moz-range-progress {
+  background: rgba(255, 255, 255, 0.14);
+}
+:where(.lf-range):disabled::-webkit-slider-thumb {
+  background: var(--faint);
+}
+:where(.lf-range):disabled::-moz-range-thumb {
+  background: var(--faint);
+}
 
 /* the source picker and the input pick — flat selects: no face at rest (the caret says "opens"), the
    control face on hover. The picker names the slot's source, so it reads at the slot name's size and
    weight. Explicit background-color so no UA face shows. */
 .slot__source,
 .slot__in {
-  height: 30px;
+  height: calc(30px * var(--ui));
   min-width: 0;
   appearance: none;
   -webkit-appearance: none;
@@ -724,18 +760,18 @@ option {
   grid-area: source;
   justify-self: start;
   width: 100%;
-  max-width: 300px;
-  font-size: 13px;
+  max-width: calc(300px * var(--ui));
+  font-size: calc(13px * var(--ui));
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text);
   text-overflow: ellipsis;
 }
 .slot__in {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ui));
   font-weight: 600;
   letter-spacing: 0.08em;
-  color: var(--dim);
+  color: var(--legend);
 }
 .slot__source:hover:not(:disabled),
 .slot__in:hover {
