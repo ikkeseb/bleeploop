@@ -76,9 +76,19 @@ One row per round. Overall is the council's weighted mean in that round's packet
 | Round | Commit | Dev | Incumbent | Candidate | Gain | Kept | Tokens (k) per model | Wall |
 |---|---|---:|---:|---:|---:|---|---|---|
 | 1 | f3dbbfe1 | 5.2 | 5.2 (dev) | 7.8 | +2.6 | yes | build: opus 726 (four stages); council: opus 155, sol 120, astra 95, argon 80 | ~2 h |
+| 2 | 65103a53 | 4.5 | 7.4 (r1) | 7.9 | +0.47 | yes | build: opus 412 (two stages); council: opus 163, sol 575, astra 222, argon 47 | ~1 h 15 m |
 
 Round 1 notes: the packet held dev, the r3 B variant as it stood and the candidate. B fell from 7.7
 (r3, six categories) to 5.2 here; its wave scored 3.1 against dev's 4.9, as the owner's note on r3 said.
 Every delegate ranked the candidate first. Open for round 2 (all four agree): a bigger wave body, fading
 legible without words, a 2 px playhead at 2560, the last non-sound hues in chrome (A LIVE, INPUT LIVE,
 the status dot), larger lane and drawer type at 2560, a quieter keyboard, the selection's full outline.
+
+Round 2 notes: the packet held dev, round 1 and the candidate. Three delegates ranked the candidate
+first; the Opus delegate ranked round 1 first (7.5 against 7.0: the fading drain read as played against
+unplayed, the hollow muted wave as an empty lane, the wave's dark rim as a pen line). The gain is under
+0.5: one round of two toward the stop. Open for round 3 (three or four delegates agree): fading must
+read from the whole body, not as a played/unplayed split; muted needs a body or a stronger contour; one
+thin edge instead of the dark rim; FIXED and AUTO REC show their remembered "on" beside the lock; the
+LOOP ring neutral while nothing plays; larger FX drawer type at 2560; the 1920 command bar's half-empty
+second row; the lane number crowding A LIVE; selection that reads in the empty state.
