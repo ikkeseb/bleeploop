@@ -228,11 +228,21 @@
   row-gap: 3px;
   column-gap: 6px;
 }
+/* In a lane's FX drawer the label and read-out are read from the guitar: 10.75 px at --ui 1, 14 px at
+   the lanes' wide-display step (--ui-lane 1.3); a pinned line height keeps the drawer's row tight */
+.lp-drawer .fxp-param__label,
+.lp-drawer .fxp-param__val {
+  font-size: calc(10.75px * var(--ui));
+  line-height: 1.2;
+}
+/* the pair shares one baseline (Geist beside Geist Mono: centring would set them a pixel apart) */
 .fxp-group .fxp-param__label {
   grid-area: 1 / 1;
+  align-self: baseline;
 }
 .fxp-group .fxp-param__val {
   grid-area: 1 / 2;
+  align-self: baseline;
 }
 .fxp-group .fxp-param__range,
 .fxp-group .fxp-param__select {

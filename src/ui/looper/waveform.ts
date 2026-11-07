@@ -36,24 +36,24 @@ const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
 const GRID_NUM = 'rgba(148,168,215,.56)'; //   bar numbers, top-left of each bar: read from the chair, never brighter than a wave
 /**
- * The wave is two filled, anti-aliased shapes in its colour: a translucent OUTER peak envelope (each
- * bin's min/max), kept a thin, quiet rim of detail, and inside it a solid BODY, the take's sustained
- * level. Alpha per look (of the colour): a sounding take is saturated; a stopped one is a solid grey
- * (--dim) body, quieter than any sounding take; a muted one is the same grey drawn hollow, its body's
- * edge a line over a faint fill, quieter still and plainly there (`MUTED_EDGE`). The outer stays at or
- * over .18 while a take records so its rec-red reads in the outer envelope alone (wave-steady probe).
+ * The wave is one filled, anti-aliased BODY in its colour, the take's level, its own edge the only edge
+ * (no second silhouette around it). Alpha per look (of the colour): a sounding take is saturated; a
+ * stopped one is a solid grey (--dim) body, quieter than any sounding take; a muted one is a darker grey
+ * body under a crisp grey contour (`MUTED_EDGE`), quieter than stopped and plainly there.
  */
-const LOOK_SOUNDING = { outer: 0.22, body: 0.94 };
-const LOOK_STOPPED = { outer: 0.1, body: 0.42 };
-const LOOK_MUTED = { outer: 0, body: 0.09 };
-/** A muted take's body edge: its alpha (of --dim) and width (CSS px), a hollow shape set apart from a
- * stopped take's solid one at a glance. */
-const MUTED_EDGE = { alpha: 0.62, width: 1.25 };
+const LOOK_SOUNDING = 0.94;
+const LOOK_STOPPED = 0.42;
+const LOOK_MUTED = 0.2;
+/** A muted take's contour: its alpha (of --dim) and width in CSS px, `wide` on a lane `PLAYHEAD_WIDE`
+ * CSS px or wider (2 device px on a 2560 display at 100 %), so it holds from the chair. */
+const MUTED_EDGE = { alpha: 0.6, width: 1.5, wide: 2 };
+/** A fading take's colour over its grey silhouette: a fixed step toward grey from the moment the fade
+ * begins (`drawFade`), so a fade never reads as a plain playing take. */
+const FADE_STEP = 0.42;
 /** A muted lane that captures keeps its capture colour, a step down (its word says REC/OVERDUB). */
 const MUTED_CAPTURE = 0.6;
 /** The body's height as a share of the bins' mean |peak|, smoothed over a bin each side, so the body
- * carries the take and the peak envelope is a rim of detail around it: a transient stands out of the
- * body in the outer alone. Never past the outer envelope. */
+ * carries the take and a lone spike does not jag its edge. Never past the bins' peak envelope. */
 const BODY_K = 0.88;
 /** The display's zoom: a level `v` is drawn at `ZOOM`·v up to the knee, eased into full scale above it
  * (`shown`), so a take at a working level fills its row while a louder one still draws taller and a
@@ -75,7 +75,7 @@ let gridBeats = 4;
  * FADE, per lane, a plain feed a Solid effect writes (`setLaneFade`, `Looper.tsx`): the device frame the
  * fade's stop lands on (none: no fade) and the frame heard as the lane began fading. The engine ramps a
  * fading lane's level as r², r running linearly from 1 at the press to 0 at the stop (`lf-engine`
- * `looper.rs`, `render`), so the draw loop knows the level every point of the loop will next sound at.
+ * `looper.rs`, `render`), so the draw loop knows the level the lane sounds at now.
  */
 const fadeTo: number[] = [];
 const fadeFrom: number[] = [];
@@ -131,19 +131,18 @@ interface Lane {
   levels: Float64Array;
   shownMax: Float32Array;
   shownMin: Float32Array;
+  /** Per bin, the cubic's slopes into and out of each knot of those three rows (`slopes`), stride the
+   * arrays' length. */
+  slopes: Float32Array;
   /** A fade at the last rasterise: the take is drawn twice, grey in `wave` and sounding in `fading`. */
   lastFading: boolean;
-  /** While the lane fades (`drawFade`, made on its first fade): its take in its sounding colour, no grid,
-   * and a one-row mask of the level each column will next sound at, stretched over the row. */
+  /** While the lane fades (`drawFade`, made on its first fade): its take in its sounding colour, no grid. */
   fading: Fade | null;
 }
 
 interface Fade {
   take: HTMLCanvasElement;
   tctx: CanvasRenderingContext2D;
-  mask: HTMLCanvasElement;
-  mctx: CanvasRenderingContext2D;
-  row: ImageData;
 }
 
 /** The bar-number font at a given device-pixel ratio and row height (CSS px): Geist Mono, the `--mono`
@@ -433,17 +432,60 @@ function drawGrid(lane: Lane, bars: number): void {
   }
 }
 
-/** A knot's tangent from the secants either side of it: zero at a local extreme (or a flat side), else
- * their harmonic mean, which keeps the cubic monotone between knots (Fritsch–Butland): no overshoot. */
-function tangent(a: number, b: number): number {
-  return a * b <= 0 ? 0 : (2 * a * b) / (a + b);
+/**
+ * The slopes of the monotone cubic through row `y`'s first `count` knots (sign `s`: +1 for a top edge or
+ * a level, −1 for a bottom edge), per knot into `sl`: the slope arriving from the left at `sl[into + p]`,
+ * leaving to the right at `sl[out + p]`. A knot's slope is the harmonic mean of the secants either side
+ * (Fritsch–Butland: zero at an extreme or a flat side, no overshoot). At a PINCH, a knot whose magnitude
+ * is a strict local minimum (two lobes meeting), each side instead takes its own secant times the join's
+ * depth (twice its dip below the nearer neighbour, as a share of it, at most 1), so a deep join is a clean
+ * point, not a flat shoulder, and a shallow dip in a sustained tone stays round. That slope is at most
+ * the secant's, so a segment still never passes its knots: no invented data. Once per row per rasterise,
+ * all arithmetic inline and written to `sl`: no double crosses a call (the per-column `hermite` stays
+ * small enough to inline; with the pinch inside it, it did not, ~1.3 MB/s in a take).
+ */
+function slopes(
+  y: Float32Array | Float64Array,
+  s: number,
+  count: number,
+  sl: Float32Array,
+  into: number,
+  out: number,
+): void {
+  const last = count - 1;
+  for (let p = 0; p < count; p++) {
+    const ya = y[p > 0 ? p - 1 : 0];
+    const yk = y[p];
+    const yb = y[p < last ? p + 1 : last];
+    const dl = yk - ya;
+    const dr = yb - yk;
+    let mi = dl * dr <= 0 ? 0 : (2 * dl * dr) / (dl + dr);
+    let mo = mi;
+    const a = s * ya;
+    const k = s * yk;
+    const b = s * yb;
+    if (k < a && k < b) {
+      const w = depth(k, a < b ? a : b);
+      mi = w * dl;
+      mo = w * dr;
+    }
+    sl[into + p] = mi;
+    sl[out + p] = mo;
+  }
 }
 
-/** The monotone cubic between knots `y1` (f = 0) and `y2` (f = 1), its neighbours `y0` and `y3`. */
-function hermite(y0: number, y1: number, y2: number, y3: number, f: number): number {
-  const d = y2 - y1;
-  const m1 = tangent(y1 - y0, d);
-  const m2 = tangent(d, y3 - y2);
+/** A pinch's depth, 0..1: twice the dip of its knot `k` below `near` (its nearer neighbour), as a share
+ * of it, at most 1 (a knot at or under zero: 1). Called from `slopes` only, its result stored straight
+ * into a typed array. */
+function depth(k: number, near: number): number {
+  if (k <= 0) return 1;
+  const w = 2 * (1 - k / near);
+  return w < 0 ? 0 : w > 1 ? 1 : w;
+}
+
+/** The cubic Hermite between knots `y1` (f = 0) and `y2` (f = 1), leaving `y1` at slope `m1` and
+ * arriving at `y2` at `m2` (`slopes`). */
+function hermite(y1: number, y2: number, m1: number, m2: number, f: number): number {
   const f2 = f * f;
   const f3 = f2 * f;
   return (2 * f3 - 3 * f2 + 1) * y1 + (f3 - 2 * f2 + f) * m1 + (3 * f2 - 2 * f3) * y2 + (f3 - f2) * m2;
@@ -484,8 +526,9 @@ function level(min: Float32Array, max: Float32Array, p: number, last: number): n
  * `max` and `lv` come shown, `Lane.levels`): the outer
  * envelope's top at [0, dw), its bottom at [dw, 2dw), the body's top at [2dw, 3dw) and its bottom at
  * [3dw, 4dw). `across` bins span the width; the first `cols` columns hold the take. A column narrower
- * than a bin takes the monotone cubic through the bin centres at its own centre; a column wider than a
- * bin takes its bins' extremes (and their mean level for the body, from `lv`, `level` per bin).
+ * than a bin takes the monotone cubic through the bin centres at its own centre, its knots' slopes from
+ * `sl` (`slopes`, stride `z`: max in/out, min in/out, level in/out); a column wider than a bin takes its
+ * bins' extremes (and their mean level for the body, from `lv`, `level` per bin).
  * O(cols + count), no allocation.
  * Returns the columns written.
  */
@@ -498,6 +541,8 @@ function envelope(
   min: Float32Array,
   max: Float32Array,
   lv: Float64Array,
+  sl: Float32Array,
+  z: number,
 ): number {
   const per = across / dw; // bins per column
   const last = count - 1;
@@ -532,9 +577,9 @@ function envelope(
       else if (t > last) t = last;
       const i = t >= last ? last - 1 : Math.floor(t);
       const f = t - i;
-      hi = hermite(at(max, i - 1, last), max[i], max[i + 1], at(max, i + 2, last), f);
-      lo = hermite(at(min, i - 1, last), min[i], min[i + 1], at(min, i + 2, last), f);
-      body = hermite(lv[i > 0 ? i - 1 : 0], lv[i], lv[i + 1], lv[i + 2 > last ? last : i + 2], f);
+      hi = hermite(max[i], max[i + 1], sl[z + i], sl[i + 1], f);
+      lo = hermite(min[i], min[i + 1], sl[3 * z + i], sl[2 * z + i + 1], f);
+      body = hermite(lv[i], lv[i + 1], sl[5 * z + i], sl[4 * z + i + 1], f);
     }
     // The body never passes the outer.
     const capHi = hi > 0 ? hi : 0;
@@ -633,9 +678,9 @@ function edgePath(
 }
 
 /**
- * Draw a take from `envelope`'s rows (`buf`, its first `n` columns) in `color` at `look`'s alphas (times
- * `mul`): the outer envelope, then the body, each one anti-aliased fill. With an `edge` width (device px)
- * the body's top and bottom edges are stroked too, at `MUTED_EDGE`'s alpha: a hollow take.
+ * Draw a take from `envelope`'s rows (`buf`, its first `n` columns) in `color` at alpha `body` (times
+ * `mul`): the body, one anti-aliased fill. With an `edge` width (device px) its top and bottom edges are
+ * stroked too, at `MUTED_EDGE`'s alpha: a muted take's contour.
  */
 function drawTake(
   ctx: CanvasRenderingContext2D,
@@ -646,22 +691,18 @@ function drawTake(
   A: number,
   step: number,
   color: string,
-  look: { outer: number; body: number },
+  body: number,
   edge: number,
   mul = 1,
 ): void {
   const dw = buf.length >> 2;
   ctx.fillStyle = color;
-  // The outer keeps a 1 px trace through a silent stretch, so a take reads as one line in its colour.
-  if (look.outer > 0) {
-    ctx.globalAlpha = look.outer * mul;
-    fillBand(ctx, buf, 0, dw, n, end, midY, A, 0.5, step);
-  }
-  ctx.globalAlpha = look.body * mul;
-  fillBand(ctx, buf, 2 * dw, 3 * dw, n, end, midY, A, 0, step);
+  // The body keeps a 1 px trace through a silent stretch, so a take reads as one line in its colour.
+  ctx.globalAlpha = body * mul;
+  fillBand(ctx, buf, 2 * dw, 3 * dw, n, end, midY, A, 0.5, step);
   if (edge > 0 && n > 0) {
-    // Round joins, so the hollow edge is as smooth as a filled one; through silence the two edges meet
-    // in one line on the centre.
+    // Round joins, so the contour is as smooth as the fill; through silence the two edges meet in one
+    // line on the centre.
     ctx.strokeStyle = color;
     ctx.globalAlpha = MUTED_EDGE.alpha * mul;
     ctx.lineWidth = edge * SUB;
@@ -677,44 +718,36 @@ function drawTake(
   ctx.globalAlpha = 1;
 }
 
-/** The lane's fade canvases (`Lane.fading`), made on its first fade and resized with the lane: the
+/** The lane's fade canvas (`Lane.fading`), made on its first fade and resized with the lane: the
  * cached path only (`rasterise`), so the draw loop allocates nothing. */
 function fadeFor(lane: Lane): Fade | null {
   const { dw, dh } = lane;
   let f = lane.fading;
   if (!f) {
     const take = document.createElement('canvas');
-    const mask = document.createElement('canvas');
     const tctx = take.getContext('2d');
-    const mctx = mask.getContext('2d');
     // No context: the lane draws its fade as a plain playing take.
-    if (!tctx || !mctx) return null;
-    f = { take, tctx, mask, mctx, row: mctx.createImageData(1, 1) };
+    if (!tctx) return null;
+    f = { take, tctx };
     lane.fading = f;
   }
   if (f.take.width !== dw || f.take.height !== dh) {
     f.take.width = dw;
     f.take.height = dh;
   }
-  if (f.row.width !== dw) {
-    f.mask.width = dw;
-    f.mask.height = 1;
-    f.row = f.mctx.createImageData(dw, 1);
-  }
   return f;
 }
 
 /**
- * Rasterise the bar grid + two-layer waveform envelope into the off-screen bitmap. All of this is the
+ * Rasterise the bar grid + the waveform body into the off-screen bitmap. All of this is the
  * CACHED-BITMAP path — it runs only on a dirty frame, never in the per-frame steady state.
  *
- * The wave is two filled paths (`fillBand`), anti-aliased by the canvas: the translucent OUTER peak
- * envelope (each bin's max over its min) and inside it the solid BODY (`BODY_K` of the bins' mean |peak|,
- * smoothed over a bin each side, mirrored around mid and clipped to the outer). Each is sampled once per
- * device column (`envelope`): where a bin spans several columns the column takes a monotone cubic through
- * the bin centres (`hermite`), which passes through every bin's value and never past its neighbours, so
- * a peak keeps its height and an attack rises within its bin, with no stair-steps and no invented shape;
- * where a column spans several bins it takes their extremes. While a take records (`span` > 0, its
+ * The wave is one filled path (`fillBand`), anti-aliased by the canvas: the BODY (`BODY_K` of the bins'
+ * mean |peak|, smoothed over a bin each side, mirrored around mid and clipped to the bins' peak envelope).
+ * It is sampled once per device column (`envelope`): where a bin spans several columns the column takes a
+ * monotone cubic through the bin centres (`hermite`), which passes through every bin's value and never
+ * past its neighbours, so a peak keeps its height and an attack rises within its bin, with no stair-steps
+ * and no invented shape; where a column spans several bins it takes their extremes. While a take records (`span` > 0, its
  * `recSpanFrames`) each bin sits at its frame over the span, so the recorded region ends at `end` and, on
  * a later take, the remainder gets the dotted rec-red "tape to fill" guide.
  */
@@ -777,8 +810,10 @@ function rasterise(
       lane.levels = new Float64Array(size);
       lane.shownMax = new Float32Array(size);
       lane.shownMin = new Float32Array(size);
+      lane.slopes = new Float32Array(6 * size);
     }
-    const { levels: lv, shownMax: hs, shownMin: ls } = lane;
+    const { levels: lv, shownMax: hs, shownMin: ls, slopes: sl } = lane;
+    const z = lv.length;
     for (let p = 0; p < count; p++) {
       lv[p] = shown(level(min, max, p, count - 1) * BODY_K);
       const hi = max[p];
@@ -786,7 +821,10 @@ function rasterise(
       hs[p] = hi > 0 ? shown(hi) : -shown(-hi);
       ls[p] = lo > 0 ? shown(lo) : -shown(-lo);
     }
-    const n = envelope(lane.cols, dw, cols, count, across, ls, hs, lv);
+    slopes(hs, 1, count, sl, 0, z);
+    slopes(ls, -1, count, sl, 2 * z, 3 * z);
+    slopes(lv, 1, count, sl, 4 * z, 5 * z);
+    const n = envelope(lane.cols, dw, cols, count, across, ls, hs, lv, sl, z);
     // A vertex every 2 device px where a bin spans 4 or more (the cubic is near-straight over 2 px),
     // else one per column, which keeps every bin's extremes.
     const step = across * 4 <= dw ? 2 : 1;
@@ -794,15 +832,16 @@ function rasterise(
     const f = fade ? fadeFor(lane) : null;
     if (f) {
       // A fading lane's take twice: grey, as it will be once stopped, and in its sounding colour on its
-      // own canvas, which `drawFade` lays over it at the level it will sound at.
+      // own canvas, which `drawFade` lays over it at the level it sounds at now.
       f.tctx.clearRect(0, 0, dw, dh);
       drawTake(wctx, lane.cols, n, end, midY, A, step, lane.colors.stopped, LOOK_STOPPED, 0);
       drawTake(f.tctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, false), LOOK_SOUNDING, 0);
     } else {
-      const look = muted && !capturing ? LOOK_MUTED : state === 'STOPPED' ? LOOK_STOPPED : LOOK_SOUNDING;
+      const hushed = muted && !capturing;
+      const body = hushed ? LOOK_MUTED : state === 'STOPPED' ? LOOK_STOPPED : LOOK_SOUNDING;
       const mul = muted && capturing ? MUTED_CAPTURE : 1;
-      const edge = look === LOOK_MUTED ? MUTED_EDGE.width * dpr : 0;
-      drawTake(wctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, muted), look, edge, mul);
+      const edge = hushed ? (lane.cssW >= PLAYHEAD_WIDE ? MUTED_EDGE.wide : MUTED_EDGE.width) * dpr : 0;
+      drawTake(wctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, muted), body, edge, mul);
     }
   }
 
@@ -871,33 +910,23 @@ export function setLaneFade(index: number, stopAt: number | null): void {
 }
 
 /**
- * Draw a fading lane: its take in its sounding colour at the level each point of the loop will next sound
- * at, over the same take in grey (`rasterise`). The level is the engine's ramp, r², r falling linearly from
- * the fade's start (`from`) to its stop (`to`), at the frame the playhead next reaches each column: ahead
- * of the head the take drains toward the stop, behind it (heard again a loop later) it is lower still, and
- * past the stop only grey is left. Per frame: one row of alpha (`Fade.row`, reused) stretched over the
- * take with `destination-in`, the grey slid in under it; no allocation.
+ * Draw a fading lane, one treatment across the whole row: the take's full-size grey silhouette (the
+ * lane's bitmap, `rasterise`, as it will look once stopped) and over it the take in its sounding colour a
+ * fixed step toward grey (`FADE_STEP`), scaled about the centre line to the level the lane sounds at now.
+ * That level is the engine's ramp, r², r falling linearly from the fade's start (`from`) to its stop
+ * (`to`), so the colour sinks into the grey as the fade runs and is gone at the stop. Per frame: two
+ * blits at integer sizes; no allocation.
  */
-function drawFade(lane: Lane, f: Fade, to: number, from: number, master: number): void {
+function drawFade(lane: Lane, f: Fade, to: number, from: number): void {
   const { ctx, dw, dh } = lane;
-  const a = f.row.data;
-  const now = looper.heardFrameValue();
-  const head = looper.phaseValue();
-  const inv = 1 / Math.max(1, to - from);
-  for (let x = 0; x < dw; x++) {
-    let d = (x + 0.5) / dw - head;
-    if (d < 0) d += 1;
-    let r = (to - now - d * master) * inv;
-    r = r < 0 ? 0 : r > 1 ? 1 : r;
-    a[4 * x + 3] = (r * r * 255 + 0.5) | 0;
-  }
-  f.mctx.putImageData(f.row, 0, 0);
-  ctx.drawImage(f.take, 0, 0);
-  ctx.globalCompositeOperation = 'destination-in';
-  ctx.drawImage(f.mask, 0, 0, dw, 1, 0, 0, dw, dh);
-  ctx.globalCompositeOperation = 'destination-over';
+  let r = (to - looper.heardFrameValue()) / Math.max(1, to - from);
+  r = r < 0 ? 0 : r > 1 ? 1 : r;
+  const h = Math.round(dh * r * r);
   ctx.drawImage(lane.wave, 0, 0);
-  ctx.globalCompositeOperation = 'source-over';
+  if (h < 1) return;
+  ctx.globalAlpha = FADE_STEP;
+  ctx.drawImage(f.take, 0, 0, dw, dh, 0, (dh - h) >> 1, dw, h);
+  ctx.globalAlpha = 1;
 }
 
 /** The single rAF loop: draw every registered lane, then schedule the next frame. */
@@ -946,7 +975,7 @@ function frame(now: number): void {
     if (dirty || moving) {
       const { ctx, dw, dh } = lane;
       ctx.clearRect(0, 0, dw, dh);
-      if (fade && lane.fading && lane.fading.row.width === dw) drawFade(lane, lane.fading, to, fadeFrom[lane.index] ?? 0, master);
+      if (fade && lane.fading && lane.fading.take.width === dw) drawFade(lane, lane.fading, to, fadeFrom[lane.index] ?? 0);
       else ctx.drawImage(lane.wave, 0, 0);
       drawPlayhead(lane, state, waiting);
     }
@@ -992,6 +1021,7 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     levels: new Float64Array(0),
     shownMax: new Float32Array(0),
     shownMin: new Float32Array(0),
+    slopes: new Float32Array(0),
     lastFading: false,
     fading: null,
   };

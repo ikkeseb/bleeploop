@@ -107,12 +107,13 @@
   background: var(--key-on);
 }
 
-/* Keyboard/MIDI-selected lane — selection by tone, never a box (the app.css header's THE DISPLAY): the
-   whole row lifts a tone end to end, its body (--surf-sel) and its strip of the glass (--glass-sel, below
-   in the well section), under one warm-white hairline along its top across head, glass and mix, so
-   "which track will Space/Enter hit" is glanceable without competing with the state colour (--sc). No
-   rail (owner, 2026-09-23), no tint, no card: a live capture keeps the same row, its colour is in the
-   wave, the word and the core. Its FX drawer open under it shares the lifted body. */
+/* Keyboard/MIDI-selected lane — its edge lights, never a box or a rail (owner, 2026-09-23; the app.css
+   header's THE DISPLAY): one warm-white hairline along its top AND its bottom across head, glass and mix,
+   so the row reads as picked in every state (empty included) without competing with the state colour
+   (--sc); its number lights warm-white (engaged chrome), and its body lifts one quiet tone. The glass
+   strip does not lift: a lighter well read as a state. A live capture keeps the same row, its colour is
+   in the wave, the word and the core. Its FX drawer open under it shares the lifted body, and the bottom
+   line moves to the drawer's foot, so lane and drawer read as one picked block. */
 .lp-lane.is-selected.is-selected,
 .lp-lane.is-selected + .lp-drawer {
   background: var(--surf-sel);
@@ -120,11 +121,19 @@
 .lp-lane.is-selected::after {
   content: '';
   position: absolute;
-  inset: 0 0 auto;
-  height: 1px;
+  inset: 0;
   z-index: 3;
-  background: var(--sel-line);
+  border-block: 1px solid var(--sel-line);
   pointer-events: none;
+}
+.lp-lane.is-selected:has(+ .lp-drawer)::after {
+  border-bottom-color: transparent;
+}
+.lp-lane.is-selected + .lp-drawer {
+  box-shadow: inset 0 -1px 0 var(--sel-line);
+}
+.lp-lane.is-selected .lp-lane__num.lp-lane__num {
+  color: var(--engaged);
 }
 /* EMPTY: the row keeps the body's tone (one machine); the EMPTY word + unlit LED carry the cue */
 .lp-lane[data-state='empty'] {
@@ -148,11 +157,15 @@
   gap: 6px;
   width: clamp(80px, 6.6vw, calc(108px * var(--ui))); /* the number and, on the selected lane, "A+B LIVE" beside it */
 }
-/* the wide display's lane step (--ui-lane 1.3) sets "A+B LIVE" at 17 px beside a 31 px number: about
-   150 px, so the box takes the room the left cluster has spare there (333 px holds 156 + core + pair) */
+/* the wide display's lane step (--ui-lane 1.3) sets "A+B LIVE" at 17 px beside a 31 px number, 18 px
+   apart so the source never crowds the number: about 158 px, so the box takes the room the left cluster
+   has spare there */
 @media (min-width: 2200px) {
   .lp-lane__idbox {
-    width: calc(120px * var(--ui));
+    width: calc(126px * var(--ui));
+  }
+  .lp-lane .lp-lane__head {
+    gap: calc(14px * var(--ui));
   }
 }
 /* the number's row: the number, and on the selected lane the live source a take there would hear */
@@ -300,6 +313,18 @@
   width: 38%;
   height: 38%;
   position: relative;
+}
+/* the overdub glyph (Looper.tsx IconDub, the one stroked glyph): a plain + the size of the record ●
+   (about 16 px on a 2560 core), its stroke a step under the ●'s weight; the ring round it went, so it
+   reads from the chair as "add a layer", not as a small sign inside a circle inside the core's ring */
+.lp-core svg[stroke] circle {
+  display: none;
+}
+.lp-core svg[stroke] path {
+  transform: scale(2.1);
+  transform-box: fill-box;
+  transform-origin: center;
+  stroke-width: 1.75;
 }
 /* the state ring around the cap, a dark gap from its rim */
 .lp-core::before {
@@ -502,10 +527,6 @@
 .lp__lanes > .lp-lane:has(+ .lp-drawer) .lp-lane__well {
   border-bottom-left-radius: var(--r-well);
   border-bottom-right-radius: var(--r-well);
-}
-/* the selected row's strip of the pane lifts a tone with its body (the selection above) */
-.lp-lane.is-selected .lp-lane__well {
-  background-color: var(--glass-sel);
 }
 .lp-lane__well canvas {
   position: absolute;
