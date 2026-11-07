@@ -565,24 +565,21 @@
 /* Narrow-width ladder. The `.cmd` card (app.css) is `overflow: hidden` via body, so anything that does
    not fit is simply unreachable. First rung: when one row cannot fit (measured by app/cmd-fit.ts —
    including FIXED's bars while it is on) the bar carries `.cmd--stack` and the five record modes take a
-   second row under the brand; TAP (`.transport__pair`) follows them there, under BPM, only when row 1
-   is still full without the tool icons (`.cmd--stack-pair`); past that the brand folds to its dot
-   (`.cmd--stack-brand`, app.css). `order` moves them visually only: the DOM keeps the one-row order,
-   and `.cmd`'s `reading-flow` (app.css) walks Tab through the rows as drawn. The width stays intrinsic (no flex-basis: 100%) so the measurement
-   cannot see its own effect. */
+   second row; TAP (`.transport__pair`) follows them there, under BPM, only when row 1 is still full
+   without the tool icons (`.cmd--stack-pair`); past that the brand folds to its dot
+   (`.cmd--stack-brand`, app.css). Only those move: ■/▶ ALL · FADE · ✕ ALL · IN FX never leave row 1, right
+   after LOOP, because they act on the loop that read-out shows (stop, fade, clear what it counts); set
+   apart from it on another row they read as a separate panel. Row 2 starts flush with the brand, the
+   card's one content edge, and the modes, which say how the next take records, sit under the tempo and
+   loop they set (CLICK under the BPM side, FIXED's bars towards LOOP): at 1920 they end around the
+   transport's first key, so row 2 reads as the lower half of that left block, not a strip of its own;
+   the open space to its right sits under the spacer and the output, which already read as one zone.
+   `order` moves them visually only: the DOM keeps the one-row order, and `.cmd`'s `reading-flow`
+   (app.css) walks Tab through the rows as drawn. The width stays intrinsic (no flex-basis: 100%) so the
+   measurement cannot see its own effect. */
 .cmd--stack .transport__modes,
 .cmd--stack-pair .transport__pair {
   order: 2;
-}
-/* Row balance: while the tools still share row 1 (no `.cmd--stack-tools`, so row 1 fits even WITH the
-   global transport), ■/▶ ALL · FADE · ✕ ALL · IN FX follow the modes down and hold row 2's right edge, under
-   master and the tools. Both rows then run edge to edge: tempo, loop and output on top; how a take records
-   (left) and what the whole loop does (right) below, with one shared channel between them. Row 2 fits by
-   construction: the modes are narrower than row 1 without the global cluster. Visual `order` and a margin
-   only, so cmd-fit.ts's intrinsic widths never see it. */
-.cmd--stack:not(.cmd--stack-tools) .transport__global {
-  order: 2;
-  margin-left: auto;
 }
 /* Further rung: drop the loop seconds. */
 @media (max-width: 1180px) {
