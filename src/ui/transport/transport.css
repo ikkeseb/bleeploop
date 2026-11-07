@@ -1,17 +1,19 @@
 /* Command-bar transport clusters — colour is state. These render as direct
    flex items of the `.cmd` header (Transport returns a Fragment); the `.cmd` card + brand/lamp/tools
-   live in app.css. Styled to the "Instrument" tokens (src/app.css):
-   matte key faces, sans labels, a sunk display window for BPM + loop; colour rationed to state
-   (--engaged on, --play record level/loop, --dub two-step confirm). */
+   live in app.css. Styled to the "Instrument" tokens (src/app.css): every toggle and stepper is a key of
+   the one family (the app.css header's KEYS: a quiet resting face, lifted on hover, one step lighter and
+   a lit legend when engaged), a sunk display window for BPM + loop; colour rationed to sound (--play the
+   record level and the loop dial; a two-step confirm and a fade under way are chrome, lit warm-white).
+   Sizes follow --ui (the app.css header's SIZE). No glow. */
 
 /* ---- BPM group — big numeral, ± steppers, unit + beat dots. It and the loop readout sit in a sunk
    display window: the one "screen" on the panel. ---- */
 .transport__bpm-group,
 .transport__loop {
   background: var(--sunk);
-  /* edge + recess as shadows only: the window adds no height to the command bar (layout probes) */
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 2px 5px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
-  border-radius: 10px;
+  /* its one dark hairline as a shadow: the window adds no height to the command bar (layout probes) */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.5);
+  border-radius: var(--r-well);
   padding: 0 6px;
 }
 .transport__bpm-group {
@@ -23,18 +25,19 @@
 /* the ± steppers */
 .transport__step {
   position: relative; /* anchors the ::before hit pad */
-  width: 22px;
-  height: 22px;
+  width: calc(22px * var(--ui));
+  height: calc(22px * var(--ui));
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border-radius: 7px;
-  background: var(--surf-2);
-  color: var(--dim);
-  font-size: 13px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--legend);
+  font-size: calc(15px * var(--ui));
+  font-weight: 500;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color var(--motion), background-color var(--motion);
 }
 /* the 22px face stays (the display window's row height is pinned); the hit area is 24x24 (WCAG 2.2 target size) */
 .transport__step::before {
@@ -42,42 +45,40 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 24px;
-  height: 24px;
+  width: calc(24px * var(--ui));
+  height: calc(24px * var(--ui));
   transform: translate(-50%, -50%);
 }
 .transport__step:hover:not(:disabled) {
   color: var(--text);
-  background: var(--surf-3);
+  background: var(--key-hover);
 }
 /* disabled = no face, a --faint legend: tone, never an opacity fade (.tgl:disabled) */
 .transport__step:disabled {
   cursor: not-allowed;
   background: transparent;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
 
-/* the 34px numeral — a click-to-edit button, lit like a display readout. It and its editor share one
-   fixed 64px box (three tabular digits; the tempo is a whole 40..300), so typing a tempo neither
-   widens the bar nor makes it re-measure its rows (app/cmd-fit.ts). */
+/* the 34px numeral — a click-to-edit button in a light display weight, the screen's second read after
+   the waves. It and its editor share one fixed 64px box (three tabular digits; the tempo is a whole
+   40..300), so typing a tempo neither widens the bar nor makes it re-measure its rows (app/cmd-fit.ts). */
 .transport__bpm-num {
-  font-size: 34px;
-  font-weight: 600;
+  font-size: calc(34px * var(--ui));
+  font-weight: 300;
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
-  color: #f6f1e7;
-  text-shadow: 0 0 14px rgba(246, 241, 231, 0.18);
+  color: var(--engaged);
   background: none;
   border: 0;
   padding: 0 2px;
   cursor: text;
-  min-width: 64px;
+  min-width: calc(64px * var(--ui));
   text-align: center;
 }
 .transport__bpm-num:hover:not(:disabled) {
-  color: var(--engaged);
+  color: #fff;
 }
 .transport__bpm-num:disabled {
   cursor: default;
@@ -87,17 +88,17 @@
    by its `size` (about 20 characters) and the line height `normal`, never by min-width or line-height */
 .transport__bpm-input {
   font-family: inherit;
-  font-size: 34px;
-  font-weight: 600;
+  font-size: calc(34px * var(--ui));
+  font-weight: 300;
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
   color: var(--engaged);
   background: none;
   border: 0;
   padding: 0 2px;
-  width: 64px;
-  height: 34px;
+  width: calc(64px * var(--ui));
+  height: calc(34px * var(--ui));
   text-align: center;
   outline: none;
   -moz-appearance: textfield;
@@ -118,9 +119,9 @@
   gap: 5px;
 }
 .transport__bpm-unit {
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
+  font-size: calc(10px * var(--ui));
+  font-weight: 600;
+  letter-spacing: 0.08em;
   color: var(--faint);
 }
 /* the meter picker — a small key face with the themed caret beside the unit; locked, it reads as a
@@ -129,24 +130,24 @@
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
-  background-color: var(--surf-2);
+  background-color: transparent;
   background-image: var(--caret-svg);
   background-repeat: no-repeat;
   background-position: right 3px center;
   background-size: 9px 9px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 4px;
   color: var(--dim);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui));
   line-height: 1;
   padding: 2px 14px 2px 5px;
   cursor: pointer;
-  transition: color 0.12s, background-color 0.12s;
+  transition: color var(--motion), background-color var(--motion);
 }
 .transport__meter:hover:not(:disabled) {
   color: var(--text);
-  background-color: var(--surf-3);
+  background-color: var(--key-hover);
 }
 .transport__meter:disabled {
   background: none;
@@ -162,15 +163,14 @@
   gap: 5px;
 }
 .transport__beat {
-  width: 7px;
-  height: 7px;
+  width: calc(7px * var(--ui));
+  height: calc(7px * var(--ui));
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.12);
-  transition: background 0.06s, box-shadow 0.06s;
+  transition: background-color 0.06s;
 }
 .transport__beat.on {
-  background: var(--text);
-  box-shadow: 0 0 8px rgba(238, 241, 248, 0.8);
+  background: var(--engaged);
 }
 
 /* lock glyph leading the group when tempo is frozen */
@@ -180,18 +180,18 @@
   color: var(--dim);
 }
 
-/* one-shot pulse on the first loop commit so the freeze is noticeable (a warm-white ring blooming out) */
+/* one-shot on the first loop commit so the freeze is noticeable: the window's own hairline lights
+   warm-white and settles back, inside its frame (no ring outside it, no glow) */
 @keyframes transport-bpm-locked-pulse {
   0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--engaged) 45%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--engaged) 40%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 10px color-mix(in srgb, var(--engaged) 0%, transparent);
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.5);
   }
 }
 .transport__bpm-group--just-locked {
-  border-radius: 12px;
-  animation: transport-bpm-locked-pulse 0.75s ease-out 2;
+  animation: transport-bpm-locked-pulse 1.2s ease-out 1;
 }
 @media (prefers-reduced-motion: reduce) {
   .transport__bpm-group--just-locked {
@@ -199,46 +199,46 @@
   }
 }
 
-/* ---- toggle pills — TAP / CLICK / FIXED / RETAKE / AUTO REC / END STOP / ALL / FADE / ✕ ALL / IN FX */
+/* ---- keys — TAP / CLICK / FIXED / RETAKE / AUTO REC / END STOP / ALL / FADE / ✕ ALL / IN FX ---- */
 .transport__modes,
 .transport__global {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-/* record-level meter — a 4px vertical bar between ✕ ALL and IN FX, filled from the bottom by --lvl
+/* record-level meter — a slim vertical bar between ✕ ALL and IN FX, filled from the bottom by --lvl
    (0..1 over −60..0 dBFS, set by the waveform rAF loop); --play normally, --rec within 1 dB of full
    scale. With AUTO on, `has-thr` draws a cyan tick at --thr: where the detector's RMS trigger sits
-   on that scale. */
+   on that scale. The tick stays inside the bar's width, so the meter never reads as a cross. Silent, it
+   still reads as a meter, never a stray tick: a sunk slot the keys' height with a hairline rim. */
 .transport__inmeter {
   --lvl: 0;
   --thr: 0;
   --meter-c: var(--play);
   position: relative;
   flex: 0 0 auto;
-  width: 4px;
-  height: 22px;
-  margin: 0 3px;
-  border-radius: 2px;
+  width: calc(7px * var(--ui));
+  height: calc(28px * var(--ui) + 2px); /* the keys' height beside it (.transport__tgl) */
+  margin: 0 4px;
+  border-radius: 3px;
+  overflow: hidden;
   background: linear-gradient(
     to top,
     var(--meter-c) calc(var(--lvl) * 100%),
-    rgba(255, 255, 255, 0.12) calc(var(--lvl) * 100%)
+    var(--sunk) calc(var(--lvl) * 100%)
   );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 .transport__inmeter.is-hot {
   --meter-c: var(--rec);
-  box-shadow: 0 0 0 1px var(--rec);
 }
 .transport__inmeter.has-thr::after {
   content: '';
   position: absolute;
-  left: -3px;
-  right: -3px;
+  left: 0;
+  right: 0;
   bottom: calc(var(--thr) * 100% - 1px);
-  height: 3px;
-  border-top: 1px solid var(--bg);
-  border-bottom: 1px solid var(--bg);
+  height: 2px;
   background: var(--cyan);
   pointer-events: none;
 }
@@ -247,32 +247,31 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  font-size: 11px;
-  line-height: 12px; /* pinned: the pill keeps the command bar's measured row height */
+  font-size: calc(10.5px * var(--ui));
+  line-height: calc(12px * var(--ui)); /* pinned: the toggle keeps the command bar's measured row height */
   font-weight: 600;
-  letter-spacing: 0.06em;
-  padding: 8px 13px;
+  letter-spacing: 0.08em;
+  padding: calc(8px * var(--ui)) calc(13px * var(--ui));
   border: 1px solid transparent;
-  border-radius: 8px;
-  background: var(--surf-2);
-  box-shadow: inset 0 1px 0 var(--hair);
-  color: var(--dim);
+  border-radius: var(--r-ctl);
+  background: var(--key);
+  color: var(--legend);
   cursor: pointer;
-  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+  transition: color var(--motion), background-color var(--motion), border-color var(--motion);
 }
 .transport__tgl:hover:not(:disabled) {
   color: var(--text);
-  background: var(--surf-3);
+  background: var(--key-hover);
 }
 .transport__tgl:active:not(:disabled) {
   background: var(--sunk);
   box-shadow: var(--pressed);
 }
+/* disabled = the quieter off face, a --faint legend: still a key in its row, just not lit */
 .transport__tgl:disabled {
   cursor: not-allowed;
-  background: transparent;
+  background: var(--key-off);
   box-shadow: none;
-  border-color: rgba(255, 255, 255, 0.06);
   color: var(--faint);
 }
 /* A pill whose word changes (▶ ALL / ■ ALL / ■ NOW, FADE / FADING) holds the width of its widest
@@ -287,63 +286,78 @@
   overflow: hidden;
   visibility: hidden;
 }
-/* engaged = the lit warm-white legend (selection/mode on) */
-.transport__tgl.is-on {
+/* engaged = the lit warm-white legend on the engaged face (selection/mode on); it outranks hover, so the
+   face never drops under the pointer */
+.transport__tgl.is-on,
+.transport__tgl.is-on:hover:not(:disabled):not(:active) {
   color: var(--engaged);
-  background: var(--surf-3);
-  border-color: rgba(244, 239, 230, 0.28);
-  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
+  background: var(--key-on);
 }
-/* on but greyed out (FIXED under RETAKE over a loop): the disabled face, its dim lamp alone says "set" */
+/* ON BUT LOCKED (FIXED under RETAKE over a loop, AUTO REC once a loop exists): a third look, apart from
+   both on and off (the app.css header's KEYS). The lamp stays lit (the mode IS on, remembered) and a
+   padlock follows the legend (it cannot act now); the legend is the disabled one (the contact sheet pins
+   it at --faint, no text-shadow) on the off face ringed by an engaged rim with no fill. Plain on is a lit
+   lamp and legend on a lit face; plain off an empty socket on the resting face. A split key's read-out
+   wears the same rim. */
 .transport__tgl.is-on:disabled {
   color: var(--faint);
-  background: transparent;
-  border-color: rgba(255, 255, 255, 0.06);
+  background: var(--key-off);
+  box-shadow: inset 0 0 0 1px rgba(255, 246, 232, 0.22);
   text-shadow: none;
 }
-/* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an unlit socket
-   before the legend, lit warm-white while the mode is on, so a mode reads on or off from the guitar.
+/* A record mode's lamp, the lane LED's vocabulary (looper.css, the FX pill's lamp): an empty socket
+   ring before the legend, lit warm-white while the mode is on, so a mode reads on or off from the guitar.
    Always in the row, so lighting it never moves the legend or resizes the pill. A mode that is on but
-   greyed out (FIXED under RETAKE over a loop) keeps a dim lamp: set, not in effect. */
+   greyed out keeps its lamp lit over the --faint legend: on, not in effect. */
 .transport__tgl--led {
-  padding-left: 10px;
+  padding-left: calc(10px * var(--ui));
 }
 .transport__tgl--led::before {
   content: '';
-  width: 5px;
-  height: 5px;
+  width: calc(6px * var(--ui));
+  height: calc(6px * var(--ui));
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--led-socket);
   box-shadow: var(--led-socket-shade);
-  transition: background-color 0.12s, box-shadow 0.12s;
+  transition: background-color var(--motion), box-shadow var(--motion);
 }
 .transport__tgl--led.is-on::before {
   background: var(--engaged);
-  box-shadow: 0 0 6px var(--engaged);
-}
-.transport__tgl--led.is-on:disabled::before {
-  background: color-mix(in srgb, var(--engaged) 35%, var(--led-socket));
   box-shadow: none;
 }
-/* A split pill: the mode's toggle and, joined to it, the read-out of its one setting, which opens that
-   setting's popover (Transport.tsx, BarPopover.tsx). The read-out wears the toggle's state. One rim runs
-   round both halves; the 1px gap between them is the divider, and each half lifts on its own hover. */
+.transport__tgl--led.is-on:disabled::after {
+  /* the padlock (Transport.tsx's tempo-lock path) after the legend, in the read-out's --dim: a word, not a
+     lamp, so it never competes with the lit dot before the legend */
+  content: '';
+  width: calc(7px * var(--ui));
+  height: calc(9px * var(--ui));
+  flex: 0 0 auto;
+  margin-left: calc(-1px * var(--ui));
+  background: var(--dim);
+  mask: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='5 1.8 14 19.2'%3e%3cpath d='M12 1.8a4.2 4.2 0 0 0-4.2 4.2V9H6.6A1.6 1.6 0 0 0 5 10.6v8.8A1.6 1.6 0 0 0 6.6 21h10.8a1.6 1.6 0 0 0 1.6-1.6v-8.8A1.6 1.6 0 0 0 17.4 9h-1.2V6A4.2 4.2 0 0 0 12 1.8zm2.6 7.2H9.4V6a2.6 2.6 0 0 1 5.2 0z'/%3e%3c/svg%3e")
+    center / contain no-repeat;
+  forced-color-adjust: none;
+}
+/* A split toggle: the mode's toggle and, joined to it, the read-out of its one setting, which opens that
+   setting's popover (Transport.tsx, BarPopover.tsx). The read-out wears the toggle's state. Engaged, one
+   face runs round both halves; the 1px gap between them is the divider, and each half lifts on its own
+   hover. */
 .transport__split {
   display: flex;
   align-items: center;
   gap: 1px;
 }
 .transport__split > .transport__tgl:first-child {
-  padding-right: 10px;
+  padding-right: calc(10px * var(--ui));
   border-right-color: transparent;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
 .transport__split > .transport__readout {
   gap: 4px;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-left: calc(8px * var(--ui));
+  padding-right: calc(8px * var(--ui));
   border-left-color: transparent;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
@@ -369,46 +383,74 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-/* two-step confirm (✕ SURE?) = dub-amber warn */
-.transport__tgl.is-armed {
-  color: var(--dub);
-  background: color-mix(in srgb, var(--dub) 10%, var(--surf-2));
-  border-color: color-mix(in srgb, var(--dub) 55%, transparent);
+/* two-step confirm (✕ SURE?) and a fade under way (FADING) are chrome, not sound (amber is overdub's
+   alone): the engaged recipe, the lit warm-white legend on the face a step up; the word says which */
+.transport__tgl.is-armed,
+.transport__tgl.is-armed:hover:not(:disabled):not(:active) {
+  color: var(--engaged);
+  background: var(--key-on);
+}
+/* pressed: the sunk face (.transport__tgl:active) wins, the lit legend stays */
+.transport__tgl.is-armed:active:not(:disabled) {
+  color: var(--engaged);
 }
 
-/* FIXED and FADE pair a pill with its bars. FADE's stay beside it: a fade's length is set before the
-   press that ends the song. */
+/* FIXED and FADE pair a key with its bars: one split key, as CLICK | 70 (the key, then its stepper on a
+   face of its own, joined by a 1 px gap), so the bars read as their key's and never as the next mode's.
+   FADE's stay beside it: a fade's length is set before the press that ends the song. */
 .transport__fixed,
 .transport__fade {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 1px;
+}
+.transport__fixed > .transport__tgl:has(+ .transport__bars),
+.transport__fade > .transport__tgl {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
-/* the fixed-length bar stepper (mono readout between ± steppers) */
+/* the bar stepper (mono readout between ± steppers): the split key's second face, the pills' height, so
+   it reads as a key of the row; each ± lifts on its own hover */
 .transport__bars {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
+  height: calc(28px * var(--ui) + 2px); /* the mode pill's height beside it (.transport__tgl) */
+  padding: 0 4px;
+  border-radius: 0 var(--r-ctl) var(--r-ctl) 0;
+  background: var(--key);
+}
+/* FIXED on but locked: its bars wear the key's locked rim (.transport__tgl.is-on:disabled), the count
+   still read but not lit */
+.transport__tgl.is-on:disabled + .transport__bars {
+  background: var(--key-off);
+  box-shadow: inset 0 0 0 1px rgba(255, 246, 232, 0.22);
+}
+.transport__tgl.is-on:disabled + .transport__bars .transport__bars-val {
+  color: var(--dim);
 }
 .transport__bars-val {
   display: flex;
   align-items: baseline;
   justify-content: center;
   gap: 3px;
-  min-width: 44px;
+  min-width: calc(44px * var(--ui));
   text-align: center;
-  font-size: 13px;
-  font-weight: 600;
+  font-family: var(--mono);
+  font-size: calc(13px * var(--ui));
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   color: var(--text);
   line-height: 1;
 }
 .transport__bars-unit {
-  font-size: 9px;
-  letter-spacing: 0.1em;
+  font-family: var(--sans);
+  font-size: calc(10px * var(--ui));
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--dim);
 }
 
 /* ---- loop ring-dial readout ---- */
@@ -418,9 +460,17 @@
   gap: 11px;
 }
 .transport__dial {
-  width: 38px;
-  height: 38px;
+  width: calc(38px * var(--ui));
+  height: calc(38px * var(--ui));
   flex: 0 0 auto;
+}
+/* the progress arc spends green only while a lane sounds (Transport.tsx `anyLive`): over a stopped loop
+   it still shows where the loop is, in the legend's tone (colour is sound, the app.css header) */
+.transport__dial-arc {
+  stroke: var(--legend);
+}
+.transport__dial-arc.is-live {
+  stroke: var(--play);
 }
 /* The read-out and its unseen sizer (Transport.tsx) share one grid cell under LOOP: the cell is as wide
    as the widest read-out at every rung, so ▶ ALL, FADE, ✕ ALL and IN FX hold their x from the empty
@@ -437,15 +487,15 @@
   visibility: hidden;
 }
 .transport__loop-k {
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
+  font-size: calc(10px * var(--ui));
+  font-weight: 600;
+  letter-spacing: 0.08em;
   color: var(--faint);
 }
 .transport__loop-v,
 .transport__loop-fit {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: calc(15px * var(--ui));
+  font-weight: 500;
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -454,7 +504,7 @@
 .transport__loop-fit small {
   color: var(--dim);
   font-weight: 400;
-  font-size: 11px;
+  font-size: calc(11px * var(--ui));
 }
 
 /* ---- flexible spacer ---- */
@@ -475,21 +525,25 @@
   min-width: 60px;
 }
 .transport__master-mute {
-  width: 30px;
-  height: 30px;
+  width: calc(30px * var(--ui));
+  height: calc(30px * var(--ui));
   flex: 0 0 auto;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-ctl);
   background: none;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.12s, background 0.12s;
+  transition: color var(--motion), background-color var(--motion);
+}
+.transport__master-mute svg {
+  width: calc(15px * var(--ui));
+  height: calc(15px * var(--ui));
 }
 .transport__master-mute:hover {
   color: var(--text);
-  background: var(--surf-3);
+  background: var(--key-hover);
 }
 .transport__master-mute.is-muted {
   color: var(--rec);
@@ -501,7 +555,7 @@
 }
 .transport__volume-val {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: calc(12px * var(--ui));
   font-variant-numeric: tabular-nums;
   color: var(--dim);
   min-width: 24px;
@@ -519,6 +573,16 @@
 .cmd--stack .transport__modes,
 .cmd--stack-pair .transport__pair {
   order: 2;
+}
+/* Row balance: while the tools still share row 1 (no `.cmd--stack-tools`, so row 1 fits even WITH the
+   global transport), ■/▶ ALL · FADE · ✕ ALL · IN FX follow the modes down and hold row 2's right edge, under
+   master and the tools. Both rows then run edge to edge: tempo, loop and output on top; how a take records
+   (left) and what the whole loop does (right) below, with one shared channel between them. Row 2 fits by
+   construction: the modes are narrower than row 1 without the global cluster. Visual `order` and a margin
+   only, so cmd-fit.ts's intrinsic widths never see it. */
+.cmd--stack:not(.cmd--stack-tools) .transport__global {
+  order: 2;
+  margin-left: auto;
 }
 /* Further rung: drop the loop seconds. */
 @media (max-width: 1180px) {
@@ -582,9 +646,6 @@
     gap: 3px;
     padding-left: 6px;
     padding-right: 6px;
-  }
-  .transport__fixed {
-    gap: 4px;
   }
   .transport__readout-k {
     display: none;

@@ -117,11 +117,17 @@ function DubFeedback(props: { index: number }) {
   );
 }
 
+// The params row's columns, one per param in chain order: each FX's key heads its own params' columns
+// (`--col`, `--span`), so a group sits under its key whichever FX are engaged (fxpanel.css).
+const FX_SPANS = FX_META.map((meta) => FX_PARAM_DEFS[meta.kind].length);
+const FX_COLS = FX_SPANS.reduce((sum, n) => sum + n, 0);
+const FX_STARTS = FX_SPANS.map((_, i) => 1 + FX_SPANS.slice(0, i).reduce((sum, n) => sum + n, 0));
+
 export function FxPanel(props: { index: number }) {
   // A bypass press is a whole gesture: it toggles what the key shows.
   const engaged = (fxI: number) => !looper.fxBypassShown(props.index, fxI);
   return (
-    <div class="fxp">
+    <div class="fxp" style={{ '--cols': FX_COLS }}>
       <div class="fxp-keys">
         <For each={FX_META}>
           {(meta, fxI) => {
@@ -130,6 +136,7 @@ export function FxPanel(props: { index: number }) {
               <button
                 class="fxp-mod__toggle"
                 classList={{ 'fxp-mod__toggle--on': engaged(fxI()) }}
+                style={{ '--col': FX_STARTS[fxI()], '--span': FX_SPANS[fxI()] }}
                 onClick={() => looper.setFxBypass(props.index, fxI(), engaged(fxI()))}
                 aria-pressed={engaged(fxI())}
                 aria-label={`${meta.label}, track ${props.index + 1}`}
@@ -146,7 +153,7 @@ export function FxPanel(props: { index: number }) {
           <For each={FX_META}>
             {(meta, fxI) => (
               <Show when={engaged(fxI())}>
-                <div class="fxp-group" style={{ '--params': FX_PARAM_DEFS[meta.kind].length }}>
+                <div class="fxp-group" style={{ '--col': FX_STARTS[fxI()], '--params': FX_SPANS[fxI()] }}>
                   <span class="fxp-group__tag">{meta.label}</span>
                   <For each={FX_PARAM_DEFS[meta.kind]}>
                     {(def) => <ParamControl index={props.index} fxIndex={fxI()} fx={meta.label} def={def} />}

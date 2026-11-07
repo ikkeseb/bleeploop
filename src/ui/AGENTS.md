@@ -13,6 +13,29 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   and compare against `logs/contact-sheet/index.html` (fixed scenes at three window sizes). What
   binds: guitar first, the looper as the hero with five lanes, one command bar for the whole
   transport, lane volume **0..1.5** with a 0 dB detent at 1.0, and the owner's decisions below.
+- **The main screen's principles,** drawn from the owner's design notes (2026-10/11); an earlier one
+  settles a conflict. The screen is played standing, about 1.5 m from a 27" 2560x1440 display, guitar
+  in hand: an instrument, not a DAW window. How each is drawn (surfaces, colour, keys, the wave,
+  selection, motion, sizes) is the `src/app.css` header's.
+  1. *Read from the chair, without reading:* each lane's state and where the loop is read within a
+     second by colour, fill and the playhead; a state word confirms, never carries alone. Two states
+     that look alike from the chair are a defect.
+  2. *Colour is sound,* as an RC-505's rings; what is silent is tone, quieter than anything sounding
+     and still plainly there.
+  3. *The wave is the face:* it holds up at full size at 2560 beside the best DAWs' waveforms; its
+     colour is its state, its brightness its importance.
+  4. *Calm by default:* motion only where it reports something (the playhead, a take filling in, a
+     count-in, a fade, a brief confirm), never standing or decorative. Spectacle belongs in the stage
+     view.
+  5. *One hierarchy:* lanes, then the command bar, then the slots, then the keyboard (a fallback that
+     recedes).
+  6. *One machine, one key family;* nothing reads as bolted on.
+  7. *Every pixel earns its place:* no stray marks or unreadable labels; columns align across rows
+     and the drawer, and a group's heading spans its group.
+  8. *An evolution, not a new product:* the layout stays (command bar on top, slots A | B, five lanes
+     as head | wave | mix, the FX drawer under its lane).
+  Reference products are named in words (Ableton Live's Session view, Teenage Engineering's OP-1
+  field, Logic Pro), never copied from screenshots or made targets.
 - **Empty-lane right cluster is disabled by design** (`disabled={isEmpty()}` in `Looper.tsx`). Ask
   before changing it; decision D4: volume on an EMPTY track stays non-settable.
 - **Layout:** `layout/SplitStack.tsx` is the N-pane seam and panes never remount on

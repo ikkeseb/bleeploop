@@ -486,7 +486,8 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </button>
       </div>
 
-      {/* Loop readout — the mini ring-dial (progress = loopPhase) + N BARS · S.S s. */}
+      {/* Loop readout — the mini ring-dial (progress = loopPhase) + N BARS · S.S s. The arc is green only
+          while a lane sounds or records (`anyLive`); over a stopped loop it is tone (transport.css). */}
       <div class="transport__loop" title="Master loop length">
         <svg class="transport__dial" viewBox="0 0 40 40" aria-hidden="true">
           <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(148,168,215,.15)" stroke-width="3" />
@@ -495,8 +496,9 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
               cx="20"
               cy="20"
               r="16"
+              class="transport__dial-arc"
+              classList={{ 'is-live': anyLive() }}
               fill="none"
-              stroke="var(--play)"
               stroke-width="3"
               stroke-linecap="round"
               stroke-dasharray={String(DIAL_C)}
