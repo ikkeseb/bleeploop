@@ -162,6 +162,10 @@ await probe(async ({ browser, open }) => {
       const readouts = (root, defs) => page.evaluate(([root, defs]) => [...document.querySelectorAll(`${root} .fxp-param:not(.fxp-dub .fxp-param)`)].map((p) => {
         const control = p.querySelector('.fxp-param__range, .fxp-param__select');
         const val = p.querySelector('.fxp-param__val');
+        // an auto-sized read-out never overflows itself, so it must also sit inside its param, clear of its label,
+        // and its param inside its group (the drawer's effect, the IN FX popover)
+        const outside = (el, box) => { const a = el.getBoundingClientRect(), b = box.getBoundingClientRect(); return a.left < b.left - 0.5 || a.right > b.right + 0.5 ? { el: [a.left, a.right], box: [b.left, b.right] } : null; };
+        const overlaps = (a, b) => { if (!a) return false; const x = a.getBoundingClientRect(), y = b.getBoundingClientRect(); return x.right > y.left + 0.5 && y.right > x.left + 0.5 && x.bottom > y.top + 0.5 && y.bottom > x.top + 0.5; };
         const name = control?.getAttribute('aria-label');
         const def = defs[name];
         if (!def) return { name, problem: 'no definition for this control' };
@@ -180,6 +184,9 @@ await probe(async ({ browser, open }) => {
           : !unit.test(text) ? 'not in its unit'
           : control.getAttribute('aria-valuetext') !== text ? `speaks ${control.getAttribute('aria-valuetext')}`
           : val.scrollWidth > val.clientWidth + 0.5 ? `overflows (${val.scrollWidth} > ${val.clientWidth})`
+          : outside(val, p) ? `spills out of its param (${JSON.stringify(outside(val, p))})`
+          : outside(p, p.closest('.fxp-group, .infx-popover')) ? `its param spills out of its group (${JSON.stringify(outside(p, p.closest('.fxp-group, .infx-popover')))})`
+          : overlaps(p.querySelector('.fxp-param__label'), val) ? 'runs into its label'
           : null;
         return { name, text, problem };
       }), [root, defs]);
@@ -592,12 +599,13 @@ await probe(async ({ browser, open }) => {
           const lanes = [...document.querySelectorAll('.lp-lane')];
           const look = (el) => { const cs = getComputedStyle(el); return `${cs.color} ${cs.fontWeight}`; };
           const shadow = (q) => { const el = document.querySelector(q); return el ? getComputedStyle(el).boxShadow : null; };
-          const edges = (el, pseudo) => { const cs = getComputedStyle(el, pseudo); return `${cs.borderTopWidth} ${cs.borderBottomWidth} ${cs.outlineStyle}`; };
+          const edges = (el, pseudo) => { const cs = getComputedStyle(el, pseudo); return `${cs.borderTopWidth} ${cs.borderRightWidth} ${cs.borderBottomWidth} ${cs.borderLeftWidth} ${cs.outlineStyle}`; };
           return {
             nums: lanes.map((l) => look(l.querySelector('.lp-lane__num'))),
             labels: lanes.map((l) => l.querySelector('.lp-lane__num').textContent),
             edge: getComputedStyle(lanes[2], '::after').content,
-            // The row and its overlay draw no border or outline; its one light is any row's divider.
+            // The row and its overlay draw no border on any side (no edge, no rail) or outline; its one light is
+            // any row's divider.
             borders: [edges(lanes[2]), edges(lanes[2], '::after')],
             rowShadow: [getComputedStyle(lanes[2]).boxShadow, getComputedStyle(lanes[1]).boxShadow],
             slotTop: [shadow('.slot--active'), shadow('.slot:not(.slot--active)')],
@@ -608,7 +616,7 @@ await probe(async ({ browser, open }) => {
         if (sel.nums.join() !== nums.join()) fail(`${tag} ${scene}: the lane numbers read ${sel.nums.join(' | ')}, not ${nums.join(' | ')}`);
         if (sel.labels.join() !== '1,2,3,4,5') fail(`${tag} ${scene}: the lane numbers are ${sel.labels.join(', ')}, not 1-5`);
         if (sel.edge !== 'none') fail(`${tag} ${scene}: the selected lane draws an edge (::after ${sel.edge})`);
-        if (sel.borders.some((b) => b !== '0px 0px none')) fail(`${tag} ${scene}: the selected lane draws an edge (row, ::after: ${sel.borders.join(' | ')})`);
+        if (sel.borders.some((b) => b !== '0px 0px 0px 0px none')) fail(`${tag} ${scene}: the selected lane draws an edge (row, ::after: ${sel.borders.join(' | ')})`);
         if (sel.rowShadow[0] !== sel.rowShadow[1]) fail(`${tag} ${scene}: the selected lane's shadow (${sel.rowShadow[0]}) is not another row's (${sel.rowShadow[1]})`);
         if (sel.slotTop[0] !== sel.slotTop[1] || !sel.slotTop[0] || sel.slotTop[0] === 'none') fail(`${tag} ${scene}: the selected slot's top light (${sel.slotTop[0]}) is not a card's (${sel.slotTop[1]}), or a card has none`);
         // The tempo is locked under a loop: its numeral reads --dim (1-empty holds the free side).
@@ -621,14 +629,14 @@ await probe(async ({ browser, open }) => {
         const forced = await page.evaluate(() => {
           const o = (el, pseudo) => {
             const cs = getComputedStyle(el, pseudo);
-            return { content: cs.content, position: cs.position, inset: `${cs.top} ${cs.right} ${cs.bottom} ${cs.left}`, outline: `${cs.outlineWidth} ${cs.outlineStyle}` };
+            return { content: cs.content, position: cs.position, inset: `${cs.top} ${cs.right} ${cs.bottom} ${cs.left}`, outline: `${cs.outlineWidth} ${cs.outlineStyle}`, z: Number(cs.zIndex) };
           };
-          return { lane: o(document.querySelector('.lp-lane.is-selected'), '::after'), other: o(document.querySelector('.lp-lane:not(.is-selected)'), '::after'), slot: o(document.querySelector('.slot--active')) };
+          return { well: Number(getComputedStyle(document.querySelector('.lp-lane.is-selected .lp-lane__well')).zIndex), lane: o(document.querySelector('.lp-lane.is-selected'), '::after'), other: o(document.querySelector('.lp-lane:not(.is-selected)'), '::after'), slot: o(document.querySelector('.slot--active')) };
         });
         await shoot(scene);
         await page.emulateMedia({ forcedColors: 'none' });
-        const laneOk = forced.lane.content !== 'none' && forced.lane.position === 'absolute' && forced.lane.inset === '0px 0px 0px 0px' && forced.lane.outline === '2px solid';
-        if (!laneOk || !forced.other.outline.endsWith(' none') || forced.slot.outline !== '2px solid') fail(`${tag} ${scene}: forced colours outline the selected lane ${JSON.stringify(forced.lane)}, another ${forced.other.outline}, the selected slot ${forced.slot.outline} (an absolute overlay at 0px with 2px solid, none, 2px solid)`);
+        const laneOk = forced.lane.content !== 'none' && forced.lane.position === 'absolute' && forced.lane.inset === '0px 0px 0px 0px' && forced.lane.outline === '2px solid' && forced.lane.z > forced.well;
+        if (!laneOk || !forced.other.outline.endsWith(' none') || forced.slot.outline !== '2px solid') fail(`${tag} ${scene}: forced colours outline the selected lane ${JSON.stringify(forced.lane)}, another ${forced.other.outline}, the selected slot ${forced.slot.outline} (an absolute overlay at 0px with 2px solid above the well's z-index ${forced.well}, none, 2px solid)`);
 
         // The same jam with lane 2's EDIT menu open over the lanes.
         scene = '13b-jam-edit';
