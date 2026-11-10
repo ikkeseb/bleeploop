@@ -17,10 +17,20 @@
  * - close: Escape sends `SetTuner(false)` once per press and the overlay stays until the engine's `Tuner`
  *   (two quick ones never reopen it); the on-screen close does the same; an engine-side close closes it and
  *   focus returns where it was; a reset frame closes it unless it carries `Tuner` on (then it stays,
- *   unremounted); a refused press shows its reason on the lane and opens nothing;
+ *   unremounted, its reading dropped at once and a fresh one shown); a refused press shows its reason
+ *   on the lane and opens nothing;
  * - key: the command bar's TUNER key sends the press and is lit while the tuner is on;
  * - stage: over the stage view the tuner is on top, the view inert under it, and Escape closes the tuner
  *   first, focus back on the view;
+ * - gap: a loud reading then no more drops the pitch and never says no signal (only fresh readings under
+ *   -60 dBFS count, and a stale stretch ends the second);
+ * - text: a second of one steady reading writes the cents and frequency text nodes not once;
+ * - held: a held Escape (its key repeats) closes the tuner and leaves the stage view under it open;
+ * - return: the focus target resolved at close: a popover the tuner closed falls back to the TUNER key, an
+ *   inert one (a stage view opened under the tuner) to the view's root, a live one gets it back;
+ * - confirm: a pending ask (`src/ui/confirm/`) under a pedal-opened tuner is not shown, takes no focus and
+ *   no key (Escape closes the tuner, the ask stays pending), and is back with focus on its button when the
+ *   tuner closes; an ask that arrives under the tuner takes focus when it closes;
  * - shots: the four states at 2560x1440, 1920x1080, 1280x820, 1000x700 and 960x600 into `logs/tuner/`,
  *   each measured: the letter's cap height at least a fifth of the window, the note, the scale and the
  *   lines inside it and apart;
@@ -103,8 +113,10 @@ await probe(async ({ open }) => {
       ([h, l]) => {
         clearInterval(window.__tunerPump);
         let s = 1_000_000;
-        const send = () =>
+        const send = () => {
           window.__lf.native.emit({ seq: s++, reset: false, events: [], device: [], anchor: null, meter: null, peaks: [], tuner: { hz: h, level: l } });
+          window.__tunerLastAt = performance.now();
+        };
         send();
         window.__tunerPump = setInterval(send, 40);
         window.__tunerPumpAt = performance.now();
@@ -176,6 +188,12 @@ await probe(async ({ open }) => {
     } catch (error) {
       failures.push(name);
       console.log(`FAIL ${name}: ${error.message}`);
+      // A failed group leaves no ask pending and no stage view open for the next one.
+      await page.evaluate(async () => {
+        const { pendingConfirm } = await import('/src/ui/confirm/confirm-store.ts');
+        pendingConfirm()?.answer(false);
+      });
+      if (await page.evaluate(() => !!document.querySelector('.sv'))) await page.click('.sv-btn--exit').catch(() => {});
     } finally {
       await stopPump();
     }
@@ -281,8 +299,8 @@ await probe(async ({ open }) => {
     r = await read();
     assert.deepEqual([r.letter, r.state], ['–', 'none'], 'a reading older than 300 ms is dropped');
 
-    // A second under -60 dBFS: no signal arrives on the input (counted from a signal: a stale reading is
-    // quiet too, so the stale one above already started a quiet stretch).
+    // A second of fresh readings under -60 dBFS: no signal arrives on the input (a stale reading counts
+    // for nothing, `gap`).
     await pump(110, -20);
     await settle(150);
     await pump(null, -75);
@@ -376,13 +394,30 @@ await probe(async ({ open }) => {
     await page.evaluate(() => (document.querySelector('.tn').__probeMark = 1));
     await pump(110, -20);
     await settle(120);
+    // The pump stops before the reset, so nothing after it can stand in for the reading it drops.
+    await stopPump();
+    assert.equal((await read()).letter, 'A', 'control: the reading shows before the reset');
     await boot([tunerEvent(true)]);
-    await settle(60);
-    const kept = await page.evaluate(() => document.querySelector('.tn')?.__probeMark ?? null);
-    assert.equal(kept, 1, 'a reset frame carrying Tuner on keeps it open, the same element');
+    const after = await page.evaluate(
+      () =>
+        new Promise((done) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              const t = document.querySelector('.tn');
+              done({ mark: t?.__probeMark ?? null, letter: t?.querySelector('.tn-letter').textContent, sinceMs: performance.now() - window.__tunerLastAt });
+            }),
+          ),
+        ),
+    );
+    console.log(`reset with the tuner on: ${JSON.stringify(after)}`);
+    assert.equal(after.mark, 1, 'a reset frame carrying Tuner on keeps it open, the same element');
+    assert.ok(after.sinceMs < 250, `read well inside the 300 ms stale window: ${after.sinceMs.toFixed(0)} ms`);
+    assert.equal(after.letter, '–', 'the reset dropped the reading before it went stale');
+    await emit({ tuner: { hz: 110, level: -20 } });
+    await page.waitForFunction(() => document.querySelector('.tn-letter')?.textContent === 'A', undefined, { timeout: 1000 });
+    assert.equal(await page.evaluate(() => document.querySelector('.tn')?.__probeMark ?? null), 1, 'a fresh reading shows on the same overlay');
 
     // A refused press: the reason on the lane, nothing opens.
-    await stopPump();
     await emit({ events: [tunerEvent(false)] });
     await waitOpen(false);
     await emit({ events: [{ Lane: { frame: 0, lane: 0, info: { ...lane('Recording'), length: 0 } } }] });
@@ -434,6 +469,162 @@ await probe(async ({ open }) => {
     assert.equal(await page.evaluate(() => !!document.querySelector('.sv') && !document.querySelector('.sv-host').inert), true, 'the stage view stays, live again');
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.querySelector('.sv'));
+  });
+
+  await group('gap', async () => {
+    // A gap in the feed after a loud reading is no measurement of the input: the pitch drops when the
+    // reading goes stale, and the no-signal line never comes.
+    await openByEngine();
+    await pump(110, -20);
+    await settle(150);
+    await stopPump();
+    await settle(1700);
+    const r = await read();
+    console.log(`1.7 s with no reading after a loud one: letter ${r.letter}, signal ${r.signal}, quiet "${r.quiet}"`);
+    assert.deepEqual([r.letter, r.state], ['–', 'none'], 'the stale reading is dropped');
+    assert.deepEqual([r.signal, r.quiet], [null, ''], 'a feed gap never says no signal');
+    // Quiet readings that go stale part way: the second restarts with the next fresh quiet one.
+    await pump(null, -75);
+    await settle(600);
+    await stopPump();
+    await settle(700);
+    assert.equal((await read()).signal, null, 'a stale stretch never continues the quiet second');
+  });
+
+  await group('text', async () => {
+    // A steady reading writes the cents and the frequency once, not on every arrival (invariant 6).
+    await openByEngine();
+    await pump(off(110, 4), -20);
+    await settle(200);
+    const writes = await page.evaluate(
+      () =>
+        new Promise((done) => {
+          let n = 0;
+          const obs = new MutationObserver((records) => (n += records.length));
+          for (const el of [document.querySelector('.tn-cents > span'), document.querySelector('.tn-hz > span')]) {
+            obs.observe(el, { childList: true, characterData: true, subtree: true });
+          }
+          setTimeout(() => {
+            obs.disconnect();
+            done(n);
+          }, 1000);
+        }),
+    );
+    const r = await read();
+    console.log(`a second of one reading: ${writes} text writes, cents "${r.cents}", hz "${r.hz}"`);
+    assert.deepEqual([r.cents, r.hz], ['+4', off(110, 4).toFixed(2)], 'control: the reading shows');
+    assert.equal(writes, 0, 'no text write while the shown strings stand still');
+    // A change still writes.
+    await pump(off(110, -7), -20);
+    await page.waitForFunction(() => document.querySelector('.tn-cents > span').textContent === '−7', undefined, { timeout: 1000 });
+  });
+
+  await group('held', async () => {
+    // One physical Escape, one dismissal: a held Escape closes the tuner and leaves the stage view under it.
+    await page.keyboard.press('b');
+    await page.waitForFunction(() => document.activeElement === document.querySelector('.sv'));
+    await page.keyboard.press('n');
+    await waitOpen(true);
+    await clearSent();
+    await page.keyboard.down('Escape');
+    await waitOpen(false);
+    for (let i = 0; i < 4; i++) await page.keyboard.down('Escape'); // the key's repeats
+    await settle();
+    await page.keyboard.up('Escape');
+    const left = await page.evaluate(() => ({ sv: !!document.querySelector('.sv'), sent: window.__lf.native.sent.slice() }));
+    assert.deepEqual(left.sent, [{ SetTuner: false }], `one SetTuner(false), nothing more: ${JSON.stringify(left.sent)}`);
+    assert.equal(left.sv, true, 'the held Escape left the stage view open');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.sv'));
+  });
+
+  await group('return', async () => {
+    const focusIs = (sel) =>
+      page
+        .waitForFunction((s) => document.activeElement === document.querySelector(s), sel, { timeout: 1500 })
+        .then(() => true)
+        .catch(() => false);
+    const active = () => page.evaluate(() => document.activeElement?.className || document.activeElement?.tagName);
+    // Help open with focus in its panel: the tuner closes Help; on close the panel is gone, so the TUNER key.
+    await page.click('.tool--help');
+    await page.waitForFunction(() => document.activeElement?.closest('[role="dialog"]') && !document.querySelector('.tn'));
+    await openByEngine();
+    await emit({ events: [tunerEvent(false)] });
+    await waitOpen(false);
+    assert.ok(await focusIs('.tool--tuner'), `a closed popover's focus falls back to the TUNER key: on ${await active()}`);
+    // A stage view opened under the tuner leaves the saved target inert: Escape returns to the view.
+    await page.evaluate(() => document.querySelector('.tool--help').focus());
+    await openByEngine();
+    await page.keyboard.press('b');
+    await page.waitForSelector('.sv');
+    await page.keyboard.press('Escape');
+    await waitOpen(false);
+    assert.ok(await focusIs('.sv'), `an inert target falls back to the stage view: on ${await active()}`);
+    // The on-screen close: a target still live gets focus back.
+    await page.evaluate(() => document.querySelector('.sv-btn--exit').focus());
+    await openByEngine();
+    await page.click('.tn-close');
+    await waitOpen(false);
+    assert.ok(await focusIs('.sv-btn--exit'), `a live target gets focus back: on ${await active()}`);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.sv'));
+  });
+
+  await group('confirm', async () => {
+    // The app's own ask, pending, when a pedal opens the tuner: the ask steps aside (not shown, no focus,
+    // no key) and comes back as it was when the tuner closes.
+    await page.evaluate(async () => {
+      const { confirm } = await import('/src/ui/confirm/confirm-store.ts');
+      window.__answer = undefined;
+      void confirm({ title: 'Probe ask', body: 'Pending under the tuner.', yes: 'Yes', no: 'No' }).then((a) => (window.__answer = a));
+    });
+    const noBtn = () => page.evaluate(() => document.activeElement?.matches('.confirm__btn:last-child') ?? false);
+    await page.waitForFunction(() => document.activeElement?.matches('.confirm__btn:last-child'), undefined, { timeout: 2000 });
+    await emit({ events: [tunerEvent(true)] }); // the pedal's press, as the engine answers it
+    await waitOpen(true);
+    await settle(150);
+    const under = await page.evaluate(() => {
+      const c = document.querySelector('.confirm');
+      return { shown: !!c && c.checkVisibility(), tunerFocused: document.activeElement === document.querySelector('.tn') };
+    });
+    console.log(`ask under the tuner: ${JSON.stringify(under)}`);
+    assert.equal(under.shown, false, 'the ask is not shown while the tuner is on');
+    assert.equal(under.tunerFocused, true, 'the tuner has the focus, not the ask');
+    await clearSent();
+    await page.keyboard.press('Space');
+    assert.deepEqual(await sent(), [{ Action: 'RecDub' }], 'the transport keys reach the looper, not the ask');
+    await clearSent();
+    await hold(true);
+    await page.keyboard.press('Escape');
+    assert.deepEqual(await sent(), [{ SetTuner: false }], 'Escape closes the tuner first');
+    assert.equal(await page.evaluate(() => window.__answer), undefined, 'and leaves the ask unanswered');
+    await hold(false);
+    await waitOpen(false);
+    await page.waitForFunction(() => document.querySelector('.confirm')?.checkVisibility(), undefined, { timeout: 1500 });
+    assert.ok(await page.waitForFunction(() => document.activeElement?.matches('.confirm__btn:last-child'), undefined, { timeout: 1500 }).then(() => true, () => false), 'the ask is back with focus on its no button');
+    await settle(100);
+    assert.equal(await noBtn(), true, 'and keeps it');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__answer === false, undefined, { timeout: 1000 });
+    // An ask that arrives while the tuner is on waits under it, then takes the focus when it closes.
+    await openByEngine();
+    await page.evaluate(async () => {
+      const { confirm } = await import('/src/ui/confirm/confirm-store.ts');
+      window.__answer = undefined;
+      void confirm({ title: 'Probe ask', body: 'Arrives under the tuner.', yes: 'Yes', no: 'No' }).then((a) => (window.__answer = a));
+    });
+    await settle(150);
+    assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.tn') && !document.querySelector('.confirm')?.checkVisibility()), true, 'a new ask stays out of the tuner');
+    await emit({ events: [tunerEvent(false)] });
+    await waitOpen(false);
+    assert.ok(await page.waitForFunction(() => document.activeElement?.matches('.confirm__btn:last-child'), undefined, { timeout: 1500 }).then(() => true, () => false), 'it takes the focus once the tuner closes');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__answer === false, undefined, { timeout: 1000 });
+    // Nothing had focus when the tuner opened, so the tuner's return was the TUNER key: the answered ask sends it there.
+    assert.ok(
+      await page.waitForFunction(() => document.activeElement === document.querySelector('.tool--tuner'), undefined, { timeout: 1000 }).then(() => true, () => false),
+      'answered, focus goes where the tuner would have returned it',
+    );
   });
 
   await group('shots', async () => {

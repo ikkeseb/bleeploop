@@ -192,6 +192,10 @@ check('the fixture has a frame carrying a pitched tuner reading, one with no pit
   assert.ok(fixture.feed.some((f) => f.tuner === undefined), 'and a frame with the field absent');
   assert.ok(fixture.feed.every((f) => !f.reset || f.tuner === undefined), 'a reset frame never carries one');
 });
+check('a tuner reading above 0 dBFS decodes (the host only floors the level; an over-range input reads above 0)', () => {
+  const f = decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110, level: 3.2 } });
+  assert.deepEqual(f.tuner, { hz: 110, level: 3.2 });
+});
 check('the fixture has a reset frame that carries the tuner on', () =>
   assert.ok(fixture.feed.some((f) => f.reset && f.events.some((e) => e.Tuner?.on === true))),
 );
@@ -236,7 +240,6 @@ const refused = {
   'a tuner press with a payload': () => decodeCommand({ Action: { Tuner: true } }),
   'a tuner setter that is no bool': () => decodeCommand({ SetTuner: 1 }),
   'a tuner event without on': () => decodeEvent({ Tuner: { frame: 0 } }),
-  'a tuner reading above 0 dBFS': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110, level: 0.5 } }),
   'a tuner reading under its -120 dBFS floor': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110, level: -121 } }),
   'a tuner reading of 0 Hz (no pitch is null)': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 0, level: -20 } }),
   'a tuner reading without its level': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110 } }),

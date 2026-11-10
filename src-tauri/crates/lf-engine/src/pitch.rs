@@ -4,22 +4,26 @@
 //! one is shown), and the newest [`Reading`] goes to the UI. Everything is allocated in `new`; a push
 //! allocates, locks and waits for nothing.
 //!
-//! A detector low-passes its input (an 8th-order Butterworth at 4 kHz), decimates it to about 12 kHz
-//! (11.025 kHz from 44.1), keeps the last 2048 samples (171 ms, 186 ms from 44.1) and reads them every
-//! 512 (43 ms, 46 ms). It analyses the newest span that holds one sound: a block 30 dB under the
-//! window's loudest, or a 6 dB rise in energy (a pluck on a ringing string), starts the span, so an
-//! onset or a reset is read from its own samples alone. On the span it computes McLeod's normalised
-//! square difference function (MPM) through an FFT autocorrelation, oversampled four times between
-//! lags by padding its spectrum, and picks the first key maximum within 0.9 of the highest among the
-//! lags of the reportable pitches. It refines that period on the peaks nearest twice, four times... it,
-//! out to the largest multiple within half the span, dividing each lag by its multiple: that is what
-//! buys a hundredth of a cent on the high strings. A second refinement runs on the span through a
-//! boxcar half a period long, which nulls the even partials and weakens the odd ones as 1/k: a
-//! string's partials run sharp of harmonic (inharmonicity), and without it a low string reads up to
-//! 5 cents sharp of its first partial (E1, measured), the pitch a player tunes by. A reading has a pitch only above
-//! -60 dBFS peak, at a clarity (the NSDF at the period) of at least 0.93, and when the weighted
-//! refinement agrees within 3 % and stays periodic (every peak it climbs at least 0.95): a hum or a
-//! noise that would pull the reading ends it instead.
+//! A detector low-passes its input (an 8th-order Butterworth at 4 kHz), decimates it to at most
+//! 12 kHz (11.025 kHz from 44.1), keeps the last 2048 samples (171 ms, 186 ms from 44.1) and reads
+//! them every 512 (43 ms, 46 ms). The factor is the smallest whole one that brings the device's own
+//! rate to 12 kHz or under, the band every constant below was tuned for (the longest period inside
+//! 256 samples of history and 512 of onset average): 8 and 11.025 kHz are read undecimated, 16 at
+//! 8, 22.05 and 88.2 at 11.025 like 44.1, 32 at 10.67, 176.4 at 11.76, the multiples of 48 at 12.
+//! It analyses the newest span that holds one sound: a block 30 dB under the window's loudest, or a
+//! 6 dB rise in energy (a pluck on a ringing string), starts the span, so an onset or a reset is
+//! read from its own samples alone. On the span it computes McLeod's normalised square difference
+//! function (MPM) through an FFT autocorrelation, oversampled four times between lags by padding
+//! its spectrum, and picks the first key maximum within 0.9 of the highest among the lags of the
+//! reportable pitches. It refines that period on the peaks nearest twice, four times... it, out to
+//! the largest multiple within half the span, dividing each lag by its multiple: that is what buys
+//! a hundredth of a cent on the high strings. A second refinement runs on the span through a boxcar
+//! half a period long, which nulls the even partials and weakens the odd ones as 1/k: a string's
+//! partials run sharp of harmonic (inharmonicity), and without it a low string reads up to 5 cents
+//! sharp of its first partial (E1, measured), the pitch a player tunes by. A reading has a pitch
+//! only above -60 dBFS peak, at a clarity (the NSDF at the period) of at least 0.93, and when the
+//! weighted refinement agrees within 3 % and stays periodic (every peak it climbs at least 0.95): a
+//! hum or a noise that would pull the reading ends it instead.
 //!
 //! Measured by `tests/pitch.rs` at 44.1, 48 and 96 kHz: steady harmonic tones from A0 to B6 (and
 //! 35 cents either side) read within 0.11 cent, consecutive readings within 0.16 cent of each other,
@@ -66,7 +70,9 @@ pub struct Reading {
     pub clarity: f32,
 }
 
-/// The analysis rate the input is decimated to, about: the factor is `round(rate / ANALYSIS_RATE)`.
+/// The highest analysis rate: the factor is `ceil(rate / ANALYSIS_RATE)`. Over it, the longest period
+/// (half a semitone under A0) outgrows `HISTORY` and `ONSET_SPAN`: rounded instead, 16 kHz stayed
+/// undecimated and A0 there indexed out of the ring.
 const ANALYSIS_RATE: u32 = 12_000;
 /// The analysis window in decimated samples: 171 ms at 12 kHz, 186 ms at 11.025 kHz.
 const WINDOW: usize = 2048;
@@ -175,7 +181,7 @@ pub struct Detector {
 impl Detector {
     /// Allocates everything the detector will ever use.
     pub fn new(sample_rate: u32) -> Self {
-        let factor = ((sample_rate as f64 / ANALYSIS_RATE as f64).round() as usize).max(1);
+        let factor = (sample_rate.div_ceil(ANALYSIS_RATE) as usize).max(1);
         let full = sample_rate as f64;
         let rate = full / factor as f64;
         let mut alias = [Section::default(); ALIAS_SECTIONS];
@@ -317,8 +323,10 @@ impl Detector {
         // weakens the odd ones as 1/k, so an inharmonic string reads near its first partial. Its first
         // outputs use the samples before the span when the span is the whole window, else they start
         // half a period in, so a fresh span has no filter transient.
+        // A `wide` past the range's longest period (rejected below) may outgrow the history: it starts
+        // in the span, never before the ring.
         let half = ((wide / UP as f64) / 2.0).round().max(1.0) as usize;
-        let begin = if s == HISTORY && self.filled >= RING { s + 1 - half } else { s };
+        let begin = if s == HISTORY && self.filled >= RING { (s + 1).checked_sub(half).unwrap_or(s) } else { s };
         let lw = RING - (begin + half - 1);
         let reach = lw / 2;
         if ((UP * reach) as f64) < 1.5 * wide {

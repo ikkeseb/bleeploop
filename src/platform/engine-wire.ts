@@ -669,13 +669,14 @@ function decodeScope(raw: unknown): ScopeUpdate {
 /** The floor of a tuner reading's level (dBFS): the host sends nothing quieter. */
 const TUNER_FLOOR_DB = -120;
 
-/** One tuner reading: a pitch above 0 Hz or null, a level in -120..0 dBFS. */
+/** One tuner reading: a pitch above 0 Hz or null, a finite level at or above -120 dBFS. No ceiling: the
+ * host only floors it, and an over-range input reads above 0. */
 function decodeTuner(raw: unknown): TunerUpdate {
   const o = obj(raw, 'feed.tuner');
   const hz = o.hz === null ? null : num(o.hz, 'tuner.hz');
   if (hz !== null && hz <= 0) fail('tuner.hz must be above 0 or null', o.hz);
   const level = num(o.level, 'tuner.level');
-  if (level > 0 || level < TUNER_FLOOR_DB) fail(`tuner.level must be in ${TUNER_FLOOR_DB}..0 dBFS`, o.level);
+  if (level < TUNER_FLOOR_DB) fail(`tuner.level must be at or above ${TUNER_FLOOR_DB} dBFS`, o.level);
   return { hz, level };
 }
 

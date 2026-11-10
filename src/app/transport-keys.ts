@@ -67,8 +67,10 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
 
   const onKeyDown = (e: KeyboardEvent) => {
     lastInputWasPointer = false;
+    // One physical Escape, one dismissal: a held key's repeats would close what lay under the thing it
+    // closed (the tuner's off lands mid-hold, then a repeat cancels learn or closes the stage view).
     if (e.key === 'Escape') {
-      opts.onEscape();
+      if (!e.repeat) opts.onEscape();
       return;
     }
 

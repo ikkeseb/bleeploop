@@ -12,7 +12,8 @@ mod common;
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::tuner::{tuner_capacity, TunerFrame};
-use lf_engine::{Action, Command, Event, LaneState, Refusal, Toggle};
+use lf_engine::scope::SCOPE_MONITOR;
+use lf_engine::{Action, Command, Event, InputSend, InputSendParam, LaneState, Refusal, Toggle};
 
 const SR: f64 = 48000.0;
 
@@ -188,6 +189,77 @@ fn the_mute_starts_on_its_exact_frame_at_any_block_size() {
     let (m, r) = (&runs[2].monitor, &reference.monitor);
     assert_eq!(m[..1037], r[..1037], "untouched up to the press frame");
     assert_eq!(m[1037], (r[1037] as f64 * coef()) as f32, "the gain moves on the press frame itself");
+}
+
+/// Everything the monitor reaches loses the guitar AND an input send's tail under the tuner: with a
+/// loop and the click playing, ECHO on and ringing and the scope on, once the glide has landed the
+/// monitor tap, the scope's monitor column and the monitor's share of the Share mix are exactly 0.0,
+/// while the record tap and the master bus (loop and click) are the run without the tuner's, bit for
+/// bit. The guitar stops after the press, so the run without the tuner rings with the tail alone.
+#[test]
+fn the_mute_reaches_the_input_sends_the_share_mix_and_the_scopes_monitor() {
+    const TOTAL: Frame = 60_000;
+    const PRESS: Frame = 500;
+    // The glide lands within 1344 frames of the press (the mute test); the guitar stops later.
+    const LANDED: usize = PRESS as usize + 2_000;
+    const GUITAR_STOPS: Frame = 20_000;
+    // `guitar`: the input carries the sine to `GUITAR_STOPS`, else it is silent throughout.
+    let run = |guitar: bool, press: bool| {
+        let mut rig = looping();
+        rig.set(Command::SetMetronome(true));
+        rig.set(Command::SetInputSendParam(InputSendParam::EchoLevel, 1.0));
+        rig.set(Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.6));
+        rig.set(Command::SetInputSend(InputSend::Echo, true));
+        rig.set(Command::SetScope(true));
+        rig.read_scope();
+        rig.keep_output();
+        let start = rig.frame;
+        if guitar {
+            rig.set_input(move |f| if f < start + GUITAR_STOPS { sine(f) } else { 0.0 });
+        } else {
+            rig.set_level(0.0);
+        }
+        if press {
+            rig.send_at(start + PRESS, tuner());
+        }
+        let mut columns = Vec::new();
+        while rig.frame < start + TOTAL {
+            rig.advance(4_800);
+            columns.extend(rig.read_scope());
+        }
+        assert_eq!(rig.engine.diag().scope_dropped, 0);
+        (rig, start, columns)
+    };
+    let (muted, start, muted_columns) = run(true, true);
+    let (open, _, open_columns) = run(true, false);
+    let (quiet, _, _) = run(false, false);
+    let after = |columns: &[lf_engine::scope::ScopeBin]| -> Vec<(f32, f32)> {
+        columns.iter().filter(|c| c.frame >= start + LANDED as Frame).map(|c| (c.lo[SCOPE_MONITOR], c.hi[SCOPE_MONITOR])).collect()
+    };
+    let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let tail = GUITAR_STOPS as usize + 100..TOTAL as usize;
+
+    // What the mute removes is there without it: the guitar, then the echo's tail alone.
+    assert!(peak(&open.monitor[LANDED..GUITAR_STOPS as usize]) > 0.4, "the guitar on the monitor");
+    let rings = peak(&open.monitor[tail.clone()]);
+    assert!(rings > 0.01, "the echo's tail rings after the guitar stops: {rings}");
+    assert!(after(&open_columns).iter().any(|&(lo, hi)| hi - lo > 0.01), "the scope's monitor column shows it");
+    assert!(quiet.monitor.iter().all(|&x| x == 0.0), "a silent input puts nothing on the monitor");
+    assert_ne!(open.share[tail.clone()], quiet.share[tail.clone()], "the tail is in the Share mix");
+
+    // Under the tuner: exactly nothing of either, on all three.
+    assert!(muted.monitor[LANDED..].iter().all(|&x| x == 0.0), "the monitor tap: guitar and tail, exactly 0.0");
+    assert!(after(&muted_columns).iter().all(|&(lo, hi)| lo == 0.0 && hi == 0.0), "the scope's monitor column, exactly 0.0");
+    assert_eq!(muted.share[LANDED..], quiet.share[LANDED..], "the Share mix holds the loop alone (left)");
+    assert_eq!(muted.share_right[LANDED..], quiet.share_right[LANDED..], "the Share mix holds the loop alone (right)");
+
+    // And nothing else moves: the record tap and the master bus (the loop and the click).
+    assert!(peak(&muted.bus) > 1e-3, "the loop and the click play");
+    assert_eq!(muted.record, open.record, "the record tap");
+    assert_eq!(muted.bus, open.bus, "the master bus (left)");
+    assert_eq!(muted.bus_right, open.bus_right, "the master bus (right)");
+    assert_eq!(muted.bus, quiet.bus, "the loop and the click do not hear the input");
+    println!("tuner over ECHO: the tail peaks {rings:.3} without the tuner, exactly 0.0 under it");
 }
 
 /// Press the tuner and its setter over a take: refused, nothing switched, no `Tuner` event.

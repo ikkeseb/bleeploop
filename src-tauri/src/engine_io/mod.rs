@@ -1146,7 +1146,8 @@ impl EngineHost {
     /// [`EngineHost::drain_feed`] and the engine's taps: with `columns`, its finished scope columns,
     /// oldest first; with `tuner`, the tuner's frames, oldest first, up to the storage's capacity (it
     /// never grows here: the feed sizes it for the engine's ring, `lf_engine::tuner::tuner_capacity`, so
-    /// one drain empties a full ring). One acquisition of `settings` and `ends` for all three: `ends` is
+    /// one drain empties a full ring; storage still sized for a smaller ring takes what fits, and the
+    /// rest is discarded). One acquisition of `settings` and `ends` for all three: `ends` is
     /// the lock the player's own `input_send` batch takes, so the feed takes it once a tick, and a second
     /// acquisition could straddle a rebuild and mix one engine's events with another's taps. The feed
     /// drains the taps every tick, whatever it sends: a ring left to fill would make the next batch a
@@ -1170,6 +1171,12 @@ impl EngineHost {
             while tuner.len() < tuner.capacity() {
                 let Ok(frame) = ends.tuner.pop() else { break };
                 tuner.push(frame);
+            }
+            // Storage smaller than this engine's ring: the feed has not met it yet (a rebuild to a higher
+            // rate), and discards this whole drain. What did not fit goes too, so no audio from before
+            // that reset is left for a later tick; nothing is allocated here.
+            if tuner.capacity() < ends.tuner.buffer().capacity() {
+                while ends.tuner.pop().is_ok() {}
             }
         }
         FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate }

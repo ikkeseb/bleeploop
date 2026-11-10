@@ -18,7 +18,9 @@
 //! epoch of the tap (the engine's: the tuner turned on, a frame the full ring refused, a device-frame
 //! jump, an xrun or a damaged block), a new engine, a capture-channel change or a device start (the
 //! owner's: `Core::break_tuner`, whose fence the frames before which are skipped), and after any tick
-//! that discarded.
+//! that discarded; a start-over drops the reading the tick had so far, and no frame from before the
+//! tuner's current activation is read. The drain that meets another engine is discarded whole, its
+//! ring emptied past what the storage held.
 //!
 //! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
 //! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
@@ -245,7 +247,10 @@ impl Feed {
         if self.gen != Some(gen) {
             self.overview = overview;
             // Another engine (its rate may differ): the analysis starts over, made for its rate, off the
-            // locks; the storage grows here, before the next drain, if its ring is larger.
+            // locks; the storage grows here, before the next drain, if its ring is larger. This drain's
+            // frames go: they came before the feed met the engine, and storage sized for a smaller ring
+            // left a hole after them (`drain_feed_taps` emptied the ring past what fit).
+            self.tuner_frames.clear();
             if rate != self.ear_rate {
                 self.ear = (rate > 0).then(|| Ear::new(rate));
                 self.ear_rate = rate;
@@ -403,7 +408,12 @@ impl Feed {
     /// Read this tick's tuner frames, oldest first, and keep the newest reading. `analyse` false — a tick
     /// that sends no ordinary frame — discards them, as does a mirror that says the tuner is off (frames
     /// after an off), and the `Ear` starts over at the next frame. It starts over at an epoch change and
-    /// at the owner's break too, whose fence's earlier frames are skipped. `None`: no reading this tick.
+    /// at the owner's break too, whose fence's earlier frames are skipped, and every start-over drops the
+    /// reading this tick had so far: a frame carries only a pitch read since the input's last break.
+    /// Frames before the mirror's activation (the frame of its `Event::Tuner`) are skipped too: a drain
+    /// that holds an earlier activation's tail and the current one's epoch reads the current one alone,
+    /// from its first frame (its own epoch, since each activation starts one). `None`: no reading this
+    /// tick.
     fn tuner(&mut self, analyse: bool) -> Option<TunerUpdate> {
         let breaks = self.host.core.tuner_breaks.load(Acquire);
         if breaks != self.tuner_breaks {
@@ -411,8 +421,8 @@ impl Feed {
             self.tuner_fence = self.host.core.tuner_fence.load(Relaxed);
             self.tuner_epoch = None;
         }
-        let ear = match self.ear.as_mut() {
-            Some(ear) if analyse && self.tuner_on.is_some() => ear,
+        let (ear, on) = match (self.ear.as_mut(), self.tuner_on) {
+            (Some(ear), Some(on)) if analyse => (ear, on),
             _ => {
                 self.tuner_frames.clear();
                 self.tuner_epoch = None;
@@ -421,11 +431,12 @@ impl Feed {
         };
         let mut newest = None;
         for f in &self.tuner_frames {
-            if f.frame < self.tuner_fence {
+            if f.frame < self.tuner_fence || f.frame < on {
                 continue;
             }
             if self.tuner_epoch != Some(f.epoch) {
                 ear.reset();
+                newest = None;
                 self.tuner_epoch = Some(f.epoch);
             }
             if let Some(reading) = ear.push(f.x) {
@@ -1993,30 +2004,38 @@ mod tests {
 
     /// A new epoch (the engine's: here a device-frame jump inside one tick) and the owner's break (here
     /// with no jump at all) start the analysis over: no reading mixes the input before with the input
-    /// after. The break's fence skips the frames before it.
+    /// after. The tick of the break carries no reading when less than one hop (2048 frames at 48 kHz)
+    /// followed it, though the input before it completed one in that tick; after it, only the new pitch.
+    /// The break's fence skips the frames before it.
     #[test]
     fn an_epoch_or_an_owners_break_starts_the_analysis_over() {
         let mut rig = TunerRig::new();
         rig.set_tuner(true);
-        let mark = rig.mark();
         rig.play(0.5, &tone(110.0));
-        rig.render(3 * TUNER_BLOCK, &tone(110.0));
+        assert!(rig.readings(0).iter().any(|r| r.hz.is_some()), "pitched before the break");
+        let mark = rig.mark();
+        // More than one hop of the old pitch, then the jump, then less than a hop: one tick.
+        rig.render(2_048 + 2 * TUNER_BLOCK, &tone(110.0));
         rig.at += 4_800;
         rig.render(3 * TUNER_BLOCK, &tone(165.0));
         rig.turn();
+        assert_eq!(rig.readings(mark), [], "the break tick drops the reading the old epoch completed");
+        let mark = rig.mark();
         rig.play(0.5, &tone(165.0));
         let readings = rig.readings(mark);
-        only(&readings, &[110.0, 165.0]);
+        only(&readings, &[165.0]);
         assert!(readings.iter().rev().take(5).all(|r| r.hz.is_some_and(|hz| (hz - 165.0).abs() < 1.0)), "{readings:?}");
 
         let mark = rig.mark();
-        rig.render(3 * TUNER_BLOCK, &tone(165.0));
+        rig.render(2_048 + 2 * TUNER_BLOCK, &tone(165.0));
         rig.feed.host.core.break_tuner(rig.at);
         rig.render(3 * TUNER_BLOCK, &tone(247.5));
         rig.turn();
+        assert_eq!(rig.readings(mark), [], "the owner's break tick reads nothing");
+        let mark = rig.mark();
         rig.play(0.5, &tone(247.5));
         let readings = rig.readings(mark);
-        only(&readings, &[165.0, 247.5]);
+        only(&readings, &[247.5]);
         assert!(readings.iter().rev().take(5).all(|r| r.hz.is_some_and(|hz| (hz - 247.5).abs() < 1.0)), "{readings:?}");
 
         // A fence ahead (a WASAPI change's): nothing is read until the input passes it.
@@ -2073,6 +2092,73 @@ mod tests {
         assert!(sent.iter().all(|f| tuner_events(f).is_empty() && f.tuner.is_none()), "no tuner, no reading");
         assert_eq!((rig.feed.tuner_on, rig.feed.ear_rate), (None, 44_100));
         assert!(rig.feed.tuner_frames.capacity() >= tuner_capacity(44_100));
+    }
+
+    /// Off and on again between two ticks: nothing played before the new activation is read, whether
+    /// the old activation's frames fill the ring (the new one's refused) or end in a tail that
+    /// completes a reading before the new epoch's first frames.
+    #[test]
+    fn an_off_and_on_between_ticks_never_reads_the_old_pitch() {
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        rig.play(0.5, &tone(110.0));
+        assert!(rig.readings(0).iter().any(|r| r.hz.is_some_and(|hz| (hz - 110.0).abs() < 1.0)));
+        // The ring fills with the old pitch; off and on, and the new activation's frames are refused.
+        let mark = rig.mark();
+        rig.render(TUNER_RATE as usize / 2, &tone(110.0));
+        assert_eq!(rig.waiting(), tuner_capacity(TUNER_RATE), "the ring is full");
+        rig.set_tuner(false);
+        rig.set_tuner(true);
+        rig.render(4 * TUNER_BLOCK, &tone(220.0));
+        rig.play(0.5, &tone(220.0));
+        let sent = rig.sent.lock().unwrap()[mark..].to_vec();
+        assert_eq!(sent.iter().flat_map(tuner_events).collect::<Vec<_>>(), [false, true], "off and on, in one tick");
+        let readings = rig.readings(mark);
+        only(&readings, &[220.0]);
+        assert!(readings.iter().any(|r| r.hz.is_some()), "{readings:?}");
+
+        // A tail of more than one hop, off and on, less than a hop of the new pitch: one tick, no reading.
+        let mark = rig.mark();
+        rig.render(2_048 + 2 * TUNER_BLOCK, &tone(220.0));
+        rig.set_tuner(false);
+        rig.set_tuner(true);
+        rig.render(3 * TUNER_BLOCK, &tone(330.0));
+        rig.turn();
+        assert_eq!(rig.readings(mark), [], "the old activation's tail is never read");
+        let mark = rig.mark();
+        rig.play(0.5, &tone(330.0));
+        let readings = rig.readings(mark);
+        only(&readings, &[330.0]);
+        assert!(readings.iter().any(|r| r.hz.is_some()), "{readings:?}");
+    }
+
+    /// A rebuild to a higher rate with the tuner on in the new engine and a backlog larger than the
+    /// storage sized for the old rate: the drain that meets the engine empties its ring, so no audio
+    /// from before the reset is read later.
+    #[test]
+    fn a_rebuild_to_a_higher_rate_reads_nothing_from_before_its_reset() {
+        const HIGH: u32 = 96_000;
+        let at_high = |hz: f64| move |f: Frame| (0.5 * (std::f64::consts::TAU * hz * f as f64 / f64::from(HIGH)).sin()) as f32;
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        rig.play(0.2, &tone(110.0));
+        install(&rig.feed.host.core, HIGH);
+        rig.set_tuner(true);
+        // A backlog of the old pitch past the storage the feed sized for 48 kHz.
+        rig.render(30_000, &at_high(110.0));
+        assert!(rig.waiting() > rig.feed.tuner_frames.capacity(), "the backlog outgrows the storage");
+        let mark = rig.mark();
+        rig.turn();
+        assert!(rig.sent.lock().unwrap()[mark].reset, "another engine: a reset");
+        assert_eq!(rig.waiting(), 0, "the drain that met the engine emptied its ring");
+        for _ in 0..40 {
+            rig.render(TUNER_TICK, &at_high(165.0));
+            rig.turn();
+        }
+        let readings = rig.readings(mark);
+        only(&readings, &[165.0]);
+        assert!(readings.iter().any(|r| r.hz.is_some()), "{readings:?}");
+        assert!(rig.feed.tuner_frames.capacity() >= tuner_capacity(HIGH));
     }
 
     /// A full ring empties in one drain, into storage that never grows.

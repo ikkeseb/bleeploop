@@ -66,7 +66,7 @@ const TONE: f64 = 1.2;
 // ---- the detector's geometry, as the tests see it ----
 
 fn factor(rate: u32) -> f64 {
-    (rate as f64 / 12_000.0).round()
+    (rate as f64 / 12_000.0).ceil()
 }
 
 /// The analysis window in seconds: 2048 decimated samples.
@@ -999,6 +999,66 @@ fn ear_on_identical_inputs_is_one_detector() {
         }
         println!("{rate}: identical inputs, {} readings, bit-identical to one detector", rows.len());
     }
+}
+
+// ---- 7b: every rate a device can report ----
+
+/// The rates a device can open at: the host takes the endpoint's own.
+const DEVICE_RATES: [u32; 12] = [8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 384_000];
+
+/// A sawtooth's harmonics band-limited to what `rate` carries (under 0.45 of it), as a device's own
+/// converter would deliver it.
+fn sawtooth_at(hz: f64, rate: u32) -> Vec<f64> {
+    let top = 5_000f64.min(0.45 * rate as f64);
+    let n = ((top / hz).floor() as usize).clamp(1, 20);
+    (1..=n).map(|k| 1.0 / k as f64).collect()
+}
+
+/// The worst error in cents of the pitched readings from `from` s on, and how many readings had no pitch.
+fn held(readings: &[At], rate: u32, from: f64, truth: f64) -> (f64, usize) {
+    let late: Vec<&At> = readings.iter().filter(|a| a.t(rate) >= from).collect();
+    let worst = late.iter().filter(|a| a.pitched()).map(|a| cents(a.r.hz as f64, truth).abs()).fold(0.0, f64::max);
+    (worst, late.iter().filter(|a| !a.pitched()).count())
+}
+
+/// At 16 kHz the lowest notes' half period would pass the detector's 256 samples of history if the
+/// rate were analysed undecimated (it once was, and A0 indexed out of the ring once it was full): read
+/// after read past a full ring, they hold their pitch.
+#[test]
+fn the_lowest_notes_at_16_khz_hold_past_a_full_ring() {
+    let rate = 16_000;
+    let mut fails = Vec::new();
+    for (i, &(name, f)) in [("A0", 27.5), ("B0", 30.87)].iter().enumerate() {
+        let x = to_f32(&at_peak(&harmonic(rate, 3.0, &|_| f, &sawtooth_at(f, rate), 900 + i as u64), -12.0));
+        let readings = listen(rate, &x);
+        let (worst, unpitched) = held(&readings, rate, 0.5, f);
+        println!("16000 {name}: {} readings, worst {worst:.3} c from 0.5 s, {unpitched} unpitched", readings.len());
+        if worst > 1.0 || unpitched > 0 {
+            fails.push(format!("16000 {name}: worst {worst:.3} c, {unpitched} unpitched"));
+        }
+    }
+    report(&fails);
+}
+
+/// Every rate a device can report: a steady E2 and A4 and the range's two ends, 2 s each, never panic
+/// and read within 1 cent (the measured worst per rate printed).
+#[test]
+fn every_device_rate_reads_the_range() {
+    let mut fails = Vec::new();
+    for &rate in &DEVICE_RATES {
+        let mut line = format!("{rate:>6}:");
+        for (i, &(name, f)) in [("A0", 27.5), ("E2", 82.41), ("A4", 440.0), ("B6", 1975.53)].iter().enumerate() {
+            let x = to_f32(&at_peak(&harmonic(rate, 2.0, &|_| f, &sawtooth_at(f, rate), 1_000 + i as u64), -12.0));
+            let readings = listen(rate, &x);
+            let (worst, unpitched) = held(&readings, rate, 0.5, f);
+            line += &format!("  {name} {worst:.3} c ({unpitched} unpitched)");
+            if worst > 1.0 || unpitched > 0 {
+                fails.push(format!("{rate} {name}: worst {worst:.3} c, {unpitched} unpitched"));
+            }
+        }
+        println!("{line}");
+    }
+    report(&fails);
 }
 
 // ---- 8: the allocation guard this file leans on is live ----

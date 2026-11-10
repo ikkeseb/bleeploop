@@ -130,9 +130,20 @@ export function App() {
   // The tuner (`src/ui/tuner/`) shows exactly while the engine says it is on: a press, a pedal or the engine
   // itself (a take, a stopped device) opens and closes it, so it hides the popovers as the stage view
   // does, takes focus, and hands focus back where it was when it closes, however it closed. The return
-  // waits a microtask, past this frame's inert switch, and goes through `returnFocus` so Space and Enter
-  // on a returned button still drive the looper.
+  // waits a microtask, past this frame's inert switch, and resolves the target then, on every close path:
+  // the element saved at open if it is still connected, visible and not inert (opening the tuner closes
+  // the popovers, which unmounts what had focus in them, and a stage view opened under the tuner leaves the
+  // command bar inert); else the stage view's root while it is open; else the TUNER key. It goes through
+  // `returnFocus` so Space and Enter on a returned button still drive the looper. A pending ask (the
+  // confirm, suspended while the tuner is on) pulls the focus to itself and learns this target as its own.
   let tunerReturn: Element | null = null;
+  let tunerBtn: HTMLButtonElement | undefined;
+  const focusable = (el: Element | null | undefined): el is HTMLElement =>
+    el instanceof HTMLElement &&
+    el !== document.body &&
+    el.isConnected &&
+    el.checkVisibility({ visibilityProperty: true }) &&
+    !el.closest('[inert]');
   createEffect<boolean>((prevOpen) => {
     const open = looper.tunerOn();
     if (open && !prevOpen) {
@@ -144,7 +155,9 @@ export function App() {
       const back = tunerReturn;
       tunerReturn = null;
       queueMicrotask(() => {
-        if (back instanceof HTMLElement && back !== document.body && back.isConnected && !looper.tunerOn()) transportKeys?.returnFocus(back);
+        if (looper.tunerOn()) return;
+        const stage = stageOpen() ? document.querySelector('.sv') : null;
+        transportKeys?.returnFocus(focusable(back) ? back : focusable(stage) ? stage : tunerBtn);
       });
     }
     return open;
@@ -471,6 +484,7 @@ export function App() {
           {/* Tuner — the full-window tuner (`src/ui/tuner/`); also the N key and a learnable pedal (the
               `tunerToggle` action, which this key runs). Engaged = the engine says it is on. A tuning fork. */}
           <button
+            ref={tunerBtn}
             type="button"
             class="tool tool--tuner"
             classList={{ 'tool--on': looper.tunerOn() }}
@@ -589,7 +603,7 @@ export function App() {
           reach only console.error (invisible in a release WebView2 build). Rendered once, above the
           popovers; pointer-transparent so the play path stays live behind it. */}
       <Toasts />
-      <Confirm />
+      <Confirm suspended={looper.tunerOn()} />
 
       {/* The stage view: a full-window layer over the command bar and the stage below, which stay mounted
           (no pane remounts, the looper keeps drawing) but go inert and unpainted while it is open. */}

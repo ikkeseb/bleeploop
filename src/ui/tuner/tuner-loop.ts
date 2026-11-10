@@ -9,8 +9,9 @@ import { centsText, inTuneStep, noteOf } from './pitch';
  * DOM itself: the indicator's place on the cents scale, eased toward each reading by a critically damped
  * follower (it reports, so it moves; with reduced motion it steps), the cents and the frequency. It
  * decides what the reading means: a reading older than `STALE_MS` is no pitch, the in-tune state keeps
- * its hysteresis (`pitch.ts`), and a second of quiet (no fresh reading, or one under `QUIET_DB`) is no
- * signal. The note, the in-tune state and the no-signal state go to the Solid side through `onState`,
+ * its hysteresis (`pitch.ts`), and a second of fresh readings under `QUIET_DB` is no signal: a stale one
+ * (a gap in the feed is no measurement of the input) drops the pitch and ends that second. The cents and
+ * the frequency text is written only when its string changes. The note, the in-tune state and the no-signal state go to the Solid side through `onState`,
  * called only when one of them changes (a few times a second at most).
  *
  * Invariant 6: no Solid import, no signal read; `verify/guards/stage-draw.mjs` holds this file and what
@@ -60,11 +61,14 @@ interface Run {
   midi: number | null;
   cents: number;
   level: number;
+  /** The cents and frequency strings last written. */
+  centsShown: string;
+  hzShown: string;
   /** The state last reported. */
   shownMidi: number | null;
   inTune: boolean;
   noSignal: boolean;
-  /** When the current quiet began (`performance.now()`), -1 while there is signal. */
+  /** When the current quiet began (`performance.now()`), -1 while there is signal or no fresh reading. */
   quietSince: number;
   /** The indicator: its place (cents) and speed (cents/s), and the place last written. */
   x: number;
@@ -99,14 +103,17 @@ function tunerFrame(now: number): void {
     r.midi = note ? note.midi : null;
     if (note) {
       r.cents = note.cents;
-      r.els.cents.textContent = centsText(note.cents);
-      r.els.hz.textContent = (view.hz as number).toFixed(2);
+      // Text only on change (invariant 6): a steady reading arrives 20 to 25 times a second.
+      const c = centsText(note.cents);
+      if (c !== r.centsShown) r.els.cents.textContent = r.centsShown = c;
+      const f = (view.hz as number).toFixed(2);
+      if (f !== r.hzShown) r.els.hz.textContent = r.hzShown = f;
     }
   }
   const fresh = r.at > 0 && now - r.at <= STALE_MS;
   const midi = fresh ? r.midi : null;
   const inTune = midi !== null && inTuneStep(r.inTune, r.cents);
-  if (!fresh || r.level < QUIET_DB) {
+  if (fresh && r.level < QUIET_DB) {
     if (r.quietSince < 0) r.quietSince = now;
   } else r.quietSince = -1;
   const noSignal = r.quietSince >= 0 && now - r.quietSince >= NO_SIGNAL_MS;
@@ -144,6 +151,8 @@ export function startTuner(els: TunerEls, onState: TunerOnState, reduced: boolea
     midi: null,
     cents: 0,
     level: -120,
+    centsShown: '',
+    hzShown: '',
     shownMidi: null,
     inTune: false,
     noSignal: false,

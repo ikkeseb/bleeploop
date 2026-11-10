@@ -10,6 +10,10 @@
   padding: 24px;
   background: rgba(10, 11, 14, 0.55);
 }
+/* Suspended while the tuner is on (Confirm.tsx): the ask waits, unseen, its question kept. */
+.confirm--suspended {
+  display: none;
+}
 
 .confirm__panel {
   display: flex;
