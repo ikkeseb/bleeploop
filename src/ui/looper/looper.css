@@ -536,13 +536,37 @@
   font-weight: 600;
   color: var(--dim);
 }
-.lp-lane__cue {
+.lp-lane__cue,
+.lp-lane__start-line {
   max-width: 100%;
   padding: 5px 10px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--bg) 78%, transparent);
   letter-spacing: 0.14em;
+}
+/* The empty looper's start line (a guitar-first install: lane-state.ts `startLine`): one sentence in the
+   silent tone on the messages' box, which also parts the faint centre line under it, and its key a lane
+   key's cap (a legend, not a control). */
+.lp-lane__start {
+  color: var(--faint);
+  font-weight: 500;
+}
+.lp-lane__start-line {
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+.lp-lane__key {
+  display: inline-block;
+  margin-right: 0.45em;
+  padding: 2px 7px;
+  border-radius: var(--r-sm);
+  background: var(--key);
+  color: var(--legend);
+  font-family: inherit;
+  font-size: calc(10.5px * var(--ui));
+  font-weight: 600;
+  letter-spacing: 0.08em;
 }
 /* the count-in numeral (a counted-in take): big enough to read from the guitar, lit warm-white (the
    count is chrome; the dashed red ring on the core and the ARMED word carry the take it counts toward, so

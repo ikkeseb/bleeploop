@@ -1,8 +1,16 @@
 /** Screenshot contact sheet: fixed looper scenes at three viewports (1280x820, 1920x1080, 1000x700),
  * keyboard bottom and hidden, in engine mode on the web engine fake (`src/platform/host.web.ts`, the
  * `engine-seam` pattern: `window.__lfEngineFake` set before the app loads, every lane, the clock and the
- * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11, 12 and 14 run in one fresh browser
- * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
+ * waveforms scripted on the feed through `__lf.native`). 1-empty is a fresh install's first screen (the
+ * guitar-first defaults: slot A Off asking for the amp-sim with its input, GO LIVE and meter, slot B folded,
+ * the keyboard hidden whatever the pass, the start line on the selected lane), in a context of its own that
+ * also walks the start line (it follows the selection, leaves on an arm and AUTO REC's listen, comes back
+ * when the arm is cancelled, and leaves for good with the first take: CLEAR ALL and a reload keep it gone)
+ * and the keyboard's one reveal for the first synth picked. Every other scene opens as a
+ * returning player (the harness's `lf.` key, `verify/harness/probe.ts`), so it matches the sheet from before
+ * that rule. Scenes 1r-7, 11, 12 and 14 run in one returning browser
+ * context: 1r-returning (the empty looper of an install that stored anything: Lead and Bass, the keyboard
+ * where the pass puts it, no start line), 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
  * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 5b-fx-all-on (the
  * same with lane 1 playing and all five of its FX engaged), 6-help (Help's
@@ -11,10 +19,13 @@
  * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 14-modes-on (a reset frame
  * with CLICK, FIXED 4, RETAKE, AUTO REC and END STOP on, then the five lanes of scene 5, drawer closed: the
  * command bar's rows with every mode on) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
- * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
+ * the Windows app's screens, in contexts whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
- * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
- * loaded (slot A's source picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in
+ * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = a fresh install with the host
+ * booted, nothing loaded (slot A asks for the amp-sim, its picker offering it under Plugins);
+ * 8b-first-launch-live = then GO LIVE on slot A's Off, the guitar dry at about -12 dBFS; 8c-first-launch-amp-sim
+ * = then the amp-sim picked in slot A (the keyboard still hidden: an effect is no synth). Then a returning
+ * context: 9-amp-sim-live = the amp-sim picked in
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
  * stopping live input; 9b-live-take-hot (shot after 10) = live again, a first take one second in, slot
  * A's input clipped a moment ago and now near -3 dBFS (scene 9 plays it at about -12 dBFS): the card's
@@ -50,8 +61,8 @@ import { probe } from '../harness/probe.ts';
 const outDir = 'logs/contact-sheet';
 const viewports = process.env.CS_VIEWPORTS ? process.env.CS_VIEWPORTS.split(',').map((v) => v.split('x').map(Number)) : [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
-const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on'];
+const scenes = ['1-empty', '1r-returning', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
+  '8-native-first-launch', '8b-first-launch-live', '8c-first-launch-amp-sim', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -109,10 +120,12 @@ await probe(async ({ browser, open }) => {
         page.on('pageerror', (e) => errors.push({ scene, text: String(e) }));
       };
       // Engine mode on the fake; `native` also serves host.web.ts with `available: true`, so the native-only
-      // chrome (the plugin host, GO LIVE, the editor) renders.
-      const openPage = async (native) => {
+      // chrome (the plugin host, GO LIVE, the editor) renders. A `firstLaunch` page is a fresh install, its
+      // keyboard where the guitar-first defaults put it; any other is a returning player's, the keyboard
+      // where this pass puts it.
+      const openPage = async (native, firstLaunch = false) => {
         const ctx = await browser.newContext();
-        const opened = await open({ context: ctx, viewport: { width, height }, allowPageErrors: true, init: async (p) => {
+        const opened = await open({ context: ctx, viewport: { width, height }, allowPageErrors: true, firstLaunch, init: async (p) => {
           init(p);
           if (native) await p.route('**/src/platform/host.web.ts', async (route) => {
             const response = await route.fetch();
@@ -121,10 +134,10 @@ await probe(async ({ browser, open }) => {
           await p.addInitScript(() => { window.__lfEngineFake = true; });
         } });
         await opened.page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
-        await opened.page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
+        if (!firstLaunch) await opened.page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
         return [ctx, opened.page];
       };
-      let [context, page] = await openPage(false);
+      let [context, page] = await openPage(false, true);
       let seq = 0;
       const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
       /** A reset frame: a fresh engine with every lane EMPTY and `settings` remembered. */
@@ -157,6 +170,44 @@ await probe(async ({ browser, open }) => {
         const cs = getComputedStyle(el), size = parseFloat(cs.fontSize), want = 11 * parseFloat(cs.getPropertyValue('--ui'));
         return { text: el.textContent, size, want, ok: Math.abs(size - want) < 0.01 };
       }), sel);
+      /** The first screen's guitar-first parts: the keyboard's placement, each slot card's picker text, ask,
+       * fold and live controls, each lane's start line, and whether the boot routed slot A's notes to Off. */
+      const firstLook = () => page.evaluate(() => ({
+        kbd: window.__lf.layoutStore.keyboardPlacement(),
+        slots: [...document.querySelectorAll('.slot')].map((el) => ({
+          picker: el.querySelector('.slot__source')?.selectedOptions[0]?.textContent.trim(),
+          ask: !!el.querySelector('.slot__source--ask'),
+          folded: el.classList.contains('slot--folded'),
+          input: !!el.querySelector('.slot__in'),
+          live: !!el.querySelector('.live'),
+          meter: !!el.querySelector('.slot__meter'),
+          // the picker whole inside its card, past the card's own padding (a hugging card sized as if empty
+          // clips it)
+          fits: (() => {
+            const c = el.getBoundingClientRect(), s = el.querySelector('.slot__source')?.getBoundingClientRect();
+            return !!s && s.width > 0 && s.left >= c.left && s.right <= c.right - 1;
+          })(),
+        })),
+        start: [...document.querySelectorAll('.lp-lane')].map((l) => l.querySelector('.lp-lane__start')?.textContent.trim() ?? ''),
+        routedOff: window.__lf.native.inputSent.some((e) => JSON.stringify(e) === JSON.stringify({ selectTarget: { slot: 0, target: 'Off' } })),
+      }));
+      const START = 'SPACE or your pedal records here';
+      const startOn = (lane) => [0, 1, 2, 3, 4].map((i) => (i === lane ? START : '')).join('|');
+      /** A fresh install's first screen, `liveA` saying whether slot A is live: slot A Off and asking, with its
+       * input, GO LIVE and meter; slot B folded to its letter and picker; the keyboard hidden; the start line
+       * on lane 1; the boot's notes routed to Off. */
+      const checkFirstScreen = async (liveA = false) => {
+        const f = await firstLook();
+        const [a, b] = f.slots;
+        const problems = [
+          f.kbd !== 'hidden' && `the keyboard is ${f.kbd}, not hidden`,
+          !(a?.picker === 'Pick your amp-sim' && a.ask && !a.folded && a.input && a.live && a.meter && a.fits) && `slot A reads ${JSON.stringify(a)}`,
+          !(b?.picker === 'Add a second sound' && b.ask && b.folded && !b.input && !b.live && !b.meter && b.fits) && `slot B reads ${JSON.stringify(b)}`,
+          f.start.join('|') !== startOn(0) && `the start line reads ${JSON.stringify(f.start)}, not on lane 1 alone`,
+          !f.routedOff && "the boot did not route slot A's notes to Off",
+        ].filter(Boolean);
+        for (const p of problems) fail(`${tag} ${scene}${liveA ? ' (A live)' : ''}: ${p}`);
+      };
       /** Each param read-out under `root` against the unit its definition implies, and whether it fits its
        * box. `defs` maps a slider's or select's accessible name to its definition; DUB FEEDBACK is not one. */
       const readouts = (root, defs) => page.evaluate(([root, defs]) => [...document.querySelectorAll(`${root} .fxp-param:not(.fxp-dub .fxp-param)`)].map((p) => {
@@ -195,6 +246,73 @@ await probe(async ({ browser, open }) => {
       await reset();
       await page.waitForTimeout(200);
       await shoot(scene);
+      await checkFirstScreen();
+      // The start line follows the selected lane, leaves on an arm (AUTO REC's listen included) and comes
+      // back when that arm is cancelled before it records; the first take ends it for good, also one
+      // cleared in the frame that committed it: CLEAR ALL leaves it gone, and so does a reload (checked
+      // last in this context). The install's marker says which: owed, then played.
+      {
+        const startNow = async () => (await firstLook()).start.join('|');
+        const marker = () => page.evaluate(() => localStorage.getItem('lf.guitarFirst'));
+        const allEmpty = () => [0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty')));
+        const seen = {};
+        seen.owed = await marker() === '1';
+        await emit({ events: [{ Selected: { frame: 0, lane: 2 } }] });
+        seen.selected3 = await startNow() === startOn(2);
+        await emit({ events: [{ Selected: { frame: 0, lane: 0 } }, laneEvent(0, lane('Recording', { armed: true })), transport(0, true, 120)] });
+        seen.armed = await startNow() === startOn(-1);
+        await emit({ events: [laneEvent(0, lane('Recording', { autoArmed: true })), transport(0, false, 120)] });
+        seen.listening = await startNow() === startOn(-1);
+        await emit({ events: [laneEvent(0, lane('Empty')), transport(0, false, 120)] });
+        seen.cancelled = await startNow() === startOn(0);
+        seen.stillOwed = await marker() === '1';
+        await emit({ events: [laneEvent(0, lane('Recording')), transport(0, true, 120)] });
+        seen.recording = await startNow() === startOn(-1);
+        // The first take commits and is cleared inside one feed frame (a catch-up frame carries both): the
+        // loop existed, so the line is over although no rendered state ever showed it.
+        await emit({ events: [laneEvent(0, lane('Playing', { length: RATE * 2, canReverse: true })), laneEvent(0, lane('Empty')), transport(0, false, 120)] });
+        seen.tookAndCleared = await startNow() === startOn(-1);
+        seen.played = await marker() === 'played';
+        await emit({ events: [laneEvent(0, lane('Playing', { length: RATE * 2, canReverse: true })), transport(RATE * 2, true, 120)] });
+        seen.took = await startNow() === startOn(-1);
+        await emit({ events: [...allEmpty(), transport(0, false, 120)] });
+        seen.clearedAll = await startNow() === startOn(-1);
+        if (Object.values(seen).some((v) => !v)) fail(`${tag} ${scene}: the start line ${JSON.stringify(seen)} (owed; on lane 3 once selected; gone while armed and listening; back after the arm is cancelled, still owed; gone while the first take records; gone, the marker played, after a take committed and cleared in one frame; gone while a later take plays and after CLEAR ALL)`);
+      }
+      // The first synth picked shows the keyboard where it returns (the bottom), once.
+      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption('lead');
+      await page.waitForTimeout(100);
+      {
+        const f = await firstLook();
+        if (f.kbd !== 'bottom' || f.slots[0]?.picker !== 'Lead' || f.slots[0]?.ask) fail(`${tag} ${scene}: picking Lead in slot A leaves the keyboard ${f.kbd} and slot A ${JSON.stringify(f.slots[0])}`);
+      }
+      // A reload over an empty engine: the first take ended the start line for good on this install.
+      await page.reload();
+      await page.waitForFunction(() => '__lf' in window && window.__lf.native.opened.length === 1, undefined, { timeout: 30_000 });
+      seq = 0;
+      await reset();
+      await page.waitForTimeout(200);
+      {
+        const f = await firstLook();
+        const marker = await page.evaluate(() => localStorage.getItem('lf.guitarFirst'));
+        if (f.start.some(Boolean) || marker !== 'played') fail(`${tag} ${scene}: after a reload the start line reads ${JSON.stringify(f.start)} and the marker ${JSON.stringify(marker)} (no line, played)`);
+      }
+      for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
+      errors.length = 0;
+      await context.close();
+
+      // A returning player: the same empty looper as before the guitar-first rule.
+      scene = '1r-returning';
+      [context, page] = await openPage(false);
+      seq = 0;
+      await reset();
+      await page.waitForTimeout(200);
+      await shoot(scene);
+      {
+        const f = await firstLook();
+        const [a, b] = f.slots;
+        if (f.kbd !== kbd || a?.picker !== 'Lead' || b?.picker !== 'Bass' || a.ask || b.ask || b.folded || f.start.some(Boolean)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
+      }
       // The tempo is free before a loop: its numeral is not dimmed (13-jam holds the locked side).
       const freeBpm = await bpmLook();
       if (!freeBpm.shown || freeBpm.locked || freeBpm.color === freeBpm.dim) fail(`${tag} ${scene}: the free BPM numeral reads ${JSON.stringify(freeBpm)} (not locked, not --dim)`);
@@ -482,30 +600,69 @@ await probe(async ({ browser, open }) => {
       }
       await context.close();
 
+      /** Let the app's own native boot finish (its scan found nothing), then rescan with the amp-sim and
+       * stub the host's load and editor replies; a reset frame; the amp-sim listed in slot A's picker. */
+      const bootNative = async () => {
+        await page.evaluate(async (ampSim) => {
+          const { platform } = await import('/src/platform/index.ts');
+          const instrument = await import('/src/ui/state/instrument.ts');
+          const host = platform.pluginHost;
+          // Let the app's own boot chain finish (its scan found nothing), then rescan with the amp-sim.
+          const deadline = Date.now() + 10000;
+          while (!instrument.nativeHostReady() || instrument.scanning()) {
+            if (Date.now() > deadline) throw new Error('native host boot did not finish');
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          host.scanPlugins = async () => [ampSim];
+          host.loadPlugin = async (slot) => ({ slot, descriptor: ampSim });
+          host.unloadPlugin = async () => {};
+          host.openEditor = async () => {};
+          host.listParams = async () => [];
+          await instrument.scanForPlugins();
+        }, AMP_SIM);
+        await reset();
+        await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
+        await page.waitForTimeout(200);
+      };
+
       scene = '8-native-first-launch';
+      [context, page] = await openPage(true, true);
+      seq = 0;
+      await bootNative();
+      await shoot(scene);
+      await checkFirstScreen();
+
+      // GO LIVE on slot A's Off: the guitar dry, at a working level (about -12 dBFS).
+      scene = '8b-first-launch-live';
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).click();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
+      await emit({ meter: { peak: [0.25, 0], clip: [false, false] } });
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      await checkFirstScreen(true);
+
+      // The amp-sim picked in slot A: it goes live with its editor; an effect is no synth, so the keyboard
+      // still waits, and slot B stays folded.
+      scene = '8c-first-launch-amp-sim';
+      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption({ label: 'Probe Amp Sim (VST3)' });
+      await page.getByRole('button', { name: 'Editor for slot A', exact: true, pressed: true }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
+      await emit({ meter: { peak: [0.25, 0], clip: [false, false] } });
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      {
+        const f = await firstLook();
+        const [a, b] = f.slots;
+        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !b?.folded || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
+      }
+      for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
+      errors.length = 0;
+      await context.close();
+
+      // The rest of the Windows app's scenes as a returning player (slot A on Lead, B on Bass).
       [context, page] = await openPage(true);
       seq = 0;
-      await page.evaluate(async (ampSim) => {
-        const { platform } = await import('/src/platform/index.ts');
-        const instrument = await import('/src/ui/state/instrument.ts');
-        const host = platform.pluginHost;
-        // Let the app's own boot chain finish (its scan found nothing), then rescan with the amp-sim.
-        const deadline = Date.now() + 10000;
-        while (!instrument.nativeHostReady() || instrument.scanning()) {
-          if (Date.now() > deadline) throw new Error('native host boot did not finish');
-          await new Promise((r) => setTimeout(r, 50));
-        }
-        host.scanPlugins = async () => [ampSim];
-        host.loadPlugin = async (slot) => ({ slot, descriptor: ampSim });
-        host.unloadPlugin = async () => {};
-        host.openEditor = async () => {};
-        host.listParams = async () => [];
-        await instrument.scanForPlugins();
-      }, AMP_SIM);
-      await reset();
-      await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
-      await page.waitForTimeout(200);
-      await shoot(scene);
+      await bootNative();
 
       scene = '9-amp-sim-live';
       await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption({ label: 'Probe Amp Sim (VST3)' });

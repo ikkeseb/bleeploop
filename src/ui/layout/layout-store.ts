@@ -1,7 +1,8 @@
 import { createSignal } from 'solid-js';
+import { guitarFirstInstall } from '../state/instrument-slots';
 
 /**
- * Layout state for the resizable / movable stage. Three things persist across reloads (localStorage,
+ * Layout state for the resizable / movable stage. These persist across reloads (localStorage,
  * mirroring audio-settings.ts — best-effort, swallows quota/private-mode throws). A legacy stored
  * `slotSizes` key (a deleted instrument-slot width split) still parses fine — unknown keys are ignored:
  *
@@ -11,8 +12,12 @@ import { createSignal } from 'solid-js';
  *                     weight 1; a legacy 'instrument' key still parses but is ignored.
  *  - `keyboardPlacement` — where the on-screen keyboard sits: 'top' (between the slots and the looper),
  *                     'bottom' (below the looper — the DEFAULT), or 'hidden' (removed — restore from
- *                     the command bar's keyboard tool).
+ *                     the command bar's keyboard tool). A guitar-first install (`guitarFirstInstall`)
+ *                     starts it hidden, returning to the bottom: the guitar plays through a slot, and
+ *                     the keyboard waits for the first built-in synth (`revealKeyboardForSynth`).
  *  - `lastVisiblePlacement` — where a hidden keyboard returns, including across reloads.
+ *  - `keyboardWaits` — stored only while true: that guitar-first wait, until the keyboard shows for a
+ *                     synth or the player places it themselves (every placement setter below ends it).
  *
  * The weights are relative (fr), so a record like { keyboard: 0.55, looper: 1.4 } is fine — SplitStack
  * normalises against the sum of the *present* weighted regions, which is why hiding the keyboard doesn't
@@ -27,6 +32,7 @@ interface LayoutState {
   stageSizes: Record<string, number>;
   keyboardPlacement: KeyboardPlacement;
   lastVisiblePlacement: 'top' | 'bottom';
+  keyboardWaits?: true;
 }
 
 /**
@@ -59,17 +65,22 @@ function isWeightRecord(v: unknown): v is Record<string, number> {
   );
 }
 
+// Read while the module loads, before the app stores anything (`guitarFirstInstall`).
+const guitarFirst = guitarFirstInstall();
+
 function read(): LayoutState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    // No persisted layout → seed the looper-hero baseline + keyboard at the bottom (fresh install /
-    // cleared storage). 'bottom' is the default placement (the keyboard is the fallback play path, so it
-    // sits under the looper rather than between the source row and the lanes).
+    // No persisted layout → seed the looper-hero baseline + keyboard at the bottom (cleared storage, an
+    // install from before the guitar-first rule). 'bottom' is the default placement (the keyboard is the
+    // fallback play path, so it sits under the looper rather than between the source row and the lanes).
+    // A guitar-first install starts it hidden, waiting for a synth, and it returns to the bottom.
     if (!raw)
       return {
         stageSizes: { ...DEFAULT_STAGE_WEIGHTS },
-        keyboardPlacement: 'bottom',
+        keyboardPlacement: guitarFirst ? 'hidden' : 'bottom',
         lastVisiblePlacement: 'bottom',
+        ...(guitarFirst ? { keyboardWaits: true as const } : {}),
       };
     const p = JSON.parse(raw) as Partial<LayoutState>;
     // An explicitly-stored 'top'/'bottom'/'hidden' is honored; anything else falls back to the 'bottom'
@@ -92,6 +103,8 @@ function read(): LayoutState {
       stageSizes: isWeightRecord(p.stageSizes) ? p.stageSizes : { ...DEFAULT_STAGE_WEIGHTS },
       keyboardPlacement: placement,
       lastVisiblePlacement,
+      // The wait holds only over the hidden keyboard it started with.
+      ...(p.keyboardWaits === true && placement === 'hidden' ? { keyboardWaits: true as const } : {}),
     };
   } catch {
     return {
@@ -108,6 +121,8 @@ const [keyboardPlacement, setKeyboardPlacementSig] = createSignal<KeyboardPlacem
 
 // Where the keyboard goes back to when un-hidden (so the command-bar toggle restores its last visible spot).
 let lastVisiblePlacement: 'top' | 'bottom' = initial.lastVisiblePlacement;
+// The guitar-first wait (`keyboardWaits` above): the keyboard is hidden until a synth is picked.
+let keyboardWaits = initial.keyboardWaits === true;
 
 function persist(): void {
   try {
@@ -117,6 +132,7 @@ function persist(): void {
         stageSizes: stageSizes(),
         keyboardPlacement: keyboardPlacement(),
         lastVisiblePlacement,
+        ...(keyboardWaits ? { keyboardWaits: true as const } : {}),
       } satisfies LayoutState),
     );
   } catch {
@@ -132,9 +148,20 @@ export function setStageSizes(next: Record<string, number>): void {
 }
 
 export function setKeyboardPlacement(p: KeyboardPlacement): void {
+  keyboardWaits = false; // the player placed it: it is theirs now
   if (p !== 'hidden') lastVisiblePlacement = p;
   setKeyboardPlacementSig(p);
   persist();
+}
+
+/**
+ * The player picked a built-in synth (the slot picker's gesture, never a default or a restore): on a
+ * guitar-first install whose keyboard still waits, it shows where a hidden keyboard returns, so the PC
+ * keys that hiding paused play the synth. Once only; after it, or once the player placed the keyboard,
+ * this does nothing.
+ */
+export function revealKeyboardForSynth(): void {
+  if (keyboardWaits) setKeyboardPlacement(lastVisiblePlacement);
 }
 
 /** True when the keyboard occupies a stage region (top or bottom). */

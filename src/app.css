@@ -796,6 +796,26 @@ option {
   cursor: default;
   color: var(--faint);
 }
+/* a slot that has never held a source (a guitar-first install) asks for one: the picker's ask reads a
+   step under a named source, and above the disabled picker's --faint, so it never reads as unavailable */
+.slot__source--ask {
+  color: var(--dim);
+}
+/* slot B before its first source: its letter and the picker's one line, hugging them, so slot A takes
+   the row; any pick restores the two equal cards. It drops the card's inline-size containment, which
+   would size the hugging card as if empty (it has no one-line form to query). */
+.slot--folded {
+  flex: 0 0 auto;
+  container-type: normal;
+}
+.slot--folded .slot__row {
+  grid-template-columns: auto auto;
+  grid-template-areas: 'id source';
+}
+.slot--folded .slot__source {
+  width: auto;
+  field-sizing: content;
+}
 .slot__source:focus-visible,
 .slot__in:focus-visible {
   outline-offset: 1px;

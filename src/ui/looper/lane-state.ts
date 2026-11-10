@@ -1,5 +1,6 @@
 import { createMemo, type Accessor } from 'solid-js';
 import { clock, looper, type TrackState } from '../state/audio';
+import { startLineOwed } from '../state/instrument-slots';
 import { laneCue, refusalText } from './gates';
 
 /**
@@ -56,6 +57,8 @@ interface LaneView {
   wellMsg: Accessor<string>;
   /** The count-in numeral (4-3-2-1) of an armed take that is counted in; 0 otherwise. */
   wellCount: Accessor<number>;
+  /** The empty looper's start line (the looper lanes' only; the stage view has no keys to name). */
+  startLine: Accessor<boolean>;
 }
 
 /** The shared view of lane `i`. */
@@ -92,8 +95,9 @@ export function createLaneView(i: number): LaneView {
     if (c !== null && c.track === i) return c.text;
     return clearArmed() ? refusalText('ConfirmClear') : '';
   });
-  // Only ARMED/LISTENING and a pending stop carry a well message; EMPTY shows nothing (the lane's record
-  // affordance already says "press to record"). A refusal cue outranks every message while it lasts.
+  // Only ARMED/LISTENING and a pending stop carry a well message; an EMPTY lane's says nothing (its
+  // record core already says "press to record"), and the empty looper's start line is apart from it
+  // (`startLine`). A refusal cue outranks every message while it lasts.
   // A take behind the forced count-in → the well counts it down big (4-3-2-1, the numeral is
   // clock.countLeft); a take waiting for the loop boundary → plain text. Which one is the engine's to
   // say: a FIRST take (no master yet) is always counted in, and a LATER take is counted in when the
@@ -111,5 +115,17 @@ export function createLaneView(i: number): LaneView {
     return '';
   };
   const wellCount = () => (!cue() && countedIn() ? clock.countLeft() : 0);
-  return { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount };
+  // On a guitar-first install that has never held a loop (`startLineOwed`), while all five lanes are
+  // EMPTY (so nothing is armed either), the selected lane's well says how to start: the key and the
+  // pedal that record onto it. Any well message outranks it (AUTO REC's listen, a refusal); an arm
+  // takes it away and a cancelled one brings it back, but the first loop any lane holds ends it for
+  // good on this install (`engine-store.ts` `applyLane`), so CLEAR ALL never brings it back.
+  const startLine = createMemo(
+    () =>
+      startLineOwed() &&
+      looper.selectedTrack() === i &&
+      wellMsg() === '' &&
+      Array.from({ length: looper.trackCount }, (_, j) => looper.track(j)().state === 'EMPTY').every(Boolean),
+  );
+  return { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount, startLine };
 }

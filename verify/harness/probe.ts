@@ -52,7 +52,26 @@ export interface OpenOptions {
   noLf?: boolean;
   /** The probe asserts on `pageErrors` itself (it injects failures that surface as uncaught). */
   allowPageErrors?: boolean;
+  /** Open as a fresh install (no `lf.` key stored): the guitar-first defaults. Without it (or `storage`) the
+   *  page opens as a returning player (`RETURNING_KEY`). */
+  firstLaunch?: boolean;
+  /** Open over this stored localStorage instead of `RETURNING_KEY`: written once, before the app first
+   *  loads in the page (an init script that marks the tab's sessionStorage, so a reload never seeds again
+   *  and shows what the app left, an emptied storage included), e.g. an older install's real keys. Wins
+   *  over `firstLaunch`. */
+  storage?: Record<string, string>;
 }
+
+/**
+ * Stored before the app loads whenever no `lf.` key is (an init script, so every reload of the page too),
+ * unless the probe opens a first launch or its own `storage`. The app's guitar-first scan
+ * (`guitarFirstInstall` in `src/ui/state/instrument-slots.ts`) sees it as any `lf.` key, which is what
+ * makes the page a returning player's: the defaults from before the guitar-first install (slots A and B on
+ * Lead and Bass, the keyboard at the bottom, no start line on the empty looper), which the probes assert on.
+ * Nothing in the app reads its value. `verify/probes/legacy-storage.mjs` boots on an older install's real
+ * keys instead.
+ */
+const RETURNING_KEY = 'lf.probe.returning';
 
 export interface Probe {
   browser: Browser;
@@ -115,6 +134,26 @@ export async function probe(body: (p: Probe) => Promise<unknown>, options: Probe
       });
       opened.push({ app, allowPageErrors: !!o.allowPageErrors });
       await o.init?.(page);
+      if (o.storage) {
+        await page.addInitScript((stored) => {
+          try {
+            if (sessionStorage.getItem('probe.seeded') !== null) return;
+            sessionStorage.setItem('probe.seeded', '1');
+            if (Object.keys(localStorage).some((k) => k.startsWith('lf.'))) return;
+            for (const [k, v] of Object.entries(stored)) localStorage.setItem(k, v);
+          } catch {
+            /* no storage on this document */
+          }
+        }, o.storage);
+      } else if (!o.firstLaunch) {
+        await page.addInitScript((key) => {
+          try {
+            if (!Object.keys(localStorage).some((k) => k.startsWith('lf.'))) localStorage.setItem(key, '1');
+          } catch {
+            /* no storage on this document */
+          }
+        }, RETURNING_KEY);
+      }
       await page.goto(url);
       if (!o.noLf) await page.waitForFunction(() => '__lf' in window, undefined, { timeout: 30_000 });
       return app;
