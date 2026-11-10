@@ -810,6 +810,15 @@
   color: var(--dim);
   white-space: nowrap;
 }
+/* Under 1010 px of drawer (a window near the 1000 px minimum) the title gives its width to the params
+   row: there all five engaged FX share one row of eight columns, and with the title beside them a
+   column (~91 px) is narrower than CUTOFF and its widest read-out (`9.9 kHz`) on one line. The drawer
+   hangs under its own lit lane and keeps its accessible name (Looper.tsx), so the title only repeats it. */
+@container drawer (max-width: 1009.98px) {
+  .lp-drawer__title {
+    display: none;
+  }
+}
 .lp-drawer__close {
   flex: 0 0 auto;
   width: var(--drawer-key);

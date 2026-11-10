@@ -7,7 +7,7 @@ name: browser-lifecycle
 # and the v0.1.0 session files verify/probes/legacy-sessions.mjs imports.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths: ['src/**', 'verify/**', 'index.html', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.json', 'vite.config.ts', 'scripts/build-commit.mjs', 'src-tauri/crates/lf-engine/tests/fixtures/v0.1.0/**', '.github/workflows/browser-lifecycle.yml']
   pull_request:
     branches: [main]

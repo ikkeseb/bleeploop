@@ -360,12 +360,12 @@ const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(ma
 
 /** Each lane's mix as the fake engine holds it: what the commands sent and the events emitted set, as
  * the engine applies them (a reset frame's settings, a mix command, CLEAR, COPY, a pedal's MUTE). */
-const fakeMixes: LaneMix[] = Array.from({ length: ENGINE_LANES }, defaultLaneMix);
+const fakeMixes: LaneMix[] = /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, defaultLaneMix);
 /** Per source lane, the mix its last COPY command latched: the engine copies the source's mix when the
  * COPY applies, and its Copied comes only when the PCM job ends. A COPY the engine drops (no EMPTY lane)
  * leaves its latch to the next one. `Action` COPY acts on the engine's selected lane, which the fake
  * does not know: its Copied takes the source's mix then. */
-const copyLatches: (LaneMix | null)[] = Array.from({ length: ENGINE_LANES }, () => null);
+const copyLatches: (LaneMix | null)[] = /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, () => null);
 
 function applyMixCommand(c: EngineCommand): void {
   if (typeof c !== 'object') return;
@@ -441,7 +441,7 @@ function applyMixFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'>):
 // ── The fake's `Mix`: each change of a lane's mix reported once, as the engine's feed does ─────────────
 
 /** Each lane's mix as the fake last reported it. */
-const reported: LaneMix[] = Array.from({ length: ENGINE_LANES }, defaultLaneMix);
+const reported: LaneMix[] = /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, defaultLaneMix);
 /** The reports owed, in the order the changes were applied: each a copy of its lane's mix as that
  * application left it. */
 const echoQueue: { readonly lane: number; readonly mix: LaneMix }[] = [];
@@ -514,7 +514,7 @@ function setToggleValue(t: EngineToggle, on: boolean): void {
 /** What the fake knows of the looper for the toggles' gate, as the scripted frames left it: each lane's
  * state, the master, the tempo's lock, the selected lane (a refusal's lane: the scripted `Selected`, not
  * a `SelectTrack` the UI sent, which the fake does not answer). */
-const gateView = { states: Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'), master: 0, locked: false, selected: 0 };
+const gateView = { states: /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'), master: 0, locked: false, selected: 0 };
 
 /** The setters that set a toggled setting outright: the setting and the value. */
 function setterToggle(c: EngineCommand): [EngineToggle, boolean] | null {
