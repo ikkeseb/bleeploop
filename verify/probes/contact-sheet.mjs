@@ -38,7 +38,9 @@
  * no edge on its row and the selected slot under a card's top light; 13c-jam-forced-colours is the same
  * under forced colours, one system outline on the selected lane and slot; in 14-modes-on, FIXED greyed
  * out wears the disabled face, no lit legend. 13b-jam-edit is the same jam with lane
- * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). Writes
+ * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). 15-slots-paired (after 13b)
+ * = the same with slot B on Off beside A's live amp-sim; 15b-slots-refused = the amp-sim live in both
+ * slots, both EDITORs refused with the longest refusal (two loads overlapping in flight). Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
@@ -51,8 +53,10 @@
  * Manual is scrolled to its foot, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
  * AUTO REC line pointing at the SENS word only where the bar shows it (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); in 1-empty, 8, 8b, 8c and 9 slot A's own controls (the
- * input pick, GO LIVE, EDITOR / PARAMS) follow its picker, on its line one column gap after it and unwrapped, or
- * on the next starting under it, and its volume keeps the card's right edge; no scene logs console.error or an uncaught page error
+ * input pick, GO LIVE, EDITOR / PARAMS) follow its picker in the form its card's width asks for: from 760 px on
+ * its line, one column gap after it and unwrapped, narrower or with an error showing on the next line, under it
+ * one row gap down; every part of the row inside its padding, none overlapping, the volume at the card's right
+ * edge; in 15 and 15b both cards' do, starting at one x from their card's edge; no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
  * Run: pnpm probe contact-sheet
@@ -64,7 +68,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = process.env.CS_VIEWPORTS ? process.env.CS_VIEWPORTS.split(',').map((v) => v.split('x').map(Number)) : [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '1r-returning', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '8b-first-launch-live', '8c-first-launch-amp-sim', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on'];
+  '8-native-first-launch', '8b-first-launch-live', '8c-first-launch-amp-sim', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on', '15-slots-paired', '15b-slots-refused'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -190,20 +194,48 @@ await probe(async ({ browser, open }) => {
             const c = el.getBoundingClientRect(), s = el.querySelector('.slot__source')?.getBoundingClientRect();
             return !!s && s.width > 0 && s.left >= c.left && s.right <= c.right - 1;
           })(),
-          // the source's own controls follow the picker: on the picker's line, one column gap (12 px) after
-          // it and none wrapped; or on the next line, starting under it (a narrow card's second line may
-          // wrap); the volume at the card's right padding (18 px) either way. Null on a card with no controls.
-          follows: (() => {
+          ...(() => {
+            // the source's own controls follow the picker, in the form the card's width asks for: a card
+            // 760 px wide and up (its content box, the header's container query) shows them on the
+            // picker's line, the first one column gap (12 px) after it, every control and none wrapped;
+            // a narrower card, or a row with an error beside its controls, on the next line, the first
+            // under the picker's left edge, one row gap (8 px) below the first line. Either way every part
+            // of the row (letter, picker, volume, each control and error) lies inside the row's padding
+            // (18 px) and none overlaps another, and the volume keeps the card's right padding. `follows`
+            // is null on a card with no controls; `why` names the first rule broken. `first` = the first
+            // control's x from the card's left edge, `width` the card's and `content` its content box (the
+            // width the container query reads, unrounded), for the paired cards' check. A control or an
+            // error that is in the row but not drawn fails: it cannot be left out of the rules.
+            const c = el.getBoundingClientRect(), row = el.querySelector('.slot__row').getBoundingClientRect();
             const s = el.querySelector('.slot__source')?.getBoundingClientRect();
-            const acts = [...el.querySelectorAll('.slot__acts > :is(select, button)')].map((a) => a.getBoundingClientRect());
-            if (!s || !acts.length) return null;
-            const mid = (r) => (r.top + r.bottom) / 2;
-            const onPickerLine = (r) => Math.abs(mid(r) - mid(s)) < 2;
-            const beside = onPickerLine(acts[0])
-              ? Math.abs(acts[0].left - s.right - 12) <= 1 && acts.every(onPickerLine)
-              : Math.abs(acts[0].left - s.left) <= 1 && acts[0].top >= s.bottom;
-            const c = el.getBoundingClientRect(), v = el.querySelector('.slot__vol')?.getBoundingClientRect();
-            return beside && !!v && Math.abs(c.right - 1 - 18 - v.right) <= 1;
+            const v = el.querySelector('.slot__vol')?.getBoundingClientRect(), id = el.querySelector('.slot__id').getBoundingClientRect();
+            const acts = [...el.querySelectorAll('.slot__acts > *')].map((a) => ({ name: a.getAttribute('aria-label') ?? a.className, r: a.getBoundingClientRect() }));
+            const box = getComputedStyle(el), px = (k) => parseFloat(box[k]) || 0;
+            const content = c.width - px('borderLeftWidth') - px('borderRightWidth') - px('paddingLeft') - px('paddingRight');
+            if (!s || !acts.length) return { follows: null, width: c.width, content };
+            const why = (() => {
+              if (!v) return 'no volume';
+              const gone = acts.find((a) => a.r.width === 0 || a.r.height === 0);
+              if (gone) return `${gone.name} is in the row but not drawn`;
+              const first = acts[0].r, mid = (r) => (r.top + r.bottom) / 2;
+              if (content >= 760 && !el.querySelector('.slot__acts > .pc__err')) {
+                if (Math.abs(first.left - s.right - 12) > 1) return `one line: its first control starts ${(first.left - s.right).toFixed(1)} px after the picker, not 12`;
+                const off = acts.find((a) => Math.abs(mid(a.r) - mid(s)) >= 2);
+                if (off) return `one line: ${off.name} sits off the picker's line`;
+              } else {
+                if (Math.abs(first.left - s.left) > 1) return `two lines: its first control starts ${(first.left - s.left).toFixed(1)} px from the picker's left edge, not 0`;
+                const gap = Math.min(...acts.map((a) => a.r.top)) - Math.max(s.bottom, v.bottom, id.bottom);
+                if (Math.abs(gap - 8) > 1) return `two lines: its controls start ${gap.toFixed(1)} px below the first line, not 8`;
+              }
+              const parts = [{ name: 'the letter', r: id }, { name: 'the picker', r: s }, { name: 'the volume', r: v }, ...acts];
+              const out = parts.find((p) => p.r.left < row.left + 18 - 0.5 || p.r.right > row.right - 18 + 0.5);
+              if (out) return `${out.name} spans ${out.r.left.toFixed(1)}..${out.r.right.toFixed(1)}, outside the row's padding ${row.left + 18}..${row.right - 18}`;
+              const meet = (a, b) => a.right > b.left + 0.5 && b.right > a.left + 0.5 && a.bottom > b.top + 0.5 && b.bottom > a.top + 0.5;
+              for (const [i, p] of parts.entries()) for (const q of parts.slice(i + 1)) if (meet(p.r, q.r)) return `${p.name} overlaps ${q.name}`;
+              if (Math.abs(c.right - 1 - 18 - v.right) > 1) return "the volume left the card's right padding";
+              return '';
+            })();
+            return { follows: why === '', why, first: acts[0].r.left - c.left, width: c.width, content };
           })(),
         })),
         start: [...document.querySelectorAll('.lp-lane')].map((l) => l.querySelector('.lp-lane__start')?.textContent.trim() ?? ''),
@@ -829,6 +861,67 @@ await probe(async ({ browser, open }) => {
         await page.keyboard.press('Escape');
         await menu.waitFor({ state: 'detached' });
       }
+
+      /** Both slot cards full, their controls following their pickers and starting at one x from their
+       * card's left edge, whatever controls each shows. The one x holds on two lines and, on one line, from
+       * a 904 px card up (`src/app.css` `.slot__row`): between 760 and 904 px the crowded card narrows its
+       * picker, so only the rules of `follows` bind there. */
+      const checkPaired = async () => {
+        const [a, b] = (await firstLook()).slots;
+        for (const [letter, s] of [['A', a], ['B', b]]) if (!s?.follows) fail(`${tag} ${scene}: slot ${letter}'s own controls do not follow its picker: ${JSON.stringify(s)}`);
+        const narrows = (s) => s.content >= 760 && s.content < 904;
+        if (a?.follows && b?.follows && !narrows(a) && !narrows(b) && (Math.abs(a.width - b.width) > 0.5 || Math.abs(a.first - b.first) > 0.5)) {
+          fail(`${tag} ${scene}: the cards' first controls start ${a.first.toFixed(1)} px (A, card ${a.width} px) and ${b.first.toFixed(1)} px (B, card ${b.width} px) from their card's left edge, not at one x`);
+        }
+      };
+      const dismissToasts = () => page.evaluate(async () => {
+        const notify = await import('/src/notify.ts');
+        for (const t of notify.toasts()) notify.dismissToast(t.id);
+      });
+
+      // The crowded card beside a quiet one: the amp-sim live in A (input, INPUT LIVE, EDITOR, PARAMS),
+      // B on Off (input, GO LIVE).
+      scene = '15-slots-paired';
+      await page.getByRole('combobox', { name: 'Source for slot B', exact: true }).selectOption('off');
+      await page.getByRole('button', { name: 'Live input for slot B', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      await checkPaired();
+
+      // The amp-sim in both slots, live, both loads overlapping in flight (instrument-controls' case), so
+      // both EDITORs are refused with the longest refusal: each row shows its controls on the line under
+      // the picker, the refusal after them, nothing outside the card and nothing overlapping.
+      scene = '15b-slots-refused';
+      await page.evaluate(async (ampSim) => {
+        const { platform } = await import('/src/platform/index.ts');
+        const instrument = await import('/src/ui/state/instrument.ts');
+        await instrument.clearPlugin(0);
+        await instrument.clearPlugin(1);
+        const loadHost = platform.pluginHost.loadPlugin;
+        let release;
+        const held = new Promise((resolve) => (release = resolve));
+        platform.pluginHost.loadPlugin = async (slot, ...rest) => {
+          if (slot === 0) await held;
+          return loadHost(slot, ...rest);
+        };
+        const loadA = instrument.selectPlugin(0, ampSim);
+        await instrument.selectPlugin(1, ampSim);
+        release();
+        await loadA;
+        platform.pluginHost.loadPlugin = loadHost;
+      }, AMP_SIM);
+      for (const [i, letter] of [[0, 'A'], [1, 'B']]) {
+        const live = page.getByRole('button', { name: `Live input for slot ${letter}`, exact: true });
+        if ((await live.getAttribute('aria-pressed')) !== 'true') await live.click();
+        await page.getByRole('button', { name: `Live input for slot ${letter}`, exact: true, pressed: true }).waitFor();
+        await page.getByRole('button', { name: `Editor for slot ${letter}`, exact: true }).click();
+        await page.locator('.slot').nth(i).locator('.pc__err', { hasText: 'editor owned by an unknown slot (both loaded it at once)' }).waitFor();
+      }
+      await dismissToasts();
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      await checkPaired();
 
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
       await context.close();
