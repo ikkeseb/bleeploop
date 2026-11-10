@@ -20,16 +20,19 @@ import {
 import { notifyError } from '../../notify';
 import {
   activeSlot,
+  guitarFirstInstall,
   nativeHostReady,
   serializeSlot,
   setActiveSlotSignal,
   setSlotIds,
   setSlotOff,
   setSlotPlugins,
+  setSlotUnset,
   slotIds,
   slotOff,
   slotPendingCounts,
   slotPlugins,
+  slotUnset,
   withAt,
 } from './instrument-slots';
 import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
@@ -95,6 +98,10 @@ function writeSource(slot: 0 | 1, source: string): void {
   }
 }
 
+// A slot with no stored source starts on its default synth, or, on a guitar-first install
+// (`guitarFirstInstall`), Off and unset: the guitar's slot, passing the input dry once GO LIVE is on,
+// as a stored Off does. A plugin's first load into an unset slot stores its Off, so the slot stays set.
+const guitarFirst = guitarFirstInstall();
 for (const slot of [0, 1] as const) {
   let saved: string | null = null;
   try {
@@ -104,6 +111,15 @@ for (const slot of [0, 1] as const) {
   }
   if (saved === 'off') setSlotOff((prev) => withAt(prev, slot, true));
   else if (saved !== null && SYNTHS.some((s) => s.id === saved)) setSlotIds((prev) => withAt(prev, slot, saved));
+  else if (saved === null && guitarFirst) {
+    setSlotOff((prev) => withAt(prev, slot, true));
+    setSlotUnset((prev) => withAt(prev, slot, true));
+  }
+}
+
+/** Slot `slot` holds a source now (a pick, or a plugin that loaded): it is no longer unset. */
+function settleUnset(slot: 0 | 1): void {
+  if (slotUnset()[slot]) setSlotUnset((prev) => withAt(prev, slot, false));
 }
 
 // Each slot's input level (what an Off slot's live input is heard and recorded at: the engine's slot
@@ -192,6 +208,7 @@ function activateSlot(i: 0 | 1): void {
  */
 export function selectSynth(slotIndex: 0 | 1, id: string): void {
   chosenSource[slotIndex] = true;
+  settleUnset(slotIndex);
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
   setSlotOff((prev) => withAt(prev, slotIndex, false));
   // Serialize the routing work on the SAME per-slot chain as selectPlugin/clearPlugin, so a synth
@@ -221,6 +238,7 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
  */
 export function selectOff(slotIndex: 0 | 1): void {
   chosenSource[slotIndex] = true;
+  settleUnset(slotIndex);
   setSlotOff((prev) => withAt(prev, slotIndex, true));
   void serializeSlot(slotIndex, async () => {
     if (slotPlugins()[slotIndex]) {
@@ -398,6 +416,11 @@ async function doSelectPlugin(
   swapping[slot] = false;
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   rememberSlotPlugin(slot, desc);
+  // An unset slot has held a source now: its Off under the plugin is kept for the next launch.
+  if (slotUnset()[slot]) {
+    writeSource(slot, 'off');
+    settleUnset(slot);
+  }
   // The host restored the plugin's stored tone inside the load; one it could not restore (the host
   // logged why) leaves the plugin at its defaults, and the player should know.
   if (tone === 'failed') notifyError(`Could not restore the saved settings of ${desc.name}. Set it up again from its defaults.`);
@@ -653,7 +676,7 @@ export function slotTakesInput(slot: 0 | 1): boolean {
 /** Read-only reactive accessors: the instrument id per slot, whether a slot is Off, the loaded plugin per
  * slot (null = instrument or Off), the active slot index. (Owned by `instrument-slots.ts`; re-exported as
  * the UI's one path.) */
-export { slotIds, slotOff, slotPendingCounts, slotPlugins, activeSlot };
+export { slotIds, slotOff, slotPendingCounts, slotPlugins, slotUnset, activeSlot };
 
 /**
  * Derived predicate: is the ACTIVE slot playing the built-in GM drum kit (synth id 'drum' AND not
