@@ -430,6 +430,12 @@ impl Feed {
             }
         };
         let mut newest = None;
+        // Accepted limit: `on` is the mirror's, so it moves only when the `Event::Tuner` arrives. An off
+        // and on whose two events a full event ring refused leaves the old activation's frames looking
+        // current for a tick, and one reading of the same input from before the double press can reach
+        // a frame; the new activation's first frame (a new epoch) resets the analysis. A break of the
+        // input itself (a channel change, a device start, a new engine) never rests on an event: the
+        // fence and the drain cover those.
         for f in &self.tuner_frames {
             if f.frame < self.tuner_fence || f.frame < on {
                 continue;
