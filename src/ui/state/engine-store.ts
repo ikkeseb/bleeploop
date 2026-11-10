@@ -46,7 +46,7 @@ import {
 } from './audio-devices';
 import { autosave } from '../../session/autosave';
 import { engineResync } from './instrument';
-import { withAt } from './instrument-slots';
+import { endStartLine, withAt } from './instrument-slots';
 import { adoptEngineLive, engineInputLive, setEngineInput } from './native-io';
 import { notifyError, notifyInfo, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
@@ -540,6 +540,10 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
   if (next === 'EMPTY') cancelOverlays(lane);
   plain.clearing[lane] = false;
   plain.state[lane] = next;
+  // The guitar-first start line ends with the first loop any lane holds. Here, per event, and not in an
+  // effect on the lanes' signals: a frame is applied in one batch, so a take committed and cleared inside
+  // one frame never shows a rendered state. A no-op once ended or on an install that owes no line.
+  if (holdsLoop(next)) endStartLine();
   plain.waiting[lane] = waiting;
   plain.retakePass[lane] = info.retakePass;
   lanes[lane][1](trackView(info));

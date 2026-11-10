@@ -109,6 +109,12 @@ never the owner's guitar, latency, a driver, a pedal or feel.
 The owner at the 27" display with the installed release, or an agent's screenshots: what an eye
 settles.
 
+- A fresh install's first screen (nothing of the app's stored yet: slot A asks `Pick your amp-sim`
+  with its input pick and GO LIVE, slot B folds to `Add a second sound`, the keyboard stays hidden
+  until a built-in synth is picked, lane 1 says `SPACE or your pedal records here` until the first
+  loop): does it say plug in, pick your sound, record? Only an empty profile shows it; an install
+  that stored anything opens as before. (machine: `verify/probes/legacy-storage.mjs`, the contact
+  sheet's scene 8)
 - The main screen's restyle (2026-11-07; the principles in `src/ui/AGENTS.md`, the look in the
   `src/app.css` header: the waves as smooth bodies, grey for silent, a mode on but locked, the lanes a
   step larger at 2560, one bar ruler, the loop's length in bars only), from the chair on the 27":

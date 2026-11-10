@@ -269,7 +269,8 @@ function TrackLane(props: {
   // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
   // stage view. An EMPTY lane has no well message — the bright ● core already says "press to record";
   // the spoken 'record' action lives on the core button's aria-label. A guitar-first install's empty
-  // looper adds one start line on the selected lane (`startLine`), naming the key and the pedal.
+  // looper adds one start line on the selected lane (`startLine`), naming the key and the pedal, until
+  // its first loop.
   const { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount, startLine } =
     createLaneView(props.index);
   const fxSelected = () => props.fxTrack === props.index;
