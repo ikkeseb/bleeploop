@@ -37,7 +37,8 @@ const noEngineFake: Plugin = {
     for (const chunk of Object.values(bundle)) {
       if (chunk.type !== 'chunk') continue;
       for (const [id, module] of Object.entries(chunk.modules)) {
-        if (/[\\/]src[\\/]platform[\\/]host\.web\.ts$/.test(id) && module.renderedLength > 0) {
+        // A module id may carry a query (`?worker`, `?v=…`): match the path before it.
+        if (/[\\/]src[\\/]platform[\\/]host\.web\.ts$/.test(id.split('?')[0]) && module.renderedLength > 0) {
           this.error(`The engine fake (src/platform/host.web.ts) leaked into ${chunk.fileName} (${module.renderedLength} bytes): it is DEV-only (src/platform/index.ts selects it outside import.meta.env.PROD).`);
         }
       }

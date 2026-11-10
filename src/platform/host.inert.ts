@@ -55,7 +55,8 @@ const midi: MidiHost = {
   setMomentary: absent,
   setHold: absent,
   assign: absent,
-  importLegacy: absent,
+  // Nothing to import and nothing to report: the boot asks every launch, and a rejection would toast.
+  importLegacy: async () => null,
 };
 
 export const inertPlatform: Platform = {
