@@ -7,7 +7,13 @@ import {
   type AudioOutputDevice,
   type DeviceStatus,
 } from '../../platform';
-import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from './audio-settings';
+import {
+  defaultSlotInputChannels,
+  readAudioDeviceSettings,
+  writeAudioDeviceSettings,
+  type BufferFrames,
+  type SampleRate,
+} from './audio-settings';
 import { notifyError, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
 
@@ -47,7 +53,8 @@ const [asioEnabled, setAsioEnabledSig] = createSignal<boolean>(readAudioDeviceSe
 export const usingAsio = () => asioAvailable() && asioEnabled();
 
 // Each slot's capture channel pick ('' = auto), saved with the device picks. A pick is
-// device-bound: an input device change or prune resets both, and a device without it resets that one.
+// device-bound: an input device change or prune resets both to the install's default
+// (`defaultSlotInputChannels`), and a device without it resets that one to Auto.
 const [slotInputChannels, setSlotInputChannelsSig] = createSignal(readAudioDeviceSettings().slotInputChannels);
 
 /** Save and show each slot's capture channel pick. */
@@ -134,7 +141,7 @@ export async function refreshAndPruneDevices(running: DeviceStatus | null = null
   ) {
     // This endpoint belongs to WASAPI. Its disappearance cannot invalidate the cached ASIO channel.
     writeAudioDeviceSettings({ inputDeviceId: '', ...(usingAsio() ? {} : { inputChannel: '' }) });
-    if (!usingAsio()) saveSlotInputChannels(['', '']);
+    if (!usingAsio()) saveSlotInputChannels(defaultSlotInputChannels());
   }
   // A slot pick past the device's inputs (saved on a device with more) is not what the slot reads.
   const inputs = inputChannelCount(running);

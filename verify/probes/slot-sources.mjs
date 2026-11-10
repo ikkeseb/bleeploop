@@ -19,6 +19,8 @@
  * - a slot's input names only a channel the slot reads: an open whose status reads auto for a pick the
  *   device lacks, a status from a device the owner reopened on, an input device change and a prune (a
  *   vanished device, a pick past the device's inputs) reset that pick to Auto, in storage and on screen;
+ *   on a fresh install the input device change and the vanished device reset the picks to its default
+ *   instead (slot A on In 1, slot B Auto), and the reopen asks for that;
  * - GO LIVE pressed (the named action, as a pedal) while a tone reload holds a live slot: one press stops
  *   it (the reload does not resume it), two leave it live;
  * - a source pick whose plugin unload fails is not saved for the next launch; one that unloads is;
@@ -356,6 +358,42 @@ await probe(async ({ browser, open }) => {
     await clear();
     await p.evaluate(async (AMP) => (await import('/src/ui/state/instrument.ts')).restorePlugin(0, AMP), AMP);
     assert.ok((await sentNow()).includes('{"SetSlotGain":[0,0.8]}'), `the recalled plugin comes back at its level: ${await sentNow()}`);
+    await context.close();
+  }
+
+  // ── A fresh install: a reset of the picks goes to its default (slot A on In 1), not to Auto ──────────
+  {
+    const context = await browser.newContext();
+    const { page: p } = await open({ context, viewport: { width: 1280, height: 800 }, firstLaunch: true, init: (pg) => engineInit(pg) });
+    await boot(p);
+    const saved = () => p.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices') ?? '{}').slotInputChannels ?? null);
+    const openedNow = () => p.evaluate(() => window.__lf.native.opened.map((o) => o.inputChannels));
+    assert.deepEqual((await openedNow())[0], [0, null], 'a fresh install opens slot A on input 1, slot B on auto');
+    // An input device change in Audio Settings.
+    await p.evaluate(async () => {
+      const { platform } = await import('/src/platform/index.ts');
+      platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }, { id: 'other', name: 'Other input', channels: 2 }];
+      window.__lf.ui.openSettings();
+    });
+    await p.waitForFunction(() => document.querySelectorAll('[aria-label="Audio input device"] option').length === 3);
+    const opens = (await openedNow()).length;
+    await p.getByRole('combobox', { name: 'Audio input device', exact: true }).selectOption('other');
+    await p.waitForFunction((n) => window.__lf.native.opened.length > n, opens);
+    assert.deepEqual(await saved(), ['0', ''], "an input device change on a fresh install keeps slot A on input 1");
+    assert.deepEqual((await openedNow()).at(-1), [0, null], 'and the reopen asks for input 1 on slot A, auto on slot B');
+    await p.evaluate(() => window.__lf.ui.closeSettings());
+    // The prune of a vanished input device, over picks the player made.
+    const pruned = await p.evaluate(async () => {
+      const devices = await import('/src/ui/state/audio-devices.ts');
+      const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
+      writeAudioDeviceSettings({ inputDeviceId: 'other' });
+      devices.saveSlotInputChannels(['1', '0']);
+      const { platform } = await import('/src/platform/index.ts');
+      platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
+      await devices.refreshAndPruneDevices();
+      return { vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
+    });
+    assert.deepEqual(pruned, { vanished: ['0', ''], shown: ['0', ''] }, 'a vanished input device on a fresh install resets the picks to slot A on input 1');
     await context.close();
   }
 

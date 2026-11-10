@@ -30,9 +30,9 @@ export interface AudioDeviceSettings {
   /** The pre-per-slot input channel (0-based; '' = auto): seeds `slotInputChannels` from old settings. */
   inputChannel: string;
   /** Each slot's 0-based capture channel, in the same form. Saved settings from before
-   * the per-slot pick start both slots on `inputChannel`; with none saved, a guitar-first install
-   * (`guitarFirstInstall`) starts slot A on input 1 (the rig's instrument jack; Auto reads input 2
-   * there) and leaves slot B on Auto. */
+   * the per-slot pick start both slots on `inputChannel`; with none saved, and after a reset, the
+   * install's default (`defaultSlotInputChannels`): on a guitar-first install slot A on input 1 (the
+   * rig's instrument jack; Auto reads input 2 there), slot B on Auto. */
   slotInputChannels: [string, string];
   /** Native output device id; '' = default output. */
   outputDeviceId: string;
@@ -64,12 +64,19 @@ const DEFAULTS: AudioDeviceSettings = {
   shareDeviceId: '',
 };
 
+/** The install's default slot input picks: what the slots start on with no settings stored, and what
+ * a reset of them (an input device change, a pruned input device) goes to. A guitar-first install
+ * (`guitarFirstInstall`): slot A on input 1, slot B Auto; any other: both Auto. A fresh pair each call. */
+export function defaultSlotInputChannels(): [string, string] {
+  return guitarFirstInstall() ? ['0', ''] : ['', ''];
+}
+
 /** Read the persisted device settings, falling back to defaults for any missing/invalid field. The first
  * read runs as `audio-devices.ts` loads, so it decides the install as `guitarFirstInstall` asks. */
 export function readAudioDeviceSettings(): AudioDeviceSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS, slotInputChannels: guitarFirstInstall() ? ['0', ''] : ['', ''] };
+    if (!raw) return { ...DEFAULTS, slotInputChannels: defaultSlotInputChannels() };
     const p = JSON.parse(raw) as Partial<AudioDeviceSettings>;
     const inputChannel = typeof p.inputChannel === 'string' ? p.inputChannel : '';
     const slots = p.slotInputChannels;

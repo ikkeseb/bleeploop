@@ -17,7 +17,8 @@
 // kept (anything else, or settings from before it, is the device's own), and the Sample rate select
 // (rateChoice): the picks the device runs, the saved one shown only where it runs and, while a device
 // runs, only at the rate it runs at. And the guitar-first install's default picks: with nothing stored,
-// slot A on input 1 (kept by the first unrelated write); an older install, or any stored settings, as before.
+// slot A on input 1 (kept by the first unrelated write); an older install, or any stored settings, as before;
+// and the default a reset of the picks goes to (defaultSlotInputChannels), whatever is stored.
 
 import assert from 'node:assert';
 import '../harness/hooks.ts';
@@ -49,7 +50,7 @@ globalThis.localStorage = {
   },
 };
 
-const { readAudioDeviceSettings, writeAudioDeviceSettings, BUFFER_FRAMES_OPTIONS, DEFAULT_BUFFER_FRAMES, asioBlock, asioBufferChoice, rateChoice } =
+const { readAudioDeviceSettings, writeAudioDeviceSettings, defaultSlotInputChannels, BUFFER_FRAMES_OPTIONS, DEFAULT_BUFFER_FRAMES, asioBlock, asioBufferChoice, rateChoice } =
   await import('../../src/ui/state/audio-settings.ts');
 
 const KEY = 'lf.audioDevices';
@@ -251,6 +252,24 @@ check('on a guitar-first install the first unrelated write stores slot A on inpu
 reset({ returning: false });
 store.set(KEY, '{ not valid json');
 check('a fresh install with corrupt stored settings: DEFAULTS', () => assert.deepStrictEqual(readAudioDeviceSettings(), DEFAULTS));
+// What a reset of the slots' picks goes to (an input device change, a pruned input device): the
+// install's default, not both on Auto.
+reset({ returning: false });
+check('the default picks on a fresh install: slot A on input 1, slot B auto', () =>
+  assert.deepStrictEqual(defaultSlotInputChannels(), ['0', '']));
+check('the default picks hand out a fresh pair each call', () => {
+  defaultSlotInputChannels()[0] = '7';
+  assert.deepStrictEqual(defaultSlotInputChannels(), ['0', '']);
+});
+reset();
+check('the default picks on an older install: both auto', () => assert.deepStrictEqual(defaultSlotInputChannels(), ['', '']));
+reset({ returning: false });
+store.set(GUITAR_FIRST, 'played');
+store.set(KEY, JSON.stringify({ slotInputChannels: ['1', '1'] }));
+check('the default picks on a guitar-first install with stored picks: still slot A on input 1, the read keeps the stored', () => {
+  assert.deepStrictEqual(defaultSlotInputChannels(), ['0', '']);
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']);
+});
 
 // ---------------------------------------------------------------------------
 // 7. The ASIO Buffer select: the size an open asks for, and what the select offers and shows.

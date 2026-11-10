@@ -27,8 +27,8 @@ const PLAYED = 'played';
 /**
  * Whether this install opened guitar-first: nothing of BleepLoop's (no `lf.` key) was stored when it
  * first ran, so it keeps the guitar-first defaults for everything its player has not set: both slots
- * Off (slot A asking for the amp-sim, slot B folded), slot A's input on In 1 while no audio settings
- * are stored (`audio-settings.ts`), the keyboard hidden until the first built-in
+ * Off (slot A asking for the amp-sim, slot B folded), slot A's input on In 1 by default, a
+ * reset of the picks included (`audio-settings.ts` `defaultSlotInputChannels`), the keyboard hidden until the first built-in
  * synth is picked (`layout-store.ts`) and the empty looper's start line until the first loop
  * (`startLineOwed`). An install that stored anything before this rule existed keeps today's defaults to
  * the pixel. The first call on a fresh install stores the marker, so every later call and launch
