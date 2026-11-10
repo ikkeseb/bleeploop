@@ -60,7 +60,7 @@ answered and refill this list from § Not heard yet: at most five, and the docs 
    the new take sit together? (machine: `tests/later_arm.rs`; no rig probe arms it, so this is its
    first run on a real device)
 4. **The stage view's new look, SCOPE, over the jam.** B opens the stage view on SCOPE (V still
-   reaches Orbit and Strata), one live scope per bay, what the speaker plays on top with the guitar
+   reaches Orbit, Strata and Ember), one live scope per bay, what the speaker plays on top with the guitar
    as a cyan line over it and then each lane after its FX: does it say what is locked and what is
    alive from where you stand, and is it worth leaving open while you play?
 5. **End with FADE, then reopen.** FADE (2 bars) while three lanes play, then close and reopen the
@@ -189,6 +189,12 @@ anything else that needs the interface or a real plugin.
   `verify/probes/scope-mirror.mjs`, the stage-view probe's `scope` group.)
 - With SCOPE flowing: does the guitar still feel immediate?
 - The pedal action "Stage view: next look": does it still feel right?
+- EMBER, a fourth stage look (V steps to it after STRATA; the owner has seen stills only): five rings of
+  the lanes' loops round one centre, ice plays, amber writes, red records, grey is muted or stopped,
+  and the guitar a braid of light landing on the ring it writes. Does a state read from where you
+  stand, does the braid follow the guitar without lag, and does the app stay tight on ASIO 128 with
+  it open? (machine: the stage-view probe's per-look groups; `verify/probes/frame-cost.mjs` measures
+  no EMBER scene yet)
 - The same plugin file in both slots (D29): the editor belongs to the slot whose load came first,
   and the other slot's is refused with a toast; does the toast say what to do? (machine: the
   `instrument-controls` and `rig-recall` probes)
@@ -298,4 +304,3 @@ nothing is said.
 | D30 | Three remote branches, one unlanded commit each, kept as they are: `pw16/heap-probe` (22a2b33d, a candidate: the stage draw's clock and level reads in typed arrays, the allocation probe on the freshness path), `proto11/settings-a` (f6ed7aee, a WIP Audio Settings prototype, ungated), `proto11/bar-c` (297d6acd, a prototype: one TAKE chip holding the five mode pills). Land, rework or delete each? | Kept untouched until the owner says |
 | D31 | A press just past the loop's 1 waits for the next pass: a later take starts a whole loop late (rendered: `tests/later_arm.rs`, the ignored test; 8 s on 4 bars at 120, up to 60 s), and END STOP, UNDO and REVERSE share that boundary (read from source). Snap a press within a grace back to the 1, or keep waiting a loop? It changes how the looper plays. | Keeps waiting a loop until the owner says |
 | D32 | A dropout inside an overdub (a block the device side flags): today the take is rejected and the loop stays as it was. `pw/engine-red-3` keeps the take and marks the damaged part; a third option smooths over it (`pw/dropout-ab`'s ignored test renders the three side by side). Which should the looper do? | Rejects the take, as today, until the owner says |
-| D33 | EMBER, a fourth stage look on `design/peak-stage-4` (unlanded): keep it as a fourth look, make it the default, or drop it? | Stays unlanded until the owner says |

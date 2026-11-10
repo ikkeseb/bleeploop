@@ -827,7 +827,8 @@ await probe(async ({ browser, open }) => {
       const fourth = await census();
       console.log(JSON.stringify({ view: v.id, selection: { first: [first.warm, first.warmDist, first.warmY], fourth: [fourth.warm, fourth.warmDist, fourth.warmY] } }));
       assert.ok(first.warm > 200 && fourth.warm > 200, 'the selected lane carries a warm-white mark');
-      if (v.id === 'orbit') assert.ok(fourth.warmDist < first.warmDist - 20, `orbit: the selection circle moves inward for lane 4 (${first.warmDist} to ${fourth.warmDist} px)`);
+      // The ring looks (orbit, ember) mark the selection with a circle round the centre: it moves inward, not down.
+      if (v.id === 'orbit' || v.id === 'ember') assert.ok(fourth.warmDist < first.warmDist - 20, `${v.id}: the selection circle moves inward for lane 4 (${first.warmDist} to ${fourth.warmDist} px)`);
       else assert.ok(fourth.warmY > first.warmY + 40, `${v.id}: the selection mark moves down for lane 4 (${first.warmY} to ${fourth.warmY} px)`);
     });
   }
@@ -1462,7 +1463,7 @@ await probe(async ({ browser, open }) => {
       await clearSent();
       await page.mouse.click(at.x + 1, at.y);
       assert.deepEqual(await sentAtLeast(1), [{ SelectTrack: 3 }], `${v.id}: a pointer press on lane 4's form sends SelectTrack 3`);
-      if (v.id === 'orbit') {
+      if (v.id === 'orbit' || v.id === 'ember') {
         const centre = await page.evaluate(() => {
           const sv = document.querySelector('.sv').style;
           return { x: parseFloat(sv.getPropertyValue('--sv-count-x')), y: parseFloat(sv.getPropertyValue('--sv-count-y')) };
@@ -1470,7 +1471,7 @@ await probe(async ({ browser, open }) => {
         await clearSent();
         await page.mouse.click(centre.x, centre.y);
         await settle(150);
-        assert.deepEqual(await sent(), [], 'orbit: a press in the centre hole sends nothing');
+        assert.deepEqual(await sent(), [], `${v.id}: a press in the centre hole sends nothing`);
       }
       console.log(JSON.stringify({ view: v.id, pressedAt: at }));
     });
@@ -1787,6 +1788,7 @@ await probe(async ({ browser, open }) => {
   });
 
   await group('shots', async () => {
+    const GUITAR = { meter: { peak: [0.32, 0], clip: [false, false] } };
     await setOpen(true);
     for (const v of VIEWS) {
       await showView(v.id);
@@ -1798,6 +1800,7 @@ await probe(async ({ browser, open }) => {
           // The settle is inside the scene, before its columns: the shot must catch the live trace
           // while the stream still counts as alive (the look fades a stale one out after 250 ms).
           await rich(at, 450);
+          await emit(GUITAR); // the scope columns' frames carry no meter, so the input read silent: play on
           await shoot(name);
         }
         await page.evaluate(() => window.__lf.looper.setMute(1, false));
@@ -1805,9 +1808,11 @@ await probe(async ({ browser, open }) => {
         await settle(1000);
         await shoot('rest');
         await laterTake(true, 2.6 * BAR);
+        await emit(GUITAR); // a take is played: the input at a working level, for the looks that draw it
         await settle(450);
         await shoot('later-take');
         await laterTake(false, 5.3 * BAR);
+        await emit(GUITAR); // the guitar played into the wait: the looks that draw the input show where it lands
         await settle(450);
         await shoot('armed');
         await boot(page);
@@ -1815,6 +1820,7 @@ await probe(async ({ browser, open }) => {
         await settle(250);
         await shoot('count-in');
         await firstTake(3);
+        await emit(GUITAR); // a first take is played too (boot left the input silent)
         await settle(450);
         await shoot('first-take');
         await boot(page);
@@ -1828,6 +1834,7 @@ await probe(async ({ browser, open }) => {
       await page.setViewportSize({ width: 960, height: 600 });
       await page.mouse.move(480, 300);
       await rich(2.9 * BAR, 450);
+      await emit(GUITAR); // as in the rich scenes above
       await shoot('rich-b');
       await boot(page);
     }

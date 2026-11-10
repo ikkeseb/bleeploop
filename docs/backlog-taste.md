@@ -78,9 +78,9 @@ added a line.
 - Undo as visible history (layer count on ↶ UNDO); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a
   plugin is loaded.
-- Stage looks beyond Orbit and Strata: Horizon (designed, not built: five lanes of road in perspective
-  rolling toward a near edge where now is, the input glowing in the sky; a look is one module and one
-  line in `src/ui/stage/views.ts`). Orbit and Strata read each lane's waveform bins, its volume and the
-  input meter, so they see neither lane FX nor a fade's level; SCOPE is the look that reads the live
-  columns (`lf_engine::scope`), and the same tap would make the two older looks honest. Band levels,
-  which a spectrum look would want, are not built.
+- Stage looks beyond Orbit, Strata and Ember: Horizon (designed, not built: five lanes of road in
+  perspective rolling toward a near edge where now is, the input glowing in the sky; a look is one
+  module and one line in `src/ui/stage/views.ts`). Orbit, Strata and Ember read each lane's waveform
+  bins, its volume and the input meter, so they see neither lane FX nor a fade's level; SCOPE is the
+  look that reads the live columns (`lf_engine::scope`), and the same tap would make the three
+  loop-drawing looks honest. Band levels, which a spectrum look would want, are not built.

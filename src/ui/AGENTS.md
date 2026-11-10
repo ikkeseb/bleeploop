@@ -65,7 +65,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   would leave the taps folding for nobody. Additive light settles at `alpha / fade` per pass, which is
   also its ceiling, so keep the sum of every additive pass on one pixel below warm white, which means
   SELECTED here, and make the per-column strips TILE the trace: a strip that overlaps its neighbour
-  takes its dim and its light twice and breaks that arithmetic.
+  takes its dim and its light twice and breaks that arithmetic. EMBER's frame light blends with
+  `screen` instead, so that sum binds only its one `lighter` pass (the ground rays' bake); its light
+  must still read apart from SELECTED's warm white, and its ice, mixed from `--play`, must stay inside
+  the play green the stage-view probe's census counts.
 - **The engine's names:** components take `looper`, `clock`, `master`, `session` and `sampleRate`
   from `state/audio.ts` (the engine store behind them: `state/engine-store.ts`). A gesture sends a
   command and the feed shows the outcome (invariant 3). A lane mix control (volume, pan, DUB FEEDBACK, FX)
