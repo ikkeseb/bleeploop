@@ -267,9 +267,11 @@ function TrackLane(props: {
   const rev = createMemo(() => reverseGate(props.index));
   const undo = createMemo(() => undoGate(props.index));
   // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
-  // stage view. EMPTY shows no well message — the bright ● core already says "press to record"; the
-  // spoken 'record' action lives on the core button's aria-label.
-  const { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount } = createLaneView(props.index);
+  // stage view. An EMPTY lane has no well message — the bright ● core already says "press to record";
+  // the spoken 'record' action lives on the core button's aria-label. A guitar-first install's empty
+  // looper adds one start line on the selected lane (`startLine`), naming the key and the pedal.
+  const { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount, startLine } =
+    createLaneView(props.index);
   const fxSelected = () => props.fxTrack === props.index;
   const isEmpty = () => state() === 'EMPTY';
   // Any of the lane's effects engaged in the mix the engine applied (the feed's, never a control's
@@ -467,6 +469,13 @@ function TrackLane(props: {
               </span>
             </Show>
             <span class="lp-lane__cue">{wellMsg()}</span>
+          </div>
+        </Show>
+        <Show when={startLine()}>
+          <div class="lp-lane__wellmsg lp-lane__start">
+            <span class="lp-lane__start-line">
+              <kbd class="lp-lane__key">SPACE</kbd> or your pedal records here
+            </span>
           </div>
         </Show>
       </div>

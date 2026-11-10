@@ -52,7 +52,19 @@ export interface OpenOptions {
   noLf?: boolean;
   /** The probe asserts on `pageErrors` itself (it injects failures that surface as uncaught). */
   allowPageErrors?: boolean;
+  /** Open as a fresh install (no `lf.` key stored): the guitar-first defaults. Without it the page opens as
+   *  a returning player (`RETURNING_KEY`). */
+  firstLaunch?: boolean;
 }
+
+/**
+ * Stored before the app loads whenever no `lf.` key is (an init script, so every reload of the page too),
+ * unless the probe opens a first launch: an install that stored anything keeps the defaults from before the
+ * guitar-first install (slots A and B on Lead and Bass, the keyboard at the bottom, no start line on the
+ * empty looper: `guitarFirstInstall` in `src/ui/state/instrument-slots.ts`), which the probes assert on.
+ * The app reads no such key, so nothing else changes.
+ */
+const RETURNING_KEY = 'lf.probe.returning';
 
 export interface Probe {
   browser: Browser;
@@ -115,6 +127,15 @@ export async function probe(body: (p: Probe) => Promise<unknown>, options: Probe
       });
       opened.push({ app, allowPageErrors: !!o.allowPageErrors });
       await o.init?.(page);
+      if (!o.firstLaunch) {
+        await page.addInitScript((key) => {
+          try {
+            if (!Object.keys(localStorage).some((k) => k.startsWith('lf.'))) localStorage.setItem(key, '1');
+          } catch {
+            /* no storage on this document */
+          }
+        }, RETURNING_KEY);
+      }
       await page.goto(url);
       if (!o.noLf) await page.waitForFunction(() => '__lf' in window, undefined, { timeout: 30_000 });
       return app;

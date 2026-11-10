@@ -12,6 +12,7 @@ import {
   slotOff,
   slotPendingCounts,
   slotPlugins,
+  slotUnset,
 } from '../state/instrument';
 import {
   pluginDescriptorKey,
@@ -25,12 +26,17 @@ import { PluginBar, PluginParams } from './PluginControls';
 import { InputPick, LiveButton, SlotMeter, SlotVolume } from './SlotControls';
 import { liveShown } from './live';
 import { openSettings, type SettingsPage } from '../../settings-opener';
+import { revealKeyboardForSynth } from '../layout/layout-store';
+import { inputArmed } from '../state/native-io';
 
 /**
  * One instrument slot (A / B) — a compact card. Its header: the A/B identity button, the source picker
  * (Off, the built-in instruments, the scanned plugins), the slot's volume, and the source's
  * own controls — the input pick and GO LIVE of a source that takes input, the plugin's EDITOR / PARAMS —
  * on a second line, or beside the picker when the card is wide. Below it, the plugin params drawer.
+ * On a guitar-first install a slot that has never held a source (`slotUnset`) asks for one: slot A's
+ * picker reads `Pick your amp-sim` over its Off (whose input pick, GO LIVE and meter the guitar needs
+ * next), and slot B folds to its letter and a picker reading `Add a second sound`, so A takes the row.
  * app.tsx's renderInstrument mounts two of these (slot 0 / slot 1). The per-slot `paramsOpen` disclosure
  * is state LOCAL to each instance (created once per mount) so opening one slot's params never touches
  * the other — and it is a SIBLING of the looper region, so opening it never remounts the looper's RAF
@@ -51,12 +57,27 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
   // auto-starts (live + editor) and clears this; a reload resync never sets it, so it never reopens
   // windows. Plain variable — it is read once at PluginBar mount, nothing renders from it.
   let freshPickKey: string | null = null;
-  // The picker's value: '' (its hidden "Updating…" entry) while a source change is queued.
+  // Never held a source on a guitar-first install, and nothing is on its way: the picker asks for one.
+  const unset = () => slotUnset()[slotIdx] && slotOff()[slotIdx] && !plugin() && !pending();
+  // Slot B folds while unset, unless it went live meanwhile (a pedal's GO LIVE on it while active).
+  const folded = () => slotIdx === 1 && unset() && !inputArmed()[1];
+  // The picker's value: '' (its hidden "Updating…" entry) while a source change is queued, 'unset' (its
+  // hidden ask) while `unset`.
   const source = () =>
-    pending() ? '' : plugin() ? pluginDescriptorKey(plugin()!) : slotOff()[slotIdx] ? 'off' : slotIds()[slotIdx];
+    pending()
+      ? ''
+      : plugin()
+        ? pluginDescriptorKey(plugin()!)
+        : unset()
+          ? 'unset'
+          : slotOff()[slotIdx]
+            ? 'off'
+            : slotIds()[slotIdx];
   const pick = (value: string) => {
     if (value === 'off' || SYNTHS.some((s) => s.id === value)) {
       freshPickKey = null;
+      // A built-in synth plays from keys: a keyboard still waiting on a guitar-first install shows.
+      if (value !== 'off') revealKeyboardForSynth();
       // selectSynth activates the slot itself once its queued work lands (not when a failed unload
       // keeps the plugin); Off leaves the MIDI slot where it is.
       if (value === 'off') selectOff(slotIdx);
@@ -76,7 +97,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
     // convenience; the keyboard/SR activation control is the A/B identity button.
     <div
       class="slot"
-      classList={{ 'slot--active': isActive() }}
+      classList={{ 'slot--active': isActive(), 'slot--folded': folded() }}
       role="group"
       aria-label={`Slot ${letter}${isActive() ? ', active' : ''}`}
       aria-busy={pending()}
@@ -98,6 +119,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
             the built-in instruments, then the native plugins (Tauri only; ONE list scales to any count). */}
         <select
           class="slot__source"
+          classList={{ 'slot__source--ask': unset() }}
           aria-label={`Source for slot ${letter}`}
           aria-busy={pending()}
           disabled={pending()}
@@ -110,6 +132,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         >
           <option value="" hidden selected={source() === ''}>
             Updating…
+          </option>
+          <option value="unset" hidden selected={source() === 'unset'}>
+            {slotIdx === 0 ? 'Pick your amp-sim' : 'Add a second sound'}
           </option>
           <option value="off" selected={source() === 'off'}>
             Off
@@ -135,11 +160,12 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
             </optgroup>
           </Show>
         </select>
-        <Show when={slotLevel(slotIdx) !== null}>
+        {/* A folded card is its letter and its picker only. */}
+        <Show when={slotLevel(slotIdx) !== null && !folded()}>
           <SlotVolume slot={slotIdx} />
         </Show>
         {/* The source's own controls. `keyed` on the plugin so a swap remounts them (resets editor/live). */}
-        <Show when={liveShown(slotIdx) || plugin()}>
+        <Show when={!folded() && (liveShown(slotIdx) || plugin())}>
           <div class="slot__acts" onClick={(e) => e.stopPropagation()}>
             <Show when={liveShown(slotIdx)}>
               <InputPick slot={slotIdx} />
@@ -163,7 +189,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
           </div>
         </Show>
       </div>
-      <Show when={platform.pluginHost.available && availablePlugins().length === 0}>
+      <Show when={!folded() && platform.pluginHost.available && availablePlugins().length === 0}>
         <span class="slot__plugin-note" role="note">
           {scanning() ? (
             'Scanning plugins…'
@@ -194,7 +220,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         )}
       </Show>
       {/* The slot's input meter along the card's foot (dark until the slot goes live), under an open drawer too. */}
-      <Show when={liveShown(slotIdx)}>
+      <Show when={liveShown(slotIdx) && !folded()}>
         <SlotMeter slot={slotIdx} />
       </Show>
     </div>

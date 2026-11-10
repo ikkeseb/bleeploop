@@ -6,7 +6,10 @@
 // -> DEFAULT_STAGE_WEIGHTS, while a VALID saved layout is honored verbatim, including a legacy one that
 // still carries an `instrument` key); the keyboardPlacement allow-list ('top'|'bottom'|'hidden', else
 // 'bottom'); the restore placement a hidden keyboard returns to, persisted or derived from an old record;
-// and the persist -> reload round trip of every setter.
+// the persist -> reload round trip of every setter; and the guitar-first install (nothing of BleepLoop's
+// stored: `guitarFirstInstall`): its keyboard starts hidden and returns to the bottom, shows once for the
+// first synth picked unless the player placed it first, keeps that wait across a reload, and an install
+// that stored anything else keeps the bottom default and records without the wait.
 
 import assert from 'node:assert';
 import '../harness/hooks.ts';
@@ -22,13 +25,22 @@ globalThis.localStorage = {
   setItem(k, v) {
     store.set(k, String(v));
   },
+  get length() {
+    return store.size;
+  },
+  key(i) {
+    return [...store.keys()][i] ?? null;
+  },
 };
 
 let generation = 0;
-/** Store `record` (an object, a raw string, or undefined for no key) and load a fresh module. */
-async function load(record, { blocked = false } = {}) {
+/** Store `record` (an object, a raw string, or undefined for no key) and load a fresh module. With nothing
+ * stored at all the module loads as a guitar-first install; `returning` stores another key of the app's
+ * first, as an install from before that rule has. */
+async function load(record, { blocked = false, returning = false } = {}) {
   store.clear();
   throwOnGet = false;
+  if (returning) store.set('lf.masterVolume', '0.8');
   if (record !== undefined) store.set(STORAGE_KEY, typeof record === 'string' ? record : JSON.stringify(record));
   throwOnGet = blocked;
   try {
@@ -62,10 +74,10 @@ await check('the baseline weights the looper as the hero and carries no instrume
   assert.deepStrictEqual(DEFAULT_STAGE_WEIGHTS, BASELINE);
   assert.ok(DEFAULT_STAGE_WEIGHTS.looper > DEFAULT_STAGE_WEIGHTS.keyboard);
 });
-for (const [label, record, blocked] of [['no key', undefined, false], ['corrupt JSON', '{ not json', false],
+for (const [label, record, blocked] of [['no key, another key stored', undefined, false], ['corrupt JSON', '{ not json', false],
   ['getItem throws', { keyboardPlacement: 'top' }, true]]) {
   await check(`${label} -> baseline, keyboard at the bottom`, async () => {
-    const m = await load(record, { blocked });
+    const m = await load(record, { blocked, returning: true });
     assert.deepStrictEqual(m.stageSizes(), BASELINE);
     assert.strictEqual(m.keyboardPlacement(), 'bottom');
     m.toggleKeyboardHidden();
@@ -148,7 +160,7 @@ for (const [record, want, label] of [
 // 5. Every setter persists, and a reload restores exactly what was set.
 // ---------------------------------------------------------------------------
 await check('stage sizes, placement and restore placement survive a reload', async () => {
-  const m = await load(undefined);
+  const m = await load(undefined, { returning: true });
   m.setStageSizes({ keyboard: 0.4, looper: 3 });
   m.moveKeyboard(); // bottom -> top
   m.toggleKeyboardHidden(); // hidden, restore = top
@@ -175,6 +187,66 @@ await check('moveKeyboard swaps top/bottom and is a no-op while hidden', async (
   m.moveKeyboard();
   assert.strictEqual(m.keyboardPlacement(), 'hidden');
   assert.strictEqual(m.keyboardVisible(), false);
+});
+
+// ---------------------------------------------------------------------------
+// 6. The guitar-first install: the keyboard waits, hidden, for the first synth.
+// ---------------------------------------------------------------------------
+const stored = () => JSON.parse(store.get(STORAGE_KEY));
+await check('guitar-first: baseline weights, the keyboard hidden, and it returns to the bottom', async () => {
+  const m = await load(undefined);
+  assert.deepStrictEqual(m.stageSizes(), BASELINE);
+  assert.strictEqual(m.keyboardPlacement(), 'hidden');
+  assert.strictEqual(m.keyboardVisible(), false);
+  m.toggleKeyboardHidden();
+  assert.strictEqual(m.keyboardPlacement(), 'bottom');
+});
+await check('guitar-first: the first synth shows it at the bottom, once', async () => {
+  const m = await load(undefined);
+  m.revealKeyboardForSynth();
+  assert.strictEqual(m.keyboardPlacement(), 'bottom');
+  assert.deepStrictEqual(Object.keys(stored()).sort(), ['keyboardPlacement', 'lastVisiblePlacement', 'stageSizes'], 'the wait is not stored once over');
+  m.setKeyboardPlacement('hidden');
+  m.revealKeyboardForSynth();
+  assert.strictEqual(m.keyboardPlacement(), 'hidden', 'a later synth leaves a keyboard the player hid');
+  assert.strictEqual((await reload()).keyboardPlacement(), 'hidden');
+});
+await check('guitar-first: a keyboard the player showed and hid again is theirs', async () => {
+  const m = await load(undefined);
+  m.toggleKeyboardHidden(); // shown by the player
+  m.toggleKeyboardHidden(); // and hidden again
+  m.revealKeyboardForSynth();
+  assert.strictEqual(m.keyboardPlacement(), 'hidden');
+  const r = await reload();
+  r.revealKeyboardForSynth();
+  assert.strictEqual(r.keyboardPlacement(), 'hidden', 'and stays theirs after a reload');
+});
+await check('guitar-first: the wait outlives a reload, stored or not', async () => {
+  await load(undefined);
+  let r = await reload(); // nothing stored but the install's marker
+  assert.strictEqual(r.keyboardPlacement(), 'hidden');
+  r.setStageSizes({ keyboard: 0.4, looper: 3 }); // a layout stored while it waits
+  assert.strictEqual(stored().keyboardWaits, true);
+  r = await reload();
+  assert.strictEqual(r.keyboardPlacement(), 'hidden');
+  r.revealKeyboardForSynth();
+  assert.strictEqual(r.keyboardPlacement(), 'bottom');
+  assert.deepStrictEqual(r.stageSizes(), { keyboard: 0.4, looper: 3 });
+});
+await check('a stored wait over a visible keyboard is no wait', async () => {
+  const m = await load({ keyboardPlacement: 'top', lastVisiblePlacement: 'top', keyboardWaits: true });
+  m.setKeyboardPlacement('hidden');
+  const r = await reload();
+  r.revealKeyboardForSynth();
+  assert.strictEqual(r.keyboardPlacement(), 'hidden');
+});
+await check('an install that stored anything else: no wait, and its record carries none', async () => {
+  const m = await load(undefined, { returning: true });
+  m.setKeyboardPlacement('hidden');
+  m.revealKeyboardForSynth();
+  assert.strictEqual(m.keyboardPlacement(), 'hidden');
+  assert.strictEqual('keyboardWaits' in stored(), false);
+  assert.strictEqual(store.has('lf.guitarFirst'), false, 'no guitar-first marker');
 });
 
 console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
