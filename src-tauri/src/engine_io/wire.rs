@@ -147,6 +147,7 @@ enum CommandDef {
     SetInputSend(#[serde(with = "input_send")] InputSend, bool),
     SetInputSendParam(#[serde(with = "input_send_param")] InputSendParam, f64),
     SetScope(bool),
+    SetTuner(bool),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -169,6 +170,7 @@ enum ActionDef {
     Release(u8),
     FadeAll,
     Toggle(#[serde(with = "ToggleDef")] Toggle),
+    Tuner,
 }
 
 /// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, `{"Send":"echo"}` (a send
@@ -235,6 +237,7 @@ enum EventDef {
         toggle: Toggle,
         on: bool,
     },
+    Tuner { frame: Frame, on: bool },
 }
 
 /// A [`CompactMix`] in the track shape of [`WireLaneMix`].
@@ -301,6 +304,7 @@ enum RefusalDef {
     RetakeCapturing,
     AutoRecCapturing,
     AutoRecLocked,
+    TunerCapturing,
 }
 
 /// An `Instrument` as its id (`Instrument::id`).
@@ -475,6 +479,16 @@ pub struct ScopeUpdate {
     pub max: Vec<Vec<f32>>,
 }
 
+/// The tuner's newest reading this frame (`lf_engine::pitch`), sent only while the tuner is on and a
+/// tick analysed a window of its input. `hz` to three decimals, `None` (`null`) when the window had no
+/// pitch; `level` the window's RMS in dBFS to one decimal, floored at -120.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunerUpdate {
+    pub hz: Option<f32>,
+    pub level: f32,
+}
+
 /// One `engine_feed` message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedFrame {
@@ -504,6 +518,9 @@ pub struct FeedFrame {
     /// Absent unless the stage view asked for the scope and this frame carries columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeUpdate>,
+    /// Absent unless the tuner is on and this tick read a window of its input; never on a reset frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuner: Option<TunerUpdate>,
     /// Reset frames only (absent otherwise): the settings the host keeps and replays into every new
     /// engine (`settings.rs`), in replay order and as the UI sends them; a lane's mix as the engine last
     /// applied it, where it differs from a fresh lane's. A setting missing from it is at the engine's
@@ -613,7 +630,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 47;
+    const COMMANDS: usize = 48;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -664,12 +681,13 @@ mod tests {
             SetScope(_) => 44,
             SetMeter(_) => 45,
             CopyWide(_) => 46,
+            SetTuner(_) => 47,
         }
     }
 
     /// Every `Action` and `Refusal` variant, by position: a new one fails to compile here until the
     /// fixture sends (or answers) it.
-    const ACTIONS: usize = 17;
+    const ACTIONS: usize = 18;
     fn action_index(a: &Action) -> usize {
         match a {
             Action::RecDub => 0,
@@ -689,10 +707,11 @@ mod tests {
             Action::FadeAll => 14,
             Action::Toggle(_) => 15,
             Action::CopyWide => 16,
+            Action::Tuner => 17,
         }
     }
 
-    const REFUSALS: usize = 21;
+    const REFUSALS: usize = 22;
     fn refusal_index(r: &Refusal) -> usize {
         match r {
             Refusal::Stopping => 0,
@@ -716,10 +735,11 @@ mod tests {
             Refusal::RetakeCapturing => 18,
             Refusal::AutoRecCapturing => 19,
             Refusal::AutoRecLocked => 20,
+            Refusal::TunerCapturing => 21,
         }
     }
 
-    const EVENTS: usize = 12;
+    const EVENTS: usize = 13;
     fn event_index(e: &Event) -> usize {
         match e {
             Event::Lane { .. } => 0,
@@ -734,6 +754,7 @@ mod tests {
             Event::Muted { .. } => 9,
             Event::Mix { .. } => 10,
             Event::Toggled { .. } => 11,
+            Event::Tuner { .. } => 12,
         }
     }
 
@@ -882,6 +903,33 @@ mod tests {
         assert!(frames.iter().filter_map(|f| f.meter).any(|m| m.peak[0] != m.peak[1] && m.clip[0] != m.clip[1]), "a meter per slot");
         assert!(frames.iter().any(|f| f.reset && f.live.is_some_and(|l| l[0] != l[1])), "a reset frame with each slot's live flag");
         assert!(frames.iter().any(|f| f.live.is_none()), "and a frame where it did not change (the field is absent then)");
+        let readings: Vec<TunerUpdate> = frames.iter().filter_map(|f| f.tuner).collect();
+        assert!(readings.iter().any(|t| t.hz.is_some()) && readings.iter().any(|t| t.hz.is_none()), "a pitched reading and one without a pitch");
+        assert!(frames.iter().any(|f| f.tuner.is_none()), "and a frame without a reading (the field is absent then)");
+        assert!(frames.iter().filter(|f| f.reset).all(|f| f.tuner.is_none()), "a reset frame carries no reading");
+        let reset_tuner = frames.iter().filter(|f| f.reset).flat_map(|f| &f.events).any(|e| matches!(e.0, Event::Tuner { on: true, .. }));
+        assert!(reset_tuner, "a reset frame carries the tuner while it is on");
+    }
+
+    #[test]
+    fn a_tuner_reading_writes_no_pitch_as_null_and_is_left_out_when_absent() {
+        // As the IPC sends it: text (a `Value` would widen the f32 to f64 digits).
+        let unpitched: Value = serde_json::from_str(&serde_json::to_string(&TunerUpdate { hz: None, level: -71.2 }).unwrap()).unwrap();
+        assert!(unpitched.get("hz").is_some_and(Value::is_null), "no pitch is a null, never a missing hz: {unpitched}");
+        assert!(same(&unpitched, &serde_json::json!({ "hz": null, "level": -71.2 })), "{unpitched}");
+        let frame = FeedFrame {
+            seq: 0, reset: false, catch_up: false, events: Vec::new(), device: Vec::new(), status: None, anchor: None, meter: None,
+            live: None, peaks: Vec::new(), scope: None, tuner: None, settings: None,
+        };
+        let json = serde_json::to_value(&frame).unwrap();
+        assert!(json.get("tuner").is_none(), "no reading: the field is absent: {json}");
+        let read: Value = serde_json::from_str(&serde_json::to_string(&FeedFrame { tuner: Some(TunerUpdate { hz: Some(82.407), level: -18.5 }), ..frame }).unwrap()).unwrap();
+        assert!(same(&read["tuner"], &serde_json::json!({ "hz": 82.407, "level": -18.5 })), "{read}");
+        let command = |json: &str| serde_json::from_str::<WireCommand>(json).map(|c| c.0);
+        assert_eq!(command(r#"{"Action":"Tuner"}"#).unwrap(), Command::Action(Action::Tuner));
+        assert_eq!(command(r#"{"SetTuner":false}"#).unwrap(), Command::SetTuner(false));
+        let event = serde_json::to_value(WireEvent(Event::Tuner { frame: 7, on: true })).unwrap();
+        assert_eq!(event, serde_json::json!({ "Tuner": { "frame": 7, "on": true } }));
     }
 
     #[test]

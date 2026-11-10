@@ -53,6 +53,7 @@ const REFUSAL = {
   retakeCapturing: refuse('a take is recording, RETAKE changes after it'),
   autoRecCapturing: refuse('a take is recording, AUTO REC changes after it'),
   autoRecLocked: refuse('AUTO REC starts a first take, clear all to use it'),
+  tunerCapturing: refuse('a take is recording, the tuner opens after it'),
   capturing: refuse('this track is recording, stop it first'),
   noTrim: refuse('nothing to trim, the loop needs two bars or more'),
   noEdit: refuse('nothing to edit, record first'),
@@ -108,6 +109,8 @@ export function refusalText(reason: Refusal): string {
       return REFUSAL.autoRecCapturing.reason;
     case 'AutoRecLocked':
       return REFUSAL.autoRecLocked.reason;
+    case 'TunerCapturing':
+      return REFUSAL.tunerCapturing.reason;
   }
 }
 

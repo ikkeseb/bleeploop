@@ -378,6 +378,33 @@ fn the_uis_commands_join_the_queue_and_its_settings_go_straight_to_the_engine() 
     assert_eq!(r.take(), all, "pedal, click, pedal");
 }
 
+// The tuner: a pedal's press and the UI's press and close all take the one queue, so a close never
+// overtakes a press still waiting behind a full ring (it would reopen the tuner). With no device the
+// press is dropped as any press is, and answered; the close is dropped with no answer (the stopped
+// device closed the tuner), and nothing of either is held for a later device or engine.
+#[test]
+fn the_tuners_press_and_close_keep_their_order_and_a_close_with_no_device_is_dropped_quietly() {
+    let mut r = Rig::new();
+    r.learn(ActionId::TunerToggle, None, A, &[[0xb0, 21, 127], [0xb0, 21, 0]]);
+    r.engine.full.store(true, Relaxed);
+    r.send(A, &[[0xb0, 21, 127]]);
+    assert_eq!(r.host.ui_commands(vec![Command::SetTuner(false)]), Ok(None), "queued behind the pedal, not dropped");
+    assert_eq!(r.host.ui_commands(vec![Command::Action(Action::Tuner)]), Ok(None));
+    r.engine.full.store(false, Relaxed);
+    r.wait(RETRY);
+    let order = [Command::Action(Action::Tuner), Command::SetTuner(false), Command::Action(Action::Tuner)];
+    assert_eq!(r.take(), order, "pedal, close, press: in the order they were made");
+
+    r.running(false);
+    assert_eq!(r.host.ui_commands(vec![Command::SetTuner(false)]), Ok(None), "no answer: nothing to tell the player");
+    assert_eq!(r.host.ui_commands(vec![Command::Action(Action::Tuner)]), Ok(Some(Dropped::NoDevice)), "a press is answered as any press");
+    assert_eq!(r.host.ui_commands(vec![Command::SetTuner(false), Command::SetBpm(90.0)]), Ok(None));
+    assert_eq!(r.take(), [Command::SetBpm(90.0)], "the close reached nothing; the setting still goes");
+    r.running(true);
+    r.wait(RETRY);
+    assert_eq!(r.take(), [], "nothing was held for the next device");
+}
+
 // Decisions 8 and 9: a legacy record activates on the one present port with its name, and the move
 // is saved (its real id replaces the ordinal one).
 #[test]

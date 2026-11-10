@@ -291,6 +291,15 @@ impl Rig {
         out
     }
 
+    /// Take the tuner frames the engine has pushed, oldest first (the feed's drain).
+    pub fn read_tuner(&mut self) -> Vec<lf_engine::tuner::TunerFrame> {
+        let mut out = Vec::new();
+        while let Ok(frame) = self.handle.tuner.pop() {
+            out.push(frame);
+        }
+        out
+    }
+
     /// Columns the ring holds, taken and thrown away (a reader that keeps up).
     pub fn drop_scope(&mut self) -> usize {
         self.read_scope().len()

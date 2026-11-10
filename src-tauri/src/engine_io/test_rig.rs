@@ -50,7 +50,7 @@ impl TestDevice {
         *core.ports[1].lock().unwrap() = Some(p1);
         let scope_bin = lf_engine::scope::scope_bin_frames(rate) as u32;
         *core.ends.lock().unwrap() =
-            Some(Ends { commands: handle.commands, pushed: 0, events: handle.events, overview: handle.overview, session: Some(handle.session), scope: handle.scope, scope_bin });
+            Some(Ends { commands: handle.commands, pushed: 0, events: handle.events, overview: handle.overview, session: Some(handle.session), scope: handle.scope, scope_bin, tuner: handle.tuner, rate });
         core.rt.lock().unwrap().engine = Some(engine);
         core.rate.store(rate, Relaxed);
         core.max_block.store(config.max_block as u32, Relaxed);

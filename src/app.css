@@ -238,6 +238,11 @@ optgroup {
 .app--staged > .stage {
   visibility: hidden;
 }
+/* The tuner (src/ui/tuner/) covers the window the same way, the stage view too: the stage view's host
+   (app.tsx) only carries its inert switch, with no box of its own. */
+.sv-host {
+  display: contents;
+}
 
 /* ---- command bar ----
    ONE card holding brand · system lamp · the transport clusters (Transport.tsx) · tool icons.

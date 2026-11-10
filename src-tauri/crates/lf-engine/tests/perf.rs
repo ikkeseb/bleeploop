@@ -15,6 +15,8 @@
 //!   every lane's pan always moving, printed side by side (no bar of its own).
 //! - The live scope taps: the Stage 2 engine with them off, then on with a reader keeping up, printed
 //!   side by side (no bar of its own).
+//! - The tuner: the Stage 2 engine with its overdub committed (a take closes the tuner), the tuner off,
+//!   then on with its tap drained as the feed drains it, printed side by side (no bar of its own).
 //! - The master at 64 and 128 frames: the Stage 2 engine quiet and in sustained gain reduction, and one
 //!   master limiter alone, under and over its threshold on every frame, each block's median beside the
 //!   mean (no bar of its own).
@@ -360,6 +362,43 @@ fn the_scope_taps_cost() {
     assert_eq!(rig.engine.diag().scope_dropped, 0, "the reader kept up");
     println!(
         "stage 2 engine, {blocks} blocks of {BLOCK} at 48 k: scope off mean {:.1} µs ({:.2} %); on mean {:.1} µs ({:.2} %), {columns} columns; the taps add {:.1} µs ({:.2} %)",
+        off * period * 1e6,
+        off * 100.0,
+        on * period * 1e6,
+        on * 100.0,
+        (on - off) * period * 1e6,
+        (on - off) * 100.0
+    );
+}
+
+/// What the tuner costs (`lf_engine::tuner`): the Stage 2 engine with its overdub committed, since the
+/// tuner and a take never coexist, timed with the tuner off, then on (the monitor's mute and the tap)
+/// with a reader draining the tap in rounds, 20 s each, in one run. No bar of its own.
+#[test]
+#[ignore]
+fn the_tuners_cost() {
+    let (mut rig, _) = five_lanes_one_overdubbing();
+    rig.press(Command::RecDub(0));
+    rig.idle();
+    assert!((0..5).all(|i| rig.state(i) == LaneState::Playing) && rig.engine.looper().recorder().is_none());
+    let blocks = 48000 * 20 / BLOCK;
+    let period = BLOCK as f64 / 48000.0;
+    let (off, ..) = time_blocks(&mut rig, blocks);
+    rig.set(Command::SetTuner(true));
+    assert!(rig.engine.tuner());
+    // In rounds of 256 blocks (0.34 s at 64 frames, inside the ring's 0.35 s), drained between them.
+    const ROUND: usize = 256;
+    let rounds = blocks / ROUND;
+    let mut on = 0.0;
+    let mut frames = 0;
+    for _ in 0..rounds {
+        let (mean, ..) = time_blocks(&mut rig, ROUND);
+        on += mean / rounds as f64;
+        frames += rig.read_tuner().len();
+    }
+    assert_eq!(rig.engine.diag().tuner_dropped, 0, "the reader kept up");
+    println!(
+        "stage 2 engine, its dub committed, {blocks} blocks of {BLOCK} at 48 k: tuner off mean {:.1} µs ({:.2} %); on mean {:.1} µs ({:.2} %), {frames} frames tapped; the tuner adds {:.1} µs ({:.2} %)",
         off * period * 1e6,
         off * 100.0,
         on * period * 1e6,

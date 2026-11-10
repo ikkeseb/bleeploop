@@ -2,11 +2,12 @@ import { activeIsDrum } from '../ui/state/instrument';
 import { DRUM_KIT } from '../ui/state/drum-kit';
 import * as layoutStore from '../ui/layout/layout-store';
 import { stageOpen } from '../ui/stage/stage-store';
+import { looper } from '../ui/state/audio';
 import { runAction, selectTrack, type ActionId } from './actions';
 
 export interface TransportKeysOptions {
-  /** Escape was pressed — the app cancels a pending MIDI learn, else closes whichever popover is open.
-   * Never a play key. */
+  /** Escape was pressed — the app closes the tuner, else cancels a pending MIDI learn, else closes
+   * whichever popover is open. Never a play key. */
   onEscape: () => void;
 }
 
@@ -31,7 +32,8 @@ export interface TransportKeys {
  * Transport key → named action (`actions.ts`), on the selected track. The arrows and PageUp/PageDown
  * are what page-turner footswitches send; Backspace/Delete are a keyboard's take-back keys (CLEAR
  * wants a second press, see actions.ts); B opens and closes the stage view, and V steps its look while
- * it is open. None is a note-play key, Esc or a digit; V alone is also a drum pad (Hi Tom, DRUM_KIT),
+ * it is open; N opens and closes the tuner. None is a note-play key, Esc or a digit; V alone is also a
+ * drum pad (Hi Tom, DRUM_KIT),
  * so outside the stage view it is left to the pads (see the handler). A letter matches either case.
  * Help's Looper keys section lists this table.
  */
@@ -48,6 +50,7 @@ export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   PageUp: 'prevTrack',
   b: 'stageView',
   v: 'stageNextView',
+  n: 'tunerToggle',
 };
 
 /**
@@ -109,11 +112,11 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     // shared predicate from ui/state/instrument.ts, the same one Keyboard.tsx's drumActive reads.) The
     // yield only applies while the keyboard pane is VISIBLE: the pad key handler lives in Keyboard.tsx
     // and unmounts with the pane, so with it hidden the digits would otherwise go entirely dead in
-    // drum mode. The stage view hides the keyboard too (it stays mounted underneath, its key handler
-    // off while the view is open), so there the digits always select.
+    // drum mode. The stage view and the tuner hide the keyboard too (it stays mounted underneath, its
+    // key handler off while either is open), so there the digits always select.
     if (e.key >= '1' && e.key <= '5') {
       const idx = Number(e.key) - 1;
-      const padsLive = layoutStore.keyboardVisible() && !stageOpen();
+      const padsLive = layoutStore.keyboardVisible() && !stageOpen() && !looper.tunerOn();
       if (activeIsDrum() && padsLive && DRUM_KIT.some((pad) => pad.key === e.key)) return;
       e.preventDefault();
       selectTrack(idx);

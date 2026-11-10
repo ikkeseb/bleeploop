@@ -99,6 +99,8 @@ itself.
   input; Strata scrolls five ribbons past a now line; Ember draws the loops as five rings of light,
   with the guitar streaming into the one it writes. The selected track, the bar, the beat and the count-in stay readable from where you
   stand with the guitar.
+- Tuner (N, or a learned pedal): a full-window chromatic tuner (A4 = 440 Hz) that mutes the guitar
+  while the loops and the click play on; starting a take closes it.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3/VST2 plugin slots with floating plugin editors; each slot reloads its last
   plugin at launch with the settings you left it at, never armed, and an exported session carries each

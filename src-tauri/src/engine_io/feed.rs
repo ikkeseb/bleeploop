@@ -9,9 +9,21 @@
 //! show. A batch the UI cannot splice onto what it holds (columns the engine or a held tick lost, the
 //! cap, a new engine, a reset frame) carries `gap`, and the UI drops its trace instead.
 //!
+//! The tuner's tap (`lf_engine::tuner`) is drained every tick too, in the same acquisition, into storage
+//! sized for its ring; the feed's one [`Ear`] (`lf_engine::pitch`, made for the engine's rate) reads it
+//! after the locks are released, and the newest reading of a tick goes out as `tuner`, itself a reason
+//! to send. Only a tick that sends an ordinary frame analyses: a held, withheld or unsubscribed tick,
+//! the catch-up or reset that ends it, and every tick while the mirror says the tuner is off drain and
+//! discard, so no reading comes from old input. The `Ear` starts over where the input broke: a new
+//! epoch of the tap (the engine's: the tuner turned on, a frame the full ring refused, a device-frame
+//! jump, an xrun or a damaged block), a new engine, a capture-channel change or a device start (the
+//! owner's: `Core::break_tuner`, whose fence the frames before which are skipped), and after any tick
+//! that discarded.
+//!
 //! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
 //! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
-//! keeps a mirror of the lanes, the transport, the selection and the current count-in: a new subscriber
+//! keeps a mirror of the lanes, the transport, the selection, the current count-in and whether the tuner
+//! is on (a reset carries its `Event::Tuner` while it is, and nothing when off): a new subscriber
 //! (a WebView reload) and a new engine (another sample rate, a fault) get a `reset` frame carrying it, with the
 //! settings the host keeps and each lane's last `Mix` (`settings.rs`, which every drain feeds), so the
 //! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills; it then
@@ -57,11 +69,13 @@ use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
 use lf_engine::overview::PEAK_FRAMES;
+use lf_engine::pitch::{Ear, Reading};
 use lf_engine::scope::{ScopeBin, SCOPE_SOURCES};
+use lf_engine::tuner::{tuner_capacity, TunerFrame};
 use lf_engine::{Event, LaneInfo, LaneState, Overview, SLOT_COUNT, TRACK_COUNT};
 
-use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, WireCommand, WireEvent};
-use super::{DeviceEvent, DeviceStatus, EngineHost};
+use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, TunerUpdate, WireCommand, WireEvent};
+use super::{DeviceEvent, DeviceStatus, EngineHost, FeedDrain};
 
 /// The device events an unsent feed keeps for its next frame; older ones go first.
 const HELD_DEVICE_EVENTS: usize = 64;
@@ -79,6 +93,12 @@ const STUCK: Duration = Duration::from_secs(5);
 /// go and the UI is told its trace broke (`gap`): a batch the size of the whole ring would play seconds
 /// of old sound as a fast light show.
 const SCOPE_BATCH: usize = 64;
+
+/// The lowest level a tuner reading reports, in dBFS: what silence (or a level that is no number) reads.
+const TUNER_FLOOR_DB: f32 = -120.0;
+
+/// The sample rate the tuner's storage is first sized for; a new engine at a higher one grows it once.
+const TUNER_FIRST_RATE: u32 = 48_000;
 
 /// The feed's period: about 60 frames a second.
 const TICK: Duration = Duration::from_micros(16_667);
@@ -157,6 +177,19 @@ pub(crate) struct Feed {
     /// Columns were lost since the last batch went out (a full ring, a skip, a held feed, the cap, a new
     /// engine): the next batch says so and the UI drops the trace it holds.
     scope_gap: bool,
+    /// The mirror's tuner: the frame of the `Event::Tuner` that turned it on, while it is on.
+    tuner_on: Option<Frame>,
+    /// This tick's tuner frames, in storage sized for the engine's ring before any drain (a drain never
+    /// grows it), and the pitch analysis for the engine's rate (`None` with no engine).
+    tuner_frames: Vec<TunerFrame>,
+    ear: Option<Ear>,
+    ear_rate: u32,
+    /// The epoch of the last frame the `Ear` read; `None`: it starts over at the next frame.
+    tuner_epoch: Option<u32>,
+    /// The owner's last tuner break seen (`Core::tuner_breaks`), and its fence: frames before it are
+    /// skipped.
+    tuner_breaks: u64,
+    tuner_fence: Frame,
 }
 
 impl Feed {
@@ -189,6 +222,13 @@ impl Feed {
             scope_bin: 0,
             scope_next: None,
             scope_gap: false,
+            tuner_on: None,
+            tuner_frames: Vec::with_capacity(tuner_capacity(TUNER_FIRST_RATE)),
+            ear: None,
+            ear_rate: 0,
+            tuner_epoch: None,
+            tuner_breaks: 0,
+            tuner_fence: Frame::MIN,
         }
     }
 
@@ -197,12 +237,22 @@ impl Feed {
     fn drain(&mut self) -> bool {
         self.drained.clear();
         self.columns.clear();
-        // The events and the columns in one acquisition, so this tick's columns are the engine whose
-        // events it took: a second drain could straddle a rebuild and mix the two.
-        let (gen, overview, bin) = self.host.drain_feed_scope(&mut self.drained, Some(&mut self.columns));
-        self.scope_bin = bin;
+        self.tuner_frames.clear();
+        // The events and the taps in one acquisition, so this tick's columns and tuner frames are the
+        // engine whose events it took: a second drain could straddle a rebuild and mix the two.
+        let FeedDrain { gen, overview, scope_bin, rate } = self.host.drain_feed_taps(&mut self.drained, Some(&mut self.columns), Some(&mut self.tuner_frames));
+        self.scope_bin = scope_bin;
         if self.gen != Some(gen) {
             self.overview = overview;
+            // Another engine (its rate may differ): the analysis starts over, made for its rate, off the
+            // locks; the storage grows here, before the next drain, if its ring is larger.
+            if rate != self.ear_rate {
+                self.ear = (rate > 0).then(|| Ear::new(rate));
+                self.ear_rate = rate;
+                let need = tuner_capacity(rate.max(1));
+                self.tuner_frames.reserve_exact(need.saturating_sub(self.tuner_frames.len()));
+            }
+            self.tuner_epoch = None;
         }
         self.update_mirror(gen)
     }
@@ -220,6 +270,8 @@ impl Feed {
             self.count_beat = None;
             self.count_downbeat = None;
             self.count_unarmed = false;
+            // A new engine starts with the tuner off (a rebuild closes it).
+            self.tuner_on = None;
         }
         for event in &self.drained {
             match *event {
@@ -248,6 +300,7 @@ impl Feed {
                     self.count_unarmed = true;
                 }
                 Event::Beat { count_left: 0, .. } if self.count_beat.is_some() && self.count_downbeat.is_none() => self.count_downbeat = Some(*event),
+                Event::Tuner { frame, on } => self.tuner_on = on.then_some(frame),
                 _ => {}
             }
         }
@@ -287,6 +340,7 @@ impl Feed {
         self.replaced |= replaced;
         self.keep_drained();
         self.scope(false);
+        self.tuner(false);
         self.held_device.extend(self.host.take_device_events());
         // A device that keeps failing behind a dialog left open: the latest are what the page needs.
         let over = self.held_device.len().saturating_sub(HELD_DEVICE_EVENTS);
@@ -321,9 +375,11 @@ impl Feed {
         // A reset carries no scope: the UI replaces its view with this frame, so the trace starts over.
         self.scope_gap |= catch_up;
         let scope = self.scope(!reset);
+        // The tick that ends a held stretch, or a reset, reads no old input: it discards and starts over.
+        let tuner = self.tuner(!reset && !catch_up);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
-        // A batch of columns is itself a reason to send: a tick that built one never drops it.
-        if !(reset || catch_up || due || metered || live.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some()) {
+        // A batch of columns or a tuner reading is itself a reason to send: a tick that built one never drops it.
+        if !(reset || catch_up || due || metered || live.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some() || tuner.is_some()) {
             return None;
         }
         let events = if reset {
@@ -341,7 +397,43 @@ impl Feed {
         self.kept_notices.clear();
         self.sent = Some(Instant::now());
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, catch_up, events, device, status, anchor, meter, live, peaks, scope, settings })
+        Some(FeedFrame { seq: self.seq - 1, reset, catch_up, events, device, status, anchor, meter, live, peaks, scope, tuner, settings })
+    }
+
+    /// Read this tick's tuner frames, oldest first, and keep the newest reading. `analyse` false — a tick
+    /// that sends no ordinary frame — discards them, as does a mirror that says the tuner is off (frames
+    /// after an off), and the `Ear` starts over at the next frame. It starts over at an epoch change and
+    /// at the owner's break too, whose fence's earlier frames are skipped. `None`: no reading this tick.
+    fn tuner(&mut self, analyse: bool) -> Option<TunerUpdate> {
+        let breaks = self.host.core.tuner_breaks.load(Acquire);
+        if breaks != self.tuner_breaks {
+            self.tuner_breaks = breaks;
+            self.tuner_fence = self.host.core.tuner_fence.load(Relaxed);
+            self.tuner_epoch = None;
+        }
+        let ear = match self.ear.as_mut() {
+            Some(ear) if analyse && self.tuner_on.is_some() => ear,
+            _ => {
+                self.tuner_frames.clear();
+                self.tuner_epoch = None;
+                return None;
+            }
+        };
+        let mut newest = None;
+        for f in &self.tuner_frames {
+            if f.frame < self.tuner_fence {
+                continue;
+            }
+            if self.tuner_epoch != Some(f.epoch) {
+                ear.reset();
+                self.tuner_epoch = Some(f.epoch);
+            }
+            if let Some(reading) = ear.push(f.x) {
+                newest = Some(reading);
+            }
+        }
+        self.tuner_frames.clear();
+        newest.map(tuner_update)
     }
 
     /// Build this frame's batch from the columns `drain` took. `send` false — held, nobody subscribed,
@@ -459,8 +551,9 @@ impl Feed {
     }
 
     /// A reset frame's events: the transport (once an engine reported it), every lane, each lane's last
-    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, the current count's
-    /// latest beat and downbeat, the kept notices, then this tick's other one-shots.
+    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, the tuner while it
+    /// is on, the current count's latest beat and downbeat, the kept notices, then this tick's other
+    /// one-shots.
     fn state_events(&self) -> Vec<WireEvent> {
         let lanes = self.lanes.iter().enumerate().map(|(i, lane)| {
             let (frame, info) = lane.unwrap_or((0, EMPTY_LANE));
@@ -469,8 +562,20 @@ impl Feed {
         let selected = Event::Selected { frame: self.selected.0, lane: self.selected.1 };
         // Beats drained this tick are already in `rest`. Replaying a past count beat leaves the beat
         // LED on its beat_in_bar until the next live beat; that is acceptable on a reset.
-        let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. } | Event::Mix { .. }));
-        self.transport.into_iter().chain(lanes).chain(self.host.mixes()).chain([selected]).chain(self.count_events()).chain(self.kept_notices.iter().copied()).chain(rest).map(WireEvent).collect()
+        let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. } | Event::Mix { .. } | Event::Tuner { .. }));
+        // The tuner while it is on; nothing when off (the UI sets it off on every reset).
+        let tuner = self.tuner_on.map(|frame| Event::Tuner { frame, on: true });
+        self.transport
+            .into_iter()
+            .chain(lanes)
+            .chain(self.host.mixes())
+            .chain([selected])
+            .chain(tuner)
+            .chain(self.count_events())
+            .chain(self.kept_notices.iter().copied())
+            .chain(rest)
+            .map(WireEvent)
+            .collect()
     }
 
     /// The mirror's count, except beats this tick already carries.
@@ -486,6 +591,15 @@ fn is_notice(event: &Event) -> bool {
 fn keep_newest(notices: &mut Vec<Event>) {
     let over = notices.len().saturating_sub(KEPT_NOTICES);
     notices.drain(..over);
+}
+
+/// A tuner reading as sent: the pitch to three decimals (`None`: no pitch), the level in dBFS to one,
+/// floored at `TUNER_FLOOR_DB` (silence, or a level that is no number, reads the floor).
+fn tuner_update(r: Reading) -> TunerUpdate {
+    let hz = (r.hz.is_finite() && r.hz > 0.0).then(|| ((r.hz as f64 * 1000.0).round() / 1000.0) as f32);
+    let db = 20.0 * (r.level as f64).log10();
+    let level = if db.is_finite() { ((db * 10.0).round() / 10.0).max(TUNER_FLOOR_DB as f64) as f32 } else { TUNER_FLOOR_DB };
+    TunerUpdate { hz, level }
 }
 
 /// A bin's value as sent: three decimals are plenty for a waveform and keep the JSON short.
@@ -752,7 +866,7 @@ mod tests {
         let (engine, handle) = lf_engine::Engine::new(config);
         *core.ends.lock().unwrap() = Some(super::super::Ends {
             commands: handle.commands, pushed: 0, events: handle.events, overview: handle.overview,
-            session: Some(handle.session), scope: handle.scope, scope_bin: 32,
+            session: Some(handle.session), scope: handle.scope, scope_bin: 32, tuner: handle.tuner, rate: 8_000,
         });
         (engine, Feed::new(EngineHost { core }))
     }
@@ -1682,6 +1796,309 @@ mod tests {
         let after = batches(&sent);
         assert_eq!(after.len(), sent_while_held + 2, "the catch-up and the following tick each carry a batch");
         assert!(!after[after.len() - 1].gap, "the following batch splices onto the catch-up");
+    }
+
+    /// The tuner on the feed: a real engine at `TUNER_RATE` installed as the device owner installs one
+    /// (`swap_engine`), rendered only when the test asks, with both slots' input `tone`. `play` renders
+    /// in ticks of `TUNER_TICK` frames, about the feed's own period, the feed turning once after each.
+    struct TunerRig {
+        feed: Feed,
+        at: Frame,
+        page: Option<Subscriber>,
+        sent: Sent,
+        hold: Arc<Hold>,
+        /// The longest `turn` so far.
+        longest: Duration,
+    }
+
+    const TUNER_RATE: u32 = 48_000;
+    const TUNER_TICK: usize = 768;
+    const TUNER_BLOCK: usize = 128;
+
+    /// A sine of `hz` at amplitude 0.5 (-9.03 dBFS RMS) at device frame `f`.
+    fn tone(hz: f64) -> impl Fn(Frame) -> f32 {
+        move |f| (0.5 * (std::f64::consts::TAU * hz * f as f64 / f64::from(TUNER_RATE)).sin()) as f32
+    }
+
+    fn silence(_: Frame) -> f32 {
+        0.0
+    }
+
+    fn install(core: &Arc<super::super::Core>, rate: u32) {
+        let config = lf_engine::EngineConfig { max_loop_seconds: 2.0, ..lf_engine::EngineConfig::new(rate) };
+        let (engine, handle) = lf_engine::Engine::new(config);
+        drop(super::super::owner::swap_engine(core, engine, handle, config));
+    }
+
+    impl TunerRig {
+        fn new() -> TunerRig {
+            let core = Arc::new(super::super::Core::new());
+            install(&core, TUNER_RATE);
+            let (page, sent) = subscriber();
+            let mut rig = TunerRig { feed: Feed::new(EngineHost { core }), at: 0, page, sent, hold: Arc::new(Hold::default()), longest: Duration::ZERO };
+            rig.turn();
+            assert!(rig.sent.lock().unwrap()[0].reset);
+            rig
+        }
+
+        fn set_tuner(&self, on: bool) {
+            send(&self.feed, [Command::SetTuner(on)]);
+        }
+
+        /// Render `frames` (whole blocks) with no feed tick.
+        fn render(&mut self, frames: usize, input: &dyn Fn(Frame) -> f32) {
+            let mut x = [0.0f32; TUNER_BLOCK];
+            let (mut l, mut r) = ([0.0f32; TUNER_BLOCK], [0.0f32; TUNER_BLOCK]);
+            for _ in 0..frames.div_ceil(TUNER_BLOCK) {
+                for (k, s) in x.iter_mut().enumerate() {
+                    *s = input(self.at + k as Frame);
+                }
+                let ctx = lf_engine::ProcessContext { frame: self.at, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+                let mut rt = self.feed.host.core.rt.lock().unwrap();
+                rt.engine.as_mut().expect("an engine").process_inputs(&ctx, [&x, &x], &mut l, &mut r);
+                self.at += TUNER_BLOCK as Frame;
+            }
+        }
+
+        /// One feed tick, then the page acks what it was sent, as a page that keeps up does (an unacked
+        /// page is withheld after `MAX_IN_FLIGHT` frames).
+        fn turn(&mut self) {
+            let began = Instant::now();
+            turn(&mut self.feed, &mut self.page, &self.hold);
+            self.longest = self.longest.max(began.elapsed());
+            let newest = self.sent.lock().unwrap().last().map(|f| f.seq);
+            if let Some(page) = self.page.as_mut() {
+                page.ack(newest, Instant::now());
+            }
+        }
+
+        /// `seconds` of `input`, tick by tick.
+        fn play(&mut self, seconds: f64, input: &dyn Fn(Frame) -> f32) {
+            for _ in 0..(seconds * f64::from(TUNER_RATE) / TUNER_TICK as f64).ceil() as usize {
+                self.render(TUNER_TICK, input);
+                self.turn();
+            }
+        }
+
+        /// How many frames were sent so far.
+        fn mark(&self) -> usize {
+            self.sent.lock().unwrap().len()
+        }
+
+        /// The readings of the frames sent from `mark` on, in order.
+        fn readings(&self, mark: usize) -> Vec<TunerUpdate> {
+            self.sent.lock().unwrap()[mark..].iter().filter_map(|f| f.tuner).collect()
+        }
+
+        /// The tuner's frames waiting in the engine's ring.
+        fn waiting(&self) -> usize {
+            self.feed.host.core.ends.lock().unwrap().as_ref().unwrap().tuner.slots()
+        }
+    }
+
+    fn tuner_events(frame: &FeedFrame) -> Vec<bool> {
+        frame.events.iter().filter_map(|e| match e.0 {
+            Event::Tuner { on, .. } => Some(on),
+            _ => None,
+        }).collect()
+    }
+
+    /// Every reading pitched within 1 Hz of one of `tones`, or unpitched.
+    #[track_caller]
+    fn only(readings: &[TunerUpdate], tones: &[f32]) {
+        for r in readings {
+            assert!(r.hz.is_none_or(|hz| tones.iter().any(|t| (hz - t).abs() < 1.0)), "{r:?} is none of {tones:?}: {readings:?}");
+        }
+    }
+
+    /// A steady tone reads its pitch and its RMS level; silence reads no pitch at the floor; the tuner is
+    /// never a setting the host keeps.
+    #[test]
+    fn the_tuner_reads_a_steady_tones_pitch_and_level_and_silence_as_no_pitch() {
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        assert!(!rig.feed.host.settings().iter().any(|c| matches!(c, Command::SetTuner(_))), "a SetTuner the ring took is kept nowhere");
+        let mark = rig.mark();
+        rig.play(1.0, &tone(110.0));
+        let sent = rig.sent.lock().unwrap()[mark..].to_vec();
+        assert_eq!(sent.iter().flat_map(tuner_events).collect::<Vec<_>>(), [true], "the tuner's on, once");
+        let readings = rig.readings(mark);
+        let pitched: Vec<&TunerUpdate> = readings.iter().filter(|r| r.hz.is_some()).collect();
+        assert!(pitched.len() >= 15, "about twenty readings a second: {readings:?}");
+        assert!(readings[readings.len() - 10..].iter().all(|r| r.hz.is_some()), "a steady tone stays pitched: {readings:?}");
+        let rms_db = 20.0 * (0.5f64 / 2f64.sqrt()).log10();
+        for r in &pitched {
+            assert!((r.hz.unwrap() - 110.0).abs() < 0.05, "{r:?}");
+            assert!((f64::from(r.level) - rms_db).abs() < 0.5, "{r:?} against {rms_db:.2} dBFS");
+        }
+        println!("the tuner's feed tick: longest {:?} over one second of 110 Hz (debug build)", rig.longest);
+
+        let mark = rig.mark();
+        rig.play(0.5, &silence);
+        let readings = rig.readings(mark);
+        let quiet: Vec<_> = readings.iter().filter(|r| r.level <= -100.0).collect();
+        assert!(quiet.len() >= 5, "silence still reads: {readings:?}");
+        assert!(quiet.iter().all(|r| r.hz.is_none()), "with no pitch: {readings:?}");
+        assert!(readings.last().is_some_and(|r| r.hz.is_none() && r.level == TUNER_FLOOR_DB), "silence reads the floor: {readings:?}");
+        assert!(!rig.feed.host.settings().iter().any(|c| matches!(c, Command::SetTuner(_))));
+    }
+
+    /// Off, nothing is read: before it is on, and from the frame that says it went off.
+    #[test]
+    fn the_tuner_off_reads_nothing() {
+        let mut rig = TunerRig::new();
+        rig.play(0.5, &tone(110.0));
+        assert!(rig.sent.lock().unwrap().iter().all(|f| f.tuner.is_none()), "never turned on");
+        rig.set_tuner(true);
+        rig.play(0.3, &tone(110.0));
+        assert!(!rig.readings(0).is_empty());
+        rig.set_tuner(false);
+        let mark = rig.mark();
+        rig.play(0.5, &tone(110.0));
+        let sent = rig.sent.lock().unwrap();
+        let off = mark + sent[mark..].iter().position(|f| tuner_events(f) == [false]).expect("the off is sent");
+        assert!(sent[off..].iter().all(|f| f.tuner.is_none()), "no reading from the frame that says off");
+        assert!(rig.feed.tuner_frames.is_empty() && rig.waiting() == 0);
+    }
+
+    /// A held feed drains the tap and reads nothing of it; its catch-up carries the tuner's on and no
+    /// reading; the first readings after it come from input played after the hold.
+    #[test]
+    fn a_held_feed_drains_the_tuner_reads_nothing_of_it_and_catches_up_with_its_on() {
+        let mut rig = TunerRig::new();
+        rig.play(0.2, &tone(110.0));
+        let guard = FeedHold::take(&rig.hold);
+        let mark = rig.mark();
+        rig.set_tuner(true);
+        rig.play(0.5, &tone(220.0));
+        assert_eq!(rig.mark(), mark, "held: nothing is sent");
+        assert_eq!(rig.waiting(), 0, "the held ticks drained the tap");
+        // Played after the last held tick: the catch-up's own drain, which it discards.
+        rig.render(4 * TUNER_TICK, &tone(220.0));
+        drop(guard);
+        rig.turn();
+        {
+            let sent = rig.sent.lock().unwrap();
+            assert_eq!(sent.len(), mark + 1);
+            let catch_up = &sent[mark];
+            assert!(catch_up.catch_up && !catch_up.reset);
+            assert_eq!(tuner_events(catch_up), [true], "the kept Tuner event");
+            assert_eq!(catch_up.tuner, None, "the catch-up reads nothing");
+        }
+        rig.play(0.5, &tone(110.0));
+        let readings = rig.readings(mark);
+        only(&readings, &[110.0]);
+        assert!(readings.iter().filter(|r| r.hz.is_some()).count() >= 5, "{readings:?}");
+    }
+
+    /// A new epoch (the engine's: here a device-frame jump inside one tick) and the owner's break (here
+    /// with no jump at all) start the analysis over: no reading mixes the input before with the input
+    /// after. The break's fence skips the frames before it.
+    #[test]
+    fn an_epoch_or_an_owners_break_starts_the_analysis_over() {
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        let mark = rig.mark();
+        rig.play(0.5, &tone(110.0));
+        rig.render(3 * TUNER_BLOCK, &tone(110.0));
+        rig.at += 4_800;
+        rig.render(3 * TUNER_BLOCK, &tone(165.0));
+        rig.turn();
+        rig.play(0.5, &tone(165.0));
+        let readings = rig.readings(mark);
+        only(&readings, &[110.0, 165.0]);
+        assert!(readings.iter().rev().take(5).all(|r| r.hz.is_some_and(|hz| (hz - 165.0).abs() < 1.0)), "{readings:?}");
+
+        let mark = rig.mark();
+        rig.render(3 * TUNER_BLOCK, &tone(165.0));
+        rig.feed.host.core.break_tuner(rig.at);
+        rig.render(3 * TUNER_BLOCK, &tone(247.5));
+        rig.turn();
+        rig.play(0.5, &tone(247.5));
+        let readings = rig.readings(mark);
+        only(&readings, &[165.0, 247.5]);
+        assert!(readings.iter().rev().take(5).all(|r| r.hz.is_some_and(|hz| (hz - 247.5).abs() < 1.0)), "{readings:?}");
+
+        // A fence ahead (a WASAPI change's): nothing is read until the input passes it.
+        let fence = rig.at + 9_600;
+        rig.feed.host.core.break_tuner(fence);
+        let mark = rig.mark();
+        rig.play(0.15, &tone(110.0));
+        assert!(rig.at < fence && rig.readings(mark).is_empty(), "frames before the fence are skipped");
+        rig.play(0.5, &tone(110.0));
+        let readings = rig.readings(mark);
+        only(&readings, &[110.0]);
+        assert!(!readings.is_empty());
+    }
+
+    /// A reset frame carries the tuner while it is on, never a reading; nothing of it while off.
+    #[test]
+    fn a_reset_frame_carries_the_tuner_on_and_no_reading() {
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        rig.play(0.3, &tone(110.0));
+        assert!(!rig.readings(0).is_empty());
+        rig.render(2 * TUNER_TICK, &tone(110.0));
+        let (mut page, sent) = subscriber();
+        turn(&mut rig.feed, &mut page, &rig.hold);
+        {
+            let sent = sent.lock().unwrap();
+            assert!(sent[0].reset && sent[0].tuner.is_none(), "a reset carries no reading");
+            assert_eq!(tuner_events(&sent[0]), [true], "the mirror's tuner, once");
+            assert!(sent[0].events.iter().any(|e| matches!(e.0, Event::Tuner { frame: 0, on: true })), "at the frame it went on (the first)");
+        }
+        rig.page = page;
+        rig.sent = sent;
+        rig.play(0.3, &tone(110.0));
+        assert!(!rig.readings(1).is_empty(), "the next frames read again");
+        rig.set_tuner(false);
+        rig.play(0.1, &tone(110.0));
+        let events = reload(&mut rig.feed);
+        assert!(!events.iter().any(|e| matches!(e, Event::Tuner { .. })), "off: nothing of the tuner in a reset");
+    }
+
+    /// Another engine: the mirror's tuner goes off (the new engine starts with it off), the reset says
+    /// nothing of it, and nothing is read; the analysis is made for the new rate.
+    #[test]
+    fn a_new_engine_leaves_the_tuner_off() {
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        rig.play(0.3, &tone(110.0));
+        assert!(rig.feed.tuner_on.is_some() && !rig.readings(0).is_empty());
+        install(&rig.feed.host.core, 44_100);
+        let mark = rig.mark();
+        rig.play(0.5, &tone(110.0));
+        let sent = rig.sent.lock().unwrap()[mark..].to_vec();
+        assert!(sent[0].reset, "another engine: a reset");
+        assert!(sent.iter().all(|f| tuner_events(f).is_empty() && f.tuner.is_none()), "no tuner, no reading");
+        assert_eq!((rig.feed.tuner_on, rig.feed.ear_rate), (None, 44_100));
+        assert!(rig.feed.tuner_frames.capacity() >= tuner_capacity(44_100));
+    }
+
+    /// A full ring empties in one drain, into storage that never grows.
+    #[test]
+    fn the_tuner_drain_empties_a_full_ring_without_growing_its_storage() {
+        let mut rig = TunerRig::new();
+        rig.set_tuner(true);
+        rig.play(0.1, &tone(110.0));
+        let capacity = rig.feed.tuner_frames.capacity();
+        assert!(capacity >= tuner_capacity(TUNER_RATE));
+        rig.render(TUNER_RATE as usize / 2, &tone(110.0));
+        let ring = rig.waiting();
+        assert_eq!(ring, tuner_capacity(TUNER_RATE), "the ring is full");
+        assert!(rig.feed.host.core.rt.lock().unwrap().engine.as_ref().unwrap().diag().tuner_dropped > 0, "and refused frames");
+        let mut taken = Vec::new();
+        let mut frames = std::mem::take(&mut rig.feed.tuner_frames);
+        rig.feed.host.drain_feed_taps(&mut taken, None, Some(&mut frames));
+        assert_eq!((frames.len(), frames.capacity(), rig.waiting()), (ring, capacity, 0), "one drain took the whole ring");
+        frames.clear();
+        rig.feed.tuner_frames = frames;
+        rig.render(TUNER_RATE as usize / 2, &tone(110.0));
+        rig.turn();
+        assert_eq!((rig.feed.tuner_frames.capacity(), rig.waiting()), (capacity, 0), "and a tick's too");
+        let mark = rig.mark();
+        rig.play(0.5, &tone(110.0));
+        only(&rig.readings(mark), &[110.0]);
     }
 
     /// The thread itself: held, it sends nothing while the engine reports; released, its next frame

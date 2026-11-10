@@ -1,11 +1,13 @@
-// verify/guards/stage-draw.mjs — invariant 6 for the two 60 fps draw loops, the stage view's
-// (src/ui/stage/) and the looper's (src/ui/looper/waveform.ts): each reads a plain feed and the looper's
-// non-reactive getters, never a Solid signal.
+// verify/guards/stage-draw.mjs — invariant 6 for the three 60 fps draw loops, the stage view's
+// (src/ui/stage/), the looper's (src/ui/looper/waveform.ts) and the tuner's (src/ui/tuner/): each reads a
+// plain feed and the looper's non-reactive getters, never a Solid signal.
 //
 // A static check of the real source. A loop's draw modules are everything its roots reach through
 // relative sibling imports: for the stage, `stage-loop.ts` (the rAF loop) and `views.ts` (the looks it
 // draws); for the looper, `waveform.ts`, whole (its register calls run from Solid, read no signal
-// either). Each may import only its siblings and, from `../state/audio`, the looper facade,
+// either); for the tuner, `tuner-loop.ts` and the pitch arithmetic it calls (`TunerView.tsx`, its Solid
+// side, hands it a callback it calls when the note, the in-tune or the no-signal state changes). Each
+// may import only its siblings and, from `../state/audio`, the looper facade,
 // `PEAK_FRAMES` and types; none may import `solid-js`; and on the looper facade it may touch only the
 // plain getters (`PLAIN`), since the same object also carries signal accessors (`selectedTrack`,
 // `trackVolume`, `track`, ...). Solid's side of the stage (`StageView.tsx`, `stage-store.ts`) is not
@@ -30,12 +32,14 @@ import { fileURLToPath } from 'node:url';
 
 const uiDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'ui');
 /** The looper's non-reactive getters (`engineLooper` in src/ui/state/engine-store.ts). */
-const PLAIN = new Set(['peaksInto', 'scopeInto', 'phaseValue', 'levelValue', 'stateOf', 'mutedOf', 'waitingOf', 'countingValue', 'recHeadFrac', 'recSpanFrames', 'masterFramesValue', 'gridValue', 'heardFrameValue', 'trackCount', 'clipCount', 'takePeak']);
+const PLAIN = new Set(['peaksInto', 'scopeInto', 'tunerInto', 'phaseValue', 'levelValue', 'stateOf', 'mutedOf', 'waitingOf', 'countingValue', 'recHeadFrac', 'recSpanFrames', 'masterFramesValue', 'gridValue', 'heardFrameValue', 'trackCount', 'clipCount', 'takePeak']);
 /** What a draw module may take from `../state/audio`. */
 const AUDIO = ['looper', 'PEAK_FRAMES', 'PeakView', 'TrackState', 'ScopeView', 'SCOPE_MASTER', 'SCOPE_MONITOR'];
 
 /** The stage view's loop: no exception. */
 const STAGE = { dir: 'stage', roots: ['stage-loop', 'views'], audio: new Set(AUDIO), named: {}, gated: null };
+/** The tuner's loop: no exception; it takes the reading's type too. */
+const TUNER = { dir: 'tuner', roots: ['tuner-loop'], audio: new Set([...AUDIO, 'TunerReading']), named: {}, gated: null };
 /** The looper's loop, with its bar grid's tempo read (the header). */
 const LOOPER = {
   dir: 'looper',
@@ -178,6 +182,20 @@ check('another clock read inside the gate is flagged', () => assert.deepStrictEq
 check('the tempo read stays out of the stage loop', () => assert.deepStrictEqual(violations(WAVE), ['imports clock from ../state/audio', 'imports sampleRate from ../state/audio']));
 check('only masterBars comes from shared.ts', () => assert.deepStrictEqual(wave("import { masterBars } from './shared';", "import { masterBars, anyTrackIn } from './shared';"), ['imports anyTrackIn from ./shared']));
 
+// The tuner's loop: the reading through its plain getter, never the tuner's signal or its commands.
+const TUNE = `import { looper, type TunerReading } from '../state/audio';
+import { centsText, noteOf } from './pitch';
+function tunerFrame(now: number): void {
+  const view = looper.tunerInto(out);
+  rafId = requestAnimationFrame(tunerFrame);
+}`;
+const tune = (find, replace) => violations(TUNE.replace(find, replace), TUNER);
+check('a clean tuner loop passes', () => assert.deepStrictEqual(violations(TUNE, TUNER), []));
+check("the tuner's on signal in its loop is flagged", () => assert.deepStrictEqual(tune('  rafId', '  if (!looper.tunerOn()) return;\n  rafId'), ['reads looper.tunerOn']));
+check("the tuner's close in its loop is flagged", () => assert.deepStrictEqual(tune('  rafId', '  looper.closeTuner();\n  rafId'), ['reads looper.closeTuner']));
+check('a Solid batch in the tuner loop is flagged', () => assert.deepStrictEqual(tune("import { centsText", "import { batch } from 'solid-js';\nimport { centsText"), ['imports solid-js']));
+check("the tuner's reading type stays out of the stage loop", () => assert.deepStrictEqual(violations(TUNE), ['imports TunerReading from ../state/audio']));
+
 // ── 2. The draw modules: everything each loop reaches ───────────────────────────────────────────────
 /** Walk `set`'s roots through sibling imports (those `set.named` lists are not followed) and check each. */
 function walk(set) {
@@ -207,7 +225,9 @@ check('the Solid side stays out of the stage walk', () => {
 });
 const looperLoop = walk(LOOPER);
 check('the looper walk holds waveform.ts, not its Solid-side sibling', () => assert.deepStrictEqual([...looperLoop.keys()], ['waveform']));
+const tunerLoop = walk(TUNER);
+check('the tuner walk holds its loop and the pitch arithmetic', () => assert.deepStrictEqual([...tunerLoop.keys()].sort(), ['pitch', 'tuner-loop']));
 
-console.log(`stage-draw: ${[...stage.keys()].sort().join(', ')}; looper: ${[...looperLoop.keys()].join(', ')}`);
+console.log(`stage-draw: ${[...stage.keys()].sort().join(', ')}; looper: ${[...looperLoop.keys()].join(', ')}; tuner: ${[...tunerLoop.keys()].sort().join(', ')}`);
 console.log(`=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

@@ -13,12 +13,12 @@ import { dismissLaneCue, refuseOnLane, tapGate } from '../ui/looper/gates';
  * `midi-actions.ts` (`runNativeAction`, `nativePressed`). Each action is an on-screen control's: the lane
  * core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY, ↔ WIDE and ✂ TRIM (halve: the first half); the command bar's ▶/■
  * ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN FX's three sends; the slot's GO LIVE,
- * the stage view's cap and its view switch.
+ * the stage view's cap and its view switch, and the tuner's key.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
  * follow the take. Every lane action and the engine's global ones (`ENGINE_GLOBAL`: NEXT/PREV TRACK,
- * ▶/■ ALL, FADE and the toggles CLICK, END STOP, FIXED, RETAKE, AUTO REC and the three sends) go to the
+ * ▶/■ ALL, FADE, the toggles CLICK, END STOP, FIXED, RETAKE, AUTO REC and the three sends, and the tuner) go to the
  * engine as its `Action`: on the lane the engine has selected when the press lands (never the UI's copy
  * of the selection, which a feed frame may not have refreshed yet), or `ActionOn` a named track. The
  * engine gates them, confirms CLEAR per lane (one arm for the lane's CLR, the key and a pedal alike, on
@@ -44,7 +44,8 @@ type EngineGlobalId =
   | 'autoRecToggle'
   | 'inFxEcho'
   | 'inFxReverb'
-  | 'inFxRing';
+  | 'inFxRing'
+  | 'tunerToggle';
 /** The global actions the UI owns: native MIDI hands them back (`runNativeAction`). */
 type UiActionId = 'goLive' | 'stageView' | 'stageNextView' | 'tapTempo';
 export type ActionId = LaneActionId | EngineGlobalId | UiActionId;
@@ -81,6 +82,7 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   inFxEcho: 'Input echo on / off',
   inFxReverb: 'Input reverb on / off',
   inFxRing: 'Input ring mod on / off',
+  tunerToggle: 'Tuner',
 };
 
 /** The lane actions, as the engine's. A row added here is a lane action everywhere: it takes a target in
@@ -145,6 +147,10 @@ const ENGINE_GLOBAL: Readonly<Record<EngineGlobalId, EngineAction>> = {
   inFxEcho: { Toggle: { Send: 'echo' } },
   inFxReverb: { Toggle: { Send: 'reverb' } },
   inFxRing: { Toggle: { Send: 'ring' } },
+  // The engine's tuner, not one of its toggles: it opens or closes it from the value it has when the
+  // press lands, refuses to open it while a take exists, and closes it on its own (a take, a stopped
+  // device). The overlay follows its `Tuner` event (`src/ui/tuner/`).
+  tunerToggle: 'Tuner',
 };
 
 /** The stage view's own controls. Not looper presses: the engine never hears them, and a pending CLEAR

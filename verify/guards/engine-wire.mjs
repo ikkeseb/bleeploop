@@ -57,18 +57,19 @@ const COMMANDS = [
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',
+  'SetTuner',
 ];
 const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'CopyWide',
-  'Halve', 'Hold', 'Release', 'FadeAll', 'Toggle',
+  'Halve', 'Hold', 'Release', 'FadeAll', 'Tuner', 'Toggle',
 ];
 const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Live:0', 'Live:1'];
 const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
   'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing',
-  'AutoRecCapturing', 'AutoRecLocked',
+  'AutoRecCapturing', 'AutoRecLocked', 'TunerCapturing',
 ];
-const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted', 'Mix', 'Toggled'];
+const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted', 'Mix', 'Toggled', 'Tuner'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────
@@ -159,8 +160,8 @@ for (const s of fixture.deviceStatuses) {
 for (const f of fixture.feed) {
   check(`feed frame ${f.seq}`, () => {
     const decoded = decodeFeedFrame(structuredClone(f));
-    // `scope` and `catchUp` have decoded defaults; `status` mirrors its own absence.
-    assert.deepEqual(keys(decoded), keys({ scope: null, catchUp: false, ...f }), 'the same top-level fields');
+    // `scope`, `tuner` and `catchUp` have decoded defaults; `status` mirrors its own absence.
+    assert.deepEqual(keys(decoded), keys({ scope: null, tuner: null, catchUp: false, ...f }), 'the same top-level fields');
     assert.equal(decoded.seq, f.seq);
     assert.equal(decoded.reset, f.reset);
     assert.equal(decoded.catchUp, f.catchUp ?? false);
@@ -173,6 +174,7 @@ for (const f of fixture.feed) {
     assert.deepEqual(decoded.meter, f.meter);
     assert.deepEqual(decoded.peaks, f.peaks);
     assert.deepEqual(decoded.scope, f.scope ?? null);
+    assert.deepEqual(decoded.tuner, f.tuner ?? null);
   });
 }
 check('the fixture has a frame carrying scope columns and frames carrying none', () => {
@@ -183,6 +185,16 @@ check('the fixture has a frame carrying scope columns and frames carrying none',
   assert.ok([...min, ...max].every((c) => c.length === min[0].length), 'every array holds the same columns');
   assert.ok(fixture.feed.some((f) => f.scope === undefined), 'and a frame with the field absent');
 });
+check('the fixture has a frame carrying a pitched tuner reading, one with no pitch, and frames carrying none', () => {
+  const readings = fixture.feed.filter((f) => f.tuner !== undefined).map((f) => f.tuner);
+  assert.ok(readings.some((t) => typeof t.hz === 'number' && t.hz > 0), 'a pitch');
+  assert.ok(readings.some((t) => t.hz === null), 'no pitch: null, never 0');
+  assert.ok(fixture.feed.some((f) => f.tuner === undefined), 'and a frame with the field absent');
+  assert.ok(fixture.feed.every((f) => !f.reset || f.tuner === undefined), 'a reset frame never carries one');
+});
+check('the fixture has a reset frame that carries the tuner on', () =>
+  assert.ok(fixture.feed.some((f) => f.reset && f.events.some((e) => e.Tuner?.on === true))),
+);
 check('the fixture has a reset frame with remembered settings', () =>
   assert.ok(fixture.feed.some((f) => f.reset && Array.isArray(f.settings) && f.settings.length > 0)),
 );
@@ -219,6 +231,16 @@ const refused = {
   'an input send by its Rust name': () => decodeCommand({ SetInputSend: ['Echo', true] }),
   'a toggled send by its Rust name': () => decodeCommand({ Action: { Toggle: { Send: 'Echo' } } }),
   'an unknown toggle': () => decodeCommand({ Action: { Toggle: 'Metronome' } }),
+  'the tuner as a toggle (it is its own action)': () => decodeCommand({ Action: { Toggle: 'Tuner' } }),
+  'a toggled event for the tuner (it is its own event)': () => decodeEvent({ Toggled: { frame: 0, toggle: 'Tuner', on: true } }),
+  'a tuner press with a payload': () => decodeCommand({ Action: { Tuner: true } }),
+  'a tuner setter that is no bool': () => decodeCommand({ SetTuner: 1 }),
+  'a tuner event without on': () => decodeEvent({ Tuner: { frame: 0 } }),
+  'a tuner reading above 0 dBFS': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110, level: 0.5 } }),
+  'a tuner reading under its -120 dBFS floor': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110, level: -121 } }),
+  'a tuner reading of 0 Hz (no pitch is null)': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 0, level: -20 } }),
+  'a tuner reading without its level': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { hz: 110 } }),
+  'a tuner reading without its hz': () => decodeFeedFrame({ ...structuredClone(fixture.feed[1]), tuner: { level: -20 } }),
   'GO LIVE on a third slot': () => decodeCommand({ Action: { Toggle: { Live: 2 } } }),
   'a live flag on a third slot': () => decodeCommand({ SetSlotLive: [2, true] }),
   'a toggled event with an unknown toggle': () => decodeEvent({ Toggled: { frame: 0, toggle: 'Click ', on: true } }),
