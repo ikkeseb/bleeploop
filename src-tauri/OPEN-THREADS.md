@@ -50,7 +50,8 @@
   ASIO open (2026-11-10, a dev build on an empty profile, 256 frames behind the 128-frame preopen): the
   log's "Stream reset was requested by the ASIO driver", about 3 s apart, each handled as a lost
   device and recovered on the same request, the last one staying up. None came in the 40 minutes
-  after, three further ASIO opens at that size included. Cause unknown: whether the preopen (written
+  after, three further ASIO opens at that size included, and none in the first 134 s of a second
+  launch on another empty profile an hour later (same build path, sizes and preopen). Cause unknown: whether the preopen (written
   for the Focusrite driver), the recovery's own reopen or something outside the app (the thread
   below, EVO Control) set it off was not looked at. Next check: grep the log of a launch on the
   owner's own profile at 128 frames for that line; if it is there, the same launch with the preopen
