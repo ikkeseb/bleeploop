@@ -114,3 +114,16 @@ prints the reasons.
    run's log is evidence.
 3. Write the header: what it drives, what it proves, what it cannot see, how to run it.
 4. Break the covered code once and watch the probe go red, as for a guard.
+
+## The listening sheet
+
+`pnpm listen` renders short clips from the real engine onto one self-contained page the owner
+answers from a phone. Each question checks clicks, the grid or curves by ear. The input is a
+synthetic plucked guitar: this proves nothing about the owner's guitar, latency, drivers, pedals
+or the feel of playing. These are listening questions, not an automated pass.
+
+The page lands at `logs/listen/index.html`, with the WAVs embedded; open it as a file or over HTTP.
+Answers stay in local storage per commit; Copy verdicts also shows selectable text for plain HTTP.
+`pnpm listen --from <folder>` rebuilds the page from existing clip JSON and WAV files without cargo.
+To add a clip, add an ignored test in `src-tauri/crates/lf-engine/tests/listen.rs`, following that
+file's header: drive the rig, mark the moments the question names, then finish the clip with metadata.
