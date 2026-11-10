@@ -40,191 +40,246 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 
 ## Next jam
 
-Install the latest release (v0.8.8, published 2026-10-26 and CI-built, holds every check below; an
-installed v0.8.7 offers it through the UPDATE pill) rather than `pnpm dev:asio`. Audio Settings:
-the Audient ASIO driver (a saved Focusrite pick toasts as not installed), buffer 128; the guitar's
-slot on In 1; EVO Control's monitor mix fully clockwise. Play a real jam with these in it and say
-what felt off.
-After the jam, agents note what it tried under "Last play", drop what it answered and refill this
-list from § Not heard yet: at most five, and the docs guard counts them.
+Install the latest release, v0.8.8 (published 2026-10-26 and CI-built, it holds every check below;
+an installed v0.8.7 offers it through the UPDATE pill), not `pnpm dev:asio`. In Audio Settings pick
+the Audient ASIO driver (a saved Focusrite pick toasts as not installed) at buffer 128 and put the
+guitar's slot on In 1; turn EVO Control's monitor mix fully clockwise. Play a real jam with these in
+it and say what felt off. After the jam, agents note what it tried under "Last play", drop what it
+answered and refill this list from § Not heard yet: at most five, and the docs guard counts them.
 
-1. **The amp-sim live, and takes on the click.** GO LIVE (VST3, Petrucci): does the guitar through the
-   amp feel immediate? The first take, an overdub and FIXED 4 keep their attacks and endings on the
-   click; the master fader scales the wet, not the recorded level. Then the 5 ms edges (D23, landed
-   unheard): press GO LIVE once mid-note, punch a DUB in and out over a held note, and UNDO, STOP and
-   PLAY a lane mid-note: is every click gone, and does an attack right on the punch-in still sound whole?
-2. **A MIDI footswitch, if one is plugged** (MIDI now runs natively, outside the WebView). Does the
-   pedal learned before the update fire with no relearn? One listed as "not connected" in Audio
-   Settings → MIDI learn: ASSIGN it to the pedal. Learn REC/DUB onto it (one tap) and take the jam's
-   records with the foot: one press, one action? Still learned after a restart? Then switch it to
-   HOLD and hold it through one overdub.
-3. **A later take from stopped loops.** Stop every loop (■ ALL), then REC on an empty track: one bar of
-   count-in clicks (4-3-2-1), then every track starts from the top on the downbeat after it and the
-   take records from there. Does it feel like the first take's count-in, and do the old loops and the
-   new take sit together? A press that cancels the count leaves the loops stopped and silent (machine:
-   `tests/later_arm.rs`; no rig probe arms it, so this is its first run on a real device).
-4. **The stage view's new look, SCOPE, over the jam.** B opens it and SCOPE is what it opens on (V
-   still reaches Orbit and Strata). Each bay is a live scope: the top one is what the speaker plays
-   with the guitar as a cyan line over it, then one per lane after its FX. Does it say what is locked
-   and what is alive, from where you stand, and is it worth leaving open while you play? Then what
-   only a device answers: with the columns flowing (they flow only while this look shows), does the
-   app stay tight on ASIO 128, does the guitar still feel immediate, and does the pedal action
-   "Stage view: next look" still feel right? Also: does the count-in read from where you stand?
-5. **End with FADE, then reopen.** FADE (2 bars) while three lanes play: the level falls smoothly to
-   the bar line and the lanes stop there. Close and reopen the app: the loops and the plugin come back
-   (not live), the amp-sim's knobs where you left them, and one GO LIVE re-arms.
+1. **The amp-sim live, and takes on the click.** GO LIVE on the amp-sim (VST3, Petrucci) and record a
+   first take, an overdub and a FIXED 4: does the guitar feel immediate, and does every take keep its
+   attacks and endings on the click?
+2. **A MIDI footswitch, if one is plugged (MIDI now runs natively, outside the WebView).** Try the
+   pedal you learned before the update, then learn REC/DUB onto it (one tap) and take the jam's
+   records with your foot: does it fire with no relearn, and is every press one action?
+3. **A later take from stopped loops.** Stop every loop (■ ALL) and press REC on an empty track: one
+   bar of count-in clicks (4-3-2-1), then every track starts from the top on the downbeat and the
+   take records from there; does it feel like the first take's count-in, and do the old loops and
+   the new take sit together? (machine: `tests/later_arm.rs`; no rig probe arms it, so this is its
+   first run on a real device)
+4. **The stage view's new look, SCOPE, over the jam.** B opens the stage view on SCOPE (V still
+   reaches Orbit and Strata), one live scope per bay, what the speaker plays on top with the guitar
+   as a cyan line over it and then each lane after its FX: does it say what is locked and what is
+   alive from where you stand, and is it worth leaving open while you play?
+5. **End with FADE, then reopen.** FADE (2 bars) while three lanes play, then close and reopen the
+   app: are the loops and the plugin back (not live) with the amp-sim's knobs where you left them,
+   and does one GO LIVE re-arm?
 
 ## Not heard yet
 
 Built, and proven by machine where a probe reaches, but never played. A line leaves when a jam answers
 it.
 
+### On the listening sheet
+
+No rig, no guitar: `pnpm listen` writes `logs/listen/index.html` and the owner answers there. Each
+clip is a synthetic plucked phrase through the real engine: it settles clicks, the grid and curves,
+never the owner's guitar, latency, a driver, a pedal or feel.
+
+- An overdub punched in and out over a held note (the 5 ms edges, D23): is every click gone?
+  `punch-edges`
+- STOP, PLAY and ↶ UNDO on a lane mid-note (the 5 ms edges, D23): is every click gone? `stop-play`
+- TRIM halves an 8-bar lane while it plays and ↶ UNDO brings the 8 back: is there a click at either
+  swap? `trim-swap`
+- REV while a lane plays: does the turn of direction click? `reverse-turn`
+- A longer later take grows the loop (FIXED 4 over a 1-bar loop makes it 4 bars): is there a seam?
+  `multiply-seam`
+- A later lane joins at master phase: is there a seam? `later-lane`
+- CLEAR on a lane whose delay is still echoing: does the echo stop at the press, with nothing of what
+  was cleared coming back? `clear-tail`
+- The count-in: one bar, the accent on 1: does it sound right? `count-in`
+- The 6/8 click: are the softer eighths between the dotted quarters heard, and not busy? `click-6-8`
+- The lane delay with a high feedback over a loop, its repeats now a whole division apart (no longer
+  drifting about 3 ms each): do they sit on the click and still sound right? `delay-on-click`
+- FADE (2 bars) while three lanes play: does the level fall smoothly to the bar line, with the lanes
+  stopping there? `fade`
+- DUB FEEDBACK at 50 % over two passes, then 0 %: do the old layers fade at 50 %, and does 0 %
+  replace them? `dub-feedback`
+- IN FX ECHO on the input at its default: are its repeats on the tempo? `in-fx`
+- RING MOD (never heard) at its 440 Hz default, an agent's pick: keep it, or name what to change.
+  `ring-mod`
+- ↔ WIDE (a copy 20 ms behind, the pan mirrored) on a riff, without and then with: is 20 ms the
+  gap? `wide`
+- Pan hard left, centre, hard right: does a hard pan play +3 dB on its side and leave the other side
+  silent? `pan`
+
+### With the app open, no guitar
+
+The owner at the 27" display with the installed release, or an agent's screenshots: what an eye
+settles.
+
 - The main screen's restyle (2026-11-07; the principles in `src/ui/AGENTS.md`, the look in the
-  `src/app.css` header): the waves as smooth bodies with a grey for silent and a FADE that sinks,
-  the selected lane marked by its lit number alone, a mode that is on but locked, the lanes a step
-  larger at 2560, and fewer numbers (one bar ruler over the pane, the loop's length in bars only).
-  From the chair on the 27": does every lane's state read at a glance, does a FADE read as the loop
-  sinking in motion, and is the selected lane findable?
-- The designer walk's fixes: the command-bar popovers (CLICK, SENS, IN FX) open under the bar, not
-  their pill; a toast that is neither an error nor a finished action reads as a dim note; the 48 kHz
-  switch and the mid-jam update ask are the app's own dialog (Esc declines); a disabled control fades
-  by tone; the lane core's hover is a rim tone and a press darkens it, with no grow or spring. Does a
-  popover 10 px lower read as its pill's, does the note toast still catch the eye when it must, does
-  the in-app ask read as a question to answer before playing on, and do the disabled tools still read
-  as present from the chair?
-- The same plugin file in both slots (D29): its editor belongs to the slot whose load came first, so the
-  other slot's editor is refused with a toast even if the first never opened one; loads that overlapped,
-  or the owner unloading while the other slot keeps the file, refuse both until neither holds it
-  (machine: the `instrument-controls` and `rig-recall` probes). Does the toast say what to do, and does
-  Archetype in both slots never hang the app?
-- A plugin bundle whose scan failed is listed on Audio Settings' PLUGINS page with a host-worded
-  reason, the picker stays clean and the rescan retries it (no real failed bundle seen yet): does the
-  row say enough, or should the picker grey it?
-- The feed's bound (machine: the `feed.rs` tests, `engine-seam` and `meter-picker`): a stalled page
-  lags at most 30 frames (about half a second of them), then takes one step to now once it reads
-  again, and the plugin folder dialog ends the same way instead of redrawing the view. With loops playing, close that dialog after a minute open, with a
-  pedal's CLEAR or a rejected take while it was open: do the waveforms, the count and the toasts land
-  without a jump, and does a gesture held across it keep its value?
+  `src/app.css` header: the waves as smooth bodies, grey for silent, a mode on but locked, the lanes a
+  step larger at 2560, one bar ruler, the loop's length in bars only), from the chair on the 27":
+  does every lane's state read at a glance?
+- The selected lane, marked by its lit number alone: is it findable from the chair?
+- A FADE on the restyled waves: does it read as the loop sinking, in motion?
+- The command-bar popovers (CLICK, SENS, IN FX) now open under the bar, 10 px lower: does each still
+  read as its pill's?
+- A toast that is neither an error nor a finished action is now a dim note: does it still catch the
+  eye when it must?
+- The 48 kHz switch and the mid-jam update ask are the app's own dialog (Esc declines): does it read
+  as a question to answer before playing on?
+- A disabled control fades by tone, and a lane core's hover is a rim tone that a press darkens, with
+  no grow or spring: do the disabled tools still read as present from the chair?
 - SCOPE's beam moves on with the bar when the live columns stop, and only a fresh column takes it:
   does it ever jump, stutter or lag the bar when the view opens mid-loop?
-- GO LIVE lights only from the engine's live flag, and a lost press toasts once: does the pill ever
-  lag the guitar going live, or light while the dry guitar is silent? Each press is now the engine's
-  toggle: hammer GO LIVE from a pedal and the cap together, during a plugin load too: one switch per
-  press, none lost?
-- Audio Settings in four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS), a lamp
-  and a state word each: does a pedal's port pick take fewer moves, and does the lamp read from the
-  chair?
-- The command bar: CLICK volume and AUTO REC SENS in popovers, an LED on each engaged mode pill, END
-  STOP with the modes. Do the five pills read from 1.5 m, and is a slider in a popover one move too
-  many mid-jam?
-- CLR, the CLEAR key and a pedal share the engine's arm, SURE? showing while a second press would
-  clear: does it read in time from the guitar, and does a slip on CLR never cost a loop?
-- Lane state colour lands on the beat, no fade: does a quick stop-then-play read as a flicker?
-- The count-in numeral fills the lane well at every window size, and the FX pill carries a lamp while
-  any lane effect is on: does 4-3-2-1 read from 1.5 m, and the lamp as FX, not as a state LED?
+- In the stage view: does the count-in read from where you stand?
+- Audio Settings in four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS): does a
+  pedal's port pick take fewer moves?
+- The rail's lamp and state word on each page: does the lamp read from the chair?
+- The command bar's five mode pills, an LED on each engaged one, END STOP among them: do they read
+  from 1.5 m?
+- CLICK volume and AUTO REC SENS in popovers: is a slider in a popover one move too many mid-jam?
+- Lane state colour lands on the beat, with no fade: does a quick stop-then-play read as a flicker?
+- The count-in numeral fills the lane at every window size: does 4-3-2-1 read from 1.5 m?
+- The FX pill's lamp while any lane effect is on: does it read as FX, not as a state LED?
 - The one-row FX drawer (the lanes on a 53 px rung while it shows params; five lanes at 1000x700 with
   the keyboard): are the FX keys and the 91 px sliders big enough to hit while playing?
-- Buffer 256 and 64: the take on the click at each size, a short switch gap, and a plugin loaded while
-  loops play crossfading in without a click (machine: `tests/slots.rs`).
-- An amp-sim unloaded or swapped while GO LIVE is on: the slot goes off live first, so no dry DI is
-  heard or recorded between the plugins (machine: `tests/slots.rs`, `engine_io/plugins.rs`); a
-  plugin-requested restart (a FabFilter latency-mode change) keeps the slot live. Is the swap a clean
-  gap with no dry flash?
-- An instrument entering or leaving a slot while GO LIVE is on: the dry guitar fades across where it
-  stepped before (machine: `tests/slots.rs`). Is the change inaudible mid-note?
-- The input meter on each live slot's card (its own input, a held peak, CLIP), INPUT LIVE and the "A
-  LIVE" badge: does the meter read from where you stand, and does CLIP light when the interface clips
-  and only then?
-- The count-in (1 bar, accent on 1, the tempo locking mid-count-in); FIXED 2 stopping after exactly 2
-  bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a free record stopped
-  near the downbeat keeping its N bars, an early or mid-bar stop behaving; a PLAY/STOP (or REC/DUB)
-  press while the take's tail is in flight committing it stopped.
-- The click: silent when idle, stopping with STOP ALL, the count-in clicking with CLICK off.
-- Time signatures (machine: `tests/meter.rs`): in 6/8 BPM and TAP count the dotted quarter, the
-  count-in reads 2-1 and the eighths click softer between. TAP along a 6/8 song unprompted: on the
-  dotted quarter or every eighth? (Counting eighths changes the BPM's unit in the engine, the wire's
-  meter table and the 6/8 sessions already saved.) Are the soft eighths heard, not busy?
-- A later track starts at master phase with no seam; does reverse's turn of direction click?
-- 48 kHz with loops playing: the confirm asks, the driver reopens at 48 kHz, and a new take lands on
-  the click as clean as at 44.1.
-- IN FX on the guitar: ECHO and REVERB immediate, the echo on the tempo, a take sounding as it did
-  live. RING MOD (never heard): its 20–1500 Hz range and 440 Hz default are an agent's pick: keep, or
-  name what to change.
-- Multiply: FIXED 4 over a 1-bar loop grows it to 4 bars with no seam; with FIXED off a take stopped
-  ~1.6 loops in grows to two loops, ~1.3 keeps one.
-- ↔ WIDE (the copy 20 ms behind, mirrored pan): on a guitar riff, two guitars, and is 20 ms the gap?
-- TRIM halves an 8-bar lane while it plays and ↶ UNDO brings the 8 back: no click at either swap?
-- DUB FEEDBACK 50 % over two passes fades the old layers, 0 % replaces, ↶ UNDO brings the loop back.
-- 10+ minutes: loops and click stay tight, no LED hop or click flam at a commit. A free record past
-  60 s closes at the cap, mid-bar: fine, or close on the last bar line?
-- Editors: in front; close and reopen with no hang; with FabFilter's open, a drawer slider moves its
-  knob and its own size menu resizes the host window.
-- A drawer slider dragged fast, or while a preset loads in the plugin's own editor, ends where the
-  plugin ends (one set in flight per plugin); a tempo or meter changed while the device is stopped or
-  switching is the one the loops play at once it opens (machine: `plugin-param-refused` probe,
-  `engine_io/tests.rs`). Does the amp-sim's knob ever sit off its slider after a quick sweep?
-- A real 64-bit VST2 plugin whose parameters hold a value (so far a fixture, and ReaJS and ReaStream in
-  `native:smoke` and `native:swap`): plays live with no click on load, its editor opens, resizes and
-  keeps redrawing (`effIdle` runs each owner turn until it answers 0), a knob there moves the drawer's
-  slider, and its settings come back after a restart.
-- Yank the interface while loops play: a toast, the loops and the plugin stay; reconnect: the device
-  comes back (or WASAPI takes over) and the loops play on (fake driver only); at a WASAPI rate unlike
-  ASIO's the loops come back from recovery after a relaunch. With no device, is the command bar's
-  amber lamp clear enough?
-- A saved ASIO driver uninstalled since it was picked (the rig's Focusrite): the app starts on the
-  automatic driver, possibly an unrelated one (a controller's), a toast names both, and Audio Settings
-  keeps the pick marked not installed (machine: the `asio-driver` probe). On the rig, does the toast
-  show at launch and say what to pick? (A driver still installed whose device is gone fails to start
-  instead.)
-- A headset plugged in mid-jam on WASAPI with System default picked: the sound moves to it, a take in
-  flight keeps recording, and Audio Settings names it (fake driver only; a mic at another format is
-  unmeasured). One at another rate plays converted until a Buffer change reopens it (asking first while
-  loops are held): fine, or keep the converted stream?
-- The lane's mix follows the engine (D21): a dragged fader, DUB FEEDBACK or FX knob stays where it was
-  left; MUTE toggles in the engine (two quick presses, two toggles; an on-screen MUTE cancels a pedal's
-  armed CLEAR); an import or recovery plays each lane at its saved mix from its first sample.
-- Pan per lane: hard left or right is +3 dB on that side and silence on the other, a move glides with
-  no zipper, an older session opens centred. The right cluster grew from 240 to 264 px: still fine at
-  1000 px wide?
-- CLEAR stops a lane's delay echo at the press, so no echo of what was cleared comes back.
-- Two slots live at once on In 1 and In 2: each heard, each recording only its own input.
-- AUTO REC: a muted-guitar noise floor does not arm it, a real attack does.
-- Session files: export, CLEAR ALL, import brings the loops back on the grid and the amp-sim as at the
-  export; a stem and the master open in a DAW; the toast says where the zip went. Kill the app mid-jam:
-  the relaunch restores it.
-- Share output: OBS, Chrome and Discord hear the master with no stutter as Share turns on, and a call
-  of 20 minutes or more no dropout, also into the interface's own Windows output (machine: a 26-minute
-  soak at the 40 ms mirror buffer).
-- Share output without the click: a stream hears the loops, the plugins and the guitar but no count-in
-  or CLICK while the headphones click (ASIO only; `src-tauri/crates/lf-engine/tests/share_mix.rs`). On
-  a loud mix the stream may sound a touch louder on the beat than the headphones.
-- SCOPE on a device: no eye has seen it draw a live pixel. Its frame cost with columns flowing is
-  measured on the browser rig (`pnpm probe frame-cost`: script p99 under 0.5 ms, a feed frame about
-  30 µs, 635-byte JSON); paint and real WebView2 are not (next jam's 4; machine:
-  `src-tauri/crates/lf-engine/tests/scope.rs`, `verify/probes/scope-mirror.mjs`, the stage-view probe's
-  `scope` group).
-- The six synths and the lane FX by ear.
-- The lane delay's repeats land a whole division apart, no longer drifting ~3 ms each: with a high
-  feedback over a loop, do they sit on the click and still sound right?
-- Native MIDI through a jam: mod-wheel vibrato, pitch-bend and CC64 sustain on a built-in synth;
-  unplugged mid-note, a toast and the note released; 20 quick replugs (under a second each) with notes
-  held, each releasing them and the bindings firing after each.
-- The MIDI bindings across the update, a restart and a move to another USB socket: they fire with no
-  relearn (ASSIGN fixes one listed as "not connected").
-- RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a
-  loop locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
+- 6/8: do BPM and TAP count the dotted quarter, and does the count-in read 2-1? (machine:
+  `tests/meter.rs`)
+- TAP along a 6/8 song, unprompted: do you tap the dotted quarter or every eighth? (Counting eighths
+  would change the BPM's unit in the engine, the wire's meter table and the 6/8 sessions already
+  saved.)
+- With no device: is the command bar's amber lamp clear enough?
+- The lane's mix follows the engine (D21): does a dragged fader, DUB FEEDBACK or FX knob stay where it
+  was left?
+- MUTE toggles in the engine (D21): do two quick presses make two toggles?
+- An older session opened after pan per lane: does every lane open centred?
+- The right cluster grew from 240 to 264 px for pan: is it still fine at 1000 px wide?
+- A session export: does the toast say where the zip went, and do a stem and the master open in a
+  DAW?
 - The UPDATE pill and its panel (the download in MB with a bar, the signature check, the installer;
-  machine: `verify/probes/app-update.mjs`): over a real GitHub download, do the numbers climb at a
-  watchable rate, is the pill findable untold, and does the last frame before the app quits read as
-  progress, not a freeze? Only a real install answers. The download now runs while the jam plays, and
-  the jam is saved after it: on the update from the release that carries this to the next, commit a
-  take during the download; is it back after the restart?
+  machine: `verify/probes/app-update.mjs`), over a real GitHub download: do the numbers climb at a
+  watchable rate? Only a real install answers.
+- The UPDATE pill: is it findable without being told?
+- The update's last frame before the app quits: does it read as progress, not a freeze?
 - Help in two tabs (Reference unscrolled at every window size, Manual with About this build at its
   foot): can it be read at a glance mid-jam, from playing distance?
-- One running app (`src-tauri/src/single_instance.rs`, machine: its unit tests on the real kernel
-  mutex, with no window): a second launch comes to the front and restores a minimized window, a
-  reopen during a quit waits and starts, and an installer's relaunch starts. Only a release launch
-  shows them: does the window come up on top, and does nothing ever open twice?
+- One running app (`src-tauri/src/single_instance.rs`; machine: its unit tests on the real kernel
+  mutex, with no window): does a second launch bring the window up on top, restoring a minimized
+  one? Only a release launch shows it.
+- A second launch, a reopen during a quit and an installer's relaunch: does each start the app once,
+  with nothing ever open twice?
+
+### Only on the rig
+
+Guitar in, ASIO, a pedal where named: feel, latency, devices, drivers, plugins, MIDI hardware, and
+anything else that needs the interface or a real plugin.
+
+- The amp-sim live: does the master fader scale the wet sound, never the recorded level?
+- GO LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
+- An attack played right on a DUB's punch-in (D23): does it still sound whole?
+- A MIDI binding after a restart and after a move to another USB socket: does it fire with no
+  relearn? (ASSIGN fixes one listed as "not connected" in Audio Settings → MIDI learn.)
+- The pedal switched to HOLD: does holding it through one overdub work?
+- A press that cancels a later take's count-in: do the loops stay stopped and silent?
+- SCOPE on the device (the next jam's 4): no eye has seen it draw a live pixel. With its columns flowing (only while
+  that look shows), does the app stay tight on ASIO 128? (Frame cost measured on the browser rig only,
+  `pnpm probe frame-cost`: script p99 under 0.5 ms, a feed frame about 30 µs, 635-byte JSON; paint
+  and real WebView2 are not. Machine: `src-tauri/crates/lf-engine/tests/scope.rs`,
+  `verify/probes/scope-mirror.mjs`, the stage-view probe's `scope` group.)
+- With SCOPE flowing: does the guitar still feel immediate?
+- The pedal action "Stage view: next look": does it still feel right?
+- The same plugin file in both slots (D29): the editor belongs to the slot whose load came first,
+  and the other slot's is refused with a toast; does the toast say what to do? (machine: the
+  `instrument-controls` and `rig-recall` probes)
+- Archetype in both slots (D29): does the app never hang?
+- A plugin bundle whose scan failed, listed on Audio Settings' PLUGINS page with a host-worded reason
+  (no real failed bundle seen yet; the picker stays clean, a rescan retries it): does the row say
+  enough, or should the picker grey it?
+- With loops playing, keep the plugin folder dialog open a minute, with a pedal's CLEAR or a rejected
+  take while it is open, then close it: do the waveforms, the count and the toasts land without a
+  jump? (machine: the `feed.rs` tests, `engine-seam` and `meter-picker`)
+- A gesture held across that dialog: does it keep its value?
+- GO LIVE: does the pill ever lag the guitar going live, or light while the dry guitar is silent?
+- Hammer GO LIVE from a pedal and the cap together, during a plugin load too: one switch per press,
+  none lost?
+- CLR, the CLEAR key and a pedal share one arm, SURE? showing while a second press would clear: does
+  SURE? read in time from the guitar?
+- A slip on CLR: does it never cost a loop?
+- Buffer 256 and 64: does a take land on the click at each size, with a short switch gap? (machine:
+  `tests/slots.rs`)
+- A plugin loaded while loops play: does it crossfade in without a click?
+- An amp-sim unloaded or swapped while GO LIVE is on: is the swap a clean gap, with no dry DI heard or
+  recorded between the plugins? (machine: `tests/slots.rs`, `engine_io/plugins.rs`)
+- A plugin-requested restart while live (a FabFilter latency-mode change): does the slot stay live?
+- An instrument entering or leaving a slot while GO LIVE is on: is the change inaudible mid-note?
+  (machine: `tests/slots.rs`)
+- The input meter on each live slot's card (its own input, a held peak, CLIP), with INPUT LIVE and the
+  "A LIVE" badge: does the meter read from where you stand?
+- The slot card's CLIP: does it light when the interface clips, and only then?
+- The first take's count-in: does the tempo lock mid-count-in?
+- FIXED 2: does the take stop after exactly 2 bars?
+- A FIXED pick too long for 60 s: does it record the largest whole-bar fit?
+- A free record stopped near the downbeat: does it keep its N bars?
+- A free record stopped early or mid-bar: does it behave?
+- A PLAY/STOP (or REC/DUB) press while a take's tail is in flight: is the take committed, stopped?
+- The click: is it silent when idle, does it stop with STOP ALL, and does the count-in click with
+  CLICK off?
+- 48 kHz with loops playing: does the confirm ask, the driver reopen at 48 kHz, and a new take land
+  on the click as clean as at 44.1?
+- IN FX ECHO and REVERB on the guitar: are they immediate?
+- A take through IN FX: does it sound as it did live?
+- RING MOD's 20–1500 Hz range, an agent's pick: keep it, or name what to change.
+- With FIXED off, a take stopped about 1.6 loops in grows the loop to two, about 1.3 keeps one: does
+  that feel right?
+- ↔ WIDE on your own guitar riff: does it sound like two guitars?
+- DUB FEEDBACK, then ↶ UNDO: does the loop come back?
+- 10 minutes or more: do the loops and the click stay tight, with no LED hop or click flam at a
+  commit?
+- A free record past 60 s closes at the cap, mid-bar: fine, or should it close on the last bar line?
+- Plugin editors: does each open in front, and close and reopen with no hang?
+- FabFilter's editor open: does a drawer slider move its knob, and does its own size menu resize the
+  host window?
+- A drawer slider dragged fast, or while a preset loads in the plugin's own editor: does the amp-sim's
+  knob ever sit off its slider after a quick sweep? (machine: `plugin-param-refused` probe)
+- A tempo or meter changed while the device is stopped or switching: do the loops play at it once the
+  device opens? (machine: `engine_io/tests.rs`)
+- A real 64-bit VST2 plugin whose parameters hold a value (so far a fixture, and ReaJS and ReaStream
+  in `native:smoke` and `native:swap`): does it play live with no click on load?
+- That VST2's editor: does it open, resize and keep redrawing (`effIdle` runs each owner turn until
+  it answers 0), and does a knob there move the drawer's slider?
+- That VST2 after a restart: do its settings come back?
+- Yank the interface while loops play: is there a toast with the loops and the plugin kept, and on
+  reconnect does the device come back (or WASAPI take over) with the loops playing on? (fake driver
+  only so far)
+- At a WASAPI rate unlike ASIO's: do the loops come back from recovery after a relaunch?
+- A saved ASIO driver uninstalled since it was picked (the rig's Focusrite): the app starts on the
+  automatic driver, possibly an unrelated one (a controller's), and Audio Settings keeps the pick
+  marked not installed; does the toast show at launch, name both and say what to pick? (machine: the
+  `asio-driver` probe; a driver still installed whose device is gone fails to start instead)
+- A headset plugged in mid-jam on WASAPI with System default picked: does the sound move to it, a take
+  in flight keep recording, and Audio Settings name it? (fake driver only; a mic at another format is
+  unmeasured)
+- A headset at another rate plays converted until a Buffer change reopens it (asking first while
+  loops are held): fine, or keep the converted stream?
+- An on-screen MUTE while a pedal's CLEAR is armed (D21): does it cancel the CLEAR?
+- An import or a recovery (D21): does each lane play at its saved mix from its first sample?
+- Pan per lane: does a pan move glide, with no zipper?
+- Two slots live at once on In 1 and In 2: is each heard, each recording only its own input?
+- AUTO REC: does a muted guitar's noise floor leave it unarmed, and a real attack arm it?
+- Session files: export, CLEAR ALL, import: are the loops back on the grid and the amp-sim as at the
+  export?
+- Kill the app mid-jam: does the relaunch restore it?
+- Share output: do OBS, Chrome and Discord hear the master with no stutter as Share turns on?
+- Share output on a call of 20 minutes or more, also into the interface's own Windows output: no
+  dropout? (machine: a 26-minute soak at the 40 ms mirror buffer)
+- Share output without the click (ASIO only): does a stream hear the loops, the plugins and the
+  guitar but no count-in or CLICK while the headphones click? On a loud mix the stream may sound a
+  touch louder on the beat. (machine: `src-tauri/crates/lf-engine/tests/share_mix.rs`)
+- The six synths and the lane FX, played by ear: anything off?
+- Native MIDI on a built-in synth: do mod-wheel vibrato, pitch-bend and CC64 sustain work through a
+  jam?
+- A MIDI controller unplugged mid-note: is there a toast, and is the note released?
+- 20 quick replugs (under a second each) with notes held: does each release them, with the bindings
+  firing after each?
+- RETAKE and AUTO REC from a learned pedal: one press, one toggle?
+- The same pedal mid-take (and AUTO REC once a loop locks the tempo): is the press refused with its
+  reason on the lane, as the greyed button is?
+- The update from the release that carries the in-jam download to the next: commit a take during the
+  download; is it back after the restart?
 
 ## Decisions
 
