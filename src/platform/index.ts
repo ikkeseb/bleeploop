@@ -9,13 +9,19 @@ import type { EngineCommand, NoteTarget } from './engine-wire';
 import { encodeInput, encodeItem, type Dropped, type InputItem, type MidiEvent } from './midi-wire';
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
+import { inertPlatform } from './host.inert';
 import { notifyError } from '../notify';
 import { settingsAction } from '../settings-opener';
 import { reportTauriDiagnostics, tauriConfirmClose, tauriOnCloseRequested, tauriPlatform } from './host.tauri';
 
 const underTauri = isTauri();
 
-export const platform: Platform = underTauri ? tauriPlatform : webPlatform;
+/** Outside Tauri, a production build gets the inert platform, so the engine fake and its probe hooks never
+ * ship (Vite drops `host.web.ts`; `vite.config.ts` checks). Keyed on PROD, not DEV: the Node guards' env
+ * stub (`verify/harness/hooks.ts`) has no PROD, so they keep the scriptable rig, as DEV does. */
+const browserPlatform: Platform = import.meta.env.PROD ? inertPlatform : webPlatform;
+
+export const platform: Platform = underTauri ? tauriPlatform : browserPlatform;
 
 /**
  * DEV-only: report WebView2-internal facts (secure context, user agent) to `tauri dev` stdout —
@@ -332,8 +338,8 @@ export const input = {
   },
 };
 
-/** The web engine fake a probe scripts through `__lf.native`; null under Tauri. */
-export const engineFake: EngineFake | null = underTauri ? null : webEngineFake;
+/** The web engine fake a probe scripts through `__lf.native`; null under Tauri and in a production build. */
+export const engineFake: EngineFake | null = import.meta.env.PROD || underTauri ? null : webEngineFake;
 
 export * from './host';
 export * from './engine-wire';
