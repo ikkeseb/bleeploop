@@ -275,9 +275,10 @@ export interface EngineFake extends EngineHost {
   refuseMix: boolean;
   /**
    * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
-   * would. Only probes call it, through `__lf.native`. A frame's waveform `peaks` and its `scope`
-   * columns pass straight through, so a probe scripts what the looper and the stage view draw; the
-   * frames the fake makes itself (a lane's `Mix`, a toggle's answer) carry neither.
+   * would. Only probes call it, through `__lf.native`. A frame's waveform `peaks`, its `scope` columns
+   * and its `tuner` reading pass straight through, so a probe scripts what the looper, the stage view and
+   * the tuner draw; the frames the fake makes itself (a lane's `Mix`, a toggle's or the tuner's answer)
+   * carry none of them.
    * @public
    */
   emit(raw: unknown): void;
@@ -494,6 +495,7 @@ function flushEchoes(): void {
       meter: lastMeter,
       peaks: [],
       scope: null,
+      tuner: null,
     };
     for (const onFrame of engineSubscribers) onFrame(frame);
   }
@@ -529,14 +531,16 @@ function setterToggle(c: EngineCommand): [EngineToggle, boolean] | null {
   return null;
 }
 
+/** A lane records or overdubs, as the scripted frames show it: the fake's stand-in for a take existing. */
+const capturing = (): boolean => gateView.states.some((s) => s === 'Recording' || s === 'Overdubbing');
+
 /** The engine's `Looper::toggle_gate`: FIXED, RETAKE and AUTO REC not while a lane records or overdubs,
  * FIXED not under RETAKE over a loop, AUTO REC not once the tempo is locked. */
 function toggleRefusal(key: string): Refusal | null {
-  const capturing = gateView.states.some((s) => s === 'Recording' || s === 'Overdubbing');
-  if (key === 'Fixed' && capturing) return 'FixedCapturing';
+  if (key === 'Fixed' && capturing()) return 'FixedCapturing';
   if (key === 'Fixed' && fakeToggles.get('Retake') === true && gateView.master > 0) return 'FixedRetake';
-  if (key === 'Retake' && capturing) return 'RetakeCapturing';
-  if (key === 'AutoRec' && capturing) return 'AutoRecCapturing';
+  if (key === 'Retake' && capturing()) return 'RetakeCapturing';
+  if (key === 'AutoRec' && capturing()) return 'AutoRecCapturing';
   if (key === 'AutoRec' && gateView.locked) return 'AutoRecLocked';
   return null;
 }
@@ -566,9 +570,40 @@ function applyToggleCommand(c: EngineCommand): void {
       toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: action.Toggle, on });
     }
   }
+  scheduleToggleAnswers();
+}
+
+function scheduleToggleAnswers(): void {
   if (togglesScheduled) return;
   togglesScheduled = true;
   queueMicrotask(flushToggles);
+}
+
+// ── The fake's tuner: on or off, as the engine owns it (not a toggle: the engine closes it on its own) ──
+
+/** The tuner as the fake holds it. A scripted frame's `Tuner` event sets it; a reset frame turns it off
+ * before its events (a reset carries `Tuner` while the engine's tuner is on). */
+let fakeTuner = false;
+
+/** Apply `c` to the fake's tuner as the engine does: the press (`{Action:'Tuner'}`, or `ActionOn` with its
+ * lane ignored) switches it, refused with `TunerCapturing` on the selected lane on the way on while a lane
+ * captures; `SetTuner` sets it (`true` while a lane captures leaves it off, unrefused). A change is
+ * answered by `Tuner`, a microtask later, in the toggles' frame (`flushToggles`); `SetTuner` to the value
+ * it has is not answered. */
+function applyTunerCommand(c: EngineCommand): void {
+  if (typeof c !== 'object') return;
+  let on: boolean;
+  if ('SetTuner' in c) on = c.SetTuner && !capturing();
+  else if (('Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null) !== 'Tuner') return;
+  else if (!fakeTuner && capturing()) {
+    toggleAnswers.push({ type: 'Refused', frame: 0, lane: gateView.selected, reason: 'TunerCapturing' });
+    scheduleToggleAnswers();
+    return;
+  } else on = !fakeTuner;
+  if (on === fakeTuner) return;
+  fakeTuner = on;
+  toggleAnswers.push({ type: 'Tuner', frame: 0, on });
+  scheduleToggleAnswers();
 }
 
 /** Hand the toggles' answers to the UI, one frame: never inside the call that sent the toggle. */
@@ -576,7 +611,7 @@ function flushToggles(): void {
   togglesScheduled = false;
   const events = toggleAnswers.splice(0);
   if (events.length === 0) return;
-  const frame: FeedFrame = { seq: 0, reset: false, catchUp: false, events, device: [], anchor: null, meter: lastMeter, peaks: [], scope: null };
+  const frame: FeedFrame = { seq: 0, reset: false, catchUp: false, events, device: [], anchor: null, meter: lastMeter, peaks: [], scope: null, tuner: null };
   for (const onFrame of engineSubscribers) onFrame(frame);
 }
 
@@ -589,6 +624,7 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
     gateView.locked = false;
     gateView.selected = 0;
     fakeToggles.clear();
+    fakeTuner = false;
     frame.settings?.forEach(applyToggleCommand);
   }
   for (const ev of frame.events) {
@@ -598,13 +634,15 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
       gateView.locked = ev.locked;
     } else if (ev.type === 'Selected') gateView.selected = ev.lane;
     else if (ev.type === 'Toggled' && !(typeof ev.toggle === 'object' && 'Live' in ev.toggle)) fakeToggles.set(toggleKey(ev.toggle), ev.on);
+    else if (ev.type === 'Tuner') fakeTuner = ev.on;
   }
 }
 
-/** A command as the fake applies it: a lane's mix, and the toggles (GO LIVE's included). */
+/** A command as the fake applies it: a lane's mix, the toggles (GO LIVE's included) and the tuner. */
 function applyCommand(c: EngineCommand): void {
   applyMixCommand(c);
   applyToggleCommand(c);
+  applyTunerCommand(c);
 }
 
 // ── The fake's GO LIVE: each slot's live flag, as the engine's overview holds it ──────────────────────
@@ -623,7 +661,7 @@ function setFakeLive(slot: 0 | 1, on: boolean): void {
   liveScheduled = true;
   queueMicrotask(() => {
     liveScheduled = false;
-    const frame: FeedFrame = { seq: 0, reset: false, catchUp: false, events: [], device: [], anchor: null, meter: lastMeter, live: [fakeLive[0], fakeLive[1]], peaks: [], scope: null };
+    const frame: FeedFrame = { seq: 0, reset: false, catchUp: false, events: [], device: [], anchor: null, meter: lastMeter, live: [fakeLive[0], fakeLive[1]], peaks: [], scope: null, tuner: null };
     for (const onFrame of engineSubscribers) onFrame(frame);
   });
 }
@@ -823,8 +861,9 @@ function runCommand(command: EngineCommand): void {
  * probe forces this fake on. Forced on, it answers `open()` with a canned device, records every batch in `sent` and hands a
  * probe-scripted frame from `emit()` to the subscribers. Not a second looper: what it answers by itself is
  * a lane's mix, reported as the engine's `Mix` once it changes (a mix command, a scripted COPY, CLEAR or
- * MUTE, a load), and a toggle (`{Action:{Toggle}}`), switched or refused as the engine's gate would on the
- * looper the scripted frames show, answered by `Toggled` or `Refused`; every other state a probe asserts
+ * MUTE, a load), a toggle (`{Action:{Toggle}}`), switched or refused as the engine's gate would on the
+ * looper the scripted frames show, answered by `Toggled` or `Refused`, and the tuner (`{Action:'Tuner'}`,
+ * `SetTuner`), answered by `Tuner` or `Refused` (`applyTunerCommand`); every other state a probe asserts
  * on is scripted.
  */
 export const webEngineFake: EngineFake = {

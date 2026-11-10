@@ -595,7 +595,7 @@ mod tests {
     // actions.ts: every action is learnable; a lane action keeps its target, a global one gets none, a
     // track that does not exist is none; HOLD only on a momentary recDub, and a latching read drops it.
     #[test]
-    fn all_25_actions_learn_with_a_target_on_lane_actions_only_and_hold_on_a_momentary_rec_dub_only() {
+    fn every_action_learns_with_a_target_on_lane_actions_only_and_hold_on_a_momentary_rec_dub_only() {
         let mut l = Learn::default();
         let t = Instant::now();
         for (n, action) in ActionId::ALL.into_iter().enumerate() {

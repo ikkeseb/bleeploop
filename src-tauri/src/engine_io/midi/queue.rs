@@ -1279,7 +1279,7 @@ mod pipeline {
 
         fn new() -> Real {
             let (engine, handle) = RealEngine::new(EngineConfig { max_loop_seconds: 2.0, ..EngineConfig::new(48_000) });
-            let EngineHandle { commands, events, slots, overview, session, scope } = handle;
+            let EngineHandle { commands, events, slots, overview, session, scope, .. } = handle;
             Real { engine, ring: commands, _handle: (events, slots, overview, session, scope), frame: 0 }
         }
 

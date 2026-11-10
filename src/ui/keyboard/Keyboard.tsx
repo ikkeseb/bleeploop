@@ -5,6 +5,7 @@ import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '..
 import { DRUM_KIT } from '../state/drum-kit';
 import type { KeyboardPlacement } from '../layout/layout-store';
 import { stageOpen } from '../stage/stage-store';
+import { looper } from '../state/audio';
 import { isBlackKey, noteName, octaveBase } from './notes';
 import './keyboard.css';
 
@@ -162,10 +163,11 @@ export function Keyboard(props: KeyboardProps = {}) {
   const heldKeyNote = new Map<string, Hold>();
   function onKeyDown(e: KeyboardEvent) {
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-    // The stage view hides the keyboard: while it is open no computer key plays a note or a pad, as
-    // with the pane hidden (this component stays mounted underneath, so its window listener would
-    // otherwise still fire). Drum mode's 1–4 then select lanes (src/app/transport-keys.ts).
-    if (stageOpen()) return;
+    // The stage view and the tuner hide the keyboard: while either is open no computer key plays a note
+    // or a pad, as with the pane hidden (this component stays mounted underneath, so its window listener
+    // would otherwise still fire). Drum mode's 1–4 then select lanes (src/app/transport-keys.ts). A note
+    // held when one opens still ends on its key-up (`onKeyUp` has no such gate).
+    if (stageOpen() || looper.tunerOn()) return;
     // Yield to text entry only: typing in a settings field (a device <select>, the BPM number box)
     // must not play — and with a track armed, record — notes. Unlike the transport yield in
     // src/app/transport-keys.ts this

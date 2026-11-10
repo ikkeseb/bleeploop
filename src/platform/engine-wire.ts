@@ -43,15 +43,17 @@ export type Refusal =
   | 'FixedRetake'
   | 'RetakeCapturing'
   | 'AutoRecCapturing'
-  | 'AutoRecLocked';
+  | 'AutoRecLocked'
+  | 'TunerCapturing';
 /** A setting a press switches (Rust `lf_engine::Toggle`): the click, END STOP, FIXED, RETAKE, AUTO REC, an
  * input send or a slot's GO LIVE. The engine switches it from the value it has when the press lands and
  * reports the value as `Toggled`. */
 export type EngineToggle = 'Click' | 'EndStop' | 'Fixed' | 'Retake' | 'AutoRec' | { Send: InputSendId } | { Live: 0 | 1 };
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
  * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release, by the number of
- * the control (0..255) whose press the release ends; `FadeAll` is FADE; `Toggle` switches a setting (as
- * `ActionOn` its lane is ignored). */
+ * the control (0..255) whose press the release ends; `FadeAll` is FADE; `Tuner` opens the tuner or closes
+ * it, from the engine's value when it lands (refused with `TunerCapturing` while a take exists, never on
+ * the way off); `Toggle` switches a setting (as `ActionOn` its lane is ignored). */
 export type EngineAction =
   | 'RecDub'
   | 'PlayStop'
@@ -69,6 +71,7 @@ export type EngineAction =
   | { Hold: number }
   | { Release: number }
   | 'FadeAll'
+  | 'Tuner'
   | { Toggle: EngineToggle };
 /** The built-in instruments by id (`src/ui/state/instruments.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
@@ -131,6 +134,7 @@ const REFUSALS: readonly Refusal[] = [
   'RetakeCapturing',
   'AutoRecCapturing',
   'AutoRecLocked',
+  'TunerCapturing',
 ];
 const UNIT_TOGGLES: readonly Extract<EngineToggle, string>[] = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec'];
 /** The unit actions; `Hold` and `Release` carry their control (`decodeAction`). */
@@ -149,6 +153,7 @@ const ACTIONS: readonly Extract<EngineAction, string>[] = [
   'CopyWide',
   'Halve',
   'FadeAll',
+  'Tuner',
 ];
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
 const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'reverb'];
@@ -235,7 +240,11 @@ export type EngineCommand =
   | { SetInputSendParam: [InputSendParamId, number] }
   /** The live scope taps on or off: the UI asks for columns while the stage view is open
    * (`ScopeUpdate`). Off (the default) the engine folds and sends nothing. */
-  | { SetScope: boolean };
+  | { SetScope: boolean }
+  /** The tuner on or off, outright: the UI sends only `false` (Escape, the tuner's close), so two quick
+   * presses never reopen it. `true` while a take exists leaves it off, with no refusal. Never kept, never
+   * replayed (no reset frame's `settings` carry it). The press is `{ Action: 'Tuner' }`. */
+  | { SetTuner: boolean };
 
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
  * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
@@ -320,7 +329,11 @@ export type EngineEvent =
   /** A toggled setting's value as the engine applies it: after an accepted `Toggle`, and whenever it differs
    * from the last one delivered (a setter changed it; a full ring delayed it). The UI shows the setting from
    * it; a reset frame's settings carry the value the host last read. */
-  | { type: 'Toggled'; frame: Frame; toggle: EngineToggle; on: boolean };
+  | { type: 'Toggled'; frame: Frame; toggle: EngineToggle; on: boolean }
+  /** The tuner's state, on every change whatever caused it (a press, `SetTuner`, a take starting, a
+   * stopped device); a reset frame carries it while the tuner is on. The UI shows the tuner exactly while
+   * the last one said on (invariant 3). Not a `Toggled`: the engine closes it on its own. */
+  | { type: 'Tuner'; frame: Frame; on: boolean };
 
 /** Rust `engine_io::DeviceEvent`, decoded to a `type`-tagged union. */
 export type DeviceEvent =
@@ -391,6 +404,16 @@ export interface ScopeUpdate {
   max: number[][];
 }
 
+/**
+ * One tuner reading (Rust `TunerUpdate`), the host's pitch detector over the inputs while the
+ * tuner is on, about 20 to 25 a second: `hz` the pitch (to 3 decimals), null when the window had none;
+ * `level` the window's RMS in dBFS (to 1 decimal), at most 0, floor -120.
+ */
+export interface TunerUpdate {
+  hz: number | null;
+  level: number;
+}
+
 /** One `engine_feed` message. */
 export interface FeedFrame {
   seq: number;
@@ -415,6 +438,9 @@ export interface FeedFrame {
   /** null: this frame carries no scope columns (the stage view is closed, or none finished since the
    * last frame). The wire leaves the field out then; a decoded frame always has it. */
   scope: ScopeUpdate | null;
+  /** null: this frame carries no tuner reading (the tuner is off, or the tick produced none; always in a
+   * reset frame). The wire leaves the field out then; a decoded frame always has it. */
+  tuner: TunerUpdate | null;
 }
 
 // ── Decoders ───────────────────────────────────────────────────────────────────────────────────────
@@ -538,6 +564,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'Mix', frame: at, lane: lane(o.lane, 'Mix.lane'), mix: decodeLaneMix(o.mix, 'Mix.mix') };
     case 'Toggled':
       return { type: 'Toggled', frame: at, toggle: decodeToggle(o.toggle, 'Toggled.toggle'), on: bool(o.on, 'Toggled.on') };
+    case 'Tuner':
+      return { type: 'Tuner', frame: at, on: bool(o.on, 'Tuner.on') };
     default:
       return fail('unknown Event variant', raw);
   }
@@ -638,6 +666,20 @@ function decodeScope(raw: unknown): ScopeUpdate {
   };
 }
 
+/** The floor of a tuner reading's level (dBFS): the host sends nothing quieter. */
+const TUNER_FLOOR_DB = -120;
+
+/** One tuner reading: a pitch above 0 Hz or null, a finite level at or above -120 dBFS. No ceiling: the
+ * host only floors it, and an over-range input reads above 0. */
+function decodeTuner(raw: unknown): TunerUpdate {
+  const o = obj(raw, 'feed.tuner');
+  const hz = o.hz === null ? null : num(o.hz, 'tuner.hz');
+  if (hz !== null && hz <= 0) fail('tuner.hz must be above 0 or null', o.hz);
+  const level = num(o.level, 'tuner.level');
+  if (level < TUNER_FLOOR_DB) fail(`tuner.level must be at or above ${TUNER_FLOOR_DB} dBFS`, o.level);
+  return { hz, level };
+}
+
 export function decodeFeedFrame(raw: unknown): FeedFrame {
   const o = obj(raw, 'feed frame');
   const device = o.device === undefined || o.device === null ? [] : Array.isArray(o.device) ? o.device : [o.device];
@@ -668,6 +710,8 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
     peaks: o.peaks === undefined || o.peaks === null ? [] : array(o.peaks, 'feed.peaks').map(decodePeaks),
     // Absent on the wire unless the stage view asked for columns and some finished.
     scope: o.scope === undefined || o.scope === null ? null : decodeScope(o.scope),
+    // Absent on the wire unless the tuner is on and the host's detector read a window this tick.
+    tuner: o.tuner === undefined || o.tuner === null ? null : decodeTuner(o.tuner),
   };
   if ('status' in o) out.status = o.status === null ? null : decodeDeviceStatus(o.status);
   if (o.settings !== undefined) out.settings = array(o.settings, 'feed.settings').map(decodeCommand);
@@ -682,7 +726,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
 
 const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff', 'Press'] as const;
 const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Clear', 'SelectTrack'] as const;
-const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope'] as const;
+const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope', 'SetTuner'] as const;
 const NUMBER_COMMANDS = [
   'SetBpm',
   'SetClickVolume',

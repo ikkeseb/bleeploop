@@ -29,6 +29,8 @@
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`scope`] | the live scope taps, while the UI asks for them ([`Command::SetScope`]): per lane after its FX, per monitor and per master, a min/max envelope in 4 ms columns on its own ring | — (engine only) |
+//! | [`tuner`] | the tuner's on flag and its tap: both slots' raw input, frame by frame, on its own ring for a pitch detector off the audio thread, with an epoch that changes wherever the input breaks | — (engine only) |
+//! | [`pitch`] | the tuner's ear, run off the audio thread by the host's feed: a pitch detector per slot input (MPM through an FFT autocorrelation, refined to a tenth of a cent) and which input is shown | — (engine only) |
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
@@ -137,6 +139,11 @@
 //!   crossfades to bypass, stops the unit once and hands it back, and an eviction hands back every unit,
 //!   a waiting install included. The slots render ahead to the next slot command, so a plugin sees one
 //!   call per block unless a stamped note, target, live flag or gain splits it there.
+//! - **The tuner mutes the monitor and nothing else** ([`tuner`]): the wet signal and the input sends glide
+//!   to silence over about 2 ms from its frame and back when it closes; loops, the click and the record
+//!   tap play on. It and a take never coexist: pressed on while one exists it is refused, and a take that
+//!   comes to exist closes it on that frame, after the frame's events, commands and session work. A
+//!   stopped device closes it too ([`Engine::punch_out`]).
 //! - **A stopped device is a punch-out** (STATUS E3, [`Engine::punch_out`]): what records ends after the
 //!   last rendered frame and commits as usual (a RETAKE roll with a kept pass commits that pass), what
 //!   has retained nothing is cancelled, and rendering resumes on the next frame with loop-end stops and
@@ -215,10 +222,12 @@ pub mod looper;
 #[cfg(debug_assertions)]
 pub mod note_record;
 pub mod overview;
+pub mod pitch;
 pub mod render;
 pub mod scope;
 pub mod session;
 pub mod slots;
+pub mod tuner;
 
 pub use api::*;
 pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};

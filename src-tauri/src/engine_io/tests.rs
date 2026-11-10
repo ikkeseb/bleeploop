@@ -1356,6 +1356,38 @@ fn the_capture_channel_changes_without_a_new_stream() {
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
 }
 
+/// What only the device side sees break the tuner's input (the feed starts its pitch analysis over at
+/// it, `Core::break_tuner`): a device that starts, from the frame it starts at; a capture channel that
+/// changes, announced before the change with no fence and then fenced a block on (ASIO) or past the
+/// join pipe's capacity (WASAPI).
+#[test]
+fn a_device_start_and_a_channel_change_break_the_tuners_input() {
+    let h = Harness::new();
+    let breaks = |h: &Harness| h.host.core.tuner_breaks.load(SeqCst);
+    let fence = |h: &Harness| h.host.core.tuner_fence.load(SeqCst);
+    let before = breaks(&h);
+    let start = h.frame();
+    h.open(asio(Some(256)));
+    assert_eq!((breaks(&h), fence(&h)), (before + 1, start), "a start breaks it at its first frame");
+    h.play(RATE / 10);
+    let (from, to) = (h.frame(), {
+        h.host.set_slot_input_channel(0, Some(0)).unwrap();
+        h.frame()
+    });
+    assert_eq!(breaks(&h), before + 3, "announced, then fenced");
+    assert!((from + 256..=to + 256).contains(&fence(&h)), "a block on from the change: {} in {}..={}", fence(&h), from + 256, to + 256);
+    assert!(h.host.set_slot_input_channel(0, Some(2)).is_err());
+    assert_eq!(breaks(&h), before + 3, "a refused change breaks nothing");
+
+    h.open(wasapi(None, None));
+    let opened = breaks(&h);
+    let from = h.frame();
+    h.host.set_slot_input_channel(1, Some(0)).unwrap();
+    let pipe = (f64::from(h.host.rate().unwrap()) * 0.5).ceil() as Frame;
+    assert_eq!(breaks(&h), opened + 2);
+    assert!(fence(&h) >= from + pipe, "past what the join pipe can hold of the old channel: {} against {}", fence(&h), from + pipe);
+}
+
 /// After another `seconds`, the device's last 64 frames (left) play `want`, each within 1e-3. A
 /// failure says what played there, as runs of one value (NaN: nothing played), and the counters.
 #[track_caller]

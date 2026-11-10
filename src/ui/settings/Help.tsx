@@ -300,6 +300,7 @@ function Manual(props: { hidden: boolean }) {
           <li>Keyboard bar: move it above / below the looper, or hide it</li>
           <li>The keyboard icon among the command bar's tools shows a hidden keyboard again</li>
           <li><span class="help__note">Stage view</span> (<kbd class="help__kbd">B</kbd>, the stage icon, or a learned pedal) fills the window with a visualizer of the loops, each track in its state's colour, with the selected track, the bar, the beat and the count-in still readable from across the room. The default look, SCOPE, draws each track's live signal after its FX, with the engine's whole output above them; ORBIT, STRATA and EMBER draw each track's recorded loop and its volume. <kbd class="help__kbd">V</kbd> or its bottom-right button switches the look. The looper keys stay live; B, Esc or the ✕ button leaves it</li>
+          <li><span class="help__note">Tuner</span> (<kbd class="help__kbd">N</kbd>, the tuning-fork icon, or a learned pedal) fills the window with a chromatic tuner (A4 = 440 Hz) and mutes the guitar while the loops and the click play on; it opens only between takes, starting one closes it, and N, Esc or the ✕ button leaves it</li>
         </ul>
       </section>
 

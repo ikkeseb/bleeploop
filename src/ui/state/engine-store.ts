@@ -25,6 +25,7 @@ import {
   type LaneState,
   type ScopeUpdate,
   type TimeSignature,
+  type TunerUpdate,
   SCOPE_SOURCES,
 } from '../../platform';
 import { firstTakeSpan, openingSpan, type LoadSessionPayload, type PeakView, type TrackState } from './looper-types';
@@ -78,7 +79,9 @@ import { confirm } from '../confirm/confirm-store';
  * Invariant 6: a frame writes a Solid signal only when its value changed; the waveform rAF reads the
  * plain mirror (`plain`) and extrapolates the playhead from the feed's clock anchor. The live scope
  * taps land in that mirror too and nowhere else (`applyScope`, read through `scopeInto`): a frame of
- * them writes no signal, and a draw loop reading them subscribes to nothing.
+ * them writes no signal, and a draw loop reading them subscribes to nothing. So do the tuner's readings
+ * (`applyTunerReading`, read through `tunerInto`); whether the tuner is on is a signal (`tunerOn`), written
+ * only from the engine's `Tuner` event and set off by every reset frame before its events.
  */
 
 /** A lane's public shape, filled from the feed's `LaneInfo`. */
@@ -216,6 +219,8 @@ const [metronome, setMetronomeSignal] = createSignal(false);
 const [clickVolume, setClickVolumeSignal] = createSignal(readStoredNumber(CLICK_KEY, 0.7, 0, 1));
 const [masterVolume, setMasterVolumeSignal] = createSignal(readStoredNumber(MASTER_KEY, 1, 0, 1));
 const [masterMuted, setMasterMutedSignal] = createSignal(false);
+/** The tuner is on, as the engine's last `Tuner` event said: never flipped by a press, never kept. */
+const [tunerOn, setTunerOnSignal] = createSignal(false);
 
 // ── The input sends (ECHO, REVERB, RING MOD on the live input): a rig setting, not a session's, so kept in
 // localStorage like the master and click levels, restored at boot and sent to an engine that lacks them ─
@@ -325,6 +330,22 @@ export interface ScopeView {
   epoch: number;
 }
 
+/**
+ * A non-reactive view of the tuner's last reading, filled into a caller-owned object by `tunerInto` so the
+ * tuner's rAF loop reads it with no allocation and no Solid subscription (invariant 6). `hz` is the
+ * pitch, null when the window had none; `level` the window's RMS in dBFS (-120 with no reading); `at`
+ * when the reading arrived, on `performance.now()`'s clock, 0 with none held: the reading is dropped when
+ * the tuner goes off and on a reset frame.
+ */
+export interface TunerReading {
+  hz: number | null;
+  level: number;
+  at: number;
+}
+
+/** A tuner reading's level when none is held (the wire's floor, dBFS). */
+const TUNER_SILENT_DB = -120;
+
 const plain = {
   state: Array.from({ length: ENGINE_LANES }, (): TrackState => 'EMPTY'),
   waiting: Array.from({ length: ENGINE_LANES }, () => false),
@@ -375,6 +396,9 @@ const plain = {
     bin: 0,
     epoch: 0,
   },
+  /** The tuner as the last `Tuner` event left it, and its last reading (`TunerReading`): written by
+   * `setTuner` and `applyTunerReading`, read by `tunerInto`. */
+  tuner: { on: false, hz: null as number | null, level: TUNER_SILENT_DB, at: 0 },
   /** Per lane, bumped when its committed loop may have changed: a waveform update while it neither
    * records nor overdubs, and the end of a take or layer. Still while a layer sums, whose snapshot is
    * the loop before it (`engineSession.revision`). */
@@ -510,6 +534,35 @@ function scopeInto(out: ScopeView): ScopeView {
   return out;
 }
 
+function tunerInto(out: TunerReading): TunerReading {
+  const t = plain.tuner;
+  out.hz = t.hz;
+  out.level = t.level;
+  out.at = t.at;
+  return out;
+}
+
+/** The tuner on or off as the engine said (`Tuner`, or a reset frame's off): off drops the reading. */
+function setTuner(on: boolean): void {
+  plain.tuner.on = on;
+  if (!on) {
+    plain.tuner.hz = null;
+    plain.tuner.level = TUNER_SILENT_DB;
+    plain.tuner.at = 0;
+  }
+  setTunerOnSignal(on);
+}
+
+/** A frame's tuner reading into the mirror, stamped with its arrival. One that comes while the tuner is
+ * off (a tick the host analysed as it closed) is dropped. */
+function applyTunerReading(u: TunerUpdate): void {
+  const t = plain.tuner;
+  if (!t.on) return;
+  t.hz = u.hz;
+  t.level = u.level;
+  t.at = performance.now();
+}
+
 // ── The feed reducer ──────────────────────────────────────────────────────────────────────────────
 
 type EventListener = (ev: EngineEvent) => void;
@@ -618,6 +671,9 @@ function applyEvent(ev: EngineEvent): void {
       break;
     case 'Toggled':
       applyToggle(ev.toggle, ev.on);
+      break;
+    case 'Tuner':
+      setTuner(ev.on);
       break;
   }
 }
@@ -790,6 +846,9 @@ function applyFrameNow(f: FeedFrame): void {
     for (const [, setCounted] of counted) setCounted(false);
     setCountLeft(0);
     for (let i = 0; i < ENGINE_LANES; i++) cancelOverlays(i);
+    // The tuner is not kept: a reset frame carries the engine's `Tuner` while it is on, and an engine
+    // without one (a new engine, a rebuild) has it off.
+    setTuner(false);
   }
   // The device and its clock first: the anchor is read after the frame's events, so a take the events
   // start snaps to the grid it carries.
@@ -832,6 +891,9 @@ function applyFrameNow(f: FeedFrame): void {
   }
   for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max, f.catchUp);
   if (f.scope) applyScope(f.scope);
+  // After the frame's events: a reading in the frame that turned the tuner on is shown, one in the frame
+  // that turned it off is not.
+  if (f.tuner) applyTunerReading(f.tuner);
 }
 
 /** Slot `slot`'s input level in the last frame (linear), at least 1 if it carried a clip. */
@@ -1272,6 +1334,14 @@ export const engineLooper = {
    * engine gets it back, while `adoptSettings` ignores it: the owner sends the state it wants after
    * the feed's first reset instead of trusting the engine's. */
   setScope: (on: boolean): Promise<boolean> => sendEngine({ SetScope: on }),
+  /** The tuner is on, as the engine's `Tuner` said: the tuner overlay shows exactly while it is. Its press
+   * is the `tunerToggle` action (`src/app/actions.ts`: N, the command bar's key, a learned pedal). */
+  tunerOn,
+  /** Close the tuner outright (`SetTuner(false)`): Escape and the tuner's own close. Two quick ones never
+   * reopen it, as two presses would; the overlay closes on the engine's `Tuner`. */
+  closeTuner: (): void => void sendEngine({ SetTuner: false }),
+  /** The tuner's last reading, for its draw loop (`TunerReading`): no signal read. */
+  tunerInto,
   phaseValue,
   /** The input level (linear; at least 1 while the last frame carried a clip): slot `slot`'s, else the
    * louder slot's (the command bar's meter). */

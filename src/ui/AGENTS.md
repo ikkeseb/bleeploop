@@ -53,7 +53,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   the BPM and sample-rate signals only when the master loop's length changes, and caches the bar
   count (`waveform.ts` `rasterise`); the meter's beats a bar reach it plain (`setGridBeats`). The stage view's own loop (`stage/stage-loop.ts`) holds the same
   line through a plain feed that Solid effects write. `verify/guards/stage-draw.mjs` checks both loops,
-  the grid's exception by name and only inside its master-length gate.
+  the grid's exception by name and only inside its master-length gate, and the tuner's
+  (`tuner/tuner-loop.ts`), which tells its Solid side the note, the in-tune state and the no-signal
+  state through a callback, on change only. The tuner overlay shows exactly while the feed's last
+  `Tuner` event said on (every reset frame turns it off before its events apply); Esc and its close
+  send `SetTuner(false)`, never a local flip.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
 - **A stage look draws two layers** (`src/ui/stage/`): the lane's recorded contour, dim and static,
   from `stage/visual.ts`'s shared helpers, and over it, where the look has them, the engine's live

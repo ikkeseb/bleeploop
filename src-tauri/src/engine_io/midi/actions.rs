@@ -6,8 +6,9 @@
 //!   (`Command::Action`, never the UI's copy of the selection), or `Command::ActionOn` a named lane. A
 //!   named REC/DUB selects its lane first (`SelectTrack`, as `looper.selectTrack(target)` does), so the
 //!   transport keys follow the take; another named action leaves the selection alone. HALVE is `Halve`.
-//! - **NEXT/PREV TRACK, PLAY ALL, STOP ALL, FADE and the eight toggles are the engine's own actions.**
-//!   A toggle is a looper press itself (it disarms a pending CLEAR), so it goes with no `Press`.
+//! - **NEXT/PREV TRACK, PLAY ALL, STOP ALL, FADE, the eight toggles and the tuner are the engine's own
+//!   actions.** A toggle and the tuner's press are looper presses themselves (each disarms a pending
+//!   CLEAR), so they go with no `Press`. A tuner pedal latches: one press on, the next off.
 //! - **GO LIVE and TAP stay the UI's:** a `Press` tells the engine a looper press came, and the UI runs
 //!   the action on its event. The stage view and its next look are no looper presses: an event only,
 //!   nothing for the engine, so a pending CLEAR and a lane cue outlive them.
@@ -68,6 +69,7 @@ fn engine_global(action: ActionId) -> Option<Action> {
         ActionId::InFxEcho => Action::Toggle(Toggle::Send(InputSend::Echo)),
         ActionId::InFxReverb => Action::Toggle(Toggle::Send(InputSend::Reverb)),
         ActionId::InFxRing => Action::Toggle(Toggle::Send(InputSend::Ring)),
+        ActionId::TunerToggle => Action::Tuner,
         _ => return None,
     })
 }
@@ -132,8 +134,9 @@ pub(crate) fn run(fire: Fire) -> Run {
 /// Where one of the UI's engine commands (`input_send`'s) goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiRoute {
-    /// An input command (a looper press, `Press`, `SelectTrack`, a toggle): the one queue, in order
-    /// with the pedals, under the same no-device rule.
+    /// An input command (a looper press, `Press`, `SelectTrack`, a toggle, the tuner's press and its
+    /// setter): the one queue, in order with the pedals, under the same no-device rule (but for the
+    /// tuner's close: `MidiHost::ui_commands`).
     Queue,
     /// A note, a wheel, the note target or a panic: the router's alone (one ordered path into the
     /// engine). Refused here: sent past the router it would break note ownership.
@@ -167,7 +170,8 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::Action(_)
         | Command::ActionOn(..)
         | Command::Press
-        | Command::SelectTrack(_) => UiRoute::Queue,
+        | Command::SelectTrack(_)
+        | Command::SetTuner(_) => UiRoute::Queue,
         Command::NoteOn(..)
         | Command::NoteOff(_)
         | Command::PitchBend(_)
@@ -214,8 +218,8 @@ mod tests {
         run.out.iter().map(|o| o.command).collect()
     }
 
-    // actions.ts runAction, pressHold and releaseHold, row by row: all 26 actions on the selected lane
-    // and, for the eight lane actions, on a named one; HOLD's press both ways and its release.
+    // actions.ts runAction, pressHold and releaseHold, row by row: all 27 actions on the selected lane
+    // and, for the nine lane actions, on a named one; HOLD's press both ways and its release.
     #[test]
     fn the_fire_table() {
         use ActionId::*;
@@ -260,6 +264,7 @@ mod tests {
             (Fire::Run { action: InFxEcho, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Echo))), pressed()),
             (Fire::Run { action: InFxReverb, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Reverb))), pressed()),
             (Fire::Run { action: InFxRing, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Ring))), pressed()),
+            (Fire::Run { action: TunerToggle, target: None }, a(Action::Tuner), pressed()),
             (Fire::HoldPress { target: None, control: 3 }, a(Action::Hold(3)), pressed()),
             (Fire::HoldPress { target: Some(4), control: 3 }, vec![Command::SelectTrack(4), Command::ActionOn(4, Action::Hold(3))], pressed()),
             (Fire::HoldRelease { control: 3 }, a(Action::Release(3)), vec![]),
@@ -285,6 +290,7 @@ mod tests {
         assert_eq!(classes(Fire::HoldPress { target: Some(1), control: 0 }), [Class::Action, Class::HoldPress]);
         assert_eq!(classes(Fire::HoldRelease { control: 0 }), [Class::HoldRelease]);
         assert_eq!(classes(Fire::Run { action: ActionId::ClickToggle, target: None }), [Class::Action]);
+        assert_eq!(classes(Fire::Run { action: ActionId::TunerToggle, target: None }), [Class::Action]);
     }
 
     // The UI's input commands join the queue; the router's commands are refused there; a setting and
@@ -308,6 +314,8 @@ mod tests {
             Command::ActionOn(2, Action::RecDub),
             Command::Press,
             Command::SelectTrack(3),
+            Command::Action(Action::Tuner),
+            Command::SetTuner(false),
         ];
         let router = [
             Command::NoteOn(60, 0.5),

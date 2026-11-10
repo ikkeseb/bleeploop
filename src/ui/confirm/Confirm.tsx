@@ -1,4 +1,4 @@
-import { For, Show, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, onCleanup, onMount } from 'solid-js';
 import { pendingConfirm, type PendingConfirm } from './confirm-store';
 import './confirm.css';
 
@@ -19,23 +19,44 @@ import './confirm.css';
  * cannot be read here (the list's own keys make a mouse-opened select match `:focus-visible`, measured
  * in the sample-rate probe), so every select gives way: a keyboard player is one Tab from the panel's
  * controls again.
+ *
+ * `suspended` (the tuner is on, `src/app.tsx`): the ask steps aside, its question kept: not shown, inert,
+ * taking no key and no focus, so the tuner's Escape and the transport keys reach it. When it ends the ask
+ * is back as it was, focus on its button. An ask that arrives suspended takes focus when it ends, and
+ * learns where to send it back from the first focus move it pulls in (the app's return from the tuner).
  */
-export function Confirm() {
-  return <Show when={pendingConfirm()}>{(ask) => <ConfirmDialog ask={ask()} />}</Show>;
+export function Confirm(props: { suspended: boolean }) {
+  return <Show when={pendingConfirm()}>{(ask) => <ConfirmDialog ask={ask()} suspended={props.suspended} />}</Show>;
 }
 
-function ConfirmDialog(props: { ask: PendingConfirm }) {
+/** Where focus goes back to once the ask is answered, from where it was. */
+function backFrom(at: Element | null): HTMLElement | null {
+  if (!(at instanceof HTMLElement)) return null;
+  return at instanceof HTMLSelectElement ? at.closest<HTMLElement>('[tabindex="-1"]') : at;
+}
+
+function ConfirmDialog(props: { ask: PendingConfirm; suspended: boolean }) {
+  let root!: HTMLDivElement;
   let no!: HTMLButtonElement;
   let yes!: HTMLButtonElement;
-  const at = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const back = at instanceof HTMLSelectElement ? at.closest<HTMLElement>('[tabindex="-1"]') : at;
+  const late = props.suspended; // mounted under the tuner: `back` is learned when it ends
+  let back = late ? null : backFrom(document.activeElement);
+  let learn = late;
   let held: HTMLButtonElement | undefined; // the button focus belongs on
   const onFocusIn = (e: FocusEvent) => {
+    if (props.suspended) return;
     if (e.target === yes) held = yes;
     else if (e.target === no) held = no;
-    else held?.focus();
+    else {
+      if (learn && e.target instanceof Node && !root.contains(e.target)) {
+        learn = false;
+        back = backFrom(e.target as Element);
+      }
+      (held ?? no).focus();
+    }
   };
   const onKeyDown = (e: KeyboardEvent) => {
+    if (props.suspended) return;
     e.stopPropagation();
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -48,15 +69,27 @@ function ConfirmDialog(props: { ask: PendingConfirm }) {
   onMount(() => {
     window.addEventListener('keydown', onKeyDown, { capture: true });
     document.addEventListener('focusin', onFocusIn, { capture: true });
-    no.focus();
+    if (!props.suspended) no.focus();
   });
+  // Back from suspension: focus returns to the button that had it (or no, for an ask that arrived suspended).
+  createEffect<boolean>((was) => {
+    const now = props.suspended;
+    if (was && !now) (held ?? no).focus();
+    return now;
+  }, late);
   onCleanup(() => {
     window.removeEventListener('keydown', onKeyDown, { capture: true });
     document.removeEventListener('focusin', onFocusIn, { capture: true });
-    if (back?.isConnected && back !== document.body) back.focus();
+    if (!props.suspended && back?.isConnected && back !== document.body) back.focus();
   });
   return (
-    <div class="confirm" onClick={() => props.ask.answer(false)}>
+    <div
+      class="confirm"
+      classList={{ 'confirm--suspended': props.suspended }}
+      inert={props.suspended}
+      ref={root}
+      onClick={() => props.ask.answer(false)}
+    >
       <div
         class="confirm__panel"
         role="alertdialog"

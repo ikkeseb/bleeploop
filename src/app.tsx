@@ -15,6 +15,7 @@ import { Toasts } from './ui/toast/Toasts';
 import { Confirm } from './ui/confirm/Confirm';
 import { StageView } from './ui/stage/StageView';
 import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
+import { TunerView } from './ui/tuner/TunerView';
 import * as layoutStore from './ui/layout/layout-store';
 import { installFrontendLogPipe, platform } from './platform';
 import { looper } from './ui/state/audio';
@@ -24,6 +25,7 @@ import { installCloseGuard } from './app/close-guard';
 import { checkForUpdate, updateOffered } from './app/update';
 import { installCmdFit } from './app/cmd-fit';
 import { installMidiActions } from './app/midi-actions';
+import { runAction } from './app/actions';
 import { installTransportKeys, type TransportKeys } from './app/transport-keys';
 import { installLfDebug } from './debug/lf';
 
@@ -125,6 +127,41 @@ export function App() {
     } else if (prevOpen && !lastInputWasPointer()) transportKeys?.returnFocus(stageBtn);
     return open;
   }, false);
+  // The tuner (`src/ui/tuner/`) shows exactly while the engine says it is on: a press, a pedal or the engine
+  // itself (a take, a stopped device) opens and closes it, so it hides the popovers as the stage view
+  // does, takes focus, and hands focus back where it was when it closes, however it closed. The return
+  // waits a microtask, past this frame's inert switch, and resolves the target then, on every close path:
+  // the element saved at open if it is still connected, visible and not inert (opening the tuner closes
+  // the popovers, which unmounts what had focus in them, and a stage view opened under the tuner leaves the
+  // command bar inert); else the stage view's root while it is open; else the TUNER key. It goes through
+  // `returnFocus` so Space and Enter on a returned button still drive the looper. A pending ask (the
+  // confirm, suspended while the tuner is on) pulls the focus to itself and learns this target as its own.
+  let tunerReturn: Element | null = null;
+  let tunerBtn: HTMLButtonElement | undefined;
+  const focusable = (el: Element | null | undefined): el is HTMLElement =>
+    el instanceof HTMLElement &&
+    el !== document.body &&
+    el.isConnected &&
+    el.checkVisibility({ visibilityProperty: true }) &&
+    !el.closest('[inert]');
+  createEffect<boolean>((prevOpen) => {
+    const open = looper.tunerOn();
+    if (open && !prevOpen) {
+      tunerReturn = document.activeElement;
+      setSettingsOpen(false);
+      setHelpOpen(false);
+      setUpdateOpen(false);
+    } else if (!open && prevOpen) {
+      const back = tunerReturn;
+      tunerReturn = null;
+      queueMicrotask(() => {
+        if (looper.tunerOn()) return;
+        const stage = stageOpen() ? document.querySelector('.sv') : null;
+        transportKeys?.returnFocus(focusable(back) ? back : focusable(stage) ? stage : tunerBtn);
+      });
+    }
+    return open;
+  }, false);
   // The live scope taps (`SetScope`): the engine folds and sends columns only while a look that draws
   // them shows, and nothing else in the app sends that command. The ask lives HERE, in the always
   // mounted owner, not in `StageView.tsx`: `Key::Scope` is a remembered host setting that a rebuilt
@@ -171,7 +208,13 @@ export function App() {
     // depends on what is focused or mounted.
     transportKeys = installTransportKeys({
       onEscape: () => {
-        // A pending MIDI learn takes the Escape first; the panel it was started from stays open.
+        // The tuner takes the Escape before anything else: it asks the engine to close it (an outright
+        // off, so a second quick Escape never reopens it), and the overlay leaves on the engine's answer.
+        if (looper.tunerOn()) {
+          looper.closeTuner();
+          return;
+        }
+        // A pending MIDI learn takes the Escape next; the panel it was started from stays open.
         if (cancelLearn()) return;
         if (settingsOpen()) setSettingsOpen(false);
         if (helpOpen()) setHelpOpen(false);
@@ -325,13 +368,13 @@ export function App() {
   };
 
   return (
-    <div class="app" classList={{ 'app--staged': stageOpen() }}>
+    <div class="app" classList={{ 'app--staged': stageOpen() || looper.tunerOn() }}>
       {/* Command bar — ONE card combining brand, system lamp, transport, and tool icons. Left→right:
           brand · system lamp · (Transport fragment: BPM · TAP · CLICK/FIXED · loop ring-dial · END STOP · ■/✕ ALL ·
           IN FX · spacer · master) · tool icons. Host/engine/plugin/midi detail lives in the Audio
           Settings diagnostics block; the lamp is their at-a-glance aggregate and its title lists all
           four. */}
-      <header class="cmd" inert={stageOpen()} ref={(el) => onCleanup(installCmdFit(el))}>
+      <header class="cmd" inert={stageOpen() || looper.tunerOn()} ref={(el) => onCleanup(installCmdFit(el))}>
         <span class="brand">
           <i class="brand__dot" aria-hidden="true" />
           <span class="brand__word">
@@ -436,6 +479,22 @@ export function App() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
               <rect x="3" y="4" width="18" height="16" rx="2" />
               <path d="M7 9h2M7 12h2M7 15h2M12 9h5M12 12h5M12 15h5" stroke-linecap="round" />
+            </svg>
+          </button>
+          {/* Tuner — the full-window tuner (`src/ui/tuner/`); also the N key and a learnable pedal (the
+              `tunerToggle` action, which this key runs). Engaged = the engine says it is on. A tuning fork. */}
+          <button
+            ref={tunerBtn}
+            type="button"
+            class="tool tool--tuner"
+            classList={{ 'tool--on': looper.tunerOn() }}
+            aria-label="Tuner"
+            aria-pressed={looper.tunerOn()}
+            title="Tuner (N)"
+            onClick={() => runAction('tunerToggle')}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+              <path d="M8.5 3v7.5a3.5 3.5 0 0 0 7 0V3M12 14v7" />
             </svg>
           </button>
           {/* Help / shortcuts — universal (the keyboard play map applies in every build), so unlike the
@@ -544,18 +603,27 @@ export function App() {
           reach only console.error (invisible in a release WebView2 build). Rendered once, above the
           popovers; pointer-transparent so the play path stays live behind it. */}
       <Toasts />
-      <Confirm />
+      <Confirm suspended={looper.tunerOn()} />
 
       {/* The stage view: a full-window layer over the command bar and the stage below, which stay mounted
           (no pane remounts, the looper keeps drawing) but go inert and unpainted while it is open. */}
       <Show when={stageOpen()}>
-        <StageView onExit={() => setStageOpen(false)} />
+        {/* inert under the tuner, which covers it */}
+        <div class="sv-host" inert={looper.tunerOn()}>
+          <StageView onExit={() => setStageOpen(false)} />
+        </div>
+      </Show>
+
+      {/* The tuner: a full-window layer over the stage view too, shown exactly while the engine's last
+          `Tuner` said on (`looper.tunerOn`). Its close sends the engine's off and waits for the answer. */}
+      <Show when={looper.tunerOn()}>
+        <TunerView onClose={looper.closeTuner} />
       </Show>
 
       {/* The stage is a vertical SplitStack of resizable regions; the keyboard slots in above the looper,
           below it, or is hidden (restore from the command-bar piano cap). Each region resizes by dragging the
           divider between it and its neighbour. */}
-      <main class="stage" inert={stageOpen()}>
+      <main class="stage" inert={stageOpen() || looper.tunerOn()}>
         <SplitStack
           orientation="vertical"
           panels={stagePanels()}

@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | this file | [`MidiHost`] and its UI calls, [`Core`] (the state every thread shares, under one lock), which stored bindings are live, the timers, the UI events | `src/ui/state/midi.ts` (glue) |
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` (removed) |
-//! | `bindings` | [`Binding`], the 26 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
+//! | `bindings` | [`Binding`], the 27 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
 //! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
 //! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts` (removed), `instrument.ts` `routeEngine` |
@@ -1161,8 +1161,11 @@ impl MidiHost {
     }
 
     /// A batch of the UI's engine commands (`input_send`'s), in order. Its input commands (looper
-    /// presses, `Press`, `SelectTrack`, toggles) join the one queue, a run of them as one batch, and while
-    /// no device runs they are dropped, as a pedal's are; a setting goes straight to the engine, and may
+    /// presses, `Press`, `SelectTrack`, toggles, the tuner's press and setter) join the one queue, a run of
+    /// them as one batch, and while no device runs they are dropped, as a pedal's are, and answered so; but
+    /// the tuner's close (`SetTuner(false)`, Escape and the overlay's close) is dropped then with no answer:
+    /// a stopped device has closed the tuner already (`Engine::punch_out`), and a rebuild's engine starts
+    /// with it off, so there is nothing to tell the player. A setting goes straight to the engine, and may
     /// overtake input still queued behind a full ring. GO LIVE's toggle goes straight there too, so no
     /// live operation overtakes another (`actions::UiRoute::Live`); dropped while no device runs or the
     /// ring is full. A note, a wheel, the note target or a panic is
@@ -1177,6 +1180,9 @@ impl MidiHost {
         let mut run: Vec<Out> = Vec::new();
         for command in commands {
             let route = actions::ui_route(&command);
+            if command == Command::SetTuner(false) && !self.core.engine.running() {
+                continue;
+            }
             if route == UiRoute::Queue {
                 run.push(Out::new(command));
                 continue;

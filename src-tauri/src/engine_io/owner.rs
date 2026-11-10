@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use lf_engine::grid::Frame;
 use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -67,7 +68,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     if let Some(hook) = &hook {
         hook.pause();
     }
-    let EngineHandle { commands, events, slots, overview, session, scope } = handle;
+    let EngineHandle { commands, events, slots, overview, session, scope, tuner } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
     core.max_block.store(config.max_block as u32, Relaxed);
@@ -132,7 +133,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             settings.record(command);
         }
         let scope_bin = lf_engine::scope::scope_bin_frames(config.sample_rate) as u32;
-        let ends = ends.insert(Ends { commands, pushed: 0, events, overview, session: Some(session), scope, scope_bin });
+        let ends = ends.insert(Ends { commands, pushed: 0, events, overview, session: Some(session), scope, scope_bin, tuner, rate: config.sample_rate });
         let replay: Vec<_> = settings.replay().collect();
         let made = core.engine_gen.fetch_add(1, Release) + 1;
         debug_assert_eq!(made, generation, "another thread raised the engine generation mid-swap");
@@ -678,6 +679,9 @@ impl<D: Driver> Owner<D> {
             })?),
         };
         let wiring = Wiring::new(self.core.clone(), run.clone(), join);
+        // Another device's input from here on: the frame counter carries over, so the tuner's tap would
+        // splice it onto the last device's without a break the engine could see.
+        self.core.break_tuner(self.core.frame.load(Relaxed));
         // Up before the first callback, and raised under the engine lock: a slot host servicing its
         // port finishes first, and one waiting for the lock finds it up and waits on its port instead
         // of taking the lock from under the callback (a lock miss).
@@ -914,9 +918,11 @@ impl<D: Driver> Owner<D> {
     fn set_input_channels(&mut self, channels: [Option<u32>; SLOT_COUNT]) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
         let resolved = open_channels(&active.spec, channels);
+        self.core.break_tuner(Frame::MAX);
         active.run.set_slot_channels(resolved);
         active.request.input_channels = channels;
         self.publish_channels(resolved);
+        self.break_tuner_input();
         Ok(())
     }
 
@@ -934,10 +940,27 @@ impl<D: Driver> Owner<D> {
             Err(_) if active.spec.in_channels == 0 => 0,
             pick => pick?,
         };
+        self.core.break_tuner(Frame::MAX);
         active.run.set_slot_channels(picks);
         active.request.input_channels[slot] = channel;
         self.publish_channels(picks);
+        self.break_tuner_input();
         Ok(())
+    }
+
+    /// A capture channel changed under the running device (announced before the change with no fence,
+    /// `Frame::MAX`, so a feed tick that drains between the two skips what it drained): the tuner's tap
+    /// carries the new one from the frame after the next block the output renders (that block's input
+    /// may have been read before the change), and on WASAPI only past what the join pipe can still hold
+    /// of the old one, its whole capacity: a bound, not a measure, so the tuner reads nothing for up to
+    /// half a second after the change.
+    fn break_tuner_input(&self) {
+        let Some(active) = self.active.as_ref() else { return };
+        let mut fence = self.core.frame.load(Relaxed) + Frame::from(active.block);
+        if !active.spec.backend.is_asio() {
+            fence += (active.spec.rate as f64 * JOIN_CAPACITY_SECONDS).ceil() as Frame;
+        }
+        self.core.break_tuner(fence);
     }
 
     /// The channels each slot reads now, into the status.

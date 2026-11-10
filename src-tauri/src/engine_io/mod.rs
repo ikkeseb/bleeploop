@@ -110,6 +110,12 @@
 //! - **The scope's ring is drained every feed tick, whatever the feed sends** (`lf_engine::scope`,
 //!   `feed.rs`): held, unsubscribed or on a reset frame the columns are dropped and the UI is told its
 //!   trace broke. A ring left to fill would make the next batch a replay of seconds of old sound.
+//! - **The tuner's ring too** (`lf_engine::tuner`), under the same acquisition, into storage the feed
+//!   preallocated; the pitch analysis (`lf_engine::pitch::Ear`) runs on the feed thread after both
+//!   locks are released, never under them. A tick that does not send, and the first after it, analyse
+//!   nothing: no reading from old input. The engine breaks the tap's epoch where it can see the input
+//!   break; where only the device side can (a slot's capture channel changed, a device started), the
+//!   owner says so (`Core::break_tuner`), with the first device frame surely read from the new input.
 //! - **cpal is pinned at `=0.18.1`:** the callback order the Stage 1 A1 run proved is read from
 //!   asio-sys 0.3.0; 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs its own A1 rerun.
 //!
@@ -161,6 +167,7 @@ use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
+use lf_engine::tuner::TunerFrame;
 use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
@@ -497,7 +504,7 @@ impl IoDiag {
 
     /// The glitch diagnostics that count, by name: not faults (no probe fails on them), but the release
     /// log and the probe show them beside the faults.
-    fn diagnostics(&self) -> [(&'static str, u64); 4] {
+    fn diagnostics(&self) -> [(&'static str, u64); 5] {
         [
             ("asio_phase_slips", self.asio_phase_slips),
             ("asio_late_finishes", self.asio_late_finishes),
@@ -505,6 +512,9 @@ impl IoDiag {
             // Scope columns the audio thread could not publish (a reader that stopped reading, a
             // device-frame skip): the UI redraws from the gap, so it is no fault.
             ("engine.scope_dropped", self.engine.scope_dropped),
+            // Tuner frames the full ring refused (a reader that stopped reading): the epoch tells the
+            // feed where its input broke, so it is no fault either.
+            ("engine.tuner_dropped", self.engine.tuner_dropped),
         ]
     }
 
@@ -563,6 +573,23 @@ pub(crate) struct Ends {
     /// column of this engine covers.
     pub(crate) scope: Consumer<ScopeBin>,
     pub(crate) scope_bin: u32,
+    /// The tuner's tap (`lf_engine::tuner`): both slots' raw input while the tuner is on, drained by the
+    /// feed every tick with the scope; and this engine's sample rate, which the feed's pitch analysis
+    /// is built for.
+    pub(crate) tuner: Consumer<TunerFrame>,
+    pub(crate) rate: u32,
+}
+
+/// What one feed drain read under `settings` and `ends`, besides the events and taps it moved out.
+pub(crate) struct FeedDrain {
+    /// The engine generation the drain read (`Core::engine_gen`).
+    pub(crate) gen: u64,
+    /// That engine's overview; `None` while no engine exists.
+    pub(crate) overview: Option<Arc<Overview>>,
+    /// The frames one scope column of that engine covers (0: no engine).
+    pub(crate) scope_bin: u32,
+    /// That engine's sample rate (0: no engine).
+    pub(crate) rate: u32,
 }
 
 /// Who takes `settings` or `ends` (`lock_at`): the input path (`EngineHost::send_all`), the feed
@@ -631,6 +658,11 @@ pub(crate) struct Core {
     /// whether a sample reached full scale.
     pub(crate) meter_peak: [AtomicU32; SLOT_COUNT],
     pub(crate) meter_clip: [AtomicBool; SLOT_COUNT],
+    /// The tuner's input broke where the engine cannot see it (`Core::break_tuner`): raised by the owner
+    /// once `tuner_fence` holds the first device frame surely read from the new input. The feed resets
+    /// its pitch analysis on a change and skips the tap's frames before the fence.
+    pub(crate) tuner_breaks: AtomicU64,
+    pub(crate) tuner_fence: AtomicI64,
     /// One session job at a time (`session.rs`), and the jobs an earlier call gave up on that are still
     /// in the engine of that generation: (generation, count).
     pub(crate) session_busy: Mutex<(u64, usize)>,
@@ -725,6 +757,8 @@ impl Core {
             input_frames: AtomicI64::new(0),
             meter_peak: [const { AtomicU32::new(0) }; SLOT_COUNT],
             meter_clip: [const { AtomicBool::new(false) }; SLOT_COUNT],
+            tuner_breaks: AtomicU64::new(0),
+            tuner_fence: AtomicI64::new(0),
             session_busy: Mutex::new((0, 0)),
             #[cfg(test)]
             session_sent: AtomicU64::new(0),
@@ -740,6 +774,14 @@ impl Core {
 
     pub(crate) fn rate(&self) -> Option<u32> {
         Some(self.rate.load(Relaxed)).filter(|&r| r != 0)
+    }
+
+    /// The tuner's input breaks here, unseen by the engine (a slot's capture channel changed, a device
+    /// starts): from device frame `fence` on, the tap carries only the new input. The feed's pitch
+    /// analysis starts over and skips the frames before it (`feed.rs`).
+    pub(crate) fn break_tuner(&self, fence: Frame) {
+        self.tuner_fence.store(fence, Relaxed);
+        self.tuner_breaks.fetch_add(1, AcqRel);
     }
 
     /// Some lane of the engine holds audio, or will: any lane not EMPTY (a loop, a take in flight or
@@ -792,6 +834,7 @@ pub(crate) struct EngineDiag {
     slot_events_dropped: AtomicU64,
     slot_protocol_errors: AtomicU64,
     scope_dropped: AtomicU64,
+    tuner_dropped: AtomicU64,
 }
 
 impl EngineDiag {
@@ -802,6 +845,7 @@ impl EngineDiag {
         self.slot_events_dropped.store(d.slot_events_dropped, Relaxed);
         self.slot_protocol_errors.store(d.slot_protocol_errors, Relaxed);
         self.scope_dropped.store(d.scope_dropped, Relaxed);
+        self.tuner_dropped.store(d.tuner_dropped, Relaxed);
     }
 
     fn load(&self) -> lf_engine::Diag {
@@ -812,6 +856,7 @@ impl EngineDiag {
             slot_events_dropped: self.slot_events_dropped.load(Relaxed),
             slot_protocol_errors: self.slot_protocol_errors.load(Relaxed),
             scope_dropped: self.scope_dropped.load(Relaxed),
+            tuner_dropped: self.tuner_dropped.load(Relaxed),
         }
     }
 }
@@ -1074,16 +1119,10 @@ impl EngineHost {
     /// came from and its overview (`None` while no engine exists), read under the same lock.
     #[cfg(any(debug_assertions, test))]
     pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
-        let (gen, overview, _) = self.drain_feed_scope(out, None);
+        let FeedDrain { gen, overview, .. } = self.drain_feed_taps(out, None, None);
         (gen, overview)
     }
 
-    /// [`EngineHost::drain_feed`] and, with `columns`, the engine's finished scope columns, oldest
-    /// first, and the frames one of them covers. One acquisition of `settings` and `ends` for both:
-    /// `ends` is the lock the player's own `input_send` batch takes, so the feed takes it once a tick,
-    /// and a second acquisition could straddle a rebuild and mix one engine's events with another's
-    /// columns. The feed drains the columns every tick, whatever it sends: a ring left to fill would
-    /// make the next batch a replay of seconds of old sound.
     /// With no device running nothing renders, so nothing offers again what the full event ring refused at
     /// the stop (`Engine::publish_idle`): do it here, under the engine lock, as a slot host services its
     /// port (`SlotHost::service_if_idle`). The feed calls it every tick, before it drains.
@@ -1104,24 +1143,47 @@ impl EngineHost {
         }
     }
 
-    pub(crate) fn drain_feed_scope(&self, out: &mut Vec<Event>, columns: Option<&mut Vec<ScopeBin>>) -> (u64, Option<Arc<Overview>>, u32) {
+    /// [`EngineHost::drain_feed`] and the engine's taps: with `columns`, its finished scope columns,
+    /// oldest first; with `tuner`, the tuner's frames, oldest first, up to the storage's capacity (it
+    /// never grows here: the feed sizes it for the engine's ring, `lf_engine::tuner::tuner_capacity`, so
+    /// one drain empties a full ring; storage still sized for a smaller ring takes what fits, and the
+    /// rest is discarded). One acquisition of `settings` and `ends` for all three: `ends` is
+    /// the lock the player's own `input_send` batch takes, so the feed takes it once a tick, and a second
+    /// acquisition could straddle a rebuild and mix one engine's events with another's taps. The feed
+    /// drains the taps every tick, whatever it sends: a ring left to fill would make the next batch a
+    /// replay of seconds of old sound. Nothing is analysed here: the feed reads the tuner's frames after
+    /// both locks are released.
+    pub(crate) fn drain_feed_taps(&self, out: &mut Vec<Event>, columns: Option<&mut Vec<ScopeBin>>, tuner: Option<&mut Vec<TunerFrame>>) -> FeedDrain {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
-        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return (self.core.engine_gen.load(Acquire), None, 0) };
+        let none = |gen| FeedDrain { gen, overview: None, scope_bin: 0, rate: 0 };
+        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return none(self.core.engine_gen.load(Acquire)) };
         let gen = self.core.engine_gen.load(Acquire);
-        let Some(ends) = ends.as_mut() else { return (gen, None, 0) };
+        let Some(ends) = ends.as_mut() else { return none(gen) };
         drain(&mut settings, &mut ends.events, gen, |e| out.push(e));
-        let mut bin = 0;
+        let mut scope_bin = 0;
         if let Some(columns) = columns {
             while let Ok(column) = ends.scope.pop() {
                 columns.push(column);
             }
-            bin = ends.scope_bin;
+            scope_bin = ends.scope_bin;
         }
-        (gen, Some(ends.overview.clone()), bin)
+        if let Some(tuner) = tuner {
+            while tuner.len() < tuner.capacity() {
+                let Ok(frame) = ends.tuner.pop() else { break };
+                tuner.push(frame);
+            }
+            // Storage smaller than this engine's ring: the feed has not met it yet (a rebuild to a higher
+            // rate), and discards this whole drain. What did not fit goes too, so no audio from before
+            // that reset is left for a later tick; nothing is allocated here.
+            if tuner.capacity() < ends.tuner.buffer().capacity() {
+                while ends.tuner.pop().is_ok() {}
+            }
+        }
+        FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate }
     }
 
     /// Move the engine's events into `out` (a lane's `Mix` reaches the settings memory on the way). The
-    /// DEV probe's and the tests' (the app's feed drains with the scope: `drain_feed_scope`).
+    /// DEV probe's and the tests' (the app's feed drains with the taps: `drain_feed_taps`).
     #[cfg(any(debug_assertions, test))]
     pub fn drain_events(&self, out: &mut Vec<Event>) {
         self.drain_feed(out);

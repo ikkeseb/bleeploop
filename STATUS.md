@@ -195,6 +195,13 @@ anything else that needs the interface or a real plugin.
   stand, does the braid follow the guitar without lag, and does the app stay tight on ASIO 128 with
   it open? (machine: the stage-view probe's per-look groups; `verify/probes/frame-cost.mjs` measures
   no EMBER scene yet)
+- The tuner (N, the fork key in the command bar, or a learned pedal; one press on, one off): the
+  guitar's monitor mutes, the loops and the click play on, and the window shows the note and its cents
+  (A4 = 440). Does it agree with your own tuner on every string, is the needle steady while a string
+  rings, does in tune read at a glance from where you stand, and does REC close it with the take
+  whole? What you pluck while tuning still runs through the amp-sim and the input sends unheard: is
+  an echo of it ever left when the tuner closes? (machine: `tests/tuner.rs` and `tests/pitch.rs` on
+  synthetic strings, `verify/probes/tuner.mjs`; no real guitar has been read)
 - The same plugin file in both slots (D29): the editor belongs to the slot whose load came first,
   and the other slot's is refused with a toast; does the toast say what to do? (machine: the
   `instrument-controls` and `rig-recall` probes)

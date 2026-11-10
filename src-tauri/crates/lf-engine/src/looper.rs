@@ -1293,8 +1293,8 @@ impl Looper {
             }
             Action::FadeAll => return self.fade_all(cx, i),
             // The engine runs a toggle itself (`engine.rs` `toggle`): it reaches the click and the input
-            // sends too. Nothing sends it here.
-            Action::Toggle(_) => {}
+            // sends too. Nothing sends it here. Nor the tuner's press (`engine.rs`).
+            Action::Toggle(_) | Action::Tuner => {}
         }
         Applied::Done
     }

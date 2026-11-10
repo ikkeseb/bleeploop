@@ -1,0 +1,260 @@
+/* The tuner (TunerView.tsx): a full-window layer read from 1.5 m, guitar in hand. The "Instrument" tokens
+   (src/app.css header): the --bg floor, tone for what is silent or off pitch, the engaged recipe (a lit
+   warm-white legend over the --key-on face) for in tune, never a hue; matte, no glow, halo, shadow or
+   blur. The indicator is the one thing that moves, because it reports (tuner-loop.ts eases it); a state
+   switches with no transition, as an LED does. Every size is fixed by the window (vh, capped by vw on a
+   narrow one), so a reading never moves the layout. */
+
+.tn {
+  --tn-pad: clamp(12px, 2vh, 24px);
+  /* The letter's em: Geist's capitals stand about 0.7 em, so its cap height is a quarter of the window. */
+  --tn-letter: min(36vh, 46vw);
+  --tn-scale: min(72vw, 118vh);
+  --tn-track: clamp(44px, 9vh, 140px);
+  --tn-ink: var(--faint); /* the letter, the octave, the cents: what the state lights */
+  --tn-needle: var(--faint);
+  position: fixed;
+  inset: 0;
+  z-index: 150; /* over the stage view (100), under the error toasts (200) */
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  place-items: center;
+  background: var(--bg);
+  color: var(--dim);
+  outline: none;
+  overflow: hidden;
+}
+.tn[data-state='off'] {
+  --tn-ink: var(--dim);
+  --tn-needle: var(--dim);
+}
+.tn[data-state='in'] {
+  --tn-ink: var(--engaged);
+  --tn-needle: var(--engaged);
+}
+
+.tn-body {
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: var(--tn-scale);
+}
+
+/* ---- the note: the letter centred on the window, its sharp and octave hung off its right edge so a
+   sharp never moves it ---- */
+.tn-note {
+  position: relative;
+  color: var(--tn-ink);
+}
+.tn-letter {
+  display: block;
+  font-family: var(--sans);
+  font-size: var(--tn-letter);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+  /* the box is the capital's own height: the sharp sits on its top, the octave on its baseline */
+  text-box: trim-both cap alphabetic;
+}
+.tn[data-state='none'] .tn-letter {
+  color: var(--faint);
+  font-weight: 250; /* the dash: a quiet stroke, never a slab that could read as a note */
+}
+.tn-sharp {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  width: calc(var(--tn-letter) * 0.27);
+  height: calc(var(--tn-letter) * 0.36);
+  margin-left: calc(var(--tn-letter) * 0.05);
+}
+.tn-octave {
+  position: absolute;
+  left: 100%;
+  bottom: 0;
+  margin-left: calc(var(--tn-letter) * 0.07);
+  font-family: var(--sans);
+  font-size: calc(var(--tn-letter) * 0.22);
+  font-weight: 500;
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
+}
+
+/* ---- the cents scale: -50 to +50, flat left, sharp right ---- */
+.tn-scale {
+  position: relative;
+  width: 100%;
+  margin-top: calc(var(--tn-letter) * 0.2);
+}
+.tn-track {
+  position: relative;
+  height: var(--tn-track);
+}
+/* the flat and sharp marks outside the scale's ends: the side to turn from */
+.tn-end {
+  position: absolute;
+  top: 50%;
+  width: calc(var(--tn-track) * 0.32);
+  height: calc(var(--tn-track) * 0.43);
+  translate: 0 -50%;
+  color: var(--faint);
+}
+.tn-end--flat {
+  right: calc(100% + var(--tn-track) * 0.3);
+}
+.tn-end--sharp {
+  left: calc(100% + var(--tn-track) * 0.3);
+}
+.tn-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: max(2px, 0.2vh);
+  translate: 0 -50%;
+  background: var(--line-2);
+}
+.tn-tick {
+  position: absolute;
+  top: 50%;
+  width: max(2px, 0.26vh);
+  height: 34%;
+  translate: -50% -50%;
+  border-radius: 999px;
+  background: var(--faint);
+}
+.tn-tick--end {
+  height: 56%;
+}
+/* the in-tune zone, plus or minus 2.5 cents (pitch.ts IN_TUNE_ENTER): an empty socket off pitch (a ring
+   that thickens with the window, so it still reads at 1.5 m), the engaged face in tune */
+.tn-zone {
+  position: absolute;
+  left: 47.5%;
+  width: 5%;
+  top: 0;
+  bottom: 0;
+  border: max(1px, 0.14vh) solid var(--line-2);
+  border-radius: var(--r-ctl);
+}
+.tn[data-state='in'] .tn-zone {
+  background: var(--key-on);
+  border-color: transparent;
+}
+.tn-centre {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: max(2px, 0.26vh);
+  translate: -50% 0;
+  border-radius: 999px;
+  background: var(--faint);
+}
+.tn[data-state='in'] .tn-centre {
+  background: var(--engaged);
+}
+/* The indicator: a layer the scale's width, its bar at the centre, moved by translateX(<cents>%) from
+   tuner-loop.ts (a cent is a hundredth of the scale). */
+.tn-needle {
+  position: absolute;
+  inset: calc(var(--tn-track) * -0.14) 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.tn-needle > i {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: max(6px, 0.8vh);
+  translate: -50% 0;
+  border-radius: 999px;
+  background: var(--tn-needle);
+}
+
+/* ---- the read-outs: the cents (the precise read) and the frequency, Geist Mono ---- */
+.tn-read {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6vh;
+  margin-top: 4.5vh;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.tn[data-state='none'] .tn-read {
+  visibility: hidden;
+}
+.tn-cents {
+  font-size: min(7vh, 9vw);
+  font-weight: 500;
+  color: var(--tn-ink);
+}
+.tn-unit {
+  margin-left: 0.08em;
+  font-size: 0.55em;
+  color: var(--faint);
+}
+.tn-hz {
+  font-size: max(13px, 2.4vh);
+  color: var(--faint);
+}
+
+/* ---- the two lines of words, plain lower-case sentences as the refusal texts ---- */
+.tn-quiet {
+  min-height: 1.3em;
+  margin: 3vh 0 0;
+  font-size: max(15px, 2.8vh);
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--dim);
+}
+.tn-muted {
+  grid-row: 3;
+  align-self: end;
+  margin: 0 var(--tn-pad) var(--tn-pad);
+  font-size: max(12px, 1.9vh);
+  line-height: 1.3;
+  text-align: center;
+  color: var(--faint);
+}
+
+/* ---- the close: a ghost button, as the stage view's exit ---- */
+.tn-close {
+  position: absolute;
+  top: var(--tn-pad);
+  right: var(--tn-pad);
+  width: clamp(32px, 4vh, 44px);
+  height: clamp(32px, 4vh, 44px);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  appearance: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surf-2) 60%, transparent);
+  border: 1px solid var(--edge);
+  color: var(--dim);
+  cursor: pointer;
+}
+.tn-close:hover {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.tn-close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.tn-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}

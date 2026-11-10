@@ -7,9 +7,10 @@
 //! through its FX chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built
 //! in and plugin) and the click sum on the stereo master bus: master volume, then the master limiter
 //! (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
-//! after the limiter, under the same master volume: the played instrument is heard without the
-//! limiter's pre-delay, as the old native monitor was, and like it is not limited; the sends are heard
-//! on the frame they are recorded. Ported from `engine.ts` and `master.ts`.
+//! after the limiter, under the same master volume and the tuner's mute (theirs alone: `tuner`): the
+//! played instrument is heard without the limiter's pre-delay, as the old native monitor was, and like
+//! it is not limited; the sends are heard on the frame they are recorded. Ported from `engine.ts` and
+//! `master.ts`.
 //!
 //! The limiter delays everything it carries by its pre-delay, the click included, so a take's alignment
 //! is `align_frames` + the largest live effect's latency + the limiter's. The sends add no term: the dry
@@ -33,7 +34,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, Command, CompactMix, Event, NoteTarget, ProcessContext, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, NoteTarget, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -49,6 +50,7 @@ use crate::overview::Overview;
 use crate::scope::{Scope, ScopeBin, SCOPE_MASTER, SCOPE_MONITOR, SCOPE_SOURCES};
 use crate::session::{SessionEnd, SessionPort};
 use crate::slots::{Rack, SlotPort};
+use crate::tuner::{TunerFrame, TunerTap};
 
 /// Commands the engine holds for a future frame (a stamped command's, a wait for a block job).
 const MAX_PENDING: usize = 64;
@@ -56,6 +58,9 @@ const MAX_PENDING: usize = 64;
 const NOISE_SEED: u32 = 7;
 /// Master volume smoothing (master.ts `RAMP_TC`).
 const MASTER_TAU_SECONDS: f64 = 0.012;
+/// The tuner's mute of the monitor: a glide quick enough to sound like a switch without a click, at
+/// -60 dB some 14 ms after the press and exactly silent (through `GLIDE_SNAP`) some 28 ms after it.
+const MONITOR_TAU_SECONDS: f64 = 0.002;
 
 #[derive(Clone, Copy, Debug)]
 pub struct EngineConfig {
@@ -91,6 +96,9 @@ pub struct EngineHandle {
     /// ([`Command::SetScope`]): its own ring, so a visual never pushes an event out of `events`
     /// (invariant 2).
     pub scope: Consumer<ScopeBin>,
+    /// The tuner's tap: both slots' raw input, one frame each, while the tuner is on ([`crate::tuner`]);
+    /// its own ring, as the scope's.
+    pub tuner: Consumer<TunerFrame>,
 }
 
 /// The event ring's producer. A full ring refuses the event and counts it: the audio never waits.
@@ -118,7 +126,7 @@ impl Feed {
 pub struct Taps<'a> {
     /// The master bus's two sides: everything but the wet signal, under the master volume.
     pub bus: [&'a [f32]; 2],
-    /// The wet signal and the input sends under the master volume.
+    /// The wet signal and the input sends under the master volume and the tuner's mute.
     pub monitor: &'a [f32],
     /// The record tap: what a capture writes (the wet signal, the input sends, the instruments' record
     /// path).
@@ -144,6 +152,9 @@ pub struct Diag {
     /// open column a device-frame skip discarded. No fault: a reader that stops reading makes them, and
     /// the `frame` sequence tells the UI what it lost.
     pub scope_dropped: u64,
+    /// Tuner frames the full ring refused ([`TunerTap::dropped`]): no fault, a reader that stopped
+    /// reading makes them, and the epoch tells it where its input broke.
+    pub tuner_dropped: u64,
 }
 
 /// One chunk the scope still owes its master column: the frames it covered, and every source's
@@ -233,8 +244,8 @@ pub struct Engine {
     /// The stereo master bus: the lanes through their FX, the reverb bus, the instruments and the click,
     /// then under the master volume (the limiter's input).
     mix: [Vec<f32>; 2],
-    /// The wet signal and the input sends under the master volume: what joins the output after the
-    /// limiter.
+    /// The wet signal and the input sends under the master volume and the tuner's mute: what joins the
+    /// output after the limiter.
     monitor: Vec<f32>,
     /// The looper's own mix under the master volume: the lanes before their FX, and the click. Empty
     /// unless [`EngineConfig::looper_tap`].
@@ -244,6 +255,15 @@ pub struct Engine {
     /// This block's chunks waiting for their master column ([`ScopeChunk`]); never longer than the
     /// capacity it was built with.
     scope_chunks: Vec<ScopeChunk>,
+    /// The tuner's on flag and its tap ([`crate::tuner`]): off in a new engine.
+    tuner: TunerTap,
+    /// The last change of the tuner the full event ring refused: an `Event::Tuner` of its value then is
+    /// owed (one flag, since the value is state, not a count of answers).
+    tuner_owed: bool,
+    /// The monitor's gain under the tuner: 1 while it is off, gliding to 0 while it is on. Exactly 1
+    /// leaves every bit of the monitor as it was.
+    monitor_gain: f64,
+    monitor_coef: f64,
     /// The frames `process` rendered last: the length of the taps.
     rendered: usize,
     limiter: Compressor,
@@ -290,6 +310,7 @@ impl Engine {
         let overview = looper.overview().clone();
         let (session_port, session) = crate::session::channel();
         let (scope, scope_rx) = Scope::new(config.sample_rate);
+        let (tuner, tuner_rx) = TunerTap::new(config.sample_rate);
         let engine = Engine {
             config,
             clock: Clock::new(config.sample_rate),
@@ -326,6 +347,10 @@ impl Engine {
             looper_mix: vec![0.0; if config.looper_tap { config.max_block } else { 0 }],
             scope,
             scope_chunks: scope_chunks(config.max_block),
+            tuner,
+            tuner_owed: false,
+            monitor_gain: 1.0,
+            monitor_coef: (-1.0 / (MONITOR_TAU_SECONDS * config.sample_rate as f64)).exp(),
             rendered: 0,
             // Built here, so its start-up gain dip passes on the first frames the device renders.
             limiter: Compressor::master_limiter(config.sample_rate as f32),
@@ -343,7 +368,7 @@ impl Engine {
             commands_dropped: 0,
             xruns: 0,
         };
-        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port, scope: scope_rx })
+        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port, scope: scope_rx, tuner: tuner_rx })
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -368,6 +393,11 @@ impl Engine {
 
     pub fn input_fx(&self) -> &InputFx {
         &self.input_fx
+    }
+
+    /// Whether the tuner is on ([`crate::tuner`]).
+    pub fn tuner(&self) -> bool {
+        self.tuner.on()
     }
 
     /// True while a command waits for a block job.
@@ -400,6 +430,7 @@ impl Engine {
             slot_events_dropped: self.rack.events_dropped,
             slot_protocol_errors: self.rack.protocol_errors,
             scope_dropped: self.scope.dropped(),
+            tuner_dropped: self.tuner.dropped(),
         }
     }
 
@@ -444,14 +475,16 @@ impl Engine {
     /// While no device runs and the host holds the engine: offer the lanes' state, their mixes and the
     /// transport again, as every block's publish does. Nothing renders while a device is stopped, so what
     /// a full event ring refused at the stop (`punch_out`'s publish: a CLEAR's arm gone, a punched-out
-    /// take) would wait for the next device; the host calls this once its feed drained the ring. Offers
-    /// only what differs from what the ring last took. A no-op before the first block.
+    /// take, the tuner punch-out closed) would wait for the next device; the host calls this once its
+    /// feed drained the ring. Offers only what differs from what the ring last took. A no-op before the
+    /// first block.
     pub fn publish_idle(&mut self) {
         if !self.started {
             return;
         }
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.publish(&mut cx, self.replayed);
+        offer_tuner(cx.feed, cx.now, &self.tuner, &mut self.tuner_owed);
     }
 
     /// Each lane's mix as the engine applies it ([`Looper::mix`], as its [`Event::Mix`] carries it) and
@@ -524,6 +557,8 @@ impl Engine {
             master_muted: &mut self.master_muted,
             toggles_owed: &mut self.toggles_owed,
             scope: &mut self.scope,
+            tuner: &mut self.tuner,
+            tuner_owed: &mut self.tuner_owed,
         };
         apply(&mut self.looper, &mut cx, &mut at, command) == Applied::Done
     }
@@ -557,9 +592,10 @@ impl Engine {
     }
 
     /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out after
-    /// the last rendered frame and is kept (STATUS E3; `Looper::punch_out`). Call it while no device
-    /// runs; the next block continues the frame counter where the last one ended. A no-op before the
-    /// first block.
+    /// the last rendered frame and is kept (STATUS E3; `Looper::punch_out`), and the tuner closes (no
+    /// callback would close it later; its `Event::Tuner` is owed if the ring refuses it, and
+    /// [`Engine::publish_idle`] offers it again). Call it while no device runs; the next block continues
+    /// the frame counter where the last one ended. A no-op before the first block.
     pub fn punch_out(&mut self) {
         if !self.started {
             return;
@@ -567,6 +603,7 @@ impl Engine {
         // Nothing a punch-out does starts a capture, the only reader of the alignment.
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.punch_out(&mut cx);
+        set_tuner(cx.feed, cx.now, &mut self.tuner, &mut self.tuner_owed, false);
         self.looper.publish(&mut cx, self.replayed);
     }
 
@@ -611,6 +648,8 @@ impl Engine {
         let live_latency = self.rack.record_latency();
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
+            // The tuner's input breaks here: its next frame starts a new epoch (`crate::tuner`).
+            self.tuner.gap();
             // Use the tap's latched latency: live changes cannot move a capture's alignment.
             // A damaged block's own input frames are lost too.
             self.looper.input_gap(lost_from, start, if ctx.damaged { end } else { start }, live_latency);
@@ -640,6 +679,8 @@ impl Engine {
                 master_muted: &mut self.master_muted,
                 toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
+                tuner: &mut self.tuner,
+                tuner_owed: &mut self.tuner_owed,
             };
             apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
             if f == start {
@@ -649,11 +690,19 @@ impl Engine {
                 self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false, self.commands_taken, settled);
                 self.looper.events(&mut cx);
             }
+            // The tuner and a take never coexist: a take that came to exist on this frame (a command
+            // above, a scheduled event, a load) closes the tuner here, on that frame, before the chunk
+            // is rendered or scanned. Only those three ever start a recorder; the AUTO scan below needs
+            // one already. A press or a setter refuses to open it over a take (`apply`).
+            if self.tuner.on() && self.looper.recorder().is_some() {
+                set_tuner(cx.feed, f, &mut self.tuner, &mut self.tuner_owed, false);
+            }
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {
                 cx.feed.push(Event::Beat { frame: f, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
             }
             self.looper.publish(&mut cx, self.replayed);
             offer_toggles(cx.feed, f, &mut self.toggles_owed, cx.clock, &self.looper, &self.input_fx, &self.rack);
+            offer_tuner(cx.feed, f, &self.tuner, &mut self.tuner_owed);
             self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), self.clock.meter(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), self.clock.meter(), f);
 
@@ -709,6 +758,9 @@ impl Engine {
             }
             let k1 = (next - start) as usize;
             let len = k1 - k0;
+            // The tuner's tap: this chunk's raw input of both slots, while on (nothing past the flag
+            // while off).
+            self.tuner.chunk(f, inputs.map(|x| &x[k0..k1]));
             let (l, r) = (&mut mix_l[k0..k1], &mut mix_r[k0..k1]);
             l.copy_from_slice(&self.instrument[0][k0..k1]);
             r.copy_from_slice(&self.instrument[1][k0..k1]);
@@ -752,13 +804,18 @@ impl Engine {
             }
             self.looper.capture(f, &self.record[k0..k1]);
             let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
+            // The tuner mutes the monitor alone, gliding from the frame it switched on: a gain of exactly
+            // 1 (off, landed) leaves every bit as it was.
+            let monitor_target = if self.tuner.on() { 0.0 } else { 1.0 };
             for (((l, r), o), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(wet.iter().zip(sends)) {
                 let g = self.master_gain;
+                self.monitor_gain = crate::glide(self.monitor_gain, monitor_target, self.monitor_coef);
+                let m = self.monitor_gain;
                 *l = (g * *l as f64) as f32;
                 *r = (g * *r as f64) as f32;
-                *o = (g * w as f64) as f32;
+                *o = (g * w as f64 * m) as f32;
                 if sounded {
-                    *o += (g * y as f64) as f32;
+                    *o += (g * y as f64 * m) as f32;
                 }
                 self.master_gain = crate::glide(self.master_gain, target, self.master_coef);
             }
@@ -832,6 +889,10 @@ impl Engine {
             self.scope.chunk(chunk.frame, chunk.k1 - chunk.k0, &lo, &hi);
         }
         self.scope_chunks.clear();
+        if ctx.damaged {
+            // A damaged block's input is silence or a splice: what follows it does not continue it.
+            self.tuner.gap();
+        }
     }
 
     /// Move the ring's commands into the table, an unstamped or late one due at `now`. Take no more than
@@ -999,6 +1060,22 @@ fn offer_toggles(feed: &mut Feed, now: Frame, owed: &mut [u32; Toggle::COUNT], c
     }
 }
 
+/// Switch the tuner to `on` at `now` and say so with `Event::Tuner`, owed when the full ring refuses it
+/// (one that reaches the ring carries the newest value, so it settles what was owed). A value it
+/// already has changes nothing and says nothing.
+fn set_tuner(feed: &mut Feed, now: Frame, tuner: &mut TunerTap, owed: &mut bool, on: bool) {
+    if tuner.set_on(on) {
+        *owed = !feed.push(Event::Tuner { frame: now, on });
+    }
+}
+
+/// Offer the owed `Event::Tuner` again, at the tuner's value now.
+fn offer_tuner(feed: &mut Feed, now: Frame, tuner: &TunerTap, owed: &mut bool) {
+    if *owed && feed.push(Event::Tuner { frame: now, on: tuner.on() }) {
+        *owed = false;
+    }
+}
+
 /// What a command reaches besides the looper and its context.
 struct Apply<'a> {
     instruments: &'a mut Instruments,
@@ -1009,6 +1086,9 @@ struct Apply<'a> {
     /// The engine's `toggles_owed`.
     toggles_owed: &'a mut [u32; Toggle::COUNT],
     scope: &'a mut Scope,
+    tuner: &'a mut TunerTap,
+    /// The engine's `tuner_owed`.
+    tuner_owed: &'a mut bool,
 }
 
 fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> Applied {
@@ -1055,6 +1135,19 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
                 looper.disarm_clear();
             }
             toggle(looper, cx, at, t);
+            Applied::Done
+        }
+        // The tuner's press: a looper press, so it disarms a pending pedal CLEAR, refused or not. It
+        // opens only with no take (a count-in, an armed or listening take, a recording, an overdub, a
+        // RETAKE roll: `Looper::recorder`); it always closes.
+        Command::Action(Action::Tuner) | Command::ActionOn(_, Action::Tuner) => {
+            looper.disarm_clear();
+            let on = !at.tuner.on();
+            if on && looper.recorder().is_some() {
+                cx.feed.push(Event::Refused { frame: now, lane: looper.selected() as u8, reason: Refusal::TunerCapturing });
+            } else {
+                set_tuner(cx.feed, now, at.tuner, at.tuner_owed, on);
+            }
             Applied::Done
         }
         Command::Action(action) => {
@@ -1238,6 +1331,11 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             at.scope.set_on(on);
             // The lanes' envelope is taken in the FX render itself, so the chains hear the switch too.
             cx.fx.set_env(on);
+            Applied::Done
+        }
+        // Not a press: no CLEAR is disarmed. On over a take leaves it off, with no refusal.
+        Command::SetTuner(on) => {
+            set_tuner(cx.feed, now, at.tuner, at.tuner_owed, on && looper.recorder().is_none());
             Applied::Done
         }
     }

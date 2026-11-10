@@ -28,6 +28,7 @@
     { "Action": "CopyWide" },
     { "Action": "Halve" },
     { "ActionOn": [2, "Halve"] },
+    { "Action": "Tuner" },
     { "Action": { "Hold": 1 } },
     { "Action": { "Release": 1 } },
     { "ActionOn": [0, { "Release": 0 }] },
@@ -81,7 +82,8 @@
     { "SetInputSendParam": ["echoTime", 2] },
     { "SetInputSendParam": ["reverbLevel", 0.35] },
     { "SetInputSendParam": ["ringFreq", 440] },
-    { "SetScope": true }
+    { "SetScope": true },
+    { "SetTuner": false }
   ],
   "events": [
     {
@@ -165,9 +167,11 @@
     { "Refused": { "frame": 99236, "lane": 2, "reason": "RetakeCapturing" } },
     { "Refused": { "frame": 99237, "lane": 3, "reason": "AutoRecCapturing" } },
     { "Refused": { "frame": 99238, "lane": 4, "reason": "AutoRecLocked" } },
+    { "Refused": { "frame": 99239, "lane": 0, "reason": "TunerCapturing" } },
     { "Toggled": { "frame": 99240, "toggle": "Fixed", "on": true } },
     { "Toggled": { "frame": 99241, "toggle": { "Send": "ring" }, "on": false } },
     { "Toggled": { "frame": 99242, "toggle": { "Live": 1 }, "on": true } },
+    { "Tuner": { "frame": 99243, "on": true } },
     { "TakeRejected": { "frame": 99300, "lane": 1, "overdub": true } },
     { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
     { "Copied": { "frame": 99500, "from": 0, "to": 3, "feedback": 0.25 } },
@@ -374,7 +378,8 @@
             }
           }
         },
-        { "Selected": { "frame": 0, "lane": 0 } }
+        { "Selected": { "frame": 0, "lane": 0 } },
+        { "Tuner": { "frame": 96000, "on": true } }
       ],
       "device": [],
       "status": {
@@ -411,7 +416,8 @@
       "device": [],
       "anchor": { "frame": 1235456, "atMs": 1790000000143.5, "rate": 44100, "grid": 96666 },
       "meter": { "peak": [0.5, 1], "clip": [false, true] },
-      "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }]
+      "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }],
+      "tuner": { "hz": 82.407, "level": -18.5 }
     },
     {
       "seq": 2,
@@ -455,6 +461,16 @@
           [0.64, 0.651]
         ]
       }
+    },
+    {
+      "seq": 4,
+      "reset": false,
+      "events": [],
+      "device": [],
+      "anchor": { "frame": 1241000, "atMs": 1790000000264.75, "rate": 48000, "grid": 96666 },
+      "meter": { "peak": [0.001, 0], "clip": [false, false] },
+      "peaks": [],
+      "tuner": { "hz": null, "level": -71.2 }
     }
   ],
   "snapshotHeaders": [

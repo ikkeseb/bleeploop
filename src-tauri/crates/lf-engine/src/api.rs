@@ -126,6 +126,10 @@ pub enum Command {
     /// nothing. No [`Toggle`]: no pedal switches it and it answers with no [`Event::Toggled`] — it is a
     /// reader's subscription, not a setting the player plays with.
     SetScope(bool),
+    /// The tuner on or off, outright ([`crate::tuner`]): idempotent, and answered by [`Event::Tuner`]
+    /// only when the value changes. On while a take exists leaves it off, with no refusal. No
+    /// [`Toggle`]: the engine closes the tuner on its own, so it is never kept or replayed.
+    SetTuner(bool),
 }
 
 impl Command {
@@ -399,6 +403,12 @@ pub enum Action {
     /// not, but for GO LIVE's ([`Toggle::Live`]). No lane: as `Command::ActionOn` it acts as `Command::Action` does, its lane ignored. The
     /// setters (`Command::SetMetronome` and the rest) stay for initialization and a settings replay.
     Toggle(Toggle),
+    /// The tuner's press ([`crate::tuner`]): switch it from the value it has when the press applies,
+    /// answered by [`Event::Tuner`]. Turning it on while a take exists is refused
+    /// ([`Refusal::TunerCapturing`]) with nothing switched; turning it off never is. A looper press: it
+    /// disarms a pending pedal CLEAR and waits behind a held looper command. No lane: as
+    /// `Command::ActionOn` its lane is ignored.
+    Tuner,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -543,6 +553,9 @@ pub enum Refusal {
     AutoRecCapturing,
     /// AUTO REC switched once a loop has locked the tempo (it only starts a first take).
     AutoRecLocked,
+    /// The tuner pressed on while a take exists (a count-in, an armed or listening take, a recording,
+    /// an overdub, a RETAKE roll).
+    TunerCapturing,
 }
 
 impl Refusal {
@@ -569,6 +582,7 @@ impl Refusal {
             Refusal::RetakeCapturing => "a take is recording, RETAKE changes after it",
             Refusal::AutoRecCapturing => "a take is recording, AUTO REC changes after it",
             Refusal::AutoRecLocked => "AUTO REC starts a first take, clear all to use it",
+            Refusal::TunerCapturing => "a take is recording, the tuner opens after it",
         }
     }
 }
@@ -610,6 +624,10 @@ pub enum Event {
     /// the setting from it; the host's settings memory counts the answers against what it sent, so an
     /// answer older than a setter still in flight never overwrites it (`engine_io/settings.rs`).
     Toggled { frame: Frame, toggle: Toggle, on: bool },
+    /// The tuner's value, sent on every change whatever made it (its press, its setter, a take that
+    /// came to exist, a stopped device). One the full ring refuses is owed and offered again at the
+    /// next publish, at the value then. The UI shows the tuner exactly while the last one said on.
+    Tuner { frame: Frame, on: bool },
 }
 
 /// The callback's view of the device.

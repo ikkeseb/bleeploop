@@ -52,6 +52,11 @@
 //! The note target and the wheels native MIDI's queue still held at a rebuild, sent to no engine yet,
 //! are kept before the replay too (`super::RebuildHook::rebuild`), so the new engine gets the player's
 //! latest through the replay alone.
+//!
+//! The tuner is no setting (`Command::SetTuner`, `Action::Tuner`, `lf_engine::tuner`): the engine closes
+//! it on its own (a take, a stopped device), which no kept value could follow, so it is never kept,
+//! never replayed, and neither its commands nor its `Event::Tuner` nor its refusal
+//! (`Refusal::TunerCapturing`) count toward any toggled setting's answers. A rebuild closes it.
 
 use std::collections::BTreeMap;
 
@@ -164,7 +169,8 @@ fn key(command: &Command) -> Option<Key> {
         | Command::Press
         | Command::NoteOn(..)
         | Command::NoteOff(_)
-        | Command::AllNotesOff => return None,
+        | Command::AllNotesOff
+        | Command::SetTuner(_) => return None,
     })
 }
 
@@ -512,6 +518,29 @@ mod tests {
         s.pushed(&toggle);
         assert!(s.toggled(2, Toggle::Click, false), "a new engine counts from nothing");
         assert!(replay(&s).contains(&Command::SetMetronome(false)));
+    }
+
+    // The tuner is no setting: a setter the ring took is not kept or replayed, and a refused press is no
+    // toggle's answer (counted as one, it would let an older answer overwrite a setter in flight).
+    #[test]
+    fn the_tuner_is_never_kept_and_its_refusal_answers_no_toggle() {
+        let mut s = Settings::default();
+        s.follow(1);
+        for command in [Command::SetTuner(true), Command::Action(Action::Tuner), Command::SetTuner(false)] {
+            assert!(!s.record(&command), "{command:?} is kept nowhere");
+            s.pushed(&command);
+        }
+        assert_eq!(replay(&s), [], "nothing of the tuner is replayed");
+        // AUTO REC's toggle, then its setter, both in flight; the tuner's refused press lands between.
+        let toggle = Command::Action(Action::Toggle(Toggle::AutoRec));
+        s.pushed(&toggle);
+        assert!(s.record(&Command::SetAutoRecord(false)));
+        s.pushed(&Command::SetAutoRecord(false));
+        s.refused(1, Refusal::TunerCapturing);
+        assert!(s.toggled(1, Toggle::AutoRec, true), "the toggle's own answer");
+        assert_eq!(replay(&s), [Command::SetAutoRecord(false)], "the answer older than the setter in flight never overwrites it");
+        assert!(s.toggled(1, Toggle::AutoRec, false), "the setter's answer");
+        assert_eq!(replay(&s), [Command::SetAutoRecord(false)]);
     }
 
     #[test]
