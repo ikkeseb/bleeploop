@@ -1,8 +1,9 @@
 // verify/guards/audio-settings.mjs — deterministic guard for src/ui/state/audio-settings.ts persistence validators.
 //
-// Imports the REAL source (Node TS type-stripping), NOT a port, so it cannot drift. The source is
-// import-free and touches `localStorage` only at call-time (never at module load), so a tiny in-memory
-// localStorage shim installed before the first call is enough to exercise it. Run: node verify/guards/audio-settings.mjs
+// Imports the REAL source (Node TS type-stripping, `verify/harness/hooks.ts` for its one import, the
+// guitar-first marker's leaf), NOT a port, so it cannot drift. Neither module touches `localStorage` at
+// load, only at call-time, so a tiny in-memory localStorage shim installed before the first call is
+// enough to exercise it. Run: node verify/guards/audio-settings.mjs
 //
 // Covers readAudioDeviceSettings's field-by-field validation + DEFAULTS fallback (missing key, corrupt
 // JSON, out-of-range / wrong-typed bufferFrames, non-string device ids (Share output's and the ASIO
@@ -15,9 +16,11 @@
 // malformed pair) start both slots on the saved global channel. And the rate pick: only 44.1/48 kHz is
 // kept (anything else, or settings from before it, is the device's own), and the Sample rate select
 // (rateChoice): the picks the device runs, the saved one shown only where it runs and, while a device
-// runs, only at the rate it runs at.
+// runs, only at the rate it runs at. And the guitar-first install's default picks: with nothing stored,
+// slot A on input 1 (kept by the first unrelated write); an older install, or any stored settings, as before.
 
 import assert from 'node:assert';
+import '../harness/hooks.ts';
 
 // ---- in-memory localStorage shim (the source reads/writes localStorage only inside its functions) ----
 const store = new Map();
@@ -37,6 +40,12 @@ globalThis.localStorage = {
   },
   clear() {
     store.clear();
+  },
+  get length() {
+    return store.size;
+  },
+  key(i) {
+    return [...store.keys()][i] ?? null;
   },
 };
 
@@ -67,11 +76,15 @@ function check(name, fn) {
     console.error(`FAIL: ${name}\n  ${e.message}`);
   }
 }
-function reset() {
+// `returning`: another key of the app's stored first, as an install from before the guitar-first rule
+// has, so an empty settings record reads today's defaults. Without it the store is a fresh install.
+function reset({ returning = true } = {}) {
   store.clear();
   throwOnGet = false;
   throwOnSet = false;
+  if (returning) store.set('lf.masterVolume', '0.8');
 }
+const GUITAR_FIRST = 'lf.guitarFirst';
 
 // ---------------------------------------------------------------------------
 // 1. Missing key / corrupt JSON -> full DEFAULTS (the two fall-through paths).
@@ -198,6 +211,46 @@ check('write swallows a storage throw', () => assert.doesNotThrow(() => writeAud
 reset();
 throwOnGet = true;
 check('read swallows a storage throw -> DEFAULTS', () => assert.deepStrictEqual(readAudioDeviceSettings(), DEFAULTS));
+reset({ returning: false });
+throwOnGet = true;
+check('unreadable storage on a fresh install -> DEFAULTS', () => assert.deepStrictEqual(readAudioDeviceSettings(), DEFAULTS));
+
+// ---------------------------------------------------------------------------
+// 6b. The guitar-first install: slot A starts on input 1 until settings are stored.
+// ---------------------------------------------------------------------------
+reset({ returning: false });
+check('fresh install (empty storage): slot A on input 1, slot B auto', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings(), { ...DEFAULTS, slotInputChannels: ['0', ''] }));
+check('the fresh install is marked guitar-first by that read', () => assert.ok(store.has(GUITAR_FIRST)));
+check('later reads agree through the marker', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['0', '']));
+check('the guitar-first defaults hand out a fresh pair each read', () => {
+  readAudioDeviceSettings().slotInputChannels[1] = '7';
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['0', '']);
+});
+reset();
+check('an older install (another lf. key, no marker, no settings): both auto', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']));
+check('an older install is never marked guitar-first', () => assert.ok(!store.has(GUITAR_FIRST)));
+reset({ returning: false });
+store.set(GUITAR_FIRST, '1');
+store.set(KEY, JSON.stringify({ slotInputChannels: ['', ''] }));
+check('a guitar-first install with stored picks reads them', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']));
+reset({ returning: false });
+store.set(GUITAR_FIRST, 'played');
+store.set(KEY, JSON.stringify({ inputChannel: '1' }));
+check('a guitar-first install with stored settings from before the per-slot pick: the global channel', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']));
+reset({ returning: false });
+writeAudioDeviceSettings({ asioDriver: 'Audient USB Audio ASIO Driver' });
+check('on a guitar-first install the first unrelated write stores slot A on input 1', () => {
+  assert.deepStrictEqual(JSON.parse(store.get(KEY)).slotInputChannels, ['0', '']);
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['0', '']);
+});
+reset({ returning: false });
+store.set(KEY, '{ not valid json');
+check('a fresh install with corrupt stored settings: DEFAULTS', () => assert.deepStrictEqual(readAudioDeviceSettings(), DEFAULTS));
 
 // ---------------------------------------------------------------------------
 // 7. The ASIO Buffer select: the size an open asks for, and what the select offers and shows.

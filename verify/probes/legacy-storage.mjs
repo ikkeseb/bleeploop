@@ -8,13 +8,15 @@
  * - full older install: `OLDER_INSTALL`, every `lf.` key the app writes with a non-default value (surveyed
  *   from `src/`). After the boot settles, and again after a reload, every seeded key holds its exact text,
  *   no `lf.guitarFirst` exists, nothing else was added, and the screen is the returning one: no amp-sim ask,
- *   slot B not folded, slot A Off and slot B on Pad as stored, the keyboard at the top with the stored
- *   weights, no start line on the empty looper;
+ *   slot B not folded, slot A Off and slot B on Pad as stored, slot A's input on the stored In 2 (and the
+ *   device opened with the stored picks), the keyboard at the top with the stored weights, no start line
+ *   on the empty looper;
  * - minimal older install: `lf.masterVolume` alone. Still returning: `lf.guitarFirst` never written, Lead and
- *   Bass, the keyboard at the bottom, no start line. The boot adds exactly `BOOT_ADDS`, what it stores on
- *   any install that kept none of it: the engine's applied meter and input sends;
+ *   Bass, both inputs Auto, the keyboard at the bottom, no start line. The boot adds exactly `BOOT_ADDS`,
+ *   what it stores on any install that kept none of it: the engine's applied meter and input sends;
  * - fresh install (empty storage), for contrast: `lf.guitarFirst` is written and the guitar-first first
- *   screen shows, so the probe tells the two apart.
+ *   screen shows, slot A's input on In 1 (the device opened with it, slot B Auto), so the probe tells the
+ *   two apart.
  *
  * Not booted: the plugin host (the browser build has none), so the device prune, the ASIO probe and rig
  * recall, which run only with it, leave `lf.audioDevices` and `lf.rigRecall` alone here; `audio-settings-
@@ -109,6 +111,7 @@ await probe(async ({ browser, open }) => {
   const storage = (page) => page.evaluate(() => Object.fromEntries(Object.keys(localStorage).sort().map((k) => [k, localStorage.getItem(k)])));
   /** What the screen shows of the guitar-first rule. */
   const look = (page) => page.evaluate(() => {
+    const inA = document.querySelector('[aria-label="Input for slot A"]');
     const zone = (sel) => document.querySelector(sel)?.getBoundingClientRect();
     const kb = zone('.zone--keyboard'), loop = zone('.zone--looper');
     return {
@@ -122,6 +125,9 @@ await probe(async ({ browser, open }) => {
         folded: el.classList.contains('slot--folded'),
       })),
       start: [...document.querySelectorAll('.lp-lane')].map((l) => l.querySelector('.lp-lane__start')?.textContent.trim() ?? ''),
+      // slot A's input pick (null while its source takes no input), and each slot's channel the device opened with
+      inputA: inA ? { value: inA.value, text: inA.selectedOptions[0]?.textContent.trim() } : null,
+      asked: window.__lf.native.opened.at(-1)?.inputChannels ?? null,
     };
   });
   /** Opens the app in a fresh context over `seeded` (null: an empty storage, a fresh install). */
@@ -164,6 +170,8 @@ await probe(async ({ browser, open }) => {
       assert.equal(l.placement, 'top', `${when}: the keyboard placement`);
       assert.equal(l.keyboardAbove, true, `${when}: the keyboard is not drawn above the looper: ${JSON.stringify(l)}`);
       assert.deepEqual(l.stageSizes, { keyboard: 0.8, looper: 1.6 }, `${when}: the stage weights`);
+      assert.deepEqual(l.inputA, { value: '1', text: 'In 2' }, `${when}: slot A's input pick`);
+      assert.deepEqual(l.asked, [1, 0], `${when}: the channels the device opened with`);
       console.log(`${when}: ${Object.keys(stored).length} keys kept, ${JSON.stringify(l.slots)}, keyboard ${l.placement}`);
     }
     await context.close();
@@ -180,6 +188,7 @@ await probe(async ({ browser, open }) => {
     assertReturning(l, ['Lead', 'Bass'], when);
     assert.equal(l.placement, 'bottom', `${when}: the keyboard placement`);
     assert.equal(l.keyboardBelow, true, `${when}: the keyboard is not drawn below the looper: ${JSON.stringify(l)}`);
+    assert.deepEqual(l.asked, [null, null], `${when}: the channels the device opened with (both Auto)`);
     console.log(`${when}: ${JSON.stringify(stored)}, ${JSON.stringify(l.slots)}, keyboard ${l.placement}`);
     await context.close();
   }
@@ -197,6 +206,8 @@ await probe(async ({ browser, open }) => {
     ], `${when}: the slots`);
     assert.equal(l.placement, 'hidden', `${when}: the keyboard placement`);
     assert.deepEqual(l.start, ['SPACE or your pedal records here', '', '', '', ''], `${when}: the start line`);
+    assert.deepEqual(l.inputA, { value: '0', text: 'In 1' }, `${when}: slot A's input pick`);
+    assert.deepEqual(l.asked, [0, null], `${when}: the channels the device opened with (slot A on In 1, slot B Auto)`);
     console.log(`${when}: ${JSON.stringify(stored)}, ${JSON.stringify(l.slots)}, keyboard ${l.placement}`);
     await context.close();
   }

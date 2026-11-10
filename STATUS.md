@@ -17,7 +17,8 @@ owner's loopback run.
 
 **What the EVO 4 changes for playing:** the guitar's front instrument jack is channel 1, and a slot's
 Auto input reads In 2 on a device with two or more inputs (`input_channel` in
-`src-tauri/src/engine_io/transition.rs`), so the guitar's slot needs In 1 picked. A headphone in the
+`src-tauri/src/engine_io/transition.rs`), so the guitar's slot needs In 1 picked (a fresh install
+starts slot A on it). A headphone in the
 front jack mutes the rear monitor outputs (SmartMuting, no setting). Its Loop-back channels are a
 digital send inside the driver and do not stand in for the rig's cable. EVO Control (system tray) sets
 the ASIO buffer and rate, the handle for a check no device has run: a change there while the app plays
@@ -42,8 +43,8 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 
 Install the latest release, v0.8.8 (published 2026-10-26 and CI-built, it holds every check below;
 an installed v0.8.7 offers it through the UPDATE pill), not `pnpm dev:asio`. In Audio Settings pick
-the Audient ASIO driver (a saved Focusrite pick toasts as not installed) at buffer 128 and put the
-guitar's slot on In 1; turn EVO Control's monitor mix fully clockwise. Play a real jam with these in
+the Audient ASIO driver (a saved Focusrite pick toasts as not installed) at buffer 128 and check the
+guitar's slot is on In 1; turn EVO Control's monitor mix fully clockwise. Play a real jam with these in
 it and say what felt off. After the jam, agents note what it tried under "Last play", drop what it
 answered and refill this list from § Not heard yet: at most five, and the docs guard counts them.
 
@@ -110,7 +111,7 @@ The owner at the 27" display with the installed release, or an agent's screensho
 settles.
 
 - A fresh install's first screen (nothing of the app's stored yet: slot A asks `Pick your amp-sim`
-  with its input pick and GO LIVE, slot B folds to `Add a second sound`, the keyboard stays hidden
+  with its input pick on In 1 and GO LIVE, slot B folds to `Add a second sound`, the keyboard stays hidden
   until a built-in synth is picked, lane 1 says `SPACE or your pedal records here` until the first
   loop): does it say plug in, pick your sound, record? Only an empty profile shows it; an install
   that stored anything opens as before. (machine: `verify/probes/legacy-storage.mjs`, the contact
