@@ -47,6 +47,7 @@ import { platform, type ListedBinding, type MidiBinding } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
   asioBufferChoice,
+  defaultSlotInputChannels,
   rateChoice,
   readAudioDeviceSettings,
   writeAudioDeviceSettings,
@@ -556,7 +557,8 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
               const v = e.currentTarget.value;
               setSelectedDevice(v);
               writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
-              saveSlotInputChannels(['', '']); // the slots' picks too (a declined switch puts them back)
+              // The slots' picks to the install's default too (a declined switch puts them back).
+              saveSlotInputChannels(defaultSlotInputChannels());
               reopenEngine(syncPicks);
             }}
             aria-label="Audio input device"
