@@ -5,7 +5,8 @@
  * guitar-first defaults: slot A Off asking for the amp-sim with its input, GO LIVE and meter, slot B folded,
  * the keyboard hidden whatever the pass, the start line on the selected lane), in a context of its own that
  * also walks the start line (it follows the selection, leaves on an arm and AUTO REC's listen, comes back
- * after CLEAR ALL) and the keyboard's one reveal for the first synth picked. Every other scene opens as a
+ * when the arm is cancelled, and leaves for good with the first take: CLEAR ALL and a reload keep it gone)
+ * and the keyboard's one reveal for the first synth picked. Every other scene opens as a
  * returning player (the harness's `lf.` key, `verify/harness/probe.ts`), so it matches the sheet from before
  * that rule. Scenes 1r-7, 11, 12 and 14 run in one returning browser
  * context: 1r-returning (the empty looper of an install that stored anything: Lead and Bass, the keyboard
@@ -247,19 +248,36 @@ await probe(async ({ browser, open }) => {
       await shoot(scene);
       await checkFirstScreen();
       // The start line follows the selected lane, leaves on an arm (AUTO REC's listen included) and comes
-      // back after CLEAR ALL (every lane EMPTY again).
+      // back when that arm is cancelled before it records; the first take ends it for good, also one
+      // cleared in the frame that committed it: CLEAR ALL leaves it gone, and so does a reload (checked
+      // last in this context). The install's marker says which: owed, then played.
       {
         const startNow = async () => (await firstLook()).start.join('|');
+        const marker = () => page.evaluate(() => localStorage.getItem('lf.guitarFirst'));
+        const allEmpty = () => [0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty')));
         const seen = {};
+        seen.owed = await marker() === '1';
         await emit({ events: [{ Selected: { frame: 0, lane: 2 } }] });
         seen.selected3 = await startNow() === startOn(2);
         await emit({ events: [{ Selected: { frame: 0, lane: 0 } }, laneEvent(0, lane('Recording', { armed: true })), transport(0, true, 120)] });
         seen.armed = await startNow() === startOn(-1);
         await emit({ events: [laneEvent(0, lane('Recording', { autoArmed: true })), transport(0, false, 120)] });
         seen.listening = await startNow() === startOn(-1);
-        await reset();
-        seen.cleared = await startNow() === startOn(0);
-        if (Object.values(seen).some((v) => !v)) fail(`${tag} ${scene}: the start line ${JSON.stringify(seen)} (on lane 3 once selected, gone while armed and listening, back after CLEAR ALL)`);
+        await emit({ events: [laneEvent(0, lane('Empty')), transport(0, false, 120)] });
+        seen.cancelled = await startNow() === startOn(0);
+        seen.stillOwed = await marker() === '1';
+        await emit({ events: [laneEvent(0, lane('Recording')), transport(0, true, 120)] });
+        seen.recording = await startNow() === startOn(-1);
+        // The first take commits and is cleared inside one feed frame (a catch-up frame carries both): the
+        // loop existed, so the line is over although no rendered state ever showed it.
+        await emit({ events: [laneEvent(0, lane('Playing', { length: RATE * 2, canReverse: true })), laneEvent(0, lane('Empty')), transport(0, false, 120)] });
+        seen.tookAndCleared = await startNow() === startOn(-1);
+        seen.played = await marker() === 'played';
+        await emit({ events: [laneEvent(0, lane('Playing', { length: RATE * 2, canReverse: true })), transport(RATE * 2, true, 120)] });
+        seen.took = await startNow() === startOn(-1);
+        await emit({ events: [...allEmpty(), transport(0, false, 120)] });
+        seen.clearedAll = await startNow() === startOn(-1);
+        if (Object.values(seen).some((v) => !v)) fail(`${tag} ${scene}: the start line ${JSON.stringify(seen)} (owed; on lane 3 once selected; gone while armed and listening; back after the arm is cancelled, still owed; gone while the first take records; gone, the marker played, after a take committed and cleared in one frame; gone while a later take plays and after CLEAR ALL)`);
       }
       // The first synth picked shows the keyboard where it returns (the bottom), once.
       await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).selectOption('lead');
@@ -267,6 +285,17 @@ await probe(async ({ browser, open }) => {
       {
         const f = await firstLook();
         if (f.kbd !== 'bottom' || f.slots[0]?.picker !== 'Lead' || f.slots[0]?.ask) fail(`${tag} ${scene}: picking Lead in slot A leaves the keyboard ${f.kbd} and slot A ${JSON.stringify(f.slots[0])}`);
+      }
+      // A reload over an empty engine: the first take ended the start line for good on this install.
+      await page.reload();
+      await page.waitForFunction(() => '__lf' in window && window.__lf.native.opened.length === 1, undefined, { timeout: 30_000 });
+      seq = 0;
+      await reset();
+      await page.waitForTimeout(200);
+      {
+        const f = await firstLook();
+        const marker = await page.evaluate(() => localStorage.getItem('lf.guitarFirst'));
+        if (f.start.some(Boolean) || marker !== 'played') fail(`${tag} ${scene}: after a reload the start line reads ${JSON.stringify(f.start)} and the marker ${JSON.stringify(marker)} (no line, played)`);
       }
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
       errors.length = 0;

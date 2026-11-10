@@ -1,6 +1,6 @@
 import { createMemo, type Accessor } from 'solid-js';
 import { clock, looper, type TrackState } from '../state/audio';
-import { guitarFirstInstall } from '../state/instrument-slots';
+import { startLineOwed } from '../state/instrument-slots';
 import { laneCue, refusalText } from './gates';
 
 /**
@@ -12,10 +12,6 @@ import { laneCue, refusalText } from './gates';
  * Reactive: `createLaneView` builds memos, so call it during component setup, never from the 60 fps
  * draw loop (invariant 6).
  */
-
-// Read while the module loads, before the app stores anything (`guitarFirstInstall`): only a
-// guitar-first install's looper draws the start line (`startLine`).
-const guitarFirst = guitarFirstInstall();
 
 /**
  * Display states add 'ARMED' — a track that pressed REC but is still waiting for its downbeat before
@@ -119,12 +115,14 @@ export function createLaneView(i: number): LaneView {
     return '';
   };
   const wellCount = () => (!cue() && countedIn() ? clock.countLeft() : 0);
-  // On a guitar-first install, while all five lanes are EMPTY (so nothing is armed either), the selected
-  // lane's well says how to start: the key and the pedal that record onto it. Any well message outranks
-  // it (AUTO REC's listen, a refusal); the first arm takes it away, and CLEAR ALL brings it back.
+  // On a guitar-first install that has never held a loop (`startLineOwed`), while all five lanes are
+  // EMPTY (so nothing is armed either), the selected lane's well says how to start: the key and the
+  // pedal that record onto it. Any well message outranks it (AUTO REC's listen, a refusal); an arm
+  // takes it away and a cancelled one brings it back, but the first loop any lane holds ends it for
+  // good on this install (`engine-store.ts` `applyLane`), so CLEAR ALL never brings it back.
   const startLine = createMemo(
     () =>
-      guitarFirst &&
+      startLineOwed() &&
       looper.selectedTrack() === i &&
       wellMsg() === '' &&
       Array.from({ length: looper.trackCount }, (_, j) => looper.track(j)().state === 'EMPTY').every(Boolean),
