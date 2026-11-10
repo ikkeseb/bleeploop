@@ -60,6 +60,9 @@
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
  * Run: pnpm probe contact-sheet
+ * Other window sizes: CS_VIEWPORTS=1600x900,2560x1440. From WSL the variable reaches Windows node only
+ * through WSLENV (`WSLENV=CS_VIEWPORTS CS_VIEWPORTS=… pnpm probe contact-sheet`); without it the probe
+ * shoots the three default sizes and says nothing.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { probe } from '../harness/probe.ts';
