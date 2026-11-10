@@ -802,9 +802,11 @@ option {
   color: var(--dim);
 }
 /* slot B before its first source: its letter and the picker's one line, hugging them, so slot A takes
-   the row; any pick restores the two equal cards */
+   the row; any pick restores the two equal cards. It drops the card's inline-size containment, which
+   would size the hugging card as if empty (it has no one-line form to query). */
 .slot--folded {
   flex: 0 0 auto;
+  container-type: normal;
 }
 .slot--folded .slot__row {
   grid-template-columns: auto auto;

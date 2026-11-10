@@ -180,6 +180,12 @@ await probe(async ({ browser, open }) => {
           input: !!el.querySelector('.slot__in'),
           live: !!el.querySelector('.live'),
           meter: !!el.querySelector('.slot__meter'),
+          // the picker whole inside its card, past the card's own padding (a hugging card sized as if empty
+          // clips it)
+          fits: (() => {
+            const c = el.getBoundingClientRect(), s = el.querySelector('.slot__source')?.getBoundingClientRect();
+            return !!s && s.width > 0 && s.left >= c.left && s.right <= c.right - 1;
+          })(),
         })),
         start: [...document.querySelectorAll('.lp-lane')].map((l) => l.querySelector('.lp-lane__start')?.textContent.trim() ?? ''),
         routedOff: window.__lf.native.inputSent.some((e) => JSON.stringify(e) === JSON.stringify({ selectTarget: { slot: 0, target: 'Off' } })),
@@ -194,8 +200,8 @@ await probe(async ({ browser, open }) => {
         const [a, b] = f.slots;
         const problems = [
           f.kbd !== 'hidden' && `the keyboard is ${f.kbd}, not hidden`,
-          !(a?.picker === 'Pick your amp-sim' && a.ask && !a.folded && a.input && a.live && a.meter) && `slot A reads ${JSON.stringify(a)}`,
-          !(b?.picker === 'Add a second sound' && b.ask && b.folded && !b.input && !b.live && !b.meter) && `slot B reads ${JSON.stringify(b)}`,
+          !(a?.picker === 'Pick your amp-sim' && a.ask && !a.folded && a.input && a.live && a.meter && a.fits) && `slot A reads ${JSON.stringify(a)}`,
+          !(b?.picker === 'Add a second sound' && b.ask && b.folded && !b.input && !b.live && !b.meter && b.fits) && `slot B reads ${JSON.stringify(b)}`,
           f.start.join('|') !== startOn(0) && `the start line reads ${JSON.stringify(f.start)}, not on lane 1 alone`,
           !f.routedOff && "the boot did not route slot A's notes to Off",
         ].filter(Boolean);
