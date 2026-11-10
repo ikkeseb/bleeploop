@@ -46,6 +46,15 @@
   the driver's sample position; `callback::PhaseSlips`). A single late wake is no signal: on the rig's
   USB driver at 64 frames, wakes more than a period behind the best phase came ~180 times a second
   with every fault counter 0 (2026-10-07).
+- The EVO 4's driver asked for a stream reset 20 times in the first minute after a launch's first
+  ASIO open (2026-11-10, a dev build on an empty profile, 256 frames behind the 128-frame preopen): the
+  log's "Stream reset was requested by the ASIO driver", about 3 s apart, each handled as a lost
+  device and recovered on the same request, the last one staying up. None came in the 40 minutes
+  after, three further ASIO opens at that size included. Cause unknown: whether the preopen (written
+  for the Focusrite driver), the recovery's own reopen or something outside the app (the thread
+  below, EVO Control) set it off was not looked at. Next check: grep the log of a launch on the
+  owner's own profile at 128 frames for that line; if it is there, the same launch with the preopen
+  skipped.
 - A rate or buffer change made in the ASIO driver's own control panel while the app runs (read from
   source 2026-10-07, never run on a device; Audio Settings sends a fixed-size driver's users there): a
   reset, resync or rate change reaches the run as cpal's `StreamInvalidated`, which the owner handles

@@ -1,3 +1,5 @@
+import { guitarFirstInstall } from './instrument-slots';
+
 /**
  * Persisted audio device selections — the engine's input and output device, each slot's input channel,
  * the buffer size, the ASIO tier and driver and Share output. Survives a
@@ -28,7 +30,9 @@ export interface AudioDeviceSettings {
   /** The pre-per-slot input channel (0-based; '' = auto): seeds `slotInputChannels` from old settings. */
   inputChannel: string;
   /** Each slot's 0-based capture channel, in the same form. Saved settings from before
-   * the per-slot pick start both slots on `inputChannel`. */
+   * the per-slot pick start both slots on `inputChannel`; with none saved, a guitar-first install
+   * (`guitarFirstInstall`) starts slot A on input 1 (the rig's instrument jack; Auto reads input 2
+   * there) and leaves slot B on Auto. */
   slotInputChannels: [string, string];
   /** Native output device id; '' = default output. */
   outputDeviceId: string;
@@ -60,11 +64,12 @@ const DEFAULTS: AudioDeviceSettings = {
   shareDeviceId: '',
 };
 
-/** Read the persisted device settings, falling back to defaults for any missing/invalid field. */
+/** Read the persisted device settings, falling back to defaults for any missing/invalid field. The first
+ * read runs as `audio-devices.ts` loads, so it decides the install as `guitarFirstInstall` asks. */
 export function readAudioDeviceSettings(): AudioDeviceSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS, slotInputChannels: ['', ''] };
+    if (!raw) return { ...DEFAULTS, slotInputChannels: guitarFirstInstall() ? ['0', ''] : ['', ''] };
     const p = JSON.parse(raw) as Partial<AudioDeviceSettings>;
     const inputChannel = typeof p.inputChannel === 'string' ? p.inputChannel : '';
     const slots = p.slotInputChannels;
