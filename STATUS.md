@@ -175,6 +175,9 @@ settles.
 Guitar in, ASIO, a pedal where named: feel, latency, devices, drivers, plugins, MIDI hardware, and
 anything else that needs the interface or a real plugin.
 
+- A fresh install's first GO LIVE (slot A starts on In 1 and keeps it through a Windows input device
+  pick): is the guitar heard with nothing picked but the amp-sim? (machine: the `legacy-storage` and
+  `slot-sources` probes; on the rig an empty profile's first ASIO open read slot A on channel 1)
 - The amp-sim live: does the master fader scale the wet sound, never the recorded level?
 - GO LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
 - An attack played right on a DUB's punch-in (D23): does it still sound whole?
@@ -297,3 +300,5 @@ nothing is said.
 |---|---|---|
 | D30 | Three remote branches, one unlanded commit each, kept as they are: `pw16/heap-probe` (22a2b33d, a candidate: the stage draw's clock and level reads in typed arrays, the allocation probe on the freshness path), `proto11/settings-a` (f6ed7aee, a WIP Audio Settings prototype, ungated), `proto11/bar-c` (297d6acd, a prototype: one TAKE chip holding the five mode pills). Land, rework or delete each? | Kept untouched until the owner says |
 | D31 | A press just past the loop's 1 waits for the next pass: a later take starts a whole loop late (rendered: `tests/later_arm.rs`, the ignored test; 8 s on 4 bars at 120, up to 60 s), and END STOP, UNDO and REVERSE share that boundary (read from source). Snap a press within a grace back to the 1, or keep waiting a loop? It changes how the looper plays. | Keeps waiting a loop until the owner says |
+| D32 | A dropout inside an overdub (a block the device side flags): today the take is rejected and the loop stays as it was. `pw/engine-red-3` keeps the take and marks the damaged part; a third option smooths over it (`pw/dropout-ab`'s ignored test renders the three side by side). Which should the looper do? | Rejects the take, as today, until the owner says |
+| D33 | EMBER, a fourth stage look on `design/peak-stage-4` (unlanded): keep it as a fourth look, make it the default, or drop it? | Stays unlanded until the owner says |
