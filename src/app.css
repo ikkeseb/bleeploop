@@ -178,6 +178,13 @@ option {
   background: var(--bg);
   color: var(--text);
 }
+/* A group's heading takes its own fill: Chromium lays the open list over white wherever the select's
+   own background-color is translucent (a key's face is), and a heading with no fill shows that white
+   under its light text. The themed selects fill their options with --option; the heading matches. */
+optgroup {
+  background: var(--option);
+  color: var(--faint);
+}
 
 /* Text selection — themed to the new palette. (body is user-select:none, so this shows only in the few
    selectable inputs; there are no global scrollbar rules to re-palette.) */
