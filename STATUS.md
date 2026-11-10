@@ -175,9 +175,6 @@ settles.
 Guitar in, ASIO, a pedal where named: feel, latency, devices, drivers, plugins, MIDI hardware, and
 anything else that needs the interface or a real plugin.
 
-- A fresh install's first GO LIVE (slot A starts on In 1 and keeps it through a Windows input device
-  pick): is the guitar heard with nothing picked but the amp-sim? (machine: the `legacy-storage` and
-  `slot-sources` probes; on the rig an empty profile's first ASIO open read slot A on channel 1)
 - The amp-sim live: does the master fader scale the wet sound, never the recorded level?
 - GO LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
 - An attack played right on a DUB's punch-in (D23): does it still sound whole?
