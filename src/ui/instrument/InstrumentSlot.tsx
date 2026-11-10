@@ -33,7 +33,8 @@ import { inputArmed } from '../state/native-io';
  * One instrument slot (A / B) — a compact card. Its header: the A/B identity button, the source picker
  * (Off, the built-in instruments, the scanned plugins), the slot's volume, and the source's
  * own controls — the input pick and GO LIVE of a source that takes input, the plugin's EDITOR / PARAMS —
- * on a second line, or beside the picker when the card is wide. Below it, the plugin params drawer.
+ * following the picker: on a second line under it, or right beside it when the card is wide (the volume
+ * keeps the right edge; `src/app.css` `.slot__row`). Below it, the plugin params drawer.
  * On a guitar-first install a slot that has never held a source (`slotUnset`) asks for one: slot A's
  * picker reads `Pick your amp-sim` over its Off (whose input pick, GO LIVE and meter the guitar needs
  * next), and slot B folds to its letter and a picker reading `Add a second sound`, so A takes the row.

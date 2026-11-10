@@ -49,7 +49,9 @@
  * build at the reference's height (Help never resizes on a tab switch) with the tabs in reach when the
  * Manual is scrolled to its foot, its Pedals section naming TAP, CLICK, END STOP and FIXED as the bar's legends read and its
  * AUTO REC line pointing at the SENS word only where the bar shows it (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
- * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
+ * no rec-red in its canvas while waiting (audit A3); in 1-empty, 8, 8b, 8c and 9 slot A's own controls (the
+ * input pick, GO LIVE, EDITOR / PARAMS) follow its picker, on its line one column gap after it and unwrapped, or
+ * on the next starting under it, and its volume keeps the card's right edge; no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
  * Run: pnpm probe contact-sheet
@@ -170,7 +172,8 @@ await probe(async ({ browser, open }) => {
         return { text: el.textContent, size, want, ok: Math.abs(size - want) < 0.01 };
       }), sel);
       /** The first screen's guitar-first parts: the keyboard's placement, each slot card's picker text, ask,
-       * fold and live controls, each lane's start line, and whether the boot routed slot A's notes to Off. */
+       * fold and live controls and where they sit, each lane's start line, and whether the boot routed slot
+       * A's notes to Off. */
       const firstLook = () => page.evaluate(() => ({
         kbd: window.__lf.layoutStore.keyboardPlacement(),
         slots: [...document.querySelectorAll('.slot')].map((el) => ({
@@ -186,6 +189,21 @@ await probe(async ({ browser, open }) => {
             const c = el.getBoundingClientRect(), s = el.querySelector('.slot__source')?.getBoundingClientRect();
             return !!s && s.width > 0 && s.left >= c.left && s.right <= c.right - 1;
           })(),
+          // the source's own controls follow the picker: on the picker's line, one column gap (12 px) after
+          // it and none wrapped; or on the next line, starting under it (a narrow card's second line may
+          // wrap); the volume at the card's right padding (18 px) either way. Null on a card with no controls.
+          follows: (() => {
+            const s = el.querySelector('.slot__source')?.getBoundingClientRect();
+            const acts = [...el.querySelectorAll('.slot__acts > :is(select, button)')].map((a) => a.getBoundingClientRect());
+            if (!s || !acts.length) return null;
+            const mid = (r) => (r.top + r.bottom) / 2;
+            const onPickerLine = (r) => Math.abs(mid(r) - mid(s)) < 2;
+            const beside = onPickerLine(acts[0])
+              ? Math.abs(acts[0].left - s.right - 12) <= 1 && acts.every(onPickerLine)
+              : Math.abs(acts[0].left - s.left) <= 1 && acts[0].top >= s.bottom;
+            const c = el.getBoundingClientRect(), v = el.querySelector('.slot__vol')?.getBoundingClientRect();
+            return beside && !!v && Math.abs(c.right - 1 - 18 - v.right) <= 1;
+          })(),
         })),
         start: [...document.querySelectorAll('.lp-lane')].map((l) => l.querySelector('.lp-lane__start')?.textContent.trim() ?? ''),
         routedOff: window.__lf.native.inputSent.some((e) => JSON.stringify(e) === JSON.stringify({ selectTarget: { slot: 0, target: 'Off' } })),
@@ -200,7 +218,7 @@ await probe(async ({ browser, open }) => {
         const [a, b] = f.slots;
         const problems = [
           f.kbd !== 'hidden' && `the keyboard is ${f.kbd}, not hidden`,
-          !(a?.picker === 'Pick your amp-sim' && a.ask && !a.folded && a.input && a.live && a.meter && a.fits) && `slot A reads ${JSON.stringify(a)}`,
+          !(a?.picker === 'Pick your amp-sim' && a.ask && !a.folded && a.input && a.live && a.meter && a.fits && a.follows) && `slot A reads ${JSON.stringify(a)}`,
           !(b?.picker === 'Add a second sound' && b.ask && b.folded && !b.input && !b.live && !b.meter && b.fits) && `slot B reads ${JSON.stringify(b)}`,
           f.start.join('|') !== startOn(0) && `the start line reads ${JSON.stringify(f.start)}, not on lane 1 alone`,
           !f.routedOff && "the boot did not route slot A's notes to Off",
@@ -624,7 +642,7 @@ await probe(async ({ browser, open }) => {
       {
         const f = await firstLook();
         const [a, b] = f.slots;
-        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !b?.folded || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
+        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !a.follows || !b?.folded || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
       }
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
       errors.length = 0;
@@ -643,6 +661,10 @@ await probe(async ({ browser, open }) => {
       await emit({ meter: { peak: [0.25, 0], clip: [false, false] } });
       await page.waitForTimeout(250);
       await shoot(scene);
+      {
+        const a = (await firstLook()).slots[0];
+        if (!a?.follows) fail(`${tag} ${scene}: slot A's own controls do not follow its picker, or its volume left the card's right edge: ${JSON.stringify(a)}`);
+      }
 
       scene = '10-amp-sim-idle';
       await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).click();
