@@ -8,6 +8,9 @@ added a line.
 
 ## With the app open, `pnpm dev:asio`
 
+- **The empty first screen reads dark (the owner's eye on a 2560 still, 2026-11-10):** a fresh
+  install's five empty wave wells are near-black over most of the window; possibly fine as it is.
+  Lift an empty well a tone, or leave it?
 - **Sample rate row (unseen):** Audio Settings' select under Buffer, "Device (44.1 kHz)" / "44.1 kHz"
   / "48 kHz" (under ASIO only the rates the driver runs; under WASAPI a read-out of the device's own
   rate, no caret, with a hint that Windows sets it). Clear beside Buffer, and is the hint useful?

@@ -579,8 +579,10 @@ option {
   background: var(--surf-sel);
 }
 /* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
-   EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
-   enough for one line */
+   EDITOR, PARAMS) following the picker: on a second line starting under it, or on a card wide enough
+   for one line, right after it, the volume keeping the card's right edge. Either way they read as the
+   picker's own; while the picker has its full width, the input and GO LIVE stay put when a plugin's
+   keys join them, and two full cards line them up at one x. */
 .slot__row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -595,10 +597,26 @@ option {
 .slot__row:has(> .slot__acts) {
   grid-template-areas: 'id source vol' '. acts acts';
 }
+/* the one-line form: the picker's column caps at the picker's own width and at 28% of the card, so two
+   equal cards give their pickers one width whatever controls each shows; the controls take their whole
+   width beside it, and the volume's column takes what is left, the volume at its end (no empty column,
+   so no extra gap on a full row). 28%: at 2560 a full card (1242 px) keeps the picker's whole 345 px; at
+   1920 a full card (922 px) caps it at 258 px, 13 px under what an input-taking plugin's four keys, live,
+   leave it. Below a 904 px card that crowded card narrows its picker, never wraps its controls. */
 @container slot (min-width: 760px) {
   .slot__row:has(> .slot__acts) {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: auto minmax(0, min(calc(300px * var(--ui)), 28cqi)) max-content minmax(max-content, 1fr);
     grid-template-areas: 'id source acts vol';
+  }
+  .slot__row:has(> .slot__acts) > .slot__vol {
+    justify-self: end;
+  }
+  /* a refusal or an error beside the controls (one line of text, never wrapped) would take the picker's
+     width and could push the row past the card: that row keeps the two-line form, its controls wrapping
+     on their own line */
+  .slot__row:has(> .slot__acts > .pc__err) {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: 'id source vol' '. acts acts';
   }
 }
 /* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
