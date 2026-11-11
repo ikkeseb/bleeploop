@@ -246,7 +246,7 @@ export function App() {
       // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`, `src/debug/recall-restart.ts`,
       // `src/debug/engine-smoke.ts`, `src/debug/engine-recovery.ts`, `src/debug/engine-loopback.ts`,
       // `src/debug/tone-recall.ts`, `src/debug/export-master.ts`, `src/debug/midi-switch.ts`,
-      // `src/debug/bench-load.ts`, `src/debug/editor-premise.ts`.
+      // `src/debug/bench-load.ts`, `src/debug/editor-premise.ts`, `src/debug/tuner-smoke.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-premise') {
@@ -259,6 +259,8 @@ export function App() {
         void import('./debug/recall-restart').then((m) => m.runRecallRestart());
       } else if (import.meta.env.VITE_LF_PROBE === 'engine-smoke') {
         void import('./debug/engine-smoke').then((m) => m.runEngineSmoke());
+      } else if (import.meta.env.VITE_LF_PROBE === 'tuner-smoke') {
+        void import('./debug/tuner-smoke').then((m) => m.runTunerSmoke());
       } else if (import.meta.env.VITE_LF_PROBE === 'engine-recovery') {
         void import('./debug/engine-recovery').then((m) => m.runEngineRecovery());
       } else if (import.meta.env.VITE_LF_PROBE === 'engine-loopback') {

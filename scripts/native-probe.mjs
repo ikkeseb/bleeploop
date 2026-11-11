@@ -5,6 +5,7 @@
 //   pnpm native:swap    swap stress     (src/debug/swap-stress.ts)
 //   pnpm native:recall  recall restart  (src/debug/recall-restart.ts): one launch per phase
 //   pnpm native:engine-smoke  the UI on the native engine (src/debug/engine-smoke.ts)
+//   pnpm native:tuner  the tuner on the native engine (src/debug/tuner-smoke.ts): one launch, on ASIO
 //   pnpm native:engine-recovery  export, import and recovery on the engine (src/debug/engine-recovery.ts)
 //   pnpm native:engine-loopback  where takes land against the click on the engine
 //     (src/debug/engine-loopback.ts): needs an output cabled into input 2 (`--channel=` is 0-based)
@@ -59,6 +60,13 @@ const PROBES = {
     config: 'scripts/engine-probe.tauri.json',
     cleanLog: true,
     phases: [{ name: 'smoke', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
+  },
+  // engine-smoke's profile; one launch, closed through its window.
+  'tuner-smoke': {
+    tag: 'tuner-smoke',
+    config: 'scripts/engine-probe.tauri.json',
+    cleanLog: true,
+    phases: [{ name: 'tuner', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
   // The same profile; the save phase ends with app.exe killed while its loops play, the restore phase
   // with a window close.
