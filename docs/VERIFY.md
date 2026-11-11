@@ -210,7 +210,7 @@ blocks until the verdict, so an agent harness should run it in the background.
 ### The owner's loopback run (`release:smoke` with the cable, EVO 4)
 
 The owner cables and sets the levels; an agent may run step 2 from WSL (the `pnpm` wrapper) while the
-owner watches EVO Control. Last passed 7/7 with an input take for v0.8.8 on 2026-10-26, the owner's
+owner watches EVO Control. Last passed 7/7 with an input take for v0.8.8 on 2026-10-26 (v0.8.9 went out without one, on the owner's word), the owner's
 guitar standing in for the cable (step 1); with the cable on 2026-10-16 (8a18e5ad, ASIO 128 at
 44.1 kHz).
 
