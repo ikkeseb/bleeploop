@@ -1513,6 +1513,9 @@ mod tests {
         send(&feed, [Command::Stop(1), Command::PlayAll]);
         render(&mut engine, &mut at, 1);
         let cancel = at - 128;
+        // Past the grace a REC just after a boundary snaps back over (D31: a quarter beat, 500 frames at
+        // 240 BPM and 8 kHz), so lane 2 arms; still before the next beat (2000), and no turn between.
+        render(&mut engine, &mut at, 7);
         send(&feed, [Command::RecDub(2)]);
         render(&mut engine, &mut at, 1);
         turn(&mut feed, &mut page, &hold);
