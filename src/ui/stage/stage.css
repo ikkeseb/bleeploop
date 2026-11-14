@@ -216,6 +216,9 @@
   color: var(--dim);
   transition: opacity 0.08s;
 }
+.sv.is-idle .sv-msg {
+  max-width: calc(100% - 2 * var(--sv-pad)); /* the buttons are hidden: the line takes the width */
+}
 .sv-msg:empty {
   opacity: 0;
 }

@@ -8,7 +8,7 @@
  * when the arm is cancelled, and leaves for good with the first take: CLEAR ALL and a reload keep it gone)
  * and the keyboard's one reveal for the first synth picked. Every other scene opens as a
  * returning player (the harness's `lf.` key, `verify/harness/probe.ts`), so it matches the sheet from before
- * that rule. Scenes 1r-7, 11, 12 and 14 run in one returning browser
+ * that rule. Scenes 1r-7, 11, 12, 14 and 16 run in one returning browser
  * context: 1r-returning (the empty looper of an install that stored anything: Lead and Bass, the keyboard
  * where the pass puts it, no start line), 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
@@ -16,7 +16,8 @@
  * same with lane 1 playing and all five of its FX engaged), 6-help (Help's
  * reference, as `?` opens it), 6-help-manual (its Manual tab, About included),
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
- * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 14-modes-on (a reset frame
+ * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 16-tight-lanes (lane 1
+ * dubbed with UNDO lit, lane 2 ENDING, lane 3 showing a refused UNDO's cue in its well, lanes 4-5 stopped), 14-modes-on (a reset frame
  * with CLICK, FIXED 4, RETAKE, AUTO REC and END STOP on, then the five lanes of scene 5, drawer closed: the
  * command bar's rows with every mode on) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's screens, in contexts whose plugin host is served with
@@ -40,7 +41,7 @@
  * out wears the disabled face, no lit legend. 13b-jam-edit is the same jam with lane
  * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). 15-slots-paired (after 13b)
  * = the same with slot B on Off beside A's live amp-sim; 15b-slots-refused = the amp-sim live in both
- * slots, both EDITORs refused with the longest refusal (two loads overlapping in flight). Writes
+ * slots, both EDITORs refused with the longest refusal (two loads overlapping in flight). Empties its own PNGs, then writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present and fully visible at every size, the
@@ -64,14 +65,14 @@
  * through WSLENV (`WSLENV=CS_VIEWPORTS CS_VIEWPORTS=… pnpm probe contact-sheet`); without it the probe
  * shoots the three default sizes and says nothing.
  */
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { probe } from '../harness/probe.ts';
 
 const outDir = 'logs/contact-sheet';
 const viewports = process.env.CS_VIEWPORTS ? process.env.CS_VIEWPORTS.split(',').map((v) => v.split('x').map(Number)) : [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '1r-returning', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '5b-fx-all-on', '6-help', '6-help-manual', '7-audio-settings',
-  '8-native-first-launch', '8b-first-launch-live', '8c-first-launch-amp-sim', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on', '15-slots-paired', '15b-slots-refused'];
+  '8-native-first-launch', '8b-first-launch-live', '8c-first-launch-amp-sim', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx', '13-jam', '13c-jam-forced-colours', '13b-jam-edit', '14-modes-on', '15-slots-paired', '15b-slots-refused', '16-tight-lanes'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -116,6 +117,8 @@ const loopFrame = ({ count, playing, bpm = 120, bars = 1 }) => {
 
 await probe(async ({ browser, open }) => {
   await mkdir(outDir, { recursive: true });
+  // The probe writes over its own sheet: a scene renamed or dropped leaves no stale PNG behind.
+  for (const f of await readdir(outDir)) if (f.endsWith('.png')) await rm(`${outDir}/${f}`);
   const failures = [];
   const shots = [];
   const fail = (msg) => { failures.push(msg); console.log(`FAIL ${msg}`); };
@@ -577,6 +580,23 @@ await probe(async ({ browser, open }) => {
       await page.waitForTimeout(250);
       await shoot(scene);
       await page.evaluate(() => window.__lf.ui.closeSettings());
+
+      // The lanes' tightest states side by side: lane 1 dubbed (UNDO lit, so its right cluster shows
+      // every button), lane 2 ENDING (a stop pending at the loop end), lane 3 showing a refused UNDO's
+      // cue in its well (the cue lasts 1.6 s: gates.ts CUE_MS); lanes 4 and 5 stopped.
+      scene = '16-tight-lanes';
+      const tight = loopFrame({ count: 5, playing: [0, 1, 2] });
+      const tightMaster = tight.events[0].Transport.master;
+      await emit(tight);
+      await emit({ events: [
+        laneEvent(0, lane('Playing', { length: tightMaster, canReverse: true, canUndo: true })),
+        laneEvent(1, lane('Playing', { length: tightMaster, canReverse: true, stopAt: tightMaster })),
+        { Refused: { frame: 0, lane: 2, reason: 'NoUndo' } },
+      ] });
+      await page.waitForTimeout(300);
+      await shoot(scene);
+      // The refused UNDO's cue outlives the shot (CUE_MS): let it end so 12-stage opens on no message.
+      await page.waitForFunction(() => !document.querySelector('.lp-lane.is-cued'), undefined, { timeout: 4000 });
 
       scene = '12-stage';
       await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
