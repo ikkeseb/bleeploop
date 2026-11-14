@@ -195,6 +195,18 @@ fn grace_parts(meter: Meter) -> Frame {
     4 * meter.beats_per_bar() as Frame
 }
 
+/// A later take's REC pressed `late` frames past a loop boundary is inside the grace, so it snaps back to
+/// that boundary (D31): the stop's grace, the same exact comparison as [`plan_retake_stop`].
+pub fn late_in_grace(late: Frame, fpb: Frame, meter: Meter) -> bool {
+    late >= 0 && grace_parts(meter) * late <= fpb
+}
+
+/// The longest such grace at `sample_rate`, over every offered meter at [`MIN_BPM`] (about 15·sr/40
+/// frames): the lookback a snap reads must hold this much.
+pub fn late_grace_max(sample_rate: u32) -> Frame {
+    Meter::OFFERED.iter().map(|&m| frames_per_bar(MIN_BPM as f64, sample_rate, m) / grace_parts(m)).max().unwrap_or(0)
+}
+
 /// Whole bars chosen by a stop pressed `elapsed` frames after the take's musical start, with a quarter
 /// beat of grace for a slightly early press (grid-math `planFreeStop` / `planLaterStop`).
 pub fn bars_at(elapsed: Frame, fpb: Frame, meter: Meter) -> Frame {

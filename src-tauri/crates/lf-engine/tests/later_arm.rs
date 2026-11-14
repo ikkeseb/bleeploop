@@ -10,7 +10,12 @@
 //! A free later take runs until the press (E10; `tests/multiply.rs` holds the take that grows the loop):
 //! the takes here end with a REC press 1.3 loops in, which keeps one loop and commits at once.
 //!
-//! The engine's own, the `idle_` group at the end: a later take armed on an idle transport (a master,
+//! D31, the `d31_` group at the end: a later take's REC within the quarter-beat grace past a boundary
+//! snaps back to it and records what an on-time press records, sample for sample; a gap, an alignment
+//! change or another capture inside the frames it would copy makes it wait a loop, as every press past
+//! the grace does.
+//!
+//! The engine's own, the `idle_` group: a later take armed on an idle transport (a master,
 //! every loop stopped) counts in as the first take did, and on the count's downbeat the grid re-anchors
 //! and every stopped loop starts from the top, the take recording from there. A cancel during the count
 //! leaves the loops stopped and gives the pulse back to the old grid; a PLAY during it is dropped, COPY
@@ -37,10 +42,13 @@ fn a_later_takes_land_frame_exact_on_the_master_grid() {
                 rig.set_input(code);
                 for phase in [0.013, 0.37, 0.81] {
                     let next = rig.next_boundary();
-                    rig.advance_to(next + (phase * master as f64) as Frame);
+                    let late = (phase * master as f64) as Frame;
+                    rig.advance_to(next + late);
                     rig.press(Command::RecDub(1));
                     let boundary = rig.start_frame();
-                    assert_eq!(boundary, rig.next_boundary(), "arms on the next boundary");
+                    // 0.013 of a loop is inside the quarter-beat grace at every tempo here: it snaps back (D31).
+                    let want = if 16 * late <= rig.fpb() { next } else { rig.next_boundary() };
+                    assert_eq!(boundary, want, "arms on the next boundary, or snaps back to the one just passed");
                     rig.advance_to(boundary + master * 13 / 10);
                     rig.press(Command::RecDub(1));
                     rig.advance(master * 8 / 10);
@@ -759,7 +767,6 @@ fn idle_13_a_command_on_the_downbeats_own_frame_finds_the_loops_restarted() {
 }
 
 #[test]
-#[ignore = "red, D31: a press just past the boundary waits a whole loop, and whether it should snap back is the owner's call (lf-engine briefing)"]
 fn a_later_take_pressed_just_past_the_boundary_starts_on_it() {
     let mut waits = Vec::new();
     for block in [1, 128] {
@@ -775,4 +782,253 @@ fn a_later_take_pressed_just_past_the_boundary_starts_on_it() {
         }
     }
     assert!(waits.iter().all(|&(.., wait)| wait == 0), "(block, frames late, frames waited): {waits:?}");
+}
+
+// ── D31: a later take pressed within the grace past a boundary snaps back to it ─────────────────────
+
+/// A rig at 120 BPM in `meter` with a `bars`-bar loop on lane 0, the frame-coded input on from then.
+fn d31_rig(block: usize, align: Frame, meter: Meter, bars: Frame) -> (Rig, Frame) {
+    let mut rig = Rig::with(Opts { block, align, ..Default::default() });
+    rig.set(Command::SetMeter(meter));
+    rig.set(Command::SetBpm(120.0));
+    rig.set_level(0.5);
+    let press = rig.frame;
+    rig.press(Command::RecDub(0));
+    let downbeat = Grid::tempo(press, 0, rig.bpm(), rig.sr, meter).beat_frame(meter.pulses_per_bar());
+    rig.advance_to(downbeat + align + bars * rig.fpb() + 1000);
+    rig.press(Command::RecDub(0));
+    rig.advance(rig.seconds(0.25));
+    let master = rig.master();
+    assert_eq!(master, bars * rig.fpb());
+    rig.set_input(code);
+    (rig, master)
+}
+
+/// The quarter-beat grace (`grid::late_in_grace`), computed here on its own.
+fn d31_grace(rig: &Rig) -> Frame {
+    rig.fpb() / (4 * rig.meter().beats_per_bar() as Frame)
+}
+
+/// Lane 1's REC `late` frames past the next boundary, REC again 1.3 loops after that boundary (one
+/// loop kept), then the tail. Returns the take's start less the boundary, its loop and its waveform bins.
+fn d31_take(block: usize, align: Frame, meter: Meter, late: Frame) -> (Frame, Vec<f32>, Vec<(f32, f32)>) {
+    let (mut rig, master) = d31_rig(block, align, meter, 2);
+    let boundary = rig.next_boundary();
+    rig.advance_to(boundary + late);
+    rig.press(Command::RecDub(1));
+    let start = rig.start_frame();
+    let copied = boundary + late - start;
+    assert_eq!(rig.lane(1).armed, copied < 0, "late {late}: armed only while the window has not opened");
+    if copied >= 0 {
+        // The lookback's frames (and the one rendered since) are in the buffer and its waveform already.
+        let view = rig.engine.looper().overview().lane(1);
+        let written = rig.frame - start;
+        let want = code(start + written.min(lf_engine::overview::PEAK_FRAMES as Frame) - 1);
+        assert_eq!(rig.engine.looper().overview().bin(view.buf, 0), (0.0, want), "late {late}: bin 0 holds the copied frames");
+    }
+    rig.advance_to(boundary + master * 13 / 10);
+    rig.press(Command::RecDub(1));
+    rig.advance(master * 8 / 10);
+    rig.idle();
+    assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0, "late {late}: committed clean");
+    let overview = rig.engine.looper().overview();
+    let buf = overview.lane(1).buf;
+    let bins = (0..overview.bins()).map(|b| overview.bin(buf, b)).collect();
+    (start - boundary, rig.pcm(1), bins)
+}
+
+#[test]
+fn d31_a_snapped_take_records_what_an_on_time_press_records_sample_for_sample() {
+    // 4/4 at both block sizes and alignments; 6/8 once. A press inside `align` finds the window not yet
+    // open (nothing to copy, still armed); one past it copies the lookback.
+    let cases: [(Meter, usize, Frame, &[Frame]); 5] = [
+        (Meter::FOUR_FOUR, 1, 0, &[1, 500]),
+        (Meter::FOUR_FOUR, 128, 0, &[1, 500]),
+        (Meter::FOUR_FOUR, 1, 37, &[18, 37, 500]),
+        (Meter::FOUR_FOUR, 128, 37, &[18, 37, 500]),
+        (Meter::new(6, 8).unwrap(), 128, 37, &[18, 500]),
+    ];
+    for (meter, block, align, lates) in cases {
+        let (at, pcm, bins) = d31_take(block, align, meter, 0);
+        assert_eq!(at, align, "on time: the take starts on the boundary");
+        let first = frame_of(pcm[0], 0);
+        assert!(pcm.iter().enumerate().all(|(k, &x)| frame_of(x, first + k as Frame) == first + k as Frame), "on time: frame exact");
+        for &late in lates {
+            let tag = format!("{meter:?} block {block} align {align} late {late}");
+            let (snapped_at, snapped, snapped_bins) = d31_take(block, align, meter, late);
+            assert_eq!(snapped_at, align, "{tag}: snapped back to the boundary");
+            assert!(snapped == pcm, "{tag}: the loop differs from the on-time take's");
+            assert!(snapped_bins == bins, "{tag}: the waveform differs from the on-time take's");
+        }
+    }
+}
+
+#[test]
+fn d31_a_press_on_the_grace_snaps_and_one_frame_past_it_waits_a_loop() {
+    for meter in [Meter::FOUR_FOUR, Meter::new(6, 8).unwrap()] {
+        for (late, snaps) in [(0, true), (1, true), (2, false)] {
+            let (mut rig, master) = d31_rig(128, 0, meter, 2);
+            let grace = d31_grace(&rig);
+            assert_eq!(grace, 6000, "a quarter beat at 120 BPM, 48 kHz, in every meter");
+            let late = grace + late - 1;
+            let boundary = rig.next_boundary();
+            rig.advance_to(boundary + late);
+            rig.press(Command::RecDub(1));
+            let want = if snaps { boundary } else { boundary + master };
+            assert_eq!(rig.start_frame(), want, "{meter:?}: {late} frames late");
+        }
+    }
+}
+
+#[test]
+fn d31_a_gap_inside_the_frames_a_snap_would_copy_makes_the_press_wait_a_loop() {
+    // An xrun's point gap, a damaged block and a device jump inside [boundary, press): the lookback holds
+    // nothing from before them, so the press waits for the next boundary, and that take is clean (not
+    // damaged: the gap is before its window). A gap before the boundary costs nothing.
+    for (at, kind, snaps) in [(-200, 0, true), (100, 0, false), (100, 1, false), (100, 2, false)] {
+        let (mut rig, master) = d31_rig(128, 0, Meter::FOUR_FOUR, 2);
+        let boundary = rig.next_boundary();
+        rig.advance_to(boundary + at);
+        match kind {
+            0 => rig.gap(),
+            1 => rig.damage(),
+            _ => rig.skip(64),
+        }
+        rig.advance(128);
+        rig.advance_to(boundary + 500);
+        rig.press(Command::RecDub(1));
+        let start = rig.start_frame();
+        assert_eq!(start, if snaps { boundary } else { boundary + master }, "gap kind {kind} at {at}");
+        rig.advance_to(start + master * 13 / 10);
+        rig.press(Command::RecDub(1));
+        rig.advance(master * 8 / 10);
+        rig.idle();
+        assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0, "gap kind {kind} at {at}: committed clean");
+        let pcm = rig.pcm(1);
+        assert!(pcm.iter().enumerate().all(|(k, &x)| frame_of(x, start + k as Frame) == start + k as Frame), "gap kind {kind} at {at}: frame exact");
+    }
+}
+
+#[test]
+fn d31_an_alignment_change_inside_the_frames_a_snap_would_copy_makes_the_press_wait_a_loop() {
+    for (at, snaps) in [(-200, true), (100, false)] {
+        let (mut rig, master) = d31_rig(128, 37, Meter::FOUR_FOUR, 2);
+        let boundary = rig.next_boundary();
+        rig.advance_to(boundary + at);
+        rig.align = 50;
+        rig.advance_to(boundary + 500);
+        rig.press(Command::RecDub(1));
+        let start = rig.start_frame();
+        assert_eq!(start, if snaps { boundary + 50 } else { boundary + master + 50 }, "align changed at {at}");
+        rig.advance_to(start + master * 13 / 10);
+        rig.press(Command::RecDub(1));
+        rig.advance(master * 8 / 10);
+        rig.idle();
+        let pcm = rig.pcm(1);
+        assert!(pcm.iter().enumerate().all(|(k, &x)| frame_of(x, start + k as Frame) == start + k as Frame), "align changed at {at}: frame exact");
+    }
+}
+
+#[test]
+fn d31_a_snap_never_copies_input_another_capture_took() {
+    // An overdub on lane 0 stopped just past the boundary took the frames up to its press: lane 1's
+    // REC waits a loop rather than record them a second time. One stopped before the boundary leaves
+    // the snap free.
+    for (stop, snaps) in [(-100, true), (200, false)] {
+        let (mut rig, master) = d31_rig(128, 0, Meter::FOUR_FOUR, 2);
+        let boundary = rig.next_boundary();
+        rig.advance_to(boundary - master / 2);
+        rig.press(Command::RecDub(0));
+        assert_eq!(rig.state(0), LaneState::Overdubbing);
+        rig.advance_to(boundary + stop);
+        rig.press(Command::RecDub(0));
+        assert_eq!(rig.state(0), LaneState::Playing);
+        rig.advance_to(boundary + 500);
+        rig.press(Command::RecDub(1));
+        assert_eq!(rig.start_frame(), if snaps { boundary } else { boundary + master }, "dub stopped at {stop}");
+    }
+}
+
+#[test]
+fn d31_rec_again_just_after_a_snapped_start_is_the_later_takes_ordinary_stop() {
+    // Past the window start (frames copied): the stop plan's, one bar recorded on to its bar line and
+    // tiled, as after an on-time press.
+    let (mut rig, master) = d31_rig(128, 0, Meter::FOUR_FOUR, 2);
+    let fpb = rig.fpb();
+    let boundary = rig.next_boundary();
+    rig.advance_to(boundary + 500);
+    rig.press(Command::RecDub(1));
+    assert!(rig.start_frame() == boundary && !rig.lane(1).armed);
+    rig.advance_to(boundary + 600);
+    rig.press(Command::RecDub(1));
+    assert!(rig.state(1) == LaneState::Recording && rig.end_frame() == boundary + fpb, "records on to its first bar line");
+    rig.advance_to(boundary + fpb + 1);
+    rig.idle();
+    let pcm = rig.pcm(1);
+    assert!(rig.state(1) == LaneState::Playing && pcm.len() == master as usize);
+    assert_eq!(pcm[..fpb as usize], pcm[fpb as usize..], "the one bar tiles across the loop");
+    assert_eq!(frame_of(pcm[0], boundary), boundary);
+}
+
+#[test]
+fn d31_a_snap_whose_window_has_not_opened_stays_armed_and_cancels_as_an_arm_does() {
+    // `align` 1000, the press 64 frames past the boundary: the window starts on the boundary plus
+    // `align`, still ahead, so the lane stays armed. A second REC before it cancels, and so does a
+    // punch-out; neither commits.
+    for punch in [false, true] {
+        let (mut rig, _) = d31_rig(128, 1000, Meter::FOUR_FOUR, 2);
+        let boundary = rig.next_boundary();
+        rig.advance_to(boundary + 64);
+        rig.press(Command::RecDub(1));
+        assert!(rig.start_frame() == boundary + 1000 && rig.lane(1).armed && rig.lane(1).length == 0, "snapped, armed");
+        rig.advance_to(boundary + 500);
+        if punch {
+            rig.punch_out();
+        } else {
+            rig.press(Command::RecDub(1));
+        }
+        rig.advance(rig.seconds(0.1));
+        assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0 && rig.window().is_none(), "punch {punch}: cancelled");
+        assert!(!rig.events.iter().any(|e| matches!(e, Event::TakeRejected { .. })), "punch {punch}: nothing rejected");
+    }
+}
+
+#[test]
+fn d31_a_discarded_snap_leaves_its_frames_to_no_other_lane() {
+    // REC on lane 1, STOP on it and REC on lane 2, all on one frame inside the grace: lane 1's snap took
+    // the lookback's frames before the STOP discarded them, and no capture has rendered since, so lane 2
+    // must not copy them a second time. It waits a loop.
+    let (mut rig, master) = d31_rig(128, 0, Meter::FOUR_FOUR, 2);
+    let boundary = rig.next_boundary();
+    rig.advance_to(boundary + 400);
+    for command in [Command::RecDub(1), Command::Stop(1), Command::RecDub(2)] {
+        rig.send_at(boundary + 500, command);
+    }
+    rig.advance_to(boundary + 501);
+    assert!(rig.state(1) == LaneState::Empty && rig.state(2) == LaneState::Recording);
+    assert_eq!(rig.start_frame(), boundary + master, "lane 2 waits a loop");
+}
+
+#[test]
+fn d31_a_snap_never_reaches_back_over_a_punch_out() {
+    // A punch-out with nothing recording, inside the frames a snap would copy: the input before it is
+    // another run's, so the press waits a loop, and that take records frame exact. One before the
+    // boundary leaves the snap free.
+    for (at, snaps) in [(-200, true), (100, false)] {
+        let (mut rig, master) = d31_rig(128, 0, Meter::FOUR_FOUR, 2);
+        let boundary = rig.next_boundary();
+        rig.advance_to(boundary + at);
+        rig.punch_out();
+        rig.advance_to(boundary + 500);
+        rig.press(Command::RecDub(1));
+        let start = rig.start_frame();
+        assert_eq!(start, if snaps { boundary } else { boundary + master }, "punch-out at {at}");
+        rig.advance_to(start + master * 13 / 10);
+        rig.press(Command::RecDub(1));
+        rig.advance(master * 8 / 10);
+        rig.idle();
+        let pcm = rig.pcm(1);
+        assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0, "punch-out at {at}: committed clean");
+        assert!(pcm.iter().enumerate().all(|(k, &x)| frame_of(x, start + k as Frame) == start + k as Frame), "punch-out at {at}: frame exact");
+    }
 }

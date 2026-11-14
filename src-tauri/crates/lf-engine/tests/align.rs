@@ -55,6 +55,9 @@ fn later_takes_and_overdubs_land_on_the_grid_too() {
     rig.advance_to(rig.end_frame() + 1);
     let master = rig.master();
     rig.set_input(|_| 0.0);
+    // Half a loop on, past the grace a press just after a boundary snaps back over (D31): this one arms
+    // on the next boundary, where the player then plays.
+    rig.advance(master / 2);
     rig.press(Command::RecDub(1));
     let boundary = rig.start_frame() - PHYS - PLUGIN - LIMITER;
     assert_eq!((boundary - rig.anchor()) % master, 0, "armed on a master boundary");

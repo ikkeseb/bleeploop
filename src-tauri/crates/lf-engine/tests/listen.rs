@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use common::Rig;
 use lf_engine::dsp::fx::{FxKind, FxParam};
-use lf_engine::grid::{Frame, Grid, Meter};
+use lf_engine::grid::{frames_per_bar, Frame, Grid, Meter};
 use lf_engine::{Action, Command, Event, InputSend, LaneState};
 use pluck::{Note, DOT, LAYER, RIFF_A, RIFF_A2, RIFF_B, RIFF_B2, RIFF_C, SIX_EIGHT, STABS};
 use serde_json::json;
@@ -565,6 +565,123 @@ fn delay_on_click() {
             stereo: false,
             max_seconds: 8.0,
             settings: json!({ "bpm": 120, "meter": "4/4", "click": true, "click_volume": 0.5, "loop_bars": 1, "delay_time": "1/4", "delay_feedback": 0.85, "delay_mix": 0.5 }),
+        },
+    );
+}
+
+/// D31's pair, one performance: a two-bar loop on lane 1; the player means to add a layer on lane 2 from
+/// the loop's 1, plays it from that 1 for one pass and on until REC closes the take just past it, muted
+/// over 10 ms into the press, silent after. Only the opening press differs: lane 2's REC lands `late`
+/// frames after the 1. The clip runs on to lane 2's next loop point and a little past it.
+struct LatePress {
+    rig: Rig,
+    clip: Clip,
+    /// The 1 the player means: the loop boundary the layer is played from.
+    one: Frame,
+    master: Frame,
+    /// The recorder's window as the opening press armed it: its first input frame.
+    start: Frame,
+    /// The closing press.
+    close: Frame,
+    /// Where lane 2 commits (PLAYING), an input frame.
+    commit: Frame,
+}
+
+/// 30 ms at 48 kHz.
+const LATE: Frame = 1440;
+
+fn late_press(late: Frame) -> LatePress {
+    let mut rig = rig_at(120.0);
+    first_take(&mut rig, 0, 2, riff(&[&RIFF_B[..], &RIFF_B2[..]].concat(), 2.0, 120.0, 0.25));
+    let master = rig.master();
+    rig.advance_to(rig.next_boundary() + master / 3);
+    let one = rig.next_boundary();
+    rig.advance_to(one - secs(0.5));
+    let since = rig.events.len();
+    let clip = Clip::begin(&mut rig);
+    let close = one + master + 2400;
+    let lag = rig.align;
+    let played = looped(riff(&[&RIFF_A[..], &RIFF_A2[..]].concat(), 2.0, 120.0, 0.25), one + lag);
+    // The player mutes the strings over 10 ms into the closing press, as a hand does: a dead stop would
+    // be a click the take records, which is not the question.
+    let mute = 480;
+    rig.set_input(move |f| if f < close + lag { played(f) * ((close + lag - f) as f32 / mute as f32).min(1.0) } else { 0.0 });
+    rig.send_at(one + late, Command::RecDub(1));
+    rig.advance_to(one + late + 1);
+    let start = rig.start_frame();
+    rig.send_at(close, Command::RecDub(1));
+    rig.advance_to(one + 2 * master + secs(0.6));
+    assert_eq!(rig.master(), master, "lane 1's loop is unchanged");
+    let commit = commits(&rig, since, 1);
+    LatePress { rig, clip, one, master, start, close, commit }
+}
+
+/// D31: a REC 30 ms past the 1 snaps back to it, the input since the 1 taken from the lookback. The take
+/// starts on that 1 and the closing press commits one loop: the same loop a press on the 1 records.
+#[test]
+#[ignore]
+fn late_press_snap() {
+    let LatePress { rig, mut clip, one, master, start, close, commit } = late_press(LATE);
+    assert_eq!(start, one + rig.align, "the press 30 ms past the 1 snaps back to it");
+    assert_eq!(commit, close, "the closing press commits at once");
+    assert!(rig.state(1) == LaneState::Playing && rig.lane(1).length == master, "lane 2 commits one loop");
+    assert!(rig.pcm(1) == late_press(0).rig.pcm(1), "lane 2 holds what a press on the 1 records");
+    clip.mark("REC, 30 ms after the 1", one + LATE);
+    clip.mark("the take starts on the 1", one);
+    clip.mark("REC again: lane 2 carries on", close);
+    clip.mark("lane 2's next loop point", one + 2 * master);
+    clip.finish(
+        &rig,
+        Meta {
+            id: "late-press-snap",
+            group: 1,
+            order: 4,
+            title: "REC just after the 1: it snaps back",
+            question: "REC on lane 2 lands 30 ms after the loop's 1; the layer is played from that 1 for one pass, and REC again just past it. The press snaps back to the 1, so lane 2 plays the whole layer on from the second press. Does it sound as if pressed on time?",
+            cannot_tell: "A machine-timed player pressing exactly 30 ms late. Your latency, your feel and whether a quarter beat is the right grace are not in it.",
+            status: "\"A later take's REC 30 ms after the loop's 1 snaps back to the 1\"",
+            stereo: false,
+            max_seconds: 10.0,
+            settings: json!({ "bpm": 120, "meter": "4/4", "loop_bars": 2, "lanes": 2, "late_ms": 30 }),
+        },
+    );
+}
+
+/// D31: a REC 30 ms past the grace (a quarter beat, 125 ms at 120) still arms on the next 1, a whole
+/// loop late; the closing press then lands 50 ms into that take, inside its first bar, so the take
+/// records on to its bar line and the one bar tiles across the loop: lane 2 keeps the 50 ms the player
+/// was still playing.
+#[test]
+#[ignore]
+fn late_press_past_grace() {
+    // A quarter of a counted beat: 125 ms at 120 BPM.
+    let grace = frames_per_bar(120.0, SR, Meter::FOUR_FOUR) / 16;
+    let LatePress { rig, mut clip, one, master, start, close, commit } = late_press(grace + LATE);
+    let (fpb, lag) = (rig.fpb(), rig.align);
+    assert_eq!(start, one + master + lag, "the press past the grace arms on the next 1");
+    assert_eq!(commit, one + master + fpb + lag, "the closing press records on to the take's first bar line");
+    assert!(close < commit && rig.state(1) == LaneState::Playing && rig.lane(1).length == master, "lane 2 holds one bar, tiled across the loop");
+    let pcm = rig.pcm(1);
+    assert_eq!(pcm[..fpb as usize], pcm[fpb as usize..], "both bars of lane 2 are the one bar recorded");
+    let last = pcm[..fpb as usize].iter().rposition(|x| x.abs() > 1e-4).expect("lane 2 is silent");
+    assert!(last < 2400, "lane 2 holds only the 50 ms before the closing press (sound up to frame {last})");
+    clip.mark("REC, 155 ms after the 1", one + grace + LATE);
+    clip.mark("the take starts a loop late; REC again 50 ms in", one + master);
+    clip.mark("the take ends on its bar line", one + master + fpb);
+    clip.mark("lane 2's next loop point", one + 2 * master);
+    clip.finish(
+        &rig,
+        Meta {
+            id: "late-press-past-grace",
+            group: 1,
+            order: 3,
+            title: "REC past the grace: it waits a loop",
+            question: "The same performance, REC on lane 2 155 ms after the 1, 30 ms past the grace. The take only starts on the next 1, so lane 2 keeps the 50 ms before the second press, one bar repeated. Is a press that late fair to wait a loop?",
+            cannot_tell: "A machine-timed player pressing exactly 155 ms late, who mutes the strings over 10 ms into the second press. Your latency and your feel are not in it.",
+            status: "\"A later take's REC 30 ms after the loop's 1 snaps back to the 1\"",
+            stereo: false,
+            max_seconds: 10.0,
+            settings: json!({ "bpm": 120, "meter": "4/4", "loop_bars": 2, "lanes": 2, "late_ms": 155 }),
         },
     );
 }

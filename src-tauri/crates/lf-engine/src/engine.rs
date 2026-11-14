@@ -802,7 +802,7 @@ impl Engine {
                 *l += c;
                 *r += c;
             }
-            self.looper.capture(f, &self.record[k0..k1]);
+            self.looper.capture(f, &self.record[k0..k1], align);
             let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
             // The tuner mutes the monitor alone, gliding from the frame it switched on: a gain of exactly
             // 1 (off, landed) leaves every bit as it was.

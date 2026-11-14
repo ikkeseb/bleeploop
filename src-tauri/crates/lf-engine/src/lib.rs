@@ -92,6 +92,15 @@
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
 //!   block, inside the free-stop grace: a quarter of a counted beat); a MIDI note or pedal lands there too (D22: native
 //!   MIDI stamps nothing, so the ring's order is the order things apply in). No audio FIFO.
+//! - **A later take's REC within the grace past a loop boundary snaps back to it** (D31): pressed at
+//!   most a quarter of a counted beat after the boundary (`grid::late_in_grace`, the stops' grace), the
+//!   take starts there as if pressed on it, the tap frames it missed copied from the looper's lookback
+//!   (the record tap's last quarter beat at 40 BPM, allocated with the looper); later, it waits for the
+//!   next boundary. The lookback holds one run under one alignment: a jump, an input gap, a punch-out,
+//!   an alignment change and the frames a capture window took all cut it, and a press whose window it
+//!   cannot cover waits instead. A window not yet open (a press inside `align`) is an ordinary arm.
+//!   END STOP, UNDO and REVERSE still wait for the next boundary: they change what plays from the
+//!   press on, and cannot reach back over what has already sounded.
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
 //!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
 //!   counts in as the first did, restarts every loop from the top on the count's downbeat, and refuses
@@ -185,11 +194,6 @@
 //!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
 //!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
 //!   block with no jump keeps the device interval at all.
-//! - **A later take pressed just after a loop boundary starts a whole loop late.** `start_recording`
-//!   takes `next_boundary` with no tolerance, as END STOP's `stop_at` and UNDO and REVERSE's `switch_at`
-//!   do (those two read from source, not rendered); the free-stop grace is in the stop plans alone. A
-//!   press on the loop's 1 that lands a frame late waits for the next pass: rendered at block sizes 1
-//!   and 128 by the ignored test in `tests/later_arm.rs`. Whether such a press snaps back is D31.
 //! - **A slot's record-path delay is clipped where the capture's alignment is not.** `latch_record`
 //!   clamps each slot's `dw` to its line (`slots.rs` 401: a second plus a block, 52 095 frames at 48 kHz
 //!   and 4096) while the capture aligns on the full live latency (`engine.rs` `let align`), so beside a

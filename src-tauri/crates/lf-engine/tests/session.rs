@@ -293,6 +293,7 @@ fn a_later_take_armed_and_aborted_on_a_loaded_session_leaves_its_grid_and_lanes(
     // A later take armed on lane 3 and stopped before its boundary.
     let mut fresh = loaded(&s);
     let (anchor, lanes) = (fresh.anchor(), (0..3).map(|i| (fresh.lane(i), fresh.pcm(i))).collect::<Vec<_>>());
+    fresh.advance(master / 2); // out of the grace past the load's anchor (D31)
     fresh.press(Command::RecDub(3));
     assert!(fresh.lane(3).armed, "armed for the next boundary");
     fresh.press(Command::Stop(3));
@@ -308,6 +309,9 @@ fn a_later_take_armed_and_aborted_on_a_loaded_session_leaves_its_grid_and_lanes(
     let anchor = fresh.anchor();
     fresh.press(Command::Clear(0));
     fresh.press(Command::Clear(2));
+    // Half a loop past the load's anchor, out of the grace a press just after a boundary snaps back
+    // over (D31): this REC arms for the next boundary.
+    fresh.advance(master / 2);
     fresh.press(Command::RecDub(0));
     assert!(fresh.lane(0).armed);
     fresh.press(Command::Clear(1));

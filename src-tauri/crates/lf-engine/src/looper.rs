@@ -44,9 +44,8 @@ use crate::clock::Clock;
 use crate::effects::LaneFx;
 use crate::engine::Feed;
 use crate::grid::{
-    clamp_bars, commit_anchor, frames_per_bar, later_take_bars, loop_pos, max_whole_bars, next_boundary, plan_commit,
-    plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Meter, RetakeStop, TakeFill, MAX_BPM,
-    MIN_BPM,
+    clamp_bars, commit_anchor, frames_per_bar, late_grace_max, late_in_grace, later_take_bars, loop_pos, max_whole_bars, next_boundary, plan_commit, plan_free_stop,
+    plan_later_stop, plan_retake_stop, Frame, Meter, RetakeStop, TakeFill, MAX_BPM, MIN_BPM,
 };
 use crate::overview::{LaneView, Overview};
 use crate::session::{Load, Pin, SessionError, Snapshot, SnapshotTrack};
@@ -275,6 +274,66 @@ struct DubWrite {
     new: f32,
 }
 
+/// The record tap's last frames, for a later take that snaps back to the boundary just behind its press
+/// (D31, `start_recording`): one contiguous run `[from, end)` of device frames taken under one alignment,
+/// frame `f` at `buf[f mod len]`. It holds nothing across a reset: a jump in the device frame or a change
+/// of alignment (`push`), an input gap and a punch-out (`cut`), and the frames a capture window took
+/// (`capture`), so a snapped take never doubles audio another lane recorded.
+struct Lookback {
+    buf: Vec<f32>,
+    from: Frame,
+    end: Frame,
+    align: Frame,
+}
+
+impl Lookback {
+    fn new(frames: Frame) -> Self {
+        Lookback { buf: vec![0.0; frames.max(1) as usize], from: Frame::MIN, end: Frame::MIN, align: 0 }
+    }
+
+    fn push(&mut self, f0: Frame, input: &[f32], align: Frame) {
+        if f0 != self.end || align != self.align {
+            self.cut(f0);
+            self.align = align;
+        }
+        let len = self.buf.len() as Frame;
+        let n = input.len() as Frame;
+        let skip = (n - len).max(0);
+        // At most two copies of at most `len` frames: a quarter beat at 40 BPM.
+        let (mut f, mut src) = (f0 + skip, &input[skip as usize..]);
+        while !src.is_empty() {
+            let at = f.rem_euclid(len) as usize;
+            let k = src.len().min(self.buf.len() - at);
+            self.buf[at..at + k].copy_from_slice(&src[..k]);
+            (f, src) = (f + k as Frame, &src[k..]);
+        }
+        self.end = f0 + n;
+    }
+
+    /// Frames before `at` are no longer held.
+    fn cut(&mut self, at: Frame) {
+        self.from = self.from.max(at);
+    }
+
+    /// Whether every tap frame of `[lo, hi)` is held, taken under `align`.
+    fn holds(&self, lo: Frame, hi: Frame, align: Frame) -> bool {
+        self.align == align && self.end == hi && self.from.max(self.end - self.buf.len() as Frame) <= lo
+    }
+
+    /// Copy the held frames `[lo, lo + out.len())` into `out`.
+    fn copy(&self, lo: Frame, out: &mut [f32]) {
+        let len = self.buf.len() as Frame;
+        let (mut f, mut dst) = (lo, out);
+        while !dst.is_empty() {
+            let at = f.rem_euclid(len) as usize;
+            let k = dst.len().min(self.buf.len() - at);
+            let (head, rest) = std::mem::take(&mut dst).split_at_mut(k);
+            head.copy_from_slice(&self.buf[at..at + k]);
+            (f, dst) = (f + k as Frame, rest);
+        }
+    }
+}
+
 /// What an overdub writes over `old` from input `x`, `d` frames into its window of punch ramp `n` (D23):
 /// from the ramp's end on, today's `x + fb * old` (at a feedback of 1 the plain sum, bit for bit); at the
 /// window's first frame `old` itself; between, the input faded in and the old layer faded from 1 down to
@@ -460,6 +519,8 @@ pub struct Looper {
     /// edge runs after them may lie in them. The device frames first, then the frames of the record tap.
     gap: [(Frame, Frame); 2],
     detector: Detector,
+    /// The record tap's last quarter beat at the slowest tempo, for a later take's snap (D31).
+    lookback: Lookback,
     gain_coef: f64,
     loop_end_stop: bool,
     fixed_length: bool,
@@ -518,6 +579,8 @@ impl Looper {
             job_work: 0,
             gap: [(Frame::MIN, Frame::MIN); 2],
             detector: Detector::new(sample_rate),
+            // The largest grace a snap reaches back over, and a frame to spare.
+            lookback: Lookback::new(late_grace_max(sample_rate) + 1),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
             fixed_length: false,
@@ -1334,6 +1397,7 @@ impl Looper {
             return;
         }
         let idle = self.idle();
+        let (fpb, meter) = (self.fpb(cx), cx.clock.meter());
         let t = &mut self.lanes[i];
         t.written = 0;
         t.armed = false;
@@ -1367,7 +1431,30 @@ impl Looper {
         } else {
             t.armed = true;
             let boundary = next_boundary(self.anchor, self.master, cx.now);
-            rec.start = Some(seam.unwrap_or(boundary + rec.align));
+            // D31: a press within the stop's grace past the boundary behind it snaps back to that
+            // boundary, as if pressed on it, when its window has not opened yet or the lookback holds
+            // every tap frame it has missed; otherwise it waits for the next one. A RETAKE handoff
+            // starts on its seam. END STOP, UNDO and REVERSE never reach back (lf-engine briefing).
+            let prev = boundary - self.master;
+            let start = prev + rec.align;
+            let snap = seam.is_none() && boundary != cx.now && late_in_grace(cx.now - prev, fpb, meter) && (start >= cx.now || self.lookback.holds(start, cx.now, rec.align));
+            rec.start = Some(match seam {
+                Some(seam) => seam,
+                None if snap => start,
+                None => boundary + rec.align,
+            });
+            if snap && start < cx.now {
+                // The frames `capture` would have written, at most a quarter beat at 40 BPM: no
+                // loop-sized work. The take records from here on, so `events` must not zero them.
+                let n = (cx.now - start) as usize;
+                let data = &mut self.bufs[t.live];
+                self.lookback.copy(start, &mut data[..n]);
+                self.overview.touch(t.live, data, 0, n, n);
+                t.written = n as Frame;
+                t.armed = false;
+                // The frames are this take's now, even if a command on this same frame discards it.
+                self.lookback.cut(cx.now);
+            }
         }
         self.rec = Some(rec);
         self.configure_end(cx);
@@ -1647,6 +1734,8 @@ impl Looper {
     pub fn punch_out(&mut self, cx: &mut Cx) {
         // A stopped device ends a pending CLEAR: its window would wait out the stop, and come back armed.
         self.clear_armed = None;
+        // Nor does a snap reach back over the stop (D31): the input before it is another run's.
+        self.lookback.cut(cx.now);
         let Some(mut rec) = self.rec else { return };
         let i = rec.lane;
         if self.lanes[i].armed || self.lanes[i].auto_armed {
@@ -2301,6 +2390,8 @@ impl Looper {
             let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < gap.1));
             *gap = (if behind { gap.0.min(from) } else { from }, to);
         }
+        // No snapped take reaches back over a gap, the tap's shifted one included (D31).
+        self.lookback.cut(self.gap[0].1.max(self.gap[1].1));
         self.damage_from_gap();
     }
 
@@ -2341,7 +2432,10 @@ impl Looper {
     /// an input gap damaged writes nothing more: it is rejected at its end, and a write after the gap
     /// could land where its undo copy has not been yet (a device jump carries the write head past the
     /// copy, `skip`), which the rejection would then restore as the loop before the layer.
-    pub fn capture(&mut self, f0: Frame, input: &[f32]) {
+    /// Every frame also feeds the lookback (`Lookback`), taken under the alignment `align` a take armed
+    /// now would start with.
+    pub fn capture(&mut self, f0: Frame, input: &[f32], align: Frame) {
+        self.lookback.push(f0, input, align);
         let Some(rec) = self.rec.as_mut() else { return };
         let Some(start) = rec.start else { return };
         let lane = &mut self.lanes[rec.lane];
@@ -2353,6 +2447,8 @@ impl Looper {
         if lo >= hi {
             return;
         }
+        // A window's frames are no snapped take's (D31): two lanes never record the same input.
+        self.lookback.cut(hi);
         let (buf, data) = (lane.live, &mut self.bufs[lane.live]);
         match rec.kind {
             Kind::Take => {

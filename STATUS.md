@@ -91,6 +91,9 @@ never the owner's guitar, latency, a driver, a pedal or feel.
 - A later lane joins at master phase: is there a seam? `later-lane`
 - CLEAR on a lane whose delay is still echoing: does the echo stop at the press, with nothing of what
   was cleared coming back? `clear-tail`
+- A later take's REC 30 ms after the loop's 1 snaps back to the 1 (D31), and one 30 ms past the
+  quarter-beat grace still waits a loop: does the snapped take sound as if pressed on time, and is the
+  grace the right size? `late-press-snap` `late-press-past-grace`
 - The count-in: one bar, the accent on 1: does it sound right? `count-in`
 - The 6/8 click: are the softer eighths between the dotted quarters heard, and not busy? `click-6-8`
 - The lane delay with a high feedback over a loop, its repeats now a whole division apart (no longer
@@ -312,5 +315,4 @@ nothing is said.
 | # | Question | Default |
 |---|---|---|
 | D30 | Three remote branches, one unlanded commit each, kept as they are: `pw16/heap-probe` (22a2b33d, a candidate: the stage draw's clock and level reads in typed arrays, the allocation probe on the freshness path), `proto11/settings-a` (f6ed7aee, a WIP Audio Settings prototype, ungated), `proto11/bar-c` (297d6acd, a prototype: one TAKE chip holding the five mode pills). Land, rework or delete each? | Kept untouched until the owner says |
-| D31 | A press just past the loop's 1 waits for the next pass: a later take starts a whole loop late (rendered: `tests/later_arm.rs`, the ignored test; 8 s on 4 bars at 120, up to 60 s), and END STOP, UNDO and REVERSE share that boundary (read from source). Snap a press within a grace back to the 1, or keep waiting a loop? It changes how the looper plays. | Keeps waiting a loop until the owner says |
 | D32 | A dropout inside an overdub (a block the device side flags): today the take is rejected and the loop stays as it was. `pw/engine-red-3` keeps the take and marks the damaged part (`pw-fix/engine-red`, 525246ff, an earlier separate attempt that keeps the reject and judges a dropout through the amp-sim's latency: the version to land if the reject stays); a third option smooths over it (`pw/dropout-ab`'s ignored test renders the three side by side). Which should the looper do? | Rejects the take, as today, until the owner says |

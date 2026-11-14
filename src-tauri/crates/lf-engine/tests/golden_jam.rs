@@ -390,7 +390,9 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     // ── 6: STOP on an armed lane resets the blank session ───────────────────────────────────────
     rig.set(Command::SetFixedLength(true));
     rig.press(Command::RecDub(1));
-    rig.advance_to(rig.end_frame() + 1);
+    // Half a loop past the take's end, out of the grace a press just after a boundary snaps back over
+    // (D31): this REC arms for the next boundary.
+    rig.advance_to(rig.end_frame() + expected_master / 2);
     rig.press(Command::RecDub(0));
     assert!(rig.lane(0).armed);
     rig.press(Command::Clear(1));
