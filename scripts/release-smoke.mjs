@@ -56,6 +56,12 @@
 //                close guard) ends the process within 60 s, and this run's release log holds no ERROR line
 // A screenshot after the take and this run's slice of the release log land in logs/release-smoke/.
 //
+// A full PASS records itself on the commit the exe was built from (the checkout's HEAD, as `build`
+// proved) as a GitHub commit status, context `release-smoke`, on origin's repo through `gh api`: a
+// tag's `release` job publishes nothing without it (scripts/release-smoke-rule.mjs). The commit must be
+// pushed for that; a PASS that could not be recorded says why and exits 3. `--no-record` skips it
+// (a run that is no release's gate).
+//
 // What it cannot see: sound. A take that is not flat proves the input reached the loop, not that it
 // sounds right or sits on the grid (the ear, and `pnpm native:engine-loopback`, judge those). The take hears
 // the click only through a cable from an output into the picked input; without one it records the
@@ -88,6 +94,7 @@ import { appRunning, assertWindows } from './native-kill.mjs';
 import { releaseChanges } from './release-changes.mjs';
 import { inputTakeRule } from './release-input-rule.mjs';
 import { exeBuildRule } from './release-exe-rule.mjs';
+import { SMOKE_CONTEXT } from './release-smoke-rule.mjs';
 
 const OWNER_ID = 'com.bleeploop.app';
 /** The synth take's source and its chord: a sustained voice, so held notes fill the bar. Four of them (C
@@ -110,11 +117,11 @@ for (const arg of process.argv.slice(2)) {
   else if (key === 'channel' && value !== undefined) opts.channel = Number(value);
   else if (key === 'cdp-wait' && value !== undefined) opts.cdpWait = Number(value);
   else if (key === 'driver' && value) opts.driver = value;
-  else if ((key === 'fresh' || key === 'owner-profile') && value === undefined) flags.add(key);
+  else if ((key === 'fresh' || key === 'owner-profile' || key === 'no-record') && value === undefined) flags.add(key);
   else usage(`unknown argument ${arg}`);
 }
 function usage(why) {
-  console.error(`${why}\nusage: node scripts/release-smoke.mjs [--exe=<path>] [--fresh] [--port=9333] [--buffer=128] [--channel=1] [--cdp-wait=60] [--driver=<substring>] [--owner-profile]`);
+  console.error(`${why}\nusage: node scripts/release-smoke.mjs [--exe=<path>] [--fresh] [--port=9333] [--buffer=128] [--channel=1] [--cdp-wait=60] [--driver=<substring>] [--owner-profile] [--no-record]`);
   process.exit(1);
 }
 assertWindows('release smoke');
@@ -236,7 +243,7 @@ $bmp.Save('${file.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::P
 
 const results = [];
 function report(name, ok, lines) {
-  results.push({ name, ok });
+  results.push({ name, ok, line: lines[0] });
   console.log(`${ok ? 'PASS' : 'FAIL'} ${name}: ${lines[0]}`);
   for (const l of lines.slice(1)) console.log(`       ${l}`);
 }
@@ -272,6 +279,8 @@ try {
 console.log(`  launched pid ${pid}; CDP on ${cdpUrl}`);
 let browser = null;
 let exited = false;
+/** The checkout's HEAD, as `build` read it: the commit a pass is recorded on. */
+let head = null;
 process.once('SIGINT', () => {
   if (alive(pid)) execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
   process.exit(130);
@@ -413,7 +422,6 @@ try {
     const label = await page.evaluate(() => document.querySelector('#lf-help-popover .help__about')?.textContent?.trim() ?? null);
     await page.keyboard.press('Escape');
     await page.locator('#lf-help-popover').waitFor({ state: 'hidden', timeout: 5000 });
-    let head = null;
     try {
       head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {
@@ -753,4 +761,30 @@ try {
 
 const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'export', 'exit'].every((n) => results.some((r) => r.name === n));
 console.log(`\n=== release-smoke: ${ok ? 'PASS' : 'FAIL'}: ${results.filter((r) => r.ok).length}/${results.length} checks passed (${Math.round((Date.now() - t0) / 1000)} s) ===`);
+if (ok && !flags.has('no-record')) {
+  const why = recordPass();
+  if (why) {
+    console.log(`NOT RECORDED: ${why}. A tag on this commit publishes nothing until a run records its pass.`);
+    process.exit(3);
+  }
+}
 process.exit(ok ? 0 : 1);
+
+/** Post the pass as HEAD's `release-smoke` status on origin's repo; the reason it failed, or null. */
+function recordPass() {
+  try {
+    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const repo = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/)?.[1];
+    if (!repo) return `origin (${url}) is no GitHub repo`;
+    const take = results.find((r) => r.name === 'take')?.line.match(/^(input|synth) take/)?.[0] ?? 'take';
+    const description = `PASS ${results.length}/${results.length} with the ${take}`;
+    execFileSync('gh', ['api', '-X', 'POST', `repos/${repo}/statuses/${head}`, '-f', 'state=success', '-f', `context=${SMOKE_CONTEXT}`, '-f', `description=${description}`], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    console.log(`recorded: ${SMOKE_CONTEXT} success on ${repo}@${head}`);
+    return null;
+  } catch (e) {
+    return `gh api could not post the status (is ${head} pushed, and gh logged in?): ${String(e instanceof Error ? e.message : e).split('\n')[0]}`;
+  }
+}

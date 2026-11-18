@@ -3,8 +3,8 @@ name: build-exe
 # The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
 # run artifact. On demand (Actions tab: build only) and on a `v*` tag push; never on a plain main push
 # (a release build is ~15-20 min of Windows runner). A tag push also PUBLISHES the GitHub Release once
-# the exe and this commit's `ci`, `rust-test` and `browser-lifecycle` are green; a red gate publishes
-# nothing. The three count as green from main's own push of the tagged commit (the release prep commit
+# the exe and this commit's `ci`, `rust-test` and `browser-lifecycle` are green and `pnpm release:smoke`
+# passed on this commit (its `release-smoke` status); a red gate publishes nothing. The three count as green from main's own push of the tagged commit (the release prep commit
 # starts all three: its version bump touches package.json and src-tauri/; the run waits for one still
 # going), and the tag's run runs whichever it cannot read as green. Run by hand
 # with `smoke`, it builds the exe `pnpm release:smoke` drives instead: bare, unsigned, in the smoke's
@@ -17,8 +17,12 @@ name: build-exe
 # `pnpm release:smoke` on a release build of main's head in the smoke's profile
 # (`gh workflow run build-exe.yml --ref main -f smoke=true`, then that run's `BleepLoop-smoke-<sha>`
 # artifact through `--exe=`: docs/VERIFY.md; a red run is fixed first: a flat input take's FAIL says
-# when the loopback cable must be in, and a PASS names the take that passed), then
-# `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
+# when the loopback cable must be in, and a PASS names the take that passed and records itself as the
+# commit's `release-smoke` status, without which the tag publishes nothing), then
+# `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag. Only on the owner's word may a release
+# go out without a full PASS; the waiver is then that status posted by hand on the same commit, naming
+# what did not pass: `gh api -X POST repos/<owner>/<repo>/statuses/<sha> -f state=success
+# -f context=release-smoke -f "description=owner waiver: <what failed>"`.
 # The notes file is `BleepLoop vX.Y.Z`, a blank line, then one bullet per player-visible change since
 # the previous release; it becomes the release's "What's new". No line may start with `#`: git
 # strips those as comments. A failed build or gate publishes nothing: fix, move the tag, push it again (a
@@ -107,6 +111,26 @@ jobs:
     needs: verdict
     if: ${{ !cancelled() && (github.event_name == 'push' && needs.verdict.outputs.browser_lifecycle != 'green' || github.event_name == 'workflow_dispatch' && !inputs.smoke) }}
     uses: ./.github/workflows/browser-lifecycle.yml
+
+  # A tag push: did `pnpm release:smoke` pass on this exact commit? It runs on the PC, so no runner can
+  # run it again: a full PASS records itself as the commit's `release-smoke` status, and an owner's
+  # waiver is that status posted by hand (the header's last step). No pass, or an unreadable answer,
+  # fails this job and `release` publishes nothing (scripts/release-smoke-verdict.mjs).
+  smoke-verdict:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/release-smoke-verdict.mjs "${{ github.sha }}"
 
   exe:
     runs-on: windows-latest
@@ -211,11 +235,13 @@ jobs:
 
   # The only job with write access, and it runs no repo code: it publishes the files built above as
   # the tag's release through the runner's preinstalled `gh`, with the annotated tag's notes.
-  # Each gate is green when it ran here and passed, or was skipped because `verdict` read it green.
+  # Each gate is green when it ran here and passed, or was skipped because `verdict` read it green;
+  # the Windows smoke only when `smoke-verdict` passed.
   release:
-    needs: [verdict, ci, rust-test, browser-lifecycle, exe]
+    needs: [verdict, smoke-verdict, ci, rust-test, browser-lifecycle, exe]
     if: >-
       ${{ !cancelled() && github.event_name == 'push' && needs.exe.result == 'success'
+      && needs.smoke-verdict.result == 'success'
       && (needs.ci.result == 'success' || needs.ci.result == 'skipped' && needs.verdict.outputs.ci == 'green')
       && (needs.rust-test.result == 'success' || needs.rust-test.result == 'skipped' && needs.verdict.outputs.rust_test == 'green')
       && (needs.browser-lifecycle.result == 'success' || needs.browser-lifecycle.result == 'skipped' && needs.verdict.outputs.browser_lifecycle == 'green') }}
