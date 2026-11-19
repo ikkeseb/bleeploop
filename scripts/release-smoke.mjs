@@ -56,11 +56,12 @@
 //                close guard) ends the process within 60 s, and this run's release log holds no ERROR line
 // A screenshot after the take and this run's slice of the release log land in logs/release-smoke/.
 //
-// A full PASS records itself on the commit the exe was built from (the checkout's HEAD, as `build`
-// proved) as a GitHub commit status, context `release-smoke`, on origin's repo through `gh api`: a
-// tag's `release` job publishes nothing without it (scripts/release-smoke-rule.mjs). The commit must be
-// pushed for that; a PASS that could not be recorded says why and exits 3. `--no-record` skips it
-// (a run that is no release's gate).
+// Once `build` proved the commit (the checkout's HEAD), the run records its verdict there as a GitHub
+// commit status, context `release-smoke`, on origin's repo through `gh api` (gh needs write access to
+// commit statuses): `success` on a full PASS, `failure` otherwise, so a later failed run cancels an
+// earlier pass. A tag's `release` job publishes nothing without a pass (scripts/release-smoke-rule.mjs).
+// The commit must be pushed for that; a PASS that could not be recorded says why and exits 3.
+// `--no-record` skips it (a run that is no release's gate).
 //
 // What it cannot see: sound. A take that is not flat proves the input reached the loop, not that it
 // sounds right or sits on the grid (the ear, and `pnpm native:engine-loopback`, judge those). The take hears
@@ -761,30 +762,45 @@ try {
 
 const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'export', 'exit'].every((n) => results.some((r) => r.name === n));
 console.log(`\n=== release-smoke: ${ok ? 'PASS' : 'FAIL'}: ${results.filter((r) => r.ok).length}/${results.length} checks passed (${Math.round((Date.now() - t0) / 1000)} s) ===`);
-if (ok && !flags.has('no-record')) {
-  const why = recordPass();
-  if (why) {
+// `head` is set only once `build` passed: before that no commit is proven, so nothing is recorded.
+if (head && results.some((r) => r.name === 'build' && r.ok) && !flags.has('no-record')) {
+  const why = record(ok);
+  if (why && ok) {
     console.log(`NOT RECORDED: ${why}. A tag on this commit publishes nothing until a run records its pass.`);
     process.exit(3);
   }
+  if (why) console.log(`failure not recorded: ${why}`);
 }
 process.exit(ok ? 0 : 1);
 
-/** Post the pass as HEAD's `release-smoke` status on origin's repo; the reason it failed, or null. */
-function recordPass() {
+/** Post this run's verdict as HEAD's `release-smoke` status on origin's repo; why it failed, or null. */
+function record(pass) {
+  let repo;
   try {
-    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    const repo = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/)?.[1];
+    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    repo = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/)?.[1];
     if (!repo) return `origin (${url}) is no GitHub repo`;
-    const take = results.find((r) => r.name === 'take')?.line.match(/^(input|synth) take/)?.[0] ?? 'take';
-    const description = `PASS ${results.length}/${results.length} with the ${take}`;
-    execFileSync('gh', ['api', '-X', 'POST', `repos/${repo}/statuses/${head}`, '-f', 'state=success', '-f', `context=${SMOKE_CONTEXT}`, '-f', `description=${description}`], {
-      cwd: root,
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    console.log(`recorded: ${SMOKE_CONTEXT} success on ${repo}@${head}`);
-    return null;
   } catch (e) {
-    return `gh api could not post the status (is ${head} pushed, and gh logged in?): ${String(e instanceof Error ? e.message : e).split('\n')[0]}`;
+    return `git could not name origin: ${firstLine(e)}`;
   }
+  const take = results.find((r) => r.name === 'take')?.line.match(/^(input|synth) take/)?.[0] ?? 'take';
+  const failedChecks = results.filter((r) => !r.ok).map((r) => r.name);
+  const description = pass
+    ? `PASS ${results.length}/${results.length} with the ${take}`
+    : `FAIL: ${failedChecks.join(', ') || 'a check did not run'}`.slice(0, 140);
+  try {
+    execFileSync(
+      'gh',
+      ['api', '--hostname', 'github.com', '-X', 'POST', `repos/${repo}/statuses/${head}`, '-f', `state=${pass ? 'success' : 'failure'}`, '-f', `context=${SMOKE_CONTEXT}`, '-f', `description=${description}`],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+  } catch (e) {
+    return `gh api could not post the status (is ${head} pushed, and gh logged in with access to commit statuses?): ${firstLine(e)}`;
+  }
+  console.log(`recorded: ${SMOKE_CONTEXT} ${pass ? 'success' : 'failure'} on ${repo}@${head}`);
+  return null;
+}
+function firstLine(e) {
+  const text = (e && typeof e === 'object' && 'stderr' in e && String(e.stderr).trim()) || String(e instanceof Error ? e.message : e);
+  return text.split('\n')[0];
 }

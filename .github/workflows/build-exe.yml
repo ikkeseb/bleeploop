@@ -113,10 +113,12 @@ jobs:
     uses: ./.github/workflows/browser-lifecycle.yml
 
   # A tag push: did `pnpm release:smoke` pass on this exact commit? It runs on the PC, so no runner can
-  # run it again: a full PASS records itself as the commit's `release-smoke` status, and an owner's
-  # waiver is that status posted by hand (the header's last step). No pass, or an unreadable answer,
-  # fails this job and `release` publishes nothing (scripts/release-smoke-verdict.mjs).
+  # run it again: a run records its verdict as the commit's `release-smoke` status, and an owner's
+  # waiver is that status posted by hand (the header's release steps). No pass, or an unreadable answer,
+  # fails this job and `release` publishes nothing (scripts/release-smoke-verdict.mjs). It reads after
+  # the build, so a failure recorded while the exe built still counts.
   smoke-verdict:
+    needs: exe
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5

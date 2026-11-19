@@ -4,10 +4,12 @@
 // Imports the REAL rule and reads the REAL .github/workflows/build-exe.yml. Covers: the rule passes only
 // when the newest `release-smoke` status is a success, whatever order the list comes in; a later
 // failure or pending status cancels an earlier pass; other contexts, no status, an unreadable list or
-// time fail closed; an owner's waiver (a success posted by hand) passes. The workflow: `release` needs
+// time fail closed, as does any status in the context whose time cannot be read; ties on time go to the
+// higher id; a success passes only as the smoke's `PASS …` or an `owner waiver: …` with its reason; the
+// paginated API answer flattens only when every page is a list. The workflow: `release` needs
 // `smoke-verdict` and requires its success outside every `||`; `smoke-verdict` runs on a tag push,
-// reads the statuses for this commit through the verdict script, may read statuses and cannot be
-// skipped past with continue-on-error.
+// runs after `exe`, reads the statuses for this commit through the verdict script on an unconditional
+// step with its token and repo, may read statuses and cannot be skipped past with continue-on-error.
 // Cannot see: GitHub's answer (the API call and the runner's token) or the smoke's own post
 // (scripts/release-smoke.mjs runs on Windows with the rig); a tag's run and a smoke run exercise those.
 // Run: node verify/guards/release-smoke-gate.mjs
@@ -16,7 +18,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SMOKE_CONTEXT, smokeVerdict } from '../../scripts/release-smoke-rule.mjs';
+import { SMOKE_CONTEXT, smokeVerdict, statusesOf } from '../../scripts/release-smoke-rule.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 let passed = 0;
@@ -56,6 +58,14 @@ for (const [name, list, ok] of [
   ['a pass after a failure passes in either order', [status('success', 2), status('failure', 1)], true],
   ['another context\'s later failure does not cancel a pass', [status('failure', 2, 'ci'), status('success', 1)], true],
   ['a newest status with no time fails', [{ ...status('success', 1), created_at: undefined }], false],
+  ['an undated failure beside a dated pass fails', [{ ...status('failure', 2), created_at: 'soon' }, status('success', 1)], false],
+  ['an undated failure beside a dated pass fails in either order', [status('success', 1), { ...status('failure', 2), created_at: null }], false],
+  ['a same-time failure with the higher id fails', [status('success', 1), status('failure', 1)], false],
+  ['a same-time failure with the higher id fails in either order', [status('success', 1), status('failure', 1)].reverse(), false],
+  ['a same-time pass with the higher id passes', [status('failure', 1), status('success', 1)], true],
+  ['a success with no description fails', [status('success', 1, SMOKE_CONTEXT, '')], false],
+  ['a success with another description fails', [status('success', 1, SMOKE_CONTEXT, 'looks fine')], false],
+  ['a waiver with no reason fails', [status('success', 1, SMOKE_CONTEXT, 'owner waiver: ')], false],
   ['null entries are skipped', [null, status('success', 1)], true],
   ['an unreadable list fails', null, false],
   ['an object instead of a list fails', { context: SMOKE_CONTEXT, state: 'success' }, false],
@@ -68,6 +78,13 @@ for (const [name, list, ok] of [
 }
 check('a pass says when and what passed', () =>
   assert.match(smokeVerdict([status('success', 1)]).why, /release-smoke passed on this commit at 2026-11-19T01:00:00Z: PASS 8\/8/));
+check('statusesOf flattens pages of lists', () => assert.deepStrictEqual(statusesOf([[1, 2], [], [3]]), [1, 2, 3]));
+check('statusesOf takes an empty answer as no status', () => assert.deepStrictEqual(statusesOf([[]]), []));
+for (const [name, pages] of [
+  ['a page that is no list', [[status('success', 1)], { message: 'oops' }]],
+  ['an answer that is no list', { message: 'Not Found' }],
+  ['no answer', null],
+]) check(`statusesOf refuses ${name}`, () => assert.strictEqual(statusesOf(pages), null));
 check('a refusal names the newest state', () =>
   assert.match(smokeVerdict([status('failure', 2), status('success', 1)]).why, /newest release-smoke status is "failure"/));
 
@@ -122,6 +139,12 @@ check('release requires smoke-verdict to have succeeded, outside every ||', () =
 });
 check('smoke-verdict exists', () => assert.ok(smoke, `no smoke-verdict job in ${WORKFLOW}`));
 check('smoke-verdict runs on a tag push', () => assert.strictEqual(ifOf(smoke), "github.event_name == 'push'"));
+check('smoke-verdict reads after the build', () => assert.match(smoke, /^ {4}needs:\s*\[?\s*exe\s*\]?\s*$/m));
+check('no step of smoke-verdict carries a condition', () => assert.doesNotMatch(smoke, /^ {6}(- )? *if:/m));
+check('smoke-verdict hands the script its token and repo', () => {
+  assert.match(smoke, /^ {10}GH_TOKEN: \$\{\{ github\.token \}\}\s*$/m);
+  assert.match(smoke, /^ {10}GH_REPO: \$\{\{ github\.repository \}\}\s*$/m);
+});
 check('smoke-verdict asks about this commit through the verdict script', () =>
   assert.match(smoke, /^ {8}run: node scripts\/release-smoke-verdict\.mjs "\$\{\{ github\.sha \}\}"\s*$/m));
 check('smoke-verdict may read statuses', () => assert.match(smoke, /^ {6}statuses: read\s*$/m));

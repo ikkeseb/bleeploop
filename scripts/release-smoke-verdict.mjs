@@ -6,7 +6,7 @@
 // Prints the verdict; exit 0 only on a pass. An API error fails closed.
 
 import { execFileSync } from 'node:child_process';
-import { smokeVerdict } from './release-smoke-rule.mjs';
+import { smokeVerdict, statusesOf } from './release-smoke-rule.mjs';
 
 const sha = process.argv[2];
 const repo = process.env.GH_REPO;
@@ -21,7 +21,7 @@ try {
   const pages = JSON.parse(
     execFileSync('gh', ['api', '--paginate', '--slurp', `repos/${repo}/commits/${sha}/statuses?per_page=100`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }),
   );
-  statuses = Array.isArray(pages) ? pages.flat() : null;
+  statuses = statusesOf(pages);
 } catch (e) {
   console.error(`could not read the statuses: ${String(e instanceof Error ? e.message : e).split('\n')[0]}`);
 }
