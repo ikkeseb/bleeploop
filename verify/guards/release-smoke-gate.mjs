@@ -66,6 +66,8 @@ for (const [name, list, ok] of [
   ['a success with no description fails', [status('success', 1, SMOKE_CONTEXT, '')], false],
   ['a success with another description fails', [status('success', 1, SMOKE_CONTEXT, 'looks fine')], false],
   ['a waiver with no reason fails', [status('success', 1, SMOKE_CONTEXT, 'owner waiver: ')], false],
+  ['a bare PASS fails', [status('success', 1, SMOKE_CONTEXT, 'PASS ')], false],
+  ['a numeric time on a failure fails', [{ ...status('failure', 2), created_at: 0 }, status('success', 1)], false],
   ['null entries are skipped', [null, status('success', 1)], true],
   ['an unreadable list fails', null, false],
   ['an object instead of a list fails', { context: SMOKE_CONTEXT, state: 'success' }, false],
@@ -141,12 +143,11 @@ check('smoke-verdict exists', () => assert.ok(smoke, `no smoke-verdict job in ${
 check('smoke-verdict runs on a tag push', () => assert.strictEqual(ifOf(smoke), "github.event_name == 'push'"));
 check('smoke-verdict reads after the build', () => assert.match(smoke, /^ {4}needs:\s*\[?\s*exe\s*\]?\s*$/m));
 check('no step of smoke-verdict carries a condition', () => assert.doesNotMatch(smoke, /^ {6}(- )? *if:/m));
-check('smoke-verdict hands the script its token and repo', () => {
-  assert.match(smoke, /^ {10}GH_TOKEN: \$\{\{ github\.token \}\}\s*$/m);
-  assert.match(smoke, /^ {10}GH_REPO: \$\{\{ github\.repository \}\}\s*$/m);
-});
-check('smoke-verdict asks about this commit through the verdict script', () =>
-  assert.match(smoke, /^ {8}run: node scripts\/release-smoke-verdict\.mjs "\$\{\{ github\.sha \}\}"\s*$/m));
+check('smoke-verdict asks about this commit through the verdict script, its token and repo on that step', () =>
+  assert.match(
+    smoke,
+    /^ {6}- env:\n {10}GH_TOKEN: \$\{\{ github\.token \}\}\n {10}GH_REPO: \$\{\{ github\.repository \}\}\n {8}run: node scripts\/release-smoke-verdict\.mjs "\$\{\{ github\.sha \}\}"\s*$/m,
+  ));
 check('smoke-verdict may read statuses', () => assert.match(smoke, /^ {6}statuses: read\s*$/m));
 check('smoke-verdict cannot pass by continue-on-error', () => assert.doesNotMatch(smoke, /continue-on-error/));
 

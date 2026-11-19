@@ -35,7 +35,7 @@ export function smokeVerdict(statuses) {
   if (ours.length === 0) {
     return { ok: false, why: `no ${SMOKE_CONTEXT} status on this commit: run pnpm release:smoke on it (docs/VERIFY.md) before the tag` };
   }
-  const dated = ours.map((s) => ({ s, t: Date.parse(s.created_at) }));
+  const dated = ours.map((s) => ({ s, t: typeof s.created_at === 'string' ? Date.parse(s.created_at) : NaN }));
   // An entry whose time cannot be read might be the newest: no verdict can rest on the others.
   if (dated.some(({ t }) => !Number.isFinite(t))) return { ok: false, why: `a ${SMOKE_CONTEXT} status carries no readable time` };
   // The API lists newest first; sort anyway (time, then id), so the order of the list cannot decide.
@@ -43,7 +43,7 @@ export function smokeVerdict(statuses) {
   const { state, description } = newest;
   const said = typeof description === 'string' && description ? `: ${description}` : '';
   if (state !== 'success') return { ok: false, why: `the newest ${SMOKE_CONTEXT} status is ${JSON.stringify(state)}${said}` };
-  if (typeof description !== 'string' || !/^(PASS |owner waiver: \S)/.test(description)) {
+  if (typeof description !== 'string' || !/^(PASS \d+\/\d+|owner waiver: \S)/.test(description)) {
     return { ok: false, why: `the newest ${SMOKE_CONTEXT} success is neither the smoke's PASS nor an owner waiver${said || ' (no description)'}` };
   }
   return { ok: true, why: `${SMOKE_CONTEXT} passed on this commit at ${newest.created_at}${said}` };

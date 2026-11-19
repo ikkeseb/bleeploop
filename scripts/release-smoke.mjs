@@ -801,6 +801,6 @@ function record(pass) {
   return null;
 }
 function firstLine(e) {
-  const text = (e && typeof e === 'object' && 'stderr' in e && String(e.stderr).trim()) || String(e instanceof Error ? e.message : e);
+  const text = (e && typeof e === 'object' && 'stderr' in e && e.stderr && String(e.stderr).trim()) || String(e instanceof Error ? e.message : e);
   return text.split('\n')[0];
 }
