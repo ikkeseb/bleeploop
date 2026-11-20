@@ -120,7 +120,7 @@
   color: var(--dim);
 }
 
-/* ---- a matte key-face cap (the legend is a key name, so Geist, not mono) ---- */
+/* ---- a matte key-face cap (the legend is a key name, so a legend, not a numeral) ---- */
 .help__kbd {
   font-size: 11.5px;
   font-weight: 600;

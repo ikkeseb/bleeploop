@@ -15,11 +15,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   `#rrggbb`: a token edit over HMR shows stale canvas colours until a page reload.
 - **The rendered app is the looper-UI spec.** Before looper-UI work, run `pnpm probe contact-sheet`
   and compare against `logs/contact-sheet/index.html` (fixed scenes at three window sizes). What
-  binds: guitar first, the looper as the hero with five lanes, one command bar for the whole
+  binds: the instrument in hand first (the guitar the reference), the looper as the hero with five lanes, one command bar for the whole
   transport, lane volume **0..1.5** with a 0 dB detent at 1.0, and the owner's decisions below.
 - **The main screen's principles,** drawn from the owner's design notes (2026-10/11); an earlier one
-  settles a conflict. The screen is played standing, about 1.5 m from a 27" 2560x1440 display, guitar
-  in hand: an instrument, not a DAW window. How each is drawn (surfaces, colour, keys, the wave,
+  settles a conflict. The screen is played standing, about 1.5 m from a 27" 2560x1440 display, an
+  instrument in hand: an instrument, not a DAW window. How each is drawn (surfaces, colour, keys, the wave,
   selection, motion, sizes) is the `src/app.css` header's.
   1. *Read from the chair, without reading:* each lane's state and where the loop is read within a
      second by colour, fill and the playhead; a state word confirms, never carries alone. Two states

@@ -268,7 +268,7 @@
 .lp-drawer .fxp-dub {
   background: transparent;
 }
-/* the pair shares one baseline (Geist beside Geist Mono: centring would set them a pixel apart) */
+/* the pair shares one baseline (a legend beside a numeral: centring would set them a pixel apart) */
 .fxp-group .fxp-param__label {
   grid-area: 1 / 1;
   align-self: baseline;

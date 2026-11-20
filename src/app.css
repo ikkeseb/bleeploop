@@ -18,7 +18,8 @@
      (--band-light: each band a touch lighter at its top) under a fine static grain (--grain), print, and
      dark recessed glass (--glass, one faint reflection along its top edge). Bands and lanes part by a
      milled groove (--groove). No wells round groups, no group captions, no box round a value but the
-     small value window.
+     small value window. What opens over the panel (a popover, a unit's face) floats on --panel-drop,
+     the one drop shadow.
      COLOUR is sound only: REC --rec, OVERDUB --dub, PLAYING --play, the meter ladder's --meter-*. Engaged
      chrome is warm white (--engaged): a lit LED, a lit legend, a value being changed, a two-step confirm,
      a fade under way. An LED is a small solid shape with a tight bloom in its own colour (6 px at most);

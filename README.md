@@ -1,9 +1,11 @@
 # BleepLoop
 
-A looper for Windows that you play with a guitar. Load your own amp-sim plugin, play through it live
-over ASIO, and build a song on five loop tracks, hands-free with a MIDI footswitch. Each take is placed
-from the latency the ASIO driver reports, so there is no latency setting to tune. That has been
-measured on one interface so far; see [Where it stands](#where-it-stands).
+A looper for Windows that you play live: a guitar, a bass, a synth or a keyboard. Load your own amp-sim
+or instrument plugin, play through it live over ASIO, and build a song on five loop tracks, hands-free
+with a MIDI footswitch. Each take is placed from the latency the ASIO driver reports, so there is no
+latency setting to tune. That has been measured on one interface so far; see [Where it
+stands](#where-it-stands).
+
 
 [![Download for Windows](https://img.shields.io/github/v/release/ikkeseb/bleeploop?label=Download%20for%20Windows&logo=windows&style=for-the-badge&color=2ea043)](https://github.com/ikkeseb/bleeploop/releases/latest)
 

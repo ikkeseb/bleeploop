@@ -47,11 +47,13 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   roadmap > an agent's tier list.
 - **A replacement is judged on latency, stability, UX or function,** however large, and measured as
   any other change.
-- **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
-  looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
-  its MIDI input is native; PC-keyboard→MIDI is its fallback. By-ear sessions happen on
-  guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
-  heads `README.md`; what is not built on purpose: `docs/backlog-taste.md` § Parked ideas.
+- **The first play path is an instrument into its slot's input → the slot's chain (an amp-sim plugin for
+  the guitar; native monitor) → play/loop/dub at low latency.** The guitar stays first-class, and by-ear
+  sessions happen on it; a bass, a synth or a keyboard through a line input takes the same path. The
+  looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers; its
+  MIDI input is native; PC-keyboard→MIDI is its fallback. The on-screen keyboard stays available, but it
+  is not the first-screen hero. The promise heads `README.md`; what is not built on purpose:
+  `docs/backlog-taste.md` § Parked ideas.
 - **One native audio engine; there is no Web Audio path.** Audio behaviour is built in lf-engine and
   MIDI input in native MIDI; the WebView is UI, settings and session files.
 - **The browser tier is a VERIFICATION RIG, not a product:** the browser build is silent, its UI
@@ -118,7 +120,7 @@ together.
 1. The engine's device-frame clock is the single tempo/quantization authority.
 2. Commands and events cross the RT boundary only through rtrb rings.
 3. The engine alone owns musical state: the UI sends commands and reads the feed.
-4. Plugin lifecycle runs off the RT thread, with the slot bypassed.
+4. Unit lifecycle runs off the RT thread, with that unit bypassed.
 5. The RT path (engine callback, plugin process) never allocates, logs, blocks or waits on a lock.
 6. No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop.
 7. All `@tauri-apps/*` confined to `src/platform/` (CI-guarded).

@@ -186,16 +186,7 @@ today's `FADE_SECONDS`): lifecycle (undelayed input ↔ what the seat sounds), i
   `Remove { id }`, `Withdraw { id }`, `Move { id, to }`, each answered by `Seat`; the rack holds
   `[Seat; MAX_UNITS]` and an order per slot; `src-tauri/AGENTS.md`'s unload order loses its live-off step.
 
-**Proposed rule text** (for the owner's word; `AGENTS.md` and `docs/ARCHITECTURE.md` change together):
-
-> AGENTS.md title: `4. Unit lifecycle runs off the RT thread, with that unit bypassed.`
->
-> docs/ARCHITECTURE.md: 4. **Unit lifecycle runs off the RT thread, with that unit bypassed.** Load,
-> activate, restart and teardown of a chain's unit run off the callback: a plugin's on its own owner
-> thread, a built-in's on the chain host. The callback crossfades a unit in and out of its seat and
-> hands it back on a ring, never drops one (a drop frees memory and may call into the plugin's DLL).
-> Meanwhile that unit's seat passes its input, delayed by the unit's last latency (an effect), or is
-> silent (a source); the rest of its chain, the other slot, loops and click play on and never wait.
+Invariant 4 reads unit-scoped since the owner's word of 2026-11-20 (`docs/ARCHITECTURE.md`).
 
 ## 4. The built-in synths: the SYNTH unit, a chain's source
 
