@@ -131,6 +131,11 @@ export type UnitState = UnitRecord & {
   latency: Frame;
   error?: string;
   state: 'loading' | 'waiting' | 'seated' | 'leaving' | 'failed';
+  /** `failed` by a park (unit contract §3): withdrawn, its seat kept with its place and latency, until a
+   * restart reseats it or the player removes it. Absent: a failed add (no seat). */
+  parked?: boolean;
+  /** An edit of this unit waits for a take to end (its removal while `leaving`, a move while `seated`). */
+  held?: boolean;
 };
 /** One slot's chain as applied: its units in order, their latencies' sum (bypassed ones included), and
  * whether an edit waits for a take to end. */
@@ -857,6 +862,8 @@ function decodeUnitState(v: unknown, what: string): UnitState {
     latency: int(o.latency, `${what}.latency`),
     state: oneOf(o.state, UNIT_STATES, `${what}.state`),
     ...(o.error === undefined ? {} : { error: str(o.error, `${what}.error`) }),
+    ...(o.parked === undefined ? {} : { parked: bool(o.parked, `${what}.parked`) }),
+    ...(o.held === undefined ? {} : { held: bool(o.held, `${what}.held`) }),
   };
   if (kind === 'plugin') {
     const p = obj(o.plugin, `${what}.plugin`);

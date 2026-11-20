@@ -409,6 +409,7 @@ const tauriChainHost: ChainHost = {
   move: noChain,
   openEditor: noChain,
   closeEditor: noChain,
+  onEditorClosed: () => () => {},
   listParams: noChain,
   setParameter: noChain,
   takeTone: noChain,

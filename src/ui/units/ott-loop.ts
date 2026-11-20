@@ -19,6 +19,8 @@ interface Glass {
   values: HTMLElement[];
   unit: number;
   drawn: number;
+  /** The size and scale the glass was last drawn at: a reflow of the face draws it again. */
+  laid: string;
 }
 interface Mini {
   el: HTMLElement;
@@ -30,10 +32,10 @@ const glasses = new Set<Glass>();
 const minis = new Set<Mini>();
 let rafId = 0;
 
-/** The glass's geometry in CSS pixels (the face draws it 852x232 inside its bezel). */
+/** The glass's geometry in CSS pixels (the face draws it 852x232 inside its bezel, 852x178 in its narrow
+ * reflow): the scale's left edge; the 0 dB line and the pixels per dB come from the canvas
+ * (`data-y0`, `data-px`, set by the face's layout). */
 const X0 = 40;
-const Y0 = 120;
-const PX = 7;
 const LAD = 58;
 const MW = 6;
 const PAD = 12;
@@ -49,7 +51,7 @@ const rgba = (c: readonly number[], a: number): string => `rgba(${c[0]},${c[1]},
 
 /** Draw an OTT face's glass for `unit` while it is mounted. */
 export function registerOttGlass(canvas: HTMLCanvasElement, values: HTMLElement[], unit: number): () => void {
-  const g: Glass = { canvas, values, unit, drawn: -1 };
+  const g: Glass = { canvas, values, unit, drawn: -1, laid: '' };
   glasses.add(g);
   start();
   return () => glasses.delete(g);
@@ -73,8 +75,12 @@ function frame(): void {
   for (const g of glasses) {
     const v = unitMeters.get(g.unit);
     const version = v ? v.version : 0;
+    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}:${g.canvas.dataset.y0}:${g.canvas.dataset.px}`;
     // a glass not laid out yet draws on a later frame
-    if (version !== g.drawn && drawGlass(g, v)) g.drawn = version;
+    if ((version !== g.drawn || laid !== g.laid) && drawGlass(g, v)) {
+      g.drawn = version;
+      g.laid = laid;
+    }
   }
   for (const m of minis) {
     const v = unitMeters.get(m.unit);
@@ -103,6 +109,8 @@ function drawGlass(gl: Glass, v: UnitMeterView | undefined): boolean {
   }
   const g = cv.getContext('2d');
   if (!g) return false;
+  const Y0 = Number(cv.dataset.y0) || 120;
+  const PX = Number(cv.dataset.px) || 7;
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
   const X1 = W - 6;

@@ -15,12 +15,20 @@ import './ott-face.css';
  * four programmed knobs, DEPTH the hero. A knob sends `SetUnitParam` and shows the feed's value, its own
  * only while a drag holds it. Non-modal, as the row's popovers: Escape, its close or a press outside
  * closes it, a keyboard close hands focus back to the plate's name. The face is 900x540 at the chrome's
- * size step (`--ui`); where the window is smaller, it scales down to fit, every knob still in reach.
+ * size step (`--ui`); where the window cannot hold that under the row (1000x700, 960x600), it reflows to
+ * its narrow face, 900x382: a shorter glass (5 px a dB), smaller knobs, the same legends at full size.
+ * Its type is never scaled below the base (a scale under 1 only past the app's minimum window).
  */
 
-/** The face's own size (CSS pixels at scale 1). */
-const FACE_W = 900;
-const FACE_H = 540;
+/** The face's two layouts (CSS pixels at scale 1): the accepted face, and its narrow reflow. */
+interface Layout {
+  w: number;
+  h: number;
+  /** The glass's 0 dB line and pixels per dB (`ott-loop.ts` reads them off the canvas). */
+  y0: number;
+  px: number;
+  knobs: readonly KnobDef[];
+}
 /** Where the plate's centre falls on the face, as the mockup hangs it (the face's left on the lanes' glass). */
 const TIE_AT = 333;
 
@@ -34,12 +42,30 @@ interface KnobDef {
   hero?: boolean;
   tri?: 'up' | 'dn';
 }
-const KNOBS: readonly KnobDef[] = [
-  { param: 'ottDepth', label: 'DEPTH', def: 0.5, x: 318, y: 386, size: 172, hero: true },
-  { param: 'ottTime', label: 'TIME', def: 0.5, x: 528, y: 424, size: 92 },
-  { param: 'ottUpward', label: 'UP', def: 1, x: 690, y: 424, size: 92, tri: 'up' },
-  { param: 'ottDownward', label: 'DOWN', def: 1, x: 812, y: 424, size: 92, tri: 'dn' },
-];
+const WIDE: Layout = {
+  w: 900,
+  h: 540,
+  y0: 120,
+  px: 7,
+  knobs: [
+    { param: 'ottDepth', label: 'DEPTH', def: 0.5, x: 318, y: 386, size: 172, hero: true },
+    { param: 'ottTime', label: 'TIME', def: 0.5, x: 528, y: 424, size: 92 },
+    { param: 'ottUpward', label: 'UP', def: 1, x: 690, y: 424, size: 92, tri: 'up' },
+    { param: 'ottDownward', label: 'DOWN', def: 1, x: 812, y: 424, size: 92, tri: 'dn' },
+  ],
+};
+const NARROW: Layout = {
+  w: 900,
+  h: 382,
+  y0: 92,
+  px: 5,
+  knobs: [
+    { param: 'ottDepth', label: 'DEPTH', def: 0.5, x: 300, y: 275, size: 96, hero: true },
+    { param: 'ottTime', label: 'TIME', def: 0.5, x: 500, y: 287, size: 60 },
+    { param: 'ottUpward', label: 'UP', def: 1, x: 655, y: 287, size: 60, tri: 'up' },
+    { param: 'ottDownward', label: 'DOWN', def: 1, x: 790, y: 287, size: 60, tri: 'dn' },
+  ],
+};
 const NAMES: Record<string, string> = { ottDepth: 'depth', ottTime: 'time', ottUpward: 'upward', ottDownward: 'downward' };
 
 const paramOf = (u: UnitState, k: KnobDef): number => {
@@ -54,17 +80,20 @@ export function OttFace(props: {
   plate: () => HTMLElement | undefined;
   slotLetter: string;
 }) {
-  const [box, setBox] = createSignal({ left: 0, top: 0, scale: 1, tieX: 0, tieY: 0 });
+  const [box, setBox] = createSignal({ left: 0, top: 0, scale: 1, tieX: 0, tieY: 0, layout: WIDE });
   const place = () => {
     const r = props.plate()?.getBoundingClientRect();
     if (!r) return;
     const top = r.bottom + 19;
-    // the chrome's size step (`--ui`, a step up on the wide display), never past what the window holds
+    // the chrome's size step (`--ui`, a step up on the wide display); the accepted face where the window
+    // holds it under the row, else the narrow reflow; a scale under the step only past the minimum window
     const ui = Number(getComputedStyle(document.documentElement).getPropertyValue('--ui')) || 1;
-    const scale = Math.min(ui, (window.innerWidth - 16) / FACE_W, Math.max(0.3, (window.innerHeight - top - 8) / FACE_H));
+    const room = (l: Layout) => Math.min((window.innerWidth - 16) / l.w, (window.innerHeight - top - 8) / l.h);
+    const layout = room(WIDE) >= ui ? WIDE : NARROW;
+    const scale = Math.max(0.3, Math.min(ui, room(layout)));
     const centre = r.left + r.width / 2;
-    const left = Math.max(8, Math.min(centre - TIE_AT * scale, window.innerWidth - 8 - FACE_W * scale));
-    setBox({ left, top, scale, tieX: centre - 16, tieY: r.bottom + 4 });
+    const left = Math.max(8, Math.min(centre - TIE_AT * scale, window.innerWidth - 8 - layout.w * scale));
+    setBox({ left, top, scale, tieX: centre - 16, tieY: r.bottom + 4, layout });
   };
   onMount(() => {
     place();
@@ -80,7 +109,7 @@ export function OttFace(props: {
         <i class="ott-tie" aria-hidden="true" style={{ left: `${box().tieX}px`, top: `${box().tieY}px` }} />
         <div
           class="ott"
-          classList={{ 'ott--byp': !on() }}
+          classList={{ 'ott--byp': !on(), 'ott--narrow': box().layout === NARROW }}
           role="dialog"
           aria-label={`OTT, slot ${props.slotLetter}`}
           id={`ott-face-${id()}`}
@@ -89,7 +118,7 @@ export function OttFace(props: {
           ref={(el) => queueMicrotask(() => el.focus())}
           onClick={(e) => e.stopPropagation()}
         >
-          <Glass unit={id()} />
+          <Glass unit={id()} y0={box().layout.y0} px={box().layout.px} />
           <span class="ott__wm" aria-hidden="true">
             OTT
           </span>
@@ -106,7 +135,7 @@ export function OttFace(props: {
           <span class="ott__maker" aria-hidden="true">
             BLEEPLOOP
           </span>
-          <For each={KNOBS}>{(k) => <Knob def={k} unit={props.unit} />}</For>
+          <For each={box().layout.knobs}>{(k) => <Knob def={k} unit={props.unit} />}</For>
           <button type="button" class="ott__close" aria-label="Close the OTT" onClick={(e) => props.pop.close(e.detail === 0)}>
             <svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
               <path d="M2 2l8 8M10 2L2 10" />
@@ -119,21 +148,22 @@ export function OttFace(props: {
 }
 
 /** The glass: its canvas, the printed scale and band names, the three read-outs the loop writes. */
-function Glass(props: { unit: number }) {
+function Glass(props: { unit: number; y0: number; px: number }) {
   const values: HTMLElement[] = [];
   let canvas!: HTMLCanvasElement;
   onMount(() => onCleanup(registerOttGlass(canvas, values, props.unit)));
-  // the scale and the bands' places, as the loop draws them (ott-loop.ts: X0 40, the 0 dB line at 120, 7 px a dB)
+  // the scale and the bands' places, as the loop draws them (ott-loop.ts: X0 40, the 0 dB line at `y0`,
+  // `px` a dB)
   const W = 852;
   const band = (i: number) => 40 + ((W - 6 - 40) / 3) * i;
   const dbs = [12, 6, 0, -6, -12];
   return (
     <div class="ott__bezel">
       <div class="ott__glass">
-        <canvas ref={canvas} class="ott__canvas" aria-hidden="true" />
+        <canvas ref={canvas} class="ott__canvas" data-y0={props.y0} data-px={props.px} aria-hidden="true" />
         <For each={dbs}>
           {(d) => (
-            <span class="ott__db" classList={{ 'is-zero': d === 0 }} style={{ top: `${120 - d * 7}px` }} aria-hidden="true">
+            <span class="ott__db" classList={{ 'is-zero': d === 0 }} style={{ top: `${props.y0 - d * props.px}px` }} aria-hidden="true">
               {d > 0 ? `+${d}` : d < 0 ? `−${-d}` : '0'}
             </span>
           )}
@@ -179,7 +209,8 @@ function Knob(props: { def: KnobDef; unit: () => UnitState }) {
   const [held, setHeld] = createSignal<number | null>(null);
   const value = () => held() ?? paramOf(props.unit(), k);
   const pct = () => Math.round(value() * 100);
-  const enabled = () => props.unit().state === 'seated' || props.unit().state === 'waiting';
+  // only a seated unit takes its params (the batch drops one for any other: a waiting, parked or leaving unit)
+  const enabled = () => props.unit().state === 'seated';
   const send = (v: number) => {
     const x = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
     setUnitParam(props.unit().id, k.param, x);

@@ -91,7 +91,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 - **The chain seam:** while `platform.chain.available` (the DEV fake with `__lfChainFake`; the native engine
   once it speaks the chain) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
   `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's face; otherwise the row is
-  the fixed topology (`instrument/InstrumentSlot.tsx`). A plate moves when the feed says so, never on drop.
+  the fixed topology (`instrument/InstrumentSlot.tsx`), and the feed's `chains` apply to nothing. A plate moves
+  when the feed says so, never on drop; a drop is judged at its release, from the plates' places when the drag
+  began. A refusal the contract makes certain (a ninth unit, a source moved, an effect ahead of a source) is the
+  slot's tag with nothing sent (`addRefusal`, `moveRefusal`); the host resolves the rest. A gesture reaches only a
+  seated unit, and a popover of a unit that stops being seated closes.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.
@@ -107,6 +111,19 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   `console.error` sites, which feed the release log. Keep both.
 
 ## Open threads (non-gate)
+
+- **Chain mode's activation.** The gate is `platform.chain.available` (`state/chain.ts` `chainShown`): the
+  native host refuses every chain call, so chain mode is the DEV fake's alone. It turns on natively only
+  together with the native chain host and these, none built: contract §6's durable migration in rig recall
+  (`lf.rig` with its `pending` step; chain mode today simply does not draw the old IN FX sends, and their
+  values do not become units); the named pedal actions (`InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt`)
+  running `Toggle.Units` in chain mode instead of the legacy sends; the per-unit editor-closed event natively
+  (`plugin:editor-closed` carrying `unit`; the fake has it, `ChainHost.onEditorClosed`); the slot's level kept
+  across a launch (chain mode holds it in memory, unity at boot, `state/instrument.ts` `chainGains`); SYNTH's
+  instrument pick through the note router (§4; a synth unit takes its pick only at its add). Chain mode
+  already routes notes to the slot (`{ Slot: n }`) and sends the slot's level as `SetSlotGain`, never the
+  legacy `Builtin` target or `SetInstrumentGain`. Next check: with the engine step, `rig-recall` on a stored
+  v0.8.9 profile in chain mode.
 
 - A reset that asks for the kept meter (`engine-store.ts` `meterAsked`) guards only its own frame: a
   later Transport that lands before the asked `SetMeter` applies writes the engine's 4/4 to `lf.meter`

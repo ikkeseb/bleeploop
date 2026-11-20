@@ -85,8 +85,9 @@ row draws today's fixed topology, as the native build does): the platform's
 `chain` answers add, remove, move and reload with `chains` frames, the batch's unit commands switch the
 model, each seated unit gets a meter on every frame the fake makes (an active OTT's bands on the fake's
 own 60 Hz timer), the unit commands never reach `input_send` where the chain is unavailable, and its seams sit on
-`__lf.native.chain` (`verify/probes/chain-fake.mjs` is the pattern; `verify/probes/chain-ui.mjs` drives the row's chain and
-the OTT's face on it). Native MIDI is faked the same way: the fake records the
+`__lf.native.chain` (a park and a reseat, a plugin window closed by its own close; `verify/probes/chain-fake.mjs` is the
+pattern; `verify/probes/chain-ui.mjs` drives the row's chain and the OTT's face on it, and reads what the UI applied through
+`__lf.chainRow()`). Native MIDI is faked the same way: the fake records the
 outbox's batches (`__lf.native.batches`, each with its epoch; their input events flattened in
 `__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls (`__lf.native.midiCalls`,
 each with the page's epoch), answers a learn or its cancel with a `learning` event and nothing else, and

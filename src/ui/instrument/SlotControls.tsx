@@ -1,3 +1,4 @@
+import { chainShown } from '../state/chain';
 import { For, Show, createEffect, createMemo, onCleanup } from 'solid-js';
 import {
   SLOT_GAIN_MAX,
@@ -144,7 +145,9 @@ export function SlotVolume(props: { slot: 0 | 1 }) {
   const db = () => volumeDb(level());
   const pending = () => slotPendingCounts()[slot] > 0;
   const what = () =>
-    slotPlugins()[slot]
+    chainShown()
+      ? "Slot level: the slot's sound after its chain"
+      : slotPlugins()[slot]
       ? 'Plugin output'
       : slotOff()[slot]
         ? "Input level: what this slot's live input is heard and recorded at"

@@ -93,6 +93,10 @@ export interface ChainFake {
   park(unit: UnitId, reason: string): void;
   /** Probe seam: reseat a parked unit, as a restart that succeeds does. */
   reseat(unit: UnitId): void;
+  /** The plugin units whose editor window is open (an `openEditor` it took, no close since). */
+  readonly editorsOpen: ReadonlySet<UnitId>;
+  /** Probe seam: the player closes `unit`'s editor window with its own close (the window event, by unit). */
+  closeWindow(unit: UnitId): void;
   /** Probe seam: the meters' own 60 Hz timer (on by default); off, `meterTick` emits one frame. */
   meterTimer: boolean;
   /** Whether the 60 Hz interval is live now: only while the timer is on and an OTT is seated and on. */
@@ -405,6 +409,14 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
   let scheduled = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let captureSeam = false;
+  /** The editor windows open, by unit, and who hears one close (`ChainHost.onEditorClosed`). */
+  const editorsOpen = new Set<UnitId>();
+  const editorClosed = new Set<(unit: UnitId) => void>();
+  /** A unit's editor window closed (its own close, its unit withdrawn or removed): told a microtask later. */
+  function windowClosed(unit: UnitId): void {
+    if (!editorsOpen.delete(unit)) return;
+    queueMicrotask(() => editorClosed.forEach((cb) => cb(unit)));
+  }
 
   const all = (): Unit[] => [...chains[0], ...chains[1]];
   const find = (unit: UnitId): Unit | undefined => all().find((u) => u.state.id === unit && !u.noSeat);
@@ -420,7 +432,13 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
 
   /** The chain as applied: its units in order, their latency sum (bypassed and parked seats included). */
   function chainState(slot: Slot): ChainState {
-    const units = chains[slot].map((u) => structuredClone(u.state));
+    // an edit of a unit that waits behind a take marks its plate (a held removal, a move queued behind one)
+    const waits = new Set(held[slot].filter((h) => h.kind === 'remove' || h.kind === 'move').map((h) => h.unit));
+    const units = chains[slot].map((u) => {
+      const s = structuredClone(u.state);
+      if (waits.has(s.id)) s.held = true;
+      return s;
+    });
     const latency = chains[slot].filter(applied).reduce((s, u) => s + u.state.latency, 0);
     return { units, latency, held: held[slot].length > 0 };
   }
@@ -547,6 +565,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     if (reserved.get(u.state.id) === u.slot && !u.noSeat) reserved.delete(u.state.id);
     sims.delete(u.state.id);
     lastBands.delete(u.state.id);
+    if (!u.noSeat) windowClosed(u.state.id);
     if (u.state.kind === 'plugin' && !u.noSeat) {
       if (u.tone) slotTones.set(toneKey(u.slot, u.state.plugin), u.tone);
       release(u.inst, u.state.plugin.path);
@@ -858,10 +877,17 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
       if (entry.state === 'orphaned') refuse(`the editor of ${u.state.name} is bound to unit ${entry.unit}'s previous load`);
       if (entry.state === 'unordered') refuse(`the editor of ${u.state.name} belongs to an unknown unit (two loaded it at once)`);
       if (entry.inst !== u.inst) refuse(`the editor of ${u.state.name} belongs to unit ${entry.unit}`);
+      editorsOpen.add(unit);
     },
     async closeEditor(unit) {
       fake.calls.push(['closeEditor', unit]);
       guard();
+      // a close the UI asked for is no window event of its own
+      editorsOpen.delete(unit);
+    },
+    onEditorClosed(cb) {
+      editorClosed.add(cb);
+      return () => editorClosed.delete(cb);
     },
     async listParams(unit): Promise<PluginParamDesc[]> {
       fake.calls.push(['listParams', unit]);
@@ -1075,6 +1101,9 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
       if (!u || u.state.state !== 'seated') throw new Error(`unit ${unit} is not seated`);
       u.state.state = 'failed';
       u.state.error = reason;
+      u.state.parked = true;
+      // a withdrawn plugin's window goes with it
+      windowClosed(unit);
       emitChains();
     },
     reseat(unit) {
@@ -1082,7 +1111,13 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
       if (!u || u.state.state !== 'failed') throw new Error(`unit ${unit} is not parked`);
       u.state.state = 'seated';
       delete u.state.error;
+      delete u.state.parked;
       emitChains();
+    },
+    editorsOpen,
+    closeWindow(unit) {
+      if (!editorsOpen.has(unit)) throw new Error(`unit ${unit} has no editor window open`);
+      windowClosed(unit);
     },
     get meterTimer() {
       return meterTimer;

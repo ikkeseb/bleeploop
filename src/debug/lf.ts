@@ -21,6 +21,7 @@ import { clock, looper, master } from '../ui/state/audio';
 import { dismissToast, notifyError, toasts } from '../notify';
 import { engineFake, input, platform, reportDiagnostics } from '../platform';
 import * as layoutStore from '../ui/layout/layout-store';
+import { slotChain } from '../ui/state/chain';
 
 /**
  * The DEV debug surface (`window.__lf`) for automated (Playwright) verification + by-ear/by-eye
@@ -60,6 +61,9 @@ export interface LfDebug {
    * The browser build has an engine only with `window.__lfEngineFake = true` set before the app loads
    * (`verify/probes/engine-seam.mjs`). Null under Tauri. */
   native: typeof engineFake;
+  /** The chain per slot as the UI applied it from the feed (`src/ui/state/chain.ts`): empty while the row
+   * draws the fixed topology (the feed's `chains` apply only while `platform.chain.available`). */
+  chainRow: () => [ReturnType<typeof slotChain>, ReturnType<typeof slotChain>];
   /** Mute the master (true) or unmute it; routes through `master` so the UI mute + slider stay
    * consistent. */
   setMasterMute: (on: boolean) => void;
@@ -125,6 +129,7 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     midi,
     platform,
     native: engineFake,
+    chainRow: () => [slotChain(0), slotChain(1)],
     setMasterMute: (on) => {
       master.setMuted(on);
     },

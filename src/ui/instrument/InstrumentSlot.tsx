@@ -33,7 +33,7 @@ import { liveShown } from './live';
 import { openSettings, type SettingsPage } from '../../settings-opener';
 import { revealKeyboardForSynth } from '../layout/layout-store';
 import { inputArmed } from '../state/native-io';
-import { chainShown, slotChain } from '../state/chain';
+import { appliedHead, chainShown, slotChain } from '../state/chain';
 import { ChainLine } from '../units/ChainLine';
 
 /**
@@ -116,7 +116,7 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
     if (!chained) return sourceName();
     const units = slotChain(slotIdx).units;
     if (units.length === 0) return 'Empty';
-    const head = units[0];
+    const head = appliedHead(slotIdx) ?? units[0];
     const name = head.kind === 'synth' ? (SYNTHS[('params' in head ? head.params?.instrument : 0) ?? 0]?.name ?? head.name) : head.name;
     return units.length > 1 ? `${name} +${units.length - 1}` : name;
   };
@@ -220,7 +220,7 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
                 setShownSlot(slotIdx);
               }}
             >
-              <span class="plate__lamp" classList={{ 'is-on': live() || (chained ? slotChain(slotIdx).units[0]?.source === true : !!synth()) }} aria-hidden="true" />
+              <span class="plate__lamp" classList={{ 'is-on': live() || (chained ? appliedHead(slotIdx)?.source === true : !!synth()) }} aria-hidden="true" />
               <span class="slot__fold-id">{letter}</span>
               <span class="plate__name">{foldName()}</span>
               {/* its meter stays in sight folded: a hot or clipping input reads from either slot */}

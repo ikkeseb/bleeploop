@@ -11,52 +11,74 @@
   align-items: center;
   height: var(--plate-h);
 }
-/* the row's last folds: compact plates (no marks, shorter names); then, only where that is still too long,
-   the chain scrolls along its own line, its thin scrollbar under the plates (a focused plate scrolls in) */
+/* the row's last folds: compact plates (no static marks, shorter names); then, only where that is still too
+   long, the plates scroll along their own line, its thin scrollbar under them (a focused plate scrolls in).
+   The `+` stays outside the scroller, always in sight. The overflow cue is a chevron at each end, outside
+   the plates, lit only toward the side that holds more (a scroll-driven animation: no scroll, no cue); it
+   never dims a plate's text. */
+.unit-chain {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.unit-chain--scroll {
+  flex: 0 1 auto;
+  timeline-scope: --chain-x;
+}
 .unit-line.unit-line--scroll {
   min-width: 0;
   height: auto;
-  padding: 6px 2px 0; /* room at each end, so the last plate and the + scroll fully in */
+  padding: 6px 2px 0; /* room at each end, so the first and last plate scroll fully in */
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
   scrollbar-color: #4a4f56 transparent;
-  /* the side that holds more fades out (a scroll-driven mask: no scroll, no fade) */
-  mask-image: linear-gradient(to right, transparent 0, #000 var(--fade-l), #000 calc(100% - var(--fade-r)), transparent 100%);
-  animation: unit-line-fade linear both;
-  animation-timeline: scroll(self inline);
+  scroll-timeline: --chain-x x;
 }
-@property --fade-l {
-  syntax: '<length>';
-  inherits: false;
-  initial-value: 0px;
+.unit-more {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(14px * var(--ui));
+  color: var(--legend);
+  opacity: 0;
+  pointer-events: none;
 }
-@property --fade-r {
-  syntax: '<length>';
-  inherits: false;
-  initial-value: 0px;
+.unit-chain--scroll > .unit-more {
+  display: flex;
 }
-@keyframes unit-line-fade {
+.unit-more--l {
+  animation: unit-more-l linear both;
+  animation-timeline: --chain-x;
+}
+.unit-more--r {
+  animation: unit-more-r linear both;
+  animation-timeline: --chain-x;
+}
+@keyframes unit-more-l {
   0% {
-    --fade-l: 0px;
-    --fade-r: 32px;
+    opacity: 0;
   }
-  6% {
-    --fade-l: 32px;
+  3%,
+  100% {
+    opacity: 1;
   }
-  94% {
-    --fade-r: 32px;
+}
+@keyframes unit-more-r {
+  0%,
+  97% {
+    opacity: 1;
   }
   100% {
-    --fade-l: 32px;
-    --fade-r: 0px;
+    opacity: 0;
   }
 }
-.slot__chain:has(> .unit-line--scroll) {
+.slot__chain:has(.unit-chain--scroll) {
   min-width: 0;
   flex: 0 1 auto;
 }
-.slot:has(.unit-line--scroll) {
+.slot:has(.unit-chain--scroll) {
   min-width: 0;
 }
 .unit-line--compact .plate.unit {
@@ -109,7 +131,7 @@
 .unit-line--compact .unit__status {
   max-width: calc(96px * var(--ui));
 }
-/* a failed or parked unit: its plate stays in its place, sunk, its name secondary, its reason read */
+/* a failed add: its plate stays in its place, sunk, its name struck, its reason read */
 .plate.unit--failed {
   background: #121417;
   box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.9), inset 0 2px 5px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -120,6 +142,19 @@
   text-decoration-color: var(--faint);
 }
 .unit--failed .unit__status {
+  color: var(--legend);
+}
+/* a parked unit keeps its seat (its place, its latency) until a restart reseats it: raised as a bypassed
+   plate, its name kept, unstruck, and its reason read under it */
+.plate.unit--parked {
+  background: none;
+  box-shadow: none;
+}
+.unit--parked .plate__name {
+  text-decoration: none;
+}
+/* an edit of the unit waits for the take: its status line says what will happen when it ends */
+.unit--held .unit__status {
   color: var(--legend);
 }
 /* loading or waiting: the lens breathes in warm white, the engaged chrome's colour (a change under way) */
@@ -239,6 +274,14 @@
 }
 .slot .unit-err.pc__err {
   position-anchor: --err-add;
+}
+/* the row's popovers hang from their plate (slot.css `--slot-pop-plate`): the name's trigger sits inside the
+   plate's text, and the `+` is its own plate */
+.plate.unit:has(.unit__name[aria-expanded='true']) {
+  anchor-name: --slot-pop-plate;
+}
+.slot .unit-add[aria-expanded='true'] {
+  anchor-name: --slot-pop, --slot-pop-plate, --err-add;
 }
 .unit-add-menu {
   min-width: 220px;

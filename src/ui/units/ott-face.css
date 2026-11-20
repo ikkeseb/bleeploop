@@ -1,7 +1,8 @@
 /* The OTT's face (OttFace.tsx), as the accepted docs/redesign/ott.css and ott-open.html draw it, on the
    app.css header's tokens: one piece of gear, 900x540, the glass the hero and DEPTH the one knob that
    matters. Programmed knobs only (the owner chose them over the rendered cap). It hangs under the slot
-   row over the lanes and scales down where the window is smaller than it (`scale`, set inline). */
+   row over the lanes; where the window cannot hold it there it reflows narrow (`.ott--narrow`, below),
+   never scaling its type under the base size. */
 
 .ott-backdrop {
   z-index: 45; /* over the row's tags (30) and its popovers' layer */
@@ -364,6 +365,31 @@
 .ott__ctl--hero .ott__ptr::after {
   top: 2.5%;
   height: 30%;
+}
+
+/* ---- the narrow reflow (OttFace.tsx `NARROW`, where the window cannot hold the face under the row):
+   900x382, a shorter glass, smaller knobs on one row, every legend and number at its full size ---- */
+.ott.ott--narrow {
+  height: 382px;
+}
+.ott--narrow .ott__bezel {
+  height: 186px;
+}
+.ott--narrow .ott__wm {
+  top: 258px;
+  font-size: 52px;
+}
+.ott--narrow .ott__pwr {
+  top: 343px;
+}
+.ott--narrow .ott__maker {
+  top: 350px;
+}
+.ott--narrow .ott__lgd {
+  top: 331px;
+}
+.ott--narrow .ott__val {
+  top: 352px;
 }
 
 @media (prefers-reduced-motion: reduce) {

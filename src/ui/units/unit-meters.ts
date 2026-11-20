@@ -42,8 +42,19 @@ interface WireBand {
   levelPeak: number;
 }
 
-/** One feed frame's meters into the mirror (the engine store's frame path). */
+/** One feed frame's meters into the mirror (the engine store's frame path). A frame's meters are complete
+ * (unit contract §2: one per seated unit, every frame), so a unit the frame omits no longer sounds (parked,
+ * withdrawn, held out): its readings and history clear, never freeze on its last frame. */
 export function applyUnitMeters(meters: readonly { unit: number; bands?: readonly WireBand[] }[]): void {
+  for (const [id, v] of unitMeters) {
+    if (v.count === 0 && !v.bands) continue;
+    if (meters.some((m) => m.unit === id)) continue;
+    v.count = 0;
+    v.bands = false;
+    v.gain.fill(0);
+    v.level.fill(LEVEL_FLOOR);
+    v.version++;
+  }
   for (const m of meters) {
     let v = unitMeters.get(m.unit);
     if (!v) {

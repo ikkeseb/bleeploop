@@ -1,12 +1,15 @@
-import { For, Show, createResource, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createResource, createSignal, on, onCleanup, onMount } from 'solid-js';
 import { platform, type PluginParamDesc, type UnitParamId, type UnitState } from '../../platform';
 import {
   addUnit,
+  appliedHead,
   chainRefusal,
   editorOpen,
+  moveRefusal,
   moveUnit,
   pickerPlugins,
   removeUnit,
+  setPluginParam,
   setUnitParam,
   slotChain,
   toggleEditor,
@@ -42,55 +45,154 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
   const chain = () => slotChain(props.slot);
   const letter = slotLetter(props.slot);
   let line!: HTMLDivElement;
-  const [drag, setDrag] = createSignal<{ unit: number; dx: number; gap: number | null } | null>(null);
+  let wrap!: HTMLDivElement;
+  const [drag, setDrag] = createSignal<Drag | null>(null);
+  const head = () => appliedHead(props.slot);
+  const focusBack = (el: HTMLElement | undefined) => (props.returnFocus ?? ((x) => x?.focus()))(el);
+
+  // ── focus: a report that moves or removes the focused plate, or a fold that unmounts the line, hands
+  // focus to a surviving control (the same control on the moved plate, else its neighbour's menu, else `+`)
+  let lastFocus: { unit: number; cls: string; index: number } | null = null;
+  const onFocusIn = (e: FocusEvent) => {
+    const t = e.target as HTMLElement;
+    const p = t.closest<HTMLElement>('.unit');
+    if (!p) {
+      lastFocus = null;
+      return;
+    }
+    const cls = ['plate__lamp', 'unit__name', 'plate__ed', 'plate__menu'].find((c) => t.classList.contains(c)) ?? 'plate__menu';
+    lastFocus = { unit: Number(p.dataset.unit), cls, index: chain().units.findIndex((u) => u.id === Number(p.dataset.unit)) };
+  };
+  // Chromium blurs a focused node a report moves or removes (focusout, no related target): that loss, just
+  // now, is what is restored; focus taken elsewhere is never pulled back
+  let lostAt = -Infinity;
+  const onFocusOut = (e: FocusEvent) => {
+    const to = e.relatedTarget as Node | null;
+    if (to && !wrap.contains(to)) lastFocus = null;
+    else if (!to) lostAt = performance.now();
+  };
+  const focusLost = () => !document.activeElement || document.activeElement === document.body;
+  const restoreFocus = () => {
+    const f = lastFocus;
+    if (!f || !focusLost() || !wrap.isConnected || performance.now() - lostAt > 1000) return;
+    const same = line.querySelector<HTMLElement>(`.unit[data-unit="${f.unit}"] .${f.cls}:not(:disabled)`);
+    const plates = [...line.querySelectorAll<HTMLElement>(':scope > .unit')];
+    const near = plates[Math.min(f.index, plates.length - 1)]?.querySelector<HTMLElement>('.plate__menu');
+    const to = same ?? line.querySelector<HTMLElement>(`.unit[data-unit="${f.unit}"] .plate__menu`) ?? near ?? wrap.parentElement?.querySelector<HTMLElement>('.unit-add');
+    if (to) focusBack(to);
+  };
+  createEffect(
+    on(
+      () => chain().units.map((u) => `${u.id}:${u.state}`).join(),
+      () => queueMicrotask(restoreFocus),
+      { defer: true },
+    ),
+  );
+  onCleanup(() => {
+    // the slot folded under the focus: its fold plate takes it
+    if (lastFocus && (wrap.contains(document.activeElement) || focusLost())) {
+      const slot = wrap.closest('.slot');
+      queueMicrotask(() => {
+        const fold = slot?.querySelector<HTMLElement>('.slot__fold');
+        if (fold && focusLost()) focusBack(fold);
+      });
+    }
+  });
+
+  // ── what changed, said: a plate's label changing is not announced, so its transitions are ──────────
+  const [said, setSaid] = createSignal('');
+  // what the line found when it mounted (a slot unfolded) is no change
+  let before = new Map(chain().units.map((u) => [u.id, u]));
+  createEffect(
+    on(
+      () => chain().units,
+      (units) => {
+        const words: string[] = [];
+        const now = new Map(units.map((u) => [u.id, u]));
+        for (const u of units) {
+          const w = transition(before.get(u.id), u, chain().held);
+          if (w) words.push(w);
+        }
+        for (const [id, u] of before) if (!now.has(id)) words.push(`${plateName(u)} removed`);
+        before = now;
+        if (words.length === 0) return;
+        // a repeat of the same words is said again
+        setSaid('');
+        queueMicrotask(() => setSaid(`Slot ${letter}: ${words.join('. ')}`));
+      },
+      { defer: true },
+    ),
+  );
+
   return (
     <>
-    <div
-      class="unit-line"
-      classList={{ 'unit-line--compact': chainCompact(), 'unit-line--scroll': chainScroll(), 'unit-line--drag': drag() !== null }}
-      role="list"
-      aria-label={`Slot ${letter}'s chain`}
-      ref={line}
-    >
-      {/* keyed by id: a report's new objects never remount a plate (its open face, its drag) */}
-      <For each={chain().units.map((x) => x.id)}>
-        {(id, i) => {
-          let last = chain().units[i()];
-          const u = (): UnitState => (last = chain().units.find((x) => x.id === id) ?? last);
-          return (
-          <>
-            <Show when={i() > 0}>
-              <i class="slot__sig" classList={{ 'is-dim': !sounding(u(), props.live, chain().units[0]) }} aria-hidden="true" />
-            </Show>
-            <UnitPlate
-              slot={props.slot}
-              unit={u}
-              index={i}
-              count={() => chain().units.length}
-              held={() => chain().held}
-              live={props.live}
-              line={() => line}
-              drag={drag}
-              setDrag={setDrag}
-              returnFocus={props.returnFocus}
-            />
-          </>
-          );
-        }}
-      </For>
-      <Show when={drag()?.gap != null}>
-        <i class="unit-drop" aria-hidden="true" style={{ left: `${dropX(line, drag()!.gap!)}px` }} />
-      </Show>
-      <i class="slot__sig" classList={{ 'is-dim': chain().units.length > 0 && !props.live && chain().units[0]?.source !== true }} aria-hidden="true" />
+      <div class="unit-chain" classList={{ 'unit-chain--scroll': chainScroll() }} ref={wrap} onFocusIn={onFocusIn} onFocusOut={onFocusOut}>
+        <i class="unit-more unit-more--l" aria-hidden="true">
+          <Icon name="left" size={14} />
+        </i>
+        <div
+          class="unit-line"
+          classList={{ 'unit-line--compact': chainCompact(), 'unit-line--scroll': chainScroll(), 'unit-line--drag': drag() !== null }}
+          role="list"
+          aria-label={`Slot ${letter}'s chain`}
+          ref={line}
+        >
+          {/* keyed by id: a report's new objects never remount a plate (its open face, its drag) */}
+          <For each={chain().units.map((x) => x.id)}>
+            {(id, i) => {
+              let last = chain().units[i()];
+              const u = (): UnitState => (last = chain().units.find((x) => x.id === id) ?? last);
+              return (
+                <>
+                  <Show when={i() > 0}>
+                    <i class="slot__sig" classList={{ 'is-dim': !sounding(u(), props.live, head()) }} aria-hidden="true" />
+                  </Show>
+                  <UnitPlate
+                    slot={props.slot}
+                    unit={u}
+                    index={i}
+                    count={() => chain().units.length}
+                    held={() => chain().held}
+                    live={props.live}
+                    line={() => line}
+                    drag={drag}
+                    setDrag={setDrag}
+                    returnFocus={props.returnFocus}
+                  />
+                </>
+              );
+            }}
+          </For>
+          <Show when={drag()?.gap != null}>
+            <i class="unit-drop" aria-hidden="true" style={{ left: `${dropX(line, drag()!.gap!)}px` }} />
+          </Show>
+        </div>
+        <i class="unit-more unit-more--r" aria-hidden="true">
+          <Icon name="right" size={14} />
+        </i>
+      </div>
+      <i class="slot__sig" classList={{ 'is-dim': chain().units.length > 0 && !props.live && head()?.source !== true }} aria-hidden="true" />
       <AddBay slot={props.slot} returnFocus={props.returnFocus} />
-    </div>
-    <Show when={chainRefusal(props.slot)}>
-      <span class="pc__err unit-err" role="status" data-slot={props.slot} title={chainRefusal(props.slot) ?? ''}>
-        {chainRefusal(props.slot)}
+      <Show when={chainRefusal(props.slot)}>
+        <span class="pc__err unit-err" role="status" data-slot={props.slot} title={chainRefusal(props.slot) ?? ''}>
+          {chainRefusal(props.slot)}
+        </span>
+      </Show>
+      <span class="lf-visually-hidden unit-said" role="status" aria-live="polite" data-slot={props.slot}>
+        {said()}
       </span>
-    </Show>
     </>
   );
+}
+
+/** A plate's change as a few words for the live region, or null when nothing worth saying changed. */
+function transition(prev: UnitState | undefined, u: UnitState, held: boolean): string | null {
+  const name = plateName(u);
+  const status = unitStatus(u, held);
+  if (!prev) return u.state === 'seated' ? `${name} added` : `${name} added, ${status}`;
+  if (prev.state === u.state && prev.held === u.held && prev.parked === u.parked && prev.error === u.error) return null;
+  if (u.state === 'seated' && !u.held) return prev.state === 'failed' ? `${name} back` : prev.held ? `${name} moved` : `${name} ready`;
+  return status ? `${name} ${status}` : null;
 }
 
 /** Whether sound passes plate `u`: it is seated and on, and an input-fed chain is live. */
@@ -130,6 +232,31 @@ function plateName(u: UnitState): string {
 /** Pixels a pointer moves on a plate before it is a drag. */
 const DRAG_THRESHOLD = 5;
 
+/** A drag in flight: its unit, how far the plate follows the pointer, the gap a release would drop it in
+ * (null: no move there, or one the chain refuses). */
+interface Drag {
+  unit: number;
+  dx: number;
+  gap: number | null;
+}
+
+/** The gap (0..n) the content-x `x` falls in, from the plates' middles measured before the drag moved any. */
+function gapOf(mids: readonly number[], x: number): number {
+  const k = mids.findIndex((m) => x < m);
+  return k < 0 ? mids.length : k;
+}
+
+/** Swallow the click a drag's release makes (a pointer's, never a keyboard's), only in this task. */
+function swallowNextClick(): void {
+  const eat = (e: MouseEvent) => {
+    if (e.detail === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  window.addEventListener('click', eat, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener('click', eat, { capture: true }), 0);
+}
+
 function UnitPlate(props: {
   slot: 0 | 1;
   unit: () => UnitState;
@@ -138,8 +265,8 @@ function UnitPlate(props: {
   held: () => boolean;
   live: boolean;
   line: () => HTMLElement;
-  drag: () => { unit: number; dx: number; gap: number | null } | null;
-  setDrag: (d: { unit: number; dx: number; gap: number | null } | null) => void;
+  drag: () => Drag | null;
+  setDrag: (d: Drag | null) => void;
   returnFocus?: (el: HTMLElement | undefined) => void;
 }) {
   const u = props.unit;
@@ -151,95 +278,136 @@ function UnitPlate(props: {
   const name = () => plateName(u());
   const label = () => `${name()}, ${kindWords(u())}${status() ? `, ${status()}` : ''}`;
   const dragging = () => props.drag()?.unit === u().id;
+  const failedNote = () => (u().state === 'failed' ? status() : null);
 
-  // ── the drag: pointer capture once past the threshold, a marker between plates, Escape cancels ──
-  let press: { id: number; x: number; y: number; captured: boolean } | null = null;
-  let swallowClick = false;
-  const gapAt = (x: number): number => {
-    const plates = [...props.line().querySelectorAll<HTMLElement>(':scope > .unit')];
-    let gap = plates.length;
-    for (let k = 0; k < plates.length; k++) {
-      const r = plates[k].getBoundingClientRect();
-      if (x < r.left + r.width / 2) {
-        gap = k;
-        break;
+  // ── the drag: one press per pointer, from its down to its release, cancel, capture loss or Escape ────
+  // The gap is judged from the plates' places measured when the drag began (the lifted plate never moves
+  // the targets), and judged again at the release: the move sent is the release's, whatever the steps.
+  let press: { id: number; x: number; y: number; phase: 'pending' | 'drag' | 'cancelled'; mids: number[]; order: string; at: number } | null = null;
+  const order = () => [...props.line().querySelectorAll<HTMLElement>(':scope > .unit')].map((e) => e.dataset.unit).join();
+  const contentX = (clientX: number) => clientX - props.line().getBoundingClientRect().left + props.line().scrollLeft;
+  /** Where a release at content-x `x` would move the plate (its index), or null for no move. */
+  const target = (x: number): number | null => {
+    if (!press) return null;
+    const gap = gapOf(press.mids, x);
+    const i = press.at;
+    if (gap === i || gap === i + 1) return null;
+    return gap > i ? gap - 1 : gap;
+  };
+  const end = () => {
+    const p = press;
+    press = null;
+    window.removeEventListener('pointermove', onWinMove, true);
+    window.removeEventListener('pointerup', onWinUp, true);
+    window.removeEventListener('pointercancel', onWinCancel, true);
+    window.removeEventListener('keydown', onKey, true);
+    if (p && plate?.hasPointerCapture(p.id)) plate.releasePointerCapture(p.id);
+    if (props.drag()?.unit === u().id) props.setDrag(null);
+  };
+  const onWinMove = (e: PointerEvent) => {
+    if (!press || e.pointerId !== press.id || press.phase === 'cancelled') return;
+    const dx = e.clientX - press.x;
+    if (press.phase === 'pending') {
+      if (Math.hypot(dx, e.clientY - press.y) < DRAG_THRESHOLD) return;
+      const box = props.line().getBoundingClientRect();
+      const plates = [...props.line().querySelectorAll<HTMLElement>(':scope > .unit')];
+      press.mids = plates.map((el) => {
+        const r = el.getBoundingClientRect();
+        return r.left - box.left + props.line().scrollLeft + r.width / 2;
+      });
+      press.order = order();
+      press.at = props.index();
+      press.phase = 'drag';
+      try {
+        plate?.setPointerCapture(e.pointerId);
+      } catch {
+        /* the pointer is gone: its release or cancel ends the press */
       }
     }
-    return gap;
+    const to = target(contentX(e.clientX));
+    const gap = to === null || moveRefusal(u().id, to) !== null ? null : gapOf(press.mids, contentX(e.clientX));
+    props.setDrag({ unit: u().id, dx, gap });
   };
-  const cancel = () => {
-    press = null;
-    props.setDrag(null);
-    window.removeEventListener('keydown', onKey, true);
+  const onWinUp = (e: PointerEvent) => {
+    if (!press || e.pointerId !== press.id) return;
+    const p = press;
+    // confirmed on the release: the gap at the release's own x, on the chain the drag began with
+    const to = p.phase === 'drag' && order() === p.order ? target(contentX(e.clientX)) : null;
+    end();
+    if (p.phase === 'pending') return;
+    swallowNextClick();
+    if (to !== null) void moveUnit(u().id, to);
+  };
+  const onWinCancel = (e: PointerEvent) => {
+    if (press && e.pointerId === press.id) end();
   };
   const onKey = (e: KeyboardEvent) => {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || !press) return;
+    if (press.phase !== 'drag') {
+      // a press not yet a drag lets Escape through to whatever else it closes
+      end();
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
-    swallowClick = true;
-    cancel();
+    // cancelled: the marker and the lift go now; the press waits for its release, whose click it eats
+    press.phase = 'cancelled';
+    props.setDrag(null);
+    if (plate?.hasPointerCapture(press.id)) plate.releasePointerCapture(press.id);
   };
-  onCleanup(() => window.removeEventListener('keydown', onKey, true));
+  const onLostCapture = (e: PointerEvent) => {
+    // a capture the drag did not let go of (the window lost the pointer): the drag ends, nothing sent
+    if (press && e.pointerId === press.id && press.phase === 'drag') end();
+  };
+  onCleanup(end);
+  // a report that unseats the plate or leaves it alone in its chain ends its drag
+  createEffect(() => {
+    if (press && (!seated() || props.count() < 2)) end();
+  });
   const onDown = (e: PointerEvent) => {
-    // a drag's own click never outlives it: one cancelled away from the plate left no click to swallow
-    swallowClick = false;
-    if (e.button !== 0 || !seated() || props.count() < 2) return;
+    if (press || e.button !== 0 || !seated() || props.count() < 2) return;
     // Solid's delegated events reach the plate from its portals too (the OTT face's knobs, a popover):
     // only a press on the plate itself is a drag
     if (!plate?.contains(e.target as Node)) return;
     // the lamp, the editor glyph and the menu are their own presses
     if ((e.target as HTMLElement).closest('.plate__lamp, .plate__ed, .plate__menu')) return;
-    press = { id: e.pointerId, x: e.clientX, y: e.clientY, captured: false };
-  };
-  const onMove = (e: PointerEvent) => {
-    if (!press || press.id !== e.pointerId) return;
-    const dx = e.clientX - press.x;
-    if (!press.captured) {
-      if (Math.hypot(dx, e.clientY - press.y) < DRAG_THRESHOLD) return;
-      press.captured = true;
-      plate?.setPointerCapture(e.pointerId);
-      window.addEventListener('keydown', onKey, true);
-    }
-    const gap = gapAt(e.clientX);
-    // a gap either side of the plate itself is no move
-    const i = props.index();
-    props.setDrag({ unit: u().id, dx, gap: gap === i || gap === i + 1 ? null : gap });
-  };
-  const onUp = (e: PointerEvent) => {
-    if (!press || press.id !== e.pointerId) return;
-    const was = press.captured;
-    const d = props.drag();
-    cancel();
-    if (!was) return;
-    swallowClick = true;
-    if (d && d.gap !== null) {
-      const i = props.index();
-      void moveUnit(u().id, d.gap > i ? d.gap - 1 : d.gap);
-    }
-  };
-  const onClickCapture = (e: MouseEvent) => {
-    if (!swallowClick) return;
-    swallowClick = false;
-    e.preventDefault();
-    e.stopPropagation();
+    press = { id: e.pointerId, x: e.clientX, y: e.clientY, phase: 'pending', mids: [], order: '', at: props.index() };
+    window.addEventListener('pointermove', onWinMove, true);
+    window.addEventListener('pointerup', onWinUp, true);
+    window.addEventListener('pointercancel', onWinCancel, true);
+    window.addEventListener('keydown', onKey, true);
   };
 
+  // ── a popover open on a unit that stops being seated (withdrawn, parked, leaving) closes; focus that was
+  // in it goes to the plate's menu, the control that survives every state ──
+  createEffect(() => {
+    if (!pop.open() || seated()) return;
+    const inside = document.activeElement?.closest('.slot-pop, .ott') != null;
+    pop.close(false);
+    if (!inside) return;
+    queueMicrotask(() => {
+      const menu = plate?.querySelector<HTMLElement>('.plate__menu') ?? undefined;
+      if (props.returnFocus) props.returnFocus(menu);
+      else menu?.focus();
+    });
+  });
+
   const isOtt = () => u().kind === 'ott';
-  const params = () => (u().kind === 'plugin' || u().kind === 'synth' || isOtt() || u().kind in KIND_SENDS);
+  const params = () => u().kind === 'plugin' || u().kind === 'synth' || isOtt() || u().kind in KIND_SENDS;
   const items = (): PlateMenuItem[][] => {
     const i = props.index();
     const gone = u().state === 'leaving';
     const first: PlateMenuItem[] = [];
     if (u().kind === 'plugin')
-      first.push({ label: 'Editor', icon: 'win', checked: editorOpen(u().id), disabled: !seated(), onSelect: () => void toggleEditor(u().id) });
-    if (params()) first.push({ label: 'Parameters', icon: 'params', checked: pop.open(), disabled: !seated() && u().state !== 'waiting', onSelect: () => pop.toggle() });
+      first.push({ key: 'editor', label: 'Editor', icon: 'win', checked: editorOpen(u().id), disabled: !seated(), onSelect: () => void toggleEditor(u().id) });
+    if (params()) first.push({ key: 'params', label: 'Parameters', icon: 'params', checked: pop.open(), disabled: !seated(), onSelect: () => seated() && pop.toggle() });
     return [
       first,
       [
-        { label: 'Move left', icon: 'left', disabled: !seated() || i === 0, onSelect: () => void moveUnit(u().id, i - 1) },
-        { label: 'Move right', icon: 'right', disabled: !seated() || i >= props.count() - 1, onSelect: () => void moveUnit(u().id, i + 1) },
+        { key: 'left', label: 'Move left', icon: 'left', disabled: !seated() || i === 0, onSelect: () => void moveUnit(u().id, props.index() - 1) },
+        { key: 'right', label: 'Move right', icon: 'right', disabled: !seated() || i >= props.count() - 1, onSelect: () => void moveUnit(u().id, props.index() + 1) },
       ],
-      [{ label: 'Remove', icon: 'x', disabled: gone, onSelect: () => void removeUnit(u().id) }],
+      [{ key: 'remove', label: 'Remove', icon: 'x', disabled: gone, onSelect: () => void removeUnit(u().id) }],
     ];
   };
   return (
@@ -251,6 +419,8 @@ function UnitPlate(props: {
         'plate--idle': seated() && !u().bypass && !props.live && u().kind !== 'synth' && !u().source,
         'unit--busy': u().state === 'loading' || u().state === 'waiting' || u().state === 'leaving',
         'unit--failed': u().state === 'failed',
+        'unit--parked': u().state === 'failed' && u().parked === true,
+        'unit--held': u().held === true,
         'unit--open': pop.open(),
         'unit--dragging': dragging(),
       }}
@@ -265,10 +435,7 @@ function UnitPlate(props: {
       })()}
       style={dragging() ? { translate: `${props.drag()!.dx}px 0` } : undefined}
       onPointerDown={onDown}
-      onPointerMove={onMove}
-      onPointerUp={onUp}
-      onPointerCancel={() => cancel()}
-      on:click={{ handleEvent: onClickCapture, capture: true }}
+      on:lostpointercapture={onLostCapture}
     >
       <button
         type="button"
@@ -292,10 +459,10 @@ function UnitPlate(props: {
             aria-haspopup="dialog"
             aria-expanded={pop.open()}
             aria-label={`${name()}: parameters`}
-            disabled={!seated() && u().state !== 'waiting'}
+            disabled={!seated()}
             onClick={(e) => {
               e.stopPropagation();
-              pop.toggle();
+              if (seated()) pop.toggle();
             }}
           >
             <span class="plate__name" classList={{ 'plate__name--fx': u().kind !== 'plugin' && u().kind !== 'synth' }}>
@@ -303,19 +470,18 @@ function UnitPlate(props: {
             </span>
           </button>
         </Show>
-        <Show when={status() && u().state !== 'seated'}>
+        <Show when={status() && (u().state !== 'seated' || u().held)}>
           <span class="unit__status" title={status() ?? ''}>
             {status()}
           </span>
         </Show>
       </span>
-      <Show when={!chainCompact()}>
-        <UnitMark unit={u()} seated={seated()} />
-      </Show>
+      <UnitMark unit={u()} seated={seated()} compact={chainCompact()} />
       <PlateMenu
         id={`unit-${u().id}-menu`}
         label={`Menu for ${name()} in slot ${letter}`}
         menuLabel={`Slot ${letter}: ${name()}`}
+        note={failedNote()}
         returnFocus={props.returnFocus}
         groups={items()}
       />
@@ -337,7 +503,7 @@ function UnitPlate(props: {
 
 /** The small mark at a plate's right: a plugin's format and its editor glyph; the OTT's live miniature; an
  * effect's glyph of what it does; a synth's keys. */
-function UnitMark(props: { unit: UnitState; seated: boolean }) {
+function UnitMark(props: { unit: UnitState; seated: boolean; compact: boolean }) {
   const u = () => props.unit;
   return (
     <span class="plate__what">
@@ -345,6 +511,8 @@ function UnitMark(props: { unit: UnitState; seated: boolean }) {
         <span class="plate__fmt" aria-hidden="true">
           {u().kind === 'plugin' ? (u() as Extract<UnitState, { kind: 'plugin' }>).plugin.format.toUpperCase() : ''}
         </span>
+        {/* compact: the editor stays in the plate's menu */}
+        <Show when={!props.compact}>
         <button
           type="button"
           class="plate__ed"
@@ -359,7 +527,9 @@ function UnitMark(props: { unit: UnitState; seated: boolean }) {
         >
           <Icon name="win" size={16} />
         </button>
+        </Show>
       </Show>
+      {/* the OTT's live miniature stays in a compact plate: what the unit is doing, at a glance */}
       <Show when={u().kind === 'ott'}>
         <span
           class="unit-mini unit-mini--ott"
@@ -371,14 +541,14 @@ function UnitMark(props: { unit: UnitState; seated: boolean }) {
           <i style={{ '--b': 2 }} />
         </span>
       </Show>
-      <Show when={u().kind === 'echo' || u().kind === 'reverb' || u().kind === 'ring'}>
+      <Show when={!props.compact && (u().kind === 'echo' || u().kind === 'reverb' || u().kind === 'ring')}>
         <span class="unit-mini" aria-hidden="true">
           <svg width="30" height="16" viewBox="0 0 30 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
             <path d={GLYPHS[u().kind as 'echo' | 'reverb' | 'ring']} />
           </svg>
         </span>
       </Show>
-      <Show when={u().kind === 'synth'}>
+      <Show when={!props.compact && u().kind === 'synth'}>
         <span class="unit-mini unit-mini--bare" aria-hidden="true">
           <Icon name="keys" size={18} />
         </span>
@@ -505,7 +675,7 @@ function PluginParamRows(props: { unit: number }) {
                 step={(p.maxValue - p.minValue) / 200}
                 value={p.value}
                 aria-label={p.name}
-                onInput={(e) => void platform.chain.setParameter(props.unit, p.id, Number(e.currentTarget.value)).catch((err: unknown) => console.error('[chain] plugin parameter refused', err))}
+                onInput={(e) => setPluginParam(props.unit, p.id, Number(e.currentTarget.value))}
               />
             </label>
           )}
