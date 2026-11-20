@@ -18,7 +18,8 @@
  *   the Off and synth levels survive a reload and are sent to the engine again;
  * - a slot's input names only a channel the slot reads: an open whose status reads auto for a pick the
  *   device lacks, a status from a device the owner reopened on, an input device change and a prune (a
- *   vanished device, a pick past the device's inputs) reset that pick to Auto, in storage and on screen;
+ *   vanished device, a pick past the running device's inputs; at startup none runs and the open resolves
+ *   it) reset that pick to Auto, in storage and on screen;
  *   on a fresh install the input device change and the vanished device reset the picks to its default
  *   instead (slot A on In 1, slot B Auto), and the reopen asks for that;
  * - GO LIVE pressed (the named action, as a pedal) while a tone reload holds a live slot: one press stops
@@ -267,21 +268,27 @@ await probe(async ({ browser, open }) => {
     assert.deepEqual(await saved(), [null, null], 'an input device change resets both picks');
     assert.deepEqual((await p.evaluate(() => window.__lf.native.opened.at(-1))).inputChannels, [null, null], 'and the reopen asks for auto');
     await p.evaluate(() => window.__lf.ui.closeSettings());
-    // 1d. The prune (startup, Audio Settings): a pick past the saved device's inputs, then a vanished device.
+    // 1d. The prune: a pick past the saved device's inputs stays for the open at startup (no device
+    // runs: the open resolves it, its status resets it) and goes in Audio Settings (counted on the
+    // device that runs, here the two-input one); then a vanished device.
     const pruned = await p.evaluate(async () => {
       const devices = await import('/src/ui/state/audio-devices.ts');
+      const { engineDevice } = await import('/src/ui/state/engine-store.ts');
       const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
       writeAudioDeviceSettings({ inputDeviceId: 'other' });
       devices.saveSlotInputChannels([3, 1]);
       await devices.refreshAndPruneDevices();
+      const startup = readAudioDeviceSettings().slotInputChannels;
+      await devices.refreshAndPruneDevices({ ...engineDevice(), inputName: 'Other input' });
       const past = readAudioDeviceSettings().slotInputChannels;
       devices.saveSlotInputChannels([1, 0]);
       const { platform } = await import('/src/platform/index.ts');
       platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
       await devices.refreshAndPruneDevices();
-      return { past, vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
+      return { startup, past, vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
     });
-    assert.deepEqual(pruned, { past: [null, 1], vanished: [null, null], shown: [null, null] }, 'the prune drops a pick past the inputs, and both with a vanished device');
+    assert.deepEqual(pruned, { startup: [3, 1], past: [null, 1], vanished: [null, null], shown: [null, null] },
+      'the startup prune leaves a pick past the inputs to the open, the running device\'s drops it, and a vanished device both');
 
     // 2. GO LIVE pressed (the named action) while a tone reload holds live slot A. Under the amp, A plays
     // a synth, and B is Off (takes input): the press must still reach A, whose plugin the reload removed.
