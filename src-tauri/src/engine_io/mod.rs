@@ -27,7 +27,7 @@
 //! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands, shutdown on exit |
 //! | `midi_mode` | native MIDI's Tauri commands: the UI's one ordered input path (`input_send`: its engine commands, through native MIDI's routing, and its note input), the document's subscription and input epoch (`midi_subscribe`), the learn UI's `midi_*` calls |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
-//! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
+//! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume, mute and OTT), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
 //! | `share` | Share output: the master without the click (the engine's Share mix) mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI, the app's only MIDI path: ports and hot-plug, parse, MIDI learn and its stored bindings, the one note router for every note source, the ordered input queue into [`EngineHost::send`] and its part in a rebuild ([`RebuildHook`]) |

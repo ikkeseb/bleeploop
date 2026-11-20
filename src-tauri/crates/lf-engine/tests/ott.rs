@@ -1,13 +1,15 @@
 //! The master OTT (`dsp::ott`, `Command::SetMasterOtt`, `Command::SetMasterOttAmount`): the engine's own
 //! design, so these pin its properties rather than a reference render. With every band at unity the
 //! three bands null against an AP88 · AP2500 cascade (magnitude and phase) and are flat 20 Hz–20 kHz,
-//! at 44.1 and 48 kHz; the static gain curve's points; on, an AMOUNT change and an on/off fade reversed
-//! mid-fade, all on frames off the 128-frame quanta, render bit-identical at block sizes 1, 64, 127
-//! and 480; finite output for silence, a full-scale square and near-denormal input, and exact silence
-//! once a decay has settled; a loud onset after quiet overshoots under 3 dB and −66 dBFS hiss is lifted
-//! under 6 dB at AMOUNT 1; off (the default, or switched off and settled) leaves the device output
-//! and the Share mix bit for bit as they were, and the click never passes it; a non-finite AMOUNT is
-//! dropped and one past 1 clamps.
+//! at 44.1 and 48 kHz; the static gain curve's points and the ceiling's shape; on, an AMOUNT change and
+//! an on/off fade reversed mid-fade, all on frames off the 128-frame quanta, render bit-identical at
+//! block sizes 1, 64, 127 and 480, and an AMOUNT change is heard from its own frame; the fade lands
+//! exactly on its last frame; finite output for silence, a full-scale square and near-denormal input,
+//! and exact silence once a decay has settled; a hard square onset (a plugin instrument) and a
+//! five-lane jam leave the device and the Share under −0.3 dBFS; a loud onset after quiet overshoots
+//! under 3 dB and −66 dBFS hiss is lifted under 6 dB at AMOUNT 1; off (the default, or switched off and
+//! settled) leaves the device output and the Share mix bit for bit as they were, and the click never
+//! passes it; a non-finite AMOUNT is dropped and one past 1 clamps.
 //!
 //! `measurements` (ignored) prints the numbers the design was accepted on: run it with
 //! `cargo test -p lf-engine --release --test ott -- --ignored --nocapture measurements`.
@@ -23,9 +25,9 @@ use std::rc::Rc;
 
 use common::{Opts, Rig};
 use lf_engine::dsp::compressor::Compressor;
-use lf_engine::dsp::ott::{gain_db, Ott, DEFAULT_AMOUNT, FADE_SECONDS, MAKEUP_DB};
+use lf_engine::dsp::ott::{ceiling, gain_db, Ott, CEILING, CEILING_KNEE, DEFAULT_AMOUNT, FADE_SECONDS, MAKEUP_DB};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Instrument, LaneState, NoteTarget};
+use lf_engine::{Command, Instrument, LaneState, NoteTarget, SlotEvent, SlotKind, SlotProcessor};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 
@@ -163,6 +165,8 @@ fn null_depth(sr: u32) -> f64 {
     let mut ott = settled(sr, 0.0, true);
     let (mut l, mut r) = (x.clone(), x.clone());
     run(&mut ott, &mut l, &mut r);
+    // `max` folds a NaN away: an output that is no number must fail here, not pass as a deep null.
+    assert!(l.iter().chain(&r).all(|v| v.is_finite()), "sr={sr}: a sample that is no number");
     let (mut ap_lo, mut ap_hi) = (Section::new(Kind::Allpass, 88.0, sr as f64), Section::new(Kind::Allpass, 2500.0, sr as f64));
     let mut worst = 0.0f64;
     for (k, &v) in x.iter().enumerate() {
@@ -181,6 +185,7 @@ fn flatness(sr: u32) -> f64 {
     l[0] = 0.5;
     r[0] = 0.5;
     run(&mut ott, &mut l, &mut r);
+    assert!(l.iter().all(|v| v.is_finite()), "sr={sr}: a sample that is no number");
     let mut spectrum: Vec<Complex<f64>> = l.iter().map(|&v| Complex::new(v as f64 / 0.5, 0.0)).collect();
     FftPlanner::new().plan_fft_forward(n).process(&mut spectrum);
     let bin = |f: f64| (f * n as f64 / sr as f64).round() as usize;
@@ -194,6 +199,32 @@ fn the_unity_bands_null_against_the_allpass_cascade_and_are_flat() {
         assert!(depth < -130.0, "sr={sr}: the bands sum to AP88 · AP2500 of the input only to {depth:.1} dB");
         let flat = flatness(sr);
         assert!(flat < 0.05, "sr={sr}: the unity bands deviate {flat:.4} dB from flat");
+    }
+}
+
+#[test]
+fn the_ceiling_is_the_identity_below_its_knee_smooth_through_it_and_never_reaches_its_top() {
+    for x in [0.0, 1e-9, 0.25, CEILING_KNEE] {
+        assert_eq!(ceiling(x), x);
+        assert_eq!(ceiling(-x), -x);
+    }
+    // Slope 1 into the knee from above, then monotonic, odd and under the ceiling, out to +40 dBFS.
+    let h = 1e-7;
+    assert!(((ceiling(CEILING_KNEE + h) - CEILING_KNEE) / h - 1.0).abs() < 1e-6);
+    // The bend itself, which a hard clip at the ceiling would not match: one room past the knee it is
+    // at tanh(1) of the room, and half a room past it its slope is 1/cosh²(0.5).
+    let room = CEILING - CEILING_KNEE;
+    assert!((ceiling(CEILING_KNEE + room) - (CEILING_KNEE + room * 1f64.tanh())).abs() < 1e-12);
+    let mid = CEILING_KNEE + room / 2.0;
+    let slope = (ceiling(mid + h) - ceiling(mid - h)) / (2.0 * h);
+    assert!((slope - 1.0 / 0.5f64.cosh().powi(2)).abs() < 1e-6, "slope {slope} half a room past the knee");
+    let mut last = CEILING_KNEE;
+    for k in 1..=100_000 {
+        let x = CEILING_KNEE + k as f64 * 1e-3;
+        let y = ceiling(x);
+        assert!(y >= last, "folds back at {x}");
+        assert!(y <= CEILING && ceiling(-x) == -y, "at {x}: {y}");
+        last = y;
     }
 }
 
@@ -259,6 +290,65 @@ fn jam(block: usize, script: &Script, click: bool) -> Rig {
     rig
 }
 
+/// A plugin instrument that plays a square at ±`amp`, `half` frames a half period, from device frame
+/// `start` (silent before): a hard synth onset on the bus before the OTT, with no click and no monitor.
+struct Square {
+    start: Frame,
+    half: Frame,
+    amp: f32,
+}
+
+impl SlotProcessor for Square {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Instrument
+    }
+
+    fn latency(&self) -> Frame {
+        0
+    }
+
+    fn process(&mut self, frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        for (k, y) in out.iter_mut().enumerate() {
+            let f = frame + k as Frame;
+            *y = if f < self.start {
+                0.0
+            } else if ((f - self.start) / self.half) % 2 == 0 {
+                self.amp
+            } else {
+                -self.amp
+            };
+        }
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// A square at ±`amp` and `freq` Hz out of a second of silence through the engine at 48 kHz, the OTT on
+/// at `amount` (None: off) and settled before it: the device's and the Share's peaks after their
+/// limiters and the bus's before them, linear, over the onset and two seconds after it.
+fn square_onset(freq: f64, amp: f32, amount: Option<f32>) -> (f64, f64, f64) {
+    let mut rig = Rig::new();
+    rig.set(Command::SetMetronome(false));
+    if let Some(a) = amount {
+        rig.set(Command::SetMasterOttAmount(a));
+        rig.set(Command::SetMasterOtt(true));
+    }
+    let start = rig.frame + rig.seconds(1.0);
+    rig.install(1, Box::new(Square { start, half: (48000.0 / (2.0 * freq)).round() as Frame, amp }));
+    rig.advance(rig.seconds(0.5));
+    rig.keep_output();
+    rig.advance(rig.seconds(2.5));
+    let both = |a: &[f32], b: &[f32]| {
+        assert!(a.iter().chain(b).all(|v| v.is_finite()), "a sample that is no number");
+        peak(a).max(peak(b)) as f64
+    };
+    (both(&rig.heard, &rig.heard_right), both(&rig.share, &rig.share_right), both(&rig.bus, &rig.bus_right))
+}
+
 #[test]
 fn on_an_amount_change_and_a_reversed_fade_render_the_same_at_any_block_size() {
     let fade = (FADE_SECONDS * 48000.0) as Frame;
@@ -290,6 +380,23 @@ fn on_an_amount_change_and_a_reversed_fade_render_the_same_at_any_block_size() {
 }
 
 #[test]
+fn an_amount_change_lands_on_its_frame() {
+    // The same jam, on from frame 1 001, with and without an AMOUNT change at 30 077 (off the quanta):
+    // bit for bit the same before it, different from it on. An engine that dropped AMOUNT commands, or
+    // applied one at a block or quantum start, fails here.
+    let at = 30_077;
+    let on: Script = vec![(1_001, Command::SetMasterOtt(true))];
+    let mut moved = on.clone();
+    moved.push((at, Command::SetMasterOttAmount(1.0)));
+    let (a, b) = (jam(128, &on, false), jam(128, &moved, false));
+    for (name, x, y) in [("left", &a.bus, &b.bus), ("right", &a.bus_right, &b.bus_right)] {
+        assert_eq!(first_difference(x, y), Some(at as usize), "the {name} bus");
+        let late = at as usize + 4_800..at as usize + 9_600;
+        assert!(first_difference(&x[late.clone()], &y[late]).is_some(), "the {name} bus 100 ms on");
+    }
+}
+
+#[test]
 fn a_switch_inside_a_fade_turns_from_the_weight_reached() {
     let mut ott = settled(48000, DEFAULT_AMOUNT, false);
     let step = 1.0 / (FADE_SECONDS * 48000.0);
@@ -300,6 +407,25 @@ fn a_switch_inside_a_fade_turns_from_the_weight_reached() {
     ott.set_on(false);
     ott.process(&mut l[160..], &mut r[160..]);
     assert!((ott.weight() - 120.0 * step).abs() < 1e-12, "weight {}", ott.weight());
+}
+
+#[test]
+fn the_fade_lands_exactly_on_its_last_frame() {
+    // Counted, not accumulated: 480 frames at 48 kHz reach exactly 1 and exactly 0 (summing 1/480 left
+    // 2.9e-15 on the off fade's last frame and settled one frame later).
+    let fade = (FADE_SECONDS * 48000.0) as usize;
+    let mut ott = settled(48000, DEFAULT_AMOUNT, false);
+    let (mut l, mut r) = (vec![0.1f32; fade], vec![0.1f32; fade]);
+    ott.set_on(true);
+    ott.process(&mut l[..fade - 1], &mut r[..fade - 1]);
+    assert!(ott.weight() < 1.0);
+    ott.process(&mut l[fade - 1..], &mut r[fade - 1..]);
+    assert_eq!(ott.weight(), 1.0);
+    ott.set_on(false);
+    ott.process(&mut l[..fade - 1], &mut r[..fade - 1]);
+    assert!(ott.weight() > 0.0);
+    ott.process(&mut l[fade - 1..], &mut r[fade - 1..]);
+    assert_eq!(ott.weight(), 0.0);
 }
 
 #[test]
@@ -320,8 +446,10 @@ fn off_leaves_the_device_output_and_the_share_mix_untouched() {
     let fade = (FADE_SECONDS * 48000.0) as usize;
     let back = jam(128, &vec![(1_000, Command::SetMasterOtt(true)), (20_000, Command::SetMasterOtt(false))], true);
     assert_eq!(first_difference(&back.bus[1_000..], &off.bus[1_000..]), Some(0), "it was on from its frame");
-    assert_eq!(first_difference(&back.bus[20_000 + fade..], &off.bus[20_000 + fade..]), None, "off and settled: the dry bus");
-    assert_eq!(first_difference(&back.bus_right[20_000 + fade..], &off.bus_right[20_000 + fade..]), None);
+    // The fade's last frame (its 480th, from the command's) is already the dry bus.
+    let dry = 20_000 + fade - 1;
+    assert_eq!(first_difference(&back.bus[dry..], &off.bus[dry..]), None, "off and settled: the dry bus");
+    assert_eq!(first_difference(&back.bus_right[dry..], &off.bus_right[dry..]), None);
 }
 
 #[test]
@@ -369,15 +497,46 @@ fn silence_a_full_scale_square_and_near_denormal_input_stay_finite() {
         let (mut l, mut r) = (x.to_vec(), x.to_vec());
         run(&mut ott, &mut l, &mut r);
         assert!(l.iter().chain(&r).all(|v| v.is_finite()), "{name}: a sample that is no number");
-        // Bounded, not small: the crossovers' phase turns a square's edges into spikes (the cascade
-        // alone peaks at +5.2 dBFS), and the makeup rides on them; the fast attack keeps the onset's
-        // lift off (measured +5.4 dBFS for this square at AMOUNT 1, +14.5 with the slow attacks).
-        assert!(peak(&l) < 2.5, "{name}: peak {}", peak(&l));
+        // The crossovers' phase turns a square's edges into spikes (the cascade alone peaks at +5.2
+        // dBFS) and the makeup rides on them (+2.8 dBFS for this square at AMOUNT 1 without the
+        // ceiling): the ceiling holds them under −1.5 dBFS.
+        assert!(peak(&l).max(peak(&r)) as f64 <= CEILING, "{name}: peak {}", peak(&l));
     }
     // Twenty seconds after the input stopped every state has been flushed: exact silence.
     let (mut l, mut r) = (vec![0.0f32; 128], vec![0.0f32; 128]);
     ott.process(&mut l, &mut r);
     assert!(l.iter().chain(&r).all(|&v| v == 0.0));
+}
+
+/// −0.3 dBFS: what the ceiling guarantees at the device and in the Share mix, after the limiter's
+/// +0.57 dB makeup (measured −0.93 dBFS for every hard square onset below).
+const DEVICE_CEILING_DB: f64 = -0.3;
+
+#[test]
+fn a_hard_onset_leaves_the_device_and_the_share_under_full_scale() {
+    // A square out of silence, a plugin instrument on the bus: the OTT's makeup on the crossovers' phase
+    // spikes took the device to +1.05 dBFS at AMOUNT 1 (±0.8, 200 Hz) before the ceiling.
+    for (amp, freq) in [(0.8f32, 100.0), (0.8, 200.0), (1.0, 200.0)] {
+        for amount in [0.0f32, 0.5, 1.0] {
+            let (device, share, _) = square_onset(freq, amp, Some(amount));
+            for (name, x) in [("device", device), ("Share", share)] {
+                assert!(db(x) <= DEVICE_CEILING_DB, "±{amp} {freq} Hz at AMOUNT {amount}: the {name} at {:+.2} dBFS", db(x));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_five_lane_jam_leaves_the_device_under_full_scale() {
+    let mut rig = five_lanes();
+    rig.set(Command::SetMasterOttAmount(1.0));
+    rig.set(Command::SetMasterOtt(true));
+    rig.advance(rig.seconds(0.5));
+    rig.keep_output();
+    rig.advance(rig.master());
+    let device = peak(&rig.heard).max(peak(&rig.heard_right)) as f64;
+    assert!(rig.heard.iter().chain(&rig.heard_right).all(|v| v.is_finite()));
+    assert!(db(device) <= DEVICE_CEILING_DB, "the device at {:+.2} dBFS", db(device));
 }
 
 // ── Measurements ───────────────────────────────────────────────────────────────────────────────────
@@ -577,7 +736,17 @@ fn measurements() {
         let mut off = settled(48000, 0.0, true);
         let (mut ol, mut or) = (square.clone(), square);
         run(&mut off, &mut ol, &mut or);
-        println!("  peak {:+.1} dBFS (the crossovers alone, AMOUNT 0: {:+.1} dBFS)", db(peak(&l) as f64), db(peak(&ol) as f64));
+        // Without the ceiling: +2.8 dBFS, and +5.2 at AMOUNT 0 (the crossovers' phase alone).
+        println!("  peak {:+.1} dBFS (AMOUNT 0: {:+.1} dBFS), the ceiling's", db(peak(&l) as f64), db(peak(&ol) as f64));
+    }
+
+    println!("\n## A square out of a second of silence through the engine (a plugin instrument on the bus, no click, no monitor), 48 kHz: peak dBFS");
+    for (amp, freq) in [(0.8f32, 100.0), (0.8, 200.0), (1.0, 100.0), (1.0, 200.0)] {
+        for amount in [None, Some(0.0f32), Some(0.5), Some(1.0)] {
+            let (device, share, bus) = square_onset(freq, amp, amount);
+            let name = amount.map_or("OTT off".to_string(), |a| format!("AMOUNT {a}"));
+            println!("  ±{amp} {freq} Hz, {name:<10}: device {:+.2}, Share {:+.2}; bus before the limiters {:+.2}", db(device), db(share), db(bus));
+        }
     }
 
     println!("\n## Calibration: pink noise at -18 dBFS RMS, AMOUNT 1, RMS over seconds 2-12, 48 kHz, before the limiter");
@@ -706,8 +875,30 @@ fn measurements() {
         let bus = peak(&rig.bus).max(peak(&rig.bus_right)) as f64;
         let device = peak(&rig.heard).max(peak(&rig.heard_right)) as f64;
         println!(
-            "  {name:<20} before the limiter: peak {:.1} dBFS, RMS {:.1} dBFS; device output: peak {:.1} dBFS, RMS {:.1} dBFS",
+            "  {name:<20} before the limiter: peak {:.2} dBFS, RMS {:.2} dBFS; device output: peak {:.2} dBFS, RMS {:.2} dBFS",
             db(bus), db(rms(&rig.bus)), db(device), db(rms(&rig.heard))
         );
     }
+}
+
+#[test]
+fn an_amount_set_while_off_and_settled_is_taken_at_once() {
+    // As a new engine's replay sends it: the amount, then the switch. It must come on at the amount, as
+    // an OTT whose glide had all the time it wanted.
+    let signal = sine(220.0, -12.0, 4_800, 48_000);
+    let mut at_once = Ott::new(48_000);
+    at_once.set_amount(1.0);
+    at_once.set_on(true);
+    let (mut l1, mut r1) = (signal.clone(), signal.clone());
+    at_once.process(&mut l1, &mut r1);
+
+    let mut glided = Ott::new(48_000);
+    glided.set_amount(1.0);
+    let mut silence = vec![0.0f32; 48_000];
+    let mut silence_r = silence.clone();
+    glided.process(&mut silence, &mut silence_r);
+    glided.set_on(true);
+    let (mut l2, mut r2) = (signal.clone(), signal);
+    glided.process(&mut l2, &mut r2);
+    assert_eq!((l1, r1), (l2, r2), "the amount set while off is in force from the first frame on");
 }

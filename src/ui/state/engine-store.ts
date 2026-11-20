@@ -1142,9 +1142,12 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
       setMasterOttSignal(c.SetMasterOtt);
       writeStoredNumber(OTT_KEY, c.SetMasterOtt ? 1 : 0);
     } else if ('SetMasterOttAmount' in c) {
+      // As the engine reads it (`Ott::set_amount`): clamped to 0..1 (the feed's decoder refuses a value
+      // that is no number).
+      const amount = Math.max(0, Math.min(1, c.SetMasterOttAmount));
       ottAmountKnown = true;
-      setMasterOttAmountSignal(c.SetMasterOttAmount);
-      writeStoredNumber(OTT_AMOUNT_KEY, c.SetMasterOttAmount);
+      setMasterOttAmountSignal(amount);
+      writeStoredNumber(OTT_AMOUNT_KEY, amount);
     } else if ('SetClickVolume' in c) {
       clickKnown = true;
       setClickVolumeSignal(c.SetClickVolume);

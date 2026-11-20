@@ -24,7 +24,7 @@
 //!
 //! A snapshot asked WITH the master (an export; a recovery autosave never asks) also carries the wet
 //! stereo master, rendered offline from those same loops by `lf_engine::render` with the tracks' `mix`
-//! and the master volume and mute this host keeps (`settings`): the header gains `"master":{"frames"}`
+//! and the master volume, mute and OTT this host keeps (`settings`): the header gains `"master":{"frames"}`
 //! (`frames` = `masterLengthFrames`) and the PCM gains its left block then its right block, after the
 //! tracks', frame 0 at loop position 0 like the stems. A render that fails leaves the stems as they are:
 //! no `master`, and `"masterError"` holds its sentence instead.
@@ -143,8 +143,8 @@ impl EngineHost {
         Err("the loops kept changing while the snapshot copied them; try again".to_string())
     }
 
-    /// The wet master of snapshot `s`, with each track's mix from its pin and the master volume and mute
-    /// this host keeps: the loops go in as a load does (`load_track`), on this thread, off the engine's
+    /// The wet master of snapshot `s`, with each track's mix from its pin and the master volume, mute and
+    /// OTT this host keeps: the loops go in as a load does (`load_track`), on this thread, off the engine's
     /// lock.
     fn render_master(&self, s: &Snapshot) -> Result<WetMaster, String> {
         #[cfg(test)]

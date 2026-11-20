@@ -17,6 +17,11 @@
 //! never rides the lift the quiet left. AMOUNT scales the
 //! curve and the makeup together and glides (about 20 ms) so a move never zippers.
 //!
+//! The processed signal then passes a soft ceiling ([`ceiling`]): untouched up to −3 dBFS, never
+//! past −1.5 dBFS, so the makeup riding the crossovers' phase spikes on a hard onset cannot drive the
+//! master limiter (which lets a fast spike through) past full scale. It is a function of the sample
+//! alone: no state, no lookahead.
+//!
 //! On and off crossfade dry and processed linearly over 10 ms from the command's frame; a switch inside
 //! a fade turns from the weight reached. Once off and settled the bus passes untouched, bit for bit. The
 //! processor always runs, so a switch on meets warm filters and envelopes. Every state is per frame and
@@ -67,6 +72,22 @@ pub const DEFAULT_AMOUNT: f32 = 0.5;
 const AMOUNT_TAU: f64 = 0.020;
 /// The on/off crossfade, seconds.
 pub const FADE_SECONDS: f64 = 0.010;
+/// The wet path's soft ceiling, linear: identity up to `CEILING_KNEE`, then a tanh curve that meets it
+/// with slope 1 and no curvature and approaches `CEILING` without reaching it ([`ceiling`]). The
+/// master limiter after it is a k-rate compressor with a 6 ms pre-delay, not a sample-peak brickwall,
+/// and its own makeup lifts what it does not reduce by +0.57 dB: without the ceiling a square at ±0.8
+/// out of silence (a plugin instrument, `tests/ott.rs` `measurements`) left the device at +1.05 dBFS
+/// at AMOUNT 1 (200 Hz; +0.45 at 100 Hz), the crossovers' phase spikes at its edges riding the makeup
+/// past the limiter. With the bus held under −1.5 dBFS the device stays at or under −0.93 in every
+/// such case, which is under the same square with the OTT off plus 0.5 dB (−1.37 + 0.5); a ceiling at
+/// −1 dBFS left it at −0.43, 0.94 dB over that. The knee sits at the top of what music reaches: the
+/// five-lane jam at AMOUNT 1 peaks at −2.45 dBFS before the limiter, its device peak (−1.88 dBFS) and
+/// RMS (−27.27) moved under a tenth of a dB; a low E at −12 dBFS (THD −53.9 dB) and −66 dBFS hiss
+/// (+3.0 dB) never reach it. A sustained tone hotter than the knee is shaped only at a low AMOUNT: the
+/// downward curve takes AMOUNT × 17 dB off one at −1 dBFS, enough to pass under the knee from AMOUNT
+/// ~0.15 up; below that it leaves soft-clipped (a 200 Hz sine at −1.1 dBFS, AMOUNT 0: ~2.6 % THD).
+pub const CEILING: f64 = 0.841_395_141_645_195_1; // −1.5 dBFS
+pub const CEILING_KNEE: f64 = 0.707_945_784_384_137_9; // −3 dBFS
 /// The envelope's floor for the level: −180 dBFS.
 const LEVEL_FLOOR: f64 = 1e-9;
 /// Filter and envelope state below this is flushed to zero: a decay into digital silence would
@@ -89,6 +110,18 @@ pub fn gain_db(level: f64) -> f64 {
         let lift = ((UP_THRESHOLD - level) * (1.0 - 1.0 / UP_RATIO)).min(UP_MAX);
         lift * ((level - FLOOR) / FLOOR_RAMP).clamp(0.0, 1.0)
     }
+}
+
+/// The wet path's soft ceiling on one sample: `x` up to `CEILING_KNEE` in magnitude, then
+/// `knee + (CEILING − knee) · tanh((|x| − knee) / (CEILING − knee))` with `x`'s sign. Stateless, so it
+/// changes nothing about block-size identity.
+pub fn ceiling(x: f64) -> f64 {
+    let a = x.abs();
+    if a <= CEILING_KNEE {
+        return x;
+    }
+    let room = CEILING - CEILING_KNEE;
+    (CEILING_KNEE + room * ((a - CEILING_KNEE) / room).tanh()).copysign(x)
 }
 
 /// A 2nd-order section's coefficients, normalised by a0.
@@ -170,9 +203,10 @@ pub struct Ott {
     amount_target: f64,
     amount_coef: f64,
     on: bool,
-    /// The processed signal's share of the output: 0 is the literal dry bus.
-    weight: f64,
-    step: f64,
+    /// The on/off fade's position, frames: 0 is the literal dry bus, `fade` the processed signal alone.
+    /// Counted, not accumulated, so the fade's last frame lands exactly on 0 or 1.
+    pos: u32,
+    fade: u32,
     /// The last frame's bands (low, mid, high; left, right) and the linear gain each got: what a
     /// measurement reads ([`Ott::bands`], [`Ott::gains`]).
     bands: [[f64; 2]; 3],
@@ -198,8 +232,8 @@ impl Ott {
             amount_target: DEFAULT_AMOUNT as f64,
             amount_coef: coef(AMOUNT_TAU),
             on: false,
-            weight: 0.0,
-            step: 1.0 / (FADE_SECONDS * sr),
+            pos: 0,
+            fade: ((FADE_SECONDS * sr).round() as u32).max(1),
             bands: [[0.0; 2]; 3],
             gains: [1.0; 3],
         }
@@ -214,10 +248,15 @@ impl Ott {
         self.on
     }
 
-    /// AMOUNT, 0..1 (clamped), glided to from the next frame. A value that is no number is ignored.
+    /// AMOUNT, 0..1 (clamped), glided to from the next frame; off and settled, where nothing hears the
+    /// glide, taken at once, so an OTT replayed into a new engine (its amount before its switch) comes
+    /// on at it. A value that is no number is ignored.
     pub fn set_amount(&mut self, amount: f32) {
         if amount.is_finite() {
             self.amount_target = amount.clamp(0.0, 1.0) as f64;
+            if !self.on && self.pos == 0 {
+                self.amount = self.amount_target;
+            }
         }
     }
 
@@ -228,7 +267,7 @@ impl Ott {
 
     /// The processed signal's share of the output, 0..1: 0 off and settled, 1 on and settled.
     pub fn weight(&self) -> f64 {
-        self.weight
+        self.pos as f64 / self.fade as f64
     }
 
     /// The last frame's bands, low, mid and high, each `[left, right]`, before their gains.
@@ -243,7 +282,6 @@ impl Ott {
 
     /// The bus in place, frame by frame. Off and settled, every sample is left as it was.
     pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
-        let target = if self.on { 1.0 } else { 0.0 };
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let dry = [*l as f64, *r as f64];
             let mut band = [[0.0f64; 2]; 3];
@@ -273,16 +311,17 @@ impl Ott {
                 wet[1] += band[b][1] * g;
             }
             self.bands = band;
-            self.weight = if self.on { (self.weight + self.step).min(target) } else { (self.weight - self.step).max(target) };
-            let w = self.weight;
-            if w == 0.0 {
+            self.pos = if self.on { (self.pos + 1).min(self.fade) } else { self.pos.saturating_sub(1) };
+            if self.pos == 0 {
                 // Off and settled: the bus as it came, bit for bit.
                 continue;
             }
-            if w == 1.0 {
+            let wet = wet.map(ceiling);
+            if self.pos == self.fade {
                 *l = wet[0] as f32;
                 *r = wet[1] as f32;
             } else {
+                let w = self.weight();
                 *l = (dry[0] + w * (wet[0] - dry[0])) as f32;
                 *r = (dry[1] + w * (wet[1] - dry[1])) as f32;
             }

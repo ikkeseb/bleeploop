@@ -76,8 +76,9 @@ enum Key {
     ClickVolume,
     MasterVolume,
     MasterMute,
-    MasterOtt,
+    /// The OTT's amount before its switch, so an OTT that comes on in a new engine comes on at it.
     MasterOttAmount,
+    MasterOtt,
     /// An input send's param, by `InputSendParam as usize`; before the sends' on/off, so a send that
     /// comes on in a new engine comes on with its values.
     InputSendParam(usize),
@@ -429,17 +430,17 @@ mod tests {
     #[test]
     fn master_ott_replays_its_latest_settings_after_clear_all() {
         let mut s = Settings::default();
-        assert!(s.record(&Command::SetMasterOtt(true)));
-        assert!(s.record(&Command::SetMasterOttAmount(0.75)));
         assert!(s.record(&Command::SetMasterOtt(false)));
         assert!(s.record(&Command::SetMasterOttAmount(0.5)));
+        assert!(s.record(&Command::SetMasterOtt(true)));
+        assert!(s.record(&Command::SetMasterOttAmount(0.75)));
         assert!(s.record(&Command::SetVolume(0, 0.25)));
 
         assert!(!s.record(&Command::ClearAll));
         assert!(s.mixed(0, 100, 0, &CompactMix::from(&LaneMix::default())));
         s.follow(1);
 
-        assert_eq!(replay(&s), [Command::SetMasterOtt(false), Command::SetMasterOttAmount(0.5)]);
+        assert_eq!(replay(&s), [Command::SetMasterOttAmount(0.75), Command::SetMasterOtt(true)], "the latest of each, the amount before the switch");
     }
 
     /// Lane `lane`'s mix as an `Event::Mix` carries it, from a fresh lane's with `edit` applied.

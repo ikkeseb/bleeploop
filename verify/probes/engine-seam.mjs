@@ -375,6 +375,17 @@ await probe(async ({ open }) => {
   assert.ok(adopted.some((c) => JSON.stringify(c) === JSON.stringify({ SetInputSendParam: ['echoLevel', 0.8] })), 'the kept echo level the engine lacks is sent');
   assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.echo')), '0', "the engine's echo is kept");
 
+  // An OTT amount past one comes back as the engine holds it, clamped (`Ott::set_amount`).
+  await emit({
+    reset: true,
+    settings: [{ SetMasterOttAmount: 3 }],
+    events: [laneEvent(0, committed), transport(BAR, true, 120), { Selected: { frame: BAR, lane: 0 } }],
+    anchor: { frame: BAR, atMs: Date.now(), rate: RATE, grid: 0 },
+    meter: { peak: [0, 0], clip: [false, false] },
+  });
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.masterOttAmount')), '1', 'an adopted OTT amount is clamped to one');
+  assert.equal((await page.getByRole('button', { name: 'OTT amount' }).textContent()).trim(), '100', 'and shown as 100');
+
   // ── FIXED past the loop (F14 multiply): a bar at a time up to the loop, whole loops above it ─────
   await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });
   await clearSent();

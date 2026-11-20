@@ -1,11 +1,11 @@
-//! The export's wet master rendered by the engine ([`lf_engine::render`]), which replaced the Tone
-//! render (`src/session/render.ts`, removed): its length, its alignment with the stems (frame 0 is loop
-//! position 0: the limiter's pre-delay is compensated, which the Tone export did not), a reversed lane,
-//! every lane playing (a STOPPED one too), each lane's mix and the master's settings (a lane's mix in the
-//! settings changes nothing), a delay's echo wrapping to the head, the warm-up's steady state (a delay
-//! with the reverb after it, a delay at full feedback), no click and no instrument whatever the settings
-//! say, the same bits at any block size, and every refusal an `Err`. A snapshot's mix into the render:
-//! `tests/session.rs`.
+//! The export's wet master rendered by the engine ([`lf_engine::render`]), which replaced the Tone render
+//! (`src/session/render.ts`, removed): its length, its alignment with the stems (frame 0 is loop position
+//! 0: the limiter's pre-delay is compensated, which the Tone export did not), a reversed lane, every lane
+//! playing (a STOPPED one too), each lane's mix and the master's settings, its OTT among them (a lane's mix
+//! in the settings changes nothing), a delay's echo wrapping to the head, the warm-up's steady state (a
+//! delay with the reverb after it, a delay at full feedback), no click and no instrument whatever the
+//! settings say, the same bits at any block size, and every refusal an `Err`. A snapshot's mix into the
+//! render: `tests/session.rs`.
 
 mod common;
 
@@ -200,6 +200,23 @@ fn every_lane_plays_a_muted_one_is_silent_and_the_volumes_scale() {
     // A muted master is silence.
     let out = render(vec![lane(0, &[(1_000, A)])], &[], &[Command::SetMasterMute(true)]);
     assert_eq!(peak(&out.left).max(peak(&out.right)), 0.0, "a muted master");
+}
+
+// d2)
+#[test]
+fn the_master_ott_reaches_the_render_on_and_at_its_amount_and_off_is_dry() {
+    let busy = || vec![busy_lane(0)];
+    let dry = render(busy(), &[], &[]);
+    let on_full = render(busy(), &[], &[Command::SetMasterOttAmount(1.0), Command::SetMasterOtt(true)]);
+    let on_default = render(busy(), &[], &[Command::SetMasterOtt(true)]);
+    let off_full = render(busy(), &[], &[Command::SetMasterOttAmount(1.0)]);
+    for (x, y) in [(&on_full.left, &dry.left), (&on_full.right, &dry.right)] {
+        let diff = max_diff(x, y);
+        assert!(diff > 1e-3, "the OTT, on at AMOUNT 1, is in the master: {diff} off the dry render");
+    }
+    let diff = max_diff(&on_full.left, &on_default.left);
+    assert!(diff > 1e-3, "the OTT's AMOUNT is in the master: AMOUNT 1 is {diff} off the default");
+    assert_eq!((off_full.left, off_full.right), (dry.left, dry.right), "an OTT that is off leaves the master bit for bit");
 }
 
 // e)
