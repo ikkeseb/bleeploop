@@ -1685,3 +1685,85 @@ fn the_keys_a_halt_left_down_are_released_in_the_first_slice_after_the_cycle() {
     assert_eq!((probe.slices_after_events.load(Relaxed), probe.event_calls_unanswered.load(Relaxed)), (1 + runs, 0));
     drop(unit);
 }
+
+/// The unit on its own: a stereo VST2 effect driven directly through `UnitProcessor::process` keeps
+/// distinct left and right impulses on their own sides across slices, with nothing of one side on
+/// the other.
+#[test]
+fn a_stereo_unit_keeps_left_and_right_apart() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let slot = device.host().slot(0);
+    let probe = Probe::new();
+    let mut plugin = plugin_here(&slot, Shape { inputs: 2, outputs: 2, probe: Some(probe), ..Shape::default() });
+    let (unit, _params, faults) = unit_here(&mut plugin, &slot, 64);
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (mut in_l, mut in_r) = ([0.0f32; 160], [0.0f32; 160]);
+        in_l[5] = 1.0;
+        in_l[70] = -0.75;
+        in_r[19] = 0.5;
+        in_r[135] = 0.25;
+        let (mut out_l, mut out_r) = ([1.0f32; 160], [1.0f32; 160]);
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: lf_engine::grid::Meter::FOUR_FOUR };
+        unit.process(&cx, [&in_l, &in_r], &[], [&mut out_l, &mut out_r]);
+        assert_eq!(out_l, in_l, "left carries only the left impulses, across every slice");
+        assert_eq!(out_r, in_r, "right carries only the right impulses, across every slice");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        (probe.processes.load(Relaxed), probe.distinct_inputs.load(Relaxed), probe.distinct_outputs.load(Relaxed)),
+        (3, 2, 2),
+        "160 frames at 64 max: 64 + 64 + 32, two distinct pins each way"
+    );
+    assert_eq!(faults.load(Relaxed), 0);
+    drop(unit);
+}
+
+/// The unit on its own: a mono VST2 effect (`1` in, `1` out) receives the stereo pair's mean and
+/// copies its one output pin to both sides across slices (`docs/unit-contract.md` §7).
+#[test]
+fn a_mono_unit_folds_input_to_the_mean_and_copies_output_to_both_sides() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let slot = device.host().slot(0);
+    let probe = Probe::new();
+    let mut plugin = plugin_here(&slot, Shape { inputs: 1, outputs: 1, probe: Some(probe), ..Shape::default() });
+    let (unit, _params, faults) = unit_here(&mut plugin, &slot, 64);
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (mut in_l, mut in_r) = ([0.0f32; 160], [0.0f32; 160]);
+        in_l[5] = 1.0;
+        in_r[19] = 0.5;
+        in_l[70] = 0.75;
+        in_r[70] = -0.25;
+        in_l[135] = -0.5;
+        in_r[135] = 0.5;
+        in_l[140] = 0.75;
+        in_r[140] = 0.25;
+        let mut expected = [0.0f32; 160];
+        expected[5] = 0.5;
+        expected[19] = 0.25;
+        expected[70] = 0.25;
+        expected[140] = 0.5;
+        let (mut out_l, mut out_r) = ([1.0f32; 160], [1.0f32; 160]);
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: lf_engine::grid::Meter::FOUR_FOUR };
+        unit.process(&cx, [&in_l, &in_r], &[], [&mut out_l, &mut out_r]);
+        assert_eq!(out_l, expected, "left carries the mono output of the pair's mean");
+        assert_eq!(out_r, expected, "right carries the same mono output");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        (probe.processes.load(Relaxed), probe.distinct_inputs.load(Relaxed), probe.distinct_outputs.load(Relaxed)),
+        (3, 1, 1),
+        "160 frames at 64 max: 64 + 64 + 32, one pin each way"
+    );
+    assert_eq!(faults.load(Relaxed), 0);
+    drop(unit);
+}

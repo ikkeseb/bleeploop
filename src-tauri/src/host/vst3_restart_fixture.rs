@@ -1459,3 +1459,101 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     }
     assert!(!s.contract_violation.load(Relaxed));
 }
+
+/// The unit on its own: a stereo VST3 effect driven directly through `UnitProcessor::process` keeps
+/// distinct left and right impulses on their own sides across slices, with nothing of one side on
+/// the other.
+#[test]
+fn a_stereo_unit_keeps_left_and_right_apart() {
+    use super::engine::Vst3Unit;
+    use lf_engine::{grid::Meter, UnitCx, UnitProcessor};
+
+    let fixture = ComWrapper::new(FixtureComponent::new());
+    let s: &FixtureComponent = &fixture;
+    s.inputs.store(2, Relaxed);
+    let component = fixture.to_com_ptr::<IComponent>().unwrap();
+    let processor = component.cast::<IAudioProcessor>().unwrap();
+    let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
+    assert_eq!((activation.in_channels, activation.out_channels), (2, 2));
+    let (_params, ring) = RingBuffer::<ParamEvent>::new(8);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (mut in_l, mut in_r) = ([0.0f32; 160], [0.0f32; 160]);
+        in_l[5] = 1.0;
+        in_l[70] = -0.75;
+        in_r[19] = 0.5;
+        in_r[135] = 0.25;
+        let (mut out_l, mut out_r) = ([1.0f32; 160], [1.0f32; 160]);
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        unit.process(&cx, [&in_l, &in_r], &[], [&mut out_l, &mut out_r]);
+        assert_eq!(out_l, in_l, "left carries only the left impulses, across every slice");
+        assert_eq!(out_r, in_r, "right carries only the right impulses, across every slice");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(s.processes.load(Relaxed), 3, "160 frames at 64 max: 64 + 64 + 32");
+    assert_eq!(faults.load(Relaxed), 0);
+    drop(unit);
+    unsafe {
+        assert_eq!(component.setActive(0), kResultOk);
+    }
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// The unit on its own: a mono VST3 effect (`1` in, `1` out via `getBusInfo`) receives the stereo
+/// pair's mean and copies its one output channel to both sides across slices
+/// (`docs/unit-contract.md` §7).
+#[test]
+fn a_mono_unit_folds_input_to_the_mean_and_copies_output_to_both_sides() {
+    use super::engine::Vst3Unit;
+    use lf_engine::{grid::Meter, UnitCx, UnitProcessor};
+
+    let fixture = ComWrapper::new(FixtureComponent::new());
+    let s: &FixtureComponent = &fixture;
+    s.inputs.store(1, Relaxed);
+    s.out_channels.store(1, Relaxed);
+    let component = fixture.to_com_ptr::<IComponent>().unwrap();
+    let processor = component.cast::<IAudioProcessor>().unwrap();
+    let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
+    assert_eq!((activation.in_channels, activation.out_channels), (1, 1));
+    let (_params, ring) = RingBuffer::<ParamEvent>::new(8);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (mut in_l, mut in_r) = ([0.0f32; 160], [0.0f32; 160]);
+        in_l[5] = 1.0;
+        in_r[19] = 0.5;
+        in_l[70] = 0.75;
+        in_r[70] = -0.25;
+        in_l[135] = -0.5;
+        in_r[135] = 0.5;
+        in_l[140] = 0.75;
+        in_r[140] = 0.25;
+        let mut expected = [0.0f32; 160];
+        expected[5] = 0.5;
+        expected[19] = 0.25;
+        expected[70] = 0.25;
+        expected[140] = 0.5;
+        let (mut out_l, mut out_r) = ([1.0f32; 160], [1.0f32; 160]);
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        unit.process(&cx, [&in_l, &in_r], &[], [&mut out_l, &mut out_r]);
+        assert_eq!(out_l, expected, "left carries the mono output of the pair's mean");
+        assert_eq!(out_r, expected, "right carries the same mono output");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(s.processes.load(Relaxed), 3, "160 frames at 64 max: 64 + 64 + 32");
+    assert_eq!(faults.load(Relaxed), 0);
+    drop(unit);
+    unsafe {
+        assert_eq!(component.setActive(0), kResultOk);
+    }
+    assert!(!s.contract_violation.load(Relaxed));
+}

@@ -106,6 +106,8 @@ struct Observed {
     /// The input port's channel count (`clap.audio-ports`); 0 = no input port, an instrument. With
     /// an input the plugin is an effect that echoes each input channel to its output.
     inputs: AtomicU32,
+    /// The output port's channel count (`clap.audio-ports`); 0 = default stereo (2).
+    outputs: AtomicU32,
     /// Two ports each way instead (`TWO_PORT_*`): a stereo main and a mono sidechain in, a stereo
     /// main and a mono aux out. `process` echoes the main input, writes `AUX_MARKER` to the aux
     /// output and records whether the sidechain carried anything.
@@ -586,7 +588,10 @@ unsafe extern "C" fn port_get(
     } else if is_input {
         inputs
     } else {
-        2
+        match s.outputs.load(Relaxed) {
+            0 => 2,
+            channels => channels,
+        }
     };
     // SAFETY: the host passes a writable clap_audio_port_info; every field is written.
     unsafe {
@@ -1634,6 +1639,86 @@ fn a_failed_process_call_plays_silence_and_latches_the_fault() {
     .unwrap();
     assert_eq!(s.processes.load(Relaxed), 2);
     assert_eq!(faults.load(Relaxed), FAULT_PROCESS, "the failure latched");
+    instance.deactivate(unit.take_stopped().unwrap());
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// The unit on its own: a stereo CLAP effect driven directly through `UnitProcessor::process` keeps
+/// distinct left and right impulses on their own sides across slices, with nothing of one side on
+/// the other.
+#[test]
+fn a_stereo_unit_keeps_left_and_right_apart() {
+    use lf_engine::{grid::Meter, UnitCx, UnitProcessor};
+
+    let mut instance = fixture_instance();
+    let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
+    s.inputs.store(2, Relaxed);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = bare_unit(&mut instance, &faults);
+    let mut unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (mut in_l, mut in_r) = ([0.0f32; 160], [0.0f32; 160]);
+        in_l[5] = 1.0;
+        in_l[70] = -0.75;
+        in_r[19] = 0.5;
+        in_r[135] = 0.25;
+        let (mut out_l, mut out_r) = ([1.0f32; 160], [1.0f32; 160]);
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        unit.process(&cx, [&in_l, &in_r], &[], [&mut out_l, &mut out_r]);
+        assert_eq!(out_l, in_l, "left carries only the left impulses, across every slice");
+        assert_eq!(out_r, in_r, "right carries only the right impulses, across every slice");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(s.processes.load(Relaxed), 3, "160 frames at 64 max: 64 + 64 + 32");
+    assert_eq!(faults.load(Relaxed), 0);
+    instance.deactivate(unit.take_stopped().unwrap());
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// The unit on its own: a mono CLAP effect (`1` in, `1` out via `clap.audio-ports`) receives the
+/// stereo pair's mean and copies its one output channel to both sides across slices
+/// (`docs/unit-contract.md` §7).
+#[test]
+fn a_mono_unit_folds_input_to_the_mean_and_copies_output_to_both_sides() {
+    use lf_engine::{grid::Meter, UnitCx, UnitProcessor};
+
+    let mut instance = fixture_instance();
+    let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
+    s.inputs.store(1, Relaxed);
+    s.outputs.store(1, Relaxed);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = bare_unit(&mut instance, &faults);
+    let mut unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (mut in_l, mut in_r) = ([0.0f32; 160], [0.0f32; 160]);
+        in_l[5] = 1.0;
+        in_r[19] = 0.5;
+        in_l[70] = 0.75;
+        in_r[70] = -0.25;
+        in_l[135] = -0.5;
+        in_r[135] = 0.5;
+        in_l[140] = 0.75;
+        in_r[140] = 0.25;
+        let mut expected = [0.0f32; 160];
+        expected[5] = 0.5;
+        expected[19] = 0.25;
+        expected[70] = 0.25;
+        expected[140] = 0.5;
+        let (mut out_l, mut out_r) = ([1.0f32; 160], [1.0f32; 160]);
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        unit.process(&cx, [&in_l, &in_r], &[], [&mut out_l, &mut out_r]);
+        assert_eq!(out_l, expected, "left carries the mono output of the pair's mean");
+        assert_eq!(out_r, expected, "right carries the same mono output");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(s.processes.load(Relaxed), 3, "160 frames at 64 max: 64 + 64 + 32");
+    assert_eq!(faults.load(Relaxed), 0);
     instance.deactivate(unit.take_stopped().unwrap());
     assert!(!s.contract_violation.load(Relaxed));
 }
