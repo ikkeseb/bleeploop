@@ -449,14 +449,16 @@ fn step(fade: &mut u32, engaged: bool, n: u32) {
 }
 
 /// A move's dip at frame `f`: 1 outside it, falling linearly to exactly 0 on `at` (the reorder's
-/// frame) while `down`, rising from there to 1 over `n` frames after.
-fn dip_gain(dip: Option<Frame>, down: bool, f: Frame, n: Frame) -> f32 {
+/// frame), rising from there to 1 over `n` frames after. Judged by the frame alone, not by whether the
+/// reorder has applied: a render call that holds the reorder splits there, and its frames before it
+/// are still on the way down when the whole call is mixed.
+fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
     let Some(at) = dip else { return 1.0 };
-    let k = if down { at - f } else { f - at };
+    let k = (at - f).abs();
     if k >= n {
         1.0
     } else {
-        k.max(0) as f32 / n as f32
+        k as f32 / n as f32
     }
 }
 
@@ -465,6 +467,10 @@ fn dip_gain(dip: Option<Frame>, down: bool, f: Frame, n: Frame) -> f32 {
 /// the chain's in `tail`. `to_bus` falls to the frame a leaving source head is gone.
 #[allow(clippy::too_many_arguments)]
 fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [Vec<f32>; 2], tail: &mut [Vec<f32>; 2], events: &[SlotEvent], cx: &UnitCx, (a, b): (usize, usize), n: u32, to_bus: &mut usize, errors: &mut u64) {
+    // A move's reorder on a call's first frame leaves nothing before it: no unit is called for no frames.
+    if a == b {
+        return;
+    }
     for k in 0..seats.len() {
         let (before, rest) = seats.split_at_mut(k);
         let seat = &mut rest[0];
@@ -1488,7 +1494,7 @@ impl Rack {
             for j in 0..m {
                 let mut y = [s.tail[0][j], s.tail[1][j]];
                 if dipping {
-                    let g = dip_gain(s.dip, s.reorder.is_some(), frame + j as Frame, fade_frames as Frame);
+                    let g = dip_gain(s.dip, frame + j as Frame, fade_frames as Frame);
                     if g != 1.0 {
                         y = y.map(|v| v * g);
                     }

@@ -702,9 +702,11 @@ pub enum Event {
     /// lane's `Mix` is.
     Seat { frame: Frame, slot: u8, unit: UnitId, op: SeatOp, outcome: SeatOutcome },
     /// Slot `slot`'s chain as applied, head first: its first `len` seats (a withdrawn seat included, a
-    /// leaving one not), each unit's id, kind, bypass and latency. Sent on `frame` whenever an edit, a
-    /// move's reorder or a bypass command applies (one per change, at the chain as it then stands);
-    /// owed until the ring takes it, as [`Event::Seat`] is, and offered after the slot's seat answers.
+    /// leaving one not), each unit's id, kind, bypass and latency. Owed whenever an edit, a move's
+    /// reorder or a bypass command applies, on its frame, until the ring takes it, as [`Event::Seat`]
+    /// is, and offered after the slot's seat answers; changes before it is offered fold into one, at
+    /// the chain as it then stands and the last change's frame (the port's messages of one block start,
+    /// a reorder and the bypass command that follows it before the next chunk).
     Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
 }
 
