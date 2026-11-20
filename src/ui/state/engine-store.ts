@@ -501,11 +501,12 @@ function recSpanFrames(i: number): number {
   return plain.span[i];
 }
 
-/** A take's record head, 0..1 of its span (`recSpanFrames`); a later take waiting for its downbeat rides
- * the loop phase, a first take waiting (count-in, AUTO listening) has none: -1. */
-function recHeadFrac(i: number): number {
+/** A take's record head, 0..1 of `span` (defaulting to `recSpanFrames(i)` — the waveform passes the span
+ * it rasterised for so a frame's bins and head never split across a span growth); a later take waiting for
+ * its downbeat rides the loop phase, a first take waiting (count-in, AUTO listening) has none: -1. */
+function recHeadFrac(i: number, span?: number): number {
   if (plain.waiting[i]) return plain.master > 0 ? phaseValue() : -1;
-  const f = (heardFrame() - plain.takeStart[i]) / recSpanFrames(i);
+  const f = (heardFrame() - plain.takeStart[i]) / (span && span > 0 ? span : recSpanFrames(i));
   return f < 0 ? 0 : f > 1 ? 1 : f;
 }
 

@@ -1224,9 +1224,11 @@ function headOf(lane: Lane, state: TrackState, waiting: boolean): number {
     return -1;
   }
   if (state === 'RECORDING') {
-    // The head sweeps the same span the bins are placed over (`recSpanFrames`); -1 (no track yet): the
-    // right edge.
-    const frac = looper.recHeadFrac(lane.index);
+    // The head sweeps the exact span the bins were rasterised over (`lane.lastSpan`, updated from
+    // `recSpanFrames` before `repaint`): never re-read `recSpanFrames` here, or a clock tick mid-frame
+    // draws the head over the new span while the cached bitmap still holds the old one. -1 (no track
+    // yet): the right edge.
+    const frac = looper.recHeadFrac(lane.index, lane.lastSpan);
     lane.headColor = lane.colors.rec;
     return frac < 0 ? dw - lane.dpr : frac * dw;
   }
@@ -1539,6 +1541,17 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
   askGridFont(lane.gridFont);
 
   if (rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
+/**
+ * The recording span (frames) lane `index`'s canvas was last rasterised over (0 when not recording).
+ * Read by browser probes (`window.__lf.drawnSpan`, `verify/probes/wave-steady.mjs`) so a drawn frame is
+ * judged against the span it was drawn for rather than a fresh `Date.now()` read of `recSpanFrames`.
+ * @public
+ */
+export function drawnSpan(index: number): number {
+  for (const lane of lanes.values()) if (lane.index === index) return lane.lastSpan;
+  return 0;
 }
 
 /** Unregister a canvas. Stops the shared rAF loop when nothing is registered any more. */
