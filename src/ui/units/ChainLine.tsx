@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createResource, createSignal, on, onCleanup, onMount } from 'solid-js';
+import { For, Match, Show, Switch, createEffect, createResource, createSignal, on, onCleanup, onMount } from 'solid-js';
 import { platform, type PluginParamDesc, type UnitParamId, type UnitState } from '../../platform';
 import {
   addUnit,
@@ -26,6 +26,7 @@ import { Icon } from '../instrument/icons';
 import { PlateMenu, type PlateMenuItem } from '../instrument/PlateMenu';
 import { RowPopoverPanel, createRowPopover } from '../instrument/RowPopover';
 import { chainCompact, chainScroll } from '../instrument/row-fit';
+import { EchoFace } from './EchoFace';
 import { OttFace } from './OttFace';
 import { registerOttMini } from './ott-loop';
 import '../looper/fxpanel.css';
@@ -53,7 +54,7 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
   // ── focus: a report that moves or removes the focused plate, or a fold that unmounts the line, hands
   // focus to a surviving control (the same control on the moved plate, else its neighbour's menu, else `+`)
   let lastFocus: { unit: number; cls: string; index: number } | null = null;
-  // whether the focus is the line's: in a plate, in a plate's portal (its menu, Parameters, the OTT face:
+  // whether the focus is the line's: in a plate, in a plate's portal (its menu, Parameters, a unit's face:
   // Solid's delegation brings their focus events through the plate), or on the `+`
   let owned = false;
   let addButton: HTMLButtonElement | undefined;
@@ -390,7 +391,7 @@ function UnitPlate(props: {
   });
   const onDown = (e: PointerEvent) => {
     if (press || e.button !== 0 || !seated() || props.count() < 2) return;
-    // Solid's delegated events reach the plate from its portals too (the OTT face's knobs, a popover):
+    // Solid's delegated events reach the plate from its portals too (a face's knobs, a popover):
     // only a press on the plate itself is a drag
     if (!plate?.contains(e.target as Node)) return;
     // the lamp, the editor glyph and the menu are their own presses
@@ -406,7 +407,7 @@ function UnitPlate(props: {
   // in it goes to the plate's menu, the control that survives every state ──
   createEffect(() => {
     if (!pop.open() || seated()) return;
-    const inside = document.activeElement?.closest('.slot-pop, .ott') != null;
+    const inside = document.activeElement?.closest('.slot-pop, .uface') != null;
     pop.close(false);
     if (!inside) return;
     queueMicrotask(() => {
@@ -510,16 +511,20 @@ function UnitPlate(props: {
         groups={items()}
       />
       <Show when={pop.open()}>
-        <Show
-          when={isOtt()}
+        <Switch
           fallback={
             <RowPopoverPanel pop={pop} id={`unit-${u().id}-params`} label={`${name()} parameters`} role="dialog" class="infx-pop">
               <UnitParams unit={u} />
             </RowPopoverPanel>
           }
         >
-          <OttFace pop={pop} unit={u} plate={() => plate} slotLetter={letter} />
-        </Show>
+          <Match when={isOtt()}>
+            <OttFace pop={pop} unit={u} plate={() => plate} slotLetter={letter} />
+          </Match>
+          <Match when={u().kind === 'echo'}>
+            <EchoFace pop={pop} unit={u} plate={() => plate} slotLetter={letter} />
+          </Match>
+        </Switch>
       </Show>
     </div>
   );
@@ -588,7 +593,8 @@ const GLYPHS = {
   ring: 'M3 8c2.5-6 5-6 7.5 0s5 6 7.5 0 5-6 7.5 0',
 } as const;
 
-/** ECHO, REVERB and RING MOD keep today's settings (the old sends' defs and their popover's look). */
+/** ECHO, REVERB and RING MOD take today's settings (the old sends' defs); REVERB and RING MOD show them in
+ * the row's popover, ECHO on its own face. */
 const KIND_SENDS: Record<string, 'echo' | 'reverb' | 'ring'> = { echo: 'echo', reverb: 'reverb', ring: 'ring' };
 const BLURBS: Record<string, string> = {
   echo: 'Repeats in time with the tempo',

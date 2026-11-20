@@ -26,8 +26,10 @@
  *   its batch); a reset settling a held move and a call still loading;
  * - the meters: one per seated unit on every frame the fake makes; the OTT face's `unitMeters` at about
  *   60 Hz on one live interval exactly while an OTT is seated and on (none when bypassed, removed, reset or
- *   the timer is off); with the timer off, one frame per `meterTick`, following DEPTH, TIME, UP and DOWN; a
- *   frame scripted through `emit` reaches the feed as scripted;
+ *   the timer is off); with the timer off, one frame per `meterTick`, following DEPTH, TIME, UP and DOWN;
+ *   the ECHO's `out` per channel, a note on each downbeat and its repeats at TIME (the engine's index:
+ *   1/4, 1/8, 1/16), FEEDBACK and LEVEL and the scripted tempo, deterministic, its timer live while it is
+ *   on; a frame scripted through `emit` reaches the feed as scripted;
  * - every `ChainHost` call recorded in order with all its arguments; the injectable id mint; the stereo
  *   pick over four canned inputs; the Tauri and production hosts refusing the chain; under Tauri the
  *   unit commands never reach `input_send` (the IPC spied: zero invokes for them).
@@ -550,6 +552,9 @@ await probe(async ({ open }) => {
   for (const id of [...rig, fresh]) assert.deepEqual(await call('remove', id), { ok: null });
 
   // ── The meters: one per seated unit; the OTT face's on its own 60 Hz timer ─────────────────────────
+  // the ECHO left on in slot A sits bypassed here: an ECHO's meters are their own checks (below)
+  await send({ SetUnitBypass: [echoAhead, true] });
+  await page.waitForFunction((id) => window.__lf.native.chain.chains()[0].units.find((u) => u.id === id).bypass, echoAhead);
   const seatedIds = () => page.evaluate(() => window.__lf.native.chain.chains().flatMap((c) => c.units.filter((u) => u.state === 'seated' || u.state === 'leaving').map((u) => u.id)));
   assert.deepEqual((await lastFrame()).unitMeters.map((u) => u.unit), await seatedIds(), 'a chains frame carries a meter per seated unit');
   assert.ok((await lastFrame()).unitMeters.every((u) => u.out[0] === 0 && u.out[1] === 0 && u.bands === undefined), 'silent, no bands, with no OTT');
@@ -630,6 +635,57 @@ await probe(async ({ open }) => {
   const held = (bs) => bs.reduce((s, b) => s - b.gain, 0) / bs.length;
   console.log('TIME 0 mean cut', held(fast).toFixed(3), 'TIME 1 mean cut', held(slow).toFixed(3));
   assert.ok(held(slow) > held(fast) + 0.1, 'TIME 1 holds more cut than TIME 0');
+  // The ECHO's meters: `out` per channel from a plucked note on each bar's downbeat and its repeats, through
+  // the unit's own params at the scripted tempo, one frame per tick while the timer is off.
+  const echoTicks = async (params, n) => {
+    const id = await mint();
+    assert.deepEqual(await call('add', 1, id, { kind: 'echo', params }, 0), { ok: 'seated' });
+    const q = await mark();
+    for (let k = 0; k < n; k++) await page.evaluate(() => window.__lf.native.chain.meterTick());
+    const got = (await timerFrames(q)).map((f) => f.unitMeters.find((u) => u.unit === id));
+    assert.equal(got.length, n, 'one ECHO frame per tick');
+    assert.deepEqual(await call('remove', id), { ok: null });
+    return got.map((u) => u.out);
+  };
+  /** Frame `f` (from 1) holds the output over ((f - 1) / 60, f / 60]: a repeat at `s` seconds rises in the
+   * frame after its onset's, above the frame before it. */
+  const rises = (outs, s) => {
+    const f = Math.floor(s * 60) + 1;
+    return outs[f][0] > outs[f - 2][0] * 1.5 + 0.02;
+  };
+  const e8 = await echoTicks({ echoTime: 1, echoFeedback: 0.5, echoLevel: 1 }, 150);
+  console.log('ECHO 1/8 at 120, frames 1, 15-17, 30-32:', [0, 14, 15, 16, 29, 30, 31].map((i) => e8[i][0].toFixed(3)).join(' '));
+  assert.ok(e8.every(([l, r]) => Number.isFinite(l) && l >= 0 && l <= 1 && Math.abs(r - l * 0.94) < 1e-9), 'L in 0..1, R a touch under it');
+  assert.ok(e8[0][0] > 0.4, `the note on the downbeat: ${e8[0][0]}`);
+  assert.ok(rises(e8, 0.25) && rises(e8, 0.5) && rises(e8, 0.75), 'a repeat every 1/8 (0.25 s at 120)');
+  assert.ok(rises(e8, 2), 'the next bar’s note');
+  const peak = (outs, s) => Math.max(...outs.slice(Math.floor(s * 60), Math.floor(s * 60) + 4).map((o) => o[0]));
+  const ratio = peak(e8, 0.5) / peak(e8, 0.25);
+  assert.ok(ratio > 0.4 && ratio < 0.65, `each repeat FEEDBACK (0.5) of the one before: ${ratio.toFixed(3)}`);
+  const e4 = await echoTicks({ echoTime: 0, echoFeedback: 0.5, echoLevel: 1 }, 60);
+  assert.ok(!rises(e4, 0.25) && rises(e4, 0.5), 'the engine’s index 0 is 1/4: no repeat at 0.25 s, one at 0.5 s');
+  const e16 = await echoTicks({ echoTime: 3, echoFeedback: 0.5, echoLevel: 1 }, 30);
+  assert.ok(rises(e16, 0.125), 'index 3 is 1/16: a repeat at 0.125 s');
+  const fb0 = await echoTicks({ echoTime: 1, echoFeedback: 0, echoLevel: 1 }, 60);
+  assert.ok(rises(fb0, 0.25) && !rises(fb0, 0.5), 'FEEDBACK 0: one repeat');
+  const dry = await echoTicks({ echoTime: 1, echoFeedback: 0.5, echoLevel: 0 }, 60);
+  assert.ok(!rises(dry, 0.25) && dry[0][0] === e8[0][0], 'LEVEL 0: the note alone');
+  assert.deepEqual(await echoTicks({ echoTime: 1, echoFeedback: 0.5, echoLevel: 1 }, 150), e8, 'deterministic: the same params, the same frames');
+  await emit({ events: [{ Transport: { frame: 0, master: 0, bpm: 60, meter: { num: 4, den: 4, beats: 4 }, locked: false } }] });
+  const at60 = await echoTicks({ echoTime: 1, echoFeedback: 0.5, echoLevel: 1 }, 60);
+  assert.ok(!rises(at60, 0.25) && rises(at60, 0.5), 'the scripted tempo: 1/8 at 60 BPM is 0.5 s');
+  await emit({ events: [{ Transport: { frame: 0, master: 0, bpm: 120, meter: { num: 4, den: 4, beats: 4 }, locked: false } }] });
+  // the timer runs while an ECHO is seated and on, and stops when it is bypassed
+  await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+  const echoOn = await mint();
+  assert.deepEqual(await call('add', 1, echoOn, { kind: 'echo' }, 0), { ok: 'seated' });
+  assert.equal(await intervals(), 1, 'an ECHO seated and on: one timer');
+  await send({ SetUnitBypass: [echoOn, true] });
+  await page.waitForFunction((id) => window.__lf.native.chain.chains()[1].units.find((u) => u.id === id).bypass, echoOn);
+  await quietFor(200, 'silent while the ECHO is bypassed');
+  assert.deepEqual((await lastFrame()).unitMeters.find((u) => u.unit === echoOn).out, [0, 0], 'a bypassed ECHO reads silent');
+  assert.deepEqual(await call('remove', echoOn), { ok: null });
+  await page.evaluate(() => (window.__lf.native.chain.meterTimer = false));
   // A frame scripted through `emit` reaches the feed as scripted.
   const scriptedMeter = { unit: 77, out: [0.5, 0.25], bands: [0, 1, 2].map((i) => ({ gain: 0 - i, gainMin: -1 - i, gainMax: 0 - i, level: -30, levelPeak: -20 })) };
   m = await mark();
@@ -671,7 +727,7 @@ await probe(async ({ open }) => {
   assert.match(refusal(strand), /reset/, 'a held move is settled, refused, by the reset');
   assert.match(refusal(staleAnswer), /reset/, 'a call still loading answers refused, never seated');
   assert.deepEqual(await page.evaluate(() => window.__lf.native.chain.chains()), coldRig, 'the model is the cold rig');
-  assert.equal(await intervals(), 0, 'its OTT gone: no timer');
+  assert.equal(await intervals(), 1, 'its OTT gone; its two ECHOs on hold the one timer');
   assert.match(refusal(await call('add', 0, cold[1], { kind: 'echo' }, 0)), /reserved/, 'its ids are reserved');
   m = await mark();
   await send({ Action: { ToggleUnit: cold[0] } }, { SetUnitParam: [cold[2], 'echoLevel', 0.5] });

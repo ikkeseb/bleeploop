@@ -309,7 +309,7 @@ await probe(async ({ open }) => {
         // the next keyboard press on the plate is its own
         await plate(order[0]).locator('.unit__name').focus();
         await page.keyboard.press('Enter');
-        await page.getByRole('dialog', { name: 'ECHO parameters' }).waitFor({ timeout: 1500 });
+        await page.getByRole('dialog', { name: 'ECHO, slot A' }).waitFor({ timeout: 1500 });
         await page.keyboard.press('Escape');
         await settle();
         await plate(order[0]).locator('.plate__menu').click();
@@ -368,7 +368,7 @@ await probe(async ({ open }) => {
         await page.mouse.up();
         await page.keyboard.up('Escape');
         await settle();
-        assert.equal(await page.locator('.infx-pop, .ott').count(), 0, 'the cancelled press’s release opened nothing');
+        assert.equal(await page.locator('.infx-pop, .uface').count(), 0, 'the cancelled press’s release opened nothing');
         assert.deepEqual((await calls()).slice(before), [], 'no call');
         assert.deepEqual(await ids(0), order);
       });
@@ -478,7 +478,7 @@ await probe(async ({ open }) => {
         const took = (await chains())[0].units.find((u) => u.id === ott).params.ottDepth;
         assert.ok(took > 0.66 && took < 0.76, `a 44 px drag up lifts DEPTH by about 0.2 (took ${took})`);
         assert.equal(await depth.getAttribute('aria-valuenow'), String(Math.round(took * 100)));
-        assert.match(await page.locator('.ott__ctl--hero .ott__val').textContent(), new RegExp(`^${Math.round(took * 100)}`), 'the number under it');
+        assert.match(await page.locator('.ott .uface__ctl--hero .uface__val').textContent(), new RegExp(`^${Math.round(took * 100)}`), 'the number under it');
       });
       await check('the OTT face: its glass (read-outs, ladders, history, level meters) and the plate’s miniature follow unitMeters; a complete frame without it clears them', async () => {
         const ott = await unitOf('ott');
@@ -547,17 +547,17 @@ await probe(async ({ open }) => {
         assert.equal(await active(), `unit__name slot-pop__trigger@${ott}`);
       });
       await check('the row’s popovers hang from their plate: the name’s Parameters and the + menu', async () => {
-        const echo = await unitOf('echo');
-        await plate(echo).locator('.unit__name').click();
-        const panel = page.getByRole('dialog', { name: 'ECHO parameters' });
+        const reverb = await unitOf('reverb');
+        await plate(reverb).locator('.unit__name').click();
+        const panel = page.getByRole('dialog', { name: 'REVERB parameters' });
         await panel.waitFor();
-        const pb = await plate(echo).boundingBox();
+        const pb = await plate(reverb).boundingBox();
         const fb = await panel.boundingBox();
-        assert.ok(fb.y >= pb.y + pb.height && fb.y <= pb.y + pb.height + 14, `under the ECHO plate: panel top ${fb.y}, plate bottom ${pb.y + pb.height}`);
+        assert.ok(fb.y >= pb.y + pb.height && fb.y <= pb.y + pb.height + 14, `under the REVERB plate: panel top ${fb.y}, plate bottom ${pb.y + pb.height}`);
         assert.ok(fb.x >= pb.x - 20 && fb.x <= pb.x + pb.width, `beside it: panel left ${fb.x}, plate ${pb.x}..${pb.x + pb.width}`);
         await page.keyboard.press('Escape');
         await settle();
-        assert.equal(await active(), `unit__name slot-pop__trigger@${echo}`, 'focus back on the name');
+        assert.equal(await active(), `unit__name slot-pop__trigger@${reverb}`, 'focus back on the name');
         const plus = page.locator('.slot--a .unit-add');
         await plus.click();
         const menuBox = await page.getByRole('menu', { name: 'Add to slot A' }).boundingBox();
@@ -949,7 +949,7 @@ await probe(async ({ open }) => {
         await foldWith('a', 'b', async () => {
           await plate(await unitOf('ott', 0)).locator('.unit__name').click();
           await page.getByRole('dialog', { name: 'OTT, slot A' }).getByRole('slider').first().focus();
-          assert.match(await active(), /ott/, 'the focus in the face');
+          assert.match(await active(), /uface__knob/, 'the focus in the face');
         });
       });
       await check('a fold with the focus in a plate’s menu hands it to the slot’s fold plate', async () => {
@@ -1008,9 +1008,9 @@ await probe(async ({ open }) => {
       if (SHOTS) await shot('ott');
       const type = await faceTypeMin();
       assert.ok(type.min >= 12 - 1e-6, `the smallest type is ${type.min.toFixed(2)} px (${type.what})`);
-      assert.deepEqual(await unreached('.ott .ott__knob, .ott .ott__pwr, .ott .ott__close'), []);
+      assert.deepEqual(await unreached('.ott .uface__knob, .ott .uface__pwr, .ott .uface__close'), []);
       assert.notEqual(await page.locator('.ott__gv').first().evaluate((e) => e.firstChild.textContent), '0.0', 'the meters run');
-      await page.locator('.ott__close').click();
+      await page.locator('.ott .uface__close').click();
       await settle();
     });
     if (!first) {
