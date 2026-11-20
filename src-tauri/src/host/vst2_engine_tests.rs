@@ -551,9 +551,9 @@ fn a_device_change_reactivates_the_plugin_at_the_new_rate() {
 }
 
 /// Sixteen outputs with signal on the first pair only, as a multi-output instrument's main pair,
-/// its two sides at different levels: the slot plays that pair's mean, as loud as a plain stereo
-/// instrument at the level between them, not one side of it, not the sum, and not the mean of all
-/// sixteen (an eighth of it).
+/// its two sides at different levels: the slot plays that pair as it is (E1's deliberate break of the
+/// mono mean, `docs/unit-contract.md` §7), its left side at the left's level, never the sum and never
+/// diluted by the other fourteen.
 #[test]
 fn a_multi_output_instrument_is_not_attenuated() {
     let _one = engine_slot::one_engine_test_at_a_time();
@@ -572,7 +572,7 @@ fn a_multi_output_instrument_is_not_attenuated() {
     let (handle, _) = load(&device, 0, Shape { outputs: 16, ..instrument(probe) });
     assert!(wait_for(|| probe.processes.load(Relaxed) > 8));
     let level = level_once_settled(&device);
-    assert!((level - reference).abs() < 1e-3, "the pair's mean at full level: {level} beside {reference}");
+    assert!((level - 1.5 * reference).abs() < 1e-3, "the pair's left side (0.75 against 0.5) at full level: {level} beside {reference}");
     assert_eq!(probe.distinct_outputs.load(Relaxed), 16, "every declared output has a row of its own");
     handle.unload().unwrap();
 }
@@ -1000,7 +1000,7 @@ fn a_unit_slices_a_long_call_places_each_note_and_allocates_nothing() {
             unit.process_mono(200, &input, &notes, &mut out)
         });
         assert_eq!(allocations, 0, "process allocates nothing");
-        assert!(out.iter().all(|&x| x == 0.5), "0.75 and 0.25, their mean to mono");
+        assert!(out.iter().all(|&x| x == 0.75), "0.75 and 0.25: the left side is the first pin's, no mean to mono");
         unit.stop();
         (unit, runs)
     })
