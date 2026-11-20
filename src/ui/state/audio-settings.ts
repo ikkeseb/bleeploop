@@ -52,10 +52,12 @@ export interface AudioDeviceSettings {
   shareDeviceId: string;
 }
 
-/** A saved channel: '' (auto) or a 0-based index. */
+/** A channel saved as a string (the global `inputChannel`, a slot's pick before the pair): '' (auto) or
+ * a 0-based index of up to three digits. */
 const isChannel = (v: unknown): v is string => typeof v === 'string' && (v === '' || /^\d{1,3}$/.test(v));
 
-const isIndex = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 999;
+/** A channel saved as a number: the wire's range, a u32 (`engine-wire.ts`'s `readPick`). */
+const isIndex = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 0xffff_ffff;
 
 /** A saved slot pick as the engine takes it, or undefined when it is none: null, a channel, `[l, r]`,
  * or the string a build before the pair saved ('' auto, else a channel). */

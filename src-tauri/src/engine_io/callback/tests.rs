@@ -276,8 +276,39 @@ fn every_slots_pick_travels_in_one_word() {
     run.set_slot_channels([Pair([1, 2]), Mono(0)]);
     assert_eq!(run.picks(8), [[1, 2], [0, 0]], "a swap lands whole");
     assert_eq!(run.picks(2), [[1, 1], [0, 0]], "a pick past the device's channels reads its last");
-    run.set_slot_channels([Mono(u32::MAX), Pair([0, 65_535])]);
-    assert_eq!(run.picks(65_536), [[65_535, 65_535], [0, 65_535]], "a channel past the word's 16 bits reads the last it holds");
+    let last = PICK_CHANNELS as u32 - 1;
+    run.set_slot_channels([Mono(last), Pair([last - 1, last])]);
+    assert_eq!(run.picks(PICK_CHANNELS + 1), [[65_535, 65_535], [65_534, 65_535]], "the word carries every channel a pick can name, whole");
+}
+
+/// A mono pick meters its one channel on both sides: the output callback publishing such blocks while
+/// the feed takes the meter as fast as it can, every take holds both sides of the same blocks, never a
+/// peak on one side whose other half lands in the next take.
+#[test]
+fn a_slots_two_peaks_are_published_and_taken_together() {
+    let core = Arc::new(Core::new());
+    let done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (core, done) = (core.clone(), done.clone());
+        std::thread::spawn(move || {
+            for k in 0..2_000_000u32 {
+                let block = [(k % 1000 + 1) as f32 / 1000.0];
+                meter(&core, 0, [&block, &block]);
+            }
+            done.store(true, Relaxed);
+        })
+    };
+    let (mut takes, mut split) = (0u64, None);
+    while !done.load(Relaxed) {
+        let ([[l, r], _], _) = core.take_meter();
+        takes += u64::from(l > 0.0);
+        if l != r && split.is_none() {
+            split = Some((l, r));
+        }
+    }
+    writer.join().unwrap();
+    assert!(takes > 1000, "the feed took the meter while it moved ({takes} takes)");
+    assert_eq!(split, None, "a take held one side of a block without the other");
 }
 
 const RATE: u32 = 48_000;

@@ -29,7 +29,7 @@ import { mkdir } from 'node:fs/promises';
 function installHost() {
   const calls = [];
   let releaseInit = () => {};
-  window.__startup = { calls, releaseInit: () => releaseInit() };
+  window.__startup = { calls, picks: [], releaseInit: () => releaseInit() };
   window.__startupHost = {
     init: () => {
       calls.push('init');
@@ -55,6 +55,7 @@ Object.assign(webPluginHost, window.__startupHost ?? {});
 const __probeOpen = webEngineFake.open;
 webEngineFake.open = (request, force) => {
   window.__startup?.calls.push('open:' + request.backend + ':' + request.buffer);
+  window.__startup?.picks.push(JSON.stringify(request.inputChannels));
   return __probeOpen(request, force);
 };
 `;
@@ -171,6 +172,29 @@ await probe(async ({ open }) => {
   });
   await mkdir('logs/layout', { recursive: true });
   await page.screenshot({ path: 'logs/layout/audio-settings.png' });
+
+  // A launch under ASIO (four inputs) with a pair saved on a device with more: the startup open sends
+  // it as saved, so the device side sees the pick it lacks (and logs its fallback to auto), and the
+  // open's status resets the saved pick to Auto.
+  const lacking = await open({
+    viewport: { width: 960, height: 600 },
+    init: async (p) => {
+      await serveHost(p);
+      await p.addInitScript(() => {
+        window.__lfEngineFake = true;
+        localStorage.setItem('lf.audioDevices', JSON.stringify({ asioEnabled: true, slotInputChannels: [[0, 5], 2] }));
+      });
+      await p.addInitScript(installHost);
+    },
+  });
+  await lacking.page.waitForFunction(() => window.__startup.calls.includes('init'), undefined, { timeout: 10000 });
+  const unpruned = await lacking.page.evaluate(async () => {
+    const { readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
+    return { opened: window.__startup.picks[0], saved: readAudioDeviceSettings().slotInputChannels };
+  });
+  console.log(JSON.stringify({ unpruned }));
+  assert.deepEqual(unpruned, { opened: '[[0,5],2]', saved: [null, 2] },
+    'the startup open sends the saved pair the device lacks; its status, not a prune before it, resets it');
 
   // A launch whose plugin host fails to start.
   const failed = await open({

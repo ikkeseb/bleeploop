@@ -696,6 +696,16 @@ await probe(async ({ open }) => {
   assert.match(await pick(0, 4), /lacks/);
   assert.match(await pick(0, [0, 4]), /lacks/);
   assert.deepEqual(await page.evaluate(() => window.__lf.native.slotInputChannels), [[0, [2, 3]], [1, null], [1, 0]]);
+  // With no device open the pick is refused, as native refuses it, and nothing is recorded.
+  const closed = await page.evaluate(async () => {
+    const engine = window.__lf.platform.engine;
+    await engine.close();
+    const why = await engine.setSlotInputChannel(0, 1).then(() => 'ok', (e) => e.message);
+    await engine.open(window.__lf.native.opened.at(-1));
+    return why;
+  });
+  assert.equal(closed, 'no audio device is open', 'a pick after close() is refused');
+  assert.deepEqual(await page.evaluate(() => window.__lf.native.slotInputChannels), [[0, [2, 3]], [1, null], [1, 0]], 'and not recorded');
 
   // ── The Tauri and production hosts refuse the chain without logging ──────────────────────────────
   const refusals = await page.evaluate(async () => {
@@ -721,7 +731,7 @@ await probe(async ({ open }) => {
       transformCallback: () => 1,
       unregisterCallback() {},
       invoke: async (cmd, args) => {
-        invokes.push([cmd, cmd === 'input_send' ? args.items : null]);
+        invokes.push([cmd, cmd === 'input_send' ? args.items : cmd === 'engine_set_slot_input_channel' ? args : null]);
         return cmd === 'midi_subscribe' ? 1 : null;
       },
     };
@@ -754,5 +764,6 @@ await probe(async ({ open }) => {
   assert.deepEqual([ipc.unitOnly, ipc.mixed], [false, false], 'a call that carried a unit command resolves false');
   assert.equal(ipc.direct, 'The native engine does not have the chain yet.', 'the IPC boundary refuses a batch with one');
   assert.deepEqual(ipc.invokes.filter(([cmd]) => cmd === 'input_send').map(([, items]) => items), [[{ engine: 'PlayAll' }]], 'zero unit commands invoked: only the other command left');
-  assert.ok(ipc.invokes.some(([cmd]) => cmd === 'engine_set_slot_input_channel'), 'the stereo pick goes to the native engine as the one input-pick command');
+  assert.deepEqual(ipc.invokes.filter(([cmd]) => cmd === 'engine_set_slot_input_channel'), [['engine_set_slot_input_channel', { slot: 0, channel: [0, 1] }]],
+    'the stereo pick goes to the native engine as the one input-pick command, its slot and pair whole');
 });

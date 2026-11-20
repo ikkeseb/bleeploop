@@ -128,7 +128,8 @@ export async function refreshOutputDevices(): Promise<boolean> {
  * Refresh BOTH native device lists and prune any persisted device id no longer present (an interface
  * unplugged since it was last picked), resetting it to '' so a later arm falls back to the default
  * device instead of failing on a stale id; and each slot's channel pick the device lacks, or both with
- * a pruned input device (counted on `running`, the device that runs, if one does: `inputChannelCount`).
+ * a pruned input device (counted on `running`, the device that runs: `inputChannelCount`; with none
+ * running, the open resolves them).
  * Called once at startup — so pruning happens before the user can arm — and again whenever the Audio
  * Settings popover opens (to catch a mid-session unplug). No-op in the web build.
  */
@@ -146,9 +147,11 @@ export async function refreshAndPruneDevices(running: DeviceStatus | null = null
     writeAudioDeviceSettings({ inputDeviceId: '', ...(usingAsio() ? {} : { inputChannel: '' }) });
     if (!usingAsio()) saveSlotInputChannels(defaultSlotInputChannels());
   }
-  // A slot pick past the device's inputs, either side of a pair (saved on a device with more), is not
-  // what the slot reads.
-  const inputs = inputChannelCount(running);
+  // A slot pick past the running device's inputs, either side of a pair (saved on a device with more),
+  // is not what the slot reads. With no device running (startup) the picks go to the open as saved: the
+  // device side reads auto for one it lacks and logs the fallback, and the open's status resets the
+  // saved pick (`dropLackingPicks`, `engine-store.ts`).
+  const inputs = running ? inputChannelCount(running) : 0;
   if (inputs > 0) {
     const picks = slotInputChannels();
     const past = (pick: InputPick): boolean => pickSides(pick)?.some((c) => c >= inputs) ?? false;

@@ -589,23 +589,74 @@ fn assert_take_records(h: &mut Harness) {
     assert!(ended.is_none(), "the take records on: {ended:?}");
 }
 
+/// The monitor's last `frames`, slot 0 live alone on the fake (channel c carries (c + 1) x `tone`): its
+/// left side `ratio` x its right on every frame, and the left at `level` x the tone's 0.1 peak.
+#[track_caller]
+fn assert_slot_0_reads(h: &Harness, ratio: f32, level: f32, what: &str) {
+    // Past the join pipe's capacity (half a second): no frame read before the change is in the window.
+    h.play(RATE * 3 / 4);
+    let at = h.frame();
+    let heard = h.fake.heard_stereo(at - 4096..at);
+    assert_sides(&heard, ratio, 1e-5, 0.08 * level, what);
+    let peak = heard.iter().map(|[l, _]| l.abs()).fold(0.0, f32::max);
+    assert!(peak < 0.1 * level + 1e-3, "{what}: the left peaks at {peak}, past input {level}'s");
+}
+
 // Windows moves a stream on its default with the default (a headset plugged in): cpal opens a default
 // side as Windows' virtual default endpoint. Where the new endpoint runs the engine's rate, the run
 // follows it, though its mic is mono: an open that changes nothing else (the Buffer select, which
 // WASAPI ignores) keeps the stream that already plays there, and a take in flight keeps recording.
+// The capture keeps the two channels it opened with, and each slot's pick is read again against the
+// headset's one input: the pair on inputs 1+2 and auto take input 1, the status says so, the monitor
+// plays input 1 on both sides, and a change to an input the headset lacks is refused.
 #[test]
 fn a_default_windows_moved_at_the_engines_rate_plays_on_through_a_take() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
-    h.open(wasapi(None, None));
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    assert_eq!(h.open(request.clone()).input_channels, [Pair([0, 1]), Mono(1)]);
     start_take(&mut h);
+    assert_slot_0_reads(&h, 0.5, 1.0, "the pair on the stereo default: input 1 left, input 2 right");
     h.fake.move_default("headset", FakeDevice { in_channels: 1, ..FakeDevice::new("Headset", 48_000, 480) });
-    until("the status names the new default", || h.host.status().is_some_and(|s| (s.input_name.as_str(), s.output_name.as_str()) == ("Headset", "Headset")));
-    h.open(DeviceRequest { buffer: Some(128), ..wasapi(None, None) });
-    h.open(wasapi(None, None));
+    until("the status names the new default and what each slot reads there", || {
+        h.host.status().is_some_and(|s| (s.input_name.as_str(), s.output_name.as_str(), s.input_channels) == ("Headset", "Headset", [Mono(0), Mono(0)]))
+    });
+    assert!(h.host.set_slot_input_channel(1, Some(Mono(1))).is_err(), "an input the headset lacks");
+    assert!(h.host.set_slot_input_channel(1, Some(Pair([0, 1]))).is_err(), "a pair with a side it lacks");
+    assert_slot_0_reads(&h, 1.0, 1.0, "input 1 on both sides");
+    h.open(DeviceRequest { buffer: Some(128), ..request.clone() });
+    h.open(request);
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Mono(0), Mono(0)]), "an open of the same request reads them the same");
     h.play(RATE / 10);
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
     assert_take_records(&mut h);
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// A default Windows moved to a wider input than the capture opened with (an interface with four inputs
+// for a stereo one): the running stream cannot read the inputs past its two, so the owner reopens there
+// on its own, at the engine's rate, with each slot's pick, and a change to inputs 3+4 then plays. Moved
+// to a mono headset and back, the stream that opened four wide plays on, each pick read again against
+// each endpoint's inputs; the request keeps the pick, so the interface reads it again.
+#[test]
+fn a_default_windows_moved_to_a_wider_input_reopens_there_with_the_picks() {
+    let h = Harness::new();
+    h.fake.set_input(|frame| tone(frame) * 0.25);
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    assert_eq!(h.open(request).input_channels, [Pair([0, 1]), Mono(1)]);
+    h.send(Command::SetSlotLive(0, true));
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the run reopens on the interface", || h.fake.started.load(SeqCst) == 2 && h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Pair([0, 1]), Mono(1)]), "with the pair");
+    assert_slot_0_reads(&h, 0.5, 0.25, "input 1 left, input 2 right");
+    h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).expect("inputs 3+4: the new stream reads them");
+    assert_slot_0_reads(&h, 0.75, 0.75, "input 3 left, input 4 right");
+    h.fake.move_default("headset", FakeDevice { in_channels: 1, ..FakeDevice::new("Headset", 48_000, 480) });
+    until("the headset's one input", || h.host.status().is_some_and(|s| s.input_channels == [Mono(0), Mono(0)]));
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the interface again", || h.host.status().is_some_and(|s| s.input_name == "Interface" && s.input_channels == [Pair([2, 3]), Mono(1)]));
+    assert_slot_0_reads(&h, 0.75, 0.75, "inputs 3+4 again");
+    assert_eq!(h.fake.started.load(SeqCst), 2, "the stream that opened on the interface ran on through the headset and back");
     assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
 }
 
@@ -1471,6 +1522,25 @@ fn assert_sides(heard: &[[f32; 2]], ratio: f32, tol: f32, floor: f32, what: &str
     assert!(odd.is_empty(), "{what}: the left is not {ratio} x the right on its frame: {odd:?} of {}", heard.len());
 }
 
+/// ASIO's monitor over the `heard.len()` frames before `at`, one slot live on the fake (channel c
+/// carrying (c + 1) x `tone`): each side bit for bit its channel's `gains` x `tone` on the same frame,
+/// through the fake's i32 input and output rails, the engine at unity between them. A frame late, a gain
+/// off by one part in a million or the other side's channel fails it.
+#[track_caller]
+fn assert_asio_monitor(heard: &[[f32; 2]], at: Frame, gains: [f32; 2], what: &str) {
+    use cpal::Sample;
+    let rail = |x: f32| f32::from_sample(i32::from_sample(x));
+    let start = at - heard.len() as Frame;
+    let odd: Vec<(Frame, [f32; 2])> = heard
+        .iter()
+        .enumerate()
+        .map(|(k, &sides)| (start + k as Frame, sides))
+        .filter(|&(t, sides)| (0..2).any(|s| sides[s].to_bits() != rail(rail(tone(t) * gains[s])).to_bits()))
+        .take(4)
+        .collect();
+    assert!(odd.is_empty(), "{what}: frames off their input frame's value: {odd:?}");
+}
+
 /// A pair pick through the device side (unit contract §7): the fake's four channels, channel c carrying
 /// (c + 1) x a tone, so each side names the channel it read by its level. Slot 0 on inputs 3+1 (left 3x,
 /// right 1x) keeps each side its own channel on the same frame through the monitor, and on ASIO's
@@ -1494,13 +1564,9 @@ fn a_pair_pick_keeps_each_side_its_own_channel_through_the_monitor_and_the_recor
         let monitor = h.fake.heard_stereo(at - 4096..at);
         assert_sides(&monitor, 3.0, 1e-5, 0.25, &format!("{backend:?}: the monitor"));
         if backend == AudioBackend::Asio {
-            // The handoff moves no frame: some one delay maps every output frame to its input frame,
-            // on both sides at once.
-            let exact = |d: Frame| (0..4096).all(|k| {
-                let (t, [l, r]) = (at - 4096 + k as Frame, monitor[k]);
-                (l - tone(t - d) * 3.0).abs() < 1e-6 && (r - tone(t - d)).abs() < 1e-6
-            });
-            assert!((-4096..4096).any(exact), "ASIO: no one delay maps both sides to their input frames");
+            // The handoff moves no frame: output frame t plays input frame t on both sides, each its own
+            // channel bit for bit through the fake's i32 rails at unity.
+            assert_asio_monitor(&monitor, at, [3.0, 1.0], "ASIO: the pair");
         }
         h.host.set_slot_input_channel(0, Some(Mono(2))).unwrap();
         h.play(RATE * 3 / 4);
@@ -1508,6 +1574,10 @@ fn a_pair_pick_keeps_each_side_its_own_channel_through_the_monitor_and_the_recor
         let mono = h.fake.heard_stereo(at - 4096..at);
         assert_sides(&mono, 1.0, 0.0, 0.25, &format!("{backend:?}: a mono pick"));
         assert!(mono.iter().all(|[l, r]| l.to_bits() == r.to_bits()), "{backend:?}: a mono pick plays both sides bit-equal");
+        if backend == AudioBackend::Asio {
+            // Each side bit for bit what a mono pick played before the pair: its channel, on its frame.
+            assert_asio_monitor(&mono, at, [3.0, 3.0], "ASIO: a mono pick");
+        }
         h.host.set_slot_input_channel(0, Some(Pair([2, 0]))).unwrap();
         h.play(RATE * 3 / 4);
         // The take records the slot's pair (record_loop takes the slot live for the take only).
@@ -1523,15 +1593,31 @@ fn a_pair_pick_keeps_each_side_its_own_channel_through_the_monitor_and_the_recor
 
 /// A pick the device lacks, either side of a pair: an open takes auto for that slot (mono, and the
 /// owner logs the fallback), the other slot keeps its pair; a change on the running device to one is
-/// refused and moves nothing.
+/// refused and moves nothing, in the status and in what both slots play (channel c carries (c + 1) x the
+/// input: slot 0 on input 2 is 2x on both sides, slot 1 on inputs 4+3 is 4x left and 3x right, so the
+/// two live together play 6x left and 5x right, and either slot silenced or moved shows).
 #[test]
 fn a_pair_with_a_side_the_device_lacks_opens_as_auto_and_a_change_to_one_is_refused() {
     let h = Harness::new();
     h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    h.fake.set_input(|frame| tone(frame) * 0.25);
     let status = h.open(DeviceRequest { input_channels: [Some(Pair([1, 5])), Some(Pair([3, 2]))], ..asio(Some(256)) });
     assert_eq!(status.input_channels, [Mono(1), Pair([3, 2])], "the right side is missing: slot 0 reads auto");
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::SetSlotLive(1, true));
+    let both_play = |what: &str| {
+        h.play(RATE / 4);
+        let at = h.frame();
+        let heard = h.fake.heard_stereo(at - 4096..at);
+        assert_sides(&heard, 6.0 / 5.0, 1e-5, 0.6 * 0.025 * 0.8, what);
+        let peak = heard.iter().map(|[l, _]| l.abs()).fold(0.0, f32::max);
+        assert!(peak < 6.0 * 0.025 + 1e-3, "{what}: the left peaks at {peak}, past 6x the input's");
+    };
+    both_play("slot 0 on input 2, slot 1 on inputs 4+3");
     assert!(h.host.set_slot_input_channel(1, Some(Pair([4, 0]))).is_err(), "a left side the device lacks");
+    both_play("after a refused left side");
     assert!(h.host.set_slot_input_channel(1, Some(Pair([0, 4]))).is_err(), "a right side the device lacks");
+    both_play("after a refused right side");
     assert_eq!(h.host.status().map(|s| s.input_channels), Some([Mono(1), Pair([3, 2])]), "a refused change moves nothing");
     h.host.set_slot_input_channel(0, Some(Pair([0, 1]))).unwrap();
     assert_eq!(h.host.status().map(|s| s.input_channels), Some([Pair([0, 1]), Pair([3, 2])]));

@@ -967,11 +967,13 @@ export const webEngineFake: EngineFake = {
   },
   async setSlotInputChannel(slot, pick) {
     if (!engineForced()) throw new Error(NO_ENGINE);
+    // As native: no device open, no pick (`EngineHost::set_slot_input_channel`).
+    if (!fakeStatus) throw new Error('no audio device is open');
     if (slot !== 0 && slot !== 1) throw new Error(`slot ${slot} does not exist`);
     if (pick !== null && lacksPick(pick)) throw new Error(`The device lacks input ${JSON.stringify(pick)}`);
     const taken: InputPick = Array.isArray(pick) ? [pick[0], pick[1]] : pick;
     webEngineFake.slotInputChannels.push([slot, taken]);
-    if (fakeStatus?.inputChannels) {
+    if (fakeStatus.inputChannels) {
       const reads = fakeStatus.inputChannels.slice() as [ReadPick, ReadPick];
       reads[slot] = taken ?? 1;
       fakeStatus = { ...fakeStatus, inputChannels: reads };

@@ -260,6 +260,10 @@ struct Active {
     input_dead: bool,
     /// What each slot reads now (`DeviceStatus::input_channels`): the owner is the only writer.
     reads: [InputPick; SLOT_COUNT],
+    /// The inputs a slot's pick is judged against: the input endpoint's now. The capture stream keeps
+    /// the width it opened at (`spec.in_channels`); a default Windows moved to a narrower endpoint
+    /// narrows this, one wider reopens (`transition::follows`), so it never exceeds the stream's.
+    inputs: usize,
 }
 
 /// The release log's view of the callbacks, which cannot log: once a `GLITCH_EVERY`, the fault counters
@@ -472,7 +476,7 @@ impl<D: Driver> Owner<D> {
             log::info!("[engine_io] a switch to {} Hz refused: the engine at {from} Hz holds audio", spec.rate);
             return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
         }
-        let channels = open_channels(&spec, request.input_channels);
+        let channels = open_channels(&spec.input_name, spec.in_channels, request.input_channels);
         if steps.stop {
             self.stop(steps.fade_out);
         }
@@ -558,10 +562,26 @@ impl<D: Driver> Owner<D> {
                 moved.rate,
                 self.core.rate().unwrap_or(0)
             ),
-            Ok(Some((moved, _))) => log::info!(
+            Ok(Some((moved, _))) if !self.core.device.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.input_open) => log::info!(
                 "[engine_io] Windows moved the default input to \"{}\": the device that runs has no input; an open of the same device starts it there",
                 moved.input_name
             ),
+            Ok(Some((moved, _))) => {
+                // A wider capture (`transition::follows`): the stream that runs cannot read its other
+                // inputs, so it reopens there now, at the engine's rate (a take in flight punches out).
+                log::info!(
+                    "[engine_io] Windows moved the default input to \"{}\" ({} inputs, the stream reads {}): reopening there",
+                    moved.input_name,
+                    moved.in_channels,
+                    self.active.as_ref().map_or(0, |a| a.spec.in_channels)
+                );
+                let backend = request.backend;
+                if let Err(error) = self.open(request, By::Owner) {
+                    let reason = format!("the device did not reopen on Windows' new default input: {error}");
+                    log::error!("[engine_io] {reason}");
+                    self.event(DeviceEvent::Lost { backend, reason });
+                }
+            }
             Err(error) => log::warn!("[engine_io] Windows' default changed and does not resolve: {error}"),
         }
     }
@@ -592,6 +612,15 @@ impl<D: Driver> Owner<D> {
         active.spec.output_name = moved.output_name;
         if moved.in_channels > 0 {
             active.spec.input_name = moved.input_name;
+        }
+        // A capture endpoint of another width the stream still carries (a mono headset mic under a
+        // stereo stream, and back): each slot's pick is read again against its inputs, a pick it lacks
+        // taking auto, flagged, so the status never names an input the endpoint lacks and a change to
+        // one is refused.
+        if input_open && moved.in_channels > 0 && moved.in_channels != active.inputs {
+            active.inputs = moved.in_channels;
+            let picks = active.request.input_channels;
+            self.set_input_channels(picks)?;
         }
         Ok(None)
     }
@@ -743,7 +772,8 @@ impl<D: Driver> Owner<D> {
             input_frames: 0,
         };
         *self.core.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
-        self.active = Some(Active { request, spec, run, streams: started.streams, block, input_dead: false, reads: channels });
+        let inputs = spec.in_channels;
+        self.active = Some(Active { request, spec, run, streams: started.streams, block, input_dead: false, reads: channels, inputs });
         if let Some(s) = self.status() {
             log::info!(
                 "[engine_io] {:?} running: {} Hz, {block}-frame blocks, in \"{}\" {:?} (per slot), out \"{}\", align {} frames (input {})",
@@ -868,7 +898,7 @@ impl<D: Driver> Owner<D> {
         };
         self.recaptured = Some(Instant::now());
         log::error!("[engine_io] the input callback panicked: restarting \"{}\" at {} Hz; the engine and its loops stay", spec.output_name, spec.rate);
-        let channels = open_channels(&spec, request.input_channels);
+        let channels = open_channels(&spec.input_name, spec.in_channels, request.input_channels);
         self.stop(true);
         if let Err(error) = self.start(request, spec.clone(), device, channels) {
             let reason = format!("the device did not restart after its input failed: {error}");
@@ -927,7 +957,7 @@ impl<D: Driver> Owner<D> {
     /// Every slot's input, in place, as an open takes them (a pick the device lacks: auto).
     fn set_input_channels(&mut self, channels: [Option<InputPick>; SLOT_COUNT]) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
-        let resolved = open_channels(&active.spec, channels);
+        let resolved = open_channels(&active.spec.input_name, active.inputs, channels);
         self.core.break_tuner(Frame::MAX);
         active.run.set_slot_channels(resolved);
         active.reads = resolved;
@@ -946,8 +976,8 @@ impl<D: Driver> Owner<D> {
             return Err(format!("no slot {slot}"));
         }
         let mut picks = active.reads;
-        picks[slot] = match transition::input_channel(active.spec.in_channels, channel) {
-            Err(_) if active.spec.in_channels == 0 => InputPick::Mono(0),
+        picks[slot] = match transition::input_channel(active.inputs, channel) {
+            Err(_) if active.inputs == 0 => InputPick::Mono(0),
             pick => pick?,
         };
         self.core.break_tuner(Frame::MAX);
@@ -1081,18 +1111,13 @@ impl<D: Driver> Owner<D> {
     }
 }
 
-/// Each slot's channel at an open of `spec` ([`transition::open_channels`]): a slot whose pick the
-/// device lacks reads auto, said once in the log.
-fn open_channels(spec: &Spec, picks: [Option<InputPick>; SLOT_COUNT]) -> [InputPick; SLOT_COUNT] {
-    let (channels, fell_back) = transition::open_channels(spec.in_channels, picks);
+/// Each slot's channel on the input `name` with `inputs` channels ([`transition::open_channels`]): a
+/// slot whose pick it lacks reads auto, said once in the log with why.
+fn open_channels(name: &str, inputs: usize, picks: [Option<InputPick>; SLOT_COUNT]) -> [InputPick; SLOT_COUNT] {
+    let (channels, fell_back) = transition::open_channels(inputs, picks);
     for slot in (0..SLOT_COUNT).filter(|&slot| fell_back[slot]) {
-        log::warn!(
-            "[engine_io] slot {slot}: {} is not on \"{}\" ({} inputs): it reads {}",
-            picks[slot].map_or_else(|| "auto".to_string(), input_name),
-            spec.input_name,
-            spec.in_channels,
-            input_name(channels[slot])
-        );
+        let why = transition::input_channel(inputs, picks[slot]).err().unwrap_or_default();
+        log::warn!("[engine_io] slot {slot} on \"{name}\": {why}: it reads {}", input_name(channels[slot]));
     }
     channels
 }

@@ -159,7 +159,7 @@ reset();
 store.set(KEY, JSON.stringify({ inputChannel: '1' }));
 check('no per-slot channels saved -> both slots start on the global channel', () =>
   assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [1, 1]));
-for (const bad of [['1'], ['1', '2', '3'], ['x', '1'], ['-1', ''], 'ab', null, {}, [[0], 1], [[0, 1, 2], null], [-1, null], [1.5, null], [[0, '1'], null]]) {
+for (const bad of [['1'], ['1', '2', '3'], ['x', '1'], ['-1', ''], ['1000', ''], 'ab', null, {}, [[0], 1], [[0, 1, 2], null], [-1, null], [1.5, null], [[0, '1'], null], [2 ** 32, null], [[0, 2 ** 32], null]]) {
   reset();
   store.set(KEY, JSON.stringify({ inputChannel: '2', slotInputChannels: bad }));
   check(`slotInputChannels ${JSON.stringify(bad)} -> the global channel for both`, () =>
@@ -176,6 +176,10 @@ reset();
 store.set(KEY, JSON.stringify({ inputChannel: '1', slotInputChannels: [null, [2, 3]] }));
 check('picks in the engine shape (null, a channel, [left, right]) read as stored', () =>
   assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, [2, 3]]));
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: '1', slotInputChannels: [[0, 1000], 2 ** 32 - 1] }));
+check("a numeric pick takes the wire's u32 range (the three-digit rule is the legacy strings')", () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [[0, 1000], 2 ** 32 - 1]));
 reset();
 store.set(KEY, JSON.stringify({ slotInputChannels: ['1', ''] }));
 writeAudioDeviceSettings({ slotInputChannels: [[0, 1], null] });

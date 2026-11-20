@@ -737,6 +737,42 @@ pub(crate) mod tests {
         }
     }
 
+    /// DEV measurement, not a gate (`--ignored`): what the WASAPI join's pull (push included) costs at
+    /// 2 and 4 channels, 10 ms pushes and 470-490-frame pulls, 30 s of audio per case, rubato at
+    /// opt-level 3 as every build has it. Prints the mean and the 99th percentile per pull, and the mean
+    /// as a share of a 10 ms period. The numbers live in `callback.rs` at `JOIN_CHANNELS`.
+    #[test]
+    #[ignore]
+    fn measure_the_join_pull_at_2_and_4_channels() {
+        for (in_rate, out_rate) in [(48_000, 48_000), (44_100, 48_000)] {
+            for channels in [2, 4] {
+                let (mut tx, mut rx) = pipe(PipeConfig { channels, ..config(in_rate, out_rate) }).unwrap();
+                let push = in_rate as usize / 100;
+                let block: Vec<f32> = (0..push * channels).map(|k| (k as f32 * 0.01).sin() * 0.25).collect();
+                let mut out = vec![0.0f32; 1024 * channels];
+                let mut size = wandering();
+                let (mut pulled, mut owed, mut took) = (0usize, 0.0f64, Vec::new());
+                while pulled < out_rate as usize * 30 {
+                    owed += push as f64 * out_rate as f64 / in_rate as f64;
+                    let at = std::time::Instant::now();
+                    tx.push(&block);
+                    while owed >= 490.0 {
+                        let n = size(pulled as u64);
+                        rx.pull(&mut out[..n * channels]);
+                        std::hint::black_box(&out);
+                        owed -= n as f64;
+                        pulled += n;
+                    }
+                    took.push(at.elapsed().as_secs_f64() * 1e6);
+                }
+                took.sort_by(f64::total_cmp);
+                let mean = took.iter().sum::<f64>() / took.len() as f64;
+                let p99 = took[took.len() * 99 / 100];
+                println!("join {in_rate}->{out_rate} Hz, {channels} ch: mean {mean:.1} us, p99 {p99:.1} us per 10 ms ({:.2} % of the period)", mean / 100.0);
+            }
+        }
+    }
+
     /// `host::rt_alloc`'s shim is this crate's global allocator in debug builds (the test build): its
     /// counter moves for any allocation on a thread that holds the guard.
     #[cfg(debug_assertions)]

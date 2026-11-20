@@ -8,6 +8,7 @@
 
 use lf_engine::SLOT_COUNT;
 
+use super::callback::PICK_CHANNELS;
 use super::driver::Spec;
 use super::{DeviceRequest, InputPick, SAMPLE_RATES};
 use crate::audio_output::AudioBackend;
@@ -98,11 +99,15 @@ pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers
 /// flag, keeps the width and rate it opened at, and whether Windows converts it across another format
 /// is unmeasured (a dead capture is a loss, as any). At the engine's rate the run already plays where
 /// `moved` names, and a restart would only end a take. It reopens only for what the running streams
-/// cannot give: another engine rate (a fresh open runs the endpoint's own), or a capture where the run
-/// has none (`input_open` false: none opened, or none to open) and Windows now offers another.
+/// cannot give: another engine rate (a fresh open runs the endpoint's own), a capture where the run
+/// has none (`input_open` false: none opened, or none to open) and Windows now offers another, or a
+/// capture wider than the one that runs (`running.in_channels`, the width it opened at): a channel
+/// past it is one the stream cannot read, and the slots' picks are judged against the endpoint's
+/// inputs. A narrower one plays on; the owner reads its picks again against the new width.
 pub(crate) fn follows(running: &Spec, input_open: bool, moved: &Spec) -> bool {
     let capture_to_start = !input_open && moved.in_channels > 0 && moved.endpoints.input != running.endpoints.input;
-    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start
+    let wider = input_open && moved.in_channels > running.in_channels;
+    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start && !wider
 }
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
@@ -130,12 +135,16 @@ pub(crate) fn fallbacks(lost: &DeviceRequest, input_lost: bool, output_lost: boo
 /// What `requested` reads on an input with `channels` channels: auto is input 2 on a device with two or
 /// more (where an instrument input usually sits), as `audio_input` picks it, mono. A pick the device
 /// lacks, either side of a pair, is refused: a change on the running device
-/// (`EngineHost::set_slot_input_channel`).
+/// (`EngineHost::set_slot_input_channel`). So is a channel past the [`PICK_CHANNELS`] the callback's
+/// pick word can carry, on a device that has it (cpal 0.18.1 counts channels in a `u16`, so none does).
 pub(crate) fn input_channel(channels: usize, requested: Option<InputPick>) -> Result<InputPick, String> {
     let channels = channels.max(1);
     match requested {
-        Some(pick) => match pick.sides().into_iter().find(|&c| c as usize >= channels) {
+        Some(pick) => match pick.sides().into_iter().find(|&c| c as usize >= channels.min(PICK_CHANNELS)) {
             None => Ok(pick),
+            Some(channel) if (channel as usize) < channels => {
+                Err(format!("input channel {} is past the {PICK_CHANNELS} a slot can read", channel as u64 + 1))
+            }
             Some(channel) => Err(format!("input channel {} is unavailable; this device has {channels} channels", channel as u64 + 1)),
         },
         None => Ok(InputPick::Mono(if channels >= 2 { 1 } else { 0 })),
@@ -245,6 +254,7 @@ mod tests {
         assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1)), "a mono mic: the capture runs on at its width");
         assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2)), "a mic at another rate: the capture runs on at the rate it opened at");
         assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0)), "no capture default left: nothing to reopen for");
+        assert!(!follows(&running, true, &spec("Interface", 48_000, 48_000, 4)), "a wider capture: inputs the running stream cannot read");
         assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2)), "another engine rate opens at the endpoint's own");
         assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2)), "a capture the run lacks starts there");
         let output_moved = Spec { endpoints: Endpoints { input: Some("Mic".into()), output: Some("Headset".into()) }, ..spec("Headset", 48_000, 48_000, 2) };
@@ -324,6 +334,11 @@ mod tests {
         assert_eq!(input_channel(4, Some(Pair([3, 0]))), Ok(Pair([3, 0])), "in either order");
         assert!(input_channel(2, Some(Pair([0, 2]))).is_err(), "a pair whose right side the device lacks");
         assert!(input_channel(2, Some(Pair([2, 0]))).is_err(), "or its left");
+        let wide = PICK_CHANNELS + 1;
+        assert_eq!(input_channel(wide, Some(Mono(PICK_CHANNELS as u32 - 1))), Ok(Mono(PICK_CHANNELS as u32 - 1)), "the last channel the pick word carries");
+        assert!(input_channel(wide, Some(Mono(PICK_CHANNELS as u32))).is_err(), "past it: refused, never read as another");
+        assert!(input_channel(wide, Some(Pair([0, PICK_CHANNELS as u32]))).is_err(), "either side of a pair");
+        assert_eq!(open_channels(wide, [Some(Mono(PICK_CHANNELS as u32)), None]), ([Mono(1), Mono(1)], [true, false]), "an open takes auto, flagged");
     }
 
     #[test]

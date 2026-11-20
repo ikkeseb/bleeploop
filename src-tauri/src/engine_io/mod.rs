@@ -84,7 +84,10 @@
 //!   converted to the new endpoint's format; the capture across another format: unmeasured). On cpal's
 //!   `DeviceChanged` (and on an open of the same request) the owner names the new endpoint in the
 //!   status; at the engine's rate the run follows it, so nothing reopens and no take ends
-//!   (`transition::follows`). At another rate, or with a capture to start where the run has none, an
+//!   (`transition::follows`). The capture keeps the width it opened at: on a narrower input endpoint
+//!   each slot's pick is read again against its inputs (a pick it lacks reads auto, logged; the status
+//!   says so), and a wider one, whose inputs past that width the stream cannot read, reopens there at
+//!   once, at the engine's rate. At another rate, or with a capture to start where the run has none, an
 //!   open of the same request reopens there (refused while the loops cannot play at the new rate).
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
@@ -685,9 +688,10 @@ pub(crate) struct Core {
     /// The alignment the output callback last rendered with (`DeviceStatus`).
     pub(crate) align_frames: AtomicI64,
     pub(crate) input_frames: AtomicI64,
-    /// The input meter since the feed last took it, per slot: each side's peak (f32 bits) and whether a
+    /// The input meter since the feed last took it, per slot: both sides' peaks in one word (f32 bits,
+    /// the left low, `callback::meter`), so a callback's pair and a take never split, and whether a
     /// sample on either reached full scale.
-    pub(crate) meter_peak: [[AtomicU32; 2]; SLOT_COUNT],
+    pub(crate) meter_peak: [AtomicU64; SLOT_COUNT],
     pub(crate) meter_clip: [AtomicBool; SLOT_COUNT],
     /// The tuner's input broke where the engine cannot see it (`Core::break_tuner`): raised by the owner
     /// once `tuner_fence` holds the first device frame surely read from the new input. The feed resets
@@ -760,6 +764,15 @@ pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Eve
 }
 
 impl Core {
+    /// The input meter since the last take (`EngineHost::take_meter`): each slot's pair in one swap.
+    pub(crate) fn take_meter(&self) -> ([[f32; 2]; SLOT_COUNT], [bool; SLOT_COUNT]) {
+        let peak = self.meter_peak.each_ref().map(|p| {
+            let word = p.swap(0, Relaxed);
+            [f32::from_bits(word as u32), f32::from_bits((word >> 32) as u32)]
+        });
+        (peak, self.meter_clip.each_ref().map(|c| c.swap(false, Relaxed)))
+    }
+
     pub(crate) fn new() -> Core {
         Core {
             rt: Mutex::new(Rt {
@@ -794,7 +807,7 @@ impl Core {
             frame: AtomicI64::new(0),
             align_frames: AtomicI64::new(0),
             input_frames: AtomicI64::new(0),
-            meter_peak: [const { [const { AtomicU32::new(0) }; 2] }; SLOT_COUNT],
+            meter_peak: [const { AtomicU64::new(0) }; SLOT_COUNT],
             meter_clip: [const { AtomicBool::new(false) }; SLOT_COUNT],
             tuner_breaks: AtomicU64::new(0),
             tuner_fence: AtomicI64::new(0),
@@ -1235,8 +1248,7 @@ impl EngineHost {
     /// The input meter since the last call, per slot: each side's linear peak (a mono pick's twice), and
     /// whether a sample on either reached full scale.
     pub fn take_meter(&self) -> ([[f32; 2]; SLOT_COUNT], [bool; SLOT_COUNT]) {
-        let peak = self.core.meter_peak.each_ref().map(|slot| slot.each_ref().map(|p| f32::from_bits(p.swap(0, Relaxed))));
-        (peak, self.core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed)))
+        self.core.take_meter()
     }
 
     /// The engine's sample rate, once a device opened.

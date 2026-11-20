@@ -249,20 +249,33 @@ impl Run {
     }
 }
 
-const _: () = assert!(JOIN_CHANNELS * 16 <= 64, "every side of every slot fits the one word");
+/// The channels a slot's pick can name: 16 bits a side in the one word. `transition::input_channel`
+/// refuses a channel past them (an open takes auto for it, flagged), so the word never holds one.
+pub(crate) const PICK_CHANNELS: usize = 1 << 16;
+const _: () = assert!(JOIN_CHANNELS * PICK_CHANNELS.ilog2() as usize <= 64, "every side of every slot fits the one word");
 
-/// Every slot's two sides in one word, side `k` of slot `s` in bits `16 (2 s + k)..` (a channel past
-/// 16 bits reads the last the word holds: no device has that many, and the read clamps to the device's).
+/// Every slot's two sides in one word, side `k` of slot `s` in bits `16 (2 s + k)..`. Every channel is
+/// below [`PICK_CHANNELS`] (`transition::input_channel`).
 fn pack(picks: [InputPick; SLOT_COUNT]) -> u64 {
     let sides = picks.iter().flat_map(|p| p.sides());
-    sides.enumerate().fold(0, |word, (k, c)| word | u64::from(c.min(u32::from(u16::MAX))) << (16 * k))
+    sides.enumerate().fold(0, |word, (k, c)| {
+        debug_assert!((c as usize) < PICK_CHANNELS, "channel {c} past the pick word");
+        word | u64::from(c as u16) << (16 * k)
+    })
 }
 
 fn unpack(word: u64) -> [[u32; 2]; SLOT_COUNT] {
     std::array::from_fn(|s| std::array::from_fn(|k| (word >> (16 * (2 * s + k))) as u16 as u32))
 }
 
-/// The join pipe's width: each slot's pair, interleaved slot by slot, left first.
+/// The join pipe's width: each slot's pair, interleaved slot by slot, left first, whatever the picks
+/// (a mono pick's channel twice). Its resampler's channels are fixed when the pipe is built, so carrying
+/// only what the picks need would rebuild the join, its primed fill and its learned drift, on every
+/// pick change. The cost of the width (`pipes`' `measure_the_join_pull_at_2_and_4_channels`, two runs,
+/// the test profile: this crate at opt-level 0, rubato at 3; release unmeasured): a 10 ms push and its
+/// pulls take a mean of 155-164 us (p99 268-328 us) at 2 channels and 308-323 us (p99 521-583 us) at 4,
+/// at 48 -> 48 and 44.1 -> 48 kHz alike: linear in the channels, about 3 % of the period at 4. The rig's
+/// WASAPI input and output callback times at 4 channels are unmeasured.
 pub(crate) const JOIN_CHANNELS: usize = SLOT_COUNT * 2;
 
 /// The median of a run's first `LATENCY_SAMPLES` latency reports, then frozen.
@@ -915,9 +928,7 @@ impl Render {
             Source::Join { xs, .. } => xs.each_ref().map(|pair| pair.each_ref().map(|x| &x[..])),
         };
         for (slot, pair) in inputs.iter().enumerate() {
-            for (side, input) in pair.iter().enumerate() {
-                meter(&self.core, slot, side, &input[..avail.min(input.len())]);
-            }
+            meter(&self.core, slot, pair.map(|input| &input[..avail.min(input.len())]));
         }
         let mut engine = engine.as_mut().filter(|_| !*faulted);
         let max_block = self.left.len();
@@ -992,13 +1003,17 @@ impl Render {
     }
 }
 
-/// Fold a block of one side of a slot's input into the meter's peak the feed takes. Its clip the input
-/// callbacks latch, in the device's own format ([`Rail`]).
-fn meter(core: &Core, slot: usize, side: usize, input: &[f32]) {
-    let peak = input.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
-    if peak > 0.0 {
-        // A non-negative f32's bits order as the value does.
-        core.meter_peak[slot][side].fetch_max(peak.to_bits(), Relaxed);
+/// Fold a block of a slot's pair into the meter's peaks the feed takes, both sides in one word
+/// (`Core::meter_peak`), so a feed take never holds one side of a block without the other. Its clip
+/// the input callbacks latch, in the device's own format ([`Rail`]).
+pub(crate) fn meter(core: &Core, slot: usize, pair: [&[f32]; 2]) {
+    let [left, right] = pair.map(|input| input.iter().fold(0.0f32, |m, &x| m.max(x.abs())).to_bits());
+    if left | right != 0 {
+        // A non-negative f32's bits order as the value does. The feed's take is the only other writer:
+        // the update retries at most past its one swap.
+        let _ = core.meter_peak[slot].fetch_update(Relaxed, Relaxed, |word| {
+            Some(u64::from((word as u32).max(left)) | u64::from(((word >> 32) as u32).max(right)) << 32)
+        });
     }
 }
 
