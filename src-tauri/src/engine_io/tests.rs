@@ -2409,6 +2409,32 @@ fn a_master_that_fails_to_render_still_answers_the_stems_with_its_error() {
     assert_eq!(pcm, stems, "the stems, and nothing after them");
 }
 
+/// An export renders at the master volume and mute it was asked at: a mute that lands while it waits
+/// for another export's render leaves its master as loud as the same export unwaited.
+#[test]
+fn a_waiting_export_keeps_the_master_level_of_its_ask() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    let (_, _, [alone, _]) = session_with_master(&h.host.snapshot(true).expect("an unwaited export"));
+    let loudest = |x: &[f32]| x.iter().fold(0.0f32, |p, v| p.max(v.abs()));
+    assert!(loudest(&alone) > 0.01, "the unwaited master sounds");
+    let held = h.host.core.master_render.lock().unwrap();
+    std::thread::scope(|s| {
+        let export = s.spawn(|| h.host.snapshot(true));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!export.is_finished(), "the export waits for the render");
+        h.send(Command::SetMasterMute(true));
+        h.play(RATE / 100);
+        drop(held);
+        let (header, _, [left, right]) = session_with_master(&export.join().unwrap().expect("the waited export"));
+        assert!(header.get("masterError").is_none(), "{header}");
+        assert!(left.iter().chain(&right).all(|x| x.is_finite()), "every sample finite");
+        assert!(left == alone, "the master at the level of its ask, not muted after it (peak {} against {})", loudest(&left), loudest(&alone));
+    });
+}
+
 #[test]
 fn the_glitch_watch_logs_a_span_in_which_a_fault_counter_moved() {
     use super::owner::{GlitchWatch, GLITCH_EVERY};
@@ -3021,7 +3047,9 @@ fn a_one_channel_sessions_lane_plays_on_both_sides() {
     let from = h.frame();
     h.host.load_session(&session_bytes(&load, &pcm)).expect("the load");
     h.play(RATE / 2);
-    let played: Vec<[f32; 2]> = h.fake.heard_stereo(from..h.frame()).into_iter().filter(|p| !p[0].is_nan()).collect();
+    let played = h.fake.heard_stereo(from..h.frame());
+    // Both sides of every frame finite before they are compared (a NaN passes the check below).
+    assert!(played.iter().flatten().all(|x| x.is_finite()), "every frame of both sides heard and finite");
     assert!(played.iter().filter(|p| p[0].abs() > 0.01).count() > RATE as usize / 4, "the lane plays");
     // Alike to the output stage's rounding (the centred lane's two gains differ by an ulp, measured):
     // a side the decoder lost or garbled would be orders past it.

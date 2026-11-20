@@ -188,6 +188,8 @@ fn distinct_impulses_keep_their_side_frame_and_gain_from_input_to_the_wet_master
     // render's its warm-up (at the impulses about 1e-4 apart, measured).
     for (side, (wet, live)) in [&wet.left, &wet.right].into_iter().zip(&heard.master).enumerate() {
         assert_eq!(wet.len(), live.len());
+        // `f32::max` passes over a NaN difference: every sample finite first.
+        assert!(wet.iter().chain(live).all(|x| x.is_finite()), "side {side}: every sample finite");
         let worst = wet.iter().zip(live).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(worst < 5e-4, "side {side}: the wet master is the pass the device played, every frame ({worst} apart)");
     }
