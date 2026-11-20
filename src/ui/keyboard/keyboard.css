@@ -1,6 +1,6 @@
 /* Keyboard — KEY RIBBON. ONE horizontal bar: left meta (label + octave −/+ + current octave), the keys
-   as slim flat cells (white = one matte tone, black = one near-black tone, no gradient or shadow: the
-   fallback keyboard recedes under the lanes; hover lifts a tone, pressed = cyan-tinted fill), right meta
+   as slim flat cells (white = one matte ivory, black = one near-black tone, no gradient or shadow; hover
+   shifts a tone, pressed = cyan-tinted fill), right meta
    (key-row hint + move/hide). The 4×4 GM drum kit restyles to a 16-wide
    single row of the same cells so the ribbon height never jumps on a synth swap. The bar fills its
    resizable SplitStack pane, so the keys/pads STRETCH vertically when the user drags it taller.
@@ -130,25 +130,24 @@
   box-sizing: border-box;
 }
 
-/* WHITE keys — one flat tone with a hairline seam on the right. The tone sits plainly above the
-   near-black well and the black keys (2026-07-05 eye check: at .06 the "light" keys read fully dark), so
-   the piano geography reads at a glance, yet never the largest light surface on the screen: the keyboard
-   is the fallback and recedes under the lanes (no gradient, no shadow). */
+/* WHITE keys — one flat matte ivory with a hairline seam on the right (the owner's eye, 2026-11-20:
+   grey keys read wrong, keys should be whiter), so the piano geography reads at a glance; held below
+   paper white so the ribbon does not outshine the lanes (no gradient, no shadow). */
 .kb__key--white {
-  background: #18191f;
+  background: #d3d5d9;
   border-right: 1px solid var(--bg);
   border-radius: 0 0 3px 3px;
   z-index: 1;
   transition: background 0.05s, box-shadow 0.05s;
 }
 .kb__key--white:hover {
-  background: #202329;
+  background: #e2e4e7;
 }
 .kb__key--white.kb__key--down {
   /* pressed = a cyan face with a flat 1 px rim (no halo; matches the drum-pad hit idiom), NOT a hard
      bottom bar (2026-07-06 eye check: the -2px cyan edge under white keys was rejected) */
-  background: color-mix(in srgb, var(--cyan) 24%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 40%, transparent);
+  background: color-mix(in srgb, var(--cyan) 55%, #d3d5d9);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 80%, #0c0d10);
 }
 
 /* BLACK keys — one near-black flat tone over the whites, parted from them by the ground's hairline */
@@ -171,13 +170,13 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 55%, transparent);
 }
 
-/* octave markers (C keys only) — mono, seated at the key's foot: readable (11 px, scaled with the chair's
-   --ui) yet --faint, so the fallback keyboard stays the quietest thing on screen */
+/* octave markers (C keys only) — mono, seated at the key's foot: dark ink on the ivory (11 px, scaled
+   with the chair's --ui) */
 .kb__label {
   font-family: var(--mono);
   font-size: calc(11px * var(--ui));
   letter-spacing: 0.02em;
-  color: var(--faint);
+  color: #4a4e57;
   pointer-events: none;
 }
 
