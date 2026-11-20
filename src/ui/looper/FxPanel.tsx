@@ -6,7 +6,8 @@ import { mixDisposal, mixGesture } from './mix-gesture';
 import './fxpanel.css';
 
 /**
- * Per-track FX panel, two rows. The keys: the five FX (fixed chain order) as bypass toggles, then DUB
+ * Per-track FX panel, two rows. The keys: the five FX (fixed chain order) as latched keys whose LED is lit
+ * while the effect is engaged (the recipes, `src/app.css`), then DUB
  * FEEDBACK. Under them, while any FX is engaged, ONE row of every engaged FX's params (sliders for
  * continuous params, a select for tempo-synced divisions), each FX's group led by a tag naming it, so
  * engaging all five grows the drawer by one row, not by the tallest FX's stack.
@@ -59,7 +60,7 @@ function ParamControl(props: { index: number; fxIndex: number; fx: string; def: 
         fallback={
           <input
             type="range"
-            class="lf-range fxp-param__range"
+            class="k-fader fxp-param__range"
             min={props.def.min}
             max={props.def.max}
             step={props.def.step}
@@ -112,7 +113,7 @@ function DubFeedback(props: { index: number }) {
           <span class="fxp-param__label">Keep</span>
           <input
             type="range"
-            class="lf-range fxp-param__range"
+            class="k-fader fxp-param__range"
             min={0}
             max={100}
             step={1}
@@ -150,13 +151,14 @@ export function FxPanel(props: { index: number }) {
             mixDisposal(props.index, `fx${fxI()}`);
             return (
               <button
-                class="fxp-mod__toggle"
+                class="k-key k-key--latch fxp-mod__toggle"
                 classList={{ 'fxp-mod__toggle--on': engaged(fxI()) }}
                 style={{ '--col': FX_STARTS[fxI()], '--span': FX_SPANS[fxI()] }}
                 onClick={() => looper.setFxBypass(props.index, fxI(), engaged(fxI()))}
                 aria-pressed={engaged(fxI())}
                 aria-label={`${meta.label}, track ${props.index + 1}`}
               >
+                <i class="k-led" />
                 {meta.label}
               </button>
             );

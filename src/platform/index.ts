@@ -5,7 +5,7 @@
  */
 import { isTauri } from '@tauri-apps/api/core';
 import type { MidiSubscription, Platform } from './host';
-import type { EngineCommand, NoteTarget } from './engine-wire';
+import { isUnitCommand, type EngineCommand, type NoteTarget, type UnitId } from './engine-wire';
 import { encodeInput, encodeItem, type Dropped, type InputItem, type MidiEvent } from './midi-wire';
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
@@ -303,13 +303,25 @@ async function submit(items: InputItem[], toastLost: boolean): Promise<boolean> 
  * a command the engine did take brings the value back through its lane's `Mix` (`engine-store.ts`).
  */
 export function sendEngine(...commands: EngineCommand[]): Promise<boolean> {
-  return enqueue(commands.map(encodeItem.engine));
+  return enqueueEngine(commands, false);
 }
 
 /** `sendEngine` for a caller that names its own loss to the player (GO LIVE's press): a lost batch that
  * carried only such commands is logged but not toasted here. */
 export function sendEngineReported(...commands: EngineCommand[]): Promise<boolean> {
-  return enqueue(commands.map(encodeItem.engine), true);
+  return enqueueEngine(commands, true);
+}
+
+/**
+ * Queue engine commands, less the unit commands (`isUnitCommand`) while the platform's chain host is not
+ * available: the native engine does not speak the chain yet (unit contract §2), so they never reach
+ * `input_send`, under Tauri or in the production build. A refused command resolves its call false, as a
+ * dropped one does, without a log line or a toast: the chain UI asks `platform.chain.available` first.
+ */
+function enqueueEngine(commands: EngineCommand[], ownToast: boolean): Promise<boolean> {
+  const kept = platform.chain.available ? commands : commands.filter((c) => !isUnitCommand(c));
+  const sent = enqueue(kept.map(encodeItem.engine), ownToast);
+  return kept.length === commands.length ? sent : sent.then(() => false);
 }
 
 /**
@@ -340,6 +352,25 @@ export const input = {
 
 /** The web engine fake a probe scripts through `__lf.native`; null under Tauri and in a production build. */
 export const engineFake: EngineFake | null = import.meta.env.PROD || underTauri ? null : webEngineFake;
+
+/**
+ * A new unit's id (unit contract §1): 32 random bits, never 0, so a project opened later never lands a
+ * tone on another's unit by count. On the DEV fake a probe injects the mint (`__lf.native.chain.mint`);
+ * an injected id is checked as the wire checks one.
+ * @public the chain UI's `+` will mint with it; until then the chain-fake probe does
+ */
+export function mintUnitId(): UnitId {
+  const injected = engineFake?.chain.mint;
+  if (injected) {
+    const id = injected();
+    if (!Number.isSafeInteger(id) || id < 1 || id > 0xffff_ffff) throw new Error(`mintUnitId: ${id} is not a non-zero u32`);
+    return id;
+  }
+  const word = new Uint32Array(1);
+  do crypto.getRandomValues(word);
+  while (word[0] === 0);
+  return word[0];
+}
 
 export * from './host';
 export * from './engine-wire';

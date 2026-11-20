@@ -71,8 +71,9 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   `pnpm lint`, the one guard `node verify/guards/<name>.mjs`, `pnpm test:engine`. Once on the integrated tree, never per writer: `pnpm rust:check` (cargo check
   asio/no-asio + tests) when the change reaches the native build or its tests (`src-tauri/`,
   `verify/fixtures/`, Cargo config or dependencies); `pnpm build` when the frontend changed.
-  `pnpm check` is the pre-push hook: never run it by hand before a push. Then CI. Never push red. The
-  owner's open checks (`STATUS.md`) live ON `main`; a batch on `dev` brings its own when it lands.
+  The pre-push hook runs `pnpm check:push` (typecheck and lint, seconds); CI runs the rest on every push
+  (the guards, the probes, the native checks). A red CI on `dev` is fixed forward by the next push; `main`
+  moves only on the owner's word, after a green CI on the tree it moves to. The owner's open checks (`STATUS.md`) live ON `main`; a batch on `dev` brings its own when it lands.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.

@@ -59,8 +59,10 @@ export function runPrePush(stdin, run = spawnSync) {
     if (decision.action !== 'gate') return { code: decision.action === 'nothing' ? 0 : 1, message: decision.message };
     // One command string through the shell: `.cmd` shims need it on Windows, and Node 24 warns
     // (DEP0190) when an argument list goes through one.
-    const result = run('pnpm check', [], { stdio: 'inherit', shell: true });
-    if (result.error) return { code: 1, message: `pre-push: could not start pnpm check: ${result.error.message}` };
+    // The fast half only (the owner's call): CI runs the guards, the probes and the native checks on every
+    // push, so a red on `dev` is caught there and fixed forward.
+    const result = run('pnpm check:push', [], { stdio: 'inherit', shell: true });
+    if (result.error) return { code: 1, message: `pre-push: could not start pnpm check:push: ${result.error.message}` };
     return { code: result.status ?? 1 };
   } catch (e) {
     return { code: 1, message: refusal(e.message).message };

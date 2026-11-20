@@ -802,7 +802,7 @@ impl Engine {
                 // sides give the side itself, bit for bit), their output on both sides.
                 let [al, ar] = &self.aligned;
                 for ((m, &l), &r) in self.aligned_mean[a..b].iter_mut().zip(&al[a..b]).zip(&ar[a..b]) {
-                    *m = 0.5 * (l + r);
+                    *m = crate::fold(l, r);
                 }
                 if self.input_fx.render(start + a as Frame, &self.aligned_mean[a..b], &mut self.sends[a..b]) {
                     self.sends_sounded = true;
@@ -824,7 +824,7 @@ impl Engine {
             if self.tuner.on() {
                 for (mean, [l, r]) in self.tuner_in.iter_mut().zip(inputs) {
                     for ((m, &a), &b) in mean[k0..k1].iter_mut().zip(&l[k0..k1]).zip(&r[k0..k1]) {
-                        *m = 0.5 * (a + b);
+                        *m = crate::fold(a, b);
                     }
                 }
                 let [t0, t1] = &self.tuner_in;

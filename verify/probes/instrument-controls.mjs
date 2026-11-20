@@ -5,7 +5,7 @@
  * `__lf.native.midiEmit`) reads in the Audio Settings diagnostics and the command bar's status lamp, a port
  * another program holds says so, and LEARN is enabled only while a port is open; both empty native slots
  * show the install hint (in sans, as prose), the keyboard's hide cap reads the one close glyph ✕, the keyboard
- * octave survives a placement remount, PARAMS wears the shared SVG caret (turned over open), the slot volume (a
+ * octave survives a placement remount, the plate menu's Parameters opens the drawer and reads checked, the slot volume (a
  * plugin's output gain) honors the unity detent under keyboard steps and slider input and shows its dB
  * read-out at home (0.0 dB) untouched (the owner's call), and with one
  * plugin file in both slots, its editor belongs to the slot whose load came first (D29): the later loader's
@@ -26,7 +26,9 @@ import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
   const { page, consumeConsoleErrors } = await open({
-    viewport: { width: 1280, height: 820 },
+    // 1920: both slots holding a live plugin show both lines whole (narrower, the slot row folds one
+    // slot to a plate, `src/ui/instrument/row-fit.ts`), so both slots' EDITOR stay on screen
+    viewport: { width: 1920, height: 1080 },
     init: async (p) => {
       await p.addInitScript(() => void (window.__lfEngineFake = true));
       await p.route('**/src/platform/host.web.ts*', async (route) => {
@@ -119,19 +121,22 @@ await probe(async ({ open }) => {
     window.__gain = () => instrument.pluginGain()[0];
   });
 
-  const paramsButton = page.getByRole('button', { name: /Plugin parameters for slot A/ });
-  // PARAMS wears the app's one caret (--caret-svg, the EDIT pill's), not a text glyph, turned over open.
-  const paramsCaret = () =>
-    paramsButton.evaluate((el) => {
-      const after = getComputedStyle(el, '::after');
-      return { text: el.textContent.trim(), mask: after.maskImage, transform: after.transform };
-    });
-  const caretClosed = await paramsCaret();
-  assert.equal(caretClosed.text, 'PARAMS', `PARAMS carries no text caret: ${caretClosed.text}`);
-  assert.ok(caretClosed.mask.includes('M3 6l5 5 5-5'), `PARAMS wears the shared SVG caret: ${caretClosed.mask.slice(0, 60)}`);
-  assert.equal(caretClosed.transform, 'none', 'the caret points down while the drawer is shut');
-  await paramsButton.click();
-  await page.waitForFunction(() => getComputedStyle(document.querySelector('.slot__params.on'), '::after').transform !== 'none');
+  // Parameters lives in the plate's menu: a checkbox item that names the drawer it opens, unchecked and
+  // the drawer shut until it is picked, then checked with the drawer open under the line.
+  const menu = page.getByRole('button', { name: 'Menu for slot A', exact: true });
+  const paramsItem = page.getByRole('menuitemcheckbox', { name: 'Parameters', exact: true });
+  const drawer = page.locator('#slot-0-params');
+  await menu.click();
+  assert.equal(await menu.getAttribute('aria-expanded'), 'true', 'the chevron says its menu is open');
+  assert.equal(await paramsItem.getAttribute('aria-checked'), 'false', 'Parameters reads unchecked while the drawer is shut');
+  assert.equal(await paramsItem.getAttribute('aria-controls'), 'slot-0-params', 'Parameters names the drawer it opens');
+  assert.equal(await drawer.isVisible(), false, 'the drawer is shut before Parameters is picked');
+  await paramsItem.click();
+  await drawer.waitFor({ state: 'visible' });
+  assert.equal(await menu.getAttribute('aria-expanded'), 'false', 'a pick closes the menu');
+  await menu.click();
+  assert.equal(await paramsItem.getAttribute('aria-checked'), 'true', 'Parameters reads checked while the drawer is open');
+  await page.keyboard.press('Escape');
   const output = page.getByRole('slider', { name: 'Volume for slot A', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
   await page.waitForFunction(() => window.__gain() === 1);

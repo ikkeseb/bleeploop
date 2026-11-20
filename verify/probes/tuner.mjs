@@ -651,7 +651,10 @@ await probe(async ({ open }) => {
           };
           const letter = t.querySelector('.tn-letter');
           const ctx = document.createElement('canvas').getContext('2d');
-          ctx.font = getComputedStyle(letter).font;
+          // From the longhands: the shorthand `font` reads '' when a longhand it cannot carry is set (the
+          // body's tabular figures), and the canvas would then measure its 10 px default.
+          const cs = getComputedStyle(letter);
+          ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
           const cap = ctx.measureText('E').actualBoundingBoxAscent;
           const note = [box('.tn-letter'), box('.tn-octave'), ...(t.querySelector('.tn-note .tn-sharp') ? [box('.tn-note .tn-sharp')] : [])];
           return {

@@ -3,14 +3,19 @@
  * `engine-seam` pattern: an init script sets `window.__lfEngineFake`, the probe scripts the feed through
  * `__lf.native` and reads what the UI sends):
  *
- * - FADE (the command bar, `src/ui/transport/Transport.tsx`): the pill beside ■ ALL sends the engine's
- *   `FadeAll` action; its bars stepper steps 1, 2, 4, 8 and sends `SetFadeBars`; it is disabled with its
- *   reason while nothing plays and while a lane records. Lanes the feed reports fading read FADING (the
+ * - FADE (the command bar, `src/ui/transport/Transport.tsx`): the key beside ■ ALL sends the engine's
+ *   `FadeAll` action; its bars ride on the key and step 1, 2, 4, 8 by the arrows, the wheel and a drag
+ *   (a drag is no press; a press let go of off the key and brought back over it with no button held steps
+ *   nothing), each sending `SetFadeBars`, the scale window showing while they change; its press
+ *   is disabled with its reason while nothing plays and while a lane records, its bars stay settable. Lanes the feed reports fading read FADING (the
  *   word where ENDING shows, the well's FADING OUT) in the looper, and in the stage view by their chips'
- *   names and its message line; the pill reads
+ *   names and its message line; the key reads
  *   FADING and a press stops the fade; an engine refusal (`Fading`) lands on its lane. A reset frame's
  *   remembered bars are adopted. The bars persist: across launches of one browser profile, a fresh
  *   engine gets the bars last chosen, and an engine's remembered bars win and are kept.
+ * - The tempo's drag (the display's numeral, `Transport.tsx`): five steps in one pointer event send five
+ *   tempos counted from the gesture's start while the display keeps the feed's; a step back onto the feed's
+ *   tempo before its echo is owed and sent with the next echo; the next gesture starts from the feed.
  * - `fadeAll` ('Fade out all', `src/app/actions.ts`): in MIDI learn's picker; it sends the engine's
  *   action.
  * - DUB FEEDBACK (the lane's FX drawer, `src/ui/looper/FxPanel.tsx`): the slider starts at 100 %, sends
@@ -68,10 +73,13 @@ await probe(async ({ browser, open }) => {
   const lanes = page.locator('.lp-lane');
   const word = (i) => lanes.nth(i).locator('.lp-lane__state').textContent();
   const well = (i) => lanes.nth(i).locator('.lp-lane__wellmsg');
-  const fade = page.locator('.transport__fade .transport__tgl');
-  const shorter = page.getByRole('button', { name: 'Shorter fade', exact: true });
-  const longer = page.getByRole('button', { name: 'Longer fade', exact: true });
-  const fadeBars = () => page.locator('.transport__fade .transport__bars-val').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
+  // FADE is a key that carries its bars (`ValueKey.tsx`): its legend, its value line, and a step on the
+  // focused key (ArrowUp / ArrowDown, the steps its drag and wheel take).
+  const fade = page.locator('.transport__fade');
+  const fadeWord = () => fade.locator('.k-key__l').textContent().then((t) => t.trim());
+  const shorter = () => fade.press('ArrowDown');
+  const longer = () => fade.press('ArrowUp');
+  const fadeBars = () => page.locator('.transport__fade .k-key__v').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
   const runAction = (id) => page.evaluate((a) => import('/src/app/actions.ts').then((m) => m.runAction(a)), id);
 
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
@@ -89,7 +97,7 @@ await probe(async ({ browser, open }) => {
     meter: { peak: [0, 0], clip: [false, false] },
   });
 
-  // ── FADE: the pill and its bars ────────────────────────────────────────────────────────────────────
+  // ── FADE: the key and its bars ────────────────────────────────────────────────────────────────────
   assert.equal(await fade.count(), 1, 'FADE shows in engine mode');
   const beside = await page.evaluate(() => {
     const kids = [...document.querySelector('.transport__global').children];
@@ -97,18 +105,61 @@ await probe(async ({ browser, open }) => {
     return kids[all + 1]?.classList.contains('transport__fade');
   });
   assert.ok(beside, 'FADE sits beside ■ ALL');
-  assert.equal((await fade.textContent()).trim(), 'FADE');
+  assert.equal(await fadeWord(), 'FADE');
   assert.equal(await fadeBars(), '2 bars', 'two bars by default');
   await page.locator('.cmd').screenshot({ path: `${outDir}/command-bar.png` });
   await clearSent();
-  await longer.click();
-  await longer.click();
-  assert.ok(await longer.isDisabled(), 'at most 8 bars');
-  for (let k = 0; k < 3; k++) await shorter.click();
-  assert.ok(await shorter.isDisabled(), 'at least 1 bar');
-  assert.equal(await fadeBars(), '1 bar');
-  assert.deepEqual(await sentAtLeast(5), [4, 8, 4, 2, 1].map((b) => ({ SetFadeBars: b })), 'the stepper walks 1, 2, 4, 8');
-  await longer.click();
+  await longer();
+  await longer();
+  await longer();
+  assert.equal(await fadeBars(), '8 bars', 'at most 8 bars');
+  for (let k = 0; k < 4; k++) await shorter();
+  assert.equal(await fadeBars(), '1 bar', 'at least 1 bar');
+  assert.deepEqual(await sentAtLeast(5), [4, 8, 4, 2, 1].map((b) => ({ SetFadeBars: b })), "the key's steps walk 1, 2, 4, 8, and stop at the ends");
+  await page.waitForTimeout(100);
+  assert.equal((await sent()).length, 5, 'a step past an end sends nothing');
+  // The wheel over the key is a step, and while it changes the value line lights and the scale shows.
+  await clearSent();
+  await fade.hover();
+  await page.mouse.wheel(0, -100);
+  assert.deepEqual(await sentAtLeast(1), [{ SetFadeBars: 2 }], 'a wheel notch up is one step');
+  assert.ok(await fade.evaluate((el) => el.classList.contains('is-adjusting')), 'the key reads adjusting while it changes');
+  assert.equal(await fade.locator('.transport__scale .is-on').textContent(), '2', 'its scale window shows the bars set');
+  // A vertical drag past the threshold steps the bars and is no press: no FadeAll.
+  await clearSent();
+  const box = await fade.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  for (let k = 1; k <= 8; k++) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 4 * k);
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [{ SetFadeBars: 4 }, { SetFadeBars: 8 }], 'a drag up of 32 px steps twice, and its release is no press');
+  // A press is tracked from pointerdown, before the drag captures the pointer, so its release anywhere ends
+  // it: pressed, slid off the key sideways (under the threshold), let go over the lanes, then brought back
+  // over the key and moved up and down with no button held, it steps nothing (a hover once stepped the
+  // bars). Nor does a press that starts elsewhere and is dragged over the key.
+  await page.waitForTimeout(800);
+  await clearSent();
+  const mid = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const away = await lanes.nth(3).boundingBox();
+  await page.mouse.move(mid.x, mid.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width + 30, mid.y + 1, { steps: 4 });
+  await page.mouse.move(away.x + away.width / 2, away.y + away.height / 2, { steps: 4 });
+  await page.mouse.up();
+  await page.mouse.move(mid.x, mid.y, { steps: 4 });
+  for (let k = 1; k <= 8; k++) await page.mouse.move(mid.x, mid.y - 4 * k);
+  for (let k = 7; k >= -8; k--) await page.mouse.move(mid.x, mid.y - 4 * k);
+  await page.mouse.move(away.x + away.width / 2, away.y + away.height / 2, { steps: 4 });
+  await page.mouse.down();
+  for (let k = 1; k <= 8; k++) await page.mouse.move(mid.x, mid.y - 4 * k);
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.deepEqual((await sent()).filter((c) => c.SetFadeBars !== undefined), [], 'a key let go of elsewhere steps nothing when the pointer comes back');
+  assert.ok(!(await fade.evaluate((el) => el.classList.contains('is-adjusting'))), 'and never reads adjusting');
+  await shorter();
+  await shorter();
+  await page.waitForTimeout(800);
   await clearSent();
   await fade.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: 'FadeAll' }], 'FADE sends the engine action');
@@ -119,9 +170,9 @@ await probe(async ({ browser, open }) => {
   assert.equal(await word(0), 'FADING', 'the lane word reads FADING where ENDING shows');
   assert.equal(await word(1), 'FADING');
   assert.match(await well(0).textContent(), /FADING OUT/);
-  assert.equal((await fade.textContent()).trim(), 'FADING', 'the pill reads FADING');
+  assert.equal(await fadeWord(), 'FADING', 'the key reads FADING');
   assert.equal(await fade.getAttribute('aria-label'), 'Stop the fade now');
-  assert.match(await page.locator('.transport__global .transport__tgl').first().textContent(), /■ NOW/, '■ ALL stops now');
+  assert.match(await page.locator('.transport__global .transport__key').first().textContent(), /■ NOW/, '■ ALL stops now');
   await page.locator('.cmd').screenshot({ path: `${outDir}/command-bar-fading.png` });
   await page.locator('.lp-lane').first().screenshot({ path: `${outDir}/lane-fading.png` });
   await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
@@ -145,14 +196,29 @@ await probe(async ({ browser, open }) => {
   const stopped = lane('Stopped', { length: 2 * BAR, canReverse: true });
   await emit({ events: [laneEvent(0, stopped, end), laneEvent(1, stopped, end)] });
   assert.equal(await word(0), 'STOPPED');
-  assert.equal((await fade.textContent()).trim(), 'FADE');
-  assert.ok(await fade.isDisabled(), 'nothing plays: FADE is disabled');
+  assert.equal(await fadeWord(), 'FADE');
+  // Its press is refused while its value stays live: the disabled face, and to assistive tech an enabled
+  // key whose description says the press waits and the value can be changed (not "dimmed").
+  assert.ok(!(await fade.isDisabled()), 'nothing plays: FADE stays enabled to assistive tech, its value live');
+  assert.ok(await fade.evaluate((el) => el.classList.contains('is-soft-off')), 'nothing plays: FADE wears the disabled face');
+  assert.match(await fade.getAttribute('aria-description'), /nothing is playing to fade, the value can still be changed/i);
   assert.match(await fade.getAttribute('title'), /nothing is playing to fade/);
+  await clearSent();
+  await fade.click();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [], 'nothing plays: a press sends nothing');
+  // Its press is refused, its bars are not: they can be set before the jam.
+  await clearSent();
+  await longer();
+  assert.deepEqual(await sentAtLeast(1), [{ SetFadeBars: 4 }], 'nothing plays: the bars still step');
+  await shorter();
   await emit({ events: [laneEvent(0, playing()), laneEvent(2, lane('Recording', { armed: true }))] });
-  assert.ok(await fade.isDisabled(), 'a lane records: FADE is disabled');
+  const refused = () => fade.evaluate((el) => el.classList.contains('is-soft-off'));
+  assert.ok(await refused(), 'a lane records: FADE wears the disabled face');
+  assert.match(await fade.getAttribute('aria-description'), /this track is recording, stop it first, the value can still be changed/i);
   assert.match(await fade.getAttribute('title'), /this track is recording, stop it first/);
   await emit({ events: [laneEvent(2, lane('Empty'))] });
-  assert.ok(!(await fade.isDisabled()));
+  assert.ok(!(await refused()) && !/unavailable|stop it first/i.test(await fade.getAttribute('aria-description')), 'a lane plays: FADE takes its press again');
 
   // ── fadeAll: MIDI learn, and the engine action ───────────────────────────────────────────────────
   await clearSent();
@@ -218,6 +284,52 @@ await probe(async ({ browser, open }) => {
   const adopted = await sent();
   assert.ok(!adopted.some((c) => c.SetFadeBars !== undefined || c.SetDubFeedback), 'adopted settings are not pushed back');
 
+  // ── The tempo's drag outruns the feed ─────────────────────────────────────────────────────────────
+  // The tempo on the display shows the feed's BPM (invariant 3) and a drag steps it from the tempo the
+  // gesture started on, so a fast drag that takes five steps in one pointer event before any echo sends
+  // 121..125, not 121 five times; the display holds 120 until the feed says otherwise. Back down past the
+  // feed's tempo while the echoes lag: the store sends no tempo equal to the feed's, so that last step is
+  // owed and goes out with the next echo, and the engine ends where the hand stopped.
+  await emit({
+    reset: true,
+    settings: [],
+    events: [transport(0, false), ...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), { Selected: { frame: 0, lane: 0 } }],
+    anchor: anchorAt(0),
+    meter: { peak: [0, 0], clip: [false, false] },
+  });
+  const tempo = page.locator('.transport__bpm-num');
+  await page.waitForFunction(() => !document.querySelector('.transport__bpm-num')?.disabled);
+  await clearSent();
+  const tb = await tempo.boundingBox();
+  const t0 = { x: tb.x + tb.width / 2, y: tb.y + tb.height / 2 };
+  const bpmSent = async () => (await sent()).filter((c) => c.SetBpm !== undefined).map((c) => c.SetBpm);
+  await page.mouse.move(t0.x, t0.y);
+  await page.mouse.down();
+  await page.mouse.move(t0.x, t0.y - 5); // past the threshold: the drag captures, no step yet
+  await page.mouse.move(t0.x, t0.y - 5 - 20); // 20 px in one event: five steps of 4 px
+  assert.deepEqual(await bpmSent(), [121, 122, 123, 124, 125], 'five steps in one pointer event send five tempos');
+  assert.equal((await tempo.textContent()).trim(), '120', 'the display holds the feed tempo until its echo');
+  await page.mouse.move(t0.x, t0.y - 5); // back down 20 px in one event: five steps, the last to 120
+  assert.deepEqual((await bpmSent()).slice(5), [124, 123, 122, 121], 'the steps back down count from the gesture; 120, the feed tempo, is not sent while the feed shows it');
+  await emit({ events: [{ Transport: { frame: 0, master: 0, bpm: 121, locked: false } }] });
+  await page.waitForFunction(() => window.__lf.native.sent.filter((c) => c.SetBpm !== undefined).length >= 10, undefined, { timeout: 2000 }).catch(() => {});
+  assert.deepEqual((await bpmSent()).slice(9), [120], 'the owed 120 goes out with the first echo, so the engine ends where the hand stopped');
+  // One step up onto the feed's 121 while the engine's last word is 120: owed in turn, and out with the
+  // next echo, never dropped as the feed's own tempo.
+  await page.mouse.move(t0.x, t0.y - 9);
+  await emit({ events: [{ Transport: { frame: 0, master: 0, bpm: 122, locked: false } }] });
+  await page.waitForFunction(() => window.__lf.native.sent.filter((c) => c.SetBpm !== undefined).length >= 11, undefined, { timeout: 2000 }).catch(() => {});
+  assert.deepEqual((await bpmSent()).slice(10), [121], 'a step onto the feed tempo after an owed send goes out with the next echo');
+  await page.mouse.up();
+  for (const bpm of [123, 124, 125, 124, 123, 122, 121, 120, 121]) await emit({ events: [{ Transport: { frame: 0, master: 0, bpm, locked: false } }] });
+  await page.waitForTimeout(900); // past the gesture's linger
+  assert.equal((await tempo.textContent()).trim(), '121', 'the display follows the feed');
+  assert.deepEqual((await bpmSent()).slice(11), [], 'nothing more once the feed has caught up');
+  // A new gesture starts from the feed's tempo.
+  await tempo.focus();
+  await page.keyboard.press('ArrowUp');
+  assert.deepEqual((await bpmSent()).slice(11), [122], 'the next gesture steps from the feed tempo');
+
   // ── FADE's bars outlive a restart, as the master and click levels do ─────────────────────────────
   // One browser profile, launched three times: the bars chosen are sent to a fresh engine (which
   // remembers nothing), and an engine that remembers bars wins and is kept for the next launch.
@@ -233,15 +345,15 @@ await probe(async ({ browser, open }) => {
       anchor: anchorAt(0),
       meter: { peak: [0, 0], clip: [false, false] },
     });
-    const bars = () => app.page.locator('.transport__fade .transport__bars-val').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
+    const bars = () => app.page.locator('.transport__fade .k-key__v').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
     const sentFade = () => app.page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetFadeBars !== undefined));
     return { ...app, bars, sentFade };
   };
   const first = await launch([]);
   assert.equal(await first.bars(), '2 bars', 'a first launch: the default');
-  const longerThere = first.page.getByRole('button', { name: 'Longer fade', exact: true });
-  await longerThere.click();
-  await longerThere.click();
+  const longerThere = first.page.locator('.transport__fade');
+  await longerThere.press('ArrowUp');
+  await longerThere.press('ArrowUp');
   assert.equal(await first.bars(), '8 bars');
   await first.page.close();
   const second = await launch([]);

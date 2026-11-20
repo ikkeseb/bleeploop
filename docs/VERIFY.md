@@ -13,7 +13,8 @@ Git hooks are local checkout state. Before relying on the push gate, inspect the
 older, install the configured hook with `pnpm exec simple-git-hooks`. An existing `node_modules`
 directory does not prove that the package's prepare script installed hooks in this checkout. The hook
 gates what is pushed, not the working tree: it refuses a push unless every pushed ref is the checked-out
-HEAD and the tree is clean (untracked files count; deletes need no gate), then runs `pnpm check` once.
+HEAD and the tree is clean (untracked files count; deletes need no gate), then runs `pnpm check:push`
+(typecheck and lint) once; CI runs the guards, the probes and the native checks.
 Push any other commit from a clean checkout of it.
 
 The owner's clones also run a public-hygiene commit check (`pre-commit`, `commit-msg`). Its script

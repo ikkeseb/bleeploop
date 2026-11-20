@@ -6,7 +6,7 @@
  *
  * - a lane the feed reports PLAYING with a pending stop (`stopAt`) cues it (`src/ui/looper/Looper.tsx`,
  *   `src/ui/looper/gates.ts`): its REC/DUB core is disabled, keeps its action in its aria-label and
- *   names the refusal in its title, its transforms (↺ REV, ↶ UNDO, and ✂ TRIM in its EDIT menu) are disabled, and its PLAY/STOP cap turns into a
+ *   names the refusal in its title, its transforms (REV, UNDO, and ✂ TRIM in its EDIT menu) are disabled, and its PLAY/STOP cap turns into a
  *   visible stop-now control; the same lane without the pending stop has all of them enabled;
  * - a pointer click on that stop-now control sends the engine's PLAY/STOP for the lane (the engine's
  *   second press stops at once: lf-engine `tests/copy.rs`); the feed's STOPPED ends the cue.
@@ -102,7 +102,7 @@ await probe(async ({ open }) => {
   for (const [name, disabled] of Object.entries(pending.transforms)) assert.ok(disabled, `${name} is disabled while the stop is pending`);
   const stopNow = button('Track 1 stop now');
   assert.ok(await stopNow.isVisible(), 'a visible stop-now control');
-  assert.equal(pending.playStop.text, '■ NOW');
+  assert.equal(pending.playStop.text, 'NOW');
 
   // A pointer click on it sends the lane's PLAY/STOP.
   await clearSent();

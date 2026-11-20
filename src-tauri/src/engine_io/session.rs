@@ -26,10 +26,10 @@
 //!
 //! A snapshot asked WITH the master (an export; a recovery autosave never asks) also carries the wet
 //! stereo master, rendered offline from those same loops by `lf_engine::render` with the tracks' `mix`
-//! and the master volume and mute this host keeps (`settings`): the header gains `"master":{"frames"}`
-//! (`frames` = `masterLengthFrames`) and the PCM gains its left block then its right block, after the
-//! tracks', frame 0 at loop position 0 like the stems. A render that fails leaves the stems as they are:
-//! no `master`, and `"masterError"` holds its sentence instead.
+//! and the master volume and mute this host keeps (`settings`), read when the export is asked: the
+//! header gains `"master":{"frames"}` (`frames` = `masterLengthFrames`) and the PCM gains its left block
+//! then its right block, after the tracks', frame 0 at loop position 0 like the stems. A render that
+//! fails leaves the stems as they are: no `master`, and `"masterError"` holds its sentence instead.
 //!
 //! Only the loops cross here, once per save and off the RT path (invariant 3). Settings, rig recall and
 //! MIDI bindings stay in the UI's storage; each plugin's tone lives natively (`host/tone.rs`) and
@@ -123,9 +123,12 @@ impl EngineHost {
     /// at most one render engine and its lane pool exist beside the live engine.
     pub fn snapshot(&self, master: bool) -> Result<Vec<u8>, String> {
         let s = self.copy_loops()?;
-        let wet = master.then(|| {
+        // The master's volume and mute as the stems were copied: a change while this export waits for
+        // another's render is not in this one's master.
+        let settings = master.then(|| self.settings());
+        let wet = settings.map(|settings| {
             let _one = self.core.master_render.lock().unwrap_or_else(|e| e.into_inner());
-            self.render_master(&s)
+            self.render_master(&s, &settings)
         });
         Ok(snapshot_bytes(&s, wet))
     }
@@ -153,9 +156,9 @@ impl EngineHost {
     }
 
     /// The wet master of snapshot `s`, with each track's mix from its pin and the master volume and mute
-    /// this host keeps: the loops go in as a load does (`load_track`), on this thread, off the engine's
-    /// lock.
-    fn render_master(&self, s: &Snapshot) -> Result<WetMaster, String> {
+    /// in `settings` (this host's kept settings at the ask): the loops go in as a load does
+    /// (`load_track`), on this thread, off the engine's lock.
+    fn render_master(&self, s: &Snapshot, settings: &[lf_engine::Command]) -> Result<WetMaster, String> {
         #[cfg(test)]
         if FAIL_RENDER.with(|f| f.get()) {
             return Err("a test planted this render failure".to_string());
@@ -176,9 +179,8 @@ impl EngineHost {
             .collect();
         let load = Load { bpm: s.bpm, meter: s.meter, bars: s.master / fpb, master: s.master, tracks, result: None };
         let started = Instant::now();
-        let settings = self.settings();
         // A panic is a failed render too: the stems still go out.
-        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, &settings)))
+        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, settings)))
             .unwrap_or_else(|_| Err("export render: the render panicked".to_string()));
         match &wet {
             Ok(m) => log::info!("[engine_io] export master rendered: {} frames, {} warm-up passes, {} ms", s.master, m.warmup, started.elapsed().as_millis()),

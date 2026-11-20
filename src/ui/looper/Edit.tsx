@@ -1,23 +1,26 @@
 import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js';
 import { Portal } from 'solid-js/web';
+import { runAction } from '../../app/actions';
 import { looper } from '../state/audio';
 import { stageOpen } from '../stage/stage-store';
-import { copyGate, editGate, trimGate, why, type Gate } from './gates';
-import { EscapeCloses } from './shared';
+import { copyGate, editGate, reverseGate, trimGate, undoGate, why, type Gate } from './gates';
+import { EscapeCloses, narrow } from './shared';
 import { TrimDialog } from './Trim';
 import './edit.css';
 
 /**
- * The lane's EDIT pill, the last of its fixed columns (FX · MUTE · REV · UNDO · EDIT), and its popover:
+ * The lane's EDIT key, the last of its fixed columns (FX · MUTE · REV · UNDO · EDIT), and its popover:
  * ⧉ COPY, ↔ WIDE and ✂ TRIM, the lane edits a jam reaches for less often than the four beside it. Each
  * stays its own named action (`src/app/actions.ts`: `copy`, `copyWide`, `halveTrack`), so a pedal or a
  * learned MIDI note reaches it without the popover.
  *
- * The pill opens over a committed loop (`editGate`); the empty lane's is disabled with the rest of the
- * cluster (D4). The popover hangs under the pill, IN FX's pattern (`src/ui/transport/InputFx.tsx`), and
+ * The key opens over a committed loop (`editGate`); the empty lane's is disabled with the rest of the
+ * cluster (D4). Folded (`narrow`, under 1200 px: looper.css hides the lane's own REV and UNDO keys), the
+ * menu leads with ⇄ REV and ↶ UNDO, the same presses as those keys, and the key opens whenever any of
+ * its five rows would act. The popover hangs under the key and
  * lists the three edits, each disabled with the engine's reason where it would be refused. COPY and WIDE
  * send and close; TRIM turns the popover into its bar stepper (`Trim.tsx`). Escape, an outside click or
- * the stage view closes it; a keyboard close hands focus back to the pill on the app's behalf
+ * the stage view closes it; a keyboard close hands focus back to the key on the app's behalf
  * (`returnFocus`), so Space after it still arms REC.
  */
 
@@ -31,6 +34,31 @@ type Item = {
   /** Sends the edit; none for TRIM, whose bar stepper comes first. */
   run?: (i: number) => void;
 };
+
+/** REV and UNDO, the lane's own keys at full width; folded, the menu's first rows. `word` carries the
+ * state REV toggles, as the key's lit legend does. They are the named actions (`src/app/actions.ts`), as a
+ * pedal reaches them: the engine gates them on the lane named, and the selection stays where the press on
+ * the lane put it. */
+const FOLDED: readonly Item[] = [
+  {
+    glyph: '⇄',
+    word: 'REV',
+    hint: 'reverse or forward, from the loop end',
+    label: (t) => `Track ${t} reverse`,
+    title: 'Reverse / forward (toggle)',
+    gate: reverseGate,
+    run: (i) => runAction('reverse', i),
+  },
+  {
+    glyph: '↶',
+    word: 'UNDO',
+    hint: 'undo or redo the last overdub or trim',
+    label: (t) => `Track ${t} undo or redo the last overdub or trim`,
+    title: 'Undo / redo the last overdub or trim',
+    gate: undoGate,
+    run: (i) => runAction('undo', i),
+  },
+];
 
 const ITEMS: readonly Item[] = [
   {
@@ -65,7 +93,12 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
   const [view, setView] = createSignal<'menu' | 'trim' | null>(null);
   const track = props.index + 1;
   const id = `lf-edit-popover-${props.index}`;
-  const gate = () => editGate(props.index);
+  const items = () => (narrow() ? [...FOLDED, ...ITEMS] : ITEMS);
+  // Folded, the key opens while any row would act (REV and UNDO need no committed loop's edits).
+  const gate = (): Gate => {
+    const g = editGate(props.index);
+    return g.ok || !narrow() || !FOLDED.some((item) => item.gate(props.index).ok) ? g : { ok: true };
+  };
   let trigger: HTMLButtonElement | undefined;
   const close = (keyboard: boolean) => {
     setView(null);
@@ -82,7 +115,7 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
   // the app's behalf, so Space there still arms REC.
   let menu: HTMLDivElement | undefined;
   createEffect(() => {
-    for (const item of ITEMS) item.gate(props.index);
+    for (const item of items()) item.gate(props.index);
     const el = document.activeElement;
     if (menu && el instanceof HTMLButtonElement && el.disabled && menu.contains(el)) close(true);
   });
@@ -98,14 +131,14 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
     <>
       <button
         ref={trigger}
-        class="lp-pb lp-pb--edit"
+        class="k-key k-key--mo lp-pb lp-pb--edit"
         classList={{ 'is-open': view() !== null }}
         disabled={!gate().ok}
         aria-label={`Edit track ${track}`}
         aria-haspopup="dialog"
         aria-expanded={view() !== null}
         aria-controls={id}
-        title={why(gate()) ?? 'Copy, copy wide or trim this track'}
+        title={why(gate()) ?? (narrow() ? 'Reverse, undo, copy, copy wide or trim this track' : 'Copy, copy wide or trim this track')}
         onClick={() => setView((v) => (v === null ? 'menu' : null))}
       >
         EDIT
@@ -129,7 +162,7 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div class="edit">
-                    <For each={ITEMS}>
+                    <For each={items()}>
                       {(item) => {
                         const g = () => item.gate(props.index);
                         // The hint reads on from the word ("COPY to the first empty track"), a refusal too.
@@ -140,6 +173,8 @@ export function Edit(props: { index: number; returnFocus?: (el: HTMLElement | un
                         return (
                           <button
                             class="edit__item"
+                            classList={{ 'is-on': item.word === 'REV' && looper.track(props.index)().reversed }}
+                            aria-pressed={item.word === 'REV' ? looper.track(props.index)().reversed : undefined}
                             disabled={!g().ok}
                             aria-label={item.label(track)}
                             title={g().ok ? item.title : undefined}

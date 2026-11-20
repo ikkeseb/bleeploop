@@ -196,7 +196,8 @@ is gitignored for it). A binary built with it is GPLv3, see [License](#license).
 | `pnpm dev:wasapi` | Full app, WASAPI (no ASIO SDK needed) |
 | `pnpm build` | `tsc --noEmit && vite build`, which the Tauri bundle depends on |
 | `pnpm build:app` | Standalone release exe with ASIO (`tauri build --no-bundle --features asio`) |
-| `pnpm check` | Typecheck, oxlint, the capability-boundary check, and the `verify/` guards. Also the pre-push hook |
+| `pnpm check` | Typecheck, oxlint, the capability-boundary check, and the `verify/` guards |
+| `pnpm check:push` | Typecheck and oxlint: the pre-push hook (CI runs the rest) |
 | `pnpm verify` | Deterministic guards for the frontend's pure logic, file formats, the engine wire and the docs; no browser or hardware |
 | `pnpm test:engine` | The engine's tests (`cargo test -p lf-engine`): looper, click, grid, synths and FX rendered offline, frame by frame |
 | `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |

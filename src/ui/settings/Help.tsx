@@ -226,11 +226,11 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Guitar <span class="help__tag">the main way to play</span></h3>
         <ul class="help__list">
-          <li>Pick an amp plugin as a slot's source, pick its input (<span class="help__note">In 1</span>, <span class="help__note">In 2</span>…) and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot hears its input and monitors it natively</li>
-          <li>Raw input (a hardware synth, a mic): set a slot's source to <span class="help__note">Off</span>, pick its input and use GO LIVE. It is heard and recorded dry (through the OTT when that is on), and an Off slot plays no notes. Both slots can be live at once, each on its own input</li>
-          <li>Each slot's volume sets its synth, plugin or input level. Synths and plugins feed the looper directly; the bar beside IN FX shows record level</li>
-          <li><span class="help__note">IN FX</span> puts <span class="help__note">ECHO</span>, <span class="help__note">REVERB</span> and <span class="help__note">RING MOD</span> on the live input, before the looper: what they add is heard and recorded, the dry sound stays untouched (the OTT, below, works on the sound itself). The pill lights while any of them, or the OTT, is on</li>
-          <li><span class="help__note">OTT</span>, IN FX's fourth row, evens out loud and quiet in three bands on what you play, after the slot's plugin or synth: you hear it as you play and it is recorded into the loop. <span class="help__note">DEPTH</span> sets how hard it works, <span class="help__note">TIME</span> how fast it lets go, <span class="help__note">UP</span> how much it lifts the quiet parts and <span class="help__note">DOWN</span> how much it tames the loud ones</li>
+          <li>Pick an amp plugin as a slot's source (its name on the plate), pick its input (<span class="help__note">In 1</span>, <span class="help__note">In 2</span>…) and press <span class="help__note">LIVE</span>. Its lit LED means that slot hears its input and monitors it natively</li>
+          <li>Raw input (a hardware synth, a mic): set a slot's source to <span class="help__note">Off</span>, pick its input and press LIVE. It is heard and recorded dry (through the OTT when that is on), and an Off slot plays no notes. Both slots can be live at once, each on its own input</li>
+          <li>Each slot's volume sets its synth, plugin or input level. Synths and plugins feed the looper directly; the meter at the end of the slot's line shows its input level</li>
+          <li><span class="help__note">ECHO</span>, <span class="help__note">REVERB</span> and <span class="help__note">RING MOD</span>, the plates after slot A's sound, work on the live input of both slots, before the looper: what they add is heard and recorded, the dry sound stays untouched (the OTT, below, works on the sound itself). A plate's round lamp switches it on; its menu holds its settings. On a narrow window the four fold into one <span class="help__note">IN FX</span> plate</li>
+          <li><span class="help__note">OTT</span>, the fourth of those plates, evens out loud and quiet in three bands on what you play, after the slot's plugin or synth: you hear it as you play and it is recorded into the loop. <span class="help__note">DEPTH</span> sets how hard it works, <span class="help__note">TIME</span> how fast it lets go, <span class="help__note">UP</span> how much it lifts the quiet parts and <span class="help__note">DOWN</span> how much it tames the loud ones</li>
         </ul>
       </section>
 
@@ -238,7 +238,7 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
         <ul class="help__list">
           <li>A MIDI footswitch or controller: <SettingsLink page="midi" />. Pick an action beside <span class="help__note">MIDI LEARN</span>, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
-          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; <span class="help__note">TAP</span>, <span class="help__note">CLICK</span>, <span class="help__note">END STOP</span>, <span class="help__note">FIXED</span> and IN FX's ECHO, REVERB and RING MOD work as their buttons do</li>
+          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy, copy wide) acts on the selected track or on the track you pick; <span class="help__note">TAP</span>, <span class="help__note">CLICK</span>, <span class="help__note">END STOP</span>, <span class="help__note">FIXED</span> and the input effects ECHO, REVERB and RING MOD switch as their plates' lamps do</li>
           <li><span class="help__note">HOLD</span>, beside a REC/DUB learned on a momentary pedal: hold the pedal to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
           <li><span class="help__note">Halve track</span> (MIDI learn only) keeps the selected track's first half, as <span class="help__note">✂ TRIM</span> does; undo gives the whole loop back</li>
@@ -248,12 +248,12 @@ function Manual(props: { hidden: boolean }) {
       <section class="help__sec">
         <h3 class="help__h">Looper <span class="help__tag">5 tracks · the instrument</span></h3>
         <ul class="help__list">
-          <li>The big ring records a track, then overdubs (layers) onto it once it has a take</li>
-          <li><span class="help__note">▶ / ■</span> plays or stops a track &middot; <span class="help__note">CLR</span> clears it (press twice to confirm)</li>
-          <li><span class="help__note">↶ UNDO</span> undoes the last overdub layer or trim (press again to redo)</li>
-          <li><span class="help__note">FX</span> opens a track's effects, and its lamp lights while any of them is on &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0 and resets to it on a double-click &middot; the pan beside it (L / C / R) centres on a double-click, Alt-click or 0</li>
+          <li>The lit key beside a track's number records the track, then overdubs (layers) onto it once it has a take; its light is the track's state, and a round lamp beside it lights while it records</li>
+          <li><span class="help__note">▶ PLAY</span> / <span class="help__note">■ STOP</span> plays or stops a track &middot; <span class="help__note">CLR</span> clears it (press twice: it reads <span class="help__note">CLR?</span> between)</li>
+          <li><span class="help__note">UNDO</span> undoes the last overdub layer or trim (press again to redo)</li>
+          <li><span class="help__note">FX</span> opens a track's effects, and its lamp lights while any of them is on &middot; <span class="help__note">MUTE</span> silences it &middot; the level fader has a 0 dB detent at 1.0 and resets to it on a double-click; the window beside it reads the level and the pan &middot; the pan knob (L / C / R; on a narrow window, the window's pan field) centres on a double-click, Alt-click or 0</li>
           <li><span class="help__note">DUB FEEDBACK</span>, last in the FX drawer, is what an overdub keeps of the layers under it: 100 % keeps them all, 0 % replaces them, and in between the old layers fade pass by pass</li>
-          <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
+          <li><span class="help__note">REV</span> reverses a track in place. Overdub is blocked while reversed. On a narrow window REV and UNDO sit at the top of EDIT's menu</li>
           <li><span class="help__note">EDIT</span> opens a track's edits: <span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
           <li><span class="help__note">↔ WIDE</span> copies it wide: the copy plays 20 ms behind, panned to the other side (a centred track goes half left, the copy half right), so one riff sounds like two guitars. Summed to mono the two cancel in places and sound hollow; a real double is a second take</li>
           <li><span class="help__note">✂ TRIM</span> keeps a track's first bars and repeats them across the loop. The loop keeps its length</li>
@@ -268,8 +268,8 @@ function Manual(props: { hidden: boolean }) {
         <ul class="help__list">
           <li><span class="help__note">▶ ALL</span> starts every stopped track together &middot; <span class="help__note">■ ALL</span> stops them all; a take being recorded or overdubbed ends as its own stop would end it</li>
           <li><span class="help__note">END STOP</span> on: a track's stop and ■ ALL wait for the end of the loop; it never delays a recording or overdub. While tracks wait, ■ ALL reads <span class="help__note">■ NOW</span>, and a second stop lands right away</li>
-          <li><span class="help__note">FADE</span> fades every playing track out over its bars (1, 2, 4 or 8, from the stepper beside it) and stops them on the first bar line after; press it again while <span class="help__note">FADING</span> to stop now. Volumes never move, so ▶ ALL brings the tracks back</li>
-          <li><span class="help__note">✕ ALL</span> clears every track and resets the loop length, which unlocks the tempo and the time signature (press twice to confirm)</li>
+          <li><span class="help__note">FADE</span> fades every playing track out over the bars on its key (1, 2, 4 or 8: drag or scroll on the key) and stops them on the first bar line after; press it again while <span class="help__note">FADING</span> to stop now. Volumes never move, so ▶ ALL brings the tracks back</li>
+          <li><span class="help__note">✕ ALL</span> clears every track and resets the loop length, which unlocks the tempo and the time signature (press twice: it reads <span class="help__note">CONFIRM</span> between)</li>
         </ul>
       </section>
 
@@ -277,12 +277,12 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Transport &amp; tempo</h3>
         <ul class="help__list">
           <li>A 1-bar count-in (one bar of clicks, counted down to 1) leads the first recording. You come in on the downbeat after the count, not the button press. A later take recorded with the loops stopped gets the count-in too, and every track starts from the top on that downbeat</li>
-          <li><span class="help__note">CLICK</span> toggles the metronome (never recorded, silent while nothing runs); the number beside it opens its volume. A mode that is on lights its lamp</li>
-          <li><span class="help__note">FIXED</span> records exactly the bars set beside it and auto-stops on the downbeat. Off, every take runs until you stop it</li>
+          <li><span class="help__note">CLICK</span> toggles the metronome (never recorded, silent while nothing runs); the number on the key is its volume: drag or scroll on the key to set it. A mode that is on lights its lamp</li>
+          <li><span class="help__note">FIXED</span> records exactly the bars on its key (drag or scroll on the key to set them) and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
-          <li><span class="help__note">AUTO REC</span> replaces the first count-in: arm the track, then playing starts the take. The number beside it opens its sensitivity (<span class="help__note">SENS</span>): raise it for quieter input; the cyan tick on the record level is the trigger</li>
-          <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
-          <li>The time signature beside BPM (4/4, 3/4, 6/8, 12/8, 5/4) sets the bar: the click accents its first beat, and FIXED, FADE and the grid count its bars. In 6/8 and 12/8, BPM and TAP count the dotted quarter (two and four beats a bar). It locks with the tempo</li>
+          <li><span class="help__note">AUTO REC</span> replaces the first count-in: arm the track, then playing starts the take. The number on the key is its sensitivity: drag or scroll on the key to raise it for quieter input; the cyan tick on the record level is the trigger</li>
+          <li>Click the tempo in the display to type it, drag or scroll on it to step it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
+          <li>The time signature under BPM in the display (4/4, 3/4, 6/8, 12/8, 5/4) sets the bar: the click accents its first beat, and FIXED, FADE and the grid count its bars. In 6/8 and 12/8, BPM and TAP count the dotted quarter (two and four beats a bar). It locks with the tempo</li>
         </ul>
       </section>
 

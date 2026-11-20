@@ -6,6 +6,7 @@ import { Looper } from './ui/looper/Looper';
 import { Transport } from './ui/transport/Transport';
 import { SessionTools } from './ui/transport/SessionTools';
 import { InstrumentSlot } from './ui/instrument/InstrumentSlot';
+import { fitRow } from './ui/instrument/row-fit';
 import { AudioSettings } from './ui/settings/AudioSettings';
 import { registerSettingsOpener, settingsPath, type SettingsPage } from './settings-opener';
 import { Help } from './ui/settings/Help';
@@ -289,16 +290,15 @@ export function App() {
   // canvas loop + capture state survive every layout change. `render` is a function so a region that's
   // removed (keyboard hidden) tears down cleanly (releases its key listeners), and re-mounts fresh.
 
-  // The two instrument slots are compact cards side by side; compact rows don't need width resize, so
-  // params expand DOWN as an accordion instead. A drawer that outgrows the instrument region scrolls
-  // INSIDE its card (under the pinned header row), so the card's decorative top edge stays anchored and
-  // the looper never moves (see .src in app.css). Each InstrumentSlot owns its per-slot `paramsOpen`
-  // disclosure (state local to the instance).
+  // The slot row: two signal lines side by side, parted by a groove (`src/ui/instrument/slot.css`). A
+  // plugin's parameters drawer opens DOWN under its slot's line, in flow. Each InstrumentSlot owns its
+  // per-slot `paramsOpen` disclosure (state local to the instance); slot A carries the input effects.
   const renderInstrument = () => (
     <section class="zone zone--instrument" aria-label="Instrument">
-      <div class="src">
-        <InstrumentSlot slot={0} />
-        <InstrumentSlot slot={1} />
+      <div class="src" ref={fitRow}>
+        <InstrumentSlot slot={0} returnFocus={(el) => transportKeys?.returnFocus(el)} />
+        <div class="src__groove" aria-hidden="true" />
+        <InstrumentSlot slot={1} returnFocus={(el) => transportKeys?.returnFocus(el)} />
       </div>
     </section>
   );
@@ -371,11 +371,10 @@ export function App() {
 
   return (
     <div class="app" classList={{ 'app--staged': stageOpen() || looper.tunerOn() }}>
-      {/* Command bar — ONE card combining brand, system lamp, transport, and tool icons. Left→right:
-          brand · system lamp · (Transport fragment: BPM · TAP · CLICK/FIXED · loop ring-dial · END STOP · ■/✕ ALL ·
-          IN FX · spacer · master) · tool icons. Host/engine/plugin/midi detail lives in the Audio
-          Settings diagnostics block; the lamp is their at-a-glance aggregate and its title lists all
-          four. */}
+      {/* Command bar — the top band: brand · system lamp · (Transport fragment: the display and TAP ·
+          ■ ALL, FADE, ✕ ALL · the record modes · master) · tool icons (transport.css). Host/engine/
+          plugin/midi detail lives in the Audio Settings diagnostics block; the lamp is their at-a-glance
+          aggregate and its title lists all four. */}
       <header class="cmd" inert={stageOpen() || looper.tunerOn()} ref={(el) => onCleanup(installCmdFit(el))}>
         <span class="brand">
           <i class="brand__dot" aria-hidden="true" />
@@ -399,7 +398,7 @@ export function App() {
           </span>
         </Show>
 
-        <Transport returnFocus={(el) => transportKeys?.returnFocus(el)} />
+        <Transport />
 
         <div class="tools">
           {/* UPDATE — present ONLY while the updater has an offer, so it is invisible almost always and

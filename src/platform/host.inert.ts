@@ -3,7 +3,7 @@
  * Tauri, so this runs only when someone opens the built `dist` in a plain browser; it must boot, and every
  * capability says it is absent. The scriptable rig (`host.web.ts`) is DEV-only (`index.ts`).
  */
-import type { LogFolder, MidiHost, Platform, PluginHost } from './host';
+import type { ChainHost, LogFolder, MidiHost, Platform, PluginHost } from './host';
 
 const ABSENT = 'Not available in the browser build.';
 const absent = async (): Promise<never> => {
@@ -59,6 +59,22 @@ const midi: MidiHost = {
   importLegacy: async () => null,
 };
 
+// The chain per slot (`docs/unit-contract.md` §2): no engine, so nothing to chain.
+const chain: ChainHost = {
+  available: false,
+  add: absent,
+  remove: absent,
+  reload: absent,
+  move: absent,
+  openEditor: absent,
+  closeEditor: absent,
+  listParams: absent,
+  setParameter: absent,
+  takeTone: absent,
+  importTone: absent,
+  forgetTone: absent,
+};
+
 export const inertPlatform: Platform = {
   kind: 'web',
   pluginHost,
@@ -68,11 +84,13 @@ export const inertPlatform: Platform = {
     close: nothing,
     status: async () => null,
     setSlotInputChannel: absent,
+    setSlotInputPick: absent,
     setShare: absent,
     snapshot: absent,
     loadSession: absent,
     subscribe: () => () => {},
   },
+  chain,
   exports: { save: absent },
   logs,
   updates: { available: false, check: async () => null, download: absent, install: absent, onProgress() {} },

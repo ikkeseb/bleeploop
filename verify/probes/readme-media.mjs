@@ -8,7 +8,7 @@
  *
  * The clip is a jam played with a pointer, the way a player clicks through one: the pointer starts take 1
  * from track 1's record core (a count-in follows), three two-bar takes land on tracks 1-3, and between
- * them, while the loops play, the player switches ECHO on in IN FX, engages DELAY in track 1's FX drawer,
+ * them, while the loops play, the player switches ECHO on (its plate's lamp), engages DELAY in track 1's FX drawer,
  * swaps slot A's amp-sim (the slot reads "Updating…", then comes back live), then opens the stage view,
  * exits it and presses ✕ ALL twice. That ends it on the first frame's state, so it loops; the rig (IN FX,
  * the lane's FX, slot A) resets behind the stage view, which covers the UI. The pointer is an arrow
@@ -74,7 +74,7 @@ const TAKE0 = COUNT_IN + BAR;
 const bar = (k) => TAKE0 + k * LOOP; // the k-th loop boundary
 const LAND1 = bar(1);
 const nextBar = (f) => { let k = 0; while (bar(k) < f + sec(0.3)) k++; return bar(k); };
-const REC2 = at(s(LAND1) + 8.7); // track 2's core, after IN FX and track 1's FX
+const REC2 = at(s(LAND1) + 8.7); // track 2's core, after ECHO and track 1's FX
 const LAND2 = nextBar(REC2) + LOOP;
 const REC3 = at(s(LAND2) + 3.6); // track 3's core, after the amp-sim swap
 const TAKE = [TAKE0, nextBar(REC2), nextBar(REC3)]; // each take's downbeat
@@ -205,15 +205,10 @@ const SCRIPT = [
   { t: s(REC1), click: true },
   { t: s(TAKE0) - 0.2, cam: 'full', dur: 1.0 },
   { t: s(TAKE0) - 0.1, move: REST, dur: 0.8 },
-  // Track 1 plays: ECHO on in IN FX.
-  { t: s(LAND1) + 0.15, cam: button('Input effects'), zoom: 1.5, dur: 0.9, pad: { x: 0, y: 120 } },
-  { t: s(LAND1) + 0.2, move: button('Input effects'), dur: 0.7 },
-  { t: s(LAND1) + 1.0, click: true },
-  { t: s(LAND1) + 1.1, cam: { role: 'dialog', name: 'Input effects' }, zoom: 1.6, dur: 0.7, pad: { x: 0, y: 44 } },
-  { t: s(LAND1) + 1.3, move: button('Input echo'), dur: 0.6 },
-  { t: s(LAND1) + 2.0, click: true },
-  { t: s(LAND1) + 3.2, move: { role: 'dialog', name: 'Input effects', edge: 'below' }, dur: 0.5 },
-  { t: s(LAND1) + 3.8, click: true }, // the backdrop closes it
+  // Track 1 plays: ECHO on, by the power lamp on its plate in slot A's line.
+  { t: s(LAND1) + 0.15, cam: button('Input echo'), zoom: 1.6, dur: 0.9, pad: { x: 160, y: 60 } },
+  { t: s(LAND1) + 0.2, move: button('Input echo'), dur: 0.9 },
+  { t: s(LAND1) + 1.4, click: true },
   // DELAY on track 1's FX.
   { t: s(LAND1) + 3.9, cam: button('Track 1 FX'), zoom: 1.5, dur: 0.9, pad: { x: 200, y: 60 } },
   { t: s(LAND1) + 4.0, move: button('Track 1 FX'), dur: 0.8 },

@@ -5,19 +5,25 @@
  * and keeps the pick in `localStorage`; nothing here changes what a state looks like, only how a take's
  * level is drawn:
  *
- * - `stripes` (the default): stripes on the musical grid, a power of two of them per bar whose pitch
- *   lands nearest `STRIPE_PITCH` CSS px, so every bar and beat line falls in a gap; each stripe
+ * - `stripes` (the default): stripes on the musical grid, the meter's beats a bar times a power of two
+ *   per bar, the count whose pitch lands nearest `STRIPE_PITCH` CSS px, so every bar and beat line falls
+ *   in a gap in any meter (3/4, 6/8 too); each stripe
  *   `STRIPE_DUTY` of its pitch, as tall as the peak of its slice, square-ended, mirrored on the centre
  *   line and snapped to device px, a tick for a silent slice; one vertical gradient per lane, full colour
  *   on the centre line easing along a smoothstep toward the glass at the tallest reach. No trail.
- * - `dense`: fine bars on a 3 CSS px pitch, the envelope smoothed, each bar its own light: a bright core
- *   over the level falling off to a soft dim tip at the peak; a short trail burns behind the playhead.
+ * - `dense`: fine rounded bars on a 3 CSS px pitch, the envelope smoothed, each bar its own light: a
+ *   bright core over the level falling off to a soft dim tip at the peak; a short trail burns behind the
+ *   playhead.
  * - `bars`: light bars, a rounded bar on a 5 CSS px pitch, the dim peak with the bright level inside it.
+ *
+ * No element reaches past the recorded boundary (`WaveInput.end`): a slice the take only partly covers
+ * is sampled over what it holds, and its element drawn once it fits inside the take (`fit`).
  *
  * Every look draws the part to come the same take turned down (`PART_AHEAD`) and the part already played
  * lit (`PART_ON`); `waveform.ts` keeps both bitmaps and shows each on its side of the playhead, the cut
  * snapped so the element under the head counts as played (`cutAt`). An overdub's played part shows the
- * layer being laid (`WaveInput.nu`) as a warm-white core where the look has one.
+ * layer being laid (`WaveInput.nu`) as a warm core where the look has one, never the mixed level: audio
+ * the dub left unchanged keeps the state's own colour.
  *
  * The feed carries only min/max bins of `PEAK_FRAMES` frames (no RMS): a slice's peak is the largest
  * |min|/|max| of the bins it covers, its level the body's level (`waveform.ts` `level`). A slice narrower
@@ -103,8 +109,13 @@ export interface WaveInput {
   /** While a layer sums: per bin, the level the layer adds over the loop as the dub began (display
    * scale); else null. */
   nu: Float64Array | null;
-  /** The grid's bar count across the width (0: no loop yet, the stripes run free). */
+  /** The grid's bar count across the width (0: no loop yet, the stripes run free), and the meter's
+   * counted beats a bar (`waveform.ts` `setGridBeats`; 6/8 counts two). */
   bars: number;
+  beats: number;
+  /** The recorded boundary, device px: no element reaches past it (a take that records ends short of the
+   * width; else `dw`). */
+  end: number;
   rgb: WaveRGB;
   /** Per slice, filled by `prepare`: the peak, the level, the layer's level (display scale). */
   pk: Float32Array;
@@ -140,6 +151,8 @@ export function waveInput(rgb: WaveRGB): WaveInput {
     z: 0,
     nu: null,
     bars: 0,
+    beats: 4,
+    end: 0,
     rgb,
     pk: new Float32Array(0),
     rm: new Float32Array(0),
@@ -276,6 +289,13 @@ function sample(w: WaveInput, n: number, p: number): number {
   return drawn;
 }
 
+/** Of the first `n` elements, those whose right edge lies at or before the recorded boundary (`end`): a
+ * slice the take only partly covers is sampled over what it holds, and its element waits until it fits. */
+function fit(w: WaveInput, n: number): number {
+  while (n > 0 && Math.round((n - 1) * w.pitch + w.co) + w.width > w.end) n--;
+  return n;
+}
+
 /** The dense look's smoothing: a gaussian of σ 1.4 slices (radius 5), normalised. */
 const GAUSS = (() => {
   const k = new Float32Array(11);
@@ -306,12 +326,14 @@ function smooth(a: Float32Array, tmp: Float32Array, n: number): void {
 export function prepare(lk: WaveLook, w: WaveInput): number {
   const { dw, dpr } = w;
   if (lk === 'stripes') {
-    // A power of two of stripes per bar, the one whose pitch lands nearest STRIPE_PITCH; with no loop yet
-    // (no bars), stripes at that pitch across the width.
+    // The meter's beats a bar times a power of two, the count whose pitch lands nearest STRIPE_PITCH and
+    // never under one a beat: every beat line then falls between two stripes (a 3/4 bar of 4 stripes
+    // would put its beat lines under the second and third). With no loop yet (no bars), stripes at that
+    // pitch across the width.
     let N: number;
     if (w.bars > 0) {
       const bar = dw / dpr / w.bars;
-      let k = 1;
+      let k = w.beats > 0 ? w.beats : 1;
       while (Math.abs(bar / (2 * k) - STRIPE_PITCH) < Math.abs(bar / k - STRIPE_PITCH)) k *= 2;
       N = k * w.bars;
     } else N = Math.max(1, Math.round(dw / dpr / STRIPE_PITCH));
@@ -321,7 +343,7 @@ export function prepare(lk: WaveLook, w: WaveInput): number {
     w.width = sw;
     w.co = p / 2 - sw / 2;
     w.cq = sw / 2;
-    return sample(w, N, p);
+    return fit(w, sample(w, N, p));
   }
   if (lk === 'dense') {
     const P = Math.max(2, Math.round(DENSE_PITCH * dpr));
@@ -330,7 +352,7 @@ export function prepare(lk: WaveLook, w: WaveInput): number {
     w.width = bw;
     w.co = 0;
     w.cq = bw;
-    const n = sample(w, Math.floor(dw / P), P);
+    const n = fit(w, sample(w, Math.ceil(dw / P), P));
     // The envelope smoothed so no bar stands alone: each peak the max of it and its neighbours, then a
     // gaussian; the level and the layer the gaussian alone, never above the peak.
     const { pk, rm, nr, tmp } = w;
@@ -354,7 +376,7 @@ export function prepare(lk: WaveLook, w: WaveInput): number {
   w.width = lw;
   w.co = P / 2 - lw / 2;
   w.cq = lw / 2;
-  return sample(w, Math.floor(dw / P), P);
+  return fit(w, sample(w, Math.ceil(dw / P), P));
 }
 
 /** Where the played part ends for a head at `x` (device px): the left edge of the first element not yet
@@ -513,6 +535,30 @@ function denseColor(rgb: WaveRGB, tone: number): number {
 
 const ri = (v: number): number => Math.round((v < 0 ? 0 : v > 0.97 ? 0.97 : v) * R_STEPS);
 
+/**
+ * One dense bar, rounded as the reference's (`docs/redesign/main.js` `paintA`, a 1 CSS px radius on a 2 px
+ * bar: round ends): its outline `hh` px either side of the centre line `mid` at `x`, laid in device px,
+ * then filled under a transform that scales the unit-tall gradient `style` (y −1..1) to `scale` px, so
+ * the gradient fits the bar while its corners stay round.
+ */
+function denseBar(
+  g: CanvasRenderingContext2D,
+  x: number,
+  mid: number,
+  hh: number,
+  width: number,
+  radius: number,
+  style: CanvasGradient | string,
+  scale: number,
+): void {
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.beginPath();
+  g.roundRect(x, mid - hh, width, 2 * hh, radius < hh ? radius : hh);
+  g.setTransform(1, 0, 0, scale, 0, mid);
+  g.fillStyle = style;
+  g.fill();
+}
+
 function paintDense(w: WaveInput, g: CanvasRenderingContext2D, n: number, tone: number, part: number): void {
   const { pk, rm, nr, pitch, width, dpr } = w;
   const mid = Math.round(w.dh / 2);
@@ -521,6 +567,8 @@ function paintDense(w: WaveInput, g: CanvasRenderingContext2D, n: number, tone: 
   const hot = part === PART_HOT;
   const layer = tone === TONE_DUB && part !== PART_AHEAD && w.nu !== null;
   const white = css(mix(denseColor(w.rgb, tone), 0.78, WHITE));
+  // The corner: 1 CSS px, never past half the bar's width.
+  const radius = dpr < width / 2 ? dpr : width / 2;
   const alpha = g.globalAlpha;
   if (part === PART_AHEAD) g.globalAlpha = alpha * (tone === TONE_MUTED ? 0.8 : 0.5);
   for (let j = 0; j < n; j++) {
@@ -532,28 +580,19 @@ function paintDense(w: WaveInput, g: CanvasRenderingContext2D, n: number, tone: 
     if (layer) {
       // An overdub's played bar: the old take's amber body out to the sum, the layer's warm core inside.
       const rn = nr[j] / p;
-      g.setTransform(1, 0, 0, hh, 0, mid);
-      g.fillStyle = denseGrad(w, g, tone, D_DUB, ri((r > rn ? r : rn) + 0.1));
-      g.fillRect(x, -1, width, 2);
+      denseBar(g, x, mid, hh, width, radius, denseGrad(w, g, tone, D_DUB, ri((r > rn ? r : rn) + 0.1)), hh);
       const ch = rn * hh;
-      if (ch >= 1) {
-        g.setTransform(1, 0, 0, ch, 0, mid);
-        g.fillStyle = denseGrad(w, g, tone, hot ? D_CORE_HOT : D_CORE, 0);
-        g.fillRect(x, -1, width, 2);
-      }
+      if (ch >= 1) denseBar(g, x, mid, ch, width, radius, denseGrad(w, g, tone, hot ? D_CORE_HOT : D_CORE, 0), ch);
     } else {
-      g.setTransform(1, 0, 0, hh, 0, mid);
-      g.fillStyle = denseGrad(w, g, tone, silent ? D_GREY : hot ? D_HOT : D_ON, ri(r > 0.96 ? 0.96 : r));
-      g.fillRect(x, -1, width, 2);
+      const kind = silent ? D_GREY : hot ? D_HOT : D_ON;
+      denseBar(g, x, mid, hh, width, radius, denseGrad(w, g, tone, kind, ri(r > 0.96 ? 0.96 : r)), hh);
     }
     if (hot) {
       // At full burn a white core over the level, as the trail's peak.
       let hw = (layer ? nr[j] : rm[j]) * amp * 0.8;
       if (hw < dpr) hw = dpr;
-      g.setTransform(1, 0, 0, hw, 0, mid);
       g.globalAlpha = alpha * 0.55;
-      g.fillStyle = white;
-      g.fillRect(x, -1, width, 2);
+      denseBar(g, x, mid, hw, width, radius, white, 1);
       g.globalAlpha = alpha;
     }
   }
@@ -564,47 +603,51 @@ function paintDense(w: WaveInput, g: CanvasRenderingContext2D, n: number, tone: 
 const SUB = 16;
 const sub = (v: number): number => (v * SUB + 0.5) | 0;
 
+/**
+ * The light bars: a rounded bar per slice, the dim peak with the brighter level inside it. An overdub's
+ * played part keeps the loop's level in amber and lights only the layer being laid (`nr`) as a warm core,
+ * so audio the dub left unchanged never reads as new. Every tone draws the part to come a step dimmer than
+ * the part played, muted included.
+ */
 function paintBars(w: WaveInput, g: CanvasRenderingContext2D, n: number, tone: number, part: number): void {
-  const { pk, rm, pitch, width, rgb } = w;
+  const { pk, rm, nr, pitch, width, rgb } = w;
   const mid = w.dh / 2;
   const amp = w.A * (tone === TONE_MUTED ? 0.47 : 0.72);
   const half = width / 2;
   const ahead = part === PART_AHEAD;
   let c = rgb.play;
-  let inner = c;
   let ao = ahead ? 0.2 : 0.28;
   let ai = ahead ? 0.56 : 0.74;
-  if (tone === TONE_REC) c = inner = rgb.rec;
+  if (tone === TONE_REC) c = rgb.rec;
   else if (tone === TONE_DUB) {
-    c = inner = rgb.dub;
+    c = rgb.dub;
     if (ahead) {
       ao = 0.26;
       ai = 0.64;
-    } else {
-      ao = 0.44;
-      inner = BARS_HOT;
-      ai = 1;
-    }
+    } else ao = 0.44;
   } else if (tone === TONE_STOPPED) {
-    c = inner = rgb.dim;
+    c = rgb.dim;
     ao = 0.22;
     ai = 0.5;
   } else if (tone === TONE_MUTED) {
-    c = inner = mix(rgb.dim, 0.45, rgb.glass);
-    ao = 0.2;
-    ai = 0.42;
+    c = mix(rgb.dim, 0.45, rgb.glass);
+    ao = ahead ? 0.14 : 0.2;
+    ai = ahead ? 0.3 : 0.42;
   }
+  // The layer's core: an overdub's played part only, while the layer is known.
+  const core = tone === TONE_DUB && !ahead && w.nu !== null;
   g.setTransform(1 / SUB, 0, 0, 1 / SUB, 0, 0);
   g.lineCap = 'round';
   g.lineWidth = width * SUB;
-  for (let pass = 0; pass < 2; pass++) {
-    g.strokeStyle = pass === 0 ? css(c, ao) : css(inner, ai);
+  for (let pass = 0; pass < (core ? 3 : 2); pass++) {
+    g.strokeStyle = pass === 0 ? css(c, ao) : pass === 1 ? css(c, ai) : css(BARS_HOT, 1);
+    const v = pass === 0 ? pk : pass === 1 ? rm : nr;
     g.beginPath();
     for (let j = 0; j < n; j++) {
       const x = sub(j * pitch + pitch / 2);
-      const v = (pass === 0 ? pk[j] : rm[j]) * amp;
-      if (pass === 1 && v <= half) continue;
-      const h = (v > half ? v : half) - half;
+      const a = v[j] * amp;
+      if (pass > 0 && a <= half) continue;
+      const h = (a > half ? a : half) - half;
       g.moveTo(x, sub(mid - h));
       g.lineTo(x, sub(mid + h));
     }

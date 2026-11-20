@@ -1,0 +1,704 @@
+/* The slot row: the thin band WHAT IS PLAYED IN (the app.css header's three bands; drawn after
+   docs/redesign/main.html and narrow.html). Two slots side by side, A about two thirds, parted by a milled
+   groove. A slot is a signal line read left to right: its letter · the input (a small value window with a
+   chevron) · LIVE (a latched key) → its unit plates on a fine signal line with small arrowheads → at its
+   right end its LED meter and its volume (a knob and its dB window). Every part is a recipe of the app.css
+   header (.k-key, .k-led, .k-win, .k-meter, .k-knob) sized here; the plate and its lamp are this file's
+   (one anatomy for every unit: lamp, name, a mark, the menu chevron). Up to 1439 px the line steps
+   down a size and the knob goes (its dB window is the control). Layout: `InstrumentSlot.tsx`, the fold
+   points: `row-fit.ts`. */
+
+/* ---- the row ---- */
+.src {
+  --row-h: calc(60px * var(--ui));
+  --plate-h: calc(44px * var(--ui));
+  --sig-w: 20px;
+  --name-max: calc(220px * var(--ui));
+  display: flex;
+  align-items: flex-start; /* an open drawer grows its own slot only */
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow-x: clip; /* a line too long for the row is folded (row-fit.ts), never drawn past it */
+  padding: 0 calc(4px * var(--ui));
+}
+@media (max-width: 1439px) {
+  .src {
+    --row-h: 48px;
+    --plate-h: 36px;
+    --sig-w: 11px;
+    --name-max: 170px;
+  }
+}
+/* the milled groove between the two slots, along the line only */
+.src__groove {
+  order: 2;
+  flex: none;
+  align-self: flex-start;
+  width: 2px;
+  height: calc(var(--row-h) - 16px);
+  margin: 8px calc(12px * var(--ui)) 0;
+  background: var(--row-line);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.04);
+}
+
+/* ---- a slot: its line, then (in flow under it) the install hint and the parameters drawer ---- */
+.slot.slot {
+  order: 1;
+  flex: 2 1 0;
+  min-width: max-content; /* a line too long for the row overflows it, and row-fit.ts folds it */
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+}
+.slot.slot--b {
+  order: 3;
+  flex: 1 1 0;
+}
+/* slot B shown whole while A is folded: B leads the row, A's fold plate ends it */
+.src:has(> .slot--a.slot--fold) > .slot--b {
+  order: 1;
+}
+/* a folded slot (the row too narrow for both lines, or slot B's first run): its one plate, hugged */
+.slot.slot--fold,
+.slot.slot--folded {
+  flex: 0 0 auto;
+}
+.slot__line {
+  display: flex;
+  align-items: center;
+  height: var(--row-h);
+  min-width: 0;
+  gap: 0;
+}
+/* the letter, printed; lit warm white on the slot the keys and MIDI play (the selection recipe) */
+.slot .slot__id {
+  flex: none;
+  min-width: calc(22px * var(--ui));
+  margin: 0 calc(14px * var(--ui)) 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  font: 600 calc(22px * var(--ui)) / 1 var(--font-num);
+  color: var(--faint);
+  cursor: pointer;
+  transition: color var(--motion);
+}
+.slot .slot__id:hover {
+  color: var(--dim);
+}
+.slot--active .slot__id.slot__id {
+  color: var(--engaged);
+}
+.slot .slot__id:focus-visible {
+  outline-offset: 3px;
+}
+
+/* ---- the input: a small value window with a chevron, the native select laid over it ---- */
+.slot .slot__inwin {
+  position: relative;
+  min-width: calc(76px * var(--ui));
+  margin-right: calc(10px * var(--ui));
+  gap: 6px;
+  cursor: pointer;
+}
+.slot__inwin > .slot-icon {
+  margin-left: auto;
+  color: var(--dim);
+}
+.slot__inval {
+  white-space: nowrap;
+}
+.slot .slot__in {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.slot__inwin:hover {
+  color: var(--engaged);
+}
+.slot__inwin:has(> .slot__in:focus-visible) {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+.slot__in option,
+.slot__source option {
+  background: var(--option);
+  color: var(--text);
+  font-weight: 500;
+}
+.slot__in option:checked,
+.slot__source option:checked {
+  background: #2a2d35;
+  color: #fff;
+}
+
+/* ---- LIVE: a latched key (.k-key--latch) at the line's key height ---- */
+.slot .slot__live {
+  --kh: calc(40px * var(--ui));
+  min-width: calc(64px * var(--ui));
+  margin-right: calc(4px * var(--ui));
+}
+.slot__line {
+  position: relative;
+}
+/* a refusal or a failure beside a control (the editor's, LIVE's): a small tag hanging under the control,
+   its right edge on the control's (flipped to the left edge near the window's), out of the line's flow, so
+   it never makes the row refold under the hand that caused it. Fixed and anchored to the control it follows,
+   as the row's popovers are: the slot row's pane clips what hangs past it (a tag positioned in the line
+   was cut off under the row, and its static place was the chain's start, past the window's left edge).
+   One anchor name per kind, scoped to its slot, so both slots' tags stand at once. */
+.slot {
+  anchor-scope: --err-live, --err-plate;
+}
+.slot .slot__live:has(+ .pc__err) {
+  anchor-name: --err-live;
+}
+.slot .plate:has(+ .pc__err) {
+  anchor-name: --err-plate;
+}
+.slot .slot__live + .pc__err {
+  position-anchor: --err-live;
+}
+.slot .plate + .pc__err {
+  position-anchor: --err-plate;
+}
+.slot .pc__err {
+  position: fixed;
+  z-index: 30; /* over the lanes it hangs into, under the popovers (40) */
+  top: calc(anchor(bottom) + 6px);
+  right: anchor(right);
+  position-try-fallbacks: flip-inline;
+  max-width: calc(260px * var(--ui));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 7px;
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  box-shadow: var(--panel-drop);
+  font: 500 calc(12px * var(--ui)) / 1.2 var(--font-legend);
+  color: var(--dub);
+  white-space: nowrap;
+}
+
+/* ---- the signal line: plates of one height on a fine line with small arrowheads ---- */
+.slot__chain {
+  display: flex;
+  align-items: center;
+  height: var(--plate-h);
+}
+.slot__sig {
+  position: relative;
+  flex: none;
+  width: var(--sig-w);
+  height: 100%;
+}
+.slot__sig::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 4px;
+  top: calc(50% - 0.5px);
+  height: 1px;
+  background: #6a7078;
+}
+.slot__sig::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  top: calc(50% - 3px);
+  border-left: 5px solid #8e949c;
+  border-block: 3px solid transparent;
+}
+/* where nothing sounds through it: a bypassed plate, a slot not live */
+.slot__sig.is-dim::before {
+  background: #33373c;
+}
+.slot__sig.is-dim::after {
+  border-left-color: #43474d;
+}
+
+/* ---- the plate: one anatomy for every unit. A low cap (the key's depth at plate scale): its lamp at the
+   left, its name, a small mark at the right, the menu chevron at its very end ---- */
+.plate {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: calc(9px * var(--ui));
+  height: var(--plate-h);
+  min-width: calc(120px * var(--ui));
+  padding: 0 calc(6px * var(--ui)) 0 calc(9px * var(--ui));
+  border-radius: var(--r-ctl);
+  background: linear-gradient(#262a30, #1e2126);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 -1px 0 rgba(0, 0, 0, 0.35), 0 2px 0 #0d0f12, 0 3px 0 #030405, 0 4px 8px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  cursor: default;
+}
+/* powered but nothing playing through it (a plugin while the slot is not live, a synth): printed a step down,
+   its lamp lit without bloom */
+.plate.plate--idle {
+  background: linear-gradient(#22252a, #1c1e22);
+}
+.plate--idle .plate__name {
+  color: #c3c8cf;
+}
+/* bypassed (an input effect switched off): lamp dark, name secondary */
+.plate.plate--byp {
+  background: linear-gradient(#1f2226, #1a1c20);
+}
+.plate--byp .plate__name {
+  color: var(--dim);
+}
+/* empty (Off, a first run's ask, a change on its way): recessed, the picker's words in it */
+.plate.plate--empty {
+  min-width: calc(150px * var(--ui));
+  padding-right: calc(10px * var(--ui));
+  background: #0d0f11;
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.95), inset 0 3px 7px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.plate--empty .plate__name {
+  color: var(--dim);
+  font-weight: 600;
+}
+.plate--empty:hover .plate__name,
+.plate--ask .plate__name {
+  color: var(--text);
+}
+.plate--empty > .plate__pick {
+  flex: 1 1 auto; /* the whole recessed plate picks */
+}
+.plate--empty > .plate__pick > .slot-icon {
+  margin-left: auto;
+  color: var(--dim);
+}
+
+/* the lamp: a round cap with a lens; lit, a tight bloom in the play green. A button where it switches the
+   unit (an input effect's power), an indicator where nothing can (a loaded source: lit while it plays) */
+.plate__lamp {
+  position: relative;
+  flex: none;
+  width: calc(22px * var(--ui));
+  height: calc(22px * var(--ui));
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: linear-gradient(#383c43, #25282d);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 2px 0 #101215, 0 3px 4px rgba(0, 0, 0, 0.55);
+}
+.plate__lamp::after {
+  content: '';
+  position: absolute;
+  left: calc(50% - 3px);
+  top: calc(50% - 3px);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
+  transition: background-color var(--motion), box-shadow var(--motion);
+}
+.plate__lamp.is-on::after,
+.plate__lamp[aria-pressed='true']::after {
+  background: var(--play);
+  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--play) 50%, transparent);
+}
+.plate--idle .plate__lamp.is-on::after {
+  background: #2f8a63;
+  box-shadow: none;
+}
+button.plate__lamp {
+  cursor: pointer;
+  appearance: none;
+}
+button.plate__lamp:hover {
+  background: linear-gradient(#41454d, #2b2e33);
+}
+button.plate__lamp:active {
+  translate: 0 1px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 1px 0 #101215, 0 2px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* the name: a unit's name, and on a source plate the slot's source picker (a transparent select laid
+   over it, so the list is the system's) */
+.plate__pick {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+.plate__name {
+  min-width: 0;
+  max-width: var(--name-max);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 650 calc(16px * var(--ui)) / 1.2 var(--font-name);
+  color: var(--text);
+}
+.plate__name--fx {
+  font: 600 calc(14px * var(--ui)) / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.plate__pick:hover .plate__name {
+  color: var(--engaged);
+}
+.slot .plate__pick > .slot__source {
+  position: absolute;
+  inset: -6px -4px;
+  width: calc(100% + 8px);
+  height: calc(100% + 12px);
+  opacity: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.slot .plate__pick > .slot__source:disabled {
+  cursor: default;
+}
+.plate__pick:has(> .slot__source:focus-visible) {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+/* the right end: what the unit is (a format mark, the keys of a synth) and the plugin's window */
+.plate__what {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-left: 4px;
+  color: var(--dim);
+}
+.plate__fmt {
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+}
+.plate .plate__ed,
+.plate .plate__menu {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  appearance: none;
+  cursor: pointer;
+}
+.plate .plate__ed {
+  width: 24px;
+  height: 24px;
+  color: #d0d5db;
+}
+.plate .plate__ed:hover:not(:disabled),
+.plate .plate__menu:hover:not(:disabled) {
+  color: var(--engaged);
+}
+.plate .plate__ed[aria-pressed='true'] {
+  color: var(--engaged);
+  background: rgba(255, 243, 224, 0.1); /* the window is open: the glyph lit on a faint warm floor */
+}
+.plate .plate__ed:disabled,
+.plate .plate__menu:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+/* the menu chevron at the plate's very end, set off by a fine milled rule */
+.plate .plate__menu {
+  height: 24px;
+  margin-left: 2px;
+  padding: 0 2px 0 8px;
+  color: var(--dim);
+  border-radius: 0 3px 3px 0;
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.45), inset 2px 0 0 rgba(255, 255, 255, 0.04);
+}
+.plate__what + .plate__menu {
+  margin-left: 0;
+}
+.plate .plate__menu[aria-expanded='true'] {
+  color: var(--engaged);
+}
+
+/* ---- the slot's right end: its meter and its volume ---- */
+.slot__out {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  padding-left: calc(16px * var(--ui));
+}
+
+/* the input meter: an LED ladder (.k-meter) over -60..0 dBFS (`--lvl`, written by the waveform rAF loop,
+   never a signal), its held peak (`--pk`) a fine tick; CLIP, the one filled flag, laid over the ladder's
+   top while the engine reports a clip. Dark while the slot is not live. */
+.slot__meter {
+  --lvl: 0;
+  --pk: 0;
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  width: calc(72px * var(--ui));
+  height: 20px;
+}
+.slot__meter-track.k-meter {
+  /* --lvl is linear in dB over -60..0: -12 dB sits at 80 %, -3 dB at 95 % */
+  --meter-y-at: 80%;
+  --meter-r-at: 95%;
+  --level: calc(var(--lvl) * 100%);
+  flex: 1 1 auto;
+}
+.slot__meter-pk {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  z-index: 1;
+  width: 2px;
+  left: calc(var(--pk) * 100% - 2px);
+  background: var(--text);
+}
+.slot__meter:not(.is-live) .slot__meter-pk {
+  display: none;
+}
+.slot__meter.is-clip .slot__meter-pk {
+  background: var(--rec);
+}
+.slot__meter .slot__meter-clip {
+  position: absolute;
+  right: -2px;
+  top: 50%;
+  translate: 0 -50%;
+  z-index: 2;
+  padding: 3px 5px;
+  border-radius: 3px;
+  font: 600 calc(12px * var(--ui)) / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  color: #0b0b0d;
+  background: var(--rec);
+  visibility: hidden;
+}
+.slot__meter.is-clip .slot__meter-clip {
+  visibility: visible;
+}
+
+/* the volume: a small knob and its dB window, turned by a drag or a scroll on either; the range input
+   under them is its keyboard and assistive face */
+.slot__vol {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--ui));
+  margin-left: calc(12px * var(--ui));
+  cursor: ns-resize;
+  touch-action: none;
+}
+.slot__knob.k-knob {
+  --s: calc(30px * var(--ui));
+}
+.slot__vdb.k-win {
+  min-width: calc(70px * var(--ui));
+  justify-content: flex-end;
+  gap: 4px;
+}
+.slot__unit {
+  font: 500 12px / 1 var(--font-legend);
+  color: var(--dim);
+}
+.slot__vol.is-off {
+  cursor: default;
+}
+.slot .slot__vbar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.slot__vol:has(> .slot__vbar:focus-visible) {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: var(--r-sm);
+}
+@media (max-width: 1439px) {
+  .slot .slot__knob {
+    display: none;
+  }
+  .slot .slot__inwin {
+    min-width: 58px;
+    margin-right: 8px;
+  }
+  .slot .slot__live {
+    --kh: 32px;
+    min-width: 52px;
+  }
+  .slot .slot__id {
+    margin-right: 8px;
+  }
+  .slot .slot__vdb {
+    min-width: 64px;
+  }
+  .slot .slot__meter {
+    width: 48px;
+  }
+}
+
+/* ---- a folded slot: one plate at the row's end, a press shows its whole line ---- */
+.slot.slot--fold {
+  order: 3;
+}
+.plate.slot__fold {
+  gap: 7px;
+  font: inherit;
+  appearance: none;
+  border: 0;
+  cursor: pointer;
+}
+.slot__fold:hover .plate__name {
+  color: var(--engaged);
+}
+.slot__fold-id {
+  font: 600 calc(22px * var(--ui)) / 1 var(--font-num);
+  color: var(--faint);
+}
+.slot--active .slot__fold-id {
+  color: var(--engaged);
+}
+.slot__fold > .slot-icon {
+  color: var(--dim);
+}
+.slot .slot__fold > .slot__meter {
+  width: 36px;
+  margin-left: 2px;
+}
+
+/* ---- in flow under the line: the install hint and the parameters drawer ---- */
+.slot .slot__plugin-note {
+  display: block;
+  max-width: 64ch;
+  margin: calc(-4px * var(--ui)) 0 8px calc(36px * var(--ui));
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.3;
+}
+/* Narrow (the line's smaller step): the hint is one line, under slot A only (B's would say the same, the
+   scan is the app's), without the folders it scans, so the lanes keep their 1000x700 room with a lane's
+   FX params open */
+@media (max-width: 1439px) {
+  .slot .slot__plugin-note-more,
+  .slot.slot--b .slot__plugin-note {
+    display: none;
+  }
+  .slot .slot__plugin-note {
+    white-space: nowrap;
+  }
+}
+/* the hint is a whole extra line: under the 600 px window floor it yields to the lanes' reach
+   (`verify/probes/layout-reachability.mjs --plugin-source`) */
+@media (max-height: 640px) {
+  .slot .slot__plugin-note {
+    display: none;
+  }
+}
+.slot__drawer {
+  display: none;
+}
+.slot__drawer.slot__drawer--open {
+  display: block;
+  max-width: calc(880px * var(--ui));
+  margin: 2px 0 10px;
+  padding: 12px 16px 14px;
+  min-height: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  border-radius: var(--r-well);
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  cursor: default;
+}
+
+/* ---- the row's popovers: a plate's menu, an input effect's settings. One open at a time; it hangs under
+   its trigger (anchor positioning) and flips to the trigger's right edge near the window's ---- */
+.slot-pop__trigger[aria-expanded='true'] {
+  anchor-name: --slot-pop;
+}
+/* its top hangs from the trigger's plate, whose bottom edge sits lower than the trigger's (a popover hung
+   from the trigger covered the plate's lower edge) */
+.plate:has(> .slot-pop__trigger[aria-expanded='true']) {
+  anchor-name: --slot-pop-plate;
+}
+.slot-pop__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.slot-pop {
+  position: fixed;
+  top: 140px; /* fallback for an engine without anchor positioning */
+  left: 24px;
+  position-anchor: --slot-pop;
+  top: calc(anchor(--slot-pop-plate bottom) + 6px);
+  left: calc(anchor(right) - 18px);
+  position-try-fallbacks: flip-inline;
+  padding: 6px;
+  border-radius: var(--r-card);
+  background: var(--panel);
+  box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
+  outline: none;
+}
+.slot-menu {
+  min-width: 200px;
+  display: grid;
+}
+.slot-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  appearance: none;
+  font: 500 14px / 1 var(--font-legend);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.slot-menu__item > .slot-icon {
+  color: var(--dim);
+}
+.slot-menu__item > .k-led {
+  margin-left: auto;
+}
+.slot-menu__item:hover:not(:disabled),
+.slot-menu__item:focus-visible {
+  background: var(--surf-3);
+  outline: none;
+}
+.slot-menu__item:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+.slot-menu__sep {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--edge);
+}
+
+/* FORCED COLORS: the lamp's lit lens is a colour; an outline marks an input effect that is on */
+@media (forced-colors: active) {
+  .plate__lamp[aria-pressed='true'],
+  .plate__lamp.is-on {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
+}

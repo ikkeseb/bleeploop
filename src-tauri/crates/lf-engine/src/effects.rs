@@ -348,7 +348,7 @@ impl LaneFx {
             // The mean of the two sends: equal sides send exactly the one send (`x + x` and the half
             // are exact).
             for (s, (&a, &b)) in sends.iter_mut().zip(send_l.iter().zip(send_r.iter())) {
-                *s += 0.5 * (a + b);
+                *s += crate::fold(a, b);
             }
             let pan = &mut self.pans[i];
             let target = pan.target as f64;

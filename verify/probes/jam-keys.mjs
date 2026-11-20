@@ -13,15 +13,15 @@
  * - CLEAR, ONE ARM FOR EVERY HAND, the engine's (`LaneInfo.clearArmed` on the feed): the lane's CLR pill, the
  *   Delete key and a learned pedal (native MIDI's `pressed`, its CLEAR sent natively) each press the
  *   engine's CLEAR and never send an outright `Clear`; one press leaves the loop in place; the pill reads
- *   SURE? and the well "press again to clear" exactly while the feed's lane says `clearArmed`, whichever
+ *   CLR? and the well "press again to clear" exactly while the feed's lane says `clearArmed`, whichever
  *   hand armed it: no UI timer ends it early (it outlasts 2.5 s while the engine still says armed), a
  *   pedal's `pressed` does not take it down, a `ConfirmClear` alone (a late answer) raises nothing, and it
  *   goes when the lane says so; the engine's `Cleared` empties the lane. Either hand confirms what the
  *   other armed (mouse then key, key then mouse, pedal then mouse, mouse then pedal); CLR's confirming
  *   click sends no `SelectTrack` before it (a selection disarms the engine), while REC/DUB on an armed
  *   lane still selects it first.
- * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", with its SENS read-out live: it opens
- *   the sensitivity popover, whose slider takes keys, and Escape hands focus back to the read-out (AUTO
+ * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", with the sensitivity on the AUTO REC
+ *   key still live: the focused key steps it by keys (`SetAutoSensitivity`) and drives no looper action (AUTO
  *   sends the engine's AUTO REC toggle, and the button shows the `Toggled` the fake answers); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
  *   pressable as the approve gesture (while a plain take records, it is refused); `TakeRejected` and
  *   `PassDropped` each reach the player (a toast naming the lane) and the release log (one console.error);
@@ -127,37 +127,22 @@ await probe(async ({ open }) => {
     return {
       state: l.getAttribute('data-state'),
       well: l.querySelector('.lp-lane__wellmsg')?.textContent?.trim(),
-      sens: document.querySelector('button[aria-label="Auto record sensitivity"]')?.disabled === false,
+      // The AUTO REC key carries the sensitivity: its value stays live while LISTENING (`ValueKey.tsx`).
+      sens: document.querySelector('button[aria-label="Auto record"]')?.getAttribute('aria-description')?.includes('arrow keys') === true,
     };
   });
   console.log('AUTO arm', JSON.stringify(listening));
   assert.deepEqual(listening, { state: 'listening', well: 'WAITING FOR INPUT', sens: true }, 'an AUTO arm reads LISTENING beside its sensitivity');
-  // The sensitivity stays tunable while LISTENING: by keyboard, the read-out opens it, and Escape returns.
-  const sens = page.getByRole('button', { name: 'Auto record sensitivity', exact: true });
-  await sens.focus();
-  await page.keyboard.press('Enter');
-  const sensSlider = page.getByRole('dialog', { name: 'Auto record sensitivity' }).getByRole('slider');
-  await sensSlider.focus();
-  await page.keyboard.press('End');
-  assert.equal(await sensSlider.inputValue(), '100', 'the sensitivity slider takes keys while LISTENING');
-  assert.match(await sens.textContent(), /100/, 'the read-out shows the sensitivity');
-  await page.keyboard.press('Escape');
-  await page.getByRole('dialog', { name: 'Auto record sensitivity' }).waitFor({ state: 'detached' });
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Auto record sensitivity', 'Escape hands focus back to the read-out');
-  // One bar popover at a time: opening SENS by keyboard while CLICK's is open closes CLICK's (they share
-  // one anchor, so both open stacked at one spot and one outside click closed only one).
-  await page.getByRole('button', { name: 'Metronome click' }).click();
-  await page.waitForFunction(() => document.querySelector('button[aria-label="Click volume"]')?.disabled === false);
-  await page.getByRole('button', { name: 'Click volume', exact: true }).focus();
-  await page.keyboard.press('Enter');
-  await page.getByRole('dialog', { name: 'Click volume' }).waitFor();
-  await sens.focus();
-  await page.keyboard.press('Enter');
-  await page.getByRole('dialog', { name: 'Auto record sensitivity' }).waitFor();
-  assert.equal(await page.getByRole('dialog').count(), 1, 'opening SENS closes the CLICK popover: exactly one bar popover is mounted');
-  await page.mouse.click(5, 300);
-  await page.getByRole('dialog').waitFor({ state: 'detached' });
-  await page.getByRole('button', { name: 'Metronome click' }).click();
+  // The sensitivity stays tunable while LISTENING: by keyboard on the focused key, which keeps the keys.
+  const auto = page.getByRole('button', { name: 'Auto record', exact: true });
+  await clearSent();
+  for (let k = 0; k < 6; k++) await auto.press('PageUp');
+  assert.equal(await auto.locator('.k-key__v').textContent(), '100', 'the key shows the sensitivity, set by keys while LISTENING');
+  const sensSent = (await sent()).filter((c) => c.SetAutoSensitivity !== undefined).map((c) => c.SetAutoSensitivity);
+  assert.equal(sensSent.at(-1), 100, `the steps send SetAutoSensitivity (${sensSent})`);
+  assert.ok(!(await sent()).some((c) => c.Action !== undefined || c.SelectTrack !== undefined), 'a key on the focused AUTO REC drove the looper');
+  assert.equal(await auto.getAttribute('aria-pressed'), 'true', 'stepping the value is no press: AUTO stays on');
+  await page.evaluate(() => document.activeElement?.blur());
   await emit({ events: [laneEvent(0, lane('Empty'))] });
   await clearSent();
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();
@@ -323,7 +308,7 @@ await probe(async ({ open }) => {
     cue: (await cues())[L],
   });
   const IDLE = { state: 'play', pill: 'CLR', cue: '' };
-  const ARMED = { state: 'play', pill: 'SURE?', cue: 'press again to clear' };
+  const ARMED = { state: 'play', pill: 'CLR?', cue: 'press again to clear' };
   const CLEARED = { state: 'empty', pill: 'CLR', cue: '' };
   /** Wait until the lane shows `want`, or fail with what it shows. */
   const shows = async (want, what) => {
@@ -373,7 +358,7 @@ await probe(async ({ open }) => {
     await pressClear(hand);
     await shows(IDLE, `${hand}: one press, before the engine answers, leaves the loop and shows no arm`);
     await emit(armAnswer);
-    await shows(ARMED, `${hand}: the engine's arm shows (SURE?, "press again to clear") and the loop stays`);
+    await shows(ARMED, `${hand}: the engine's arm shows (CLR?, "press again to clear") and the loop stays`);
     await page.waitForTimeout(2700);
     await shows(ARMED, `${hand}: no UI timer ends the arm while the engine still holds it`);
     await midi('pressed');

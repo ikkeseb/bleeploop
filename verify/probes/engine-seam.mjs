@@ -6,18 +6,18 @@
  * - boot: the saved device opens once (WASAPI in the browser, the saved buffer); the first reset frame
  *   gets what the UI persists and owns (master and click level; the note target, through `input`), not defaults the
  *   engine has; no AudioContext is ever built (the app has no Web Audio path);
- * - gesture → command: BPM +, CLICK (the engine's toggle, shown from the `Toggled` the fake answers), the
+ * - gesture → command: a step on the tempo, CLICK (the engine's toggle, shown from the `Toggled` the fake answers), the
  *   lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
  *   a PC key (its note to native MIDI's router, `__lf.native.inputSent`, by its owner `key:<code>`), the
- *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14; its bars
+ *   FIXED key's bars over a committed loop (a bar at a time up to the loop, whole loops past it: F14; its bars
  *   show only while FIXED is on), IN FX
  *   (ECHO, RING MOD and OTT switches and parameters, their persisted values, the engaged pill and an adopted OTT depth clamped on screen),
  *   ⧉ COPY and ↔ WIDE in the lane's EDIT menu (`Copy`, `CopyWide`; the `copyWide` action is the engine's
  *   `CopyWide`, on its own selection or a named track);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
  *   beat is heard (its frame and the output latency against the clock anchor), a live take, a committed
- *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
+ *   loop (PLAYING, the loop readout, a moving progress line from the clock anchor), the record meter, a
  *   refusal on its lane, the selection, a COPY carrying the lane's volume (the copy's `Mix`, which the
  *   fake reports as the engine does), a lane's mix kept when it only goes EMPTY and reset by `Cleared`'s
  *   `Mix`, a multiply take's record head sweeping its window (the canvas),
@@ -129,8 +129,9 @@ await probe(async ({ open }) => {
 
   // ── Gestures → commands ───────────────────────────────────────────────────────────────────────
   await clearSent();
-  await page.getByRole('button', { name: 'BPM plus' }).click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetBpm: 121 }], 'BPM + sends SetBpm');
+  // The tempo on the display steps by the value gesture (`value-drag.ts`): ArrowUp on the focused tempo.
+  await page.locator('.transport__bpm-num').press('ArrowUp');
+  assert.deepEqual(await sentAtLeast(1), [{ SetBpm: 121 }], 'a step up on the tempo sends SetBpm');
   // The engine echoes the tempo on the feed; nothing changes until it does.
   assert.equal(await page.locator('.transport__bpm-num').textContent(), '120');
   await emit({ events: [transport(0, false, 121)] });
@@ -158,7 +159,7 @@ await probe(async ({ open }) => {
   assert.equal(await lanes.nth(0).locator('.lp-lane__count').textContent(), '4');
   assert.match(await well(0).textContent(), /COUNT-IN/);
   assert.ok(await page.locator('.transport__bpm-group--locked').isVisible(), 'the BPM group reads locked');
-  assert.ok(await page.getByRole('button', { name: 'BPM plus' }).isDisabled(), 'BPM + is disabled while locked');
+  assert.ok(await page.locator('.transport__bpm-num').isDisabled(), 'the tempo is disabled while locked');
   assert.ok(await page.locator('.transport__beat').nth(0).evaluate((el) => el.classList.contains('on')), 'beat LED 1 lit');
 
   await emit({ events: [{ Beat: { frame: 12000, beatInBar: 1, countLeft: 3, clicked: true } }], anchor: anchorAt(12000) });
@@ -167,7 +168,8 @@ await probe(async ({ open }) => {
 
   await emit({ events: [laneEvent(0, lane('Recording')), { Beat: { frame: BAR, beatInBar: 0, countLeft: 0, clicked: true } }], anchor: anchorAt(BAR) });
   assert.equal(await lanes.nth(0).getAttribute('data-state'), 'rec');
-  assert.equal(await lanes.nth(0).locator('.lp-lane__state').textContent(), '● REC');
+  assert.equal(await lanes.nth(0).locator('.lp-lane__state').textContent(), 'REC');
+  assert.ok(await lanes.nth(0).locator('.lp-core__lamp').isVisible(), "the lit key's rec lamp carries REC past colour (D14)");
 
   // ── The committed loop: state, readout, a playhead from the clock anchor ──────────────────────
   const committed = lane('Playing', { length: BAR, canReverse: true });
@@ -185,13 +187,13 @@ await probe(async ({ open }) => {
   const loopTitle = await page.locator('.transport__loop').getAttribute('title');
   console.log('loop title', loopTitle);
   assert.equal(loopTitle, 'Master loop length: 1 bar, 2.0 s', "the seconds live in the read-out's title");
-  const dial = page.locator('.transport__dial circle[stroke-dashoffset]');
+  const dial = page.locator('.transport__progress-line line[stroke-dashoffset]');
   const offsetAt = async () => Number(await dial.getAttribute('stroke-dashoffset'));
   const first = await offsetAt();
   await page.waitForTimeout(300);
   const second = await offsetAt();
-  console.log('ring dial', first, '→', second);
-  assert.notEqual(first, second, 'the ring dial moves with the extrapolated clock');
+  console.log('progress line', first, '→', second);
+  assert.notEqual(first, second, "the display's progress line moves with the extrapolated clock");
   const lvl = await page.locator('.transport__inmeter').evaluate((el) => Number(el.style.getPropertyValue('--lvl')));
   console.log('meter --lvl', lvl);
   assert.ok(Math.abs(lvl - 0.9) < 0.02, 'a 0.5 peak reads −6 dBFS on the meter');
@@ -270,7 +272,33 @@ await probe(async ({ open }) => {
   assert.ok(!(await sent()).some((c) => c.NoteOn || c.NoteOff !== undefined), 'no note goes past the router (engine_send)');
 
   // ── IN FX: the input sends, a rig setting the UI keeps ────────────────────────────────────────────
+  // Wide, the four are plates in slot A's line: each its power lamp (the send's toggle) and its settings
+  // under its chevron, saying what it acts on.
+  assert.equal(await page.getByRole('button', { name: 'Input effects' }).count(), 0, 'wide, the input effects show as four plates');
+  const echoLamp = page.getByRole('button', { name: 'Input echo', exact: true });
+  await clearSent();
+  await echoLamp.click();
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'echo' } } }], "ECHO's lamp sends the engine's toggle");
+  assert.equal(await echoLamp.getAttribute('aria-pressed'), 'true', "ECHO's lamp shows the engine's Toggled");
+  const echoSettings = page.getByRole('button', { name: 'Settings for input Echo', exact: true });
+  await echoSettings.click();
+  const echoPop = page.getByRole('dialog', { name: 'Input echo settings' });
+  await echoPop.waitFor();
+  assert.match(await echoPop.textContent(), /both slots/, 'its settings say it acts on both slots');
+  await clearSent();
+  await echoPop.getByRole('slider', { name: 'Echo level' }).fill('0.6');
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: ['echoLevel', 0.6] }], "the plate's level slider sends its value");
+  await page.keyboard.press('Escape');
+  await echoPop.waitFor({ state: 'detached' });
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Settings for input Echo', 'Escape returns focus to its chevron');
+  await clearSent();
+  await echoLamp.click();
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'echo' } } }], 'a second press switches it off');
+  assert.equal(await echoLamp.getAttribute('aria-pressed'), 'false');
+  // Narrow, the four fold into one IN FX plate whose popover holds them, lit while any is on.
+  await page.setViewportSize({ width: 1000, height: 900 });
   const infx = page.getByRole('button', { name: 'Input effects' });
+  await infx.waitFor();
   const engaged = () => infx.evaluate((el) => el.classList.contains('is-on'));
   const dialog = page.getByRole('dialog', { name: 'Input effects' });
   assert.equal(await engaged(), false, 'IN FX starts off');
@@ -373,7 +401,7 @@ await probe(async ({ open }) => {
   console.log('second reset sent', JSON.stringify(adopted));
   assert.equal(await page.getByRole('slider', { name: 'Track 1 volume' }).inputValue(), '50', "the engine's lane volume is adopted");
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "the engine's click is adopted");
-  assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
+  assert.equal(await page.getByRole('slider', { name: 'Master volume' }).getAttribute('aria-valuenow'), '60', "the engine's master volume is adopted");
   await infx.click();
   assert.equal(await ott.getAttribute('aria-pressed'), 'true', "the engine's OTT is adopted");
   assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.ott')), '1', "the engine's OTT is kept");
@@ -403,31 +431,36 @@ await probe(async ({ open }) => {
   assert.equal(await dialog.locator('.fxp-param', { has: page.getByRole('slider', { name: 'OTT depth' }) }).locator('.fxp-param__val').textContent(), '100 %');
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
+  await page.setViewportSize({ width: 1600, height: 900 });
 
   // ── FIXED past the loop (F14 multiply): a bar at a time up to the loop, whole loops above it ─────
   await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });
   await clearSent();
   const fixedToggle = page.getByRole('button', { name: 'Fixed take length', exact: true });
-  const fixedBars = page.locator('.transport__fixed .transport__bars-val');
-  assert.equal(await fixedBars.count(), 0, 'FIXED off shows no bars');
+  // The bars ride on the key (its value line); off, the key's value takes no gesture.
+  const fixedBars = page.locator('.transport__fixed .k-key__v');
+  await fixedToggle.press('ArrowUp');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [], 'FIXED off: a step on its bars sends nothing');
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'true', "FIXED shows the engine's Toggled");
-  assert.equal((await fixedBars.textContent()).trim(), '4bars', 'FIXED 4 over a 2-bar loop: two loops');
+  assert.equal((await fixedBars.textContent()).trim(), '4 BARS', 'FIXED 4 over a 2-bar loop: two loops');
   assert.match(await fixedToggle.getAttribute('title'), /Longer: the loop grows to it in whole loops/);
-  const more = page.getByRole('button', { name: 'More bars', exact: true });
-  const fewer = page.getByRole('button', { name: 'Fewer bars', exact: true });
+  // A step on the key (ArrowUp / ArrowDown on the focused FIXED: the same steps its drag and wheel take).
+  const more = () => fixedToggle.press('ArrowUp');
+  const fewer = () => fixedToggle.press('ArrowDown');
   await clearSent();
-  for (const step of [more, fewer, fewer, fewer]) await step.click();
+  for (const step of [more, fewer, fewer, fewer]) await step();
   assert.deepEqual(await sentAtLeast(4), [{ SetFixedBars: 6 }, { SetFixedBars: 4 }, { SetFixedBars: 2 }, { SetFixedBars: 1 }]);
   await emit({ events: [laneEvent(0, lane('Playing', { length: 3 * BAR, canReverse: true })), transport(3 * BAR, true, 120)] });
   await clearSent();
-  for (const step of [more, more, more, fewer]) await step.click();
+  for (const step of [more, more, more, fewer]) await step();
   assert.deepEqual(await sentAtLeast(4), [{ SetFixedBars: 2 }, { SetFixedBars: 3 }, { SetFixedBars: 6 }, { SetFixedBars: 3 }], 'a 3-bar loop steps 1, 2, 3, 6');
   await clearSent();
-  await more.click();
+  await more();
   await emit({ events: [laneEvent(0, committed), transport(BAR, true, 120)] });
-  assert.equal((await fixedBars.textContent()).trim(), '6bars', 'over a 1-bar loop every bar is a whole loop');
+  assert.equal((await fixedBars.textContent()).trim(), '6 BARS', 'over a 1-bar loop every bar is a whole loop');
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(2), [{ SetFixedBars: 6 }, { Action: { Toggle: 'Fixed' } }]);
 
@@ -459,7 +492,13 @@ await probe(async ({ open }) => {
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'false', "FIXED shows the engine's off");
-  assert.equal(await fixedBars.count(), 0, 'FIXED off hides its bars');
+  // Off, the key still carries the bars it would take (its value line, unlit), and they take no step.
+  assert.equal((await fixedBars.textContent()).trim(), '6 BARS', 'FIXED off keeps its bars on the key');
+  await clearSent();
+  await fixedToggle.press('ArrowDown');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [], 'FIXED off: its bars take no step');
+  await page.evaluate(() => document.activeElement?.blur());
 
   // ── A later take's wait: counted in or not is the engine's to say (its beats' `countLeft`) ─────────
   const count = (i) => lanes.nth(i).locator('.lp-lane__count');

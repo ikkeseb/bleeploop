@@ -5,8 +5,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 `state/` excepted (the root `AGENTS.md` rule).
 
 - **Type and tokens:** Instrument Sans (vendored, `src/assets/fonts/`) in three roles, `--font-legend`,
-  `--font-num` and `--font-name`, so a change of face is one line; no display or retro font. Geist Mono
-  stays only for the wave's bar numbers in `looper/waveform.ts`, until that file takes `--font-num`.
+  `--font-num` and `--font-name`, so a change of face is one line; no display or retro font. The wave's
+  bar numbers (`looper/waveform.ts`) draw in `--font-num` too, every digit one advance wide.
   The surface language ("the panel": depth only on what is pressed, turned or slid; flat panel, print
   and dark glass for the rest; colour only for sound; warm white = engaged), its tokens and the shared
   recipes (`.k-key`, `.k-led`, `.k-glass`, `.k-win`, `.k-meter`, `.k-fader`, `.k-knob`) live in the
@@ -110,3 +110,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   the ask through later Transports until its echo, a refusal or the player's own pick ends it. Read
   from source, not reproduced. Next check: a meter-picker case with a non-reset Transport between the
   reset and the asked meter's echo, and one whose `SetMeter` the fake refuses.
+- `wave-steady`'s "nothing drawn past the recorded boundary" goes red in about one run in three, on the
+  redesigned wave before and after the command bar's fit fix: the red pixels are the previous span's quiet
+  bins (x about 900-919 of 934 against a new end of 449-615), so a frame drawn over the old span is read
+  against the new one. `recSpanFrames` reads `Date.now()`, so the span can grow between the draw and the
+  probe's read (a probe race); one run showed it on two samples in a row with the same bin count, which
+  points at stale pixels kept after the span grows (a wave defect). Next check: log `lane.lastSpan`
+  against the span the sample reads.

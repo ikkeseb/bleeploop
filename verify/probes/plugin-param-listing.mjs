@@ -92,7 +92,9 @@ await probe(async ({ open }) => {
   };
 
   // (1) The drawer's first listing (Alpha 0.25) is in flight when the editor turns Alpha to 0.6.
-  await page.getByRole('button', { name: /Plugin parameters for slot A/ }).click();
+  // Parameters is in the plate's menu
+  await page.getByRole('button', { name: 'Menu for slot A', exact: true }).click();
+  await page.getByRole('menuitemcheckbox', { name: 'Parameters', exact: true }).click();
   await page.waitForFunction(() => window.__listProbe?.pending.length === 1);
   await run(() => window.__listProbe.editorTurn(1, 0.6));
   await settle();

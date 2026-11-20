@@ -31,12 +31,13 @@ import {
  * invariant 6) and never scans raw PCM. Per track the waveform AND its bar grid are rasterised into an
  * off-screen canvas and cached, in the look the player picked (`wave-looks.ts`: the stripes, the dense
  * wave, the light bars, or this file's own smooth body, `plain`); a look that turns the part to come down
- * caches that part as a second bitmap. The bitmaps are re-rasterised ONLY when the peaks change (version
- * bump), the track state changes (colour), the master loop length changes (grid geometry), a recording
- * take's span changes (bin placement), the look changes, or the element resizes. Every frame the loop
+ * caches that part as a second bitmap; a fade caches its sounding colour beside its grey (`rasterise`).
+ * The bitmaps are re-rasterised ONLY when the peaks change (version bump), the track state changes
+ * (colour), the master loop length changes (grid geometry), a recording take's span changes (bin
+ * placement), a fade begins or ends, the look changes, or the element resizes. Every frame the loop
  * repaints only what moved (`repaint`): the playhead's old and new columns, the played/to-come cut's
- * step, the dense look's trail, blitted from the cached bitmaps — a few small `drawImage`s and a
- * `fillRect` per track, holding 60fps with flat GC even with all five tracks live.
+ * step either way, the dense look's trail, a fade's band edges, blitted from the cached bitmaps — a few
+ * small `drawImage`s and a `fillRect` per track, holding 60fps with flat GC even with all five tracks live.
  *
  * The bar grid is derived from `masterBars()` (the shared bar-math in `shared.ts`) so it can
  * never disagree with the spoken loop length. That is the ONLY place Solid signals are read
@@ -52,10 +53,15 @@ import {
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.
  */
 
-// Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
+// Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint). The ruler's bar numbers
+// (the top row's only) are --faint, solid: 6.2:1 on the glass, read from the chair (`drawGrid`).
 const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
-const GRID_NUM = 'rgba(148,168,215,.56)'; //   the ruler's bar numbers (the top row's only): read from the chair, never brighter than a wave
+/** The ruler (`drawGrid`), CSS px: its numbers' top margin, and the clear gap under them to the wave. */
+const RULER_TOP = 4;
+const RULER_GAP = 3;
+/** The ruler's digits, one string each, so a numeral draws without allocating. */
+const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 /**
  * The plain look: the wave is one filled, anti-aliased BODY in its colour, the take's level, its own
  * edge the only edge (no second silhouette around it). Alpha per state (of the colour): a sounding take
@@ -70,7 +76,7 @@ const LOOK_MUTED = 0.2;
  * CSS px or wider (2 device px on a 2560 display at 100 %), so it holds from the chair. */
 const MUTED_EDGE = { alpha: 0.6, width: 1.5, wide: 2 };
 /** A fading take's colour over its grey silhouette: a fixed step toward grey from the moment the fade
- * begins (`drawFade`), so a fade never reads as a plain playing take. */
+ * begins (`fadeLayer`), so a fade never reads as a plain playing take. */
 const FADE_STEP = 0.42;
 /** A muted lane that captures keeps its capture colour, a step down (its word says REC/OVERDUB). */
 const MUTED_CAPTURE = 0.6;
@@ -144,6 +150,13 @@ interface Lane {
   gridBars: number;
   /** Cached bar-number font string (depends on dpr and the row's height) — so rasterise allocates nothing. */
   gridFont: string;
+  /** The ruler's metrics for `rulerFont` (`measureRuler`): one digit's advance (every figure one width,
+   * tabular), the digits' ascent, device px. `strip`: the band the ruler holds at the row's top at the last
+   * rasterise (0: no ruler); the wave's reach stops under it. */
+  rulerFont: string;
+  digitW: number;
+  rulerAsc: number;
+  strip: number;
   /** The wave's per-column scratch, 4 × `dw` (set on resize, reused by every rasterise): the outer
    * envelope's top and bottom and the body's, as signed amplitudes. */
   cols: Float32Array;
@@ -158,10 +171,17 @@ interface Lane {
   /** Per bin, the cubic's slopes into and out of each knot of those three rows (`slopes`), stride the
    * arrays' length. */
   slopes: Float32Array;
-  /** A fade at the last rasterise: the take is drawn twice, grey in `wave` and sounding in `fading`. */
+  /** A fade at the last rasterise: `wave` holds the take grey, as it will be once stopped, and `fading`
+   * (and `fadeAhead` where the look splits) the take sounding a step toward grey over it, each with the
+   * grid (`fadeLayer`); `repaint` shows the sounding bitmaps inside the fade's band, `wave` outside it. */
   lastFading: boolean;
-  /** While the lane fades (`drawFade`, made on its first fade): its take in its sounding colour, no grid. */
   fading: Fade | null;
+  fadeAhead: Fade | null;
+  /** The last rasterise drew a fade's bitmaps. */
+  fadeOn: boolean;
+  /** The fade's band at the last frame, device rows [bandTop, bandBot) (both 0: none). */
+  bandTop: number;
+  bandBot: number;
   /** The look at the last rasterise (`wave-looks.ts`). */
   lastLook: WaveLook | '';
   /** The take as the looks other than `plain` read it (`wave-looks.ts`), reused by every rasterise. */
@@ -199,19 +219,22 @@ interface Fade {
   tctx: CanvasRenderingContext2D;
 }
 
-/** The bar-number font at a given device-pixel ratio and row height (CSS px): Geist Mono, the `--mono`
- * token's stack (`src/app.css`), 11 px in a short row up to 14 px in a tall one (a 2560 display), so the
- * pane's one ruler reads from the chair without shouting over the take. */
+/** The numerals' face, the `--font-num` token's stack (`src/app.css`), read once at the first mount. */
+let numFamily = '';
+
+/** The bar-number font at a given device-pixel ratio and row height (CSS px): the numerals' face
+ * (`numFamily`) at 500, 12 px in a short row (a legend's floor, the app.css header's TYPE) up to 14 px in a
+ * tall one (a 2560 display), so the pane's one ruler reads from the chair without shouting over the take. */
 function gridFontFor(dpr: number, cssH: number): string {
-  const px = Math.min(14, Math.max(11, cssH * 0.075));
-  return `500 ${(px * dpr).toFixed(1)}px 'Geist Mono', ui-monospace, Consolas, monospace`;
+  const px = Math.min(14, Math.max(12, cssH * 0.075));
+  return `500 ${(px * dpr).toFixed(1)}px ${numFamily}`;
 }
 
 /**
- * Geist Mono is an `@font-face` (`src/app.css`) that loads on first use: a grid rasterised before it is
- * in draws a fallback face, and the cached bitmap keeps it until something else dirties the lane. So the
- * first lane asks for the face once, and when it lands every lane re-rasterises (a plain field write,
- * read by the draw loop's dirty check; no signal, invariant 6).
+ * The numerals' face is an `@font-face` (`src/app.css`) that loads on first use: a grid rasterised before
+ * it is in draws a fallback face, and the cached bitmap keeps it until something else dirties the lane. So
+ * the first lane asks for the face once, and when it lands every lane measures its ruler again and
+ * re-rasterises (plain field writes, read by the draw loop's dirty check; no signal, invariant 6).
  */
 let gridFontAsked = false;
 function askGridFont(font: string): void {
@@ -220,7 +243,10 @@ function askGridFont(font: string): void {
   if (document.fonts.check(font)) return;
   document.fonts.load(font).then(
     () => {
-      for (const lane of lanes.values()) lane.lastVersion = -2;
+      for (const lane of lanes.values()) {
+        lane.rulerFont = '';
+        lane.lastVersion = -2;
+      }
     },
     // A face that fails to load or decode leaves the fallback in place; a rejection here would
     // otherwise surface as an unhandled one in the release log for a numeral nobody can fix at a jam.
@@ -400,8 +426,43 @@ export function unregisterPhaseDial(): void {
   stopIfIdle();
 }
 
+/**
+ * The display's BAR.BEAT (Transport.tsx) is read off the same clock as the progress line, every frame:
+ * the loop's phase, so a new clock anchor that moves the playhead moves the position with it (a read that
+ * waited for the next beat once kept the bar a correction left behind). `grid` is plain: the loop's beats
+ * (0 without a loop) and the beats a bar, kept by a Transport effect; the text is written only when it
+ * changes (no signal, invariant 6).
+ */
+let position: { el: HTMLElement; grid: { total: number; beats: number }; last: string } | null = null;
+
+function drawPosition(): void {
+  if (!position) return;
+  const { total, beats } = position.grid;
+  let text = '—';
+  if (total > 0 && beats > 0 && looper.masterFramesValue() > 0) {
+    // a hair over, so a phase that lands a rounding error under a beat line counts that beat
+    const at = Math.floor(looper.phaseValue() * total + 1e-6) % total;
+    text = `${Math.floor(at / beats) + 1}.${(at % beats) + 1}`;
+  }
+  if (text === position.last) return;
+  position.last = text;
+  position.el.textContent = text;
+}
+
+/** Register the display's position read-out (Transport.tsx). Starts the shared rAF loop if nothing else has. */
+export function registerPositionReadout(el: HTMLElement, grid: { total: number; beats: number }): void {
+  position = { el, grid, last: '' };
+  if (rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
+/** Unregister the position read-out; stops the loop when nothing else is registered. */
+export function unregisterPositionReadout(): void {
+  position = null;
+  stopIfIdle();
+}
+
 function stopIfIdle(): void {
-  if (lanes.size === 0 && dial === null && meter === null && !cardMeters[0] && !cardMeters[1] && rafId !== 0) {
+  if (lanes.size === 0 && dial === null && position === null && meter === null && !cardMeters[0] && !cardMeters[1] && rafId !== 0) {
     cancelAnimationFrame(rafId);
     rafId = 0;
   }
@@ -475,9 +536,24 @@ function syncSize(lane: Lane): boolean {
   return true;
 }
 
-/** Draw the bar/beat grid UNDER the wave, and on the pane's top row its one ruler. `bars` from the shared
- * bar-math. */
+/** The ruler's metrics in `lane.gridFont` (set on `wctx`): the widest digit's advance, which every digit
+ * takes (tabular figures: a canvas cannot ask the face for them), and the digits' ascent. Once per font. */
+function measureRuler(lane: Lane): void {
+  const { wctx } = lane;
+  let w = 0;
+  for (let d = 0; d < 10; d++) {
+    const m = wctx.measureText(DIGITS[d]).width;
+    if (m > w) w = m;
+  }
+  lane.digitW = w;
+  lane.rulerAsc = wctx.measureText('0').actualBoundingBoxAscent;
+  lane.rulerFont = lane.gridFont;
+}
+
+/** Draw the bar/beat grid UNDER the wave, and on the pane's top row its one ruler, in a strip at the row's
+ * top that the wave never reaches (`lane.strip`, `rasterise`). `bars` from the shared bar-math. */
 function drawGrid(lane: Lane, bars: number): void {
+  lane.strip = 0;
   if (bars <= 0) return;
   const { wctx, dw, dh, dpr } = lane;
   const total = bars * gridBeats;
@@ -489,17 +565,37 @@ function drawGrid(lane: Lane, bars: number): void {
   // The bar numbers: every row draws the master loop's grid, so they would be one ruler five times over.
   // They go once, on the top row (an EMPTY one draws its grid too, so the ruler stands over the pane
   // whenever a loop exists), and not at all on a one-bar loop, where a lone 1 says nothing. Each number
-  // hangs off the top of the bar line it names, as on a ruler: its left edge a hair right of the line
-  // (Geist Mono: every figure one width, so 9 and 10 line up as tabular figures do).
+  // hangs off the top of the bar line it names, as on a ruler: its left edge a hair right of the line, in
+  // the numerals' face, every digit one advance wide (as tabular figures), in --faint (6.2:1 on the glass).
+  // A long loop's bars grow narrower than their numbers: the ruler then names every 2nd, 4th, 8th … bar
+  // (1, 3, 5 … or 1, 5, 9 …), the fewest skipped for the widest number and a digit's air to fit in the
+  // stride; every bar and beat line stays.
   if (lane.index !== 0 || bars < 2) return;
-  wctx.fillStyle = GRID_NUM;
   wctx.font = lane.gridFont;
-  wctx.textBaseline = 'top';
+  if (lane.rulerFont !== lane.gridFont) measureRuler(lane);
+  wctx.fillStyle = lane.colors.mid;
+  wctx.textAlign = 'center';
+  wctx.textBaseline = 'alphabetic';
   const pad = 1 + Math.round(4 * dpr);
-  const top = Math.round(5 * dpr);
-  for (let b = 0; b < bars; b++) {
-    wctx.fillText(String(b + 1), Math.round((b / bars) * dw) + pad, top);
+  const base = Math.round(RULER_TOP * dpr + lane.rulerAsc);
+  const adv = lane.digitW;
+  let widest = 1;
+  for (let m = bars; m >= 10; m = (m / 10) | 0) widest++;
+  const need = (widest + 1) * adv + pad;
+  let every = 1;
+  while (every < bars && (every * dw) / bars < need) every *= 2;
+  for (let b = 0; b < bars; b += every) {
+    let n = b + 1;
+    let digits = 1;
+    for (let m = n; m >= 10; m = (m / 10) | 0) digits++;
+    const x = Math.round((b / bars) * dw) + pad;
+    for (let i = digits - 1; i >= 0; i--) {
+      wctx.fillText(DIGITS[n % 10], x + (i + 0.5) * adv, base);
+      n = (n / 10) | 0;
+    }
   }
+  wctx.textAlign = 'start';
+  lane.strip = base + Math.round(RULER_GAP * dpr);
 }
 
 /**
@@ -811,6 +907,18 @@ function fadeFor(lane: Lane): Fade | null {
   return lane.fading;
 }
 
+/** Start a fade's sounding bitmap `f`: a copy of `wave` (the grid and the take grey, as it will be once
+ * stopped), its context left at `FADE_STEP` alpha for the take in its sounding colour, which the caller
+ * draws next and then sets the alpha back to 1. */
+function fadeLayer(lane: Lane, f: Fade): CanvasRenderingContext2D {
+  const g = f.tctx;
+  g.globalAlpha = 1;
+  g.clearRect(0, 0, lane.dw, lane.dh);
+  g.drawImage(lane.wave, 0, 0);
+  g.globalAlpha = FADE_STEP;
+  return g;
+}
+
 /** The dense look's trail reach behind the head, CSS px, and its ramp's power (brightest at the head). */
 const TRAIL_CSS = 84;
 const TRAIL_POW = 2.2;
@@ -868,9 +976,10 @@ function layerOf(lane: Lane, min: Float32Array, max: Float32Array, count: number
 
 /**
  * Draw the take in a look other than `plain` (`wave-looks.ts`) from the bins `rasterise` put on the
- * display's scale: into `wave` as played and, where the look splits (a running loop, no fade), into
- * `ahead` as to come over a copy of the grid and, for the dense look's trail, into `hot` at full burn. A
- * fade draws the take grey in `wave` and sounding in `f`, as the plain look does.
+ * display's scale, reaching `A` px from the centre line and never past `end`: into `wave` as played and,
+ * where the look splits (a running loop), into `ahead` as to come over a copy of the grid and, for the
+ * dense look's trail, into `hot` at full burn. A fade (`f`) draws the take grey in `wave` and sounding,
+ * a step toward grey, in `f` as played and in `fadeAhead` as to come: the split holds through a fade.
  */
 function drawLook(
   lane: Lane,
@@ -883,13 +992,17 @@ function drawLook(
   muted: boolean,
   capturing: boolean,
   f: Fade | null,
+  A: number,
+  end: number,
 ): void {
   const { wctx, dw, dh, dpr } = lane;
   const w = lane.wi;
   w.dw = dw;
   w.dh = dh;
   w.dpr = dpr;
-  w.A = (dh / 2) * WAVE_REACH;
+  w.A = A;
+  w.end = end;
+  w.beats = gridBeats;
   w.count = count;
   w.across = across;
   w.hs = lane.shownMax;
@@ -901,9 +1014,17 @@ function drawLook(
   w.nu = state === 'OVERDUBBING' && lane.baseCount > 0 ? layerOf(lane, min, max, count) : null;
   const n = prepare(look, w);
   if (f) {
-    f.tctx.clearRect(0, 0, dw, dh);
     paint(look, w, wctx, n, TONE_STOPPED, PART_ON);
-    paint(look, w, f.tctx, n, TONE_PLAY, PART_ON);
+    const g = fadeLayer(lane, f);
+    paint(look, w, g, n, TONE_PLAY, PART_ON);
+    g.globalAlpha = 1;
+    lane.fadeAhead = layerFor(lane.fadeAhead, dw, dh);
+    if (lane.fadeAhead) {
+      const a = fadeLayer(lane, lane.fadeAhead);
+      paint(look, w, a, n, TONE_PLAY, PART_AHEAD);
+      a.globalAlpha = 1;
+      lane.split = true;
+    }
     return;
   }
   const tone =
@@ -978,9 +1099,9 @@ function rasterise(
   wctx.globalAlpha = 1;
   lane.split = false;
   lane.trail = false;
+  lane.fadeOn = false;
 
   const midY = dh / 2;
-  const A = midY * WAVE_REACH; // peak amplitude in px — headroom so loud transients never reach the row's edge
 
   // Bar grid, UNDER the wave. Bar count comes from the shared Looper.tsx helper; it (and the one
   // bpm signal read) is cached and only recomputed when the master loop length changes.
@@ -989,6 +1110,13 @@ function rasterise(
     lane.gridBars = masterFrames > 0 ? masterBars(masterFrames, clock.bpm(), sampleRate(), gridBeats) : 0;
   }
   drawGrid(lane, lane.gridBars);
+  // The peak's reach in px: headroom so loud transients never reach the row's edge, and on the top row
+  // never into the ruler's strip (`drawGrid`), so no wave covers a bar number. The centre line stays the
+  // row's, on the axis the lane's head shares, so a loud top row draws a little smaller than the rest; a
+  // row too short for both keeps at least 60 % of its reach.
+  const reach = midY * WAVE_REACH;
+  const below = midY - lane.strip;
+  const A = lane.strip > 0 && below < reach ? Math.max(below, reach * 0.6) : reach;
 
   // Bins across the full width: a recording take's span in bins, else the loop's `count`. While a take
   // records, bin b sits at b·PEAK_FRAMES/span of the width whatever the record head does, so a drawn
@@ -1040,20 +1168,22 @@ function rasterise(
     slopes(lv, 1, count, sl, 4 * z, 5 * z);
     const capturing = state === 'RECORDING' || state === 'OVERDUBBING';
     const f = fade ? fadeFor(lane) : null;
+    lane.fadeOn = f !== null;
     const look = waveLook();
     if (look !== 'plain') {
-      drawLook(lane, look, count, across, min, max, state, muted, capturing, f);
+      drawLook(lane, look, count, across, min, max, state, muted, capturing, f, A, end);
     } else {
       const n = envelope(lane.cols, dw, cols, count, across, ls, hs, lv, sl, z);
       // A vertex every 2 device px where a bin spans 4 or more (the cubic is near-straight over 2 px),
       // else one per column, which keeps every bin's extremes.
       const step = across * 4 <= dw ? 2 : 1;
       if (f) {
-        // A fading lane's take twice: grey, as it will be once stopped, and in its sounding colour on its
-        // own canvas, which `drawFade` lays over it at the level it sounds at now.
-        f.tctx.clearRect(0, 0, dw, dh);
+        // A fading lane's take twice: grey, as it will be once stopped, and on its own canvas over that grey
+        // in its sounding colour a step toward grey, which `repaint` shows inside the fade's band.
         drawTake(wctx, lane.cols, n, end, midY, A, step, lane.colors.stopped, LOOK_STOPPED, 0);
-        drawTake(f.tctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, false), LOOK_SOUNDING, 0);
+        const g = fadeLayer(lane, f);
+        g.globalAlpha = 1;
+        drawTake(g, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, false), LOOK_SOUNDING, 0, FADE_STEP);
       } else {
         const hushed = muted && !capturing;
         const body = hushed ? LOOK_MUTED : state === 'STOPPED' ? LOOK_STOPPED : LOOK_SOUNDING;
@@ -1108,11 +1238,45 @@ function headOf(lane: Lane, state: TrackState, waiting: boolean): number {
 }
 
 /**
- * Draw a lane's frame over what the last one left: the cached bitmaps (`wave` left of the cut, `ahead`
- * right of it on a split look), the dense look's trail and one crisp head. `full` (the bitmap changed, a
- * resize) or a cut that went back (the loop wrapped) repaints the row; otherwise only the columns that
- * moved: the old and new head, the cut's step, the trail's old and new span. A fade (`to` >= 0) repaints
- * the row each frame (`drawFade`). Integer blits, no allocation.
+ * Lay the cached bitmaps over the lane's columns [x0, x1) and rows [y0, y1), cleared first: `wave` left of
+ * the cut, `ahead` right of it on a split look. In a fade (`fade`) the band [bandTop, bandBot) shows the
+ * take sounding (`fading` left of the cut, `fadeAhead` right of it) and the rows outside it `wave`, the
+ * take grey: the colour sinks toward the centre line as the level falls. Integer blits, no allocation.
+ */
+function blit(lane: Lane, x0: number, x1: number, y0: number, y1: number, cut: number, fade: boolean): void {
+  if (x1 <= x0 || y1 <= y0) return;
+  const { ctx } = lane;
+  ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+  const c = cut < x0 ? x0 : cut > x1 ? x1 : cut;
+  if (!fade || !lane.fading) {
+    rows(ctx, lane.wave, x0, c, y0, y1);
+    if (lane.ahead) rows(ctx, lane.ahead.take, c, x1, y0, y1);
+    return;
+  }
+  const b0 = lane.bandTop > y0 ? lane.bandTop : y0;
+  const b1 = lane.bandBot < y1 ? lane.bandBot : y1;
+  if (b1 <= b0) {
+    rows(ctx, lane.wave, x0, x1, y0, y1);
+    return;
+  }
+  rows(ctx, lane.wave, x0, x1, y0, b0);
+  rows(ctx, lane.wave, x0, x1, b1, y1);
+  rows(ctx, lane.fading.take, x0, c, b0, b1);
+  rows(ctx, (lane.fadeAhead ?? lane.fading).take, c, x1, b0, b1);
+}
+
+/** Copy `src`'s rect [x0, x1) x [y0, y1) onto `ctx` in place (nothing when empty). */
+function rows(ctx: CanvasRenderingContext2D, src: HTMLCanvasElement, x0: number, x1: number, y0: number, y1: number): void {
+  if (x1 > x0 && y1 > y0) ctx.drawImage(src, x0, y0, x1 - x0, y1 - y0, x0, y0, x1 - x0, y1 - y0);
+}
+
+/**
+ * Draw a lane's frame over what the last one left: the cached bitmaps (`blit`), the dense look's trail and
+ * one crisp head. `full` (the bitmap changed, a resize) or a wrap (the head or the cut jumped back more
+ * than half the row) repaints the row; otherwise only the columns that moved: the old and new head, the
+ * cut's step in either direction (a clock correction can move it back a few px), the trail's old and new
+ * span. A fade (`to` >= 0, its bitmaps cached) adds its band: the rows the band's edges crossed since the
+ * last frame repaint across the row (`blit`). Integer blits, no allocation.
  */
 function repaint(lane: Lane, state: TrackState, waiting: boolean, full: boolean, to: number): void {
   const { ctx, dw, dh } = lane;
@@ -1134,10 +1298,27 @@ function repaint(lane: Lane, state: TrackState, waiting: boolean, full: boolean,
     t1 = t1 < 0 ? 0 : t1 > dw ? dw : t1;
     t0 = t1 - lane.trailW < 0 ? 0 : t1 - lane.trailW;
   }
-  const fading = to >= 0 && lane.fading !== null && lane.fading.take.width === dw;
+  // A fade's band: the rows the take sounds in, about the centre line, as tall as the level the lane
+  // sounds at now. That level is the engine's ramp, r², r falling linearly from the fade's start to its
+  // stop (`to`), so the colour sinks into the grey as the fade runs and is gone at the stop.
+  const fade = to >= 0 && lane.fadeOn && lane.fading !== null && lane.fading.take.width === dw;
+  let b0 = 0;
+  let b1 = 0;
+  if (fade) {
+    const from = fadeFrom[lane.index] ?? 0;
+    let r = (to - looper.heardFrameValue()) / Math.max(1, to - from);
+    r = r < 0 ? 0 : r > 1 ? 1 : r;
+    const half = (dh / 2) * r * r;
+    b0 = Math.round(dh / 2 - half);
+    b1 = Math.round(dh / 2 + half);
+    if (b1 <= b0) b0 = b1 = 0;
+  }
+  const wrap =
+    (lane.lastHX >= 0 && hx >= 0 && lane.lastHX - hx > dw / 2) || (lane.lastCut < dw && lane.lastCut - cut > dw / 2);
+  const whole = full || wrap;
   let x0 = 0;
   let x1 = dw;
-  if (!full && !fading && cut >= lane.lastCut) {
+  if (!whole) {
     x0 = dw;
     x1 = 0;
     if (lane.lastHX >= 0) {
@@ -1148,9 +1329,11 @@ function repaint(lane: Lane, state: TrackState, waiting: boolean, full: boolean,
       if (hx < x0) x0 = hx;
       if (hx + hw > x1) x1 = hx + hw;
     }
-    if (cut > lane.lastCut) {
-      if (lane.lastCut < x0) x0 = lane.lastCut;
-      if (cut > x1) x1 = cut;
+    if (cut !== lane.lastCut) {
+      const lo = cut < lane.lastCut ? cut : lane.lastCut;
+      const hi = cut < lane.lastCut ? lane.lastCut : cut;
+      if (lo < x0) x0 = lo;
+      if (hi > x1) x1 = hi;
     }
     if (lane.lastT1 > lane.lastT0) {
       if (lane.lastT0 < x0) x0 = lane.lastT0;
@@ -1160,23 +1343,38 @@ function repaint(lane: Lane, state: TrackState, waiting: boolean, full: boolean,
       if (t0 < x0) x0 = t0;
       if (t1 > x1) x1 = t1;
     }
+    // The band's edges moved: the rows between the old edge and the new, across the row (the head and
+    // the trail are drawn again below, over them).
+    if (fade && (b0 !== lane.bandTop || b1 !== lane.bandBot)) {
+      const pb0 = lane.bandTop;
+      const pb1 = lane.bandBot;
+      lane.bandTop = b0;
+      lane.bandBot = b1;
+      if (pb1 <= pb0 || b1 <= b0) blit(lane, 0, dw, 0, dh, cut, true);
+      else {
+        blit(lane, 0, dw, pb0 < b0 ? pb0 : b0, pb0 < b0 ? b0 : pb0, cut, true);
+        blit(lane, 0, dw, pb1 < b1 ? pb1 : b1, pb1 < b1 ? b1 : pb1, cut, true);
+      }
+      if (hx >= 0) {
+        if (hx < x0) x0 = hx;
+        if (hx + hw > x1) x1 = hx + hw;
+      }
+      if (t1 > t0) {
+        if (t0 < x0) x0 = t0;
+        if (t1 > x1) x1 = t1;
+      }
+    }
   }
+  lane.bandTop = b0;
+  lane.bandBot = b1;
   lane.lastHX = hx;
   lane.lastHW = hw;
   lane.lastCut = cut;
   lane.lastT0 = t0;
   lane.lastT1 = t1;
   if (x1 <= x0) return;
-  if (fading && lane.fading) {
-    ctx.clearRect(0, 0, dw, dh);
-    drawFade(lane, lane.fading, to, fadeFrom[lane.index] ?? 0);
-  } else {
-    ctx.clearRect(x0, 0, x1 - x0, dh);
-    const c = cut < x0 ? x0 : cut > x1 ? x1 : cut;
-    if (c > x0) ctx.drawImage(lane.wave, x0, 0, c - x0, dh, x0, 0, c - x0, dh);
-    if (x1 > c && lane.ahead) ctx.drawImage(lane.ahead.take, c, 0, x1 - c, dh, c, 0, x1 - c, dh);
-    if (t1 > t0) drawTrail(lane, t0, t1);
-  }
+  blit(lane, x0, x1, 0, dh, cut, fade);
+  if (t1 > t0) drawTrail(lane, t0, t1);
   if (hx >= 0) {
     ctx.fillStyle = lane.headColor;
     ctx.fillRect(hx, 0, hw, dh);
@@ -1209,26 +1407,6 @@ export function setLaneFade(index: number, stopAt: number | null): void {
   if (fadeTo[index] === stopAt) return;
   fadeTo[index] = stopAt;
   fadeFrom[index] = looper.heardFrameValue();
-}
-
-/**
- * Draw a fading lane, one treatment across the whole row: the take's full-size grey silhouette (the
- * lane's bitmap, `rasterise`, as it will look once stopped) and over it the take in its sounding colour a
- * fixed step toward grey (`FADE_STEP`), scaled about the centre line to the level the lane sounds at now.
- * That level is the engine's ramp, r², r falling linearly from the fade's start (`from`) to its stop
- * (`to`), so the colour sinks into the grey as the fade runs and is gone at the stop. Per frame: two
- * blits at integer sizes; no allocation.
- */
-function drawFade(lane: Lane, f: Fade, to: number, from: number): void {
-  const { ctx, dw, dh } = lane;
-  let r = (to - looper.heardFrameValue()) / Math.max(1, to - from);
-  r = r < 0 ? 0 : r > 1 ? 1 : r;
-  const h = Math.round(dh * r * r);
-  ctx.drawImage(lane.wave, 0, 0);
-  if (h < 1) return;
-  ctx.globalAlpha = FADE_STEP;
-  ctx.drawImage(f.take, 0, 0, dw, dh, 0, (dh - h) >> 1, dw, h);
-  ctx.globalAlpha = 1;
 }
 
 /** The single rAF loop: draw every registered lane, then schedule the next frame. */
@@ -1280,6 +1458,7 @@ function frame(now: number): void {
     if (dirty || moving) repaint(lane, state, waiting, dirty, fade ? to : -1);
   }
   drawDial();
+  drawPosition();
   drawMeter();
   for (const m of cardMeters) if (m) drawCardMeter(m, now);
   rafId = requestAnimationFrame(frame);
@@ -1296,6 +1475,9 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
   }
 
   const colors = readColors(canvas);
+  if (!numFamily) {
+    numFamily = getComputedStyle(canvas).getPropertyValue('--font-num').trim() || "'Instrument Sans', system-ui, sans-serif";
+  }
   const lane: Lane = {
     index,
     canvas,
@@ -1317,6 +1499,10 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     gridMaster: -1,
     gridBars: 0,
     gridFont: gridFontFor(self.devicePixelRatio || 1, canvas.clientHeight),
+    rulerFont: '',
+    digitW: 0,
+    rulerAsc: 0,
+    strip: 0,
     cols: new Float32Array(0),
     levels: new Float64Array(0),
     shownMax: new Float32Array(0),
@@ -1324,6 +1510,10 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     slopes: new Float32Array(0),
     lastFading: false,
     fading: null,
+    fadeAhead: null,
+    fadeOn: false,
+    bandTop: 0,
+    bandBot: 0,
     lastLook: '',
     wi: waveInput(colors.rgb),
     split: false,

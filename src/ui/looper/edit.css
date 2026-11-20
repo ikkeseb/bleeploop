@@ -1,15 +1,10 @@
-/* The lane's EDIT pill and its popover — "Instrument". The pill wears the select caret (--caret-svg as a
-   mask, so it takes the legend's colour in every state) and turns it over while open. The popover hangs
-   under the pill (anchor positioning; the bar's popovers hang under the bar instead: bar-popover.css); only the open lane's
-   pill carries the anchor name, so one name serves five lanes. The floating panel tone and a hairline
-   of top light; chrome stays monochrome. */
-.lp-pb--edit {
-  grid-auto-flow: column;
-  column-gap: 3px;
-  justify-content: center;
-}
+/* The lane's EDIT key (a momentary key, the recipe) and its popover. The key wears the select caret
+   (--caret-svg as a mask, so it takes the legend's colour in every state) and turns it over while open, its
+   legend lit warm white. The popover hangs under the key (anchor positioning; only the open lane's key
+   carries the anchor name, so one name serves five lanes): the floating panel, one row per edit. */
 .lp-pb--edit::after {
   content: '';
+  flex: none;
   width: 8px;
   height: 8px;
   background: currentColor;
@@ -20,8 +15,9 @@
 }
 .lp-pb--edit.is-open {
   anchor-name: --lf-edit;
+}
+.lp-pb--edit.is-open:not(:disabled) {
   color: var(--engaged);
-  background: var(--surf-3);
 }
 .lp-pb--edit.is-open::after {
   transform: rotate(180deg);
@@ -32,39 +28,39 @@
   top: 40vh; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
   right: clamp(16px, 2vw, 28px);
   position-anchor: --lf-edit;
-  top: calc(anchor(bottom) + 6px);
+  top: calc(anchor(bottom) + 8px);
   right: anchor(right);
   position-try-fallbacks: flip-block;
   outline: none;
 }
 
-/* The menu: one row per edit, its legend over a faint line that says what it does, or, disabled, why
-   not (the engine's refusal words). */
+/* The menu: one row per edit, its legend over a line that says what it does, or, disabled, why not (the
+   engine's refusal words). Folded, REV and UNDO lead it; REV's legend lights while the lane plays
+   reversed, as its key's does. */
 .edit {
-  width: 236px;
+  width: 260px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 5px;
-  border-radius: 12px;
+  padding: 6px;
+  border-radius: var(--r-card);
   background: var(--panel);
-  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
 }
 .edit__item {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
-  padding: 7px 9px;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-ctl);
   background: transparent;
-  color: var(--dim);
-  font-family: var(--sans);
+  color: var(--legend);
+  font-family: var(--font-legend);
   text-align: left;
   cursor: pointer;
-  transition: color 0.12s, background-color 0.12s;
+  transition: color var(--motion), background-color var(--motion);
 }
 .edit__item:hover:not(:disabled) {
   color: var(--text);
@@ -74,25 +70,33 @@
   background: var(--sunk);
   box-shadow: var(--pressed);
 }
+.edit__item.is-on:not(:disabled) {
+  color: var(--engaged);
+}
 .edit__item:disabled {
-  cursor: not-allowed;
+  cursor: default;
   color: var(--faint);
 }
 .edit__word {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 10px;
+  gap: 8px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
 }
 .edit__glyph {
-  width: 12px;
+  width: 14px;
   text-align: center;
 }
 .edit__hint {
-  padding-left: 19px; /* under the word, past the glyph's column */
-  font-size: 11px;
+  padding-left: 22px; /* under the word, past the glyph's column */
+  font-size: 12px;
   line-height: 1.3;
   color: var(--faint);
+  transition: color var(--motion);
+}
+/* the hovered row's lifted face takes the brighter grey: --faint on --surf-3 is 4.3:1, --dim 6.3:1 */
+.edit__item:hover:not(:disabled) .edit__hint {
+  color: var(--dim);
 }

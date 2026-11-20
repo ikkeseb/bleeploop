@@ -17,6 +17,7 @@
  * no Tauri, DOM or Solid import, so a Node guard imports this file directly.
  */
 import { array, bool, fail, int, nullable, num, obj, oneOf, str, tagged, type Obj } from './wire-read.ts'; // explicit .ts: Node guards import this file
+import type { PluginFormat } from './host';
 
 /** A device frame (Rust `lf_engine::Frame`, i64). */
 export type Frame = number;
@@ -48,7 +49,17 @@ export type Refusal =
 /** A setting a press switches (Rust `lf_engine::Toggle`): the click, END STOP, FIXED, RETAKE, AUTO REC, an
  * input send or a slot's GO LIVE. The engine switches it from the value it has when the press lands and
  * reports the value as `Toggled`. */
-export type EngineToggle = 'Click' | 'EndStop' | 'Fixed' | 'Retake' | 'AutoRec' | { Send: InputSendId } | { Live: 0 | 1 };
+export type EngineToggle =
+  | 'Click'
+  | 'EndStop'
+  | 'Fixed'
+  | 'Retake'
+  | 'AutoRec'
+  | { Send: InputSendId }
+  | { Live: 0 | 1 }
+  /** Every unit of a built-in effect kind in both chains (unit contract §6, the old pedals): if any is on,
+   * all go bypassed, else all come on; `Toggled`'s `on` is the value they took. No kept setting. */
+  | { Units: UnitEffectKindId };
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
  * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release, by the number of
  * the control (0..255) whose press the release ends; `FadeAll` is FADE; `Tuner` opens the tuner or closes
@@ -72,7 +83,9 @@ export type EngineAction =
   | { Release: number }
   | 'FadeAll'
   | 'Tuner'
-  | { Toggle: EngineToggle };
+  | { Toggle: EngineToggle }
+  /** A plate's lamp (unit contract §2): switches that unit's bypass from the engine's value. */
+  | { ToggleUnit: UnitId };
 /** The built-in instruments by id (`src/ui/state/instruments.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
@@ -86,6 +99,64 @@ export type InputSendParamId =
   | 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel' | 'ringFreq' | 'ringLevel'
   | 'ottDepth' | 'ottTime' | 'ottUpward' | 'ottDownward';
 export type AudioBackend = 'Wasapi' | 'Asio';
+
+// ── The chain per slot (`docs/unit-contract.md` §2): the wire's unit shapes ─────────────────────────
+// The native engine does not speak these yet; the browser fake (`chain-fake.ts`) answers them as the
+// contract says the engine will. Nothing here changes a shape the native side reads today.
+
+/** A unit's id: an opaque non-zero u32, minted by whoever asks for the unit (`mintUnitId`). */
+export type UnitId = number;
+/** The unit kinds: a loaded plugin or a built-in. */
+export type UnitKindId = 'plugin' | 'ott' | 'echo' | 'reverb' | 'ring' | 'synth';
+/** The built-in effect kinds, which `Toggle.Units` switches (the old pedals). */
+export type UnitEffectKindId = 'ott' | 'echo' | 'reverb' | 'ring';
+/** A plugin's identity: what the scan names it by (`PluginDescriptor`'s `format`, `path`, `id`). */
+export type PluginRef = { format: PluginFormat; path: string; id: string };
+/** SYNTH's per-instrument levels, `gain<Name>` in the UI's `SYNTHS` order. */
+export type SynthGainParamId = 'gainLead' | 'gainBass' | 'gainPad' | 'gainPiano' | 'gainOrgan' | 'gainDrum';
+/** A built-in unit's parameter: today's send keys, SYNTH's `instrument` (the index in the UI's `SYNTHS`
+ * order: 0 lead, 1 bass, 2 pad, 3 piano, 4 organ, 5 drum) and its levels. */
+export type UnitParamId = InputSendParamId | 'instrument' | SynthGainParamId;
+/** What restores a unit: `add`, the rig record and the v3 rig share it. */
+export type UnitSpec = (
+  | { kind: 'plugin'; plugin: PluginRef }
+  | { kind: Exclude<UnitKindId, 'plugin'>; params?: Partial<Record<UnitParamId, number>> }
+) & { bypass?: boolean };
+export type UnitRecord = UnitSpec & { id: UnitId };
+/** A unit as the engine applied it. `waiting`: held until a take ends; `failed`: no seat, or parked, the
+ * plate in its place. */
+export type UnitState = UnitRecord & {
+  source: boolean;
+  name: string;
+  latency: Frame;
+  error?: string;
+  state: 'loading' | 'waiting' | 'seated' | 'leaving' | 'failed';
+};
+/** One slot's chain as applied: its units in order, their latencies' sum (bypassed ones included), and
+ * whether an edit waits for a take to end. */
+export interface ChainState {
+  units: UnitState[];
+  latency: Frame;
+  held: boolean;
+}
+/** The OTT face's band (low, mid, high): `gain` in dB at the frame's last sample, `gainMin`/`gainMax` its
+ * range since the last frame, `level` the linked follower in dBFS (floor -120), `levelPeak` its largest. */
+export interface BandMeter {
+  gain: number;
+  gainMin: number;
+  gainMax: number;
+  level: number;
+  levelPeak: number;
+}
+/** A unit's meter since the last frame: its output peak per channel, and the OTT's bands. */
+export interface UnitMeter {
+  unit: UnitId;
+  out: [number, number];
+  bands?: [BandMeter, BandMeter, BandMeter];
+}
+/** A slot's input pick (unit contract §7): `null` auto (input 2, mono), a channel (mono: that channel on
+ * both sides), or `[left, right]`. 0-based. */
+export type InputPick = number | [number, number] | null;
 
 /**
  * A meter (time signature, Rust `lf_engine::grid::Meter`): `num/den`, and `beats`, the beats a bar that
@@ -167,10 +238,20 @@ const INPUT_SEND_PARAMS: readonly InputSendParamId[] = [
   'ottDepth', 'ottTime', 'ottUpward', 'ottDownward',
 ];
 const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
+const UNIT_KINDS: readonly UnitKindId[] = ['plugin', 'ott', 'echo', 'reverb', 'ring', 'synth'];
+const UNIT_EFFECT_KINDS: readonly UnitEffectKindId[] = ['ott', 'echo', 'reverb', 'ring'];
+const UNIT_PARAMS: readonly UnitParamId[] = [
+  ...INPUT_SEND_PARAMS, 'instrument', 'gainLead', 'gainBass', 'gainPad', 'gainPiano', 'gainOrgan', 'gainDrum',
+];
+const UNIT_STATES: readonly UnitState['state'][] = ['loading', 'waiting', 'seated', 'leaving', 'failed'];
+const PLUGIN_FORMATS: readonly PluginFormat[] = ['clap', 'vst3', 'vst2'];
 
 /** Lanes and plugin slots (`lf_engine::TRACK_COUNT`, `SLOT_COUNT`). */
 export const ENGINE_LANES = 5;
 export const ENGINE_SLOTS = 2;
+/** The units a slot's chain holds at most (unit contract §1, Rust `MAX_UNITS` beside `SLOT_COUNT`, not
+ * yet built). */
+export const MAX_UNITS = 8;
 /** Sources a scope batch carries (`lf_engine::scope::SCOPE_SOURCES`), in order: the five lanes after
  * their FX, then the monitor (the live wet signal and the input sends), then the master: the engine's
  * output as the device takes it, through the limiter and with the monitor summed in. */
@@ -248,7 +329,25 @@ export type EngineCommand =
   /** The tuner on or off, outright: the UI sends only `false` (Escape, the tuner's close), so two quick
    * presses never reopen it. `true` while a take exists leaves it off, with no refusal. Never kept, never
    * replayed (no reset frame's `settings` carry it). The press is `{ Action: 'Tuner' }`. */
-  | { SetTuner: boolean };
+  | { SetTuner: boolean }
+  /** A unit's bypass, outright (unit contract §2). A command naming an id that is not seated is dropped. */
+  | { SetUnitBypass: [UnitId, boolean] }
+  /** A built-in unit's parameter, clamped as the unit clamps it; one of another kind is dropped. */
+  | { SetUnitParam: [UnitId, UnitParamId, number] };
+
+/**
+ * A batch command only a chain host takes (unit contract §2): `SetUnitBypass`, `SetUnitParam`, and the
+ * actions `ToggleUnit` and `Toggle.Units` (pressed or `ActionOn`). The native engine does not speak the
+ * chain yet: the outbox refuses these before they are queued wherever `ChainHost.available` is false
+ * (`src/platform/index.ts`), and the Tauri host's `input_send` refuses a batch that carries one.
+ */
+export function isUnitCommand(c: EngineCommand): boolean {
+  if (typeof c !== 'object') return false;
+  if ('SetUnitBypass' in c || 'SetUnitParam' in c) return true;
+  const action = 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
+  if (action === null || typeof action !== 'object') return false;
+  return 'ToggleUnit' in action || ('Toggle' in action && typeof action.Toggle === 'object' && 'Units' in action.Toggle);
+}
 
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
  * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
@@ -445,6 +544,10 @@ export interface FeedFrame {
   /** null: this frame carries no tuner reading (the tuner is off, or the tick produced none; always in a
    * reset frame). The wire leaves the field out then; a decoded frame always has it. */
   tuner: TunerUpdate | null;
+  /** Each slot's chain as applied (unit contract §2): on a reset frame and on change; absent = unchanged. */
+  chains?: [ChainState, ChainState];
+  /** One meter per metered unit since the last frame (unit contract §2); absent = none. */
+  unitMeters?: UnitMeter[];
 }
 
 // ── Decoders ───────────────────────────────────────────────────────────────────────────────────────
@@ -470,27 +573,31 @@ function decodeTimeSignature(v: unknown, what: string): TimeSignature {
   return meter;
 }
 
-/** A `Toggle`: a unit toggle's name, `{"Send": key}` or `{"Live": slot}`. */
+/** A `Toggle`: a unit toggle's name, `{"Send": key}`, `{"Live": slot}` or `{"Units": kind}`. */
 function decodeToggle(v: unknown, what: string): EngineToggle {
   const [name, send] = tagged(v, what);
   if (name === 'Send') oneOf(send, INPUT_SENDS, `${what}.Send`);
   else if (name === 'Live') slot(send, `${what}.Live`);
+  else if (name === 'Units') oneOf(send, UNIT_EFFECT_KINDS, `${what}.Units`);
   else if (send !== undefined) fail(`${what} ${name} is a unit variant`, v);
   else oneOf(name, UNIT_TOGGLES, what);
   return v as EngineToggle;
 }
 
-/** An `Action`: a unit action's name, `{"Hold": control}` / `{"Release": control}` (a u8), or
- * `{"Toggle": toggle}`. */
+/** An `Action`: a unit action's name, `{"Hold": control}` / `{"Release": control}` (a u8),
+ * `{"Toggle": toggle}` or `{"ToggleUnit": unit}`. */
 function decodeAction(v: unknown, what: string): EngineAction {
   const [name, control] = tagged(v, what);
   if (name === 'Hold' || name === 'Release') int(control, `${what}.${name}`, 0, 255);
   else if (name === 'Toggle') decodeToggle(control, `${what}.Toggle`);
+  else if (name === 'ToggleUnit') unitId(control, `${what}.ToggleUnit`);
   else if (control !== undefined) fail(`${what} ${name} is a unit variant`, v);
   else oneOf(name, ACTIONS, what);
   return v as EngineAction;
 }
 const slot = (v: unknown, what: string) => int(v, what, 0, ENGINE_SLOTS - 1);
+/** A unit id: a non-zero u32. */
+const unitId = (v: unknown, what: string): UnitId => int(v, what, 1, 0xffff_ffff);
 
 /** A `NoteTarget`: `{"Builtin": id}`, `{"Slot": slot}` or `"Off"`. */
 export function decodeNoteTarget(v: unknown, what: string): NoteTarget {
@@ -723,7 +830,75 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
     const [l0, l1] = array(o.live, 'feed.live', ENGINE_SLOTS);
     out.live = [bool(l0, 'feed.live[0]'), bool(l1, 'feed.live[1]')];
   }
+  if (o.chains !== undefined) {
+    const [c0, c1] = array(o.chains, 'feed.chains', ENGINE_SLOTS);
+    out.chains = [decodeChainState(c0, 'feed.chains[0]'), decodeChainState(c1, 'feed.chains[1]')];
+  }
+  if (o.unitMeters !== undefined) out.unitMeters = array(o.unitMeters, 'feed.unitMeters').map(decodeUnitMeter);
   return out;
+}
+
+/** A built-in unit's params: each key a `UnitParamId`, each value a finite number. */
+function decodeUnitParams(v: unknown, what: string): Partial<Record<UnitParamId, number>> {
+  const o = obj(v, what);
+  const params: Partial<Record<UnitParamId, number>> = {};
+  for (const [k, x] of Object.entries(o)) params[oneOf(k, UNIT_PARAMS, `${what} key`)] = num(x, `${what}.${k}`);
+  return params;
+}
+
+function decodeUnitState(v: unknown, what: string): UnitState {
+  const o = obj(v, what);
+  const kind = oneOf(o.kind, UNIT_KINDS, `${what}.kind`);
+  const common = {
+    id: unitId(o.id, `${what}.id`),
+    bypass: o.bypass === undefined ? false : bool(o.bypass, `${what}.bypass`),
+    source: bool(o.source, `${what}.source`),
+    name: str(o.name, `${what}.name`),
+    latency: int(o.latency, `${what}.latency`),
+    state: oneOf(o.state, UNIT_STATES, `${what}.state`),
+    ...(o.error === undefined ? {} : { error: str(o.error, `${what}.error`) }),
+  };
+  if (kind === 'plugin') {
+    const p = obj(o.plugin, `${what}.plugin`);
+    const plugin = {
+      format: oneOf(p.format, PLUGIN_FORMATS, `${what}.plugin.format`),
+      path: str(p.path, `${what}.plugin.path`),
+      id: str(p.id, `${what}.plugin.id`),
+    };
+    return { ...common, kind, plugin };
+  }
+  return { ...common, kind, ...(o.params === undefined ? {} : { params: decodeUnitParams(o.params, `${what}.params`) }) };
+}
+
+function decodeChainState(v: unknown, what: string): ChainState {
+  const o = obj(v, what);
+  const units = array(o.units, `${what}.units`).map((u, k) => decodeUnitState(u, `${what}.units[${k}]`));
+  // Unit contract §4: at most `MAX_UNITS` units, plus the one install in flight that resolves at activation
+  // as the source replacing the seated one (its plate shows `loading` beside the eight it may replace).
+  if (units.length > MAX_UNITS + 1) fail(`${what}.units holds at most ${MAX_UNITS} and one install`, units.length);
+  return { units, latency: int(o.latency, `${what}.latency`), held: bool(o.held, `${what}.held`) };
+}
+
+function decodeBandMeter(v: unknown, what: string): BandMeter {
+  const o = obj(v, what);
+  return {
+    gain: num(o.gain, `${what}.gain`),
+    gainMin: num(o.gainMin, `${what}.gainMin`),
+    gainMax: num(o.gainMax, `${what}.gainMax`),
+    level: num(o.level, `${what}.level`),
+    levelPeak: num(o.levelPeak, `${what}.levelPeak`),
+  };
+}
+
+function decodeUnitMeter(v: unknown): UnitMeter {
+  const o = obj(v, 'UnitMeter');
+  const [l, r] = array(o.out, 'UnitMeter.out', 2);
+  const meter: UnitMeter = { unit: unitId(o.unit, 'UnitMeter.unit'), out: [num(l, 'UnitMeter.out[0]'), num(r, 'UnitMeter.out[1]')] };
+  if (o.bands !== undefined) {
+    const [lo, mid, hi] = array(o.bands, 'UnitMeter.bands', 3);
+    meter.bands = [decodeBandMeter(lo, 'UnitMeter.bands[0]'), decodeBandMeter(mid, 'UnitMeter.bands[1]'), decodeBandMeter(hi, 'UnitMeter.bands[2]')];
+  }
+  return meter;
 }
 
 // ── Command and request validators (the fixture guard; the UI builds these values typed) ────────────
@@ -860,6 +1035,19 @@ export function decodeCommand(raw: unknown): EngineCommand {
         const [k, v] = pair('(param, value)');
         oneOf(k, INPUT_SEND_PARAMS, 'SetInputSendParam.param');
         num(v, 'SetInputSendParam.value');
+        break;
+      }
+      case 'SetUnitBypass': {
+        const [u, v] = pair('(unit, bypassed)');
+        unitId(u, 'SetUnitBypass.unit');
+        bool(v, 'SetUnitBypass.bypassed');
+        break;
+      }
+      case 'SetUnitParam': {
+        const [u, k, v] = array(p, 'SetUnitParam (unit, param, value)', 3);
+        unitId(u, 'SetUnitParam.unit');
+        oneOf(k, UNIT_PARAMS, 'SetUnitParam.param');
+        num(v, 'SetUnitParam.value');
         break;
       }
       default:

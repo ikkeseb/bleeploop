@@ -23,14 +23,6 @@ app. It is licensed under the SIL Open Font License 1.1, not the repository's MI
 text is `licenses/OFL-1.1-InstrumentSans.txt`; the installer puts it beside the exe. Upstream:
 <https://github.com/Instrument/instrument-sans>.
 
-### Geist Mono: SIL Open Font License 1.1
-
-Geist Mono (Copyright (c) 2023 Vercel, in collaboration with basement.studio), which still draws the
-wave's bar numbers, is vendored unmodified as a variable WOFF2 file from the `geist` npm package 1.7.2
-in `src/assets/fonts/` and bundled into the app. It is licensed under the SIL Open Font License 1.1,
-not the repository's MIT licence. The licence text is `licenses/OFL-1.1-Geist.txt`; the installer puts
-it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
-
 ### Lucide icon: ISC
 
 The Audio Settings gear in the command bar (`src/app.tsx`, `.tool--gear`) is the `settings` icon of

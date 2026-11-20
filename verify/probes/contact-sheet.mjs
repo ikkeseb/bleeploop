@@ -30,16 +30,17 @@
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
  * stopping live input; 9b-live-take-hot (shot after 10) = live again, a first take one second in, slot
  * A's input clipped a moment ago and now near -3 dBFS (scene 9 plays it at about -12 dBFS): the card's
- * meter, CLIP and the lane's "A LIVE" (asserted by `live-meter`). 13-jam (shot last, live still on) is a
+ * meter, CLIP and the lane's "FROM A" (asserted by `live-meter`). 13-jam (shot last, live still on) is a
  * mid-jam picture over a two-bar loop: lane 1 PLAYING, lane 2 PLAYING over an overdub layer (REV, UNDO and
  * EDIT enabled) with FILTER and DELAY engaged and the drawer closed, lane 3 OVERDUB in flight (selected,
- * "A LIVE"), lane 4 MUTED, lane 5 FADING, slot A's meter at about -12 dBFS; its right clusters keep five
+ * "FROM A"), lane 4 MUTED, lane 5 FADING, slot A's meter at about -12 dBFS; its right clusters keep five
  * fixed columns (FX, MUTE, REV, UNDO, EDIT) at one x on every lane, and its PLAY/STOP/NOW pills end at
- * one x whichever word they show, lane 3's number alone lit (warm-white, a weight up; the numbers 1-5),
+ * one x whichever word they show, lane 3's number lit warm white (the sounding lanes' --legend, the muted
+ * one's --faint; the numbers 1-5),
  * no edge on its row and the selected slot under a card's top light; 13c-jam-forced-colours is the same
  * under forced colours, one system outline on the selected lane and slot; in 14-modes-on, FIXED greyed
  * out wears the disabled face, no lit legend. 13b-jam-edit is the same jam with lane
- * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled). 15-slots-paired (after 13b)
+ * 2's EDIT menu open (COPY and WIDE disabled, no lane being free; TRIM enabled; under 1200 px it leads with REV and UNDO). 15-slots-paired (after 13b)
  * = the same with slot B on Off beside A's live amp-sim; 15b-slots-refused = the amp-sim live in both
  * slots, both EDITORs refused with the longest refusal (two loads overlapping in flight). Empties its own PNGs, then writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
@@ -192,56 +193,75 @@ await probe(async ({ browser, open }) => {
           ask: !!el.querySelector('.slot__source--ask'),
           folded: el.classList.contains('slot--folded'),
           input: !!el.querySelector('.slot__in'),
-          live: !!el.querySelector('.live'),
+          live: !!el.querySelector('.slot__live'),
           meter: !!el.querySelector('.slot__meter'),
-          // the picker whole inside its card, past the card's own padding (a hugging card sized as if empty
-          // clips it)
+          // the picker (its transparent select, the press's whole area) inside its plate and its slot on both
+          // axes (a hugging slot sized as if empty clips it), and the press lands on it at its centre
           fits: (() => {
-            const c = el.getBoundingClientRect(), s = el.querySelector('.slot__source')?.getBoundingClientRect();
-            return !!s && s.width > 0 && s.left >= c.left && s.right <= c.right - 1;
+            const c = el.getBoundingClientRect(), src = el.querySelector('.slot__source');
+            const s = src?.getBoundingClientRect(), p = src?.closest('.plate')?.getBoundingClientRect();
+            const within = (a, b) => a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5;
+            const hit = s && document.elementFromPoint((s.left + s.right) / 2, (s.top + s.bottom) / 2);
+            return !!s && !!p && s.width > 0 && within(s, p) && within(s, c) && (hit === src || src.contains(hit));
+          })(),
+          // Every control in the slot's line (each plate's own keys and pick, LIVE, the input pick, the volume,
+          // the fold plate) and the refusal under it: drawn inside the slot and the window, and the target of a
+          // press at its centre (a slot's volume is a range input laid under its knob: the knob is the
+          // surface). The refusal hangs under the line: inside the slot's sides and the window, on top where
+          // it is drawn, covering none of the slot's controls. Each entry names what broke.
+          reach: (() => {
+            const c = el.getBoundingClientRect(), bad = [];
+            const name = (k) => k.getAttribute('aria-label') ?? (k.textContent.trim() || k.className);
+            const controls = [...el.querySelectorAll('.slot__line button, .slot__line select, .slot__line input')]
+              .filter((k) => k.checkVisibility({ visibilityProperty: true }) && k.getBoundingClientRect().width > 0);
+            for (const k of controls) {
+              const surface = k.closest('.slot__vol') ?? k, r = surface.getBoundingClientRect();
+              if (r.left < c.left - 0.5 || r.right > c.right + 0.5 || r.top < c.top - 0.5 || r.bottom > c.bottom + 0.5 || r.right > innerWidth || r.bottom > innerHeight)
+                bad.push(`${name(k)} spans ${r.left.toFixed(1)}..${r.right.toFixed(1)} x ${r.top.toFixed(1)}..${r.bottom.toFixed(1)}, outside the slot or the window`);
+              const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+              if (!hit || !(surface === hit || surface.contains(hit))) bad.push(`${name(k)}: a press at its centre lands on ${hit?.className || hit?.tagName || 'nothing'}`);
+            }
+            for (const e of el.querySelectorAll('.slot__line .pc__err')) {
+              const r = e.getBoundingClientRect();
+              if (!r.width || !r.height) { bad.push('the refusal is in the line but not drawn'); continue; }
+              if (r.left < c.left - 0.5 || r.right > c.right + 0.5 || r.right > innerWidth || r.bottom > innerHeight)
+                bad.push(`the refusal spans ${r.left.toFixed(1)}..${r.right.toFixed(1)} x ..${r.bottom.toFixed(1)}, outside the slot's sides or the window`);
+              const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+              if (!hit || !(e === hit || e.contains(hit))) bad.push(`the refusal is covered by ${hit?.className || 'nothing'}`);
+              for (const k of controls) {
+                const x = (k.closest('.slot__vol') ?? k).getBoundingClientRect();
+                if (x.right > r.left + 0.5 && r.right > x.left + 0.5 && x.bottom > r.top + 0.5 && r.bottom > x.top + 0.5) bad.push(`the refusal covers ${name(k)}`);
+              }
+            }
+            return bad;
           })(),
           ...(() => {
-            // the source's own controls follow the picker, in the form the card's width asks for: a card
-            // 760 px wide and up (its content box, the header's container query) shows them on the
-            // picker's line, the first one column gap (12 px) after it, every control and none wrapped;
-            // a narrower card, or a row with an error beside its controls, on the next line, the first
-            // under the picker's left edge, one row gap (8 px) below the first line. Either way every part
-            // of the row (letter, picker, volume, each control and error) lies inside the row's padding
-            // (18 px) and none overlaps another, and the volume keeps the card's right padding. `follows`
-            // is null on a card with no controls; `why` names the first rule broken. `first` = the first
-            // control's x from the card's left edge, `width` the card's and `content` its content box (the
-            // width the container query reads, unrounded), for the paired cards' check. A control or an
-            // error that is in the row but not drawn fails: it cannot be left out of the rules.
-            const c = el.getBoundingClientRect(), row = el.querySelector('.slot__row').getBoundingClientRect();
-            const s = el.querySelector('.slot__source')?.getBoundingClientRect();
-            const v = el.querySelector('.slot__vol')?.getBoundingClientRect(), id = el.querySelector('.slot__id').getBoundingClientRect();
-            const acts = [...el.querySelectorAll('.slot__acts > *')].map((a) => ({ name: a.getAttribute('aria-label') ?? a.className, r: a.getBoundingClientRect() }));
-            const box = getComputedStyle(el), px = (k) => parseFloat(box[k]) || 0;
-            const content = c.width - px('borderLeftWidth') - px('borderRightWidth') - px('paddingLeft') - px('paddingRight');
-            if (!s || !acts.length) return { follows: null, width: c.width, content };
+            // The slot reads as one signal line, left to right: the letter, the input, LIVE, the plates
+            // (a refusal hangs under the line, out of it), the meter, the volume last, or, folded by the row,
+            // its one plate.
+            // Every part is drawn, sits on the line's centre (within 2 px), starts after the one before it
+            // ends (none overlaps, none out of order) and lies inside the slot and the window. `follows` is
+            // null on a slot with no volume (slot B's first-run fold); `why` names the first rule broken;
+            // `mid` is the line's centre, for the paired slots' check.
+            const c = el.getBoundingClientRect();
+            const line = el.querySelector('.slot__line')?.getBoundingClientRect();
+            if (!line || (!el.querySelector('.slot__vol') && !el.querySelector('.slot__fold'))) return { follows: null, width: c.width };
+            const mid = (r) => (r.top + r.bottom) / 2;
+            const sel = '.slot__id, .slot__inwin, .slot__live, .slot__chain > .plate, .slot__out > .slot__meter, .slot__vol, .slot__fold';
+            const parts = [...el.querySelectorAll(sel)].map((a) => ({ name: a.getAttribute('aria-label') ?? a.className, r: a.getBoundingClientRect() }));
             const why = (() => {
-              if (!v) return 'no volume';
-              const gone = acts.find((a) => a.r.width === 0 || a.r.height === 0);
-              if (gone) return `${gone.name} is in the row but not drawn`;
-              const first = acts[0].r, mid = (r) => (r.top + r.bottom) / 2;
-              if (content >= 760 && !el.querySelector('.slot__acts > .pc__err')) {
-                if (Math.abs(first.left - s.right - 12) > 1) return `one line: its first control starts ${(first.left - s.right).toFixed(1)} px after the picker, not 12`;
-                const off = acts.find((a) => Math.abs(mid(a.r) - mid(s)) >= 2);
-                if (off) return `one line: ${off.name} sits off the picker's line`;
-              } else {
-                if (Math.abs(first.left - s.left) > 1) return `two lines: its first control starts ${(first.left - s.left).toFixed(1)} px from the picker's left edge, not 0`;
-                const gap = Math.min(...acts.map((a) => a.r.top)) - Math.max(s.bottom, v.bottom, id.bottom);
-                if (Math.abs(gap - 8) > 1) return `two lines: its controls start ${gap.toFixed(1)} px below the first line, not 8`;
+              const gone = parts.find((a) => a.r.width === 0 || a.r.height === 0);
+              if (gone) return `${gone.name} is in the line but not drawn`;
+              const off = parts.find((a) => Math.abs(mid(a.r) - mid(line)) >= 2);
+              if (off) return `${off.name} sits off the line's centre (${(mid(off.r) - mid(line)).toFixed(1)} px)`;
+              for (const [k, p] of parts.entries()) {
+                if (k > 0 && p.r.left < parts[k - 1].r.right - 0.5) return `${p.name} starts at ${p.r.left.toFixed(1)}, before ${parts[k - 1].name} ends (${parts[k - 1].r.right.toFixed(1)})`;
               }
-              const parts = [{ name: 'the letter', r: id }, { name: 'the picker', r: s }, { name: 'the volume', r: v }, ...acts];
-              const out = parts.find((p) => p.r.left < row.left + 18 - 0.5 || p.r.right > row.right - 18 + 0.5);
-              if (out) return `${out.name} spans ${out.r.left.toFixed(1)}..${out.r.right.toFixed(1)}, outside the row's padding ${row.left + 18}..${row.right - 18}`;
-              const meet = (a, b) => a.right > b.left + 0.5 && b.right > a.left + 0.5 && a.bottom > b.top + 0.5 && b.bottom > a.top + 0.5;
-              for (const [i, p] of parts.entries()) for (const q of parts.slice(i + 1)) if (meet(p.r, q.r)) return `${p.name} overlaps ${q.name}`;
-              if (Math.abs(c.right - 1 - 18 - v.right) > 1) return "the volume left the card's right padding";
+              const out = parts.find((p) => p.r.left < c.left - 0.5 || p.r.right > c.right + 0.5 || p.r.right > innerWidth);
+              if (out) return `${out.name} spans ${out.r.left.toFixed(1)}..${out.r.right.toFixed(1)}, outside the slot ${c.left.toFixed(1)}..${c.right.toFixed(1)} or the window`;
               return '';
             })();
-            return { follows: why === '', why, first: acts[0].r.left - c.left, width: c.width, content };
+            return { follows: why === '', why, mid: mid(line), width: c.width, folds: el.classList.contains('slot--fold') };
           })(),
         })),
         start: [...document.querySelectorAll('.lp-lane')].map((l) => l.querySelector('.lp-lane__start')?.textContent.trim() ?? ''),
@@ -261,6 +281,7 @@ await probe(async ({ browser, open }) => {
           !(b?.picker === 'Add a second sound' && b.ask && b.folded && !b.input && !b.live && !b.meter && b.fits) && `slot B reads ${JSON.stringify(b)}`,
           f.start.join('|') !== startOn(0) && `the start line reads ${JSON.stringify(f.start)}, not on lane 1 alone`,
           !f.routedOff && "the boot did not route slot A's notes to Off",
+          ...f.slots.flatMap((s, i) => s.reach.map((r) => `slot ${'AB'[i]}: ${r}`)),
         ].filter(Boolean);
         for (const p of problems) fail(`${tag} ${scene}${liveA ? ' (A live)' : ''}: ${p}`);
       };
@@ -292,7 +313,7 @@ await probe(async ({ browser, open }) => {
           : control.getAttribute('aria-valuetext') !== text ? `speaks ${control.getAttribute('aria-valuetext')}`
           : val.scrollWidth > val.clientWidth + 0.5 ? `overflows (${val.scrollWidth} > ${val.clientWidth})`
           : outside(val, p) ? `spills out of its param (${JSON.stringify(outside(val, p))})`
-          : outside(p, p.closest('.fxp-group, .infx-popover')) ? `its param spills out of its group (${JSON.stringify(outside(p, p.closest('.fxp-group, .infx-popover')))})`
+          : outside(p, p.closest('.fxp-group, .infx-pop')) ? `its param spills out of its group (${JSON.stringify(outside(p, p.closest('.fxp-group, .infx-pop')))})`
           : overlaps(p.querySelector('.fxp-param__label'), val) ? 'runs into its label'
           : null;
         return { name, text, problem };
@@ -530,13 +551,14 @@ await probe(async ({ browser, open }) => {
         const hold = [...h.querySelectorAll('.help__note')].filter((el) => el.textContent === 'HOLD')
           .map((el) => `${el.closest('[role="tabpanel"]')?.id}${el.closest('.help__sec')?.textContent.includes('MIDI LEARN') ? '' : ' (no MIDI LEARN)'}`);
         // The Pedals section names the bar's switches as the bar's legends read (TAP, never "tap tempo").
-        const bar = [...document.querySelectorAll('.cmd button')].filter((b) => b.checkVisibility()).map((b) => b.textContent.trim());
+        // A key that carries its value reads by its legend (`.k-key__l`), its value line apart.
+        const bar = [...document.querySelectorAll('.cmd button')].filter((b) => b.checkVisibility()).map((b) => (b.querySelector('.k-key__l') ?? b).textContent.trim());
         const pedals = [...h.querySelectorAll('#lf-help-manual .help__sec')].find((sec) => sec.textContent.includes('MIDI LEARN'));
         const pedalNotes = [...(pedals?.querySelectorAll('.help__note') ?? [])].map((el) => el.textContent);
         const switches = ['TAP', 'CLICK', 'END STOP', 'FIXED'].map((name) => `${name}${pedalNotes.includes(name) ? '' : ' (not named)'}${bar.includes(name) ? '' : ' (not in the bar)'}`);
         // AUTO REC's line may point at the SENS word only where the bar shows it (it drops it when narrow).
         const autoRec = [...h.querySelectorAll('#lf-help-manual li')].find((li) => li.textContent.startsWith('AUTO REC'))?.textContent ?? '';
-        const sensWord = [...document.querySelectorAll('.cmd .transport__readout-k')].some((el) => el.textContent === 'SENS' && el.checkVisibility());
+        const sensWord = [...document.querySelectorAll('.cmd .k-key__l, .cmd .k-key__v')].some((el) => el.textContent === 'SENS' && el.checkVisibility());
         const sensClaim = /SENS beside it/.test(autoRec) && !sensWord ? 'says SENS sits beside AUTO REC, which the bar does not show' : '';
         // What scrolls (Help, or the panel that shows), how tall Help stands, and whether the selected tab
         // is still under the pointer with everything scrolled to its foot.
@@ -640,10 +662,34 @@ await probe(async ({ browser, open }) => {
       // A reload's reset frame from an engine that remembers every input send on.
       scene = '11-engine-in-fx';
       await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }, { SetInputSend: ['ott', true] }]);
-      await page.getByRole('button', { name: 'Input effects', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
+      // The four input effects are plates in slot A's line, each its own settings popover; where the row is
+      // narrow they fold into one IN FX plate whose popover holds all four. The shot: the folded popover, or
+      // the OTT's.
+      const SEND_LABELS = ['Echo', 'Reverb', 'Ring mod', 'OTT'];
+      const fxFolded = async () => (await page.getByRole('button', { name: 'Input effects', exact: true }).count()) > 0;
+      const openSends = async (label) => {
+        const folded = await fxFolded();
+        await page.getByRole('button', { name: folded ? 'Input effects' : `Settings for input ${label}`, exact: true }).click();
+        await page.getByRole('dialog', { name: folded ? 'Input effects' : `Input ${label.toLowerCase()} settings`, exact: true }).waitFor();
+        return folded;
+      };
+      /** Every send's read-outs, through the one folded popover or each plate's in turn (the OTT's left open). */
+      const sendReadouts = async (defs) => {
+        if (await openSends('OTT')) return readouts('.infx', defs);
+        const vals = [...(await readouts('.infx', defs))];
+        for (const label of SEND_LABELS.slice(0, 3)) {
+          await page.keyboard.press('Escape');
+          await openSends(label);
+          vals.push(...(await readouts('.infx', defs)));
+        }
+        await page.keyboard.press('Escape');
+        await openSends('OTT');
+        return vals;
+      };
+      await openSends('OTT');
       await page.waitForTimeout(250);
       await shoot(scene);
+      await page.keyboard.press('Escape');
       // The sends' read-outs follow the drawer's units (InputFx.tsx shares FxPanel.tsx `formatVal`), at the
       // defaults shot and at their widest.
       const sendDefs = await page.evaluate(() => import('/src/ui/state/engine-store.ts').then(({ engineInputSends }) => {
@@ -658,10 +704,12 @@ await probe(async ({ browser, open }) => {
         const { engineInputSends } = await import('/src/ui/state/engine-store.ts');
         for (const [key, v] of values) engineInputSends.setValue(key, v);
       }, values);
-      const sendVals = { shot: await readouts('.infx', sendDefs) };
+      const sendVals = { shot: await sendReadouts(sendDefs) };
+      await page.keyboard.press('Escape');
       await setSends(SEND_WIDEST);
       await page.waitForTimeout(200);
-      sendVals.widest = await readouts('.infx', sendDefs);
+      sendVals.widest = await sendReadouts(sendDefs);
+      await page.keyboard.press('Escape');
       await setSends(SEND_WIDEST.map(([key]) => [key, Object.values(sendDefs).find((d) => d.key === key).default]));
       console.log(JSON.stringify({ tag, scene, sendVals }));
       for (const [when, vals] of Object.entries(sendVals)) {
@@ -730,7 +778,7 @@ await probe(async ({ browser, open }) => {
       {
         const f = await firstLook();
         const [a, b] = f.slots;
-        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !a.follows || !b?.folded || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
+        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !a.follows || !a.fits || a.reach.length || !b?.folded || b.reach.length || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
       }
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
       errors.length = 0;
@@ -751,7 +799,8 @@ await probe(async ({ browser, open }) => {
       await shoot(scene);
       {
         const a = (await firstLook()).slots[0];
-        if (!a?.follows) fail(`${tag} ${scene}: slot A's own controls do not follow its picker, or its volume left the card's right edge: ${JSON.stringify(a)}`);
+        if (!a?.follows) fail(`${tag} ${scene}: slot A's line does not read in order: ${JSON.stringify(a)}`);
+        if (!a?.fits || a.reach.length) fail(`${tag} ${scene}: slot A's picker or controls are out of reach: ${JSON.stringify(a)}`);
       }
 
       scene = '10-amp-sim-idle';
@@ -829,14 +878,13 @@ await probe(async ({ browser, open }) => {
         if (jam.lane2Fx.join() !== '0,3') fail(`${tag} ${scene}: lane 2 has FX ${jam.lane2Fx.join(', ') || 'none'} engaged, not filter and delay`);
         if (jam.drawerOpen) fail(`${tag} ${scene}: the FX drawer is open`);
 
-        // The selection: lane 3's number lights warm-white a weight up and every other rests --faint and
-        // light whatever its state (playing, muted, fading); no edge on the row, and the selected slot
-        // keeps a card's top light. Forced colours flatten that, so there one system outline marks the
+        // The selection: lane 3's number lights warm white, the brightest in the heads; a sounding lane's rests
+        // --legend (playing, fading) and a muted one's --faint; no edge on the row, and the selected slot's
+        // letter lights warm white, the other's resting --faint. Forced colours flatten that, so there one system outline marks the
         // lane (on its overlay, over the glass) and the slot.
         const sel = await page.evaluate(() => {
           const lanes = [...document.querySelectorAll('.lp-lane')];
           const look = (el) => { const cs = getComputedStyle(el); return `${cs.color} ${cs.fontWeight}`; };
-          const shadow = (q) => { const el = document.querySelector(q); return el ? getComputedStyle(el).boxShadow : null; };
           const edges = (el, pseudo) => { const cs = getComputedStyle(el, pseudo); return `${cs.borderTopWidth} ${cs.borderRightWidth} ${cs.borderBottomWidth} ${cs.borderLeftWidth} ${cs.outlineStyle}`; };
           return {
             nums: lanes.map((l) => look(l.querySelector('.lp-lane__num'))),
@@ -846,17 +894,17 @@ await probe(async ({ browser, open }) => {
             // any row's divider.
             borders: [edges(lanes[2]), edges(lanes[2], '::after')],
             rowShadow: [getComputedStyle(lanes[2]).boxShadow, getComputedStyle(lanes[1]).boxShadow],
-            slotTop: [shadow('.slot--active'), shadow('.slot:not(.slot--active)')],
+            slotId: [document.querySelector('.slot--active .slot__id, .slot--active .slot__fold-id'), document.querySelector('.slot:not(.slot--active) .slot__id, .slot:not(.slot--active) .slot__fold-id')].map((el) => (el ? getComputedStyle(el).color : null)),
           };
         });
-        const LIT = 'rgb(255, 243, 224) 500', REST = 'rgb(138, 144, 152) 300';
-        const nums = [REST, REST, LIT, REST, REST];
+        const LIT = 'rgb(255, 243, 224) 500', ON = 'rgb(195, 200, 207) 500', MUTED = 'rgb(138, 144, 152) 500';
+        const nums = [ON, ON, LIT, MUTED, ON];
         if (sel.nums.join() !== nums.join()) fail(`${tag} ${scene}: the lane numbers read ${sel.nums.join(' | ')}, not ${nums.join(' | ')}`);
         if (sel.labels.join() !== '1,2,3,4,5') fail(`${tag} ${scene}: the lane numbers are ${sel.labels.join(', ')}, not 1-5`);
         if (sel.edge !== 'none') fail(`${tag} ${scene}: the selected lane draws an edge (::after ${sel.edge})`);
         if (sel.borders.some((b) => b !== '0px 0px 0px 0px none')) fail(`${tag} ${scene}: the selected lane draws an edge (row, ::after: ${sel.borders.join(' | ')})`);
         if (sel.rowShadow[0] !== sel.rowShadow[1]) fail(`${tag} ${scene}: the selected lane's shadow (${sel.rowShadow[0]}) is not another row's (${sel.rowShadow[1]})`);
-        if (sel.slotTop[0] !== sel.slotTop[1] || !sel.slotTop[0] || sel.slotTop[0] === 'none') fail(`${tag} ${scene}: the selected slot's top light (${sel.slotTop[0]}) is not a card's (${sel.slotTop[1]}), or a card has none`);
+        if (sel.slotId.join() !== 'rgb(255, 243, 224),rgb(138, 144, 152)') fail(`${tag} ${scene}: the selected slot's letter reads ${sel.slotId[0]} and the other's ${sel.slotId[1]}, not warm white and --faint`);
         // The tempo is locked under a loop: its numeral reads --dim (1-empty holds the free side).
         const lockedBpm = await bpmLook();
         if (!lockedBpm.locked || lockedBpm.color !== lockedBpm.dim) fail(`${tag} ${scene}: the locked BPM numeral reads ${JSON.stringify(lockedBpm)} (locked, --dim)`);
@@ -883,23 +931,27 @@ await probe(async ({ browser, open }) => {
         await menu.waitFor();
         await page.waitForTimeout(150);
         await shoot(scene);
-        const items = await menu.getByRole('button').evaluateAll((els) => els.map((el) => el.disabled));
-        if (items.join() !== 'true,true,false') fail(`${tag} ${scene}: COPY, WIDE, TRIM disabled ${items.join(', ')}, not true, true, false`);
+        // Read by name: folded (under 1200 px) the menu leads with REV and UNDO (the lane's own keys there
+        // are hidden), and COPY, WIDE and TRIM keep their states.
+        const items = await menu.getByRole('button').evaluateAll((els) => Object.fromEntries(els.map((el) => [el.getAttribute('aria-label'), el.disabled])));
+        const edits = ['Copy track 2 to the first empty track', 'Copy track 2 wide to the first empty track', 'Trim track 2'].map((n) => items[n]);
+        if (edits.join() !== 'true,true,false') fail(`${tag} ${scene}: COPY, WIDE, TRIM disabled ${edits.join(', ')}, not true, true, false`);
+        const folded = ['Track 2 reverse', 'Track 2 undo or redo the last overdub or trim'].filter((n) => n in items);
+        if (folded.length !== (width < 1200 ? 2 : 0)) fail(`${tag} ${scene}: the menu carries ${folded.length} of REV and UNDO at ${width} px, not ${width < 1200 ? 2 : 0}`);
         await page.keyboard.press('Escape');
         await menu.waitFor({ state: 'detached' });
       }
 
-      /** Both slot cards full, their controls following their pickers and starting at one x from their
-       * card's left edge, whatever controls each shows. The one x holds on two lines and, on one line, from
-       * a 904 px card up (`src/app.css` `.slot__row`): between 760 and 904 px the crowded card narrows its
-       * picker, so only the rules of `follows` bind there. */
+      /** Both slots on one line: each slot's line reads in order (`follows`), and the two lines (or a line
+       * and the other slot's fold plate, where the row is narrow) share one centre. */
       const checkPaired = async () => {
         const [a, b] = (await firstLook()).slots;
-        for (const [letter, s] of [['A', a], ['B', b]]) if (!s?.follows) fail(`${tag} ${scene}: slot ${letter}'s own controls do not follow its picker: ${JSON.stringify(s)}`);
-        const narrows = (s) => s.content >= 760 && s.content < 904;
-        if (a?.follows && b?.follows && !narrows(a) && !narrows(b) && (Math.abs(a.width - b.width) > 0.5 || Math.abs(a.first - b.first) > 0.5)) {
-          fail(`${tag} ${scene}: the cards' first controls start ${a.first.toFixed(1)} px (A, card ${a.width} px) and ${b.first.toFixed(1)} px (B, card ${b.width} px) from their card's left edge, not at one x`);
+        for (const [letter, s] of [['A', a], ['B', b]]) {
+          if (!s?.follows) fail(`${tag} ${scene}: slot ${letter}'s line does not read in order: ${JSON.stringify(s)}`);
+          // a slot the row folds to one plate has no picker in sight; its plate is a control of the line
+          if (s && ((!s.folds && !s.fits) || s.reach.length)) fail(`${tag} ${scene}: slot ${letter}'s picker or controls are out of reach: ${JSON.stringify(s)}`);
         }
+        if (a?.follows && b?.follows && Math.abs(a.mid - b.mid) > 0.5) fail(`${tag} ${scene}: the slots' lines sit at ${a.mid.toFixed(1)} (A) and ${b.mid.toFixed(1)} (B), not on one centre`);
       };
       const dismissToasts = () => page.evaluate(async () => {
         const notify = await import('/src/notify.ts');
@@ -909,8 +961,16 @@ await probe(async ({ browser, open }) => {
       // The crowded card beside a quiet one: the amp-sim live in A (input, INPUT LIVE, EDITOR, PARAMS),
       // B on Off (input, GO LIVE).
       scene = '15-slots-paired';
+      // a narrow row folds slot B to one plate: a press shows its line, and slot A's folds in turn
+      const showSlot = async (letter) => {
+        const fold = page.getByRole('button', { name: new RegExp(`^Show slot ${letter}`) });
+        if (await fold.count()) await fold.click();
+      };
+      await showSlot('B');
       await page.getByRole('combobox', { name: 'Source for slot B', exact: true }).selectOption('off');
+      await showSlot('B');
       await page.getByRole('button', { name: 'Live input for slot B', exact: true }).waitFor();
+      await showSlot('A');
       await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
@@ -939,6 +999,7 @@ await probe(async ({ browser, open }) => {
         platform.pluginHost.loadPlugin = loadHost;
       }, AMP_SIM);
       for (const [i, letter] of [[0, 'A'], [1, 'B']]) {
+        await showSlot(letter);
         const live = page.getByRole('button', { name: `Live input for slot ${letter}`, exact: true });
         if ((await live.getAttribute('aria-pressed')) !== 'true') await live.click();
         await page.getByRole('button', { name: `Live input for slot ${letter}`, exact: true, pressed: true }).waitFor();

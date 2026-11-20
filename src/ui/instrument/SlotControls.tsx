@@ -16,15 +16,16 @@ import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
 import { slotLetter } from '../state/slot-tones';
+import { Icon } from './icons';
 
 /**
- * The slot header's own controls (`InstrumentSlot.tsx` lays them out): the input pick and GO LIVE of a
- * source that takes input, and the slot's one volume. The plugin's EDITOR / PARAMS pair is
- * `PluginControls.tsx`.
+ * The slot line's own controls (`InstrumentSlot.tsx` lays them out, `slot.css` draws them): the input
+ * pick and LIVE of a source that takes input, the slot's input meter, and its one volume. The plugin
+ * plate's editor and menu are `PluginControls.tsx`.
  */
 
-
-/** The slot's capture channel ("In 1".."In N", or Auto), switched in place. */
+/** The slot's capture channel ("In 1".."In N", or Auto), switched in place: a small value window with
+ * a chevron, the native select laid over it (so the list is the system's, and a pick is a pick). */
 export function InputPick(props: { slot: 0 | 1 }) {
   const pick = () => engineSlotInputChannels()[props.slot];
   const channels = createMemo(() => {
@@ -39,25 +40,30 @@ export function InputPick(props: { slot: 0 | 1 }) {
     const read = pick() === '' && d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
     return read === undefined ? 'Auto' : `Auto · In ${read + 1}`;
   };
+  const shown = () => (pick() === '' ? auto() : `In ${Number(pick()) + 1}`);
   return (
-    <select
-      class="slot__in"
-      aria-label={`Input for slot ${slotLetter(props.slot)}`}
-      title="The input this slot hears. Auto: input 2 on an interface with two or more"
-      value={pick()}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setEngineSlotInputChannel(props.slot, e.currentTarget.value)}
-    >
-      <option value="">{auto()}</option>
-      <For each={channels()}>{(c) => <option value={c}>In {Number(c) + 1}</option>}</For>
-    </select>
+    <span class="slot__inwin k-win" onClick={(e) => e.stopPropagation()}>
+      <span class="slot__inval">{shown()}</span>
+      <Icon name="drop" size={14} />
+      <select
+        class="slot__in"
+        aria-label={`Input for slot ${slotLetter(props.slot)}`}
+        title="The input this slot hears. Auto: input 2 on an interface with two or more"
+        value={pick()}
+        onChange={(e) => setEngineSlotInputChannel(props.slot, e.currentTarget.value)}
+      >
+        <option value="">{auto()}</option>
+        <For each={channels()}>{(c) => <option value={c}>In {Number(c) + 1}</option>}</For>
+      </select>
+    </span>
   );
 }
 
 /**
- * GO LIVE / INPUT LIVE: the slot hears its own input, through its effect or dry while it is Off, and
- * the engine plays it at low latency. One accessible name; aria-pressed carries the state. Locked only
- * while a source op holds the slot; a press still in flight shows as busy, and the next one queues.
+ * LIVE: the slot hears its own input, through its effect or dry while it is Off, and the engine plays
+ * it at low latency. A latched key whose LED is lit while live. One accessible name; aria-pressed
+ * carries the state. Locked only while a source op holds the slot; a press still in flight shows as
+ * busy, and the next one queues.
  */
 export function LiveButton(props: { slot: 0 | 1 }) {
   const slot = props.slot;
@@ -67,10 +73,10 @@ export function LiveButton(props: { slot: 0 | 1 }) {
     <>
       <button
         type="button"
-        class="tgl live"
-        classList={{ 'on-green': live() }}
+        class="k-key k-key--latch slot__live"
         aria-pressed={live()}
         aria-label={`Live input for slot ${slotLetter(slot)}`}
+        title={live() ? 'Live: this slot plays its input. Press to stop' : 'Press to play this slot\'s input, heard and recorded'}
         disabled={slotPendingCounts()[slot] > 0}
         aria-busy={liveBusy(slot)}
         onClick={(e) => {
@@ -78,26 +84,25 @@ export function LiveButton(props: { slot: 0 | 1 }) {
           void toggleLive(slot);
         }}
       >
-        <span class="live__face">
-          <Show when={live()}>
-            <i class="tgl__dot" aria-hidden="true" />
-          </Show>
-          {live() ? 'INPUT LIVE' : 'GO LIVE'}
-        </span>
+        <span class="k-led" aria-hidden="true" />
+        LIVE
       </button>
       <Show when={liveError(slot)}>
-        <span class="pc__err">{liveError(slot)}</span>
+        <span class="pc__err" title={liveError(slot) ?? ''}>
+          {liveError(slot)}
+        </span>
       </Show>
     </>
   );
 }
 
 /**
- * The input meter along the foot of a slot whose source takes input: dark until the slot goes live, then
- * the slot's own input (its capture channel, before the plugin), its held peak and a CLIP lamp lit
- * ~1.5 s after the input reached full scale. Drawn by the waveform rAF loop through style writes
- * (`registerCardMeter`); Solid only mounts it and (un)registers it as the slot goes live. Hidden from
- * assistive tech: the command bar's meter speaks the input, the louder slot's.
+ * The slot's input meter at its line's right end: an LED ladder, dark until the slot goes live, then
+ * the slot's own input (its capture channel, before the plugin) over −60..0 dBFS, its held peak and a
+ * CLIP lamp lit ~1.5 s after the input reached full scale. Drawn by the waveform rAF loop through style
+ * writes on this element (`--lvl`, `--pk`, `is-clip`: `registerCardMeter`); Solid only mounts it and
+ * (un)registers it as the slot goes live. Hidden from assistive tech: the command bar's meter speaks
+ * the input, the louder slot's.
  */
 export function SlotMeter(props: { slot: 0 | 1 }) {
   const slot = props.slot;
@@ -115,8 +120,7 @@ export function SlotMeter(props: { slot: 0 | 1 }) {
         onCleanup(() => unregisterCardMeter(slot, el));
       }}
     >
-      <div class="slot__meter-track">
-        <i class="slot__meter-fill" />
+      <div class="slot__meter-track k-meter">
         <i class="slot__meter-pk" />
       </div>
       <span class="slot__meter-clip">CLIP</span>
@@ -124,53 +128,105 @@ export function SlotMeter(props: { slot: 0 | 1 }) {
   );
 }
 
+/** Pixels of drag for the volume's whole travel (0..SLOT_GAIN_MAX); Shift drags four times finer. */
+const DRAG_PX = 180;
+
 /**
  * The slot's one volume (`slotLevel`): its plugin's output, an Off slot's input level or its synth's
- * level, 0..1.5 with unity at the lane faders' tick and read-out. The unity detent snaps only while the
- * thumb approaches it, so a keyboard step can leave it; double-click resets to unity.
+ * level, 0..1.5 with unity at the lanes' 0 dB. A small knob and its dB value window, turned by a drag
+ * (up or right) or a scroll on either; double-click resets to unity. The range input under them is the
+ * control's keyboard and assistive face (arrows step it). The unity detent snaps only while the value
+ * approaches it, so a keyboard step can leave it.
  */
 export function SlotVolume(props: { slot: 0 | 1 }) {
   const slot = props.slot;
   const level = () => slotLevel(slot) ?? 1;
   const db = () => volumeDb(level());
+  const pending = () => slotPendingCounts()[slot] > 0;
   const what = () =>
     slotPlugins()[slot]
       ? 'Plugin output'
       : slotOff()[slot]
         ? "Input level: what this slot's live input is heard and recorded at"
         : `${SYNTHS.find((s) => s.id === slotIds()[slot])?.name ?? 'Synth'} level, shared by every slot playing it`;
-  const set = (v: number) => setSlotLevel(slot, v);
-  function onInput(input: HTMLInputElement) {
-    let v = Number(input.value);
-    const detentLimit = 0.03 + Number.EPSILON;
-    const inUnityDetent = (value: number) => Math.abs(value - 1.0) <= detentLimit;
-    if (!inUnityDetent(level()) && inUnityDetent(v)) v = 1.0; // snap only while approaching unity
-    set(v);
+  const detentLimit = 0.03 + Number.EPSILON;
+  const inUnityDetent = (value: number) => Math.abs(value - 1.0) <= detentLimit;
+  /** Set `v`, snapped to unity while approaching it from outside the detent. */
+  const set = (v: number) => {
+    const clamped = Math.max(0, Math.min(SLOT_GAIN_MAX, v));
+    const snapped = !inUnityDetent(level()) && inUnityDetent(clamped) ? 1.0 : clamped;
+    setSlotLevel(slot, snapped);
+    return snapped;
+  };
+  let input!: HTMLInputElement;
+  function onInput() {
+    const v = set(Number(input.value));
     // Solid does not update the native range when the snapped value equals the existing signal.
-    // Keep the thumb aligned with the stored value inside the unity detent.
     input.value = String(v);
   }
+  // A drag turns the value from where it was (never jumps to the pointer); the gesture's own value
+  // runs unsnapped under the detent so a slow drag can pass through unity.
+  let drag: { id: number; x: number; y: number; from: number } | null = null;
+  const onDown = (e: PointerEvent) => {
+    if (pending() || e.button !== 0) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, from: level() };
+  };
+  const onMove = (e: PointerEvent) => {
+    if (!drag || drag.id !== e.pointerId) return;
+    const px = e.clientX - drag.x - (e.clientY - drag.y);
+    const raw = drag.from + (px / DRAG_PX) * SLOT_GAIN_MAX * (e.shiftKey ? 0.25 : 1);
+    const v = Math.max(0, Math.min(SLOT_GAIN_MAX, raw));
+    setSlotLevel(slot, inUnityDetent(v) ? 1.0 : Math.round(v * 100) / 100);
+  };
+  const onUp = (e: PointerEvent) => {
+    if (drag?.id === e.pointerId) drag = null;
+  };
+  const wheel = (e: WheelEvent) => {
+    if (pending()) return;
+    e.preventDefault();
+    set(Math.round((level() + (e.deltaY < 0 ? 0.02 : -0.02)) * 100) / 100);
+  };
+  const angle = () => `${-135 + (level() / SLOT_GAIN_MAX) * 270}deg`;
+  const num = () => db().replace(/ dB$/, '');
   return (
-    <div class="slot__vol" title={what()} onClick={(e) => e.stopPropagation()}>
-      <div class="slot__vbar-wrap">
-        {/* unity (0 dB) tick behind the thumb, as on the lane faders */}
-        <div class="slot__vbar-unity" />
-        <input
-          class="lf-range slot__vbar"
-          type="range"
-          min={0}
-          max={SLOT_GAIN_MAX}
-          step={0.01}
-          value={level()}
-          style={{ '--fill': `${(level() / SLOT_GAIN_MAX) * 100}%` }}
-          onInput={(ev) => onInput(ev.currentTarget)}
-          onDblClick={() => set(1.0)}
-          aria-label={`Volume for slot ${slotLetter(slot)}`}
-          aria-valuetext={db()}
-          disabled={slotPendingCounts()[slot] > 0}
-        />
-      </div>
-      <span class="slot__vdb">{db()}</span>
+    <div
+      class="slot__vol"
+      classList={{ 'is-off': pending() }}
+      title={`${what()}. Drag or scroll; double-click for 0 dB`}
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={onDown}
+      onPointerMove={onMove}
+      onPointerUp={onUp}
+      onPointerCancel={onUp}
+      onDblClick={() => !pending() && setSlotLevel(slot, 1.0)}
+      ref={(el) => {
+        el.addEventListener('wheel', wheel, { passive: false });
+        onCleanup(() => el.removeEventListener('wheel', wheel));
+      }}
+    >
+      <span class="k-knob slot__knob" style={{ '--a': angle() }} aria-disabled={pending()} />
+      <span class="k-win slot__vdb" classList={{ 'is-off': pending() }}>
+        {num()}
+        <Show when={db().endsWith(' dB')}>
+          {' '}
+          <span class="slot__unit">dB</span>
+        </Show>
+      </span>
+      <input
+        ref={input}
+        class="slot__vbar"
+        type="range"
+        min={0}
+        max={SLOT_GAIN_MAX}
+        step={0.01}
+        value={level()}
+        onInput={onInput}
+        aria-label={`Volume for slot ${slotLetter(slot)}`}
+        aria-valuetext={db()}
+        disabled={pending()}
+      />
     </div>
   );
 }

@@ -50,7 +50,7 @@ guitar's slot is on In 1; turn EVO Control's monitor mix fully clockwise. Play a
 it and say what felt off. After the jam, agents note what it tried under "Last play", drop what it
 answered and refill this list from § Not heard yet: at most five, and the docs guard counts them.
 
-1. **The amp-sim live, and takes on the click.** GO LIVE on the amp-sim (VST3, Petrucci) and record a
+1. **The amp-sim live, and takes on the click.** LIVE on the amp-sim's slot (VST3, Petrucci) and record a
    first take, an overdub and a FIXED 4: does the guitar feel immediate, and does every take keep its
    attacks and endings on the click?
 2. **A MIDI footswitch, if one is plugged (MIDI now runs natively, outside the WebView).** Try the
@@ -67,7 +67,7 @@ answered and refill this list from § Not heard yet: at most five, and the docs 
    alive from where you stand, and is it worth leaving open while you play?
 5. **End with FADE, then reopen.** FADE (2 bars) while three lanes play, then close and reopen the
    app: are the loops and the plugin back (not live) with the amp-sim's knobs where you left them,
-   and does one GO LIVE re-arm?
+   and does one LIVE press re-arm?
 
 ## Not heard yet
 
@@ -102,14 +102,14 @@ never the owner's guitar, latency, a driver, a pedal or feel.
   stopping there? `fade`
 - DUB FEEDBACK at 50 % over two passes, then 0 %: do the old layers fade at 50 %, and does 0 %
   replace them? `dub-feedback`
-- IN FX ECHO on the input at its default: are its repeats on the tempo? `in-fx`
+- ECHO (an input-effect plate in slot A's row) on the input at its default: are its repeats on the tempo? `in-fx`
 - RING MOD (never heard) at its 440 Hz default, an agent's pick: keep it, or name what to change.
   `ring-mod`
 - ↔ WIDE (a copy 20 ms behind, the pan mirrored) on a riff, without and then with: is 20 ms the
   gap? `wide`
 - Pan hard left, centre, hard right: does a hard pan play +3 dB on its side and leave the other side
   silent? `pan`
-- The input OTT (IN FX's fourth row) on a plucked phrase played in and looped: off, then DEPTH 50 %,
+- The input OTT (the fourth input-effect plate) on a plucked phrase played in and looped: off, then DEPTH 50 %,
   then 100 %: is it denser without pumping or hiss lifted between the notes, and is 50 % the right
   default? `input-ott`
 
@@ -119,7 +119,7 @@ The owner at the 27" display with the installed release, or an agent's screensho
 settles.
 
 - A fresh install's first screen (nothing of the app's stored yet: slot A asks `Pick your amp-sim`
-  with its input pick on In 1 and GO LIVE, slot B folds to `Add a second sound`, the keyboard stays hidden
+  with its input pick on In 1 and LIVE, slot B folds to `Add a second sound`, the keyboard stays hidden
   until a built-in synth is picked, lane 1 says `SPACE or your pedal records here` until the first
   loop): does it say plug in, pick your sound, record? Only an empty profile shows it; an install
   that stored anything opens as before. (machine: `verify/probes/legacy-storage.mjs`, the contact
@@ -129,19 +129,18 @@ settles.
   step larger at 2560, one bar ruler, the loop's length in bars only), from the chair on the 27":
   does every lane's state read at a glance?
 - The selected lane, marked by its lit number alone: is it findable from the chair?
-- Each lane's number and state word now centred in their column, the selected lane's `A LIVE` on a
-  line under the word (it drops where a short stack has no room for it): does the column read better
-  than left-aligned, is `A LIVE` still where the eye looks, and does the few-pixel rise of the selected
-  lane's number and word (the third line centred with them) read as part of the selection or as a
-  jump? (machine: `live-meter`)
+- Each lane's number and state word flush left in their column, the selected lane's `FROM A` on a
+  line under the word (it drops only on the tightest rung, a drawer's params open in a short stack):
+  does the column read from the chair, is `FROM A` where the eye looks, and does the selected lane's
+  third line read as part of the selection or as a jump? (machine: `live-meter`)
 - A FADE on the restyled waves: does it read as the loop sinking, in motion?
-- The command-bar popovers (CLICK, SENS, IN FX) now open under the bar, 10 px lower: does each still
-  read as its pill's?
+- The scale window a value key shows while its value changes (CLICK, FIXED, FADE, AUTO REC) and an
+  input-effect plate's settings menu: does each read as its own key's or plate's?
 - A toast that is neither an error nor a finished action is now a dim note: does it still catch the
   eye when it must?
 - The 48 kHz switch and the mid-jam update ask are the app's own dialog (Esc declines): does it read
   as a question to answer before playing on?
-- A disabled control fades by tone, and a lane core's hover is a rim tone that a press darkens, with
+- A disabled control fades by tone, and a lane's lit key lifts a tone on hover and sinks when held, with
   no grow or spring: do the disabled tools still read as present from the chair?
 - SCOPE's beam moves on with the bar when the live columns stop, and only a fresh column takes it:
   does it ever jump, stutter or lag the bar when the view opens mid-loop?
@@ -149,12 +148,12 @@ settles.
 - Audio Settings in four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS): does a
   pedal's port pick take fewer moves?
 - The rail's lamp and state word on each page: does the lamp read from the chair?
-- The command bar's five mode pills, an LED on each engaged one, END STOP among them: do they read
+- The command bar's five mode keys, an LED on each engaged one, END STOP among them: do they read
   from 1.5 m?
-- CLICK volume and AUTO REC SENS in popovers: is a slider in a popover one move too many mid-jam?
+- CLICK volume and AUTO REC's sensitivity as values on their keys (a drag or a scroll on the key): are they quick enough to set mid-jam?
 - Lane state colour lands on the beat, with no fade: does a quick stop-then-play read as a flicker?
 - The count-in numeral fills the lane at every window size: does 4-3-2-1 read from 1.5 m?
-- The FX pill's lamp while any lane effect is on: does it read as FX, not as a state LED?
+- The lane FX key's LED while any lane effect is on: does it read as FX, not as a state LED?
 - The one-row FX drawer (the lanes on a 53 px rung while it shows params; five lanes at 1000x700 with
   the keyboard): are the FX keys and the 91 px sliders big enough to hit while playing?
 - 6/8: do BPM and TAP count the dotted quarter, and does the count-in read 2-1? (machine:
@@ -188,13 +187,13 @@ settles.
 Guitar in, ASIO, a pedal where named: feel, latency, devices, drivers, plugins, MIDI hardware, and
 anything else that needs the interface or a real plugin.
 
-- The input OTT (IN FX's fourth row) on the amp-sim, heard while you play and recorded into the loop:
+- The input OTT (the fourth input-effect plate) on the amp-sim, heard while you play and recorded into the loop:
   does the guitar feel as immediate with it on (no sample is added; its crossovers delay the lows about
   4.6 ms at 100 Hz), and does the loop sound as it did live? Is DEPTH 50 %
   the right start, and do TIME, UP and DOWN each do what their name says? Toggle it on a held note:
   any thump or hollow moment? Between notes, is the amp-sim's hiss lifted?
 - The amp-sim live: does the master fader scale the wet sound, never the recorded level?
-- GO LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
+- LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
 - An attack played right on a DUB's punch-in (D23): does it still sound whole?
 - A MIDI binding after a restart and after a move to another USB socket: does it fire with no
   relearn? (ASSIGN fixes one listed as "not connected" in Audio Settings → MIDI learn.)
@@ -232,23 +231,23 @@ anything else that needs the interface or a real plugin.
   take while it is open, then close it: do the waveforms, the count and the toasts land without a
   jump? (machine: the `feed.rs` tests, `engine-seam` and `meter-picker`)
 - A gesture held across that dialog: does it keep its value?
-- GO LIVE: does the pill ever lag the guitar going live, or light while the dry guitar is silent?
-- Hammer GO LIVE from a pedal and the cap together, during a plugin load too: one switch per press,
+- LIVE: does its LED ever lag the guitar going live, or light while the dry guitar is silent?
+- Hammer LIVE from a pedal and the key together, during a plugin load too: one switch per press,
   none lost?
-- CLR, the CLEAR key and a pedal share one arm, SURE? showing while a second press would clear: does
-  SURE? read in time from the guitar?
+- CLR, the CLEAR key and a pedal share one arm, CLR? showing while a second press would clear: does
+  CLR? read in time from the guitar?
 - A slip on CLR: does it never cost a loop?
 - Buffer 256 and 64: does a take land on the click at each size, with a short switch gap? (machine:
   `tests/slots.rs`)
 - A plugin loaded while loops play: does it crossfade in without a click?
-- An amp-sim unloaded or swapped while GO LIVE is on: is the swap a clean gap, with no dry DI heard or
+- An amp-sim unloaded or swapped while LIVE is on: is the swap a clean gap, with no dry DI heard or
   recorded between the plugins? (machine: `tests/slots.rs`, `engine_io/plugins.rs`)
 - A plugin-requested restart while live (a FabFilter latency-mode change): does the slot stay live?
-- An instrument entering or leaving a slot while GO LIVE is on: is the change inaudible mid-note?
+- An instrument entering or leaving a slot while LIVE is on: is the change inaudible mid-note?
   (machine: `tests/slots.rs`)
-- The input meter on each live slot's card (its own input, a held peak, CLIP), with INPUT LIVE and the
-  "A LIVE" badge: does the meter read from where you stand?
-- The slot card's CLIP: does it light when the interface clips, and only then?
+- The input meter at the end of each live slot's line (its own input, a held peak, CLIP), with LIVE lit
+  and the lane's "FROM A": does the meter read from where you stand?
+- A slot's CLIP: does it light when the interface clips, and only then?
 - The first take's count-in: does the tempo lock mid-count-in?
 - FIXED 2: does the take stop after exactly 2 bars?
 - A FIXED pick too long for 60 s: does it record the largest whole-bar fit?
@@ -259,8 +258,8 @@ anything else that needs the interface or a real plugin.
   CLICK off?
 - 48 kHz with loops playing: does the confirm ask, the driver reopen at 48 kHz, and a new take land
   on the click as clean as at 44.1?
-- IN FX ECHO and REVERB on the guitar: are they immediate?
-- A take through IN FX: does it sound as it did live?
+- The input effects ECHO and REVERB on the guitar: are they immediate?
+- A take through the input effects: does it sound as it did live?
 - RING MOD's 20–1500 Hz range, an agent's pick: keep it, or name what to change.
 - With FIXED off, a take stopped about 1.6 loops in grows the loop to two, about 1.3 keeps one: does
   that feel right?

@@ -10,7 +10,7 @@ those are verified by running the app and measuring it (`docs/VERIFY.md`, `STATU
 | | `guards/` | `probes/` |
 |---|---|---|
 | Runs in | plain Node: no browser, no audio hardware | headless Chromium against the real UI on a Vite dev server, on the engine fake |
-| Command | `pnpm verify` (part of `pnpm check`, the pre-push hook) | `pnpm probe <name>` · `--all` · `--ci` · `--list` |
+| Command | `pnpm verify` (part of `pnpm check`; CI runs it on every push) | `pnpm probe <name>` · `--all` · `--ci` · `--list` |
 | CI | `ci.yml` | `browser-lifecycle.yml` runs `pnpm probe --ci` |
 | Speed | a few seconds for all | seconds to minutes each |
 | Sees | the real source's logic, file formats, the engine wire, repository contracts | the running UI through `window.__lf` and the DOM: the commands a gesture sends, the screen a feed frame draws, IndexedDB, the export's archive, rendered layout |
@@ -62,7 +62,7 @@ tests hold to the same rule (the lf-engine briefing, `src-tauri/crates/lf-engine
 3. Track checks with a `passed`/`failed` counter, print `=== RESULT: N/N checks passed, M failed ===`
    and `process.exit(failed === 0 ? 0 : 1)`. The runner fails a guard that exits non-zero, prints no RESULT line or more than one, or reports a failure or zero checks in it; a guard still running after 60 s is killed and fails.
 4. Plant realistic bugs in the covered code; each must turn the guard red. Revert them.
-5. Run the new guard alone: `node verify/guards/<name>.mjs`. The pre-push hook runs the whole set.
+5. Run the new guard alone: `node verify/guards/<name>.mjs`. CI runs the whole set (`pnpm verify`).
 
 ## Probes
 
@@ -78,7 +78,12 @@ engine's gate would on the scripted looper and answers with `Toggled` or `Refuse
 which it answers with `Tuner` or `Refused` (it does not close the tuner when a scripted take starts:
 that rule is the engine's, `tests/tuner.rs`),
 so a probe proves gesture → command and frame → screen, never the engine
-(`verify/probes/engine-seam.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
+(`verify/probes/engine-seam.mjs` is the pattern). The chain per slot, which the native engine does not
+speak yet, is modelled whole (`src/platform/chain-fake.ts`, `docs/unit-contract.md` §10): the platform's
+`chain` answers add, remove, move and reload with `chains` frames, the batch's unit commands switch the
+model, each seated unit gets a meter on every frame the fake makes (an active OTT's bands on the fake's
+own 60 Hz timer), the unit commands never reach `input_send` where the chain is unavailable, and its seams sit on
+`__lf.native.chain` (`verify/probes/chain-fake.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
 outbox's batches (`__lf.native.batches`, each with its epoch; their input events flattened in
 `__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls (`__lf.native.midiCalls`,
 each with the page's epoch), answers a learn or its cancel with a `learning` event and nothing else, and

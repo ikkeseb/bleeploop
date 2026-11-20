@@ -1,53 +1,54 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createMemo, createSignal, onCleanup, onMount, type Accessor, type JSX } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
 import { editorAffinityBlocker, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
 import { liveShown, startLive } from './live';
+import { Icon } from './icons';
+import { PlateMenu } from './PlateMenu';
 import './plugin-controls.css';
 
 /**
- * Source-row plugin controls, split across the slot header and its params drawer:
+ * The plugin's controls in the slot row:
  *
- *  - `PluginBar`    — the header's plugin pair: the plugin EDITOR toggle (pop-out window) and the PARAMS
- *                     drawer disclosure. The slot's GO LIVE and its volume (the plugin's output) sit
- *                     beside them (`SlotControls.tsx`).
- *  - `PluginParams` — the accordion drawer body: a preview grid of the plugin's first params, as slim
- *                     groove sliders. Mounts when a plugin is loaded (so `onParamChanged` tracks live
- *                     positions even while collapsed); the drawer's open state is CSS-toggled by the
- *                     owning slot, so it never remounts on open/close.
+ *  - `PluginPlate`  — the loaded plugin as a unit plate: its lamp, its name (the slot's source picker,
+ *                     handed in by `InstrumentSlot.tsx`), its format mark and the opens-a-window glyph
+ *                     (its EDITOR), and the plate's menu (Editor, Parameters, a change of sound, Remove).
+ *  - `PluginParams` — the parameters drawer under the slot's line: a preview grid of the plugin's first
+ *                     params, as slim groove sliders. Mounts when a plugin is loaded (so `onParamChanged`
+ *                     tracks live positions even while collapsed); the drawer's open state is CSS-toggled
+ *                     by the owning slot, so it never remounts on open/close.
  *
  * Both mount under the slot's `<Show keyed>` on the loaded descriptor, so a plugin swap remounts them
- * (re-fetching params / resetting the editor).
+ * (re-fetching params); the editor's state is the slot's (`createPluginEditor`), new with each descriptor.
  */
 const PARAM_PREVIEW_COUNT = 12;
 
 /**
- * The header's plugin pair (editor + params disclosure). The flat-pill styling comes from the shared
- * `.tgl` rules in app.css, so this only owns the wiring.
+ * A loaded plugin's editor window, as the UI knows it: open, an open or close in flight, the last error.
+ * Owned by the slot (`InstrumentSlot.tsx`), one per loaded descriptor, not by the plate: the plate unmounts
+ * when the row folds its slot, while the native window stays open, and a plate remounted with a fresh
+ * closed state then opened a second time instead of closing it. A swap (a new descriptor) makes a new one.
+ * Call inside a reactive owner: its window-closed subscription ends with it.
  */
-export function PluginBar(props: {
-  slot: 0 | 1;
-  descriptor: PluginDescriptor;
-  paramsOpen: boolean;
-  onToggleParams: () => void;
-  drawerId: string;
-  /** True when the user just picked this plugin in the slot dropdown (not a reload resync): an effect
-   * goes live and the editor opens on its own. `onAutoStartDone` clears the owner's one-shot flag. */
-  autoStart: boolean;
-  onAutoStartDone: () => void;
-}) {
+export interface PluginEditor {
+  open: Accessor<boolean>;
+  busy: Accessor<boolean>;
+  error: Accessor<string | null>;
+  /** Open or close the window; `quiet` = the auto-open after a pick (no toasts). */
+  toggle: (quiet?: boolean) => Promise<void>;
+}
+
+export function createPluginEditor(slot: 0 | 1, descriptor: PluginDescriptor): PluginEditor {
   const [editorOpen, setEditorOpen] = createSignal(false);
   const [editorBusy, setEditorBusy] = createSignal(false);
   const [editorError, setEditorError] = createSignal<string | null>(null);
-  const sourcePending = () => slotPendingCounts()[props.slot] > 0;
 
   const offClosed = platform.pluginHost.onEditorClosed((s) => {
-    if (s === props.slot) setEditorOpen(false);
+    if (s === slot) setEditorOpen(false);
   });
   onCleanup(offClosed);
-
   // `quiet` = the auto-open after a dropdown pick: a refusal or a plugin with no editor is not an error
   // the user caused, so it skips the toasts (the console.error stays — it feeds the release log).
   async function toggleEditor(quiet = false) {
@@ -58,7 +59,7 @@ export function PluginBar(props: {
     // (the rule: `editorAffinity` in `src/ui/state/instrument.ts`). Ownership is fixed at load, so two
     // opens racing each other cannot both pass.
     if (wantOpen) {
-      const blocked = editorAffinityBlocker(props.slot, props.descriptor.path);
+      const blocked = editorAffinityBlocker(slot, descriptor.path);
       if (blocked) {
         if (quiet) return;
         const { owner } = blocked;
@@ -81,10 +82,10 @@ export function PluginBar(props: {
     setEditorError(null);
     try {
       if (wantOpen) {
-        await platform.pluginHost.openEditor(props.slot);
+        await platform.pluginHost.openEditor(slot);
         setEditorOpen(true);
       } else {
-        await platform.pluginHost.closeEditor(props.slot);
+        await platform.pluginHost.closeEditor(slot);
         setEditorOpen(false);
       }
     } catch (e) {
@@ -100,7 +101,7 @@ export function PluginBar(props: {
       console.error('[PluginControls] editor toggle failed', e);
       if (!quiet) {
         notifyError(
-          wantOpen ? 'Could not open the plugin editor. Press EDITOR again.' : 'Could not close the plugin editor. Press EDITOR again.',
+          wantOpen ? 'Could not open the plugin editor. Press its window button again.' : 'Could not close the plugin editor. Press its window button again.',
           e,
         );
       }
@@ -109,6 +110,37 @@ export function PluginBar(props: {
     }
   }
 
+  return { open: editorOpen, busy: editorBusy, error: editorError, toggle: toggleEditor };
+}
+
+/** The plugin plate. The menu's Parameters entry is the drawer's disclosure (`aria-controls`). */
+export function PluginPlate(props: {
+  slot: 0 | 1;
+  descriptor: PluginDescriptor;
+  /** The plate's name: the source picker over the plugin's name (`InstrumentSlot.tsx`). */
+  name: JSX.Element;
+  /** The lamp's bloom: the slot plays its input through the plugin. */
+  live: boolean;
+  paramsOpen: boolean;
+  onToggleParams: () => void;
+  drawerId: string;
+  /** Open the source picker (the menu's change of sound) and pick Off (its Remove). */
+  onChangeSound: () => void;
+  onRemove: () => void;
+  returnFocus?: (el: HTMLElement | undefined) => void;
+  /** True when the user just picked this plugin in the slot dropdown (not a reload resync): an effect
+   * goes live and the editor opens on its own. `onAutoStartDone` clears the owner's one-shot flag. */
+  autoStart: boolean;
+  onAutoStartDone: () => void;
+  /** The editor's state, the slot's (`createPluginEditor`), so it outlives a fold of the row. */
+  editor: PluginEditor;
+}) {
+  const sourcePending = () => slotPendingCounts()[props.slot] > 0;
+  const letter = slotLetter(props.slot);
+  const editorOpen = () => props.editor.open();
+  const editorBusy = () => props.editor.busy();
+  const editorError = () => props.editor.error();
+  const toggleEditor = (quiet = false) => props.editor.toggle(quiet);
   // A fresh dropdown pick starts itself: hearing yourself through the effect is the point of loading
   // one, so a scanned EFFECT goes live first (a synth or an unclassified plugin is left alone — going
   // live on a plugin with no input bus only yields an error), then the editor opens.
@@ -123,43 +155,61 @@ export function PluginBar(props: {
     })();
   });
 
+  const fmt = () => props.descriptor.format.toUpperCase();
   return (
     <>
-      {/* editor toggle (open = the lit warm-white `.on` legend; one accessible name, the state in aria-pressed) */}
-      <button
-        type="button"
-        class="tgl"
-        classList={{ on: editorOpen() }}
-        aria-pressed={editorOpen()}
-        aria-label={`Editor for slot ${slotLetter(props.slot)}`}
-        disabled={sourcePending() || editorBusy()}
-        onClick={() => void toggleEditor()}
-      >
-        EDITOR
-      </button>
-      {/* PARAMS — the params-drawer disclosure, named for what it opens. */}
-      <button
-        type="button"
-        class="tgl slot__params"
-        classList={{ on: props.paramsOpen }}
-        aria-expanded={props.paramsOpen}
-        aria-controls={props.drawerId}
-        aria-label={`Plugin parameters for slot ${slotLetter(props.slot)}`}
-        disabled={sourcePending()}
-        onClick={props.onToggleParams}
-      >
-        PARAMS
-      </button>
+      <div class="plate" classList={{ 'plate--idle': !props.live }}>
+        <span class="plate__lamp is-on" aria-hidden="true" />
+        {props.name}
+        <span class="plate__what">
+          <span class="plate__fmt" aria-hidden="true">
+            {fmt()}
+          </span>
+          {/* EDITOR: the opens-a-window glyph (open = lit warm white; one accessible name, the state in aria-pressed) */}
+          <button
+            type="button"
+            class="plate__ed"
+            aria-pressed={editorOpen()}
+            aria-label={`Editor for slot ${letter}`}
+            title={editorOpen() ? "Close the plugin's window" : "Open the plugin's window"}
+            disabled={sourcePending() || editorBusy()}
+            onClick={(e) => {
+              e.stopPropagation();
+              void toggleEditor();
+            }}
+          >
+            <Icon name="win" size={16} />
+          </button>
+        </span>
+        <PlateMenu
+          id={`slot-${props.slot}-menu`}
+          label={`Menu for slot ${letter}`}
+          menuLabel={`Slot ${letter}: ${props.descriptor.name}`}
+          returnFocus={props.returnFocus}
+          groups={[
+            [
+              { label: 'Editor', icon: 'win', checked: editorOpen(), disabled: sourcePending() || editorBusy(), onSelect: () => void toggleEditor() },
+              { label: 'Parameters', icon: 'params', checked: props.paramsOpen, controls: props.drawerId, disabled: sourcePending(), onSelect: props.onToggleParams },
+            ],
+            [
+              { label: 'Change sound', icon: 'swap', disabled: sourcePending(), onSelect: props.onChangeSound },
+              { label: 'Remove', icon: 'x', disabled: sourcePending(), onSelect: props.onRemove },
+            ],
+          ]}
+        />
+      </div>
       <Show when={editorError()}>
-        <span class="pc__err">{editorError()}</span>
+        <span class="pc__err" title={editorError() ?? ''}>
+          {editorError()}
+        </span>
       </Show>
     </>
   );
 }
 
 /**
- * The accordion drawer body: a preview grid of the plugin's first params (its output level is the slot
- * header's volume). The `onParamChanged` subscription proves "editor → web UI updates" — a knob
+ * The parameters drawer's body: a preview grid of the plugin's first params (its output level is the
+ * slot's volume). The `onParamChanged` subscription proves "editor → web UI updates" — a knob
  * dragged in the plugin's own GUI repositions the matching slider and shows a last-edited readout. A
  * plugin like Surge exposes thousands of params, so we render only the first PARAM_PREVIEW_COUNT — the
  * editor is the full UI.

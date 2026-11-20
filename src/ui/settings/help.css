@@ -275,7 +275,7 @@
   .help__panel--ref .help__list {
     gap: 2px;
   }
-  /* 17 px: the looper keys' column holds ten rows (the tuner's N the tenth) unscrolled at 960x600 */
+  /* 17 px: the looper keys' column holds its rows unscrolled at 1000x700 (960x600: the step below) */
   .help__panel--ref .help__kbd {
     height: 17px;
   }
@@ -288,6 +288,16 @@
   }
   .help__panel--ref .help__pad {
     padding: 3px 4px;
+  }
+}
+/* The 960x600 minimum under the two-row bar (126 px, as docs/redesign/narrow.html draws it): the looper
+   keys' eleven rows (the wave look's I the eleventh) take one more step in, their caps and gaps only */
+@media (max-height: 640px) {
+  .help__panel--ref .help__keys .help__kbd {
+    height: 15px;
+  }
+  .help__panel--ref .help__keys {
+    row-gap: 1px;
   }
 }
 
