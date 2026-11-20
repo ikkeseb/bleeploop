@@ -13,7 +13,8 @@ use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext,
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
 use super::owner::Request;
-use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError, LOAD_BINS};
+use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, InputPick, OpenError, LOAD_BINS};
+use InputPick::{Mono, Pair};
 use crate::asio_startup::{AsioStartupStatus, AsioStatusReport};
 use crate::audio_output::AudioBackend;
 
@@ -157,6 +158,12 @@ impl Harness {
             std::thread::sleep(Duration::from_millis(2));
         }
         events
+    }
+
+    /// Wait until the owner has answered what it was doing (a request it takes only between two turns
+    /// of its loop: here Share output off, which none of these tests turns on).
+    fn owner_settled(&self) {
+        self.host.set_share(None).expect("the owner answers");
     }
 
     /// The frame each output callback started at, one list per run.
@@ -593,24 +600,253 @@ fn assert_take_records(h: &mut Harness) {
     assert!(ended.is_none(), "the take records on: {ended:?}");
 }
 
+/// The monitor's last `frames`, slot 0 live alone on the fake (channel c carries (c + 1) x `tone`): its
+/// left side `ratio` x its right on every frame, and the left at `level` x the tone's 0.1 peak.
+#[track_caller]
+fn assert_slot_0_reads(h: &Harness, ratio: f32, level: f32, what: &str) {
+    // Past the join pipe's capacity (half a second): no frame read before the change is in the window.
+    h.play(RATE * 3 / 4);
+    let at = h.frame();
+    let heard = h.fake.heard_stereo(at - 4096..at);
+    assert_sides(&heard, ratio, 1e-5, 0.08 * level, what);
+    let peak = heard.iter().map(|[l, _]| l.abs()).fold(0.0, f32::max);
+    assert!(peak < 0.1 * level + 1e-3, "{what}: the left peaks at {peak}, past input {level}'s");
+}
+
 // Windows moves a stream on its default with the default (a headset plugged in): cpal opens a default
 // side as Windows' virtual default endpoint. Where the new endpoint runs the engine's rate, the run
 // follows it, though its mic is mono: an open that changes nothing else (the Buffer select, which
 // WASAPI ignores) keeps the stream that already plays there, and a take in flight keeps recording.
+// The capture keeps the two channels it opened with, and each slot's pick is read again against the
+// headset's one input: the pair on inputs 1+2 and auto take input 1, the status says so, the monitor
+// plays input 1 on both sides, and a change to an input the headset lacks is refused.
 #[test]
 fn a_default_windows_moved_at_the_engines_rate_plays_on_through_a_take() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
-    h.open(wasapi(None, None));
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    assert_eq!(h.open(request.clone()).input_channels, [Pair([0, 1]), Mono(1)]);
     start_take(&mut h);
+    assert_slot_0_reads(&h, 0.5, 1.0, "the pair on the stereo default: input 1 left, input 2 right");
     h.fake.move_default("headset", FakeDevice { in_channels: 1, ..FakeDevice::new("Headset", 48_000, 480) });
-    until("the status names the new default", || h.host.status().is_some_and(|s| (s.input_name.as_str(), s.output_name.as_str()) == ("Headset", "Headset")));
-    h.open(DeviceRequest { buffer: Some(128), ..wasapi(None, None) });
-    h.open(wasapi(None, None));
+    until("the status names the new default and what each slot reads there", || {
+        h.host.status().is_some_and(|s| (s.input_name.as_str(), s.output_name.as_str(), s.input_channels) == ("Headset", "Headset", [Mono(0), Mono(0)]))
+    });
+    assert!(h.host.set_slot_input_channel(1, Some(Mono(1))).is_err(), "an input the headset lacks");
+    assert!(h.host.set_slot_input_channel(1, Some(Pair([0, 1]))).is_err(), "a pair with a side it lacks");
+    assert_slot_0_reads(&h, 1.0, 1.0, "input 1 on both sides");
+    h.open(DeviceRequest { buffer: Some(128), ..request.clone() });
+    h.open(request);
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Mono(0), Mono(0)]), "an open of the same request reads them the same");
     h.play(RATE / 10);
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
     assert_take_records(&mut h);
     assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// A default Windows moved to a wider input than the capture opened with (an interface with four inputs
+// for a stereo one): no pick reads past the stream's two, so the run plays on, a take in flight included.
+// A change to inputs 3+4 then reopens there, once, at the engine's rate, the new stream four wide, and an
+// input past the interface's four is refused. Moved to a mono headset and back, the stream that opened
+// four wide plays on, each pick read again against each endpoint's inputs; the request keeps the pick,
+// so the interface reads it again.
+#[test]
+fn a_default_windows_moved_to_a_wider_input_plays_on_until_a_pick_reads_past_the_stream() {
+    let mut h = Harness::new();
+    h.fake.set_input(|frame| tone(frame) * 0.25);
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    assert_eq!(h.open(request).input_channels, [Pair([0, 1]), Mono(1)]);
+    start_take(&mut h);
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Pair([0, 1]), Mono(1)]), "with the pair");
+    assert_slot_0_reads(&h, 0.5, 0.25, "input 1 left, input 2 right");
+    assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair: no pick reads the interface's inputs 3+4");
+    assert_take_records(&mut h);
+    h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).expect("inputs 3+4: a reopen on the interface reads them");
+    assert_eq!(h.fake.started.load(SeqCst), 2, "one reopen for the pick");
+    assert_eq!(h.host.status().map(|s| (s.sample_rate, s.input_channels)), Some((48_000, [Pair([2, 3]), Mono(1)])));
+    // The reopen punched the take out: its loop would play under the monitor.
+    h.send(Command::Clear(0));
+    assert_slot_0_reads(&h, 0.75, 0.75, "input 3 left, input 4 right");
+    h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).expect("the same pick again");
+    assert!(h.host.set_slot_input_channel(1, Some(Mono(4))).is_err(), "an input past the interface's four");
+    h.play(RATE / 10);
+    assert_eq!(h.fake.started.load(SeqCst), 2, "the stream four wide reads them: no second reopen");
+    h.fake.move_default("headset", FakeDevice { in_channels: 1, ..FakeDevice::new("Headset", 48_000, 480) });
+    until("the headset's one input", || h.host.status().is_some_and(|s| s.input_channels == [Mono(0), Mono(0)]));
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the interface again", || h.host.status().is_some_and(|s| s.input_name == "Interface" && s.input_channels == [Pair([2, 3]), Mono(1)]));
+    assert_slot_0_reads(&h, 0.75, 0.75, "inputs 3+4 again");
+    assert_eq!(h.fake.started.load(SeqCst), 2, "the stream that opened on the interface ran on through the headset and back");
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// A default Windows moved to a mono headset at another rate: the run plays on (the output converted,
+// the capture at the width and rate it opened at), and each slot's pick is read again against the
+// headset's one input in the same status that names it, so a change to input 2 is refused there; moved
+// back, the stereo endpoint's picks read again, the take recording throughout.
+#[test]
+fn a_default_windows_moved_to_a_mono_input_at_another_rate_reads_the_picks_there_and_back() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    h.open(request);
+    start_take(&mut h);
+    h.fake.move_default("headset", FakeDevice { in_channels: 1, ..FakeDevice::new("Headset", 44_100, 441) });
+    until("the status names the headset", || h.host.status().is_some_and(|s| s.output_name == "Headset"));
+    let status = h.host.status().unwrap();
+    assert_eq!((status.input_name.as_str(), status.input_channels), ("Headset", [Mono(0), Mono(0)]), "named with the picks it reads");
+    assert!(h.host.set_slot_input_channel(1, Some(Mono(1))).is_err(), "an input the headset lacks");
+    assert!(h.host.set_slot_input_channel(0, Some(Pair([0, 1]))).is_err(), "a pair with a side it lacks");
+    assert_slot_0_reads(&h, 1.0, 1.0, "input 1 on both sides");
+    h.fake.move_default("default", FakeDevice::new("Fake WASAPI", 48_000, 480));
+    until("the status names the default moved back", || h.host.status().is_some_and(|s| s.output_name == "Fake WASAPI"));
+    let status = h.host.status().unwrap();
+    assert_eq!((status.input_name.as_str(), status.input_channels), ("Fake WASAPI", [Pair([0, 1]), Mono(1)]), "its picks again");
+    h.host.set_slot_input_channel(1, Some(Mono(1))).expect("input 2 again");
+    assert_slot_0_reads(&h, 0.5, 1.0, "input 1 left, input 2 right");
+    assert_eq!((h.fake.started.load(SeqCst), h.host.core.rate()), (1, Some(48_000)), "nothing restarts");
+    assert_take_records(&mut h);
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// The owner's own reopen for a pick past the stream (a saved pick on inputs 3+4, read as auto on the
+// stereo default, and an interface with four as the new default) resolves the default again; Windows
+// moved it once more meanwhile, to an endpoint at another rate. The owner never rebuilds the engine
+// over the take it holds: the reopen is refused before anything stops, and the run plays on.
+#[test]
+fn the_owners_reopen_on_a_moved_default_never_rebuilds_at_another_rate_over_held_audio() {
+    let mut h = Harness::new();
+    let request = DeviceRequest { input_channels: [Some(Pair([2, 3])), None], ..wasapi(None, None) };
+    assert_eq!(h.open(request).input_channels, [Mono(1), Mono(1)]);
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_resolve.lock().unwrap() = Some(Box::new(move || {
+        let mut listed = fake.wasapi.lock().unwrap();
+        listed[0].1 = FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 44_100, 441) };
+    }));
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.output_name == "Interface"));
+    // The name is published at the first resolution; the owner has answered the move once it answers this.
+    h.owner_settled();
+    h.play(RATE / 5);
+    assert_eq!((h.fake.started.load(SeqCst), h.host.core.rate()), (1, Some(48_000)), "no reopen at 44.1 kHz: the engine and its take stay");
+    let status = h.host.status().unwrap();
+    assert_eq!((status.input_channels, status.input_requests), ([Mono(1), Mono(1)], [Some(Pair([2, 3])), None]), "the picks read as before");
+    assert_take_records(&mut h);
+    let events = h.host.take_device_events();
+    assert!(events.iter().all(|e| !matches!(e, DeviceEvent::LoopsDropped { .. } | DeviceEvent::Lost { .. })), "{events:?}");
+}
+
+// A moved default whose capture format does not read yet, under a running capture: the run follows the
+// output there and keeps its input endpoint, so once the headset reads mono an open of the same request
+// resolves it again and reads the picks against its one input.
+#[test]
+fn a_moved_input_whose_format_did_not_read_is_resolved_again_once_it_reads() {
+    let h = Harness::new();
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    h.open(request.clone());
+    h.fake.move_default("headset", FakeDevice { in_channels: 0, ..FakeDevice::new("Headset", 48_000, 480) });
+    until("the status names the headset", || h.host.status().is_some_and(|s| s.output_name == "Headset"));
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Pair([0, 1]), Mono(1)]), "nothing read yet");
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 1;
+    let status = h.open(request);
+    assert_eq!((status.input_name.as_str(), status.input_channels), ("Headset", [Mono(0), Mono(0)]), "the headset's one input");
+    assert_eq!(h.fake.started.load(SeqCst), 1);
+}
+
+// The initial open finds Windows' default capture endpoint but cannot read its format yet: the run
+// plays output only. Once the format reads under the same endpoint, an open of the same request resolves
+// it again and starts the capture there.
+#[test]
+fn a_default_input_whose_format_did_not_read_at_the_open_is_resolved_again_once_it_reads() {
+    let h = Harness::new();
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    assert!(!h.open(request.clone()).input_open, "no capture format: output only");
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 2;
+    let status = h.open(request);
+    assert_eq!((status.input_open, status.input_name.as_str(), status.input_channels), (true, "Fake WASAPI", [Pair([0, 1]), Mono(1)]));
+    assert_eq!(h.fake.started.load(SeqCst), 2, "a run with its capture");
+}
+
+// A live pick on inputs 3+4 while the default is a four-input interface the stereo stream followed: the
+// owner reads the endpoint ids, then Windows moves the default back to the stereo endpoint before the
+// reopen resolves it. Resolved there, the pick reads auto within the stream's two inputs, so nothing
+// stops: the take records on, one stream throughout.
+#[test]
+fn a_live_pick_that_no_longer_reads_past_the_stream_once_resolved_never_stops_it() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) });
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_defaults.lock().unwrap() = Some(Box::new(move || {
+        let mut listed = fake.wasapi.lock().unwrap();
+        listed.retain(|(e, _)| e != "default");
+        listed.insert(0, ("default".to_string(), FakeDevice::new("Fake WASAPI", 48_000, 480)));
+    }));
+    h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).expect("the pick stays the request");
+    let status = h.host.status().unwrap();
+    assert_eq!((status.input_name.as_str(), status.input_channels), ("Fake WASAPI", [Mono(1), Mono(1)]), "auto on the stereo endpoint");
+    assert_eq!(status.input_requests, [Some(Pair([2, 3])), None], "the pick it answers");
+    h.play(RATE / 10);
+    assert_eq!(h.fake.started.load(SeqCst), 1, "one stream: nothing stopped");
+    assert_take_records(&mut h);
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// The owner's reopen where Windows moved the default (a pick past the stream on a four-input interface)
+// finds the stream faulted by the time it opens, and the interface at another rate: it never rebuilds the
+// engine over the take on its own. The dead stream is a loss, and its fallback says the loops left.
+#[test]
+fn the_owners_reopen_on_a_moved_default_whose_stream_faulted_never_drops_held_audio_unreported() {
+    let mut h = Harness::new();
+    h.open(DeviceRequest { input_channels: [Some(Pair([2, 3])), None], ..wasapi(None, None) });
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_resolve.lock().unwrap() = Some(Box::new(move || {
+        fake.wasapi.lock().unwrap()[0].1 = FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 44_100, 441) };
+        fake.fatal.store(Side::Output as u8, SeqCst);
+        let deadline = Instant::now() + PATIENCE;
+        while fake.fatal.load(SeqCst) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The fake latches the fault as it takes the bit: past it, the run reads faulted.
+        std::thread::sleep(Duration::from_millis(50));
+    }));
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("a run at 44.1 kHz", || h.host.status().is_some_and(|s| s.sample_rate == 44_100));
+    // The loss, its recovery and the drop (reported after the recovery's status is out).
+    let events = h.device_events(3);
+    assert!(matches!(events.first(), Some(DeviceEvent::Lost { .. })), "the dead stream is a loss: {events:?}");
+    assert!(events.iter().any(|e| matches!(e, DeviceEvent::LoopsDropped { from: 48_000, to: 44_100, .. })), "the loops' drop is reported: {events:?}");
+}
+
+// A live pick's reopen on a four-input default that fails to start, with Windows' default at another rate
+// by then: the rollback to the run it stopped never rebuilds the engine over the take. It stays closed,
+// the loops held, and says so.
+#[test]
+fn a_live_picks_reopen_that_failed_to_start_never_rolls_back_at_another_rate_over_held_audio() {
+    let mut h = Harness::new();
+    h.open(DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) });
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_start.lock().unwrap() = Some(Box::new(move || {
+        fake.wasapi.lock().unwrap()[0].1 = FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 44_100, 441) };
+    }));
+    h.fake.fail_starts.store(1, SeqCst);
+    assert!(h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).is_err(), "the reopen did not start");
+    assert_eq!(h.host.core.rate(), Some(48_000), "the engine and its loops stay");
+    assert!(h.host.core.holds_audio(), "the take, punched out, is held");
+    let events = h.host.take_device_events();
+    assert!(events.iter().all(|e| !matches!(e, DeviceEvent::LoopsDropped { .. })), "{events:?}");
+    assert!(matches!(events.as_slice(), [DeviceEvent::Lost { .. }]), "the closed device is reported: {events:?}");
 }
 
 // A side the request names keeps its endpoint; the side left to the default follows Windows, also an
@@ -709,9 +945,9 @@ fn a_default_gone_or_unresolved_leaves_the_run_as_it_plays() {
     assert!(status.input_open && status.input_name == "Fake WASAPI", "{status:?}");
     h.fake.wasapi.lock().unwrap().clear();
     let mut picked = wasapi(None, None);
-    picked.input_channels[1] = Some(0);
+    picked.input_channels[1] = Some(Mono(0));
     let status = h.host.open(picked, false).expect("the run plays on");
-    assert_eq!((status.input_channels[1], status.output_name.as_str()), (0, "Speakers"));
+    assert_eq!((status.input_channels[1], status.output_name.as_str()), (Mono(0), "Speakers"));
     h.play(RATE / 10);
     assert_eq!(h.fake.started.load(SeqCst), 1);
 }
@@ -1034,7 +1270,7 @@ fn a_channel_change_its_caller_gave_up_on_before_it_ran_leaves_the_device_runnin
     let h = Harness::new();
     h.open(asio(Some(256)));
     let claimed = Arc::new(AtomicBool::new(true));
-    assert!(open_claimed(&h, DeviceRequest { input_channels: [Some(1); SLOT_COUNT], ..asio(Some(256)) }, &claimed).is_err());
+    assert!(open_claimed(&h, DeviceRequest { input_channels: [Some(Mono(1)); SLOT_COUNT], ..asio(Some(256)) }, &claimed).is_err());
     assert_eq!(h.host.status().map(|s| s.block), Some(256), "the device still runs");
     let frame = h.frame();
     h.play(RATE / 20);
@@ -1054,6 +1290,32 @@ fn a_switch_its_caller_gave_up_on_midway_puts_back_the_device_that_ran() {
     let frame = h.frame();
     h.play(RATE / 20);
     assert!(h.frame() > frame);
+}
+
+// A live pick past the stream reopens the device (a four-input default the stereo stream followed), and
+// its caller gives up midway, as at an open's timeout: the owner undoes it, so the pick the caller then
+// puts back is the route that runs. One given up on before it ran never runs.
+#[test]
+fn a_live_pick_its_caller_gave_up_on_puts_back_the_route_that_ran() {
+    let h = Harness::new();
+    h.open(DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) });
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    let pick = |claimed: &Arc<AtomicBool>| {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        h.host.owner_tx().unwrap().send(Request::SetSlotInputChannel(0, Some(Pair([2, 3])), claimed.clone(), reply_tx)).unwrap();
+        reply_rx.recv_timeout(PATIENCE).expect("the owner answers")
+    };
+    let ran = |h: &Harness| h.host.status().map(|s| (s.input_channels, s.input_requests));
+    let before = Some(([Pair([0, 1]), Mono(1)], [Some(Pair([0, 1])), None]));
+    let claimed = Arc::new(AtomicBool::new(false));
+    let gave_up = claimed.clone();
+    *h.fake.on_start.lock().unwrap() = Some(Box::new(move || gave_up.store(true, SeqCst)));
+    assert!(pick(&claimed).is_err(), "the caller hears the pick was cancelled");
+    assert_eq!(h.fake.started.load(SeqCst), 2, "the reopen ran");
+    assert_eq!(ran(&h), before, "the route that ran before, and its request");
+    assert!(pick(&Arc::new(AtomicBool::new(true))).is_err());
+    assert_eq!((h.fake.started.load(SeqCst), ran(&h)), (2, before), "a pick given up on before it ran never runs");
 }
 
 #[test]
@@ -1351,10 +1613,10 @@ fn the_capture_channel_changes_without_a_new_stream() {
         h.fake.heard(at - 64..at)
     };
     assert!(heard(&h).iter().all(|s| (s - 0.5).abs() < 1e-3), "auto takes input 2 (0.5 on the fake)");
-    h.host.set_slot_input_channel(0, Some(0)).unwrap();
+    h.host.set_slot_input_channel(0, Some(Mono(0))).unwrap();
     assert!(heard(&h).iter().all(|s| (s - 0.25).abs() < 1e-3), "input 1");
-    assert!(h.host.set_slot_input_channel(0, Some(2)).is_err(), "the fake has two inputs");
-    let same = DeviceRequest { input_channels: [Some(1); SLOT_COUNT], ..asio(Some(256)) };
+    assert!(h.host.set_slot_input_channel(0, Some(Mono(2))).is_err(), "the fake has two inputs");
+    let same = DeviceRequest { input_channels: [Some(Mono(1)); SLOT_COUNT], ..asio(Some(256)) };
     h.open(same);
     assert!(heard(&h).iter().all(|s| (s - 0.5).abs() < 1e-3), "an open of the running device only changes the channel");
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
@@ -1375,18 +1637,18 @@ fn a_device_start_and_a_channel_change_break_the_tuners_input() {
     assert_eq!((breaks(&h), fence(&h)), (before + 1, start), "a start breaks it at its first frame");
     h.play(RATE / 10);
     let (from, to) = (h.frame(), {
-        h.host.set_slot_input_channel(0, Some(0)).unwrap();
+        h.host.set_slot_input_channel(0, Some(Mono(0))).unwrap();
         h.frame()
     });
     assert_eq!(breaks(&h), before + 3, "announced, then fenced");
     assert!((from + 256..=to + 256).contains(&fence(&h)), "a block on from the change: {} in {}..={}", fence(&h), from + 256, to + 256);
-    assert!(h.host.set_slot_input_channel(0, Some(2)).is_err());
+    assert!(h.host.set_slot_input_channel(0, Some(Mono(2))).is_err());
     assert_eq!(breaks(&h), before + 3, "a refused change breaks nothing");
 
     h.open(wasapi(None, None));
     let opened = breaks(&h);
     let from = h.frame();
-    h.host.set_slot_input_channel(1, Some(0)).unwrap();
+    h.host.set_slot_input_channel(1, Some(Mono(0))).unwrap();
     let pipe = (f64::from(h.host.rate().unwrap()) * 0.5).ceil() as Frame;
     assert_eq!(breaks(&h), opened + 2);
     assert!(fence(&h) >= from + pipe, "past what the join pipe can hold of the old channel: {} against {}", fence(&h), from + pipe);
@@ -1423,7 +1685,7 @@ fn each_slot_reads_its_own_capture_channel_on_asio_and_wasapi() {
     h.fake.set_input(|_| 0.0625);
     for request in [asio(Some(256)), wasapi(None, None)] {
         let backend = request.backend;
-        h.open(DeviceRequest { input_channels: [Some(0), Some(3)], ..request });
+        h.open(DeviceRequest { input_channels: [Some(Mono(0)), Some(Mono(3))], ..request });
         h.send(Command::SetSlotLive(0, true));
         h.send(Command::SetSlotLive(1, true));
         assert_heard(&h, 0.2, 0.0625 + 0.25, &format!("{backend:?}: input 1 on slot 0 plus input 4 on slot 1"));
@@ -1447,19 +1709,161 @@ fn the_meter_reads_each_slots_own_capture_channel() {
     h.fake.set_input(|_| 0.25);
     // The meter over a tenth of a second, after one to let the last change settle: each slot's peak
     // (WASAPI's sample conversion leaves it within 1e-6) and clip.
-    let assert_metered = |peak: [f32; SLOT_COUNT], clip: [bool; SLOT_COUNT], what: &str| {
+    let assert_metered = |peak: [[f32; 2]; SLOT_COUNT], clip: [bool; SLOT_COUNT], what: &str| {
         h.play(RATE / 10);
         h.host.take_meter();
         h.play(RATE / 10);
         let (got, clipped) = h.host.take_meter();
-        assert!(got.iter().zip(peak).all(|(g, p)| (g - p).abs() < 1e-6) && clipped == clip, "{what}: {got:?} {clipped:?}");
+        assert!(got.iter().flatten().zip(peak.iter().flatten()).all(|(g, p)| (g - p).abs() < 1e-6) && clipped == clip, "{what}: {got:?} {clipped:?}");
     };
     for request in [asio(Some(256)), wasapi(None, None)] {
         let backend = request.backend;
-        h.open(DeviceRequest { input_channels: [Some(0), Some(3)], ..request });
-        assert_metered([0.25, 1.0], [false, true], &format!("{backend:?}: input 1 on slot 0, input 4 at full scale on slot 1"));
-        h.host.set_slot_input_channel(1, Some(1)).unwrap();
-        assert_metered([0.25, 0.5], [false, false], &format!("{backend:?}: slot 1 moved to input 2"));
+        h.open(DeviceRequest { input_channels: [Some(Mono(0)), Some(Mono(3))], ..request });
+        assert_metered([[0.25; 2], [1.0; 2]], [false, true], &format!("{backend:?}: input 1 on slot 0, input 4 at full scale on slot 1"));
+        h.host.set_slot_input_channel(1, Some(Mono(1))).unwrap();
+        assert_metered([[0.25; 2], [0.5; 2]], [false, false], &format!("{backend:?}: slot 1 moved to input 2"));
+    }
+    assert_eq!(h.host.diag().rt_allocs, 0, "the meter allocates nothing on the audio thread");
+}
+
+/// Both sides of every frame in `heard`: the left `ratio` times the right on the same frame (within
+/// `tol`, the output stage's rounding), and the left sounding past `floor`. A side read from the other
+/// channel, from their mean, or a frame early or late against its pair would be orders past `tol`.
+#[track_caller]
+fn assert_sides(heard: &[[f32; 2]], ratio: f32, tol: f32, floor: f32, what: &str) {
+    assert!(heard.iter().flatten().all(|x| x.is_finite()), "{what}: every frame of both sides heard");
+    assert!(heard.iter().map(|[l, _]| l.abs()).fold(0.0, f32::max) > floor, "{what}: the left side sounds");
+    let odd: Vec<(usize, [f32; 2])> = heard.iter().copied().enumerate().filter(|(_, [l, r])| (l - ratio * r).abs() > tol).take(6).collect();
+    assert!(odd.is_empty(), "{what}: the left is not {ratio} x the right on its frame: {odd:?} of {}", heard.len());
+}
+
+/// ASIO's monitor over the `heard.len()` frames before `at`, one slot live on the fake (channel c
+/// carrying (c + 1) x `tone`): each side bit for bit its channel's `gains` x `tone` on the same frame,
+/// through the fake's i32 input and output rails, the engine at unity between them. A frame late, a gain
+/// off by one part in a million or the other side's channel fails it.
+#[track_caller]
+fn assert_asio_monitor(heard: &[[f32; 2]], at: Frame, gains: [f32; 2], what: &str) {
+    use cpal::Sample;
+    let rail = |x: f32| f32::from_sample(i32::from_sample(x));
+    let start = at - heard.len() as Frame;
+    let odd: Vec<(Frame, [f32; 2])> = heard
+        .iter()
+        .enumerate()
+        .map(|(k, &sides)| (start + k as Frame, sides))
+        .filter(|&(t, sides)| (0..2).any(|s| sides[s].to_bits() != rail(rail(tone(t) * gains[s])).to_bits()))
+        .take(4)
+        .collect();
+    assert!(odd.is_empty(), "{what}: frames off their input frame's value: {odd:?}");
+}
+
+/// A pair pick through the device side (unit contract §7): the fake's four channels, channel c carrying
+/// (c + 1) x a tone, so each side names the channel it read by its level. Slot 0 on inputs 3+1 (left 3x,
+/// right 1x) keeps each side its own channel on the same frame through the monitor, and on ASIO's
+/// handoff to the exact frame of the input; switched in place to a mono pick on input 3, both sides
+/// play bit-equal, as every pick did before the pair; and through the record tap into a loop the
+/// loop's sides keep the pair. On ASIO's same-cycle handoff and WASAPI's join.
+#[test]
+fn a_pair_pick_keeps_each_side_its_own_channel_through_the_monitor_and_the_record_tap() {
+    for request in [asio(Some(256)), wasapi(None, None)] {
+        let mut h = Harness::new();
+        let backend = request.backend;
+        h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+        h.fake.wasapi.lock().unwrap()[0].1.in_channels = 4;
+        h.fake.set_input(tone);
+        let status = h.open(DeviceRequest { input_channels: [Some(Pair([2, 0])), None], ..request });
+        assert_eq!(status.input_channels, [Pair([2, 0]), Mono(1)], "{backend:?}: the status names the pair");
+        h.send(Command::SetSlotLive(0, true));
+        // Past the join pipe's capacity (half a second), so no frame of the start is in the window.
+        h.play(RATE * 3 / 4);
+        let at = h.frame();
+        let monitor = h.fake.heard_stereo(at - 4096..at);
+        assert_sides(&monitor, 3.0, 1e-5, 0.25, &format!("{backend:?}: the monitor"));
+        if backend == AudioBackend::Asio {
+            // The handoff moves no frame: output frame t plays input frame t on both sides, each its own
+            // channel bit for bit through the fake's i32 rails at unity.
+            assert_asio_monitor(&monitor, at, [3.0, 1.0], "ASIO: the pair");
+        }
+        h.host.set_slot_input_channel(0, Some(Mono(2))).unwrap();
+        h.play(RATE * 3 / 4);
+        let at = h.frame();
+        let mono = h.fake.heard_stereo(at - 4096..at);
+        assert_sides(&mono, 1.0, 0.0, 0.25, &format!("{backend:?}: a mono pick"));
+        assert!(mono.iter().all(|[l, r]| l.to_bits() == r.to_bits()), "{backend:?}: a mono pick plays both sides bit-equal");
+        if backend == AudioBackend::Asio {
+            // Each side bit for bit what a mono pick played before the pair: its channel, on its frame.
+            assert_asio_monitor(&mono, at, [3.0, 3.0], "ASIO: a mono pick");
+        }
+        h.host.set_slot_input_channel(0, Some(Pair([2, 0]))).unwrap();
+        h.play(RATE * 3 / 4);
+        // The take records the slot's pair (record_loop takes the slot live for the take only).
+        h.send(Command::SetSlotLive(0, false));
+        let length = h.record_loop();
+        h.play(length);
+        let at = h.frame();
+        assert_sides(&h.fake.heard_stereo(at - length..at), 3.0, 1e-5, 0.25, &format!("{backend:?}: the loop the record tap took"));
+        let diag = h.host.diag();
+        assert_eq!((diag.rt_allocs, diag.join_starves, diag.join_overruns), (0, 0, 0), "{backend:?}: {diag:?}");
+    }
+}
+
+/// A pick the device lacks, either side of a pair: an open takes auto for that slot (mono, and the
+/// owner logs the fallback), the other slot keeps its pair; a change on the running device to one is
+/// refused and moves nothing, in the status and in what each slot plays alone (channel c carries
+/// (c + 1) x the input).
+#[test]
+fn a_pair_with_a_side_the_device_lacks_opens_as_auto_and_a_change_to_one_is_refused() {
+    let h = Harness::new();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    h.fake.set_input(|frame| tone(frame) * 0.25);
+    let status = h.open(DeviceRequest { input_channels: [Some(Pair([1, 5])), Some(Pair([3, 2]))], ..asio(Some(256)) });
+    assert_eq!(status.input_channels, [Mono(1), Pair([3, 2])], "the right side is missing: slot 0 reads auto");
+    // Each slot alone, the other muted: slot 0 on input 2 plays 2x on both sides, slot 1 on inputs 4+3
+    // 4x left and 3x right, so a slot silenced, moved or swapped with the other shows.
+    let each_plays = |what: &str| {
+        for (slot, ratio, gain) in [(0, 1.0, 2.0), (1, 4.0 / 3.0, 4.0)] {
+            h.send(Command::SetSlotLive(slot, true));
+            h.send(Command::SetSlotLive(1 - slot, false));
+            h.play(RATE / 4);
+            let at = h.frame();
+            let heard = h.fake.heard_stereo(at - 4096..at);
+            assert_sides(&heard, ratio, 1e-5, 0.6 * gain * 0.025, &format!("{what}: slot {slot} alone"));
+            let peak = heard.iter().map(|[l, _]| l.abs()).fold(0.0, f32::max);
+            assert!(peak < gain * 0.025 + 1e-3, "{what}: slot {slot} alone peaks at {peak}, past {gain}x the input's");
+        }
+    };
+    each_plays("slot 0 on input 2, slot 1 on inputs 4+3");
+    assert!(h.host.set_slot_input_channel(1, Some(Pair([4, 0]))).is_err(), "a left side the device lacks");
+    each_plays("after a refused left side");
+    assert!(h.host.set_slot_input_channel(1, Some(Pair([0, 4]))).is_err(), "a right side the device lacks");
+    each_plays("after a refused right side");
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Mono(1), Pair([3, 2])]), "a refused change moves nothing");
+    h.host.set_slot_input_channel(0, Some(Pair([0, 1]))).unwrap();
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Pair([0, 1]), Pair([3, 2])]));
+}
+
+/// The meter reads each side of a pair apart (channel c carries (c + 1) x the input): a clip on
+/// either side lights the slot's clip.
+#[test]
+fn the_meter_reads_each_side_of_a_pair_and_a_clip_on_either() {
+    let h = Harness::new();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 4;
+    h.fake.set_input(|_| 0.25);
+    let metered = || {
+        h.play(RATE / 10);
+        h.host.take_meter();
+        h.play(RATE / 10);
+        h.host.take_meter()
+    };
+    let near = |got: [[f32; 2]; SLOT_COUNT], want: [[f32; 2]; SLOT_COUNT]| got.iter().flatten().zip(want.iter().flatten()).all(|(g, w)| (g - w).abs() < 1e-6);
+    for request in [asio(Some(256)), wasapi(None, None)] {
+        let backend = request.backend;
+        h.open(DeviceRequest { input_channels: [Some(Pair([1, 0])), Some(Pair([0, 3]))], ..request });
+        let (peak, clip) = metered();
+        assert!(near(peak, [[0.5, 0.25], [0.25, 1.0]]) && clip == [false, true], "{backend:?}: each side its own peak, input 4's full scale clips slot 1: {peak:?} {clip:?}");
+        h.host.set_slot_input_channel(1, Some(Pair([3, 0]))).unwrap();
+        let (peak, clip) = metered();
+        assert!(near(peak, [[0.5, 0.25], [1.0, 0.25]]) && clip == [false, true], "{backend:?}: the clip on the left side too: {peak:?} {clip:?}");
     }
     assert_eq!(h.host.diag().rt_allocs, 0, "the meter allocates nothing on the audio thread");
 }
@@ -1468,19 +1872,19 @@ fn the_meter_reads_each_slots_own_capture_channel() {
 fn auto_is_input_two_for_each_slot_an_open_takes_auto_for_a_missing_channel_and_a_change_to_one_is_refused() {
     let h = Harness::new();
     h.fake.set_input(|_| 0.125);
-    assert_eq!(h.open(asio(Some(256))).input_channels, [1, 1]);
+    assert_eq!(h.open(asio(Some(256))).input_channels, [Mono(1), Mono(1)]);
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::SetSlotLive(1, true));
     assert_heard(&h, 0.1, 0.25 + 0.25, "auto: input 2 for each slot");
-    h.host.set_slot_input_channel(1, Some(0)).unwrap();
+    h.host.set_slot_input_channel(1, Some(Mono(0))).unwrap();
     assert_heard(&h, 0.1, 0.25 + 0.125, "slot 1 moves to input 1, slot 0 stays on auto");
-    assert!(h.host.set_slot_input_channel(0, Some(2)).is_err(), "the fake has two inputs");
-    assert!(h.host.set_slot_input_channel(2, Some(0)).is_err(), "and there are two slots");
+    assert!(h.host.set_slot_input_channel(0, Some(Mono(2))).is_err(), "the fake has two inputs");
+    assert!(h.host.set_slot_input_channel(2, Some(Mono(0))).is_err(), "and there are two slots");
     assert_heard(&h, 0.1, 0.375, "a refused change moves neither slot");
-    assert_eq!(h.host.status().map(|s| s.input_channels), Some([1, 0]), "the status says what each slot reads");
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([Mono(1), Mono(0)]), "the status says what each slot reads");
     // A pick saved on a driver with more inputs: the open goes ahead, that slot on auto.
-    let stale = DeviceRequest { input_channels: [Some(0), Some(2)], ..asio(Some(256)) };
-    assert_eq!(h.open(stale).input_channels, [0, 1]);
+    let stale = DeviceRequest { input_channels: [Some(Mono(0)), Some(Mono(2))], ..asio(Some(256)) };
+    assert_eq!(h.open(stale).input_channels, [Mono(0), Mono(1)]);
     assert_heard(&h, 0.1, 0.125 + 0.25, "slot 0 on input 1, slot 1 on auto");
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
 }
@@ -1492,8 +1896,8 @@ fn auto_is_input_two_for_each_slot_an_open_takes_auto_for_a_missing_channel_and_
 fn a_reopen_on_a_driver_with_fewer_inputs_takes_auto_for_the_pick_it_lacks() {
     let h = Harness::new();
     h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
-    let status = h.open(DeviceRequest { input_channels: [Some(3), Some(0)], ..asio(Some(256)) });
-    assert_eq!(status.input_channels, [3, 0]);
+    let status = h.open(DeviceRequest { input_channels: [Some(Mono(3)), Some(Mono(0))], ..asio(Some(256)) });
+    assert_eq!(status.input_channels, [Mono(3), Mono(0)]);
     let switch_to = |name: &str, inputs: usize| {
         let (fake, name) = (h.fake.clone(), name.to_string());
         h.host
@@ -1504,8 +1908,8 @@ fn a_reopen_on_a_driver_with_fewer_inputs_takes_auto_for_the_pick_it_lacks() {
             .unwrap();
         h.host.status().map(|s| (s.output_name, s.input_channels))
     };
-    assert_eq!(switch_to("Two inputs", 2), Some(("Two inputs".to_string(), [1, 0])), "input 4 is gone: slot 0 reads auto");
-    assert_eq!(switch_to("Four inputs", 4), Some(("Four inputs".to_string(), [3, 0])), "the pick comes back with the inputs");
+    assert_eq!(switch_to("Two inputs", 2), Some(("Two inputs".to_string(), [Mono(1), Mono(0)])), "input 4 is gone: slot 0 reads auto");
+    assert_eq!(switch_to("Four inputs", 4), Some(("Four inputs".to_string(), [Mono(3), Mono(0)])), "the pick comes back with the inputs");
 }
 
 #[test]
@@ -1514,8 +1918,8 @@ fn a_reopen_keeps_each_slots_channel_and_one_input_channel_sets_both() {
     h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
     h.fake.set_input(|_| 0.0625);
     h.open(asio(Some(256)));
-    h.host.set_slot_input_channel(0, Some(0)).unwrap();
-    h.host.set_slot_input_channel(1, Some(2)).unwrap();
+    h.host.set_slot_input_channel(0, Some(Mono(0))).unwrap();
+    h.host.set_slot_input_channel(1, Some(Mono(2))).unwrap();
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::SetSlotLive(1, true));
     assert_heard(&h, 0.1, 0.0625 + 0.1875, "inputs 1 and 3");
@@ -1900,8 +2304,8 @@ fn the_feed_resyncs_a_new_subscriber_and_a_new_engine() {
     let anchor = feed_until(&mut feed, &mut seen, "the running device's anchor", |f| f.anchor.is_some()).anchor.unwrap();
     assert_eq!(anchor.rate, 48_000);
     assert!(anchor.frame >= 0 && anchor.at_ms > 1.7e12, "a device frame at a Unix time");
-    let meter = feed_until(&mut feed, &mut seen, "the input meter moves", |f| f.meter.is_some_and(|m| m.peak[0] > 0.0)).meter.unwrap();
-    assert!(meter.peak.iter().all(|&p| p <= 0.5) && meter.clip == [false; SLOT_COUNT], "the tone's peak, no clip");
+    let meter = feed_until(&mut feed, &mut seen, "the input meter moves", |f| f.meter.is_some_and(|m| m.peak[0][0] > 0.0)).meter.unwrap();
+    assert!(meter.peak.iter().flatten().all(|&p| p <= 0.5) && meter.clip == [false; SLOT_COUNT], "the tone's peak, no clip");
     let kept = |f: &super::wire::FeedFrame| f.events.iter().any(|e| matches!(e.0, Event::Transport { bpm: 240, .. }));
     if !seen.iter().any(kept) {
         feed_until(&mut feed, &mut seen, "the kept tempo on the transport", kept);
@@ -2049,14 +2453,14 @@ fn a_reversed_lane_a_multiply_grows_is_drawn_whole() {
 fn a_wasapi_endpoint_with_no_input_plays_output_only() {
     let h = Harness::new();
     h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;
-    let status = h.host.open(DeviceRequest { input_channels: [Some(1), Some(3)], ..wasapi(None, None) }, false).expect("output only opens");
+    let status = h.host.open(DeviceRequest { input_channels: [Some(Mono(1)), Some(Mono(3))], ..wasapi(None, None) }, false).expect("output only opens");
     assert!(!status.input_open && status.input_name.is_empty(), "{status:?}");
     let frame = h.frame();
     h.play(RATE / 10);
     assert!(h.frame() > frame, "the device plays");
-    assert!(h.host.set_slot_input_channel(1, Some(0)).is_ok(), "a channel pick changes nothing and is no error");
+    assert!(h.host.set_slot_input_channel(1, Some(Mono(0))).is_ok(), "a channel pick changes nothing and is no error");
     let (peak, _) = h.host.take_meter();
-    assert_eq!(peak, [0.0; SLOT_COUNT], "the input is silence");
+    assert_eq!(peak, [[0.0; 2]; SLOT_COUNT], "the input is silence");
     assert_eq!(h.host.diag().join_starves, 0, "a join that never had input is no starve");
     h.fake.wasapi.lock().unwrap()[0].1.in_channels = 2;
     assert!(h.open(asio(Some(256))).input_open);
@@ -3015,7 +3419,7 @@ fn a_panic_in_the_wasapi_input_callback_restarts_the_device_and_keeps_the_loop()
         h.play(RATE / 10);
         h.host.take_meter();
         h.play(RATE / 10);
-        h.host.take_meter().0[0]
+        h.host.take_meter().0[0][0]
     };
     assert!(input_peak(&h) > 0.1, "the input is heard");
 
@@ -3237,3 +3641,4 @@ fn exports_render_their_masters_one_at_a_time() {
         assert!(left.iter().any(|x| x.abs() > 0.01), "its own master");
     });
 }
+

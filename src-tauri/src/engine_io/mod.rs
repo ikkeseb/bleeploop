@@ -45,13 +45,15 @@
 //!   and from then on a miss is a duplex-order fault, counted. WASAPI: the output callback is the clock; the input joins through a ring and a
 //!   resampler with a drift controller. Every callback thread is promoted to MMCSS Pro Audio on first
 //!   entry.
-//! - **Each plugin slot reads its own capture channel** (`DeviceRequest::input_channels`; auto is input
-//!   2 on a device with two or more). An open never fails on a pick: a slot whose pick the device lacks
-//!   (saved on a driver with more inputs) reads auto, and `DeviceStatus::input_channels` says what each
-//!   slot reads; only a change on the running device refuses one. The input callback publishes one
-//!   mono stream per slot, from the picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
-//!   WASAPI pushes them interleaved through the one join pipe. The engine hands each slot its own
-//!   (`Engine::process_inputs`); the meter reads each slot's channel apart.
+//! - **Each plugin slot reads its own input pick** (`DeviceRequest::input_channels`, an [`InputPick`]:
+//!   auto, input 2 on a device with two or more, mono; one channel, mono; or a left/right pair). An open
+//!   never fails on a pick: a slot whose pick the device lacks, either side of a pair (saved on a driver
+//!   with more inputs), reads auto, logged, and `DeviceStatus::input_channels` says what each slot reads;
+//!   only a change on the running device refuses one. The input callback publishes a pair per slot, from
+//!   the picks in `Run` (one atomic word, changed in place): ASIO copies each slot's two channels into
+//!   its handoff, WASAPI pushes all four interleaved through the one join pipe. A mono pick is its
+//!   channel copied to both sides, at unity, no pan law. The engine hands each slot its pair
+//!   (`Engine::process_inputs`); the meter reads each slot's sides apart.
 //! - **The rate pick (`DeviceRequest::sample_rate`, one of [`SAMPLE_RATES`]; `None` = the device's
 //!   own) never fails an open either.** ASIO runs it when the driver can (`AsioCache::sample_rates`, read
 //!   by the startup probe; cpal sets the driver's rate at the stream build), else the driver's own,
@@ -82,15 +84,27 @@
 //!   converted to the new endpoint's format; the capture across another format: unmeasured). On cpal's
 //!   `DeviceChanged` (and on an open of the same request) the owner names the new endpoint in the
 //!   status; at the engine's rate the run follows it, so nothing reopens and no take ends
-//!   (`transition::follows`). At another rate, or with a capture to start where the run has none, an
-//!   open of the same request reopens there (refused while the loops cannot play at the new rate).
+//!   (`transition::follows`). The capture keeps the width it opened at, and each slot's pick is read
+//!   again against the new input endpoint's inputs, whatever the rate, in the same status that names it
+//!   (a pick it lacks reads auto, logged). A wider endpoint plays on while no pick reads past the
+//!   stream's width; one that does (a saved pick the endpoint has, or a live one) reopens there, once, at
+//!   the engine's rate, judged again on the open's final resolution before anything stops (Windows may
+//!   have moved the default back meanwhile). At another rate, or with a capture to start where the run
+//!   has none (also a default whose capture format did not read at the open), an open of the same
+//!   request reopens there; neither the player's nor the owner's reopen of the running device rebuilds
+//!   the engine at another rate while it holds audio (unless the player forces it), a stream that faulted
+//!   since included (its loss then reports the drop), and neither does the rollback of a guarded open.
+//!   The status carries each slot's read with the pick it answers (`DeviceStatus::input_requests`), so the
+//!   UI tells a fallback from a switch not yet answered. A live pick waits and is undone as an open is.
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,
 //!   before anything stops; read again after the stop, with no session job running until the build, so
 //!   a load that lands in the fade-out refuses it too, as does a session job still running after
 //!   `SESSION_WAIT`, and the stopped device reopens, reported [`DeviceEvent::Lost`] if it does not)
-//!   until the UI confirms and opens again with `force`. The owner's own reopens
+//!   until the UI confirms and opens again with `force`. An unforced switch that fails to start, or that
+//!   its caller gave up on, reopens what it replaced under the same rule (a refusal reported `Lost`). The
+//!   owner's own reopens
 //!   (a loss's recovery or fallback, a replaced engine) go ahead; a loss's fallback that rebuilds the
 //!   engine at another rate reports [`DeviceEvent::LoopsDropped`], whether or not that device then
 //!   starts, and the UI keeps the loops in its recovery (`src/session/autosave.ts`).
@@ -206,9 +220,10 @@ pub struct DeviceRequest {
     pub input: Option<String>,
     /// WASAPI render device id (`audio_output::list_output_devices`); `None` = the default.
     pub output: Option<String>,
-    /// Each plugin slot's capture channel (0-based); `None` = auto (`transition::input_channel`). On
-    /// the wire `inputChannels: [a, b]`; a request with one `inputChannel` instead sets both slots.
-    pub input_channels: [Option<u32>; SLOT_COUNT],
+    /// Each plugin slot's input pick; `None` = auto (`transition::input_channel`). On the wire
+    /// `inputChannels: [a, b]`, each `null`, a channel or `[left, right]` (0-based); a request with one
+    /// `inputChannel` (a channel or `null`) instead sets both slots.
+    pub input_channels: [Option<InputPick>; SLOT_COUNT],
     /// Frames per device callback; `None` = the driver's default.
     pub buffer: Option<u32>,
     /// The engine's sample rate, one of [`SAMPLE_RATES`]; `None` = the device's own. Applies where the
@@ -222,7 +237,27 @@ pub struct DeviceRequest {
 #[cfg_attr(not(feature = "asio"), allow(dead_code))]
 pub const SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
 
-/// A [`DeviceRequest`] as it arrives: each slot's channel, or one channel for both.
+/// A slot's input (unit contract §7): one channel, heard on both sides of the slot's pair at unity, or
+/// a pair, each side as it is. 0-based. On the wire a number or `[left, right]`; auto is `null` around it
+/// (`Option<InputPick>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputPick {
+    Mono(u32),
+    Pair([u32; 2]),
+}
+
+impl InputPick {
+    /// The channel each side reads: a mono pick's on both.
+    pub fn sides(self) -> [u32; 2] {
+        match self {
+            InputPick::Mono(c) => [c, c],
+            InputPick::Pair(pair) => pair,
+        }
+    }
+}
+
+/// A [`DeviceRequest`] as it arrives: each slot's pick, or one channel for both.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RequestWire {
@@ -230,7 +265,7 @@ struct RequestWire {
     input: Option<String>,
     output: Option<String>,
     #[serde(default)]
-    input_channels: Option<[Option<u32>; SLOT_COUNT]>,
+    input_channels: Option<[Option<InputPick>; SLOT_COUNT]>,
     #[serde(default)]
     input_channel: Option<u32>,
     buffer: Option<u32>,
@@ -240,7 +275,7 @@ struct RequestWire {
 
 impl From<RequestWire> for DeviceRequest {
     fn from(w: RequestWire) -> DeviceRequest {
-        let input_channels = w.input_channels.unwrap_or([w.input_channel; SLOT_COUNT]);
+        let input_channels = w.input_channels.unwrap_or([w.input_channel.map(InputPick::Mono); SLOT_COUNT]);
         DeviceRequest { backend: w.backend, input: w.input, output: w.output, input_channels, buffer: w.buffer, sample_rate: w.sample_rate }
     }
 }
@@ -259,9 +294,13 @@ pub struct DeviceStatus {
     /// The input runs. False: WASAPI plays output only (no capture endpoint, or its stream did not
     /// open, e.g. a microphone Windows' privacy settings block) and the engine's input is silence.
     pub input_open: bool,
-    /// The capture channel each plugin slot reads (0-based): its pick, or auto where it has none or the
-    /// device lacks it.
-    pub input_channels: [u32; SLOT_COUNT],
+    /// What each plugin slot reads: its pick, or auto (input 2 on a device with two or more, mono) where it
+    /// has none or the device lacks it, either side of a pair. Never `null` on the wire.
+    pub input_channels: [InputPick; SLOT_COUNT],
+    /// The pick each slot's read answers: the running request's (`None` auto), kept where the device
+    /// lacks it, so a reader tells a fallback (`input_channels` differs from it) from a switch the status
+    /// has not caught up with yet (it differs from the pick just asked).
+    pub input_requests: [Option<InputPick>; SLOT_COUNT],
     /// Input plus output latency in frames (`ProcessContext::align_frames`), and its input side.
     pub align_frames: Frame,
     pub input_frames: Frame,
@@ -545,9 +584,9 @@ pub(crate) struct Rt {
     /// A panic was caught under the lock: the engine stays silent until the owner replaces it
     /// (`Core::fault` tells the owner).
     pub(crate) faulted: bool,
-    /// ASIO: this cycle's input, each slot's channel, copied by the input callback for the output
-    /// callback, and each side's cycle count (equal after a whole cycle).
-    pub(crate) handoff: [Vec<f32>; SLOT_COUNT],
+    /// ASIO: this cycle's input, each slot's pair (its left and right channel), copied by the input
+    /// callback for the output callback, and each side's cycle count (equal after a whole cycle).
+    pub(crate) handoff: [[Vec<f32>; 2]; SLOT_COUNT],
     pub(crate) handoff_len: usize,
     pub(crate) in_cycles: u64,
     pub(crate) out_cycles: u64,
@@ -662,9 +701,10 @@ pub(crate) struct Core {
     /// The alignment the output callback last rendered with (`DeviceStatus`).
     pub(crate) align_frames: AtomicI64,
     pub(crate) input_frames: AtomicI64,
-    /// The input meter since the feed last took it, per slot: its capture channel's peak (f32 bits) and
-    /// whether a sample reached full scale.
-    pub(crate) meter_peak: [AtomicU32; SLOT_COUNT],
+    /// The input meter since the feed last took it, per slot: both sides' peaks in one word (f32 bits,
+    /// the left low, `callback::meter`), so a callback's pair and a take never split, and whether a
+    /// sample on either reached full scale.
+    pub(crate) meter_peak: [AtomicU64; SLOT_COUNT],
     pub(crate) meter_clip: [AtomicBool; SLOT_COUNT],
     /// The tuner's input broke where the engine cannot see it (`Core::break_tuner`): raised by the owner
     /// once `tuner_fence` holds the first device frame surely read from the new input. The feed resets
@@ -737,12 +777,21 @@ pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Eve
 }
 
 impl Core {
+    /// The input meter since the last take (`EngineHost::take_meter`): each slot's pair in one swap.
+    pub(crate) fn take_meter(&self) -> ([[f32; 2]; SLOT_COUNT], [bool; SLOT_COUNT]) {
+        let peak = self.meter_peak.each_ref().map(|p| {
+            let word = p.swap(0, Relaxed);
+            [f32::from_bits(word as u32), f32::from_bits((word >> 32) as u32)]
+        });
+        (peak, self.meter_clip.each_ref().map(|c| c.swap(false, Relaxed)))
+    }
+
     pub(crate) fn new() -> Core {
         Core {
             rt: Mutex::new(Rt {
                 engine: None,
                 faulted: false,
-                handoff: std::array::from_fn(|_| vec![0.0; MAX_DEVICE_BLOCK]),
+                handoff: std::array::from_fn(|_| [vec![0.0; MAX_DEVICE_BLOCK], vec![0.0; MAX_DEVICE_BLOCK]]),
                 handoff_len: 0,
                 in_cycles: 0,
                 out_cycles: 0,
@@ -771,7 +820,7 @@ impl Core {
             frame: AtomicI64::new(0),
             align_frames: AtomicI64::new(0),
             input_frames: AtomicI64::new(0),
-            meter_peak: [const { AtomicU32::new(0) }; SLOT_COUNT],
+            meter_peak: [const { AtomicU64::new(0) }; SLOT_COUNT],
             meter_clip: [const { AtomicBool::new(false) }; SLOT_COUNT],
             tuner_breaks: AtomicU64::new(0),
             tuner_fence: AtomicI64::new(0),
@@ -956,17 +1005,22 @@ impl EngineHost {
     /// switch that fails to start reopens the device it replaced; a request for the running device only
     /// changes its channels. A slot's pick the device lacks reads auto (the status says which).
     pub fn open(&self, request: DeviceRequest, force: bool) -> Result<DeviceStatus, OpenError> {
-        // Whoever claims the flag first decides: the owner once the open finished (its result is then
-        // this caller's), or this caller on its timeout (a later open is the owner's to undo).
+        self.ask_claimed("open", |claimed, reply| Request::Open(request, force, claimed, reply))
+    }
+
+    /// Ask the owner for what may open a device, and wait for its answer (at most `OPEN_TIMEOUT`). Whoever
+    /// claims the flag first decides: the owner once it finished (its result is then this caller's), or
+    /// this caller on its timeout (what the owner finishes later is its to undo: `Owner::claimed`).
+    fn ask_claimed<T, E: From<String>>(&self, op: &str, request: impl FnOnce(Arc<AtomicBool>, SyncSender<Result<T, E>>) -> Request) -> Result<T, E> {
         let claimed = Arc::new(AtomicBool::new(false));
         let tx = self.owner_tx()?;
         let (reply_tx, reply_rx) = sync_channel(1);
-        tx.send(Request::Open(request, force, claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
+        tx.send(request(claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
         match reply_rx.recv_timeout(OPEN_TIMEOUT) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 if claimed.compare_exchange(false, true, AcqRel, Acquire).is_ok() {
-                    Err(format!("open timed out after {} s", OPEN_TIMEOUT.as_secs()).into())
+                    Err(format!("{op} timed out after {} s", OPEN_TIMEOUT.as_secs()).into())
                 } else {
                     // The owner claimed it at the deadline: its answer is on the way.
                     reply_rx.recv().unwrap_or_else(|_| Err("the audio device owner stopped".to_string().into()))
@@ -981,11 +1035,12 @@ impl EngineHost {
         self.ask("close", REQUEST_TIMEOUT, Request::Close)
     }
 
-    /// Change `slot`'s capture channel (`None` = auto) without rebuilding a stream; the running
-    /// request keeps it, so the owner's reopens (a loss, a fault) keep it too. Refused for a channel the
-    /// device lacks (the other slot's stays), and while no device runs.
-    pub fn set_slot_input_channel(&self, slot: usize, channel: Option<u32>) -> Result<(), String> {
-        self.ask("set_slot_input_channel", REQUEST_TIMEOUT, |reply| Request::SetSlotInputChannel(slot, channel, reply))
+    /// Change `slot`'s input pick (`None` = auto) without rebuilding a stream; the running request keeps
+    /// it, so the owner's reopens (a loss, a fault) keep it too. Refused for a channel the device lacks,
+    /// either side of a pair (the other slot's stays), and while no device runs. One on an input past the
+    /// width the capture opened at reopens the device (an open's wait and claim: `ask_claimed`).
+    pub fn set_slot_input_channel(&self, slot: usize, channel: Option<InputPick>) -> Result<(), String> {
+        self.ask_claimed("set_slot_input_channel", |claimed, reply| Request::SetSlotInputChannel(slot, channel, claimed, reply))
     }
 
     /// Switch the ASIO driver: `switch` replaces the cached one (`audio_output::switch_asio_driver`) on
@@ -1209,11 +1264,10 @@ impl EngineHost {
         self.drain_feed(out);
     }
 
-    /// The input meter since the last call, per slot: its capture channel's linear peak, and whether a
-    /// sample reached full scale.
-    pub fn take_meter(&self) -> ([f32; SLOT_COUNT], [bool; SLOT_COUNT]) {
-        let peak = self.core.meter_peak.each_ref().map(|p| f32::from_bits(p.swap(0, Relaxed)));
-        (peak, self.core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed)))
+    /// The input meter since the last call, per slot: each side's linear peak (a mono pick's twice), and
+    /// whether a sample on either reached full scale.
+    pub fn take_meter(&self) -> ([[f32; 2]; SLOT_COUNT], [bool; SLOT_COUNT]) {
+        self.core.take_meter()
     }
 
     /// The engine's sample rate, once a device opened.

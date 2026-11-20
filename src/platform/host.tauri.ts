@@ -177,12 +177,8 @@ const tauriEngineHost: EngineHost = {
     const status = await invoke<unknown>('engine_status');
     return status == null ? null : decodeDeviceStatus(status);
   },
-  async setSlotInputChannel(slot, channel) {
-    await invoke('engine_set_slot_input_channel', { slot, channel });
-  },
-  async setSlotInputPick() {
-    // Unit contract §7: the stereo pick is not on the native side yet; never sent to it as if understood.
-    throw new Error(NO_STEREO_PICK);
+  async setSlotInputChannel(slot, pick) {
+    await invoke('engine_set_slot_input_channel', { slot, channel: pick });
   },
   async setShare(endpoint) {
     await invoke('engine_set_share', { endpoint });
@@ -394,7 +390,6 @@ const tauriUpdates: AppUpdates = {
 };
 
 const NO_CHAIN = 'The native engine does not have the chain yet.';
-const NO_STEREO_PICK = 'The native engine does not take a stereo input pick yet.';
 const noChain = async (): Promise<never> => {
   throw new Error(NO_CHAIN);
 };

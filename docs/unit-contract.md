@@ -286,7 +286,7 @@ below reads an old key through the resolver that reads it today, so a missing ke
   unity, its instrument levels from `lf.synthGain.<id>` (the input trim never scaled a synth). GO LIVE is
   never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
-  `inputChannel` seeding both, as today) each become a mono pick, '' auto; stereo is the player's (§7).
+  `inputChannel` seeding both, as today) each become a mono pick, `null` auto; stereo is the player's (§7).
 - **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.
 - **Proved by** `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1 and 48
   kHz) and `rig-recall.mjs` on a stored v0.8.9 profile; at the boundaries those fakes skip, `src-tauri`
@@ -328,7 +328,11 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   `[[&[f32]; 2]; SLOT_COUNT]`; `callback.rs`, `pipes.rs`). One shape in request, archive and fake: `null`
   (auto: input 2, mono), a channel number, or `[left, right]` (`DeviceRequest.inputChannels`,
   `setSlotInputChannel`, `SlotControls.tsx`, `audio-settings.ts`). A pick the device lacks, either side of
-  a pair, opens as auto, flagged (`transition.rs` `open_channels`). The feed's `meter` has a peak per channel.
+  a pair, opens as auto, flagged (`transition.rs` `open_channels`); the request and the saved pick keep it,
+  so a device that has it again reads it, and the slot shows it with the input it reads ("In 4 · In 2"),
+  judged from the status alone: its read against the pick it answers (`DeviceStatus.inputRequests`); a
+  pick whose switch the status has not answered yet shows plain.
+  The feed's `meter` has a peak per channel.
 - **Latency sums within a chain,** bypassed units included. A take aligns on the largest sum across live
   input-fed chains (plus the driver's report and the limiter's pre-delay); each live chain's wet reaches
   the record tap delayed by what its own sum lacks of it.

@@ -83,7 +83,7 @@ use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneState, NoteTarget, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 
 use super::tone::{Facts, Shared, ToneRig};
-use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, IoDiag};
+use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, InputPick, IoDiag};
 use crate::chirp_lag::{chirp, find_arrivals, median, slope, spread, CHIRP_LEN};
 use crate::audio_output::AudioBackend;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
@@ -404,7 +404,7 @@ impl Devices {
             AudioBackend::Wasapi => (self.wasapi_in.clone(), self.wasapi_out.clone()),
         };
         let buffer = buffer.filter(|_| backend.is_asio());
-        let input_channels = std::array::from_fn(|slot| Some(self.tone.filter(|_| slot == 1).unwrap_or(self.channel)));
+        let input_channels = std::array::from_fn(|slot| Some(InputPick::Mono(self.tone.filter(|_| slot == 1).unwrap_or(self.channel))));
         DeviceRequest { backend, input, output, input_channels, buffer, sample_rate: None }
     }
 
@@ -887,8 +887,8 @@ impl Probe {
         self.silence()?;
         self.rate = status.sample_rate;
         say(format!("open {}: {}", label(start), describe(&status)));
-        if let Some(tone) = a.tone.filter(|&tone| status.input_channels[1] != tone) {
-            return Err(format!("--tone {tone}: the device has no such input (slot 1 reads input {})", status.input_channels[1]));
+        if let Some(tone) = a.tone.filter(|&tone| status.input_channels[1] != InputPick::Mono(tone)) {
+            return Err(format!("--tone {tone}: the device has no such input (slot 1 reads {:?})", status.input_channels[1]));
         }
         // `--tone-from`: the tone watches the stream's first seconds, through the setup below.
         if self.tone_from.is_some() {
@@ -1683,8 +1683,8 @@ mod tests {
         assert_eq!(args("asio 64 --mute --in 1 --tone 0 --out 0").ok().map(|a| (a.tone, a.out)), Some((Some(0), 0)));
         // Slot 0 keeps `--in`, slot 1 reads the cable.
         let request = Devices::new(a.input, a.tone, None).ok().unwrap().request(a.backend, a.buffer);
-        assert_eq!(request.input_channels, [Some(0), Some(1)]);
-        assert_eq!(Devices::new(0, None, None).ok().unwrap().request(a.backend, a.buffer).input_channels, [Some(0), Some(0)]);
+        assert_eq!(request.input_channels, [Some(InputPick::Mono(0)), Some(InputPick::Mono(1))]);
+        assert_eq!(Devices::new(0, None, None).ok().unwrap().request(a.backend, a.buffer).input_channels, [Some(InputPick::Mono(0)); 2]);
         for (line, want) in [
             ("asio 64 --tone 1", "--mute"),
             ("asio 64 --mute --tone 0", "same input"),

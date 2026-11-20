@@ -162,9 +162,24 @@ export interface UnitMeter {
   out: [number, number];
   bands?: [BandMeter, BandMeter, BandMeter];
 }
-/** A slot's input pick (unit contract §7): `null` auto (input 2, mono), a channel (mono: that channel on
- * both sides), or `[left, right]`. 0-based. */
+/** A slot's input pick (unit contract §7; Rust `engine_io::InputPick` in an `Option`): `null` auto (input
+ * 2 on a device with two or more, mono), a channel (mono: that channel on both sides at unity), or
+ * `[left, right]`. 0-based. The one shape of the request, the saved settings and the fake. */
 export type InputPick = number | [number, number] | null;
+/** What a slot reads (`DeviceStatus.inputChannels`): a pick resolved, never auto. */
+export type ReadPick = Exclude<InputPick, null>;
+
+/** Two picks alike (a pair by its sides, in order). */
+export function samePick(a: InputPick | undefined, b: InputPick | undefined): boolean {
+  return Array.isArray(a) && Array.isArray(b) ? a[0] === b[0] && a[1] === b[1] : a === b;
+}
+
+/** A pick as it travels: a channel or `[left, right]`, 0-based (`null` is the caller's). */
+function readPick(v: unknown, what: string): ReadPick {
+  if (!Array.isArray(v)) return int(v, what, 0, 0xffff_ffff);
+  const [l, r] = array(v, what, 2);
+  return [int(l, `${what}[0]`, 0, 0xffff_ffff), int(r, `${what}[1]`, 0, 0xffff_ffff)];
+}
 
 /**
  * A meter (time signature, Rust `lf_engine::grid::Meter`): `num/den`, and `beats`, the beats a bar that
@@ -321,7 +336,7 @@ export type EngineCommand =
   | { NoteOff: number }
   | { PitchBend: number }
   | { Modulation: number }
-  /** GO LIVE: the slot's own input (its capture channel, `EngineHost.setSlotInputChannel`) feeds it; both
+  /** GO LIVE: the slot's own input (its pick, `EngineHost.setSlotInputChannel`) feeds it; both
    * slots may be live at once. */
   | { SetSlotLive: [number, boolean] }
   /** A slot's output level (linear, 0..), heard and recorded; an empty live slot's is its input's level. */
@@ -357,9 +372,9 @@ export function isUnitCommand(c: EngineCommand): boolean {
   return 'ToggleUnit' in action || ('Toggle' in action && typeof action.Toggle === 'object' && 'Units' in action.Toggle);
 }
 
-/** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
- * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
- * on a device with two or more). */
+/** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The input picks are each
+ * plugin slot's (`inputChannels`, `InputPick`s), or one channel for both (`inputChannel`, from before the
+ * per-slot pick); 0-based, null = auto (input 2 on a device with two or more). */
 export type DeviceRequest = {
   backend: AudioBackend;
   /** WASAPI capture / render endpoint id; null = the default. ASIO ignores both (the cached driver). */
@@ -371,7 +386,7 @@ export type DeviceRequest = {
    * its own; WASAPI runs the endpoint's own (`DeviceStatus.sampleRate` says what runs). A request
    * without it asks for the device's own. */
   sampleRate: number | null;
-} & ({ inputChannels: [number | null, number | null] } | { inputChannel: number | null });
+} & ({ inputChannels: [InputPick, InputPick] } | { inputChannel: number | null });
 
 /** Rust `engine_io::DeviceStatus`: the device that runs. */
 export interface DeviceStatus {
@@ -386,10 +401,15 @@ export interface DeviceStatus {
   /** False when WASAPI opened output only (no capture device, or its stream failed): the engine's
    * input is silence. Always true on ASIO. */
   inputOpen: boolean;
-  /** The capture channel each plugin slot reads (0-based): its pick, or auto (input 2 on a device with
-   * two or more) where it has none or the device lacks it. The native engine always sends it; a
-   * scripted probe frame may leave it out. */
-  inputChannels?: [number, number];
+  /** What each plugin slot reads (0-based): its pick, or auto (input 2 on a device with two or more,
+   * mono) where it has none or the device lacks it, either side of a pair. The native engine always
+   * sends it; a scripted probe frame may leave it out. */
+  inputChannels?: [ReadPick, ReadPick];
+  /** The pick each slot's read answers (`null` auto): the running request's, kept where the device lacks
+   * it. A read that differs from it is a fallback; a request that differs from the pick just asked is a
+   * switch the status has not caught up with. The native engine always sends it; a scripted probe frame
+   * may leave it out. */
+  inputRequests?: [InputPick, InputPick];
 }
 
 /** Rust `lf_engine::LaneInfo` (the TS `TrackPublic`). */
@@ -477,10 +497,11 @@ export interface ClockAnchor {
   grid: Frame;
 }
 
-/** The input since the last frame, per plugin slot (its capture channel, before any plugin): the
- * linear peak, and whether a sample reached full scale. */
+/** The input since the last frame, per plugin slot (its pick, before any plugin): each side's linear peak
+ * (`[left, right]`, a mono pick's twice), and whether a sample on either reached full scale. The slot's
+ * meter shows the louder side. A scripted frame may give a slot one number: its peak on both sides. */
 export interface Meter {
-  peak: [number, number];
+  peak: [[number, number], [number, number]];
   clip: [boolean, boolean];
 }
 
@@ -702,12 +723,29 @@ export function decodeDeviceStatus(raw: unknown): DeviceStatus {
     inputFrames: int(o.inputFrames, 'DeviceStatus.inputFrames'),
     inputOpen: bool(o.inputOpen, 'DeviceStatus.inputOpen'),
     ...(o.inputChannels === undefined ? {} : { inputChannels: slotChannels(o.inputChannels) }),
+    ...(o.inputRequests === undefined ? {} : { inputRequests: slotRequests(o.inputRequests) }),
   };
 }
 
-function slotChannels(v: unknown): [number, number] {
+function slotRequests(v: unknown): [InputPick, InputPick] {
+  const [a, b] = array(v, 'DeviceStatus.inputRequests', ENGINE_SLOTS);
+  const pick = (p: unknown, what: string): InputPick => nullable(p, (q) => readPick(q, what));
+  return [pick(a, 'DeviceStatus.inputRequests[0]'), pick(b, 'DeviceStatus.inputRequests[1]')];
+}
+
+function slotChannels(v: unknown): [ReadPick, ReadPick] {
   const [a, b] = array(v, 'DeviceStatus.inputChannels', ENGINE_SLOTS);
-  return [int(a, 'DeviceStatus.inputChannels[0]'), int(b, 'DeviceStatus.inputChannels[1]')];
+  return [readPick(a, 'DeviceStatus.inputChannels[0]'), readPick(b, 'DeviceStatus.inputChannels[1]')];
+}
+
+/** One slot's meter peak: `[left, right]`, or a scripted frame's one number for both sides. */
+function slotPeak(v: unknown, what: string): [number, number] {
+  if (!Array.isArray(v)) {
+    const p = num(v, what);
+    return [p, p];
+  }
+  const [l, r] = array(v, what, 2);
+  return [num(l, `${what}[0]`), num(r, `${what}[1]`)];
 }
 
 export function decodeDeviceEvent(raw: unknown): DeviceEvent {
@@ -822,7 +860,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
       const [p0, p1] = array(m.peak, 'meter.peak', ENGINE_SLOTS);
       const [c0, c1] = array(m.clip, 'meter.clip', ENGINE_SLOTS);
       return {
-        peak: [num(p0, 'meter.peak[0]'), num(p1, 'meter.peak[1]')],
+        peak: [slotPeak(p0, 'meter.peak[0]'), slotPeak(p1, 'meter.peak[1]')],
         clip: [bool(c0, 'meter.clip[0]'), bool(c1, 'meter.clip[1]')],
       };
     }),
@@ -1082,10 +1120,10 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
     // Absent (a request from before the pick): the device's own rate, as the Rust side reads it.
     sampleRate: o.sampleRate === undefined ? null : nullable(o.sampleRate, (v) => int(v, 'DeviceRequest.sampleRate', 1)),
   };
-  const channel = (v: unknown, what: string) => nullable(v, (c) => int(c, what));
-  if (o.inputChannels === undefined) return { ...base, inputChannel: channel(o.inputChannel, 'DeviceRequest.inputChannel') };
+  if (o.inputChannels === undefined) return { ...base, inputChannel: nullable(o.inputChannel, (c) => int(c, 'DeviceRequest.inputChannel', 0, 0xffff_ffff)) };
   const [a, b] = array(o.inputChannels, 'DeviceRequest.inputChannels', ENGINE_SLOTS);
-  return { ...base, inputChannels: [channel(a, 'DeviceRequest.inputChannels[0]'), channel(b, 'DeviceRequest.inputChannels[1]')] };
+  const pick = (v: unknown, what: string): InputPick => nullable(v, (p) => readPick(p, what));
+  return { ...base, inputChannels: [pick(a, 'DeviceRequest.inputChannels[0]'), pick(b, 'DeviceRequest.inputChannels[1]')] };
 }
 
 // ── Session bytes (`engine_snapshot` / `engine_load_session`) ───────────────────────────────────────

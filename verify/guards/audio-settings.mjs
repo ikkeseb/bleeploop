@@ -57,7 +57,7 @@ const KEY = 'lf.audioDevices';
 const DEFAULTS = {
   inputDeviceId: '',
   inputChannel: '',
-  slotInputChannels: ['', ''],
+  slotInputChannels: [null, null],
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
   sampleRate: null,
@@ -106,7 +106,7 @@ reset();
 const full = {
   inputDeviceId: 'in-1',
   inputChannel: '2',
-  slotInputChannels: ['0', '3'],
+  slotInputChannels: [[0, 1], 3],
   outputDeviceId: 'out-9',
   bufferFrames: 128,
   sampleRate: 44100,
@@ -158,31 +158,46 @@ check('asioEnabled false preserved', () => assert.strictEqual(readAudioDeviceSet
 reset();
 store.set(KEY, JSON.stringify({ inputChannel: '1' }));
 check('no per-slot channels saved -> both slots start on the global channel', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']));
-for (const bad of [['1'], ['1', '2', '3'], [1, 2], ['x', '1'], ['-1', ''], 'ab', null, {}]) {
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [1, 1]));
+for (const bad of [['1'], ['1', '2', '3'], ['x', '1'], ['-1', ''], ['1000', ''], 'ab', null, {}, [[0], 1], [[0, 1, 2], null], [-1, null], [1.5, null], [[0, '1'], null], [2 ** 32, null], [[0, 2 ** 32], null]]) {
   reset();
   store.set(KEY, JSON.stringify({ inputChannel: '2', slotInputChannels: bad }));
   check(`slotInputChannels ${JSON.stringify(bad)} -> the global channel for both`, () =>
-    assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['2', '2']));
+    assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [2, 2]));
 }
 reset();
 store.set(KEY, JSON.stringify({ inputChannel: 'junk' }));
-check('a malformed global channel seeds auto', () => assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']));
+check('a malformed global channel seeds auto', () => assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, null]));
 reset();
 store.set(KEY, JSON.stringify({ inputChannel: '1', slotInputChannels: ['', '5'] }));
-check('a saved pair wins over the global channel', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '5']));
+check('a saved pick per slot from before the pair (strings) wins over the global channel, read as today', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, 5]));
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: '1', slotInputChannels: [null, [2, 3]] }));
+check('picks in the engine shape (null, a channel, [left, right]) read as stored', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, [2, 3]]));
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: '1', slotInputChannels: [[0, 1000], 2 ** 32 - 1] }));
+check("a numeric pick takes the wire's u32 range (the three-digit rule is the legacy strings')", () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [[0, 1000], 2 ** 32 - 1]));
+reset();
+store.set(KEY, JSON.stringify({ slotInputChannels: ['1', ''] }));
+writeAudioDeviceSettings({ slotInputChannels: [[0, 1], null] });
+check('a write stores the engine shape over a pick from before the pair', () => {
+  assert.deepStrictEqual(JSON.parse(store.get(KEY)).slotInputChannels, [[0, 1], null]);
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [[0, 1], null]);
+});
 reset();
 store.set(KEY, JSON.stringify({ inputChannel: '1' }));
 writeAudioDeviceSettings({ bufferFrames: 128 });
 check('the first write keeps the migrated pair', () => {
   store.set(KEY, JSON.stringify({ ...JSON.parse(store.get(KEY)), inputChannel: '' }));
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']);
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [1, 1]);
 });
 reset();
 check('the defaults hand out a fresh pair each read', () => {
-  readAudioDeviceSettings().slotInputChannels[0] = '7';
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']);
+  readAudioDeviceSettings().slotInputChannels[0] = 7;
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, null]);
 });
 
 // ---------------------------------------------------------------------------
@@ -221,33 +236,33 @@ check('unreadable storage on a fresh install -> DEFAULTS', () => assert.deepStri
 // ---------------------------------------------------------------------------
 reset({ returning: false });
 check('fresh install (empty storage): slot A on input 1, slot B auto', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings(), { ...DEFAULTS, slotInputChannels: ['0', ''] }));
+  assert.deepStrictEqual(readAudioDeviceSettings(), { ...DEFAULTS, slotInputChannels: [0, null] }));
 check('the fresh install is marked guitar-first by that read', () => assert.ok(store.has(GUITAR_FIRST)));
 check('later reads agree through the marker', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['0', '']));
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [0, null]));
 check('the guitar-first defaults hand out a fresh pair each read', () => {
-  readAudioDeviceSettings().slotInputChannels[1] = '7';
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['0', '']);
+  readAudioDeviceSettings().slotInputChannels[1] = 7;
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [0, null]);
 });
 reset();
 check('an older install (another lf. key, no marker, no settings): both auto', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']));
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, null]));
 check('an older install is never marked guitar-first', () => assert.ok(!store.has(GUITAR_FIRST)));
 reset({ returning: false });
 store.set(GUITAR_FIRST, '1');
 store.set(KEY, JSON.stringify({ slotInputChannels: ['', ''] }));
 check('a guitar-first install with stored picks reads them', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']));
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [null, null]));
 reset({ returning: false });
 store.set(GUITAR_FIRST, 'played');
 store.set(KEY, JSON.stringify({ inputChannel: '1' }));
 check('a guitar-first install with stored settings from before the per-slot pick: the global channel', () =>
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']));
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [1, 1]));
 reset({ returning: false });
 writeAudioDeviceSettings({ asioDriver: 'Audient USB Audio ASIO Driver' });
 check('on a guitar-first install the first unrelated write stores slot A on input 1', () => {
-  assert.deepStrictEqual(JSON.parse(store.get(KEY)).slotInputChannels, ['0', '']);
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['0', '']);
+  assert.deepStrictEqual(JSON.parse(store.get(KEY)).slotInputChannels, [0, null]);
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [0, null]);
 });
 reset({ returning: false });
 store.set(KEY, '{ not valid json');
@@ -256,19 +271,19 @@ check('a fresh install with corrupt stored settings: DEFAULTS', () => assert.dee
 // install's default, not both on Auto.
 reset({ returning: false });
 check('the default picks on a fresh install: slot A on input 1, slot B auto', () =>
-  assert.deepStrictEqual(defaultSlotInputChannels(), ['0', '']));
+  assert.deepStrictEqual(defaultSlotInputChannels(), [0, null]));
 check('the default picks hand out a fresh pair each call', () => {
-  defaultSlotInputChannels()[0] = '7';
-  assert.deepStrictEqual(defaultSlotInputChannels(), ['0', '']);
+  defaultSlotInputChannels()[0] = 7;
+  assert.deepStrictEqual(defaultSlotInputChannels(), [0, null]);
 });
 reset();
-check('the default picks on an older install: both auto', () => assert.deepStrictEqual(defaultSlotInputChannels(), ['', '']));
+check('the default picks on an older install: both auto', () => assert.deepStrictEqual(defaultSlotInputChannels(), [null, null]));
 reset({ returning: false });
 store.set(GUITAR_FIRST, 'played');
 store.set(KEY, JSON.stringify({ slotInputChannels: ['1', '1'] }));
 check('the default picks on a guitar-first install with stored picks: still slot A on input 1, the read keeps the stored', () => {
-  assert.deepStrictEqual(defaultSlotInputChannels(), ['0', '']);
-  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']);
+  assert.deepStrictEqual(defaultSlotInputChannels(), [0, null]);
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, [1, 1]);
 });
 
 // ---------------------------------------------------------------------------

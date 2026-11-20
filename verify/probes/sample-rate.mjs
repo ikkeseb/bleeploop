@@ -370,21 +370,21 @@ await probe(async ({ open }) => {
     return [...document.querySelector('[aria-label="Input for slot A"]').options].map((o) => o.textContent.trim());
   });
   console.log('fallback inputs', JSON.stringify(fallbackInputs));
-  assert.deepEqual(fallbackInputs.slice(1), ['In 1', 'In 2', 'In 3', 'In 4'], "after a fallback to WASAPI the input pick lists its input's channels");
+  assert.deepEqual(fallbackInputs.slice(1), ['In 1', 'In 2', 'In 3', 'In 4', 'In 1+2', 'In 3+4'], "after a fallback to WASAPI the input pick lists its input's channels and their pairs");
   // In 4 picked there survives Audio Settings opening (its prune counts the input that runs too).
   const keptPick = await page.evaluate(async () => {
     const select = document.querySelector('[aria-label="Input for slot A"]');
     select.value = '3';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     const { engineSlotInputChannels } = await import('/src/ui/state/engine-store.ts');
-    for (let t = 0; engineSlotInputChannels()[0] !== '3' && t < 100; t++) await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let t = 0; engineSlotInputChannels()[0] !== 3 && t < 100; t++) await new Promise((resolve) => setTimeout(resolve, 20));
     window.__lf.ui.openSettings();
     await new Promise((resolve) => setTimeout(resolve, 300));
     window.__lf.ui.closeSettings();
     return { pick: engineSlotInputChannels()[0], shown: document.querySelector('[aria-label="Input for slot A"]').value };
   });
   console.log('fallback pick after Audio Settings', JSON.stringify(keptPick));
-  assert.deepEqual(keptPick, { pick: '3', shown: '3' }, 'In 4 on the running WASAPI input stays picked when Audio Settings opens');
+  assert.deepEqual(keptPick, { pick: 3, shown: '3' }, 'In 4 on the running WASAPI input stays picked when Audio Settings opens');
 
   // 6. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
   // shows, and the player's pick stays saved for a driver that runs it.

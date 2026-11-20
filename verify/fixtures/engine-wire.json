@@ -214,6 +214,7 @@
         "outputName": "Focusrite USB ASIO",
         "inputOpen": true,
         "inputChannels": [1, 1],
+        "inputRequests": [null, null],
         "alignFrames": 666,
         "inputFrames": 305
       }
@@ -227,6 +228,7 @@
         "outputName": "Speakers (Realtek Audio)",
         "inputOpen": false,
         "inputChannels": [0, 0],
+        "inputRequests": [0, null],
         "alignFrames": 1731,
         "inputFrames": 1150
       }
@@ -240,7 +242,7 @@
     "the device did not start"
   ],
   "deviceRequests": [
-    { "backend": "Asio", "input": null, "output": null, "inputChannels": [0, 3], "buffer": 128, "sampleRate": 44100 },
+    { "backend": "Asio", "input": null, "output": null, "inputChannels": [[0, 1], 3], "buffer": 128, "sampleRate": 44100 },
     {
       "backend": "Wasapi",
       "input": "{0.0.1.00000000}.{8d4d5e1a-3c7b-4f0e-9d2a-5b6c7d8e9f01}",
@@ -258,7 +260,8 @@
       "inputName": "Focusrite USB ASIO",
       "outputName": "Focusrite USB ASIO",
       "inputOpen": true,
-      "inputChannels": [1, 1],
+      "inputChannels": [[0, 1], 1],
+      "inputRequests": [[0, 1], [4, 5]],
       "alignFrames": 666,
       "inputFrames": 305
     }
@@ -396,11 +399,12 @@
         "outputName": "Focusrite USB ASIO",
         "inputOpen": true,
         "inputChannels": [1, 1],
+        "inputRequests": [null, 1],
         "alignFrames": 666,
         "inputFrames": 305
       },
       "anchor": { "frame": 1234560, "atMs": 1790000000123.25, "rate": 44100, "grid": 96666 },
-      "meter": { "peak": [0.125, 0.0625], "clip": [false, false] },
+      "meter": { "peak": [[0.125, 0.125], [0.0625, 0.0625]], "clip": [false, false] },
       "peaks": [{ "lane": 0, "start": 0, "count": 3, "min": [-0.5, -0.25, -0.125], "max": [0.5, 0.25, 0.123] }],
       "settings": [
         { "SetBpm": 96 },
@@ -421,7 +425,7 @@
       "events": [{ "Beat": { "frame": 1234688, "beatInBar": 2, "countLeft": 0, "clicked": true } }],
       "device": [],
       "anchor": { "frame": 1235456, "atMs": 1790000000143.5, "rate": 44100, "grid": 96666 },
-      "meter": { "peak": [0.5, 1], "clip": [false, true] },
+      "meter": { "peak": [[0.5, 0.25], [1, 1]], "clip": [false, true] },
       "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }],
       "tuner": { "hz": 82.407, "level": -18.5 }
     },
@@ -442,7 +446,7 @@
       "events": [],
       "device": [],
       "anchor": { "frame": 1240000, "atMs": 1790000000243.5, "rate": 48000, "grid": 96666 },
-      "meter": { "peak": [0.25, 0], "clip": [false, false] },
+      "meter": { "peak": [[0.25, 0.25], [0, 0]], "clip": [false, false] },
       "peaks": [],
       "scope": {
         "frame": 1239616,
@@ -474,7 +478,7 @@
       "events": [],
       "device": [],
       "anchor": { "frame": 1241000, "atMs": 1790000000264.75, "rate": 48000, "grid": 96666 },
-      "meter": { "peak": [0.001, 0], "clip": [false, false] },
+      "meter": { "peak": [[0.001, 0.001], [0, 0]], "clip": [false, false] },
       "peaks": [],
       "tuner": { "hz": null, "level": -71.2 }
     }

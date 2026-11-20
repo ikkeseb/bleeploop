@@ -13,7 +13,8 @@
  *   the rail's DIAGNOSTICS claims audio only (`audio ok`); PLUGINS with no plugin says what to do;
  * - under ASIO the input and output device selects are disabled and name the ASIO device, and a slot's
  *   input pick offers the ASIO device's inputs; pruning an unplugged Windows endpoint leaves the slots'
- *   input picks alone;
+ *   input picks alone; a pair saved on a device with more inputs goes to the startup open as saved and
+ *   stays saved (the slot's window that names it with its fallback: `slot-sources`);
  * - a startup whose plugin host fails says so, leaves native selection closed and a following manual
  *   scan does nothing.
  *
@@ -29,7 +30,7 @@ import { mkdir } from 'node:fs/promises';
 function installHost() {
   const calls = [];
   let releaseInit = () => {};
-  window.__startup = { calls, releaseInit: () => releaseInit() };
+  window.__startup = { calls, picks: [], releaseInit: () => releaseInit() };
   window.__startupHost = {
     init: () => {
       calls.push('init');
@@ -55,6 +56,7 @@ Object.assign(webPluginHost, window.__startupHost ?? {});
 const __probeOpen = webEngineFake.open;
 webEngineFake.open = (request, force) => {
   window.__startup?.calls.push('open:' + request.backend + ':' + request.buffer);
+  window.__startup?.picks.push(JSON.stringify(request.inputChannels));
   return __probeOpen(request, force);
 };
 `;
@@ -126,7 +128,7 @@ await probe(async ({ open }) => {
     // As the ASIO box does: the device reopens, on ASIO (a slot's input pick counts the backend that runs).
     await (await import('/src/ui/state/engine-store.ts')).openEngineDevice();
     writeAudioDeviceSettings({ inputDeviceId: 'unplugged-windows-endpoint', inputChannel: '1' });
-    settings.saveSlotInputChannels(['1', '']);
+    settings.saveSlotInputChannels([1, null]);
     await settings.refreshAndPruneDevices();
     const s = readAudioDeviceSettings();
     const afterWindowsPrune = { inputChannel: s.inputChannel, slotInputChannels: s.slotInputChannels };
@@ -161,8 +163,9 @@ await probe(async ({ open }) => {
   assert.deepEqual({ disabled: w.buffer.disabled, caret: w.buffer.caret }, { disabled: false, caret: true }, 'the buffer stays a pick');
   assert.deepEqual({ device: w.rail.device, diagnostics: w.rail.diagnostics }, { device: 'WASAPI', diagnostics: 'audio ok' }, 'DIAGNOSTICS claims audio only');
   assert.equal(w.pluginsHint, 'No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.', 'PLUGINS with no plugin says what to do');
-  assert.deepEqual(result.asioUi, { inputDisabled: true, outputDisabled: true, name: 'Probe ASIO', slotInputs: 4 });
-  assert.deepEqual(result.afterWindowsPrune, { inputChannel: '1', slotInputChannels: ['1', ''] },
+  // Four inputs: In 1..In 4 and the pairs In 1+2, In 3+4.
+  assert.deepEqual(result.asioUi, { inputDisabled: true, outputDisabled: true, name: 'Probe ASIO', slotInputs: 6 });
+  assert.deepEqual(result.afterWindowsPrune, { inputChannel: '1', slotInputChannels: [1, null] },
     'pruning an unrelated Windows endpoint must not reset the ASIO input picks');
   await page.evaluate(() => {
     for (const toast of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(toast.id);
@@ -170,6 +173,32 @@ await probe(async ({ open }) => {
   });
   await mkdir('logs/layout', { recursive: true });
   await page.screenshot({ path: 'logs/layout/audio-settings.png' });
+
+  // A launch under ASIO (four inputs) with a pair saved on a device with more: the startup open sends
+  // it as saved, so the device side sees the pick it lacks (and logs its fallback to auto); the pick
+  // stays saved, as asked, while the status says the slot reads auto (input 2).
+  const lacking = await open({
+    viewport: { width: 960, height: 600 },
+    init: async (p) => {
+      await serveHost(p);
+      await p.addInitScript(() => {
+        window.__lfEngineFake = true;
+        localStorage.setItem('lf.audioDevices', JSON.stringify({ asioEnabled: true, slotInputChannels: [[0, 5], 2] }));
+      });
+      await p.addInitScript(installHost);
+    },
+  });
+  await lacking.page.waitForFunction(() => window.__startup.calls.includes('init'), undefined, { timeout: 10000 });
+  await lacking.page.waitForFunction(() => window.__startup.picks.length > 0, undefined, { timeout: 10000 });
+  const unpruned = await lacking.page.evaluate(async () => {
+    const { readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
+    const { engineDevice } = await import('/src/ui/state/engine-store.ts');
+    for (let i = 0; i < 400 && !engineDevice(); i++) await new Promise((r) => setTimeout(r, 25));
+    return { opened: window.__startup.picks[0], saved: readAudioDeviceSettings().slotInputChannels, reads: engineDevice()?.inputChannels };
+  });
+  console.log(JSON.stringify({ unpruned }));
+  assert.deepEqual(unpruned, { opened: '[[0,5],2]', saved: [[0, 5], 2], reads: [1, 2] },
+    'the startup open sends the saved pair the device lacks; it reads auto there, and the pick stays saved as asked');
 
   // A launch whose plugin host fails to start.
   const failed = await open({

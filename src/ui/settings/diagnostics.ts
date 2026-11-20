@@ -1,6 +1,6 @@
 import { asioStatus, slotInputChannels } from '../state/audio-devices';
 import { slotIds, slotOff, slotPlugins } from '../state/instrument';
-import { platform } from '../../platform';
+import { platform, type ReadPick } from '../../platform';
 import { notifyError, notifyInfo } from '../../notify';
 import { engineDevice } from '../state/engine-store';
 
@@ -39,12 +39,14 @@ function slotLine(slot: 0 | 1): string {
   return `Slot ${slot === 0 ? 'A' : 'B'}: ${what}`;
 }
 
-/** Each slot's input pick, and the input it reads while a device runs ("auto (2)"). */
-function slotChannelsLine(inUse: readonly number[] | undefined): string {
+/** Each slot's input pick, and the input it reads while a device runs where that is not the pick ("auto (2)", "4 (2)"). */
+function slotChannelsLine(inUse: readonly ReadPick[] | undefined): string {
+  // 1-based, a pair as "1+2".
+  const name = (p: ReadPick): string => (Array.isArray(p) ? `${p[0] + 1}+${p[1] + 1}` : String(p + 1));
   const one = (slot: 0 | 1): string => {
     const pick = slotInputChannels()[slot];
-    const reads = inUse ? ` (${inUse[slot] + 1})` : '';
-    return `${slot === 0 ? 'A' : 'B'} ${pick === '' ? `auto${reads}` : Number(pick) + 1}`;
+    const reads = inUse && (pick === null || name(pick) !== name(inUse[slot])) ? ` (${name(inUse[slot])})` : '';
+    return `${slot === 0 ? 'A' : 'B'} ${pick === null ? 'auto' : name(pick)}${reads}`;
   };
   return `Input channels: ${one(0)}, ${one(1)}`;
 }

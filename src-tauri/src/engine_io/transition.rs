@@ -1,6 +1,6 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), when the device that runs
-//! follows a WASAPI default Windows moved rather than reopening there ([`follows`]), where a lost device
+//! follows a WASAPI default Windows moved rather than reopening there ([`follows`], [`reads_past`]), where a lost device
 //! falls back to ([`fallbacks`]), which capture channel a request selects for each slot
 //! ([`input_channel`], [`open_channels`]), which buffer an ASIO open and its preopen ask the driver for
 //! ([`asio_block`], [`preopen_block`]), and the rate it runs at ([`open_rate`]). `owner.rs` carries out
@@ -8,8 +8,9 @@
 
 use lf_engine::SLOT_COUNT;
 
+use super::callback::PICK_CHANNELS;
 use super::driver::Spec;
-use super::{DeviceRequest, SAMPLE_RATES};
+use super::{DeviceRequest, InputPick, SAMPLE_RATES};
 use crate::audio_output::AudioBackend;
 
 /// What a transition does, in this order.
@@ -98,11 +99,21 @@ pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers
 /// flag, keeps the width and rate it opened at, and whether Windows converts it across another format
 /// is unmeasured (a dead capture is a loss, as any). At the engine's rate the run already plays where
 /// `moved` names, and a restart would only end a take. It reopens only for what the running streams
-/// cannot give: another engine rate (a fresh open runs the endpoint's own), or a capture where the run
-/// has none (`input_open` false: none opened, or none to open) and Windows now offers another.
-pub(crate) fn follows(running: &Spec, input_open: bool, moved: &Spec) -> bool {
+/// cannot give: another engine rate (a fresh open runs the endpoint's own), a capture where the run
+/// has none (`input_open` false: none opened, or none to open) and Windows now offers another, or a
+/// slot's pick (`picks`, read on `moved`'s inputs) on a channel past the width the capture opened at
+/// (`running.in_channels`), one the stream cannot read ([`reads_past`]). A wider endpoint whose extra
+/// inputs no pick reads plays on, as a narrower one does; the owner reads the picks again against it.
+pub(crate) fn follows(running: &Spec, input_open: bool, moved: &Spec, picks: [Option<InputPick>; SLOT_COUNT]) -> bool {
     let capture_to_start = !input_open && moved.in_channels > 0 && moved.endpoints.input != running.endpoints.input;
-    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start
+    let past = input_open && moved.in_channels > 0 && reads_past(moved.in_channels, picks, running.in_channels);
+    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start && !past
+}
+
+/// Whether `picks`, as an open on an input with `inputs` channels reads them ([`open_channels`]: auto
+/// is input 2 there), name a channel past `width`, the channels a running capture opened with.
+pub(crate) fn reads_past(inputs: usize, picks: [Option<InputPick>; SLOT_COUNT], width: usize) -> bool {
+    open_channels(inputs, picks).0.iter().any(|pick| pick.sides().iter().any(|&c| c as usize >= width))
 }
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
@@ -127,28 +138,35 @@ pub(crate) fn fallbacks(lost: &DeviceRequest, input_lost: bool, output_lost: boo
     }
 }
 
-/// The capture channel `requested` selects on an input with `channels` channels: auto is input 2 on a
-/// device with two or more (where an instrument input usually sits), as `audio_input` picks it. A
-/// pick the device lacks is refused: a change on the running device (`EngineHost::set_slot_input_channel`).
-pub(crate) fn input_channel(channels: usize, requested: Option<u32>) -> Result<u32, String> {
+/// What `requested` reads on an input with `channels` channels: auto is input 2 on a device with two or
+/// more (where an instrument input usually sits), as `audio_input` picks it, mono. A pick the device
+/// lacks, either side of a pair, is refused: a change on the running device
+/// (`EngineHost::set_slot_input_channel`). So is a channel past the [`PICK_CHANNELS`] the callback's
+/// pick word can carry, on a device that has it (cpal 0.18.1 counts channels in a `u16`, so none does).
+pub(crate) fn input_channel(channels: usize, requested: Option<InputPick>) -> Result<InputPick, String> {
     let channels = channels.max(1);
     match requested {
-        Some(channel) if (channel as usize) < channels => Ok(channel),
-        Some(channel) => Err(format!("input channel {} is unavailable; this device has {channels} channels", channel as u64 + 1)),
-        None => Ok(if channels >= 2 { 1 } else { 0 }),
+        Some(pick) => match pick.sides().into_iter().find(|&c| c as usize >= channels.min(PICK_CHANNELS)) {
+            None => Ok(pick),
+            Some(channel) if (channel as usize) < channels => {
+                Err(format!("input channel {} is past the {PICK_CHANNELS} a slot can read", channel as u64 + 1))
+            }
+            Some(channel) => Err(format!("input channel {} is unavailable; this device has {channels} channels", channel as u64 + 1)),
+        },
+        None => Ok(InputPick::Mono(if channels >= 2 { 1 } else { 0 })),
     }
 }
 
-/// Each slot's channel at an open (every reopen and recovery too): its pick, or auto for a slot whose
-/// pick the device lacks (one saved on a driver with more inputs), so an open never fails on a channel.
-/// With it, the slots that fell back, for the owner's log; an output-only device (`channels` 0)
-/// captures nothing, so no slot falls back there.
-pub(crate) fn open_channels(channels: usize, requested: [Option<u32>; SLOT_COUNT]) -> ([u32; SLOT_COUNT], [bool; SLOT_COUNT]) {
+/// Each slot's input at an open (every reopen and recovery too): its pick, or auto for a slot whose
+/// pick the device lacks, either side of a pair (one saved on a driver with more inputs), so an open
+/// never fails on a channel. With it, the slots that fell back, for the owner's log; an output-only
+/// device (`channels` 0) captures nothing, so no slot falls back there.
+pub(crate) fn open_channels(channels: usize, requested: [Option<InputPick>; SLOT_COUNT]) -> ([InputPick; SLOT_COUNT], [bool; SLOT_COUNT]) {
     let mut fell_back = [false; SLOT_COUNT];
     let picks = std::array::from_fn(|slot| {
         input_channel(channels, requested[slot]).unwrap_or_else(|_| {
             fell_back[slot] = channels > 0;
-            input_channel(channels, None).unwrap_or(0)
+            input_channel(channels, None).unwrap_or(InputPick::Mono(0))
         })
     });
     (picks, fell_back)
@@ -158,20 +176,21 @@ pub(crate) fn open_channels(channels: usize, requested: [Option<u32>; SLOT_COUNT
 mod tests {
     use super::*;
     use crate::engine_io::driver::Endpoints;
+    use InputPick::{Mono, Pair};
 
     fn wasapi(input: Option<&str>, output: Option<&str>) -> DeviceRequest {
         DeviceRequest {
             backend: AudioBackend::Wasapi,
             input: input.map(str::to_string),
             output: output.map(str::to_string),
-            input_channels: [Some(0); SLOT_COUNT],
+            input_channels: [Some(Mono(0)); SLOT_COUNT],
             buffer: None,
             sample_rate: None,
         }
     }
 
     fn asio(buffer: Option<u32>) -> DeviceRequest {
-        DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [Some(1), None], buffer, sample_rate: None }
+        DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [Some(Mono(1)), None], buffer, sample_rate: None }
     }
 
     #[test]
@@ -201,7 +220,7 @@ mod tests {
     #[test]
     fn a_channel_change_is_not_a_new_device() {
         let mut other_channel = wasapi(Some("in"), Some("out"));
-        other_channel.input_channels = [Some(0), Some(1)];
+        other_channel.input_channels = [Some(Mono(0)), Some(Pair([0, 1]))];
         let a = ("A", Some("A"));
         assert!(same_device(&wasapi(Some("in"), Some("out")), &other_channel, a));
         assert!(!same_device(&wasapi(Some("in"), Some("out")), &wasapi(Some("in"), None), a), "another output");
@@ -237,14 +256,21 @@ mod tests {
             endpoints: Endpoints { input: Some(name.into()), output: Some(name.into()) },
         };
         let running = spec("Mic", 48_000, 48_000, 2);
-        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 2)), "rerouted: the stream plays there already");
-        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1)), "a mono mic: the capture runs on at its width");
-        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2)), "a mic at another rate: the capture runs on at the rate it opened at");
-        assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0)), "no capture default left: nothing to reopen for");
-        assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2)), "another engine rate opens at the endpoint's own");
-        assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2)), "a capture the run lacks starts there");
+        let (stereo, auto, upper) = ([Some(Pair([0, 1])), None], [None, None], [Some(Pair([0, 1])), Some(Pair([2, 3]))]);
+        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 2), stereo), "rerouted: the stream plays there already");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1), stereo), "a mono mic: the capture runs on at its width");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2), stereo), "a mic at another rate: the capture runs on at the rate it opened at");
+        assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0), upper), "no capture default left: nothing to reopen for");
+        assert!(follows(&running, true, &spec("Interface", 48_000, 48_000, 4), stereo), "a wider capture whose extra inputs no pick reads");
+        assert!(!follows(&running, true, &spec("Interface", 48_000, 48_000, 4), upper), "a pick on inputs 3+4: past the running stream's two");
+        assert!(follows(&running, true, &spec("Interface", 48_000, 48_000, 2), upper), "the pick the endpoint lacks reads auto, input 2");
+        let mono = spec("Mic", 48_000, 48_000, 1);
+        assert!(!follows(&mono, true, &spec("Interface", 48_000, 48_000, 2), auto), "auto is input 2 on a stereo endpoint: past a mono stream");
+        assert!(follows(&mono, true, &spec("Interface", 48_000, 48_000, 2), [Some(Mono(0)); SLOT_COUNT]), "input 1 the mono stream reads");
+        assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2), stereo), "another engine rate opens at the endpoint's own");
+        assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2), stereo), "a capture the run lacks starts there");
         let output_moved = Spec { endpoints: Endpoints { input: Some("Mic".into()), output: Some("Headset".into()) }, ..spec("Headset", 48_000, 48_000, 2) };
-        assert!(follows(&running, false, &output_moved), "the capture that did not open is where it was");
+        assert!(follows(&running, false, &output_moved, upper), "the capture that did not open is where it was");
     }
 
     #[test]
@@ -269,7 +295,7 @@ mod tests {
         let lost = asio(Some(128));
         let tried = fallbacks(&lost, true, true);
         assert_eq!(tried[0], lost, "ASIO first rebuilds from the cache");
-        assert_eq!(tried[1], DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, input_channels: [Some(1), None], buffer: None, sample_rate: None });
+        assert_eq!(tried[1], DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, input_channels: [Some(Mono(1)), None], buffer: None, sample_rate: None });
         let picked = DeviceRequest { sample_rate: Some(44_100), ..lost.clone() };
         assert_eq!(fallbacks(&picked, true, true)[1].sample_rate, Some(44_100), "the fallback keeps the pick");
         assert_eq!(tried.len(), 2);
@@ -311,20 +337,33 @@ mod tests {
 
     #[test]
     fn auto_picks_input_two_and_a_change_to_a_missing_channel_is_refused() {
-        assert_eq!(input_channel(2, None), Ok(1));
-        assert_eq!(input_channel(1, None), Ok(0));
-        assert_eq!(input_channel(4, Some(3)), Ok(3));
-        assert!(input_channel(2, Some(2)).is_err());
-        assert_eq!(input_channel(0, None), Ok(0), "a device reporting no channels still reads one");
+        assert_eq!(input_channel(2, None), Ok(Mono(1)));
+        assert_eq!(input_channel(1, None), Ok(Mono(0)));
+        assert_eq!(input_channel(4, Some(Mono(3))), Ok(Mono(3)));
+        assert!(input_channel(2, Some(Mono(2))).is_err());
+        assert_eq!(input_channel(0, None), Ok(Mono(0)), "a device reporting no channels still reads one");
+        assert_eq!(input_channel(4, Some(Pair([2, 3]))), Ok(Pair([2, 3])), "a pair, each side as it is");
+        assert_eq!(input_channel(4, Some(Pair([3, 0]))), Ok(Pair([3, 0])), "in either order");
+        assert!(input_channel(2, Some(Pair([0, 2]))).is_err(), "a pair whose right side the device lacks");
+        assert!(input_channel(2, Some(Pair([2, 0]))).is_err(), "or its left");
+        let wide = PICK_CHANNELS + 1;
+        assert_eq!(input_channel(wide, Some(Mono(PICK_CHANNELS as u32 - 1))), Ok(Mono(PICK_CHANNELS as u32 - 1)), "the last channel the pick word carries");
+        assert!(input_channel(wide, Some(Mono(PICK_CHANNELS as u32))).is_err(), "past it: refused, never read as another");
+        assert!(input_channel(wide, Some(Pair([0, PICK_CHANNELS as u32]))).is_err(), "either side of a pair");
+        assert_eq!(open_channels(wide, [Some(Mono(PICK_CHANNELS as u32)), None]), ([Mono(1), Mono(1)], [true, false]), "an open takes auto, flagged");
     }
 
     #[test]
-    fn an_open_takes_each_slots_channel_and_auto_for_a_slot_whose_pick_the_device_lacks() {
-        assert_eq!(open_channels(4, [Some(0), Some(3)]), ([0, 3], [false, false]));
-        assert_eq!(open_channels(2, [None, Some(0)]), ([1, 0], [false, false]), "auto is input 2 for each slot on its own");
-        assert_eq!(open_channels(1, [None, None]), ([0, 0], [false, false]));
-        assert_eq!(open_channels(2, [Some(0), Some(7)]), ([0, 1], [false, true]), "a stale pick takes auto for that slot alone");
-        assert_eq!(open_channels(2, [Some(2), Some(3)]), ([1, 1], [true, true]));
-        assert_eq!(open_channels(0, [Some(1), None]), ([0, 0], [false, false]), "an output-only device captures nothing");
+    fn an_open_takes_each_slots_pick_and_auto_for_a_slot_whose_pick_the_device_lacks() {
+        let m = |a, b| [Mono(a), Mono(b)];
+        assert_eq!(open_channels(4, [Some(Mono(0)), Some(Mono(3))]), (m(0, 3), [false, false]));
+        assert_eq!(open_channels(2, [None, Some(Mono(0))]), (m(1, 0), [false, false]), "auto is input 2 for each slot on its own");
+        assert_eq!(open_channels(1, [None, None]), (m(0, 0), [false, false]));
+        assert_eq!(open_channels(2, [Some(Mono(0)), Some(Mono(7))]), (m(0, 1), [false, true]), "a stale pick takes auto for that slot alone");
+        assert_eq!(open_channels(2, [Some(Mono(2)), Some(Mono(3))]), (m(1, 1), [true, true]));
+        assert_eq!(open_channels(0, [Some(Mono(1)), None]), (m(0, 0), [false, false]), "an output-only device captures nothing");
+        assert_eq!(open_channels(4, [Some(Pair([0, 1])), Some(Pair([3, 2]))]), ([Pair([0, 1]), Pair([3, 2])], [false, false]), "a pair per slot");
+        assert_eq!(open_channels(2, [Some(Pair([0, 1])), Some(Pair([1, 2]))]), ([Pair([0, 1]), Mono(1)], [false, true]), "a pair missing one side: auto, mono, flagged");
+        assert_eq!(open_channels(2, [Some(Pair([3, 1])), None]), ([Mono(1), Mono(1)], [true, false]), "the other side missing too");
     }
 }

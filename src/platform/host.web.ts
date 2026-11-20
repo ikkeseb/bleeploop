@@ -18,6 +18,7 @@ import {
   type FeedFrame,
   type FxParamId,
   type InputPick,
+  type ReadPick,
   type LaneMix,
   type LaneState,
   type LoadHeader,
@@ -264,10 +265,8 @@ export interface EngineFake extends EngineHost {
   readonly loadedSessions: Uint8Array[];
   /** Every Share endpoint `setShare()` received. */
   readonly shares: (string | null)[];
-  /** Every `setSlotInputChannel()` pick, in order: [slot, channel]. */
-  readonly slotInputChannels: [number, number | null][];
-  /** Every pick `setSlotInputPick()` took, in order: [slot, pick] (unit contract §7's shape). */
-  readonly slotInputPicks: [number, InputPick][];
+  /** Every pick `setSlotInputChannel()` took, in order: [slot, pick] (unit contract §7's shape). */
+  readonly slotInputChannels: [number, InputPick][];
   /** The fake device's four canned inputs (unit contract §10), channel 0 first: a pick past them is refused. */
   readonly inputs: readonly string[];
   /** The chain per slot (`chain-fake.ts`): its `ChainHost`, its record and its probe seams. */
@@ -890,6 +889,9 @@ function runCommand(command: EngineCommand): void {
 
 /** The fake device's four canned inputs (unit contract §10); the pick shape is §7's. */
 const FAKE_INPUTS: readonly string[] = ['Fake input 1', 'Fake input 2', 'Fake input 3', 'Fake input 4'];
+/** A pick the fake's four inputs lack, either side of a pair. */
+const lacksPick = (pick: Exclude<InputPick, null>): boolean =>
+  (Array.isArray(pick) ? pick : [pick]).some((c) => !Number.isSafeInteger(c) || c < 0 || c >= FAKE_INPUTS.length);
 
 /** The chain per slot, modelled (`chain-fake.ts`): its frames go to the feed's subscribers. Made on first
  * use, never at module load: made at module scope, even under a `@__PURE__` annotation, it shipped this
@@ -960,8 +962,10 @@ export const webEngineFake: EngineFake = {
     webEngineFake.opened.push(request);
     webEngineFake.forced.push(force);
     if (webEngineFake.refusal && !force) throw { RateChange: { ...webEngineFake.refusal } };
-    // A two-input device: auto (null) reads input 2, as the engine picks it.
-    const picks = 'inputChannels' in request ? request.inputChannels : [request.inputChannel, request.inputChannel];
+    // Auto (null) reads input 2, as the engine picks it; so does a pick the fake's inputs lack, either
+    // side of a pair (the engine opens it as auto).
+    const asked = 'inputChannels' in request ? request.inputChannels : [request.inputChannel, request.inputChannel];
+    const picks = asked.map((p) => (p === null || lacksPick(p) ? 1 : Array.isArray(p) ? ([p[0], p[1]] as [number, number]) : p));
     fakeStatus = {
       backend: request.backend,
       sampleRate: fakeRate(),
@@ -971,7 +975,8 @@ export const webEngineFake: EngineFake = {
       alignFrames: 0,
       inputFrames: 0,
       inputOpen: true,
-      inputChannels: [picks[0] ?? 1, picks[1] ?? 1],
+      inputChannels: [picks[0], picks[1]],
+      inputRequests: [asked[0], asked[1]],
     };
     return fakeStatus;
   },
@@ -981,20 +986,25 @@ export const webEngineFake: EngineFake = {
   async status() {
     return fakeStatus;
   },
-  async setSlotInputChannel(slot, channel) {
+  async setSlotInputChannel(slot, pick) {
     if (!engineForced()) throw new Error(NO_ENGINE);
-    webEngineFake.slotInputChannels.push([slot, channel]);
-  },
-  async setSlotInputPick(slot, pick) {
-    if (!engineForced()) throw new Error(NO_ENGINE);
-    const lacking = (c: number) => !Number.isSafeInteger(c) || c < 0 || c >= FAKE_INPUTS.length;
+    // As native: no device open, no pick (`EngineHost::set_slot_input_channel`).
+    if (!fakeStatus) throw new Error('no audio device is open');
     if (slot !== 0 && slot !== 1) throw new Error(`slot ${slot} does not exist`);
-    if (pick !== null && (Array.isArray(pick) ? pick.some(lacking) : lacking(pick))) {
-      throw new Error(`The device lacks input ${JSON.stringify(pick)}`);
+    if (pick !== null && lacksPick(pick)) throw new Error(`The device lacks input ${JSON.stringify(pick)}`);
+    const taken: InputPick = Array.isArray(pick) ? [pick[0], pick[1]] : pick;
+    webEngineFake.slotInputChannels.push([slot, taken]);
+    if (fakeStatus.inputChannels) {
+      const reads = fakeStatus.inputChannels.slice() as [ReadPick, ReadPick];
+      reads[slot] = taken ?? 1;
+      fakeStatus = { ...fakeStatus, inputChannels: reads };
     }
-    webEngineFake.slotInputPicks.push([slot, Array.isArray(pick) ? [pick[0], pick[1]] : pick]);
+    if (fakeStatus.inputRequests) {
+      const requests = fakeStatus.inputRequests.slice() as [InputPick, InputPick];
+      requests[slot] = taken;
+      fakeStatus = { ...fakeStatus, inputRequests: requests };
+    }
   },
-  slotInputPicks: [],
   inputs: FAKE_INPUTS,
   get chain() {
     return chainFake();
@@ -1038,7 +1048,10 @@ export const webEngineFake: EngineFake = {
     applyMixFrame(frame);
     applyToggleFrame(frame);
     if (frame.live) [fakeLive[0], fakeLive[1]] = frame.live;
-    if (frame.meter) lastMeter = { peak: [frame.meter.peak[0], frame.meter.peak[1]], clip: [false, false] };
+    if (frame.meter) {
+      const [a, b] = frame.meter.peak;
+      lastMeter = { peak: [[a[0], a[1]], [b[0], b[1]]], clip: [false, false] };
+    }
     chainFake().scripted(frame);
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.

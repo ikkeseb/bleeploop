@@ -16,9 +16,13 @@
  * - the slot volume sends what its source needs: an Off slot's input level (`SetSlotGain`), a synth's
  *   level (`SetInstrumentGain`), a plugin's output (`SetSlotGain`); the Off source, the input picks and
  *   the Off and synth levels survive a reload and are sent to the engine again;
- * - a slot's input names only a channel the slot reads: an open whose status reads auto for a pick the
- *   device lacks, a status from a device the owner reopened on, an input device change and a prune (a
- *   vanished device, a pick past the device's inputs) reset that pick to Auto, in storage and on screen;
+ * - a slot's pick stays the one the player asked for on a device that lacks it (an open whose status
+ *   reads auto for it, a device the owner reopened on, a prune with a device running or none): saved and
+ *   asked for again by the next open, the slot's window naming it with the input the slot reads instead
+ *   ("In 4 · In 2"), Auto kept plain, judged from the status alone (a headset no device list names
+ *   yet, a four-input endpoint whose stream still reads auto; a pick the stream reads shows plain, and
+ *   so does a pick whose switch the status has not answered); an input device change and a vanished device reset the picks to
+ *   Auto, in storage and on screen;
  *   on a fresh install the input device change and the vanished device reset the picks to its default
  *   instead (slot A on In 1, slot B Auto), and the reopen asks for that;
  * - GO LIVE pressed (the named action, as a pedal) while a tone reload holds a live slot: one press stops
@@ -219,34 +223,68 @@ await probe(async ({ browser, open }) => {
     await inp(1).selectOption('3');
     await inp(2).selectOption('1');
     await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 2);
-    assert.deepEqual(await saved(), ['3', '1']);
+    assert.deepEqual(await saved(), [3, 1]);
+    // A pair (unit contract §7): offered beside the single inputs, sent and saved as [left, right].
+    await inp(1).selectOption('0+1');
+    await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 3);
+    assert.deepEqual(await p.evaluate(() => window.__lf.native.slotInputChannels.at(-1)), [0, [0, 1]], 'a pair pick reaches the engine as [left, right]');
+    assert.deepEqual(await saved(), [[0, 1], 1], 'and is saved in the same shape');
+    assert.equal(await p.locator('.slot__inval').first().textContent(), 'In 1+2', 'the window names the pair');
+    await inp(1).selectOption('3');
+    await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 4);
 
-    // 1a. A reopen whose status says slot A reads input 2: the device lacks input 4.
+    // 1a. A reopen on a device with two inputs, whose status says slot A reads input 2: it lacks input 4.
+    const shownIn = (slot) => p.locator('.slot__inval').nth(slot - 1).textContent();
     await p.evaluate(async () => {
+      const { platform } = await import('/src/platform/index.ts');
+      platform.pluginHost.listInputDevices = async () => [
+        { id: 'fake-in', name: 'Fake input', channels: 4 }, { id: 'small', name: 'Small input', channels: 2 }, { id: 'mono', name: 'Mono input', channels: 1 }];
+      await (await import('/src/ui/state/audio-devices.ts')).refreshInputDevices();
       const native = window.__lf.native;
       const real = native.open;
-      native.open = async (request, force) => ({ ...(await real.call(native, request, force)), inputChannels: [1, 1] });
+      native.open = async (request, force) => ({ ...(await real.call(native, request, force)), inputName: 'Small input', inputChannels: [1, 1] });
       await (await import('/src/ui/state/engine-store.ts')).openEngineDevice();
       native.open = real;
     });
-    assert.deepEqual(await saved(), ['', '1'], 'a pick the device lacks is saved as Auto; the other stays');
-    assert.equal(await inp(1).inputValue(), '', 'and the slot shows Auto');
+    assert.deepEqual(await saved(), [3, 1], 'a pick the device lacks stays saved as the player asked');
+    assert.equal(await inp(1).inputValue(), '3', "and stays the select's value");
+    assert.equal(await shownIn(1), 'In 4 · In 2', 'the window names the pick and the input the slot reads instead');
+    assert.equal(await shownIn(2), 'In 2', 'a pick the device has reads plain');
     const autoText = (slot, text) => p.waitForFunction(([s, t]) =>
       document.querySelector(`[aria-label="Input for slot ${'AB'[s - 1]}"] option[value=""]`)?.textContent === t, [slot, text], { timeout: 2000 })
       .then(() => true, () => false);
-    assert.ok(await autoText(1, 'Auto · In 2'), "Auto names the input the engine reads for the slot (its status)");
-    assert.ok(await autoText(2, 'Auto'), "a slot with a pick of its own keeps Auto plain: the status reads the pick's channel");
-    // 1b. The owner reopened on another device (a fallback) whose status reads input 1 for slot B.
+    assert.ok(await autoText(1, 'Auto'), 'a slot with a pick of its own keeps Auto plain, its window names what it reads');
+    // The next open asks for the pick again: the four-input device reads it.
+    await p.evaluate(async () => void (await (await import('/src/ui/state/engine-store.ts')).openEngineDevice()));
+    assert.deepEqual((await p.evaluate(() => window.__lf.native.opened.at(-1))).inputChannels, [3, 1], 'the next open asks for the saved pick');
+    assert.equal(await shownIn(1), 'In 4', 'and a device that has it reads it again');
+    // 1b. The owner reopened on another device (a fallback) with one input: each slot reads input 1.
     await p.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [], status: {
-      backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Small input', outputName: 'Fake output',
-      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0] } }));
-    assert.deepEqual(await saved(), ['', ''], "a device the owner reopened on without slot B's pick resets it");
-    assert.equal(await inp(2).inputValue(), '');
-    assert.ok(await autoText(2, 'Auto · In 1'), 'on a device whose status reads input 1, Auto says so');
+      backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Mono input', outputName: 'Fake output',
+      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0], inputRequests: [3, 1] } }));
+    const shows = (slot, text) => p.waitForFunction(([s, t]) => document.querySelectorAll('.slot__inval')[s - 1]?.textContent === t, [slot, text], { timeout: 2000 });
+    await shows(2, 'In 2 · In 1');
+    assert.deepEqual(await saved(), [3, 1], 'a device the owner reopened on keeps the picks');
+    assert.equal(await shownIn(1), 'In 4 · In 1');
+    assert.equal(await inp(2).inputValue(), '1');
+    assert.ok(await autoText(2, 'Auto'), 'Auto stays plain beside a pick of its own');
+    // The fallback is the status's: what it reads against the pick it answers, whatever the device list.
+    // Windows moved the default to a headset plugged in since the list was read (it names none).
+    const status = (seq, inputName, inputChannels, inputRequests) => p.evaluate((st) => window.__lf.native.emit({ seq: st.seq, reset: false, events: [], status: {
+      backend: 'Wasapi', sampleRate: 48000, block: 256, outputName: 'Fake output', alignFrames: 0, inputFrames: 0, inputOpen: true, ...st.s } }),
+    { seq, s: { inputName, inputChannels, inputRequests } });
+    await status(3, 'USB headset', [0, 0], [3, 1]);
+    await shows(1, 'In 4 · In 1');
+    assert.equal(await shownIn(2), 'In 2 · In 1', 'a headset the list does not name shows each fallback');
+    // Moved to the four-input device at another rate: the stream that opened on two plays on and reads auto.
+    await status(4, 'Fake input', [1, 1], [3, 1]);
+    await shows(1, 'In 4 · In 2');
+    assert.equal(await shownIn(2), 'In 2', 'a pick the stream reads shows plain, never "In 2 · In 2"');
+    // A switch whose status is not in yet (it answers the pick before): the new pick shows plain.
+    await status(5, 'Fake input', [1, 1], [2, 1]);
+    await shows(1, 'In 4');
     // 1c. An input device change in Audio Settings resets both picks (back on the four-input device first).
-    await p.evaluate(() => window.__lf.native.emit({ seq: 3, reset: false, events: [], status: {
-      backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Fake input', outputName: 'Fake output',
-      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [1, 1] } }));
+    await status(6, 'Fake input', [1, 1], [3, 1]);
     await inp(1).selectOption('2');
     await p.evaluate(async () => {
       const { platform } = await import('/src/platform/index.ts');
@@ -254,26 +292,30 @@ await probe(async ({ browser, open }) => {
       window.__lf.ui.openSettings();
     });
     await p.waitForFunction(() => document.querySelectorAll('[aria-label="Audio input device"] option').length === 3);
+    const opens = await p.evaluate(() => window.__lf.native.opened.length);
     await p.getByRole('combobox', { name: 'Audio input device', exact: true }).selectOption('other');
-    await p.waitForFunction(() => window.__lf.native.opened.length >= 3);
-    assert.deepEqual(await saved(), ['', ''], 'an input device change resets both picks');
+    await p.waitForFunction((n) => window.__lf.native.opened.length > n, opens);
+    assert.deepEqual(await saved(), [null, null], 'an input device change resets both picks');
     assert.deepEqual((await p.evaluate(() => window.__lf.native.opened.at(-1))).inputChannels, [null, null], 'and the reopen asks for auto');
     await p.evaluate(() => window.__lf.ui.closeSettings());
-    // 1d. The prune (startup, Audio Settings): a pick past the saved device's inputs, then a vanished device.
+    // 1d. The prune with a device running: a pick past the saved device's inputs (two) stays; a vanished
+    // device resets both.
     const pruned = await p.evaluate(async () => {
       const devices = await import('/src/ui/state/audio-devices.ts');
+      const { engineDevice } = await import('/src/ui/state/engine-store.ts');
       const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
       writeAudioDeviceSettings({ inputDeviceId: 'other' });
-      devices.saveSlotInputChannels(['3', '1']);
+      devices.saveSlotInputChannels([3, 1]);
       await devices.refreshAndPruneDevices();
-      const past = readAudioDeviceSettings().slotInputChannels;
-      devices.saveSlotInputChannels(['1', '0']);
+      const kept = engineDevice() ? readAudioDeviceSettings().slotInputChannels : 'no device runs';
+      devices.saveSlotInputChannels([1, 0]);
       const { platform } = await import('/src/platform/index.ts');
       platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
       await devices.refreshAndPruneDevices();
-      return { past, vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
+      return { kept, vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
     });
-    assert.deepEqual(pruned, { past: ['', '1'], vanished: ['', ''], shown: ['', ''] }, 'the prune drops a pick past the inputs, and both with a vanished device');
+    assert.deepEqual(pruned, { kept: [3, 1], vanished: [null, null], shown: [null, null] },
+      'no prune drops a pick past the running device\'s inputs; a vanished device resets both');
 
     // 2. GO LIVE pressed (the named action) while a tone reload holds live slot A. Under the amp, A plays
     // a synth, and B is Off (takes input): the press must still reach A, whose plugin the reload removed.
@@ -380,7 +422,7 @@ await probe(async ({ browser, open }) => {
     const opens = (await openedNow()).length;
     await p.getByRole('combobox', { name: 'Audio input device', exact: true }).selectOption('other');
     await p.waitForFunction((n) => window.__lf.native.opened.length > n, opens);
-    assert.deepEqual(await saved(), ['0', ''], "an input device change on a fresh install keeps slot A on input 1");
+    assert.deepEqual(await saved(), [0, null], "an input device change on a fresh install keeps slot A on input 1");
     assert.deepEqual((await openedNow()).at(-1), [0, null], 'and the reopen asks for input 1 on slot A, auto on slot B');
     await p.evaluate(() => window.__lf.ui.closeSettings());
     // The prune of a vanished input device, over picks the player made.
@@ -388,13 +430,13 @@ await probe(async ({ browser, open }) => {
       const devices = await import('/src/ui/state/audio-devices.ts');
       const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
       writeAudioDeviceSettings({ inputDeviceId: 'other' });
-      devices.saveSlotInputChannels(['1', '0']);
+      devices.saveSlotInputChannels([1, 0]);
       const { platform } = await import('/src/platform/index.ts');
       platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
       await devices.refreshAndPruneDevices();
       return { vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
     });
-    assert.deepEqual(pruned, { vanished: ['0', ''], shown: ['0', ''] }, 'a vanished input device on a fresh install resets the picks to slot A on input 1');
+    assert.deepEqual(pruned, { vanished: [0, null], shown: [0, null] }, 'a vanished input device on a fresh install resets the picks to slot A on input 1');
     await context.close();
   }
 

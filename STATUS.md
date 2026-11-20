@@ -193,6 +193,10 @@ anything else that needs the interface or a real plugin.
   the right start, and do TIME, UP and DOWN each do what their name says? Toggle it on a held note:
   any thump or hollow moment? Between notes, is the amp-sim's hiss lifted?
 - The amp-sim live: does the master fader scale the wet sound, never the recorded level?
+- A slot's input on a pair (its input window's `In 1+2`, beside the single inputs): a stereo source on
+  two inputs, LIVE, then a take: is each side heard and looped on its own side, with no lag between
+  them, and does the slot meter read the louder side? (machine: `engine_io/tests.rs`'s pair tests on
+  the fake ASIO and WASAPI devices; no real interface has carried a pair yet)
 - LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
 - An attack played right on a DUB's punch-in (D23): does it still sound whole?
 - A MIDI binding after a restart and after a move to another USB socket: does it fire with no

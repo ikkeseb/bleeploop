@@ -438,6 +438,11 @@ pub(crate) mod tests {
         PipeConfig { in_rate, out_rate, channels: 1, capacity: in_rate as usize, setpoint: SETPOINT, max_pull: 1024 }
     }
 
+    /// `config` at the WASAPI join's width: each slot's pair (`callback::JOIN_CHANNELS`).
+    fn join(in_rate: u32, out_rate: u32) -> PipeConfig {
+        PipeConfig { channels: super::super::callback::JOIN_CHANNELS, ..config(in_rate, out_rate) }
+    }
+
     /// 10 ms pushes, pulls up to 11.1 ms, +3 ms (`PipeConfig::setpoint`'s rule), rounded up.
     const SETPOINT: f64 = 0.025;
 
@@ -457,7 +462,7 @@ pub(crate) mod tests {
             for skew in [400.0, -400.0] {
                 for pulls in ["256", "480", "470-490"] {
                     let push = in_rate as usize / 100;
-                    let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push, head_start: 0.0, stall: None };
+                    let clocks = Clocks { config: join(in_rate, out_rate), skew_ppm: skew, push, head_start: 0.0, stall: None };
                     let band_ms = push as f64 / in_rate as f64 * 1e3 + 3.0;
                     let (mut settled_at, mut shorts, mut drops, mut trims, mut lo_ms, mut hi_ms) = (0.0f64, 0, 0, 0, 0.0f64, 0.0f64);
                     let (mut drift_sum, mut drift_n, mut drift_worst, mut wobble) = (0.0, 0u32, 0.0f64, 0.0f64);
@@ -505,25 +510,37 @@ pub(crate) mod tests {
         assert_eq!(failed, 0, "cases failed:\n{report}");
     }
 
+    /// At the join's width: the sine on channel 0, and each other channel `c` the same sine at `c + 1`
+    /// times its level, so every channel is checked, and a channel that lags or leads its neighbours (a
+    /// pair whose sides drift apart) breaks the ratio.
     #[test]
     fn a_sine_keeps_its_frequency_and_has_no_discontinuity_after_settling() {
+        let width = super::super::callback::JOIN_CHANNELS;
         for &(in_rate, out_rate) in &[(44_100u32, 48_000u32), (48_000, 44_100), (48_000, 48_000)] {
             let (skew, freq) = (400.0, 440.0);
-            let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push: in_rate as usize / 100, head_start: 0.0, stall: None };
+            let clocks = Clocks { config: join(in_rate, out_rate), skew_ppm: skew, push: in_rate as usize / 100, head_start: 0.0, stall: None };
             // Counted on the puller's frames: the pusher's clock runs `skew` fast, so its 440 Hz plays at
             // 440·(1 + skew) there once the pipe tracks it (untracked, it would read 400 ppm low).
             let expected = freq * (1.0 + skew * 1e-6);
             let w = 2.0 * std::f64::consts::PI * expected / out_rate as f64;
             let (mut frame, mut prev, mut first_up, mut last_up, mut ups) = (0u64, [0.0f64; 2], None, 0.0, 0u64);
-            let mut worst: f64 = 0.0;
+            let (mut worst, mut skewed): (f64, f64) = (0.0, 0.0);
             clocks.run(
                 SETTLED_BY + 120.0,
                 wandering(),
-                |k, f| f[0] = (0.5 * (2.0 * std::f64::consts::PI * freq * k as f64 / in_rate as f64).sin()) as f32,
+                |k, f| {
+                    let y = 0.2 * (2.0 * std::f64::consts::PI * freq * k as f64 / in_rate as f64).sin();
+                    for (c, s) in f.iter_mut().enumerate() {
+                        *s = (y * (c + 1) as f64) as f32;
+                    }
+                },
                 |p| {
                     assert_eq!(p.pipe.trims, 0, "{in_rate}->{out_rate}: trimmed at {:.1} s", p.t);
-                    for &y in p.out {
-                        let y = y as f64;
+                    for sides in p.out.chunks_exact(width) {
+                        for (c, &s) in sides.iter().enumerate() {
+                            skewed = skewed.max((s as f64 - sides[0] as f64 * (c + 1) as f64).abs());
+                        }
+                        let y = sides[0] as f64 * 2.5;
                         if p.t >= SETTLED_BY {
                             // A pure sine satisfies y[n+1] = 2cos(w)·y[n] − y[n−1]: a dropped, repeated
                             // or stale frame shows up in the residual.
@@ -545,6 +562,7 @@ pub(crate) mod tests {
             println!("{in_rate}->{out_rate}: {measured:.4} Hz ({off_ppm:+.1} ppm off), worst residual {worst:.2e}");
             assert!(off_ppm.abs() < 40.0, "{in_rate}->{out_rate}: {measured} Hz, expected {expected}");
             assert!(worst < 1e-3, "{in_rate}->{out_rate}: a discontinuity of {worst}");
+            assert!(skewed < 1e-5, "{in_rate}->{out_rate}: a channel off its neighbours by {skewed}");
         }
     }
 
@@ -716,6 +734,42 @@ pub(crate) mod tests {
             let reported_ms = delay_frames / out_rate as f64 * 1e3;
             println!("{in_rate}->{out_rate}: measured {measured_ms:.3} ms, delay_frames {reported_ms:.3} ms");
             assert!((measured_ms - reported_ms).abs() < 0.05, "{in_rate}->{out_rate}: measured {measured_ms} ms, reported {reported_ms} ms");
+        }
+    }
+
+    /// DEV measurement, not a gate (`--ignored`): what the WASAPI join's pull (push included) costs at
+    /// 2 and 4 channels, 10 ms pushes and 470-490-frame pulls, 30 s of audio per case, rubato at
+    /// opt-level 3 as every build has it. Prints the mean and the 99th percentile per pull, and the mean
+    /// as a share of a 10 ms period. The numbers live in `callback.rs` at `JOIN_CHANNELS`.
+    #[test]
+    #[ignore]
+    fn measure_the_join_pull_at_2_and_4_channels() {
+        for (in_rate, out_rate) in [(48_000, 48_000), (44_100, 48_000)] {
+            for channels in [2, 4] {
+                let (mut tx, mut rx) = pipe(PipeConfig { channels, ..config(in_rate, out_rate) }).unwrap();
+                let push = in_rate as usize / 100;
+                let block: Vec<f32> = (0..push * channels).map(|k| (k as f32 * 0.01).sin() * 0.25).collect();
+                let mut out = vec![0.0f32; 1024 * channels];
+                let mut size = wandering();
+                let (mut pulled, mut owed, mut took) = (0usize, 0.0f64, Vec::new());
+                while pulled < out_rate as usize * 30 {
+                    owed += push as f64 * out_rate as f64 / in_rate as f64;
+                    let at = std::time::Instant::now();
+                    tx.push(&block);
+                    while owed >= 490.0 {
+                        let n = size(pulled as u64);
+                        rx.pull(&mut out[..n * channels]);
+                        std::hint::black_box(&out);
+                        owed -= n as f64;
+                        pulled += n;
+                    }
+                    took.push(at.elapsed().as_secs_f64() * 1e6);
+                }
+                took.sort_by(f64::total_cmp);
+                let mean = took.iter().sum::<f64>() / took.len() as f64;
+                let p99 = took[took.len() * 99 / 100];
+                println!("join {in_rate}->{out_rate} Hz, {channels} ch: mean {mean:.1} us, p99 {p99:.1} us per 10 ms ({:.2} % of the period)", mean / 100.0);
+            }
         }
     }
 
