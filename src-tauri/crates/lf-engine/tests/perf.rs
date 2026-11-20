@@ -28,6 +28,11 @@
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
 //!   blocks it runs in, and no step of it moves more than `JOB_RATE` positions a frame.
+//! - A five-lane 60 s stereo export at 48 kHz (`a_five_lane_60s_export_memory_and_snapshot_callback`,
+//!   E1): records five full-buffer stereo lanes (30 bars at 120 BPM), takes the export's snapshot over
+//!   live 64-frame callbacks and renders the wet master (`render::wet_master_measured`). Prints the
+//!   exact `Vec` capacities held at each step (live pool, snapshot, load, render engine, output) and
+//!   the callback time while the snapshot copies (no bar of its own).
 //!
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
 //! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
@@ -46,6 +51,21 @@
 //! both): the engine's median block grew by 2 to 8 µs (0.2 to 0.3 point), inside the runs' spread. One
 //! master limiter alone (four runs, as busy) takes 2.3 µs of a 64-frame block under its threshold and
 //! 3.3 µs over it (0.17 and 0.25 %), 4.7 and 6.6 µs of a 128-frame block (0.18 and 0.25 %).
+//!
+//! Stereo lanes and per-channel lane FX (E1; dev PC, release, **busy PC — other builds ran at the same
+//! time; replace on a quiet rerun**): Stage 2 mean 9.38 %, p99.9 27.07 %, worst 38.2 %. Stage 3 mean
+//! 677.1 µs (50.8 %, failing the 50 % bar on this busy PC; engine share 544.6 µs / 40.84 %, quantum-start
+//! blocks 94.9 %, scheduled worst 112.8 %, p99.9 126.2 %, worst 141.8 %). Multiply burst (341 blocks of
+//! 64): mean 14.6 % (after it 8.7 %, +5.9 %), worst 23.4 %. TRIM of the 2,880,000-frame loop (44 blocks
+//! of 64): mean 20.5 % (after it 14.2 %, +6.3 %), worst 40.6 %, largest job step 65,536 positions.
+//! Five-lane 60 s stereo export at 48 kHz (deterministic `Vec` capacities): live pool 241.7 MiB (253.4 MB,
+//! 253,440,000 B), snapshot `pcm` 109.9 MiB (115.2 MB, 115,200,000 B; live + snap 351.6 MiB / 368.6 MB),
+//! render `Load` 110.0 MiB (115.3 MB, 115,312,520 B), render engine pool 241.7 MiB (253.4 MB, 253,440,000 B;
+//! peak held during render 703.2 MiB / 737.4 MB, render-only peak 351.7 MiB / 368.8 MB), render output
+//! 22.0 MiB (23.1 MB, 23,052,288 B; `WetMaster` 22.0 MiB / 23.0 MB, after render 373.5 MiB / 391.7 MB).
+//! Snapshot callback (220 blocks of 64): mean 180.8 µs / 13.56 % (after it 107.0 µs / 8.03 %), p99.9 and
+//! worst 377.3 µs (28.3 %) on a standalone rerun (under a contention spike in the full-suite run: mean
+//! 3321.3 µs / 249.1 %, after it 1886.1 µs / 141.5 %, worst 25061.4 µs / 1879.6 %).
 
 mod common;
 
@@ -57,9 +77,11 @@ use lf_engine::dsp::compressor::{Compressor, Params};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::dsp::ott::{MonoOtt, Setting, StereoOtt};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
-use lf_engine::grid::Frame;
+use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::looper::{job_frames, JOB_RATE};
-use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext};
+use lf_engine::overview::PEAK_FRAMES;
+use lf_engine::render::{wet_master_measured, RenderOptions};
+use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, Load, LoadTrack, NoteTarget, Pair, ProcessContext, SessionJob, Snapshot};
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 64;
@@ -376,6 +398,141 @@ fn a_trim_of_the_longest_loop_costs_under_a_tenth_of_the_block_more() {
     assert!(step <= JOB_RATE * BLOCK as Frame, "a job step moved {step} positions");
     assert!(during - steady < 10.0, "the trim costs {:.1} % of the block more", during - steady);
     assert!(rig.lane(0).can_undo && rig.master() == master);
+}
+
+/// Five-lane 60 s stereo export at 48 kHz: records five full-buffer stereo lanes (30 bars of 4/4 at
+/// 120 BPM), takes the export snapshot over live 64-frame callbacks (timing every block, plus the same
+/// number of steady-state blocks after it), builds the load and renders the wet stereo master
+/// (`lf_engine::render::wet_master_measured`). Prints the heap `Vec` capacities held at each step (the
+/// live pool, the snapshot, the load, the render's peak and its output) and the callback time while the
+/// snapshot copies. No bar of its own.
+#[test]
+#[ignore]
+fn a_five_lane_60s_export_memory_and_snapshot_callback() {
+    let mut rig = Rig::with(Opts { loop_seconds: 60.0, block: 1024, ..Default::default() });
+    rig.set(Command::SetMetronome(true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(30.0));
+    rig.set_stereo_inputs(|f| [code(f), -code(f)], |_| [0.0; 2]);
+    rig.press(Command::RecDub(0));
+    while rig.master() == 0 {
+        rig.advance(1024);
+    }
+    let master = rig.master();
+    assert_eq!(master, 60 * RATE as Frame, "30 bars at 120 BPM fill the 60 s buffer");
+    for _ in 1..5 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    assert!((0..5).all(|i| rig.state(i) == LaneState::Playing));
+    assert!(!rig.engine.looper().busy());
+
+    let live_pool = rig.engine.looper().pool_bytes();
+    let samples = master as usize;
+    let need = 5 * samples;
+    let mut pcm = Vec::with_capacity(need);
+    pcm.resize(need, [0.0f32; 2]);
+    assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok(), "session port accepts snapshot");
+
+    let input_l: Vec<f32> = (0..BLOCK).map(|k| code(k as Frame) - 0.25).collect();
+    let input_r: Vec<f32> = (0..BLOCK).map(|k| 0.25 - code(k as Frame)).collect();
+    let silent = [0.0f32; BLOCK];
+    let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
+    let mut frame = rig.frame;
+    let mut block = |engine: &mut lf_engine::Engine| {
+        let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+        let t = Instant::now();
+        engine.process_inputs(&ctx, [[&input_l, &input_r], [&silent, &silent]], &mut left, &mut right);
+        frame += BLOCK as Frame;
+        t.elapsed().as_secs_f64()
+    };
+
+    let mut snap_times = Vec::new();
+    let snapshot = loop {
+        snap_times.push(block(&mut rig.engine));
+        rig.read_events();
+        rig.events.clear();
+        if let Some(job) = rig.session().returned() {
+            match *job {
+                SessionJob::Snapshot(s) => break s,
+                SessionJob::Load(_) => panic!("expected a snapshot back"),
+            }
+        }
+    };
+    assert_eq!(snapshot.result, Some(Ok(())));
+    assert_eq!(snapshot.count, 5);
+    assert_eq!(snapshot.master, master);
+
+    let after_times: Vec<f64> = (0..snap_times.len()).map(|_| block(&mut rig.engine)).collect();
+    rig.frame = frame;
+
+    let snapshot_bytes = snapshot.pcm.capacity() * std::mem::size_of::<Pair>();
+
+    let fpb = frames_per_bar(snapshot.bpm as f64, snapshot.rate, snapshot.meter);
+    let tracks: Vec<LoadTrack> = snapshot.tracks[..snapshot.count]
+        .iter()
+        .flatten()
+        .enumerate()
+        .map(|(k, t)| {
+            let play = &snapshot.pcm[k * samples..(k + 1) * samples];
+            let mut buf = Vec::with_capacity(samples);
+            buf.extend_from_slice(play);
+            if t.reversed {
+                buf.reverse();
+            }
+            let peaks = buf
+                .chunks(PEAK_FRAMES)
+                .map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &[l, r]| (lo.min(l.min(r)), hi.max(l.max(r)))))
+                .collect();
+            LoadTrack { index: t.index, buf, peaks, reversed: t.reversed, playing: true, mix: t.mix }
+        })
+        .collect();
+    let load_bytes: usize = tracks
+        .iter()
+        .map(|t| t.buf.capacity() * std::mem::size_of::<Pair>() + t.peaks.capacity() * std::mem::size_of::<(f32, f32)>())
+        .sum();
+    let load = Load { bpm: snapshot.bpm, meter: snapshot.meter, bars: snapshot.master / fpb, master: snapshot.master, tracks, result: None };
+
+    let (wet, render_bytes) = wet_master_measured(snapshot.rate, load, &[], RenderOptions::default()).expect("wet master renders");
+    assert_eq!(wet.left.len(), samples);
+    assert_eq!(wet.right.len(), samples);
+    let wet_bytes = (wet.left.capacity() + wet.right.capacity()) * std::mem::size_of::<f32>();
+
+    let period = BLOCK as f64 / RATE as f64;
+    let pct = |t: f64| t / period * 100.0;
+    let mean = |ts: &[f64]| ts.iter().sum::<f64>() / ts.len() as f64;
+    let mut sorted = snap_times.clone();
+    sorted.sort_by(f64::total_cmp);
+    let p999 = sorted[sorted.len() * 999 / 1000];
+    let worst = sorted[sorted.len() - 1];
+    let mib = |b: usize| b as f64 / (1024.0 * 1024.0);
+    let mb = |b: usize| b as f64 / 1e6;
+
+    println!(
+        "export snapshot, {} blocks of {BLOCK} at 48 k: mean {:.1} µs ({:.2} %) (after it {:.1} µs, {:.2} %), p99.9 {:.1} µs ({:.2} %), worst {:.1} µs ({:.1} % of the block)",
+        snap_times.len(),
+        mean(&snap_times) * 1e6,
+        pct(mean(&snap_times)),
+        mean(&after_times) * 1e6,
+        pct(mean(&after_times)),
+        p999 * 1e6,
+        pct(p999),
+        worst * 1e6,
+        pct(worst)
+    );
+    println!(
+        "export memory (5 x 60 s stereo @ 48 kHz, Vec capacities):\n  live pool:     {:>6.1} MiB ({:>5.1} MB, {} B)\n  snapshot pcm:  {:>6.1} MiB ({:>5.1} MB, {} B)  [live + snap: {:.1} MiB / {:.1} MB]\n  render load:   {:>6.1} MiB ({:>5.1} MB, {} B)  [live + snap + load: {:.1} MiB / {:.1} MB]\n  render engine: {:>6.1} MiB ({:>5.1} MB, {} B)  [peak during render: {:.1} MiB / {:.1} MB; render-only peak: {:.1} MiB / {:.1} MB]\n  render output: {:>6.1} MiB ({:>5.1} MB, {} B)  [wet master: {:.1} MiB / {:.1} MB; after render: {:.1} MiB / {:.1} MB]",
+        mib(live_pool), mb(live_pool), live_pool,
+        mib(snapshot_bytes), mb(snapshot_bytes), snapshot_bytes, mib(live_pool + snapshot_bytes), mb(live_pool + snapshot_bytes),
+        mib(load_bytes), mb(load_bytes), load_bytes, mib(live_pool + snapshot_bytes + load_bytes), mb(live_pool + snapshot_bytes + load_bytes),
+        mib(render_bytes.engine_pool), mb(render_bytes.engine_pool), render_bytes.engine_pool,
+        mib(live_pool + snapshot_bytes + render_bytes.peak), mb(live_pool + snapshot_bytes + render_bytes.peak),
+        mib(render_bytes.peak), mb(render_bytes.peak),
+        mib(render_bytes.output), mb(render_bytes.output), render_bytes.output,
+        mib(wet_bytes), mb(wet_bytes),
+        mib(live_pool + snapshot_bytes + wet_bytes), mb(live_pool + snapshot_bytes + wet_bytes),
+    );
+    std::hint::black_box((&rig.engine, &snapshot.pcm, &wet.left, &wet.right));
 }
 
 /// What the input sends add: the Stage 2 engine timed with them off, then (past the reverb's IR and the

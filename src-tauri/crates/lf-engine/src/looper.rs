@@ -610,6 +610,12 @@ impl Looper {
         self.capacity
     }
 
+    /// Heap capacity of the lane buffer pool, in bytes (for `tests/perf.rs`).
+    #[doc(hidden)]
+    pub fn pool_bytes(&self) -> usize {
+        self.bufs.iter().map(|b| b.capacity() * std::mem::size_of::<Pair>()).sum()
+    }
+
     pub fn master(&self) -> Frame {
         self.master
     }

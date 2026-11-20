@@ -76,6 +76,21 @@ impl Default for RenderOptions {
     }
 }
 
+/// Heap `Vec` capacities held inside [`wet_master_measured`], in bytes (for `tests/perf.rs`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderBytes {
+    /// The render engine's lane buffer pool (`Looper::pool_bytes`).
+    pub engine_pool: usize,
+    /// The `Load`'s lane buffers and peaks held beside the render engine until the swap returns and drops
+    /// the engine's old pool slots.
+    pub load_buffers: usize,
+    /// The `WetMaster` output buffers (`left` + `right`) plus the block scratch buffers held while rendering.
+    pub output: usize,
+    /// Peak of render-owned `Vec` capacities held at once (`engine_pool + max(load_buffers, output)`).
+    pub peak: usize,
+}
+
 /// Render `load`'s wet stereo master at `rate` with each lane's mix from its track and the master's in
 /// `settings` ([`wet_master_with`] at the default options).
 pub fn wet_master(rate: u32, load: Load, settings: &[Command]) -> Result<WetMaster, String> {
@@ -87,7 +102,13 @@ pub fn wet_master(rate: u32, load: Load, settings: &[Command]) -> Result<WetMast
 /// PCM reversed back); a buffer only has to hold `master` samples, and `playing` is ignored (every lane
 /// plays); each track's `mix` is its lane's (a snapshot's track's). `settings` are the commands the host
 /// keeps (its settings replay): only the master's volume and mute apply (the module doc).
-pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options: RenderOptions) -> Result<WetMaster, String> {
+pub fn wet_master_with(rate: u32, load: Load, settings: &[Command], options: RenderOptions) -> Result<WetMaster, String> {
+    wet_master_measured(rate, load, settings, options).map(|(wet, _)| wet)
+}
+
+/// [`wet_master_with`], also returning the `Vec` capacities held inside the render (for `tests/perf.rs`).
+#[doc(hidden)]
+pub fn wet_master_measured(rate: u32, mut load: Load, settings: &[Command], options: RenderOptions) -> Result<(WetMaster, RenderBytes), String> {
     if !(MIN_RATE..=MAX_RATE).contains(&rate) {
         return Err(format!("export render: the sample rate {rate} Hz is outside {MIN_RATE} to {MAX_RATE} Hz"));
     }
@@ -119,6 +140,7 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     // No device feeds it: no input side for its record lines to hold.
     let config = EngineConfig { max_loop_seconds: master as f64 / rate as f64, max_block: options.block, max_input_frames: 0, ..EngineConfig::new(rate) };
     let (mut engine, mut handle) = Engine::new(config);
+    let engine_pool = engine.looper().pool_bytes();
     let capacity = engine.looper().capacity();
     if capacity < master {
         return Err(format!("export render: the engine holds {capacity} frames, fewer than the loop's {master}"));
@@ -128,6 +150,11 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
         track.buf.resize(capacity as usize, [0.0; 2]);
         track.playing = true;
     }
+    let load_buffers: usize = load
+        .tracks
+        .iter()
+        .map(|t| t.buf.capacity() * std::mem::size_of::<crate::api::Pair>() + t.peaks.capacity() * std::mem::size_of::<(f32, f32)>())
+        .sum();
     load.result = None;
     // Nothing went onto this engine's command ring: the settings apply below, after the load.
     if handle.session.send(Box::new(SessionJob::Load(load)), 0).is_err() {
@@ -166,6 +193,8 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     let mut right = vec![0.0f32; samples];
     let silent = vec![0.0f32; options.block];
     let mut block = [vec![0.0f32; options.block], vec![0.0f32; options.block]];
+    let output = (left.capacity() + right.capacity() + silent.capacity() + block[0].capacity() + block[1].capacity()) * std::mem::size_of::<f32>();
+    let bytes = RenderBytes { engine_pool, load_buffers, output, peak: engine_pool + load_buffers.max(output) };
     let mut f: Frame = 0;
     while f < total {
         let n = (options.block as Frame).min(total - f) as usize;
@@ -185,7 +214,7 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
         while handle.events.pop().is_ok() {}
         f = to;
     }
-    Ok(WetMaster { left, right, warmup })
+    Ok((WetMaster { left, right, warmup }, bytes))
 }
 
 /// A setting the render applies: the master's volume and mute (a lane's mix is its track's).
