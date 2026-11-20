@@ -19,7 +19,8 @@
  *   stop the engine applied though its batch answered false shows GO LIVE, and two lost MIC sets leave
  *   nothing live and answer false;
  * - at 1000×700, 1280×820 and 1920×1080: the CLIP lamp, the badge and the pill are at least their
- *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, the
+ *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, each
+ *   lane's number, state word and source sit centred on its identity column's axis, the
  *   meter runs most of the card's width, and GO LIVE holds INPUT LIVE's box (going live changes neither
  *   the pill's size and place nor the card's height).
  *
@@ -156,6 +157,25 @@ await probe(async ({ open }) => {
     assert.ok(sizes.pill >= (large ? 13 : 12), `${tag}: the INPUT LIVE pill's type: ${sizes.pill}px`);
     assert.ok(sizes.badgeRight + 3 <= sizes.coreLeft, `${tag}: "A+B LIVE" clear of the REC core (badge ends ${sizes.badgeRight}, core starts ${sizes.coreLeft})`);
     assert.ok(sizes.pairRight <= sizes.leftRight + 0.5, `${tag}: the wider number box keeps PLAY and CLR inside the lane's left cluster`);
+    // The identity column is centred: every lane's number, state word and (on the selected lane) source
+    // share the column's one axis, so they line up down the stack whatever the word.
+    const offAxis = await page.evaluate(() => [...document.querySelectorAll('.lp-lane')].flatMap((lane, i) => {
+      // Each line's box hugs its content (a line stretched across the column would centre its box, not
+      // its text), and its middle is the column's.
+      const mid = (b) => b.left + b.width / 2;
+      const col = lane.querySelector('.lp-lane__idbox').getBoundingClientRect();
+      return ['.lp-lane__num', '.lp-lane__state', '.lp-lane__src'].flatMap((q) => {
+        const el = lane.querySelector(q);
+        if (!el) return [];
+        const b = el.getBoundingClientRect();
+        const off = Math.abs(mid(b) - mid(col));
+        return [
+          ...(off > 1 ? [`lane ${i + 1} ${q} ${off.toFixed(1)} px off`] : []),
+          ...(b.width > col.width - 4 ? [`lane ${i + 1} ${q} spans the column (${b.width} of ${col.width} px)`] : []),
+        ];
+      });
+    }));
+    assert.deepEqual(offAxis, [], `${tag}: the lane identity column is centred`);
     assert.ok(sizes.track >= 0.7 * sizes.card, `${tag}: the meter runs most of the card (${sizes.track} of ${sizes.card})`);
 
     if (width === 1280) {

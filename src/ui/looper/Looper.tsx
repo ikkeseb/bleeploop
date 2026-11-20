@@ -399,15 +399,13 @@ function TrackLane(props: {
       {/* left cluster: identity · core gesture · play-stop/clear pair */}
       <div class="lp-lane__left">
         <div class="lp-lane__idbox">
-          <span class="lp-lane__head">
-            <span class="lp-lane__num">{String(props.index + 1)}</span>
-            <Show when={source()}>
-              <span class="lp-lane__src" title="What a take on this lane hears: the slots with live input">
-                {source()}
-              </span>
-            </Show>
-          </span>
+          <span class="lp-lane__num">{String(props.index + 1)}</span>
           <span class="lp-lane__state">{stateWord()}</span>
+          <Show when={source()}>
+            <span class="lp-lane__src" title="What a take on this lane hears: the slots with live input">
+              {source()}
+            </span>
+          </Show>
         </div>
 
         <button

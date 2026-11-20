@@ -129,6 +129,11 @@ settles.
   step larger at 2560, one bar ruler, the loop's length in bars only), from the chair on the 27":
   does every lane's state read at a glance?
 - The selected lane, marked by its lit number alone: is it findable from the chair?
+- Each lane's number and state word now centred in their column, the selected lane's `A LIVE` on a
+  line under the word (it drops where a short stack has no room for it): does the column read better
+  than left-aligned, is `A LIVE` still where the eye looks, and does the few-pixel rise of the selected
+  lane's number and word (the third line centred with them) read as part of the selection or as a
+  jump? (machine: `live-meter`)
 - A FADE on the restyled waves: does it read as the loop sinking, in motion?
 - The command-bar popovers (CLICK, SENS, IN FX) now open under the bar, 10 px lower: does each still
   read as its pill's?
