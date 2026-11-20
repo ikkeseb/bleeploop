@@ -14,6 +14,7 @@ import { SYNTHS } from '../state/instruments';
 import { volumeDb } from '../looper/shared';
 import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
+import type { InputPick as Pick, ReadPick } from '../../platform';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
 import { slotLetter } from '../state/slot-tones';
 import { Icon } from './icons';
@@ -24,23 +25,36 @@ import { Icon } from './icons';
  * plate's editor and menu are `PluginControls.tsx`.
  */
 
-/** The slot's capture channel ("In 1".."In N", or Auto), switched in place: a small value window with
- * a chevron, the native select laid over it (so the list is the system's, and a pick is a pick). */
+/** A pick as the select keys it: '' auto, "2" a channel, "0+1" a pair (0-based). */
+const pickKey = (p: Pick): string => (p === null ? '' : Array.isArray(p) ? `${p[0]}+${p[1]}` : String(p));
+const keyPick = (k: string): Pick => (k === '' ? null : k.includes('+') ? (k.split('+').map(Number) as [number, number]) : Number(k));
+/** "In 3", "In 1+2". */
+const pickName = (p: ReadPick): string => `In ${Array.isArray(p) ? `${p[0] + 1}+${p[1] + 1}` : p + 1}`;
+
+/** The slot's input ("In 1".."In N", the pairs "In 1+2", "In 3+4"…, or Auto), switched in place: a
+ * small value window with a chevron, the native select laid over it (so the list is the system's, and a
+ * pick is a pick). */
 export function InputPick(props: { slot: 0 | 1 }) {
   const pick = () => engineSlotInputChannels()[props.slot];
   const channels = createMemo(() => {
-    const list = Array.from({ length: inputChannelCount(engineDevice()) }, (_, i) => String(i));
+    const n = inputChannelCount(engineDevice());
+    const list: ReadPick[] = Array.from({ length: n }, (_, i) => i);
+    for (let l = 0; l + 1 < n; l += 2) list.push([l, l + 1]);
     // A saved pick the device does not list stays visible rather than reading as Auto.
-    if (pick() !== '' && !list.includes(pick())) list.push(pick());
+    const p = pick();
+    if (p !== null && !list.some((c) => pickKey(c) === pickKey(p))) list.push(p);
     return list;
   });
   // Auto names the input the engine reads for the slot (its status), so a guitar on the other jack shows.
   const auto = () => {
     const d = engineDevice();
-    const read = pick() === '' && d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
-    return read === undefined ? 'Auto' : `Auto · In ${read + 1}`;
+    const read = pick() === null && d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
+    return read === undefined ? 'Auto' : `Auto · ${pickName(read)}`;
   };
-  const shown = () => (pick() === '' ? auto() : `In ${Number(pick()) + 1}`);
+  const shown = () => {
+    const p = pick();
+    return p === null ? auto() : pickName(p);
+  };
   return (
     <span class="slot__inwin k-win" onClick={(e) => e.stopPropagation()}>
       <span class="slot__inval">{shown()}</span>
@@ -49,11 +63,11 @@ export function InputPick(props: { slot: 0 | 1 }) {
         class="slot__in"
         aria-label={`Input for slot ${slotLetter(props.slot)}`}
         title="The input this slot hears. Auto: input 2 on an interface with two or more"
-        value={pick()}
-        onChange={(e) => setEngineSlotInputChannel(props.slot, e.currentTarget.value)}
+        value={pickKey(pick())}
+        onChange={(e) => setEngineSlotInputChannel(props.slot, keyPick(e.currentTarget.value))}
       >
         <option value="">{auto()}</option>
-        <For each={channels()}>{(c) => <option value={c}>In {Number(c) + 1}</option>}</For>
+        <For each={channels()}>{(c) => <option value={pickKey(c)}>{pickName(c)}</option>}</For>
       </select>
     </span>
   );

@@ -283,7 +283,7 @@ below reads an old key through the resolver that reads it today, so a missing ke
   unity, its instrument levels from `lf.synthGain.<id>` (the input trim never scaled a synth). GO LIVE is
   never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
-  `inputChannel` seeding both, as today) each become a mono pick, '' auto; stereo is the player's (§7).
+  `inputChannel` seeding both, as today) each become a mono pick, `null` auto; stereo is the player's (§7).
 - **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.
 - **Proved by** `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1 and 48
   kHz) and `rig-recall.mjs` on a stored v0.8.9 profile; at the boundaries those fakes skip, `src-tauri`

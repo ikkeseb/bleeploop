@@ -689,13 +689,13 @@ await probe(async ({ open }) => {
 
   // ── The stereo pick over four canned inputs ───────────────────────────────────────────────────────
   assert.equal(await page.evaluate(() => window.__lf.native.inputs.length), 4);
-  const pick = (slot, p) => page.evaluate(([s, v]) => window.__lf.platform.engine.setSlotInputPick(s, v).then(() => 'ok', (e) => e.message), [slot, p]);
+  const pick = (slot, p) => page.evaluate(([s, v]) => window.__lf.platform.engine.setSlotInputChannel(s, v).then(() => 'ok', (e) => e.message), [slot, p]);
   assert.equal(await pick(0, [2, 3]), 'ok');
   assert.equal(await pick(1, null), 'ok');
   assert.equal(await pick(1, 0), 'ok');
   assert.match(await pick(0, 4), /lacks/);
   assert.match(await pick(0, [0, 4]), /lacks/);
-  assert.deepEqual(await page.evaluate(() => window.__lf.native.slotInputPicks), [[0, [2, 3]], [1, null], [1, 0]]);
+  assert.deepEqual(await page.evaluate(() => window.__lf.native.slotInputChannels), [[0, [2, 3]], [1, null], [1, 0]]);
 
   // ── The Tauri and production hosts refuse the chain without logging ──────────────────────────────
   const refusals = await page.evaluate(async () => {
@@ -705,15 +705,13 @@ await probe(async ({ open }) => {
     return [
       tauriPlatform.chain.available,
       await why(tauriPlatform.chain.add(0, 5, { kind: 'echo' }, 0)),
-      await why(tauriPlatform.engine.setSlotInputPick(0, [0, 1])),
       inertPlatform.chain.available,
       await why(inertPlatform.chain.move(5, 0)),
     ];
   });
   console.log('refusals', refusals);
   assert.deepEqual(refusals.slice(0, 2), [false, 'The native engine does not have the chain yet.']);
-  assert.match(refusals[2], /does not take a stereo input pick yet/);
-  assert.deepEqual(refusals.slice(3), [false, 'Not available in the browser build.']);
+  assert.deepEqual(refusals.slice(2), [false, 'Not available in the browser build.']);
 
   // ── Under Tauri the unit commands never reach `input_send` (the IPC spied) ────────────────────────
   // A second instance of the platform module, evaluated with Tauri's globals present, over a spy.
@@ -745,6 +743,7 @@ await probe(async ({ open }) => {
       );
       const mixed = await tauri.sendEngine({ SetUnitBypass: [5, true] }, 'PlayAll');
       const direct = await tauri.platform.input.send(1, [{ engine: { SetUnitParam: [5, 'echoLevel', 1] } }]).then(() => 'sent', (e) => e.message);
+      await tauri.platform.engine.setSlotInputChannel(0, [0, 1]);
       return { kind: tauri.platform.kind, available: tauri.platform.chain.available, unitOnly, mixed, direct, invokes };
     } finally {
       delete window.__TAURI_INTERNALS__;
@@ -755,4 +754,5 @@ await probe(async ({ open }) => {
   assert.deepEqual([ipc.unitOnly, ipc.mixed], [false, false], 'a call that carried a unit command resolves false');
   assert.equal(ipc.direct, 'The native engine does not have the chain yet.', 'the IPC boundary refuses a batch with one');
   assert.deepEqual(ipc.invokes.filter(([cmd]) => cmd === 'input_send').map(([, items]) => items), [[{ engine: 'PlayAll' }]], 'zero unit commands invoked: only the other command left');
+  assert.ok(ipc.invokes.some(([cmd]) => cmd === 'engine_set_slot_input_channel'), 'the stereo pick goes to the native engine as the one input-pick command');
 });

@@ -270,11 +270,14 @@ fn a_callback_at_or_over_its_period_counts_as_over_budget() {
 
 #[test]
 fn every_slots_pick_travels_in_one_word() {
-    let run = Run::new([3, u32::MAX]);
-    assert_eq!(run.slot_channels(), [3, u32::MAX]);
-    run.set_slot_channels([u32::MAX, 0]);
-    assert_eq!(run.slot_channels(), [u32::MAX, 0], "a swap lands whole");
-    assert_eq!(run.picks(2), [1, 0], "a pick past the device's channels reads its last");
+    use InputPick::{Mono, Pair};
+    let run = Run::new([Mono(3), Pair([5, 4])]);
+    assert_eq!(run.picks(8), [[3, 3], [5, 4]], "a mono pick on both sides, a pair each side its own");
+    run.set_slot_channels([Pair([1, 2]), Mono(0)]);
+    assert_eq!(run.picks(8), [[1, 2], [0, 0]], "a swap lands whole");
+    assert_eq!(run.picks(2), [[1, 1], [0, 0]], "a pick past the device's channels reads its last");
+    run.set_slot_channels([Mono(u32::MAX), Pair([0, 65_535])]);
+    assert_eq!(run.picks(65_536), [[65_535, 65_535], [0, 65_535]], "a channel past the word's 16 bits reads the last it holds");
 }
 
 const RATE: u32 = 48_000;
@@ -321,9 +324,9 @@ impl Join {
         if let Some(max_block) = max_block {
             core.max_block.store(max_block, Relaxed);
         }
-        let run = Arc::new(Run::new([0, 0]));
+        let run = Arc::new(Run::new([InputPick::Mono(0); 2]));
         // The device owner's join (`owner.rs`): 500 ms of ring, a 25 ms setpoint.
-        let join = PipeConfig { in_rate: RATE, out_rate: RATE, channels: SLOT_COUNT, capacity: RATE as usize / 2, setpoint: 0.025, max_pull: MAX_DEVICE_BLOCK };
+        let join = PipeConfig { in_rate: RATE, out_rate: RATE, channels: JOIN_CHANNELS, capacity: RATE as usize / 2, setpoint: 0.025, max_pull: MAX_DEVICE_BLOCK };
         let (push, pull) = pipe(join).unwrap();
         let input = JoinInput::new(core.clone(), run.clone(), 1, RATE, push);
         let render = Render::join(core.clone(), run, 2, RATE, pull);
@@ -458,7 +461,7 @@ fn clip_lights_at_each_input_formats_full_scale_and_never_one_step_under_it() {
             let data = [$x; N];
             let mut out = [0.0f32; 2 * N];
             let (core, _handle) = engine_core();
-            let run = Arc::new(Run::new([0, 0]));
+            let run = Arc::new(Run::new([InputPick::Mono(0); 2]));
             let mut input = DuplexInput::new(core.clone(), run.clone(), 1, RATE);
             let mut render = Render::duplex(core.clone(), run, 2, RATE);
             input.capture(&data, None);
@@ -499,7 +502,7 @@ fn a_lock_held_across_cycles_is_one_input_gap_whichever_input_it_costs() {
     const B: usize = 256;
     for (after_input, before_input) in [(false, false), (false, true), (true, false), (true, true)] {
         let (core, _handle) = engine_core();
-        let run = Arc::new(Run::new([0, 0]));
+        let run = Arc::new(Run::new([InputPick::Mono(0); 2]));
         let mut input = DuplexInput::new(core.clone(), run.clone(), 1, RATE);
         let mut render = Render::duplex(core.clone(), run, 2, RATE);
         let x = [0.25f32; B];

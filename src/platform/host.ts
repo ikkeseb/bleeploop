@@ -349,14 +349,11 @@ export interface EngineHost {
   close(): Promise<void>;
   /** The device that runs, or null. */
   status(): Promise<DeviceStatus | null>;
-  /** A plugin slot's capture channel (0-based; null = auto: input 2 on a device with two or more),
-   * switched without reopening the device; the running device keeps it for its own reopens. Rejects for
-   * a channel the device lacks (nothing changes) and while no device runs. */
-  setSlotInputChannel(slot: number, channel: number | null): Promise<void>;
-  /** A slot's input pick in the stereo shape (unit contract §7): auto, one channel (mono) or a pair. Rejects
-   * for a pick the device lacks, either side of a pair (nothing changes), and while no device runs. Only the
-   * browser fake takes it yet: the native engine refuses it until the stereo path lands. */
-  setSlotInputPick(slot: number, pick: InputPick): Promise<void>;
+  /** A plugin slot's input pick (unit contract §7): auto (null: input 2 on a device with two or more), one
+   * channel (mono) or a `[left, right]` pair, 0-based; switched without reopening the device, and the
+   * running device keeps it for its own reopens. Rejects for a pick the device lacks, either side of a
+   * pair (nothing changes), and while no device runs. */
+  setSlotInputChannel(slot: number, pick: InputPick): Promise<void>;
   /** Share output's endpoint (a WASAPI render id, as `listOutputDevices` lists them), or null for off.
    * The mirror runs while the device is ASIO. */
   setShare(endpoint: string | null): Promise<void>;

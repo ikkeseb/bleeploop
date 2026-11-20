@@ -189,7 +189,7 @@ pub async fn engine_status() -> Result<Option<DeviceStatus>, String> {
 
 /// A plugin slot's capture channel (0-based; `null` = auto), switched without rebuilding a stream.
 #[tauri::command]
-pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Result<(), String> {
+pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<super::InputPick>) -> Result<(), String> {
     let host = app()?.host()?;
     tauri::async_runtime::spawn_blocking(move || host.set_slot_input_channel(slot as usize, channel))
         .await

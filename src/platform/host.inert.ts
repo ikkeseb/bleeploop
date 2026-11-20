@@ -84,7 +84,6 @@ export const inertPlatform: Platform = {
     close: nothing,
     status: async () => null,
     setSlotInputChannel: absent,
-    setSlotInputPick: absent,
     setShare: absent,
     snapshot: absent,
     loadSession: absent,

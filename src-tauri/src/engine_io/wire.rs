@@ -444,11 +444,12 @@ pub struct ClockAnchor {
     pub grid: Frame,
 }
 
-/// The device input since the last frame, per plugin slot (its capture channel, before any plugin):
-/// the linear peak, and whether a sample reached full scale. The command bar's meter shows the louder.
+/// The device input since the last frame, per plugin slot (its pick, before any plugin): each side's
+/// linear peak (`[left, right]`, a mono pick's twice), and whether a sample on either reached full scale.
+/// The slot's meter and the command bar's show the louder side.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meter {
-    pub peak: [f32; SLOT_COUNT],
+    pub peak: [[f32; 2]; SLOT_COUNT],
     pub clip: [bool; SLOT_COUNT],
 }
 
@@ -626,7 +627,7 @@ mod present {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DeviceRequest, OpenError};
+    use super::super::{DeviceRequest, InputPick, OpenError};
     use super::*;
     use serde_json::Value;
 
@@ -891,11 +892,17 @@ mod tests {
         assert!(requests.iter().any(|r| r.buffer.is_some()), "null and set fields");
         assert!(requests.iter().any(|r| r.sample_rate.is_some()) && requests.iter().any(|r| r.sample_rate.is_none()), "a rate pick and none");
         let one: DeviceRequest = serde_json::from_str(r#"{"backend":"Asio","input":null,"output":null,"inputChannel":3,"buffer":null}"#).unwrap();
-        assert_eq!(one.input_channels, [Some(3), Some(3)], "one inputChannel sets both slots");
+        assert_eq!(one.input_channels, [Some(InputPick::Mono(3)); SLOT_COUNT], "one inputChannel sets both slots");
+        assert!(picks.clone().any(|c| matches!(c, Some(InputPick::Pair(_)))) && picks.clone().any(|c| matches!(c, Some(InputPick::Mono(_)))), "a pair and a mono pick");
+        let pair: DeviceRequest = serde_json::from_str(r#"{"backend":"Asio","input":null,"output":null,"inputChannels":[[0,1],2],"buffer":null}"#).unwrap();
+        assert_eq!(pair.input_channels, [Some(InputPick::Pair([0, 1])), Some(InputPick::Mono(2))], "a pair is [left, right], a channel a number");
+        for bad in [r#"[[0],null]"#, r#"[[0,1,2],null]"#, r#"[-1,null]"#, r#"[[0,"1"],null]"#] {
+            let json = format!(r#"{{"backend":"Asio","input":null,"output":null,"inputChannels":{bad},"buffer":null}}"#);
+            assert!(serde_json::from_str::<DeviceRequest>(&json).is_err(), "{bad} is no pick");
+        }
         let auto: DeviceRequest = serde_json::from_str(r#"{"backend":"Wasapi","input":null,"output":null,"inputChannel":null,"buffer":null}"#).unwrap();
         assert_eq!(auto.input_channels, [None, None]);
         assert_eq!(auto.sample_rate, None, "a request from before the rate pick asks for the device's own");
-        let _: Vec<DeviceStatus> = round_trip("deviceStatuses");
         let frames: Vec<FeedFrame> = round_trip("feed");
         assert!(frames.iter().any(|f| f.reset && matches!(f.status, Some(Some(_)))), "a reset frame with a status");
         assert!(frames.iter().any(|f| f.status == Some(None)), "a frame whose device stopped (status null)");
@@ -906,6 +913,9 @@ mod tests {
         assert!(scope.min.iter().chain(&scope.max).all(|c| c.len() == scope.min[0].len()), "every array holds the same columns");
         assert!(frames.iter().any(|f| f.scope.is_none()), "and one without them (the field is absent then)");
         assert!(frames.iter().filter_map(|f| f.meter).any(|m| m.peak[0] != m.peak[1] && m.clip[0] != m.clip[1]), "a meter per slot");
+        assert!(frames.iter().filter_map(|f| f.meter).any(|m| m.peak.iter().any(|[l, r]| l != r)), "a peak per side");
+        let statuses: Vec<DeviceStatus> = round_trip("deviceStatuses");
+        assert!(statuses.iter().flat_map(|s| s.input_channels).any(|p| matches!(p, InputPick::Pair(_))), "a status that reads a pair");
         assert!(frames.iter().any(|f| f.reset && f.live.is_some_and(|l| l[0] != l[1])), "a reset frame with each slot's live flag");
         assert!(frames.iter().any(|f| f.live.is_none()), "and a frame where it did not change (the field is absent then)");
         let readings: Vec<TunerUpdate> = frames.iter().filter_map(|f| f.tuner).collect();

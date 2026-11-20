@@ -1,11 +1,14 @@
 import { createSignal } from 'solid-js';
 import {
+  pickSides,
   platform,
+  samePick,
   type AsioDeviceInfo,
   type AsioStatusReport,
   type AudioInputDevice,
   type AudioOutputDevice,
   type DeviceStatus,
+  type InputPick,
 } from '../../platform';
 import {
   defaultSlotInputChannels,
@@ -52,14 +55,14 @@ const [asioDrivers, setAsioDrivers] = createSignal<string[]>([]);
 const [asioEnabled, setAsioEnabledSig] = createSignal<boolean>(readAudioDeviceSettings().asioEnabled);
 export const usingAsio = () => asioAvailable() && asioEnabled();
 
-// Each slot's capture channel pick ('' = auto), saved with the device picks. A pick is
+// Each slot's input pick (null = auto, a channel, or a pair), saved with the device picks. A pick is
 // device-bound: an input device change or prune resets both to the install's default
-// (`defaultSlotInputChannels`), and a device without it resets that one to Auto.
+// (`defaultSlotInputChannels`), and a device without it, either side of a pair, resets that one to Auto.
 const [slotInputChannels, setSlotInputChannelsSig] = createSignal(readAudioDeviceSettings().slotInputChannels);
 
-/** Save and show each slot's capture channel pick. */
-export function saveSlotInputChannels(picks: readonly [string, string]): void {
-  if (picks[0] === slotInputChannels()[0] && picks[1] === slotInputChannels()[1]) return;
+/** Save and show each slot's input pick. */
+export function saveSlotInputChannels(picks: readonly [InputPick, InputPick]): void {
+  if (samePick(picks[0], slotInputChannels()[0]) && samePick(picks[1], slotInputChannels()[1])) return;
   setSlotInputChannelsSig([picks[0], picks[1]]);
   writeAudioDeviceSettings({ slotInputChannels: [picks[0], picks[1]] });
 }
@@ -143,14 +146,13 @@ export async function refreshAndPruneDevices(running: DeviceStatus | null = null
     writeAudioDeviceSettings({ inputDeviceId: '', ...(usingAsio() ? {} : { inputChannel: '' }) });
     if (!usingAsio()) saveSlotInputChannels(defaultSlotInputChannels());
   }
-  // A slot pick past the device's inputs (saved on a device with more) is not what the slot reads.
+  // A slot pick past the device's inputs, either side of a pair (saved on a device with more), is not
+  // what the slot reads.
   const inputs = inputChannelCount(running);
   if (inputs > 0) {
     const picks = slotInputChannels();
-    saveSlotInputChannels([
-      picks[0] !== '' && Number(picks[0]) >= inputs ? '' : picks[0],
-      picks[1] !== '' && Number(picks[1]) >= inputs ? '' : picks[1],
-    ]);
+    const past = (pick: InputPick): boolean => pickSides(pick)?.some((c) => c >= inputs) ?? false;
+    saveSlotInputChannels([past(picks[0]) ? null : picks[0], past(picks[1]) ? null : picks[1]]);
   }
   if (
     outputRefreshSucceeded &&

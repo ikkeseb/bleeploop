@@ -21,11 +21,11 @@ use lf_engine::grid::Frame;
 use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, UnitProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
+use super::callback::{Run, Tap, TapEnd, JOIN_CHANNELS, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
 use super::driver::{Driver, Endpoints, Mirror, Spec, StartError, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
 use super::slot_host::ORPHAN;
-use super::{transition, BlockLoad, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, IoDiag, OpenError, Rt};
+use super::{transition, BlockLoad, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, InputPick, IoDiag, OpenError, Rt};
 use crate::asio_startup::AsioStatusReport;
 use crate::audio_output::AudioBackend;
 
@@ -226,7 +226,7 @@ pub(crate) enum Request {
     /// up never runs.
     Open(DeviceRequest, bool, Arc<AtomicBool>, SyncSender<Result<DeviceStatus, OpenError>>),
     Close(Reply<()>),
-    SetSlotInputChannel(usize, Option<u32>, Reply<()>),
+    SetSlotInputChannel(usize, Option<InputPick>, Reply<()>),
     SetShare(Option<String>, Reply<()>),
     /// `EngineHost::switch_asio`.
     SwitchAsio(SwitchAsio, Reply<AsioStatusReport>),
@@ -258,6 +258,8 @@ struct Active {
     /// Its input callback died and the run was not restarted (`recapture`): an open of the same device
     /// restarts it.
     input_dead: bool,
+    /// What each slot reads now (`DeviceStatus::input_channels`): the owner is the only writer.
+    reads: [InputPick; SLOT_COUNT],
 }
 
 /// The release log's view of the callbacks, which cannot log: once a `GLITCH_EVERY`, the fault counters
@@ -609,7 +611,7 @@ impl<D: Driver> Owner<D> {
     /// The ASIO driver refused the size `request` asked for (`refused`): a driver whose sizes come in
     /// steps the probe's range cannot show. Open once more at the driver's own size; the running request
     /// keeps the player's, so asking for it again changes nothing, and the status says what runs.
-    fn start_at_own_size(&mut self, request: DeviceRequest, refused: String, channels: [u32; SLOT_COUNT]) -> Result<DeviceStatus, String> {
+    fn start_at_own_size(&mut self, request: DeviceRequest, refused: String, channels: [InputPick; SLOT_COUNT]) -> Result<DeviceStatus, String> {
         log::warn!("[engine_io] the driver refused the buffer ({refused}): opening at its own size");
         let (spec, device) = self.driver.resolve(&DeviceRequest { buffer: None, ..request.clone() })?;
         if self.core.rate() != Some(spec.rate) {
@@ -664,7 +666,7 @@ impl<D: Driver> Owner<D> {
     }
 
     /// Start `spec`'s streams on the engine, wait for its first callbacks, then report it.
-    fn start(&mut self, request: DeviceRequest, spec: Spec, device: D::Device, channels: [u32; SLOT_COUNT]) -> Result<DeviceStatus, StartError> {
+    fn start(&mut self, request: DeviceRequest, spec: Spec, device: D::Device, channels: [InputPick; SLOT_COUNT]) -> Result<DeviceStatus, StartError> {
         let run = Arc::new(Run::new(channels));
         {
             let mut rt = rt(&self.core);
@@ -679,8 +681,8 @@ impl<D: Driver> Owner<D> {
             AudioBackend::Wasapi => Some(pipes::pipe(PipeConfig {
                 in_rate: spec.in_rate,
                 out_rate: spec.rate,
-                // One stream per slot, interleaved.
-                channels: SLOT_COUNT,
+                // Each slot's pair, interleaved.
+                channels: JOIN_CHANNELS,
                 capacity: (spec.in_rate as f64 * JOIN_CAPACITY_SECONDS).ceil() as usize,
                 setpoint: JOIN_SETPOINT_SECONDS,
                 max_pull: MAX_DEVICE_BLOCK,
@@ -741,11 +743,11 @@ impl<D: Driver> Owner<D> {
             input_frames: 0,
         };
         *self.core.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
-        self.active = Some(Active { request, spec, run, streams: started.streams, block, input_dead: false });
+        self.active = Some(Active { request, spec, run, streams: started.streams, block, input_dead: false, reads: channels });
         if let Some(s) = self.status() {
             log::info!(
-                "[engine_io] {:?} running: {} Hz, {block}-frame blocks, in \"{}\" channels {:?} (per slot), out \"{}\", align {} frames (input {})",
-                s.backend, s.sample_rate, s.input_name, channels.map(|c| c + 1), s.output_name, s.align_frames, s.input_frames
+                "[engine_io] {:?} running: {} Hz, {block}-frame blocks, in \"{}\" {:?} (per slot), out \"{}\", align {} frames (input {})",
+                s.backend, s.sample_rate, s.input_name, channels.map(input_name), s.output_name, s.align_frames, s.input_frames
             );
         }
         if let Some(endpoint) = self.share.clone() {
@@ -922,34 +924,35 @@ impl<D: Driver> Owner<D> {
         log::error!("[engine_io] no fallback device opened; the engine waits for the next open");
     }
 
-    /// Every slot's capture channel, in place, as an open takes them (a pick the device lacks: auto).
-    fn set_input_channels(&mut self, channels: [Option<u32>; SLOT_COUNT]) -> Result<(), String> {
+    /// Every slot's input, in place, as an open takes them (a pick the device lacks: auto).
+    fn set_input_channels(&mut self, channels: [Option<InputPick>; SLOT_COUNT]) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
         let resolved = open_channels(&active.spec, channels);
         self.core.break_tuner(Frame::MAX);
         active.run.set_slot_channels(resolved);
+        active.reads = resolved;
         active.request.input_channels = channels;
         self.publish_channels(resolved);
         self.break_tuner_input();
         Ok(())
     }
 
-    /// One slot's capture channel, in place; the other slot's stays, whatever it holds (an open may
-    /// have taken auto for a pick the device lacks). Refused for a channel the device lacks: the UI
-    /// offers only the device's inputs. An output-only device takes any pick: it captures nothing.
-    fn set_slot_input_channel(&mut self, slot: usize, channel: Option<u32>) -> Result<(), String> {
+    /// One slot's input, in place; the other slot's stays, whatever it holds (an open may have taken
+    /// auto for a pick the device lacks). Refused for a channel the device lacks, either side of a pair:
+    /// the UI offers only the device's inputs. An output-only device takes any pick: it captures nothing.
+    fn set_slot_input_channel(&mut self, slot: usize, channel: Option<InputPick>) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
         if slot >= SLOT_COUNT {
             return Err(format!("no slot {slot}"));
         }
-        // The owner is the only writer: the other slot's pick is the one it last stored.
-        let mut picks = active.run.slot_channels();
+        let mut picks = active.reads;
         picks[slot] = match transition::input_channel(active.spec.in_channels, channel) {
-            Err(_) if active.spec.in_channels == 0 => 0,
+            Err(_) if active.spec.in_channels == 0 => InputPick::Mono(0),
             pick => pick?,
         };
         self.core.break_tuner(Frame::MAX);
         active.run.set_slot_channels(picks);
+        active.reads = picks;
         active.request.input_channels[slot] = channel;
         self.publish_channels(picks);
         self.break_tuner_input();
@@ -971,8 +974,8 @@ impl<D: Driver> Owner<D> {
         self.core.break_tuner(fence);
     }
 
-    /// The channels each slot reads now, into the status.
-    fn publish_channels(&self, channels: [u32; SLOT_COUNT]) {
+    /// What each slot reads now, into the status.
+    fn publish_channels(&self, channels: [InputPick; SLOT_COUNT]) {
         if let Some(status) = self.core.device.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             status.input_channels = channels;
         }
@@ -1080,18 +1083,26 @@ impl<D: Driver> Owner<D> {
 
 /// Each slot's channel at an open of `spec` ([`transition::open_channels`]): a slot whose pick the
 /// device lacks reads auto, said once in the log.
-fn open_channels(spec: &Spec, picks: [Option<u32>; SLOT_COUNT]) -> [u32; SLOT_COUNT] {
+fn open_channels(spec: &Spec, picks: [Option<InputPick>; SLOT_COUNT]) -> [InputPick; SLOT_COUNT] {
     let (channels, fell_back) = transition::open_channels(spec.in_channels, picks);
     for slot in (0..SLOT_COUNT).filter(|&slot| fell_back[slot]) {
         log::warn!(
-            "[engine_io] slot {slot}: input {} is not on \"{}\" ({} inputs): it reads input {}",
-            picks[slot].map_or(0, |c| c as u64 + 1),
+            "[engine_io] slot {slot}: {} is not on \"{}\" ({} inputs): it reads {}",
+            picks[slot].map_or_else(|| "auto".to_string(), input_name),
             spec.input_name,
             spec.in_channels,
-            channels[slot] + 1
+            input_name(channels[slot])
         );
     }
     channels
+}
+
+/// A pick as a player names it: "input 2", "inputs 1+2".
+fn input_name(pick: InputPick) -> String {
+    match pick {
+        InputPick::Mono(c) => format!("input {}", u64::from(c) + 1),
+        InputPick::Pair([l, r]) => format!("inputs {}+{}", u64::from(l) + 1, u64::from(r) + 1),
+    }
 }
 
 /// The first fatal error a run latched, as text.

@@ -219,7 +219,15 @@ await probe(async ({ browser, open }) => {
     await inp(1).selectOption('3');
     await inp(2).selectOption('1');
     await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 2);
-    assert.deepEqual(await saved(), ['3', '1']);
+    assert.deepEqual(await saved(), [3, 1]);
+    // A pair (unit contract §7): offered beside the single inputs, sent and saved as [left, right].
+    await inp(1).selectOption('0+1');
+    await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 3);
+    assert.deepEqual(await p.evaluate(() => window.__lf.native.slotInputChannels.at(-1)), [0, [0, 1]], 'a pair pick reaches the engine as [left, right]');
+    assert.deepEqual(await saved(), [[0, 1], 1], 'and is saved in the same shape');
+    assert.equal(await p.locator('.slot__inval').first().textContent(), 'In 1+2', 'the window names the pair');
+    await inp(1).selectOption('3');
+    await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 4);
 
     // 1a. A reopen whose status says slot A reads input 2: the device lacks input 4.
     await p.evaluate(async () => {
@@ -229,7 +237,7 @@ await probe(async ({ browser, open }) => {
       await (await import('/src/ui/state/engine-store.ts')).openEngineDevice();
       native.open = real;
     });
-    assert.deepEqual(await saved(), ['', '1'], 'a pick the device lacks is saved as Auto; the other stays');
+    assert.deepEqual(await saved(), [null, 1], 'a pick the device lacks is saved as Auto; the other stays');
     assert.equal(await inp(1).inputValue(), '', 'and the slot shows Auto');
     const autoText = (slot, text) => p.waitForFunction(([s, t]) =>
       document.querySelector(`[aria-label="Input for slot ${'AB'[s - 1]}"] option[value=""]`)?.textContent === t, [slot, text], { timeout: 2000 })
@@ -240,7 +248,7 @@ await probe(async ({ browser, open }) => {
     await p.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [], status: {
       backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Small input', outputName: 'Fake output',
       alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0] } }));
-    assert.deepEqual(await saved(), ['', ''], "a device the owner reopened on without slot B's pick resets it");
+    assert.deepEqual(await saved(), [null, null], "a device the owner reopened on without slot B's pick resets it");
     assert.equal(await inp(2).inputValue(), '');
     assert.ok(await autoText(2, 'Auto · In 1'), 'on a device whose status reads input 1, Auto says so');
     // 1c. An input device change in Audio Settings resets both picks (back on the four-input device first).
@@ -256,7 +264,7 @@ await probe(async ({ browser, open }) => {
     await p.waitForFunction(() => document.querySelectorAll('[aria-label="Audio input device"] option').length === 3);
     await p.getByRole('combobox', { name: 'Audio input device', exact: true }).selectOption('other');
     await p.waitForFunction(() => window.__lf.native.opened.length >= 3);
-    assert.deepEqual(await saved(), ['', ''], 'an input device change resets both picks');
+    assert.deepEqual(await saved(), [null, null], 'an input device change resets both picks');
     assert.deepEqual((await p.evaluate(() => window.__lf.native.opened.at(-1))).inputChannels, [null, null], 'and the reopen asks for auto');
     await p.evaluate(() => window.__lf.ui.closeSettings());
     // 1d. The prune (startup, Audio Settings): a pick past the saved device's inputs, then a vanished device.
@@ -264,16 +272,16 @@ await probe(async ({ browser, open }) => {
       const devices = await import('/src/ui/state/audio-devices.ts');
       const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
       writeAudioDeviceSettings({ inputDeviceId: 'other' });
-      devices.saveSlotInputChannels(['3', '1']);
+      devices.saveSlotInputChannels([3, 1]);
       await devices.refreshAndPruneDevices();
       const past = readAudioDeviceSettings().slotInputChannels;
-      devices.saveSlotInputChannels(['1', '0']);
+      devices.saveSlotInputChannels([1, 0]);
       const { platform } = await import('/src/platform/index.ts');
       platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
       await devices.refreshAndPruneDevices();
       return { past, vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
     });
-    assert.deepEqual(pruned, { past: ['', '1'], vanished: ['', ''], shown: ['', ''] }, 'the prune drops a pick past the inputs, and both with a vanished device');
+    assert.deepEqual(pruned, { past: [null, 1], vanished: [null, null], shown: [null, null] }, 'the prune drops a pick past the inputs, and both with a vanished device');
 
     // 2. GO LIVE pressed (the named action) while a tone reload holds live slot A. Under the amp, A plays
     // a synth, and B is Off (takes input): the press must still reach A, whose plugin the reload removed.
@@ -380,7 +388,7 @@ await probe(async ({ browser, open }) => {
     const opens = (await openedNow()).length;
     await p.getByRole('combobox', { name: 'Audio input device', exact: true }).selectOption('other');
     await p.waitForFunction((n) => window.__lf.native.opened.length > n, opens);
-    assert.deepEqual(await saved(), ['0', ''], "an input device change on a fresh install keeps slot A on input 1");
+    assert.deepEqual(await saved(), [0, null], "an input device change on a fresh install keeps slot A on input 1");
     assert.deepEqual((await openedNow()).at(-1), [0, null], 'and the reopen asks for input 1 on slot A, auto on slot B');
     await p.evaluate(() => window.__lf.ui.closeSettings());
     // The prune of a vanished input device, over picks the player made.
@@ -388,13 +396,13 @@ await probe(async ({ browser, open }) => {
       const devices = await import('/src/ui/state/audio-devices.ts');
       const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
       writeAudioDeviceSettings({ inputDeviceId: 'other' });
-      devices.saveSlotInputChannels(['1', '0']);
+      devices.saveSlotInputChannels([1, 0]);
       const { platform } = await import('/src/platform/index.ts');
       platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
       await devices.refreshAndPruneDevices();
       return { vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
     });
-    assert.deepEqual(pruned, { vanished: ['0', ''], shown: ['0', ''] }, 'a vanished input device on a fresh install resets the picks to slot A on input 1');
+    assert.deepEqual(pruned, { vanished: [0, null], shown: [0, null] }, 'a vanished input device on a fresh install resets the picks to slot A on input 1');
     await context.close();
   }
 

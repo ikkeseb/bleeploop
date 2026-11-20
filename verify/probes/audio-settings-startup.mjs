@@ -126,7 +126,7 @@ await probe(async ({ open }) => {
     // As the ASIO box does: the device reopens, on ASIO (a slot's input pick counts the backend that runs).
     await (await import('/src/ui/state/engine-store.ts')).openEngineDevice();
     writeAudioDeviceSettings({ inputDeviceId: 'unplugged-windows-endpoint', inputChannel: '1' });
-    settings.saveSlotInputChannels(['1', '']);
+    settings.saveSlotInputChannels([1, null]);
     await settings.refreshAndPruneDevices();
     const s = readAudioDeviceSettings();
     const afterWindowsPrune = { inputChannel: s.inputChannel, slotInputChannels: s.slotInputChannels };
@@ -161,8 +161,9 @@ await probe(async ({ open }) => {
   assert.deepEqual({ disabled: w.buffer.disabled, caret: w.buffer.caret }, { disabled: false, caret: true }, 'the buffer stays a pick');
   assert.deepEqual({ device: w.rail.device, diagnostics: w.rail.diagnostics }, { device: 'WASAPI', diagnostics: 'audio ok' }, 'DIAGNOSTICS claims audio only');
   assert.equal(w.pluginsHint, 'No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.', 'PLUGINS with no plugin says what to do');
-  assert.deepEqual(result.asioUi, { inputDisabled: true, outputDisabled: true, name: 'Probe ASIO', slotInputs: 4 });
-  assert.deepEqual(result.afterWindowsPrune, { inputChannel: '1', slotInputChannels: ['1', ''] },
+  // Four inputs: In 1..In 4 and the pairs In 1+2, In 3+4.
+  assert.deepEqual(result.asioUi, { inputDisabled: true, outputDisabled: true, name: 'Probe ASIO', slotInputs: 6 });
+  assert.deepEqual(result.afterWindowsPrune, { inputChannel: '1', slotInputChannels: [1, null] },
     'pruning an unrelated Windows endpoint must not reset the ASIO input picks');
   await page.evaluate(() => {
     for (const toast of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(toast.id);

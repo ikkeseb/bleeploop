@@ -23,7 +23,7 @@ use rtrb::{Consumer, Producer};
 
 use super::fpu::DenormalsOff;
 use super::pipes::{PullPipe, PushEnd};
-use super::{Core, IoCounters, Rt};
+use super::{Core, InputPick, IoCounters, Rt};
 
 /// The largest device callback the bodies take whole, in frames (the ASIO handoff, the join's pull
 /// buffer). The excess of a larger one renders from silence: an input gap, never out of bounds.
@@ -135,8 +135,8 @@ pub(crate) fn ends_stream(error: &cpal::Error) -> bool {
 
 /// What one run's callbacks share with the owner.
 pub(crate) struct Run {
-    /// The capture channel each slot reads (`EngineHost::set_slot_input_channel`), 32 bits a slot in one
-    /// word: a change of both is one store, so no callback reads half of it.
+    /// The channel each side of each slot reads (`EngineHost::set_slot_input_channel`), 16 bits a side
+    /// in one word: a change of every slot is one store, so no callback reads half of it.
     picks: AtomicU64,
     /// The owner asks for the fade-out; the output callback answers once the device plays silence.
     pub(crate) fade_out: AtomicBool,
@@ -170,9 +170,9 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    pub(crate) fn new(channels: [u32; SLOT_COUNT]) -> Run {
+    pub(crate) fn new(picks: [InputPick; SLOT_COUNT]) -> Run {
         Run {
-            picks: AtomicU64::new(pack(channels)),
+            picks: AtomicU64::new(pack(picks)),
             fade_out: AtomicBool::new(false),
             faded: AtomicBool::new(false),
             fault: AtomicU8::new(0),
@@ -231,19 +231,15 @@ impl Run {
         self.fault.load(Acquire) != 0
     }
 
-    /// Each slot's capture channel, as the owner last set them.
-    pub(crate) fn slot_channels(&self) -> [u32; SLOT_COUNT] {
-        unpack(self.picks.load(Relaxed))
+    /// Set every slot's input at once (the owner; the callbacks read them each block).
+    pub(crate) fn set_slot_channels(&self, picks: [InputPick; SLOT_COUNT]) {
+        self.picks.store(pack(picks), Relaxed);
     }
 
-    /// Set every slot's capture channel at once (the owner; the callbacks read them each block).
-    pub(crate) fn set_slot_channels(&self, channels: [u32; SLOT_COUNT]) {
-        self.picks.store(pack(channels), Relaxed);
-    }
-
-    /// Each slot's capture channel on an input with `channels` channels (a pick past them reads the last).
-    fn picks(&self, channels: usize) -> [usize; SLOT_COUNT] {
-        self.slot_channels().map(|c| (c as usize).min(channels - 1))
+    /// The channel each side of each slot reads on an input with `channels` channels (a pick past them
+    /// reads the last).
+    fn picks(&self, channels: usize) -> [[usize; 2]; SLOT_COUNT] {
+        unpack(self.picks.load(Relaxed)).map(|sides| sides.map(|c| (c as usize).min(channels - 1)))
     }
 
     /// The alignment the callbacks measured so far: (input + output, input), in frames.
@@ -253,16 +249,21 @@ impl Run {
     }
 }
 
-const _: () = assert!(SLOT_COUNT * 32 <= 64, "every slot's pick fits the one word");
+const _: () = assert!(JOIN_CHANNELS * 16 <= 64, "every side of every slot fits the one word");
 
-/// Every slot's capture channel in one word, slot `s` in bits `32 s..32 (s + 1)`.
-fn pack(channels: [u32; SLOT_COUNT]) -> u64 {
-    channels.iter().enumerate().fold(0, |word, (s, &c)| word | (c as u64) << (32 * s))
+/// Every slot's two sides in one word, side `k` of slot `s` in bits `16 (2 s + k)..` (a channel past
+/// 16 bits reads the last the word holds: no device has that many, and the read clamps to the device's).
+fn pack(picks: [InputPick; SLOT_COUNT]) -> u64 {
+    let sides = picks.iter().flat_map(|p| p.sides());
+    sides.enumerate().fold(0, |word, (k, c)| word | u64::from(c.min(u32::from(u16::MAX))) << (16 * k))
 }
 
-fn unpack(word: u64) -> [u32; SLOT_COUNT] {
-    std::array::from_fn(|s| (word >> (32 * s)) as u32)
+fn unpack(word: u64) -> [[u32; 2]; SLOT_COUNT] {
+    std::array::from_fn(|s| std::array::from_fn(|k| (word >> (16 * (2 * s + k))) as u16 as u32))
 }
+
+/// The join pipe's width: each slot's pair, interleaved slot by slot, left first.
+pub(crate) const JOIN_CHANNELS: usize = SLOT_COUNT * 2;
 
 /// The median of a run's first `LATENCY_SAMPLES` latency reports, then frozen.
 struct Probe {
@@ -504,7 +505,7 @@ impl Capture {
 }
 
 /// ASIO's input callback: asio-sys runs it first in every bufferSwitch (it registered first), so it
-/// copies each slot's channel into its handoff for this cycle's output callback and counts the cycle.
+/// copies each slot's two channels into its handoff for this cycle's output callback and counts the cycle.
 pub(crate) struct DuplexInput {
     core: Arc<Core>,
     run: Arc<Run>,
@@ -539,10 +540,12 @@ impl DuplexInput {
         let ok = guarded(&core.counters, || {
             let n = data.len() / channels;
             let mut clips = [false; SLOT_COUNT];
-            for ((handoff, channel), clip) in rt.handoff.iter_mut().zip(picks).zip(&mut clips) {
-                for (h, frame) in handoff.iter_mut().zip(data.chunks_exact(channels)) {
-                    *clip |= frame[channel].full_scale();
-                    *h = f32::from_sample(frame[channel]);
+            for ((pair, sides), clip) in rt.handoff.iter_mut().zip(picks).zip(&mut clips) {
+                for (handoff, channel) in pair.iter_mut().zip(sides) {
+                    for (h, frame) in handoff.iter_mut().zip(data.chunks_exact(channels)) {
+                        *clip |= frame[channel].full_scale();
+                        *h = f32::from_sample(frame[channel]);
+                    }
                 }
             }
             latch_clips(core, clips);
@@ -555,7 +558,7 @@ impl DuplexInput {
     }
 }
 
-/// WASAPI's input callback, on its own thread and clock: pushes each slot's channel, interleaved, into
+/// WASAPI's input callback, on its own thread and clock: pushes each slot's pair, interleaved, into
 /// the join pipe the output callback pulls from (drop-on-full, counted), and measures the capture's age.
 /// A caught panic leaves its pipe end unusable: the input goes silent and latches `Run::capture_fault`
 /// for the owner, which rebuilds the run (`Owner::recapture`).
@@ -566,7 +569,7 @@ pub(crate) struct JoinInput {
     /// The engine's rate: the age is measured in its frames.
     rate: u32,
     push: PushEnd,
-    /// `SCRATCH_FRAMES` frames of the slots' streams, interleaved.
+    /// `SCRATCH_FRAMES` frames of the slots' pairs, interleaved (`JOIN_CHANNELS` a frame).
     scratch: Vec<f32>,
     probe: Probe,
     /// A caught panic: the input stays silent for the rest of the run.
@@ -585,7 +588,7 @@ impl JoinInput {
             channels: channels.max(1),
             rate,
             push,
-            scratch: vec![0.0; SCRATCH_FRAMES * SLOT_COUNT],
+            scratch: vec![0.0; SCRATCH_FRAMES * JOIN_CHANNELS],
             probe: Probe::new(),
             dead: false,
             #[cfg(test)]
@@ -623,11 +626,13 @@ impl JoinInput {
             }
             let (mut dropped, mut clips) = (0, [false; SLOT_COUNT]);
             for chunk in data.chunks(channels * SCRATCH_FRAMES) {
-                let out = &mut scratch[..chunk.len() / channels * SLOT_COUNT];
-                for (o, frame) in out.chunks_exact_mut(SLOT_COUNT).zip(chunk.chunks_exact(channels)) {
-                    for ((s, &channel), clip) in o.iter_mut().zip(&picks).zip(&mut clips) {
-                        *clip |= frame[channel].full_scale();
-                        *s = f32::from_sample(frame[channel]);
+                let out = &mut scratch[..chunk.len() / channels * JOIN_CHANNELS];
+                for (o, frame) in out.chunks_exact_mut(JOIN_CHANNELS).zip(chunk.chunks_exact(channels)) {
+                    for ((pair, sides), clip) in o.chunks_exact_mut(2).zip(&picks).zip(&mut clips) {
+                        for (s, &channel) in pair.iter_mut().zip(sides) {
+                            *clip |= frame[channel].full_scale();
+                            *s = f32::from_sample(frame[channel]);
+                        }
                     }
                 }
                 dropped += push.push(out);
@@ -648,10 +653,10 @@ impl JoinInput {
 enum Source {
     /// ASIO: this cycle's handoffs in `Rt`.
     Duplex,
-    /// WASAPI: the join pipe, pulled to exactly this block (the slots' streams interleaved in `x`), then
-    /// each slot's into `xs`. `joined` once a pull came back whole: the startup pulls before the input
+    /// WASAPI: the join pipe, pulled to exactly this block (the slots' pairs interleaved in `x`), then
+    /// each side of each slot into `xs`. `joined` once a pull came back whole: the startup pulls before the input
     /// arrives are not starves.
-    Join { pipe: PullPipe, x: Vec<f32>, xs: [Vec<f32>; SLOT_COUNT], joined: bool, delay: Option<Frame> },
+    Join { pipe: PullPipe, x: Vec<f32>, xs: [[Vec<f32>; 2]; SLOT_COUNT], joined: bool, delay: Option<Frame> },
 }
 
 /// The output callback: the one clock. It numbers the device frames, renders the engine in slices of
@@ -696,8 +701,8 @@ impl Render {
 
     /// WASAPI's output callback, pulling the input through the join pipe.
     pub(crate) fn join(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32, pipe: PullPipe) -> Render {
-        let x = vec![0.0; MAX_DEVICE_BLOCK * SLOT_COUNT];
-        let xs = std::array::from_fn(|_| vec![0.0; MAX_DEVICE_BLOCK]);
+        let x = vec![0.0; MAX_DEVICE_BLOCK * JOIN_CHANNELS];
+        let xs = std::array::from_fn(|_| [vec![0.0; MAX_DEVICE_BLOCK], vec![0.0; MAX_DEVICE_BLOCK]]);
         #[cfg(debug_assertions)]
         trace::join_start();
         Render::new(core, run, channels, rate, Source::Join { pipe, x, xs, joined: false, delay: None })
@@ -787,10 +792,10 @@ impl Render {
                 let fill_before = pipe.fill();
                 #[cfg(test)]
                 inject::site("join pull");
-                let zeroed = pipe.pull(&mut x[..m * SLOT_COUNT]) + (n - m);
-                for (s, xs) in xs.iter_mut().enumerate() {
-                    for (y, frame) in xs[..m].iter_mut().zip(x.chunks_exact(SLOT_COUNT)) {
-                        *y = frame[s];
+                let zeroed = pipe.pull(&mut x[..m * JOIN_CHANNELS]) + (n - m);
+                for (k, xs) in xs.iter_mut().flatten().enumerate() {
+                    for (y, frame) in xs[..m].iter_mut().zip(x.chunks_exact(JOIN_CHANNELS)) {
+                        *y = frame[k];
                     }
                 }
                 let trims = pipe.take_trims();
@@ -905,12 +910,14 @@ impl Render {
             tone,
             ..
         } = rt;
-        let inputs: [&[f32]; SLOT_COUNT] = match &self.source {
-            Source::Duplex => handoff.each_ref().map(|h| &h[..]),
-            Source::Join { xs, .. } => xs.each_ref().map(|x| &x[..]),
+        let inputs: [[&[f32]; 2]; SLOT_COUNT] = match &self.source {
+            Source::Duplex => handoff.each_ref().map(|pair| pair.each_ref().map(|h| &h[..])),
+            Source::Join { xs, .. } => xs.each_ref().map(|pair| pair.each_ref().map(|x| &x[..])),
         };
-        for (slot, input) in inputs.iter().enumerate() {
-            meter(&self.core, slot, &input[..avail.min(input.len())]);
+        for (slot, pair) in inputs.iter().enumerate() {
+            for (side, input) in pair.iter().enumerate() {
+                meter(&self.core, slot, side, &input[..avail.min(input.len())]);
+            }
         }
         let mut engine = engine.as_mut().filter(|_| !*faulted);
         let max_block = self.left.len();
@@ -918,14 +925,12 @@ impl Render {
         let (mut off, mut clipped) = (0, false);
         while off < n {
             let m = (n - off).min(max_block);
-            let x = inputs.map(|input| if off + m <= avail { &input[off..off + m] } else { &self.zeros[..m] });
+            let x = inputs.map(|pair| pair.map(|input| if off + m <= avail { &input[off..off + m] } else { &self.zeros[..m] }));
             let (left, right) = (&mut self.left[..m], &mut self.right[..m]);
             match engine.as_deref_mut() {
                 Some(engine) => {
                     let ctx = ProcessContext { frame: ctx.frame + off as Frame, xrun: ctx.xrun && off == 0, damaged, ..ctx };
-                    // Each slot's pick is one channel today, on both sides of its pair (the pair pick's
-                    // device side is E1's next step).
-                    engine.process_inputs(&ctx, x.map(|x| [x, x]), left, right);
+                    engine.process_inputs(&ctx, x, left, right);
                 }
                 None => {
                     left.fill(0.0);
@@ -938,13 +943,13 @@ impl Render {
             fade(&mut self.gain, self.step, target, left, right);
             #[cfg(debug_assertions)]
             if let Some(lag) = lag.as_mut() {
-                lag.block(ctx.frame + off as Frame, x[0], left, right);
+                lag.block(ctx.frame + off as Frame, x[0][0], left, right);
             }
-            // The tone reads slot 1's input: valid only when this slice's input reached the callback
+            // The tone reads slot 1's left side: valid only when this slice's input reached the callback
             // (the same test that picks the zero fill above).
             #[cfg(debug_assertions)]
             if let Some(tone) = tone.as_mut() {
-                tone.block(ctx.frame + off as Frame, x[1], off + m <= avail, left, right);
+                tone.block(ctx.frame + off as Frame, x[1][0], off + m <= avail, left, right);
             }
             if let Some(tap) = tap.as_mut() {
                 let [share_l, share_r] = &mut self.share;
@@ -987,13 +992,13 @@ impl Render {
     }
 }
 
-/// Fold a block of a slot's input into the meter's peak the feed takes. Its clip the input callbacks
-/// latch, in the device's own format ([`Rail`]).
-fn meter(core: &Core, slot: usize, input: &[f32]) {
+/// Fold a block of one side of a slot's input into the meter's peak the feed takes. Its clip the input
+/// callbacks latch, in the device's own format ([`Rail`]).
+fn meter(core: &Core, slot: usize, side: usize, input: &[f32]) {
     let peak = input.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
     if peak > 0.0 {
         // A non-negative f32's bits order as the value does.
-        core.meter_peak[slot].fetch_max(peak.to_bits(), Relaxed);
+        core.meter_peak[slot][side].fetch_max(peak.to_bits(), Relaxed);
     }
 }
 

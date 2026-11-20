@@ -152,9 +152,20 @@ check('a device request from before the rate pick asks for the device rate (null
   const old = { backend: 'Wasapi', input: null, output: null, inputChannels: [null, 1], buffer: 256 };
   assert.deepEqual(decodeDeviceRequest(structuredClone(old)), { ...old, sampleRate: null });
 });
+check('a device request reads each slot pick in the engine shape: null, a channel, [left, right]', () => {
+  const picks = { backend: 'Asio', input: null, output: null, inputChannels: [[2, 3], null], buffer: null, sampleRate: null };
+  assert.deepEqual(decodeDeviceRequest(structuredClone(picks)), picks);
+  assert.ok(fixture.deviceRequests.some((r) => r.inputChannels?.some(Array.isArray)), 'the fixture carries a pair');
+});
 for (const s of fixture.deviceStatuses) {
   check(`device status ${s.backend}`, () => assert.deepEqual(decodeDeviceStatus(structuredClone(s)), s));
 }
+check('the fixture status reads a pair on a slot', () => assert.ok(fixture.deviceStatuses.some((s) => s.inputChannels.some(Array.isArray))));
+check('a meter peak per side; a scripted one number per slot reads on both sides', () => {
+  assert.ok(fixture.feed.some((f) => f.meter?.peak.some(([l, r]) => l !== r)), 'the fixture carries two sides apart');
+  const f = { ...structuredClone(fixture.feed[0]), meter: { peak: [0.5, [0.25, 0.125]], clip: [false, true] } };
+  assert.deepEqual(decodeFeedFrame(f).meter, { peak: [[0.5, 0.5], [0.25, 0.125]], clip: [false, true] });
+});
 
 // ── Feed frames: the whole frame is read, including the three states of `status` ──────────────────
 for (const f of fixture.feed) {
@@ -284,6 +295,20 @@ const refused = {
     decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [0, 1], buffer: null, sampleRate: 44100.5 }),
   'a device request with a third slot': () =>
     decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [0, 1, 2], buffer: null }),
+  'a device request with a pair of one side': () =>
+    decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [[0], null], buffer: null }),
+  'a device request with a pair of three sides': () =>
+    decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [[0, 1, 2], null], buffer: null }),
+  'a device request with a negative channel': () =>
+    decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [-1, null], buffer: null }),
+  'a device request whose one channel is a pair': () =>
+    decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannel: [0, 1], buffer: null }),
+  'a status that reads auto (null)': () => {
+    const s = structuredClone(fixture.deviceStatuses[0]);
+    s.inputChannels = [null, 1];
+    decodeDeviceStatus(s);
+  },
+  'a meter peak of three sides': () => decodeFeedFrame({ ...structuredClone(fixture.feed[0]), meter: { peak: [[0, 0, 0], 0], clip: [false, false] } }),
   'an unknown action': () => decodeCommand({ Action: 'Panic' }),
   'a HOLD without its control': () => decodeCommand({ Action: 'Hold' }),
   'a HOLD release past a u8 control': () => decodeCommand({ ActionOn: [0, { Release: 256 }] }),

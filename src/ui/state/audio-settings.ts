@@ -1,4 +1,5 @@
 import { guitarFirstInstall } from './instrument-slots';
+import type { InputPick } from '../../platform';
 
 /**
  * Persisted audio device selections — the engine's input and output device, each slot's input channel,
@@ -29,11 +30,13 @@ export interface AudioDeviceSettings {
   inputDeviceId: string;
   /** The pre-per-slot input channel (0-based; '' = auto): seeds `slotInputChannels` from old settings. */
   inputChannel: string;
-  /** Each slot's 0-based capture channel, in the same form. Saved settings from before
-   * the per-slot pick start both slots on `inputChannel`; with none saved, and after a reset, the
-   * install's default (`defaultSlotInputChannels`): on a guitar-first install slot A on input 1 (the
-   * rig's instrument jack; Auto reads input 2 there), slot B on Auto. */
-  slotInputChannels: [string, string];
+  /** Each slot's input pick, the engine's shape (unit contract §7: null auto, a channel, or
+   * `[left, right]`; 0-based). A pick saved before the pair (a string: '' auto, else a channel) reads
+   * as that pick. Saved settings from before the per-slot pick start both slots on `inputChannel`; with
+   * none saved, and after a reset, the install's default (`defaultSlotInputChannels`): on a
+   * guitar-first install slot A on input 1 (the rig's instrument jack; Auto reads input 2 there), slot
+   * B on Auto. */
+  slotInputChannels: [InputPick, InputPick];
   /** Native output device id; '' = default output. */
   outputDeviceId: string;
   /** RT block size in frames; one of BUFFER_FRAMES_OPTIONS (live buffer control). */
@@ -52,10 +55,21 @@ export interface AudioDeviceSettings {
 /** A saved channel: '' (auto) or a 0-based index. */
 const isChannel = (v: unknown): v is string => typeof v === 'string' && (v === '' || /^\d{1,3}$/.test(v));
 
+const isIndex = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 999;
+
+/** A saved slot pick as the engine takes it, or undefined when it is none: null, a channel, `[l, r]`,
+ * or the string a build before the pair saved ('' auto, else a channel). */
+function savedPick(v: unknown): InputPick | undefined {
+  if (v === null || isIndex(v)) return v;
+  if (isChannel(v)) return v === '' ? null : Number(v);
+  if (Array.isArray(v) && v.length === 2 && v.every(isIndex)) return [v[0], v[1]];
+  return undefined;
+}
+
 const DEFAULTS: AudioDeviceSettings = {
   inputDeviceId: '',
   inputChannel: '',
-  slotInputChannels: ['', ''],
+  slotInputChannels: [null, null],
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
   sampleRate: null,
@@ -67,8 +81,8 @@ const DEFAULTS: AudioDeviceSettings = {
 /** The install's default slot input picks: what the slots start on with no settings stored, and what
  * a reset of them (an input device change, a pruned input device) goes to. A guitar-first install
  * (`guitarFirstInstall`): slot A on input 1, slot B Auto; any other: both Auto. A fresh pair each call. */
-export function defaultSlotInputChannels(): [string, string] {
-  return guitarFirstInstall() ? ['0', ''] : ['', ''];
+export function defaultSlotInputChannels(): [InputPick, InputPick] {
+  return guitarFirstInstall() ? [0, null] : [null, null];
 }
 
 /** Read the persisted device settings, falling back to defaults for any missing/invalid field. The first
@@ -79,13 +93,13 @@ export function readAudioDeviceSettings(): AudioDeviceSettings {
     if (!raw) return { ...DEFAULTS, slotInputChannels: defaultSlotInputChannels() };
     const p = JSON.parse(raw) as Partial<AudioDeviceSettings>;
     const inputChannel = typeof p.inputChannel === 'string' ? p.inputChannel : '';
-    const slots = p.slotInputChannels;
-    const seed = isChannel(inputChannel) ? inputChannel : '';
+    const saved: unknown = p.slotInputChannels;
+    const slots = (Array.isArray(saved) && saved.length === 2 ? saved : []).map(savedPick);
+    const seed = isChannel(inputChannel) && inputChannel !== '' ? Number(inputChannel) : null;
     return {
       inputDeviceId: typeof p.inputDeviceId === 'string' ? p.inputDeviceId : '',
       inputChannel,
-      slotInputChannels:
-        Array.isArray(slots) && slots.length === 2 && slots.every(isChannel) ? [slots[0], slots[1]] : [seed, seed],
+      slotInputChannels: slots.length === 2 && slots[0] !== undefined && slots[1] !== undefined ? [slots[0], slots[1]] : [seed, seed],
       outputDeviceId: typeof p.outputDeviceId === 'string' ? p.outputDeviceId : '',
       bufferFrames: (BUFFER_FRAMES_OPTIONS as readonly number[]).includes(p.bufferFrames as number)
         ? (p.bufferFrames as BufferFrames)
@@ -96,7 +110,7 @@ export function readAudioDeviceSettings(): AudioDeviceSettings {
       shareDeviceId: typeof p.shareDeviceId === 'string' ? p.shareDeviceId : '',
     };
   } catch {
-    return { ...DEFAULTS, slotInputChannels: ['', ''] };
+    return { ...DEFAULTS, slotInputChannels: [null, null] };
   }
 }
 

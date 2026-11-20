@@ -45,13 +45,15 @@
 //!   and from then on a miss is a duplex-order fault, counted. WASAPI: the output callback is the clock; the input joins through a ring and a
 //!   resampler with a drift controller. Every callback thread is promoted to MMCSS Pro Audio on first
 //!   entry.
-//! - **Each plugin slot reads its own capture channel** (`DeviceRequest::input_channels`; auto is input
-//!   2 on a device with two or more). An open never fails on a pick: a slot whose pick the device lacks
-//!   (saved on a driver with more inputs) reads auto, and `DeviceStatus::input_channels` says what each
-//!   slot reads; only a change on the running device refuses one. The input callback publishes one
-//!   mono stream per slot, from the picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
-//!   WASAPI pushes them interleaved through the one join pipe. The engine hands each slot its own
-//!   (`Engine::process_inputs`); the meter reads each slot's channel apart.
+//! - **Each plugin slot reads its own input pick** (`DeviceRequest::input_channels`, an [`InputPick`]:
+//!   auto, input 2 on a device with two or more, mono; one channel, mono; or a left/right pair). An open
+//!   never fails on a pick: a slot whose pick the device lacks, either side of a pair (saved on a driver
+//!   with more inputs), reads auto, logged, and `DeviceStatus::input_channels` says what each slot reads;
+//!   only a change on the running device refuses one. The input callback publishes a pair per slot, from
+//!   the picks in `Run` (one atomic word, changed in place): ASIO copies each slot's two channels into
+//!   its handoff, WASAPI pushes all four interleaved through the one join pipe. A mono pick is its
+//!   channel copied to both sides, at unity, no pan law. The engine hands each slot its pair
+//!   (`Engine::process_inputs`); the meter reads each slot's sides apart.
 //! - **The rate pick (`DeviceRequest::sample_rate`, one of [`SAMPLE_RATES`]; `None` = the device's
 //!   own) never fails an open either.** ASIO runs it when the driver can (`AsioCache::sample_rates`, read
 //!   by the startup probe; cpal sets the driver's rate at the stream build), else the driver's own,
@@ -206,9 +208,10 @@ pub struct DeviceRequest {
     pub input: Option<String>,
     /// WASAPI render device id (`audio_output::list_output_devices`); `None` = the default.
     pub output: Option<String>,
-    /// Each plugin slot's capture channel (0-based); `None` = auto (`transition::input_channel`). On
-    /// the wire `inputChannels: [a, b]`; a request with one `inputChannel` instead sets both slots.
-    pub input_channels: [Option<u32>; SLOT_COUNT],
+    /// Each plugin slot's input pick; `None` = auto (`transition::input_channel`). On the wire
+    /// `inputChannels: [a, b]`, each `null`, a channel or `[left, right]` (0-based); a request with one
+    /// `inputChannel` (a channel or `null`) instead sets both slots.
+    pub input_channels: [Option<InputPick>; SLOT_COUNT],
     /// Frames per device callback; `None` = the driver's default.
     pub buffer: Option<u32>,
     /// The engine's sample rate, one of [`SAMPLE_RATES`]; `None` = the device's own. Applies where the
@@ -222,7 +225,27 @@ pub struct DeviceRequest {
 #[cfg_attr(not(feature = "asio"), allow(dead_code))]
 pub const SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
 
-/// A [`DeviceRequest`] as it arrives: each slot's channel, or one channel for both.
+/// A slot's input (unit contract §7): one channel, heard on both sides of the slot's pair at unity, or
+/// a pair, each side as it is. 0-based. On the wire a number or `[left, right]`; auto is `null` around it
+/// (`Option<InputPick>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputPick {
+    Mono(u32),
+    Pair([u32; 2]),
+}
+
+impl InputPick {
+    /// The channel each side reads: a mono pick's on both.
+    pub fn sides(self) -> [u32; 2] {
+        match self {
+            InputPick::Mono(c) => [c, c],
+            InputPick::Pair(pair) => pair,
+        }
+    }
+}
+
+/// A [`DeviceRequest`] as it arrives: each slot's pick, or one channel for both.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RequestWire {
@@ -230,7 +253,7 @@ struct RequestWire {
     input: Option<String>,
     output: Option<String>,
     #[serde(default)]
-    input_channels: Option<[Option<u32>; SLOT_COUNT]>,
+    input_channels: Option<[Option<InputPick>; SLOT_COUNT]>,
     #[serde(default)]
     input_channel: Option<u32>,
     buffer: Option<u32>,
@@ -240,7 +263,7 @@ struct RequestWire {
 
 impl From<RequestWire> for DeviceRequest {
     fn from(w: RequestWire) -> DeviceRequest {
-        let input_channels = w.input_channels.unwrap_or([w.input_channel; SLOT_COUNT]);
+        let input_channels = w.input_channels.unwrap_or([w.input_channel.map(InputPick::Mono); SLOT_COUNT]);
         DeviceRequest { backend: w.backend, input: w.input, output: w.output, input_channels, buffer: w.buffer, sample_rate: w.sample_rate }
     }
 }
@@ -259,9 +282,9 @@ pub struct DeviceStatus {
     /// The input runs. False: WASAPI plays output only (no capture endpoint, or its stream did not
     /// open, e.g. a microphone Windows' privacy settings block) and the engine's input is silence.
     pub input_open: bool,
-    /// The capture channel each plugin slot reads (0-based): its pick, or auto where it has none or the
-    /// device lacks it.
-    pub input_channels: [u32; SLOT_COUNT],
+    /// What each plugin slot reads: its pick, or auto (input 2 on a device with two or more, mono) where it
+    /// has none or the device lacks it, either side of a pair. Never `null` on the wire.
+    pub input_channels: [InputPick; SLOT_COUNT],
     /// Input plus output latency in frames (`ProcessContext::align_frames`), and its input side.
     pub align_frames: Frame,
     pub input_frames: Frame,
@@ -545,9 +568,9 @@ pub(crate) struct Rt {
     /// A panic was caught under the lock: the engine stays silent until the owner replaces it
     /// (`Core::fault` tells the owner).
     pub(crate) faulted: bool,
-    /// ASIO: this cycle's input, each slot's channel, copied by the input callback for the output
-    /// callback, and each side's cycle count (equal after a whole cycle).
-    pub(crate) handoff: [Vec<f32>; SLOT_COUNT],
+    /// ASIO: this cycle's input, each slot's pair (its left and right channel), copied by the input
+    /// callback for the output callback, and each side's cycle count (equal after a whole cycle).
+    pub(crate) handoff: [[Vec<f32>; 2]; SLOT_COUNT],
     pub(crate) handoff_len: usize,
     pub(crate) in_cycles: u64,
     pub(crate) out_cycles: u64,
@@ -662,9 +685,9 @@ pub(crate) struct Core {
     /// The alignment the output callback last rendered with (`DeviceStatus`).
     pub(crate) align_frames: AtomicI64,
     pub(crate) input_frames: AtomicI64,
-    /// The input meter since the feed last took it, per slot: its capture channel's peak (f32 bits) and
-    /// whether a sample reached full scale.
-    pub(crate) meter_peak: [AtomicU32; SLOT_COUNT],
+    /// The input meter since the feed last took it, per slot: each side's peak (f32 bits) and whether a
+    /// sample on either reached full scale.
+    pub(crate) meter_peak: [[AtomicU32; 2]; SLOT_COUNT],
     pub(crate) meter_clip: [AtomicBool; SLOT_COUNT],
     /// The tuner's input broke where the engine cannot see it (`Core::break_tuner`): raised by the owner
     /// once `tuner_fence` holds the first device frame surely read from the new input. The feed resets
@@ -742,7 +765,7 @@ impl Core {
             rt: Mutex::new(Rt {
                 engine: None,
                 faulted: false,
-                handoff: std::array::from_fn(|_| vec![0.0; MAX_DEVICE_BLOCK]),
+                handoff: std::array::from_fn(|_| [vec![0.0; MAX_DEVICE_BLOCK], vec![0.0; MAX_DEVICE_BLOCK]]),
                 handoff_len: 0,
                 in_cycles: 0,
                 out_cycles: 0,
@@ -771,7 +794,7 @@ impl Core {
             frame: AtomicI64::new(0),
             align_frames: AtomicI64::new(0),
             input_frames: AtomicI64::new(0),
-            meter_peak: [const { AtomicU32::new(0) }; SLOT_COUNT],
+            meter_peak: [const { [const { AtomicU32::new(0) }; 2] }; SLOT_COUNT],
             meter_clip: [const { AtomicBool::new(false) }; SLOT_COUNT],
             tuner_breaks: AtomicU64::new(0),
             tuner_fence: AtomicI64::new(0),
@@ -981,10 +1004,10 @@ impl EngineHost {
         self.ask("close", REQUEST_TIMEOUT, Request::Close)
     }
 
-    /// Change `slot`'s capture channel (`None` = auto) without rebuilding a stream; the running
-    /// request keeps it, so the owner's reopens (a loss, a fault) keep it too. Refused for a channel the
-    /// device lacks (the other slot's stays), and while no device runs.
-    pub fn set_slot_input_channel(&self, slot: usize, channel: Option<u32>) -> Result<(), String> {
+    /// Change `slot`'s input pick (`None` = auto) without rebuilding a stream; the running request keeps
+    /// it, so the owner's reopens (a loss, a fault) keep it too. Refused for a channel the device lacks,
+    /// either side of a pair (the other slot's stays), and while no device runs.
+    pub fn set_slot_input_channel(&self, slot: usize, channel: Option<InputPick>) -> Result<(), String> {
         self.ask("set_slot_input_channel", REQUEST_TIMEOUT, |reply| Request::SetSlotInputChannel(slot, channel, reply))
     }
 
@@ -1209,10 +1232,10 @@ impl EngineHost {
         self.drain_feed(out);
     }
 
-    /// The input meter since the last call, per slot: its capture channel's linear peak, and whether a
-    /// sample reached full scale.
-    pub fn take_meter(&self) -> ([f32; SLOT_COUNT], [bool; SLOT_COUNT]) {
-        let peak = self.core.meter_peak.each_ref().map(|p| f32::from_bits(p.swap(0, Relaxed)));
+    /// The input meter since the last call, per slot: each side's linear peak (a mono pick's twice), and
+    /// whether a sample on either reached full scale.
+    pub fn take_meter(&self) -> ([[f32; 2]; SLOT_COUNT], [bool; SLOT_COUNT]) {
+        let peak = self.core.meter_peak.each_ref().map(|slot| slot.each_ref().map(|p| f32::from_bits(p.swap(0, Relaxed))));
         (peak, self.core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed)))
     }
 

@@ -4,7 +4,7 @@
  * `available: true`, as `contact-sheet` does). Both slots Off, so each takes its own input.
  *
  * Proves, at 1280×820 (the fake answers GO LIVE's toggle on the feed's `live`, as the engine does):
- * - each slot card meters its OWN input (the feed's `meter.peak[slot]`): GO LIVE lights the card's meter
+ * - each slot card meters its OWN input (the feed's `meter.peak[slot]`, the louder side of its pair): GO LIVE lights the card's meter
  *   and the INPUT LIVE pill, the meter's `--lvl` follows the slot's level on the −60..0 dBFS span, and
  *   a slot not live stays dark whatever its input reads;
  * - the peak tick holds ~1.5 s after a peak, then falls toward the level, and lands on it; a peak whose
@@ -149,6 +149,12 @@ await probe(async ({ open }) => {
     console.log(tag, 'per-slot levels', JSON.stringify({ a, b }));
     assert.ok(Math.abs(a.lvl - frac(0.5)) < 0.01, `${tag}: A reads its own input, not B's: ${a.lvl}`);
     assert.deepEqual(await badges(), ['FROM A+B', '', '', '', ''], `${tag}: both slots named`);
+
+    // A pair pick (unit contract §7): the feed carries each side's peak; the card shows the louder side.
+    await emit({ meter: { peak: [[0.0316, 0.25], [0.0316, 0.0316]], clip: [false, false] } });
+    await until(1, 'A at its louder side, −12 dBFS on the right', (m) => m.live && Math.abs(m.lvl - frac(0.25)) < 0.01);
+    await emit({ meter: { peak: [[0.125, 0.0316], [0.0316, 0.0316]], clip: [false, false] } });
+    await until(1, 'A at its louder side, −18 dBFS on the left', (m) => m.live && Math.abs(m.lvl - frac(0.125)) < 0.01);
 
     // Readable from where the player stands, at every size: the measured type and the badge's room.
     const sizes = await page.evaluate(() => {
