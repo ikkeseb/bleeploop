@@ -9,8 +9,9 @@ built, so the UI and engine tracks proceed apart. When the build lands, what sti
 A **slot** (A, B) is a signal line: its input, LIVE, a **chain** of at most 8 **units**, its volume. A
 unit is a loaded plugin (CLAP, VST3, VST2) or a built-in: OTT, ECHO, REVERB, RING MOD, or SYNTH (the six
 built-in instruments as one unit). A unit is a **source** when its format's host calls it an instrument
-(today's rule per format, kept: VST2 counts a synth-flagged plugin with inputs as one,
-`src-tauri/src/host/vst2_engine.rs` `rearm`) or it is SYNTH; a source only heads a chain. Every other unit
+(today's rule per format, kept: VST2 counts one synth-flagged or with no inputs,
+`src-tauri/src/host/vst2_engine.rs` `rearm`; its scan reads the flag alone, `scan.rs`, so only
+activation settles a role) or it is SYNTH; a source only heads a chain. Every other unit
 is an **effect**. Every signal from the device input to the lanes and the stems is a stereo pair.
 
     input pair → LIVE gate → unit → unit → … → slot volume → the wet signal (monitor, record tap)
@@ -23,31 +24,26 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
 
 ## 1. Unit identity
 
-- **A unit id is an opaque non-zero u32, minted by whoever asks for the unit** (the UI: 32 random bits;
-  a test or a probe: any number): add and restore are one call and the plate exists from the click.
-  Random, because a project opened later (build step 8) brings its own ids, and a tone bound to an id must
-  not land on another project's unit by count.
+- **A unit id is an opaque non-zero u32, minted by whoever asks for the unit** (the UI: 32 random bits,
+  so a project opened later, build step 8, never lands a tone on another's unit by count; a test: any).
 - **The chain host reserves an id across both slots from the moment `add` is called** until its removal
   or a failed add; an add of a reserved id is refused at once, never at seating.
 - **The id names the instance and nothing else.** Two instances of one plugin, in one chain or in both,
   are two ids. It holds across a move, a bypass, a restart, an engine rebuild, an app restart and a save;
   it ends with a removal.
-- **The rig record** lives beside rig recall in the WebView's storage (`src/ui/state/rig-recall.ts`, where
-  recall, its crash marker and its probe live): `lf.rig`, per slot the units in order as `UnitRecord`s
-  (§2). Its writes: the upgrade writes the whole migrated record once, before the first load (§6); while
-  a recall runs (its marker stored, `src/app/boot.ts`) nothing writes it, so neither a half-restored chain
-  nor boot's `resyncNativeSlots` reaches it; after the recall settles each `chains` report writes it,
-  except a plugin unit the scan did not find, which keeps its entry for a launch where it is back (today's
-  rule). A leftover marker forgets the record's plugin units only.
+- **The rig record** is `lf.rig` in the WebView's storage, beside recall and its crash marker
+  (`src/ui/state/rig-recall.ts`): per slot the units in order as `UnitRecord`s (§2). The upgrade writes it
+  before the first load (§6); while a recall runs (`src/app/boot.ts`) nothing writes it, so neither a
+  half-restored chain nor `resyncNativeSlots` reaches it; then each `chains` report writes it, except a
+  plugin unit the scan did not find, which keeps its entry (today's rule). A leftover marker forgets the
+  record's plugin units only.
 - **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`
   `file_name`; today `slot<n>-<hash>.tone`). A removal renames it to that slot-and-plugin file, and a new
   unit with no tone of its own starts from it.
-- **D29 follows the unit.** The editor affinity is per plugin FILE and the UI's (`src/ui/state/
-  instrument.ts`, `editorAffinity`); each plugin unit gets its own owner thread, so a file's editor belongs
-  to the unit whose load came first, in either slot; a second instance in the SAME chain is refused its
-  editor (its parameters work). Overlapping loads of one file turn it `unordered` and removing the first
-  owner while another instance stays turns it `orphaned`, per unit as per slot today;
-  `verify/probes/instrument-controls.mjs` gains each case across slots and within one chain.
+- **D29 follows the unit.** The editor affinity is per plugin FILE (`instrument.ts` `editorAffinity`);
+  each plugin unit has its own owner thread, so a file's editor belongs to the unit loaded first, in either
+  slot; a second instance in the SAME chain is refused its editor (its parameters work). `unordered` and
+  `orphaned` apply per unit as per slot today; `instrument-controls.mjs` gains each case.
 - **Changes:** `MAX_UNITS = 8` beside `SLOT_COUNT` (`api.rs`); `EngineSlot` (`engine_io/plugins.rs`) and
   the holder and eviction tokens (`engine_io/slot_host.rs`) per unit; `tone.rs`; `rig-recall.ts`.
 
@@ -61,14 +57,18 @@ batch. `ChainHost` (`src/platform/host.ts`) replaces `PluginHost`'s slot-address
 type UnitId = number; // u32, never 0
 type UnitKindId = 'plugin' | 'ott' | 'echo' | 'reverb' | 'ring' | 'synth';
 type PluginRef = { format: PluginFormat; path: string; id: string };
+type UnitParamId = InputSendParamId | 'instrument' | `gain${'Lead' | 'Bass' | 'Pad' | 'Piano' | 'Organ' | 'Drum'}`;
 /** What restores a unit: `add`, the rig record and the v3 rig (§8) share it. */
 type UnitSpec = ({ kind: 'plugin'; plugin: PluginRef } | { kind: Exclude<UnitKindId, 'plugin'>;
-  params?: Record<string, number> }) & { bypass?: boolean };
+  params?: Partial<Record<UnitParamId, number>> }) & { bypass?: boolean };
 type UnitRecord = UnitSpec & { id: UnitId };
 interface ChainHost {
   /** Reserve, build, hand over at `at`; settles on the engine's answer. */
   add(slot: 0 | 1, unit: UnitId, spec: UnitSpec, at: number, toneToken?: number): Promise<'seated' | 'waiting'>;
   remove(unit: UnitId): Promise<void>;
+  /** A fresh instance under the same id, place and bypass (§3's replace of itself), if `unit` is still
+   *  `plugin` and was not re-added since `since` (a `chains` frame); the load applies `toneToken`. */
+  reload(unit: UnitId, plugin: PluginRef, since: number, toneToken: number): Promise<'reloaded' | 'moved' | 'failed'>;
   move(unit: UnitId, to: number): Promise<void>; // `to`: its index in its own chain; no move across slots
   // openEditor, closeEditor, listParams, setParameter, takeTone: today's, addressed by unit.
   /** Park a session's tone, identity-checked as today; `matches` by §8's rule. */
@@ -80,21 +80,23 @@ interface ChainHost {
 
 The window events (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) carry `unit`.
 A new `chain` module in `engine_io` (the chain host) keeps the run's model: per slot the ordered ids,
-kinds, plugin identities, a built-in's params as sent, each bypass as applied. A unit enters an engine
-carrying its params and bypass (a plugin's too), so a rebuild reseats every chain in order with no replay
-race; `engine_io/settings.rs` keeps no per-unit key.
+kinds, plugin identities, each param and bypass **as applied**: it records a built-in's params as the unit
+clamped them at build, and the engine answers each `SetUnitParam` with `Event::UnitParam { frame, unit,
+param, value }`, the value it took (ECHO's level sent as 2 reads 1), owed as `Seat`. A unit enters an
+engine carrying its params and bypass; `engine_io/settings.rs` keeps no per-unit key.
 
 **Seating is acknowledged.** A port push only queues. The engine answers every port message with
-`Event::Seat { slot, unit, op, outcome }` (install, remove, move; waiting, applied, or refused with its
-reason), owed until the ring takes it, as a lane's `Mix`; `add` and `remove` settle on it.
+`Event::Seat { slot, unit, op, outcome }` (install, remove, withdraw, move; waiting, applied, or refused
+with its reason), owed until the ring takes it, as a lane's `Mix`; `add` and `remove` settle on it.
 `LOAD_TIMEOUT` (`host/engine_slot.rs`) bounds the plugin's setup and stops at the handover;
 `REMOVE_TIMEOUT` counts only while no `waiting` answer came.
 
-**A rebuild keeps every bypass.** `swap_engine` (`engine_io/owner.rs`) reads the old engine's owed
-`Seat`/`Chain` events before `evict`, as it reads `applied_mixes` today, and the eviction hands back each
-seat as `(id, unit, bypassed)` for the reseat. A bypass command the old engine took but had not answered
-is pushed again after the reseat. `Toggle::Units` is no kept setting: no setter, its `Toggled` never
-replayed (`settings.rs` `toggled`), so a kind-wide value never overwrites a later per-unit change.
+**A rebuild keeps every bypass.** The eviction hands back each seat as `(id, unit, bypassed)`, the
+final applied values (the unit holds its params), and the reseat restores exactly those; an owed
+`Seat`/`Chain`/`UnitParam` answer only updates the model, never replays. The unit commands the old engine
+never took, in its table or ring (peeked as `unapplied_transport` peeks, `engine.rs`), are pushed after
+the reseat in their order; an applied toggle is already in `bypassed`, answered or not. `Toggle::Units` is
+no kept setting: no setter, its `Toggled` never replayed (`settings.rs` `toggled`).
 
 **What is played live rides the ordered batch** (`src/platform/engine-wire.ts`, `engine_io/wire.rs`,
 `verify/fixtures/engine-wire.json`). A command naming an id that is not seated is dropped and counted.
@@ -106,8 +108,10 @@ replayed (`settings.rs` `toggled`), so a kind-wide value never overwrites a late
 | `{ Action: { Toggle: { Units: kind } } }` | every unit of a built-in effect kind (§6, the old pedals) |
 | `{ SetUnitParam: [unit, param, number] }` | a built-in unit's parameter; one of another kind is dropped |
 
-`param` keeps today's send keys (`src/ui/state/engine-store.ts`) and adds SYNTH's: `instrument` (0 to 5,
-sent only by the note router, §4) and a level per instrument. Gone: `SetInputSend`, `SetInputSendParam`,
+`param` (`UnitParamId`) keeps today's send keys (`INPUT_SEND_PARAMS`) and adds SYNTH's: `instrument`, the
+index in the UI's `SYNTHS` order (0 lead, 1 bass, 2 pad, 3 piano, 4 organ, 5 drum; Rust maps it through
+`Instrument::from_id`, never its enum's order, where 1 is Pad), sent only by the note router (§4); and a
+`gain<Name>` per instrument (0 to `SLOT_GAIN_MAX`, 1 default). Gone: `SetInputSend`, `SetInputSendParam`,
 `Toggle.Send`, `SetInstrumentGain`, `NoteTarget.Builtin`. `Toggle::COUNT` stays 11 (`Units` takes
 `Send`'s four places). A plugin's own parameters stay off the batch, through its owner.
 
@@ -119,11 +123,11 @@ interface FeedFrame {
   unitMeters: UnitMeter[];           // one per seated unit, every frame
 }
 interface ChainState { units: UnitState[]; latency: Frame; held: boolean }
-interface UnitState extends UnitRecord {
+type UnitState = UnitRecord & { // an interface cannot extend the union
   source: boolean; name: string; latency: Frame; error?: string;
   /** waiting: held until a take ends (§7); failed: no seat, or parked (§3), the plate in its place. */
   state: 'loading' | 'waiting' | 'seated' | 'leaving' | 'failed';
-}
+};
 interface UnitMeter { unit: UnitId; out: [number, number]; bands?: [BandMeter, BandMeter, BandMeter] }
 interface BandMeter { gain: number; gainMin: number; gainMax: number; level: number; levelPeak: number }
 ```
@@ -132,13 +136,12 @@ interface BandMeter { gain: number; gainMin: number; gainMax: number; level: num
   feed says so; a built-in's `params` ride its state, so a reset frame restores every plate. The engine's
   half is `Event::Chain { frame, slot, len, seats }` (id, kind, bypass, latency per seat), owed as `Seat`.
 - `out`: the unit's output peak per channel since the last frame. `bands`, the OTT's (low, mid, high):
-  `gain` in dB at the frame's last sample, `gainMin`/`gainMax` its range over every sample since the last
-  frame, `level` the linked follower in dBFS (floor -120), `levelPeak` its largest: what the face draws
-  (`docs/redesign/ott.js`). **Today's feed carries none of it:** its `meter` is each slot's mono input
-  peak before any plugin; `Ott::gains()` and `bands()` exist (`dsp/ott.rs`), read by tests only.
+  `gain` in dB at the frame's last sample, `gainMin`/`gainMax` its range since the last frame, `level` the
+  linked follower in dBFS (floor -120), `levelPeak` its largest: what the face draws (`docs/redesign/
+  ott.js`). Today's feed has none of it; `Ott::gains()` and `bands()` (`dsp/ott.rs`) feed tests only.
 - Transport: the unit folds its range per sample; at most every 4 ms the engine moves each seat's fold
-  onto a ring of its own, `EngineHandle::unit_meters` (invariant 2), calling `take_meter` only when the
-  ring has room, so a full ring delays a range and never loses one. The feed merges what the ring held.
+  onto its ring, `EngineHandle::unit_meters` (invariant 2), calling `take_meter` only when the ring has
+  room, so a full ring delays a range and never loses one.
 
 ## 3. Add, remove, move, bypass, lifecycle, reset
 
@@ -153,7 +156,8 @@ today's `FADE_SECONDS`): lifecycle (undelayed input ↔ what the seat sounds), i
   cut. **The slot stays LIVE:** a chain edit does not end the playing; taking the amp-sim out passes the
   dry input through what is left. Today's live-off step (`EngineHost::silence_slot`) goes.
 - **Replace:** a source added where one is seated (§4) is one install that `replaces` the old id, sent
-  once the new unit is activated: one crossfade. A failed load leaves the old seated, LIVE untouched.
+  once the new unit is activated: one crossfade. A failed load leaves the old seated, LIVE untouched. A
+  reload `replaces` its own id: the same place and bypass.
 - **Move:** the chain's output dips to silence over 10 ms, the order changes on the frame the dip ends,
   it comes back over 10 ms. Every unit is called for every frame once, so a tail rings on through its new
   successors. A dip, because one stateful instance cannot run in two orders at once. A move changes no
@@ -164,19 +168,20 @@ today's `FADE_SECONDS`): lifecycle (undelayed input ↔ what the seat sounds), i
   sends do today); the OTT crossfades dry and processed over 10 ms. A plugin and SYNTH are bypassed by the
   seat's crossfade: a plugin keeps being processed (it comes back warm), its tail is cut; a bypassed
   source is silent and still gets its notes, so the held-note bookkeeping stays exact.
-- **Lifecycle (invariant 4, unit-scoped):** while a plugin unit restarts or its owner cycles it, that seat
-  alone is bypassed (an effect passes its input delayed by its last latency, a source is silent); the rest
-  plays on. A restart that comes back with another latency or role is an edit (§7, held during a take).
-  One that cannot be reseated (the reinstall fails, or a mid-chain effect came back an instrument)
-  **parks** the unit: bypassed in its place, `failed` with the reason, until a later restart reseats it or
-  the player removes it (`engine_slot.rs` `cycle` parks today with the whole slot bypassed). A restart, a
-  park and a failed replacement never change LIVE.
+- **Lifecycle (invariant 4, unit-scoped):** a restart or an owner's cycle **withdraws** the unit (today's
+  `cycle` removes it, which would vacate the seat): the seat fades to its bypass (an effect's input delayed
+  by its last latency; a source silent, its notes released), `stop` runs once on the callback, the unit
+  goes back on the return ring, and the empty seat keeps its place, role, latency and line; the rest plays
+  on. An install under that id reseats it; one with another latency or role is an edit (§7, held during a
+  take). One that cannot be reseated (the reinstall fails, or a mid-chain effect came back an instrument)
+  **parks**: withdrawn, `failed` with the reason, until a restart reseats it or the player removes it. A
+  restart, a park and a failed replacement never change LIVE.
 - **Reset** is a unit's audio state (lines, followers, tails, a carrier's phase), never its params: on
   entering an engine (a fresh build, a re-activation after an eviction), never while seated. No gesture
   resets a unit in this build, so the trait has no `reset`.
 - **Changes:** `SlotPort` (`slots.rs`) carries `Install { id, at, bypassed, replaces, unit, line }`,
-  `Remove { id }`, `Move { id, to }`, each answered by `Seat`; the rack holds `[Seat; MAX_UNITS]` and an
-  order per slot; `src-tauri/AGENTS.md`'s unload order loses its live-off step.
+  `Remove { id }`, `Withdraw { id }`, `Move { id, to }`, each answered by `Seat`; the rack holds
+  `[Seat; MAX_UNITS]` and an order per slot; `src-tauri/AGENTS.md`'s unload order loses its live-off step.
 
 **Proposed rule text** (for the owner's word; `AGENTS.md` and `docs/ARCHITECTURE.md` change together):
 
@@ -200,12 +205,15 @@ rings out. Two synth slots are two banks.
   as today's rack hands the targeted slot's unit its notes whatever its kind (`slots.rs` `note_on`); a
   built-in effect ignores them. Held notes stay tracked per slot; a release reaches every seat the note
   reached; a removed unit releases what it holds.
-- **A source change is a target change.** The router's key (`engine_io/midi/router.rs` `select_target`,
-  today `(slot, target)`) becomes `(slot, source unit, synth pick)`. A synth pick in the targeted slot,
-  and a source added, replaced or removed there, go through the router: it releases every held and
-  sustained note, then sends the change (the pick as `SetUnitParam [unit, 'instrument', n]`), one batch;
-  the chain host pushes a source's port message after that batch. SYNTH hands the picked instrument the
-  wheels it keeps (`Instruments::select`).
+- **A source change releases on the frame it applies.** The rack serves its port at a block start,
+  before the block's due commands, and a take can hold a message many blocks (`engine.rs` `process`), so
+  a router release is not ordered with it. The engine does it: on the frame a source's install,
+  replacement, withdrawal or removal applies, the old source's sounding notes (sustained ones too: their
+  `NoteOff` is withheld) are released, the new one starts with none, and a `NoteOff` reaching a seat that
+  never got its note is dropped. The router's key (`router.rs` `select_target`, today `(slot, target)`)
+  becomes `(slot, synth pick)`: a pick is a batch command, so its release and `SetUnitParam [unit,
+  'instrument', n]` go in one ordered batch. SYNTH hands the picked instrument its wheels
+  (`Instruments::select`).
 - **The wheels become slot events** (`SlotEventKind`): SYNTH applies them, a plugin ignores them (D12).
 - **A note sounds one quantum late** (`instruments::LEAD`): SYNTH reports it as its latency, so one formula
   covers every source: a source chain's record path lags by the input side plus the live chains' largest
@@ -215,8 +223,8 @@ rings out. Two synth slots are two banks.
   to the head on the feed's answer. An effect never moves ahead of a source.
 - **Changes:** `instruments.rs` behind the unit trait; `SelectInstrument` and the router's target lose
   `Builtin`; `instrument.ts` maps a synth pick to a SYNTH unit; `tests/synth.rs`, `voices.rs`,
-  `note_ownership.rs` and the router's tests drive the unit, a same-slot synth change releasing held and
-  sustained notes included.
+  `note_ownership.rs` and the router's tests drive the unit, with a same-slot synth pick and a source
+  replaced under a held and a sustained note, each released on its applied frame.
 
 ## 5. Built-in effects in series, and what proves each
 
@@ -230,15 +238,13 @@ once two are on, so the acceptance is per effect, in `tests/units.rs` (not yet b
 
 1. **Alone, it is today's send.** Before `input_fx.rs` goes, a test pins today's record tap and monitor
    per send (slot 0 live and empty, one deterministic input, 2 s at 48 kHz, the defaults and one other
-   setting, master at 1) and today's convolver's left and right outputs before they are summed. With
-   matched input (both channels equal), gain, channel and alignment (one live slot, chain latency 0), the
-   unit renders the pin: bit for bit per channel for ECHO and RING MOD; for REVERB each channel against
-   its own pinned side within 1e-6 of full scale (a mean would pass a swapped pair). At level 0 the output
-   is the input, bit for bit.
-2. **Composition.** For each ordered pair, `[X, Y]` equals `Y` run on `X`'s output alone, bit for bit. No
-   universal difference floor: ECHO and REVERB are linear and time-invariant at a steady tempo, so their
-   orders may match. That order is heard is proved by E2's clip and gain fakes, and here by each pair
-   holding RING MOD or OTT, whose two orders differ by a stated floor.
+   setting, master at 1) and the convolver's left and right outputs before they are summed. With equal
+   channels, one live slot and chain latency 0, the unit renders the pin: bit for bit per channel for ECHO
+   and RING MOD; REVERB each channel against its own side within 1e-6 of full scale (a mean would pass a
+   swapped pair). At level 0 the output is the input, bit for bit.
+2. **Composition.** For each ordered pair, `[X, Y]` equals `Y` run on `X`'s output alone, bit for bit.
+   ECHO and REVERB commute at a steady tempo, so order is proved by E2's clip and gain fakes, and here by
+   each pair holding RING MOD or OTT, whose two orders differ by a stated floor.
 3. **Bypass.** Settled, the output is the input, bit for bit, the latency unchanged. A bypassed ECHO or
    REVERB still rings out; un-bypassed, its input fades in over 20 ms from the command's frame.
 4. **Tails of two units.** Two ECHOs at different times, an impulse, then the first bypassed: its tail
@@ -255,30 +261,30 @@ below reads an old key through the resolver that reads it today, so a missing ke
 - **A learned pedal keeps working, no relearn, no file change.** The bindings and action ids stay
   (`engine_io/midi/bindings.rs`); `InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt` run `Toggle::Units(kind)`
   (`midi/actions.rs`): every unit of that kind in both chains; if any is on, all go bypassed, else all come
-  on; answered by one `Toggled` and each changed `Chain`. With none of the kind in any chain it does
-  nothing, and the settings are kept. `ToggleUnit` serves a pedal bound to one unit; learning one is not
-  in this build.
-- **The old sends become units once an input-fed chain exists;** until then `lf.inputSend.*`
-  (`engine-store.ts`) stays as it is. Then, after each input-fed chain's plugin: the OTT (dev only), RING
-  MOD → ECHO → REVERB, with their saved values; a send that was on goes on into every input-fed chain (it
-  sounded on both slots' sum), one that was off goes bypassed into every input-fed chain, so its pedal
-  reaches either input. A send that is off, at its defaults and bound to no pedal is not migrated: boot
-  stores every send's key on any install, so the key alone says nothing (`verify/probes/
-  legacy-storage.mjs` header). A synth-headed slot gets the OTT alone, if it was on.
+  on; answered by one `Toggled` and each changed `Chain`; with none of the kind it does nothing.
+  `ToggleUnit` serves a pedal bound to one unit; learning one is not in this build.
+- **The old sends become units in two durable steps,** as a plugin chain's role is known only at
+  activation (§The picture: VST2's scan and activation disagree). The upgrade's `lf.rig` write holds
+  `pending`: per slot, the send units to place, ids minted, values read. Once the recall settled and that
+  slot's head activated, one `lf.rig` write adds them to its chain and clears its `pending`; a restart
+  between places them again under the same ids, none lost or doubled; a missing plugin's slot keeps its
+  `pending`. The placement, after each input-fed chain's plugin: the OTT (dev only), RING MOD → ECHO →
+  REVERB, with their saved values; a send that was on goes on into every input-fed chain (it sounded on
+  both slots' sum), one that was off goes bypassed, so its pedal reaches either input. One off, at its
+  defaults and bound to no pedal is not migrated (boot stores every send's key, `legacy-storage.mjs`
+  header). A source-headed slot gets the OTT alone, if it was on. `lf.inputSend.*` stays as it is.
 - **Rig recall:** `lf.rigRecall` becomes `lf.rig`, written whole before the first load (§1): each slot's
   plugin a plugin unit with a fresh id, else its source as `instrument.ts` resolves `lf.slotSource.<n>`
   (unset: Lead in A, Bass in B, Off on a guitar-first install) as a SYNTH unit or an empty chain. The old
   keys stay one release.
-- **Tones:** a migrated plugin unit's first load starts from its slot and plugin's v0.8.9 file (§1) and
-  saves under its id. The upgrade writes no old file.
+- **Tones:** a migrated plugin unit's first load starts from its slot and plugin's v0.8.9 file (§1).
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
   effect, 0.1 otherwise, `instrument.ts`); an empty input-fed slot `lf.slotInputGain.<n>`; a SYNTH slot
   unity, its instrument levels from `lf.synthGain.<id>` (the input trim never scaled a synth). GO LIVE is
   never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
   `inputChannel` seeding both, as today) each become a mono pick, '' auto; stereo is the player's (§7).
-- **The autosaved jam:** a v1 or v2 recovery record restores into both channels (§8); the next save writes
-  v3, which v0.8.9 refuses as newer.
+- **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.
 - **Proved by** `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1 and 48
   kHz) and `rig-recall.mjs` on a stored v0.8.9 profile; at the boundaries those fakes skip, `src-tauri`
   tests that load a v0.8.9 `slot<n>-<hash>.tone` into a new unit (`host/tone.rs`) and dispatch a v0.8.9
@@ -315,21 +321,19 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   to both sides; a stereo side takes the pair as it is. `sum_to_mono` (`host/clap.rs` and its twins) goes.
   The host asks each format for stereo first and takes what the plugin grants.
 - **A slot's input is one channel or a pair.** A mono pick is that channel on both sides at unity, no pan
-  law, so a loop of it plays at today's level. The device side always hands the engine a pair per slot
-  (`Engine::process_inputs` takes `[[&[f32]; 2]; SLOT_COUNT]`; `engine_io/callback.rs`, `pipes.rs`). One
-  shape everywhere (request, archive, fake): `null` (auto: input 2, mono), a channel number, or
-  `[left, right]` (`DeviceRequest.inputChannels`, `EngineHost.setSlotInputChannel`, `SlotControls.tsx`,
-  `audio-settings.ts`). A pick the device lacks, either side of a pair included, opens as auto, flagged, as
-  `open_channels` does today (`engine_io/transition.rs`). The feed's `meter` carries a peak per channel.
+  law. The device side always hands the engine a pair per slot (`Engine::process_inputs` takes
+  `[[&[f32]; 2]; SLOT_COUNT]`; `callback.rs`, `pipes.rs`). One shape in request, archive and fake: `null`
+  (auto: input 2, mono), a channel number, or `[left, right]` (`DeviceRequest.inputChannels`,
+  `setSlotInputChannel`, `SlotControls.tsx`, `audio-settings.ts`). A pick the device lacks, either side of
+  a pair, opens as auto, flagged (`transition.rs` `open_channels`). The feed's `meter` has a peak per channel.
 - **Latency sums within a chain,** bypassed units included. A take aligns on the largest sum across live
   input-fed chains (plus the driver's report and the limiter's pre-delay); each live chain's wet reaches
   the record tap delayed by what its own sum lacks of it.
 - **The record lines fit every delay.** Each slot's lines and SYNTH's are sized when the engine is built
-  for a device, off the callback: the input side (`EngineConfig` gains it; today it comes per block in
-  `ProcessContext.input_frames`) plus `MAX_CHAIN_LATENCY` (one second) plus a block. An install that takes
-  a chain's sum past `MAX_CHAIN_LATENCY` is refused, so no delay (input side plus the largest live sum less
-  its own) passes its line; a block whose input side exceeds the config's is clamped and counted. That
-  settles the clipped-delay thread in the engine briefing.
+  for a device, off the callback: the input side (`EngineConfig` gains it; today per block in
+  `ProcessContext.input_frames`) plus `MAX_CHAIN_LATENCY` (one second) plus a block. An install past
+  `MAX_CHAIN_LATENCY` is refused; a block whose input side exceeds the config's is clamped and counted.
+  That settles the clipped-delay thread in the engine briefing.
 - **An edit that moves the alignment waits for the take.** Today `Rack::latch_record` latches the
   compensation while a capture runs and the unit changes anyway. Now an install, removal or reseat that
   changes a chain's sum OR its role (input-fed ↔ source, in or out of the live set: a zero-latency source
@@ -337,11 +341,10 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   answered `waiting` (`ChainState.held`); the engine judges it at a block start. Any other edit, a move
   and a bypass apply at once.
 - **One port for plugins and built-ins;** an eviction hands back every seat and every waiting install.
-- **The lanes are stereo:** interleaved `[f32; 2]` frames in the looper's pool (`looper.rs`), so every job,
-  reversal and edge keeps one index. Eleven 60 s buffers: 126.7 MB → 253.4 MB at 48 kHz (116.4 → 232.8 at
-  44.1). Lane FX per channel with shared controls; pan becomes a balance. The record tap, lookback, monitor
-  and instruments' record path are pairs; a waveform bin and a scope column fold both; the tuner reads the
-  mean.
+- **The lanes are stereo:** interleaved `[f32; 2]` frames in the looper's pool (`looper.rs`), one index per
+  job, reversal and edge. Eleven 60 s buffers: 126.7 → 253.4 MB at 48 kHz (116.4 → 232.8 at 44.1). Lane FX
+  per channel, shared controls; pan becomes a balance. Record tap, lookback, monitor and instruments'
+  record path are pairs; a waveform bin and a scope column fold both; the tuner reads the mean.
 - **AUTO REC detects on linked energy** (`(l² + r²) / 2` per frame) and keeps its look-back as pairs, so
   the onset it copies into the loop is stereo (`autorec.rs` `scan`); a mean would cancel an attack of
   opposite polarity.
@@ -365,11 +368,12 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   plugin unit's `state` names its tone entry, absent when the plugin kept none. GO LIVE is not stored. A
   reader skips a kind or a param it does not know and says so, so a later kind needs no version 4.
   Recovery writes the same archive without the master and may leave `rig` out.
-- **Tones on import** (`src/ui/state/slot-tones.ts`) go through `importTone`, parked unseated under a
-  token. A v3 tone names its unit: that one if seated with the same identity, else the first unit of that
-  identity in its slot that no tone of this import took. A v1/v2 tone names a slot: the first unit of that
-  identity there, in chain order. A match reloads with the token; a unit left without its tone, or a tone
-  with no match, gets today's toast; every token no reload took is forgotten.
+- **Tones on import** (`src/ui/state/slot-tones.ts`) go through `importTone`, parked under a token, in two
+  passes: every v3 tone whose unit is seated with its identity takes it first; then each other tone takes
+  the first unit of its identity in its slot, in chain order, that no tone took. A match goes through
+  `reload` (§2; `add` refuses a seated id). A tone with no match is stored as its slot-and-plugin file
+  (§1), so the next unit of that plugin added there starts from it (today's toast says so); every token
+  no reload took is forgotten.
 - **The import limits fit a full v3 archive:** `maxImportArchiveBytes` budgets five stereo Float32 stems,
   the PCM16 master and `SLOT_COUNT × MAX_UNITS` tones; `parseZip`'s entry cap is `TRACK_COUNT + 2 +
   SLOT_COUNT × MAX_UNITS` (`src/session/import.ts`, `MAX_UNITS` mirrored, changed together).
@@ -421,22 +425,23 @@ AUTO REC's stereo onset, the lines' sizing, the snapshot, the load, the wet mast
   effect does not wait.
 - *Lifecycle:* a ninth unit and an effect ahead of a source are refused; a source at any `at` lands at the
   head, replacing the seated one in one crossfade; a removal releases notes, stops once, returns the unit
-  under its id, LIVE unchanged; a restarted unit's seat alone goes bypassed; a failed reseat parks it in
-  place; an eviction returns every seat with its bypass; the engine never drops a fake.
+  under its id, LIVE unchanged; a withdrawn seat passes its input at its last latency, in place, until
+  reseated or parked; an eviction returns every seat with its bypass; the engine never drops a fake.
 - *Latency:* 5 + 7 + 11 reads 23; two live chains align on the larger.
 - *A proptest* of add, move, remove and bypass scripts at two block sizes: finite, bit-identical, every
   unit returned once, every port message answered once.
 
-**E3. The effects and the synths as units.** The `units` module, §5's acceptance, the meter ring (left
-full across two feed frames, the next frame's range covers every sample), `Toggle::Units`' any-on rule,
-SYNTH as a source (notes, wheels, the record lag, a same-slot synth change through the router).
-`input_fx.rs` and the OTT instances in `slots.rs` and `instruments.rs` go last, after §5's pin.
+**E3. The effects and the synths as units.** The `units` module, §5's acceptance, the meter ring (full
+across two feed frames, the next range covers every sample), `Toggle::Units`' any-on rule, SYNTH as a
+source (notes, wheels, the record lag, a pick through the router). `input_fx.rs` and the OTT instances
+go last, after §5's pin.
 
 The device side follows each step, under `pnpm rust:check`. E1: the pair per slot, and a distinct left and
 right signal through each native adapter (the CLAP, VST3 and VST2 fixtures in `src-tauri/src/host/`). E2: a
 plugin owner per unit, the chain host and `Seat`, with tests for a cold restore of a bypassed plugin and
 two ECHOs at different settings, a rebuild with a kind toggle unanswered and a per-unit change after it
-(both kept), and a restart that changes latency mid-take. E3: §6's migration and its native tests.
+(both kept), a `ToggleUnit` applied but unanswered and one not yet taken (each flips once), ECHO's level
+sent as 2 answered 1, and a restart that changes latency mid-take. E3: §6's migration and its native tests.
 
 ## 10. The browser fake
 
@@ -447,8 +452,8 @@ The UI is built against `src/platform/host.web.ts` first. The fake models the ch
   frame and its outcome, through `loading` first. Canned plugin descriptors (an effect, an instrument, one
   with latency) feed the picker; editor calls are recorded. `importTone` answers by §8's rule.
 - **Bypass and params:** `SetUnitBypass`, `ToggleUnit` and `Toggle.Units` switch the model and answer with
-  `chains` (and `Toggled`); `SetUnitParam` lands in the unit's `params`. A probe restores a cold rig (a
-  bypassed plugin, two ECHOs at different settings) and reads it back from a reset frame.
+  `chains` (and `Toggled`); `SetUnitParam` lands in `params` clamped as the engine clamps. A probe
+  restores a cold rig (a bypassed plugin, two ECHOs at different settings), reads it from a reset frame.
 - **The OTT face's feed:** while an OTT unit is seated and on, `unitMeters` on the fake's own 60 Hz timer
   from a deterministic signal (the mockup's simulated part, `docs/redesign/ott.js`, through the same
   curve), following its four params; a probe turns the timer off and scripts frames through `emit`.
@@ -459,9 +464,8 @@ The UI is built against `src/platform/host.web.ts` first. The fake models the ch
 
 ## Still to measure
 
-- **Memory at an export and the worst callback** with stereo lanes: unknown. An export holds copies beyond
-  §7's live pool (the snapshot, its bytes, the WAVs, the zip, the render's engine). Measured in E1:
-  `tests/perf.rs` and the process's peak at a full five-lane export.
+- **Memory at an export and the worst callback** with stereo lanes: an export holds copies beyond §7's
+  pool (snapshot, bytes, WAVs, zip, render engine). Measured in E1: `tests/perf.rs`, a five-lane export.
 - **The lane FX per channel** (the pitch shifter above all) and two SYNTH banks: E1's and E3's perf bars;
   if one fails, a mono-linked FX path or one shared bank is the fallback.
 - **What each real plugin grants** when asked for stereo (the amp-sim included): read from none.
