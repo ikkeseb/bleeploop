@@ -7,7 +7,10 @@
 // is the engine's (lf-engine `tests/render_master.rs`, the pan law `tests/pan.rs`).
 // Run: node verify/guards/wav-export.mjs
 import { createHash } from 'node:crypto';
-import { encodeWav, floatToPcm16, mixStereo, panGains } from '../../src/session/wav.ts';
+import { encodeWav, floatToPcm16, mixStereo as mixChannels, panGains } from '../../src/session/wav.ts';
+
+/** `mixStereo` over one-channel tracks (a mono `pcm` each): the cases below were written for them. */
+const mixStereo = (tracks, frames, level) => mixChannels(tracks.map((t) => ({ ...t, pcm: [t.pcm] })), frames, level);
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {
@@ -184,6 +187,16 @@ const centred = (tracks, frames, level) => {
   const [pl, pr] = mixStereo([{ pcm: Float32Array.from([1]), volume: 1, muted: false, pan: 0.5 }], 1, 1);
   const [gl, gr] = panGains(0.5);
   ok('E.pan 0.5: each side carries its gain (the right clamps at 1)', pl[0] === Math.fround(gl) && pr[0] === 1, JSON.stringify([pl[0], pr[0], gl, gr]));
+}
+
+// ---- F. a stereo track: each side its own, `[x, -x]` kept, pan a balance ----
+{
+  const x = Float32Array.from([0.25, -0.5, 0.125]);
+  const minus = x.map((v) => -v);
+  const [l, r] = mixChannels([{ pcm: [x, minus], volume: 1, muted: false }], 3, 1);
+  ok('F.[x, -x] centred: the left is x, the right -x (no mean cancels it)', l.every((v, i) => v === x[i]) && r.every((v, i) => v === minus[i]), JSON.stringify([Array.from(l), Array.from(r)]));
+  const [hl, hr] = mixChannels([{ pcm: [x, minus], volume: 0.5, muted: false, pan: 1 }], 3, 1);
+  ok('F.hard right on a stereo track: the left side silent, the right its own side at sqrt2 x volume', hl.every((v) => Object.is(v, 0)) && hr.every((v, i) => v === Math.fround(minus[i] * (0.5 * Math.SQRT2))), JSON.stringify(Array.from(hr)));
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

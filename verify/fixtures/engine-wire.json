@@ -489,6 +489,7 @@
         {
           "index": 0,
           "frames": 96000,
+          "channels": 2,
           "reversed": false,
           "state": "Playing",
           "mix": {
@@ -508,6 +509,7 @@
         {
           "index": 3,
           "frames": 96000,
+          "channels": 2,
           "reversed": true,
           "state": "Overdubbing",
           "mix": {
@@ -535,6 +537,7 @@
         {
           "index": 4,
           "frames": 88200,
+          "channels": 2,
           "reversed": false,
           "state": "Stopped",
           "mix": {
@@ -563,6 +566,7 @@
         {
           "index": 0,
           "frames": 192000,
+          "channels": 2,
           "reversed": false,
           "state": "Playing",
           "mix": {
@@ -581,6 +585,7 @@
         {
           "index": 2,
           "frames": 192000,
+          "channels": 1,
           "reversed": true,
           "state": "Stopped",
           "mix": {
@@ -607,6 +612,7 @@
         {
           "index": 1,
           "frames": 128000,
+          "channels": 1,
           "reversed": false,
           "state": "Playing",
           "mix": {

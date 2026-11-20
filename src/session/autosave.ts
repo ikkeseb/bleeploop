@@ -352,7 +352,7 @@ async function latestHolds(committed: StemSnapshot): Promise<boolean> {
     if (!json) return false;
     const base = json.name.slice(0, -'-session.json'.length);
     const meta = { bpm: committed.bpm, bars: snapshotBars(committed) };
-    const { entries: stems, session } = prepareStemArchive(committed, meta, base, 'float32');
+    const { entries: stems, session } = prepareStemArchive(committed, meta, base);
     const shape = (value: unknown) =>
       JSON.stringify(value, (key, v: unknown) => (key === 'exported' ? '' : typeof v === 'number' ? Math.fround(v) : v));
     if (entries.length !== stems.length + 1) return false;

@@ -68,8 +68,8 @@ async function buildSession({ bpm, bars }) {
   fx[0] = { bypassed: false, params: { cutoff: 900, q: 3 } };
   fx[3] = { bypassed: false, params: { time: 2, feedback: 0.5, mix: 0.4 } };
   await session.loadSession({ bpm, bars, masterLengthFrames: frames, tracks: [
-    { index: 0, pcm: one, volume: 0.6, muted: true, reversed: false, state: 'PLAYING', fx: defaultFxStates() },
-    { index: 1, pcm: two, volume: 1.2, muted: false, reversed: false, state: 'PLAYING', fx },
+    { index: 0, pcm: [one], volume: 0.6, muted: true, reversed: false, state: 'PLAYING', fx: defaultFxStates() },
+    { index: 1, pcm: [two], volume: 1.2, muted: false, reversed: false, state: 'PLAYING', fx },
   ] });
   // What the engine answers once it plays them.
   lf.native.snapshotBytes = encodeSessionBytes({ rate: sr, masterLengthFrames: frames, bpm,
@@ -130,7 +130,8 @@ function compareArchives(label, committed, fresh) {
       // `master.kind`: v0.1.0 wrote 'wet-v1' (Tone's render), this capture 'wet-engine' (the fake's).
       const [was, is] = [a, b].map((m) => {
         const json = JSON.parse(m.session);
-        return { ...json, exported: null, ...(json.master ? { master: { ...json.master, kind: null } } : {}) };
+        // `formatVersion`: v0.1.0 wrote 1, this capture 3 (stereo stems: `docs/unit-contract.md` §8).
+        return { ...json, exported: null, formatVersion: null, ...(json.master ? { master: { ...json.master, kind: null } } : {}) };
       });
       const [x, y] = [was, asCaptured(was, is)].map((o) => JSON.stringify(o));
       if (x !== y) {
@@ -144,8 +145,14 @@ function compareArchives(label, committed, fresh) {
     } else if (name === '-master.wav') {
       const [x, y] = [old, now].map((d) => decodeWav(d).channels);
       if (x.length !== y.length || x[0].length !== y[0].length) out.push(`${label}${name}: the master's shape changed`);
-    } else if (!Buffer.from(old).equals(Buffer.from(now))) {
-      out.push(`${label}${name}: bytes differ`);
+    } else {
+      // A stem: this capture's is always two channels (format v3), each side the committed stem's
+      // samples bit for bit (a v0.1.0 mono stem's one channel on both), whether or not the files' bytes
+      // match.
+      const [was, is] = [old, now].map((d) => decodeWav(d).channels);
+      const bits = (c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength);
+      if (is.length !== 2) out.push(`${label}${name}: ${is.length} channels, not two`);
+      else if (!is.every((c, k) => bits(c).equals(bits(was[Math.min(k, was.length - 1)])))) out.push(`${label}${name}: samples differ`);
     }
   }
   return out;

@@ -1,6 +1,6 @@
 // src/session/export.ts
 // WAV-export coordinator: pulls a read-only snapshot of the committed looper tracks and saves ONE
-// .zip (per-track mono WAVs + a stereo master mix + session.json, and each loaded plugin slot's tone,
+// .zip (per-track stereo WAVs + a stereo master mix + session.json, and each loaded plugin slot's tone,
 // `src/ui/state/slot-tones.ts`) through `platform.exports`. The master is the engine's: the same
 // snapshot carries it, rendered offline by lf-engine from those loops and the engine's mix (no Web Audio
 // render remains); a dry mixdown stands in when that render fails (`buildExportBundle`).
@@ -17,12 +17,11 @@ export interface BuildExportOptions {
   /** False for recovery snapshots: stems + session.json only; the snapshot never asks the engine for
    *  its (expensive) master render. */
   includeMaster?: boolean;
-  /** Float32 for lossless local recovery; exports also preserve editable stem headroom. */
-  stemFormat?: 'pcm16' | 'float32';
 }
 
 /**
- * Build the export bundle: every committed track as a mono WAV + session.json, optionally with the
+ * Build the export bundle: every committed track as a stereo WAV (its two sides as the engine holds
+ * them) + session.json, optionally with the
  * stereo master mix, packed into a single timestamped .zip — everything exportLoops does EXCEPT the
  * save itself (the seam that lets a headless probe byte-parse the archive without touching
  * <a download>).
@@ -65,7 +64,7 @@ export async function buildExportBundle(
   const base = exportBase();
   const sr = snap.sampleRate;
   const meta = { bpm: snap.bpm, bars: Math.max(1, Math.round(snapshotBars(snap))) };
-  const { entries, session } = prepareStemArchive(snap, meta, base, options.stemFormat ?? 'float32');
+  const { entries, session } = prepareStemArchive(snap, meta, base);
 
   if (withMaster) {
     // The engine's wet master; the dry mixdown as the fallback so one render failure can't lose the

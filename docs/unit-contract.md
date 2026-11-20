@@ -355,12 +355,14 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
 
 ## 8. The session and stem format: version 3
 
-`src/session/stem-archive.ts`, `session-schema.ts`, `import.ts`, `autosave.ts`; the engine's bytes in
+`src/session/stem-archive.ts`, `session-schema.ts`, `archive-read.ts`, `autosave.ts`; the engine's bytes in
 `engine-wire.ts` (`SnapshotHeader`, `LoadHeader`) and `src-tauri/src/engine_io/session.rs`.
 
 - **`formatVersion: 3`, always** (no 4/4 session is written as v1 any more), so an older build refuses
-  it as newer. **Stems are two-channel Float32 WAV** (`"channels": 2`); the engine's bytes carry two
-  planar blocks per track and `channels` in the header; a track saying 1 is copied to both natively.
+  it as newer, or, past its archive limit, as too large (the build before v3 checks the size first).
+  **Stems are two-channel Float32 WAV, always** (`"channels": 2`; only the master is PCM16), and the
+  import refuses a v3 stem that is not; the engine's bytes carry two planar blocks per track and
+  `channels` in the header; a track saying 1 (a v1 or v2 stem) is copied to both natively.
 - **A v1 or v2 session loads into both channels,** bit for bit; its `plugins` list reads as each slot's one
   plugin unit, under today's import rule (the rig is never swapped).
 - **v3 holds the rig,** which build step 8's project files open (whether an import applies it is that
@@ -376,7 +378,9 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   no reload took is forgotten.
 - **The import limits fit a full v3 archive:** `maxImportArchiveBytes` budgets five stereo Float32 stems,
   the PCM16 master and `SLOT_COUNT × MAX_UNITS` tones; `parseZip`'s entry cap is `TRACK_COUNT + 2 +
-  SLOT_COUNT × MAX_UNITS` (`src/session/import.ts`, `MAX_UNITS` mirrored, changed together).
+  SLOT_COUNT × MAX_UNITS` (`src/session/archive-limits.ts`, `MAX_UNITS` mirrored, changed together). The
+  tones' allowance funds no other read: session.json is bounded before it is parsed, the grid to 60 s,
+  and each stem's header must hold its channels, format, rate and frames before a sample is decoded.
   `verify/guards/import.mjs` round-trips the largest legal archive (five 60 s stereo stems at 48 kHz,
   sixteen tones of the largest size).
 

@@ -5,15 +5,20 @@
  * forgotten on `ShareLost`. The probe scripts the lanes on the feed and the snapshot the engine would
  * answer, then drives the real UI:
  *
- * - export: the Export button's download holds both stems exactly as the snapshot's PCM (play order), the
+ * Each lane's two sides differ in the snapshot (lane 1 `[x, -x]`, which a mean would save as silence;
+ * lane 2 two unalike signals), and every path keeps them: format v3 (`docs/unit-contract.md` §8).
+ *
+ * - export: the Export button's download holds both stems exactly as the snapshot's PCM (play order), each
+ *   a two-channel WAV of the lane's sides, session.json format v3, the
  *   store's mix (DUB FEEDBACK included, set in the lane's FX drawer; the pan, set on the lane's pan control,
  *   and a centred lane's 0), the lane states, and the master the
  *   snapshot carries (`master.kind` 'wet-engine'; here the fake's stand-in, a dry sum under the mix the
  *   UI sent, NOT the engine's sound: this proves the plumbing, never the master's sound); no
  *   AudioContext is built;
  * - recovery: autosave saves the jam without asking for the master, and a reloaded page (a fresh engine)
- *   loads it back into the engine and sends the loaded lanes' mix, DUB FEEDBACK and pan included;
- * - import: the exported zip goes to the engine as one session (header, PCM, orientation), and the store
+ *   loads it back into the engine, two channels a track bit for bit, and sends the loaded lanes' mix, DUB
+ *   FEEDBACK and pan included;
+ * - import: the exported zip goes to the engine as one session (header, both sides' PCM, orientation), and the store
  *   sends the loaded lanes' mix; the same zip with its session.json written before pan (no `pan`) loads
  *   every lane centred; while that load is held, IMPORT reads busy and a second pick starts no load;
  * - Share output: the saved pick reaches the engine at boot, and ShareLost clears it with a toast.
@@ -25,7 +30,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { probe } from '../harness/probe.ts';
 import { parseZip } from '../../src/session/unzip.ts';
-import { decodeWav } from '../../src/session/wav.ts';
+import { decodeWav, panGains } from '../../src/session/wav.ts';
 import { makeZip } from '../../src/session/zip.ts';
 
 const RATE = 48000;
@@ -45,6 +50,18 @@ const lane = (state, extra = {}) => ({
   ...extra,
 });
 const laneEvent = (i, info) => ({ Lane: { frame: 0, lane: i, info } });
+
+/** `got` holds `want`'s blocks sample for sample (`Object.is`: a -0 a codec lost shows), named at the
+ * first difference: a whole-array diff of this size would not print. */
+function sameBlocks(got, want, what) {
+  assert.equal(got.length, want.length, `${what}: ${got.length} blocks, expected ${want.length}`);
+  for (const [k, block] of want.entries()) {
+    assert.equal(got[k].length, block.length, `${what}: block ${k} is ${got[k].length} samples, expected ${block.length}`);
+    const at = block.findIndex((x, f) => !Object.is(got[k][f], x));
+    const show = (x) => (Object.is(x, -0) ? '-0' : String(x));
+    assert.equal(at, -1, `${what}: block ${k} differs first at frame ${at} (${show(got[k][at])} vs ${show(block[at])})`);
+  }
+}
 
 await probe(async ({ browser, open }) => {
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 }, acceptDownloads: true });
@@ -90,20 +107,24 @@ await probe(async ({ browser, open }) => {
     const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
     const a = Float32Array.from({ length: master }, (_, i) => 0.5 * Math.sin((2 * Math.PI * 440 * i) / 48000));
     const b = Float32Array.from({ length: master }, (_, i) => (i % 4800 < 100 ? 0.8 : 0) * (1 - i / master));
+    // Lane 1 `[x, -x]`; lane 2's right a quiet saw of its own.
+    const sides = [a, a.map((x) => -x), b, Float32Array.from({ length: master }, (_, i) => 0.3 * ((i % 331) / 331) - 0.15)];
     window.__lf.native.snapshotBytes = encodeSessionBytes(
       {
         rate: 48000,
         masterLengthFrames: master,
         bpm: 120,
         tracks: [
-          { index: 0, frames: master, reversed: false, state: 'Playing' },
-          { index: 1, frames: master, reversed: true, state: 'Stopped' },
+          { index: 0, frames: master, channels: 2, reversed: false, state: 'Playing' },
+          { index: 1, frames: master, channels: 2, reversed: true, state: 'Stopped' },
         ],
       },
-      [a, b],
+      sides,
     ).buffer;
-    return [Array.from(a), Array.from(b)];
+    return sides.map((side) => Array.from(side));
   }, MASTER);
+  /** Each lane's sides, `[left, right]`. */
+  const lanes = [pcm.slice(0, 2), pcm.slice(2, 4)];
   await page.getByRole('slider', { name: 'Track 1 volume' }).fill('80');
   await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
   await page.getByRole('slider', { name: 'Track 1 dub feedback', exact: true }).fill('40');
@@ -132,21 +153,25 @@ await probe(async ({ browser, open }) => {
       [2, 1, false, true, 'STOPPED', 1, 0],
     ],
   );
-  assert.equal(session.formatVersion, 1, 'a pan leaves the format at 1');
+  assert.equal(session.formatVersion, 3, 'format v3: stereo stems');
+  assert.deepEqual(session.meter, { num: 4, den: 4, beats: 4 }, 'v3 names its meter, 4/4 too');
   for (const [k, t] of session.tracks.entries()) {
-    const stem = decodeWav(entries.find((e) => e.name === t.file).data).channels[0];
-    assert.deepEqual(Array.from(stem), pcm[k].map((x) => Math.fround(x)), `stem ${t.track} is the snapshot's PCM`);
+    assert.equal(t.channels, 2, `track ${t.track} says two channels`);
+    const stem = decodeWav(entries.find((e) => e.name === t.file).data).channels;
+    assert.equal(stem.length, 2, `stem ${t.track} is a two-channel WAV`);
+    sameBlocks(stem.map((c) => Array.from(c)), lanes[k], `stem ${t.track}'s sides are the snapshot's, bit for bit`);
   }
   assert.equal(session.master.kind, 'wet-engine', "the snapshot's master");
   const master = decodeWav(entries.find((e) => e.name === session.master.file).data);
   assert.equal(master.channels.length, 2);
-  // The fake's stand-in is 0.8 × lane 1 + lane 2 (the volumes the UI sent): the PCM16 WAV holds it as
-  // sent, clipped at full scale.
-  const standIn = pcm[0].map((a, i) => Math.max(-1, Math.min(1, 0.8 * a + pcm[1][i])));
-  for (const channel of master.channels) {
+  // The fake's stand-in is lane 1 at volume 0.8 panned -0.3 (the pan law's gain per side) + lane 2 on each
+  // side (the mix the UI sent): the PCM16 WAV holds it as sent, clipped at full scale.
+  const pan = panGains(-0.3);
+  for (const [c, channel] of master.channels.entries()) {
+    const standIn = lanes[0][c].map((a, i) => Math.max(-1, Math.min(1, 0.8 * pan[c] * a + lanes[1][c][i])));
     assert.equal(channel.length, MASTER);
     const off = channel.reduce((m, x, i) => Math.max(m, Math.abs(x - standIn[i])), 0);
-    assert.ok(off < 1e-4, `the master WAV is the snapshot's master (off by ${off})`);
+    assert.ok(off < 1e-4, `the master WAV's side ${c} is the snapshot's master (off by ${off})`);
   }
 
   // ── Recovery: autosave keeps the jam; a fresh page loads it back into the engine ─────────────────
@@ -168,13 +193,13 @@ await probe(async ({ browser, open }) => {
   const { tracks: recoveredTracks, ...recoveredRest } = recovered.header;
   assert.deepEqual(recoveredRest, { bpm: 120, bars: 1, masterLengthFrames: MASTER });
   assert.deepEqual(
-    recoveredTracks.map((t) => ({ index: t.index, frames: t.frames, reversed: t.reversed, state: t.state })),
+    recoveredTracks.map((t) => ({ index: t.index, frames: t.frames, channels: t.channels, reversed: t.reversed, state: t.state })),
     [
-      { index: 0, frames: MASTER, reversed: false, state: 'Playing' },
-      { index: 1, frames: MASTER, reversed: true, state: 'Stopped' },
+      { index: 0, frames: MASTER, channels: 2, reversed: false, state: 'Playing' },
+      { index: 1, frames: MASTER, channels: 2, reversed: true, state: 'Stopped' },
     ],
   );
-  assert.deepEqual(recovered.pcm, pcm.map((block) => block.map((x) => Math.fround(x))), 'the recovered PCM is the snapshot');
+  sameBlocks(recovered.pcm, pcm, "the recovered PCM is the snapshot's, both sides of each lane");
   // The recovered mix rides in the load header (the engine sets it with the loops), not sent after it.
   assert.deepEqual(recoveredTracks.map((t) => [t.mix.volume, t.mix.muted, t.mix.dubFeedback, t.mix.pan]), [[0.8, false, 0.4, -0.3], [1, false, 1, undefined]],
     'the recovered mix, DUB FEEDBACK too (a lane left at 100 % gets 100 %), and the pan (a centred lane carries none, as the engine writes it)');
@@ -189,7 +214,7 @@ await probe(async ({ browser, open }) => {
     return { header, pcm: pcm.map((block) => Array.from(block)) };
   });
   assert.deepEqual(imported.header, recovered.header, 'import sends the session the export holds');
-  assert.deepEqual(imported.pcm, recovered.pcm);
+  sameBlocks(imported.pcm, pcm, "the import's PCM is the snapshot's, both sides of each lane");
   await page.waitForFunction(() => window.__lf.looper.trackPan(0) === -0.3, undefined, { timeout: 5000 });
 
   // ── A legacy session: the same zip, its session.json from before pan, loads every lane centred ──────

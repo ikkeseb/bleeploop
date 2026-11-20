@@ -203,6 +203,60 @@ fn distinct_impulses_render_bit_identical_at_every_block_size() {
     }
 }
 
+/// A take whose sides differ, `[x, -x]` among them (format v3, `docs/unit-contract.md` §8): its
+/// snapshot's stems, a fresh engine loaded from them and that engine's playback are the take's, bit for
+/// bit on each side. A mean of the sides would hold `[x, -x]` as silence. The bytes between snapshot and
+/// load are `engine_io`'s (`src-tauri/src/engine_io/tests.rs`, `a_stereo_sessions_sides_survive_…`).
+#[test]
+fn an_unalike_stereo_take_comes_back_from_its_snapshot_bit_for_bit_on_each_side() {
+    let mut rig = Rig::new();
+    rig.set_stereo_inputs(|_| [0.0; 2], |_| [0.0; 2]);
+    let start = arm_one_bar(&mut rig, 1.0);
+    let half = (rig.end_frame() - start) / 2;
+    // The first half `[x, -x]`; the second unalike sides, the right a slower saw.
+    let x = |f: Frame| 0.25 * (f as f32 * 0.013_7).sin();
+    rig.set_stereo_inputs(move |f| if f < start + half { [x(f), -x(f)] } else { [x(f), 0.4 * ((f % 331) as f32 / 331.0) - 0.2] }, |_| [0.0; 2]);
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    // Silence from here: the rig's output carries the monitor, and the pass below is the loop's alone.
+    rig.set_stereo_inputs(|_| [0.0; 2], |_| [0.0; 2]);
+    let take = rig.pcm2(0);
+    let m = take.len();
+    let opposite = take.iter().filter(|[l, r]| *l != 0.0 && r.to_bits() == (-*l).to_bits()).count();
+    let unalike = take.iter().filter(|[l, r]| l.abs() > 1e-3 && r.abs() > 1e-3 && (*l + *r).abs() > 1e-3 && l != r).count();
+    assert!(opposite > m / 3 && unalike > m / 3, "the take holds both: {opposite} opposite frames, {unalike} unalike, of {m}");
+
+    let mut pcm = Vec::with_capacity(m);
+    pcm.resize(m, [0.0f32; 2]);
+    let SessionJob::Snapshot(s) = run(&mut rig, SessionJob::Snapshot(Snapshot::new(pcm))) else { unreachable!() };
+    assert_eq!(s.result, Some(Ok(())));
+    let bits = |p: &[Pair]| p.iter().map(|[l, r]| [l.to_bits(), r.to_bits()]).collect::<Vec<_>>();
+    assert_eq!(bits(&s.pcm[..m]), bits(&take), "the stems");
+    // One pass of the take's playback, the looper's own mix, from a boundary.
+    let pass = |rig: &mut Rig| {
+        let next = rig.next_boundary();
+        rig.advance_to(next);
+        rig.keep_output();
+        rig.advance(rig.master());
+        [rig.output.as_ref().unwrap().1.clone(), rig.output_right.clone()]
+    };
+    let heard = pass(&mut rig);
+    assert!(heard[0].iter().zip(&heard[1]).filter(|(l, r)| **l != 0.0 && **r == -**l).count() > m / 3, "the [x, -x] half plays opposite");
+
+    let mut fresh = Rig::new();
+    fresh.set(Command::SetMetronome(false));
+    let mut buf = s.pcm[..m].to_vec();
+    buf.resize(fresh.engine.looper().capacity() as usize, [0.0; 2]);
+    let mix = s.tracks[0].unwrap().mix;
+    let load = Load { bpm: s.bpm, meter: s.meter, bars: 1, master: s.master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix }], result: None };
+    let SessionJob::Load(done) = run(&mut fresh, SessionJob::Load(load)) else { unreachable!() };
+    assert_eq!(done.result, Some(Ok(())));
+    assert_eq!(bits(&fresh.pcm2(0)), bits(&take), "the loaded lane");
+    let replay = pass(&mut fresh);
+    let side_bits = |v: &[Vec<f32>; 2]| v.iter().map(|c| c.iter().map(|x| x.to_bits()).collect::<Vec<_>>()).collect::<Vec<_>>();
+    assert_eq!(side_bits(&replay), side_bits(&heard), "the loaded lane plays the take's pass, each side bit for bit");
+}
+
 /// Impulses on both inputs at each of `at` (frames after the window's start), slot 0 chaining 64 + 32
 /// and slot 1 17, both live; `edit` runs on the rig once the frame `edits[k]` after the start is
 /// reached. Returns the loop and the monitor, each side, from `from`.

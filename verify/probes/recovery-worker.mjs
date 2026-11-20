@@ -1,6 +1,6 @@
 /**
  * Recovery encoding through the real worker (`src/session/recovery-encode.ts`): transfer ownership of
- * the copied PCM, non-finite sample rejection, a worker startup failure followed by a successful retry,
+ * the copied PCM (both sides of a lane, each its own buffer), non-finite sample rejection, a worker startup failure followed by a successful retry,
  * and a malformed reply from the worker. Then the same failure behaviour through the production autosave
  * path (`src/session/autosave.ts`) on the web engine fake (`src/platform/host.web.ts`), whose snapshot
  * the probe scripts as the engine would answer it: a failed flush leaves the previous archive
@@ -27,7 +27,7 @@ await probe(async ({ open }) => {
     const request = (sample) => ({
       snapshot: {
         sampleRate: 48000, masterLengthFrames: 4, bpm: 120, meter: { num: 4, den: 4, beats: 4 },
-        tracks: [{ index: 0, pcm: new Float32Array([0, sample, -0.0000001, -1.75]),
+        tracks: [{ index: 0, pcm: [new Float32Array([0, sample, -0.0000001, -1.75]), new Float32Array([sample, 0, 0.5, -0.0000001])],
           state: 'STOPPED', volume: 0.6, muted: true, reversed: true, fx: [] }],
       },
       meta: { bpm: 120, bars: 1 }, base: 'worker-check',
@@ -46,8 +46,8 @@ await probe(async ({ open }) => {
       const bytes = await encodeRecovery(copied);
       const entries = parseZip(bytes);
       const wav = entries.find((e) => e.name.endsWith('.wav'));
-      const samples = Array.from(decodeWav(wav.data).channels[0]);
-      const detached = copied.snapshot.tracks[0].pcm.byteLength === 0;
+      const samples = decodeWav(wav.data).channels.map((side) => Array.from(side));
+      const detached = copied.snapshot.tracks[0].pcm.every((side) => side.byteLength === 0);
       const TrackedWorker = window.Worker;
       window.Worker = class { constructor() { throw new Error('Injected worker startup failure'); } };
       let startupError = '';
@@ -66,7 +66,7 @@ await probe(async ({ open }) => {
   });
   assert.match(result.encodeError, /non-finite WAV samples/);
   assert.equal(result.startupError, 'Injected worker startup failure');
-  assert.deepEqual(result.samples, [0, 1.75, Math.fround(-0.0000001), -1.75]);
+  assert.deepEqual(result.samples, [[0, 1.75, Math.fround(-0.0000001), -1.75], [1.75, 0, 0.5, Math.fround(-0.0000001)]], 'both sides, as copied');
   assert.equal(result.detached, true);
   assert.equal(result.retry, true);
   assert.equal(result.malformedError, 'Recovery worker returned invalid data');
@@ -76,7 +76,7 @@ await probe(async ({ open }) => {
 
   const recovery = await page.evaluate(async () => {
     const lf = window.__lf;
-    const { encodeSessionBytes, splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+    const { decodeLoadSession, encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
     await lf.autosave.ready();
     lf.autosave.start()(); // Boot started it: stop its timer, so this probe's writes stay explicit.
     const RATE = 48000;
@@ -113,8 +113,8 @@ await probe(async ({ open }) => {
       const loads = lf.native.loadedSessions.length;
       const restored = await lf.autosave.restoreLatest();
       if (lf.native.loadedSessions.length !== loads + 1) return { restored, exact: false };
-      const { pcm } = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer);
-      return { restored, exact: pcm.length === 1 && pcm[0].every((v, i) => v === (i === 17 ? Math.fround(value) : 0)) };
+      const { pcm } = decodeLoadSession(lf.native.loadedSessions.at(-1).slice().buffer);
+      return { restored, exact: pcm.length === 1 && pcm[0].length === 2 && pcm[0].every((side) => side.every((v, i) => v === (i === 17 ? Math.fround(value) : 0))) };
     };
     blank();
     const originalWorker = window.Worker;

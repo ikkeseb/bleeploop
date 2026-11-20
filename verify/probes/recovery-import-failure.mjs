@@ -195,16 +195,17 @@ await probe(async ({ open, browser }) => {
         await lf.autosave.flush();
         finish = { afterEmptyClear, saved: await window.__engine.recovery() };
       } else {
-        const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+        const { decodeLoadSession } = await import('/src/platform/engine-wire.ts');
         const restored = await lf.autosave.restoreLatest();
         const loaded = lf.native.loadedSessions.at(-1);
-        const { header, pcm } = loaded ? splitSessionBytes(loaded.slice().buffer) : { header: null, pcm: [] };
+        // Each track's left side (a recovery saves both; the scripted loops have them alike).
+        const { header, pcm } = loaded ? decodeLoadSession(loaded.slice().buffer) : { header: null, pcm: [] };
         finish = {
           restored,
           loads: lf.native.loadedSessions.length,
           master: header?.masterLengthFrames ?? null,
           states: header?.tracks.map((t) => t.state) ?? [],
-          tracks: pcm.map((track, i) => ({
+          tracks: pcm.map(([track], i) => ({
             first: track[0],
             last: track[track.length - 1],
             volume: lf.looper.trackVolume(i),
@@ -290,7 +291,7 @@ await probe(async ({ open, browser }) => {
         throw new Error(refusal);
       };
       await session.loadSession({ bpm: 300, bars: 1, masterLengthFrames: frames, tracks: [{
-        index: 0, pcm, volume: 0.35, muted: true, reversed: false, fx: lf.looper.fxState(0),
+        index: 0, pcm: [pcm], volume: 0.35, muted: true, reversed: false, fx: lf.looper.fxState(0),
       }] });
     }, { frames: FRAMES, refusal: REFUSAL });
     await page.evaluate(() => window.__releaseRecoveryRead());
@@ -299,21 +300,21 @@ await probe(async ({ open, browser }) => {
     const result = await page.evaluate(async () => {
       const lf = window.__lf;
       const { session } = await import('/src/ui/state/audio.ts');
-      const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+      const { decodeLoadSession } = await import('/src/platform/engine-wire.ts');
       await lf.autosave.ready();
       const raceOutcomes = [...window.__loadSessionOutcomes];
       const beforeFlush = await session.exportSnapshot();
       await lf.autosave.flush();
       window.__engine.blank();
       const restored = await lf.autosave.restoreLatest();
-      const loaded = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer);
+      const loaded = decodeLoadSession(lf.native.loadedSessions.at(-1).slice().buffer);
       return {
         restored,
         raceOutcomes,
         before: beforeFlush.tracks.map((track) => ({
-          first: track.pcm[0], volume: track.volume, muted: track.muted,
+          first: track.pcm[0][0], volume: track.volume, muted: track.muted,
         })),
-        after: loaded.pcm.map((track, i) => ({
+        after: loaded.pcm.map(([track], i) => ({
           first: track[0], volume: lf.looper.trackVolume(i), muted: lf.looper.trackMuted(i),
         })),
       };

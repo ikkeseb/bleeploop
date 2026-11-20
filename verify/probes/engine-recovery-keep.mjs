@@ -197,9 +197,10 @@ const loaded = (page) =>
   page.evaluate(async () => {
     const sessions = window.__lf.native.loadedSessions;
     if (sessions.length === 0) return null;
-    const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
-    const { header, pcm } = splitSessionBytes(sessions.at(-1).slice().buffer);
-    return { master: header.masterLengthFrames, sigs: pcm.map((p) => window.__probe.sig(p)) };
+    const { decodeLoadSession } = await import('/src/platform/engine-wire.ts');
+    const { header, pcm } = decodeLoadSession(sessions.at(-1).slice().buffer);
+    // Each lane's left side (the scripted jams have their sides alike).
+    return { master: header.masterLengthFrames, sigs: pcm.map(([left]) => window.__probe.sig(left)) };
   });
 
 /** The stems each recovery key holds (keys it lacks: null). */
@@ -379,9 +380,9 @@ const cases = {
     const third = await boot(browser, open, context);
     await third.page.waitForFunction(() => window.__lf.native.loadedSessions.length === 1, undefined, { timeout: 15000 });
     const loaded = await third.page.evaluate(async () => {
-      const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
-      const { header, pcm } = splitSessionBytes(window.__lf.native.loadedSessions[0].slice().buffer);
-      return { header, sigs: pcm.map((p) => window.__probe.sig(p)) };
+      const { decodeLoadSession } = await import('/src/platform/engine-wire.ts');
+      const { header, pcm } = decodeLoadSession(window.__lf.native.loadedSessions[0].slice().buffer);
+      return { header, sigs: pcm.map(([left]) => window.__probe.sig(left)) };
     });
     console.log('restored', JSON.stringify(loaded.header));
     assert.equal(loaded.header.masterLengthFrames, bar(48000));

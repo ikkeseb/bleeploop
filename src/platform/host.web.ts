@@ -24,6 +24,7 @@ import {
   type Refusal,
   type SnapshotHeader,
   type SnapshotTrack,
+  type StereoPcm,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 import { decodeInputItem, decodeMidiEvent, type Dropped, type ImportReport, type InputEvent, type InputItem, type MidiEvent } from './midi-wire.ts';
 import { CANNED_PLUGINS, createChainFake, type ChainFake } from './chain-fake.ts';
@@ -706,13 +707,24 @@ export const fakeMixModel = {
 };
 
 /**
- * The fake's stand-in for the engine's wet master: the stems summed dry under each track's volume and
- * mute (its snapshot mix) and the master volume and mute the UI last sent (`sent`, as the engine host
- * keeps them). NOT the engine's
+ * The fake's stand-in for the engine's wet master: the stems summed dry under each track's volume, pan
+ * (the engine's pan law, each side its own gain) and mute (its snapshot mix) and the master volume and
+ * mute the UI last sent (`sent`, as the engine host keeps them). NOT the engine's
  * sound (no FX, no reverb, no OTT, no limiter); it only lets the browser tier's
  * export run, so no probe may claim to test the master's sound with it.
  */
-function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): Float32Array {
+/** The engine's pan law (`pan_gains`), `panGains` in `src/session/wav.ts`: the platform may not import the
+ * session layer, so the fake keeps its own copy; `verify/probes/engine-session.mjs` holds the stand-in
+ * master to `panGains`. */
+function fakePanGains(p: number): [number, number] {
+  if (p === 0) return [1, 1];
+  if (p >= 1) return [0, Math.SQRT2];
+  if (p <= -1) return [Math.SQRT2, 0];
+  const t = ((p + 1) * Math.PI) / 4;
+  return [Math.SQRT2 * Math.cos(t), Math.SQRT2 * Math.sin(t)];
+}
+
+function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): StereoPcm {
   let master = 1;
   let masterMuted = false;
   for (const c of sent) {
@@ -720,13 +732,20 @@ function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: 
     if ('SetMasterVolume' in c) master = c.SetMasterVolume;
     else if ('SetMasterMute' in c) masterMuted = c.SetMasterMute;
   }
-  const out = new Float32Array(header.masterLengthFrames);
-  if (masterMuted) return out;
-  header.tracks.forEach((t, k) => {
-    if (t.mix.muted) return;
-    const gain = t.mix.volume * master;
-    pcm[k].forEach((x, i) => (out[i] += gain * x));
-  });
+  const out: StereoPcm = { left: new Float32Array(header.masterLengthFrames), right: new Float32Array(header.masterLengthFrames) };
+  // `pcm` holds each track's channels in order: a one-channel track on both sides.
+  let at = 0;
+  for (const t of header.tracks) {
+    const channels = t.channels ?? 1;
+    const sides = [pcm[at], pcm[at + channels - 1]];
+    at += channels;
+    if (masterMuted || t.mix.muted) continue;
+    const pan = fakePanGains(t.mix.pan ?? 0);
+    [out.left, out.right].forEach((side, c) => {
+      const gain = t.mix.volume * pan[c] * master;
+      sides[c].forEach((x, i) => (side[i] += gain * x));
+    });
+  }
   return out;
 }
 
@@ -739,8 +758,7 @@ function snapshotAnswer(master: boolean): ArrayBuffer {
   const stems: SnapshotHeader = { ...scripted, tracks: scripted.tracks.map((t) => ({ ...t, mix: t.mix ?? copyMix(fakeMixes[t.index]) })) };
   if (!master) return encodeSessionBytes(stems, pcm).buffer;
   if (webEngineFake.masterError !== null) return encodeSessionBytes({ ...stems, masterError: webEngineFake.masterError }, pcm).buffer;
-  const mono = fakeMaster(stems, pcm, webEngineFake.sent);
-  return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, { left: mono, right: mono.slice() }).buffer;
+  return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, fakeMaster(stems, pcm, webEngineFake.sent)).buffer;
 }
 
 /** Forced on only by a DEV probe's init script (`verify/probes/engine-seam.mjs`), before the app loads.

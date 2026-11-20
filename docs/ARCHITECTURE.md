@@ -101,8 +101,9 @@ before (E6), a finite-ratio compressor, not a guaranteed 0 dBFS ceiling: an offl
 staging remains necessary, and a true ceiling needs an explicit distortion/latency choice and another
 latency measurement. The live wet signal joins after the limiter and is not limited.
 
-**Session files** (`src/session/`): export writes a zip of Float32 WAV stems, a PCM16 wet master and
-`<base>-session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
+**Session files** (`src/session/`): export writes a zip of Float32 WAV stems, each lane's two sides as
+the engine holds them (format v3: `docs/unit-contract.md` §8; a v1 or v2 session's mono stem loads onto both
+sides), a PCM16 wet master and `<base>-session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`), each lane with
 its mix, which the engine sets on the frame the loop goes in (the first loaded sample plays at it) and
 the host keeps as its replayed settings; a session job comes after every command sent before it, by

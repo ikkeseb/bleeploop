@@ -179,8 +179,9 @@ await probe(async ({ open, browser }) => {
     ],
   };
   const recorded = {
-    header: { bpm: 120, bars: 1, masterLengthFrames: BAR, tracks: [{ index: 0, frames: BAR, reversed: false, state: 'Playing', mix: unity }] },
-    hashes: [hash(take)],
+    // Format v3 saves the lane's two sides (here alike: a one-channel snapshot), and loads them as two.
+    header: { bpm: 120, bars: 1, masterLengthFrames: BAR, tracks: [{ index: 0, frames: BAR, channels: 2, reversed: false, state: 'Playing', mix: unity }] },
+    hashes: [hash(take), hash(take)],
   };
   await emit(page, {
     events: [laneEvent(0, lane('Playing')), { Transport: { frame: 0, master: BAR, bpm: 120, locked: true } }],

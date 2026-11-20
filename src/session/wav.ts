@@ -1,5 +1,5 @@
 // src/session/wav.ts
-// Pure WAV (PCM16 / Float32) encoder + master-mix helpers. NO Web Audio / DOM / Tauri imports so a Node
+// Pure WAV (PCM16 / Float32) encoder, header reader and decoder + master-mix helpers. NO Web Audio / DOM / Tauri imports so a Node
 // verify guard can import it directly (verify/guards/wav-export.mjs). All functions are pure.
 
 /** Clamp a float sample to [-1,1] and quantize to signed 16-bit. -1→-32767, 1→32767, |x|>1 clamps. */
@@ -67,22 +67,22 @@ export function encodeWav(
   return new Uint8Array(buf);
 }
 
+/** What a WAV's header says, read without touching its samples: its sample format, channels, rate and
+ * frames, and where its samples start. */
+export interface WavHeader {
+  float: boolean;
+  channels: number;
+  sampleRate: number;
+  frames: number;
+  /** The byte offset of the `data` chunk's body. */
+  dataOffset: number;
+}
+
 /**
- * Decode PCM16 or IEEE Float32 WAV into `{ sampleRate, channels }`.
- *
- * Parses by CHUNK WALK — RIFF/WAVE container, then iterate `fmt `/`data`/… chunks — rather than
- * trusting the 44-byte offset our own encoder emits, so it also reads files with extra chunks
- * (LIST/fact/…) and honours the RIFF odd-size padding rule. Formats are PCM16 (1) and Float32 (3);
- * anything else throws `unsupported WAV: …`. Non-finite floats are rejected. Every read
- * is bounds-checked, so a truncated header or short `data` chunk throws instead of reading garbage.
- *
- * int16 → float is `v / 32767` with NO clamp — deliberately the inverse of `floatToPcm16` (which maps
- * into [-32768, 32767]). Using 32767 (not 32768) makes `encodeWav(decodeWav(bytes))` byte-identical for
- * EVERY int16 value, including -32768: `Math.round(-32768/32767 * 32767) === -32768`. The only cost is
- * that -32768 decodes to ≈ -1.00003 (just past -1.0) — Web Audio accepts out-of-range float samples,
- * and our own encoder round-trips it back to -32768 exactly, so the round trip is lossless.
+ * Read a PCM16 or IEEE Float32 WAV's header (`decodeWav`'s rules) without reading or allocating a
+ * sample: a caller checks the dimensions it expects before the PCM is decoded.
  */
-export function decodeWav(bytes: Uint8Array): { sampleRate: number; channels: Float32Array[] } {
+export function readWavHeader(bytes: Uint8Array): WavHeader {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const len = bytes.byteLength;
   const str = (off: number, n: number): string => {
@@ -131,17 +131,42 @@ export function decodeWav(bytes: Uint8Array): { sampleRate: number; channels: Fl
   const numCh = fmt.numCh;
   if (numCh < 1) throw new Error(`unsupported WAV: ${numCh} channels`);
 
-  const sampleBytes = floating ? 4 : 2;
-  const frameBytes = numCh * sampleBytes;
+  const frameBytes = numCh * (floating ? 4 : 2);
   if (dataSize % frameBytes !== 0) {
     throw new Error(
       `unsupported WAV: data chunk ${dataSize} bytes is not aligned to ${frameBytes}-byte frames`,
     );
   }
-  const frames = dataSize / frameBytes;
+  return { float: floating, channels: numCh, sampleRate: fmt.sampleRate, frames: dataSize / frameBytes, dataOffset: dataOff };
+}
+
+/**
+ * Decode PCM16 or IEEE Float32 WAV into `{ sampleRate, channels }`.
+ *
+ * Parses by CHUNK WALK (`readWavHeader`) — RIFF/WAVE container, then iterate `fmt `/`data`/… chunks — rather than
+ * trusting the 44-byte offset our own encoder emits, so it also reads files with extra chunks
+ * (LIST/fact/…) and honours the RIFF odd-size padding rule. Formats are PCM16 (1) and Float32 (3);
+ * anything else throws `unsupported WAV: …`. Non-finite floats are rejected. Every read
+ * is bounds-checked, so a truncated header or short `data` chunk throws instead of reading garbage.
+ * `header` is this file's `readWavHeader`, when the caller already read it to check its dimensions.
+ *
+ * int16 → float is `v / 32767` with NO clamp — deliberately the inverse of `floatToPcm16` (which maps
+ * into [-32768, 32767]). Using 32767 (not 32768) makes `encodeWav(decodeWav(bytes))` byte-identical for
+ * EVERY int16 value, including -32768: `Math.round(-32768/32767 * 32767) === -32768`. The only cost is
+ * that -32768 decodes to ≈ -1.00003 (just past -1.0) — Web Audio accepts out-of-range float samples,
+ * and our own encoder round-trips it back to -32768 exactly, so the round trip is lossless.
+ */
+export function decodeWav(
+  bytes: Uint8Array,
+  header: WavHeader = readWavHeader(bytes),
+): { sampleRate: number; channels: Float32Array[] } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const { float: floating, frames, dataOffset } = header;
+  const numCh = header.channels;
+  const sampleBytes = floating ? 4 : 2;
   const channels: Float32Array[] = [];
   for (let c = 0; c < numCh; c++) channels.push(new Float32Array(frames));
-  let p = dataOff;
+  let p = dataOffset;
   for (let f = 0; f < frames; f++) {
     for (let c = 0; c < numCh; c++) {
       // int16 → float, NO clamp (see the doc comment above for why 32767, not 32768).
@@ -151,7 +176,7 @@ export function decodeWav(bytes: Uint8Array): { sampleRate: number; channels: Fl
       p += sampleBytes;
     }
   }
-  return { sampleRate: fmt.sampleRate, channels };
+  return { sampleRate: header.sampleRate, channels };
 }
 
 /**
@@ -169,15 +194,16 @@ export function panGains(p: number): [number, number] {
 }
 
 /**
- * Sum mono tracks into a stereo master, applying per-track volume and pan (`panGains`), skipping muted
- * tracks. HARD-CLAMPS each channel's per-sample sum to [-1,1] AFTER summing and the master level (chosen
+ * Sum tracks into a stereo master, applying per-track volume and pan (`panGains`, a balance on a
+ * stereo track: each side its own gain), skipping muted tracks. A track's `pcm` is its channels:
+ * `[left, right]`, or one, heard on both sides. HARD-CLAMPS each channel's per-sample sum to [-1,1] AFTER summing and the master level (chosen
  * over normalization so the export is deterministic and matches what the limiter would tame at
  * playback). A track with no pan is centred, where both channels are exactly the mono mix this fallback
  * wrote before pan, bit for bit (`verify/guards/wav-export.mjs` holds it).
  * `frames` = masterLengthFrames; tracks shorter than that are treated as zero past their end.
  */
 export function mixStereo(
-  tracks: { pcm: Float32Array; volume: number; muted: boolean; pan?: number }[],
+  tracks: { pcm: readonly Float32Array[]; volume: number; muted: boolean; pan?: number }[],
   frames: number,
   masterLevel: number,
 ): [Float32Array, Float32Array] {
@@ -185,11 +211,12 @@ export function mixStereo(
   for (const t of tracks) {
     if (t.muted || t.volume === 0) continue;
     const gains = panGains(t.pan ?? 0);
-    const n = Math.min(frames, t.pcm.length);
     channels.forEach((out, c) => {
       if (gains[c] === 0) return; // a hard pan: this side stays exactly silent
+      const side = t.pcm[Math.min(c, t.pcm.length - 1)];
+      const n = Math.min(frames, side.length);
       const gain = t.volume * gains[c]; // the volume itself at the centre (gain 1)
-      for (let i = 0; i < n; i++) out[i] += t.pcm[i] * gain;
+      for (let i = 0; i < n; i++) out[i] += side[i] * gain;
     });
   }
   for (const out of channels) {

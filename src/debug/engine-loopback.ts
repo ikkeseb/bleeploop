@@ -528,9 +528,11 @@ async function committedPcm(i: number, masterFrames: number): Promise<Float32Arr
   const snap = await session.exportSnapshot();
   const t = snap.tracks.find((tr) => tr.index === i);
   check(t !== undefined, `the snapshot holds no lane ${i + 1}`);
-  check(snap.masterLengthFrames === masterFrames && t!.pcm.length === masterFrames, `lane ${i + 1} is ${t!.pcm.length} frames, master ${snap.masterLengthFrames}, expected ${masterFrames}`);
+  const [left] = t!.pcm;
+  check(snap.masterLengthFrames === masterFrames && left.length === masterFrames, `lane ${i + 1} is ${left.length} frames, master ${snap.masterLengthFrames}, expected ${masterFrames}`);
   check(!t!.reversed, `lane ${i + 1} is reversed`);
-  return t!.pcm;
+  // The left side: the loopback's one input channel, which the device side hands each slot on both sides.
+  return left;
 }
 
 /** Record lane `i` (a FIXED take of `bars` bars) and wait for it to commit. */

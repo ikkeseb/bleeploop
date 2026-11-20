@@ -5,10 +5,12 @@
 //! swap in: nothing allocates, frees or waits on the audio thread). Buffers are built and freed here, on
 //! the calling thread, never the audio thread's.
 //!
-//! Both directions: `[u32 LE header length][UTF-8 JSON header][f32 LE mono PCM]`, one block of
-//! `masterLengthFrames` samples per header track, in header order, in play order (a reversed lane's
-//! loop as it is heard; `reversed` is its flag). A snapshot's header:
-//! `{"rate","masterLengthFrames","bpm","meter","tracks":[{"index","frames","reversed","state","mix"}]}`,
+//! Both directions: `[u32 LE header length][UTF-8 JSON header][f32 LE planar PCM]`: per header track,
+//! in header order, `channels` blocks of `masterLengthFrames` samples (left, then right), in play order
+//! (a reversed lane's loop as it is heard; `reversed` is its flag). A snapshot writes `channels` 2 for
+//! every track, the lane's two sides as they are (`docs/unit-contract.md` §8: format v3); a load takes
+//! 2, or 1 (a v1 or v2 session's mono stem), which goes to both sides bit for bit. A snapshot's header:
+//! `{"rate","masterLengthFrames","bpm","meter","tracks":[{"index","frames","channels","reversed","state","mix"}]}`,
 //! `meter` the master's (`{"num","den","beats"}`, `wire`'s `meter_obj`), the
 //! committed lanes ascending, `state` `"Playing"` | `"Stopped"` | `"Overdubbing"` (an overdubbing lane
 //! gives its loop as committed before the layer in flight), `mix` the lane's volume, mute, DUB FEEDBACK,
@@ -64,6 +66,8 @@ enum TrackState {
 pub(super) struct TrackHeader {
     index: u8,
     frames: Frame,
+    /// The track's PCM blocks: 2 (left, right), or 1 on a load (a mono stem, both sides).
+    channels: u8,
     reversed: bool,
     state: TrackState,
     /// A snapshot's as applied at its pin; a load's to set (a load without it is refused).
@@ -206,18 +210,29 @@ impl EngineHost {
             return Err(format!("session: {master} frames do not fit the engine's {capacity}"));
         }
         let samples = master as usize;
-        if header.tracks.is_empty() || header.tracks.len() > TRACK_COUNT || pcm.len() != header.tracks.len() * samples * 4 {
+        if let Some(t) = header.tracks.iter().find(|t| !(1..=2).contains(&t.channels)) {
+            return Err(format!("session: track {} has {} channels, not 1 or 2", t.index, t.channels));
+        }
+        let blocks: usize = header.tracks.iter().map(|t| usize::from(t.channels)).sum();
+        if header.tracks.is_empty() || header.tracks.len() > TRACK_COUNT || pcm.len() != blocks * samples * 4 {
             return Err(format!("session: {} tracks and {} PCM bytes do not match", header.tracks.len(), pcm.len()));
         }
         let mut tracks = Vec::with_capacity(header.tracks.len());
-        for (k, t) in header.tracks.iter().enumerate() {
+        let mut at = 0;
+        for t in &header.tracks {
             if t.frames != master || usize::from(t.index) >= TRACK_COUNT || t.state == TrackState::Overdubbing {
                 return Err(format!("session: track {} does not fit", t.index));
             }
-            // A one-channel track plays on both sides (`docs/unit-contract.md` §8; the two-channel stems
-            // of format v3 are the next step).
-            let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| [f32::from_le_bytes([b[0], b[1], b[2], b[3]]); 2]);
-            tracks.push(load_track(t.index, play, capacity, t.reversed, t.state == TrackState::Playing, t.mix.0));
+            let block = |c: usize| pcm[at + c * samples * 4..at + (c + 1) * samples * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            let playing = t.state == TrackState::Playing;
+            // A one-channel track (a v1 or v2 stem) plays its samples on both sides.
+            let track = if t.channels == 1 {
+                load_track(t.index, block(0).map(|x| [x; 2]), capacity, t.reversed, playing, t.mix.0)
+            } else {
+                load_track(t.index, block(0).zip(block(1)).map(|(l, r)| [l, r]), capacity, t.reversed, playing, t.mix.0)
+            };
+            tracks.push(track);
+            at += usize::from(t.channels) * samples * 4;
         }
         let load = Load { bpm: header.bpm, meter: header.meter, bars: header.bars, master, tracks, result: None };
         let SessionJob::Load(load) = self.session_job(&mut stale, SessionJob::Load(load))? else {
@@ -393,6 +408,7 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
         .map(|t| TrackHeader {
             index: t.index,
             frames: s.master,
+            channels: 2,
             reversed: t.reversed,
             state: match t.state {
                 LaneState::Stopped => TrackState::Stopped,
@@ -418,12 +434,11 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
         master_error,
     };
     let json = serde_json::to_vec(&header).unwrap_or_default();
-    // Until the two-channel stems of format v3 (the next step), each track's bytes stay one channel: the
-    // mean of its two sides (`lf_engine::fold`: finite for any finite pair), which is a mono loop's own
-    // samples bit for bit.
-    let samples = s.pcm[..s.count * master].iter().map(|&[l, r]| lf_engine::fold(l, r));
+    // Each track's two sides as they are, planar: its left block, then its right (never their mean, which
+    // would save a `[x, -x]` take as silence).
+    let samples = s.pcm[..s.count * master].chunks_exact(master.max(1)).flat_map(|t| t.iter().map(|p| p[0]).chain(t.iter().map(|p| p[1])));
     let stereo = wet.as_ref().map_or(0, |_| 2 * master);
-    let mut out = Vec::with_capacity(4 + json.len() + 4 * (s.count * master + stereo));
+    let mut out = Vec::with_capacity(4 + json.len() + 4 * (2 * s.count * master + stereo));
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
     out.extend_from_slice(&json);
     let wet = wet.iter().flat_map(|m| m.left.iter().chain(&m.right)).copied();
