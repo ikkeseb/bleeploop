@@ -6,6 +6,7 @@
 import { validateFxStates, type FxState } from '../ui/state/fx-metadata.ts';
 import { framesPerBar } from '../ui/state/quantize.ts';
 import { isPluginFormat } from '../ui/state/plugin-format.ts';
+import { MAX_LOOP_SECONDS } from '../ui/state/looper-types.ts';
 import type { PluginFormat, TimeSignature } from '../platform';
 
 export type ParsedSessionTrackState = 'PLAYING' | 'STOPPED';
@@ -16,7 +17,8 @@ export interface ParsedSessionTrack {
   track: number;
   /** Stem file name inside the archive (the lookup key for the WAV entry). */
   file: string;
-  /** The stem's channels: 2 in format v3 (its two sides), 1 before it (a mono stem, both sides). */
+  /** The stem's channels: 2 in format v3 (its two sides, a Float32 WAV), 1 before it (a mono stem, both
+   * sides). */
   channels: 1 | 2;
   /** Clamped to [0, 1.5] (the mixer's range) — out-of-range values are clamped, not rejected. */
   volume: number;
@@ -36,6 +38,8 @@ export interface ParsedSessionTrack {
   pan: number;
 }
 export interface ParsedSession {
+  /** session.json's formatVersion (missing reads 1): from 3 on, every stem is a stereo Float32 WAV. */
+  formatVersion: 1 | 2 | 3;
   bpm: number;
   /** The meter `bars` count in, one of the offered list `validateSession` was handed; 4/4 for v1. */
   meter: TimeSignature;
@@ -117,9 +121,10 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
  * `meters` with the `beats` this build counts it in (the BPM's unit: a file that read its tempo in
  * another unit is refused, never re-read), and the bars count in it.
  * Throws a descriptive Error on: a non-BleepLoop app tag, a formatVersion newer than this build
- * understands (or a garbage formatVersion), a track's `channels` other than 1 or 2 (absent: 2 in v3, 1
- * before it) or 2 before v3, a meter as above that does not hold, missing/mis-typed
- * fields, a non-positive/non-integer masterLengthFrames, an empty or >5-track list, track numbers
+ * understands (or a garbage formatVersion), a track's `channels` other than 2 in v3 (absent too: the
+ * stem is stereo) or other than 1 before it (absent reads 1), a meter as above that does not hold, missing/mis-typed
+ * fields, a non-positive/non-integer masterLengthFrames or one past the engine's 60 s loop
+ * (`MAX_LOOP_SECONDS`), an empty or >5-track list, track numbers
  * outside 1..5 or repeated, a per-track frames that differs from masterLengthFrames, a repeated stem
  * file, or an fx array that doesn't exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
  * clamps into [0, 1.5]; muted accepts legacy 0/1 and missing-as-false; reversed is optional and
@@ -178,6 +183,11 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
   if (!Number.isInteger(master) || master <= 0) {
     throw new Error(`session.json: masterLengthFrames must be a positive integer, got ${master}`);
   }
+  // The engine holds a loop of at most MAX_LOOP_SECONDS: a longer grid is refused here, before a stem is
+  // decoded for it or the load reaches the engine.
+  if (master > MAX_LOOP_SECONDS * sampleRate) {
+    throw new Error(`session.json: a loop of ${master} frames is longer than ${MAX_LOOP_SECONDS} s at ${sampleRate} Hz`);
+  }
   const expectedFrames = bars * framesPerBar(bpm, sampleRate, meter.beats);
   if (!Number.isSafeInteger(expectedFrames) || expectedFrames !== master) {
     throw new Error(
@@ -207,13 +217,18 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
       throw new Error(`session.json: multiple tracks reference "${t.file}"`);
     }
     seenFiles.add(t.file);
-    // A stem's channels: format v3 writes 2; a stem before it is mono, and says so or nothing.
-    const channels = t.channels === undefined ? (fv >= 3 ? 2 : 1) : t.channels;
-    if (channels !== 1 && channels !== 2) {
-      throw new Error(`session.json: track ${trackNo} channels must be 1 or 2, got ${JSON.stringify(t.channels)}`);
-    }
-    if (fv < 3 && channels !== 1) {
-      throw new Error(`session.json: track ${trackNo} has ${channels} channels, and a format v${fv} stem is mono`);
+    // A stem's channels: format v3 writes 2 and says so; a stem before it is mono, and says so or nothing.
+    let channels: 1 | 2;
+    if (fv >= 3) {
+      if (t.channels !== 2) {
+        throw new Error(`session.json: track ${trackNo} channels must be 2 (a format v3 stem is stereo), got ${JSON.stringify(t.channels)}`);
+      }
+      channels = 2;
+    } else {
+      if (t.channels !== undefined && t.channels !== 1) {
+        throw new Error(`session.json: track ${trackNo} channels must be 1 (a format v${fv} stem is mono), got ${JSON.stringify(t.channels)}`);
+      }
+      channels = 1;
     }
     if (typeof t.frames !== 'number' || t.frames !== master) {
       throw new Error(`session.json: track ${trackNo} frames ${JSON.stringify(t.frames)} !== masterLengthFrames ${master}`);
@@ -254,7 +269,7 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
     }
     return { track: trackNo, file: t.file, channels, volume, muted, reversed, state, frames: master, fx, dubFeedback, pan };
   });
-  return { bpm, meter, bars, masterLengthFrames: master, sampleRate, tracks };
+  return { formatVersion: fv as 1 | 2 | 3, bpm, meter, bars, masterLengthFrames: master, sampleRate, tracks };
 }
 
 /** session.json's `meter` in format `version` (validateSession's rules), as the entry of `meters`. */

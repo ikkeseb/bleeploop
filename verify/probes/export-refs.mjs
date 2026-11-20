@@ -145,12 +145,14 @@ function compareArchives(label, committed, fresh) {
     } else if (name === '-master.wav') {
       const [x, y] = [old, now].map((d) => decodeWav(d).channels);
       if (x.length !== y.length || x[0].length !== y[0].length) out.push(`${label}${name}: the master's shape changed`);
-    } else if (!Buffer.from(old).equals(Buffer.from(now))) {
-      // A v0.1.0 mono stem against this capture's stereo one: both sides must be its samples, bit for bit.
+    } else {
+      // A stem: this capture's is always two channels (format v3), each side the committed stem's
+      // samples bit for bit (a v0.1.0 mono stem's one channel on both), whether or not the files' bytes
+      // match.
       const [was, is] = [old, now].map((d) => decodeWav(d).channels);
       const bits = (c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength);
-      const sides = was.length === 1 && is.length === 2 && is.every((c) => bits(c).equals(bits(was[0])));
-      if (!sides) out.push(`${label}${name}: bytes differ`);
+      if (is.length !== 2) out.push(`${label}${name}: ${is.length} channels, not two`);
+      else if (!is.every((c, k) => bits(c).equals(bits(was[Math.min(k, was.length - 1)])))) out.push(`${label}${name}: samples differ`);
     }
   }
   return out;

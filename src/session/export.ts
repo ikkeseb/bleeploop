@@ -17,8 +17,6 @@ export interface BuildExportOptions {
   /** False for recovery snapshots: stems + session.json only; the snapshot never asks the engine for
    *  its (expensive) master render. */
   includeMaster?: boolean;
-  /** Float32 for lossless local recovery; exports also preserve editable stem headroom. */
-  stemFormat?: 'pcm16' | 'float32';
 }
 
 /**
@@ -66,7 +64,7 @@ export async function buildExportBundle(
   const base = exportBase();
   const sr = snap.sampleRate;
   const meta = { bpm: snap.bpm, bars: Math.max(1, Math.round(snapshotBars(snap))) };
-  const { entries, session } = prepareStemArchive(snap, meta, base, options.stemFormat ?? 'float32');
+  const { entries, session } = prepareStemArchive(snap, meta, base);
 
   if (withMaster) {
     // The engine's wet master; the dry mixdown as the fallback so one render failure can't lose the

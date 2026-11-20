@@ -707,12 +707,23 @@ export const fakeMixModel = {
 };
 
 /**
- * The fake's stand-in for the engine's wet master: the stems summed dry under each track's volume and
- * mute (its snapshot mix) and the master volume and mute the UI last sent (`sent`, as the engine host
- * keeps them). NOT the engine's
+ * The fake's stand-in for the engine's wet master: the stems summed dry under each track's volume, pan
+ * (the engine's pan law, each side its own gain) and mute (its snapshot mix) and the master volume and
+ * mute the UI last sent (`sent`, as the engine host keeps them). NOT the engine's
  * sound (no FX, no reverb, no OTT, no limiter); it only lets the browser tier's
  * export run, so no probe may claim to test the master's sound with it.
  */
+/** The engine's pan law (`pan_gains`), `panGains` in `src/session/wav.ts`: the platform may not import the
+ * session layer, so the fake keeps its own copy; `verify/probes/engine-session.mjs` holds the stand-in
+ * master to `panGains`. */
+function fakePanGains(p: number): [number, number] {
+  if (p === 0) return [1, 1];
+  if (p >= 1) return [0, Math.SQRT2];
+  if (p <= -1) return [Math.SQRT2, 0];
+  const t = ((p + 1) * Math.PI) / 4;
+  return [Math.SQRT2 * Math.cos(t), Math.SQRT2 * Math.sin(t)];
+}
+
 function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): StereoPcm {
   let master = 1;
   let masterMuted = false;
@@ -729,8 +740,11 @@ function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: 
     const sides = [pcm[at], pcm[at + channels - 1]];
     at += channels;
     if (masterMuted || t.mix.muted) continue;
-    const gain = t.mix.volume * master;
-    [out.left, out.right].forEach((side, c) => sides[c].forEach((x, i) => (side[i] += gain * x)));
+    const pan = fakePanGains(t.mix.pan ?? 0);
+    [out.left, out.right].forEach((side, c) => {
+      const gain = t.mix.volume * pan[c] * master;
+      sides[c].forEach((x, i) => (side[i] += gain * x));
+    });
   }
   return out;
 }

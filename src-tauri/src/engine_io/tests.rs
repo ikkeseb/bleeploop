@@ -3137,6 +3137,10 @@ fn a_stereo_sessions_sides_survive_its_bytes_bit_for_bit_and_play_apart() {
     let loud = ml.iter().filter(|v| v.abs() > 0.01).count();
     let worst = ml.iter().zip(&mr).map(|(l, r)| (l + r).abs()).fold(0.0f32, f32::max);
     assert!(loud > n / 4 && worst < 1e-6, "the master's sides are opposite ({worst} off) and sound ({loud} frames)");
+    // Each side is its own signal: the left `x`, the right `-x`, both at the gain the render gives `x` on a
+    // lane alone (measured below: a swapped pair fits at -1 times that, a scaled one off it).
+    let (gl, rl) = fit(&ml, &x);
+    let (gr, rr) = fit(&mr, &minus);
 
     // A lane whose right side is silent plays on its left alone.
     h.send(Command::ClearAll);
@@ -3151,6 +3155,14 @@ fn a_stereo_sessions_sides_survive_its_bytes_bit_for_bit_and_play_apart() {
     let played: Vec<[f32; 2]> = h.fake.heard_stereo(from..h.frame()).into_iter().filter(|p| !p[0].is_nan()).collect();
     let (l, r) = played.iter().fold((0.0f32, 0.0f32), |(l, r), p| (l.max(p[0].abs()), r.max(p[1].abs())));
     assert!(l > 0.05 && r < 1e-6, "the left side plays ({l}), the right stays silent ({r})");
+
+    // Its export's master: `x` on the left at the render's gain, which the `[x, -x]` master's sides hold.
+    let (_, _, [alone, _]) = session_with_master(&h.host.snapshot(true).expect("the second export"));
+    let (g, residue) = fit(&alone, &x);
+    println!("x alone: gain {g}, residue {residue}; [x, -x]: left {gl} ({rl}), right {gr} ({rr})");
+    assert!(g > 0.5 && g < 2.0 && residue < 0.01, "the render holds x at a gain ({g}, residue {residue})");
+    assert!((gl - g).abs() < 1e-3 && rl < 0.01, "the master's left is x at that gain: {gl}, residue {rl}");
+    assert!((gr - g).abs() < 1e-3 && rr < 0.01, "the master's right is -x at that gain: {gr}, residue {rr}");
 }
 
 /// A session's load bytes from outside the repo (`LF_LOAD_BYTES`: a file holding exactly what the UI sent

@@ -26,19 +26,16 @@ export function exportBase(d = new Date()): string {
   return `bleeploop-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
-export function prepareStemArchive(
-  snap: StemSnapshot,
-  meta: { bpm: number; bars: number },
-  base: string,
-  format: 'pcm16' | 'float32' = 'pcm16',
-) {
+/** The stems and session.json of `snap`: every stem a two-channel Float32 WAV, always (format v3 says
+ * so; only the export's master is PCM16). */
+export function prepareStemArchive(snap: StemSnapshot, meta: { bpm: number; bars: number }, base: string) {
   const entries: ZipEntry[] = [];
   const tracks = snap.tracks.map((t) => {
     const track = t.index + 1;
     const file = `${base}-track${track}.wav`;
     // Both sides, as the engine holds them: a stereo stem (never their mean, which saves `[x, -x]` as
     // silence).
-    entries.push({ name: file, data: encodeWav(t.pcm, snap.sampleRate, format) });
+    entries.push({ name: file, data: encodeWav(t.pcm, snap.sampleRate, 'float32') });
     return {
       track, file, channels: 2, volume: t.volume, muted: t.muted, reversed: t.reversed,
       frames: t.pcm[0].length, state: t.state, fx: t.fx, dubFeedback: t.dubFeedback ?? 1, pan: t.pan ?? 0,
@@ -50,8 +47,10 @@ export function prepareStemArchive(
     session: {
       app: 'BleepLoop',
       // Missing versions remain legacy v1; increment only for incompatible schema changes. Format 3
-      // (`docs/unit-contract.md` §8) holds stereo stems and names its meter, whatever it is, so every
-      // older build refuses it as newer instead of reading two channels as one.
+      // (`docs/unit-contract.md` §8) holds stereo stems and names its meter, whatever it is, so an older
+      // build never reads two channels as one: it refuses the file as newer, or, past its archive limit
+      // (103,854,080 bytes at 48 kHz in the build before v3, checked before the version: five full stereo
+      // stems and the master are 126,720,000), as too large.
       formatVersion: 3,
       exported: new Date().toISOString(),
       bpm: meta.bpm,

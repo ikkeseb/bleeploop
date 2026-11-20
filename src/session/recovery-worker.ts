@@ -12,7 +12,7 @@ export type RecoveryEncodeResult = { bytes: Uint8Array<ArrayBuffer> } | { error:
 const worker = self as unknown as DedicatedWorkerGlobalScope;
 worker.onmessage = ({ data }: MessageEvent<RecoveryEncodeRequest>) => {
   try {
-    const { entries, session } = prepareStemArchive(data.snapshot, data.meta, data.base, 'float32');
+    const { entries, session } = prepareStemArchive(data.snapshot, data.meta, data.base);
     entries.push({
       name: `${data.base}-session.json`,
       data: new TextEncoder().encode(JSON.stringify(session, null, 2)),

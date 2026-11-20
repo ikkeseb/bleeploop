@@ -30,7 +30,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { probe } from '../harness/probe.ts';
 import { parseZip } from '../../src/session/unzip.ts';
-import { decodeWav } from '../../src/session/wav.ts';
+import { decodeWav, panGains } from '../../src/session/wav.ts';
 import { makeZip } from '../../src/session/zip.ts';
 
 const RATE = 48000;
@@ -164,10 +164,11 @@ await probe(async ({ browser, open }) => {
   assert.equal(session.master.kind, 'wet-engine', "the snapshot's master");
   const master = decodeWav(entries.find((e) => e.name === session.master.file).data);
   assert.equal(master.channels.length, 2);
-  // The fake's stand-in is 0.8 × lane 1 + lane 2 on each side (the volumes the UI sent): the PCM16 WAV
-  // holds it as sent, clipped at full scale.
+  // The fake's stand-in is lane 1 at volume 0.8 panned -0.3 (the pan law's gain per side) + lane 2 on each
+  // side (the mix the UI sent): the PCM16 WAV holds it as sent, clipped at full scale.
+  const pan = panGains(-0.3);
   for (const [c, channel] of master.channels.entries()) {
-    const standIn = lanes[0][c].map((a, i) => Math.max(-1, Math.min(1, 0.8 * a + lanes[1][c][i])));
+    const standIn = lanes[0][c].map((a, i) => Math.max(-1, Math.min(1, 0.8 * pan[c] * a + lanes[1][c][i])));
     assert.equal(channel.length, MASTER);
     const off = channel.reduce((m, x, i) => Math.max(m, Math.abs(x - standIn[i])), 0);
     assert.ok(off < 1e-4, `the master WAV's side ${c} is the snapshot's master (off by ${off})`);

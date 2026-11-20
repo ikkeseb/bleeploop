@@ -14,6 +14,9 @@ export const MAX_UNITS = 8;
 /** The largest tone file: `MAX_STATE_BYTES` in `src-tauri/src/host/tone.rs` plus its small header.
  * Change them together. */
 export const MAX_TONE_BYTES = (16 << 20) + (1 << 16);
+/** The largest session.json an import parses: checked before it is decoded, so the tones' allowance in
+ * the archive limit never funds a JSON parse (a full v3 rig is tens of kilobytes). */
+export const MAX_SESSION_JSON_BYTES = 1 << 20;
 /** The most entries an archive holds: five stems, the master, session.json and a tone per unit. */
 export const MAX_ARCHIVE_ENTRIES = TRACK_COUNT + 2 + SLOT_COUNT * MAX_UNITS;
 
