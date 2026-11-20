@@ -151,7 +151,9 @@
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
 //!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,
 //!   crossfades to bypass, stops the unit once and hands it back, and an eviction hands back every unit,
-//!   a waiting install included. The slots render ahead to the next slot command, so a plugin sees one
+//!   a waiting install included (the host evicts again while units come back). A message leaves its
+//!   port only once its answer and its unit's return have their places, so none is dropped or leaked
+//!   on the audio thread; a refused install comes back with why. The slots render ahead to the next slot command, so a plugin sees one
 //!   call per block unless a stamped note, target, live flag, gain or input OTT command splits it there.
 //! - **The tuner mutes the monitor and nothing else** ([`tuner`]): the wet signal and the input sends glide
 //!   to silence over about 2 ms from its frame and back when it closes; loops, the click and the record
@@ -236,7 +238,7 @@ pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
 pub use overview::{LaneView, Overview};
 pub use render::{wet_master, wet_master_with, RenderOptions, WetMaster};
 pub use session::{Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, SnapshotTrack};
-pub use slots::SlotPort;
+pub use slots::{SlotPort, Ticket};
 
 /// Within this of its target a gain glide takes the target itself: -120 dB of full scale, a step far
 /// under any converter's noise floor, reached about 14 time constants into a glide from 1 (some 170 ms

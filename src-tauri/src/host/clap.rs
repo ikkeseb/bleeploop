@@ -776,7 +776,7 @@ fn pair_into(input: [&[f32]; 2], chans: &mut [Vec<f32>], at: usize, len: usize) 
         [] => {}
         [only] => {
             for (y, (&a, &b)) in only[..len].iter_mut().zip(l.iter().zip(r)) {
-                *y = 0.5 * (a + b);
+                *y = lf_engine::fold(a, b);
             }
         }
         [left, right, rest @ ..] => {

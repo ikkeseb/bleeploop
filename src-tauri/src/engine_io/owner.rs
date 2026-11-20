@@ -159,23 +159,31 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
 /// dropping it (a drop calls the plugin's DLL off its owner thread). Such a slot stays held
 /// (`Core::holder`), so its owner's teardown leaks the plugin instead of unloading it.
 fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], old: &mut Engine) -> bool {
-    let clean = catch_unwind(AssertUnwindSafe(|| {
-        old.service_slots_idle();
-        old.evict_slots();
-    }))
-    .is_ok();
-    if !clean {
-        core.counters.panics.fetch_add(1, Relaxed);
-        log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
-    }
-    for (slot, port) in ports.iter_mut().enumerate() {
-        if let Some(port) = port.as_mut() {
-            while let Some((_, unit)) = port.returned() {
-                park(core, slot, unit);
+    // An install the engine has no place to return yet waits in its port: each pass reads the returns,
+    // which makes room, until a pass hands nothing back.
+    loop {
+        let clean = catch_unwind(AssertUnwindSafe(|| {
+            old.service_slots_idle();
+            old.evict_slots();
+        }))
+        .is_ok();
+        if !clean {
+            core.counters.panics.fetch_add(1, Relaxed);
+            log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
+        }
+        let mut back = 0;
+        for (slot, port) in ports.iter_mut().enumerate() {
+            if let Some(port) = port.as_mut() {
+                while let Some((_, unit)) = port.returned() {
+                    park(core, slot, unit);
+                    back += 1;
+                }
             }
         }
+        if !clean || back == 0 {
+            return clean;
+        }
     }
-    clean
 }
 
 /// Keep an evicted unit for its plugin owner (the slot's holder), and free the slot. A unit its owner

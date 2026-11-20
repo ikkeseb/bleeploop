@@ -637,6 +637,11 @@ pub(crate) struct Core {
     pub(crate) holder: [AtomicU64; SLOT_COUNT],
     /// The next [`SlotHost`]'s token (from 1).
     pub(crate) next_token: AtomicU64,
+    /// The id each slot's unit was last installed under (`SlotHost::install` mints one per install, so
+    /// a reinstall never meets its own removal's id in the engine).
+    pub(crate) unit_ids: [AtomicU32; SLOT_COUNT],
+    /// The next unit id to mint (never 0).
+    pub(crate) next_unit: AtomicU32,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
     pub(crate) fault: AtomicBool,
     /// Units the device side took out on its own (a rebuild), waiting for their plugin owner, with its
@@ -669,6 +674,9 @@ pub(crate) struct Core {
     /// One session job at a time (`session.rs`), and the jobs an earlier call gave up on that are still
     /// in the engine of that generation: (generation, count).
     pub(crate) session_busy: Mutex<(u64, usize)>,
+    /// One export's wet master renders at a time (`EngineHost::snapshot`): each builds a render engine
+    /// with its own lane pool, so a second waits here.
+    pub(crate) master_render: Mutex<()>,
     /// Session jobs this host has handed to an engine: a test waits on it for a job to be enqueued.
     #[cfg(test)]
     pub(crate) session_sent: AtomicU64,
@@ -751,6 +759,8 @@ impl Core {
             ports: std::array::from_fn(|_| Mutex::new(None)),
             holder: std::array::from_fn(|_| AtomicU64::new(0)),
             next_token: AtomicU64::new(1),
+            unit_ids: std::array::from_fn(|_| AtomicU32::new(0)),
+            next_unit: AtomicU32::new(1),
             fault: AtomicBool::new(false),
             evicted: std::array::from_fn(|_| Mutex::new(None)),
             running: AtomicBool::new(false),
@@ -766,6 +776,7 @@ impl Core {
             tuner_breaks: AtomicU64::new(0),
             tuner_fence: AtomicI64::new(0),
             session_busy: Mutex::new((0, 0)),
+            master_render: Mutex::new(()),
             #[cfg(test)]
             session_sent: AtomicU64::new(0),
             engine_diag: EngineDiag::default(),

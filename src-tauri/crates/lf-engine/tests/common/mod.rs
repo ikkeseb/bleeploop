@@ -347,6 +347,11 @@ impl Rig {
         self.returned_id(slot).map(|(_, unit)| unit)
     }
 
+    /// The host's end of `slot`, as the device side holds it.
+    pub fn port(&mut self, slot: usize) -> &mut lf_engine::SlotPort {
+        &mut self.handle.slots[slot]
+    }
+
     /// A unit handed back on `slot`'s port, with its id.
     pub fn returned_id(&mut self, slot: usize) -> Option<(UnitId, Box<dyn UnitProcessor>)> {
         self.handle.slots[slot].returned()
@@ -540,9 +545,11 @@ impl Rig {
         self.window().and_then(|w| w.2).expect("no window end")
     }
 
-    /// Lane `i`'s loop, its left side (a mono take's both).
+    /// Lane `i`'s loop, its left side, once it proved both sides bit-equal: what a mono take records
+    /// (the regression bar), so a fault on one side alone (an overdub, a reverse, a trim, an undo, a
+    /// fade) shows. A stereo scenario reads [`Rig::pcm2`].
     pub fn pcm(&self, i: usize) -> Vec<f32> {
-        self.engine.looper().loop_pcm(i).iter().map(|p| p[0]).collect()
+        mono(self.engine.looper().loop_pcm(i))
     }
 
     /// Lane `i`'s loop, both sides.

@@ -10,8 +10,9 @@
 //! shows: a built-in synth's recorded sound is its stereo bus (the drum kit's two sides; the mono synths
 //! read as before), and a plugin's output is its own pair (`src-tauri/src/host`).
 //!
-//! What E1 leaves to E2 shows here too: a latent unit that lands mid-take moves what a live chain records
-//! after it (the held edit is E2's); this file's mid-take unit lands after the impulses it measures.
+//! A latent unit that comes or goes mid-take moves nothing the take records outside its own crossfade:
+//! the alignment holds for the capture and each chain's wet follows its own sum (`Rack::latch_record`).
+//! What E1 leaves to E2: a chain that grows past the take's alignment mid-take (E2 holds that edit).
 
 mod common;
 
@@ -104,6 +105,9 @@ struct Heard {
     record: [Vec<f32>; 2],
     pcm: Vec<Pair>,
     playback: [Vec<f32>; 2],
+    /// The same pass as the device plays it (after the lanes' FX, the master and its limiter), from the
+    /// frame the limiter's pre-delay puts loop position 0 at.
+    master: [Vec<f32>; 2],
 }
 
 /// Left 1.0 at one input frame, right 0.5 at another, through two units (latencies 64 and 32) that
@@ -137,16 +141,20 @@ fn distinct(block: usize) -> (Rig, Heard, [usize; 2]) {
     let next = rig.next_boundary();
     rig.advance_to(next);
     rig.keep_output();
-    rig.advance(rig.master());
-    let playback = [rig.output.as_ref().unwrap().1.clone(), rig.output_right.clone()];
+    let (master, limiter) = (rig.master(), rig.engine.limiter_latency());
+    rig.advance(master + limiter);
+    let m = master as usize;
+    let playback = [rig.output.as_ref().unwrap().1[..m].to_vec(), rig.output_right[..m].to_vec()];
     assert_eq!((nonzero(&playback[0]), nonzero(&playback[1])), (vec![1000], vec![3000]), "its playback, each side at its loop position");
     assert_eq!((playback[0][1000], playback[1][3000]), (1.0, 0.375));
-    (rig, Heard { monitor, record, pcm, playback }, [1000, 3000])
+    let l = limiter as usize;
+    let master = [rig.heard[l..l + m].to_vec(), rig.heard_right[l..l + m].to_vec()];
+    (rig, Heard { monitor, record, pcm, playback, master }, [1000, 3000])
 }
 
 #[test]
 fn distinct_impulses_keep_their_side_frame_and_gain_from_input_to_the_wet_master() {
-    let (mut rig, heard, [pa, pb]) = distinct(128);
+    let (mut rig, heard, _) = distinct(128);
     let master = rig.master() as usize;
     // The snapshot's stems: the lane's pairs, bit for bit.
     let mut pcm = Vec::with_capacity(master);
@@ -172,22 +180,17 @@ fn distinct_impulses_keep_their_side_frame_and_gain_from_input_to_the_wet_master
     fresh.keep_output();
     fresh.advance(fresh.master());
     assert_eq!([fresh.output.as_ref().unwrap().1.clone(), fresh.output_right.clone()], heard.playback, "the loaded lane plays what the take played");
-    // A one-channel load (`engine_io` copies a one-channel track to both sides): the block on both.
-    let mut mono = Rig::new();
-    mono.set(Command::SetMetronome(false));
-    let mut one = load(capacity);
-    for p in one.tracks[0].buf.iter_mut() {
-        *p = [p[0], p[0]];
-    }
-    let SessionJob::Load(done) = run(&mut mono, SessionJob::Load(one)) else { unreachable!() };
-    assert_eq!(done.result, Some(Ok(())));
-    assert_eq!(mono.pcm2(0)[pa], [1.0, 1.0], "a one-channel track plays on both sides");
-    // The wet master: each side's impulse at its frame (the stems' frame 0 is the master's), the other
-    // side silent there.
+    // The wet master: the live path by construction, so both of its channels, complete, are what the
+    // device played of that pass (each impulse on its side, through the lanes' FX, the master and the
+    // limiter). A one-channel session's load is `engine_io`'s (`tests.rs`, its real bytes).
     let wet = wet_master(SR, load(master), &[]).expect("the render");
-    let peak = |x: &[f32]| x.iter().enumerate().fold((0, 0.0f32), |(k, m), (i, v)| if v.abs() > m { (i, v.abs()) } else { (k, m) }).0;
-    assert_eq!((peak(&wet.left), peak(&wet.right)), (pa, pb), "the wet master, each impulse on its side at its frame");
-    assert!(wet.right[pa].abs() < 1e-6 && wet.left[pb].abs() < 1e-6, "nowhere else: {} {}", wet.right[pa], wet.left[pb]);
+    // Not bit for bit: the live pass's limiter and bypassed FX crossfades carry the take's history, the
+    // render's its warm-up (at the impulses about 1e-4 apart, measured).
+    for (side, (wet, live)) in [&wet.left, &wet.right].into_iter().zip(&heard.master).enumerate() {
+        assert_eq!(wet.len(), live.len());
+        let worst = wet.iter().zip(live).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 5e-4, "side {side}: the wet master is the pass the device played, every frame ({worst} apart)");
+    }
 }
 
 #[test]
@@ -198,36 +201,89 @@ fn distinct_impulses_render_bit_identical_at_every_block_size() {
     }
 }
 
+/// Impulses on both inputs at each of `at` (frames after the window's start), slot 0 chaining 64 + 32
+/// and slot 1 17, both live; `edit` runs on the rig once the frame `edits[k]` after the start is
+/// reached. Returns the loop and the monitor, each side, from `from`.
+fn two_live_inputs(block: usize, at: &[Frame], edits: &[(Frame, &dyn Fn(&mut Rig))]) -> (Vec<Pair>, [Vec<f32>; 2], Frame, Frame) {
+    let mut rig = Rig::with(Opts { block, ..Opts::default() });
+    rig.install(0, Lag::new(64, [1.0; 2]));
+    rig.install(0, Lag::new(32, [1.0; 2]));
+    rig.install(1, Lag::new(17, [1.0; 2]));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set_stereo_inputs(|_| [0.0; 2], |_| [0.0; 2]);
+    let start = arm_one_bar(&mut rig, 1.0);
+    let end = rig.end_frame();
+    assert_eq!((rig.engine.slot(0).map(|s| s.1), rig.engine.slot(1).map(|s| s.1), rig.engine.live_latency()), (Some(96), Some(17), 96));
+    let xs: Vec<Frame> = at.iter().map(|&k| start + k).collect();
+    let ys = xs.clone();
+    rig.set_stereo_inputs(move |f| [if xs.contains(&f) { 1.0 } else { 0.0 }, 0.0], move |f| [0.0, if ys.contains(&f) { 1.0 } else { 0.0 }]);
+    rig.keep_output();
+    let from = rig.frame;
+    for (k, edit) in edits {
+        rig.advance_to(start + k);
+        edit(&mut rig);
+    }
+    rig.advance_to(end - 1);
+    assert_eq!((rig.start_frame(), rig.end_frame()), (start, end), "block {block}: the window did not move");
+    rig.advance_to(end + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    (rig.pcm2(0), [rig.monitor.clone(), rig.monitor_right.clone()], start, from)
+}
+
 #[test]
 fn unequal_latencies_on_two_live_inputs_land_on_one_loop_frame_each_heard_at_its_own() {
     for block in BLOCKS {
-        let mut rig = Rig::with(Opts { block, ..Opts::default() });
-        rig.install(0, Lag::new(64, [1.0; 2]));
-        rig.install(0, Lag::new(32, [1.0; 2]));
-        rig.install(1, Lag::new(17, [1.0; 2]));
-        rig.set(Command::SetSlotLive(1, true));
-        rig.set_stereo_inputs(|_| [0.0; 2], |_| [0.0; 2]);
-        let start = arm_one_bar(&mut rig, 1.0);
-        let end = rig.end_frame();
-        assert_eq!((rig.engine.slot(0).map(|s| s.1), rig.engine.slot(1).map(|s| s.1), rig.engine.live_latency()), (Some(96), Some(17), 96));
-        let x = start + 2000;
-        rig.set_stereo_inputs(move |f| [if f == x { 1.0 } else { 0.0 }, 0.0], move |f| [0.0, if f == x { 1.0 } else { 0.0 }]);
-        rig.keep_output();
-        let from = rig.frame;
-        rig.advance_to(x + 200);
-        // A unit that comes mid-take, after the impulses: the take's window and alignment stay.
-        rig.install(1, Lag::new(50, [1.0; 2]));
-        rig.advance(1);
-        assert_eq!((rig.start_frame(), rig.end_frame(), rig.engine.slot(1).map(|s| s.1)), (start, end, Some(67)), "block {block}: the window did not move");
-        rig.advance_to(end + 1);
-        assert_eq!(rig.state(0), LaneState::Playing);
-        let (l, r) = (&rig.monitor, &rig.monitor_right);
-        assert_eq!((nonzero(&l[..300 + (x - from) as usize]), nonzero(&r[..300 + (x - from) as usize])), (vec![(x + 96 - from) as usize], vec![(x + 17 - from) as usize]), "block {block}: each heard at its own latency");
-        let pcm = rig.pcm2(0);
+        let (pcm, [l, r], start, from) = two_live_inputs(block, &[2000], &[]);
+        let x = (start + 2000 - from) as usize;
+        assert_eq!((nonzero(&l), nonzero(&r)), (vec![x + 96], vec![x + 17]), "block {block}: each heard at its own latency");
         let (pl, pr): (Vec<f32>, Vec<f32>) = pcm.iter().map(|&[l, r]| (l, r)).unzip();
-        let p = (x + 96 - start) as usize;
+        let p = 2000 + 96;
         assert_eq!((nonzero(&pl), nonzero(&pr)), (vec![p], vec![p]), "block {block}: one loop frame, each on its side");
         assert_eq!(pcm[p], [1.0, 1.0]);
+    }
+}
+
+/// A latent unit added to the 17-frame chain mid-take and removed again, each between two impulses:
+/// every impulse lands on its loop frame, on both sides, and the middle one is heard 50 frames later.
+#[test]
+fn a_unit_that_comes_and_goes_mid_take_moves_no_impulse() {
+    let install = |rig: &mut Rig| rig.install(1, Lag::new(50, [1.0; 2]));
+    let remove = |rig: &mut Rig| rig.remove(1);
+    for block in BLOCKS {
+        let at = [2000, 30_000, 60_000];
+        let (pcm, [l, r], start, from) = two_live_inputs(block, &at, &[(10_000, &install), (40_000, &remove)]);
+        let (pl, pr): (Vec<f32>, Vec<f32>) = pcm.iter().map(|&[l, r]| (l, r)).unzip();
+        let ps: Vec<usize> = at.iter().map(|&k| k as usize + 96).collect();
+        assert_eq!((nonzero(&pl), nonzero(&pr)), (ps.clone(), ps.clone()), "block {block}: each impulse on its loop frame, each side");
+        assert!(ps.iter().all(|&p| pcm[p] == [1.0, 1.0]), "block {block}: at its gain");
+        let x: Vec<usize> = at.iter().map(|&k| (start + k - from) as usize).collect();
+        assert_eq!(nonzero(&l), x.iter().map(|x| x + 96).collect::<Vec<_>>(), "block {block}: slot 0 heard as before");
+        assert_eq!(nonzero(&r), vec![x[0] + 17, x[1] + 67, x[2] + 17], "block {block}: slot 1 heard through what it seats");
+    }
+}
+
+/// An install serviced in the block a take arms in, raising the live latency past the other chain's:
+/// the take aligns on it, and both inputs' impulses land on one loop frame.
+#[test]
+fn an_install_in_the_block_a_take_arms_aligns_the_take() {
+    for block in BLOCKS {
+        let mut rig = Rig::with(Opts { block, ..Opts::default() });
+        rig.install(0, Lag::new(96, [1.0; 2]));
+        rig.set(Command::SetSlotLive(1, true));
+        rig.set(Command::SetMetronome(false));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(1.0));
+        rig.set_stereo_inputs(|_| [0.0; 2], |_| [0.0; 2]);
+        rig.install(1, Lag::new(200, [1.0; 2]));
+        rig.press(Command::RecDub(0));
+        assert_eq!(rig.engine.live_latency(), 200, "block {block}: serviced with the arm");
+        let start = rig.start_frame();
+        let x = start + 2000;
+        rig.set_stereo_inputs(move |f| [if f == x { 1.0 } else { 0.0 }, 0.0], move |f| [0.0, if f == x { 1.0 } else { 0.0 }]);
+        rig.advance_to(rig.end_frame() + 1);
+        let pcm = rig.pcm2(0);
+        let (pl, pr): (Vec<f32>, Vec<f32>) = pcm.iter().map(|&[l, r]| (l, r)).unzip();
+        assert_eq!((nonzero(&pl), nonzero(&pr)), (vec![2200], vec![2200]), "block {block}: one loop frame");
     }
 }
 
@@ -260,7 +316,16 @@ fn capacity_take(chain: Option<usize>) -> Vec<Pair> {
 fn a_chain_at_the_most_latency_records_every_start_intact_and_one_frame_more_is_refused() {
     let max = max_chain_latency(SR) as usize;
     let at_most = capacity_take(Some(max));
-    assert!(at_most.iter().any(|p| p[0] != 0.0 && p[0] != 1.0), "the synth recorded");
+    // Each start on its own: the chained slot's impulse at 4000 (left), the dry slot's at 4500 (right),
+    // each at its gain; the synth's note, played 1000 frames after the first and recorded the input
+    // side later (a note played when heard), starts there and not a frame before, on both sides.
+    let input = Rig::new().engine.config().max_input_frames as usize;
+    let onset = 5000 + input;
+    let (l, r): (Vec<f32>, Vec<f32>) = at_most[..onset].iter().map(|&[l, r]| (l, r)).unzip();
+    assert_eq!((nonzero(&l), nonzero(&r)), (vec![4000], vec![4500]), "the two impulses, nothing else before the note");
+    assert_eq!((at_most[4000], at_most[4500]), ([1.0, 0.0], [0.0, 1.0]));
+    let synth = &at_most[onset..onset + 64];
+    assert!(synth.iter().any(|p| p[0] != 0.0) && synth.iter().all(|p| p[0] == p[1]), "the synth from its onset, both sides");
     assert_eq!(at_most, capacity_take(None), "every start lands where it lands with no chain: the dry slot's, the chained slot's, the synth's");
 
     let mut rig = Rig::new();
@@ -295,4 +360,75 @@ fn auto_rec_triggers_on_an_attack_of_opposite_polarity_and_opens_the_loop_with_t
     assert_eq!(take.len() as Frame, rig.frame - start);
     assert!(take.iter().enumerate().all(|(k, &p)| p == onset(start + k as Frame)), "one contiguous stereo run from the retained start");
     assert!(take.iter().any(|p| p[0] > 0.0 && p[1] == -p[0]), "the pair itself, not its mean");
+}
+
+/// The rings full: the feed stops reading (the event ring fills) and the host stops taking its units
+/// back (the return ring fills) while it keeps sending installs and removals. A message with no place
+/// for its answer or its unit waits in its port (which then refuses the host); once the host reads
+/// again, every message is answered exactly once and every unit comes back exactly once: no answer
+/// dropped, no unit leaked, no protocol error.
+#[test]
+fn full_rings_keep_every_answer_and_every_unit_until_the_host_reads_again() {
+    let mut rig = Rig::with_config(Opts::default(), |c| c.event_capacity = 8);
+    rig.advance(128);
+    rig.hold_events = true;
+    let (mut sent, mut installed, mut removals) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut next, mut turned_away) = (1u32, 0);
+    let send = |rig: &mut Rig, removals: &mut Vec<(u8, u32)>, sent: &mut Vec<(u8, u32, SeatOp)>| {
+        removals.retain(|&(slot, id)| {
+            let pushed = rig.port(slot as usize).remove(id);
+            if pushed {
+                sent.push((slot, id, SeatOp::Remove));
+            }
+            !pushed
+        });
+    };
+    for _ in 0..200 {
+        send(&mut rig, &mut removals, &mut sent);
+        for slot in 0..2u8 {
+            match rig.port(slot as usize).install(next, Lag::new(8, [1.0; 2])) {
+                Ok(_) => {
+                    sent.push((slot, next, SeatOp::Install));
+                    installed.push((slot, next));
+                    removals.push((slot, next));
+                    next += 1;
+                }
+                Err(_) => turned_away += 1,
+            }
+        }
+        send(&mut rig, &mut removals, &mut sent);
+        rig.advance(rig.block as Frame);
+    }
+    assert!(turned_away > 0, "the ports filled up");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "nothing dropped or leaked while full");
+    rig.hold_events = false;
+    let mut back = Vec::new();
+    for _ in 0..10_000 {
+        send(&mut rig, &mut removals, &mut sent);
+        for slot in 0..2u8 {
+            while let Some((id, _)) = rig.returned_id(slot as usize) {
+                back.push((slot, id));
+            }
+        }
+        rig.advance(rig.block as Frame);
+        if removals.is_empty() && back.len() == installed.len() {
+            break;
+        }
+    }
+    rig.advance(rig.block as Frame);
+    let mut answered: Vec<(u8, u32, SeatOp)> = rig.events.iter().filter_map(|e| match *e {
+        Event::Seat { slot, unit, op, outcome, .. } => {
+            assert_eq!(outcome, SeatOutcome::Applied, "unit {unit}: {op:?}");
+            Some((slot, unit, op))
+        }
+        _ => None,
+    }).collect();
+    let key = |&(slot, id, op): &(u8, u32, SeatOp)| (slot, id, op == SeatOp::Remove);
+    answered.sort_by_key(key);
+    sent.sort_by_key(key);
+    assert_eq!(answered, sent, "every message answered, once");
+    back.sort();
+    installed.sort();
+    assert_eq!(back, installed, "every unit back, once");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0);
 }

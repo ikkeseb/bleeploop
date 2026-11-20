@@ -114,10 +114,15 @@ impl EngineHost {
     /// The committed loops as they stand, as bytes (the module doc's layout); with `master`, the wet
     /// master rendered from them too (an export's: the render may take seconds). Err while no engine
     /// exists, or when the loops keep changing under the copy; a render that fails is the header's
-    /// `masterError`, never an Err.
+    /// `masterError`, never an Err. The loops are copied at once; the master renders one export at a
+    /// time (`Core::master_render`): a second export waits for the first's render, never refused, so
+    /// at most one render engine and its lane pool exist beside the live engine.
     pub fn snapshot(&self, master: bool) -> Result<Vec<u8>, String> {
         let s = self.copy_loops()?;
-        let wet = master.then(|| self.render_master(&s));
+        let wet = master.then(|| {
+            let _one = self.core.master_render.lock().unwrap_or_else(|e| e.into_inner());
+            self.render_master(&s)
+        });
         Ok(snapshot_bytes(&s, wet))
     }
 
@@ -412,8 +417,9 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
     };
     let json = serde_json::to_vec(&header).unwrap_or_default();
     // Until the two-channel stems of format v3 (the next step), each track's bytes stay one channel: the
-    // mean of its two sides, which is a mono loop's own samples bit for bit.
-    let samples = s.pcm[..s.count * master].iter().map(|&[l, r]| 0.5 * (l + r));
+    // mean of its two sides (`lf_engine::fold`: finite for any finite pair), which is a mono loop's own
+    // samples bit for bit.
+    let samples = s.pcm[..s.count * master].iter().map(|&[l, r]| lf_engine::fold(l, r));
     let stereo = wet.as_ref().map_or(0, |_| 2 * master);
     let mut out = Vec::with_capacity(4 + json.len() + 4 * (s.count * master + stereo));
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());

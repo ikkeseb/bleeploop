@@ -41,11 +41,14 @@
 //! signal never steps. A removal first releases the notes the slot holds and crossfades the seat to its
 //! input; the seat is gone from the frame the fade ends, and the units after it take its input. The
 //! release reaches every unit in the fade's first `process`, [`UnitProcessor::stop`] follows the
-//! leaving unit's last, and the unit goes back on the port's return ring with its id (a full ring parks
-//! it until there is room). With no device running the ports are serviced at once, without fades, and
-//! one silent frame of `process` carries a removed unit's release. Nothing here drops a unit: an
-//! eviction hands back every seat and an install still waiting on a port too, a refused install goes
-//! straight back, never started or stopped, and a unit's methods run only while a seat holds it, so a
+//! leaving unit's last, and the unit goes back on the port's return ring with its id. A message leaves
+//! its ring only once its answer has a place among those the slot owes the event ring and, an install,
+//! once the return ring has a place for it beside every unit the slot holds: a full ring keeps the
+//! message waiting, in order, and nothing owed is ever dropped. With no device running the ports are
+//! serviced at once, without fades, and one silent frame of `process` carries a removed unit's
+//! release. Nothing here drops a unit: an eviction hands back every seat and every install its ring
+//! has room for (the host reads its returns and evicts again for the rest), a refused install goes
+//! straight back with its reason, never started or stopped, and a unit's methods run only while a seat holds it, so a
 //! panic the callback's guard catches unwinds past no unit held as a local. A call whose output holds a
 //! NaN or an infinity is silenced, counted, so nothing downstream (the mix, the input sends, the
 //! limiter, a capture) ever sees it.
@@ -60,6 +63,9 @@
 //! Those commands therefore apply at the start of a render call (every event offset is 0 in practice);
 //! an install or removal applies at the next block start. A live ramp's end splits nothing: the gate is
 //! evaluated per frame.
+
+use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Release}};
+use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
@@ -90,49 +96,92 @@ enum SlotMsg {
     Remove { id: UnitId },
 }
 
+/// A unit on its way back to the host, refused at its install or not.
+type Back = (UnitId, Unit, Option<SeatRefusal>);
+
 /// The host's end of one slot (`EngineHandle::slots`). Not real-time: the host blocks on it, the engine
 /// never does.
 pub struct SlotPort {
     tx: Producer<SlotMsg>,
-    rx: Consumer<(UnitId, Unit)>,
+    rx: Consumer<Back>,
+    /// Messages pushed, and those the engine has taken (stored after it applied each and handed back
+    /// what it refused).
+    sent: u64,
+    taken: Arc<AtomicU64>,
+}
+
+/// One message on a slot's port ([`SlotPort::install`]): whether the engine has taken it yet.
+#[derive(Clone)]
+pub struct Ticket {
+    seq: u64,
+    taken: Arc<AtomicU64>,
+}
+
+impl Ticket {
+    /// The engine has taken the message and applied it: a refused install is on the port's return ring
+    /// ([`SlotPort::refused`]), a seated one is in its chain.
+    pub fn answered(&self) -> bool {
+        self.taken.load(Acquire) >= self.seq
+    }
+
+    /// Whether `port` is the one this message went to (a rebuild replaces the ports with the engine).
+    pub fn of(&self, port: &SlotPort) -> bool {
+        Arc::ptr_eq(&self.taken, &port.taken)
+    }
 }
 
 impl SlotPort {
     /// Hand an activated unit to the slot under `id`, to seat at its chain's end; it crossfades in from
     /// the next block and is answered by an [`Event::Seat`] (a refused one comes back on
-    /// [`SlotPort::returned`]). Gives the unit back when the message ring is full (the engine is not
-    /// rendering and has not been serviced).
-    pub fn install(&mut self, id: UnitId, unit: Unit) -> Result<(), Unit> {
+    /// [`SlotPort::returned`], its reason on [`SlotPort::refused`]). The ticket tells when the engine
+    /// has taken it. Gives the unit back when the message ring is full (the engine is not rendering and
+    /// has not been serviced, or the host has not read its returns).
+    pub fn install(&mut self, id: UnitId, unit: Unit) -> Result<Ticket, Unit> {
         self.tx.push(SlotMsg::Install { id, unit }).map_err(|PushError::Full(msg)| match msg {
             SlotMsg::Install { unit, .. } => unit,
             SlotMsg::Remove { .. } => unreachable!(),
-        })
+        })?;
+        self.sent += 1;
+        Ok(Ticket { seq: self.sent, taken: self.taken.clone() })
     }
 
     /// Ask for unit `id` back: the slot releases its notes, the seat crossfades to its input, the unit
     /// stops and arrives on [`SlotPort::returned`]. Answered by an [`Event::Seat`]; nothing comes back
     /// for an id the slot does not seat. False when the ring is full.
     pub fn remove(&mut self, id: UnitId) -> bool {
-        self.tx.push(SlotMsg::Remove { id }).is_ok()
+        let pushed = self.tx.push(SlotMsg::Remove { id }).is_ok();
+        self.sent += pushed as u64;
+        pushed
     }
 
     /// A unit the engine handed back, with its id: removed, evicted ([`crate::Engine::evict_slots`]) or
     /// refused.
     pub fn returned(&mut self) -> Option<(UnitId, Unit)> {
-        self.rx.pop().ok()
+        self.rx.pop().ok().map(|(id, unit, _)| (id, unit))
+    }
+
+    /// Unit `id` with why the engine refused its install, if that is what the port hands back next.
+    pub fn refused(&mut self, id: UnitId) -> Option<(Unit, SeatRefusal)> {
+        if !self.rx.peek().is_ok_and(|(i, _, why)| *i == id && why.is_some()) {
+            return None;
+        }
+        let (_, unit, why) = self.rx.pop().ok()?;
+        why.map(|why| (unit, why))
     }
 }
 
 /// The engine's end of one slot.
 struct SlotEnd {
     rx: Consumer<SlotMsg>,
-    tx: Producer<(UnitId, Unit)>,
+    tx: Producer<Back>,
+    taken: Arc<AtomicU64>,
 }
 
 fn slot_channel() -> (SlotPort, SlotEnd) {
     let (msg_tx, msg_rx) = RingBuffer::new(MSG_CAPACITY);
     let (ret_tx, ret_rx) = RingBuffer::new(RETURN_CAPACITY);
-    (SlotPort { tx: msg_tx, rx: ret_rx }, SlotEnd { rx: msg_rx, tx: ret_tx })
+    let taken = Arc::new(AtomicU64::new(0));
+    (SlotPort { tx: msg_tx, rx: ret_rx, sent: 0, taken: taken.clone() }, SlotEnd { rx: msg_rx, tx: ret_tx, taken })
 }
 
 /// One place in a chain. Every seat's buffers are allocated with the rack; a seat holds a unit exactly
@@ -169,8 +218,6 @@ struct Slot {
     /// The chain's latency as the record line reads it: its sum at the last install or removal that
     /// left it seating a unit (an emptied chain keeps it, so a source's delayed tail plays out once).
     line_latency: Frame,
-    /// Units stopped and waiting for room on the return ring, oldest first.
-    parked: [Option<(UnitId, Unit)>; 2],
     /// GO LIVE as asked: the live gate's target, and what the record latency follows.
     live: bool,
     /// The live gate ramps linearly from `live_gain` at frame `live_end - Rack::live_frames` to the
@@ -251,29 +298,22 @@ impl Slot {
         self.seats[..self.len].iter().any(|s| !s.removing)
     }
 
-    fn park(&mut self, returned: (UnitId, Unit), errors: &mut u64) {
-        let Err(PushError::Full(returned)) = self.end.tx.push(returned) else { return };
-        match self.parked.iter_mut().find(|p| p.is_none()) {
-            Some(p) => *p = Some(returned),
-            None => {
-                // Unreachable under the host protocol (the return ring holds every seat and every
-                // message, and the host reads its port). Leak rather than drop: a drop frees memory and
-                // calls into the plugin's DLL.
-                *errors += 1;
-                std::mem::forget(returned);
-            }
+    /// Hand a unit back on the return ring. Never full: a message is taken only while the ring has a
+    /// place for every unit the slot holds and one more ([`Rack::service`]). Should that ever fail, the
+    /// unit leaks, counted, rather than drop (a drop frees memory and calls into the plugin's DLL).
+    fn give_back(&mut self, back: Back, errors: &mut u64) {
+        if let Err(PushError::Full(back)) = self.end.tx.push(back) {
+            *errors += 1;
+            std::mem::forget(back);
         }
     }
 
-    fn unpark(&mut self) {
-        for p in self.parked.iter_mut() {
-            if let Some(returned) = p.take() {
-                if let Err(PushError::Full(returned)) = self.end.tx.push(returned) {
-                    *p = Some(returned);
-                    return;
-                }
-            }
-        }
+    /// Whether the slot can take its next message now: the event ring's answer has a place among the
+    /// owed, and an install a place on the return ring beside every unit the slot holds (so a refusal,
+    /// a removal and an eviction always find one). A message that cannot waits in its ring.
+    fn can_take(&self) -> bool {
+        let Ok(msg) = self.end.rx.peek() else { return false };
+        self.owed.len() < OWED_CAPACITY && (matches!(msg, SlotMsg::Remove { .. }) || self.end.tx.slots() > self.len)
     }
 
     fn queue(&mut self, kind: SlotEventKind, offset: u32, dropped: &mut u64) {
@@ -293,11 +333,11 @@ impl Slot {
         self.held = [0; 2];
     }
 
+    /// Owe `answer` to the event ring: [`Slot::can_take`] reserved its place.
     fn answer(&mut self, answer: Answer, errors: &mut u64) {
         if self.owed.len() < OWED_CAPACITY {
             self.owed.push(answer);
         } else {
-            // Unreachable while the feed reads the ring: one answer per message, and the ports hold few.
             *errors += 1;
         }
     }
@@ -312,7 +352,7 @@ impl Slot {
         let seat = &mut self.seats[k];
         if let Some(unit) = seat.unit.take() {
             let id = seat.id;
-            self.park((id, unit), errors);
+            self.give_back((id, unit, None), errors);
         }
         let seat = &mut self.seats[k];
         seat.removing = false;
@@ -416,7 +456,6 @@ impl Rack {
                     .collect(),
                 len: 0,
                 line_latency: 0,
-                parked: [None, None],
                 live: false,
                 live_end: Frame::MIN,
                 live_gain: 0.0,
@@ -472,8 +511,9 @@ impl Rack {
     fn service(&mut self, frame: Frame, engaged: bool, fade: bool) {
         let cx = self.unit_cx(frame);
         for i in 0..SLOT_COUNT {
-            self.slots[i].unpark();
-            loop {
+            // Each message's answer and return have their places before it leaves its ring: nothing it
+            // owes is ever dropped, and one that has no place yet waits there, in order.
+            while self.slots[i].can_take() {
                 let Ok(msg) = self.slots[i].end.rx.pop() else { break };
                 let (unit, op, outcome) = match msg {
                     SlotMsg::Install { id, unit } => (id, SeatOp::Install, self.install(i, id, unit, engaged)),
@@ -481,6 +521,7 @@ impl Rack {
                 };
                 let errors = &mut self.protocol_errors;
                 self.slots[i].answer(Answer { frame, unit, op, outcome }, errors);
+                self.slots[i].end.taken.fetch_add(1, Release);
             }
             if !fade {
                 let (s, zeros, errors) = (&mut self.slots[i], &self.zeros, &mut self.protocol_errors);
@@ -501,7 +542,7 @@ impl Rack {
         let (fade_frames, max_latency) = (self.fade_frames, self.max_latency);
         let s = &mut self.slots[i];
         if let Some(why) = refused {
-            s.park((id, unit), &mut self.protocol_errors);
+            s.give_back((id, unit, Some(why)), &mut self.protocol_errors);
             return SeatOutcome::Refused(why);
         }
         // The chain seats the unit before any of its methods runs: one that panics unwinds with the unit
@@ -516,7 +557,7 @@ impl Rack {
         let info = UnitInfo { latency: info.latency.max(0), ..info };
         let refused = if info.source && k > 0 {
             Some(SeatRefusal::Placement)
-        } else if before + info.latency > max_latency {
+        } else if info.latency > max_latency - before {
             Some(SeatRefusal::Latency)
         } else {
             None
@@ -524,7 +565,7 @@ impl Rack {
         if let Some(why) = refused {
             s.len -= 1;
             if let Some(unit) = s.seats[k].unit.take() {
-                s.park((id, unit), &mut self.protocol_errors);
+                s.give_back((id, unit, Some(why)), &mut self.protocol_errors);
             }
             return SeatOutcome::Refused(why);
         }
@@ -578,7 +619,8 @@ impl Rack {
     }
 
     /// Stop every unit and hand it back (a sample-rate change: the host re-activates and reinstalls),
-    /// an install still waiting on a port included: nothing is left for the engine's drop.
+    /// with every install still waiting on a port that the return ring has room for: the host reads its
+    /// returns and evicts again until none comes back, so nothing is left for the engine's drop.
     pub(crate) fn evict(&mut self, frame: Frame) {
         self.service_idle(frame);
         let cx = self.unit_cx(frame);
@@ -600,14 +642,17 @@ impl Rack {
         self.slots.iter().filter(|s| s.live && s.shut == 0 && s.len > 0 && !s.source_head()).map(Slot::latency).max().unwrap_or(0)
     }
 
-    /// At a block start: while `open`, the record compensation follows the slots (the live latency, and
-    /// each slot's wet delayed by what its own chain's latency lacks of it); shut, it holds what it last
-    /// took. The engine shuts it while a capture's alignment is fixed, which took the same live latency.
+    /// At a block start, after the ports were serviced: while `open`, the alignment follows the slots
+    /// (the live latency); shut, it holds what it last took. The engine shuts it while a capture's
+    /// alignment is fixed, which took the same live latency. Either way each slot's wet is delayed by
+    /// what its own chain's latency lacks of that alignment, so a unit that comes or goes mid-take
+    /// moves nothing the take records outside its own crossfade. A chain that grows past the latched
+    /// alignment mid-take records late by the excess (E2 holds that edit until the take ends:
+    /// `docs/unit-contract.md` §7).
     pub(crate) fn latch_record(&mut self, open: bool) {
-        if !open {
-            return;
+        if open {
+            self.record_latency = self.live_latency();
         }
-        self.record_latency = self.live_latency();
         for s in self.slots.iter_mut() {
             let own = if s.len > 0 && !s.source_head() { s.latency() } else { 0 };
             s.dw = (self.record_latency - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;

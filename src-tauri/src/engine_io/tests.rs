@@ -3005,3 +3005,48 @@ fn a_panic_in_the_wasapi_input_callback_restarts_the_device_and_keeps_the_loop()
     assert_eq!(h.host.core.engine_gen.load(SeqCst), engine, "the engine throughout");
     assert!(h.host.take_device_events().is_empty(), "nothing was lost");
 }
+
+/// A one-channel session (the bytes before format v3, which the writer still writes: each stem one
+/// channel) loads through its real bytes onto both sides: the device plays the lane's samples on the
+/// left and the right alike.
+#[test]
+fn a_one_channel_sessions_lane_plays_on_both_sides() {
+    let h = Harness::new();
+    h.fake.set_input(|_| 0.0);
+    h.open(asio(Some(256)));
+    // 240 BPM, one bar of 4/4: a second. A saw, so nearly every frame sounds.
+    let frames = RATE;
+    let pcm: Vec<f32> = (0..frames as usize).map(|k| 0.2 * ((k % 480) as f32 / 480.0 - 0.5)).collect();
+    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    let from = h.frame();
+    h.host.load_session(&session_bytes(&load, &pcm)).expect("the load");
+    h.play(RATE / 2);
+    let played: Vec<[f32; 2]> = h.fake.heard_stereo(from..h.frame()).into_iter().filter(|p| !p[0].is_nan()).collect();
+    assert!(played.iter().filter(|p| p[0].abs() > 0.01).count() > RATE as usize / 4, "the lane plays");
+    // Alike to the output stage's rounding (the centred lane's two gains differ by an ulp, measured):
+    // a side the decoder lost or garbled would be orders past it.
+    let odd: Vec<(usize, [f32; 2])> = played.iter().copied().enumerate().filter(|(_, p)| (p[0] - p[1]).abs() > 1e-6).take(8).collect();
+    assert!(odd.is_empty(), "on both sides alike: {odd:?} of {}", played.len());
+}
+
+/// One export's master renders at a time (`Core::master_render`): a second export waits for the
+/// first's render, then renders its own, never refused.
+#[test]
+fn exports_render_their_masters_one_at_a_time() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    let host = &h.host;
+    let held = host.core.master_render.lock().unwrap();
+    std::thread::scope(|s| {
+        let export = s.spawn(|| host.snapshot(true));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!export.is_finished(), "the export waits while another master renders");
+        drop(held);
+        let bytes = export.join().unwrap().expect("the export");
+        let (header, _, [left, _]) = session_with_master(&bytes);
+        assert!(header.get("masterError").is_none(), "{header}");
+        assert!(left.iter().any(|x| x.abs() > 0.01), "its own master");
+    });
+}

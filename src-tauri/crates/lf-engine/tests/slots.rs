@@ -483,37 +483,40 @@ fn a_second_install_seats_after_the_first_in_series() {
     assert!((b.input_peak() - 0.1).abs() < 1e-6, "the second takes the first's output: {}", b.input_peak());
 }
 
-/// A host that never reads its port: the chain full, refused installs fill the return ring, two more
-/// park, and the next is leaked and counted rather than dropped. Parked units move on once the host
-/// reads.
+/// A host that never reads its port: the chain full, refused installs fill the return ring up to the
+/// places its seated units keep there, and the rest wait in the message ring, untaken, rather than be
+/// parked or leaked. They follow once the host reads, and every one comes back to be dropped by the host.
+/// (Before the review the rack parked two and leaked the next, counted.)
 #[test]
-fn a_unit_with_nowhere_to_go_is_leaked_never_dropped_and_parked_ones_follow_once_read() {
+fn a_unit_with_nowhere_to_go_waits_in_its_port_and_follows_once_the_host_reads() {
     let refused = Probe::new();
     let mut rig = Rig::new();
     for _ in 0..lf_engine::MAX_UNITS {
         rig.install(0, Fake::effect(0.0, 0.0, &Probe::new()));
     }
     rig.advance(128);
-    // The return ring holds 24; a burst is at most the message ring's 16.
+    // The return ring holds 24, eight of them kept for the seated units; a burst is at most the
+    // message ring's 16.
     for burst in [16, 11] {
         for _ in 0..burst {
             rig.install(0, Fake::effect(0.0, 0.0, &refused));
         }
         rig.advance(128);
     }
-    assert_eq!(rig.engine.diag().slot_protocol_errors, 1, "twenty-seven refused, one of them leaked");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "nothing leaked");
     let mut back = Vec::new();
     while let Some(unit) = rig.returned(0) {
         back.push(unit);
     }
-    assert_eq!(back.len(), 24, "the return ring's twenty-four");
+    assert_eq!(back.len(), 24 - lf_engine::MAX_UNITS, "the return ring less the seated units' places");
     rig.advance(128);
     while let Some(unit) = rig.returned(0) {
         back.push(unit);
     }
-    assert_eq!(back.len(), 26, "and the two parked ones");
+    assert_eq!(back.len(), 27, "and those that waited in the port");
     drop(back);
-    assert_eq!(refused.drops.load(SeqCst), 26, "the leaked one is never dropped");
+    assert_eq!(refused.drops.load(SeqCst), 27, "every one back to the host");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0);
 }
 
 /// Where a [`Panicky`] unit panics.
@@ -928,27 +931,38 @@ fn an_instrument_slot_removed_while_its_note_is_on_the_record_path_still_lands_i
     assert_eq!(hits, vec![0], "once, on the loop's frame 0");
 }
 
-/// An input side past the configured largest (`EngineConfig::max_input_frames`, which the record lines
-/// hold) is taken at it and counted; the line never wraps round to no delay at all. (Before E1 the lines
-/// held a second and the delay held the line's longest.)
+/// An input side past the configured largest (`EngineConfig::max_input_frames`, one second, which the
+/// record lines hold beside a chain's latency) is taken at it and counted, and the take is aligned on
+/// it too: a source's note played on the heard downbeat lands on the loop's first frame, never before
+/// it, and the guitar played with it lands late by the excess. (Before E1 the lines held one second for
+/// the input side and a plugin's latency together; E1's first cut held a quarter second and aligned the
+/// take on the full side, so the note landed the excess early.)
 #[test]
-fn a_record_delay_past_the_configured_input_side_holds_it_and_is_counted() {
-    const IN: Frame = 60_000;
+fn an_input_side_past_the_lines_is_clamped_counted_and_the_take_aligned_on_it() {
     let probe = Probe::new();
-    let mut rig = Rig::with(Opts { align: IN + LIMITER, ..Default::default() });
-    rig.input_latency = IN;
+    let max = Rig::new().engine.config().max_input_frames;
+    assert_eq!(max, 48_000, "a second at the rig's rate");
+    const EXCESS: Frame = 12_000;
+    let input = max + EXCESS;
+    let mut rig = Rig::with(Opts { align: input + LIMITER, ..Default::default() });
+    rig.input_latency = input;
     rig.install(1, Fake::instrument(0.0, 0, &probe));
     rig.set(Command::SelectInstrument(NoteTarget::Slot(1)));
     rig.set(Command::SetFixedLength(true));
     rig.set(Command::SetFixedBars(2.0));
+    let mark = rig.events.len();
     rig.press(Command::RecDub(0));
-    let note = rig.start_frame() + 1000;
-    rig.send_at(note, Command::NoteOn(69, 1.0));
+    let downbeat = rig.count_one(mark) + 4 * 24_000;
+    // The player hears the downbeat the limiter's pre-delay after it (no output side here), and plays
+    // the note and the guitar there; the guitar reaches the engine the whole input side later.
+    rig.send_at(downbeat + LIMITER, Command::NoteOn(69, 1.0));
+    rig.set_input(move |f| if f == downbeat + LIMITER + input { 0.5 } else { 0.0 });
+    assert_eq!(rig.start_frame() - downbeat, max + LIMITER, "the take aligned on the clamped side");
     rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
     let pcm = rig.pcm(0);
-    let hit = pcm.iter().position(|&x| x != 0.0).expect("the note is in the take") as Frame;
-    let max = rig.engine.config().max_input_frames;
-    assert_eq!(hit - 1000, max, "delayed by the configured input side");
+    let hits: Vec<(usize, f32)> = pcm.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, &x)| (k, x)).collect();
+    assert_eq!(hits, vec![(0, 1.0), (EXCESS as usize, 0.5)], "the note on the first frame, the guitar the excess late");
     assert!(rig.engine.diag().input_clamped > 0, "counted");
 }
 

@@ -77,7 +77,8 @@ pub struct EngineConfig {
     pub max_block: usize,
     /// The largest input side ([`ProcessContext::input_frames`]) a block may report: every record line
     /// holds it plus [`crate::api::max_chain_latency`] plus a block, sized here, off the callback. A block
-    /// that reports more is taken at this, and counted ([`Diag::input_clamped`]).
+    /// that reports more is taken at this, its take aligned on it too, and counted
+    /// ([`Diag::input_clamped`]).
     pub max_input_frames: Frame,
     pub command_capacity: usize,
     pub event_capacity: usize,
@@ -91,9 +92,10 @@ impl EngineConfig {
     /// The command ring holds a new engine's settings replay (about a hundred commands) and the UI's
     /// batch after it with room to spare; the engine takes up to `MAX_PENDING` a block, the rest wait.
     pub fn new(sample_rate: u32) -> Self {
-        // A quarter second of input side: an ASIO driver at its largest block with its safety offset and
-        // converters, and the WASAPI join's pipe, stay well inside it.
-        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, max_input_frames: sample_rate as Frame / 4, command_capacity: 1024, event_capacity: 4096, looper_tap: false }
+        // A second of input side: what the record lines held before E1 (one second for the input side
+        // and a plugin's latency together). An ASIO driver at its largest block with its safety offset
+        // and converters, and the WASAPI join's pipe, stay well inside it.
+        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, max_input_frames: sample_rate as Frame, command_capacity: 1024, event_capacity: 4096, looper_tap: false }
     }
 }
 
@@ -167,7 +169,9 @@ pub struct Diag {
     /// Tuner frames the full ring refused ([`TunerTap::dropped`]): no fault, a reader that stopped
     /// reading makes them, and the epoch tells it where its input broke.
     pub tuner_dropped: u64,
-    /// Blocks whose input side exceeded [`EngineConfig::max_input_frames`] and were taken at it.
+    /// Blocks whose input side exceeded [`EngineConfig::max_input_frames`] and were taken at it: a take
+    /// is aligned on the clamped side, so what the engine records of its own sources (the built-in
+    /// synths, a source chain) stays on the grid and the device's input lands late by the excess.
     pub input_clamped: u64,
 }
 
@@ -620,9 +624,10 @@ impl Engine {
         self.looper.overview().set_slot_gate_open(slot, self.rack.gate_open(slot));
     }
 
-    /// While no device runs: stop every unit, an install still waiting on its port included, and hand
-    /// it back on its port (a sample-rate change; the host re-activates each at the new rate and
-    /// installs it into the new engine).
+    /// While no device runs: stop every unit, and every install still waiting on its port that its
+    /// return ring has room for, and hand it back on its port (a sample-rate change; the host
+    /// re-activates each at the new rate and installs it into the new engine). The host reads the
+    /// returns and calls this again until none comes back.
     pub fn evict_slots(&mut self) {
         self.rack.evict(self.next_frame);
         self.rack.offer(&mut self.feed);
@@ -692,15 +697,16 @@ impl Engine {
             // A damaged block's own input frames are lost too.
             self.looper.input_gap(lost_from, start, if ctx.damaged { end } else { start }, live_latency);
         }
-        let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
-        // The record lines hold the configured input side at most: a block past it lags its sources'
-        // record path by that much only, counted.
-        let input_frames = if ctx.input_frames > self.config.max_input_frames {
+        // The record lines hold the configured input side at most. A block past it is taken at it, and
+        // so is the take's alignment: the engine's own sources (a synth's record path, delayed by the
+        // input side) then land on the grid, never before a take's first frame, and the device's input
+        // lands late by the excess. Counted.
+        let excess = (ctx.input_frames - self.config.max_input_frames).max(0);
+        if excess > 0 {
             self.input_clamped += 1;
-            self.config.max_input_frames
-        } else {
-            ctx.input_frames
-        };
+        }
+        let input_frames = ctx.input_frames - excess;
+        let align = ctx.align_frames - excess + live_latency + self.limiter.latency() as Frame;
         let record_delay = input_frames + live_latency;
         self.rendered = n;
         // A block always folds and clears its own chunks; a block the host's `catch_unwind` cut short

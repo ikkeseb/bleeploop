@@ -22,6 +22,13 @@ pub type Pair = [f32; 2];
 /// The units one slot's chain seats at most (`docs/unit-contract.md` §1).
 pub const MAX_UNITS: usize = 8;
 
+/// A pair folded to one channel, its mean: through `f64`, so two finite samples never sum past `f32`'s
+/// range, and equal sides give that side bit for bit (a subnormal included).
+#[inline]
+pub fn fold(l: f32, r: f32) -> f32 {
+    ((l as f64 + r as f64) * 0.5) as f32
+}
+
 /// The most latency one chain may sum to: one second of frames at `sample_rate`. An install past it is
 /// refused ([`SeatRefusal::Latency`]), and every record line is sized for it ([`EngineConfig`]'s input
 /// side plus this plus a block), so no compensation is ever clipped.

@@ -11,10 +11,12 @@
 //! [`Core::evicted`] until its owner takes it back ([`SlotHost::take_evicted`]), re-activates it at
 //! the new [`SlotHost::rate`] and installs it again.
 //!
-//! A slot seats one plugin unit here, under the slot's own [`UnitId`] (slot + 1: unique across the two
-//! slots while each seats one); the chain host that mints an id per unit and reads each
-//! `Event::Seat` is E2's (`docs/unit-contract.md` §9). An install the engine refuses (a latency past
-//! `lf_engine::max_chain_latency`) comes back on the port as a removed unit would.
+//! A slot seats one plugin unit here, under an id minted for each install (`Core::next_unit`), so a
+//! reinstall (a restart, a swap) never meets its own removal's id in the engine; the chain host that
+//! reads each `Event::Seat` is E2's (`docs/unit-contract.md` §9). An install settles on the engine's
+//! outcome: it waits until the engine has taken the message (its port's ticket), and an install the
+//! engine refused (a latency past `lf_engine::max_chain_latency`) comes back to its caller with the
+//! reason, as any other load error, never reported loaded while the slot plays dry.
 //!
 //! Each [`EngineHost::slot`](super::EngineHost::slot) call is one owner's handle, with its own token:
 //! a unit comes back (on the port, or evicted) only to the handle that installed it or a clone. An
@@ -26,12 +28,16 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lf_engine::{SlotPort, UnitId, UnitProcessor};
+use lf_engine::{SeatRefusal, SlotPort, Ticket, UnitId, UnitProcessor};
 
 use super::Core;
 
-/// How often `remove` looks for its unit.
+/// How often `remove` looks for its unit, and `install` for the engine's answer.
 const POLL: Duration = Duration::from_millis(1);
+/// How long `install` waits for the engine to take its unit: a running device services the port at its
+/// next block, an idle one at once. Past it (a stalled device) the install stands as sent: the device
+/// owner's recovery evicts the unit to its owner, whose reinstall settles again.
+const SETTLE: Duration = Duration::from_secs(2);
 
 /// `Core::holder` for a unit whose owner abandoned it.
 pub(crate) const ORPHAN: u64 = u64::MAX;
@@ -55,9 +61,19 @@ impl SlotHost {
         self.slot
     }
 
-    /// The id this slot's unit is seated under.
+    /// The id this slot's unit was last installed under.
     fn unit_id(&self) -> UnitId {
-        self.slot as UnitId + 1
+        self.core.unit_ids[self.slot].load(Acquire)
+    }
+
+    /// A fresh unit id, never 0.
+    fn mint(&self) -> UnitId {
+        loop {
+            let id = self.core.next_unit.fetch_add(1, Relaxed);
+            if id != 0 {
+                return id;
+            }
+        }
     }
 
     /// The engine's sample rate: what a unit is activated at. `None` before a device first opened.
@@ -74,9 +90,10 @@ impl SlotHost {
     /// once while no device runs). An engine at another rate has replaced the one `rate` was read from:
     /// the unit goes to [`SlotHost::take_evicted`] instead, for its owner to re-activate. Gives the unit
     /// back with the reason when no engine exists yet, the slot already holds a unit (an orphan still
-    /// in the engine included: try again once it is out), or the port is full.
+    /// in the engine included: try again once it is out), the port is full, or the engine refused it.
     pub fn install(&self, unit: Box<dyn UnitProcessor>, rate: u32) -> Result<(), (Box<dyn UnitProcessor>, String)> {
-        {
+        let id = self.mint();
+        let ticket = {
             // Under the port lock: a rebuild holds every port while it publishes the new rate and
             // replaces the ports, so the rate and the port read here belong to one engine.
             let mut port = match self.core.ports[self.slot].lock() {
@@ -98,13 +115,42 @@ impl SlotHost {
                 *waiting = Some((self.token, unit));
                 return Ok(());
             }
-            if let Err(unit) = port.install(self.unit_id(), unit) {
-                return Err((unit, format!("slot {}'s port is full", self.slot)));
-            }
+            let ticket = match port.install(id, unit) {
+                Ok(ticket) => ticket,
+                Err(unit) => return Err((unit, format!("slot {}'s port is full", self.slot))),
+            };
+            self.core.unit_ids[self.slot].store(id, Release);
             self.core.holder[self.slot].store(self.token, Release);
+            ticket
+        };
+        self.settle(id, &ticket)
+    }
+
+    /// Wait for the engine's outcome of install `id`: seated, `Ok`; refused, the unit back with why, and
+    /// the slot free. A rebuild that replaced the port meanwhile took the unit to the eviction mailbox
+    /// (refused or not), and a device that never services the port within [`SETTLE`] leaves it there:
+    /// both stand as `Ok`, for the owner's eviction path.
+    fn settle(&self, id: UnitId, ticket: &Ticket) -> Result<(), (Box<dyn UnitProcessor>, String)> {
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            self.service_if_idle();
+            {
+                let mut port = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
+                let Some(port) = port.as_mut().filter(|p| ticket.of(p)) else { return Ok(()) };
+                if ticket.answered() {
+                    let Some((unit, why)) = port.refused(id) else { return Ok(()) };
+                    if self.core.holder[self.slot].compare_exchange(self.token, 0, AcqRel, Acquire).is_ok() {
+                        self.core.unit_ids[self.slot].store(0, Release);
+                    }
+                    return Err((unit, refusal(self.slot, why)));
+                }
+            }
+            if Instant::now() >= deadline {
+                log::warn!("[engine_io] slot {}: the engine did not take unit {id} within {} ms; it stands as sent", self.slot, SETTLE.as_millis());
+                return Ok(());
+            }
+            std::thread::sleep(POLL);
         }
-        self.service_if_idle();
-        Ok(())
     }
 
     /// Take the slot's unit back: the engine releases its notes, crossfades it to bypass and stops it.
@@ -213,6 +259,17 @@ impl SlotHost {
     }
 }
 
+/// Why the engine refused an install, as a load error says it.
+fn refusal(slot: usize, why: SeatRefusal) -> String {
+    match why {
+        SeatRefusal::Latency => format!("slot {slot}: the plugin's latency is past the most a slot compensates (one second)"),
+        SeatRefusal::Full => format!("slot {slot} seats no more units"),
+        SeatRefusal::Id => format!("slot {slot}: the engine already seats this unit's id"),
+        SeatRefusal::Placement => format!("slot {slot}: an instrument goes only at the head of an empty chain"),
+        SeatRefusal::Unknown => format!("slot {slot}: the engine refused the unit"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
@@ -303,6 +360,63 @@ mod tests {
         device.rebuild_at(48_000, 512);
         let back = slot.take_evicted().expect("the next eviction reaches its owner");
         assert_eq!(back.into_any().downcast::<Constant>().unwrap().level, 0.25);
+    }
+
+    /// An effect with a latency and nothing else.
+    struct Latent(lf_engine::grid::Frame);
+
+    impl UnitProcessor for Latent {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: self.0 }
+        }
+        fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+            for o in out {
+                o.fill(0.0);
+            }
+        }
+        fn stop(&mut self) {}
+        fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+            self
+        }
+    }
+
+    #[test]
+    fn an_install_the_engine_refuses_comes_back_to_its_caller_with_why_and_frees_the_slot() {
+        for running in [true, false] {
+            let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+            if !running {
+                device.stop();
+            }
+            let slot = device.host().slot(0);
+            let past = lf_engine::max_chain_latency(48_000) + 1;
+            let (unit, why) = slot.install(Box::new(Latent(past)), 48_000).err().expect("refused, not reported loaded");
+            assert!(why.contains("latency"), "running {running}: {why}");
+            assert_eq!(unit.into_any().downcast::<Latent>().expect("the caller's own unit").0, past);
+            assert_eq!(device.host().core.holder[0].load(SeqCst), 0, "running {running}: the slot is free");
+            assert!(slot.install(Box::new(Latent(64)), 48_000).is_ok(), "running {running}: the next load seats");
+            assert!(slot.remove(Duration::from_secs(2)).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn a_swap_never_meets_its_own_removal_in_the_engine() {
+        let device = TestDevice::start(48_000, 64, Duration::from_millis(1), |_| 0.0);
+        let core = &device.host().core;
+        let slot = device.host().slot(1);
+        let mut ids = Vec::new();
+        for round in 0..20 {
+            // Removed, then at once installed again: each install has its own id, so the engine never
+            // judges it against the seat still fading out under the last one.
+            assert!(slot.install(Box::new(Latent(round)), 48_000).is_ok(), "round {round}: seated");
+            ids.push(core.unit_ids[1].load(SeqCst));
+            let back = slot.remove(Duration::from_secs(2)).expect("comes back").expect("a unit");
+            assert_eq!(back.into_any().downcast::<Latent>().unwrap().0, round);
+        }
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "a fresh id per install: {ids:?}");
+        assert!(!ids.contains(&0));
     }
 
     #[test]
