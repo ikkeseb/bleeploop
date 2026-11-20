@@ -19,7 +19,9 @@
  * - a slot's pick stays the one the player asked for on a device that lacks it (an open whose status
  *   reads auto for it, a device the owner reopened on, a prune with a device running or none): saved and
  *   asked for again by the next open, the slot's window naming it with the input the slot reads instead
- *   ("In 4 · In 2"), Auto kept plain; an input device change and a vanished device reset the picks to
+ *   ("In 4 · In 2"), Auto kept plain, judged from the status alone (a headset no device list names
+ *   yet, a four-input endpoint whose stream still reads auto; a pick the stream reads shows plain, and
+ *   so does a pick whose switch the status has not answered); an input device change and a vanished device reset the picks to
  *   Auto, in storage and on screen;
  *   on a fresh install the input device change and the vanished device reset the picks to its default
  *   instead (slot A on In 1, slot B Auto), and the reopen asks for that;
@@ -259,16 +261,30 @@ await probe(async ({ browser, open }) => {
     // 1b. The owner reopened on another device (a fallback) with one input: each slot reads input 1.
     await p.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [], status: {
       backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Mono input', outputName: 'Fake output',
-      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0] } }));
-    await p.waitForFunction(() => document.querySelectorAll('.slot__inval')[1]?.textContent === 'In 2 · In 1', undefined, { timeout: 2000 });
+      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0], inputRequests: [3, 1] } }));
+    const shows = (slot, text) => p.waitForFunction(([s, t]) => document.querySelectorAll('.slot__inval')[s - 1]?.textContent === t, [slot, text], { timeout: 2000 });
+    await shows(2, 'In 2 · In 1');
     assert.deepEqual(await saved(), [3, 1], 'a device the owner reopened on keeps the picks');
     assert.equal(await shownIn(1), 'In 4 · In 1');
     assert.equal(await inp(2).inputValue(), '1');
     assert.ok(await autoText(2, 'Auto'), 'Auto stays plain beside a pick of its own');
+    // The fallback is the status's: what it reads against the pick it answers, whatever the device list.
+    // Windows moved the default to a headset plugged in since the list was read (it names none).
+    const status = (seq, inputName, inputChannels, inputRequests) => p.evaluate((st) => window.__lf.native.emit({ seq: st.seq, reset: false, events: [], status: {
+      backend: 'Wasapi', sampleRate: 48000, block: 256, outputName: 'Fake output', alignFrames: 0, inputFrames: 0, inputOpen: true, ...st.s } }),
+    { seq, s: { inputName, inputChannels, inputRequests } });
+    await status(3, 'USB headset', [0, 0], [3, 1]);
+    await shows(1, 'In 4 · In 1');
+    assert.equal(await shownIn(2), 'In 2 · In 1', 'a headset the list does not name shows each fallback');
+    // Moved to the four-input device at another rate: the stream that opened on two plays on and reads auto.
+    await status(4, 'Fake input', [1, 1], [3, 1]);
+    await shows(1, 'In 4 · In 2');
+    assert.equal(await shownIn(2), 'In 2', 'a pick the stream reads shows plain, never "In 2 · In 2"');
+    // A switch whose status is not in yet (it answers the pick before): the new pick shows plain.
+    await status(5, 'Fake input', [1, 1], [2, 1]);
+    await shows(1, 'In 4');
     // 1c. An input device change in Audio Settings resets both picks (back on the four-input device first).
-    await p.evaluate(() => window.__lf.native.emit({ seq: 3, reset: false, events: [], status: {
-      backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Fake input', outputName: 'Fake output',
-      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [1, 1] } }));
+    await status(6, 'Fake input', [1, 1], [3, 1]);
     await inp(1).selectOption('2');
     await p.evaluate(async () => {
       const { platform } = await import('/src/platform/index.ts');

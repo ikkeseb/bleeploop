@@ -161,6 +161,13 @@ for (const s of fixture.deviceStatuses) {
   check(`device status ${s.backend}`, () => assert.deepEqual(decodeDeviceStatus(structuredClone(s)), s));
 }
 check('the fixture status reads a pair on a slot', () => assert.ok(fixture.deviceStatuses.some((s) => s.inputChannels.some(Array.isArray))));
+check('a status carries the pick each read answers, auto as null, apart from the read where it falls back', () => {
+  assert.ok(fixture.deviceStatuses.some((s) => s.inputRequests.some((p, i) => JSON.stringify(p) !== JSON.stringify(s.inputChannels[i]))), 'a fallback');
+  assert.ok(fixture.deviceEvents.some((e) => e.Recovered?.inputRequests.includes(null)), 'auto');
+  const s = structuredClone(fixture.deviceStatuses[0]);
+  delete s.inputRequests;
+  assert.equal('inputRequests' in decodeDeviceStatus(s), false, 'a scripted frame may leave it out');
+});
 check('a meter peak per side; a scripted one number per slot reads on both sides', () => {
   assert.ok(fixture.feed.some((f) => f.meter?.peak.some(([l, r]) => l !== r)), 'the fixture carries two sides apart');
   const f = { ...structuredClone(fixture.feed[0]), meter: { peak: [0.5, [0.25, 0.125]], clip: [false, true] } };
@@ -320,6 +327,16 @@ const refused = {
   'a status without inputOpen': () => {
     const s = structuredClone(fixture.deviceStatuses[0]);
     delete s.inputOpen;
+    decodeDeviceStatus(s);
+  },
+  "a status with a third slot's request": () => {
+    const s = structuredClone(fixture.deviceStatuses[0]);
+    s.inputRequests = [0, 1, null];
+    decodeDeviceStatus(s);
+  },
+  'a status whose request is a pair of three sides': () => {
+    const s = structuredClone(fixture.deviceStatuses[0]);
+    s.inputRequests = [[0, 1, 2], null];
     decodeDeviceStatus(s);
   },
   "a status with a third slot's channel": () => {

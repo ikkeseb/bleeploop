@@ -284,10 +284,12 @@ fn every_slots_pick_travels_in_one_word() {
 /// A mono pick meters its one channel on both sides: the output callback publishing such blocks while
 /// the feed takes the meter as fast as it can, every take holds both sides of the same blocks, never a
 /// peak on one side whose other half lands in the next take. The writer publishes until the reader has
-/// taken `TAKES` nonempty meters, so how the two threads are scheduled decides only how long it runs.
+/// taken `TAKES` nonempty meters, so how the two threads are scheduled decides only how long it runs,
+/// within a bound: a writer whose meters never reach the reader fails, it does not spin.
 #[test]
 fn a_slots_two_peaks_are_published_and_taken_together() {
     const TAKES: u32 = 100_000;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let core = Arc::new(Core::new());
     let done = Arc::new(AtomicBool::new(false));
     let writer = {
@@ -302,7 +304,7 @@ fn a_slots_two_peaks_are_published_and_taken_together() {
         })
     };
     let (mut takes, mut split) = (0u32, None);
-    while takes < TAKES && split.is_none() {
+    while takes < TAKES && split.is_none() && std::time::Instant::now() < deadline {
         let ([[l, r], _], _) = core.take_meter();
         takes += u32::from(l > 0.0 || r > 0.0);
         if l != r {
@@ -312,6 +314,7 @@ fn a_slots_two_peaks_are_published_and_taken_together() {
     done.store(true, Relaxed);
     writer.join().unwrap();
     assert_eq!(split, None, "a take held one side of a block without the other (after {takes} takes)");
+    assert_eq!(takes, TAKES, "the reader took the writer's meters within 60 s");
 }
 
 const RATE: u32 = 48_000;

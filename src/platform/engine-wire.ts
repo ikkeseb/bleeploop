@@ -166,11 +166,6 @@ export function samePick(a: InputPick | undefined, b: InputPick | undefined): bo
   return Array.isArray(a) && Array.isArray(b) ? a[0] === b[0] && a[1] === b[1] : a === b;
 }
 
-/** The channel each side of `pick` reads (a mono pick's twice); auto has none. */
-export function pickSides(pick: InputPick): [number, number] | null {
-  return pick === null ? null : Array.isArray(pick) ? [pick[0], pick[1]] : [pick, pick];
-}
-
 /** A pick as it travels: a channel or `[left, right]`, 0-based (`null` is the caller's). */
 function readPick(v: unknown, what: string): ReadPick {
   if (!Array.isArray(v)) return int(v, what, 0, 0xffff_ffff);
@@ -402,6 +397,11 @@ export interface DeviceStatus {
    * mono) where it has none or the device lacks it, either side of a pair. The native engine always
    * sends it; a scripted probe frame may leave it out. */
   inputChannels?: [ReadPick, ReadPick];
+  /** The pick each slot's read answers (`null` auto): the running request's, kept where the device lacks
+   * it. A read that differs from it is a fallback; a request that differs from the pick just asked is a
+   * switch the status has not caught up with. The native engine always sends it; a scripted probe frame
+   * may leave it out. */
+  inputRequests?: [InputPick, InputPick];
 }
 
 /** Rust `lf_engine::LaneInfo` (the TS `TrackPublic`). */
@@ -715,7 +715,14 @@ export function decodeDeviceStatus(raw: unknown): DeviceStatus {
     inputFrames: int(o.inputFrames, 'DeviceStatus.inputFrames'),
     inputOpen: bool(o.inputOpen, 'DeviceStatus.inputOpen'),
     ...(o.inputChannels === undefined ? {} : { inputChannels: slotChannels(o.inputChannels) }),
+    ...(o.inputRequests === undefined ? {} : { inputRequests: slotRequests(o.inputRequests) }),
   };
+}
+
+function slotRequests(v: unknown): [InputPick, InputPick] {
+  const [a, b] = array(v, 'DeviceStatus.inputRequests', ENGINE_SLOTS);
+  const pick = (p: unknown, what: string): InputPick => nullable(p, (q) => readPick(q, what));
+  return [pick(a, 'DeviceStatus.inputRequests[0]'), pick(b, 'DeviceStatus.inputRequests[1]')];
 }
 
 function slotChannels(v: unknown): [ReadPick, ReadPick] {

@@ -155,6 +155,12 @@ impl Harness {
         events
     }
 
+    /// Wait until the owner has answered what it was doing (a request it takes only between two turns
+    /// of its loop: here Share output off, which none of these tests turns on).
+    fn owner_settled(&self) {
+        self.host.set_share(None).expect("the owner answers");
+    }
+
     /// The frame each output callback started at, one list per run.
     fn starts(&self) -> Vec<Vec<Frame>> {
         self.fake.starts.lock().unwrap().clone()
@@ -717,8 +723,12 @@ fn the_owners_reopen_on_a_moved_default_never_rebuilds_at_another_rate_over_held
     }));
     h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
     until("the status names the interface", || h.host.status().is_some_and(|s| s.output_name == "Interface"));
+    // The name is published at the first resolution; the owner has answered the move once it answers this.
+    h.owner_settled();
     h.play(RATE / 5);
     assert_eq!((h.fake.started.load(SeqCst), h.host.core.rate()), (1, Some(48_000)), "no reopen at 44.1 kHz: the engine and its take stay");
+    let status = h.host.status().unwrap();
+    assert_eq!((status.input_channels, status.input_requests), ([Mono(1), Mono(1)], [Some(Pair([2, 3])), None]), "the picks read as before");
     assert_take_records(&mut h);
     let events = h.host.take_device_events();
     assert!(events.iter().all(|e| !matches!(e, DeviceEvent::LoopsDropped { .. } | DeviceEvent::Lost { .. })), "{events:?}");
@@ -739,6 +749,98 @@ fn a_moved_input_whose_format_did_not_read_is_resolved_again_once_it_reads() {
     let status = h.open(request);
     assert_eq!((status.input_name.as_str(), status.input_channels), ("Headset", [Mono(0), Mono(0)]), "the headset's one input");
     assert_eq!(h.fake.started.load(SeqCst), 1);
+}
+
+// The initial open finds Windows' default capture endpoint but cannot read its format yet: the run
+// plays output only. Once the format reads under the same endpoint, an open of the same request resolves
+// it again and starts the capture there.
+#[test]
+fn a_default_input_whose_format_did_not_read_at_the_open_is_resolved_again_once_it_reads() {
+    let h = Harness::new();
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;
+    let request = DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) };
+    assert!(!h.open(request.clone()).input_open, "no capture format: output only");
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 2;
+    let status = h.open(request);
+    assert_eq!((status.input_open, status.input_name.as_str(), status.input_channels), (true, "Fake WASAPI", [Pair([0, 1]), Mono(1)]));
+    assert_eq!(h.fake.started.load(SeqCst), 2, "a run with its capture");
+}
+
+// A live pick on inputs 3+4 while the default is a four-input interface the stereo stream followed: the
+// owner reads the endpoint ids, then Windows moves the default back to the stereo endpoint before the
+// reopen resolves it. Resolved there, the pick reads auto within the stream's two inputs, so nothing
+// stops: the take records on, one stream throughout.
+#[test]
+fn a_live_pick_that_no_longer_reads_past_the_stream_once_resolved_never_stops_it() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) });
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_defaults.lock().unwrap() = Some(Box::new(move || {
+        let mut listed = fake.wasapi.lock().unwrap();
+        listed.retain(|(e, _)| e != "default");
+        listed.insert(0, ("default".to_string(), FakeDevice::new("Fake WASAPI", 48_000, 480)));
+    }));
+    h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).expect("the pick stays the request");
+    let status = h.host.status().unwrap();
+    assert_eq!((status.input_name.as_str(), status.input_channels), ("Fake WASAPI", [Mono(1), Mono(1)]), "auto on the stereo endpoint");
+    assert_eq!(status.input_requests, [Some(Pair([2, 3])), None], "the pick it answers");
+    h.play(RATE / 10);
+    assert_eq!(h.fake.started.load(SeqCst), 1, "one stream: nothing stopped");
+    assert_take_records(&mut h);
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// The owner's reopen where Windows moved the default (a pick past the stream on a four-input interface)
+// finds the stream faulted by the time it opens, and the interface at another rate: it never rebuilds the
+// engine over the take on its own. The dead stream is a loss, and its fallback says the loops left.
+#[test]
+fn the_owners_reopen_on_a_moved_default_whose_stream_faulted_never_drops_held_audio_unreported() {
+    let mut h = Harness::new();
+    h.open(DeviceRequest { input_channels: [Some(Pair([2, 3])), None], ..wasapi(None, None) });
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_resolve.lock().unwrap() = Some(Box::new(move || {
+        fake.wasapi.lock().unwrap()[0].1 = FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 44_100, 441) };
+        fake.fatal.store(Side::Output as u8, SeqCst);
+        let deadline = Instant::now() + PATIENCE;
+        while fake.fatal.load(SeqCst) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The fake latches the fault as it takes the bit: past it, the run reads faulted.
+        std::thread::sleep(Duration::from_millis(50));
+    }));
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("a run at 44.1 kHz", || h.host.status().is_some_and(|s| s.sample_rate == 44_100));
+    let events = h.host.take_device_events();
+    assert!(matches!(events.first(), Some(DeviceEvent::Lost { .. })), "the dead stream is a loss: {events:?}");
+    assert!(events.iter().any(|e| matches!(e, DeviceEvent::LoopsDropped { from: 48_000, to: 44_100, .. })), "the loops' drop is reported: {events:?}");
+}
+
+// A live pick's reopen on a four-input default that fails to start, with Windows' default at another rate
+// by then: the rollback to the run it stopped never rebuilds the engine over the take. It stays closed,
+// the loops held, and says so.
+#[test]
+fn a_live_picks_reopen_that_failed_to_start_never_rolls_back_at_another_rate_over_held_audio() {
+    let mut h = Harness::new();
+    h.open(DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) });
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    start_take(&mut h);
+    let fake = h.fake.clone();
+    *h.fake.on_start.lock().unwrap() = Some(Box::new(move || {
+        fake.wasapi.lock().unwrap()[0].1 = FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 44_100, 441) };
+    }));
+    h.fake.fail_starts.store(1, SeqCst);
+    assert!(h.host.set_slot_input_channel(0, Some(Pair([2, 3]))).is_err(), "the reopen did not start");
+    assert_eq!(h.host.core.rate(), Some(48_000), "the engine and its loops stay");
+    assert!(h.host.core.holds_audio(), "the take, punched out, is held");
+    let events = h.host.take_device_events();
+    assert!(events.iter().all(|e| !matches!(e, DeviceEvent::LoopsDropped { .. })), "{events:?}");
+    assert!(matches!(events.as_slice(), [DeviceEvent::Lost { .. }]), "the closed device is reported: {events:?}");
 }
 
 // A side the request names keeps its endpoint; the side left to the default follows Windows, also an
@@ -1182,6 +1284,32 @@ fn a_switch_its_caller_gave_up_on_midway_puts_back_the_device_that_ran() {
     let frame = h.frame();
     h.play(RATE / 20);
     assert!(h.frame() > frame);
+}
+
+// A live pick past the stream reopens the device (a four-input default the stereo stream followed), and
+// its caller gives up midway, as at an open's timeout: the owner undoes it, so the pick the caller then
+// puts back is the route that runs. One given up on before it ran never runs.
+#[test]
+fn a_live_pick_its_caller_gave_up_on_puts_back_the_route_that_ran() {
+    let h = Harness::new();
+    h.open(DeviceRequest { input_channels: [Some(Pair([0, 1])), None], ..wasapi(None, None) });
+    h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
+    until("the status names the interface", || h.host.status().is_some_and(|s| s.input_name == "Interface"));
+    let pick = |claimed: &Arc<AtomicBool>| {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        h.host.owner_tx().unwrap().send(Request::SetSlotInputChannel(0, Some(Pair([2, 3])), claimed.clone(), reply_tx)).unwrap();
+        reply_rx.recv_timeout(PATIENCE).expect("the owner answers")
+    };
+    let ran = |h: &Harness| h.host.status().map(|s| (s.input_channels, s.input_requests));
+    let before = Some(([Pair([0, 1]), Mono(1)], [Some(Pair([0, 1])), None]));
+    let claimed = Arc::new(AtomicBool::new(false));
+    let gave_up = claimed.clone();
+    *h.fake.on_start.lock().unwrap() = Some(Box::new(move || gave_up.store(true, SeqCst)));
+    assert!(pick(&claimed).is_err(), "the caller hears the pick was cancelled");
+    assert_eq!(h.fake.started.load(SeqCst), 2, "the reopen ran");
+    assert_eq!(ran(&h), before, "the route that ran before, and its request");
+    assert!(pick(&Arc::new(AtomicBool::new(true))).is_err());
+    assert_eq!((h.fake.started.load(SeqCst), ran(&h)), (2, before), "a pick given up on before it ran never runs");
 }
 
 #[test]
@@ -3353,3 +3481,4 @@ fn exports_render_their_masters_one_at_a_time() {
         assert!(left.iter().any(|x| x.abs() > 0.01), "its own master");
     });
 }
+

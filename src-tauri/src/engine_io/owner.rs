@@ -226,7 +226,8 @@ pub(crate) enum Request {
     /// up never runs.
     Open(DeviceRequest, bool, Arc<AtomicBool>, SyncSender<Result<DeviceStatus, OpenError>>),
     Close(Reply<()>),
-    SetSlotInputChannel(usize, Option<InputPick>, Reply<()>),
+    /// A slot's pick, which may reopen the device: claimed as an open is.
+    SetSlotInputChannel(usize, Option<InputPick>, Arc<AtomicBool>, Reply<()>),
     SetShare(Option<String>, Reply<()>),
     /// `EngineHost::switch_asio`.
     SwitchAsio(SwitchAsio, Reply<AsioStatusReport>),
@@ -239,13 +240,34 @@ pub(crate) struct OwnerLink {
     pub(crate) join: JoinHandle<()>,
 }
 
-/// Who opens: the player (`EngineHost::open`, and the reopen after a driver switch; `force` lets a switch
-/// drop the loops at another rate), or the owner on its own (a loss's recovery or fallback, the device a
-/// failed switch or a replaced engine reopens), which never refuses a rate.
+/// Who opens: the player (`EngineHost::open`, a live pick past the stream, and the reopen after a driver
+/// switch; `force` lets a switch drop the loops at another rate); the owner's reopen of the device that
+/// runs, where Windows moved its default, and the rollback of an open held to the rate rule (`Follow`:
+/// held to the player's rule, never forced); or the owner on its own (a loss's recovery or fallback, the
+/// device a forced switch or a replaced engine reopens), which never refuses a rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum By {
     Player { force: bool },
+    Follow,
     Owner,
+}
+
+impl By {
+    /// Refused, before anything stops, when it would build an engine at another rate while this one holds
+    /// audio.
+    fn guarded(self) -> bool {
+        matches!(self, By::Player { force: false } | By::Follow)
+    }
+
+    /// Who reopens what this open replaced, after it failed to start or its caller gave up on it: held to
+    /// the same rate rule, so no rollback rebuilds over the loops an unforced open kept.
+    fn rollback(self) -> By {
+        if self.guarded() {
+            By::Follow
+        } else {
+            By::Owner
+        }
+    }
 }
 
 /// The device that runs.
@@ -384,27 +406,17 @@ impl<D: Driver> Owner<D> {
     fn handle(&mut self, request: Request) {
         match request {
             Request::Open(request, force, claimed, reply) => {
-                if claimed.load(Acquire) {
-                    log::warn!("[engine_io] an open its caller gave up on while it waited: skipped");
-                    let _ = reply.send(Err("the open was cancelled".to_string().into()));
-                    return;
-                }
-                let previous = self.active.as_ref().map(|a| a.request.clone());
-                let mut result = self.open(request, By::Player { force });
-                let abandoned = claimed.compare_exchange(false, true, AcqRel, Acquire).is_err();
-                if abandoned && result.is_ok() {
-                    log::warn!("[engine_io] open finished after its caller timed out: undoing it");
-                    self.undo_open(previous);
-                    result = Err("the open was cancelled".to_string().into());
-                }
-                let _ = reply.send(result);
+                let by = By::Player { force };
+                let _ = reply.send(self.claimed("an open", &claimed, by.rollback(), |owner| owner.open(request, by)));
             }
             Request::Close(reply) => {
                 self.stop(true);
                 let _ = reply.send(Ok(()));
             }
-            Request::SetSlotInputChannel(slot, channel, reply) => {
-                let _ = reply.send(self.set_slot_input_channel(slot, channel));
+            Request::SetSlotInputChannel(slot, channel, claimed, reply) => {
+                // A pick past the stream reopens as the player's unforced open does.
+                let rollback = By::Player { force: false }.rollback();
+                let _ = reply.send(self.claimed("a slot's pick", &claimed, rollback, |owner| owner.set_slot_input_channel(slot, channel)));
             }
             Request::SetShare(endpoint, reply) => {
                 let _ = reply.send(self.set_share(endpoint));
@@ -414,6 +426,25 @@ impl<D: Driver> Owner<D> {
             }
             Request::Shutdown(_) => unreachable!("handled by serve"),
         }
+    }
+
+    /// A request its caller may give up on (`EngineHost::ask_claimed`): whoever claims `claimed` first owns
+    /// the result. One given up on before it ran never runs; one given up on before it finished is undone
+    /// (`undo_open`, by `rollback`), so the device the caller was told failed is the one that runs.
+    fn claimed<T, E: From<String>>(&mut self, what: &str, claimed: &AtomicBool, rollback: By, run: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
+        if claimed.load(Acquire) {
+            log::warn!("[engine_io] {what} its caller gave up on while it waited: skipped");
+            return Err(format!("{what} was cancelled").into());
+        }
+        let previous = self.active.as_ref().map(|a| a.request.clone());
+        let result = run(self);
+        let abandoned = claimed.compare_exchange(false, true, AcqRel, Acquire).is_err();
+        if abandoned && result.is_ok() {
+            log::warn!("[engine_io] {what} finished after its caller timed out: undoing it");
+            self.undo_open(previous, rollback);
+            return Err(format!("{what} was cancelled").into());
+        }
+        result
     }
 
     /// What the callbacks latched: a faulted engine, a dead stream (a loss), a dead input callback,
@@ -453,12 +484,14 @@ impl<D: Driver> Owner<D> {
     /// (`By::Player`), and the owner's of the device that runs, are refused, before anything stops, when
     /// they would build an engine at another rate while this one holds audio, unless forced; and after the stop, when a load landed meanwhile or a
     /// session job outlasts `SESSION_WAIT` (`reopen_refused`). A switch of the player's that fails to
-    /// start reopens the device it replaced. A size the ASIO driver refuses opens at its own (`start_at_own_size`). A run
+    /// start reopens the device it replaced, under its own rate rule (`By::rollback`). A size the ASIO driver refuses opens at its own (`start_at_own_size`). A run
     /// whose input died (`recapture`) starts again, even on the same device.
     fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         let driver = self.driver.asio_driver();
         let running = self.active.as_ref().filter(|a| !a.run.faulted() && !a.input_dead);
         let mut resolved = None;
+        // The width of the running capture, where only a pick past it reopens the device.
+        let mut past = None;
         let in_place = running.is_some_and(|a| transition::same_device(&a.request, &request, (&a.spec.output_name, driver.as_deref())));
         if in_place {
             match self.track_default(&request) {
@@ -470,20 +503,36 @@ impl<D: Driver> Owner<D> {
                     self.set_input_channels(request.input_channels)?;
                     return Ok(self.status().ok_or_else(|| "the device stopped".to_string())?);
                 }
-                log::info!("[engine_io] a slot's pick reads an input past the ones the capture opened with: reopening the device");
+                past = self.active.as_ref().map(|a| a.spec.in_channels);
             }
         }
         let (spec, device) = match resolved {
             Some(resolved) => resolved,
             None => self.driver.resolve(&request)?,
         };
+        // Judged again on this, the final resolution, before anything stops: Windows may have moved the
+        // default since the look above (back to a stereo endpoint, where inputs 3+4 read auto). A pick that
+        // reads within the running capture there needs no reopen, so no take punches out: the run plays on
+        // and reads the picks against that endpoint's inputs (its move, once cpal reports it, is followed
+        // as any: `default_moved`).
+        if let Some(width) = past {
+            if !transition::reads_past(spec.in_channels, request.input_channels, width) {
+                log::info!("[engine_io] Windows' default resolves to \"{}\" ({} inputs) now: no pick reads past the capture's {width}, the device that runs plays on", spec.input_name, spec.in_channels);
+                if let Some(active) = self.active.as_mut() {
+                    active.request.input_channels = request.input_channels;
+                }
+                self.reconcile(&spec, spec.in_channels);
+                self.set_input_channels(request.input_channels)?;
+                return Ok(self.status().ok_or_else(|| "the device stopped".to_string())?);
+            }
+            log::info!("[engine_io] a slot's pick reads an input past the {width} the capture opened with: reopening the device");
+        }
         let previous = self.active.as_ref().map(|a| a.request.clone());
         let healthy = self.active.as_ref().is_some_and(|a| !a.run.faulted());
         let steps = transition::steps(self.core.rate(), self.active.is_some(), healthy, Some(spec.rate));
-        // The owner's reopen of the device that runs (where Windows moved its default, for a pick past its
-        // capture) is held to the same rule as the player's, judged on this, the final resolution: a
-        // default Windows moved again since the owner's first look never rebuilds over held audio.
-        let guarded = by == By::Player { force: false } || (by == By::Owner && in_place);
+        // Judged on this, the final resolution: a default Windows moved again since the owner's first look,
+        // or a stream that faulted since, never rebuilds over held audio on an open held to the rule.
+        let guarded = by.guarded();
         let unasked = (guarded && steps.evict).then(|| self.core.rate()).flatten();
         if let Some(from) = unasked.filter(|_| self.core.holds_audio()) {
             log::info!("[engine_io] a switch to {} Hz refused: the engine at {from} Hz holds audio", spec.rate);
@@ -529,10 +578,17 @@ impl<D: Driver> Owner<D> {
             Ok(status) => Ok(status),
             Err(error) => {
                 log::error!("[engine_io] the device did not start: {error}");
-                if let Some(previous) = previous.filter(|_| by != By::Owner) {
-                    match self.open(previous, By::Owner) {
+                // The player's switch reopens the device it stopped, held to its own rate rule: one that runs
+                // at another rate by now stays closed while the engine holds audio, and says so.
+                if let Some(previous) = previous.filter(|_| matches!(by, By::Player { .. })) {
+                    let backend = previous.backend;
+                    match self.open(previous, by.rollback()) {
                         Ok(_) => log::warn!("[engine_io] reopened the previous device"),
-                        Err(e) => log::error!("[engine_io] the previous device did not reopen either: {e}"),
+                        Err(e) => {
+                            let reason = format!("the device a failed switch stopped did not start again: {e}");
+                            log::error!("[engine_io] {reason}");
+                            self.event(DeviceEvent::Lost { backend, reason });
+                        }
                     }
                 }
                 Err(error.into())
@@ -591,9 +647,9 @@ impl<D: Driver> Owner<D> {
                     self.active.as_ref().map_or(0, |a| a.spec.in_channels)
                 );
                 let backend = request.backend;
-                match self.open(request, By::Owner) {
+                match self.open(request, By::Follow) {
                     Ok(_) => {}
-                    Err(refused @ OpenError::RateChange { .. }) => log::info!("[engine_io] the reopen on Windows' new default input is refused ({refused}): the run plays on"),
+                    Err(refused @ OpenError::RateChange { .. }) => log::info!("[engine_io] the reopen on Windows' new default input is refused ({refused}): nothing stopped"),
                     Err(error) => {
                         let reason = format!("the device did not reopen on Windows' new default input: {error}");
                         log::error!("[engine_io] {reason}");
@@ -652,6 +708,7 @@ impl<D: Driver> Owner<D> {
     /// one endpoint's name with another's picks.
     fn reconcile(&mut self, spec: &Spec, inputs: usize) {
         let input_open = self.input_open();
+        let requests = self.active.as_ref().map(|a| a.request.input_channels);
         let reads = match self.active.as_mut() {
             Some(active) if input_open && inputs > 0 && inputs != active.inputs => {
                 active.inputs = inputs;
@@ -672,6 +729,9 @@ impl<D: Driver> Owner<D> {
             status.output_name = spec.output_name.clone();
             if let Some(reads) = reads {
                 status.input_channels = reads;
+            }
+            if let Some(requests) = requests {
+                status.input_requests = requests;
             }
         }
         if reads.is_some() {
@@ -720,13 +780,13 @@ impl<D: Driver> Owner<D> {
     }
 
     /// An open its caller gave up on (it reported the open as failed): what ran before runs again, its
-    /// channel included, or the device closes when none ran.
-    fn undo_open(&mut self, previous: Option<DeviceRequest>) {
+    /// channels included, opened `by` (the open's `By::rollback`), or the device closes when none ran.
+    fn undo_open(&mut self, previous: Option<DeviceRequest>, by: By) {
         let Some(previous) = previous else {
             self.stop(true);
             return;
         };
-        if let Err(error) = self.open(previous, By::Owner) {
+        if let Err(error) = self.open(previous, by) {
             log::error!("[engine_io] the device that ran before did not reopen: {error}");
         }
     }
@@ -817,12 +877,20 @@ impl<D: Driver> Owner<D> {
             output_name: spec.output_name.clone(),
             input_open: started.input_open,
             input_channels: channels,
+            input_requests: request.input_channels,
             // `status()` reads the alignment the callback renders with.
             align_frames: 0,
             input_frames: 0,
         };
         *self.core.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
         let inputs = spec.in_channels;
+        // A default capture endpoint whose format did not read is not taken as the one the run opened on:
+        // the next look at Windows' default resolves it again (`track_default`), so an open of the same
+        // request starts its capture once its format reads.
+        let mut spec = spec;
+        if inputs == 0 && request.input.is_none() {
+            spec.endpoints.input = None;
+        }
         self.active = Some(Active { request, spec, run, streams: started.streams, block, input_dead: false, reads: channels, inputs, followed: inputs });
         if let Some(s) = self.status() {
             log::info!(
@@ -1013,7 +1081,7 @@ impl<D: Driver> Owner<D> {
         active.run.set_slot_channels(resolved);
         active.reads = resolved;
         active.request.input_channels = channels;
-        self.publish_channels(resolved);
+        self.publish_channels();
         self.break_tuner_input();
         Ok(())
     }
@@ -1043,7 +1111,7 @@ impl<D: Driver> Owner<D> {
         active.run.set_slot_channels(picks);
         active.reads = picks;
         active.request.input_channels[slot] = channel;
-        self.publish_channels(picks);
+        self.publish_channels();
         self.break_tuner_input();
         Ok(())
     }
@@ -1063,10 +1131,12 @@ impl<D: Driver> Owner<D> {
         self.core.break_tuner(fence);
     }
 
-    /// What each slot reads now, into the status.
-    fn publish_channels(&self, channels: [InputPick; SLOT_COUNT]) {
+    /// What each slot reads now, and the pick it answers, into the status in one write.
+    fn publish_channels(&self) {
+        let Some(active) = self.active.as_ref() else { return };
         if let Some(status) = self.core.device.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            status.input_channels = channels;
+            status.input_channels = active.reads;
+            status.input_requests = active.request.input_channels;
         }
     }
 

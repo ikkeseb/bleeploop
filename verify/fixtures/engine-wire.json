@@ -214,6 +214,7 @@
         "outputName": "Focusrite USB ASIO",
         "inputOpen": true,
         "inputChannels": [1, 1],
+        "inputRequests": [null, null],
         "alignFrames": 666,
         "inputFrames": 305
       }
@@ -227,6 +228,7 @@
         "outputName": "Speakers (Realtek Audio)",
         "inputOpen": false,
         "inputChannels": [0, 0],
+        "inputRequests": [0, null],
         "alignFrames": 1731,
         "inputFrames": 1150
       }
@@ -259,6 +261,7 @@
       "outputName": "Focusrite USB ASIO",
       "inputOpen": true,
       "inputChannels": [[0, 1], 1],
+      "inputRequests": [[0, 1], [4, 5]],
       "alignFrames": 666,
       "inputFrames": 305
     }
@@ -396,6 +399,7 @@
         "outputName": "Focusrite USB ASIO",
         "inputOpen": true,
         "inputChannels": [1, 1],
+        "inputRequests": [null, 1],
         "alignFrames": 666,
         "inputFrames": 305
       },

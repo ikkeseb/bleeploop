@@ -956,6 +956,7 @@ export const webEngineFake: EngineFake = {
       inputFrames: 0,
       inputOpen: true,
       inputChannels: [picks[0], picks[1]],
+      inputRequests: [asked[0], asked[1]],
     };
     return fakeStatus;
   },
@@ -977,6 +978,11 @@ export const webEngineFake: EngineFake = {
       const reads = fakeStatus.inputChannels.slice() as [ReadPick, ReadPick];
       reads[slot] = taken ?? 1;
       fakeStatus = { ...fakeStatus, inputChannels: reads };
+    }
+    if (fakeStatus.inputRequests) {
+      const requests = fakeStatus.inputRequests.slice() as [InputPick, InputPick];
+      requests[slot] = taken;
+      fakeStatus = { ...fakeStatus, inputRequests: requests };
     }
   },
   inputs: FAKE_INPUTS,

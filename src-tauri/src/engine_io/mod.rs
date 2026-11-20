@@ -88,16 +88,23 @@
 //!   again against the new input endpoint's inputs, whatever the rate, in the same status that names it
 //!   (a pick it lacks reads auto, logged). A wider endpoint plays on while no pick reads past the
 //!   stream's width; one that does (a saved pick the endpoint has, or a live one) reopens there, once, at
-//!   the engine's rate. At another rate, or with a capture to start where the run has none, an open of
-//!   the same request reopens there; neither the player's nor the owner's reopen of the running device
-//!   rebuilds the engine at another rate while it holds audio (unless the player forces it).
+//!   the engine's rate, judged again on the open's final resolution before anything stops (Windows may
+//!   have moved the default back meanwhile). At another rate, or with a capture to start where the run
+//!   has none (also a default whose capture format did not read at the open), an open of the same
+//!   request reopens there; neither the player's nor the owner's reopen of the running device rebuilds
+//!   the engine at another rate while it holds audio (unless the player forces it), a stream that faulted
+//!   since included (its loss then reports the drop), and neither does the rollback of a guarded open.
+//!   The status carries each slot's read with the pick it answers (`DeviceStatus::input_requests`), so the
+//!   UI tells a fallback from a switch not yet answered. A live pick waits and is undone as an open is.
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,
 //!   before anything stops; read again after the stop, with no session job running until the build, so
 //!   a load that lands in the fade-out refuses it too, as does a session job still running after
 //!   `SESSION_WAIT`, and the stopped device reopens, reported [`DeviceEvent::Lost`] if it does not)
-//!   until the UI confirms and opens again with `force`. The owner's own reopens
+//!   until the UI confirms and opens again with `force`. An unforced switch that fails to start, or that
+//!   its caller gave up on, reopens what it replaced under the same rule (a refusal reported `Lost`). The
+//!   owner's own reopens
 //!   (a loss's recovery or fallback, a replaced engine) go ahead; a loss's fallback that rebuilds the
 //!   engine at another rate reports [`DeviceEvent::LoopsDropped`], whether or not that device then
 //!   starts, and the UI keeps the loops in its recovery (`src/session/autosave.ts`).
@@ -290,6 +297,10 @@ pub struct DeviceStatus {
     /// What each plugin slot reads: its pick, or auto (input 2 on a device with two or more, mono) where it
     /// has none or the device lacks it, either side of a pair. Never `null` on the wire.
     pub input_channels: [InputPick; SLOT_COUNT],
+    /// The pick each slot's read answers: the running request's (`None` auto), kept where the device
+    /// lacks it, so a reader tells a fallback (`input_channels` differs from it) from a switch the status
+    /// has not caught up with yet (it differs from the pick just asked).
+    pub input_requests: [Option<InputPick>; SLOT_COUNT],
     /// Input plus output latency in frames (`ProcessContext::align_frames`), and its input side.
     pub align_frames: Frame,
     pub input_frames: Frame,
@@ -994,17 +1005,22 @@ impl EngineHost {
     /// switch that fails to start reopens the device it replaced; a request for the running device only
     /// changes its channels. A slot's pick the device lacks reads auto (the status says which).
     pub fn open(&self, request: DeviceRequest, force: bool) -> Result<DeviceStatus, OpenError> {
-        // Whoever claims the flag first decides: the owner once the open finished (its result is then
-        // this caller's), or this caller on its timeout (a later open is the owner's to undo).
+        self.ask_claimed("open", |claimed, reply| Request::Open(request, force, claimed, reply))
+    }
+
+    /// Ask the owner for what may open a device, and wait for its answer (at most `OPEN_TIMEOUT`). Whoever
+    /// claims the flag first decides: the owner once it finished (its result is then this caller's), or
+    /// this caller on its timeout (what the owner finishes later is its to undo: `Owner::claimed`).
+    fn ask_claimed<T, E: From<String>>(&self, op: &str, request: impl FnOnce(Arc<AtomicBool>, SyncSender<Result<T, E>>) -> Request) -> Result<T, E> {
         let claimed = Arc::new(AtomicBool::new(false));
         let tx = self.owner_tx()?;
         let (reply_tx, reply_rx) = sync_channel(1);
-        tx.send(Request::Open(request, force, claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
+        tx.send(request(claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
         match reply_rx.recv_timeout(OPEN_TIMEOUT) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 if claimed.compare_exchange(false, true, AcqRel, Acquire).is_ok() {
-                    Err(format!("open timed out after {} s", OPEN_TIMEOUT.as_secs()).into())
+                    Err(format!("{op} timed out after {} s", OPEN_TIMEOUT.as_secs()).into())
                 } else {
                     // The owner claimed it at the deadline: its answer is on the way.
                     reply_rx.recv().unwrap_or_else(|_| Err("the audio device owner stopped".to_string().into()))
@@ -1021,9 +1037,10 @@ impl EngineHost {
 
     /// Change `slot`'s input pick (`None` = auto) without rebuilding a stream; the running request keeps
     /// it, so the owner's reopens (a loss, a fault) keep it too. Refused for a channel the device lacks,
-    /// either side of a pair (the other slot's stays), and while no device runs.
+    /// either side of a pair (the other slot's stays), and while no device runs. One on an input past the
+    /// width the capture opened at reopens the device (an open's wait and claim: `ask_claimed`).
     pub fn set_slot_input_channel(&self, slot: usize, channel: Option<InputPick>) -> Result<(), String> {
-        self.ask("set_slot_input_channel", REQUEST_TIMEOUT, |reply| Request::SetSlotInputChannel(slot, channel, reply))
+        self.ask_claimed("set_slot_input_channel", |claimed, reply| Request::SetSlotInputChannel(slot, channel, claimed, reply))
     }
 
     /// Switch the ASIO driver: `switch` replaces the cached one (`audio_output::switch_asio_driver`) on

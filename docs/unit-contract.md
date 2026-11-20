@@ -326,7 +326,9 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   (auto: input 2, mono), a channel number, or `[left, right]` (`DeviceRequest.inputChannels`,
   `setSlotInputChannel`, `SlotControls.tsx`, `audio-settings.ts`). A pick the device lacks, either side of
   a pair, opens as auto, flagged (`transition.rs` `open_channels`); the request and the saved pick keep it,
-  so a device that has it again reads it, and the slot shows it with the input it reads ("In 4 · In 2").
+  so a device that has it again reads it, and the slot shows it with the input it reads ("In 4 · In 2"),
+  judged from the status alone: its read against the pick it answers (`DeviceStatus.inputRequests`); a
+  pick whose switch the status has not answered yet shows plain.
   The feed's `meter` has a peak per channel.
 - **Latency sums within a chain,** bypassed units included. A take aligns on the largest sum across live
   input-fed chains (plus the driver's report and the limiter's pre-delay); each live chain's wet reaches

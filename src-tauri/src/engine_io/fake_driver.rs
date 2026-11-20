@@ -136,6 +136,9 @@ pub(crate) struct Fake {
     pub(crate) on_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once, after the next resolve (a test's change between two resolutions).
     pub(crate) on_resolve: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, after the next read of Windows' defaults (a test's move between the owner's look at the
+    /// endpoint ids and the resolution after it).
+    pub(crate) on_defaults: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// One-shot, run by the next output stream's drop before its callbacks stop (the fade-out done,
     /// the device still rendering): a test's way into a stop midway.
     pub(crate) on_stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -170,6 +173,7 @@ impl Fake {
             lead_in: AtomicU32::new(0),
             on_start: Mutex::new(None),
             on_resolve: Mutex::new(None),
+            on_defaults: Mutex::new(None),
             on_stop: Mutex::new(None),
             input: Mutex::new(Arc::new(|_| 0.0)),
             tape: Mutex::new(Vec::new()),
@@ -267,6 +271,10 @@ impl Driver for FakeDriver {
 
     fn default_endpoints(&self) -> Endpoints {
         let default = self.0.wasapi.lock().unwrap().first().map(|(id, _)| id.clone());
+        let hook = self.0.on_defaults.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         Endpoints { input: default.clone(), output: default }
     }
 

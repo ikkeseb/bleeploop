@@ -14,7 +14,7 @@ import { SYNTHS } from '../state/instruments';
 import { volumeDb } from '../looper/shared';
 import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
-import { pickSides, type InputPick as Pick, type ReadPick } from '../../platform';
+import { samePick, type InputPick as Pick, type ReadPick } from '../../platform';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
 import { slotLetter } from '../state/slot-tones';
 import { Icon } from './icons';
@@ -45,21 +45,22 @@ export function InputPick(props: { slot: 0 | 1 }) {
     if (p !== null && !list.some((c) => pickKey(c) === pickKey(p))) list.push(p);
     return list;
   });
-  // What the engine reads for the slot (its status), named after the pick where it is not the pick:
-  // Auto, so a guitar on the other jack shows, and a pick the device that runs lacks (saved on one with
-  // more inputs), which stays the player's and reads auto here.
-  const read = () => {
+  // What the engine reads for the slot where that is not the pick: Auto's input, so a guitar on the other
+  // jack shows, and the fallback of a pick the device that runs lacks (saved on one with more inputs, or
+  // Windows moved the default to a narrower one), which stays the player's. Judged from the one status
+  // that carries both the read and the pick it answers: while that pick is not the one shown (a switch
+  // just asked, its status not in yet), the pick shows plain, so a switch never flickers a fallback.
+  const fallback = (): ReadPick | undefined => {
     const d = engineDevice();
-    return d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
+    const p = pick();
+    const asked = d?.inputRequests?.[props.slot];
+    const r = d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
+    if (r === undefined || asked === undefined || !samePick(asked, p)) return undefined;
+    return p !== null && samePick(r, p) ? undefined : r;
   };
   const named = (p: Pick, name: string) => {
-    const r = p === null || lacking(p) ? read() : undefined;
+    const r = samePick(p, pick()) ? fallback() : undefined;
     return r === undefined ? name : `${name} · ${pickName(r)}`;
-  };
-  // Judged on the device's inputs, not on its status: a status may be older than a switch just made.
-  const lacking = (p: ReadPick) => {
-    const n = inputChannelCount(engineDevice());
-    return n > 0 && (pickSides(p)?.some((c) => c >= n) ?? false);
   };
   // A slot with a pick of its own keeps Auto plain: the status reads that pick's channel, or its fallback.
   const auto = () => (pick() === null ? named(null, 'Auto') : 'Auto');
