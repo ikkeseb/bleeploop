@@ -815,7 +815,8 @@ fn the_owners_reopen_on_a_moved_default_whose_stream_faulted_never_drops_held_au
     }));
     h.fake.move_default("interface", FakeDevice { in_channels: 4, ..FakeDevice::new("Interface", 48_000, 480) });
     until("a run at 44.1 kHz", || h.host.status().is_some_and(|s| s.sample_rate == 44_100));
-    let events = h.host.take_device_events();
+    // The loss, its recovery and the drop (reported after the recovery's status is out).
+    let events = h.device_events(3);
     assert!(matches!(events.first(), Some(DeviceEvent::Lost { .. })), "the dead stream is a loss: {events:?}");
     assert!(events.iter().any(|e| matches!(e, DeviceEvent::LoopsDropped { from: 48_000, to: 44_100, .. })), "the loops' drop is reported: {events:?}");
 }
