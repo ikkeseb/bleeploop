@@ -10,7 +10,9 @@
  * the looper empty) shows no hover face.
  * At 1000x700 and 1440x900, with every input send on (a reset frame from an engine that remembers them), the
  * IN FX popover's sliders are real controls: each at least 160 px long (side by side, the sends left each
- * about 40), and the popover's bottom edge inside the window.
+ * about 40), and the popover's bottom edge inside the window; each input effect's popover (or the folded
+ * IN FX one) hangs from its anchor (18 px inside its trigger, on the left edge or, flipped, the right),
+ * both its edges inside the window, under its plate and over none of the slot row's controls.
  * At 1440x900 with a stopped one-bar loop it holds the disabled tone: TAP (the tempo is locked), IMPORT
  * (a loop is in), lane 1's core (STOPPED) and AUTO REC's value (locked with the tempo) fade by tone,
  * never by opacity: each at an effective opacity of 1 in the --faint legend a disabled key wears, an
@@ -222,23 +224,41 @@ await probe(async ({ browser, open }) => {
     const opens = folded
       ? [['Input effects', 'Input effects']]
       : ['Echo', 'Reverb', 'Ring mod', 'OTT'].map((l) => [`Settings for input ${l}`, `Input ${l.toLowerCase()} settings`]);
-    const sends = { on: [], sliders: [], bottom: 0, panel: null };
+    const sends = { on: [], sliders: [], bottom: 0, panel: null, placed: [] };
     for (const [trigger, dialog] of opens) {
       await page.getByRole('button', { name: trigger, exact: true }).click();
       await page.getByRole('dialog', { name: dialog, exact: true }).waitFor();
-      const read = await page.evaluate(() => {
+      const read = await page.evaluate((trigger) => {
         const pop = document.querySelector('.infx-pop');
+        // Where the popover hangs (slot.css `.slot-pop`): under its plate, its left edge 18 px short of the
+        // trigger's right edge, or flipped near the window's right edge, its right edge 18 px past the
+        // trigger's left edge; both its edges inside the window, under its plate and covering none of the
+        // slot row's controls (the plates, LIVE, the meters and volumes the player is looking at).
+        const t = document.querySelector(`[aria-label="${trigger}"]`), plate = t.closest('.plate');
+        const p = pop.getBoundingClientRect(), tr = t.getBoundingClientRect(), pl = plate.getBoundingClientRect();
+        const over = (r) => p.right > r.left + 0.5 && r.right > p.left + 0.5 && p.bottom > r.top + 0.5 && r.bottom > p.top + 0.5;
         return {
           on: [...document.querySelectorAll('.plate__lamp[aria-label^="Input "]')].map((b) => b.getAttribute('aria-pressed')),
           sliders: [...pop.querySelectorAll('.fxp-param__range')].map((r) => [r.getAttribute('aria-label'), r.getBoundingClientRect().width]),
           bottom: pop.getBoundingClientRect().bottom,
           panel: (({ width, height }) => ({ width, height }))(pop.querySelector('.infx').getBoundingClientRect()),
+          placed: {
+            trigger,
+            aligned: Math.min(Math.abs(p.left - (tr.right - 18)), Math.abs(p.right - (tr.left + 18))),
+            left: p.left,
+            right: p.right,
+            gap: p.top - pl.bottom,
+            covers: [...document.querySelectorAll('.slot__line .plate, .slot__line button, .slot__line select, .slot__line input, .slot__vol, .slot__meter')]
+              .filter((el) => !pop.contains(el) && el.getBoundingClientRect().width > 0 && over(el.getBoundingClientRect()))
+              .map((el) => el.getAttribute('aria-label') ?? el.className),
+          },
         };
-      });
+      }, trigger);
       sends.on = read.on;
       sends.sliders.push(...read.sliders);
       sends.bottom = Math.max(sends.bottom, read.bottom);
       sends.panel = read.panel;
+      sends.placed.push(read.placed);
       await page.keyboard.press('Escape');
     }
     console.log(JSON.stringify({ infxSends: `${width}x${height}`, ...sends }));
@@ -247,6 +267,13 @@ await probe(async ({ browser, open }) => {
     assert.equal(sends.sliders.length, 9, `${width}x${height}: the sends' sliders`);
     for (const [name, w] of sends.sliders) assert.ok(w >= MIN_SLIDER, `${width}x${height}: the IN FX slider "${name}" is ${w.toFixed(1)} px long (at least ${MIN_SLIDER})`);
     assert.ok(sends.bottom <= height, `${width}x${height}: the IN FX popover's bottom edge ${sends.bottom} is below the window`);
+    for (const q of sends.placed) {
+      const at = `${width}x${height}: the popover of "${q.trigger}"`;
+      assert.ok(q.aligned < 1, `${at} is ${q.aligned.toFixed(1)} px off its anchor (18 px inside its trigger, either edge)`);
+      assert.ok(q.left >= 0 && q.right <= width, `${at} spans ${q.left.toFixed(1)}..${q.right.toFixed(1)}, past the window's edge`);
+      assert.ok(q.gap >= 0, `${at} starts ${(-q.gap).toFixed(1)} px above its plate's bottom edge`);
+      assert.deepEqual(q.covers, [], `${at} covers controls of the slot row`);
+    }
   }
 
   // Disabled by tone, never by opacity (the recipe's .k-key:disabled and the lane pills state): with a

@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
+import { For, Show, createMemo, createSignal, onCleanup, onMount, type Accessor, type JSX } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
 import { editorAffinityBlocker, slotPendingCounts } from '../state/instrument';
@@ -21,38 +21,32 @@ import './plugin-controls.css';
  *                     by the owning slot, so it never remounts on open/close.
  *
  * Both mount under the slot's `<Show keyed>` on the loaded descriptor, so a plugin swap remounts them
- * (re-fetching params / resetting the editor).
+ * (re-fetching params); the editor's state is the slot's (`createPluginEditor`), new with each descriptor.
  */
 const PARAM_PREVIEW_COUNT = 12;
 
-/** The plugin plate. The menu's Parameters entry is the drawer's disclosure (`aria-controls`). */
-export function PluginPlate(props: {
-  slot: 0 | 1;
-  descriptor: PluginDescriptor;
-  /** The plate's name: the source picker over the plugin's name (`InstrumentSlot.tsx`). */
-  name: JSX.Element;
-  /** The lamp's bloom: the slot plays its input through the plugin. */
-  live: boolean;
-  paramsOpen: boolean;
-  onToggleParams: () => void;
-  drawerId: string;
-  /** Open the source picker (the menu's change of sound) and pick Off (its Remove). */
-  onChangeSound: () => void;
-  onRemove: () => void;
-  returnFocus?: (el: HTMLElement | undefined) => void;
-  /** True when the user just picked this plugin in the slot dropdown (not a reload resync): an effect
-   * goes live and the editor opens on its own. `onAutoStartDone` clears the owner's one-shot flag. */
-  autoStart: boolean;
-  onAutoStartDone: () => void;
-}) {
+/**
+ * A loaded plugin's editor window, as the UI knows it: open, an open or close in flight, the last error.
+ * Owned by the slot (`InstrumentSlot.tsx`), one per loaded descriptor, not by the plate: the plate unmounts
+ * when the row folds its slot, while the native window stays open, and a plate remounted with a fresh
+ * closed state then opened a second time instead of closing it. A swap (a new descriptor) makes a new one.
+ * Call inside a reactive owner: its window-closed subscription ends with it.
+ */
+export interface PluginEditor {
+  open: Accessor<boolean>;
+  busy: Accessor<boolean>;
+  error: Accessor<string | null>;
+  /** Open or close the window; `quiet` = the auto-open after a pick (no toasts). */
+  toggle: (quiet?: boolean) => Promise<void>;
+}
+
+export function createPluginEditor(slot: 0 | 1, descriptor: PluginDescriptor): PluginEditor {
   const [editorOpen, setEditorOpen] = createSignal(false);
   const [editorBusy, setEditorBusy] = createSignal(false);
   const [editorError, setEditorError] = createSignal<string | null>(null);
-  const sourcePending = () => slotPendingCounts()[props.slot] > 0;
-  const letter = slotLetter(props.slot);
 
   const offClosed = platform.pluginHost.onEditorClosed((s) => {
-    if (s === props.slot) setEditorOpen(false);
+    if (s === slot) setEditorOpen(false);
   });
   onCleanup(offClosed);
   // `quiet` = the auto-open after a dropdown pick: a refusal or a plugin with no editor is not an error
@@ -65,7 +59,7 @@ export function PluginPlate(props: {
     // (the rule: `editorAffinity` in `src/ui/state/instrument.ts`). Ownership is fixed at load, so two
     // opens racing each other cannot both pass.
     if (wantOpen) {
-      const blocked = editorAffinityBlocker(props.slot, props.descriptor.path);
+      const blocked = editorAffinityBlocker(slot, descriptor.path);
       if (blocked) {
         if (quiet) return;
         const { owner } = blocked;
@@ -88,10 +82,10 @@ export function PluginPlate(props: {
     setEditorError(null);
     try {
       if (wantOpen) {
-        await platform.pluginHost.openEditor(props.slot);
+        await platform.pluginHost.openEditor(slot);
         setEditorOpen(true);
       } else {
-        await platform.pluginHost.closeEditor(props.slot);
+        await platform.pluginHost.closeEditor(slot);
         setEditorOpen(false);
       }
     } catch (e) {
@@ -116,6 +110,37 @@ export function PluginPlate(props: {
     }
   }
 
+  return { open: editorOpen, busy: editorBusy, error: editorError, toggle: toggleEditor };
+}
+
+/** The plugin plate. The menu's Parameters entry is the drawer's disclosure (`aria-controls`). */
+export function PluginPlate(props: {
+  slot: 0 | 1;
+  descriptor: PluginDescriptor;
+  /** The plate's name: the source picker over the plugin's name (`InstrumentSlot.tsx`). */
+  name: JSX.Element;
+  /** The lamp's bloom: the slot plays its input through the plugin. */
+  live: boolean;
+  paramsOpen: boolean;
+  onToggleParams: () => void;
+  drawerId: string;
+  /** Open the source picker (the menu's change of sound) and pick Off (its Remove). */
+  onChangeSound: () => void;
+  onRemove: () => void;
+  returnFocus?: (el: HTMLElement | undefined) => void;
+  /** True when the user just picked this plugin in the slot dropdown (not a reload resync): an effect
+   * goes live and the editor opens on its own. `onAutoStartDone` clears the owner's one-shot flag. */
+  autoStart: boolean;
+  onAutoStartDone: () => void;
+  /** The editor's state, the slot's (`createPluginEditor`), so it outlives a fold of the row. */
+  editor: PluginEditor;
+}) {
+  const sourcePending = () => slotPendingCounts()[props.slot] > 0;
+  const letter = slotLetter(props.slot);
+  const editorOpen = () => props.editor.open();
+  const editorBusy = () => props.editor.busy();
+  const editorError = () => props.editor.error();
+  const toggleEditor = (quiet = false) => props.editor.toggle(quiet);
   // A fresh dropdown pick starts itself: hearing yourself through the effect is the point of loading
   // one, so a scanned EFFECT goes live first (a synth or an unclassified plugin is left alone — going
   // live on a plugin with no input bus only yields an error), then the editor opens.

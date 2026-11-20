@@ -2,8 +2,16 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack }
 import { clock, looper, master, sampleRate } from '../state/audio';
 import { FADE_BARS, engineFade, laterTakeBars } from '../state/engine-store';
 import { anyTrackIn, beatIndices, createTwoStepConfirm, masterBars } from '../looper/shared';
-import { autoRecGate, fadeGate, fixedGate, retakeGate, tapGate } from '../looper/gates';
-import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
+import { autoRecGate, fadeGate, fixedGate, retakeGate, tapGate, why } from '../looper/gates';
+import {
+  meterFrac,
+  registerInputMeter,
+  registerPhaseDial,
+  registerPositionReadout,
+  unregisterInputMeter,
+  unregisterPhaseDial,
+  unregisterPositionReadout,
+} from '../looper/waveform';
 import { autoRecordThreshold } from '../state/auto-record';
 import { RangeScale, StepScale, ValueKey } from './ValueKey';
 import { createValueDrag } from './value-drag';
@@ -24,6 +32,10 @@ import './transport.css';
  *    knob and its value.
  * The ALL / loop read-out / master controls live here alone (the looper zone has no head row).
  */
+/** The tempo's range, the engine's (`clampBpm` in `state/engine-store.ts`; the typed field's min and max). */
+const BPM_MIN = 40;
+const BPM_MAX = 300;
+
 export function Transport() {
   const anyStopping = createMemo(() =>
     Array.from({ length: looper.trackCount }, (_, i) => looper.track(i)().stopAt !== null).some(Boolean),
@@ -56,10 +68,49 @@ export function Transport() {
     }
     if (e.key === 'Escape') setEditing(false);
   }
+  // A gesture's steps add up from the tempo the gesture started on: the shown tempo is the feed's
+  // (invariant 3), which a fast drag outruns, so each step reading it sent the same tempo again (five
+  // steps from 120 sent 121 five times). A gesture runs while the value is lit (`adjusting`: the drag, or
+  // the wheel and keys until their linger ends). The store sends a tempo only when it differs from the
+  // feed's, so a gesture that comes back to that tempo before the feed has caught up would leave the
+  // engine on its last step: that tempo is owed, and sent when the next echo arrives, or as the gesture
+  // ends if none came (a refused step echoes nothing); an owed tempo never outlives its gesture.
+  let tempoGesture: { target: number; sent: number | null } | null = null;
+  let tempoOwed: number | null = null;
+  const sendTempo = (n: number): void => {
+    const g = tempoGesture;
+    if (g && n === clock.bpm() && g.sent !== null && g.sent !== n) {
+      tempoOwed = n;
+      return;
+    }
+    tempoOwed = null;
+    if (g) g.sent = n;
+    clock.setBpm(n);
+  };
+  createEffect(() => {
+    const bpm = clock.bpm();
+    if (tempoOwed === null || bpm === tempoOwed) return;
+    const n = tempoOwed;
+    tempoOwed = null;
+    if (tempoGesture) tempoGesture.sent = n;
+    clock.setBpm(n);
+  });
   const tempoDrag = createValueDrag({
     enabled: () => !clock.bpmLocked(),
-    step: (dir, big) => clock.setBpm(clock.bpm() + dir * (big ? 10 : 1)),
+    step: (dir, big) => {
+      const g = (tempoGesture ??= { target: clock.bpm(), sent: null });
+      // the engine's range (`clampBpm` in the store): a gesture parked at an end turns back at once
+      g.target = Math.max(BPM_MIN, Math.min(BPM_MAX, g.target + dir * (big ? 10 : 1)));
+      sendTempo(g.target);
+    },
     pxPerStep: 4,
+  });
+  createEffect(() => {
+    if (tempoDrag.adjusting()) return;
+    tempoGesture = null;
+    const owed = tempoOwed;
+    tempoOwed = null;
+    if (owed !== null && owed !== untrack(clock.bpm)) clock.setBpm(owed);
   });
 
   // One-shot "tempo just locked" pulse, on the false->true edge only (not on mount, not on unlock): the
@@ -94,16 +145,12 @@ export function Transport() {
   const hasMaster = () => masterFrames() > 0;
   const loopBars = () => masterBars(masterFrames(), clock.bpm(), sampleRate(), clock.meter().beats);
   const loopSecs = () => masterFrames() / sampleRate();
-  // The position: the beat from the feed's heard beat, its bar read off the loop's phase at that beat
-  // (the nearest beat, so a downbeat heard a hair early still lands in its own bar). A plain read of the
-  // phase in an effect a beat drives, never in the draw loop (invariant 6).
-  const position = createMemo(() => {
-    const beat = clock.beat();
-    if (!hasMaster()) return '—';
-    const beats = clock.meter().beats;
-    const total = loopBars() * beats;
-    const at = Math.round(untrack(() => looper.phaseValue()) * total) % total;
-    return `${Math.floor(at / beats) + 1}.${beat + 1}`;
+  // The position (BAR.BEAT): read off the loop's phase by the waveform rAF loop, the clock the progress
+  // line rides (registerPositionReadout); this effect hands it the grid as plain numbers (invariant 6).
+  const positionGrid = { total: 0, beats: 4 };
+  createEffect(() => {
+    positionGrid.beats = clock.meter().beats;
+    positionGrid.total = hasMaster() ? loopBars() * positionGrid.beats : 0;
   });
   // The progress line is drawn by the waveform rAF loop through the dial's dash (registerPhaseDial), as
   // a line PROGRESS units long, never through a signal (invariant 6).
@@ -188,6 +235,7 @@ export function Transport() {
   const volDrag = createValueDrag({
     enabled: () => true,
     step: (dir, big) => master.setVolume(Math.max(0, Math.min(100, vol() + dir * bigStep(big))) / 100),
+    edge: (end) => master.setVolume(end > 0 ? 1 : 0),
     pxPerStep: 2,
     focusOnPointer: false,
   });
@@ -231,8 +279,8 @@ export function Transport() {
                   class="transport__bpm-input"
                   aria-label="BPM"
                   type="number"
-                  min="40"
-                  max="300"
+                  min={BPM_MIN}
+                  max={BPM_MAX}
                   value={editValue()}
                   onInput={(e) => setEditValue(e.currentTarget.value)}
                   onKeyDown={onBpmKeyDown}
@@ -297,7 +345,15 @@ export function Transport() {
             </div>
             <div class="transport__ro transport__pos" title="Position in the loop: bar.beat">
               <span class="transport__cap">BAR.BEAT</span>
-              <span class="transport__fig transport__pos-v">{position()}</span>
+              <span
+                class="transport__fig transport__pos-v"
+                ref={(el) => {
+                  registerPositionReadout(el, positionGrid);
+                  onCleanup(unregisterPositionReadout);
+                }}
+              >
+                —
+              </span>
             </div>
             {/* The loop's progress: one fine line along the lower edge, a tick per bar; lit while a lane
                 sounds or records (`anyLive`), tone over a stopped loop. */}
@@ -362,6 +418,7 @@ export function Transport() {
           valueText={`Fade length ${fadeBars()} ${fadeBars() === 1 ? 'bar' : 'bars'}`}
           on={engineFade.fading()}
           pressDisabled={!fadeState().ok}
+          pressRefusal={why(fadeState())}
           adjustable
           step={stepFadeBars}
           pxPerStep={14}
@@ -457,6 +514,7 @@ export function Transport() {
           valueText={`Sensitivity ${sens()} of 100`}
           on={looper.autoRecordEnabled()}
           pressDisabled={autoRecDisabled()}
+          pressRefusal={why(autoRecGate())}
           adjustable={sensLive()}
           step={(dir, big) => looper.setAutoRecordSensitivity(sens() + dir * bigStep(big))}
           pxPerStep={2}

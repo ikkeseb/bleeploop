@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from 'solid-js';
+import { For, Show, createMemo, createSignal } from 'solid-js';
 import {
   activeSlot,
   availablePlugins,
@@ -22,7 +22,7 @@ import {
 import { SYNTHS } from '../state/instruments';
 import { platform } from '../../platform';
 import { engineDevice, engineOpenFailure } from '../state/engine-store';
-import { PluginParams, PluginPlate } from './PluginControls';
+import { PluginParams, PluginPlate, createPluginEditor } from './PluginControls';
 import { InputPick, LiveButton, SlotMeter, SlotVolume } from './SlotControls';
 import { PlateMenu } from './PlateMenu';
 import { Icon } from './icons';
@@ -63,6 +63,15 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
   // Per-slot accordion disclosure for the plugin params drawer. Created once (the component mounts once
   // per slot); a sibling of the looper region, so opening it never remounts the looper.
   const [paramsOpen, setParamsOpen] = createSignal(false);
+  // The loaded plugin's editor state, held here and not in its plate: a fold of the row unmounts the
+  // plate while the native window stays open, so the next press must still close it. One per descriptor
+  // (the memo of the descriptor settles on an unchanged one), so a swap starts closed, as the keyed plate
+  // below remounts.
+  const loaded = createMemo(() => slotPlugins()[slotIdx]);
+  const editor = createMemo(() => {
+    const desc = loaded();
+    return desc ? createPluginEditor(slotIdx, desc) : null;
+  });
   // One-shot: the descriptor key the user just picked in the picker. The PluginPlate that mounts for it
   // auto-starts (live + editor) and clears this; a reload resync never sets it, so it never reopens
   // windows. Plain variable — it is read once at PluginPlate mount, nothing renders from it.
@@ -277,6 +286,7 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
                   returnFocus={props.returnFocus}
                   autoStart={freshPickKey === pluginDescriptorKey(desc)}
                   onAutoStartDone={() => (freshPickKey = null)}
+                  editor={editor()!}
                 />
               )}
             </Show>

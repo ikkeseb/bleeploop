@@ -94,4 +94,9 @@
   font-size: 12px;
   line-height: 1.3;
   color: var(--faint);
+  transition: color var(--motion);
+}
+/* the hovered row's lifted face takes the brighter grey: --faint on --surf-3 is 4.3:1, --dim 6.3:1 */
+.edit__item:hover:not(:disabled) .edit__hint {
+  color: var(--dim);
 }

@@ -10,14 +10,24 @@
  * 1. one row, as drawn at 1920 (docs/redesign/main.html);
  * 2. `.cmd--fold-brand`: one row with the logotype folded to its mark;
  * 3. `.cmd--stack`: two rows (docs/redesign/narrow.html): the time over the record modes, the transport
- *    over the master, the tools down the right edge, the brand folded.
- * Every part keeps its width in all three (only heights change), and the folded brand reports its
- * unfolded scrollWidth, so a rung never decides from its own effect and the flag cannot oscillate.
+ *    over the master, the tools down the right edge, the brand folded;
+ * 4. `.cmd--stack .cmd--tight`: the two rows with narrower gaps and, while UPDATE is offered, the tools in
+ *    three columns under it instead of two beside it (UPDATE's word once pushed the two-column tools
+ *    82 px past a 960 px window's edge).
+ * Rungs 1-3 are decided from the one-row requirement: every part keeps its width in all three (only
+ * heights change), and the folded brand reports its unfolded scrollWidth, so a rung never decides from
+ * its own effect and the flag cannot oscillate. Rung 4 is decided by laying the two rows out and reading
+ * whether they overflow the bar (a synchronous layout read, never painted), from rung 3 every time, so it
+ * too reads the same layout on every pass.
  * Re-measured on bar resize, on any DOM change inside it (a word changing, UPDATE appearing) and when a
  * web font finishes loading (its metrics change every child's width without touching the bar's box or
- * its DOM).
+ * its DOM). Not on a change inside a box whose width transport.css fixes in every rung: the display
+ * (its figures, BAR.BEAT written every beat by waveform.ts) and the transport keys (▶ ALL turning
+ * ■ ALL) cannot move the requirement, and a pass costs up to three full layouts, which every beat of a
+ * playing loop once paid in a stalled frame.
  */
 const SPACER = 'transport__gap';
+const FIXED_WIDTH = '.transport__disp, .transport__key';
 
 export function installCmdFit(bar: HTMLElement): () => void {
   const measure = (): void => {
@@ -53,6 +63,8 @@ export function installCmdFit(bar: HTMLElement): () => void {
     const stack = need - brandSave > width;
     bar.classList.toggle('cmd--fold-brand', !stack && need > width);
     bar.classList.toggle('cmd--stack', stack);
+    bar.classList.remove('cmd--tight');
+    if (stack && bar.scrollWidth > bar.clientWidth + 0.5) bar.classList.add('cmd--tight');
     if (wasStacked) bar.style.height = '';
   };
   let raf = 0;
@@ -65,7 +77,12 @@ export function installCmdFit(bar: HTMLElement): () => void {
   };
   const ro = new ResizeObserver(schedule);
   ro.observe(bar);
-  const mo = new MutationObserver(schedule);
+  const mo = new MutationObserver((records) => {
+    for (const r of records) {
+      const el = r.target instanceof Element ? r.target : r.target.parentElement;
+      if (!el?.closest(FIXED_WIDTH)) return schedule();
+    }
+  });
   mo.observe(bar, { childList: true, subtree: true, characterData: true });
   document.fonts.addEventListener('loadingdone', schedule);
   measure();

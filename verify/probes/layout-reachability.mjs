@@ -9,10 +9,14 @@
  *   one line inside its pad, in one scheme: words or a one-letter prefix, never bare initials), the
  *   two-row command-bar cap and the muted-lane readout with the loop present;
  * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
- *   bars, RETAKE, AUTO REC, END STOP), and with every mode on before the first take, from 960 to 1920 px
+ *   bars, RETAKE, AUTO REC, END STOP), and with every mode on before the first take, from 960 to 2560 px
  *   wide: two rows at most, every control inside the bar and under its
  *   own centre point (the master knob too), Tab walking it as drawn (row 1 left to right, then row 2, then
  *   the tools), and FIXED's and FADE's keys both carrying their bars with the unit;
+ * - the command bar with an UPDATE offer (the modes idle), 960 to 2560 px: the same, UPDATE in the Tab walk;
+ * - both slots folded in turn at 960x600 and 1000x700 (two long plugin names): Tab reaches the folded
+ *   slot's plate, Enter shows its line, Tab reaches its letter, picker, editor and menu, and a plugin editor
+ *   opened before its slot folded is still open after, so its next press closes the window;
  * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
  *   1800 to 1920 px, across the one row's two edges (the brand once unfolded on a fresh page and jumped
  *   ~99 px at the first take);
@@ -214,11 +218,19 @@ await probe(async ({ open }) => {
   // first take (`empty-modes-on`), where TAP, BPM and FIXED's bars are live and stay in the Tab walk.
   const ALL_MODES = [{ SetMetronome: true }, { SetFixedLength: true }, { SetFixedBars: 4 }, { SetRetake: true },
     { SetAutoRecord: true }, { SetLoopEndStop: true }];
-  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1110, 700], [1280, 820], [1440, 900], [1600, 900], [1920, 1080]]
-    .flatMap(([w, h]) => [[w, h, 'idle'], [w, h, 'modes-on'], [w, h, 'empty-modes-on']])) {
-    const { page } = await open({ viewport: { width, height }, init });
+  // An UPDATE offer adds a key to the tools (`update`: the modes idle, the updater scripted): it once pushed
+  // the two-row bar 82 px past the window at 960 px and 42 at 1000, cutting the tools off; the bar's fourth
+  // rung (app/cmd-fit.ts `.cmd--tight`) must keep every one inside, down to the minimum and up to 2560.
+  for (const [width, height, modes] of [[960, 600], [1000, 700], [1050, 700], [1100, 700], [1105, 700], [1110, 700], [1280, 820], [1440, 900], [1600, 900], [1920, 1080], [2560, 1440]]
+    .flatMap(([w, h]) => [[w, h, 'idle'], [w, h, 'modes-on'], [w, h, 'empty-modes-on'], [w, h, 'update']])) {
+    const update = modes === 'update';
+    const { page } = await open({ viewport: { width, height }, init: async (p) => {
+      await init(p);
+      if (update) await p.addInitScript(() => void (window.__lfUpdateFake = { update: { version: '9.9.9', notes: '- probe' }, calls: [] }));
+    } });
     const empty = modes === 'empty-modes-on';
-    await boot(page, [empty ? 'Empty' : 'Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR, modes === 'idle' ? [] : ALL_MODES);
+    await boot(page, [empty ? 'Empty' : 'Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR, modes === 'idle' || update ? [] : ALL_MODES);
+    if (update) await page.locator('.cmd .tool-pill').waitFor();
     await page.waitForTimeout(250);
     const bar = await page.evaluate(() => {
       const cmd = document.querySelector('.cmd');
@@ -254,7 +266,9 @@ await probe(async ({ open }) => {
         const el = document.activeElement, cmd = document.querySelector('.cmd');
         if (!el || !cmd.contains(el)) return null;
         const r = el.getBoundingClientRect(), c = cmd.getBoundingClientRect();
-        return { name: el.getAttribute('aria-label') ?? el.textContent.trim(), x: r.left, y: Math.round(r.top),
+        // a tool spanning the cluster's rows (UPDATE beside two-row tools) reads first, as its top row does
+        const tools = el.closest('.tools'), spans = tools && r.height > 1.5 * tools.querySelector('.tool').getBoundingClientRect().height;
+        return { name: el.getAttribute('aria-label') ?? el.textContent.trim(), x: r.left, y: Math.round(spans ? tools.getBoundingClientRect().top : r.top),
           row: el.closest('.tools') ? 3 : cmd.classList.contains('cmd--stack') && (r.top + r.bottom) / 2 > (c.top + c.bottom) / 2 ? 2 : 1 };
       });
       if (!stop) { if (walk.length) break; continue; }
@@ -266,8 +280,9 @@ await probe(async ({ open }) => {
     bar.tabInVisualOrder = walk.length > 10 && walk.every((s, i) => s.name === visual[i]);
     const name = `${label}-${width}x${height}-engine${modes === 'idle' ? '' : `-${modes}`}`;
     await page.locator('.cmd').screenshot({ path: `logs/layout/${name}.png` });
-    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'idle' ? 0 : 5) && bar.tabInVisualOrder
-      && bar.units.length === 2 && new Set(bar.units).size === 1;
+    bar.update = update ? bar.tabOrder.some((s) => s.startsWith('3:Update ready')) : null;
+    const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'idle' || update ? 0 : 5) && bar.tabInVisualOrder
+      && bar.units.length === 2 && new Set(bar.units).size === 1 && bar.update !== false;
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));
@@ -293,6 +308,82 @@ await probe(async ({ open }) => {
     if (!ok) failures.push(name);
     results.push({ name, ok, fresh, forced });
     console.log(JSON.stringify({ name, ok, fresh, forced }));
+    await page.close();
+  }
+  // Both slots folded in turn, by the keyboard alone: two plugins with long names leave the row room for one
+  // slot's line (row-fit.ts), the other folded to one plate at the row's end. Tab reaches that plate, Enter
+  // shows its line, and Tab then reaches every control of it (its letter, picker, editor and menu), and the
+  // other slot's plate, which brings the first back. A plugin editor opened before its slot folded is still
+  // open when the slot shows again, so the next press closes the native window (its state once lived in the
+  // plate, which a fold unmounts, and the press opened a second window instead).
+  for (const [width, height] of [[960, 600], [1000, 700]]) {
+    const { page } = await open({ viewport: { width, height }, init: async (p) => {
+      await p.route('**/src/platform/host.web.ts*', async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({ response, body: (await response.text()).replace('available: false', 'available: true') });
+      });
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
+    } });
+    await boot(page, ['Empty', 'Empty', 'Empty', 'Empty', 'Empty']);
+    await page.evaluate(async () => {
+      const { platform } = await import('/src/platform/index.ts');
+      const instrument = await import('/src/ui/state/instrument.ts');
+      const deadline = Date.now() + 10000;
+      while (!instrument.nativeHostReady() || instrument.scanning()) {
+        if (Date.now() > deadline) throw new Error('native host boot did not finish');
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const plugins = ['Archetype Petrucci X', 'Neural Amp Modeler Suite'].map((name, i) =>
+        ({ id: `fold-${i}`, name, format: 'vst3', isEffect: true, path: `C:\\Program Files\\Common Files\\VST3\\${name}.vst3` }));
+      const host = platform.pluginHost;
+      window.__editorCalls = [];
+      host.scanPlugins = async () => plugins;
+      host.loadPlugin = async (slot, path) => ({ slot, descriptor: plugins.find((p) => p.path === path) });
+      host.unloadPlugin = async () => {};
+      host.openEditor = async (slot) => void window.__editorCalls.push(['open', slot]);
+      host.closeEditor = async (slot) => void window.__editorCalls.push(['close', slot]);
+      host.listParams = async () => [];
+      await instrument.scanForPlugins();
+      await instrument.selectPlugin(0, plugins[0]);
+      await instrument.selectPlugin(1, plugins[1]);
+    });
+    await page.locator('.slot--fold').waitFor({ timeout: 5000 });
+    const focused = () => page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? '');
+    /** Tab from the top of the page until a stop named by `match` has focus; the names passed on the way. */
+    const tabTo = async (match) => {
+      await page.evaluate(() => { document.activeElement?.blur(); document.body.focus(); });
+      const seen = [];
+      for (let i = 0; i < 120; i++) {
+        await page.keyboard.press('Tab');
+        const name = await focused();
+        seen.push(name);
+        if (match.test(name)) return seen;
+      }
+      throw new Error(`${width}x${height}: Tab never reached ${match} (walked ${seen.join(' | ')})`);
+    };
+    const stage = { width, height, editorFoldedOpen: null, walks: {} };
+    const editorA = page.getByRole('button', { name: 'Editor for slot A', exact: true });
+    await tabTo(/^Editor for slot A$/);
+    await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: 'Editor for slot A', exact: true, pressed: true }).waitFor();
+    for (const [show, other] of [['B', 'A'], ['A', 'B']]) {
+      await tabTo(new RegExp(`^Show slot ${show}`));
+      await page.keyboard.press('Enter');
+      await page.getByRole('button', { name: `Activate slot ${show}`, exact: true }).waitFor();
+      const walk = await tabTo(new RegExp(`^Show slot ${other}`));
+      stage.walks[show] = ['Activate slot', 'Source for slot', 'Editor for slot', 'Menu for slot'].map((n) => `${n} ${show}`).filter((n) => !walk.includes(n));
+    }
+    stage.editorFoldedOpen = await editorA.getAttribute('aria-pressed');
+    await editorA.focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: 'Editor for slot A', exact: true, pressed: false }).waitFor({ timeout: 2000 }).catch(() => {});
+    stage.calls = await page.evaluate(() => window.__editorCalls);
+    const name = `${label}-${width}x${height}-folded-slots`;
+    const ok = stage.walks.A.length === 0 && stage.walks.B.length === 0 && stage.editorFoldedOpen === 'true'
+      && JSON.stringify(stage.calls) === JSON.stringify([['open', 0], ['close', 0]]);
+    if (!ok) failures.push(name);
+    results.push({ name, ok, ...stage });
+    console.log(JSON.stringify({ name, ok, ...stage }));
     await page.close();
   }
   // Popovers hang under the command bar's real bottom edge (a fixed offset once covered the bar's

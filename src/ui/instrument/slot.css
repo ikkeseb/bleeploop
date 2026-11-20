@@ -144,15 +144,35 @@
   margin-right: calc(4px * var(--ui));
 }
 .slot__line {
-  position: relative; /* a refusal's tag hangs from it */
+  position: relative;
 }
-/* a refusal or a failure beside a control (the editor's, LIVE's): a small tag hanging under the line at the
-   control's right end, out of the line's flow, so it never makes the row refold under the hand that caused it */
+/* a refusal or a failure beside a control (the editor's, LIVE's): a small tag hanging under the control,
+   its right edge on the control's (flipped to the left edge near the window's), out of the line's flow, so
+   it never makes the row refold under the hand that caused it. Fixed and anchored to the control it follows,
+   as the row's popovers are: the slot row's pane clips what hangs past it (a tag positioned in the line
+   was cut off under the row, and its static place was the chain's start, past the window's left edge).
+   One anchor name per kind, scoped to its slot, so both slots' tags stand at once. */
+.slot {
+  anchor-scope: --err-live, --err-plate;
+}
+.slot .slot__live:has(+ .pc__err) {
+  anchor-name: --err-live;
+}
+.slot .plate:has(+ .pc__err) {
+  anchor-name: --err-plate;
+}
+.slot .slot__live + .pc__err {
+  position-anchor: --err-live;
+}
+.slot .plate + .pc__err {
+  position-anchor: --err-plate;
+}
 .slot .pc__err {
-  position: absolute;
-  z-index: 6;
-  top: calc(100% - 4px);
-  translate: -100% 0;
+  position: fixed;
+  z-index: 30; /* over the lanes it hangs into, under the popovers (40) */
+  top: calc(anchor(bottom) + 6px);
+  right: anchor(right);
+  position-try-fallbacks: flip-inline;
   max-width: calc(260px * var(--ui));
   overflow: hidden;
   text-overflow: ellipsis;
@@ -610,6 +630,11 @@ button.plate__lamp:active {
 .slot-pop__trigger[aria-expanded='true'] {
   anchor-name: --slot-pop;
 }
+/* its top hangs from the trigger's plate, whose bottom edge sits lower than the trigger's (a popover hung
+   from the trigger covered the plate's lower edge) */
+.plate:has(> .slot-pop__trigger[aria-expanded='true']) {
+  anchor-name: --slot-pop-plate;
+}
 .slot-pop__backdrop {
   position: fixed;
   inset: 0;
@@ -620,7 +645,7 @@ button.plate__lamp:active {
   top: 140px; /* fallback for an engine without anchor positioning */
   left: 24px;
   position-anchor: --slot-pop;
-  top: calc(anchor(bottom) + 8px);
+  top: calc(anchor(--slot-pop-plate bottom) + 6px);
   left: calc(anchor(right) - 18px);
   position-try-fallbacks: flip-inline;
   padding: 6px;

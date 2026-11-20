@@ -195,10 +195,45 @@ await probe(async ({ browser, open }) => {
           input: !!el.querySelector('.slot__in'),
           live: !!el.querySelector('.slot__live'),
           meter: !!el.querySelector('.slot__meter'),
-          // the picker whole inside its slot (a hugging slot sized as if empty clips it)
+          // the picker (its transparent select, the press's whole area) inside its plate and its slot on both
+          // axes (a hugging slot sized as if empty clips it), and the press lands on it at its centre
           fits: (() => {
-            const c = el.getBoundingClientRect(), s = el.querySelector('.slot__source')?.getBoundingClientRect();
-            return !!s && s.width > 0 && s.left >= c.left - 6 && s.right <= c.right + 6;
+            const c = el.getBoundingClientRect(), src = el.querySelector('.slot__source');
+            const s = src?.getBoundingClientRect(), p = src?.closest('.plate')?.getBoundingClientRect();
+            const within = (a, b) => a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5;
+            const hit = s && document.elementFromPoint((s.left + s.right) / 2, (s.top + s.bottom) / 2);
+            return !!s && !!p && s.width > 0 && within(s, p) && within(s, c) && (hit === src || src.contains(hit));
+          })(),
+          // Every control in the slot's line (each plate's own keys and pick, LIVE, the input pick, the volume,
+          // the fold plate) and the refusal under it: drawn inside the slot and the window, and the target of a
+          // press at its centre (a slot's volume is a range input laid under its knob: the knob is the
+          // surface). The refusal hangs under the line: inside the slot's sides and the window, on top where
+          // it is drawn, covering none of the slot's controls. Each entry names what broke.
+          reach: (() => {
+            const c = el.getBoundingClientRect(), bad = [];
+            const name = (k) => k.getAttribute('aria-label') ?? (k.textContent.trim() || k.className);
+            const controls = [...el.querySelectorAll('.slot__line button, .slot__line select, .slot__line input')]
+              .filter((k) => k.checkVisibility({ visibilityProperty: true }) && k.getBoundingClientRect().width > 0);
+            for (const k of controls) {
+              const surface = k.closest('.slot__vol') ?? k, r = surface.getBoundingClientRect();
+              if (r.left < c.left - 0.5 || r.right > c.right + 0.5 || r.top < c.top - 0.5 || r.bottom > c.bottom + 0.5 || r.right > innerWidth || r.bottom > innerHeight)
+                bad.push(`${name(k)} spans ${r.left.toFixed(1)}..${r.right.toFixed(1)} x ${r.top.toFixed(1)}..${r.bottom.toFixed(1)}, outside the slot or the window`);
+              const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+              if (!hit || !(surface === hit || surface.contains(hit))) bad.push(`${name(k)}: a press at its centre lands on ${hit?.className || hit?.tagName || 'nothing'}`);
+            }
+            for (const e of el.querySelectorAll('.slot__line .pc__err')) {
+              const r = e.getBoundingClientRect();
+              if (!r.width || !r.height) { bad.push('the refusal is in the line but not drawn'); continue; }
+              if (r.left < c.left - 0.5 || r.right > c.right + 0.5 || r.right > innerWidth || r.bottom > innerHeight)
+                bad.push(`the refusal spans ${r.left.toFixed(1)}..${r.right.toFixed(1)} x ..${r.bottom.toFixed(1)}, outside the slot's sides or the window`);
+              const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+              if (!hit || !(e === hit || e.contains(hit))) bad.push(`the refusal is covered by ${hit?.className || 'nothing'}`);
+              for (const k of controls) {
+                const x = (k.closest('.slot__vol') ?? k).getBoundingClientRect();
+                if (x.right > r.left + 0.5 && r.right > x.left + 0.5 && x.bottom > r.top + 0.5 && r.bottom > x.top + 0.5) bad.push(`the refusal covers ${name(k)}`);
+              }
+            }
+            return bad;
           })(),
           ...(() => {
             // The slot reads as one signal line, left to right: the letter, the input, LIVE, the plates
@@ -246,6 +281,7 @@ await probe(async ({ browser, open }) => {
           !(b?.picker === 'Add a second sound' && b.ask && b.folded && !b.input && !b.live && !b.meter && b.fits) && `slot B reads ${JSON.stringify(b)}`,
           f.start.join('|') !== startOn(0) && `the start line reads ${JSON.stringify(f.start)}, not on lane 1 alone`,
           !f.routedOff && "the boot did not route slot A's notes to Off",
+          ...f.slots.flatMap((s, i) => s.reach.map((r) => `slot ${'AB'[i]}: ${r}`)),
         ].filter(Boolean);
         for (const p of problems) fail(`${tag} ${scene}${liveA ? ' (A live)' : ''}: ${p}`);
       };
@@ -742,7 +778,7 @@ await probe(async ({ browser, open }) => {
       {
         const f = await firstLook();
         const [a, b] = f.slots;
-        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !a.follows || !b?.folded || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
+        if (f.kbd !== 'hidden' || a?.ask || !a?.live || !a.follows || !a.fits || a.reach.length || !b?.folded || b.reach.length || f.start.join('|') !== startOn(0)) fail(`${tag} ${scene}: ${JSON.stringify(f)}`);
       }
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
       errors.length = 0;
@@ -764,6 +800,7 @@ await probe(async ({ browser, open }) => {
       {
         const a = (await firstLook()).slots[0];
         if (!a?.follows) fail(`${tag} ${scene}: slot A's line does not read in order: ${JSON.stringify(a)}`);
+        if (!a?.fits || a.reach.length) fail(`${tag} ${scene}: slot A's picker or controls are out of reach: ${JSON.stringify(a)}`);
       }
 
       scene = '10-amp-sim-idle';
@@ -909,7 +946,11 @@ await probe(async ({ browser, open }) => {
        * and the other slot's fold plate, where the row is narrow) share one centre. */
       const checkPaired = async () => {
         const [a, b] = (await firstLook()).slots;
-        for (const [letter, s] of [['A', a], ['B', b]]) if (!s?.follows) fail(`${tag} ${scene}: slot ${letter}'s line does not read in order: ${JSON.stringify(s)}`);
+        for (const [letter, s] of [['A', a], ['B', b]]) {
+          if (!s?.follows) fail(`${tag} ${scene}: slot ${letter}'s line does not read in order: ${JSON.stringify(s)}`);
+          // a slot the row folds to one plate has no picker in sight; its plate is a control of the line
+          if (s && ((!s.folds && !s.fits) || s.reach.length)) fail(`${tag} ${scene}: slot ${letter}'s picker or controls are out of reach: ${JSON.stringify(s)}`);
+        }
         if (a?.follows && b?.follows && Math.abs(a.mid - b.mid) > 0.5) fail(`${tag} ${scene}: the slots' lines sit at ${a.mid.toFixed(1)} (A) and ${b.mid.toFixed(1)} (B), not on one centre`);
       };
       const dismissToasts = () => page.evaluate(async () => {
