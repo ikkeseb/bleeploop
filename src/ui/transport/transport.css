@@ -110,7 +110,7 @@
 /* ---- the bar's keys: one height; the transport keys 72, TAP 60, the record modes 92 ---- */
 .cmd .transport__key {
   --kh: var(--cmd-kh);
-  width: calc(72px * var(--ui));
+  width: calc(72px * var(--ui)); /* fixed: app/cmd-fit.ts ignores changes inside it */
   padding-left: 0;
   padding-right: 0;
 }
@@ -210,7 +210,7 @@
 }
 .transport__disp {
   flex: none;
-  width: calc(444px * var(--ui));
+  width: calc(444px * var(--ui)); /* fixed in every rung: app/cmd-fit.ts ignores changes inside it */
   height: calc(64px * var(--ui));
 }
 .transport__glass {

@@ -21,9 +21,13 @@
  * too reads the same layout on every pass.
  * Re-measured on bar resize, on any DOM change inside it (a word changing, UPDATE appearing) and when a
  * web font finishes loading (its metrics change every child's width without touching the bar's box or
- * its DOM).
+ * its DOM). Not on a change inside a box whose width transport.css fixes in every rung: the display
+ * (its figures, BAR.BEAT written every beat by waveform.ts) and the transport keys (▶ ALL turning
+ * ■ ALL) cannot move the requirement, and a pass costs up to three full layouts, which every beat of a
+ * playing loop once paid in a stalled frame.
  */
 const SPACER = 'transport__gap';
+const FIXED_WIDTH = '.transport__disp, .transport__key';
 
 export function installCmdFit(bar: HTMLElement): () => void {
   const measure = (): void => {
@@ -73,7 +77,12 @@ export function installCmdFit(bar: HTMLElement): () => void {
   };
   const ro = new ResizeObserver(schedule);
   ro.observe(bar);
-  const mo = new MutationObserver(schedule);
+  const mo = new MutationObserver((records) => {
+    for (const r of records) {
+      const el = r.target instanceof Element ? r.target : r.target.parentElement;
+      if (!el?.closest(FIXED_WIDTH)) return schedule();
+    }
+  });
   mo.observe(bar, { childList: true, subtree: true, characterData: true });
   document.fonts.addEventListener('loadingdone', schedule);
   measure();

@@ -116,3 +116,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   the ask through later Transports until its echo, a refusal or the player's own pick ends it. Read
   from source, not reproduced. Next check: a meter-picker case with a non-reset Transport between the
   reset and the asked meter's echo, and one whose `SetMeter` the fake refuses.
+- `wave-steady`'s "nothing drawn past the recorded boundary" goes red in about one run in three, on the
+  redesigned wave before and after the command bar's fit fix: the red pixels are the previous span's quiet
+  bins (x about 900-919 of 934 against a new end of 449-615), so a frame drawn over the old span is read
+  against the new one. `recSpanFrames` reads `Date.now()`, so the span can grow between the draw and the
+  probe's read (a probe race); one run showed it on two samples in a row with the same bin count, which
+  points at stale pixels kept after the span grows (a wave defect). Next check: log `lane.lastSpan`
+  against the span the sample reads.
