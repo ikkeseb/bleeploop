@@ -33,6 +33,8 @@ import { liveShown } from './live';
 import { openSettings, type SettingsPage } from '../../settings-opener';
 import { revealKeyboardForSynth } from '../layout/layout-store';
 import { inputArmed } from '../state/native-io';
+import { chainShown, slotChain } from '../state/chain';
+import { ChainLine } from '../units/ChainLine';
 
 /**
  * One instrument slot (A / B) as a signal line in the slot row (`slot.css` draws it): its letter (the
@@ -48,6 +50,10 @@ import { inputArmed } from '../state/native-io';
  * next), and slot B folds to its letter and a picker reading `Add a second sound`, so A takes the row.
  * Where the row cannot hold both lines (`row-fit.ts`), the slot not shown folds to one plate at the
  * row's end; a press on it shows its line instead.
+ * THE SEAM: while the platform's chain host answers (`chainShown`: the DEV browser fake now, the native
+ * engine after its next step), the line draws the slot's chain from the feed instead (`ChainLine.tsx`:
+ * its units' plates and the `+` that adds them; slot A's input effects are units there, unit contract
+ * §6) and no slot folds to its first-run ask; otherwise it is exactly the fixed topology above.
  * app.tsx mounts two of these (slot 0 / slot 1). The per-slot `paramsOpen` disclosure is state LOCAL to
  * each instance, and a SIBLING of the looper region, so opening it never remounts the looper's RAF
  * canvases.
@@ -79,12 +85,13 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
   // The source picker, opened by a plate menu's Change sound.
   let sourceSelect: HTMLSelectElement | undefined;
   // Never held a source on a guitar-first install, and nothing is on its way: the picker asks for one.
-  const unset = () => slotUnset()[slotIdx] && slotOff()[slotIdx] && !plugin() && !pending();
+  const chained = chainShown();
+  const unset = () => !chained && slotUnset()[slotIdx] && slotOff()[slotIdx] && !plugin() && !pending();
   // Slot B folds while unset, unless it went live meanwhile (a pedal's GO LIVE on it while active).
   const folded = () => slotIdx === 1 && unset() && !inputArmed()[1];
   // The row too narrow for both lines: this one shows as a plate at the row's end (never slot B's
   // first-run fold, which is already one plate, nor while it is the other's only company).
-  const otherFirstRun = () => slotIdx === 0 && slotUnset()[1] && slotOff()[1] && !slotPlugins()[1] && !inputArmed()[1];
+  const otherFirstRun = () => !chained && slotIdx === 0 && slotUnset()[1] && slotOff()[1] && !slotPlugins()[1] && !inputArmed()[1];
   const rowFolded = () => slotsFolded() && !folded() && !otherFirstRun() && shownSlot() !== slotIdx;
   const live = () => inputArmed()[slotIdx];
   const synth = () => (slotOff()[slotIdx] ? undefined : SYNTHS.find((s) => s.id === slotIds()[slotIdx]));
@@ -104,6 +111,15 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
   // What the plate's name reads: the plugin's or synth's name, else the picker's own words.
   const sourceName = () =>
     pending() ? 'Updating…' : plugin() ? plugin()!.name : unset() ? ask : (synth()?.name ?? 'Off');
+  // The folded slot's plate with the chain shown: its head unit and how many follow.
+  const foldName = () => {
+    if (!chained) return sourceName();
+    const units = slotChain(slotIdx).units;
+    if (units.length === 0) return 'Empty';
+    const head = units[0];
+    const name = head.kind === 'synth' ? (SYNTHS[('params' in head ? head.params?.instrument : 0) ?? 0]?.name ?? head.name) : head.name;
+    return units.length > 1 ? `${name} +${units.length - 1}` : name;
+  };
   const pick = (value: string) => {
     if (value === 'off' || SYNTHS.some((s) => s.id === value)) {
       freshPickKey = null;
@@ -197,16 +213,16 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
               type="button"
               class="plate slot__fold"
               classList={{ 'plate--idle': !live() }}
-              aria-label={`Show slot ${letter}: ${sourceName()}`}
-              title={`Slot ${letter}: ${sourceName()}. Press to show its line`}
+              aria-label={`Show slot ${letter}: ${foldName()}`}
+              title={`Slot ${letter}: ${foldName()}. Press to show its line`}
               onClick={(e) => {
                 e.stopPropagation();
                 setShownSlot(slotIdx);
               }}
             >
-              <span class="plate__lamp" classList={{ 'is-on': live() || !!synth() }} aria-hidden="true" />
+              <span class="plate__lamp" classList={{ 'is-on': live() || (chained ? slotChain(slotIdx).units[0]?.source === true : !!synth()) }} aria-hidden="true" />
               <span class="slot__fold-id">{letter}</span>
-              <span class="plate__name">{sourceName()}</span>
+              <span class="plate__name">{foldName()}</span>
               {/* its meter stays in sight folded: a hot or clipping input reads from either slot */}
               <Show when={liveShown(slotIdx)}>
                 <SlotMeter slot={slotIdx} />
@@ -237,7 +253,11 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
             <Show when={!folded()}>
               <i class="slot__sig" classList={{ 'is-dim': liveShown(slotIdx) && !live() }} aria-hidden="true" />
             </Show>
+            <Show when={chained}>
+              <ChainLine slot={slotIdx} live={live()} returnFocus={props.returnFocus} />
+            </Show>
             {/* The plate. `keyed` on the plugin so a swap remounts it (resets editor/live). */}
+            <Show when={!chained}>
             <Show
               keyed
               when={slotPlugins()[slotIdx]}
@@ -290,7 +310,8 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
                 />
               )}
             </Show>
-            <Show when={slotIdx === 0}>
+            </Show>
+            <Show when={slotIdx === 0 && !chained}>
               <InputFx folded={fxFolded()} returnFocus={props.returnFocus} />
             </Show>
           </div>
@@ -326,7 +347,7 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
         </Show>
         {/* Params drawer (accordion). Mounted whenever a plugin is loaded (so onParamChanged tracks live
             positions even while collapsed); open/close is CSS-only, so it never remounts on toggle. */}
-        <Show keyed when={slotPlugins()[slotIdx]}>
+        <Show keyed when={!chained && slotPlugins()[slotIdx]}>
           {(_desc) => (
             <div
               class="slot__drawer"

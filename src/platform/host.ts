@@ -379,7 +379,7 @@ export interface EngineHost {
  * production browser build every call rejects (`available` false); the DEV browser fake answers it.
  */
 export interface ChainHost {
-  /** False until the native engine speaks the chain; true on the DEV browser fake when it is on. */
+  /** False until the native engine speaks the chain; true on the DEV browser fake when a probe asks for the chain (`__lfChainFake`, with the engine fake on). */
   readonly available: boolean;
   /** Reserve `unit` across both slots, build it, hand it over at index `at` (a source goes to the head,
    * replacing a seated one); settles on the engine's answer: `seated`, or `waiting` while a take holds

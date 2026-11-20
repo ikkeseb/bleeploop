@@ -1,13 +1,15 @@
-// verify/guards/stage-draw.mjs — invariant 6 for the three 60 fps draw loops, the stage view's
-// (src/ui/stage/), the looper's (src/ui/looper/waveform.ts) and the tuner's (src/ui/tuner/): each reads a
-// plain feed and the looper's non-reactive getters, never a Solid signal.
+// verify/guards/stage-draw.mjs — invariant 6 for the four 60 fps draw loops, the stage view's
+// (src/ui/stage/), the looper's (src/ui/looper/waveform.ts), the tuner's (src/ui/tuner/) and the OTT's
+// (src/ui/units/ott-loop.ts: its face's glass and its plate's miniature): each reads a plain feed and
+// the looper's non-reactive getters, never a Solid signal.
 //
 // A static check of the real source. A loop's draw modules are everything its roots reach through
 // relative sibling imports: for the stage, `stage-loop.ts` (the rAF loop) and `views.ts` (the looks it
 // draws); for the looper, `waveform.ts`, whole (its register calls run from Solid, read no signal
 // either), and the looks it draws (`wave-looks.ts`); for the tuner, `tuner-loop.ts` and the pitch
 // arithmetic it calls (`TunerView.tsx`, its Solid side, hands it a callback it calls when the note, the
-// in-tune or the no-signal state changes). Each
+// in-tune or the no-signal state changes); for the OTT, `ott-loop.ts` and the units' plain meter mirror
+// (`unit-meters.ts`, which the engine store writes from the feed). Each
 // may import only its siblings and, from `../state/audio`, the looper facade,
 // `PEAK_FRAMES` and types; none may import `solid-js`; and on the looper facade it may touch only the
 // plain getters (`PLAIN`), since the same object also carries signal accessors (`selectedTrack`,
@@ -41,6 +43,8 @@ const AUDIO = ['looper', 'PEAK_FRAMES', 'PeakView', 'TrackState', 'ScopeView', '
 const STAGE = { dir: 'stage', roots: ['stage-loop', 'views'], audio: new Set(AUDIO), named: {}, gated: null };
 /** The tuner's loop: no exception; it takes the reading's type too. */
 const TUNER = { dir: 'tuner', roots: ['tuner-loop'], audio: new Set([...AUDIO, 'TunerReading']), named: {}, gated: null };
+/** The OTT's loop (its face's glass, its plate's miniature): no exception, nothing from the looper. */
+const OTT = { dir: 'units', roots: ['ott-loop'], audio: new Set(), named: {}, gated: null };
 /** The looper's loop, with its bar grid's tempo read (the header). */
 const LOOPER = {
   dir: 'looper',
@@ -197,6 +201,16 @@ check("the tuner's close in its loop is flagged", () => assert.deepStrictEqual(t
 check('a Solid batch in the tuner loop is flagged', () => assert.deepStrictEqual(tune("import { centsText", "import { batch } from 'solid-js';\nimport { centsText"), ['imports solid-js']));
 check("the tuner's reading type stays out of the stage loop", () => assert.deepStrictEqual(violations(TUNE), ['imports TunerReading from ../state/audio']));
 
+// The OTT's loop: the meter mirror as a sibling, never the chain's store or a signal.
+const OTTSRC = `import { HISTORY, unitMeters } from './unit-meters';
+function frame(): void {
+  const v = unitMeters.get(1);
+  rafId = requestAnimationFrame(frame);
+}`;
+check('a clean OTT loop passes', () => assert.deepStrictEqual(violations(OTTSRC, OTT), []));
+check("the chain's store in the OTT loop is flagged", () => assert.deepStrictEqual(violations(`import { slotChain } from '../state/chain';\n${OTTSRC}`, OTT), ['imports ../state/chain']));
+check('the looper in the OTT loop is flagged', () => assert.deepStrictEqual(violations(`import { looper } from '../state/audio';\n${OTTSRC}`, OTT), ['imports looper from ../state/audio']));
+
 // ── 2. The draw modules: everything each loop reaches ───────────────────────────────────────────────
 /** Walk `set`'s roots through sibling imports (those `set.named` lists are not followed) and check each. */
 function walk(set) {
@@ -227,8 +241,10 @@ check('the Solid side stays out of the stage walk', () => {
 const looperLoop = walk(LOOPER);
 check('the looper walk holds waveform.ts and its looks, not its Solid-side sibling', () => assert.deepStrictEqual([...looperLoop.keys()].sort(), ['wave-looks', 'waveform']));
 const tunerLoop = walk(TUNER);
+const ottLoop = walk(OTT);
+check('the OTT walk holds its loop and the meter mirror, not its Solid side', () => assert.deepStrictEqual([...ottLoop.keys()].sort(), ['ott-loop', 'unit-meters']));
 check('the tuner walk holds its loop and the pitch arithmetic', () => assert.deepStrictEqual([...tunerLoop.keys()].sort(), ['pitch', 'tuner-loop']));
 
-console.log(`stage-draw: ${[...stage.keys()].sort().join(', ')}; looper: ${[...looperLoop.keys()].join(', ')}; tuner: ${[...tunerLoop.keys()].sort().join(', ')}`);
+console.log(`stage-draw: ${[...stage.keys()].sort().join(', ')}; looper: ${[...looperLoop.keys()].join(', ')}; tuner: ${[...tunerLoop.keys()].sort().join(', ')}; ott: ${[...ottLoop.keys()].sort().join(', ')}`);
 console.log(`=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

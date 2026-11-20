@@ -3,6 +3,7 @@ import { slotPendingCounts, slotTakesInput } from '../state/instrument';
 import { serializeLive, withAt } from '../state/instrument-slots';
 import { goLive, holdPress, inputArmed, pressEngineLive, takeHeldPresses } from '../state/native-io';
 import { notifyError } from '../../notify';
+import { chainShown, chainTakesInput } from '../state/chain';
 
 /**
  * GO LIVE per slot: the one press path for the slot's cap (`SlotControls.tsx`) and the named action
@@ -26,9 +27,10 @@ export function clearLiveError(slot: 0 | 1): void {
   setError((prev) => withAt(prev, slot, null));
 }
 
-/** Whether slot `slot` shows a GO LIVE cap: its source takes input. */
+/** Whether slot `slot` shows a GO LIVE cap: its source takes input (with the chain shown, no source heads
+ * its chain). */
 export function liveShown(slot: 0 | 1): boolean {
-  return slotTakesInput(slot);
+  return chainShown() ? chainTakesInput(slot) : slotTakesInput(slot);
 }
 
 /** Run `send` as slot `slot`'s GO LIVE op, its failure told unless `quiet` (`wentLive`: the chip's and
@@ -58,7 +60,7 @@ async function liveOp(slot: 0 | 1, quiet: boolean, wentLive: boolean, send: (own
  */
 export function toggleLive(slot: 0 | 1): Promise<void> {
   const wentLive = !inputArmed()[slot];
-  return liveOp(slot, false, wentLive, (ownToast) => serializeLive(slot, () => pressEngineLive(slot, slotTakesInput(slot), ownToast)));
+  return liveOp(slot, false, wentLive, (ownToast) => serializeLive(slot, () => pressEngineLive(slot, liveShown(slot), ownToast)));
 }
 
 /**

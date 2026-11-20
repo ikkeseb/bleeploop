@@ -48,7 +48,7 @@ import {
 
 /** What the fake needs of the engine fake around it (`host.web.ts`). */
 interface ChainFakeDeps {
-  /** The engine fake is on (a DEV probe forced it). */
+  /** The chain fake is on: a DEV probe forced the engine fake and asked for the chain (`__lfChainFake`). */
   forced(): boolean;
   /** A take holds the alignment: a scripted lane records or overdubs (the engine judges a capture). */
   capturing(): boolean;

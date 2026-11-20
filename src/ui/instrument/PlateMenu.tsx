@@ -1,12 +1,12 @@
 import { For, Show } from 'solid-js';
-import { Icon } from './icons';
+import { Icon, type IconName } from './icons';
 import { RowPopoverPanel, createRowPopover } from './RowPopover';
 
 /** One entry of a plate's menu. `checked` makes it a checkbox item (the editor open, the parameters
  * shown); `controls` names the region it opens. */
 export interface PlateMenuItem {
   label: string;
-  icon: 'win' | 'params' | 'swap' | 'x';
+  icon: IconName;
   onSelect: () => void;
   checked?: boolean;
   disabled?: boolean;
@@ -16,7 +16,7 @@ export interface PlateMenuItem {
 /**
  * A plate's menu: the small chevron at the plate's very end, the same on every plate, and the list it
  * opens under the plate (what the plate's keys and pickers did before the redesign: the editor, the
- * parameters, a change of sound, its removal). Groups are parted by a rule. A pick closes the menu;
+ * parameters, a change of sound, its removal; on a chain's unit, its moves). Groups are parted by a rule. A pick closes the menu;
  * a keyboard pick hands focus back to the chevron.
  */
 export function PlateMenu(props: {

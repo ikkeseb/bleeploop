@@ -356,8 +356,7 @@ export const engineFake: EngineFake | null = import.meta.env.PROD || underTauri 
 /**
  * A new unit's id (unit contract §1): 32 random bits, never 0, so a project opened later never lands a
  * tone on another's unit by count. On the DEV fake a probe injects the mint (`__lf.native.chain.mint`);
- * an injected id is checked as the wire checks one.
- * @public the chain UI's `+` will mint with it; until then the chain-fake probe does
+ * an injected id is checked as the wire checks one. The row's `+` mints with it (`src/ui/state/chain.ts`).
  */
 export function mintUnitId(): UnitId {
   const injected = engineFake?.chain.mint;

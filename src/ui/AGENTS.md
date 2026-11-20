@@ -59,7 +59,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   line through a plain feed that Solid effects write. `verify/guards/stage-draw.mjs` checks both loops,
   the grid's exception by name and only inside its master-length gate, and the tuner's
   (`tuner/tuner-loop.ts`), which tells its Solid side the note, the in-tune state and the no-signal
-  state through a callback, on change only. The tuner overlay shows exactly while the feed's last
+  state through a callback, on change only; and the OTT's (`units/ott-loop.ts`: its face's glass and its
+  plate's miniature), which reads the units' meter mirror (`units/unit-meters.ts`) the engine store writes
+  from the feed's `unitMeters`, never a signal. The tuner overlay shows exactly while the feed's last
   `Tuner` event said on (every reset frame turns it off before its events apply); Esc and its close
   send `SetTuner(false)`, never a local flip.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
@@ -86,6 +88,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   the feed's `Toggled`, never their own flip (`state/engine-store.ts` `toggleSetting`); GO LIVE's press
   sends the engine's toggle too, and what means a value (an unload's live-off, a reload's resume, an
   effect pick's auto-start) `SetSlotLive`; the cap shows the feed's `live` (`state/native-io.ts`).
+- **The chain seam:** while `platform.chain.available` (the DEV fake with `__lfChainFake`; the native engine
+  once it speaks the chain) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
+  `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's face; otherwise the row is
+  the fixed topology (`instrument/InstrumentSlot.tsx`). A plate moves when the feed says so, never on drop.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.
