@@ -21,6 +21,7 @@ import { clock, looper, master } from '../ui/state/audio';
 import { dismissToast, notifyError, toasts } from '../notify';
 import { engineFake, input, platform, reportDiagnostics } from '../platform';
 import * as layoutStore from '../ui/layout/layout-store';
+import { drawnSpan } from '../ui/looper/waveform';
 
 /**
  * The DEV debug surface (`window.__lf`) for automated (Playwright) verification + by-ear/by-eye
@@ -45,6 +46,8 @@ export interface LfDebug {
   clock: typeof clock;
   looper: typeof looper;
   master: typeof master;
+  /** The recording span (frames) a lane's canvas was last rasterised over (`src/ui/looper/waveform.ts`). */
+  drawnSpan: typeof drawnSpan;
   layoutStore: typeof layoutStore;
   audioDeviceSettings: typeof audioDeviceSettings;
   setBufferSize: typeof setBufferSize;
@@ -116,6 +119,7 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     clock,
     looper,
     master,
+    drawnSpan,
     layoutStore,
     audioDeviceSettings,
     setBufferSize,

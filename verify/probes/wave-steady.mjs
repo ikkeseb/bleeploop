@@ -7,7 +7,7 @@
  * does. The clock runs 4× (first take) and 2× (later take) real time through the anchor's rate, so the
  * spans grow within seconds. Every take is quiet but for one loud burst early on; after each update the
  * probe reads, in the next drawn frame, the burst's left edge on the lane's canvas (the first rec-red
- * column of a row the quiet bins never reach) and the lane's span (`looper.recSpanFrames`).
+ * column of a row the quiet bins never reach) and the span that frame was drawn over (`__lf.drawnSpan`).
  *
  * Proves, in each of the wave's four looks (`src/ui/looper/wave-looks.ts`): while the span holds, the
  * burst stays within 1 device px across the updates, wherever the head is and however many bins arrived
@@ -113,7 +113,10 @@ async function run(open, look, grain) {
             break;
           }
         }
-        const span = looper.recSpanFrames(k);
+        // The span the frame we just read was rasterised over (`waveform.ts` `lane.lastSpan`), not a fresh
+        // `looper.recSpanFrames` call: `recSpanFrames` reads `Date.now()`, which can cross a span boundary
+        // during `frame()` or `getImageData` and grade an old-span bitmap against the new span.
+        const span = window.__lf.drawnSpan(k);
         const view = { min: null, max: null, count: 0, version: 0 };
         looper.peaksInto(k, view);
         const end = Math.ceil(((view.count * peakFrames) / span) * c.width);
@@ -164,14 +167,12 @@ async function run(open, look, grain) {
       else runs.push([s]);
     }
     for (const run of runs) {
-      // A run's first sample may be the frame the span grew in: drawn over the old span, read after it.
-      const steady = runs.indexOf(run) === 0 ? run : run.slice(1);
-      const edges = steady.map((s) => s.edge);
-      const counts = new Set(steady.map((s) => s.count));
+      const edges = run.map((s) => s.edge);
+      const counts = new Set(run.map((s) => s.count));
       const expected = Math.ceil(((burstAt * PEAK_FRAMES) / run[0].span) * run[0].width);
-      console.log(`${look} ${name}: span ${run[0].span} frames, ${steady.length} samples over ${counts.size} bin counts, burst at ${[...new Set(edges)].join('/')} px (its frame: ${expected})`);
+      console.log(`${look} ${name}: span ${run[0].span} frames, ${run.length} samples over ${counts.size} bin counts, burst at ${[...new Set(edges)].join('/')} px (its frame: ${expected})`);
       // A span sampled too thinly proves nothing about it: a slow run fails here, it never passes unchecked.
-      assert.ok(steady.length >= 4, `${look} ${name}: only ${steady.length} samples over the span ${run[0].span} (needs 4)`);
+      assert.ok(run.length >= 4, `${look} ${name}: only ${run.length} samples over the span ${run[0].span} (needs 4)`);
       assert.ok(counts.size >= 4, `${look} ${name}: the bins kept arriving within the span ${run[0].span}`);
       assert.ok(Math.max(...edges) - Math.min(...edges) <= 1, `${look} ${name}: the burst holds within 1 px over the span ${run[0].span} (${edges.join(' ')})`);
       assert.ok(
@@ -180,7 +181,11 @@ async function run(open, look, grain) {
       );
     }
     const past = samples.filter((s) => s.past > 0);
-    assert.equal(past.length, 0, `${look} ${name}: nothing drawn past the recorded boundary (${past.map((s) => `${s.past} px past ${s.end}`).join(', ')})`);
+    assert.equal(
+      past.length,
+      0,
+      `${look} ${name}: nothing drawn past the recorded boundary (${past.map((s) => `${s.past} px past ${s.end} (count ${s.count}, span ${s.span})`).join(', ')})`,
+    );
     return runs.map((run) => run[0].span);
   }
 
