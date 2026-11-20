@@ -213,7 +213,9 @@ await probe(async ({ open }) => {
   assert.deepEqual(await toasts(), [['Could not send that to the audio engine. Open an audio device.', 'No audio device is running.', 1]], 'told once');
   assert.equal(droppedLines(), 1);
   await seam('dropped', null);
-  await page.getByRole('button', { name: 'BPM plus' }).click();
+  // A setting: a step on the tempo (the focused tempo keeps the arrow), then focus back to the page.
+  await page.locator('.transport__bpm-num').press('ArrowUp');
+  await page.evaluate(() => document.activeElement?.blur());
   await page.waitForTimeout(50);
   await seam('dropped', 'noDevice');
   await tap('y');

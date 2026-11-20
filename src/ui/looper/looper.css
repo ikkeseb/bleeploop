@@ -1,13 +1,16 @@
-/* Looper UI. Five full-width horizontal LANES stacked in the looper zone, as the rows of one machine:
-   one matte body (no gap, no card per lane, a faint divider between rows) whose wave wells join into
-   one true-black glass display down the wave column (the app.css header's THE DISPLAY). The surface
-   language is the "Instrument" token set in src/app.css (matte tone steps, no blur, no glow; every lane
-   button a key of the one family, the header's KEYS). Colour is state, and a lane spends it in three
-   places only: the per-lane `--sc` token drives the state word with its dot (a filled badge while it
-   captures) and the core's ring (a flat filled disc while it captures); the waveform canvas is coloured
-   by waveform.ts (global --rec/--dub/--play tokens). The lane head carries no wash, and idle chrome no
-   hue: an empty lane's record key is tone, a fade or a pending stop is lit warm-white (amber is the
-   overdub's). Sizes follow --ui (the app.css header's SIZE). Everything is scoped under .lp. */
+/* Looper UI: the five lanes (docs/redesign/main.html and narrow.html while the build is open). Five strips of
+   equal height, each read left to right as HEAD | GLASS | MIX, the columns aligned to the pixel down the
+   five and the strips parted by a milled groove (--groove) on the panel. The glass strips meet into ONE
+   recessed pane down the middle. Every key is a recipe from src/app.css (.k-key, .k-led, .k-win, .k-fader,
+   .k-knob); what this file adds is the lane's own pieces (the lit key, the printed fader scale and knob
+   ring, the pane's frame) and the sizes. Colour is sound: the per-lane `--sc` lights the state word and the
+   lit key's window; the wave is waveform.ts's. Everything is scoped under .lp.
+
+   SIZE: a lane is a size container (`lane`), so its parts scale from its height (cqh) between the 53 px
+   rung (a short window with the FX drawer's params open) and the 1920x1080 strip (about 180 px), capped at
+   the mockup's sizes times --ui (the lanes' --ui-lane step from 2200 px). Under 1200 px wide (shared.ts
+   `narrow`, the same number) the mix folds as narrow.html: REV and UNDO into EDIT's menu, the pan knob
+   into the value window's pan field. */
 
 .lp {
   height: 100%;
@@ -15,17 +18,14 @@
   flex-direction: column;
   min-height: 0;
   position: relative;
-  padding: 1px 1px 0; /* the body's 1 px inset from the zone's edge */
   overflow: hidden; /* the lanes stay inside the looper zone (the parent .zone also clips) */
-  /* The lanes-area size container. The lane stack is its only in-flow child and fills its content box,
-     so `lp`'s height and cqh ARE the lane stack's; it sits here, not on the stack, so a query can style
-     the stack itself (its gap in the tight rung below). */
+  /* The lanes-area size container: the lane stack is its only in-flow child and fills it, so `lp`'s
+     height IS the stack's; a query here can style the stack itself (the rungs below). */
   container: lp / size;
 }
 
-/* zero-specificity reset (:where, 0,0,0) so every single-class lane button rule below wins over it.
-   A bare `.lp button` (0,1,1) would beat those and re-inherit the UA font/colour; and background:none
-   kills the UA dark-mode button face that otherwise bleeds through pills which only restyle the border. */
+/* zero-specificity reset (:where, 0,0,0) so every recipe and lane rule wins over it, and the UA's dark
+   button face never bleeds through a part that draws its own */
 :where(.lp button) {
   appearance: none;
   -webkit-appearance: none;
@@ -35,10 +35,7 @@
   border: 0;
 }
 
-/* ============ THE LANE STACK ============
-   The core button sizes to the lanes-area HEIGHT (cqh, container `lp` on .lp) — it shrinks when the
-   stage splitter makes the looper zone short. No gap: the lanes (and an open FX drawer) are the rows of
-   one body, rounded only at its outer corners. */
+/* ============ THE LANE STACK: the rows of one panel; an open FX drawer is a row between two ============ */
 .lp__lanes {
   flex: 1 1 auto;
   min-height: 0;
@@ -47,302 +44,259 @@
   overflow-y: auto;
   scrollbar-width: thin;
 }
-.lp__lanes > :first-child {
-  border-top-left-radius: var(--r-card);
-  border-top-right-radius: var(--r-card);
-  box-shadow: inset 0 1px 0 var(--hair); /* the body's one top light */
-}
-.lp__lanes > :last-child {
-  border-bottom-left-radius: var(--r-card);
-  border-bottom-right-radius: var(--r-card);
-}
 
-/* ============ ONE LANE: a row of the body ============
-   --lane-pad-y is the row's vertical inset; the wave well spans it (a negative margin of the same), so
-   the five wells meet edge to edge as one pane. */
+/* ============ ONE LANE ============
+   --lane-pad-y is the strip's vertical inset; the glass spans it (a negative margin of the same), so the
+   five strips of glass meet edge to edge as one pane. The tier variables are read by the head:
+   --c the lit key's light (the state colour), --lo its strength, --gl its bloom (0..1, 6 px at 1),
+   --wc the state word's colour, --nc the number's. */
 .lp-lane {
   --ui: var(--ui-lane); /* the lanes' own size step (the app.css header's SIZE) */
   --lane-pad-y: clamp(6px, 1vh, 9px);
+  /* sizes resolved inside the lane (cqh = the lane's height) */
+  --lk: clamp(36px, max(100cqh - 32px, 70cqh), calc(92px * var(--ui))); /* the lit key's height */
+  --sk: max(20px, (var(--lk) - 6px) / 2); /* STOP and CLR, one over the other beside it */
+  --side-w: calc(62px * var(--ui));
+  --word: clamp(12px, 14cqh, calc(16px * var(--ui))); /* the state word */
+  --mk: clamp(20px, 33cqh, calc(40px * var(--ui))); /* the mix's latched keys */
+  --win-h: clamp(20px, 30cqh, calc(28px * var(--ui))); /* the value window, the fader's slot */
+  --knob: clamp(26px, 22cqh, calc(40px * var(--ui)));
+  --mix-w: clamp(352px, 21.7vw, calc(416px * var(--ui)));
+  --sc: var(--faint);
+  --c: var(--sc);
+  --lo: 0.92;
+  --gl: 0.45;
+  --wc: color-mix(in srgb, var(--sc) 88%, var(--surf-1));
+  --nc: var(--legend);
+  container: lane / size;
   flex: 1 1 0;
   min-height: calc(55px + 2 * clamp(6px, 1vh, 9px));
   display: flex;
   align-items: stretch;
-  gap: clamp(9px, 1vw, 14px);
-  padding: var(--lane-pad-y) clamp(10px, 1vw, 14px);
-  background: var(--card);
-  box-shadow: inset 0 1px 0 var(--row-line); /* rows part by a faint divider, never a gap or a card edge */
+  padding-block: var(--lane-pad-y);
   position: relative;
   overflow: hidden;
-  --sc: var(--faint);
-  /* the selection (chrome) eases; a state colour does not: on the core's face, its ring and the state
-     word it lands on the frame the feed switches it, like a hardware REC LED */
+  background: var(--card);
+  box-shadow: var(--groove); /* the strips part by a milled groove; the glass covers it in its column */
+  /* the selection (chrome) eases; a state colour does not: it lands on the frame the feed switches it */
   transition: background-color var(--motion);
+}
+.lp__lanes > .lp-lane:first-child {
+  box-shadow: none; /* the band's own edge above the first strip */
 }
 .lp-lane[data-state='play'] { --sc: var(--play); }
 .lp-lane[data-state='rec'] { --sc: var(--rec); }
 .lp-lane[data-state='dub'] { --sc: var(--dub); }
-.lp-lane[data-state='armed'] { --sc: var(--rec); } /* a take about to record: red, as a ring and a word, never the filled disc */
+.lp-lane[data-state='armed'] { --sc: var(--rec); } /* a take about to record */
 .lp-lane[data-state='listening'] { --sc: var(--cyan); }
 .lp-lane[data-state='stop'] { --sc: #a4a8b3; } /* between EMPTY and PLAYING in luminance */
-/* MUTED take (playing or stopped): the lane goes grey — state colour, ring and the waveform
-   (waveform.ts dims it) all drop, so a silent lane is never mistaken for a sounding one from across
-   the room. A live capture (rec/dub) keeps its colour even while muted: the take is being made. */
-.lp-lane[data-muted][data-state='play'] {
-  --sc: #8a8e99;
-}
-.lp-lane[data-muted][data-state='play'] .lp-core::before {
-  opacity: 0.35;
-}
-/* A fade or a pending loop-end stop is chrome, not a sound (the lane still plays green): the word and
-   its lit LED, NOW and the well's word light warm-white, NOW on the engaged face */
-.lp-lane.is-stopping .lp-lane__state,
-.lp-lane.is-stopping .lp-pb--play,
-.lp-lane.is-stopping .lp-lane__wellmsg {
-  color: var(--engaged);
-}
-.lp-lane.is-stopping .lp-pb--play:not(:active) {
-  background: var(--key-on);
-}
 
-/* Keyboard/MIDI-selected lane — its number lights, as a selected slot's letter does (the app.css header's
-   THE DISPLAY): never a box, a rail, a hue or a glow. The number turns --engaged and a weight up
-   (.lp-lane__num below), so the row reads as picked in every state (empty included) without competing
-   with the state colour (--sc), and its body lifts one quiet tone. The glass strip does not lift: a
-   lighter well read as a state. Its FX drawer open under it shares the lifted body, so lane and drawer
-   read as one picked block. Forced colours flatten all of it: the app.css forced-colours block outlines
-   the row there. */
+/* the tiers. LEAD: the selected lane and a lane capturing or about to (its state is the loudest thing on
+   it): the light at full strength, the word in the full state colour. */
+.lp-lane.is-selected,
+.lp-lane:is([data-state='rec'], [data-state='dub'], [data-state='armed'], [data-state='listening']) {
+  --lo: 1;
+  --gl: 1;
+  --wc: var(--sc);
+  --nc: var(--text);
+}
+/* MUTED (a take playing or stopped under its mute): the light turned down and grey, the word and number
+   silent tone, so a silent lane is never read as a sounding one. A capture keeps its colour. */
+.lp-lane[data-muted]:is([data-state='play'], [data-state='stop']) {
+  --sc: var(--faint);
+  --lo: 0.42;
+  --gl: 0.15;
+  --wc: var(--faint);
+  --nc: var(--faint);
+}
+/* EMPTY: an unlit window; the word and number in the silent tone */
+.lp-lane[data-state='empty'] {
+  --lo: 0;
+  --gl: 0;
+  --wc: var(--faint);
+  --nc: var(--faint);
+}
+/* the selected lane: its strip one tone up, its number the brightest thing in its head (warm white, the
+   selection's lit number); no outline, no edge. Its FX drawer open under it shares the tone. Forced
+   colours flatten it: the app.css forced-colours block outlines the strip there. */
 .lp-lane.is-selected.is-selected,
 .lp-lane.is-selected + .lp-drawer {
   background: var(--surf-sel);
 }
-/* EMPTY: the row keeps the body's tone (one machine); the EMPTY word + unlit LED carry the cue */
-.lp-lane[data-state='empty'] {
-  --sc: #8a8e99;
+.lp-lane.is-selected {
+  --nc: var(--engaged);
+}
+/* A fade or a pending loop-end stop is chrome, not a sound (the lane still plays green): the word, NOW and
+   the glass's word light warm white */
+.lp-lane.is-stopping {
+  --wc: var(--engaged);
+}
+.lp-lane.is-stopping .lp-pb--play,
+.lp-lane.is-stopping .lp-lane__wellmsg {
+  color: var(--engaged);
 }
 
-/* ---- left cluster: identity + core + play-stop/clear pair ---- */
+/* ============ THE HEAD: the number over the state word · the lit key · STOP over CLR ============ */
 .lp-lane__left {
-  flex: 0 0 auto;
+  flex: none;
   display: flex;
   align-items: center;
-  gap: clamp(9px, 1vw, 13px);
-  width: clamp(200px, 19vw, calc(256px * var(--ui)));
-  position: relative;
-  z-index: 1;
+  gap: clamp(8px, 0.55vw, calc(10px * var(--ui)));
+  padding: 0 clamp(10px, 0.85vw, calc(16px * var(--ui))) 0 clamp(14px, 1.15vw, calc(22px * var(--ui)));
 }
-/* the identity column: the number over the state word and, on the selected lane, the live source under
-   it, each centred on the column's one axis, so the numbers and words of all five lanes line up down the
-   stack whatever the word's length or which lane shows the source */
+/* the identity column: one width on every lane (the widest word, OVERDUB, at its size), so the keys
+   beside it stand at one x down the five */
 .lp-lane__idbox {
-  flex: 0 0 auto;
+  flex: none;
+  width: calc(var(--word) * 5.6);
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  width: clamp(80px, 6.6vw, calc(108px * var(--ui)));
+  align-items: flex-start; /* each line hugs its text, flush left */
+  justify-content: center;
+  gap: clamp(2px, 3cqh, 8px);
+  min-width: 0;
 }
-/* the wide display's lane step (--ui-lane 1.3): the box takes the room the left cluster has spare there */
-@media (min-width: 2200px) {
-  .lp-lane__idbox {
-    width: calc(126px * var(--ui));
+/* the lane number, printed large in the numerals face: identity and the selection, never the sound */
+.lp-lane__num {
+  font: 500 clamp(22px, 39cqh, calc(64px * var(--ui))) / 0.8 var(--font-num);
+  letter-spacing: -0.02em;
+  color: var(--nc);
+  transition: color var(--motion);
+}
+/* the state word: a lit legend in the state colour, no plate; the lead tier's a tight bloom (6 px) */
+.lp-lane__state {
+  font: 600 var(--word) / 1 var(--font-legend);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--wc);
+}
+.lp-lane:is(.is-selected, [data-state='rec'], [data-state='dub'], [data-state='armed']):not([data-state='empty']):not(.is-stopping) .lp-lane__state {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--sc) 45%, transparent);
+}
+/* the live source a take on this lane would hear (FROM A), on the selected lane, under the word */
+.lp-lane__src {
+  font: 600 calc(12px * var(--ui)) / 1 var(--font-legend);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: var(--dim);
+}
+@container lane (max-height: 45.98px) {
+  /* the three lines need about 46 px (the number's 22 px floor at its 0.8 line, two 12 px lines, two 2 px
+     gaps): only the tightest rung (an open drawer's params) drops the third; the slot's LIVE key still says it */
+  .lp-lane__src {
+    display: none;
   }
 }
-/* the live source a take on this lane would hear: the badge language (caps with a dot), at the size read
-   from the guitar. Under the state word, 4 px from it; the 57 px rungs close the column up and the tight
-   rung drops it (the SHORT regime below) */
-.lp-lane__src {
-  margin-top: -2px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: clamp(10px, 0.68vw, calc(13px * var(--ui)));
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  line-height: 1;
-  color: var(--engaged); /* the routing is chrome, lit warm-white; the live signal's green is its dot */
-  white-space: nowrap;
-}
-.lp-lane__src::before {
-  content: '';
-  width: calc(5px * var(--ui));
-  height: calc(5px * var(--ui));
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--play);
-}
-/* the lane number: identity and the selection, never the sound (the wave, the state word with its LED
-   and the core's ring carry that). Every number at rest is a quiet --faint light figure; the selected
-   lane's lights --engaged a weight up, the step a slot's letter takes */
-.lp-lane__num {
-  font-size: clamp(19px, 1.7vw, calc(24px * var(--ui)));
-  font-weight: 300;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  color: var(--faint);
-  transition: color var(--motion), font-weight var(--motion);
-}
-.lp-lane.is-selected .lp-lane__num {
-  color: var(--engaged);
-  font-weight: 500;
-}
-/* the state word with an LED: lit (a solid dot in the word's colour) for a sounding or waiting lane
-   (PLAYING / ARMED / LISTEN; FADING and ENDING lit warm-white, .is-stopping above), dark otherwise. A live capture (REC /
-   OVERDUB) becomes a FILLED badge, a carrier that survives greyscale and every colour-vision type
-   (STATUS D14): flat, the state colour under a dark legend, no glow. The REC word brings its own ●, so the
-   badge drops the LED. */
-.lp-lane__state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: calc(11px * var(--ui));
-  letter-spacing: 0.08em;
-  font-weight: 600;
-  line-height: 1;
-  padding: 3px 0;
-  border-radius: 4px;
-  color: var(--sc);
-  white-space: nowrap;
-}
-.lp-lane__state::before {
-  content: '';
-  width: calc(6px * var(--ui));
-  height: calc(6px * var(--ui));
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--led-socket);
-  box-shadow: var(--led-socket-shade);
-}
-.lp-lane[data-state='play']:not([data-muted]) .lp-lane__state::before,
-.lp-lane[data-state='armed'] .lp-lane__state::before,
-.lp-lane[data-state='listening'] .lp-lane__state::before {
-  background: currentColor;
-  box-shadow: none;
-}
-.lp-lane[data-state='listening'] .lp-lane__state::before {
-  animation: lp-armed-ring 1.4s ease-in-out infinite;
-}
-.lp-lane[data-state='rec'] .lp-lane__state,
-.lp-lane[data-state='dub'] .lp-lane__state {
-  background: var(--sc);
-  color: #0b0b0d;
-  padding: 3px 7px;
-}
-.lp-lane[data-state='rec'] .lp-lane__state::before,
-.lp-lane[data-state='dub'] .lp-lane__state::before {
-  display: none;
-}
 
-/* the CORE — the REC/DUB gesture: a flat matte key with one hairline rim, ringed by state; REC/DUB
-   light the whole face (a flat filled disc, no bloom) */
-.lp-core {
-  flex: 0 0 auto;
-  width: clamp(38px, 8.5cqh, calc(52px * var(--ui)));
-  height: clamp(38px, 8.5cqh, calc(52px * var(--ui)));
-  border-radius: 999px;
-  display: grid;
-  place-items: center;
+/* ---- the LIT KEY: the lane's main key (the REC/DUB gesture). A key cap (the recipe) whose face carries a
+   frosted window lit in the state colour, the next action's glyph under it. While it captures a round rec
+   lamp sits beside the light bar (D14: REC and OVERDUB told from PLAYING without colour); an ARMED take
+   shows that lamp's socket unlit; an empty lane's window is dark. ---- */
+.k-key.lp-core {
+  --kh: var(--lk);
+  --wi: calc(var(--lk) * 0.13); /* the window's inset from the cap's edge */
+  --wh: max(5px, calc(var(--lk) * 0.12)); /* its height */
+  width: calc(var(--lk) * 1.26);
+  padding: calc(var(--lk) * 0.24) 0 0;
+  border-radius: var(--r-well);
+}
+/* the glyph in full ink; disabled keeps the recipe's --faint legend (tone, never an opacity fade) */
+.k-key.lp-core:not(:disabled) {
   color: var(--text);
-  background: var(--surf-2);
-  border: 1px solid var(--edge);
-  box-shadow: inset 0 1px 0 var(--hair);
-  position: relative;
-  cursor: pointer;
-  transition: border-color var(--motion); /* the hover's rim only: the face and ring are state colour */
 }
-/* A hardware REC button: hover lifts the rim's tone, a press darkens the face and sinks the glyph, and
-   the release is instant. No transform on the core itself: a scale() on this rounded gradient face with
-   its shadows rasterises with hairline seams through the centre while it animates (the owner saw them
-   on hover and release). The pointer-press probe (verify/probes/transport-focus.mjs) holds this. */
-/* a record key that can act (empty or stopped included) wears a clear neutral rim, so it reads as a
-   footswitch target from the chair; a disabled one keeps the bezel's quiet --edge (below) */
-.lp-core:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.2);
-}
-.lp-core:hover:not(:disabled) {
-  border-color: var(--dim);
-}
-.lp-core:active:not(:disabled) {
-  filter: brightness(0.8);
-}
-.lp-core:active:not(:disabled) svg {
-  transform: translateY(1px);
-}
-.lp-core:focus-visible {
-  outline-offset: 3px;
-}
-/* disabled = no face, a hairline rim in the bezel, a --faint glyph: tone, never an opacity fade (the
-   .lp-pb:disabled block below). [data-state] outranks the state glyph colours below (EMPTY's red ●); the
-   state ring is the lane's, not the control's, and stays. */
-.lp-lane[data-state] .lp-core:disabled {
-  cursor: not-allowed;
+.lp-lane[data-muted]:is([data-state='play'], [data-state='stop']) .k-key.lp-core:not(:disabled) {
   color: var(--faint);
-  background: transparent;
-  border-color: var(--edge);
-  box-shadow: none;
 }
-.lp-core svg {
-  width: 38%;
-  height: 38%;
-  position: relative;
+.lp-core__glyph {
+  display: block;
+  width: calc(var(--lk) * 0.37);
+  height: calc(var(--lk) * 0.37);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-/* the overdub glyph (Looper.tsx IconDub, the one stroked glyph): a plain + the size of the record ●
-   (about 16 px on a 2560 core), its stroke a step under the ●'s weight; the ring round it went, so it
-   reads from the chair as "add a layer", not as a small sign inside a circle inside the core's ring */
-.lp-core svg[stroke] circle {
-  display: none;
+.lp-core__glyph .fill {
+  fill: currentColor;
+  stroke: none;
 }
-.lp-core svg[stroke] path {
-  transform: scale(2.1);
-  transform-box: fill-box;
-  transform-origin: center;
-  stroke-width: 1.75;
-}
-/* the state ring around the cap, a dark gap from its rim */
+/* the light under the window, washed down the face: the window's own light, at its bloom's strength */
 .lp-core::before {
   content: '';
   position: absolute;
-  inset: -5px;
-  border-radius: 999px;
-  border: 2px solid var(--sc);
-  opacity: 0;
+  left: calc(var(--wi) * 0.65);
+  right: calc(var(--wi) * 0.65);
+  top: calc(var(--wi) + var(--wh) * 0.5);
+  height: calc(var(--lk) * 0.37);
+  border-radius: var(--r-sm);
+  opacity: var(--gl);
+  background: radial-gradient(60% 100% at 50% 0%, color-mix(in srgb, var(--c) 17%, transparent), transparent 75%);
+  pointer-events: none;
 }
-.lp-lane[data-state='play'] .lp-core::before {
-  opacity: 1;
+.lp-core__win {
+  position: absolute;
+  left: var(--wi);
+  right: var(--wi);
+  top: var(--wi);
+  height: var(--wh);
+  display: flex;
+  gap: 4px;
 }
-/* REC / OVERDUB: the whole face lights, like the hardware REC button: a flat disc in the state colour
-   with a dark glyph, and no ring (the disc is the ring's colour, at full size) */
-.lp-lane[data-state='rec'] .lp-core,
-.lp-lane[data-state='dub'] .lp-core {
-  color: #0b0b0d;
-  background: var(--sc);
-  border-color: var(--sc);
-  box-shadow: none;
+.lp-core__lamp,
+.lp-core__bar {
+  position: relative;
+  height: 100%;
+  border-radius: 2.5px;
+  background: var(--led-socket);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.95), 0 1px 0 rgba(255, 255, 255, 0.1);
 }
-/* an empty lane's ● is tone, not red: idle chrome spends no hue, and red means a take is being made */
-.lp-lane[data-state='empty'] .lp-core {
-  color: var(--dim);
+.lp-core__bar {
+  flex: 1 1 auto;
 }
-/* ARMED (waiting for the downbeat or counting in): a steady red DASHED ring round the dark face and a
-   red ● glyph, the take it is about to make; no blink (only the count-in moves). Distinct from live REC
-   (the whole face a filled red disc, ■) and OVERDUB (a filled amber disc, ■). */
-.lp-lane[data-state='armed'] .lp-core {
-  color: var(--rec);
+.lp-core__lamp {
+  display: none;
+  flex: none;
+  width: var(--wh);
+  border-radius: 50%;
 }
-.lp-lane[data-state='armed'] .lp-core::before {
-  opacity: 1;
-  border-style: dashed;
+.lp-lane:is([data-state='rec'], [data-state='dub'], [data-state='armed']) .lp-core__lamp {
+  display: block;
 }
-.lp-lane[data-state='listening'] .lp-core {
-  color: var(--cyan);
+/* the light: a frosted top over the state colour, brightest at its middle */
+.lp-core__lamp::after,
+.lp-core__bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: var(--lo);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0) 55%),
+    linear-gradient(90deg, color-mix(in srgb, var(--c) 78%, #000), var(--c) 22%, color-mix(in srgb, var(--c) 70%, #fff) 50%, var(--c) 78%, color-mix(in srgb, var(--c) 78%, #000));
 }
-.lp-lane[data-state='listening'] .lp-core::before {
-  opacity: 1;
-  border-style: dashed;
-  animation: lp-armed-ring 1.4s ease-in-out infinite;
+.lp-core__lamp::after {
+  background: radial-gradient(circle at 50% 35%, color-mix(in srgb, var(--c) 55%, #fff), var(--c) 60%, color-mix(in srgb, var(--c) 80%, #000));
 }
-@keyframes lp-armed-ring {
+/* lit: a tight bloom in its own colour (the header's LED limit, 6 px) */
+.lp-lane:not([data-state='empty']) .lp-core__bar,
+.lp-lane:is([data-state='rec'], [data-state='dub']) .lp-core__lamp {
+  box-shadow: 0 0 calc(var(--gl) * 6px) calc(var(--gl) * 1px) color-mix(in srgb, var(--c) calc(var(--gl) * 55%), transparent), 0 0 2px color-mix(in srgb, var(--c) 80%, transparent);
+}
+.lp-lane[data-state='empty'] .lp-core__bar::after,
+.lp-lane[data-state='armed'] .lp-core__lamp::after {
+  display: none;
+}
+/* ARMED waits for its downbeat: the bar at half light beside the rec lamp's dark socket */
+.lp-lane[data-state='armed'] .lp-core__bar::after {
+  opacity: 0.5;
+}
+/* LISTENING (AUTO REC waits for input): the bar breathes, the one motion that reports a wait */
+.lp-lane[data-state='listening'] .lp-core__bar::after {
+  animation: lp-listen 1.4s ease-in-out infinite;
+}
+@keyframes lp-listen {
   0%,
   100% {
     opacity: 0.4;
@@ -351,113 +305,49 @@
     opacity: 0.95;
   }
 }
+/* FADING: the light runs down to the right, the level going out */
+.lp-lane.is-fading .lp-core__bar::after {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0) 55%),
+    linear-gradient(90deg, var(--c) 0%, var(--c) 28%, color-mix(in srgb, var(--c) 14%, var(--led-socket)) 100%);
+}
 
-/* play-stop + clear, stacked; one width on every lane whichever word (PLAY, STOP, NOW) it shows. 62px
-   holds ▶ PLAY (about 43px of type) on a narrower pad and keeps the pair inside the left cluster's 200px
-   at the 1000px floor (live-meter) */
+/* ---- STOP over CLR: one width on every lane whichever word (PLAY, STOP, NOW) it shows ---- */
 .lp-lane__pair {
-  flex: 0 0 auto;
+  flex: none;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
-.lp-lane__pair .lp-pb {
-  width: calc(62px * var(--ui));
-  padding: 0 8px;
+.lp-lane__pair > .k-key {
+  --kh: var(--sk);
+  width: var(--side-w);
+  padding: 0;
+  gap: 6px;
+  font-size: clamp(12px, 7.7cqh, calc(14px * var(--ui)));
 }
-
-/* ---- lane key (STOP/PLAY/CLR + FX/MUTE/REV/UNDO/EDIT): a key of the one family (the app.css header's
-   KEYS) — the quiet resting face, lifted on hover, sunk on press, one step lighter when engaged ---- */
-.lp-pb {
-  height: clamp(20px, 4.2cqh, calc(24px * var(--ui)));
-  min-width: 58px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  background: var(--key);
-  color: var(--legend);
-  font-size: calc(10.5px * var(--ui));
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  display: grid;
-  place-items: center;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color var(--motion), background-color var(--motion), border-color var(--motion);
+.lp-lane__pair > .k-key--clr {
+  font-size: calc(12px * var(--ui));
 }
-.lp-pb:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--key-hover);
+/* STOP's glyph: a small square, PLAY's a triangle, in the legend's colour */
+.lp-glyph {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 1.5px;
+  background: currentColor;
 }
-.lp-pb:active:not(:disabled) {
-  background: var(--sunk);
-  box-shadow: var(--pressed);
-}
-/* disabled = the resting face, a legible --faint legend: tone, never an opacity fade, so an EMPTY lane's
-   PLAY / CLR / FX / MUTE still read as controls (owner eye check 2026-09-23: an opacity fade read
-   grey-on-grey) and a row of keys never mixes faces with bare words. */
-.lp-pb:disabled {
-  cursor: not-allowed;
-  background: var(--key-off);
-  box-shadow: none;
-  color: var(--faint);
-}
-/* engaged (FX / MUTE / REV) = the lit warm-white legend of every engaged key, on the face one step up */
-.lp-pb.is-on,
-.lp-pb.is-on:hover:not(:disabled):not(:active) {
-  color: var(--engaged);
-  background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
-}
-/* FX's and MUTE's lamps, the lane LED's vocabulary: an unlit socket before the legend, lit with the
-   engaged recipe of every key with a lamp (the record modes, the drawer's effects): lamp, warm-white
-   legend, the face a step up. FX is engaged while any of the lane's effects is (Looper.tsx `fxEngaged`);
-   its drawer open (.is-on) lights the legend and face alone, the lamp staying the effects'. Always in the
-   row, so lighting a lamp never moves the legend or resizes the pill. */
-.lp-pb--fx,
-.lp-pb--mute {
-  grid-auto-flow: column;
-  column-gap: calc(5px * var(--ui));
-  justify-content: center;
-  align-items: center;
-}
-.lp-pb--fx::before,
-.lp-pb--mute::before {
-  content: '';
-  width: calc(5px * var(--ui));
-  height: calc(5px * var(--ui));
-  border-radius: 999px;
-  background: var(--led-socket);
-  box-shadow: var(--led-socket-shade);
-  transition: background-color var(--motion), box-shadow var(--motion);
-}
-.lp-pb--fx.has-fx::before,
-.lp-pb--mute.is-on::before {
-  background: var(--engaged);
-  box-shadow: none;
-}
-.lp-pb--fx.has-fx:not(:disabled):not(:active) {
-  color: var(--engaged);
-  background: var(--key-on);
-}
-/* CLR armed → SURE?: a confirm is chrome (amber is the overdub's), so the engaged recipe: the lit
-   legend on the face a step up; the word says what the next press does */
-.lp-pb--clr.is-armed,
-.lp-pb--clr.is-armed:hover:not(:active) {
-  color: var(--engaged);
-  background: var(--key-on);
-}
-/* pressed: the sunk face (.lp-pb:active) wins, the lit legend stays */
-.lp-pb--clr.is-armed:active:not(:disabled) {
-  color: var(--engaged);
+.lp-glyph--play {
+  border-radius: 0;
+  clip-path: polygon(10% 0, 100% 50%, 10% 100%);
 }
 
-/* ---- the WAVE WELL — this row's strip of the one glass display (waveform + playhead drawn by
-   waveform.ts) ----
-   The well spans the row's full height (the negative margin eats --lane-pad-y), so the five wells meet
-   as one true-black pane; its lines are inset shadows UNDER the canvas, so a playhead crosses them and
-   equal-length loops draw one unbroken line down the pane. The sheen is one gradient over the whole
-   pane: each row shows its fifth of it (--row). A size container (its size comes from the lane, never
-   its content), so the count-in numeral can scale with the well's height (cqh). */
+/* ============ THE GLASS: this lane's strip of the one recessed pane ============
+   The canvas (waveform.ts) draws the wave, the bar grid with its numbers and the playhead. The strips span
+   the lane's full height (the negative margin eats --lane-pad-y) and meet as one pane; its frame is the
+   bezel's dark edge down both sides, closed and rounded at the first and last strips; the hairline between
+   two strips is an inset line UNDER the canvas, so a playhead crosses it. A size container, so the count-in
+   numeral scales with the strip. */
 .lp-lane__well {
   container: well / size;
   flex: 1 1 auto;
@@ -465,23 +355,15 @@
   margin-block: calc(-1 * var(--lane-pad-y));
   position: relative;
   overflow: hidden;
-  background-color: var(--glass);
-  background-image: var(--glass-sheen);
-  background-repeat: no-repeat;
-  background-size: 100% 500%;
-  background-position: 0 calc(var(--row, 0) * 25%);
-  box-shadow: inset 0 1px 0 var(--glass-line); /* the hairline between this row and the one above */
+  border-inline: 3px solid var(--sunk);
+  background: var(--glass);
+  box-shadow: inset 0 1px 0 var(--glass-line);
   z-index: 1;
-  transition: background-color var(--motion), box-shadow var(--motion);
+  transition: box-shadow var(--motion);
 }
-.lp-lane:nth-child(2 of .lp-lane) { --row: 1; }
-.lp-lane:nth-child(3 of .lp-lane) { --row: 2; }
-.lp-lane:nth-child(4 of .lp-lane) { --row: 3; }
-.lp-lane:nth-child(5 of .lp-lane) { --row: 4; }
-/* the pane sits in the body: the rows at its ends double their outer inset, so the body frames the
-   glass on all four sides while every row's strip keeps one height. Its outer corners round, and its top
-   row carries the one top highlight. An open FX drawer parts the pane: the row above it closes one
-   part, the row under it opens the next, and the drawer sits on the body between them. */
+/* the pane's top: its frame closes over the first strip, which takes the glass's top reflection; an open FX
+   drawer parts the pane, the strip under it opening the next part. The rows at the pane's ends double
+   their outer inset, so the panel frames the glass on all four sides while every strip keeps one height. */
 .lp__lanes > .lp-lane:first-child,
 .lp__lanes > .lp-drawer + .lp-lane {
   padding-top: calc(2 * var(--lane-pad-y));
@@ -492,12 +374,15 @@
 }
 .lp__lanes > .lp-lane:first-child .lp-lane__well,
 .lp__lanes > .lp-drawer + .lp-lane .lp-lane__well {
+  border-top: 3px solid var(--sunk);
   border-top-left-radius: var(--r-well);
   border-top-right-radius: var(--r-well);
-  box-shadow: inset 0 1px 0 var(--glass-top);
+  background-image: var(--glass-sheen);
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 8px rgba(0, 0, 0, 0.9);
 }
 .lp__lanes > .lp-lane:last-child .lp-lane__well,
 .lp__lanes > .lp-lane:has(+ .lp-drawer) .lp-lane__well {
+  border-bottom: 3px solid var(--sunk);
   border-bottom-left-radius: var(--r-well);
   border-bottom-right-radius: var(--r-well);
 }
@@ -508,10 +393,9 @@
   height: 100%;
   display: block;
 }
-/* The well's message centred in the well (over the faint canvas centre line): the word as quiet caps
-   on a dark scrim that keeps it legible over the wave, one box for every message (the armed wait, the
-   listen, a pending stop, a refusal), and the count-in's numeral on its own beside it (a row: the box
-   under the numeral overflows the 57px rung). */
+/* The strip's message, centred over the faint canvas centre line: the word as quiet caps on a dark scrim
+   that keeps it legible over the wave, one box for every message (the armed wait, the listen, a pending
+   stop, a refusal), the count-in's numeral beside it */
 .lp-lane__wellmsg {
   position: absolute;
   inset: 0;
@@ -519,13 +403,12 @@
   display: grid;
   grid-auto-flow: column;
   place-items: center;
-  place-content: center; /* the count-in's numeral and word sit together at the centre */
+  place-content: center;
   column-gap: clamp(8px, 12cqh, 16px);
   pointer-events: none;
   padding: 0 8px;
   text-align: center;
-  font-size: clamp(10px, 0.9vw, calc(11px * var(--ui)));
-  font-weight: 600;
+  font: 600 calc(12px * var(--ui)) / 1.2 var(--font-legend);
   color: var(--dim);
 }
 .lp-lane__cue,
@@ -534,12 +417,11 @@
   padding: 5px 10px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  letter-spacing: 0.14em;
+  background: color-mix(in srgb, var(--glass) 78%, transparent);
+  letter-spacing: 0.12em;
 }
-/* The empty looper's start line (a guitar-first install: lane-state.ts `startLine`): one sentence in the
-   silent tone on the messages' box, which also parts the faint centre line under it, and its key a lane
-   key's cap (a legend, not a control). */
+/* The empty looper's start line (lane-state.ts `startLine`): one sentence in the silent tone, its key a
+   printed cap (a legend, not a control) */
 .lp-lane__start {
   color: var(--faint);
   font-weight: 500;
@@ -551,24 +433,20 @@
 .lp-lane__key {
   display: inline-block;
   margin-right: 0.45em;
-  padding: 2px 7px;
+  padding: 3px 7px;
   border-radius: var(--r-sm);
-  background: var(--key);
+  background: var(--cap);
+  box-shadow: var(--cap-light);
   color: var(--legend);
-  font-family: inherit;
-  font-size: calc(10.5px * var(--ui));
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font: 600 calc(12px * var(--ui)) / 1 var(--font-legend);
+  letter-spacing: 0.06em;
 }
-/* the count-in numeral (a counted-in take): big enough to read from the guitar, lit warm-white (the
-   count is chrome; the dashed red ring on the core and the ARMED word carry the take it counts toward, so
-   no large red field fills the well before a note is recorded). Its box is trimmed to the digit (cap
-   height to baseline), so 80cqh draws a digit about 58 % of the well's height at every window size. */
+/* the count-in numeral: big enough to read from the guitar, lit warm white (the count is chrome; the
+   ARMED word and the lit key's lamp socket carry the take it counts toward). Its box is trimmed to the
+   digit, so 80cqh draws a digit about 58 % of the strip's height at every window size. */
 .lp-lane__count {
   display: block;
-  font-size: max(20px, 80cqh);
-  font-weight: 600;
-  line-height: 1;
+  font: 500 max(20px, 80cqh) / 1 var(--font-num);
   text-box: trim-both cap alphabetic;
   letter-spacing: -0.04em;
   color: var(--engaged);
@@ -577,10 +455,9 @@
 .lp-lane[data-state='listening'] .lp-lane__wellmsg {
   color: color-mix(in srgb, var(--cyan) 70%, var(--faint));
 }
-/* A refused transport key (gates.ts refuseOnLane): its reason sits in the cue's box, lit warm-white
-   like the armed CLR (a refusal is chrome; amber is the overdub's), and the row's glass is ringed
-   warm-white until the cue times out. The sighted twin of the screen-reader announcement; after the
-   state and selection rules above so it wins on any lane. */
+/* A refused transport key (gates.ts refuseOnLane): its reason in the message's box, lit warm white (a
+   refusal is chrome), and the strip's glass ringed warm white until the cue times out. The sighted twin of
+   the screen-reader announcement; after the state rules so it wins on any lane. */
 .lp-lane .lp-lane__wellmsg.is-cue {
   color: var(--engaged);
   text-transform: uppercase;
@@ -598,192 +475,304 @@
   }
 }
 
-/* ---- right cluster: FX/MUTE/REV/UNDO/EDIT pills over the mix row (volume slider and pan) ---- */
+/* ============ THE MIX: FX MUTE (latched) | REV UNDO EDIT (momentary); the fader, the window, the pan ============
+   Five fixed columns, the same on every lane: a key that does not apply is disabled, never absent.
+   D4: an empty lane's mix is disabled (its volume is not settable) and wears the disabled recipes. */
 .lp-lane__right {
-  flex: 0 0 auto;
-  width: clamp(240px, 20vw, calc(264px * var(--ui)));
+  flex: none;
+  width: var(--mix-w);
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: calc(7px * var(--ui));
-  position: relative;
-  z-index: 1;
+  gap: clamp(2px, 6cqh, calc(15px * var(--ui)));
+  padding: 0 clamp(12px, 1.25vw, calc(24px * var(--ui))) 0 clamp(12px, 1.15vw, calc(22px * var(--ui)));
 }
-/* An empty lane's mix is disabled (D4: its volume is not settable) and wears the disabled recipe, per
-   element as the pills do (the .lp-pb:disabled block above): the ranges' --faint caps (app.css
-   `.lf-range:disabled`) and --faint read-outs, never an opacity fade. */
-.lp-lane[data-state='empty'] .lp-vdb,
-.lp-lane[data-state='empty'] .lp-pan__val {
-  color: var(--faint);
-}
-/* Five fixed columns, FX · MUTE · REV · UNDO · EDIT, the same on every lane: a pill that does not apply
-   is disabled, never absent, so no column moves when another lane's state changes. The widths follow the
-   legends (FX's is the shortest, ↶ UNDO's the longest), so every legend keeps its air in the narrowest
-   cluster. */
 .lp-lane__mods {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: calc(var(--mk) + 3px); /* the cap's wall under it */
 }
-.lp-lane__mods .lp-pb {
-  min-width: 0;
+.lp-lane__mods > .k-key {
+  --kh: var(--mk);
+  font-size: clamp(12px, 8cqh, calc(14px * var(--ui)));
+}
+.lp-lane__mods > .k-key--latch {
+  --led-top: clamp(3px, calc(var(--mk) * 0.15), calc(6px * var(--ui)));
+}
+.lp-lane__mods > .lp-pb--fx {
+  width: calc(58px * var(--ui));
   padding: 0;
 }
-
-/* the mix row: the volume fader takes what the pan (a fixed 44px range and its read-out) leaves */
-.lp-lane__mix {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.lp-lane__mods > .lp-pb--mute {
+  width: calc(74px * var(--ui));
+  padding: 0;
 }
-/* horizontal volume slider — native range styled to match the command bar's .transport__volume */
+/* the momentary group, parted from the latched pair by spacing alone */
+.lp-lane__mods > .k-key--mo {
+  --kh: max(20px, calc(var(--mk) * 0.8));
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: calc(12px * var(--ui));
+}
+.lp-lane__mods > .lp-pb--rev {
+  margin-left: clamp(10px, 1.35vw, calc(26px * var(--ui)));
+}
+/* FX: its LED says the lane's effects are engaged (`fxEngaged`), its lit legend that the drawer is open.
+   The recipe lights the LED of a pressed key, so the open drawer's aria-pressed leaves it to `.is-on`. */
+.lp-pb--fx[aria-pressed='true'] > .k-led:not(.is-on) {
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
+}
+.lp-pb--fx.is-open:not(:disabled),
+.lp-pb--rev.is-on:not(:disabled) {
+  color: var(--engaged);
+}
+/* a short strip: the latched keys' LED goes beside the legend, a dot, so it never sits on it */
+@container lane (max-height: 79.98px) {
+  .lp-lane__mods > .k-key--latch {
+    padding-top: 0;
+    gap: 5px;
+  }
+  .lp-lane__mods > .k-key--latch > .k-led {
+    position: static;
+    translate: none;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+  }
+}
+
+/* the mix line: the fader takes what the value window and the pan leave */
+.lp-lane__mix {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: clamp(8px, 0.75vw, calc(14px * var(--ui)));
+}
 .lp-lane__vol {
   flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.lp-vbar-wrap {
+  min-width: 56px;
+  max-width: calc(190px * var(--ui));
   position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
 }
-.lp-vbar {
-  position: relative; /* over the absolute unity tick so the thumb reads on top of it */
-  width: 100%;
-  margin: -2px 2px; /* inline: pin the UA default — the unity tick's inset-travel calc below folds this in */
-  height: 24px; /* the drag/keyboard hit area (a 20px margin box, as before); the visible 3px track is the `.lf-range` skin (app.css) */
+.lp-vbar.k-fader {
+  height: var(--win-h);
 }
-/* unity (0 dB) tick — production volume runs 0..1.5, so unity (1.0) sits at 1/1.5 = 66.7% of travel */
+/* the printed scale under the slot: a tick under the cap's centre at each mark (--at, 0..1 of the travel,
+   the 30 px cap's half inset at each end) and the 0 dB mark lit with its figure */
+.lp-vbar__scale {
+  position: relative;
+  height: calc(14px * var(--ui));
+  margin-top: 1px;
+  pointer-events: none;
+}
+.lp-vbar__tick {
+  position: absolute;
+  top: 0;
+  left: calc(15px + var(--at) * (100% - 30px));
+  width: 1.5px;
+  height: 5px;
+  margin-left: -0.75px;
+  background: #6f767f;
+}
 .lp-vbar__unity {
+  top: -1px;
+  width: 2px;
+  height: 7px;
+  margin-left: -1px;
+  background: var(--text);
+}
+.lp-vbar__zero {
   position: absolute;
-  /* the tick positions against .lp-vbar-wrap, but the thumb travels inside the input, which sits
-     2px inset (the pinned margin above). Thumb centre relative to the wrap at fraction f:
-     2px + thumbW/2 + f·(wrapW − 4px − thumbW); at f=2/3 with the 11px thumb (same on -webkit and
-     -moz) that's 66.667% − 2.5px, minus the 1px tick's half-width → −3px. */
-  left: calc(66.667% - 3px);
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1px;
-  height: 11px;
-  background: var(--faint);
-  pointer-events: none;
+  top: 7px;
+  left: calc(15px + var(--at) * (100% - 30px));
+  translate: -50% 0;
+  font: 500 calc(12px * var(--ui)) / 1 var(--font-num);
+  color: var(--legend);
 }
-.lp-vdb {
-  flex: 0 0 auto;
-  min-width: 8ch; /* holds its widest (−40.0 dB), so a drag never moves the fader's end */
-  text-align: right;
-  font-family: var(--mono);
-  font-size: calc(12px * var(--ui));
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
+.lp-lane[data-state='empty'] .lp-vbar__tick {
+  background: var(--surf-3);
 }
-/* the pan: a 44x24 range over -100..100 with a centre tick, and its L / C / R read-out */
-.lp-lane__pan {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 5px;
+.lp-lane[data-state='empty'] .lp-vbar__zero {
+  color: var(--faint);
 }
-.lp-pan-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
+/* a strip under ~90 px has no room for the scale: the window still prints the level */
+@container lane (max-height: 89.98px) {
+  .lp-vbar__scale {
+    display: none;
+  }
 }
-.lp-pan {
-  position: relative; /* over the centre tick */
-  width: calc(44px * var(--ui));
-  height: 24px;
-  margin: -2px 0; /* no inline margin: the thumb's centre at the middle of travel is the box's centre */
+/* ONE value window: the level and the pan, one width on every lane that holds the widest pair
+   (`−40.0 dB  L 100`) */
+.k-win.lp-lane__win {
+  flex: none;
+  width: calc(120px * var(--ui));
+  height: var(--win-h);
+  justify-content: space-between;
+  gap: 6px;
 }
-.lp-pan__centre {
-  position: absolute;
-  left: calc(50% - 0.5px);
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1px;
-  height: 11px;
-  background: var(--faint);
-  pointer-events: none;
-}
+.lp-vdb,
 .lp-pan__val {
-  flex: 0 0 auto;
-  min-width: 5ch; /* `L 100` */
-  font-family: var(--mono);
+  white-space: nowrap;
+}
+.lp-unit {
+  margin-left: 0.25em;
   font-size: calc(12px * var(--ui));
   color: var(--dim);
-  font-variant-numeric: tabular-nums;
+}
+.k-win.is-off .lp-unit {
+  color: var(--faint);
+}
+/* the pan: the knob turned by the pan, its printed ring round it, the native range laid over both */
+.lp-lane__pan {
+  flex: none;
+  position: relative;
+  width: var(--knob);
+  height: var(--knob);
+  margin: calc((var(--win-h) - var(--knob)) / 2) calc(var(--knob) * 0.2) 0 auto;
+  border-radius: 50%;
+}
+.k-knob.lp-knob {
+  --s: var(--knob);
+  pointer-events: none;
+}
+.lp-knob__ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(var(--knob) * 1.625);
+  height: calc(var(--knob) * 1.625);
+  translate: -50% -50%;
+  overflow: visible;
+  pointer-events: none;
+  stroke: #6f767f;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+.lp-knob__ring .is-major,
+.lp-knob__ring .is-centre {
+  stroke: var(--legend);
+  stroke-width: 1.5;
+}
+.lp-lane[data-state='empty'] .lp-knob__ring line {
+  stroke: var(--surf-3);
+}
+/* the range: transparent, as wide as today's 44 px pan at the least (a knob drags across it left to right,
+   so a small knob keeps the pointer's resolution), its thumb a known 11 px so the travel is the box less 11 */
+.lp-pan {
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: max(100%, calc(44px * var(--ui)));
+  height: 100%;
+  margin: 0;
+  translate: -50% 0;
+  background: transparent;
+  opacity: 0;
+  cursor: ew-resize;
+}
+.lp-pan::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px;
+  height: 100%;
+}
+.lp-pan::-moz-range-thumb {
+  width: 11px;
+  height: 100%;
+  border: 0;
+}
+.lp-pan:disabled {
+  cursor: default;
+}
+.lp-lane__pan:has(.lp-pan:focus-visible) {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
 }
 
-/* ---- SHORT regime: the splitter shrinks the lanes-area (the container), so these track it ---- */
+/* ============ NARROW (under 1200 px, shared.ts `narrow`): narrow.html's mix ============
+   REV and UNDO live in EDIT's menu (Edit.tsx), the pan in the value window's pan field: the range lies over
+   that field, the knob goes. The keys: FX MUTE at the left, EDIT at the right. */
+@media (max-width: 1199.98px) {
+  .lp-lane {
+    --mix-w: clamp(220px, 22.8vw, 300px);
+    --side-w: 56px;
+  }
+  .lp-lane__mods > .lp-pb--rev,
+  .lp-lane__mods > .lp-pb--undo {
+    display: none;
+  }
+  .lp-lane__mods > .lp-pb--fx {
+    width: 50px;
+  }
+  .lp-lane__mods > .lp-pb--mute {
+    width: 66px;
+  }
+  .lp-lane__mods > .lp-pb--edit {
+    flex: none;
+    width: 70px;
+    margin-left: auto;
+  }
+  .lp-lane__vol {
+    max-width: 96px;
+  }
+  .k-win.lp-lane__win {
+    width: 108px;
+    margin-left: auto;
+    padding: 0;
+    gap: 0;
+    align-items: stretch;
+  }
+  .lp-vdb,
+  .lp-pan__val {
+    display: flex;
+    align-items: center;
+  }
+  .lp-vdb {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    padding-right: 8px;
+  }
+  .lp-pan__val {
+    flex: none;
+    width: 40px;
+    justify-content: center;
+    box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.07), inset 2px 0 0 rgba(0, 0, 0, 0.6);
+  }
+  .lp-lane__pan {
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: 40px;
+    height: var(--win-h);
+    margin: 0;
+    border-radius: 3px;
+  }
+  .lp-lane__pan > .lp-knob,
+  .lp-lane__pan > .lp-knob__ring {
+    display: none;
+  }
+}
+
+/* ============ RUNGS: the splitter or an open drawer shrinks the lanes-area (the container) ============
+   Only the strip's inset and floor change here; its parts follow its height (cqh) by themselves.
+   The 57 px rung holds five lanes in the ~380 px container of 1000x700 with the keyboard shown and the
+   drawer at rest; with the drawer's params open the 53 px rung (3 px inset) is the floor, 5 × 53 + the
+   drawer within the ~390 px stack. Past what a rung holds, the lanes scroll. */
 @container lp (max-height: 400px) {
   .lp-lane {
     --lane-pad-y: 5px;
-    min-height: 57px; /* two 20px transport buttons + 5px gap + padding */
-    gap: 10px;
-    padding-inline: 10px;
+    min-height: 57px;
   }
 }
-/* The 57 px rungs (a short stack, or the drawer open): the identity column's three lines close up to fit
-   the row (56 px at 1920 wide). The wide display's lane step sets them 72 px tall, past any 57 px row, so
-   there the source drops: the slot cards' INPUT LIVE still names it. */
-@container lp (max-height: 400px) {
-  .lp-lane__idbox {
-    gap: 2px;
-  }
-  .lp-lane__state {
-    padding-block: 2px;
-  }
-  .lp-lane__src {
-    margin-top: 0;
-  }
-}
-@container lp (max-height: 540px) {
-  .lp__lanes:has(.lp-drawer) .lp-lane__idbox {
-    gap: 2px;
-  }
-  .lp__lanes:has(.lp-drawer) .lp-lane__state {
-    padding-block: 2px;
-  }
-  .lp__lanes:has(.lp-drawer) .lp-lane__src {
-    margin-top: 0;
-  }
-}
-@media (min-width: 2200px) {
-  @container lp (max-height: 400px) {
-    .lp-lane__src {
-      display: none;
-    }
-  }
-  @container lp (max-height: 540px) {
-    .lp__lanes:has(.lp-drawer) .lp-lane__src {
-      display: none;
-    }
-  }
-}
-/* FX drawer open: the drawer (flex 0 0 auto) is a sibling INSIDE this container, so the lanes get
-   container − drawer. At rest it is one key row (~50px) and the 57px rung holds all five lanes in the
-   ~380px container of 1000x700 with the keyboard shown; each engaged FX adds its params' height (up to
-   the drawer's 46 % cap), so the rung reaches up to 540px, where the full floor (5 × (55px + 2 × 1vh
-   pad) + a drawer with FX engaged; the rows meet, no gaps) fits. Past what the rung holds, the lanes
-   scroll. */
 @container lp (max-height: 540px) {
   .lp__lanes:has(.lp-drawer) .lp-lane {
     --lane-pad-y: 5px;
     min-height: 57px;
-    gap: 10px;
-    padding-inline: 10px;
   }
 }
-/* The tight rung: with FX params open (the drawer 105px: one key row + one params row) the 57px rung
-   needs 5 × 57 + 105 = 390px, the whole of the ~390px stack of 1000x700 with the keyboard shown. Below
-   440px the whole stack steps down one notch together: lanes pad 3px (53px: the two 20px pills + their
-   5px gap + 3px pad) and the drawer's top pad 3px like the lanes' (its key row keeps its own 5px margin,
-   so the keys sit 8px from the edge, the params 6px). That floor is 368px. Only heights change, so no
-   slider loses width. */
 @container lp (max-height: 440px) {
   .lp__lanes:has(.lp-drawer .fxp-params) .lp-lane {
     --lane-pad-y: 3px;
@@ -792,44 +781,25 @@
   .lp__lanes:has(.lp-drawer .fxp-params) .lp-drawer {
     padding-top: 3px;
   }
-  /* a 3 px pad leaves the selected lane's third line no room: the slot cards' INPUT LIVE still says it */
-  .lp__lanes:has(.lp-drawer .fxp-params) .lp-lane__src {
-    display: none;
-  }
-}
-@container lp (max-height: 300px) {
-  .lp-lane__state {
-    font-size: 8.5px;
-  }
-  .lp-vdb,
-  .lp-pan__val {
-    display: none; /* drop the dB and pan read-outs when the lanes are very short */
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lp-lane[data-state='listening'] .lp-core::before,
-  .lp-lane[data-state='listening'] .lp-lane__state::before,
+  .lp-lane[data-state='listening'] .lp-core__bar::after,
   .lp-lane .lp-lane__wellmsg.is-cue,
   .lp-drawer > * {
     animation: none !important;
   }
 }
 
-/* ---- the FX drawer: docked directly UNDER its owning lane (the lane's own drawer) ----
-   A panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
-   drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. ONE row: the title,
-   the FxPanel (five keys and DUB FEEDBACK) and the close key, so at rest it costs one key row and five
-   lanes still fit the minimum window (1000x700, keyboard shown). Engaged FX open ONE params row under
-   the keys (all five engaged: one row at 1000 px wide, two at the narrowest); past the cap the panel
-   scrolls. FxPanel internals are styled in
-   fxpanel.css; here it is positioned, framed and given the row's insets. --drawer-key is the key
-   height, --drawer-inset the module pane's border + padding, so the title and the close key sit on
-   the key row whatever the row's height. The drawer is a row of the body: where it opens the glass
-   display parts round it (the well section), and it carries no divider above, so it reads as its lane's. */
+/* ============ THE FX DRAWER: docked directly UNDER its lane (the lane's own drawer) ============
+   A row of the panel inserted after the lane, so the five lanes (flex 1 1 0) share what is left while it
+   is open. ONE row at rest: the title, the FxPanel (five latched keys and DUB FEEDBACK) and the close key;
+   engaged effects open ONE params row under the keys (fxpanel.css), past the cap the panel scrolls. Where
+   it opens the glass parts round it (the glass section). --drawer-key is the key height, --drawer-inset
+   the module pane's inset, so the title and the close key sit on the key row. */
 .lp-drawer {
   --ui: var(--ui-lane); /* its lane's size step (the app.css header's SIZE) */
-  --drawer-key: calc(26px * var(--ui));
+  --drawer-key: calc(28px * var(--ui));
   --drawer-inset: 5px;
   container: drawer / inline-size; /* the FxPanel's aligned rows key on its width (fxpanel.css) */
   flex: 0 0 auto;
@@ -838,13 +808,11 @@
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 6px 11px 6px 14px;
+  padding: 5px 12px 5px 14px;
   background: var(--card);
   overflow: hidden;
 }
-/* the open eases in place: the drawer's contents fade and drop 4 px (the row's body is there at once, so
-   the parted pane never shows the ground through it), never height, so the lanes beside it settle at
-   once and nothing reflows per frame */
+/* the open eases in place: the contents fade and drop 4 px, never the height, so the lanes settle at once */
 .lp-drawer > * {
   animation: lp-drawer-in 160ms cubic-bezier(0.2, 0.7, 0.3, 1);
 }
@@ -860,46 +828,28 @@
   margin-top: var(--drawer-inset);
   display: flex;
   align-items: center;
-  font-size: calc(10.5px * var(--ui));
+  font: 600 calc(12px * var(--ui)) / 1 var(--font-legend);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
+  letter-spacing: 0.06em;
   color: var(--dim);
   white-space: nowrap;
 }
-/* Under 1010 px of drawer (a window near the 1000 px minimum) the title gives its width to the params
-   row: there all five engaged FX share one row of eight columns, and with the title beside them a
-   column (~91 px) is narrower than CUTOFF and its widest read-out (`9.9 kHz`) on one line. The drawer
-   hangs under its own lit lane and keeps its accessible name (Looper.tsx), so the title only repeats it. */
+/* Under 1010 px of drawer the title gives its width to the params row (all five engaged FX share one row
+   of eight columns there). The drawer hangs under its own lit lane and keeps its accessible name. */
 @container drawer (max-width: 1009.98px) {
   .lp-drawer__title {
     display: none;
   }
 }
-.lp-drawer__close {
-  flex: 0 0 auto;
+.k-key.lp-drawer__close {
+  --kh: calc(var(--drawer-key) - 2px);
   width: var(--drawer-key);
-  height: var(--drawer-key);
-  margin-top: var(--drawer-inset);
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-ctl);
-  border: 0;
-  background: var(--key);
-  color: var(--legend);
+  margin-top: calc(var(--drawer-inset) + 1px);
+  padding: 0;
   font-size: calc(12px * var(--ui));
-  line-height: 1;
-  cursor: pointer;
-  transition: color var(--motion), background-color var(--motion);
-}
-.lp-drawer__close:hover {
-  color: var(--text);
-  background: var(--key-hover);
 }
 /* the FxPanel takes the row between title and close, stretched to the drawer's (capped) height so it
-   scrolls there; its standalone frame drops (the drawer is the frame). Its keys row keeps the module
-   inset around each key, so the title and the close key sit on the key row; its params row flows under
-   the keys. */
+   scrolls there; its standalone frame drops (the drawer is the frame) */
 .lp-drawer .fxp {
   flex: 1 1 auto;
   align-self: stretch;
@@ -908,7 +858,7 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  row-gap: 0; /* the rows meet; the aligned grid's column gap is fxpanel.css's */
+  row-gap: 0;
   background: transparent;
   border: 0;
   box-shadow: none;
@@ -918,14 +868,14 @@
 }
 /* five equal keys, so engaging one never moves a key; DUB FEEDBACK keeps the width its one line needs */
 .lp-drawer .fxp-mod__toggle {
+  --kh: var(--drawer-key);
   flex: 1 1 0;
   min-width: 62px;
-  margin: var(--drawer-inset);
+  margin: var(--drawer-inset) var(--drawer-inset) calc(var(--drawer-inset) + 2px);
 }
 .lp-drawer .fxp-params {
   padding-inline: var(--drawer-inset);
 }
-/* DUB FEEDBACK: a key-height pane in the key row (the keys' face, height and inset) */
 .lp-drawer .fxp-dub {
   flex: 0 0 auto;
   width: clamp(272px, 22vw, calc(340px * var(--ui)));
@@ -934,21 +884,11 @@
   padding: 0 10px 0 0;
   border: 0;
 }
-.lp-drawer .fxp-mod__toggle,
 .lp-drawer .fxp-mod__title {
   height: var(--drawer-key);
   padding-block: 0;
-}
-.lp-drawer .fxp-mod__title {
   display: flex;
   align-items: center;
-}
-.lp-drawer .fxp::-webkit-scrollbar {
-  width: 8px;
-}
-.lp-drawer .fxp::-webkit-scrollbar-thumb {
-  background: var(--edge);
-  border-radius: 999px;
 }
 
 /* Visually-hidden screen-reader status line (see Looper.tsx live region). */

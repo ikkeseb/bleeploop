@@ -124,7 +124,8 @@ await probe(async ({ open }) => {
     busy: el.getAttribute('aria-busy'),
     name: el.querySelector('.slot__source')?.selectedOptions[0]?.textContent?.trim(),
     pickerDisabled: el.querySelector('.slot__source')?.disabled,
-    enabledSourceButtons: [...el.querySelectorAll('.slot__acts button')].filter((button) => !button.disabled).length,
+    // the slot's own buttons on its line (LIVE, the plate's editor and menu), not the input effects' plates
+    enabledSourceButtons: [...el.querySelectorAll('.slot__line button:not(.slot__id):not(.plate--fx button)')].filter((button) => !button.disabled).length,
   }));
 
   // Deferred swap: the outgoing descriptor disappears before native unload resolves, but the slot

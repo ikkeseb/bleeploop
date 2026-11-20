@@ -1,103 +1,6 @@
-/* The slot header's controls ("Instrument": `SlotControls.tsx`, `PluginControls.tsx`). The caps reuse
-   the shared caps text `.tgl` rules in app.css; this file styles the bits specific to a slot: GO
-   LIVE, the PARAMS disclosure, the slot volume, the input meter, and the accordion drawer body
-   (PluginParams) — a preview grid of the plugin's first params, all on the one `.lf-range` skin. */
-
-/* ---- the slot volume — the lane fader's parts at header size: a unity tick and a dB read-out ---- */
-.slot__vol {
-  grid-area: vol;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.slot__vbar-wrap {
-  position: relative;
-  width: clamp(64px, 8vw, 104px);
-  display: flex;
-  align-items: center;
-}
-.slot__vbar {
-  position: relative; /* over the absolute unity tick so the thumb reads on top of it */
-  width: 100%;
-  margin: -2px 2px; /* inline: pinned, the unity tick's travel calc folds it in (as `.lp-vbar`) */
-  height: 24px; /* the hit area; a 20px margin box, as before */
-}
-/* unity (1.0 of 1.5) at 66.7% of the thumb's travel; see `.lp-vbar__unity` for the calc */
-.slot__vbar-unity {
-  position: absolute;
-  left: calc(66.667% - 3px);
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1px;
-  height: 11px;
-  background: var(--faint);
-  pointer-events: none;
-}
-.slot__vdb {
-  flex: 0 0 auto;
-  min-width: calc(52px * var(--ui));
-  text-align: right;
-  font-family: var(--mono);
-  font-size: calc(11px * var(--ui));
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-}
-/* live monitor "on" dot — the only steady colour in the row (the live signal's green), and only while
-   live: a solid dot */
-.tgl__dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--play);
-}
-/* GO LIVE at rest is chrome, so it spends no hue (colour is sound): the resting legend of every key,
-   a size up as the row's primary action; live, the engaged recipe with the green dot (`.on-green`). */
-.tgl.live:not(.on-green) {
-  color: var(--legend);
-}
-/* the PARAMS drawer-disclosure pill: the app's one caret (--caret-svg as a mask, so it takes the
-   legend's colour in every state, as the lane's EDIT pill wears it), turned over while open */
-.slot__params {
-  gap: 5px;
-  display: inline-flex;
-  align-items: center;
-}
-.slot__params::after {
-  content: '';
-  width: 8px;
-  height: 8px;
-  background: currentColor;
-  mask: var(--caret-svg) center / contain no-repeat;
-  /* Forced colours (Windows high contrast) would paint the mask with Canvas: keep currentColor. */
-  forced-color-adjust: none;
-  transition: transform var(--motion);
-}
-.slot__params.on::after {
-  transform: rotate(180deg);
-}
-.pc__err {
-  font-size: 10px;
-  color: var(--dub);
-  white-space: nowrap;
-}
-
-/* Empty native scan: keep the installation hint in the slot without turning it into another control. */
-.slot__plugin-note {
-  display: block;
-  padding: 0 18px 9px;
-  overflow: hidden;
-  color: var(--faint);
-  font-size: 9.5px; /* prose in sans (mono is for changing numerals), at .pc__more's size; it wraps rather than shrink */
-  line-height: 1.2;
-}
-/* The note is a whole extra row per slot. Below the 600 px window floor that row pushes the drum pads
- * off screen (`verify/probes/layout-reachability.mjs --plugin-source`), so the hint yields to reachability. */
-@media (max-height: 640px) {
-  .slot__plugin-note {
-    display: none;
-  }
-}
+/* The parameters drawer's body (`PluginParams` in `PluginControls.tsx`): a preview grid of the plugin's
+   first params, all on the one `.lf-range` skin. The drawer itself, the plate and the rest of the slot
+   line are `slot.css`'s. */
 
 /* ---- PluginParams — the accordion drawer body ---- */
 .pc {
@@ -128,7 +31,7 @@
   min-width: 0;
 }
 .param__name {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--dim);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -137,7 +40,7 @@
 .param__val {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: 9.5px;
+  font-size: 12px;
   color: var(--dim);
 }
 
@@ -150,17 +53,17 @@
 
 /* a readout of the plugin's last edited param (name + value) — a quiet mono read-out, not a sound state */
 .pc__lastedit {
-  font-size: 9.5px;
+  font-size: 12px;
   color: var(--dim);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
 .pc__empty {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--faint);
 }
 .pc__more {
-  font-size: 9.5px;
+  font-size: 12px;
   color: var(--faint);
 }
 
@@ -169,107 +72,4 @@
   .pc__params {
     grid-template-columns: 1fr;
   }
-}
-
-/* ---- live and hot, readable from where the guitarist stands ----
-   INPUT LIVE is an engaged key: the lit warm-white legend on the face a step up, its one hue the solid
-   play dot before it (the live signal, as the meter along the card's foot), a medium weight, so it is
-   read, not shouted, a size up from the row's other caps (the live-meter probe holds its floor: 12 px,
-   13 px on a large window). GO LIVE
-   holds INPUT LIVE's box (its dot, gap and word in the same type, unseen in the same grid cell), so going
-   live moves nothing beside it in the row. */
-.tgl.live {
-  display: inline-grid;
-  place-items: center;
-  padding: calc(8px * var(--ui)) calc(13px * var(--ui));
-}
-.tgl.live::after,
-.tgl.live.on-green {
-  font-size: clamp(12px, 0.68vw, calc(13px * var(--ui)));
-  line-height: 1.17;
-  letter-spacing: 0.06em;
-  font-weight: 500;
-}
-.tgl.live.on-green {
-  color: var(--engaged);
-}
-.tgl.live::after {
-  content: 'INPUT LIVE';
-  grid-area: 1 / 1;
-  padding-left: 13px; /* the dot (7px) and the gap (6px) */
-  visibility: hidden;
-}
-.live__face {
-  grid-area: 1 / 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.tgl.live.on-green:hover:not(:disabled) {
-  color: var(--engaged);
-  background: var(--key-on);
-}
-
-/* The slot's input meter along its card's foot (`SlotMeter`; the waveform rAF loop writes --lvl, --pk and
-   is-clip): a thin line, not a bar. The level over −60..0 dBFS, as the command bar's meter: --play, --dub
-   from −6 dB, --rec from −1 dB (where that meter turns red); a held peak tick; a CLIP lamp lit ~1.5 s
-   after the input reached full scale, the one filled flag on the screen (an alarm). Dark while the slot
-   is not live. */
-.slot__meter {
-  --lvl: 0;
-  --pk: 0;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 18px 10px;
-  margin-top: auto; /* stays on the foot of a card stretched to its sibling's height */
-}
-/* the meter takes the header's bottom padding */
-.slot:has(> .slot__meter) > .slot__row {
-  padding-bottom: 6px;
-}
-.slot__meter-track {
-  position: relative;
-  flex: 1 1 auto;
-  height: clamp(3px, 0.2vw, 4px);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-.slot__meter-fill {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to right, var(--play) 0 90%, var(--dub) 90% 98.3%, var(--rec) 98.3%);
-  clip-path: inset(0 calc((1 - var(--lvl)) * 100%) 0 0);
-}
-.slot__meter-pk {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  left: calc(var(--pk) * 100% - 2px);
-  background: var(--text);
-}
-.slot__meter.is-clip .slot__meter-pk {
-  background: var(--rec);
-}
-.slot__meter-clip {
-  flex: 0 0 auto;
-  font-size: clamp(10.5px, 0.7vw, 13px);
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  line-height: 1;
-  padding: 3px 6px;
-  border-radius: 4px;
-  color: var(--faint);
-  background: transparent;
-}
-.slot__meter.is-clip .slot__meter-clip {
-  color: #0b0b0d;
-  background: var(--rec);
-}
-.slot__meter:not(.is-live) .slot__meter-track,
-.slot__meter:not(.is-live) .slot__meter-clip {
-  opacity: 0.45;
 }

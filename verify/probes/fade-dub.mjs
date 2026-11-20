@@ -3,11 +3,12 @@
  * `engine-seam` pattern: an init script sets `window.__lfEngineFake`, the probe scripts the feed through
  * `__lf.native` and reads what the UI sends):
  *
- * - FADE (the command bar, `src/ui/transport/Transport.tsx`): the pill beside ■ ALL sends the engine's
- *   `FadeAll` action; its bars stepper steps 1, 2, 4, 8 and sends `SetFadeBars`; it is disabled with its
- *   reason while nothing plays and while a lane records. Lanes the feed reports fading read FADING (the
+ * - FADE (the command bar, `src/ui/transport/Transport.tsx`): the key beside ■ ALL sends the engine's
+ *   `FadeAll` action; its bars ride on the key and step 1, 2, 4, 8 by the arrows, the wheel and a drag
+ *   (a drag is no press), each sending `SetFadeBars`, the scale window showing while they change; its press
+ *   is disabled with its reason while nothing plays and while a lane records, its bars stay settable. Lanes the feed reports fading read FADING (the
  *   word where ENDING shows, the well's FADING OUT) in the looper, and in the stage view by their chips'
- *   names and its message line; the pill reads
+ *   names and its message line; the key reads
  *   FADING and a press stops the fade; an engine refusal (`Fading`) lands on its lane. A reset frame's
  *   remembered bars are adopted. The bars persist: across launches of one browser profile, a fresh
  *   engine gets the bars last chosen, and an engine's remembered bars win and are kept.
@@ -68,10 +69,13 @@ await probe(async ({ browser, open }) => {
   const lanes = page.locator('.lp-lane');
   const word = (i) => lanes.nth(i).locator('.lp-lane__state').textContent();
   const well = (i) => lanes.nth(i).locator('.lp-lane__wellmsg');
-  const fade = page.locator('.transport__fade .transport__tgl');
-  const shorter = page.getByRole('button', { name: 'Shorter fade', exact: true });
-  const longer = page.getByRole('button', { name: 'Longer fade', exact: true });
-  const fadeBars = () => page.locator('.transport__fade .transport__bars-val').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
+  // FADE is a key that carries its bars (`ValueKey.tsx`): its legend, its value line, and a step on the
+  // focused key (ArrowUp / ArrowDown, the steps its drag and wheel take).
+  const fade = page.locator('.transport__fade');
+  const fadeWord = () => fade.locator('.k-key__l').textContent().then((t) => t.trim());
+  const shorter = () => fade.press('ArrowDown');
+  const longer = () => fade.press('ArrowUp');
+  const fadeBars = () => page.locator('.transport__fade .k-key__v').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
   const runAction = (id) => page.evaluate((a) => import('/src/app/actions.ts').then((m) => m.runAction(a)), id);
 
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
@@ -89,7 +93,7 @@ await probe(async ({ browser, open }) => {
     meter: { peak: [0, 0], clip: [false, false] },
   });
 
-  // ── FADE: the pill and its bars ────────────────────────────────────────────────────────────────────
+  // ── FADE: the key and its bars ────────────────────────────────────────────────────────────────────
   assert.equal(await fade.count(), 1, 'FADE shows in engine mode');
   const beside = await page.evaluate(() => {
     const kids = [...document.querySelector('.transport__global').children];
@@ -97,18 +101,38 @@ await probe(async ({ browser, open }) => {
     return kids[all + 1]?.classList.contains('transport__fade');
   });
   assert.ok(beside, 'FADE sits beside ■ ALL');
-  assert.equal((await fade.textContent()).trim(), 'FADE');
+  assert.equal(await fadeWord(), 'FADE');
   assert.equal(await fadeBars(), '2 bars', 'two bars by default');
   await page.locator('.cmd').screenshot({ path: `${outDir}/command-bar.png` });
   await clearSent();
-  await longer.click();
-  await longer.click();
-  assert.ok(await longer.isDisabled(), 'at most 8 bars');
-  for (let k = 0; k < 3; k++) await shorter.click();
-  assert.ok(await shorter.isDisabled(), 'at least 1 bar');
-  assert.equal(await fadeBars(), '1 bar');
-  assert.deepEqual(await sentAtLeast(5), [4, 8, 4, 2, 1].map((b) => ({ SetFadeBars: b })), 'the stepper walks 1, 2, 4, 8');
-  await longer.click();
+  await longer();
+  await longer();
+  await longer();
+  assert.equal(await fadeBars(), '8 bars', 'at most 8 bars');
+  for (let k = 0; k < 4; k++) await shorter();
+  assert.equal(await fadeBars(), '1 bar', 'at least 1 bar');
+  assert.deepEqual(await sentAtLeast(5), [4, 8, 4, 2, 1].map((b) => ({ SetFadeBars: b })), "the key's steps walk 1, 2, 4, 8, and stop at the ends");
+  await page.waitForTimeout(100);
+  assert.equal((await sent()).length, 5, 'a step past an end sends nothing');
+  // The wheel over the key is a step, and while it changes the value line lights and the scale shows.
+  await clearSent();
+  await fade.hover();
+  await page.mouse.wheel(0, -100);
+  assert.deepEqual(await sentAtLeast(1), [{ SetFadeBars: 2 }], 'a wheel notch up is one step');
+  assert.ok(await fade.evaluate((el) => el.classList.contains('is-adjusting')), 'the key reads adjusting while it changes');
+  assert.equal(await fade.locator('.transport__scale .is-on').textContent(), '2', 'its scale window shows the bars set');
+  // A vertical drag past the threshold steps the bars and is no press: no FadeAll.
+  await clearSent();
+  const box = await fade.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  for (let k = 1; k <= 8; k++) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 4 * k);
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [{ SetFadeBars: 4 }, { SetFadeBars: 8 }], 'a drag up of 32 px steps twice, and its release is no press');
+  await shorter();
+  await shorter();
+  await page.waitForTimeout(800);
   await clearSent();
   await fade.click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: 'FadeAll' }], 'FADE sends the engine action');
@@ -119,9 +143,9 @@ await probe(async ({ browser, open }) => {
   assert.equal(await word(0), 'FADING', 'the lane word reads FADING where ENDING shows');
   assert.equal(await word(1), 'FADING');
   assert.match(await well(0).textContent(), /FADING OUT/);
-  assert.equal((await fade.textContent()).trim(), 'FADING', 'the pill reads FADING');
+  assert.equal(await fadeWord(), 'FADING', 'the key reads FADING');
   assert.equal(await fade.getAttribute('aria-label'), 'Stop the fade now');
-  assert.match(await page.locator('.transport__global .transport__tgl').first().textContent(), /■ NOW/, '■ ALL stops now');
+  assert.match(await page.locator('.transport__global .transport__key').first().textContent(), /■ NOW/, '■ ALL stops now');
   await page.locator('.cmd').screenshot({ path: `${outDir}/command-bar-fading.png` });
   await page.locator('.lp-lane').first().screenshot({ path: `${outDir}/lane-fading.png` });
   await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
@@ -145,9 +169,14 @@ await probe(async ({ browser, open }) => {
   const stopped = lane('Stopped', { length: 2 * BAR, canReverse: true });
   await emit({ events: [laneEvent(0, stopped, end), laneEvent(1, stopped, end)] });
   assert.equal(await word(0), 'STOPPED');
-  assert.equal((await fade.textContent()).trim(), 'FADE');
+  assert.equal(await fadeWord(), 'FADE');
   assert.ok(await fade.isDisabled(), 'nothing plays: FADE is disabled');
   assert.match(await fade.getAttribute('title'), /nothing is playing to fade/);
+  // Its press is refused, its bars are not: they can be set before the jam.
+  await clearSent();
+  await longer();
+  assert.deepEqual(await sentAtLeast(1), [{ SetFadeBars: 4 }], 'nothing plays: the bars still step');
+  await shorter();
   await emit({ events: [laneEvent(0, playing()), laneEvent(2, lane('Recording', { armed: true }))] });
   assert.ok(await fade.isDisabled(), 'a lane records: FADE is disabled');
   assert.match(await fade.getAttribute('title'), /this track is recording, stop it first/);
@@ -233,15 +262,15 @@ await probe(async ({ browser, open }) => {
       anchor: anchorAt(0),
       meter: { peak: [0, 0], clip: [false, false] },
     });
-    const bars = () => app.page.locator('.transport__fade .transport__bars-val').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
+    const bars = () => app.page.locator('.transport__fade .k-key__v').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
     const sentFade = () => app.page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetFadeBars !== undefined));
     return { ...app, bars, sentFade };
   };
   const first = await launch([]);
   assert.equal(await first.bars(), '2 bars', 'a first launch: the default');
-  const longerThere = first.page.getByRole('button', { name: 'Longer fade', exact: true });
-  await longerThere.click();
-  await longerThere.click();
+  const longerThere = first.page.locator('.transport__fade');
+  await longerThere.press('ArrowUp');
+  await longerThere.press('ArrowUp');
   assert.equal(await first.bars(), '8 bars');
   await first.page.close();
   const second = await launch([]);

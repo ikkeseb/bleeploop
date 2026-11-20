@@ -86,7 +86,9 @@ function installFakeHost() {
 
 await probe(async ({ open }) => {
   const app = await open({
-    viewport: { width: 1280, height: 820 },
+    // 1920: both slots holding a live plugin show both lines whole (narrower, the slot row folds one
+    // slot to a plate, `src/ui/instrument/row-fit.ts`), so both slots' EDITOR stay on screen
+    viewport: { width: 1920, height: 1080 },
     init: (p) => Promise.all([
       p.addInitScript(() => void (window.__lfEngineFake = true)),
       p.addInitScript(installFakeHost),
@@ -145,7 +147,7 @@ await probe(async ({ open }) => {
         synths: instrument.slotIds(),
         active: instrument.activeSlot(),
         armed: [...io.inputArmed()],
-        live: [...document.querySelectorAll('.slot')].map((el) => el.querySelector('.tgl.live')?.textContent?.trim() ?? null),
+        live: [...document.querySelectorAll('.slot')].map((el) => { const k = el.querySelector('.slot__live'); return k ? (k.getAttribute('aria-pressed') === 'true' ? 'live' : 'off') : null; }),
         inFlight: recall.recallInFlight(),
         toasts: window.__lf.notify.toasts().map((t) => `${t.message} x${t.count}`),
       };
@@ -194,7 +196,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(s.slots, [keyOf(FX), keyOf(SYN)]);
   expectIdle(s, 'restored rig');
   // An instrument plugin takes no input, so slot 1 shows no GO LIVE cap at all (`slotTakesInput`).
-  assert.deepEqual(s.live, ['GO LIVE', null], 'the restored effect\'s GO LIVE is unpressed');
+  assert.deepEqual(s.live, ['off', null], 'the restored effect\'s LIVE is unpressed');
   assert.deepEqual(s.toasts, []);
   assert.equal(s.active, 1, 'the restored instrument takes the MIDI slot when the player chose nothing');
 

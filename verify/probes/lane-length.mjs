@@ -11,11 +11,12 @@
  *   closes; Escape closes it and hands focus back to EDIT, an outside click closes it, neither sends. TRIM
  *   pressed by key hands focus back to EDIT too, and the open stepper's TRIM is disabled while the lane
  *   stops. The menu is reachable by key (EDIT, then Tab to its edits); COPY says "track" in its line,
- *   hover and name. An engine refusal lands on its lane. ↶ UNDO names the trim.
+ *   hover and name. An engine refusal lands on its lane. UNDO names the trim.
  * - COPY or WIDE focused in the open menu when the last empty lane fills (its own press by key, or a pedal's
  *   copy on the feed): the menu closes and the focus is on the lane's EDIT, never dropped to the page.
- * - The lane's pill row is five fixed columns (FX, MUTE, ↺ REV, ↶ UNDO, EDIT) whose legends fit their pills
- *   at a wide and a narrow window, and ↶ UNDO holds its column, disabled, where there is nothing to undo.
+ * - The lane's key row is five fixed columns (FX, MUTE, REV, UNDO, EDIT) whose legends fit their keys at a
+ *   wide window, and UNDO holds its column, disabled, where there is nothing to undo; folded (a narrow
+ *   window) the row is FX, MUTE, EDIT and REV and UNDO lead the EDIT menu.
  * - Halve (`halveTrack`, `src/app/actions.ts`): sends the engine's `Halve` (on the engine's own selection,
  *   or `ActionOn` a named track), never a `Trim` with bars the UI counted: the engine judges the lane and
  *   the loop's bars as they stand when the press lands (lf-engine `tests/actions.rs`). Its refusal, from
@@ -220,15 +221,16 @@ await probe(async ({ open }) => {
   await dialog.waitFor({ state: 'detached' });
   assert.deepEqual(await trims(), [{ Trim: [0, 3] }, { Trim: [0, 4] }], 'the gated popover sent nothing');
 
-  // An engine refusal lands on its lane; ↶ UNDO names the trim.
+  // An engine refusal lands on its lane; UNDO names the trim.
   await emit({ events: [{ Refused: { frame: BAR, lane: 0, reason: 'Capturing' } }] });
   assert.match(await well(0).textContent(), /this track is recording, stop it first/);
   await emit({ events: [laneEvent(0, committed('Playing', 8, { canUndo: true }))] });
   const undo = lanes.nth(0).getByRole('button', { name: 'Track 1 undo or redo the last overdub or trim', exact: true });
-  assert.equal((await undo.textContent()).trim(), '↶ UNDO');
+  assert.equal((await undo.textContent()).trim(), 'UNDO');
   assert.equal(await undo.getAttribute('title'), 'Undo / redo the last overdub or trim');
-  // The pill row (FX, MUTE, ↺ REV, ↶ UNDO, EDIT) fits its cluster at a wide and a narrow window, and ↶ UNDO
-  // holds its column, disabled, on a lane with nothing to undo.
+  // The key row (FX, MUTE, REV, UNDO, EDIT) fits its cluster at a wide window, and UNDO holds its column,
+  // disabled, on a lane with nothing to undo. Folded (under 1200 px) REV and UNDO are the EDIT menu's first
+  // rows and the row shows FX, MUTE, EDIT.
   const undo4 = lanes.nth(3).getByRole('button', { name: 'Track 4 undo or redo the last overdub or trim', exact: true });
   assert.ok(await undo4.isDisabled(), 'nothing to undo: UNDO is disabled, not absent');
   assert.equal(await undo4.getAttribute('title'), 'Nothing to undo, overdub first');
@@ -242,11 +244,20 @@ await probe(async ({ open }) => {
       return [...mods.children].map((el) => {
         const r = el.getBoundingClientRect();
         return { text: el.innerText.trim(), w: Math.round(r.width), need: el.scrollWidth, inside: r.left >= box.left - 0.5 && r.right <= box.right + 0.5, clipped: el.scrollWidth > el.clientWidth + 1 };
-      });
+      }).filter((p) => p.w > 0);
     });
     console.log(`pill row at ${width} px`, JSON.stringify(row));
-    assert.deepEqual(row.map((p) => p.text), ['FX', 'MUTE', '↺ REV', '↶ UNDO', 'EDIT'], 'five pills, in their columns');
-    assert.ok(row.every((p) => p.inside && !p.clipped), `every pill fits the row and its legend fits the pill at ${width} px`);
+    const folded = width < 1200;
+    assert.deepEqual(row.map((p) => p.text), folded ? ['FX', 'MUTE', 'EDIT'] : ['FX', 'MUTE', 'REV', 'UNDO', 'EDIT'], `the key row at ${width} px`);
+    assert.ok(row.every((p) => p.inside && !p.clipped), `every key fits the row and its legend fits the key at ${width} px`);
+    if (folded) {
+      await lanes.nth(0).getByRole('button', { name: 'Edit track 1', exact: true }).click();
+      const items = page.locator('.edit__item');
+      assert.deepEqual((await items.evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')))).slice(0, 2),
+        ['Track 1 reverse', 'Track 1 undo or redo the last overdub or trim'], 'folded, REV and UNDO lead the EDIT menu');
+      assert.ok(await items.nth(1).isEnabled(), "folded UNDO acts where the lane's key would");
+      await page.keyboard.press('Escape');
+    }
   }
   await page.setViewportSize({ width: 1600, height: 900 });
 

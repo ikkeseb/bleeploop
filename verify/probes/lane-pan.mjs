@@ -10,8 +10,9 @@
  *   Alt-click centre it (the Alt-click sends nothing but the centre);
  * - (b) the overlay (3b's rule, `lane-mix` covers the machinery): a key gesture whose report waits shows
  *   its value over an unequal `Mix`, the report ends it, and a later `Mix` moves the control;
- * - (c) layout at 1000x700, 1280x820 and 1920x1080 with every pill on every lane: the pan is 44x24, on one
- *   mix row with the volume fader, and every control and read-out of each lane's right cluster lies
+ * - (c) layout at 1000x700, 1280x820 and 1920x1080 with every key on every lane: the pan's range is at
+ *   least 44 px wide and lies over what shows the pan (the knob; folded under 1200 px, the value window's
+ *   pan field), on one mix row with the volume fader, the cluster at its width, and every control and read-out of each lane's right cluster lies
  *   inside it, overlaps no other, is not clipped and is under its own centre point (the reach test of
  *   `layout-reachability`), the read-outs at their widest (`L 100`, `−40.0 dB`);
  * - (d) accessibility: each lane's pan is a slider named `Track N pan` whose `aria-valuetext` is its
@@ -345,6 +346,9 @@ await probe(async ({ open }) => {
         }
         for (let a = 0; a < boxes.length; a++) {
           for (let b = a + 1; b < boxes.length; b++) {
+            // Folded, the pan's range lies over the window's pan field by design: the read-out is its face.
+            const pair = [boxes[a].el, boxes[b].el];
+            if (pair.some((el) => el.matches('.lp-pan')) && pair.some((el) => el.matches('.lp-pan__val'))) continue;
             const p = boxes[a].r, q = boxes[b].r;
             const w = Math.min(p.right, q.right) - Math.max(p.left, q.left), h = Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top);
             if (w > 0.5 && h > 0.5) problems.push(`${boxes[a].name} overlaps ${boxes[b].name}`);
@@ -352,11 +356,17 @@ await probe(async ({ open }) => {
         }
         const pan = laneEl.querySelector('.lp-pan'), vol = laneEl.querySelector('.lp-vbar');
         const pr = pan.getBoundingClientRect(), vr = vol.getBoundingClientRect();
+        // What shows the pan: the knob, or folded the window's pan field; the range must be what a pointer
+        // there grabs.
+        const face = [laneEl.querySelector('.lp-knob'), laneEl.querySelector('.lp-pan__val')].find((el) => el.checkVisibility());
+        const fr = face.getBoundingClientRect();
+        const grabbed = document.elementFromPoint(fr.left + fr.width / 2, fr.top + fr.height / 2) === pan;
         return {
           lane: i + 1,
           cluster: rect(c),
           pills: laneEl.querySelectorAll('.lp-lane__mods > *').length,
           pan: rect(pr),
+          grabbed,
           fader: rect(vr),
           oneRow: Math.abs((pr.top + pr.bottom) / 2 - (vr.top + vr.bottom) / 2) < 1,
           readouts: [laneEl.querySelector('.lp-vdb')?.textContent, laneEl.querySelector('.lp-pan__val')?.textContent],
@@ -367,12 +377,13 @@ await probe(async ({ open }) => {
     const name = `${width}x${height}`;
     await page.screenshot({ path: `logs/probes/lane-pan-${name}.png` });
     for (const l of m) console.log('(c)', name, JSON.stringify({ ...l, cluster: Math.round(l.cluster.width), pan: [l.pan.width, l.pan.height], fader: Math.round(l.fader.width) }));
-    const expectedWidth = Math.min(264, Math.max(240, width * 0.2));
-    assert.ok(m.every((l) => l.pills === 5), 'every lane shows five pills (FX, MUTE, REV, UNDO, EDIT)');
+    const expectedWidth = width < 1200 ? Math.min(300, Math.max(220, width * 0.228)) : Math.min(416, Math.max(352, width * 0.217));
+    assert.ok(m.every((l) => l.pills === 5), 'every lane holds five keys (FX, MUTE, REV, UNDO, EDIT; folded, REV and UNDO hide for the EDIT menu)');
     assert.deepEqual(m[1].readouts, ['−40.0 dB', 'L 100'], 'lane 2 shows the widest read-outs');
     for (const l of m) {
-      assert.ok(Math.abs(l.cluster.width - expectedWidth) < 0.5, `${name} lane ${l.lane}: the cluster is clamp(240px, 20vw, 264px) wide (${l.cluster.width})`);
-      assert.deepEqual([l.pan.width, l.pan.height], [44, 24], `${name} lane ${l.lane}: the pan is 44x24`);
+      assert.ok(Math.abs(l.cluster.width - expectedWidth) < 0.5, `${name} lane ${l.lane}: the cluster is its clamp's width (${l.cluster.width} of ${expectedWidth})`);
+      assert.ok(l.pan.width >= 44 && l.pan.height >= 20, `${name} lane ${l.lane}: the pan's range is at least 44 px wide (${l.pan.width}x${l.pan.height})`);
+      assert.ok(l.grabbed, `${name} lane ${l.lane}: a pointer on what shows the pan grabs the pan`);
       assert.ok(l.oneRow, `${name} lane ${l.lane}: the pan sits on the fader's row`);
       assert.ok(l.fader.width >= 60, `${name} lane ${l.lane}: the fader keeps a usable length (${l.fader.width})`);
       assert.deepEqual(l.problems, [], `${name} lane ${l.lane}: nothing in the right cluster overlaps, clips or leaves it`);

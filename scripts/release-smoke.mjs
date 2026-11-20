@@ -522,15 +522,17 @@ try {
     await page.waitForFunction(() => document.querySelector('button[aria-label="Metronome click"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
     if ((await pressed('Fixed take length')) !== 'true') await page.locator('button[aria-label="Fixed take length"]').click();
     await page.waitForFunction(() => document.querySelector('button[aria-label="Fixed take length"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
-    // The pill reads FIXED alone; its bars show beside it while it is on, the count and its unit ("1bar" as
-    // text, "1 BAR" on screen).
-    const barsVal = page.locator('.transport__fixed .transport__bars-val');
+    // The key carries its bars (its value line, "1 BAR"), stepped on the focused key by the arrows (as by a
+    // drag or the wheel on it).
+    const fixedKey = page.locator('button[aria-label="Fixed take length"]');
+    const barsVal = fixedKey.locator('.k-key__v');
     const readBars = async () => Number.parseInt((await barsVal.textContent()) ?? '', 10);
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 40; i++) {
       const bars = await readBars();
       if (bars === 1) break;
-      await page.locator(`button[aria-label="${bars > 1 ? 'Fewer bars' : 'More bars'}"]`).click();
+      await fixedKey.press(bars > 1 ? 'ArrowDown' : 'ArrowUp');
     }
+    await page.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
     must((await readBars()) === 1, `the take length reads "${await barsVal.textContent()}", not 1 bar`);
     const fixed = 'FIXED 1 bar';
     // The input dry, as a user takes it: slot A Off, its input picked, GO LIVE.

@@ -1,19 +1,19 @@
 /**
- * Drives the rendered command bar and lane through AUTO REC's toggle and its sensitivity (the SENS
- * read-out's popover, its slider driven end to end by key) at seven desktop widths (960..1920 px), in
+ * Drives the rendered command bar and lane through AUTO REC's toggle and its sensitivity (carried on the
+ * AUTO REC key, `ValueKey.tsx`, stepped end to end by key) at seven desktop widths (960..1920 px), in
  * engine mode on the web engine fake (`window.__lfEngineFake` set before the app loads, a reset frame with
  * five EMPTY lanes), and asserts the command-bar height and lane top never move: AUTO must not reflow the
- * stage when switched on/off or set from 1 to 100, and the read-out is live only while AUTO is on.
- * At each width it also holds the bar's own layout: the stacked bar's row gap stays 3 px, the BPM
- * editor opens in the numeral's box (the bar and stage do not move while typing), every bar popover
- * (IN FX's, SENS's) opens below the bar's bottom edge, aligned to its pill, leaving END STOP uncovered,
- * and a disabled tool (Export, the looper empty) shows no hover face.
+ * stage when switched on/off or set from 1 to 100, and its value is live only while AUTO is on, its scale
+ * window showing while it changes and gone after.
+ * At each width it also holds the bar's own layout: the stacked bar's row gap stays 8 px, the BPM editor
+ * opens in the numeral's box (the bar and stage do not move while typing), and a disabled tool (Export,
+ * the looper empty) shows no hover face.
  * At 1000x700 and 1440x900, with every input send on (a reset frame from an engine that remembers them), the
  * IN FX popover's sliders are real controls: each at least 160 px long (side by side, the sends left each
  * about 40), and the popover's bottom edge inside the window.
- * At 1440x900 with a stopped one-bar loop it holds the disabled tone: the BPM steppers (locked), IMPORT
- * (a loop is in), lane 1's core (STOPPED) and a disabled read-out's caret (SENS, AUTO off) fade by tone,
- * never by opacity: each at an effective opacity of 1 in the --faint legend a disabled pill wears, an
+ * At 1440x900 with a stopped one-bar loop it holds the disabled tone: TAP (the tempo is locked), IMPORT
+ * (a loop is in), lane 1's core (STOPPED) and AUTO REC's value (locked with the tempo) fade by tone,
+ * never by opacity: each at an effective opacity of 1 in the --faint legend a disabled key wears, an
  * enabled tool (EXPORT) a brighter one. It saves that tool cluster (the native chrome on) at a
  * device-pixel ratio of 2 as `logs/transport-auto-layout/tools-loop.png`.
  * Then the Audio Settings gear (the native chrome on: host.web.ts served with `available: true`), at 1440x900
@@ -131,12 +131,12 @@ await probe(async ({ browser, open }) => {
     const before = await bounds();
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-off.png' });
 
-    // The stacked bar keeps its 3 px row gap at every width (the narrow media rule sets column-gap only).
+    // The stacked bar keeps its 8 px row gap at every width (transport.css `.cmd--stack`, narrow.html's).
     const rowGap = await page.evaluate(() => {
       const bar = document.querySelector('.cmd');
       return bar.classList.contains('cmd--stack') ? getComputedStyle(bar).rowGap : null;
     });
-    if (rowGap !== null) assert.equal(rowGap, '3px', `${width}: the stacked bar's row gap`);
+    if (rowGap !== null) assert.equal(rowGap, '8px', `${width}: the stacked bar's row gap`);
 
     // A disabled tool shows no hover face (Export, nothing to export).
     const exportTool = page.locator('.tool--export');
@@ -165,57 +165,31 @@ await probe(async ({ browser, open }) => {
     assert.ok(Math.abs(editing.bar - before.bar) < 0.5 && Math.abs(editing.lane - before.lane) < 0.5,
       `${width}: typing a tempo moved the bar (${before.bar} -> ${editing.bar}) or the stage`);
 
-    // A bar popover hangs below the bar, aligned to its pill, over nothing in the bar (IN FX on row 1
-    // used to hang inside the bar over END STOP on row 2).
-    const popoverPlace = (pillName, dialogName) => page.evaluate(([pillName, dialogName]) => {
-      const bar = document.querySelector('.cmd').getBoundingClientRect();
-      const pill = document.querySelector(`button[aria-label="${pillName}"]`).getBoundingClientRect();
-      const pop = document.querySelector(`[role="dialog"][aria-label="${dialogName}"]`);
-      const p = pop.getBoundingClientRect();
-      const end = document.querySelector('button[aria-label="Stop playing loops at loop end"]');
-      const e = end.getBoundingClientRect();
-      const hits = document.elementsFromPoint(e.left + e.width / 2, e.top + e.height / 2);
-      return {
-        barBottom: bar.bottom, top: p.top, aligned: Math.min(Math.abs(p.left - pill.left), Math.abs(p.right - pill.right)),
-        endCovered: hits.some((el) => pop.contains(el)),
-      };
-    }, [pillName, dialogName]);
-    await page.getByRole('button', { name: 'Input effects', exact: true }).click();
-    await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
-    const infx = await popoverPlace('Input effects', 'Input effects');
-    console.log(JSON.stringify({ width, infx }));
-    await page.keyboard.press('Escape');
-    await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor({ state: 'detached' });
-    assert.ok(infx.top >= infx.barBottom, `${width}: the IN FX popover's top ${infx.top} is inside the bar (bottom ${infx.barBottom})`);
-    assert.ok(infx.aligned < 1, `${width}: the IN FX popover is ${infx.aligned} px off its pill's edge`);
-    assert.equal(infx.endCovered, false, `${width}: the IN FX popover covers END STOP`);
+    // AUTO REC carries its sensitivity on the key (`ValueKey.tsx`): dead while AUTO is off, stepped by key
+    // while it is on (PageUp/PageDown ten at a time, the arrows one), its scale window over the slot row.
     const auto = page.getByRole('button', { name: 'Auto record', exact: true });
-    const sens = page.getByRole('button', { name: 'Auto record sensitivity', exact: true });
+    const sens = () => page.evaluate(() => window.__lf.looper.autoRecordSensitivity());
     assert.equal(await auto.getAttribute('aria-pressed'), 'false');
-    assert.equal(await sens.isDisabled(), true, 'SENS is dead while AUTO is off');
+    const sensBefore = await sens();
+    await auto.press('ArrowUp');
+    assert.equal(await sens(), sensBefore, 'the sensitivity is dead while AUTO is off');
     await auto.click();
-    assert.equal(await sens.isDisabled(), false, 'SENS is live while AUTO is on');
-    await sens.click();
-    const slider = page.getByRole('slider', { name: 'Auto record sensitivity', exact: true });
-    await slider.waitFor({ state: 'visible' });
-    const sensPop = await popoverPlace('Auto record sensitivity', 'Auto record sensitivity');
-    assert.ok(sensPop.top >= sensPop.barBottom && sensPop.aligned < 1, `${width}: the SENS popover ${JSON.stringify(sensPop)}`);
-    await slider.focus();
-    await page.keyboard.press('End');
-    assert.equal(await slider.inputValue(), '100');
+    assert.equal(await auto.getAttribute('aria-pressed'), 'true');
+    for (let k = 0; k < 11; k++) await auto.press('PageUp');
+    assert.equal(await sens(), 100);
+    assert.match(await auto.locator('.k-key__v').textContent(), /^100$/, 'the key shows the sensitivity');
+    assert.ok(await auto.locator('.transport__scale').isVisible(), 'the scale window shows while it changes');
     await page.waitForTimeout(150);
     const enabled = await bounds();
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-on.png' });
-    await page.keyboard.press('Home');
-    assert.equal(await slider.inputValue(), '1');
-    await page.keyboard.press('Escape');
-    await slider.waitFor({ state: 'detached' });
-    await page.waitForTimeout(150);
+    for (let k = 0; k < 11; k++) await auto.press('PageDown');
+    assert.equal(await sens(), 1);
+    await page.waitForTimeout(900);
+    assert.equal(await auto.locator('.transport__scale').count(), 0, 'the scale window goes when the change ends');
     const adjusted = await bounds();
-    assert.equal(await auto.getAttribute('aria-pressed'), 'true');
     await auto.click();
     await page.waitForTimeout(150);
-    assert.equal(await sens.isDisabled(), true);
+    assert.equal(await auto.getAttribute('aria-pressed'), 'false');
     const disabled = await bounds();
     const pass = [enabled, adjusted, disabled].every(value =>
       Math.abs(value.bar - before.bar) < 0.5 && Math.abs(value.lane - before.lane) < 0.5);
@@ -225,7 +199,7 @@ await probe(async ({ browser, open }) => {
   }
   assert.deepEqual(failures, [], 'AUTO moved the stage at these viewport widths');
 
-  // The IN FX popover with every send on: each slider a real control, the panel inside the window.
+  // The input effects' settings with every send on: each slider a real control, each popover inside the window.
   const MIN_SLIDER = 160;
   for (const [width, height] of [[1000, 700], [1440, 900]]) {
     const { page } = await open({ viewport: { width, height }, init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
@@ -242,14 +216,31 @@ await probe(async ({ browser, open }) => {
       anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
       meter: { peak: [0, 0], clip: [false, false] },
     });
-    await page.getByRole('button', { name: 'Input effects', exact: true }).click();
-    await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
-    const sends = await page.evaluate(() => ({
-      on: [...document.querySelectorAll('.infx .fxp-mod__toggle')].map((b) => b.getAttribute('aria-pressed')),
-      sliders: [...document.querySelectorAll('.infx .fxp-param__range')].map((r) => [r.getAttribute('aria-label'), r.getBoundingClientRect().width]),
-      bottom: document.querySelector('#lf-infx-popover').getBoundingClientRect().bottom,
-      panel: (({ width, height }) => ({ width, height }))(document.querySelector('#lf-infx-popover .infx').getBoundingClientRect()),
-    }));
+    // Narrow, the four fold into one IN FX plate whose popover lists them; wide, each is a plate in slot A's
+    // line with its own settings popover: every popover is read, and each must hold inside the window.
+    const folded = (await page.getByRole('button', { name: 'Input effects', exact: true }).count()) > 0;
+    const opens = folded
+      ? [['Input effects', 'Input effects']]
+      : ['Echo', 'Reverb', 'Ring mod', 'OTT'].map((l) => [`Settings for input ${l}`, `Input ${l.toLowerCase()} settings`]);
+    const sends = { on: [], sliders: [], bottom: 0, panel: null };
+    for (const [trigger, dialog] of opens) {
+      await page.getByRole('button', { name: trigger, exact: true }).click();
+      await page.getByRole('dialog', { name: dialog, exact: true }).waitFor();
+      const read = await page.evaluate(() => {
+        const pop = document.querySelector('.infx-pop');
+        return {
+          on: [...document.querySelectorAll('.plate__lamp[aria-label^="Input "]')].map((b) => b.getAttribute('aria-pressed')),
+          sliders: [...pop.querySelectorAll('.fxp-param__range')].map((r) => [r.getAttribute('aria-label'), r.getBoundingClientRect().width]),
+          bottom: pop.getBoundingClientRect().bottom,
+          panel: (({ width, height }) => ({ width, height }))(pop.querySelector('.infx').getBoundingClientRect()),
+        };
+      });
+      sends.on = read.on;
+      sends.sliders.push(...read.sliders);
+      sends.bottom = Math.max(sends.bottom, read.bottom);
+      sends.panel = read.panel;
+      await page.keyboard.press('Escape');
+    }
     console.log(JSON.stringify({ infxSends: `${width}x${height}`, ...sends }));
     await page.close();
     assert.deepEqual(sends.on, ['true', 'true', 'true', 'true'], `${width}x${height}: not every send shows on`);
@@ -258,9 +249,10 @@ await probe(async ({ browser, open }) => {
     assert.ok(sends.bottom <= height, `${width}x${height}: the IN FX popover's bottom edge ${sends.bottom} is below the window`);
   }
 
-  // Disabled by tone, never by opacity (the rule .tgl:disabled and the lane pills state): with a stopped
-  // one-bar loop the BPM steppers are locked, IMPORT waits for an empty looper and lane 1's core says play
-  // first; SENS is dead while AUTO is off. Each keeps an effective opacity of 1 and the --faint legend.
+  // Disabled by tone, never by opacity (the recipe's .k-key:disabled and the lane pills state): with a
+  // stopped one-bar loop TAP is locked, IMPORT waits for an empty looper and lane 1's core says play
+  // first; AUTO REC (and its value) is locked with the tempo. Each keeps an effective opacity of 1 and the
+  // --faint legend.
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
   const { page } = await open({
     context,
@@ -309,11 +301,10 @@ await probe(async ({ browser, open }) => {
     const q = (sel) => document.querySelector(sel);
     return {
       faint,
-      'BPM minus': read(q('button[aria-label="BPM minus"]')),
-      'BPM plus': read(q('button[aria-label="BPM plus"]')),
+      TAP: read(q('button[aria-label="Tap tempo"]')),
       IMPORT: read(q('.tool--import')),
       'track 1 core': read(q('.lp-lane .lp-core')),
-      'SENS caret': { ...read(q('button[aria-label="Auto record sensitivity"]'), '::after'), disabled: q('button[aria-label="Auto record sensitivity"]').disabled },
+      'AUTO REC value': { ...read(q('button[aria-label="Auto record"] .k-key__v')), disabled: q('button[aria-label="Auto record"]').disabled },
       EXPORT: read(q('.tool--export')),
     };
   });
@@ -325,12 +316,11 @@ await probe(async ({ browser, open }) => {
     path: 'logs/transport-auto-layout/tools-loop.png',
     clip: { x: tools.x - 6, y: tools.y - 6, width: tools.width + 12, height: tools.height + 12 },
   });
-  for (const name of ['BPM minus', 'BPM plus', 'IMPORT', 'track 1 core', 'SENS caret']) {
+  for (const name of ['TAP', 'IMPORT', 'track 1 core', 'AUTO REC value']) {
     const t = tone[name];
     assert.equal(t.disabled, true, `${name} is disabled in this state`);
     assert.equal(t.opacity, 1, `${name}: a disabled control faded by opacity (${t.opacity})`);
-    const legend = name === 'SENS caret' ? t.fill : t.color;
-    assert.equal(legend, tone.faint, `${name}: the disabled legend ${legend} is not --faint ${tone.faint}`);
+    assert.equal(t.color, tone.faint, `${name}: the disabled legend ${t.color} is not --faint ${tone.faint}`);
   }
   assert.equal(tone.EXPORT.disabled, false, 'EXPORT is live with a loop in');
   assert.notEqual(tone.EXPORT.color, tone.faint, 'an enabled tool reads as the disabled one');
@@ -380,6 +370,9 @@ await probe(async ({ browser, open }) => {
     });
     const gear = page.locator('.tool--gear');
     await gear.waitFor();
+    // The band's grain and its light from above would read as ink round the icon: the panel is flattened
+    // to its one tone for the measurement (the icon's raster is what is measured, not the panel).
+    await page.evaluate(() => void (document.querySelector('.cmd').style.background = 'var(--surf-1)'));
     await page.waitForTimeout(250);
     const place = await gear.evaluate((el) => {
       const b = el.getBoundingClientRect(), s = el.querySelector('svg').getBoundingClientRect();
@@ -393,7 +386,8 @@ await probe(async ({ browser, open }) => {
         bg: rgb(getComputedStyle(el.closest('.cmd')).backgroundColor),
       };
     });
-    const clip = { x: Math.floor(place.button.x), y: Math.floor(place.button.y), width: 34, height: 34 };
+    // The tool's own box (26 px, the tools sit edge to edge in their grid): a wider clip takes a neighbour's ink.
+    const clip = { x: Math.floor(place.button.x), y: Math.floor(place.button.y), width: Math.floor(place.button.width), height: Math.floor(place.button.height) };
     const png = await page.screenshot({ clip });
     const ink = await inkOf(page, png, { bg: place.bg, fg: place.fg, turns: Object.keys(TURN_LIMIT).map(Number), ring: TOOTH_RING });
     // CSS px from the button's layout centre (the bar centres the cluster at a fractional y; the svg paints

@@ -1,13 +1,13 @@
 import { createEffect, createSignal } from 'solid-js';
 import { trimLane } from '../state/engine-store';
 import { loopWholeBars, trimGate } from './gates';
-import '../transport/transport.css';
 import './trim.css';
 
 /**
  * ✂ TRIM (F16), the EDIT popover's third view (`Edit.tsx`): the track keeps its first N bars as heard and
  * repeats them across the loop, whose length stays (`Looper::trim` in lf-engine). One UNDO gives the loop
- * back. KEEP FIRST [−] N [+] BARS and a TRIM button; N starts at half the loop's bars, rounded down, and
+ * back. KEEP FIRST [−] N [+] BARS and a TRIM key (momentary keys and the value in its window, the
+ * recipes); N starts at half the loop's bars, rounded down, and
  * stays in 1..bars−1. TRIM sends the command and closes the popover (`done`, true for a press by key, so
  * the shell hands focus back to the EDIT pill).
  */
@@ -49,14 +49,14 @@ export function TrimDialog(props: { index: number; id: string; done: (keyboard: 
     >
       <div class="trim" role="group" aria-label="Bars to keep">
         <span class="trim__label">KEEP FIRST</span>
-        <button class="transport__step" aria-label="Keep fewer bars" disabled={n() <= 1} onClick={() => setKeep(n() - 1)}>
+        <button class="k-key k-key--mo trim__step" aria-label="Keep fewer bars" disabled={n() <= 1} onClick={() => setKeep(n() - 1)}>
           −
         </button>
-        <span class="trim__val" aria-live="polite">
+        <span class="k-win trim__val" aria-live="polite">
           {n()}
         </span>
         <button
-          class="transport__step"
+          class="k-key k-key--mo trim__step"
           aria-label="Keep more bars"
           disabled={n() >= bars() - 1}
           onClick={() => setKeep(n() + 1)}
@@ -65,7 +65,7 @@ export function TrimDialog(props: { index: number; id: string; done: (keyboard: 
         </button>
         <span class="trim__unit">{n() === 1 ? 'BAR' : 'BARS'}</span>
         <button
-          class="trim__go"
+          class="k-key trim__go"
           aria-label={`Trim track ${track} to its first ${n()} ${n() === 1 ? 'bar' : 'bars'}`}
           title={`Keep bars 1–${n()} of ${bars()} and repeat them across the loop`}
           disabled={disabled()}

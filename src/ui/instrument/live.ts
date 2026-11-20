@@ -45,7 +45,7 @@ async function liveOp(slot: 0 | 1, quiet: boolean, wentLive: boolean, send: (own
     console.error('[PluginControls] go-live toggle failed', e);
     if (quiet) return;
     setError((prev) => withAt(prev, slot, wentLive ? 'input failed' : 'stop failed'));
-    notifyError(wentLive ? 'Could not go live. Press GO LIVE again.' : 'Could not stop the live input. Press INPUT LIVE again.', e);
+    notifyError(wentLive ? 'Could not go live. Press LIVE again.' : 'Could not stop the live input. Press LIVE again.', e);
   } finally {
     setBusy((prev) => withAt(prev, slot, Math.max(0, prev[slot] - 1)));
   }

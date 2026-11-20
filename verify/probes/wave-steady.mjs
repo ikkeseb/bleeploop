@@ -9,11 +9,17 @@
  * probe reads, in the next drawn frame, the burst's left edge on the lane's canvas (the first rec-red
  * column of a row the quiet bins never reach) and the lane's span (`looper.recSpanFrames`).
  *
- * Proves: while the span holds, the burst stays within 1 device px across the updates, wherever the head
- * is and however many bins arrived (before, the bins stretched to the head, or across the lane on a first
- * take, and the burst moved with every update), and it sits where its frame falls in the span. It moves
- * only when the span grows: a first take's window doubles (4 bars at the tempo: 8 s at 120 BPM), a free
- * later take spans the loops it has reached. Every span needs 4 samples; a run too slow to take them fails.
+ * Proves, in each of the wave's four looks (`src/ui/looper/wave-looks.ts`): while the span holds, the
+ * burst stays within 1 device px across the updates, wherever the head is and however many bins arrived
+ * (before, the bins stretched to the head, or across the lane on a first take, and the burst moved with
+ * every update), and it sits where its frame falls in the span, within the look's own grain (`LOOKS`):
+ * the plain body places each bin to the device px; the stripes and the light bars light the whole
+ * element their slice falls in, so its edge sits up to one pitch from the frame; the dense look widens a
+ * peak by a slice each side and smooths it, so up to two pitches. It moves only when the span grows: a
+ * first take's window doubles (4 bars at the tempo: 8 s at 120 BPM), a free later take spans the loops it
+ * has reached. And nothing is drawn past the recorded boundary (the bins' end over the span), but the
+ * record head and the tape's dashes on the centre line. Every span needs 4 samples; a run too slow to take
+ * them fails.
  *
  * Cannot see the native engine's real feed cadence, the web looper's own takes, WebView2 or the eye.
  * Run: pnpm probe wave-steady
@@ -42,21 +48,34 @@ const lane = (state, extra = {}) => ({
 const laneEvent = (i, info, frame = 0) => ({ Lane: { frame, lane: i, info } });
 const transport = (master, locked, bpm = 120) => ({ Transport: { frame: 0, master, bpm, locked } });
 
+/**
+ * The looks, each with how far (CSS px) its burst's left edge may sit from the burst's frame: the plain
+ * body to the device px; the stripes one stripe pitch (aimed at 8.5 px, at most 12 when a bar's count
+ * snaps to the meter) since the whole stripe lights; the light bars one 5 px pitch; the dense look's
+ * neighbour max and smoothing two 3 px pitches.
+ */
+const LOOKS = { plain: 0, stripes: 12, bars: 5, dense: 6 };
+
 // A fixed-seed Park–Miller generator: a red run replays its intervals.
 let seed = 20260928;
 const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 
 await probe(async ({ open }) => {
+  for (const [look, grain] of Object.entries(LOOKS)) await run(open, look, grain);
+});
+
+async function run(open, look, grain) {
+  // Every look replays the same intervals.
+  seed = 20260928;
   const { page } = await open({
     viewport: { width: 1600, height: 900 },
-    // The plain look (`src/ui/looper/wave-looks.ts`): its body places each bin to the device px, where the
-    // stripes snap a burst to the stripe its slice falls in, so "sits at its frame" holds within 1 px here.
     init: (p) =>
-      p.addInitScript(() => {
+      p.addInitScript((l) => {
         window.__lfEngineFake = true;
-        localStorage.setItem('lf.waveLook', 'plain');
-      }),
+        localStorage.setItem('lf.waveLook', l);
+      }, look),
   });
+  const slack = 1 + Math.ceil(grain * (await page.evaluate(() => devicePixelRatio)));
   let seq = 0;
   const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
 
@@ -69,24 +88,46 @@ await probe(async ({ open }) => {
     meter: { peak: [0, 0], clip: [false, false] },
   });
 
-  /** The burst's left edge on lane `i`'s canvas in the next drawn frame, and the span it was drawn over. */
+  /**
+   * The burst's left edge on lane `i`'s canvas in the next drawn frame, the span it was drawn over, and the
+   * rec-red pixels past the recorded boundary (the bins held over the span), off the centre line's tape
+   * and the record head's columns (the ones red at the row's top, which no wave reaches).
+   */
   const sample = (i) =>
-    page.evaluate(async (k) => {
-      const { looper } = await import('/src/ui/state/audio.ts');
-      await new Promise((r) => requestAnimationFrame(r));
-      const c = document.querySelectorAll('.lp-lane')[k].querySelector('canvas');
-      // 30 % down: the burst's outer envelope (±0.9) crosses it, the quiet bins (±0.05) and the tape don't.
-      const row = c.getContext('2d').getImageData(0, Math.round(c.height * 0.3), c.width, 1).data;
-      let edge = -1;
-      for (let x = 0; x < c.width; x++) {
-        const [r, g, , a] = row.slice(4 * x, 4 * x + 4);
-        if (a > 40 && r > 150 && r - g > 80) {
-          edge = x;
-          break;
+    page.evaluate(
+      async ({ k, peakFrames }) => {
+        const { looper } = await import('/src/ui/state/audio.ts');
+        await new Promise((r) => requestAnimationFrame(r));
+        const c = document.querySelectorAll('.lp-lane')[k].querySelector('canvas');
+        const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        const red = (x, y) => {
+          const o = 4 * (y * c.width + x);
+          return px[o + 3] > 40 && px[o] > 150 && px[o] - px[o + 1] > 80;
+        };
+        // 30 % down: the burst's outer envelope (±0.9) crosses it, the quiet bins (±0.05) and the tape don't.
+        const y30 = Math.round(c.height * 0.3);
+        let edge = -1;
+        for (let x = 0; x < c.width; x++) {
+          if (red(x, y30)) {
+            edge = x;
+            break;
+          }
         }
-      }
-      return { edge, span: looper.recSpanFrames(k), width: c.width };
-    }, i);
+        const span = looper.recSpanFrames(k);
+        const view = { min: null, max: null, count: 0, version: 0 };
+        looper.peaksInto(k, view);
+        const end = Math.ceil(((view.count * peakFrames) / span) * c.width);
+        const mid = c.height / 2;
+        const tape = Math.max(2, Math.round(2 * devicePixelRatio));
+        let past = 0;
+        for (let x = end; x < c.width; x++) {
+          if (red(x, 1) || (x > 0 && red(x - 1, 1)) || (x + 1 < c.width && red(x + 1, 1))) continue;
+          for (let y = 2; y < c.height - 2; y++) if (Math.abs(y - mid) > tape && red(x, y)) past++;
+        }
+        return { edge, span, width: c.width, end, past };
+      },
+      { k: i, peakFrames: PEAK_FRAMES },
+    );
 
   /**
    * Record lane `i` from device frame `start` (grid `grid`) for `ms` of real time on a clock `speed`×
@@ -128,13 +169,18 @@ await probe(async ({ open }) => {
       const edges = steady.map((s) => s.edge);
       const counts = new Set(steady.map((s) => s.count));
       const expected = Math.ceil(((burstAt * PEAK_FRAMES) / run[0].span) * run[0].width);
-      console.log(`${name}: span ${run[0].span} frames, ${steady.length} samples over ${counts.size} bin counts, burst at ${[...new Set(edges)].join('/')} px (its frame: ${expected})`);
+      console.log(`${look} ${name}: span ${run[0].span} frames, ${steady.length} samples over ${counts.size} bin counts, burst at ${[...new Set(edges)].join('/')} px (its frame: ${expected})`);
       // A span sampled too thinly proves nothing about it: a slow run fails here, it never passes unchecked.
-      assert.ok(steady.length >= 4, `${name}: only ${steady.length} samples over the span ${run[0].span} (needs 4)`);
-      assert.ok(counts.size >= 4, `${name}: the bins kept arriving within the span ${run[0].span}`);
-      assert.ok(Math.max(...edges) - Math.min(...edges) <= 1, `${name}: the burst holds within 1 px over the span ${run[0].span} (${edges.join(' ')})`);
-      assert.ok(edges.every((e) => Math.abs(e - expected) <= 1), `${name}: the burst sits at its frame in the span ${run[0].span}`);
+      assert.ok(steady.length >= 4, `${look} ${name}: only ${steady.length} samples over the span ${run[0].span} (needs 4)`);
+      assert.ok(counts.size >= 4, `${look} ${name}: the bins kept arriving within the span ${run[0].span}`);
+      assert.ok(Math.max(...edges) - Math.min(...edges) <= 1, `${look} ${name}: the burst holds within 1 px over the span ${run[0].span} (${edges.join(' ')})`);
+      assert.ok(
+        edges.every((e) => e >= 0 && Math.abs(e - expected) <= slack),
+        `${look} ${name}: the burst sits at its frame in the span ${run[0].span}, within ${slack} px (${edges.join(' ')})`,
+      );
     }
+    const past = samples.filter((s) => s.past > 0);
+    assert.equal(past.length, 0, `${look} ${name}: nothing drawn past the recorded boundary (${past.map((s) => `${s.past} px past ${s.end}`).join(', ')})`);
     return runs.map((run) => run[0].span);
   }
 
@@ -154,5 +200,5 @@ await probe(async ({ open }) => {
   const later = await take(1, 8 * BAR, 0, 2, 2600, 20);
   const laterSpans = assertSteady('later take', later, 20);
   assert.deepEqual(laterSpans, [BAR, 2 * BAR, 3 * BAR], 'a free later take spans the loops it reached');
-
-});
+  await page.close();
+}

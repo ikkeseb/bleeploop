@@ -5,8 +5,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 `state/` excepted (the root `AGENTS.md` rule).
 
 - **Type and tokens:** Instrument Sans (vendored, `src/assets/fonts/`) in three roles, `--font-legend`,
-  `--font-num` and `--font-name`, so a change of face is one line; no display or retro font. Geist Mono
-  stays only for the wave's bar numbers in `looper/waveform.ts`, until that file takes `--font-num`.
+  `--font-num` and `--font-name`, so a change of face is one line; no display or retro font. The wave's
+  bar numbers (`looper/waveform.ts`) draw in `--font-num` too, every digit one advance wide.
   The surface language ("the panel": depth only on what is pressed, turned or slid; flat panel, print
   and dark glass for the rest; colour only for sound; warm white = engaged), its tokens and the shared
   recipes (`.k-key`, `.k-led`, `.k-glass`, `.k-win`, `.k-meter`, `.k-fader`, `.k-knob`) live in the

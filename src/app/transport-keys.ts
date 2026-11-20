@@ -11,6 +11,13 @@ import { runAction, selectTrack, type ActionId } from './actions';
  * learn; free of the note keys, the drum pads and the table below. */
 const WAVE_LOOK_KEY = 'i';
 const WAVE_TOAST = 'Wave: ';
+/** How long the wave's toast stays (ms): a glance, not the store's 8 s linger, which suits a failure. */
+const WAVE_TOAST_MS = 1500;
+
+/** Take down every wave toast (the store keeps no per-toast duration, so this one keeps its own). */
+function dismissWaveToasts(): void {
+  for (const t of toasts()) if (t.message.startsWith(WAVE_TOAST)) dismissToast(t.id);
+}
 
 export interface TransportKeysOptions {
   /** Escape was pressed — the app closes the tuner, else cancels a pending MIDI learn, else closes
@@ -69,6 +76,7 @@ export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
  */
 export function installTransportKeys(opts: TransportKeysOptions): TransportKeys {
   let lastInputWasPointer = false;
+  let waveToastTimer: ReturnType<typeof setTimeout> | undefined;
   // The element the app itself last focused via returnFocus(); cleared by any other focus move.
   let appFocused: Element | null = null;
 
@@ -114,12 +122,14 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
       return;
     }
 
-    // I steps the wave's look on the main screen, and says which in one note toast (the last one
-    // replaced, so a run of presses leaves one).
+    // I steps the wave's look on the main screen, and says which in one note toast for WAVE_TOAST_MS
+    // (the last one replaced and its time restarted, so a run of presses leaves one).
     if (e.key.toLowerCase() === WAVE_LOOK_KEY && !stageOpen()) {
       e.preventDefault();
-      for (const t of toasts()) if (t.message.startsWith(WAVE_TOAST)) dismissToast(t.id);
+      clearTimeout(waveToastTimer);
+      dismissWaveToasts();
       notifyNote(WAVE_TOAST + cycleWaveLook());
+      waveToastTimer = setTimeout(dismissWaveToasts, WAVE_TOAST_MS);
       return;
     }
 
@@ -206,6 +216,7 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
 
   return {
     dispose: () => {
+      clearTimeout(waveToastTimer);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('click', onClick, { capture: true });
       window.removeEventListener('pointerdown', onPointerDown, { capture: true });

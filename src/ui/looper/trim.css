@@ -1,56 +1,40 @@
-/* ✂ TRIM's bar stepper — "Instrument", in the EDIT popover's shell (edit.css). The floating panel tone
-   and a hairline of top light; chrome stays monochrome, and the TRIM button is the one engaged-looking
-   face (the warm-white legend). */
+/* ✂ TRIM's bar stepper, in the EDIT popover's shell (edit.css): the floating panel, the recipes' momentary
+   keys either side of the value window, and TRIM a key whose legend is lit warm white (it acts). */
 .trim {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 9px 10px;
-  border-radius: 12px;
+  padding: 10px 12px 13px;
+  border-radius: var(--r-card);
   background: var(--panel);
-  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
 }
 .trim__label,
 .trim__unit {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  color: var(--faint);
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  color: var(--dim);
 }
 .trim__label {
-  margin-right: 2px;
+  margin-right: 4px;
 }
-.trim__val {
-  min-width: 22px;
-  text-align: center;
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  line-height: 1;
+.k-key.trim__step {
+  --kh: 28px;
+  width: 28px;
+  padding: 0;
+  font-size: 14px;
 }
-.trim__go {
-  margin-left: 6px;
-  height: 24px;
-  padding: 0 12px;
-  border: 1px solid rgba(244, 239, 230, 0.28);
-  border-radius: 7px;
-  background: var(--surf-3);
-  box-shadow: inset 0 1px 0 var(--hair);
+.k-win.trim__val {
+  justify-content: center;
+  min-width: 36px;
+  padding: 0 6px;
+}
+.k-key.trim__go {
+  --kh: 30px;
+  margin-left: 8px;
+  font-size: 12px;
   color: var(--engaged);
-  font-family: var(--sans);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  transition: color 0.12s, background-color 0.12s;
 }
-.trim__go:hover {
-  background: color-mix(in srgb, var(--engaged) 10%, var(--surf-3));
-}
-.trim__go:active {
-  background: var(--sunk);
-  box-shadow: var(--pressed);
+.k-key.trim__go:disabled {
+  color: var(--faint);
 }

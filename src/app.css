@@ -5,13 +5,6 @@
   font-stretch: 75% 100%;
   font-display: block;
 }
-/* Geist Mono stays only for the wave's bar numbers (`looper/waveform.ts`), until that file takes --font-num */
-@font-face {
-  font-family: 'Geist Mono';
-  src: url('./assets/fonts/GeistMono-Variable.woff2') format('woff2');
-  font-weight: 100 900;
-  font-display: block;
-}
 
 :root {
   /* ===== The panel: the redesign the owner accepted on 2026-11-20 (references in docs/redesign/ while
@@ -37,9 +30,8 @@
      resting key's alone). A key carries its own value as a second, smaller line in the numerals (bright
      while its mode is on), changed by a drag or a scroll on the key: no value fields or steppers beside it.
      D14: REC and OVERDUB carry a mark that survives greyscale and every colour-vision type: the lane's lit
-     key shows a round rec lamp beside its light bar while it captures, a playing lane the plain bar (until
-     the lane head is rebuilt, today's filled REC / OVERDUB badge carries it). CLIP is the one other filled
-     flag (an alarm). THE WAVE is the glass's face: colour its state, brightness its importance, one crisp
+     key shows a round rec lamp beside its light bar while it captures, a playing lane the plain bar. CLIP
+     is the one other filled flag (an alarm). THE WAVE is the glass's face: colour its state, brightness its importance, one crisp
      playhead per row; its look (stripes by default) is switchable, and `looper/waveform.ts` owns the looks.
      TYPE: Instrument Sans in three roles, one line each to change: legends (--font-legend: 600, caps,
      0.06em, never under 12 px at the base scale), numerals (--font-num: 500, tabular figures, which the
@@ -54,7 +46,8 @@
      RECIPES (after the base rules), one family:
      .k-key a key cap: --latch with a .k-led over its legend, --mo momentary, --clr sunk destructive,
        --armed its armed state; on is aria-pressed="true" or .is-on, disabled :disabled.
-     .k-key--value a key that carries its value: .k-key__l the legend over .k-key__v the value line.
+     .k-key--value a key that carries its value: .k-key__l the legend over .k-key__v the value line;
+       .is-adjusting while a drag or a scroll changes it (the value line lit, the floor a step up).
      .k-led an LED bar (--dot round), lit by .is-on or its latched key being on, in --led-c.
      .k-bezel > .k-glass the recessed glass window; .k-win the small value window.
      .k-meter the LED ladder, lit up to --level (0-100 %): green, amber from -12 dB, red from -3 dB.
@@ -263,227 +256,6 @@ optgroup {
   display: contents;
 }
 
-/* ---- command bar ----
-   ONE card holding brand · system lamp · the transport clusters (Transport.tsx) · tool icons.
-   Floats over the app background (margin, rounded, 1px --edge). Horizontal margins match the
-   stage padding below so its edges align with the decks. */
-.cmd {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: clamp(10px, 1.2vw, 18px);
-  margin: clamp(10px, 1.3vh, 15px) clamp(16px, 2vw, 28px) 0;
-  padding: 9px 18px;
-  border-radius: var(--r-card);
-  background: var(--surf-1);
-  border: 1px solid transparent; /* kept for the measured height; the card's one hairline is its top light */
-  box-shadow: inset 0 1px 0 var(--hair);
-  min-width: 0;
-  anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
-  /* Tab and the accessibility tree follow the rows as drawn: the stacked bar's rows are a visual `order`
-     (transport.css), and its DOM keeps the one-row order (Chromium 137+, so WebView2's evergreen runtime) */
-  reading-flow: flex-visual;
-}
-/* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
-   cannot see FIXED's bars come and go). Row 1 keeps brand · lamp · BPM · TAP · loop dial · ALL · FADE ·
-   ✕ ALL · IN FX · master · tools; the five record modes drop to row 2, left-aligned under the brand
-   (transport.css says why the global keys stay by LOOP). The ::after element is the forced line break between the two `order` bands
-   (its own zero-height line, so the row gap counts twice). The narrower rungs stay in transport.css
-   ("Narrow-width ladder"); the last one, the brand's fold, sits with the brand below. */
-.cmd--stack {
-  flex-wrap: wrap;
-  row-gap: 3px;
-}
-.cmd--stack::after {
-  content: '';
-  flex-basis: 100%;
-  height: 0;
-  order: 1;
-}
-/* Second rung (also measured by cmd-fit.ts): when row 1 cannot hold the rest even with the modes gone,
-   the tool icons join row 2 at its right edge instead of wrapping onto a third row of their own — the
-   bar never exceeds two rows, so the stage never jumps when the loop readout appears at 960 px. */
-.cmd--stack-tools .tools {
-  order: 3;
-  margin-left: auto;
-}
-@media (max-width: 1040px) {
-  .cmd {
-    column-gap: 8px; /* the row gap stays .cmd--stack's: a `gap` here would override it */
-    padding-left: 12px;
-    padding-right: 12px;
-  }
-}
-/* zero-specificity reset (:where) so per-component pill rules (.transport__tgl etc., specificity
-   0,1,0) always win over it — a bare `.cmd button` (0,1,1) would beat them and re-inherit font/color.
-   background/border:0 kill the UA dark-mode button face bleeding through pills that only restyle
-   border-color. */
-:where(.cmd button) {
-  appearance: none;
-  -webkit-appearance: none;
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: 0;
-}
-/* brand — letterspaced sans wordmark + the conic-gradient dot (the logo is owner-approved). "BLEEP" dim,
-   "LOOP" bright. */
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-size: calc(12px * var(--ui));
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  white-space: nowrap;
-  color: var(--faint);
-}
-.brand b {
-  color: var(--dim);
-  font-weight: 600;
-}
-.brand__dot {
-  width: 11px;
-  height: 11px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: conic-gradient(
-    var(--rec),
-    var(--dub),
-    var(--play),
-    var(--cyan),
-    var(--violet),
-    var(--rec)
-  );
-}
-/* Last rung (app/cmd-fit.ts): when row 1 still overflows with everything movable on row 2, the wordmark
-   folds and the dot stays. The brand collapses to the dot while the hidden wordmark keeps its box, so the
-   brand's scrollWidth still reports the unfolded width and the measurement cannot see its own effect. */
-.cmd--stack-brand .brand {
-  width: 11px;
-}
-.cmd--stack-brand .brand__word {
-  visibility: hidden;
-}
-
-/* system lamp — the at-a-glance aggregate of host/engine/plugin/midi (detail in its title + the
-   Audio Settings diagnostics block). All well, it is chrome and spends no hue (green is a sound): a quiet
-   neutral dot; amber when the engine could not open an audio device. */
-.cmd__lamp {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--faint);
-}
-.cmd__lamp--warn {
-  background: var(--dub);
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--dub);
-}
-
-/* visually-hidden live region — carries the plugin-scan role=status announcement; no visible chip
-   renders it. */
-.cmd__sr {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-/* tools — far right, flat icon buttons: a --dim glyph at rest; disabled = a --faint glyph (tone, never an
-   opacity fade, as .tgl:disabled), so a dead tool still reads as present across the room */
-.tools {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto; /* the far-right cluster never yields width — it holds the keyboard restore + help */
-}
-.tool {
-  width: calc(34px * var(--ui));
-  height: calc(34px * var(--ui));
-  border: 0;
-  border-radius: var(--r-ctl);
-  display: grid;
-  place-items: center;
-  color: var(--dim);
-  cursor: pointer;
-  background: none;
-  transition: color var(--motion), background-color var(--motion), transform 0.08s;
-}
-.tool svg {
-  width: calc(16px * var(--ui));
-  height: calc(16px * var(--ui));
-  transition: transform 0.35s;
-}
-.tool:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--key-hover);
-}
-.tool:active {
-  transform: translateY(1px);
-}
-.tool:disabled {
-  cursor: default;
-  color: var(--faint);
-}
-.tool--gear:hover svg {
-  transform: rotate(35deg);
-}
-/* A word among the tool icons, for the one thing that must not be missed and has no icon that could
-   say it: UPDATE (`src/ui/settings/UpdatePanel.tsx`). It is mounted only while there is something to
-   press, so it costs nothing the rest of the time — the warm-white legend is the "something waits
-   here" signal the Help cap's corner dot used to carry. Its height, corner and type are a mode pill's
-   (`.transport__tgl`, transport.css), so it stands in the bar as one of them (app-update probe). */
-.tool-pill {
-  height: calc(28px * var(--ui) + 2px); /* a mode pill's: its 12 px line and 8 px pads scale, its 1 px rims do not */
-  padding: 0 calc(11px * var(--ui));
-  border: 1px solid transparent;
-  border-radius: var(--r-ctl);
-  display: grid;
-  place-items: center;
-  font-size: calc(10.5px * var(--ui));
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--engaged);
-  background: var(--key-on);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background-color var(--motion), transform 0.08s;
-}
-.tool-pill:hover {
-  background: var(--key-hover);
-}
-.tool-pill:active {
-  transform: translateY(1px);
-}
-.tool-pill--on {
-  background: var(--key-on);
-}
-/* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = an engaged key's lit legend on
-   its face (--key-on), never a solid tile */
-.tool--on,
-.tool--on:hover:not(:disabled) {
-  color: var(--engaged);
-  background: var(--key-on);
-}
-/* gear open — the same lit legend */
-.tool--gear.tool--on {
-  color: var(--engaged);
-}
-.tool--rescan.scanning svg {
-  animation: lf-spin 0.9s linear infinite;
-}
-@keyframes lf-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 @media (prefers-reduced-motion: reduce) {
   /* every control transition (--motion) lands at once, app-wide: the portals (IN FX, EDIT, TRIM) mount
      on document.body, outside .cmd and .stage. Animations (the ARMED / LISTEN pulse, the rescan spinner)
@@ -493,49 +265,6 @@ optgroup {
   *::after {
     transition: none !important;
   }
-  .tool--rescan.scanning svg {
-    animation: none;
-  }
-  .tool svg,
-  .tool--gear:hover svg {
-    transition: none;
-    transform: none;
-  }
-}
-
-/* ---- settings popover ---- */
-/* Full-screen transparent click-catcher: closes the popover on any outside click. The panel itself
-   hangs under the command bar's right edge through CSS anchor positioning, so it follows the bar's
-   real bottom edge in the one-row and the two-row arrangement alike (a fixed offset covered row 2).
-   It stops 8px above the window's bottom edge and the panel body scrolls, so a tall panel (a live
-   native slot adds rows to Audio Settings) stays reachable in a short window. Needs Chromium 138+
-   (anchor positioning, the `stretch` size; WebView2 is evergreen). The panel bodies style themselves
-   (AudioSettings.tsx, Help.tsx). */
-.settings-popover__backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-}
-.settings-popover {
-  position: fixed;
-  top: 60px; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
-  right: clamp(16px, 2vw, 28px);
-  position-anchor: --cmd;
-  top: calc(anchor(bottom) + 8px);
-  right: anchor(right);
-  max-height: stretch;
-  margin-bottom: 8px;
-  display: flex;
-  flex-direction: column;
-}
-.settings-popover > * {
-  overflow-y: auto;
-}
-/* The panel takes focus when it opens (app.tsx `focusPanel`), and an open with no pointer input (a key,
-   a toast's action, a script) would draw the UA's focus ring around the whole panel. The ring belongs on
-   the controls inside, which keep theirs; the panel itself is what the open shows. */
-.settings-popover:focus {
-  outline: none;
 }
 
 /* ---- stage + zones ----
@@ -562,166 +291,6 @@ optgroup {
 .zone__body {
   flex: 1 1 auto;
   min-height: 0;
-}
-
-/* ---- source row — two equal compact slot cards side by side. The plugin params drawer expands DOWN
-   as an accordion. When the drawer outgrows the (autoSize-clamped) instrument region, the drawer scrolls
-   INSIDE the card — the card shell (rounded lit top edge, header row) stays anchored, and the looper
-   never moves. Flex, not grid: a flex item's max-height:100% resolves against the container's definite
-   height, but a grid item's resolves against its auto row track (content-sized — circular, so the cap
-   never bites). Grid also lets the card's decorative top edge scroll under the clip boundary (the
-   "top-sheen drift"), taking the slot header along. ---- */
-.src {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start; /* an expanded drawer doesn't stretch its sibling card */
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto; /* belt only — cards cap at 100%, so this should never engage */
-  scrollbar-width: thin;
-  padding: 1px; /* keep the active glow from clipping against the region edge */
-}
-/* no drawer open: the two cards stretch to one band (a live card's meter row would otherwise leave
-   a hole under its sibling). The region hugs its content: the band is the taller card's height. */
-.src:not(:has(.slot__drawer--open)) {
-  align-items: stretch;
-}
-.slot {
-  flex: 1 1 0; /* two equal columns */
-  max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
-  min-width: 0;
-  border-radius: var(--r-card);
-  background: var(--card);
-  border: 1px solid transparent;
-  box-shadow: inset 0 1px 0 var(--hair);
-  display: flex;
-  flex-direction: column;
-  cursor: pointer;
-  container: slot / inline-size; /* the header's one-line form keys on the card's width */
-  transition: background-color var(--motion), border-color var(--motion);
-}
-.slot:hover {
-  background: #14161c;
-}
-/* ACTIVE = the selection recipe (the header's THE DISPLAY): the letter lights (.slot__id below) and the
-   card lifts a tone under its usual top light, never a box (selection is chrome, not sound, so no hue) */
-.slot--active,
-.slot--active:hover {
-  background: var(--surf-sel);
-}
-/* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
-   EDITOR, PARAMS) following the picker: on a second line starting under it, or on a card wide enough
-   for one line, right after it, the volume keeping the card's right edge. Either way they read as the
-   picker's own; while the picker has its full width, the input and GO LIVE stay put when a plugin's
-   keys join them, and two full cards line them up at one x. */
-.slot__row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: 'id source vol';
-  align-items: center;
-  column-gap: 12px;
-  row-gap: 8px;
-  padding: calc(10px * var(--ui)) 18px;
-  min-width: 0;
-  flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
-}
-.slot__row:has(> .slot__acts) {
-  grid-template-areas: 'id source vol' '. acts acts';
-}
-/* the one-line form: the picker's column caps at the picker's own width and at 28% of the card, so two
-   equal cards give their pickers one width whatever controls each shows; the controls take their whole
-   width beside it, and the volume's column takes what is left, the volume at its end (no empty column,
-   so no extra gap on a full row). 28%: at 2560 a full card (1242 px) keeps the picker's whole 345 px; at
-   1920 a full card (922 px) caps it at 258 px, 13 px under what an input-taking plugin's four keys, live,
-   leave it. Below a 904 px card that crowded card narrows its picker, never wraps its controls. */
-@container slot (min-width: 760px) {
-  .slot__row:has(> .slot__acts) {
-    grid-template-columns: auto minmax(0, min(calc(300px * var(--ui)), 28cqi)) max-content minmax(max-content, 1fr);
-    grid-template-areas: 'id source acts vol';
-  }
-  .slot__row:has(> .slot__acts) > .slot__vol {
-    justify-self: end;
-  }
-  /* a refusal or an error beside the controls (one line of text, never wrapped) would take the picker's
-     width and could push the row past the card: that row keeps the two-line form, its controls wrapping
-     on their own line */
-  .slot__row:has(> .slot__acts > .pc__err) {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: 'id source vol' '. acts acts';
-  }
-}
-/* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
-.slot__id {
-  grid-area: id;
-  font-size: calc(20px * var(--ui));
-  font-weight: 400;
-  line-height: 1;
-  color: var(--faint);
-  background: none;
-  border: 0;
-  padding: 0 2px;
-  cursor: pointer;
-  transition: color var(--motion);
-}
-.slot__id:hover {
-  color: var(--dim);
-}
-.slot--active .slot__id {
-  color: var(--engaged);
-}
-.slot__id:focus-visible {
-  outline-offset: 3px;
-  border-radius: 4px;
-}
-/* the source's own controls: they wrap inside their line rather than push the card wider */
-.slot__acts {
-  grid-area: acts;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-/* toggle — a key (the header's KEYS): a --legend caps legend on the quiet resting face, lifted on hover;
-   engaged = the legend lights warm-white on the face a step up. Pressed = the face sinks. Disabled = the
-   resting face with a legible --faint legend (tone, never an opacity fade). */
-.tgl {
-  font-size: calc(10.5px * var(--ui));
-  line-height: calc(13px * var(--ui)); /* pinned: the slot row keeps its measured height */
-  letter-spacing: 0.08em;
-  font-weight: 600;
-  padding: calc(7px * var(--ui)) calc(12px * var(--ui));
-  border: 1px solid transparent;
-  border-radius: var(--r-ctl);
-  background: var(--key);
-  color: var(--legend);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color var(--motion), background-color var(--motion), border-color var(--motion);
-}
-.tgl:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--key-hover);
-}
-.tgl:active:not(:disabled) {
-  background: var(--sunk);
-  box-shadow: var(--pressed);
-}
-.tgl:disabled {
-  cursor: default;
-  background: var(--key-off);
-  box-shadow: none;
-  color: var(--faint);
-}
-.tgl.on,
-.tgl.on:hover:not(:disabled):not(:active) {
-  color: var(--engaged);
-  background: var(--key-on); /* engaged outranks hover: the face never drops under the pointer */
-}
-/* live input: the engaged face; its green dot is the live signal (plugin-controls.css sets the legend) */
-.tgl.on-green {
-  background: var(--key-on);
 }
 
 /* ---- range sliders — ONE skin ----
@@ -795,106 +364,6 @@ optgroup {
 }
 :where(.lf-range):disabled::-moz-range-thumb {
   background: var(--faint);
-}
-
-/* the source picker and the input pick — flat selects: no face at rest (the caret says "opens"), the
-   control face on hover. The picker names the slot's source, so it reads at the slot name's size and
-   weight. Explicit background-color so no UA face shows. */
-.slot__source,
-.slot__in {
-  height: calc(30px * var(--ui));
-  min-width: 0;
-  appearance: none;
-  -webkit-appearance: none;
-  color-scheme: dark;
-  padding: 0 28px 0 11px;
-  border-radius: var(--r-ctl);
-  border: 1px solid transparent;
-  font-family: inherit;
-  cursor: pointer;
-  background-image: var(--caret-svg);
-  background-color: var(--key); /* a picker is a key: the resting face (the header's KEYS) */
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 12px 12px;
-  transition: color var(--motion), background-color var(--motion);
-}
-.slot__source {
-  grid-area: source;
-  justify-self: start;
-  width: 100%;
-  max-width: calc(300px * var(--ui));
-  font-size: calc(13px * var(--ui));
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text);
-  text-overflow: ellipsis;
-}
-.slot__in {
-  font-size: calc(10.5px * var(--ui));
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--legend);
-}
-.slot__source:hover:not(:disabled),
-.slot__in:hover {
-  color: var(--text);
-  background-color: var(--key-hover);
-}
-.slot__source:disabled {
-  cursor: default;
-  color: var(--faint);
-}
-/* a slot that has never held a source (a guitar-first install) asks for one: the picker's ask reads a
-   step under a named source, and above the disabled picker's --faint, so it never reads as unavailable */
-.slot__source--ask {
-  color: var(--dim);
-}
-/* slot B before its first source: its letter and the picker's one line, hugging them, so slot A takes
-   the row; any pick restores the two equal cards. It drops the card's inline-size containment, which
-   would size the hugging card as if empty (it has no one-line form to query). */
-.slot--folded {
-  flex: 0 0 auto;
-  container-type: normal;
-}
-.slot--folded .slot__row {
-  grid-template-columns: auto auto;
-  grid-template-areas: 'id source';
-}
-.slot--folded .slot__source {
-  width: auto;
-  field-sizing: content;
-}
-.slot__source:focus-visible,
-.slot__in:focus-visible {
-  outline-offset: 1px;
-}
-.slot__source option,
-.slot__in option {
-  background: var(--option);
-  color: var(--text);
-  font-weight: 500;
-}
-.slot__source option:checked,
-.slot__in option:checked {
-  background: #2a2d35;
-  color: #fff;
-}
-
-/* the params drawer (accordion) — a sub-panel that expands the slot card downward. Rendered
-   whenever a plugin is loaded (so its subscriptions stay live); open/close is CSS-only, no remount.
-   The drawer is the card's scroll region: when it outgrows the instrument region it scrolls under the
-   pinned header row, keeping the card's top edge anchored. */
-.slot__drawer {
-  display: none;
-}
-.slot__drawer--open {
-  display: block;
-  border-top: 1px solid var(--edge);
-  padding: 12px 18px 14px;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
 }
 
 /* ===== RECIPES: the panel's parts, one family (the header's DEPTH, KEYS and RECIPES; drawn after
@@ -1051,8 +520,24 @@ optgroup {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+/* on: the value line lit, the sheet's warm white between --text and --engaged (#f4f2ec) */
 :is(.k-key.is-on, .k-key[aria-pressed='true']) .k-key__v {
-  color: var(--text);
+  color: color-mix(in srgb, var(--text), var(--engaged));
+}
+/* adjusting (.is-adjusting, while a drag or a scroll on the key changes its value): the cap holds sunk on
+   its wall with its floor a step up from a held one, the legend steps back to --dim and the value line
+   lights --engaged, as the control sheet's value keys row */
+.k-key.k-key--value.is-adjusting:not(:disabled) {
+  transform: translateY(3px);
+  background: var(--cap);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 -1px 0 rgba(0, 0, 0, 0.28), 0 1px 0 #050607, 0 2px 3px rgba(0, 0, 0, 0.5);
+}
+.k-key--value.is-adjusting .k-key__l {
+  color: var(--dim);
+}
+.k-key--value.is-adjusting .k-key__v {
+  color: var(--engaged);
+  text-shadow: 0 0 6px rgba(255, 226, 186, 0.35);
 }
 
 /* the LED: a small solid shape; unlit a dark lens, lit a tight bloom in its own colour (6 px reach) */
@@ -1272,8 +757,6 @@ optgroup {
   .lp-pb.is-on,
   .k-key.is-on,
   .k-key[aria-pressed='true'],
-  .transport__tgl.is-on,
-  .tgl.on-green,
   .fxp-mod__toggle--on,
   .audio-settings__chip.is-on,
   .slot--active,

@@ -26,8 +26,9 @@
  * - a source pick whose plugin unload fails is not saved for the next launch; one that unloads is;
  * - a plugin's level is kept per slot and plugin: loaded again, and loaded by the rig recall's load after
  *   a reload, it comes back at that level (not its type default);
- * - the header at 1280×800 and 1000×700 (slot A Off and live on In 2, slot B the amp-sim): no control
- *   leaves its card, the source's own controls stay on one line, and at 1280 the header has at most two.
+ * - the slot row at 1280×800 and 1000×700 (slot A Off and live on In 2, slot B the amp-sim): no control
+ *   leaves its slot or the window, each slot reads as one line, both lines show at 1280, and at 1000
+ *   slot B folds to one plate whose press shows its line.
  *   `--shots=<dir>` saves those two screenshots there (else `logs/slot-sources/`).
  *
  * Cannot see the native engine, the Rust device side (a channel the device lacks) or anything audible:
@@ -407,36 +408,43 @@ await probe(async ({ browser, open }) => {
     await pk(1).selectOption('off');
     await p.getByRole('combobox', { name: 'Input for slot A', exact: true }).selectOption('1');
     await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).click();
+    // A narrow row folds the slot not shown to one plate at the row's end: a press shows its line.
+    const show = async (letter) => {
+      const fold = p.getByRole('button', { name: new RegExp(`^Show slot ${letter}`) });
+      if (await fold.count()) await fold.click();
+    };
+    await show('B');
     await pk(2).selectOption({ label: 'Probe Amp Sim (VST3)' });
+    await show('B');
     await p.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor();
+    await show('A');
     await p.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
     await p.evaluate(() => document.activeElement?.blur());
     await p.mouse.move(width - 2, height - 2); // no hover on the caps
     await p.waitForTimeout(200);
     const layout = await p.evaluate(() => [...document.querySelectorAll('.slot')].map((card) => {
       const box = card.getBoundingClientRect();
-      const row = card.querySelector('.slot__row');
-      const controls = [...row.querySelectorAll('button, select, input')].map((el) => el.getBoundingClientRect());
+      const line = card.querySelector('.slot__line').getBoundingClientRect();
+      const els = [...card.querySelectorAll('.slot__line :is(button, select, input)')];
+      const controls = els.map((el) => el.getBoundingClientRect());
       // A line: controls whose vertical centres lie within a few pixels of each other.
-      const lineCount = (rects) => {
-        const centres = rects.map((r) => r.top + r.height / 2).sort((a, b) => a - b);
-        return centres.filter((c, i) => i === 0 || c - centres[i - 1] > 6).length;
-      };
-      const acts = [...row.querySelectorAll('.slot__acts > *')].map((el) => el.getBoundingClientRect());
+      const centres = controls.map((r) => r.top + r.height / 2).sort((a, b) => a - b);
       return {
-        outside: controls.filter((r) => r.left < box.left - 0.5 || r.right > box.right + 0.5).length,
-        actsLines: lineCount(acts),
-        lines: lineCount(controls),
-        height: Math.round(row.getBoundingClientRect().height),
+        folded: card.classList.contains('slot--fold'),
+        outside: els.filter((_, i) => controls[i].left < box.left - 0.5 || controls[i].right > box.right + 0.5 || controls[i].right > innerWidth).map((el) => el.getAttribute('aria-label') ?? el.className),
+        lines: centres.filter((c, i) => i === 0 || c - centres[i - 1] > 6).length,
+        centres: els.map((el, i) => `${el.getAttribute('aria-label') ?? el.className} ${Math.round(controls[i].top + controls[i].height / 2)}`),
+        height: Math.round(line.height),
       };
     }));
-    console.log(`${width}x${height} header`, JSON.stringify(layout));
-    assert.equal(layout.length, 2, `${width}: both slot cards measured`);
+    console.log(`${width}x${height} slot row`, JSON.stringify(layout));
+    assert.equal(layout.length, 2, `${width}: both slots measured`);
     for (const [i, slot] of layout.entries()) {
-      assert.equal(slot.outside, 0, `${width}: slot ${i + 1}'s controls stay inside its card`);
-      assert.equal(slot.actsLines, 1, `${width}: slot ${i + 1}'s own controls stay on one line`);
-      if (width === 1280) assert.ok(slot.lines <= 2, `1280: slot ${i + 1}'s header keeps to two lines (${slot.lines})`);
+      assert.deepEqual(slot.outside, [], `${width}: slot ${i + 1}'s controls stay inside its slot and the window`);
+      assert.equal(slot.lines, 1, `${width}: slot ${i + 1} reads as one line`);
     }
+    // Wide enough, both lines show whole; narrow, one shows and the other is one plate.
+    assert.deepEqual(layout.map((l) => l.folded), width >= 1200 ? [false, false] : [false, true], `${width}: which slot folds`);
     const file = `${shotsDir}/slot-header-${width}x${height}.png`;
     await p.locator('.src').screenshot({ path: file });
     await p.screenshot({ path: `${shotsDir}/slot-page-${width}x${height}.png` });

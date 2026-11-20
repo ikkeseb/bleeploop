@@ -4,8 +4,8 @@ import { framesPerBar } from '../state/quantize';
 
 /**
  * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`, `Edit.tsx`), the waveform renderer
- * (`waveform.ts`), the command bar (`Transport.tsx`, `SessionTools.tsx`, `InputFx.tsx`) and the stage
- * view (`src/ui/stage/StageView.tsx`) share. They live apart from the components so the renderer never imports a component that imports
+ * (`waveform.ts`), the command bar (`Transport.tsx`, `SessionTools.tsx`, `BarPopover.tsx`), the slot row
+ * (`RowPopover.tsx`, `SlotControls.tsx`) and the stage view (`src/ui/stage/StageView.tsx`) share. They live apart from the components so the renderer never imports a component that imports
  * the renderer.
  */
 
@@ -80,7 +80,7 @@ export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WIND
   return { armed, trigger, onKeyDown: noEnterRepeat };
 }
 
-/** Mounted while a popover is open (IN FX, a lane's TRIM): Escape closes it wherever focus is (a pointer
+/** Mounted while a popover is open (a slot row plate's menu, a lane's EDIT and TRIM): Escape closes it wherever focus is (a pointer
  * press blurs the control it activated: `transport-keys.ts`). */
 export function EscapeCloses(props: { close: () => void }) {
   const onKey = (e: KeyboardEvent) => {
@@ -90,3 +90,13 @@ export function EscapeCloses(props: { close: () => void }) {
   onCleanup(() => window.removeEventListener('keydown', onKey));
   return null;
 }
+
+/** The width under which the mix folds: REV and UNDO move into EDIT's menu and the pan knob into the value
+ * window's pan field (the mix column keeps the five keys from 1200 px up). looper.css's `@media
+ * (max-width: 1199.98px)` blocks hold the same number: change them together. */
+const NARROW_QUERY = '(max-width: 1199.98px)';
+const narrowMedia = typeof matchMedia === 'function' ? matchMedia(NARROW_QUERY) : null;
+const [narrowSignal, setNarrow] = createSignal(narrowMedia?.matches ?? false);
+narrowMedia?.addEventListener('change', (e) => setNarrow(e.matches));
+/** Whether the mix is folded (`NARROW_QUERY`): the EDIT menu then carries REV and UNDO. */
+export const narrow = narrowSignal;

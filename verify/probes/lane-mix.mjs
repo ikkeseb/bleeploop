@@ -333,7 +333,7 @@ await probe(async ({ open }) => {
   await lampShows(0, true);
   const closed = { lane1: await lamp(0), lane2: await lamp(1) };
   await fxDrawer(true);
-  const drawerOpen = { lamp: await lamp(0), legend: await pill(0).evaluate((el) => el.classList.contains('is-on')) };
+  const drawerOpen = { lamp: await lamp(0), legend: await pill(0).evaluate((el) => el.classList.contains('is-open') && el.getAttribute('aria-pressed') === 'true') };
   await fxDrawer(false);
   await blur();
   await seam('holdEcho', true);

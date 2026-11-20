@@ -10,11 +10,12 @@
  *   two-row command-bar cap and the muted-lane readout with the loop present;
  * - the command bar with a playing loop, with idle modes and with every record mode on (CLICK, FIXED and its
  *   bars, RETAKE, AUTO REC, END STOP), and with every mode on before the first take, from 960 to 1920 px
- *   wide (1105: just above the narrow rung): two rows at most, every control inside the bar and under its
- *   own centre point, Tab walking it as drawn (row 1 left to right, then row 2), and FIXED's and FADE's bar
- *   steppers both with their unit or both bare;
+ *   wide: two rows at most, every control inside the bar and under its
+ *   own centre point (the master knob too), Tab walking it as drawn (row 1 left to right, then row 2, then
+ *   the tools), and FIXED's and FADE's keys both carrying their bars with the unit;
  * - the command bar's fit on a fresh page (fonts loaded) equals its fit after an unrelated DOM change, at
- *   1040 to 1280 px (the brand once unfolded on a fresh page and jumped ~99 px at the first take);
+ *   1800 to 1920 px, across the one row's two edges (the brand once unfolded on a fresh page and jumped
+ *   ~99 px at the first take);
  * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
  *   1920x1080 the open Help and Audio Settings popovers do not overlap the command bar's rendered box,
  *   stay inside the window and keep at least the right edge's margin on their left (a hint's one-line
@@ -153,7 +154,10 @@ await probe(async ({ open }) => {
           const fraction = Math.max(0, right - left) * Math.max(0, bottom - top) / (r.width * r.height);
           const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
           const interactive = el.matches('button, input, select');
-          if (fraction < 0.98 || (interactive && (!hit || !(hit === el || el.contains(hit))))) {
+          // A slot's volume is its range input for the keyboard and assistive tech, laid under the knob and
+          // its dB window, which take the pointer (SlotControls.tsx): the pointer reaches it there.
+          const surface = el.closest('.slot__vol') ?? el;
+          if (fraction < 0.98 || (interactive && (!hit || !(hit === el || surface.contains(hit))))) {
             failures.push({ name: el.getAttribute('aria-label') ?? el.textContent.trim(), fraction });
           }
         }
@@ -173,9 +177,9 @@ await probe(async ({ open }) => {
     await page.waitForTimeout(250);
     const drums = await page.evaluate(() => {
       const bar = document.querySelector('.cmd');
-      // Rows = distinct vertical centres of the bar's visible children (a row is ~34 px; clusters centre on it).
-      // The absolute 1px screen-reader announcement is not a rendered row.
-      const rows = new Set([...bar.children].filter(el => !el.classList.contains('cmd__sr')).map(el => el.getBoundingClientRect())
+      // Rows = distinct vertical centres of the bar's four groups (a row is ~44-64 px; a group centres on
+      // it). The tools are a two-row cluster of their own down the right edge, so they count no row.
+      const rows = new Set([...bar.querySelectorAll('.transport__time, .transport__global, .transport__modes, .transport__master')].map(el => el.getBoundingClientRect())
         .filter(r => r.width > 0 && r.height > 0).map(r => Math.round((r.top + r.bottom) / 2 / 14))).size;
       const pads = [...document.querySelectorAll('.kb__pad')].map(el => el.getBoundingClientRect());
       // Each pad's label on one line inside its pad.
@@ -218,10 +222,10 @@ await probe(async ({ open }) => {
     await page.waitForTimeout(250);
     const bar = await page.evaluate(() => {
       const cmd = document.querySelector('.cmd');
-      const rows = new Set([...cmd.children].filter(el => !el.classList.contains('cmd__sr')).map(el => el.getBoundingClientRect())
+      const rows = new Set([...cmd.querySelectorAll('.transport__time, .transport__global, .transport__modes, .transport__master')].map(el => el.getBoundingClientRect())
         .filter(r => r.width > 0 && r.height > 0).map(r => Math.round((r.top + r.bottom) / 2 / 14))).size;
       const unreachable = [];
-      for (const el of cmd.querySelectorAll('button, input, select')) {
+      for (const el of cmd.querySelectorAll('button, input, select, [role="slider"]')) {
         const r = el.getBoundingClientRect();
         if (!r.width || getComputedStyle(el).visibility === 'hidden') continue;
         const c = cmd.getBoundingClientRect();
@@ -231,16 +235,17 @@ await probe(async ({ open }) => {
       }
       const on = ['Metronome click', 'Fixed take length', 'Retake', 'Auto record', 'Stop playing loops at loop end']
         .filter((name) => cmd.querySelector(`button[aria-label="${name}"]`)?.getAttribute('aria-pressed') === 'true').length;
-      // FIXED's and FADE's bar steppers read alike at every width: both with their unit or both bare
-      // (FIXED once dropped "bars" at 1110 px and below while FADE kept "2 BARS").
-      const units = [...cmd.querySelectorAll('.transport__bars-unit')].map((el) => el.checkVisibility());
-      // Row 2's free width (stacked with the tools): the room a wider mode could take before row 2 wraps.
-      const tools = cmd.querySelector('.tools').getBoundingClientRect(), row2 = cmd.querySelector('.transport__modes').getBoundingClientRect();
-      const row2Slack = cmd.classList.contains('cmd--stack-tools') ? Math.round(tools.left - row2.right - parseFloat(getComputedStyle(cmd).columnGap)) : null;
+      // FIXED's and FADE's bars read alike at every width: both keys carry their unit (FIXED once dropped
+      // "bars" at 1110 px and below while FADE kept "2 BARS").
+      const units = [...cmd.querySelectorAll('.transport__key .k-key__u')].map((el) => el.checkVisibility());
+      // Row 2's free width (stacked): the room between the record modes and the master.
+      const master = cmd.querySelector('.transport__master').getBoundingClientRect(), row2 = cmd.querySelector('.transport__modes').getBoundingClientRect();
+      const row2Slack = cmd.classList.contains('cmd--stack') ? Math.round(master.left - row2.right - parseFloat(getComputedStyle(cmd).columnGap)) : null;
       return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, on, unreachable, units, row2Slack };
     });
-    // Tab walks the bar in its visual order, row 1 left to right, then row 2: the stacked rows are a
-    // visual `order` (transport.css), which once sent Tab through row 2's modes before row 1's ■ ALL.
+    // Tab walks the bar in its visual order, row 1 left to right, then row 2, then the tools (a cluster of
+    // their own at the right end, over both rows when stacked): the stacked bar once sent Tab through row
+    // 2's modes before row 1's ■ ALL.
     await page.evaluate(() => { document.activeElement?.blur(); document.body.focus(); });
     const walk = [];
     for (let i = 0; i < 80; i++) {
@@ -249,30 +254,31 @@ await probe(async ({ open }) => {
         const el = document.activeElement, cmd = document.querySelector('.cmd');
         if (!el || !cmd.contains(el)) return null;
         const r = el.getBoundingClientRect(), c = cmd.getBoundingClientRect();
-        return { name: el.getAttribute('aria-label') ?? el.textContent.trim(), x: r.left,
-          row: cmd.classList.contains('cmd--stack') && (r.top + r.bottom) / 2 > (c.top + c.bottom) / 2 ? 2 : 1 };
+        return { name: el.getAttribute('aria-label') ?? el.textContent.trim(), x: r.left, y: Math.round(r.top),
+          row: el.closest('.tools') ? 3 : cmd.classList.contains('cmd--stack') && (r.top + r.bottom) / 2 > (c.top + c.bottom) / 2 ? 2 : 1 };
       });
       if (!stop) { if (walk.length) break; continue; }
       walk.push(stop);
     }
-    const visual = [...walk].sort((a, b) => a.row - b.row || a.x - b.x).map((s) => s.name);
+    // The tools are a grid: read line by line, each left to right.
+    const visual = [...walk].sort((a, b) => a.row - b.row || (a.row === 3 ? a.y - b.y : 0) || a.x - b.x).map((s) => s.name);
     bar.tabOrder = walk.map((s) => `${s.row}:${s.name}`);
     bar.tabInVisualOrder = walk.length > 10 && walk.every((s, i) => s.name === visual[i]);
     const name = `${label}-${width}x${height}-engine${modes === 'idle' ? '' : `-${modes}`}`;
     await page.locator('.cmd').screenshot({ path: `logs/layout/${name}.png` });
     const ok = bar.rows <= 2 && !bar.unreachable.length && bar.on === (modes === 'idle' ? 0 : 5) && bar.tabInVisualOrder
-      && bar.units.length === (modes === 'idle' ? 1 : 2) && new Set(bar.units).size === 1;
+      && bar.units.length === 2 && new Set(bar.units).size === 1;
     if (!ok) failures.push(name);
     results.push({ name, ok, ...bar });
     console.log(JSON.stringify({ name, ok, ...bar }));
     await page.close();
   }
-  // A fresh page's bar fit is final: the web font loads after the first measure (Geist is requested
-  // once the bar has text) and moves every child's width, so a bar measured only before it can show the
-  // brand unfolded while row 1 lacks its spacer minimum, then jump ~99 px at the next DOM change (the
-  // first take). The sizes straddle the fold edge (1260 px caught it); an unrelated DOM change must
-  // leave the bar's fit flags where the fresh page put them.
-  for (const width of [1040, 1050, 1240, 1260, 1280]) {
+  // A fresh page's bar fit is final: the web font loads after the first measure and moves every child's
+  // width, so a bar measured only before it can show the brand unfolded while the row lacks its spacer
+  // minimum, then jump at the next DOM change (the first take). The sizes straddle the two edges of the
+  // one row (app/cmd-fit.ts: the brand folds below ~1916 px, the bar stacks below ~1810 px, measured
+  // 2026-11-20); an unrelated DOM change must leave the bar's fit flags where the fresh page put them.
+  for (const width of [1800, 1810, 1820, 1910, 1920]) {
     const { page } = await open({ viewport: { width, height: 700 }, init });
     await page.locator('.cmd .brand').waitFor();
     await page.evaluate(() => document.fonts.ready);

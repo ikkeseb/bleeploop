@@ -12,15 +12,15 @@
  * - CLIP lights only on the engine's clip (a sample at full scale), never for a level near it, on that
  *   slot alone; it lights even when the clip's frame and the next one land between two draws (the
  *   store's clip counter), and goes out ~1.5 s later, the other slot going live or not meanwhile;
- * - the selected lane names the live slots ("A LIVE", "A+B LIVE", "B LIVE"), the other lanes nothing,
+ * - the selected lane names the live slots ("FROM A", "FROM A+B", "FROM B"), the other lanes nothing,
  *   and the badge follows the selection and GO LIVE off;
  * - a GO LIVE (or a stop) whose batch never reaches the host leaves the slot as it was and says so (a
  *   single toast, GO LIVE's and not the outbox's, and the release log); the cap is the feed's `live`, so a
  *   stop the engine applied though its batch answered false shows GO LIVE, and two lost MIC sets leave
  *   nothing live and answer false;
  * - at 1000×700, 1280×820 and 1920×1080: the CLIP lamp, the badge and the pill are at least their
- *   readable size (a size up at 1920), the "A+B LIVE" badge stays clear of the lane's REC core, each
- *   lane's number, state word and source sit centred on its identity column's axis, the
+ *   readable size (a size up at 1920), the "FROM A+B" source stays clear of the lane's lit key, each
+ *   lane's number, state word and source stand flush left in its identity column, the
  *   meter runs most of the card's width, and GO LIVE holds INPUT LIVE's box (going live changes neither
  *   the pill's size and place nor the card's height).
  *
@@ -70,6 +70,21 @@ await probe(async ({ open }) => {
     const picker = (slot) => page.getByRole('combobox', { name: `Source for slot ${'AB'[slot - 1]}`, exact: true });
     const live = (slot) => page.getByRole('button', { name: `Live input for slot ${'AB'[slot - 1]}`, exact: true });
     const card = (slot) => page.locator('.slot').nth(slot - 1);
+    /** Where the row folds one slot to a plate (a narrow window), show slot `slot`'s whole line. */
+    const show = async (slot) => {
+      const fold = page.getByRole('button', { name: new RegExp(`^Show slot ${'AB'[slot - 1]}`) });
+      if (await fold.count()) await fold.click();
+    };
+    /** LIVE's state as the cap shows it: its LED lit (warm white) and aria-pressed, 'on' or 'off'. */
+    const liveCap = async (slot) => {
+      // the LED eases between its states (--motion, 150 ms): read it once it has settled
+      await page.waitForTimeout(220);
+      return live(slot).evaluate((el) => {
+        const lit = getComputedStyle(el.querySelector('.k-led')).backgroundColor === 'rgb(255, 243, 224)';
+        const pressed = el.getAttribute('aria-pressed') === 'true';
+        return lit === pressed ? (pressed ? 'on' : 'off') : `LED ${lit ? 'lit' : 'dark'} but aria-pressed ${pressed}`;
+      });
+    };
     const cardMeter = (slot) => card(slot).locator('.slot__meter');
     const lane = (i) => page.locator('.lp-lane').nth(i);
     /** A card meter's drawn state: the level and peak it was written, its CLIP lamp, lit or dark. */
@@ -92,7 +107,9 @@ await probe(async ({ open }) => {
 
     // Both slots Off: each takes its own input, so each card shows its meter, dark until it goes live.
     await picker(1).selectOption('off');
+    await show(2);
     await picker(2).selectOption('off');
+    await show(1);
     await cardMeter(1).waitFor();
     await cardMeter(2).waitFor();
     await emit(meter(0.5, 0.25));
@@ -105,13 +122,13 @@ await probe(async ({ open }) => {
     const pillBox = () => page.evaluate(() => {
       const r = (el) => el.getBoundingClientRect();
       const card = document.querySelector('.slot');
-      const pill = r(card.querySelector('.tgl.live'));
+      const pill = r(card.querySelector('.slot__live'));
       return { w: pill.width, h: pill.height, x: pill.left, card: r(card).height };
     });
     const goLive = await pillBox();
     await live(1).click();
     await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
-    assert.equal((await live(1).textContent()).trim(), 'INPUT LIVE');
+    assert.deepEqual(await liveCap(1), 'on', `${tag}: LIVE pressed lights its LED`);
     const inputLive = await pillBox();
     console.log(tag, 'GO LIVE / INPUT LIVE box', JSON.stringify({ goLive, inputLive }));
     for (const k of ['w', 'h', 'x', 'card']) {
@@ -120,9 +137,10 @@ await probe(async ({ open }) => {
     await emit(meter(0.5, 0.0316));
     await until(1, 'A live at −6 dBFS', (m) => m.live && Math.abs(m.lvl - frac(0.5)) < 0.01);
     assert.deepEqual(await read(2), { live: false, lvl: 0, pk: 0, clip: false }, `${tag}: B not live stays dark`);
-    assert.deepEqual(await badges(), ['A LIVE', '', '', '', ''], `${tag}: the selected lane names A`);
+    assert.deepEqual(await badges(), ['FROM A', '', '', '', ''], `${tag}: the selected lane names A`);
 
     // B live too: each card its own level; the badge names both.
+    await show(2);
     await live(2).click();
     await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: true }).waitFor();
     await emit(meter(0.5, 0.0316));
@@ -130,59 +148,65 @@ await probe(async ({ open }) => {
     const [a, b] = [await read(1), await read(2)];
     console.log(tag, 'per-slot levels', JSON.stringify({ a, b }));
     assert.ok(Math.abs(a.lvl - frac(0.5)) < 0.01, `${tag}: A reads its own input, not B's: ${a.lvl}`);
-    assert.deepEqual(await badges(), ['A+B LIVE', '', '', '', ''], `${tag}: both slots named`);
+    assert.deepEqual(await badges(), ['FROM A+B', '', '', '', ''], `${tag}: both slots named`);
 
     // Readable from where the player stands, at every size: the measured type and the badge's room.
     const sizes = await page.evaluate(() => {
       const px = (el) => parseFloat(getComputedStyle(el).fontSize);
-      const card = document.querySelector('.slot');
+      const card = document.querySelector('.slot:not(.slot--fold)');
       const lane = document.querySelector('.lp-lane');
       const box = (el) => el.getBoundingClientRect();
       return {
         clip: px(card.querySelector('.slot__meter-clip')),
-        pill: px(card.querySelector('.tgl.live')),
+        pill: px(card.querySelector('.slot__live')),
         badge: px(lane.querySelector('.lp-lane__src')),
         badgeRight: box(lane.querySelector('.lp-lane__src')).right,
         coreLeft: box(lane.querySelector('.lp-core')).left,
         pairRight: box(lane.querySelector('.lp-lane__pair')).right,
         leftRight: box(lane.querySelector('.lp-lane__left')).right,
         track: box(card.querySelector('.slot__meter-track')).width,
-        card: box(card).width,
+        trackRight: box(card.querySelector('.slot__meter-track')).right,
+        volLeft: box(card.querySelector('.slot__vol')).left,
       };
     });
     console.log(tag, 'sizes', JSON.stringify(sizes));
     const large = width >= 1920;
     assert.ok(sizes.clip >= (large ? 12 : 10.5), `${tag}: the CLIP lamp's type: ${sizes.clip}px`);
     assert.ok(sizes.badge >= (large ? 12 : 10), `${tag}: the lane's LIVE badge's type: ${sizes.badge}px`);
-    assert.ok(sizes.pill >= (large ? 13 : 12), `${tag}: the INPUT LIVE pill's type: ${sizes.pill}px`);
-    assert.ok(sizes.badgeRight + 3 <= sizes.coreLeft, `${tag}: "A+B LIVE" clear of the REC core (badge ends ${sizes.badgeRight}, core starts ${sizes.coreLeft})`);
+    assert.ok(sizes.pill >= (large ? 13 : 12), `${tag}: the LIVE key's legend: ${sizes.pill}px`);
+    assert.ok(sizes.badgeRight + 3 <= sizes.coreLeft, `${tag}: "FROM A+B" clear of the lit key (badge ends ${sizes.badgeRight}, core starts ${sizes.coreLeft})`);
     assert.ok(sizes.pairRight <= sizes.leftRight + 0.5, `${tag}: the wider number box keeps PLAY and CLR inside the lane's left cluster`);
-    // The identity column is centred: every lane's number, state word and (on the selected lane) source
-    // share the column's one axis, so they line up down the stack whatever the word.
+    // The identity column is flush left: every lane's number, state word and (on the selected lane) source
+    // start at the column's left edge, so they line up down the stack whatever the word.
     const offAxis = await page.evaluate(() => [...document.querySelectorAll('.lp-lane')].flatMap((lane, i) => {
-      // Each line's box hugs its content (a line stretched across the column would centre its box, not
-      // its text), and its middle is the column's.
-      const mid = (b) => b.left + b.width / 2;
+      // Each line's box hugs its content (a line stretched across the column would pass whatever its text
+      // did), and its left edge is the column's.
       const col = lane.querySelector('.lp-lane__idbox').getBoundingClientRect();
       return ['.lp-lane__num', '.lp-lane__state', '.lp-lane__src'].flatMap((q) => {
         const el = lane.querySelector(q);
         if (!el) return [];
         const b = el.getBoundingClientRect();
-        const off = Math.abs(mid(b) - mid(col));
+        // A line not drawn (display: none, the tightest rung's third line) has no edge to share.
+        if (!el.checkVisibility()) return [];
+        const off = Math.abs(b.left - col.left);
+        // Hugging: the line's box is its text's own width (a text as wide as the column, FROM A+B, still hugs).
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const text = range.getBoundingClientRect().width;
         return [
           ...(off > 1 ? [`lane ${i + 1} ${q} ${off.toFixed(1)} px off`] : []),
-          ...(b.width > col.width - 4 ? [`lane ${i + 1} ${q} spans the column (${b.width} of ${col.width} px)`] : []),
+          ...(b.width > text + 1 ? [`lane ${i + 1} ${q} spans the column (${b.width} px box round ${text} px of text, column ${col.width} px)`] : []),
         ];
       });
     }));
-    assert.deepEqual(offAxis, [], `${tag}: the lane identity column is centred`);
-    assert.ok(sizes.track >= 0.7 * sizes.card, `${tag}: the meter runs most of the card (${sizes.track} of ${sizes.card})`);
+    assert.deepEqual(offAxis, [], `${tag}: the lane identity column is flush left`);
+    assert.ok(sizes.track >= 44 && sizes.trackRight <= sizes.volLeft + 0.5, `${tag}: the meter is a readable ladder just before the slot's volume (${sizes.track} px wide, ends ${sizes.trackRight}, volume at ${sizes.volLeft})`);
 
     if (width === 1280) {
       // The badge follows the selection.
       await emit({ events: [{ Selected: { frame: 0, lane: 2 } }] });
       await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[2].querySelector('.lp-lane__src'));
-      assert.deepEqual(await badges(), ['', '', 'A+B LIVE', '', ''], 'the badge moves to the selected lane');
+      assert.deepEqual(await badges(), ['', '', 'FROM A+B', '', ''], 'the badge moves to the selected lane');
 
       // The peak holds, then falls to the level: A from −6 dBFS down to −20, sampled every frame.
       await emit(meter(0.5, 0));
@@ -247,8 +271,8 @@ await probe(async ({ open }) => {
       await live(1).click();
       await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
       await until(1, 'A dark once not live', (m) => !m.live && m.lvl === 0 && m.pk === 0);
-      assert.equal((await live(1).textContent()).trim(), 'GO LIVE');
-      assert.deepEqual(await badges(), ['', '', 'B LIVE', '', ''], 'the badge names B alone');
+      assert.equal(await liveCap(1), 'off');
+      assert.deepEqual(await badges(), ['', '', 'FROM B', '', ''], 'the badge names B alone');
       await live(2).click();
       await page.getByRole('button', { name: 'Live input for slot B', exact: true, pressed: false }).waitFor();
       assert.deepEqual(await badges(), ['', '', '', '', ''], 'nothing live: no badge');
@@ -262,24 +286,24 @@ await probe(async ({ open }) => {
       const told = () => page.evaluate(async () => (await import('/src/notify.ts')).toasts().map((t) => t.message));
       await lose();
       await live(1).click();
-      await page.locator('.toast', { hasText: 'Could not go live. Press GO LIVE again.' }).waitFor({ timeout: 5000 });
+      await page.locator('.toast', { hasText: 'Could not go live. Press LIVE again.' }).waitFor({ timeout: 5000 });
       await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
       await page.waitForFunction(() => !document.querySelector('[aria-label="Live input for slot A"]')?.disabled);
-      assert.equal((await live(1).textContent()).trim(), 'GO LIVE', 'a lost GO LIVE leaves the slot GO LIVE');
+      assert.equal(await liveCap(1), 'off', 'a lost LIVE press leaves the slot not live');
       assert.equal(await sentLive(), before, 'the engine fake applied no SetSlotLive from the lost batch');
       assert.equal(consumeConsoleErrors('[PluginControls] go-live toggle failed').length, 1, 'the lost GO LIVE reaches the release log');
-      assert.deepEqual(await told(), ['Could not go live. Press GO LIVE again.'], 'a lost GO LIVE is told once, by GO LIVE');
+      assert.deepEqual(await told(), ['Could not go live. Press LIVE again.'], 'a lost GO LIVE is told once, by GO LIVE');
       await live(1).click();
       await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: true }).waitFor();
       await lose();
       await live(1).click();
-      await page.locator('.toast', { hasText: 'Could not stop the live input. Press INPUT LIVE again.' }).waitFor({ timeout: 5000 });
+      await page.locator('.toast', { hasText: 'Could not stop the live input. Press LIVE again.' }).waitFor({ timeout: 5000 });
       await page.waitForFunction(() => !document.querySelector('[aria-label="Live input for slot A"]')?.disabled);
-      assert.equal((await live(1).textContent()).trim(), 'INPUT LIVE', 'a lost stop leaves the slot INPUT LIVE');
+      assert.equal(await liveCap(1), 'on', 'a lost stop leaves the slot live');
       assert.equal(consumeConsoleErrors('[PluginControls] go-live toggle failed').length, 1, 'the lost stop reaches the release log');
       assert.deepEqual(
-        (await told()).filter((m) => m !== 'Could not go live. Press GO LIVE again.'),
-        ['Could not stop the live input. Press INPUT LIVE again.'],
+        (await told()).filter((m) => m !== 'Could not go live. Press LIVE again.'),
+        ['Could not stop the live input. Press LIVE again.'],
         'a lost stop is told once, by INPUT LIVE',
       );
       assert.equal(consumeConsoleErrors('[platform] input batch failed').length, 2, 'the outbox logged both lost batches');
@@ -291,7 +315,7 @@ await probe(async ({ open }) => {
       await page.getByRole('button', { name: 'Live input for slot A', exact: true, pressed: false }).waitFor();
       await page.waitForFunction(() => !document.querySelector('[aria-label="Live input for slot A"]')?.disabled);
       await page.evaluate(() => void (window.__lf.native.dropped = null));
-      assert.equal((await live(1).textContent()).trim(), 'GO LIVE', 'a stop the engine applied shows, whatever the batch answered');
+      assert.equal(await liveCap(1), 'off', 'a stop the engine applied shows, whatever the batch answered');
       consumeConsoleErrors('[platform] native MIDI dropped input');
       assert.equal(consumeConsoleErrors('[PluginControls] go-live toggle failed').length, 1);
       // Two MIC sets in flight together (one batch), lost: neither reached the engine, so nothing is
@@ -304,8 +328,8 @@ await probe(async ({ open }) => {
       await page.waitForFunction(() => window.__lf.native.failSends === 0);
       await page.waitForTimeout(100);
       assert.deepEqual(
-        [(await live(1).textContent()).trim(), (await live(2).textContent()).trim()],
-        ['GO LIVE', 'GO LIVE'],
+        [await liveCap(1), await liveCap(2)],
+        ['off', 'off'],
         'two lost MIC sets leave both slots as the engine has them',
       );
       assert.equal(consumeConsoleErrors('[platform] input batch failed').length, 1, 'the lost batch, logged');

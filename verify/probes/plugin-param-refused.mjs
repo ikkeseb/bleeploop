@@ -102,7 +102,9 @@ await probe(async ({ open }) => {
     window.__paramProbe = { state, instrument, descriptors };
   });
 
-  await page.getByRole('button', { name: /Plugin parameters for slot A/ }).click();
+  // Parameters is in the plate's menu
+  await page.getByRole('button', { name: 'Menu for slot A', exact: true }).click();
+  await page.getByRole('menuitemcheckbox', { name: 'Parameters', exact: true }).click();
   const alpha = page.locator('input[aria-label="Alpha"]');
   const beta = page.locator('input[aria-label="Beta"]');
   await alpha.waitFor();

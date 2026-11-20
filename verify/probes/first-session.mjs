@@ -7,7 +7,7 @@
  * - an empty looper: Export is disabled, Import is enabled, Help's Manual tab names the Session tools and
  *   shows each tool's own icon (the same SVG, named), sized to the line;
  * - the first take through real controls: FIXED (aria-pressed off, then on, from the `Toggled` the fake
- *   answers) and its Fewer bars stepper send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
+ *   answers) and a step down on its bars send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
  *   key's press and release reach native MIDI's router (`__lf.native.inputSent`); the take the feed then
  *   reports makes Import disabled;
  * - Export's download: a .zip whose stem is the snapshot's PCM, exactly;
@@ -130,12 +130,14 @@ await probe(async ({ open, browser }) => {
   await clearSent(page);
   await fixed.click();
   assert.equal(await fixed.getAttribute('aria-pressed'), 'true');
-  for (let i = 0; i < 3; i++) await page.getByRole('button', { name: 'Fewer bars', exact: true }).click();
+  // The bars ride on the key: a step down on the focused FIXED (its drag and wheel take the same steps).
+  for (let i = 0; i < 3; i++) await fixed.press('ArrowDown');
   const fixedSent = await sent(page);
   console.log('FIXED sent', JSON.stringify(fixedSent));
   assert.deepEqual(fixedSent[0], { Action: { Toggle: 'Fixed' } }, "FIXED sends the engine's toggle");
-  assert.deepEqual(fixedSent.at(-1), { SetFixedBars: 1 }, 'Fewer bars steps down to one bar');
-  assert.equal((await page.locator('.transport__fixed .transport__bars-val').textContent()).trim(), '1bar');
+  assert.deepEqual(fixedSent.at(-1), { SetFixedBars: 1 }, 'a step down on FIXED reaches one bar');
+  assert.equal((await page.locator('.transport__fixed .k-key__v').textContent()).trim(), '1 BAR');
+  await page.evaluate(() => document.activeElement?.blur());
   await clearSent(page);
   await page.getByRole('button', { name: 'Track 1 record', exact: true }).click();
   await page.waitForFunction(() => window.__lf.native.sent.length >= 2, undefined, { timeout: 5000 });

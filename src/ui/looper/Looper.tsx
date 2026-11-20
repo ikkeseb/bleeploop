@@ -12,24 +12,31 @@ import { runAction } from '../../app/actions';
 import './looper.css';
 
 /**
- * The looper UI: five full-width horizontal LANES stacked in the looper zone (composition binding:
- * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
- * (the lane number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
- * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of five
- * fixed pill columns, FX · MUTE · REV · UNDO · EDIT (COPY, WIDE and TRIM), over a mix row (a horizontal
- * volume slider and the pan).
+ * The looper UI: five lanes of equal height stacked in the looper zone (composition binding:
+ * `src/ui/AGENTS.md`), each read left to right as HEAD | GLASS | MIX, the columns aligned to the pixel down
+ * the five (docs/redesign/main.html while the build is open):
+ * - the head: the lane number printed large over its state word (a lit legend in the state colour, no
+ *   plate) and, on the selected lane, the live source (FROM A); the main key, the LIT KEY (its window lit
+ *   in the state colour, the next action's glyph on its face, a round rec lamp beside the light while it
+ *   captures); STOP over the recessed CLR;
+ * - the glass: this lane's strip of the one recessed pane (the waveform canvas, drawn by waveform.ts)
+ *   with the count-in numeral, the well messages and the start line over it;
+ * - the mix: FX and MUTE (latched, LED) and REV, UNDO, EDIT (momentary) in one row, then the level
+ *   fader with its printed scale, ONE value window (level and pan) and the pan knob. Under 1200 px REV and
+ *   UNDO fold into EDIT's menu and the knob into the window's pan field (`narrow`, below).
  *
  * A presentation layer: the audio engine and the per-track state machine live elsewhere, and the
- * waveform.ts rAF renderer draws each <canvas> by reading non-reactive looper getters.
- * State colour is rationed to the lane's state token `--sc` (the state word with its LED, the core's
- * ring); the waveform is coloured independently by waveform.ts via the global --rec/--dub/--play
- * tokens. The selection is chrome: the lane number lights warm-white (looper.css).
+ * waveform.ts rAF renderer draws each <canvas> by reading non-reactive looper getters. The lane's state
+ * colour `--sc` (looper.css) lights the state word and the lit key's window; the wave is coloured by
+ * waveform.ts. The selection is chrome: the strip one tone up, its head the brightest (looper.css).
  */
 
-/** The lane identity-box word for each `LaneWord` (a rolling RETAKE's TAKE adds its pass count). */
+/** The state word under the lane number for each `LaneWord` (a rolling RETAKE's TAKE adds its pass
+ * count). REC and OVERDUB need no mark of their own in the word: the lit key's rec lamp carries them
+ * past greyscale (D14). */
 const STATE_WORD: Record<Exclude<LaneWord, 'TAKE'>, string> = {
   EMPTY: 'EMPTY',
-  RECORDING: '● REC',
+  RECORDING: 'REC',
   ARMED: 'ARMED',
   LISTENING: 'LISTEN',
   OVERDUBBING: 'OVERDUB',
@@ -40,37 +47,40 @@ const STATE_WORD: Record<Exclude<LaneWord, 'TAKE'>, string> = {
   MUTED: 'MUTED',
 };
 
-// ---- core glyphs. currentColor → the core's state colour.
-//   ● record  (EMPTY / ARMED — pressing starts a take)
-//   ⊕ overdub (PLAYING / STOPPED — pressing starts an overdub)
-//   ■ end     (RECORDING / OVERDUBBING — pressing ends the live capture)
+// ---- the lit key's glyphs, one family: a ring round the next action. currentColor → the key's legend.
+//   ◉ record  (EMPTY / ARMED: pressing starts a take)
+//   ⊕ overdub (PLAYING / STOPPED: pressing starts an overdub)
+//   ▣ end     (RECORDING / LISTENING / OVERDUBBING: pressing ends the live capture)
 const IconRec = (): JSX.Element => (
-  <svg viewBox="0 0 24 24" fill="currentColor">
-    <circle cx="12" cy="12" r="6.5" />
+  <svg class="lp-core__glyph" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" />
+    <circle class="fill" cx="12" cy="12" r="4.6" />
   </svg>
 );
 const IconDub = (): JSX.Element => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
-    <circle cx="12" cy="12" r="7" />
-    <path d="M12 8.4v7.2M8.4 12h7.2" stroke-linecap="round" />
+  <svg class="lp-core__glyph" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 7.2v9.6M7.2 12h9.6" />
   </svg>
 );
 const IconEnd = (): JSX.Element => (
-  <svg viewBox="0 0 24 24" fill="currentColor">
-    <rect x="7" y="7" width="10" height="10" rx="1.5" />
+  <svg class="lp-core__glyph" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" />
+    <rect class="fill" x="8.2" y="8.2" width="7.6" height="7.6" rx="1.2" />
   </svg>
 );
 
+/** The fader's printed scale, in percent of the 0..150 travel: its ticks, and the 0 dB mark at 100. */
+const FADER_TICKS = [0, 25, 50, 75, 125, 150];
+
 function Fader(props: { index: number; disabled: boolean }) {
   // Production volume runs 0..1.5; preserve the 1.5 ceiling + 0 dB detent at 1.0.
-  // A styled native <input type=range> (same idiom as the command bar's master/click sliders) over a
-  // 0..150 integer domain (= vol × 100); the unity tick + dB read-out are the per-track additions.
-  // It shows its gesture's value until the engine has it (`mixGesture`), and builds on what it shows.
-  // A double-click resets it to 0 dB, as the slot fader and the pan do.
+  // The `.k-fader` recipe (a native <input type=range>) over a 0..150 integer domain (= vol × 100), its
+  // scale printed under the slot (ticks and the 0 dB mark). The dB read-out is the value window's
+  // (TrackLane). It shows its gesture's value until the engine has it (`mixGesture`), and builds on what
+  // it shows. A double-click resets it to 0 dB, as the slot fader and the pan do.
   const vol = () => looper.mixShown(props.index, 'volume');
   const gesture = mixGesture(props.index, 'volume');
-  const frac = () => Math.max(0, Math.min(1, vol() / 1.5));
-  const dbStr = () => volumeDb(vol());
 
   const onInput = (e: Event) => {
     const input = e.target as HTMLInputElement;
@@ -78,9 +88,8 @@ function Fader(props: { index: number; disabled: boolean }) {
     if (Math.abs(v - 1.0) < 0.05) v = 1.0; // 0 dB detent
     looper.setVolume(props.index, v);
     // Resync the DOM to the SHOWN value: inside the detent zone the snapped 1.0 equals the value already
-    // shown, so Solid re-renders nothing and the native thumb would drift from the fill/dB readout for
-    // the rest of the drag. Writing it back also makes the detent read as a magnetic snap on the thumb
-    // itself.
+    // shown, so Solid re-renders nothing and the native thumb would drift from the dB read-out for the
+    // rest of the drag. Writing it back also makes the detent read as a magnetic snap on the thumb itself.
     input.value = String(Math.round(vol() * 100));
   };
   const onKeyDown = (e: KeyboardEvent) => {
@@ -98,35 +107,37 @@ function Fader(props: { index: number; disabled: boolean }) {
 
   return (
     <div class="lp-lane__vol">
-      <div class="lp-vbar-wrap">
-        {/* unity (0 dB) tick sits behind the thumb (declared first) so the thumb reads over it at unity */}
-        <div class="lp-vbar__unity" />
-        <input
-          class="lf-range lp-vbar"
-          type="range"
-          min="0"
-          max="150"
-          step="1"
-          value={Math.round(vol() * 100)}
-          style={{ '--fill': `${frac() * 100}%` }}
-          disabled={props.disabled}
-          aria-label={`Track ${props.index + 1} volume`}
-          aria-valuetext={dbStr()}
-          onInput={onInput}
-          onKeyDown={onKeyDown}
-          onKeyUp={gesture.onKeyUp}
-          onPointerDown={gesture.onPointerDown}
-          onLostPointerCapture={gesture.onLostPointerCapture}
-          onDblClick={(e) => {
-            // One send, and none when it already shows 0 dB. Resync the thumb as `onInput` does.
-            if (props.disabled || vol() === 1.0) return;
-            looper.setVolume(props.index, 1.0);
-            e.currentTarget.value = String(Math.round(vol() * 100));
-          }}
-          onBlur={gesture.onBlur}
-        />
+      <input
+        class="k-fader lp-vbar"
+        type="range"
+        min="0"
+        max="150"
+        step="1"
+        value={Math.round(vol() * 100)}
+        disabled={props.disabled}
+        aria-label={`Track ${props.index + 1} volume`}
+        aria-valuetext={volumeDb(vol())}
+        onInput={onInput}
+        onKeyDown={onKeyDown}
+        onKeyUp={gesture.onKeyUp}
+        onPointerDown={gesture.onPointerDown}
+        onLostPointerCapture={gesture.onLostPointerCapture}
+        onDblClick={(e) => {
+          // One send, and none when it already shows 0 dB. Resync the thumb as `onInput` does.
+          if (props.disabled || vol() === 1.0) return;
+          looper.setVolume(props.index, 1.0);
+          e.currentTarget.value = String(Math.round(vol() * 100));
+        }}
+        onBlur={gesture.onBlur}
+      />
+      {/* the printed scale: each mark under the thumb's centre at its value (looper.css `--at`) */}
+      <div class="lp-vbar__scale" aria-hidden="true">
+        <For each={FADER_TICKS}>{(m) => <i class="lp-vbar__tick" style={{ '--at': m / 150 }} />}</For>
+        <i class="lp-vbar__tick lp-vbar__unity" style={{ '--at': 100 / 150 }} />
+        <span class="lp-vbar__zero" style={{ '--at': 100 / 150 }}>
+          0
+        </span>
       </div>
-      <span class="lp-vdb">{dbStr()}</span>
     </div>
   );
 }
@@ -142,11 +153,30 @@ function panText(pan: number): string {
  * step across it. */
 const PAN_DETENT = 2;
 
+/** The knob's printed ring: eleven ticks from -135° to 135° and the centre mark at 12 o'clock, in a
+ * 52-unit box round a 32-unit knob (looper.css sizes it with the knob). */
+const KNOB_TICKS = Array.from({ length: 11 }, (_, i) => {
+  const a = ((-135 + 27 * i) * Math.PI) / 180;
+  const r0 = 18.5;
+  const r1 = i === 0 || i === 10 ? 23.5 : 22.5;
+  const f = (n: number) => n.toFixed(2);
+  return { x1: f(26 + r0 * Math.sin(a)), y1: f(26 - r0 * Math.cos(a)), x2: f(26 + r1 * Math.sin(a)), y2: f(26 - r1 * Math.cos(a)), major: i === 0 || i === 10 };
+});
+const KnobRing = (): JSX.Element => (
+  <svg class="lp-knob__ring" viewBox="0 0 52 52" aria-hidden="true">
+    <For each={KNOB_TICKS}>{(t) => <line class={t.major ? 'is-major' : undefined} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} />}</For>
+    <line class="is-centre" x1="26" y1="7.5" x2="26" y2="2.5" />
+  </svg>
+);
+
 /**
- * The lane's pan beside its volume fader: a native range over -100..100 (percent of the way to a side).
- * A drag snaps to the centre inside the detent; the arrow keys step by 1 and Page Up/Down by 10 (no
- * detent), Home and End go hard left and right, and 0 (while focused), a double-click or an Alt-click
- * centre it. It shows its gesture's value until the engine has it (`mixGesture`), as the fader does.
+ * The lane's pan: the `.k-knob` turned by the pan (-135° hard left, 135° hard right), driven by a native
+ * range over -100..100 (percent of the way to a side) laid over it, so it drags, steps and speaks as a
+ * slider. Folded (`narrow`), the knob goes and the range lies over the value window's pan field, where
+ * the pan is printed. A drag snaps to the centre inside the detent; the arrow keys step by 1 and Page
+ * Up/Down by 10 (no detent), Home and End go hard left and right, and 0 (while focused), a double-click
+ * or an Alt-click centre it. It shows its gesture's value until the engine has it (`mixGesture`), as the
+ * fader does.
  */
 function Pan(props: { index: number; disabled: boolean }) {
   const pan = () => looper.mixShown(props.index, 'pan');
@@ -190,38 +220,49 @@ function Pan(props: { index: number; disabled: boolean }) {
 
   return (
     <div class="lp-lane__pan">
-      <div class="lp-pan-wrap">
-        {/* the centre tick sits behind the thumb (declared first), as the fader's unity tick */}
-        <div class="lp-pan__centre" />
-        <input
-          class="lf-range lp-pan"
-          type="range"
-          min="-100"
-          max="100"
-          step="1"
-          value={pct()}
-          disabled={props.disabled}
-          aria-label={`Track ${props.index + 1} pan`}
-          aria-valuetext={panText(pan())}
-          onInput={onInput}
-          onKeyDown={onKeyDown}
-          onKeyUp={gesture.onKeyUp}
-          onPointerDown={onPointerDown}
-          onPointerUp={release}
-          onPointerCancel={release}
-          onLostPointerCapture={() => {
-            release();
-            gesture.onLostPointerCapture();
-          }}
-          onDblClick={(e) => !props.disabled && set(0, e.currentTarget)}
-          onBlur={() => {
-            release();
-            gesture.onBlur();
-          }}
-        />
-      </div>
-      <span class="lp-pan__val">{panText(pan())}</span>
+      <KnobRing />
+      <div class="k-knob lp-knob" style={{ '--a': `${pan() * 135}deg` }} aria-disabled={props.disabled ? 'true' : undefined} />
+      <input
+        class="lp-pan"
+        type="range"
+        min="-100"
+        max="100"
+        step="1"
+        value={pct()}
+        disabled={props.disabled}
+        aria-label={`Track ${props.index + 1} pan`}
+        aria-valuetext={panText(pan())}
+        onInput={onInput}
+        onKeyDown={onKeyDown}
+        onKeyUp={gesture.onKeyUp}
+        onPointerDown={onPointerDown}
+        onPointerUp={release}
+        onPointerCancel={release}
+        onLostPointerCapture={() => {
+          release();
+          gesture.onLostPointerCapture();
+        }}
+        onDblClick={(e) => !props.disabled && set(0, e.currentTarget)}
+        onBlur={() => {
+          release();
+          gesture.onBlur();
+        }}
+      />
     </div>
+  );
+}
+
+/** A lane volume's read-out in the value window: the figure, its unit smaller (`volumeDb`'s text whole,
+ * so the read-out still says `+0.0 dB`). */
+function DbText(props: { text: string }) {
+  const parts = () => /^(.*?)( dB)?$/.exec(props.text) ?? [props.text, props.text];
+  return (
+    <>
+      {parts()[1]}
+      <Show when={parts()[2]}>
+        <span class="lp-unit">{parts()[2]}</span>
+      </Show>
+    </>
   );
 }
 
@@ -267,8 +308,8 @@ function TrackLane(props: {
   const rev = createMemo(() => reverseGate(props.index));
   const undo = createMemo(() => undoGate(props.index));
   // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
-  // stage view. An EMPTY lane has no well message — the bright ● core already says "press to record";
-  // the spoken 'record' action lives on the core button's aria-label. A guitar-first install's empty
+  // stage view. An EMPTY lane has no well message: the lit key's ◉ already says "press to record"; the
+  // spoken 'record' action lives on the key's aria-label. A guitar-first install's empty
   // looper adds one start line on the selected lane (`startLine`), naming the key and the pedal, until
   // its first loop.
   const { displayState, word, stopping, fading, muted, clearArmed, cue, wellMsg, wellCount, startLine } =
@@ -276,7 +317,7 @@ function TrackLane(props: {
   const fxSelected = () => props.fxTrack === props.index;
   const isEmpty = () => state() === 'EMPTY';
   // Any of the lane's effects engaged in the mix the engine applied (the feed's, never a control's
-  // overlay), the IN FX pill's rule. The FX pill's lamp shows it; its lit legend says the drawer is open.
+  // overlay), as an input-effect plate's lamp reads its own send. The FX key's LED shows it; its lit legend says the drawer is open.
   const fxEngaged = () => !isEmpty() && looper.fxState(props.index).some((s) => !s.bypassed);
   const stateWord = () => {
     const w = word();
@@ -287,7 +328,7 @@ function TrackLane(props: {
   const source = () => {
     if (looper.selectedTrack() !== props.index) return '';
     const [a, b] = inputArmed();
-    return a && b ? 'A+B LIVE' : a ? 'A LIVE' : b ? 'B LIVE' : '';
+    return a && b ? 'FROM A+B' : a ? 'FROM A' : b ? 'FROM B' : '';
   };
 
   // The core IS the REC/DUB capture gesture. Its glyph reflects the ACTION reached by pressing it now
@@ -338,10 +379,10 @@ function TrackLane(props: {
   const playStopGlyph = () => (state() === 'STOPPED' || state() === 'EMPTY' ? '▶' : '■');
   const playStopAction = () => (stopping() ? 'stop now' : playStopGlyph() === '▶' ? 'play' : 'stop');
 
-  // Two-step clear: a take is irreversible, so the first press only ARMS ("SURE?") for a short window;
+  // Two-step clear: a take is irreversible, so the first press only ARMS (CLR? lit) for a short window;
   // a second press within it actually clears. No blocking window.confirm, which keeps the workflow fast.
   // It is the engine's CLEAR, one arm with the key's and a pedal's: either hand may arm and the other
-  // confirm, and the pill reads the engine's arm off the feed (`clearArmed`).
+  // confirm, and the key reads the engine's arm off the feed (`clearArmed`).
   let clrEl: HTMLButtonElement | undefined;
 
   // The waveform canvas is driven entirely by the plain-TS rAF renderer in waveform.ts; Solid only
@@ -380,6 +421,7 @@ function TrackLane(props: {
       classList={{
         'is-selected': looper.selectedTrack() === props.index,
         'is-stopping': stopping(),
+        'is-fading': fading(),
         'is-cued': cue() !== '',
       }}
       data-state={DATA_STATE[displayState()]}
@@ -396,7 +438,7 @@ function TrackLane(props: {
         if (!confirming) looper.selectTrack(props.index);
       }}
     >
-      {/* left cluster: identity · core gesture · play-stop/clear pair */}
+      {/* the head: the number over the state word (and the live source) · the lit key · STOP over CLR */}
       <div class="lp-lane__left">
         <div class="lp-lane__idbox">
           <span class="lp-lane__num">{String(props.index + 1)}</span>
@@ -409,7 +451,7 @@ function TrackLane(props: {
         </div>
 
         <button
-          class="lp-core"
+          class="k-key lp-core"
           disabled={!recGate().ok}
           onClick={(e) => {
             // A pointer press selected the lane on pointerdown; a keyboard one (detail 0) selects here,
@@ -420,12 +462,18 @@ function TrackLane(props: {
           aria-label={`Track ${props.index + 1} ${recDubAria()}`}
           title={why(recGate()) ?? sentence(recDubAria())}
         >
+          {/* the key's window: its light in the state colour, and while it captures the round rec lamp
+              beside it (D14's carrier past greyscale) */}
+          <span class="lp-core__win" aria-hidden="true">
+            <i class="lp-core__lamp" />
+            <i class="lp-core__bar" />
+          </span>
           {coreGlyph()}
         </button>
 
         <div class="lp-lane__pair">
           <button
-            class="lp-pb lp-pb--play"
+            class="k-key lp-pb lp-pb--play"
             disabled={!playGate().ok}
             onClick={() => looper.playStop(props.index)}
             aria-label={`Track ${props.index + 1} ${playStopAction()}`}
@@ -437,12 +485,13 @@ function TrackLane(props: {
                   : why(playGate())
             }
           >
-            {playStopGlyph()} {stopping() ? 'NOW' : playStopGlyph() === '▶' ? 'PLAY' : 'STOP'}
+            <i class="lp-glyph" classList={{ 'lp-glyph--play': playStopGlyph() === '▶' && !stopping() }} aria-hidden="true" />
+            {stopping() ? 'NOW' : playStopGlyph() === '▶' ? 'PLAY' : 'STOP'}
           </button>
           <button
             ref={clrEl}
-            class="lp-pb lp-pb--clr"
-            classList={{ 'is-armed': clearArmed() }}
+            class="k-key k-key--clr lp-pb lp-pb--clr"
+            classList={{ 'k-key--armed': clearArmed(), 'is-armed': clearArmed() }}
             disabled={isEmpty()}
             onClick={() => runAction('clear', props.index)}
             onKeyDown={noEnterRepeat}
@@ -452,12 +501,12 @@ function TrackLane(props: {
                 : `Track ${props.index + 1} clear`
             }
           >
-            {clearArmed() ? 'SURE?' : 'CLR'}
+            {clearArmed() ? 'CLR?' : 'CLR'}
           </button>
         </div>
       </div>
 
-      {/* the wave well — the recessed canvas surface (waveform + playhead drawn by waveform.ts). */}
+      {/* the glass: this lane's strip of the one recessed pane (waveform + playhead drawn by waveform.ts) */}
       <div class="lp-lane__well">
         <canvas ref={canvasEl} />
         <Show when={wellMsg()}>
@@ -479,36 +528,39 @@ function TrackLane(props: {
         </Show>
       </div>
 
-      {/* right cluster: five fixed pill columns over the mix row (volume and pan); a pill that does not
-          apply is disabled, never absent, so MUTE sits at one x on every lane. */}
+      {/* the mix: FX and MUTE (latched) | REV, UNDO, EDIT (momentary), each at one x on every lane (a key
+          that does not apply is disabled, never absent); under them the fader, the value window and the
+          pan. Folded (`narrow`, shared.ts), REV and UNDO live in EDIT's menu. */}
       <div class="lp-lane__right">
         <div class="lp-lane__mods">
           <button
             ref={props.fxRef}
-            class="lp-pb lp-pb--fx"
-            classList={{ 'is-on': fxSelected(), 'has-fx': fxEngaged() }}
+            class="k-key k-key--latch lp-pb lp-pb--fx"
+            classList={{ 'is-open': fxSelected(), 'has-fx': fxEngaged() }}
             disabled={isEmpty()}
             onClick={() => props.onToggleFx(props.index)}
             aria-label={`Track ${props.index + 1} FX`}
             aria-pressed={fxSelected()}
           >
+            {/* the LED: any of the lane's effects engaged; the lit legend: its drawer open */}
+            <i class="k-led" classList={{ 'is-on': fxEngaged() }} />
             FX
           </button>
           <button
-            class="lp-pb lp-pb--mute"
-            classList={{ 'is-on': looper.trackMuted(props.index) }}
+            class="k-key k-key--latch lp-pb lp-pb--mute"
             disabled={isEmpty()}
             onClick={() => looper.toggleMute(props.index)}
             aria-label={`Track ${props.index + 1} mute`}
             aria-pressed={looper.trackMuted(props.index)}
           >
+            <i class="k-led" />
             MUTE
           </button>
 
           {/* Per-track reverse: toggles forward/reversed; the swap lands on the next loop boundary
               (click-free, like undo). */}
           <button
-            class="lp-pb lp-pb--rev"
+            class="k-key k-key--mo lp-pb lp-pb--rev"
             disabled={!rev().ok}
             classList={{ 'is-on': reversed() }}
             onClick={() => looper.reverse(props.index)}
@@ -516,27 +568,33 @@ function TrackLane(props: {
             aria-pressed={reversed()}
             title={why(rev()) ?? 'Reverse / forward (toggle)'}
           >
-            ↺ REV
+            REV
           </button>
 
           {/* One-level undo of the last overdub or trim; a second press redoes it. */}
           <button
-            class="lp-pb lp-pb--undo"
+            class="k-key k-key--mo lp-pb lp-pb--undo"
             disabled={!undo().ok}
             onClick={() => looper.undoLastOverdub(props.index)}
             aria-label={`Track ${props.index + 1} undo or redo the last overdub or trim`}
             title={why(undo()) ?? 'Undo / redo the last overdub or trim'}
           >
-            ↶ UNDO
+            UNDO
           </button>
 
-          {/* ⧉ COPY, ↔ WIDE and ✂ TRIM, behind one pill (`Edit.tsx`). */}
+          {/* COPY, WIDE and TRIM (and, folded, REV and UNDO) behind one key (`Edit.tsx`). */}
           <Edit index={props.index} returnFocus={props.returnFocus} />
         </div>
 
-        {/* the mix row: the volume fader and the pan */}
+        {/* the mix line: the fader, ONE value window (the level and the pan), the pan knob */}
         <div class="lp-lane__mix">
           <Fader index={props.index} disabled={isEmpty()} />
+          <span class="k-win lp-lane__win" classList={{ 'is-off': isEmpty() }}>
+            <span class="lp-vdb">
+              <DbText text={volumeDb(looper.mixShown(props.index, 'volume'))} />
+            </span>
+            <span class="lp-pan__val">{panText(looper.mixShown(props.index, 'pan'))}</span>
+          </span>
           <Pan index={props.index} disabled={isEmpty()} />
         </div>
       </div>
@@ -565,8 +623,8 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
   // lane), or null.
   const [fxTrack, setFxTrack] = createSignal<number | null>(null);
   const toggleFx = (i: number) => setFxTrack((cur) => (cur === i ? null : i));
-  // Each lane's FX pill: the drawer's ✕ pressed by key (a click with detail 0, as
-  // `src/app/transport-keys.ts` reads it) unmounts the focused button, so focus goes back to the pill
+  // Each lane's FX key: the drawer's ✕ pressed by key (a click with detail 0, as
+  // `src/app/transport-keys.ts` reads it) unmounts the focused button, so focus goes back to the key
   // that opened it, on the app's behalf so Space there still arms REC. A pointer close leaves focus
   // where the transport keys' blur put it.
   const fxPills: (HTMLButtonElement | undefined)[] = [];
@@ -655,7 +713,7 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
                   <span class="lp-drawer__title">FX · Track {i + 1}</span>
                   <FxPanel index={i} />
                   <button
-                    class="lp-drawer__close"
+                    class="k-key k-key--mo lp-drawer__close"
                     onClick={(e) => closeFx(i, e)}
                     aria-label="Close FX panel"
                     title="Close FX panel"

@@ -13,8 +13,8 @@
  * - Help's tabs by keyboard: Tab lands on the selected one, the arrows, Home and End pick and focus a tab
  *   and show its panel (each tab's aria-controls names a tabpanel) without reaching the transport; a
  *   pointer pick of a tab gives Space back to REC/DUB;
- * - real controls keep the key: Space in the BPM field (named BPM) sends nothing; Tab to BPM plus and Enter steps
- *   the tempo (`SetBpm`), never a looper action;
+ * - real controls keep the key: Space in the BPM field (named BPM) sends nothing; ArrowUp and Enter on the
+ *   focused tempo step it (`SetBpm`) and open its field, never a looper action;
  * - Enter commits a typed BPM (`SetBpm`) with an AUTO REC arm on the feed, and drives no looper action
  *   though the field unmounts under the key;
  * - a held Enter on ✕ ALL sends no clear, and on a lane's CLR one engine CLEAR (the press that arms; a key
@@ -164,8 +164,8 @@ await probe(async ({ open }) => {
   await page.keyboard.press('Escape');
   await helpPanel.waitFor({ state: 'detached' });
 
-  // 3. Real controls keep the key: Space in the BPM field does not arm; Tab to BPM plus + Enter
-  //    activates that button, not PLAY/STOP.
+  // 3. Real controls keep the key: Space in the BPM field does not arm; the focused tempo keeps the arrow
+  //    and Enter.
   await clearSent();
   await page.getByRole('button', { name: /^\d+ BPM$/ }).click();
   // The field takes focus one task after it mounts (Transport.tsx startEditFocused): wait for the
@@ -176,15 +176,21 @@ await probe(async ({ open }) => {
   await page.keyboard.press('Space');
   await page.waitForTimeout(150);
   assert.equal(await recDubs(), 0, 'Space in the BPM input armed the looper');
-  await page.keyboard.press('Tab');
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'BPM plus');
+  await page.keyboard.press('Escape');
+  await page.locator('.transport__bpm-input').waitFor({ state: 'detached' });
+  // The focused tempo keeps the arrows (its value gesture, `value-drag.ts`), though they are the lane keys
+  // elsewhere; Enter on it opens its field, not PLAY/STOP.
+  await page.locator('.transport__bpm-num').focus();
   const bpmBefore = await page.evaluate(() => window.__lf.clock.bpm());
+  await page.keyboard.press('ArrowUp');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(150);
   const afterEnter = await sent();
-  console.log('sent after BPM field + Tab + Enter', JSON.stringify(afterEnter));
-  assert.ok(afterEnter.some((c) => c.SetBpm === bpmBefore + 1), 'Enter on BPM plus did not step BPM');
-  assert.ok(!afterEnter.some((c) => c.Action !== undefined || c.ActionOn !== undefined), 'Enter on a Tab-focused button drove the looper');
+  console.log('sent after ArrowUp + Enter on the focused tempo', JSON.stringify(afterEnter));
+  assert.ok(afterEnter.some((c) => c.SetBpm === bpmBefore + 1), 'ArrowUp on the focused tempo did not step BPM');
+  assert.ok(!afterEnter.some((c) => c.Action !== undefined || c.ActionOn !== undefined || c.SelectTrack !== undefined), 'a key on the focused tempo drove the looper');
+  assert.ok(await page.locator('.transport__bpm-input').isVisible(), 'Enter on the focused tempo did not open its field');
+  await page.keyboard.press('Escape');
 
   // 4. Enter commits a typed BPM and nothing else: the field unmounts under the key, and the window's
   //    transport keys must not read that Enter as PLAY/STOP (with AUTO REC armed it would end the arm).
@@ -358,9 +364,10 @@ await probe(async ({ open }) => {
   // A keyboard user keeps the select: from a known value, Tab onto it and an arrow there picks the next
   // one, no NEXT TRACK goes out, and the focus stays for the next.
   await inputPick.selectOption('0');
-  await page.getByRole('combobox', { name: 'Source for slot A', exact: true }).focus();
+  // (the slot's line reads letter · input · LIVE · source: the input is the stop after the letter)
+  await page.getByRole('button', { name: 'Activate slot A', exact: true }).focus();
   for (let i = 0; i < 6 && !(await inputPick.evaluate((el) => document.activeElement === el)); i++) await page.keyboard.press('Tab');
-  assert.ok(await inputPick.evaluate((el) => document.activeElement === el), 'Tab from the slot source did not reach the slot input select');
+  assert.ok(await inputPick.evaluate((el) => document.activeElement === el), 'Tab from the slot letter did not reach the slot input select');
   await clearSent();
   await page.keyboard.press('ArrowDown');
   await page.waitForTimeout(100);
