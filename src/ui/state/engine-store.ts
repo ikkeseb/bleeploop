@@ -1482,7 +1482,10 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
     if (!Number.isInteger(t.index) || t.index < 0 || t.index >= ENGINE_LANES) throw new Error(`loadSession: track index ${t.index} out of range`);
     if (seen.has(t.index)) throw new Error(`loadSession: duplicate track index ${t.index}`);
     seen.add(t.index);
-    if (t.pcm.length !== master) throw new Error(`loadSession: track ${t.index + 1} pcm is ${t.pcm.length} frames, expected ${master}`);
+    if (t.pcm.length !== 1 && t.pcm.length !== 2) throw new Error(`loadSession: track ${t.index + 1} has ${t.pcm.length} channels, expected 1 or 2`);
+    for (const c of t.pcm) {
+      if (c.length !== master) throw new Error(`loadSession: track ${t.index + 1} pcm is ${c.length} frames, expected ${master}`);
+    }
     const state = t.state ?? 'PLAYING';
     if (state !== 'PLAYING' && state !== 'STOPPED') throw new Error(`loadSession: track ${t.index + 1} state must be PLAYING or STOPPED`);
     const states = validateFxStates(t.fx, `loadSession: track ${t.index + 1}`);
@@ -1497,9 +1500,10 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
     ...(timeSig === FOUR_FOUR ? {} : { meter: timeSig }),
     bars,
     masterLengthFrames: master,
-    tracks: loaded.map((t) => ({ index: t.index, frames: master, reversed: t.reversed, state: TO_LOAD[t.state], mix: t.mix })),
+    tracks: loaded.map((t) => ({ index: t.index, frames: master, channels: t.pcm.length === 1 ? 1 : 2, reversed: t.reversed, state: TO_LOAD[t.state], mix: t.mix })),
   };
-  await platform.engine.loadSession(encodeSessionBytes(header, loaded.map((t) => t.pcm)));
+  // A one-channel track goes as it is: the engine plays it on both sides.
+  await platform.engine.loadSession(encodeSessionBytes(header, loaded.flatMap((t) => t.pcm)));
   // The engine applied the mix with the loops, and each loaded lane's `Mix` shows it; a control's pending
   // gesture is over (a refused load changes nothing).
   for (let i = 0; i < ENGINE_LANES; i++) cancelOverlays(i);

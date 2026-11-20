@@ -1,6 +1,6 @@
 import type { FxState } from './fx-metadata';
 import type { TimeSignature } from '../../platform';
-import { framesPerBar } from './quantize';
+import { framesPerBar } from './quantize.ts'; // explicit .ts: Node guards import this file
 
 /**
  * OWNS: the looper's shapes the engine store, the UI and the session code share — the lane count and
@@ -37,8 +37,8 @@ export interface PeakView {
 export interface ExportTrack {
   /** 0-based engine track index. */
   index: number;
-  /** Copy of the committed loop region [0, lengthFrames), MONO. */
-  pcm: Float32Array;
+  /** Copy of the committed loop region [0, lengthFrames): its two sides, `[left, right]`. */
+  pcm: [Float32Array, Float32Array];
   volume: number;
   muted: boolean;
   reversed: boolean;
@@ -78,10 +78,11 @@ export function firstTakeSpan(opening: number, elapsed: number): number {
 }
 
 /** One imported track (`SessionSource.loadSession`): 0-based engine index + EXACTLY masterLengthFrames
- * of mono PCM. */
+ * of PCM per channel. */
 export interface LoadSessionTrack {
   index: number;
-  pcm: Float32Array;
+  /** Its channels: `[left, right]`, or one (a v1 or v2 session's mono stem), which plays on both sides. */
+  pcm: readonly Float32Array[];
   volume: number;
   muted: boolean;
   reversed: boolean;

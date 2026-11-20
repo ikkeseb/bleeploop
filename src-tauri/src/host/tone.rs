@@ -44,7 +44,7 @@ use super::engine_slot::PluginFormat;
 pub(crate) const SAVE_QUIET: Duration = Duration::from_secs(2);
 
 /// The largest state a tone holds. A session import sizes its archive limit from it
-/// (`src/session/import.ts`, `MAX_TONE_BYTES`); change them together.
+/// (`src/session/archive-limits.ts`, `MAX_TONE_BYTES`); change them together.
 pub(crate) const MAX_STATE_BYTES: usize = 16 << 20;
 
 /// The largest format, path, id or name a tone file carries.

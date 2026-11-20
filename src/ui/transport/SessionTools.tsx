@@ -1,6 +1,7 @@
 import { createMemo, createSignal } from 'solid-js';
 import { exportLoops } from '../../session/export';
-import { importSession, maxImportArchiveBytes } from '../../session/import';
+import { maxImportArchiveBytes } from '../../session/archive-limits';
+import { importSession } from '../../session/import';
 import { restoreSessionTones } from '../state/slot-tones';
 import { notifyError, notifyInfo } from '../../notify';
 import { looper, sampleRate, session } from '../state/audio';

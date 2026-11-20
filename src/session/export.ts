@@ -1,6 +1,6 @@
 // src/session/export.ts
 // WAV-export coordinator: pulls a read-only snapshot of the committed looper tracks and saves ONE
-// .zip (per-track mono WAVs + a stereo master mix + session.json, and each loaded plugin slot's tone,
+// .zip (per-track stereo WAVs + a stereo master mix + session.json, and each loaded plugin slot's tone,
 // `src/ui/state/slot-tones.ts`) through `platform.exports`. The master is the engine's: the same
 // snapshot carries it, rendered offline by lf-engine from those loops and the engine's mix (no Web Audio
 // render remains); a dry mixdown stands in when that render fails (`buildExportBundle`).
@@ -22,7 +22,8 @@ export interface BuildExportOptions {
 }
 
 /**
- * Build the export bundle: every committed track as a mono WAV + session.json, optionally with the
+ * Build the export bundle: every committed track as a stereo WAV (its two sides as the engine holds
+ * them) + session.json, optionally with the
  * stereo master mix, packed into a single timestamped .zip — everything exportLoops does EXCEPT the
  * save itself (the seam that lets a headless probe byte-parse the archive without touching
  * <a download>).

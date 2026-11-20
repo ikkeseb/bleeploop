@@ -16,6 +16,8 @@ export interface ParsedSessionTrack {
   track: number;
   /** Stem file name inside the archive (the lookup key for the WAV entry). */
   file: string;
+  /** The stem's channels: 2 in format v3 (its two sides), 1 before it (a mono stem, both sides). */
+  channels: 1 | 2;
   /** Clamped to [0, 1.5] (the mixer's range) — out-of-range values are clamped, not rejected. */
   volume: number;
   muted: boolean;
@@ -111,11 +113,12 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
 /**
  * Validate + normalize a parsed session.json (the schema export.ts writes). PURE — safe under Node.
  * `meters` is the meters this build offers (`TIME_SIGNATURES`, handed in: the platform seam is not
- * Node-importable). The meter: format v1 (or none) is 4/4 and names no other meter; v2 names one of
+ * Node-importable). The meter: format v1 (or none) is 4/4 and names no other meter; v2 and v3 name one of
  * `meters` with the `beats` this build counts it in (the BPM's unit: a file that read its tempo in
  * another unit is refused, never re-read), and the bars count in it.
  * Throws a descriptive Error on: a non-BleepLoop app tag, a formatVersion newer than this build
- * understands (or a garbage formatVersion), a meter as above that does not hold, missing/mis-typed
+ * understands (or a garbage formatVersion), a track's `channels` other than 1 or 2 (absent: 2 in v3, 1
+ * before it) or 2 before v3, a meter as above that does not hold, missing/mis-typed
  * fields, a non-positive/non-integer masterLengthFrames, an empty or >5-track list, track numbers
  * outside 1..5 or repeated, a per-track frames that differs from masterLengthFrames, a repeated stem
  * file, or an fx array that doesn't exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
@@ -138,14 +141,14 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
     throw new Error(`session.json: app tag is ${JSON.stringify(s.app)}, expected "BleepLoop": not a BleepLoop session`);
   }
   // formatVersion gate: MISSING is treated as legacy v1 (every pre-versioning export still imports);
-  // 1 (4/4) and 2 (another meter) are this build's formats; an integer > 2 was written by a newer
-  // BleepLoop; anything else is garbage. A non-integer/<1 value is rejected as invalid rather than
-  // silently ignored.
+  // 1 (4/4, mono stems), 2 (another meter, mono stems) and 3 (stereo stems, `docs/unit-contract.md` §8)
+  // are this build's formats; an integer > 3 was written by a newer BleepLoop; anything else is
+  // garbage. A non-integer/<1 value is rejected as invalid rather than silently ignored.
   const fv = s.formatVersion === undefined ? 1 : s.formatVersion;
   if (typeof fv !== 'number' || !Number.isInteger(fv) || fv < 1) {
     throw new Error(`session.json: formatVersion must be a positive integer, got ${JSON.stringify(fv)}`);
   }
-  if (fv > 2) {
+  if (fv > 3) {
     throw new Error(`This session was exported by a newer version of BleepLoop (format v${fv}). Update BleepLoop to open it.`);
   }
   const meter = sessionMeter(s.meter, fv, meters);
@@ -204,6 +207,14 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
       throw new Error(`session.json: multiple tracks reference "${t.file}"`);
     }
     seenFiles.add(t.file);
+    // A stem's channels: format v3 writes 2; a stem before it is mono, and says so or nothing.
+    const channels = t.channels === undefined ? (fv >= 3 ? 2 : 1) : t.channels;
+    if (channels !== 1 && channels !== 2) {
+      throw new Error(`session.json: track ${trackNo} channels must be 1 or 2, got ${JSON.stringify(t.channels)}`);
+    }
+    if (fv < 3 && channels !== 1) {
+      throw new Error(`session.json: track ${trackNo} has ${channels} channels, and a format v${fv} stem is mono`);
+    }
     if (typeof t.frames !== 'number' || t.frames !== master) {
       throw new Error(`session.json: track ${trackNo} frames ${JSON.stringify(t.frames)} !== masterLengthFrames ${master}`);
     }
@@ -241,7 +252,7 @@ export function validateSession(json: unknown, meters: readonly TimeSignature[])
     else if (t.pan !== undefined) {
       throw new Error(`session.json: track ${trackNo} pan must be a number, got ${JSON.stringify(t.pan)}`);
     }
-    return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx, dubFeedback, pan };
+    return { track: trackNo, file: t.file, channels, volume, muted, reversed, state, frames: master, fx, dubFeedback, pan };
   });
   return { bpm, meter, bars, masterLengthFrames: master, sampleRate, tracks };
 }

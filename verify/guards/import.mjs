@@ -3,15 +3,23 @@
 // Imports the REAL session validator from the PURE schema module (Node TS type-stripping — import.ts
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
 // Asserts the export.ts session.json schema gate: a golden session round-trips, the formatVersion gate
-// (missing = legacy v1, ===1 accepted, newer rejected) and the meter it carries (v1 is 4/4, v2 names an
+// (missing = legacy v1, 1..3 accepted, newer rejected) and the meter it carries (v1 is 4/4, v2 and v3 name an
 // offered meter in this build's beats; an archive `prepareStemArchive` writes for each offered meter reads
-// back with its bars, as export and recovery write it), every malformed shape throws descriptively, and
+// back with its bars, as export and recovery write it, always format v3), each stem's channels (2 in v3,
+// 1 before it: `docs/unit-contract.md` §8), the largest legal archive round-tripping through the zip and
+// WAV code under the import's limits (`archive-limits.ts`, its `MAX_UNITS` held equal to the engine's), every malformed shape throws descriptively, and
 // volume clamp + legacy muted/state values normalize (a missing dubFeedback reads as 1, a missing pan as
 // the centre), while invalid shapes reject. This is what SESSION IMPORT relies on to never hand looper.loadSession a payload that
 // could corrupt the master grid.
 // Run: node verify/guards/import.mjs
 import { validateSession as validateWith, validateSessionPlugins } from '../../src/session/session-schema.ts';
 import { prepareStemArchive, snapshotBars } from '../../src/session/stem-archive.ts';
+import { MAX_ARCHIVE_ENTRIES, MAX_TONE_BYTES, MAX_UNITS, maxImportArchiveBytes } from '../../src/session/archive-limits.ts';
+import { parseZip } from '../../src/session/unzip.ts';
+import { makeZip } from '../../src/session/zip.ts';
+import { decodeWav, encodeWav } from '../../src/session/wav.ts';
+import { MAX_LOOP_SECONDS, TRACK_COUNT } from '../../src/ui/state/looper-types.ts';
+import { readFileSync } from 'node:fs';
 import { TIME_SIGNATURES } from '../../src/platform/engine-wire.ts';
 import { defaultFxStates } from '../../src/ui/state/fx-metadata.ts';
 import { framesPerBar } from '../../src/ui/state/quantize.ts';
@@ -125,7 +133,7 @@ for (const state of ['RECORDING', 'EMPTY', 'paused', 1, null]) {
   }, 'state must be PLAYING, OVERDUBBING or STOPPED');
 }
 
-// ---- A3. formatVersion gate: missing = legacy v1, ===1 accepted, integer > 1 rejected, garbage rejected ----
+// ---- A3. formatVersion gate: missing = legacy v1, 1..3 accepted, an integer > 3 rejected, garbage rejected ----
 {
   const legacy = golden(); // no formatVersion/reversed — every pre-versioning export still imports as v1
   for (const track of legacy.tracks) delete track.reversed;
@@ -134,8 +142,9 @@ for (const state of ['RECORDING', 'EMPTY', 'paused', 1, null]) {
   ok('A3.missing reversed defaults false', legacyOut.tracks.every((track) => track.reversed === false));
   ok('A3.formatVersion 1 accepts', validateSession({ ...golden(), formatVersion: 1 }).bpm === 120);
 }
-throws('A3.formatVersion 3 rejects with newer-version message',
-  () => validateSession({ ...golden(), formatVersion: 3 }), 'newer version of BleepLoop');
+ok('A3.formatVersion 3 accepts (it names its meter)', validateSession({ ...golden(), formatVersion: 3, meter: { num: 4, den: 4, beats: 4 } }).bpm === 120);
+throws('A3.formatVersion 4 rejects with newer-version message (an older build reads a v3 file so)',
+  () => validateSession({ ...golden(), formatVersion: 4 }), 'This session was exported by a newer version of BleepLoop (format v4). Update BleepLoop to open it.');
 throws('A3.formatVersion 99 rejects with newer-version message',
   () => validateSession({ ...golden(), formatVersion: 99 }), 'newer version of BleepLoop');
 throws('A3.non-integer formatVersion rejected as invalid',
@@ -208,14 +217,14 @@ for (const meter of TIME_SIGNATURES) {
     const bpm = 97;
     const frames = bars * framesPerBar(bpm, rate, meter.beats);
     const snap = { sampleRate: rate, masterLengthFrames: frames, bpm, meter, tracks: [
-      { index: 0, pcm: new Float32Array(frames), volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() },
+      { index: 0, pcm: [new Float32Array(frames), new Float32Array(frames)], volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() },
     ] };
     const name = `A5.${meter.num}/${meter.den} x${bars}`;
     ok(`${name} snapshotBars counts the meter`, snapshotBars(snap) === bars, String(snapshotBars(snap)));
     const { session } = prepareStemArchive(snap, { bpm, bars: snapshotBars(snap) }, 'lf', 'float32');
-    const fourFour = meter.num === 4 && meter.den === 4;
-    ok(`${name} writes v${fourFour ? 1 : 2}`, session.formatVersion === (fourFour ? 1 : 2), String(session.formatVersion));
-    ok(`${name} names the meter only off 4/4`, fourFour ? !('meter' in session) : JSON.stringify(session.meter) === JSON.stringify({ num: meter.num, den: meter.den, beats: meter.beats }), JSON.stringify(session.meter));
+    ok(`${name} writes v3`, session.formatVersion === 3, String(session.formatVersion));
+    ok(`${name} names the meter, 4/4 too`, JSON.stringify(session.meter) === JSON.stringify({ num: meter.num, den: meter.den, beats: meter.beats }), JSON.stringify(session.meter));
+    ok(`${name} names its stems' two channels`, session.tracks.every((t) => t.channels === 2), JSON.stringify(session.tracks.map((t) => t.channels)));
     reads(`${name} reads back`, JSON.parse(JSON.stringify(session)), (out) => out.meter === meter && out.bars === bars && out.masterLengthFrames === frames);
   }
 }
@@ -538,6 +547,85 @@ for (const [what, bad] of [['a string', '-0.3'], ['null', null], ['a boolean', t
     s.tracks[1].pan = bad;
     validateSession(s);
   }, 'pan must be a number');
+}
+
+// ---- K. a stem's channels: v3 two (absent reads 2, 1 allowed), before v3 one (absent reads 1, 2 refused) ----
+{
+  const v3 = () => ({ ...golden(), formatVersion: 3, meter: { num: 4, den: 4, beats: 4 } });
+  ok('K.v3 without channels reads two', validateSession(v3()).tracks.every((t) => t.channels === 2));
+  const one = v3();
+  one.tracks[0].channels = 1;
+  one.tracks[1].channels = 2;
+  ok('K.v3 names each track\'s channels', JSON.stringify(validateSession(one).tracks.map((t) => t.channels)) === '[1,2]');
+  ok('K.v1 without channels reads one', validateSession(golden()).tracks.every((t) => t.channels === 1));
+  const v1 = golden();
+  v1.tracks[0].channels = 1;
+  ok('K.v1 naming one channel reads one', validateSession(v1).tracks[0].channels === 1);
+  for (const fv of [1, 2]) {
+    throws(`K.a v${fv} stem of two channels rejects`, () => {
+      const s = fv === 1 ? golden() : inMeter(meterOf(3, 4));
+      s.tracks[0].channels = 2;
+      validateSession(s);
+    }, `a format v${fv} stem is mono`);
+  }
+  for (const bad of [0, 3, '2', null, 1.5]) {
+    throws(`K.channels ${JSON.stringify(bad)} rejects`, () => {
+      const s = v3();
+      s.tracks[1].channels = bad;
+      validateSession(s);
+    }, 'channels must be 1 or 2');
+  }
+}
+
+// ---- L. the largest legal archive (`docs/unit-contract.md` §8): five 60 s stereo stems at 48 kHz, the
+// PCM16 master and a tone of the largest size per unit, written as export writes it, under the import's
+// limits, and read back bit for bit ----
+{
+  const api = readFileSync(new URL('../../src-tauri/crates/lf-engine/src/api.rs', import.meta.url), 'utf8');
+  const engineUnits = Number(/pub const MAX_UNITS: usize = (\d+);/.exec(api)?.[1]);
+  ok('L.MAX_UNITS is the engine\'s', engineUnits === MAX_UNITS, `${engineUnits} vs ${MAX_UNITS}`);
+  const rate = 48000;
+  const frames = MAX_LOOP_SECONDS * rate;
+  const bpm = 120;
+  const meter = meterOf(4, 4);
+  const bars = frames / framesPerBar(bpm, rate, meter.beats);
+  // Each side its own: track 1 `[x, -x]`, the rest unalike sides, every sample distinct from its neighbour.
+  const side = (k, c) => {
+    const out = new Float32Array(frames);
+    const sign = k === 0 && c === 1 ? -1 : 1;
+    const step = 0.001 + 0.0003 * (k === 0 ? 0 : c + 2 * k);
+    for (let f = 0; f < frames; f++) out[f] = sign * 0.5 * Math.sin((f + 1) * step);
+    return out;
+  };
+  const tracks = Array.from({ length: TRACK_COUNT }, (_, k) => ({
+    index: k, pcm: [side(k, 0), side(k, 1)], volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates(),
+  }));
+  const snap = { sampleRate: rate, masterLengthFrames: frames, bpm, meter, tracks };
+  const { entries, session } = prepareStemArchive(snap, { bpm, bars }, 'lf', 'float32');
+  entries.push({ name: 'lf-master.wav', data: encodeWav([tracks[1].pcm[0], tracks[1].pcm[1]], rate) });
+  const tone = new Uint8Array(MAX_TONE_BYTES).fill(0x5a);
+  for (let k = 0; k < 2 * MAX_UNITS; k++) entries.push({ name: `lf-unit-${k + 1}.tone`, data: tone });
+  entries.push({ name: 'lf-session.json', data: new TextEncoder().encode(JSON.stringify({ ...session, master: { file: 'lf-master.wav', kind: 'wet-engine', level: 1 } }, null, 2)) });
+  const zip = makeZip(entries);
+  const limit = maxImportArchiveBytes(rate);
+  ok('L.the largest archive fits the import limit', zip.byteLength <= limit, `${zip.byteLength} > ${limit}`);
+  ok('L.and the limit is that archive, not far more (within the zip overhead)', limit - zip.byteLength < 1 << 20, `${limit - zip.byteLength} bytes spare`);
+  ok('L.it holds the most entries', entries.length === MAX_ARCHIVE_ENTRIES, `${entries.length} vs ${MAX_ARCHIVE_ENTRIES}`);
+  const back = parseZip(zip, MAX_ARCHIVE_ENTRIES);
+  ok('L.every entry reads back', back.length === entries.length, String(back.length));
+  const parsed = validateSession(JSON.parse(new TextDecoder().decode(back.find((e) => e.name === 'lf-session.json').data)));
+  ok('L.session.json reads as v3 of two-channel stems', parsed.tracks.length === TRACK_COUNT && parsed.tracks.every((t) => t.channels === 2) && parsed.masterLengthFrames === frames);
+  const bytes = (a) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+  const same = (a, b) => a.length === b.length && Buffer.compare(bytes(a), bytes(b)) === 0;
+  for (const t of parsed.tracks) {
+    const wav = decodeWav(back.find((e) => e.name === t.file).data);
+    const want = tracks[t.track - 1].pcm;
+    ok(`L.track ${t.track}'s stem reads back two channels, bit for bit`, wav.channels.length === 2 && same(wav.channels[0], want[0]) && same(wav.channels[1], want[1]));
+  }
+  ok('L.the tones read back whole', back.filter((e) => e.name.endsWith('.tone')).every((e) => e.data.byteLength === MAX_TONE_BYTES));
+  const small = Array.from({ length: MAX_ARCHIVE_ENTRIES + 1 }, (_, k) => ({ name: `lf-${k}.bin`, data: new Uint8Array(1) }));
+  ok('L.as many small entries read', parseZip(makeZip(small.slice(1)), MAX_ARCHIVE_ENTRIES).length === MAX_ARCHIVE_ENTRIES);
+  throws('L.one entry more is refused', () => parseZip(makeZip(small), MAX_ARCHIVE_ENTRIES), 'maximum is');
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

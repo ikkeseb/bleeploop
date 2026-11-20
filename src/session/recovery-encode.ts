@@ -31,7 +31,8 @@ export function encodeRecovery(request: RecoveryEncodeRequest): Promise<Uint8Arr
     try {
       // exportSnapshot() already copied committed PCM synchronously. Transfer those copies only;
       // live track buffers stay attached, and later edits cannot change this archive mid-encode.
-      worker.postMessage(request, request.snapshot.tracks.map((t) => t.pcm.buffer as ArrayBuffer));
+      // Each side's buffer once (a list that names one twice cannot be transferred).
+      worker.postMessage(request, [...new Set(request.snapshot.tracks.flatMap((t) => t.pcm.map((c) => c.buffer as ArrayBuffer)))]);
     } catch (error) {
       finish(error instanceof Error ? error : new Error(String(error)));
     }

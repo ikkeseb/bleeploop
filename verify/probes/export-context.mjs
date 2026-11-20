@@ -86,7 +86,7 @@ await probe(async ({ open }) => {
     const { session } = await import('/src/ui/state/audio.ts');
     const { defaultFxStates } = await import('/src/ui/state/fx-metadata.ts');
     await session.loadSession({ bpm: 120, bars: 1, masterLengthFrames: master,
-      tracks: [{ index: 0, pcm: Float32Array.from(pcm), volume: 0.25, muted: false, reversed: false, fx: defaultFxStates() }] });
+      tracks: [{ index: 0, pcm: [Float32Array.from(pcm)], volume: 0.25, muted: false, reversed: false, fx: defaultFxStates() }] });
   }, [editable, MASTER]);
   await engineHolds(editable, 'Playing');
   const exported = await page.evaluate(async (pcm) => {
@@ -141,7 +141,7 @@ await probe(async ({ open }) => {
   results.push(await page.evaluate(async () => {
     const lf = window.__lf;
     const { session } = await import('/src/ui/state/audio.ts');
-    const { maxImportArchiveBytes } = await import('/src/session/import.ts');
+    const { MAX_ARCHIVE_ENTRIES, maxImportArchiveBytes } = await import('/src/session/archive-limits.ts');
     const { parseZip } = await import('/src/session/unzip.ts');
     const { makeZip } = await import('/src/session/zip.ts');
     const { decodeWav } = await import('/src/session/wav.ts');
@@ -189,7 +189,7 @@ await probe(async ({ open }) => {
     let repeatedPayloadRejected = false;
     const began = performance.now();
     try { await lf.importSession(hostile, session); }
-    catch (error) { repeatedPayloadRejected = String(error).includes('128 entries; maximum is 9'); }
+    catch (error) { repeatedPayloadRejected = String(error).includes(`128 entries; maximum is ${MAX_ARCHIVE_ENTRIES}`); }
     const rejectionMs = performance.now() - began;
     return { name: 'A snapshot without its master exports a dry master with each lane\'s pan; import refuses oversized and repeated-payload archives',
       fallbackKind, fallbackShape, fallbackSides, oversizedRejected, cap, repeatedPayloadRejected, rejectionMs,
@@ -318,7 +318,7 @@ await probe(async ({ open }) => {
   });
 
   // ── A meter other than 4/4 ────────────────────────────────────────────────────────────────────────
-  // The snapshot's meter writes session.json v2 with the meter and its bars (3 bars of 3/4 at 120 are
+  // The snapshot's meter writes session.json (v3) with the meter and its bars (3 bars of 3/4 at 120 are
   // 216000 frames, which 4/4 would call 2.25 bars), and the import hands the engine that meter back.
   for (const [meter, bars] of [[{ num: 3, den: 4, beats: 3 }, 3], [{ num: 6, den: 8, beats: 2 }, 1]]) {
     const frames = bars * Math.round((60 / 120) * meter.beats * RATE);
@@ -350,7 +350,7 @@ await probe(async ({ open }) => {
     }, written.zip);
     delete written.zip;
     results.push({ name: `A ${meter.num}/${meter.den} export writes its meter and bars, and imports in it`, written, loaded,
-      pass: written.formatVersion === 2 && JSON.stringify(written.meter) === JSON.stringify(meter) && written.bars === bars
+      pass: written.formatVersion === 3 && JSON.stringify(written.meter) === JSON.stringify(meter) && written.bars === bars
         && loaded.imported === 'ok' && JSON.stringify(loaded.meter) === JSON.stringify(meter) && loaded.bars === bars && loaded.master === frames });
   }
 

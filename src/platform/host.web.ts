@@ -23,6 +23,7 @@ import {
   type Refusal,
   type SnapshotHeader,
   type SnapshotTrack,
+  type StereoPcm,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 import { decodeInputItem, decodeMidiEvent, type Dropped, type ImportReport, type InputEvent, type InputItem, type MidiEvent } from './midi-wire.ts';
 
@@ -699,7 +700,7 @@ export const fakeMixModel = {
  * sound (no FX, no reverb, no OTT, no limiter); it only lets the browser tier's
  * export run, so no probe may claim to test the master's sound with it.
  */
-function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): Float32Array {
+function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): StereoPcm {
   let master = 1;
   let masterMuted = false;
   for (const c of sent) {
@@ -707,13 +708,17 @@ function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: 
     if ('SetMasterVolume' in c) master = c.SetMasterVolume;
     else if ('SetMasterMute' in c) masterMuted = c.SetMasterMute;
   }
-  const out = new Float32Array(header.masterLengthFrames);
-  if (masterMuted) return out;
-  header.tracks.forEach((t, k) => {
-    if (t.mix.muted) return;
+  const out: StereoPcm = { left: new Float32Array(header.masterLengthFrames), right: new Float32Array(header.masterLengthFrames) };
+  // `pcm` holds each track's channels in order: a one-channel track on both sides.
+  let at = 0;
+  for (const t of header.tracks) {
+    const channels = t.channels ?? 1;
+    const sides = [pcm[at], pcm[at + channels - 1]];
+    at += channels;
+    if (masterMuted || t.mix.muted) continue;
     const gain = t.mix.volume * master;
-    pcm[k].forEach((x, i) => (out[i] += gain * x));
-  });
+    [out.left, out.right].forEach((side, c) => sides[c].forEach((x, i) => (side[i] += gain * x)));
+  }
   return out;
 }
 
@@ -726,8 +731,7 @@ function snapshotAnswer(master: boolean): ArrayBuffer {
   const stems: SnapshotHeader = { ...scripted, tracks: scripted.tracks.map((t) => ({ ...t, mix: t.mix ?? copyMix(fakeMixes[t.index]) })) };
   if (!master) return encodeSessionBytes(stems, pcm).buffer;
   if (webEngineFake.masterError !== null) return encodeSessionBytes({ ...stems, masterError: webEngineFake.masterError }, pcm).buffer;
-  const mono = fakeMaster(stems, pcm, webEngineFake.sent);
-  return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, { left: mono, right: mono.slice() }).buffer;
+  return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, fakeMaster(stems, pcm, webEngineFake.sent)).buffer;
 }
 
 /** Forced on only by a DEV probe's init script (`verify/probes/engine-seam.mjs`), before the app loads.

@@ -73,7 +73,7 @@ await probe(async ({ browser, open }) => {
     const { TIME_SIGNATURES } = await import('/src/platform/engine-wire.ts');
     const meter = TIME_SIGNATURES.find((m) => m.num === 3 && m.den === 4);
     await session.loadSession({ bpm: 300, meter, bars: 3, masterLengthFrames: frames, tracks: [0, 1].map((index) => ({
-      index, pcm: new Float32Array(frames).fill((index + 1) * 0.1), volume: 1, muted: false, reversed: false,
+      index, pcm: [new Float32Array(frames).fill((index + 1) * 0.1)], volume: 1, muted: false, reversed: false,
       state: index === 0 ? 'PLAYING' : 'STOPPED', fx: defaultFxStates() })) });
   }, FRAMES);
   await engineHolds(['Playing', 'Stopped']);

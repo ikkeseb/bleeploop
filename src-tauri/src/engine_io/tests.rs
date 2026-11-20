@@ -59,9 +59,14 @@ struct Harness {
 
 impl Harness {
     fn new() -> Harness {
+        Harness::with_loops(8.0)
+    }
+
+    /// A harness whose lanes hold `max_loop_seconds`.
+    fn with_loops(max_loop_seconds: f64) -> Harness {
         let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let fake = Fake::new();
-        let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 8.0 }, FakeDriver(fake.clone())).expect("the device owner starts");
+        let host = EngineHost::with_driver(HostConfig { max_loop_seconds }, FakeDriver(fake.clone())).expect("the device owner starts");
         Harness { host, fake, events: Vec::new(), cursor: 0, _serial: serial }
     }
 
@@ -1715,7 +1720,7 @@ fn the_kept_meter_is_the_one_the_engine_applied_through_a_rebuild_and_an_import(
 
     // An import sets the meter with no command: the kept one follows it, and so does the next engine.
     let frames = frames_per_bar(240.0, 44_100, five);
-    let load = serde_json::json!({ "bpm": 240, "meter": { "num": 5, "den": 4, "beats": 5 }, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    let load = serde_json::json!({ "bpm": 240, "meter": { "num": 5, "den": 4, "beats": 5 }, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "channels": 1, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
     h.host.load_session(&session_bytes(&load, &vec![0.0; frames as usize])).expect("a 5/4 load");
     assert_eq!(next_meter(&mut h, "the load's transport"), five);
     let (header, _) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
@@ -1740,7 +1745,7 @@ fn an_imported_tempo_outlives_a_clear_all_and_reaches_a_rebuilt_engine() {
     h.wait_event("the tempo the player set", |e| matches!(e, Event::Transport { bpm: 100, .. }).then_some(()));
     // An import sets the tempo with no command; CLEAR ALL unlocks it and leaves it where the load put it.
     let frames = frames_per_bar(140.0, RATE as u32, Meter::FOUR_FOUR);
-    let load = serde_json::json!({ "bpm": 140, "meter": { "num": 4, "den": 4, "beats": 4 }, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    let load = serde_json::json!({ "bpm": 140, "meter": { "num": 4, "den": 4, "beats": 4 }, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "channels": 1, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
     h.host.load_session(&session_bytes(&load, &vec![0.0; frames as usize])).expect("a 140 BPM load");
     h.wait_event("the load's transport", |e| matches!(e, Event::Transport { bpm: 140, locked: true, .. }).then_some(()));
     h.send(Command::ClearAll);
@@ -2290,9 +2295,10 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     assert_eq!(header["meter"], serde_json::json!({ "num": 4, "den": 4, "beats": 4 }), "the default meter, named");
     assert_eq!(header["masterLengthFrames"], length);
     let mix = unity_mix();
-    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing", "mix": mix }]));
-    assert_eq!(pcm.len(), length as usize);
+    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "channels": 2, "reversed": true, "state": "Playing", "mix": mix }]));
+    assert_eq!(pcm.len(), 2 * length as usize, "two blocks: the left side, then the right");
     assert!(pcm.iter().any(|&x| x.abs() > 0.1), "the loop holds the tone");
+    assert_eq!(pcm[..length as usize], pcm[length as usize..], "a mono input's take: its two sides alike");
 
     let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": length, "tracks": header["tracks"] });
     let err = h.host.load_session(&session_bytes(&load, &pcm)).expect_err("the lanes are not empty");
@@ -2320,7 +2326,7 @@ fn a_session_whose_bars_overflow_is_refused() {
     let h = Harness::new();
     h.open(asio(Some(256)));
     for bars in [i64::MAX / 2, i64::MAX] {
-        let load = serde_json::json!({ "bpm": 240, "bars": bars, "masterLengthFrames": RATE, "tracks": [{ "index": 0, "frames": RATE, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+        let load = serde_json::json!({ "bpm": 240, "bars": bars, "masterLengthFrames": RATE, "tracks": [{ "index": 0, "frames": RATE, "channels": 1, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
         let err = h.host.load_session(&session_bytes(&load, &vec![0.0; RATE as usize])).expect_err("a bar count no length has");
         assert!(err.contains("bars"), "{err}");
     }
@@ -2362,12 +2368,15 @@ fn an_export_snapshot_carries_the_engines_wet_master_in_play_order_with_the_kept
 
     let (header, stems, [left, right]) = session_with_master(&h.host.snapshot(true).expect("an export's snapshot"));
     let mix = unity_mix();
-    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing", "mix": mix }]));
+    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "channels": 2, "reversed": true, "state": "Playing", "mix": mix }]));
     assert_eq!(header["master"], serde_json::json!({ "frames": length }));
     assert!(header.get("masterError").is_none(), "{header}");
-    assert_eq!((stems.len(), left.len(), right.len()), (length as usize, length as usize, length as usize));
+    assert_eq!((stems.len(), left.len(), right.len()), (2 * length as usize, length as usize, length as usize));
     let (plain_header, plain) = session_parts(&h.host.snapshot(false).unwrap());
     assert!(plain_header.get("master").is_none() && plain == stems, "a recovery's snapshot has the stems alone");
+    // A mono input's take: its two blocks alike, the left the stem the master is held against.
+    let stems = stems[..length as usize].to_vec();
+    assert_eq!(stems[..], plain[length as usize..]);
     // The reversed lane's master is heard as its stem is: in play order, reversed once, not twice.
     for (side, channel) in [("left", &left), ("right", &right)] {
         let (g, residue) = fit(channel, &stems);
@@ -2385,7 +2394,7 @@ fn an_export_snapshot_carries_the_engines_wet_master_in_play_order_with_the_kept
     h.play(RATE / 100);
     let (muted_header, muted_stems, [ml, mr]) = session_with_master(&h.host.snapshot(true).unwrap());
     assert_eq!(muted_header["tracks"][0]["mix"]["muted"], true);
-    assert_eq!(muted_stems, stems, "a mute leaves the stem as it is");
+    assert_eq!(muted_stems, plain, "a mute leaves the stem as it is");
     let loudest = ml.iter().chain(&mr).fold(0.0f32, |p, x| p.max(x.abs()));
     assert!(loudest < 1e-6, "the muted lane is silent in the master ({loudest})");
     let diag = h.host.diag();
@@ -3006,9 +3015,8 @@ fn a_panic_in_the_wasapi_input_callback_restarts_the_device_and_keeps_the_loop()
     assert!(h.host.take_device_events().is_empty(), "nothing was lost");
 }
 
-/// A one-channel session (the bytes before format v3, which the writer still writes: each stem one
-/// channel) loads through its real bytes onto both sides: the device plays the lane's samples on the
-/// left and the right alike.
+/// A one-channel session (a v1 or v2 archive's mono stem, `"channels": 1`) loads through its real bytes
+/// onto both sides: the device plays the lane's samples on the left and the right alike.
 #[test]
 fn a_one_channel_sessions_lane_plays_on_both_sides() {
     let h = Harness::new();
@@ -3017,7 +3025,7 @@ fn a_one_channel_sessions_lane_plays_on_both_sides() {
     // 240 BPM, one bar of 4/4: a second. A saw, so nearly every frame sounds.
     let frames = RATE;
     let pcm: Vec<f32> = (0..frames as usize).map(|k| 0.2 * ((k % 480) as f32 / 480.0 - 0.5)).collect();
-    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "channels": 1, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
     let from = h.frame();
     h.host.load_session(&session_bytes(&load, &pcm)).expect("the load");
     h.play(RATE / 2);
@@ -3027,7 +3035,146 @@ fn a_one_channel_sessions_lane_plays_on_both_sides() {
     // a side the decoder lost or garbled would be orders past it.
     let odd: Vec<(usize, [f32; 2])> = played.iter().copied().enumerate().filter(|(_, p)| (p[0] - p[1]).abs() > 1e-6).take(8).collect();
     assert!(odd.is_empty(), "on both sides alike: {odd:?} of {}", played.len());
+    // The lane holds the stem on each side bit for bit: a snapshot gives it back as two blocks, each the
+    // mono stem, as the mono lane before format v3 held it.
+    let (header, back) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    assert_eq!(header["tracks"][0]["channels"], 2);
+    assert_bits(&back[..frames as usize], &pcm, "the left side is the stem's bits");
+    assert_bits(&back[frames as usize..], &pcm, "the right side is the stem's bits");
 }
+
+/// `got` is `want` bit for bit (a `-0.0` a codec changed shows); else the first frame that differs, both
+/// values, in the message.
+#[track_caller]
+fn assert_bits(got: &[f32], want: &[f32], what: &str) {
+    let at = (0..got.len().max(want.len())).find(|&k| got.get(k).map(|x| x.to_bits()) != want.get(k).map(|x| x.to_bits()));
+    if let Some(k) = at {
+        panic!("{what}: differs first at frame {k} of {}: {:?} vs {:?}", want.len(), got.get(k), want.get(k));
+    }
+}
+
+/// A two-channel load's bytes: per track its left block, then its right.
+fn stereo_bytes(header: &serde_json::Value, tracks: &[[&[f32]; 2]]) -> Vec<u8> {
+    let pcm: Vec<f32> = tracks.iter().flat_map(|[l, r]| l.iter().chain(r.iter()).copied()).collect();
+    session_bytes(header, &pcm)
+}
+
+/// Format v3's stems (`docs/unit-contract.md` §8): a take whose sides differ, `[x, -x]` among them,
+/// goes through its real bytes into the engine and back out (a recovery's snapshot, an export's stems)
+/// bit for bit per side, plays on each side as it holds it, and its export's master keeps both sides.
+/// Before v3 the snapshot wrote each track as its sides' mean: `[x, -x]` saved as silence.
+#[test]
+fn a_stereo_sessions_sides_survive_its_bytes_bit_for_bit_and_play_apart() {
+    let mut h = Harness::new();
+    h.fake.set_input(|_| 0.0);
+    h.open(asio(Some(256)));
+    let frames = RATE;
+    let n = frames as usize;
+    // Lane 0 `[x, -x]` (a mean would cancel it); lane 1, muted, sides unalike, with the edge values a codec
+    // could lose: past full scale, the smallest subnormal, -0.0.
+    let x: Vec<f32> = (0..n).map(|k| 0.2 * ((k % 480) as f32 / 480.0 - 0.5)).collect();
+    let minus: Vec<f32> = x.iter().map(|v| -v).collect();
+    let mut left: Vec<f32> = (0..n).map(|k| 0.1 * (k as f32 * 0.013_7).sin()).collect();
+    let mut right: Vec<f32> = (0..n).map(|k| 0.3 * ((k % 97) as f32 / 97.0) - 0.05).collect();
+    left[1024..1027].copy_from_slice(&[1.5, -1.5, f32::from_bits(1)]);
+    right[1024..1027].copy_from_slice(&[-0.0, 1e-7, -2.0]);
+    let mut muted = unity_mix();
+    muted["muted"] = true.into();
+    let track = |index: u8, mix: serde_json::Value| serde_json::json!({ "index": index, "frames": frames, "channels": 2, "reversed": false, "state": "Playing", "mix": mix });
+    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [track(0, unity_mix()), track(1, muted)] });
+    let sides: [[&[f32]; 2]; 2] = [[&x, &minus], [&left, &right]];
+    let from = h.frame();
+    h.host.load_session(&stereo_bytes(&load, &sides)).expect("the load");
+    h.play(RATE / 2);
+
+    // A recovery's snapshot: every block back, bit for bit.
+    let (header, back) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    assert_eq!(header["tracks"], load["tracks"], "two channels a track, each lane's mix as loaded");
+    assert_eq!(back.len(), 4 * n, "two blocks a track");
+    for (k, block) in sides.iter().flatten().enumerate() {
+        assert_bits(&back[k * n..(k + 1) * n], block, &format!("block {k}: track {} side {}", k / 2, k % 2));
+    }
+
+    // What plays: lane 0 alone (lane 1 muted), its right side the left's negation (to the output stage's
+    // rounding, the ulp `a_one_channel_sessions_lane_plays_on_both_sides` names), and loud.
+    let played: Vec<[f32; 2]> = h.fake.heard_stereo(from..h.frame()).into_iter().filter(|p| !p[0].is_nan()).collect();
+    assert!(played.iter().filter(|p| p[0].abs() > 0.01).count() > n / 4, "the [x, -x] lane plays");
+    let odd: Vec<[f32; 2]> = played.iter().copied().filter(|p| (p[0] + p[1]).abs() > 1e-6).take(8).collect();
+    assert!(odd.is_empty(), "the right side is the left's negation: {odd:?}");
+
+    // An export: the same stems, and a master whose sides keep the lane's: opposite, and sounding.
+    let (header, stems, [ml, mr]) = session_with_master(&h.host.snapshot(true).expect("an export's snapshot"));
+    assert_eq!(header["tracks"], load["tracks"]);
+    assert_bits(&stems, &back, "the export's stems are the recovery's");
+    let loud = ml.iter().filter(|v| v.abs() > 0.01).count();
+    let worst = ml.iter().zip(&mr).map(|(l, r)| (l + r).abs()).fold(0.0f32, f32::max);
+    assert!(loud > n / 4 && worst < 1e-6, "the master's sides are opposite ({worst} off) and sound ({loud} frames)");
+
+    // A lane whose right side is silent plays on its left alone.
+    h.send(Command::ClearAll);
+    h.wait_lane("the lanes clear", 0, |i| i.state == LaneState::Empty);
+    until("the overview says EMPTY", || !h.host.core.holds_audio());
+    h.play(RATE / 2);
+    let silent = vec![0.0f32; n];
+    let one = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [track(0, unity_mix())] });
+    let from = h.frame();
+    h.host.load_session(&stereo_bytes(&one, &[[&x, &silent]])).expect("the second load");
+    h.play(RATE / 2);
+    let played: Vec<[f32; 2]> = h.fake.heard_stereo(from..h.frame()).into_iter().filter(|p| !p[0].is_nan()).collect();
+    let (l, r) = played.iter().fold((0.0f32, 0.0f32), |(l, r), p| (l.max(p[0].abs()), r.max(p[1].abs())));
+    assert!(l > 0.05 && r < 1e-6, "the left side plays ({l}), the right stays silent ({r})");
+}
+
+/// A session's load bytes from outside the repo (`LF_LOAD_BYTES`: a file holding exactly what the UI sent
+/// `engine_load_session`, e.g. a v0.8.9 autosave's restore captured from the browser fake), loaded at
+/// `LF_LOAD_RATE` Hz: every track's blocks come back from a snapshot on both sides bit for bit (a
+/// one-channel track's one block on each). The owner's data stays out of the repo, so this runs by hand:
+/// `LF_LOAD_BYTES=<path> LF_LOAD_RATE=44100 cargo test -p app --no-default-features --lib
+/// loads_session_bytes_from_outside -- --ignored` (from WSL, `WSLENV=LF_LOAD_BYTES/p:LF_LOAD_RATE`).
+#[test]
+#[ignore = "runs by hand on load bytes from outside the repo"]
+fn loads_session_bytes_from_outside() {
+    let path = std::env::var("LF_LOAD_BYTES").expect("LF_LOAD_BYTES names the load bytes");
+    let rate: u32 = std::env::var("LF_LOAD_RATE").map_or(48_000, |r| r.parse().expect("LF_LOAD_RATE is a rate"));
+    let bytes = std::fs::read(&path).expect("the load bytes read");
+    let (header, pcm) = session_parts(&bytes);
+    let frames = header["masterLengthFrames"].as_u64().expect("a length") as usize;
+    let h = Harness::with_loops(60.0);
+    h.fake.set_input(|_| 0.0);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = rate;
+    h.open(asio(Some(256)));
+    h.host.load_session(&bytes).expect("the load");
+    let (back, both) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    let tracks = header["tracks"].as_array().expect("tracks");
+    assert_eq!(back["tracks"].as_array().map(Vec::len), Some(tracks.len()), "every track comes back");
+    let (mut at, mut lines) = (0, Vec::new());
+    for (k, t) in tracks.iter().enumerate() {
+        let channels = t["channels"].as_u64().expect("channels") as usize;
+        let blocks: Vec<&[f32]> = (0..channels).map(|c| &pcm[at + c * frames..at + (c + 1) * frames]).collect();
+        at += channels * frames;
+        let (left, right) = (&both[2 * k * frames..(2 * k + 1) * frames], &both[(2 * k + 1) * frames..(2 * k + 2) * frames]);
+        assert_bits(left, blocks[0], &format!("track {k}: the left side is its first block"));
+        assert_bits(right, blocks[channels - 1], &format!("track {k}: the right side is its last block"));
+        let peak = left.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        lines.push(format!("track {k} (lane {}): {channels} channel(s) in, both sides back bit for bit, peak {peak}", t["index"]));
+    }
+    println!("{} at {rate} Hz, {} BPM, {} bars, {frames} frames:\n{}", path, header["bpm"], header["bars"], lines.join("\n"));
+}
+
+#[test]
+fn a_load_with_a_track_of_no_or_three_channels_or_short_pcm_is_refused() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let frames = RATE;
+    let n = frames as usize;
+    for (channels, blocks) in [(0, 0), (3, 3), (2, 1)] {
+        let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "channels": channels, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+        let err = h.host.load_session(&session_bytes(&load, &vec![0.0; blocks * n])).expect_err("refused");
+        assert!(err.contains("channels") || err.contains("PCM bytes"), "{channels} channels, {blocks} blocks: {err}");
+    }
+    assert!(!h.host.core.holds_audio(), "nothing loaded");
+}
+
 
 /// One export's master renders at a time (`Core::master_render`): a second export waits for the
 /// first's render, then renders its own, never refused.

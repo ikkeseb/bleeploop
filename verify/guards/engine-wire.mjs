@@ -355,11 +355,13 @@ check('the fixture has a 4/4 and a compound meter on the wire, and a load header
 });
 
 // ── Session bytes: a snapshot's stems, an export's master after them, or the render's error ──────────
+/** Silent PCM for a header: each track's `channels` blocks (1 when it names none). */
+const silentBlocks = (h) => h.tracks.flatMap((t) => Array.from({ length: t.channels ?? 1 }, () => new Float32Array(h.masterLengthFrames)));
 // The fixture's snapshot headers: every field the Rust side writes is read, each track's mix included.
 for (const entry of fixture.snapshotHeaders) {
   check(`snapshot header ${JSON.stringify(entry).slice(0, 60)}… reads every field`, () => {
     const frames = entry.masterLengthFrames;
-    const stems = entry.tracks.map(() => new Float32Array(frames));
+    const stems = silentBlocks(entry);
     const master = entry.master ? { left: new Float32Array(frames), right: new Float32Array(frames) } : undefined;
     const { header } = decodeSnapshot(encodeSessionBytes(structuredClone(entry), stems, master).buffer);
     assert.deepEqual(header, entry);
@@ -444,7 +446,7 @@ check("the browser fake's FX ranges are the UI's (the engine's)", () => {
     // Without its master: the bytes are whole, so only the edited mix can make the decode throw.
     delete h.master;
     edit(h.tracks[0]);
-    return () => decodeSnapshot(encodeSessionBytes(h, h.tracks.map(() => new Float32Array(h.masterLengthFrames))).buffer);
+    return () => decodeSnapshot(encodeSessionBytes(h, silentBlocks(h)).buffer);
   };
   check('the unedited mix decodes (so each refusal below is its edit)', () => track(() => {})());
   const refusedMix = {
@@ -464,8 +466,7 @@ check("the browser fake's FX ranges are the UI's (the engine's)", () => {
 // track's mix included, and the fake's load sets each loaded lane's mix over what was sent before.
 for (const entry of fixture.loadHeaders) {
   check(`load header ${JSON.stringify(entry).slice(0, 60)}… reads every field`, () => {
-    const pcm = entry.tracks.map(() => new Float32Array(entry.masterLengthFrames));
-    const { header } = decodeLoadSession(encodeSessionBytes(structuredClone(entry), pcm).buffer);
+    const { header } = decodeLoadSession(encodeSessionBytes(structuredClone(entry), silentBlocks(entry)).buffer);
     assert.deepEqual(header, entry);
     for (const t of header.tracks) validateFxStates(t.mix.fx, `track ${t.index}`);
   });
@@ -475,7 +476,7 @@ check('a mix carries its pan off the centre and leaves it out at the centre, as 
   const snapshot = fixture.snapshotHeaders[0];
   const frames = snapshot.masterLengthFrames;
   const master = { left: new Float32Array(frames), right: new Float32Array(frames) };
-  const { header } = decodeSnapshot(encodeSessionBytes(structuredClone(snapshot), snapshot.tracks.map(() => new Float32Array(frames)), master).buffer);
+  const { header } = decodeSnapshot(encodeSessionBytes(structuredClone(snapshot), silentBlocks(snapshot), master).buffer);
   assert.deepEqual(pans(header.tracks.map((t) => t.mix)), [-1, undefined]);
   const mixEvent = decodeEvent(structuredClone(fixture.events.find((e) => tag(e)[0] === 'Mix')));
   assert.equal(mixEvent.mix.pan, 0.25);
@@ -483,8 +484,7 @@ check('a mix carries its pan off the centre and leaves it out at the centre, as 
 check('a load header from before pan (no pan in its mixes) reads as centred lanes', () => {
   const legacy = fixture.loadHeaders[0];
   assert.ok(legacy.tracks.every((t) => !('pan' in t.mix)), 'the fixture keeps a load header without pan');
-  const pcm = legacy.tracks.map(() => new Float32Array(legacy.masterLengthFrames));
-  const { header } = decodeLoadSession(encodeSessionBytes(structuredClone(legacy), pcm).buffer);
+  const { header } = decodeLoadSession(encodeSessionBytes(structuredClone(legacy), silentBlocks(legacy)).buffer);
   assert.ok(header.tracks.every((t) => (t.mix.pan ?? 0) === 0));
   assert.ok(fixture.loadHeaders.some((h) => h.tracks.some((t) => t.mix.pan === 0.5)), 'and one with a pan');
 });
@@ -507,7 +507,7 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
   const track = (edit) => {
     const h = structuredClone(loaded);
     edit(h.tracks[0], h);
-    return () => decodeLoadSession(encodeSessionBytes(h, h.tracks.map(() => new Float32Array(h.masterLengthFrames))).buffer);
+    return () => decodeLoadSession(encodeSessionBytes(h, silentBlocks(h)).buffer);
   };
   const refusedLoad = {
     'a load track without its mix': track((t) => delete t.mix),
@@ -516,6 +516,9 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
     'a load mix whose pan is no number': track((t) => (t.mix.pan = '0.5')),
     'a load track that overdubs': track((t) => (t.state = 'Overdubbing')),
     'a load track with an unknown field': track((t) => (t.gain = 1)),
+    'a load track that names no channels': track((t) => delete t.channels),
+    'a load track of three channels': track((t) => (t.channels = 3)),
+    'a load track whose channels are a string': track((t) => (t.channels = '2')),
     'a load track listed twice': track((t, h) => h.tracks.push(structuredClone(t))),
     'a load header with an unknown field': track((_, h) => (h.rate = 48000)),
     'a load header with a meter the engine does not offer': track((_, h) => (h.meter = { num: 7, den: 8, beats: 7 })),
@@ -540,7 +543,9 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
   const bytes = (h, m) => encodeSessionBytes(h, stems, m).buffer;
   check('a snapshot without a master decodes to its stems', () => {
     const s = decodeSnapshot(bytes(header()));
-    assert.deepEqual(s.pcm.map((b) => Array.from(b)), stems.map((b) => Array.from(b)));
+    // A scripted track that names no channels is one: its block on both sides, the right a copy.
+    assert.deepEqual(s.pcm.map((sides) => sides.map((b) => Array.from(b))), stems.map((b) => [Array.from(b), Array.from(b)]));
+    assert.ok(s.pcm.every(([l, r]) => l !== r), 'two arrays, not one twice');
     assert.equal(s.master, null);
     assert.deepEqual(Object.keys(s.header).sort(), ['bpm', 'masterLengthFrames', 'meter', 'rate', 'tracks']);
     assert.deepEqual(s.header.meter, { num: 4, den: 4, beats: 4 }, 'a scripted header without a meter reads as 4/4');
@@ -548,7 +553,7 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
   check("an export's snapshot carries its master after the stems, left then right", () => {
     const raw = bytes(header({ master: { frames: 4 } }), master);
     const s = decodeSnapshot(raw);
-    assert.deepEqual(s.pcm.map((b) => Array.from(b)), stems.map((b) => Array.from(b)));
+    assert.deepEqual(s.pcm.map((sides) => sides.map((b) => Array.from(b))), stems.map((b) => [Array.from(b), Array.from(b)]));
     assert.deepEqual([Array.from(s.master.left), Array.from(s.master.right)], [[1, 2, 3, 4], [5, 6, 7, 8]]);
     assert.deepEqual(s.header.master, { frames: 4 });
     const tail = new Float32Array(raw.slice(raw.byteLength - 32));
@@ -582,6 +587,44 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
     'an encode with master PCM and no master in the header': () => encodeSessionBytes(header(), stems, master),
   };
   for (const [name, fn] of Object.entries(refusedSession)) check(`refuses ${name}`, () => assert.throws(fn));
+
+  // Format v3 (`docs/unit-contract.md` §8): each track's two sides planar, left then right, `[x, -x]` kept.
+  const stereo = (extra = {}) => ({ ...header(extra), tracks: header().tracks.map((t) => ({ ...t, channels: 2 })) });
+  const x = Float32Array.from([0.25, -0.5, 1.5, -0]);
+  const sides = [x, x.map((v) => -v), Float32Array.from([1, 2, 3, 4]), Float32Array.from([-1e-7, 0, 7, 0.5])];
+  check('a two-channel snapshot decodes each side as written, [x, -x] kept, bit for bit', () => {
+    const s = decodeSnapshot(encodeSessionBytes(stereo(), sides).buffer);
+    assert.deepEqual(s.header.tracks.map((t) => t.channels), [2, 2]);
+    const bits = (a) => Array.from(new Uint32Array(a.buffer, a.byteOffset, a.length));
+    assert.deepEqual(s.pcm.flat().map(bits), sides.map(bits));
+  });
+  check("a two-channel snapshot's master follows its four blocks", () => {
+    const s = decodeSnapshot(encodeSessionBytes(stereo({ master: { frames: 4 } }), sides, master).buffer);
+    assert.deepEqual([Array.from(s.master.left), Array.from(s.master.right)], [[1, 2, 3, 4], [5, 6, 7, 8]]);
+  });
+  check('a load splits its blocks by each track\'s channels (two, then one)', () => {
+    const load = { bpm: 120, bars: 1, masterLengthFrames: 4, tracks: [
+      { index: 0, frames: 4, channels: 2, reversed: false, state: 'Playing', mix },
+      { index: 1, frames: 4, channels: 1, reversed: false, state: 'Stopped', mix },
+    ] };
+    const { pcm } = decodeLoadSession(encodeSessionBytes(load, sides.slice(0, 3)).buffer);
+    assert.deepEqual(pcm.map((t) => t.map((b) => Array.from(b))), [[Array.from(sides[0]), Array.from(sides[1])], [Array.from(sides[2])]]);
+  });
+  const refusedStereo = {
+    'an encode with fewer blocks than the channels': () => encodeSessionBytes(stereo(), sides.slice(0, 3)),
+    'a snapshot track of three channels': () => decodeSnapshot(encodeSessionBytes({ ...header(), tracks: [{ ...header().tracks[0], channels: 3 }] }, [x]).buffer),
+    'a snapshot track of no channels': () => {
+      const h = header();
+      h.tracks = [{ ...h.tracks[0], channels: 0 }];
+      // Packed by hand: the encoder itself would refuse the count.
+      const json = new TextEncoder().encode(JSON.stringify(h));
+      const out = new Uint8Array(4 + json.length);
+      new DataView(out.buffer).setUint32(0, json.length, true);
+      out.set(json, 4);
+      decodeSnapshot(out.buffer);
+    },
+  };
+  for (const [name, fn] of Object.entries(refusedStereo)) check(`refuses ${name}`, () => assert.throws(fn));
 }
 
 console.log(`=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);

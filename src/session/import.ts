@@ -16,30 +16,12 @@
 // Audio) so verify/guards/import.mjs can import the validator under Node. This coordinator is the
 // browser-only half.
 import { TIME_SIGNATURES } from '../platform';
-import { MAX_LOOP_SECONDS, TRACK_COUNT } from '../ui/state/looper-types';
 import type { SlotTone } from '../ui/state/slot-tones';
 import type { SessionSource } from './session-source';
+import { MAX_ARCHIVE_ENTRIES, MAX_TONE_BYTES, maxImportArchiveBytes } from './archive-limits.ts';
 import { validateSession, validateSessionPlugins } from './session-schema.ts';
 import { parseZip } from './unzip.ts';
 import { decodeWav } from './wav.ts';
-
-const ZIP_OVERHEAD_BYTES = 1 << 20;
-/** The plugin slots, each of which may carry a tone. */
-const SLOT_COUNT = 2;
-/** The largest tone file: `MAX_STATE_BYTES` in `src-tauri/src/host/tone.rs` plus its small header.
- * Change them together. */
-const MAX_TONE_BYTES = (16 << 20) + (1 << 16);
-
-/** Allow five Float32 editable stems plus a PCM16 stereo master, two slot tones and metadata. */
-export function maxImportArchiveBytes(sampleRate: number): number {
-  return (
-    (TRACK_COUNT * Float32Array.BYTES_PER_ELEMENT + 2 * Int16Array.BYTES_PER_ELEMENT) *
-      MAX_LOOP_SECONDS *
-    sampleRate +
-    SLOT_COUNT * MAX_TONE_BYTES +
-    ZIP_OVERHEAD_BYTES
-  );
-}
 
 /**
  * Import a BleepLoop export archive into an all-EMPTY looper: parse the zip, validate its single
@@ -57,7 +39,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
   if (u8.byteLength > limit) {
     throw new Error(`archive is ${u8.byteLength} bytes; maximum is ${limit}`);
   }
-  const entries = parseZip(u8, TRACK_COUNT + 2 + SLOT_COUNT); // Five stems, a master, session.json, two tones.
+  const entries = parseZip(u8, MAX_ARCHIVE_ENTRIES);
   const byName = new Map<string, (typeof entries)[number]>();
   for (const entry of entries) {
     if (byName.has(entry.name)) {
@@ -106,8 +88,8 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
     const entry = byName.get(st.file);
     if (!entry) throw new Error(`session.json lists "${st.file}" but the archive has no entry with that name`);
     const wav = decodeWav(entry.data);
-    if (wav.channels.length !== 1) {
-      throw new Error(`"${st.file}": expected a mono stem, got ${wav.channels.length} channels`);
+    if (wav.channels.length !== st.channels) {
+      throw new Error(`"${st.file}": expected a ${st.channels === 2 ? 'stereo' : 'mono'} stem, got ${wav.channels.length} channels`);
     }
     if (wav.sampleRate !== session.sampleRate) {
       throw new Error(`"${st.file}": WAV sample rate ${wav.sampleRate} !== session sampleRate ${session.sampleRate}`);
@@ -117,7 +99,8 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
     }
     return {
       index: st.track - 1,
-      pcm: wav.channels[0],
+      // A mono stem (v1, v2) goes as its one channel: the engine plays it on both sides.
+      pcm: wav.channels,
       volume: st.volume,
       muted: st.muted,
       reversed: st.reversed,

@@ -21,9 +21,9 @@ await probe(async ({ open }) => {
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
     const { session } = await import('/src/ui/state/audio.ts');
-    const { encodeSessionBytes, splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+    const { decodeLoadSession, encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
     const { encodeWav } = await import('/src/session/wav.ts');
-    const { maxImportArchiveBytes } = await import('/src/session/import.ts');
+    const { maxImportArchiveBytes } = await import('/src/session/archive-limits.ts');
     const sr = 48000;
     // Browser's own decoder provides an independent interoperability check of the float header.
     const wav = encodeWav([Float32Array.of(0, 2.25, -3.5, 1e-8)], sr, 'float32');
@@ -54,12 +54,13 @@ await probe(async ({ open }) => {
       { Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }]),
     { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }] });
     await lf.importSession(bundle.zipBytes, session);
-    const { header, pcm: loaded } = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer);
+    const { header, pcm: loaded } = decodeLoadSession(lf.native.loadedSessions.at(-1).slice().buffer);
     return {
       externalSamples, saveMs, bytes: bundle.zipBytes.length, limit: maxImportArchiveBytes(sr),
       loads: lf.native.loadedSessions.length, master: header.masterLengthFrames,
-      exact: loaded.length === 5 && loaded.every((track, i) =>
-        track.length === frames && track.every((sample, f) => Object.is(sample, pcm[i][f]))),
+      // Both sides of each lane (format v3's stereo stems; the scripted loops have them alike).
+      exact: loaded.length === 5 && loaded.every((sides, i) => sides.length === 2 && sides.every((track) =>
+        track.length === frames && track.every((sample, f) => Object.is(sample, pcm[i][f])))),
     };
   });
   console.log(JSON.stringify(result));

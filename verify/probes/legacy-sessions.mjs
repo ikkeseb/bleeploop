@@ -6,7 +6,8 @@
  * `src-tauri/crates/lf-engine/tests/v0_1_0_exports.rs`). Each must reach the engine as one session whose
  * header carries the grid (240 BPM, one bar, 48000 frames), both lanes playing forwards, and the mix as
  * saved (track 1 muted at 0.6, track 2 at 1.2 with its filter and delay on; DUB FEEDBACK, which the
- * format did not hold yet, at 100 %, and no pan), and whose PCM is each stem's float32 samples
+ * format did not hold yet, at 100 %, and no pan), each track one channel (the engine plays a mono stem on
+ * both sides: `docs/unit-contract.md` §8), and whose PCM is each stem's float32 samples
  * exactly, read here from the archive's bytes without the product's zip or WAV code. Today's export
  * and import changing together cannot hide a break with these files.
  *
@@ -51,8 +52,8 @@ const HEADER = {
   bars: 1,
   masterLengthFrames: FRAMES,
   tracks: [
-    { index: 0, frames: FRAMES, reversed: false, state: 'Playing', mix: { volume: 0.6, muted: true, dubFeedback: 1, fx: fx(false, false) } },
-    { index: 1, frames: FRAMES, reversed: false, state: 'Playing', mix: { volume: 1.2, muted: false, dubFeedback: 1, fx: fx(true, true) } },
+    { index: 0, frames: FRAMES, channels: 1, reversed: false, state: 'Playing', mix: { volume: 0.6, muted: true, dubFeedback: 1, fx: fx(false, false) } },
+    { index: 1, frames: FRAMES, channels: 1, reversed: false, state: 'Playing', mix: { volume: 1.2, muted: false, dubFeedback: 1, fx: fx(true, true) } },
   ],
 };
 

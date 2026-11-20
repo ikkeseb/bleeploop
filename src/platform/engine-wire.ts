@@ -891,8 +891,10 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
 
 // ── Session bytes (`engine_snapshot` / `engine_load_session`) ───────────────────────────────────────
 //
-// `[u32 LE headerLen][headerLen bytes of UTF-8 JSON][f32 LE mono PCM per header track, in header order]`,
-// no padding; each block holds `frames` samples. The PCM is in PLAY order (what is heard from loop
+// `[u32 LE headerLen][headerLen bytes of UTF-8 JSON][f32 LE planar PCM]`, no padding: per header track, in
+// header order, `channels` blocks of `frames` samples (left, then right). The engine's snapshot writes 2
+// for every track; a load writes 2, or 1 for a v1 or v2 session's mono stem, which the engine plays on both
+// sides (`docs/unit-contract.md` §8). The PCM is in PLAY order (what is heard from loop
 // position 0); `reversed` says the lane plays its recording backwards. A snapshot's track carries its
 // lane's `mix` as the engine applied it where the snapshot pinned the loops, in session.json's track
 // shape; a load's track carries the mix the engine sets on the frame the loops go in (required). A snapshot asked with the master (an export's) whose render succeeded names it in `master` and
@@ -922,6 +924,9 @@ export interface LaneMix {
 export interface SnapshotTrack {
   index: number;
   frames: number;
+  /** Its PCM blocks: the engine writes 2 (left, right); absent is 1 (the browser fake's scripted
+   * snapshot), read as both sides. */
+  channels?: 1 | 2;
   reversed: boolean;
   state: 'Playing' | 'Stopped' | 'Overdubbing';
   /** Its mix on the frame the snapshot pinned the loops (not necessarily when it was asked for). */
@@ -946,6 +951,8 @@ export interface SnapshotHeader {
 export interface LoadTrack {
   index: number;
   frames: number;
+  /** Its PCM blocks: 2 (left, right), or 1 (a mono stem the engine plays on both sides). */
+  channels: 1 | 2;
   reversed: boolean;
   state: 'Playing' | 'Stopped';
   /** The lane's mix from the load's frame: its first loaded sample plays at it. */
@@ -968,19 +975,30 @@ export interface StereoPcm {
   right: Float32Array;
 }
 
-/** Pack a header and its PCM blocks (one per header track, in order), and a snapshot header's master. */
+/** A track's `channels`: 1 or 2. */
+function channelCount(v: unknown, what: string): 1 | 2 {
+  if (v !== 1 && v !== 2) fail(`${what} must be 1 or 2`, v);
+  return v;
+}
+
+/** A track's PCM blocks: its `channels`, 1 when it names none (a scripted snapshot). */
+const trackChannels = (t: { channels?: number }): number => t.channels ?? 1;
+
+/** Pack a header and its PCM blocks (each header track's `channels` blocks, in order: left then right),
+ * and a snapshot header's master. */
 export function encodeSessionBytes(
   header: LoadHeader | SnapshotHeader,
   pcm: readonly Float32Array[],
   master?: StereoPcm,
 ): Uint8Array<ArrayBuffer> {
-  if (pcm.length !== header.tracks.length) fail('one PCM block per header track', { tracks: header.tracks.length, blocks: pcm.length });
+  const frames = header.tracks.flatMap((t) => Array.from({ length: trackChannels(t) }, () => t.frames));
+  if (pcm.length !== frames.length) fail('each header track\'s channels in PCM blocks', { channels: frames.length, blocks: pcm.length });
   const masterFrames = 'master' in header && header.master ? header.master.frames : null;
   if ((masterFrames === null) !== (master === undefined)) fail('a master block pair exactly when the header names one', masterFrames);
   const blocks = master ? [...pcm, master.left, master.right] : pcm;
   const json = new TextEncoder().encode(JSON.stringify(header));
   const samples = blocks.reduce((n, block, k) => {
-    const want = k < header.tracks.length ? header.tracks[k].frames : masterFrames;
+    const want = k < frames.length ? frames[k] : masterFrames;
     if (block.length !== want) fail(`session block ${k} holds ${block.length} samples`, want);
     return n + block.length;
   }, 0);
@@ -996,8 +1014,9 @@ export function encodeSessionBytes(
   return bytes;
 }
 
-/** Split session bytes into their JSON header, one PCM block per header track, and the master's two
- * blocks when the header names one (null otherwise). */
+/** Split session bytes into their JSON header, the PCM blocks of every header track in order (its
+ * `channels`, 1 or 2: absent is 1), and the master's two blocks when the header names one (null
+ * otherwise). */
 export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: Float32Array[]; master: StereoPcm | null } {
   const view = new DataView(buffer);
   if (buffer.byteLength < 4) fail('session bytes too short for a header length', buffer.byteLength);
@@ -1013,7 +1032,12 @@ export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: 
     at += frames * 4;
     return out;
   };
-  const pcm = tracks.map((t) => block(int(obj(t, 'session track').frames, 'session track.frames')));
+  const pcm = tracks.flatMap((raw) => {
+    const t = obj(raw, 'session track');
+    const frames = int(t.frames, 'session track.frames');
+    const channels = t.channels === undefined ? 1 : channelCount(t.channels, 'session track.channels');
+    return Array.from({ length: channels }, () => block(frames));
+  });
   let master: StereoPcm | null = null;
   if (o.master !== undefined) {
     const frames = int(obj(o.master, 'session master').frames, 'session master.frames');
@@ -1050,7 +1074,7 @@ function decodeLaneMix(raw: unknown, what: string): LaneMix {
 
 /** Read `engine_load_session`'s bytes as the engine host does (every track one master long with its
  * mix, at most one track per lane), refusing a field it would ignore. */
-export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pcm: Float32Array[] } {
+export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pcm: Float32Array[][] } {
   const { header, pcm, master } = splitSessionBytes(buffer);
   if (master) fail('a load carries no master', header);
   const o = obj(header, 'load header');
@@ -1060,11 +1084,12 @@ export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pc
   const seen = new Set<number>();
   const tracks = array(o.tracks, 'load.tracks').map((raw): LoadTrack => {
     const t = obj(raw, 'load track');
-    const unknown = Object.keys(t).filter((k) => !['index', 'frames', 'reversed', 'state', 'mix'].includes(k));
+    const unknown = Object.keys(t).filter((k) => !['index', 'frames', 'channels', 'reversed', 'state', 'mix'].includes(k));
     if (unknown.length > 0) fail('load track has unknown fields', unknown);
     const track: LoadTrack = {
       index: lane(t.index, 'load track.index'),
       frames: int(t.frames, 'load track.frames'),
+      channels: channelCount(t.channels, 'load track.channels'),
       reversed: bool(t.reversed, 'load track.reversed'),
       state: oneOf(t.state, ['Playing', 'Stopped'] as const, 'load track.state'),
       mix: decodeLaneMix(t.mix, 'load track.mix'),
@@ -1075,11 +1100,19 @@ export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pc
     return track;
   });
   const meter = o.meter === undefined ? {} : { meter: decodeTimeSignature(o.meter, 'load.meter') };
-  return { header: { bpm: int(o.bpm, 'load.bpm', 1), ...meter, bars: int(o.bars, 'load.bars', 1), masterLengthFrames: length, tracks }, pcm };
+  const decoded: LoadHeader = { bpm: int(o.bpm, 'load.bpm', 1), ...meter, bars: int(o.bars, 'load.bars', 1), masterLengthFrames: length, tracks };
+  return { header: decoded, pcm: perTrack(tracks, pcm) };
 }
 
-/** Read `engine_snapshot`'s bytes: the stems, and the wet master when the snapshot carries one. */
-export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; pcm: Float32Array[]; master: StereoPcm | null } {
+/** `blocks` (every track's channels in order) grouped by track. */
+function perTrack(tracks: readonly { channels?: number }[], blocks: readonly Float32Array[]): Float32Array[][] {
+  let at = 0;
+  return tracks.map((t) => blocks.slice(at, (at += trackChannels(t))));
+}
+
+/** Read `engine_snapshot`'s bytes: each track's stem as its two sides (a one-channel track's block on
+ * both, copied), and the wet master when the snapshot carries one. */
+export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; pcm: [Float32Array, Float32Array][]; master: StereoPcm | null } {
   const { header, pcm, master } = splitSessionBytes(buffer);
   const o = obj(header, 'snapshot header');
   const length = int(o.masterLengthFrames, 'snapshot.masterLengthFrames');
@@ -1088,6 +1121,7 @@ export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; p
     const track: SnapshotTrack = {
       index: lane(t.index, 'snapshot track.index'),
       frames: int(t.frames, 'snapshot track.frames'),
+      ...(t.channels === undefined ? {} : { channels: channelCount(t.channels, 'snapshot track.channels') }),
       reversed: bool(t.reversed, 'snapshot track.reversed'),
       state: oneOf(t.state, ['Playing', 'Stopped', 'Overdubbing'] as const, 'snapshot track.state'),
       mix: decodeLaneMix(t.mix, 'snapshot track.mix'),
@@ -1111,5 +1145,6 @@ export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; p
     if (master) fail('a snapshot carries a master and its error', o.masterError);
     decoded.masterError = str(o.masterError, 'snapshot.masterError');
   }
-  return { header: decoded, pcm, master };
+  const sides = perTrack(tracks, pcm).map(([left, right]): [Float32Array, Float32Array] => [left, right ?? left.slice()]);
+  return { header: decoded, pcm: sides, master };
 }

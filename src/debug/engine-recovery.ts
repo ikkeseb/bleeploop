@@ -51,8 +51,8 @@ async function measure(): Promise<string> {
   return JSON.stringify(
     snap.tracks.map((t) => ({
       lane: t.index + 1,
-      frames: t.pcm.length,
-      sum: t.pcm.reduce((a, x) => a + Math.abs(x), 0),
+      frames: t.pcm[0].length,
+      sum: t.pcm.map((side) => side.reduce((a, x) => a + Math.abs(x), 0)),
       volume: t.volume,
       muted: t.muted,
       reversed: t.reversed,

@@ -169,15 +169,16 @@ export function panGains(p: number): [number, number] {
 }
 
 /**
- * Sum mono tracks into a stereo master, applying per-track volume and pan (`panGains`), skipping muted
- * tracks. HARD-CLAMPS each channel's per-sample sum to [-1,1] AFTER summing and the master level (chosen
+ * Sum tracks into a stereo master, applying per-track volume and pan (`panGains`, a balance on a
+ * stereo track: each side its own gain), skipping muted tracks. A track's `pcm` is its channels:
+ * `[left, right]`, or one, heard on both sides. HARD-CLAMPS each channel's per-sample sum to [-1,1] AFTER summing and the master level (chosen
  * over normalization so the export is deterministic and matches what the limiter would tame at
  * playback). A track with no pan is centred, where both channels are exactly the mono mix this fallback
  * wrote before pan, bit for bit (`verify/guards/wav-export.mjs` holds it).
  * `frames` = masterLengthFrames; tracks shorter than that are treated as zero past their end.
  */
 export function mixStereo(
-  tracks: { pcm: Float32Array; volume: number; muted: boolean; pan?: number }[],
+  tracks: { pcm: readonly Float32Array[]; volume: number; muted: boolean; pan?: number }[],
   frames: number,
   masterLevel: number,
 ): [Float32Array, Float32Array] {
@@ -185,11 +186,12 @@ export function mixStereo(
   for (const t of tracks) {
     if (t.muted || t.volume === 0) continue;
     const gains = panGains(t.pan ?? 0);
-    const n = Math.min(frames, t.pcm.length);
     channels.forEach((out, c) => {
       if (gains[c] === 0) return; // a hard pan: this side stays exactly silent
+      const side = t.pcm[Math.min(c, t.pcm.length - 1)];
+      const n = Math.min(frames, side.length);
       const gain = t.volume * gains[c]; // the volume itself at the centre (gain 1)
-      for (let i = 0; i < n; i++) out[i] += t.pcm[i] * gain;
+      for (let i = 0; i < n; i++) out[i] += side[i] * gain;
     });
   }
   for (const out of channels) {
