@@ -9,6 +9,8 @@
  * Every capability differs per platform (web: a stub or a probe's scriptable fake; tauri: invoke/listen):
  *   - PluginHost   — native CLAP, VST3 and VST2 hosting.
  *   - EngineHost   — the native audio engine (`docs/ARCHITECTURE.md`).
+ *   - ChainHost    — a slot's chain of units (`docs/unit-contract.md` §2): add, remove, move, reload, by unit.
+ *                    Only the browser fake speaks it yet; the Tauri and production hosts refuse every call.
  *   - MidiHost     — native MIDI (`src-tauri/src/engine_io/midi`): its ports, MIDI learn and the stored
  *                    bindings, and what it tells the UI. The app never opens Web MIDI (the WebView's
  *                    permission is denied, and `verify/guards/web-midi.mjs` keeps the Web MIDI API out
@@ -22,7 +24,7 @@
  * Live audio NEVER crosses this boundary as PCM; a session save's snapshot does, once, off the RT path
  * (`EngineHost.snapshot` / `loadSession`).
  */
-import type { DeviceRequest, DeviceStatus, FeedFrame } from './engine-wire';
+import type { DeviceRequest, DeviceStatus, FeedFrame, InputPick, PluginRef, UnitId, UnitSpec } from './engine-wire';
 import type { Dropped, ImportReport, InputItem, MidiActionId, MidiEvent } from './midi-wire';
 
 export type PluginSlot = 0 | 1;
@@ -351,6 +353,10 @@ export interface EngineHost {
    * switched without reopening the device; the running device keeps it for its own reopens. Rejects for
    * a channel the device lacks (nothing changes) and while no device runs. */
   setSlotInputChannel(slot: number, channel: number | null): Promise<void>;
+  /** A slot's input pick in the stereo shape (unit contract §7): auto, one channel (mono) or a pair. Rejects
+   * for a pick the device lacks, either side of a pair (nothing changes), and while no device runs. Only the
+   * browser fake takes it yet: the native engine refuses it until the stereo path lands. */
+  setSlotInputPick(slot: number, pick: InputPick): Promise<void>;
   /** Share output's endpoint (a WASAPI render id, as `listOutputDevices` lists them), or null for off.
    * The mirror runs while the device is ASIO. */
   setShare(endpoint: string | null): Promise<void>;
@@ -362,6 +368,37 @@ export interface EngineHost {
   /** Subscribe to the feed (~60 frames/s while something changes); the first frame has `reset`.
    * Returns the unsubscribe. */
   subscribe(onFrame: (frame: FeedFrame) => void): () => void;
+}
+
+/**
+ * A slot's chain of units (`docs/unit-contract.md` §2, §3): structure is the host's, on its own path, one
+ * call at a time per slot, never items of the `input_send` batch. Each change is answered on the feed's
+ * `chains` (the UI draws the chain from that alone, invariant 3); a call settles on the engine's answer.
+ * Bypass and built-in params ride the batch (`SetUnitBypass`, `ToggleUnit`, `Toggle.Units`, `SetUnitParam`).
+ * A refusal rejects with the reason. The native engine does not have the chain yet: under Tauri and in a
+ * production browser build every call rejects (`available` false); the DEV browser fake answers it.
+ */
+export interface ChainHost {
+  /** False until the native engine speaks the chain; true on the DEV browser fake when it is on. */
+  readonly available: boolean;
+  /** Reserve `unit` across both slots, build it, hand it over at index `at` (a source goes to the head,
+   * replacing a seated one); settles on the engine's answer: `seated`, or `waiting` while a take holds
+   * the alignment. Rejects at once for a reserved id or a full chain; rejects on a failed load. */
+  add(slot: PluginSlot, unit: UnitId, spec: UnitSpec, at: number, toneToken?: number): Promise<'seated' | 'waiting'>;
+  remove(unit: UnitId): Promise<void>;
+  /** A fresh instance under the same id, place and bypass, if `unit` is still `plugin` and was not re-added
+   * since `since` (a `chains` frame's `seq`); the load applies `toneToken`. */
+  reload(unit: UnitId, plugin: PluginRef, since: number, toneToken: number): Promise<'reloaded' | 'moved' | 'failed'>;
+  /** `to`: its index in its own chain; no move across slots. */
+  move(unit: UnitId, to: number): Promise<void>;
+  openEditor(unit: UnitId): Promise<void>;
+  closeEditor(unit: UnitId): Promise<void>;
+  listParams(unit: UnitId): Promise<PluginParamDesc[]>;
+  setParameter(unit: UnitId, paramId: number, value: number): Promise<void>;
+  takeTone(unit: UnitId): Promise<Uint8Array | null>;
+  /** Park a session's tone, identity-checked as today; `matches`: the units it may go to (unit contract §8). */
+  importTone(slot: PluginSlot, bytes: Uint8Array, plugin: PluginRef, unit?: UnitId): Promise<{ token: number | null; name: string; matches: UnitId[] }>;
+  forgetTone(token: number): Promise<void>;
 }
 
 /** A session export's one .zip, handed over for keeping. */
@@ -435,6 +472,7 @@ export interface Platform {
   readonly kind: PlatformKind;
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
+  readonly chain: ChainHost;
   readonly exports: ExportFiles;
   readonly logs: LogFolder;
   readonly updates: AppUpdates;
