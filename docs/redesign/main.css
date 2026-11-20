@@ -1,0 +1,303 @@
+/* MASKIN 2: BleepLoop's main screen. Three bands: TIME and the whole machine | what is played in |
+   the five loops. Depth only on what is pressed, turned or slid; the rest is flat panel, print and glass.
+   Type scale, six sizes: 12 (captions, units, small legends) · 14 (legends, values) · 16 (state words,
+   unit names) · 22 (the display's second figure, slot letters) · 40 (the tempo) · 64 (lane numbers). */
+
+@font-face { font-family: "Instrument Sans"; src: url("fonts/InstrumentSans-Variable.ttf"); font-weight: 400 700; font-stretch: 75% 100%; }
+
+:root {
+  --font-legend: "Instrument Sans";
+  --font-num: "Instrument Sans";
+  --font-name: "Instrument Sans";
+
+  --panel: #15171b;
+  --glass: #07090b;
+  --ink: #e9ecef;
+  --ink-2: #9ba1a9;
+  --ink-3: #5a6068;
+  --white-led: #fff3e0;
+  --lens: #1d2024;
+  --rec: #ff3b52;
+  --dub: #ffae2a;
+  --play: #45d295;
+  --m-green: #4fd98f;
+  --m-amber: #ffb02e;
+  --m-red: #ff4a5a;
+
+  --cap-top: #32363c;
+  --cap-bot: #26292e;
+  --cap-side: #15171a;
+  --cap-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(0,0,0,.28),
+    0 3px 0 var(--cap-side), 0 4px 0 #050607, 0 5px 8px rgba(0,0,0,.55);
+  --recess: 0 -1px 0 rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.06), inset 0 2px 3px rgba(0,0,0,.9);
+
+  /* the panel grain: one static SVG noise tile at low strength, baked into each band's background */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='1.6 0 0 0 -.7 1.6 0 0 0 -.7 1.6 0 0 0 -.7 0 0 0 0 .05'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1920px; height: 1080px; overflow: hidden; }
+body {
+  position: relative; color: var(--ink); background: var(--panel);
+  font: 600 14px/1 var(--font-legend), sans-serif; -webkit-font-smoothing: antialiased;
+}
+body > * { position: absolute; left: 0; width: 1920px; z-index: 1; }
+
+/* ---------- the three roles ---------- */
+.lg, .key { font-family: var(--font-legend), sans-serif; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.num { font-family: var(--font-num), sans-serif; font-weight: 500; font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: 0; white-space: nowrap; }
+.name { font-family: var(--font-name), sans-serif; font-weight: 680; letter-spacing: -.005em; white-space: nowrap; }
+.u { color: var(--ink-2); font-size: 12px; margin-left: .3em; }
+
+/* ---------- bands: each a touch lighter at its top; a milled groove under the top two ---------- */
+.bar { top: 0; height: 82px; background: var(--grain), linear-gradient(#1b1d22, #15171b); }
+.slots { top: 84px; height: 60px; background: var(--grain), linear-gradient(#181a1f, #141619); }
+.groove { height: 2px; background: #08090b; box-shadow: 0 1px 0 rgba(255,255,255,.045); }
+.groove.g1 { top: 82px; } .groove.g2 { top: 144px; }
+.loops { top: 156px; height: 910px; }
+.floor { top: 146px; height: 934px; background: var(--grain), linear-gradient(#16181c, #121418); z-index: 0; }
+
+/* ---------- glass ---------- */
+.bezel { padding: 4px; border-radius: 8px;
+  background: linear-gradient(180deg, #050607 0%, #0b0d10 50%, #22262b 100%);
+  box-shadow: 0 -1px 0 rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.07); }
+.bezel > .glass { width: 100%; height: 100%; }
+.glass { background: var(--glass); border-radius: 4px; position: relative; overflow: hidden;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 8px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+.glass::after { content: ""; position: absolute; left: 4px; right: 4px; top: 1px; height: 18px; pointer-events: none;
+  background: linear-gradient(rgba(255,255,255,.04), transparent); border-radius: 3px 3px 0 0; }
+.win { background: var(--glass); border-radius: 3px; height: 28px; padding: 0 9px; display: inline-flex; align-items: center;
+  gap: 10px; position: relative; color: #f3f2ee; font-size: 14px; flex: none; box-shadow: var(--recess); }
+.win .chev { margin-left: auto; color: var(--ink-2); display: flex; }
+.win.dis { color: var(--ink-3); }
+.win.dis .u { color: var(--ink-3); }
+
+/* ---------- keys: latched (LED over legend), momentary, destructive (sunk) ---------- */
+.key {
+  --kh: 38px; height: var(--kh); min-width: var(--kh); padding: 0 12px; border-radius: 4px; border: 0;
+  background: linear-gradient(var(--cap-top), var(--cap-bot)); box-shadow: var(--cap-shadow);
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  font-size: 14px; color: var(--ink); position: relative; flex: none; line-height: 1;
+}
+.key svg { display: block; flex: none; }
+.key.latch { padding-top: 4px; }
+.key.latch > .led { position: absolute; top: 6px; left: 50%; margin-left: -8px; }
+.key.dis { color: #4d535a; background: linear-gradient(#1d2024, #191b1f);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 3px 0 #111316, 0 4px 0 #050607, 0 5px 6px rgba(0,0,0,.35); }
+.key.clr { font-size: 12px; color: var(--ink-2); background: #060708;
+  box-shadow: inset 0 2px 0 rgba(0,0,0,.95), inset 0 3px 6px rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.075); isolation: isolate; }
+.key.clr::before { content: ""; position: absolute; inset: 4px 4px 3px; border-radius: 3px; z-index: -1;
+  background: linear-gradient(#1f2226, #191b1f); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); }
+.key.clr.dis { color: #42474e; }
+.key.clr.dis::before { background: linear-gradient(#16181b, #131518); }
+.led { width: 16px; height: 3px; border-radius: 1px; background: #0a0b0d; flex: none;
+  box-shadow: inset 0 1px 1px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+.led.on { background: var(--white-led); box-shadow: 0 0 6px 1px rgba(255,226,186,.5), 0 0 2px rgba(255,244,228,.95); }
+.key.dis .led { opacity: .5; }
+.sqg { width: 8px; height: 8px; border-radius: 1.5px; background: currentColor; flex: none; }
+
+/* ---------- 1. command bar: four groups, 44 px of panel at least between them ---------- */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 44px; padding: 0 24px 0 26px; }
+.grp { display: flex; align-items: center; gap: 8px; height: 64px; }
+.brand { font: 700 12px/1 var(--font-legend); letter-spacing: .22em; color: #d9dde2; margin-right: 12px; }
+
+/* bar keys: one height, the legend always on one line; LED above it, the value below it */
+.bk { --kh: 52px; width: 72px; padding: 0; display: block; }
+.bk > * { position: absolute; left: 0; right: 0; margin: 0 auto; text-align: center; }
+.bk.latch > .led { top: 9px; width: 18px; margin-left: -9px; left: 50%; right: auto; }
+.bk .l { top: 19px; display: flex; justify-content: center; align-items: center; gap: 6px; }
+.bk .v { top: 36px; font-size: 12px; color: var(--ink-2); letter-spacing: .02em; }
+.bk.on .v { color: #f4f2ec; }
+.bk .v .w { font-family: var(--font-legend); font-weight: 600; letter-spacing: .06em; font-size: 12px; }
+.bk.tap { width: 60px; }
+/* a two-line key with no LED centres its two lines in the cap (the LED keys keep theirs under the LED) */
+.bk.fade .l { top: 11px; }
+.bk.fade .v { top: 28px; }
+.bk.clr .l { color: var(--ink-2); font-size: 12px; }
+.rec .bk { width: 92px; }
+.rec .bk .l { letter-spacing: .05em; }
+
+.disp { width: 444px; height: 64px; flex: none; }
+.disp .glass { display: flex; align-items: center; padding: 0 18px 9px 18px; color: #f4f2ec; }
+.disp .tempo { font-size: 40px; line-height: 1; font-weight: 500; letter-spacing: -.01em; }
+.disp .meta { display: flex; flex-direction: column; gap: 5px; margin-left: 10px; font-size: 14px; color: var(--ink-2); }
+.disp .meta .top { display: flex; align-items: center; gap: 5px; }
+.disp .lamps { display: flex; gap: 10px; margin: 0 0 0 28px; }
+.disp .lamps i { width: 9px; height: 9px; border-radius: 50%; background: #1c1e22; box-shadow: inset 0 1px 1px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.05); }
+.disp .lamps i.on { background: var(--white-led); box-shadow: 0 0 6px 1px rgba(255,232,200,.5); }
+.disp .ro { display: flex; flex-direction: column; gap: 5px; margin-left: 26px; }
+.disp .lamps + .ro { margin-left: auto; }
+.disp .cap { font-size: 12px; color: #747b84; letter-spacing: .08em; }
+.disp .fig { font-size: 22px; line-height: 1; color: #f4f2ec; }
+.disp .fig .w { font-size: 12px; color: var(--ink-2); margin-left: 5px; }
+.disp .progress { position: absolute; left: 18px; right: 18px; bottom: 7px; height: 3px; border-radius: 1.5px; background: #222529; }
+.disp .progress::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 31.25%; border-radius: 1.5px; background: var(--white-led); box-shadow: 0 0 4px rgba(255,232,200,.55); }
+.disp .progress b { position: absolute; top: -3px; width: 1px; height: 9px; background: #50555c; }
+.disp .progress b:first-child { background: transparent; }
+
+.master { gap: 0; }
+.meter { position: relative; width: 150px; height: 40px; flex: none; }
+.meter .lad { position: absolute; left: 0; right: 0; height: 7px; }
+.meter .lad i { position: absolute; top: 0; bottom: 0; border-radius: 1px; background: var(--lens); box-shadow: inset 0 1px 1px rgba(0,0,0,.6); }
+.meter .lad i.g { background: #1b2620; } .meter .lad i.y { background: #2e2716; } .meter .lad i.r { background: #4a2026; }
+.meter .lad i.g.on { background: var(--m-green); box-shadow: 0 0 3px rgba(79,217,143,.4); }
+.meter .lad i.y.on { background: var(--m-amber); box-shadow: 0 0 3px rgba(255,176,46,.45); }
+.meter .lad i.r.on { background: var(--m-red); }
+.meter .scale { position: absolute; left: 0; right: 0; top: 27px; height: 12px; }
+.meter .scale span { position: absolute; transform: translateX(-50%); font-size: 12px; color: var(--ink-2); }
+.meter .scale b { position: absolute; top: -6px; width: 1px; height: 4px; background: #4d5259; }
+.master .knob { margin-left: 14px; }
+.master .win { margin-left: 10px; min-width: 50px; justify-content: center; }
+.tools { display: grid; grid-template-columns: repeat(4, 26px); grid-auto-rows: 26px; margin-left: 18px; color: #a9afb7; }
+.tools span { display: flex; align-items: center; justify-content: center; }
+
+/* ---------- knob (from the accepted parts) ---------- */
+.knob { position: relative; width: var(--s, 40px); height: var(--s, 40px); flex: none; }
+.knob > svg.ticks { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); overflow: visible; }
+.knob .body { position: absolute; inset: 0; border-radius: 50%;
+  background: linear-gradient(180deg, rgba(255,255,255,.13), rgba(255,255,255,0) 42%, rgba(0,0,0,.5)),
+    repeating-conic-gradient(#2a2e34 0 var(--kd, 3deg), #0a0b0d var(--kd, 3deg) calc(var(--kd, 3deg) * 2));
+  box-shadow: 0 1px 0 #000, 0 calc(var(--s, 40px) * .07) calc(var(--s, 40px) * .14) rgba(0,0,0,.72), inset 0 1px 0 rgba(255,255,255,.16), inset 0 -1px 0 rgba(0,0,0,.6); }
+.knob .cap { position: absolute; inset: max(4px, calc(var(--s, 40px) * .075)); border-radius: 50%;
+  background: radial-gradient(120% 85% at 50% 0%, rgba(255,255,255,.13), rgba(255,255,255,0) 62%), linear-gradient(#2c3037, #16181c);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15), inset 0 -1px 1px rgba(0,0,0,.55); }
+.knob .ptr { position: absolute; inset: max(4px, calc(var(--s, 40px) * .075)); transform: rotate(var(--a, 0deg)); }
+.knob .ptr::after { content: ""; position: absolute; left: 50%; top: 3%; width: 2px; height: 36%;
+  transform: translateX(-50%); border-radius: 1px; background: #f6f7f9; }
+.knob.dis { opacity: .55; }
+.knob.dis .ptr::after { background: #4a4f56; }
+.knob.dis .cap { background: linear-gradient(#202328, #141619); }
+
+/* ---------- 2. slots: two signal lines of one anatomy ---------- */
+.slots { display: flex; align-items: stretch; padding: 0 24px 0 26px; }
+.slot { display: flex; align-items: center; height: 60px; position: relative; }
+.slot.a { width: 1250px; padding-right: 26px; }
+.slot.b { flex: 1; padding-left: 26px; }
+.vgroove { width: 2px; flex: none; background: #08090b; box-shadow: 1px 0 0 rgba(255,255,255,.04); margin: 8px 0; }
+.sl { font-size: 22px; font-weight: 600; width: 22px; color: #f1f3f5; flex: none; }
+.slot.b .sl { color: #7c838c; }
+.slot .src { margin-left: 14px; width: 76px; }
+.slot .live { --kh: 40px; margin-left: 10px; width: 64px; }
+.chain { display: flex; align-items: center; position: relative; height: 44px; }
+.sig { width: 20px; height: 44px; position: relative; flex: none; }
+.sig::before { content: ""; position: absolute; left: 0; right: 4px; top: 21.5px; height: 1px; background: #6a7078; }
+.sig::after { content: ""; position: absolute; right: 2px; top: 19px; border-left: 5px solid #8e949c; border-top: 3px solid transparent; border-bottom: 3px solid transparent; }
+.sig.dim::before { background: #33373c; } .sig.dim::after { border-left-color: #43474d; }
+.plate { height: 44px; border-radius: 5px; display: flex; align-items: center; gap: 9px; padding: 0 8px 0 9px; flex: none; position: relative;
+  background: linear-gradient(#262a30, #1e2126);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.12), inset 0 -1px 0 rgba(0,0,0,.35), 0 2px 0 #0d0f12, 0 3px 0 #030405, 0 4px 8px rgba(0,0,0,.5); }
+.pwr { width: 22px; height: 22px; border-radius: 50%; flex: none; position: relative;
+  background: linear-gradient(#383c43, #25282d); box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 2px 0 #101215, 0 3px 4px rgba(0,0,0,.55); }
+.pwr::after { content: ""; position: absolute; left: 8px; top: 8px; width: 6px; height: 6px; border-radius: 50%; background: #111214; box-shadow: inset 0 1px 1px #000; }
+.pwr.on::after { background: var(--play); box-shadow: 0 0 5px 1px rgba(69,210,149,.5); }
+.plate .name { font-size: 16px; color: #eef0f2; }
+.plate .what { margin-left: auto; padding-left: 6px; display: flex; align-items: center; gap: 8px; }
+.plate .fmt { font-size: 12px; color: var(--ink-2); letter-spacing: .06em; }
+.plate .ed { color: #d0d5db; display: flex; }
+.plate .menu { color: var(--ink-2); display: flex; padding-left: 8px; margin-left: 2px; height: 22px; align-items: center;
+  box-shadow: inset 1px 0 0 rgba(0,0,0,.45), inset 2px 0 0 rgba(255,255,255,.04); }
+.plate .mini { width: 46px; height: 26px; border-radius: 3px; flex: none; }
+.plate.byp { background: linear-gradient(#1f2226, #1a1c20); }
+.plate.byp .name { color: var(--ink-2); }
+.plate.byp .mini svg { opacity: .4; }
+/* slot B idle: the same plate, printed a step down; its lamp on without bloom (powered, nothing playing) */
+.plate.idle { background: linear-gradient(#22252a, #1c1e22); }
+.plate.idle .name { color: #b9bec5; }
+.plate.idle .pwr.on::after { background: #2f8a63; box-shadow: none; }
+.plate .bi { color: var(--ink-2); display: flex; }
+.plate { min-width: 150px; }
+.bay { width: 44px; height: 44px; border-radius: 5px; flex: none; display: flex; align-items: center; justify-content: center; color: #7c838c;
+  background: #0d0f11; box-shadow: inset 0 1px 0 rgba(0,0,0,.95), inset 0 3px 7px rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.05); }
+.out { margin-left: auto; display: flex; align-items: center; gap: 0; }
+.sm { position: relative; width: 72px; height: 11px; flex: none; }
+.sm i { position: absolute; width: 2px; height: 4px; border-radius: .5px; background: #262a2f; }
+.sm i.on.g { background: var(--m-green); } .sm i.on.y { background: var(--m-amber); }
+.out .knob { margin-left: 12px; }
+.out .win { margin-left: 10px; width: 70px; justify-content: flex-end; }
+
+/* ---------- 3. the five loops: head | glass | mix, one centre line per lane ---------- */
+.loops { display: grid; grid-template-columns: 320px 1fr 416px; grid-template-rows: repeat(5, 182px); }
+.cell { position: relative; }
+.cell.sel { background: linear-gradient(rgba(255,255,255,.042), rgba(255,255,255,.028)); }
+.cell.g { box-shadow: inset 0 2px 0 #08090b, inset 0 3px 0 rgba(255,255,255,.035); }
+.pane { grid-column: 2; grid-row: 1 / span 5; position: relative; }
+.pane .bezel { position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
+.pane canvas { position: absolute; left: 0; top: 0; display: block; }
+.pane .bn { position: absolute; top: 8px; font: 500 12px/1 var(--font-num); color: #6e757e; z-index: 2; }
+
+/* head: one 96 px block on the lane's centre line. Number + state | the lit key | STOP over CLR */
+.head { display: flex; align-items: center; padding: 0 16px 0 22px; gap: 10px; }
+.ident { width: 86px; height: 96px; position: relative; flex: none; }
+.lnum { position: absolute; left: -3px; top: -14px; font-size: 64px; line-height: 1; font-weight: 500; letter-spacing: -.02em; color: var(--nc); }
+.st { position: absolute; left: 0; top: 56px; font: 600 16px/1 var(--font-legend); letter-spacing: .05em; color: var(--sc); white-space: nowrap; text-transform: uppercase; }
+.from { position: absolute; left: 0; top: 80px; font-size: 12px; color: var(--ink-2); letter-spacing: .08em; }
+.t-lead { --nc: #ffffff; }
+.t-lead .st { text-shadow: 0 0 8px color-mix(in srgb, var(--sc) 45%, transparent); }
+.t-on { --nc: #ccd1d7; }
+.t-low { --nc: #80868e; }
+.t-empty { --nc: #4b5158; }
+.side { display: flex; flex-direction: column; gap: 6px; margin-left: -2px; }
+.side .key { width: 62px; padding: 0; }
+.side .stop { --kh: 42px; margin-bottom: 3px; gap: 6px; }
+.side .clr { --kh: 45px; }
+
+/* the lit key: a frosted light window across its top in the state colour, the next action on its face */
+.ka { width: 116px; height: 92px; border-radius: 7px; position: relative; color: #eef1f4; flex: none; margin-bottom: 4px;
+  background: linear-gradient(#33383f, #272b31 70%, #23272d);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.15), inset 0 -1px 0 rgba(0,0,0,.3), 0 4px 0 #15181c, 0 5px 0 #050607, 0 7px 12px rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; padding-top: 22px; }
+.t-low .ka { color: #8d949c; }
+.ka svg.g { width: 34px; height: 34px; stroke-width: 1.7; }
+.ka .lw { position: absolute; left: 12px; right: 12px; top: 12px; height: 11px; border-radius: 2.5px; overflow: hidden;
+  background: #0b0c0e; box-shadow: inset 0 1px 2px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.1); }
+.ka .lw::after { content: ""; position: absolute; inset: 0; border-radius: 2.5px; opacity: var(--lo, 1);
+  background: linear-gradient(180deg, rgba(255,255,255,.38), rgba(255,255,255,0) 55%),
+    linear-gradient(90deg, color-mix(in srgb, var(--c) 78%, #000), var(--c) 22%, color-mix(in srgb, var(--c) 70%, #fff) 50%, var(--c) 78%, color-mix(in srgb, var(--c) 78%, #000)); }
+.ka.lit .lw { box-shadow: 0 0 calc(var(--gl) * 13px) calc(var(--gl) * 2px) color-mix(in srgb, var(--c) calc(var(--gl, 1) * 55%), transparent), 0 0 2px color-mix(in srgb, var(--c) 80%, transparent); }
+.ka.unlit .lw::after { display: none; }
+.ka.lit::before { content: ""; position: absolute; left: 8px; right: 8px; top: 18px; height: 34px; border-radius: 4px; opacity: var(--gl, 1);
+  background: radial-gradient(60% 100% at 50% 0%, color-mix(in srgb, var(--c) 17%, transparent), transparent 75%); }
+svg.g { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+svg.g .fill { fill: currentColor; stroke: none; }
+
+/* mix: FX MUTE (latched, the column the eye reads) | REV UNDO EDIT (momentary, a quieter silhouette); then one line */
+.mix { display: flex; flex-direction: column; justify-content: center; gap: 15px; padding: 0 24px 0 22px; }
+.mkeys { display: flex; align-items: baseline; gap: 6px; height: 43px; }
+.mkeys .key { --kh: 40px; }
+.mkeys .sp { width: 26px; flex: none; }
+.mkeys .fx { width: 58px; } .mkeys .mute { width: 74px; }
+.mkeys .mo { --kh: 32px; flex: 1; padding: 0 6px; font-size: 12px; color: #aab0b7; gap: 4px;
+  background: linear-gradient(#2a2d32, #222428);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.25), 0 2px 0 #131518, 0 3px 0 #050607, 0 4px 6px rgba(0,0,0,.45); }
+.mkeys .mo.dis { color: #464b52; background: linear-gradient(#1c1f22, #18191c); }
+.mline { display: flex; align-items: flex-start; height: 42px; }
+.fader { position: relative; height: 42px; width: 190px; flex: none; }
+.fader .rail { position: absolute; left: 0; right: 0; top: 10px; height: 8px; border-radius: 4px; background: #020304;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 4px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.08); }
+.fader .tick { position: absolute; top: 25px; width: 1.5px; height: 5px; margin-left: -.75px; background: #6f767f; }
+.fader .tick.unity { top: 24px; height: 7px; width: 2px; margin-left: -1px; background: #e4e8ec; }
+.fader .zero { position: absolute; top: 33px; transform: translateX(-50%); font-size: 12px; line-height: 1; color: #d4d8dd; }
+.fader .capf { position: absolute; top: 4px; width: 30px; height: 20px; margin-left: -15px; border-radius: 4px;
+  background: linear-gradient(#3c4047, #2a2d33);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), inset 0 -1px 0 rgba(0,0,0,.3), 0 3px 0 #16181b, 0 4px 0 #040506, 0 6px 8px rgba(0,0,0,.6); }
+.fader .capf::after { content: ""; position: absolute; left: 14px; top: 3px; bottom: 3px; width: 2px; background: #f4f6f8; border-radius: 1px; }
+.fader.dis .capf { background: linear-gradient(#202327, #1b1d21); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 3px 0 #111316, 0 4px 0 #040506; }
+.fader.dis .capf::after { background: #42474e; }
+.fader.dis .tick { background: #3a3f45; }
+.fader.dis .tick.unity { background: #4d535a; } .fader.dis .zero { color: #4d535a; }
+.mline .win { margin-left: 14px; width: 108px; justify-content: space-between; align-items: baseline; padding-top: 8px; }
+.mline .knob { margin: -2px 2px 0 auto; }
+
+/* REC and OVERDUB are told from PLAYING without colour (from the control sheet) */
+/* a split window: recording = a round rec lamp + the bar; count-in = four beat cells, one goes out per beat */
+.ka .lw.split { background: none; box-shadow: none; overflow: visible; display: flex; gap: 4px; }
+.ka .lw.split::after { display: none; }
+.ka .seg { position: relative; height: 11px; flex: 1; border-radius: 2.5px; overflow: hidden;
+  background: #0b0c0e; box-shadow: inset 0 1px 2px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.1); }
+.ka .seg.dot { flex: none; width: 11px; border-radius: 50%; }
+.ka .seg::after { content: ""; position: absolute; inset: 0; border-radius: inherit; opacity: var(--lo, 1);
+  background: linear-gradient(180deg, rgba(255,255,255,.38), rgba(255,255,255,0) 55%),
+    linear-gradient(90deg, color-mix(in srgb, var(--c) 78%, #000), var(--c) 22%, color-mix(in srgb, var(--c) 70%, #fff) 50%, var(--c) 78%, color-mix(in srgb, var(--c) 78%, #000)); }
+.ka .seg.dot::after { background: radial-gradient(circle at 50% 35%, color-mix(in srgb, var(--c) 55%, #fff), var(--c) 60%, color-mix(in srgb, var(--c) 80%, #000)); }
+.ka .seg.off::after { display: none; }
+.ka.lit .seg:not(.off) { box-shadow: 0 0 calc(var(--gl) * 13px) calc(var(--gl) * 2px) color-mix(in srgb, var(--c) calc(var(--gl, 1) * 55%), transparent), 0 0 2px color-mix(in srgb, var(--c) 80%, transparent); }

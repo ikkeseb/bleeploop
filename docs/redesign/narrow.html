@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BleepLoop: main screen at 1000x700 (MASKIN 2, narrow)</title>
+<link rel="stylesheet" href="narrow.css">
+<script src="assets/wave.js"></script>
+</head>
+<body>
+
+<!-- 1. TIME and the whole machine, in two rows: time | transport above, record modes | master below -->
+<header class="bar">
+  <div class="grp g-time">
+    <div class="bezel disp"><div class="glass">
+      <span class="num tempo">120</span>
+      <div class="meta num">
+        <span class="top">BPM<svg width="9" height="11" viewBox="0 0 9 11" fill="none" stroke="#8d939b" stroke-width="1.3"><rect x="1" y="5" width="7" height="5.3" rx="1" fill="#8d939b" stroke="none"/><path d="M2.6 5V3.4a1.9 1.9 0 0 1 3.8 0V5"/></svg></span>
+        <span>4/4</span>
+      </div>
+      <div class="lamps"><i></i><i class="on"></i><i></i><i></i></div>
+      <div class="ro"><span class="cap lg">LOOP</span><span class="fig num">4<span class="w lg">BARS</span></span></div>
+      <div class="ro"><span class="cap lg">BAR.BEAT</span><span class="fig num">2.2</span></div>
+      <div class="progress"><b style="left:0"></b><b style="left:25%"></b><b style="left:50%"></b><b style="left:75%"></b></div>
+    </div></div>
+    <button class="key bk tap"><span class="l">TAP</span></button>
+  </div>
+
+  <div class="grp g-trans">
+    <button class="key bk"><span class="l"><span class="sqg"></span>ALL</span></button>
+    <button class="key bk fade"><span class="l">FADE</span><span class="v num">2 <span class="w">BARS</span></span></button>
+    <button class="key bk clr"><span class="l"><svg width="9" height="9" viewBox="0 0 9 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l7 7M8 1L1 8"/></svg>ALL</span></button>
+  </div>
+
+  <!-- the seven tools (save, open, keyboard, stage view, tuner, help, settings) behind one printed icon -->
+  <span class="tools" data-icon="menu" data-isz="20" title="Save · Open · Keyboard · Stage view · Tuner · Help · Settings"></span>
+
+  <div class="grp rec">
+    <button class="key bk latch on"><span class="led on"></span><span class="l">CLICK</span><span class="v num">70</span></button>
+    <button class="key bk latch"><span class="led"></span><span class="l">FIXED</span><span class="v num">4 <span class="w">BARS</span></span></button>
+    <button class="key bk latch"><span class="led"></span><span class="l">RETAKE</span></button>
+    <button class="key bk latch"><span class="led"></span><span class="l">AUTO REC</span><span class="v num">50</span></button>
+    <button class="key bk latch"><span class="led"></span><span class="l">END STOP</span></button>
+  </div>
+
+  <div class="grp master">
+    <div class="meter"><div class="lad" style="top:3px" data-lit="-6.4" data-pk="-4.6"></div><div class="lad" style="top:12px" data-lit="-7.2" data-pk="-5.2"></div><div class="scale num"></div></div>
+    <div class="knob" style="--s:36px" data-v=".667" data-ticks="11"></div>
+    <div class="win num">100</div>
+  </div>
+</header>
+<div class="groove g1"></div>
+
+<!-- 2. WHAT IS PLAYED IN: slot A's whole line; slot B as one plate at its end. The plates shed their
+     miniatures (OTT's bands, ECHO's taps, the amp's open-a-window glyph); EDITOR and PARAMS stay in each plate's menu -->
+<section class="slots">
+  <div class="slot a">
+    <span class="sl num">A</span>
+    <span class="win num src">In 1<span class="chev" data-icon="drop" data-isz="14"></span></span>
+    <button class="key latch live"><span class="led on"></span>LIVE</button>
+    <div class="chain">
+      <i class="sig"></i>
+      <div class="plate p-amp"><span class="pwr on"></span><span class="name">Archetype Petrucci X</span>
+        <span class="what"><span class="lg fmt">VST3</span></span>
+        <span class="menu" data-icon="drop" data-isz="14"></span></div>
+      <i class="sig"></i>
+      <div class="plate p-ott"><span class="pwr on"></span><span class="name">OTT</span>
+        <span class="menu" data-icon="drop" data-isz="14"></span></div>
+      <i class="sig dim"></i>
+      <div class="plate p-echo byp"><span class="pwr"></span><span class="name">ECHO</span>
+        <span class="menu" data-icon="drop" data-isz="14"></span></div>
+      <i class="sig dim"></i>
+      <div class="bay" data-icon="plus" data-isz="16"></div>
+    </div>
+    <!-- the slot's volume: its meter and its value window, changed there (the knob goes, as the lanes' pan knob does) -->
+    <div class="out">
+      <div class="sm" data-lit="-8.6" data-pk="-7.8"></div>
+      <span class="win num">−0.9<span class="u">dB</span></span>
+    </div>
+  </div>
+  <div class="vgroove"></div>
+  <!-- slot B folded: its letter, its instrument, its lamp; a press opens its full line in this row -->
+  <div class="slot b">
+    <div class="plate p-b idle"><span class="pwr on"></span><span class="sl num">B</span><span class="dot">·</span><span class="name">Bass</span>
+      <span class="menu" data-icon="drop" data-isz="14"></span></div>
+  </div>
+</section>
+<div class="groove g2"></div>
+
+<!-- 3. THE FIVE LOOPS: head | glass | mix -->
+<div class="floor"></div>
+<main class="loops" id="loops">
+  <div class="pane" id="pane"><div class="bezel"><div class="glass"><canvas id="cv"></canvas></div></div></div>
+</main>
+
+<script src="narrow.js"></script>
+</body>
+</html>

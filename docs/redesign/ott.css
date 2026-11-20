@@ -1,0 +1,124 @@
+/* MASKIN 2: the OTT's own face, 900x540. One piece of gear: the glass is the hero, DEPTH the one knob that matters.
+   The material and the type are the main screen's (main-v1.css); this file copies what it needs and adds nothing it does not use. */
+
+@font-face { font-family: "Instrument Sans"; src: url("fonts/InstrumentSans-Variable.ttf"); font-weight: 400 700; font-stretch: 75% 100%; }
+
+:root {
+  --font-legend: "Instrument Sans";
+  --font-num: "Instrument Sans";
+  --font-name: "Instrument Sans";
+
+  --panel: #15171b;
+  --glass: #07090b;
+  --ink: #e9ecef;
+  --ink-2: #9ba1a9;
+  --ink-3: #5a6068;
+  --white-led: #fff3e0;
+  --lift: #fff3e0;              /* upward compression: warm white */
+  --cut: #ffb02e;               /* downward: the meters' amber */
+  --play: #45d295;              /* a unit's power lamp, as on the plates */
+  --recess: 0 -1px 0 rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.06), inset 0 2px 3px rgba(0,0,0,.9);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { color: var(--ink); background: var(--panel); font: 600 13px/1 var(--font-legend), sans-serif; -webkit-font-smoothing: antialiased; }
+
+/* ---------- the page: the face alone on the panel ground, 1:1, centred ---------- */
+.p-face { width: 1920px; height: 1080px; overflow: hidden; position: relative; }
+.p-face::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: url("parts/relay/out/panel-grain.png") 0 0 / 1672px 941px; mix-blend-mode: overlay; opacity: .16; }
+.p-face .ott { left: 510px; top: 270px; }
+
+/* ---------- the face ---------- */
+.ott { position: absolute; width: 900px; height: 540px; border-radius: 10px; isolation: isolate; overflow: hidden;
+  background: linear-gradient(#1d2025, #17191d 46%, #141619);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.11), inset 0 -1px 0 rgba(0,0,0,.45), inset 1px 0 0 rgba(255,255,255,.025), inset -1px 0 0 rgba(255,255,255,.025),
+    0 0 0 1px #07080a, 0 2px 3px rgba(0,0,0,.5), 0 14px 34px rgba(0,0,0,.42); }
+.ott::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; border-radius: inherit;
+  background: url("parts/relay/out/panel-grain.png") 0 0 / 1672px 941px; mix-blend-mode: overlay; opacity: .2; }
+.ott > * { position: absolute; }
+
+.lg { font-family: var(--font-legend), sans-serif; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.num { font-family: var(--font-num), sans-serif; font-weight: 500; font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: 0; white-space: nowrap; }
+.u { color: var(--ink-2); font-size: 12px; margin-left: .22em; }
+
+/* ---------- the glass (the main screen's bezel and glass, grown) ---------- */
+.bezel { padding: 4px; border-radius: 8px;
+  background: linear-gradient(180deg, #050607 0%, #0b0d10 50%, #22262b 100%);
+  box-shadow: 0 -1px 0 rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.07); }
+.glass { width: 100%; height: 100%; background: var(--glass); border-radius: 4px; position: relative; overflow: hidden;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 8px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+.glass::after { content: ""; position: absolute; left: 4px; right: 4px; top: 1px; height: 22px; pointer-events: none;
+  background: linear-gradient(rgba(255,255,255,.035), transparent); border-radius: 3px 3px 0 0; }
+.ott .scr { left: var(--gx); top: var(--gy); width: var(--gw); height: var(--gh); }
+.ott { --gx: 20px; --gy: 20px; --gw: 860px; --gh: 240px; }
+.scr canvas { position: absolute; left: 0; top: 0; display: block; }
+.scr .t { position: absolute; z-index: 2; line-height: 1; }
+.scr .db { font: 500 12px/1 var(--font-num); color: #6f767f; transform: translateY(-50%); text-align: right; width: 26px; }
+.scr .db.z { color: #b9bfc6; }
+.scr .band { font-size: 12px; color: #aab0b8; letter-spacing: .1em; }
+.scr .gv { font: 500 18px/1 var(--font-num); text-align: right; transform: translateX(-100%); }
+.scr .gv .u { font-size: 12px; color: #7f868e; }
+.scr .gv.up { color: var(--lift); }
+.scr .gv.dn { color: var(--cut); }
+.scr .hz { font: 500 13px/1 var(--font-num); color: #7d848c; transform: translateX(-50%); }
+
+/* ---------- identity ---------- */
+.ott .wm { font: 700 76px/1 var(--font-name); font-stretch: 100%; letter-spacing: -.035em; color: #f2f0eb;
+  text-shadow: 0 1px 0 rgba(0,0,0,.55); }
+.ott .maker { font: 700 12px/1 var(--font-legend); letter-spacing: .26em; color: #b4bac1; }
+.pwr { display: block; border-radius: 50%;
+  background: linear-gradient(#383c43, #25282d); box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 2px 0 #101215, 0 3px 4px rgba(0,0,0,.55); }
+.pwr::after { content: ""; position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: #111214; box-shadow: inset 0 1px 1px #000; }
+.pwr.on::after { background: var(--play); box-shadow: 0 0 5px 1px rgba(69,210,149,.5); }
+.ott .pwr { width: 26px; height: 26px; }
+
+/* ---------- controls: knob centre at (--x, --y); legend and value on one line across the row ---------- */
+.ctl { left: 0; top: 0; width: 0; height: 0; }
+.ctl .k { position: absolute; left: var(--x); top: var(--y); width: var(--s); height: var(--s); margin: calc(var(--s) / -2) 0 0 calc(var(--s) / -2); }
+.ctl .lgd, .ctl .val { position: absolute; left: var(--x); transform: translateX(-50%); text-align: center; }
+.ctl .lgd { top: var(--ly); font-size: 13px; letter-spacing: .1em; color: #d9dde2; display: flex; align-items: center; gap: 7px; }
+.ctl .val { top: var(--vy); font-size: 16px; color: #f3f2ee; }
+.ctl .val .u { font-size: 13px; }
+.ctl.hero .lgd { font-size: 15px; letter-spacing: .14em; color: #eef0f2; }
+.ctl.hero .val { font-size: 19px; }
+.tri { width: 0; height: 0; border-left: 4.5px solid transparent; border-right: 4.5px solid transparent; }
+.tri.up { border-bottom: 6px solid var(--lift); filter: drop-shadow(0 0 2px rgba(255,232,200,.45)); }
+.tri.dn { border-top: 6px solid var(--cut); filter: drop-shadow(0 0 2px rgba(255,176,46,.45)); }
+
+/* printed ticks and the LED ring sit round the knob, centred on it */
+.k > svg.ticks, .k > .ring { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); overflow: visible; pointer-events: none; }
+.ring i { position: absolute; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: #23262b;
+  box-shadow: inset 0 1px 1px rgba(0,0,0,.85), 0 1px 0 rgba(255,255,255,.05); }
+.ring i.on { background: var(--white-led); box-shadow: 0 0 5px 1px rgba(255,226,186,.42), 0 0 1.5px rgba(255,244,228,.95); }
+
+/* A. the programmed knob: the main screen's, grown up */
+.kb .body { position: absolute; inset: 0; border-radius: 50%;
+  background: linear-gradient(180deg, rgba(255,255,255,.13), rgba(255,255,255,0) 42%, rgba(0,0,0,.5)),
+    repeating-conic-gradient(#2a2e34 0 var(--kd, 3deg), #0a0b0d var(--kd, 3deg) calc(var(--kd, 3deg) * 2));
+  box-shadow: 0 1px 0 #000, 0 calc(var(--s) * .06) calc(var(--s) * .13) rgba(0,0,0,.72), inset 0 1px 0 rgba(255,255,255,.16), inset 0 -1px 0 rgba(0,0,0,.6); }
+.kb .cap { position: absolute; inset: calc(var(--s) * .075); border-radius: 50%;
+  background: radial-gradient(120% 85% at 50% 0%, rgba(255,255,255,.12), rgba(255,255,255,0) 62%), linear-gradient(#2c3037, #16181c);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15), inset 0 -1px 1px rgba(0,0,0,.55); }
+.kb .ptr { position: absolute; inset: calc(var(--s) * .075); transform: rotate(var(--a, 0deg)); }
+.kb .ptr::after { content: ""; position: absolute; left: 50%; top: 3%; width: var(--pw, 2px); height: 36%;
+  transform: translateX(-50%); border-radius: 1px; background: #f6f7f9; }
+/* the hero: a chamfer between the knurl and the cap, and a wider top face */
+.hero .kb .cap { inset: calc(var(--s) * .085);
+  background: radial-gradient(110% 80% at 50% 0%, rgba(255,255,255,.1), rgba(255,255,255,0) 60%), radial-gradient(circle at 50% 50%, #23262b 0 66%, #1d2024 67%, #191b1f 100%), #1b1d21;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.75), 0 0 0 2px rgba(255,255,255,.05), inset 0 1px 0 rgba(255,255,255,.16), inset 0 -2px 3px rgba(0,0,0,.5); }
+.hero .kb .ptr { inset: calc(var(--s) * .085); }
+.hero .kb .ptr::after { top: 2.5%; height: 30%; }
+
+/* B. the rendered cap (?knob=render): scaled down only; the light stays where the render put it,
+   so the picture stands still and only the pointer turns (the knurl is round: a turn reads the same). */
+.kr .shadow { position: absolute; left: 4%; right: 4%; top: 10%; bottom: -5%; border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0,0,0,.75), rgba(0,0,0,.4) 70%, transparent); filter: blur(calc(var(--s) * .035)); }
+.kr img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.kr .ptr { position: absolute; inset: 0; transform: rotate(var(--a, 0deg)); }
+.kr .ptr::after { content: ""; position: absolute; left: 50%; top: 9%; width: var(--pw, 2px); height: 30%; transform: translateX(-50%);
+  border-radius: 1px; background: #f2f3f5; box-shadow: 0 1px 0 rgba(0,0,0,.6); }
+.hero .kr .ptr::after { top: 8%; height: 27%; }
+
+/* ---------- the open view's close mark (ott-open.html only) ---------- */
+.ott .close { display: none; }

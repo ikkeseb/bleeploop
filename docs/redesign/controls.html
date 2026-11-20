@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BleepLoop: the control sheet (MASKIN 2)</title>
+<link rel="stylesheet" href="controls.css">
+</head>
+<body>
+
+<div class="sheet-head"><span class="brand">BLEEPLOOP</span><span class="t lg">CONTROL SHEET · EVERY CONTROL IN EVERY STATE · 1:1</span></div>
+
+<!-- 1. THE LANE'S LIT KEY -->
+<section class="grp-s" id="g1" style="margin-bottom:34px">
+  <h2><b>1</b>THE LANE'S LIT KEY · THE WINDOW IS THE STATE, THE GLYPH IS THE NEXT PRESS</h2>
+  <div class="lanes" id="lanes"></div>
+  <div class="gsrow"><div class="gs" id="gs"></div><span class="sc gs-cap">the same eight in greyscale: a recording lane carries the round rec lamp, a playing one the plain bar</span></div>
+</section>
+
+<div class="row">
+  <!-- 2. KEYS -->
+  <section class="grp-s">
+    <h2><b>2</b>KEYS</h2>
+    <div class="sub">
+      <div class="it"><div class="stage mkeys solo"><button class="key latch fx" style="width:58px"><span class="led"></span>FX</button></div><span class="sc">FX off</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key latch fx" style="width:58px"><span class="led on"></span>FX</button></div><span class="sc">FX on</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key latch fx dis" style="width:58px"><span class="led"></span>FX</button></div><span class="sc">disabled</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key latch mute" style="width:74px"><span class="led"></span>MUTE</button></div><span class="sc">MUTE off</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key latch mute" style="width:74px"><span class="led on"></span>MUTE</button></div><span class="sc">MUTE on</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key latch mute dis" style="width:74px"><span class="led"></span>MUTE</button></div><span class="sc">disabled</span></div>
+      <span class="gap"></span>
+      <div class="it"><div class="stage"><button class="key bk latch"><span class="led"></span><span class="l">RETAKE</span></button></div><span class="sc">bar latch off</span></div>
+      <div class="it"><div class="stage"><button class="key bk latch on"><span class="led on"></span><span class="l">RETAKE</span></button></div><span class="sc">on</span></div>
+    </div>
+    <div class="sub">
+      <div class="it"><div class="stage mkeys solo"><button class="key mo">REV</button></div><span class="sc">REV up</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key mo hov">REV</button></div><span class="sc">hovered</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key mo held">REV</button></div><span class="sc">held</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key mo dis">REV</button></div><span class="sc">disabled</span></div>
+      <div class="it"><div class="stage mkeys solo"><button class="key mo" data-edit>EDIT</button></div><span class="sc">EDIT (opens a menu)</span></div>
+      <span class="gap"></span>
+      <div class="it"><div class="stage"><button class="key bk tap"><span class="l">TAP</span></button></div><span class="sc">TAP up</span></div>
+      <div class="it"><div class="stage"><button class="key bk tap hov"><span class="l">TAP</span></button></div><span class="sc">hovered</span></div>
+      <div class="it"><div class="stage"><button class="key bk tap held"><span class="l">TAP</span></button></div><span class="sc">held</span></div>
+      <div class="it"><div class="stage"><button class="key bk tap dis"><span class="l">TAP</span></button></div><span class="sc">disabled</span></div>
+    </div>
+    <div class="sub">
+      <div class="it"><div class="stage"><button class="key bk clr"><span class="l" data-x></span></button></div><span class="sc">✕ ALL at rest</span></div>
+      <div class="it"><div class="stage"><button class="key bk clr arm"><span class="l">CONFIRM</span></button></div><span class="sc">armed: press again</span></div>
+      <div class="it"><div class="stage side solo"><button class="key clr" style="--kh:45px">CLR</button></div><span class="sc">CLR at rest</span></div>
+      <div class="it"><div class="stage side solo"><button class="key clr arm" style="--kh:45px">CLR?</button></div><span class="sc">armed</span></div>
+      <span class="gap"></span>
+      <div class="it"><div class="stage side solo"><button class="key stop" style="--kh:42px;gap:6px"><span class="sqg"></span>STOP</button></div><span class="sc">STOP up</span></div>
+      <div class="it"><div class="stage side solo"><button class="key stop held" style="--kh:42px;gap:6px"><span class="sqg"></span>STOP</button></div><span class="sc">held</span></div>
+      <div class="it"><div class="stage side solo"><button class="key stop dis" style="--kh:42px;gap:6px"><span class="sqg"></span>STOP</button></div><span class="sc">disabled</span></div>
+      <div class="it"><div class="stage"><button class="key bk"><span class="l"><span class="sqg"></span>ALL</span></button></div><span class="sc">■ ALL</span></div>
+      <div class="it"><div class="stage"><button class="key bk"><span class="l"><svg width="10" height="11" viewBox="0 0 10 11"><path d="M1.5 1.2 9 5.5 1.5 9.8z" fill="currentColor"/></svg>ALL</span></button></div><span class="sc">▶ ALL (all stopped)</span></div>
+    </div>
+  </section>
+
+  <!-- 3. A KEY THAT CARRIES ITS VALUE -->
+  <section class="grp-s">
+    <h2><b>3</b>A KEY CARRIES ITS VALUE · DRAG OR SCROLL ON IT</h2>
+    <div class="sub">
+      <div class="it"><div class="stage rec"><button class="key bk latch on"><span class="led on"></span><span class="l">CLICK</span><span class="v num">70</span></button></div><span class="sc">CLICK on</span></div>
+      <div class="it"><div class="stage rec"><button class="key bk latch"><span class="led"></span><span class="l">CLICK</span><span class="v num">70</span></button></div><span class="sc">off</span></div>
+      <div class="it"><div class="stage rec"><button class="key bk latch"><span class="led"></span><span class="l">FIXED</span><span class="v num">4 <span class="w">BARS</span></span></button></div><span class="sc">FIXED off</span></div>
+      <div class="it"><div class="stage rec"><button class="key bk latch on"><span class="led on"></span><span class="l">FIXED</span><span class="v num">4 <span class="w">BARS</span></span></button></div><span class="sc">on</span></div>
+      <div class="it"><div class="stage"><button class="key bk fade"><span class="l">FADE</span><span class="v num">2 <span class="w">BARS</span></span></button></div><span class="sc">FADE</span></div>
+    </div>
+    <div class="sub vk-room">
+      <div class="it" style="width:150px"><div class="stage rec vk"><button class="key bk latch on adj held"><span class="led on"></span><span class="l">CLICK</span><span class="v num">72</span></button>
+        <div class="scw num"><span>0</span><span class="tr" style="--p:72%"></span><span>100</span></div></div><span class="sc" style="margin-top:42px">changing: a level</span></div>
+      <div class="it" style="width:150px"><div class="stage rec vk"><button class="key bk latch adj held"><span class="led"></span><span class="l">FIXED</span><span class="v num">8 <span class="w">BARS</span></span></button>
+        <div class="scw num"><span>1</span><span>2</span><span>4</span><span class="st-on">8</span><span>16</span><span>32</span></div></div><span class="sc" style="margin-top:42px">changing: steps</span></div>
+      <div class="it" style="width:130px"><div class="stage vk"><button class="key bk fade adj held"><span class="l">FADE</span><span class="v num">4 <span class="w">BARS</span></span></button>
+        <div class="scw num"><span>1</span><span>2</span><span class="st-on">4</span><span>8</span></div></div><span class="sc" style="margin-top:42px">changing, no mode</span></div>
+      <div class="it"><div class="stage rec"><button class="key bk latch on foc"><span class="led on"></span><span class="l">CLICK</span><span class="v num">70</span></button></div><span class="sc" style="margin-top:42px">keyboard focus</span></div>
+    </div>
+  </section>
+</div>
+
+<!-- 4. UNIT PLATES -->
+<section class="grp-s" style="margin-bottom:34px">
+  <h2><b>4</b>UNIT PLATES · ONE ANATOMY: LAMP, NAME, WHAT IT IS, MENU</h2>
+  <div class="pcols"><div class="pleft">
+  <div class="sub">
+    <div class="it l"><div class="stage"><div class="plate p-amp"><span class="pwr on"></span><span class="name">Archetype Petrucci X</span>
+      <span class="what"><span class="lg fmt">VST3</span><span class="ed" data-icon="win" data-isz="16"></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div></div><span class="sc">loaded plugin, on</span></div>
+    <div class="it l"><div class="stage"><div class="plate p-ott"><span class="pwr on"></span><span class="name">OTT</span>
+      <span class="what"><span class="glass mini"><svg class="ott" width="46" height="26" viewBox="3 0 46 26"></svg></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div></div><span class="sc">native unit, on</span></div>
+    <div class="it l"><div class="stage"><div class="plate p-echo byp"><span class="pwr"></span><span class="name">ECHO</span>
+      <span class="what"><span class="glass mini"><svg class="echo" width="46" height="26" viewBox="3 0 46 26"></svg></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div></div><span class="sc">bypassed</span></div>
+    <div class="it l"><div class="stage"><div class="plate p-bass idle"><span class="pwr on"></span><span class="name">Bass</span>
+      <span class="what"><span class="bi" data-icon="keys" data-isz="18"></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div></div><span class="sc">instrument (slot B, idle)</span></div>
+  </div>
+  <div class="sub" style="margin-top:22px">
+    <div class="it l"><div class="stage dragwrap"><div class="chain">
+      <i class="sig"></i><div class="ghost"></div><i class="sig dim"></i>
+      <div class="plate p-echo byp"><span class="pwr"></span><span class="name">ECHO</span><span class="what"><span class="glass mini"><svg class="echo" width="46" height="26" viewBox="3 0 46 26"></svg></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div>
+      <span class="dropm"></span></div>
+      <div class="plate p-ott lift"><span class="pwr on"></span><span class="name">OTT</span><span class="what"><span class="glass mini"><svg class="ott" width="46" height="26" viewBox="3 0 46 26"></svg></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div>
+    </div><span class="sc">OTT dragged past ECHO: its old place sinks, the drop mark shows where it lands</span></div>
+    <span class="gap"></span>
+    <div class="it"><div class="stage"><div class="bay" data-icon="plus" data-isz="16"></div></div><span class="sc">+ bay</span></div>
+    <div class="it"><div class="stage"><div class="bay hov" data-icon="plus" data-isz="16"></div></div><span class="sc">hovered</span></div>
+    <span class="gap"></span>
+    <div class="it"><div class="stage"><button class="key latch live" style="--kh:40px;width:64px"><span class="led on"></span>LIVE</button></div><span class="sc">LIVE on</span></div>
+    <div class="it"><div class="stage"><button class="key latch live" style="--kh:40px;width:64px"><span class="led"></span>LIVE</button></div><span class="sc">off</span></div>
+    </div>
+  </div>
+  <div class="sub top">
+    <div class="it l"><div class="stage menu-room"><div class="anchor"><div class="plate p-amp"><span class="pwr on"></span><span class="name">Archetype Petrucci X</span>
+      <span class="what"><span class="lg fmt">VST3</span><span class="ed" data-icon="win" data-isz="16"></span></span><span class="menu down" data-icon="drop" data-isz="14"></span></div>
+      <div class="pop" id="platemenu"></div></div></div><span class="sc">the plate's menu open (PARAMS lives here now)</span></div>
+    <div class="it l"><div class="stage inp-room"><span class="win num src" style="width:76px">In 1<span class="chev" data-icon="drop" data-isz="14"></span></span></div><span class="sc">input, closed</span></div>
+    <div class="it l" style="width:136px"><div class="stage inp-room"><div class="anchor"><span class="win num src down" style="width:76px">In 1<span class="chev" data-icon="drop" data-isz="14"></span></span>
+      <div class="pop inp"><div class="mi num">In 1<span class="ck"></span></div><div class="mi num hl">In 2</div><div class="mi num">In 3</div></div></div></div><span class="sc">open, three inputs</span></div>
+    <div class="it l"><div class="stage" style="flex-direction:column;align-items:flex-start"><div class="plate p-ott open"><span class="pwr on"></span><span class="name">OTT</span>
+      <span class="what"><span class="glass mini"><svg class="ott" width="46" height="26" viewBox="3 0 46 26"></svg></span></span><span class="menu" data-icon="drop" data-isz="14"></span></div>
+      <div class="facestub" style="--x:75px"><i></i><span class="lg">OTT FACE BELOW</span></div></div><span class="sc">open: its face shows under the row</span></div>
+  </div>
+  </div>
+</section>
+
+<div class="row">
+  <!-- 5. LEVEL AND PAN -->
+  <section class="grp-s">
+    <h2><b>5</b>LEVEL AND PAN</h2>
+    <div class="sub">
+      <div class="it"><div class="stage mline" style="height:42px"><div class="fader" data-db="0"></div></div><span class="sc">unity</span></div>
+      <div class="it"><div class="stage mline" style="height:42px"><div class="fader" data-db="-4"></div></div><span class="sc">−4 dB</span></div>
+      <div class="it"><div class="stage mline" style="height:42px"><div class="fader" data-db="3.52"></div></div><span class="sc">maximum (150 %)</span></div>
+      <div class="it"><div class="stage mline" style="height:42px"><div class="fader dis" data-db="0"></div></div><span class="sc">disabled</span></div>
+    </div>
+    <div class="sub">
+      <div class="it"><div class="stage mline"><span class="win num" style="margin:0"><span>+0.0<span class="u">dB</span></span><span>C</span></span></div><span class="sc">value window</span></div>
+      <div class="it"><div class="stage mline"><span class="win num" style="margin:0"><span>−2.5<span class="u">dB</span></span><span>L20</span></span></div><span class="sc">&nbsp;</span></div>
+      <div class="it"><div class="stage mline"><span class="win num dis" style="margin:0"><span>+0.0<span class="u">dB</span></span><span>C</span></span></div><span class="sc">disabled</span></div>
+      <span class="gap"></span>
+      <div class="it"><div class="stage"><div class="knob" style="--s:32px" data-v=".5" data-ticks="11" data-centre></div></div><span class="sc">pan C</span></div>
+      <div class="it"><div class="stage"><div class="knob" style="--s:32px" data-v=".4" data-ticks="11" data-centre></div></div><span class="sc">L20</span></div>
+      <div class="it"><div class="stage"><div class="knob" style="--s:32px" data-v=".575" data-ticks="11" data-centre></div></div><span class="sc">R15</span></div>
+      <div class="it"><div class="stage"><div class="knob dis" style="--s:32px" data-v=".5" data-ticks="11" data-centre></div></div><span class="sc">disabled</span></div>
+      <span class="gap"></span>
+      <div class="it"><div class="stage master grp" style="height:56px"><div class="knob" style="--s:40px;margin:0" data-v=".667" data-ticks="11"></div><div class="win num">100</div></div><span class="sc">master</span></div>
+      <div class="it"><div class="stage out" style="margin:0"><div class="knob" style="--s:30px;margin:0" data-v=".655" data-ticks="9"></div><span class="win num">−0.9<span class="u">dB</span></span></div><span class="sc">slot volume</span></div>
+    </div>
+  </section>
+
+  <!-- 6. METERS -->
+  <section class="grp-s">
+    <h2><b>6</b>METERS</h2>
+    <div class="sub">
+      <div class="it l"><div class="stage"><div class="meter mw"><div class="lad" style="top:3px" data-lit="-99" data-pk="-99"></div><div class="lad" style="top:12px" data-lit="-99" data-pk="-99"></div><div class="scale num"></div><i class="clip"></i></div></div><span class="sc">master idle</span></div>
+      <div class="it l"><div class="stage"><div class="meter mw"><div class="lad" style="top:3px" data-lit="-18.2" data-pk="-16.8"></div><div class="lad" style="top:12px" data-lit="-19" data-pk="-17.5"></div><div class="scale num"></div><i class="clip"></i></div></div><span class="sc">−18 dB</span></div>
+      <div class="it l"><div class="stage"><div class="meter mw"><div class="lad" style="top:3px" data-lit="-6.4" data-pk="-4.6"></div><div class="lad" style="top:12px" data-lit="-7.2" data-pk="-5.2"></div><div class="scale num"></div><i class="clip"></i></div></div><span class="sc">−6 dB</span></div>
+      <div class="it l"><div class="stage"><div class="meter mw"><div class="lad" style="top:3px" data-lit="0.2" data-pk="2.2"></div><div class="lad" style="top:12px" data-lit="-0.6" data-pk="1.4"></div><div class="scale num"></div><i class="clip on"></i></div></div><span class="sc">0 dB, clip held</span></div>
+    </div>
+    <div class="sub">
+      <div class="it l"><div class="stage" style="min-height:24px"><div class="sm" data-lit="-99" data-pk="-99"></div></div><span class="sc">slot idle</span></div>
+      <div class="it l"><div class="stage" style="min-height:24px"><div class="sm" data-lit="-8.6" data-pk="-7.8"></div></div><span class="sc">slot −8 dB</span></div>
+    </div>
+  </section>
+
+</div>
+
+<div class="row" style="margin-bottom:0">
+  <!-- 7. THE DISPLAY -->
+  <section class="grp-s">
+    <h2><b>7</b>THE DISPLAY</h2>
+    <div class="disps" id="disps"></div>
+  </section>
+    <!-- 8. TOOLS -->
+  <section class="grp-s">
+    <h2><b>8</b>TOOLS</h2>
+    <div class="sub" style="align-items:flex-start;gap:40px">
+      <div class="it l"><div class="tools solo" data-tools=""></div><span class="sc">at rest</span></div>
+      <div class="it l"><div class="tools solo" data-tools="hov:4"></div><span class="sc">tuner hovered</span></div>
+      <div class="it l"><div class="tools solo" data-tools="eng:3"></div><span class="sc">stage view engaged</span></div>
+    </div>
+  </section>
+</div>
+
+<script src="controls.js"></script>
+</body>
+</html>

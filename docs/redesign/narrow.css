@@ -1,0 +1,325 @@
+/* MASKIN 2, narrow: BleepLoop's main screen in a 1000x700 window. The same three bands and the same
+   recipes as main.css (copied, never shared); only the layout narrows.
+   Type scale, the same steps as main.css: 12 (captions, units, small legends) · 14 (legends, values, state
+   words, unit names) · 22 (the display's second figure, the slot letters) · 40 (the tempo, the lane numbers).
+   Collapses taken (in the brief's order): 1 the brand goes (the window title carries it), the seven tools sit
+   behind one printed icon; 2 the master is its knob, value and a short meter; 3 REV and UNDO live in EDIT's
+   menu, the pan in the level window (and, by the same logic, slot A's volume knob goes: its value window is
+   the control); 4 CLR and STOP narrower, their legends at 12 px; 5 slot B is one plate at the end of slot A's
+   row, the plates shed their miniatures; 6 the command bar is two rows. Not taken: the record modes keep
+   their values on every key (two rows leave the width for them). */
+
+@font-face { font-family: "Instrument Sans"; src: url("fonts/InstrumentSans-Variable.ttf"); font-weight: 400 700; font-stretch: 75% 100%; }
+
+:root {
+  --font-legend: "Instrument Sans";
+  --font-num: "Instrument Sans";
+  --font-name: "Instrument Sans";
+
+  --panel: #15171b;
+  --glass: #07090b;
+  --ink: #e9ecef;
+  --ink-2: #9ba1a9;
+  --ink-3: #5a6068;
+  --white-led: #fff3e0;
+  --lens: #1d2024;
+  --rec: #ff3b52;
+  --dub: #ffae2a;
+  --play: #45d295;
+  --m-green: #4fd98f;
+  --m-amber: #ffb02e;
+  --m-red: #ff4a5a;
+
+  --cap-top: #32363c;
+  --cap-bot: #26292e;
+  --cap-side: #15171a;
+  --cap-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(0,0,0,.28),
+    0 3px 0 var(--cap-side), 0 4px 0 #050607, 0 5px 8px rgba(0,0,0,.55);
+  --recess: 0 -1px 0 rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.06), inset 0 2px 3px rgba(0,0,0,.9);
+
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='1.6 0 0 0 -.7 1.6 0 0 0 -.7 1.6 0 0 0 -.7 0 0 0 0 .05'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  /* the narrow screen's vertical budget (700 px): bar 124 (7 · 58 · 8 · 44 · 7) · groove 2 · slots 48 · groove 2 · 8 · lanes 5 x 102 · 6 */
+  --W: 1000px;
+  --bar-h: 124px;
+  --slots-h: 48px;
+  --lh: 102px;
+  /* the lane's three columns; the glass takes what is left (506 px, over half the width) */
+  --head-w: 266px;
+  --mix-w: 228px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: var(--W); height: 700px; overflow: hidden; }
+body {
+  position: relative; color: var(--ink); background: var(--panel);
+  font: 600 14px/1 var(--font-legend), sans-serif; -webkit-font-smoothing: antialiased;
+}
+body > * { position: absolute; left: 0; width: var(--W); z-index: 1; }
+
+/* ---------- the three roles ---------- */
+.lg, .key { font-family: var(--font-legend), sans-serif; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.num { font-family: var(--font-num), sans-serif; font-weight: 500; font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: 0; white-space: nowrap; }
+.name { font-family: var(--font-name), sans-serif; font-weight: 680; letter-spacing: -.005em; white-space: nowrap; }
+.u { color: var(--ink-2); font-size: 12px; margin-left: .3em; }
+
+/* ---------- bands: each a touch lighter at its top; a milled groove under the top two ---------- */
+.bar { top: 0; height: var(--bar-h); background: var(--grain), linear-gradient(#1b1d22, #15171b); }
+.slots { top: calc(var(--bar-h) + 2px); height: var(--slots-h); background: var(--grain), linear-gradient(#181a1f, #141619); }
+.groove { height: 2px; background: #08090b; box-shadow: 0 1px 0 rgba(255,255,255,.045); }
+.groove.g1 { top: var(--bar-h); } .groove.g2 { top: calc(var(--bar-h) + 2px + var(--slots-h)); }
+.loops { top: calc(var(--bar-h) + var(--slots-h) + 12px); height: calc(var(--lh) * 5); }
+.floor { top: calc(var(--bar-h) + var(--slots-h) + 4px); bottom: 0; background: var(--grain), linear-gradient(#16181c, #121418); z-index: 0; }
+
+/* ---------- glass ---------- */
+.bezel { padding: 4px; border-radius: 8px;
+  background: linear-gradient(180deg, #050607 0%, #0b0d10 50%, #22262b 100%);
+  box-shadow: 0 -1px 0 rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.07); }
+.bezel > .glass { width: 100%; height: 100%; }
+.glass { background: var(--glass); border-radius: 4px; position: relative; overflow: hidden;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 8px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+.glass::after { content: ""; position: absolute; left: 4px; right: 4px; top: 1px; height: 18px; pointer-events: none;
+  background: linear-gradient(rgba(255,255,255,.04), transparent); border-radius: 3px 3px 0 0; }
+.win { background: var(--glass); border-radius: 3px; height: 28px; padding: 0 9px; display: inline-flex; align-items: center;
+  gap: 10px; position: relative; color: #f3f2ee; font-size: 14px; flex: none; box-shadow: var(--recess); }
+.win .chev { margin-left: auto; color: var(--ink-2); display: flex; }
+.win.dis { color: var(--ink-3); }
+.win.dis .u { color: var(--ink-3); }
+
+/* ---------- keys: latched (LED over legend), momentary, destructive (sunk) ---------- */
+.key {
+  --kh: 38px; height: var(--kh); min-width: var(--kh); padding: 0 12px; border-radius: 4px; border: 0;
+  background: linear-gradient(var(--cap-top), var(--cap-bot)); box-shadow: var(--cap-shadow);
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  font-size: 14px; color: var(--ink); position: relative; flex: none; line-height: 1;
+}
+.key svg { display: block; flex: none; }
+.key.latch { padding-top: 4px; }
+.key.latch > .led { position: absolute; top: 6px; left: 50%; margin-left: -8px; }
+.key.dis { color: #4d535a; background: linear-gradient(#1d2024, #191b1f);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 3px 0 #111316, 0 4px 0 #050607, 0 5px 6px rgba(0,0,0,.35); }
+.key.clr { font-size: 12px; color: var(--ink-2); background: #060708;
+  box-shadow: inset 0 2px 0 rgba(0,0,0,.95), inset 0 3px 6px rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.075); isolation: isolate; }
+.key.clr::before { content: ""; position: absolute; inset: 4px 4px 3px; border-radius: 3px; z-index: -1;
+  background: linear-gradient(#1f2226, #191b1f); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); }
+.key.clr.dis { color: #42474e; }
+.key.clr.dis::before { background: linear-gradient(#16181b, #131518); }
+.led { width: 16px; height: 3px; border-radius: 1px; background: #0a0b0d; flex: none;
+  box-shadow: inset 0 1px 1px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+.led.on { background: var(--white-led); box-shadow: 0 0 6px 1px rgba(255,226,186,.5), 0 0 2px rgba(255,244,228,.95); }
+.key.dis .led { opacity: .5; }
+.sqg { width: 8px; height: 8px; border-radius: 1.5px; background: currentColor; flex: none; }
+
+/* ---------- 1. command bar: two rows on one grid. Column 1: time over the record modes (512 px each);
+   column 2: transport over the master; the tools icon closes row 1 ---------- */
+.bar { display: grid; grid-template-columns: 512px 1fr auto; grid-template-rows: 58px 44px;
+  column-gap: 22px; row-gap: 8px; padding: 7px 14px 0 16px; align-items: center; }
+.g-time { grid-area: 1 / 1; } .g-trans { grid-area: 1 / 2; justify-self: end; } .tools { grid-area: 1 / 3 / 3 / 4; }
+.rec { grid-area: 2 / 1; } .master { grid-area: 2 / 2; justify-self: end; }
+.grp { display: flex; align-items: center; gap: 8px; }
+
+/* bar keys: one height, the legend always on one line; LED above it, the value below it */
+.bk { --kh: 44px; width: 72px; padding: 0; display: block; }
+.bk > * { position: absolute; left: 0; right: 0; margin: 0 auto; text-align: center; }
+.bk.latch > .led { top: 7px; width: 18px; margin-left: -9px; left: 50%; right: auto; }
+.bk .l { top: 16px; display: flex; justify-content: center; align-items: center; gap: 6px; }
+.bk .v { top: 30px; font-size: 12px; color: var(--ink-2); letter-spacing: .02em; }
+.bk:not(.latch) .l { top: 15px; }
+.bk.fade .l { top: 9px; } .bk.fade .v { top: 26px; }
+.bk.on .v { color: #f4f2ec; }
+.bk .v .w { font-family: var(--font-legend); font-weight: 600; letter-spacing: .06em; font-size: 12px; }
+.bk.tap { width: 60px; }
+.bk.clr .l { color: var(--ink-2); font-size: 12px; }
+.rec .bk { width: 96px; }
+.rec .bk .l { letter-spacing: .05em; }
+
+.disp { width: 444px; height: 58px; flex: none; }
+.disp .glass { display: flex; align-items: center; padding: 0 18px 10px 18px; color: #f4f2ec; }
+.disp .tempo { font-size: 40px; line-height: 1; font-weight: 500; letter-spacing: -.01em; }
+.disp .meta { display: flex; flex-direction: column; gap: 5px; margin-left: 10px; font-size: 14px; color: var(--ink-2); }
+.disp .meta .top { display: flex; align-items: center; gap: 5px; }
+.disp .lamps { display: flex; gap: 10px; margin: 0 0 0 28px; }
+.disp .lamps i { width: 9px; height: 9px; border-radius: 50%; background: #1c1e22; box-shadow: inset 0 1px 1px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.05); }
+.disp .lamps i.on { background: var(--white-led); box-shadow: 0 0 6px 1px rgba(255,232,200,.5); }
+.disp .ro { display: flex; flex-direction: column; gap: 5px; margin-left: 26px; }
+.disp .lamps + .ro { margin-left: auto; }
+.disp .cap { font-size: 12px; color: #747b84; letter-spacing: .08em; }
+.disp .fig { font-size: 22px; line-height: 1; color: #f4f2ec; }
+.disp .fig .w { font-size: 12px; color: var(--ink-2); margin-left: 5px; }
+.disp .progress { position: absolute; left: 18px; right: 18px; bottom: 6px; height: 3px; border-radius: 1.5px; background: #222529; }
+.disp .progress::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 31.25%; border-radius: 1.5px; background: var(--white-led); box-shadow: 0 0 4px rgba(255,232,200,.55); }
+.disp .progress b { position: absolute; top: -3px; width: 1px; height: 9px; background: #50555c; }
+.disp .progress b:first-child { background: transparent; }
+
+/* the master, short: the stereo ladder from -36 dB with three printed marks, the knob, the value */
+.master { gap: 0; height: 46px; }
+.meter { position: relative; width: 120px; height: 36px; flex: none; }
+.meter .lad { position: absolute; left: 0; right: 0; height: 7px; }
+.meter .lad i { position: absolute; top: 0; bottom: 0; border-radius: 1px; background: var(--lens); box-shadow: inset 0 1px 1px rgba(0,0,0,.6); }
+.meter .lad i.g { background: #1b2620; } .meter .lad i.y { background: #2e2716; } .meter .lad i.r { background: #4a2026; }
+.meter .lad i.g.on { background: var(--m-green); box-shadow: 0 0 3px rgba(79,217,143,.4); }
+.meter .lad i.y.on { background: var(--m-amber); box-shadow: 0 0 3px rgba(255,176,46,.45); }
+.meter .lad i.r.on { background: var(--m-red); }
+.meter .scale { position: absolute; left: 0; right: 0; top: 25px; height: 12px; }
+.meter .scale span { position: absolute; transform: translateX(-50%); font-size: 12px; color: var(--ink-2); }
+.meter .scale b { position: absolute; top: -5px; width: 1px; height: 4px; background: #4d5259; }
+.master .knob { margin-left: 16px; }
+.master .win { margin-left: 10px; min-width: 50px; justify-content: center; }
+.tools { color: #a9afb7; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; }
+
+/* ---------- knob (from the accepted parts) ---------- */
+.knob { position: relative; width: var(--s, 40px); height: var(--s, 40px); flex: none; }
+.knob > svg.ticks { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); overflow: visible; }
+.knob .body { position: absolute; inset: 0; border-radius: 50%;
+  background: linear-gradient(180deg, rgba(255,255,255,.13), rgba(255,255,255,0) 42%, rgba(0,0,0,.5)),
+    repeating-conic-gradient(#2a2e34 0 var(--kd, 3deg), #0a0b0d var(--kd, 3deg) calc(var(--kd, 3deg) * 2));
+  box-shadow: 0 1px 0 #000, 0 calc(var(--s, 40px) * .07) calc(var(--s, 40px) * .14) rgba(0,0,0,.72), inset 0 1px 0 rgba(255,255,255,.16), inset 0 -1px 0 rgba(0,0,0,.6); }
+.knob .cap { position: absolute; inset: max(4px, calc(var(--s, 40px) * .075)); border-radius: 50%;
+  background: radial-gradient(120% 85% at 50% 0%, rgba(255,255,255,.13), rgba(255,255,255,0) 62%), linear-gradient(#2c3037, #16181c);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.15), inset 0 -1px 1px rgba(0,0,0,.55); }
+.knob .ptr { position: absolute; inset: max(4px, calc(var(--s, 40px) * .075)); transform: rotate(var(--a, 0deg)); }
+.knob .ptr::after { content: ""; position: absolute; left: 50%; top: 3%; width: 2px; height: 36%;
+  transform: translateX(-50%); border-radius: 1px; background: #f6f7f9; }
+.knob.dis { opacity: .55; }
+.knob.dis .ptr::after { background: #4a4f56; }
+.knob.dis .cap { background: linear-gradient(#202328, #141619); }
+
+/* ---------- 2. slots: slot A's whole signal line, slot B folded into one plate at the row's end ---------- */
+.slots { display: flex; align-items: stretch; padding: 0 14px 0 16px; }
+.slot { display: flex; align-items: center; height: var(--slots-h); position: relative; }
+.slot.a { flex: 1; padding-right: 12px; }
+.slot.b { padding-left: 12px; }
+.vgroove { width: 2px; flex: none; background: #08090b; box-shadow: 1px 0 0 rgba(255,255,255,.04); margin: 8px 0; }
+.sl { font-size: 22px; font-weight: 600; width: 16px; color: #f1f3f5; flex: none; }
+.slot .src { margin-left: 8px; width: 58px; padding: 0 6px 0 8px; height: 26px; }
+.slot .live { --kh: 32px; margin-left: 8px; width: 52px; padding-top: 5px; }
+.slot .live > .led { top: 5px; }
+.chain { display: flex; align-items: center; position: relative; height: 36px; }
+.sig { width: 11px; height: 36px; position: relative; flex: none; }
+.sig::before { content: ""; position: absolute; left: 0; right: 3px; top: 17.5px; height: 1px; background: #6a7078; }
+.sig::after { content: ""; position: absolute; right: 1px; top: 15px; border-left: 5px solid #8e949c; border-top: 3px solid transparent; border-bottom: 3px solid transparent; }
+.sig.dim::before { background: #33373c; } .sig.dim::after { border-left-color: #43474d; }
+.plate { height: 36px; border-radius: 5px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 8px; flex: none; position: relative;
+  background: linear-gradient(#262a30, #1e2126);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.12), inset 0 -1px 0 rgba(0,0,0,.35), 0 2px 0 #0d0f12, 0 3px 0 #030405, 0 4px 8px rgba(0,0,0,.5); }
+.pwr { width: 20px; height: 20px; border-radius: 50%; flex: none; position: relative;
+  background: linear-gradient(#383c43, #25282d); box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 2px 0 #101215, 0 3px 4px rgba(0,0,0,.55); }
+.pwr::after { content: ""; position: absolute; left: 7px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: #111214; box-shadow: inset 0 1px 1px #000; }
+.pwr.on::after { background: var(--play); box-shadow: 0 0 5px 1px rgba(69,210,149,.5); }
+.plate .name { font-size: 14px; color: #eef0f2; }
+.plate .what { margin-left: auto; padding-left: 2px; display: flex; align-items: center; gap: 6px; }
+.plate .fmt { font-size: 12px; color: var(--ink-2); letter-spacing: .06em; }
+.plate .ed { color: #d0d5db; display: flex; }
+.plate .menu { color: var(--ink-2); display: flex; padding-left: 6px; margin-left: auto; height: 20px; align-items: center;
+  box-shadow: inset 1px 0 0 rgba(0,0,0,.45), inset 2px 0 0 rgba(255,255,255,.04); }
+.plate .what + .menu { margin-left: 0; }
+.plate.byp { background: linear-gradient(#1f2226, #1a1c20); }
+.plate.byp .name { color: var(--ink-2); }
+.plate.idle { background: linear-gradient(#22252a, #1c1e22); }
+.plate.idle .name { color: #b9bec5; }
+.plate.idle .pwr.on::after { background: #2f8a63; box-shadow: none; }
+.bay { width: 34px; height: 36px; border-radius: 5px; flex: none; display: flex; align-items: center; justify-content: center; color: #7c838c;
+  background: #0d0f11; box-shadow: inset 0 1px 0 rgba(0,0,0,.95), inset 0 3px 7px rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.05); }
+.out { margin-left: auto; display: flex; align-items: center; gap: 0; }
+.sm { position: relative; width: 48px; height: 11px; flex: none; }
+.sm i { position: absolute; width: 2px; height: 4px; border-radius: .5px; background: #262a2f; }
+.sm i.on.g { background: var(--m-green); } .sm i.on.y { background: var(--m-amber); }
+.out .win { margin-left: 10px; width: 64px; justify-content: flex-end; padding: 0 7px; }
+/* slot B's plate carries its letter in the slot's own print, a step down as slot B is at 1920 */
+.p-b { gap: 7px; padding-right: 4px; }
+.p-b .menu { box-shadow: none; padding-left: 0; }
+.p-b .sl { color: #7c838c; width: auto; font-size: 22px; margin-left: 2px; }
+.p-b .name { margin-right: 2px; }
+.p-b .dot { color: var(--ink-3); font-size: 14px; margin: 0 -2px; }
+
+/* ---------- 3. the five loops: head | glass | mix, one centre line per lane ---------- */
+.loops { display: grid; grid-template-columns: var(--head-w) 1fr var(--mix-w); grid-template-rows: repeat(5, var(--lh)); }
+.cell { position: relative; }
+.cell.sel { background: linear-gradient(rgba(255,255,255,.042), rgba(255,255,255,.028)); }
+.cell.g { box-shadow: inset 0 2px 0 #08090b, inset 0 3px 0 rgba(255,255,255,.035); }
+.pane { grid-column: 2; grid-row: 1 / span 5; position: relative; }
+.pane .bezel { position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
+.pane canvas { position: absolute; left: 0; top: 0; display: block; }
+.pane .bn { position: absolute; top: 6px; font: 500 12px/1 var(--font-num); color: #6e757e; z-index: 2; }
+
+/* head: one 70 px block on the lane's centre line. Number + state | the lit key | STOP over CLR */
+.head { display: flex; align-items: center; padding: 0 10px 0 16px; gap: 8px; }
+.ident { width: 78px; height: 70px; position: relative; flex: none; }
+.lnum { position: absolute; left: -2px; top: -5px; font-size: 40px; line-height: 1; font-weight: 500; letter-spacing: -.02em; color: var(--nc); }
+.st { position: absolute; left: 0; top: 38px; font: 600 14px/1 var(--font-legend); letter-spacing: .05em; color: var(--sc); white-space: nowrap; text-transform: uppercase; }
+.from { position: absolute; left: 0; top: 58px; font-size: 12px; color: var(--ink-2); letter-spacing: .08em; }
+.t-lead { --nc: #ffffff; }
+.t-lead .st { text-shadow: 0 0 8px color-mix(in srgb, var(--sc) 45%, transparent); }
+.t-on { --nc: #ccd1d7; }
+.t-low { --nc: #80868e; }
+.t-empty { --nc: #4b5158; }
+.side { display: flex; flex-direction: column; gap: 6px; }
+.side .key { width: 56px; padding: 0; font-size: 12px; }
+.side .stop { --kh: 33px; margin-bottom: 2px; gap: 5px; }
+.side .stop .sqg { width: 7px; height: 7px; }
+.side .clr { --kh: 31px; }
+
+/* the lit key: a frosted light window across its top in the state colour, the next action on its face */
+.ka { width: 90px; height: 70px; border-radius: 7px; position: relative; color: #eef1f4; flex: none; margin-bottom: 4px;
+  background: linear-gradient(#33383f, #272b31 70%, #23272d);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.15), inset 0 -1px 0 rgba(0,0,0,.3), 0 4px 0 #15181c, 0 5px 0 #050607, 0 7px 12px rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; padding-top: 17px; }
+.t-low .ka { color: #8d949c; }
+.ka svg.g { width: 28px; height: 28px; stroke-width: 1.7; }
+.ka .lw { position: absolute; left: 10px; right: 10px; top: 10px; height: 9px; border-radius: 2.5px; overflow: hidden;
+  background: #0b0c0e; box-shadow: inset 0 1px 2px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.1); }
+.ka .lw::after { content: ""; position: absolute; inset: 0; border-radius: 2.5px; opacity: var(--lo, 1);
+  background: linear-gradient(180deg, rgba(255,255,255,.38), rgba(255,255,255,0) 55%),
+    linear-gradient(90deg, color-mix(in srgb, var(--c) 78%, #000), var(--c) 22%, color-mix(in srgb, var(--c) 70%, #fff) 50%, var(--c) 78%, color-mix(in srgb, var(--c) 78%, #000)); }
+.ka.lit .lw { box-shadow: 0 0 calc(var(--gl) * 11px) calc(var(--gl) * 2px) color-mix(in srgb, var(--c) calc(var(--gl, 1) * 55%), transparent), 0 0 2px color-mix(in srgb, var(--c) 80%, transparent); }
+.ka.unlit .lw::after { display: none; }
+.ka.lit::before { content: ""; position: absolute; left: 7px; right: 7px; top: 15px; height: 28px; border-radius: 4px; opacity: var(--gl, 1);
+  background: radial-gradient(60% 100% at 50% 0%, color-mix(in srgb, var(--c) 17%, transparent), transparent 75%); }
+svg.g { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+svg.g .fill { fill: currentColor; stroke: none; }
+
+/* mix: FX MUTE (latched) | EDIT (momentary; its menu holds REV and UNDO); then one line: the fader and
+   ONE value window that holds the level and the pan, each changed where it is printed */
+.mix { display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 0 14px 0 14px; }
+.mkeys { display: flex; align-items: center; gap: 6px; height: 36px; }
+.mkeys .key { --kh: 34px; }
+.mkeys .sp { flex: 1; }
+.mkeys .fx { width: 50px; } .mkeys .mute { width: 66px; }
+.mkeys .mo { --kh: 30px; width: 70px; padding: 0 6px 0 8px; font-size: 12px; color: #aab0b7; gap: 4px;
+  background: linear-gradient(#2a2d32, #222428);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.25), 0 2px 0 #131518, 0 3px 0 #050607, 0 4px 6px rgba(0,0,0,.45); }
+.mkeys .mo.dis { color: #464b52; background: linear-gradient(#1c1f22, #18191c); }
+.mline { display: flex; align-items: flex-start; height: 36px; }
+.fader { position: relative; height: 36px; width: 96px; flex: none; }
+.fader .rail { position: absolute; left: 0; right: 0; top: 7px; height: 8px; border-radius: 4px; background: #020304;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 4px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.08); }
+.fader .tick { position: absolute; top: 21px; width: 1.5px; height: 4px; margin-left: -.75px; background: #6f767f; }
+.fader .tick.unity { top: 20px; height: 6px; width: 2px; margin-left: -1px; background: #e4e8ec; }
+.fader .zero { position: absolute; top: 27px; transform: translateX(-50%); font-size: 12px; line-height: 1; color: #d4d8dd; }
+.fader .capf { position: absolute; top: 1px; width: 26px; height: 20px; margin-left: -13px; border-radius: 4px;
+  background: linear-gradient(#3c4047, #2a2d33);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), inset 0 -1px 0 rgba(0,0,0,.3), 0 3px 0 #16181b, 0 4px 0 #040506, 0 6px 8px rgba(0,0,0,.6); }
+.fader .capf::after { content: ""; position: absolute; left: 12px; top: 3px; bottom: 3px; width: 2px; background: #f4f6f8; border-radius: 1px; }
+.fader.dis .capf { background: linear-gradient(#202327, #1b1d21); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 3px 0 #111316, 0 4px 0 #040506; }
+.fader.dis .capf::after { background: #42474e; }
+.fader.dis .tick { background: #3a3f45; }
+.fader.dis .tick.unity { background: #4d535a; } .fader.dis .zero { color: #4d535a; }
+/* the value window: level | pan, a fine printed division between the two fields */
+.mline .win { margin-left: auto; width: 98px; padding: 0; gap: 0; align-items: stretch; margin-top: -3px; }
+.mline .win > span { display: flex; align-items: center; }
+.mline .win .lv { flex: 1; justify-content: flex-end; padding-right: 8px; }
+.mline .win .pn { width: 34px; justify-content: center; box-shadow: inset 1px 0 0 rgba(255,255,255,.07), inset 2px 0 0 rgba(0,0,0,.6); }
+
+/* REC and OVERDUB are told from PLAYING without colour (from the control sheet) */
+/* the next press while counting in: the count itself, in the numerals face */
+.ka .cnt { font: 500 38px/1 var(--font-num); font-variant-numeric: tabular-nums; color: #f6f3ec; margin-top: -2px; }
+/* a split window: recording = a round rec lamp + the bar; count-in = four beat cells, one goes out per beat */
+.ka .lw.split { background: none; box-shadow: none; overflow: visible; display: flex; gap: 4px; }
+.ka .lw.split::after { display: none; }
+.ka .seg { position: relative; height: 9px; flex: 1; border-radius: 2.5px; overflow: hidden;
+  background: #0b0c0e; box-shadow: inset 0 1px 2px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.1); }
+.ka .seg.dot { flex: none; width: 9px; border-radius: 50%; }
+.ka .seg::after { content: ""; position: absolute; inset: 0; border-radius: inherit; opacity: var(--lo, 1);
+  background: linear-gradient(180deg, rgba(255,255,255,.38), rgba(255,255,255,0) 55%),
+    linear-gradient(90deg, color-mix(in srgb, var(--c) 78%, #000), var(--c) 22%, color-mix(in srgb, var(--c) 70%, #fff) 50%, var(--c) 78%, color-mix(in srgb, var(--c) 78%, #000)); }
+.ka .seg.dot::after { background: radial-gradient(circle at 50% 35%, color-mix(in srgb, var(--c) 55%, #fff), var(--c) 60%, color-mix(in srgb, var(--c) 80%, #000)); }
