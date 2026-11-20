@@ -41,6 +41,8 @@ added a line.
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the
   saved settings are kept): say that they are kept? An import whose slot holds another plugin toasts
   "This session used X in slot B": enough, or offer to load it?
+- **The master meter reads weak (the owner's eye on the running app, 2026-11-20, not urgent):** the
+  ladder and its scale (-48 … 0) beside the master knob; which of the two he means is unread.
 - **MIDI learn row:** is "latching" clear to a guitarist? A long binding list makes the popover tall.
 
 ## By ear, when convenient
@@ -57,22 +59,18 @@ added a line.
   locks at the first take's count-in until CLEAR ALL, so the loops would need a real-time stretch in
   the engine; candidates, unevaluated: Signalsmith Stretch (MIT, crates `signalsmith-stretch`,
   `ssstretch`), Bungee (MPL-2.0), Rubber Band (GPL).
-- **Asked by the owner (2026-11-20): a chain per slot, and BleepLoop's own plugins**: several effects and
-  plugins in series on a slot, as on an Ableton track (the owner plays the amp-sim with OTT after it),
-  and native BleepLoop plugins with their own interface; VST3 is enough for the owner if it is the best
-  format (Ableton Live 12 loads VST2 and VST3, not CLAP). Built so far: the input OTT (one setting, inline after each slot; `docs/ARCHITECTURE.md`
-  § Audio architecture), the parked one-knob compressor's place. Not started: a chain needs N units per
-  slot in `slots.rs` (latency summed into the record alignment, a mid-chain insert crossfaded, an
-  editor and saved state per unit, rig and session recall per unit); an own plugin can share
-  `lf-engine`'s DSP through a VST3 shell (`nih-plug` is in maintenance mode; its community fork and
-  Coupler's MIT/Apache `vst3` bindings are the candidates; the VST 3 SDK is MIT since 3.8). Waits on
-  the owner's word on scope.
+- **BleepLoop's own plugins with full faces (the owner, 2026-11-20):** native units with their own
+  interface, full plugin-style faces in the manner of Neural DSP's; VST3 is enough for the owner if it is the best format (Ableton Live 12
+  loads VST2 and VST3, not CLAP). The chain per slot he asked for the same day is being built
+  (`docs/unit-contract.md`), and the OTT face is the start he accepted. An own plugin outside BleepLoop
+  can share `lf-engine`'s DSP through a VST3 shell (`nih-plug` is in maintenance mode; its community fork
+  and Coupler's MIT/Apache `vst3` bindings are the candidates; the VST 3 SDK is MIT since 3.8).
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
   first take (it meets the bar math every meter shares, `grid.rs`); more built-in
   synths (they fill layers, they do not compete with
   plugins); a recent-jams shelf (keep the last N recovery archives on ✕ ALL and close, offered in
-  IMPORT, M); resampling on import or recovery (S); one `.pill` primitive with type tokens; a rhythm
-  guide, three GM-kit grooves on the master pulse instead of the click (M, ear-gated).
+  IMPORT, M); resampling on import or recovery (S); one `.pill` primitive with type tokens. (The GM-kit grooves
+  left this list on the owner's word, 2026-11-20: built last and detachable.)
 - **Dropped by the owner (2026-10-07):** a tester's "open device settings" button that opens the ASIO
   driver's own panel for rate and buffer: asio-sys 0.3.0 does not expose the call, and a change made
   there mid-run is the open thread in `src-tauri/OPEN-THREADS.md` (a panel change while the app runs).
