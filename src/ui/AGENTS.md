@@ -59,7 +59,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   line through a plain feed that Solid effects write. `verify/guards/stage-draw.mjs` checks both loops,
   the grid's exception by name and only inside its master-length gate, and the tuner's
   (`tuner/tuner-loop.ts`), which tells its Solid side the note, the in-tune state and the no-signal
-  state through a callback, on change only. The tuner overlay shows exactly while the feed's last
+  state through a callback, on change only; and the OTT's (`units/ott-loop.ts`: its face's glass and its
+  plate's miniature), which reads the units' meter mirror (`units/unit-meters.ts`) the engine store writes
+  from the feed's `unitMeters`, never a signal. The tuner overlay shows exactly while the feed's last
   `Tuner` event said on (every reset frame turns it off before its events apply); Esc and its close
   send `SetTuner(false)`, never a local flip.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
@@ -86,6 +88,15 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   the feed's `Toggled`, never their own flip (`state/engine-store.ts` `toggleSetting`); GO LIVE's press
   sends the engine's toggle too, and what means a value (an unload's live-off, a reload's resume, an
   effect pick's auto-start) `SetSlotLive`; the cap shows the feed's `live` (`state/native-io.ts`).
+- **The chain seam:** while `platform.chain.available` (the DEV fake with `__lfChainFake`; the native engine
+  once it speaks the chain) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
+  `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's face; otherwise the row is
+  the fixed topology (`instrument/InstrumentSlot.tsx`), and the feed's `chains` apply to nothing. A plate moves
+  when the feed says so, never on drop; a drop is judged at its release, from the plates' places when the drag
+  began. A refusal the contract makes certain (a ninth unit, a source moved, an effect ahead of a source) is the
+  slot's tag with nothing sent (`addRefusal`, `moveRefusal`), judged against the chain as the edits already
+  sent leave it (a reloading source is still the source); the host resolves the rest. A gesture reaches only a
+  seated unit, and a popover of a unit that stops being seated closes.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.
@@ -101,6 +112,32 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   `console.error` sites, which feed the release log. Keep both.
 
 ## Open threads (non-gate)
+
+- **Chain mode's activation.** The gate is `platform.chain.available` (`state/chain.ts` `chainShown`): the
+  native host refuses every chain call, so chain mode is the DEV fake's alone. It turns on natively only
+  together with the native chain host and these, none built: contract §6's durable migration in rig recall
+  (`lf.rig` with its `pending` step; chain mode today simply does not draw the old IN FX sends, and their
+  values do not become units); the named pedal actions (`InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt`)
+  running `Toggle.Units` in chain mode instead of the legacy sends; the per-unit editor-closed event natively
+  (`plugin:editor-closed` carrying `unit`; the fake has it, `ChainHost.onEditorClosed`); the slot's level kept
+  across a launch (chain mode holds it in memory, unity at boot, `state/instrument.ts` `chainGains`); SYNTH's
+  instrument pick through the note router (§4; a synth unit takes its pick only at its add). Chain mode
+  already routes notes to the slot (`{ Slot: n }`) and sends the slot's level as `SetSlotGain`, never the
+  legacy `Builtin` target or `SetInstrumentGain`. Next check: with the engine step, `rig-recall` on a stored
+  v0.8.9 profile in chain mode.
+
+- **Chain mode's edges on the fake, left at the branch's third review** (each read from source by a
+  reviewer, none reproduced; the next engine step rewrites held edits and moves, so they are judged there):
+  a drag whose chain shrinks to one plate ends without swallowing its release, so a release on the name can
+  open Parameters (`units/ChainLine.tsx`, the unseat/alone effect); a fold with the focus in the `+` menu's
+  portal loses it (the hand-off's `owned` flag sees plate portals only; its 1 s `lostAt` window is also
+  fragile); `moveRefusal` (`state/chain.ts`) assumes the queued edits apply, while a scripted report clears the
+  fake's queue, so a scripted waiting or leaving source makes the row and the fake disagree; a failed reload
+  with the editor open leaves the UI thinking it closed (the fake keeps it open: the next press sends Open);
+  the fake can emit `leaving` with `reloading` set, which contract §2 does not allow and the decoder accepts.
+  The contract question beside them: a move's `to` indexes the chain as it stands, while the host applies
+  it after the held edits ahead, so a held removal ahead shifts a target past 0 by one (translate in the UI,
+  or index against the chain to come). Next check: a chain-ui case per edge on the engine step's fake.
 
 - A reset that asks for the kept meter (`engine-store.ts` `meterAsked`) guards only its own frame: a
   later Transport that lands before the asked `SetMeter` applies writes the engine's 4/4 to `lf.meter`

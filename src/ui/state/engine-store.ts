@@ -52,6 +52,8 @@ import { adoptEngineLive, engineInputLive, setEngineInput } from './native-io';
 import { notifyError, notifyInfo, notifyNote } from '../../notify';
 import { settingsAction } from '../../settings-opener';
 import { confirm } from '../confirm/confirm-store';
+import { applyChains, chainShown } from './chain';
+import { applyUnitMeters, dropUnitMeters } from '../units/unit-meters';
 
 /**
  * OWNS: the UI's view of the native engine (invariants 3 and 6): the feed reducer, the device that
@@ -844,6 +846,7 @@ function applyFrameNow(f: FeedFrame): void {
     }
     for (let i = 0; i < ENGINE_LANES; i++) plain.revision[i]++;
     dropScope();
+    dropUnitMeters();
     plain.resets++;
     setFeedResets(plain.resets);
     plain.clearing.fill(false);
@@ -896,6 +899,13 @@ function applyFrameNow(f: FeedFrame): void {
   }
   for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max, f.catchUp);
   if (f.scope) applyScope(f.scope);
+  // The chain per slot (unit contract §2): its report on change and on a reset frame (absent: unchanged);
+  // the units' meters into their plain mirror only, as the scope's columns (invariant 6). Only while the
+  // row draws the chain (`chainShown`): otherwise the row is the fixed topology and a report is no state of it.
+  if (chainShown()) {
+    if (f.chains) applyChains(f.chains);
+    if (f.unitMeters) applyUnitMeters(f.unitMeters);
+  }
   // After the frame's events: a reading in the frame that turned the tuner on is shown, one in the frame
   // that turned it off is not.
   if (f.tuner) applyTunerReading(f.tuner);

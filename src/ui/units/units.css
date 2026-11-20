@@ -1,0 +1,332 @@
+/* A slot's chain on its signal line (ChainLine.tsx): the row's plates (slot.css `.plate`, one anatomy) in
+   chain order, then the `+` bay. What this file adds to the plate: the name as the parameters' press, a
+   status line under it for a unit that is not seated (loading, waiting, removing, failed with its reason:
+   print, never a new colour), a lamp that breathes while a unit loads, the built-ins' small marks, the
+   drag (the plate follows the pointer, a drop marker between plates) and the compact plates of a narrow
+   row (row-fit.ts). */
+
+.unit-line {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: var(--plate-h);
+}
+/* the row's last folds: compact plates (no static marks, shorter names); then, only where that is still too
+   long, the plates scroll along their own line, its thin scrollbar under them (a focused plate scrolls in).
+   The `+` stays outside the scroller, always in sight. The overflow cue is a chevron at each end, outside
+   the plates, lit only toward the side that holds more (a scroll-driven animation: no scroll, no cue); it
+   never dims a plate's text. */
+.unit-chain {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.unit-chain--scroll {
+  flex: 0 1 auto;
+  timeline-scope: --chain-x;
+}
+.unit-line.unit-line--scroll {
+  min-width: 0;
+  height: auto;
+  padding: 6px 2px 0; /* room at each end, so the first and last plate scroll fully in */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #4a4f56 transparent;
+  scroll-timeline: --chain-x x;
+}
+.unit-more {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(14px * var(--ui));
+  color: var(--legend);
+  opacity: 0;
+  pointer-events: none;
+}
+.unit-chain--scroll > .unit-more {
+  display: flex;
+}
+.unit-more--l {
+  animation: unit-more-l linear both;
+  animation-timeline: --chain-x;
+}
+.unit-more--r {
+  animation: unit-more-r linear both;
+  animation-timeline: --chain-x;
+}
+@keyframes unit-more-l {
+  0% {
+    opacity: 0;
+  }
+  3%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes unit-more-r {
+  0%,
+  97% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.slot__chain:has(.unit-chain--scroll) {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.slot:has(.unit-chain--scroll) {
+  min-width: 0;
+}
+.unit-line--compact .plate.unit {
+  min-width: 0;
+  gap: calc(6px * var(--ui));
+}
+.unit-line--compact .plate__name {
+  max-width: calc(96px * var(--ui));
+}
+
+/* ---- the plate's text: the name (a press opens the parameters) over its status ---- */
+.unit__text {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  gap: 2px;
+}
+.plate .unit__name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  appearance: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.plate .unit__name:hover:not(:disabled) .plate__name {
+  color: var(--engaged);
+}
+.plate .unit__name:disabled {
+  cursor: default;
+}
+.plate .unit__name:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.unit__status {
+  max-width: calc(180px * var(--ui));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 calc(12px * var(--ui)) / 1 var(--font-legend);
+  color: var(--dim);
+}
+.unit-line--compact .unit__status {
+  max-width: calc(96px * var(--ui));
+}
+/* a failed add: its plate stays in its place, sunk, its name struck, its reason read */
+.plate.unit--failed {
+  background: #121417;
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.9), inset 0 2px 5px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.unit--failed .plate__name {
+  color: var(--dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+.unit--failed .unit__status {
+  color: var(--legend);
+}
+/* a parked unit keeps its seat (its place, its latency) until a restart reseats it: raised as a bypassed
+   plate, its name kept, unstruck, and its reason read under it */
+.plate.unit--parked {
+  background: none;
+  box-shadow: none;
+}
+.unit--parked .plate__name {
+  text-decoration: none;
+}
+/* an edit of the unit waits for the take: its status line says what will happen when it ends */
+.unit--held .unit__status {
+  color: var(--legend);
+}
+/* loading or waiting: the lens breathes in warm white, the engaged chrome's colour (a change under way) */
+.plate__lamp.is-busy::after {
+  background: var(--engaged);
+  box-shadow: none;
+  animation: unit-breathe 1.4s ease-in-out infinite alternate;
+}
+@keyframes unit-breathe {
+  from {
+    opacity: 0.18;
+  }
+  to {
+    opacity: 0.7;
+  }
+}
+/* the open plate: one tone up, as the face hangs from it */
+.plate.unit--open {
+  background: linear-gradient(#30343b, #262a30);
+}
+
+/* ---- the marks: a small recessed window with what the unit does ---- */
+.unit-mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: calc(42px * var(--ui));
+  height: calc(24px * var(--ui));
+  border-radius: 3px;
+  background: var(--sunk);
+  box-shadow: var(--recess);
+  color: var(--faint);
+}
+.plate--byp .unit-mini {
+  color: #4a4f56;
+}
+.unit-mini--bare {
+  width: auto;
+  background: none;
+  box-shadow: none;
+  color: var(--dim);
+}
+/* the OTT's miniature: three band bars from the window's middle line, up warm white, down amber, the
+   band's gain now (--g0..--g2 in dB, ±12, written by ott-loop.ts) */
+.unit-mini--ott > i {
+  --g: var(--g0, 0);
+  position: relative;
+  width: calc(9px * var(--ui));
+  height: calc(100% - 4px);
+  /* the unlit cells, dark and still visible, as the face's ladder */
+  background: repeating-linear-gradient(to top, #15181c 0 2px, transparent 2px 3px);
+}
+.unit-mini--ott > i:nth-child(2) {
+  --g: var(--g1, 0);
+}
+.unit-mini--ott > i:nth-child(3) {
+  --g: var(--g2, 0);
+}
+.unit-mini--ott > i::before,
+.unit-mini--ott > i::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: calc(max(0, var(--g)) / 12 * 50%);
+  bottom: calc(50% + 1px);
+  background: repeating-linear-gradient(to top, var(--engaged) 0 2px, transparent 2px 3px);
+}
+.unit-mini--ott > i::after {
+  height: calc(max(0, -1 * var(--g)) / 12 * 50%);
+  top: calc(50% + 1px);
+  bottom: auto;
+  background: repeating-linear-gradient(to bottom, var(--meter-y) 0 2px, transparent 2px 3px);
+}
+/* the middle line: the 0 dB line of the face's glass */
+.unit-mini--ott {
+  background: linear-gradient(transparent calc(50% - 0.5px), #2b2f35 calc(50% - 0.5px) calc(50% + 0.5px), transparent calc(50% + 0.5px)), var(--sunk);
+}
+.plate--byp .unit-mini--ott > i::before,
+.plate--byp .unit-mini--ott > i::after {
+  opacity: 0.35;
+}
+
+/* ---- the `+` bay at the chain's end: recessed, a press opens what may be added ---- */
+.unit-add {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--plate-h);
+  height: var(--plate-h);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-ctl);
+  appearance: none;
+  cursor: pointer;
+  color: var(--dim);
+  background: #0d0f11;
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.95), inset 0 3px 7px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.unit-add:hover,
+.unit-add[aria-expanded='true'] {
+  color: var(--engaged);
+}
+.unit-add:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+/* the slot's refusal tag hangs under the `+` (slot.css `.pc__err`, anchored as the plates' are); it sits
+   outside the line, whose fold may mask what scrolls */
+.slot.slot {
+  anchor-scope: --err-live, --err-plate, --err-add;
+}
+.slot .unit-add {
+  anchor-name: --err-add;
+}
+.slot .unit-err.pc__err {
+  position-anchor: --err-add;
+}
+/* the row's popovers hang from their plate (slot.css `--slot-pop-plate`): the name's trigger sits inside the
+   plate's text, and the `+` is its own plate */
+.plate.unit:has(.unit__name[aria-expanded='true']) {
+  anchor-name: --slot-pop-plate;
+}
+.slot .unit-add[aria-expanded='true'] {
+  anchor-name: --slot-pop, --slot-pop-plate, --err-add;
+}
+.unit-add-menu {
+  min-width: 220px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+.unit-add-menu__head {
+  margin: 4px 10px 2px;
+  font: 600 12px / 1.4 var(--font-legend);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.unit-params__none {
+  margin: 4px 2px;
+  max-width: 260px;
+  font: 500 13px / 1.4 var(--font-legend);
+  color: var(--dim);
+}
+
+/* ---- the drag: the plate follows the pointer, lifted; a marker where it would land ---- */
+.unit-line--drag {
+  cursor: grabbing;
+}
+.plate.unit--dragging {
+  z-index: 3;
+  cursor: grabbing;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), var(--panel-drop);
+  transition: none;
+}
+.unit-drop {
+  position: absolute;
+  z-index: 4; /* over the lifted plate that passes it */
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--engaged);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plate__lamp.is-busy::after {
+    animation: none;
+    opacity: 0.5;
+  }
+}

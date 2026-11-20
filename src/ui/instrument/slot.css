@@ -688,6 +688,14 @@ button.plate__lamp:active {
   cursor: default;
   color: var(--faint);
 }
+/* a line read before a plate's entries: a failed unit's whole reason */
+.slot-menu__note {
+  max-width: 260px;
+  margin: 4px 10px 6px;
+  font: 500 13px / 1.4 var(--font-legend);
+  color: var(--legend);
+  overflow-wrap: anywhere;
+}
 .slot-menu__sep {
   height: 1px;
   margin: 5px 8px;

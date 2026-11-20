@@ -897,7 +897,9 @@ const FAKE_INPUTS: readonly string[] = ['Fake input 1', 'Fake input 2', 'Fake in
 let chainFakeMade: ReturnType<typeof createChainFake> | null = null;
 function chainFake(): ReturnType<typeof createChainFake> {
   chainFakeMade ??= createChainFake({
-    forced: () => engineForced(),
+    // The chain answers only when a probe asks for it (`__lfChainFake`): a probe that forces the engine
+    // fake alone drives the row as the native build draws it today (`available` false, the fixed topology).
+    forced: () => chainPluginsOn(),
     capturing: () => capturing(),
     deliver: (frame) => {
       for (const onFrame of engineSubscribers) onFrame(frame);

@@ -141,13 +141,19 @@ const swapping: [boolean, boolean] = [false, false];
  * switch), and changes nothing for the same slot and target again, so a click on the active slot cuts
  * no chord. */
 function routeEngine(i: 0 | 1): void {
-  const target: NoteTarget = slotPlugins()[i]
+  // With the chain drawn (`platform.chain.available`), notes go to the slot (unit contract §4): to its
+  // chain's source and every plugin effect in it, whatever the legacy synth pick says.
+  const target: NoteTarget = platform.chain.available || slotPlugins()[i]
     ? { Slot: i }
     : swapping[i] || slotOff()[i]
       ? 'Off'
       : { Builtin: slotIds()[i] as InstrumentId };
   input.selectTarget(i, target);
 }
+
+// With the chain drawn: each slot's level after its chain (unit contract: the slot volume sits after the
+// chain), unity at first. Not kept across a launch yet: the rig record's (`src/ui/AGENTS.md` § Open threads).
+const [chainGains, setChainGains] = createSignal<[number, number]>([1, 1]);
 
 // Per-slot plugin gain; null = no plugin.
 const [engineGains, setEngineGains] = createSignal<[number | null, number | null]>([null, null]);
@@ -170,6 +176,12 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
  */
 export function engineResync(first: boolean): void {
   applyActiveRouting();
+  if (platform.chain.available) {
+    // the chain's slot level after its chain; SYNTH's levels are its unit's params (unit contract §2, §4)
+    for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, chainGains()[slot]] });
+    if (first) disarmEngineLive();
+    return;
+  }
   for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
   for (const { id } of SYNTHS) sendEngine({ SetInstrumentGain: [id as InstrumentId, synthGains()[id]] });
   if (first) disarmEngineLive();
@@ -639,6 +651,7 @@ export const pluginGain = (): readonly [number | null, number | null] => engineG
  * (kept per instrument, so two slots holding one instrument share it).
  */
 export function slotLevel(slot: 0 | 1): number | null {
+  if (platform.chain.available) return chainGains()[slot];
   if (slotPlugins()[slot]) return pluginGain()[slot];
   return slotOff()[slot] ? inputGains()[slot] : (synthGains()[slotIds()[slot]] ?? 1);
 }
@@ -647,6 +660,11 @@ export function slotLevel(slot: 0 | 1): number | null {
  * for the next launch. */
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
+  if (platform.chain.available) {
+    setChainGains((prev) => withAt(prev, slot, v));
+    sendEngine({ SetSlotGain: [slot, v] });
+    return;
+  }
   const plugin = slotPlugins()[slot];
   if (plugin) {
     setPluginGain(slot, v);

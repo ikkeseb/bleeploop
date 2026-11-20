@@ -70,7 +70,7 @@ interface ChainHost {
    *  `plugin` and was not re-added since `since` (a `chains` frame); the load applies `toneToken`. */
   reload(unit: UnitId, plugin: PluginRef, since: number, toneToken: number): Promise<'reloaded' | 'moved' | 'failed'>;
   move(unit: UnitId, to: number): Promise<void>; // `to`: its index in its own chain; no move across slots
-  // openEditor, closeEditor, listParams, setParameter, takeTone: today's, addressed by unit.
+  // openEditor, closeEditor, onEditorClosed, listParams, setParameter, takeTone: today's, addressed by unit.
   /** Park a session's tone, identity-checked as today; `matches` by §8's rule. */
   importTone(slot: 0 | 1, bytes: Uint8Array, plugin: PluginRef, unit?: UnitId):
     Promise<{ token: number | null; name: string; matches: UnitId[] }>;
@@ -127,6 +127,9 @@ type UnitState = UnitRecord & { // an interface cannot extend the union
   source: boolean; name: string; latency: Frame; error?: string;
   /** waiting: held until a take ends (§7); failed: no seat, or parked (§3), the plate in its place. */
   state: 'loading' | 'waiting' | 'seated' | 'leaving' | 'failed';
+  parked?: boolean; // `failed` by a park (§3): its seat kept, a restart may reseat it; absent: a failed add
+  held?: boolean;   // an edit of this unit waits for a take (a removal while `leaving`, a queued move)
+  reloading?: boolean; // `loading`/`waiting` by a reload (§3): the old instance still applied; absent: an add
 };
 interface UnitMeter { unit: UnitId; out: [number, number]; bands?: [BandMeter, BandMeter, BandMeter] }
 interface BandMeter { gain: number; gainMin: number; gainMax: number; level: number; levelPeak: number }

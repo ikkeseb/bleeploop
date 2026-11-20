@@ -68,6 +68,7 @@ const chain: ChainHost = {
   move: absent,
   openEditor: absent,
   closeEditor: absent,
+  onEditorClosed: () => () => {},
   listParams: absent,
   setParameter: absent,
   takeTone: absent,
