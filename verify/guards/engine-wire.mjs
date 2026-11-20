@@ -177,6 +177,19 @@ for (const f of fixture.feed) {
     assert.deepEqual(decoded.tuner, f.tuner ?? null);
   });
 }
+check('a chains frame decodes whole: parked, held and reloading kept, absent where absent', () => {
+  const plugin = { format: 'vst3', path: 'C:\\Fake\\FakeAmp.vst3', id: 'fake.amp' };
+  const echo = { kind: 'echo', params: { echoLevel: 0.5 }, bypass: false, source: false, name: 'ECHO', latency: 0 };
+  const units = [
+    { id: 1, kind: 'plugin', plugin, bypass: false, source: true, name: 'Fake Amp', latency: 64, state: 'loading', reloading: true },
+    { id: 2, ...echo, state: 'failed', error: 'the restart failed', parked: true },
+    { id: 3, ...echo, state: 'leaving', held: true },
+    { id: 4, ...echo, state: 'seated', held: true },
+    { id: 5, ...echo, state: 'failed', error: 'the DLL did not load' },
+  ];
+  const chains = [{ units, latency: 64, held: true }, { units: [], latency: 0, held: false }];
+  assert.deepEqual(decodeFeedFrame({ ...structuredClone(fixture.feed[1]), chains: structuredClone(chains) }).chains, chains);
+});
 check('the fixture has a frame carrying scope columns and frames carrying none', () => {
   const carried = fixture.feed.filter((f) => f.scope !== undefined);
   assert.equal(carried.length, 1);

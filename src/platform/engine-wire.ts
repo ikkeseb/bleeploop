@@ -136,6 +136,9 @@ export type UnitState = UnitRecord & {
   parked?: boolean;
   /** An edit of this unit waits for a take to end (its removal while `leaving`, a move while `seated`). */
   held?: boolean;
+  /** `loading` or `waiting` by a reload (unit contract §3): its old instance stays seated, applied and
+   * counted until the new one lands. Absent: an add, not applied yet. */
+  reloading?: boolean;
 };
 /** One slot's chain as applied: its units in order, their latencies' sum (bypassed ones included), and
  * whether an edit waits for a take to end. */
@@ -864,6 +867,7 @@ function decodeUnitState(v: unknown, what: string): UnitState {
     ...(o.error === undefined ? {} : { error: str(o.error, `${what}.error`) }),
     ...(o.parked === undefined ? {} : { parked: bool(o.parked, `${what}.parked`) }),
     ...(o.held === undefined ? {} : { held: bool(o.held, `${what}.held`) }),
+    ...(o.reloading === undefined ? {} : { reloading: bool(o.reloading, `${what}.reloading`) }),
   };
   if (kind === 'plugin') {
     const p = obj(o.plugin, `${what}.plugin`);

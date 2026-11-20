@@ -57,9 +57,11 @@ if (platform.chain.available)
     if (editors().has(unit)) setEditors(new Set([...editors()].filter((id) => id !== unit)));
   });
 
-/** Whether `u` is applied in its chain: what sets the chain's role and what the batch reaches (seated, on
- * its way out, or parked in its seat). A loading or held unit is not, yet. */
-export const isApplied = (u: UnitState): boolean => u.state === 'seated' || u.state === 'leaving' || (u.state === 'failed' && u.parked === true);
+/** Whether `u` is applied in its chain: what sets the chain's role (seated, on its way out, parked in its
+ * seat, or reloading: its old instance plays on until the new one lands, unit contract §3). A unit still
+ * loading or waiting for its add is not, yet. */
+export const isApplied = (u: UnitState): boolean =>
+  u.state === 'seated' || u.state === 'leaving' || u.reloading === true || (u.state === 'failed' && u.parked === true);
 
 /** The unit that heads slot `slot`'s chain as applied (unit contract §4: a source there makes it a source
  * chain), or undefined. */
@@ -110,7 +112,10 @@ export function addRefusal(slot: 0 | 1, spec: UnitSpec): string | null {
 }
 
 /** Why moving `unit` to index `to` of its chain is refused for certain (unit contract §4: a source only
- * heads its chain, an effect never goes ahead of one), or that it is no move at all. `null`: send it. */
+ * heads its chain, an effect never goes ahead of one), or that it is no move at all. `null`: send it.
+ * Judged as the host judges a move: against the chain as it will be once the edits already sent apply
+ * (a move waits behind them, then is judged again, §7): a unit on its way out is gone by then, a source
+ * waiting for its add heads it; what only an unanswered load could settle is the host's. */
 export function moveRefusal(unit: UnitId, to: number): string | null {
   const slot = slotOf(unit);
   if (slot === null) return 'the unit is no longer in the chain';
@@ -119,9 +124,11 @@ export function moveRefusal(unit: UnitId, to: number): string | null {
   const u = units[at];
   if (u.state !== 'seated') return `${u.name} is not seated`;
   if (to < 0 || to >= units.length || to === at) return 'no move';
-  if (u.source) return 'a source only heads its chain';
-  const head = appliedHead(slot);
-  if (to === 0 && head?.source === true && head.id !== unit) return 'an effect cannot go ahead of the source';
+  if (u.source) return to === 0 ? null : 'a source only heads its chain';
+  const sourceHeads = units.some(
+    (o) => o.id !== unit && o.source && ((isApplied(o) && o.state !== 'leaving') || (o.state === 'waiting' && o.reloading !== true)),
+  );
+  if (to === 0 && sourceHeads) return 'an effect cannot go ahead of the source';
   return null;
 }
 

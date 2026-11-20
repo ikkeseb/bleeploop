@@ -7,12 +7,17 @@
  * - add: each built-in through the `+` menu (ECHO, REVERB, RING MOD, OTT), a synth and a plugin; each is
  *   one `add` call at the chain's end and a plate in the chain's order, its mark beside its name;
  * - the contract's known refusals judged in the row, the slot's tag and no call (a ninth unit, an effect
- *   moved ahead of a source by the menu or a drag, a source moved);
+ *   moved ahead of a source by the menu or a drag, a source moved), judged against the chain the edits
+ *   already sent leave: an effect dragged to the front while the source's removal waits for a take is sent;
+ *   a reloading source keeps LIVE away and is the source a replacement on a full chain takes;
  * - move: by the plate's menu, reached by the keyboard's arrows, focus kept on the moved plate's menu; by
  *   dragging a plate (one move per drop, the same index whatever the pointer's step, slow or fast); a
  *   press released outside before it was a drag, Escape (the pointer let go, a keyboard press after it
- *   not eaten), a lost capture and a plate unmounted mid-drag each leave no drag behind and send nothing;
- * - the plate's menu keeps its focused entry through a `chains` report;
+ *   not eaten; held, its repeats keep the release's click eaten), a lost capture, a plate unmounted or
+ *   parked mid-drag each leave no drag behind and send nothing; the release eats only its own pointer's
+ *   click; a move queued behind a held edit says so on its plate at once;
+ * - the plate's menu keeps its focused entry through a `chains` report; a resize that folds a slot with the
+ *   focus in its OTT face or a plate's menu hands the focus to its fold plate;
  * - bypass: the lamp sends `ToggleUnit`, the plate shows the feed's bypass; remove by the menu, focus to a
  *   surviving plate's menu;
  * - states on the plate, in its accessible name and said in the slot's live region: `loading`, `waiting`
@@ -34,7 +39,7 @@
  * - with the chain flag off, a `chains` frame changes nothing the UI holds.
  *
  * Each check is soft (`check`): a run reports every red one, then fails. `--shots=<dir>` writes each size's
- * screenshots (`fix2-<scene>-<W>x<H>.png`: the chain of four, the face open with its meters live, a drag in
+ * screenshots (`chain-<scene>-<W>x<H>.png`: the chain of four, the face open with its meters live, a drag in
  * flight, a failed and a parked plate; at 960 the chain of eight). Cannot see the native engine (it does not
  * speak the chain yet) or any sound.
  * Run: pnpm probe chain-ui
@@ -129,7 +134,7 @@ await probe(async ({ open }) => {
     const tag = (slot) => page.locator(`.slot--${slot} .unit-err`).textContent({ timeout: 1000 }).catch(() => null);
     const said = (slot) => page.locator(`.unit-said[data-slot="${slot}"]`).textContent();
     const label = (id) => plate(id).getAttribute('aria-label');
-    const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/fix2-${name}-${W}x${H}.png` }) : null);
+    const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/chain-${name}-${W}x${H}.png` }) : null);
     /** The centre of plate `id`'s name, where a drag takes it. */
     const grip = async (id) => {
       const b = await plate(id).locator('.plate__name').boundingBox();
@@ -346,6 +351,102 @@ await probe(async ({ open }) => {
         await page.mouse.up();
         await settle();
         assert.deepEqual((await calls()).slice(before), [], 'no call');
+      });
+      await check('move by drag: Escape held (repeating) through a drag, released on the name, opens nothing', async () => {
+        const order = await ids(0);
+        const from = await grip(order[0]);
+        const to = await plate(order[3]).boundingBox();
+        const before = (await calls()).length;
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move(to.x + to.width * 0.8, to.y + to.height / 2, { steps: 8 });
+        // a held key: its press, then the keyboard's repeats
+        for (let k = 0; k < 3; k++) await page.keyboard.down('Escape');
+        assert.equal(await page.locator('.unit-drop, .unit--dragging').count(), 0, 'Escape drops the drag');
+        // back over the plate's name, where a click of its own opens its Parameters
+        await page.mouse.move(from.x, from.y, { steps: 4 });
+        await page.mouse.up();
+        await page.keyboard.up('Escape');
+        await settle();
+        assert.equal(await page.locator('.infx-pop, .ott').count(), 0, 'the cancelled press’s release opened nothing');
+        assert.deepEqual((await calls()).slice(before), [], 'no call');
+        assert.deepEqual(await ids(0), order);
+      });
+      await check('move by drag: the release eats only its own pointer’s click', async () => {
+        const order = await ids(0);
+        const from = await grip(order[0]);
+        const to = await plate(order[3]).boundingBox();
+        const before = (await calls()).length;
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move(to.x + to.width * 0.8, to.y + to.height / 2, { steps: 8 });
+        await page.mouse.move(from.x, from.y + 300, { steps: 4 });
+        const sentBefore = (await sent()).length;
+        // the drag's pointer released and, in the same task, another pointer's click on another plate's lamp
+        const eaten = await page.evaluate(
+          ({ lamp, x, y }) => {
+            window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, pointerType: 'mouse', clientX: x, clientY: y, bubbles: true }));
+            const click = new PointerEvent('click', { pointerId: 2, pointerType: 'touch', detail: 1, bubbles: true, cancelable: true });
+            document.querySelector(lamp).dispatchEvent(click);
+            return click.defaultPrevented;
+          },
+          { lamp: `.unit[data-unit="${order[1]}"] .plate__lamp`, x: from.x, y: from.y + 300 },
+        );
+        await page.mouse.up();
+        await settle();
+        assert.equal(eaten, false, "another pointer's click is not eaten");
+        assert.ok((await sent()).slice(sentBefore).some((c) => c.Action?.ToggleUnit === order[1]), 'its lamp switched');
+        assert.deepEqual((await calls()).slice(before), [], 'no chain call');
+        // the lamp back as it was
+        await plate(order[1]).locator('.plate__lamp').click();
+        await settle();
+        assert.equal(await plate(order[1]).locator('.plate__lamp').getAttribute('aria-pressed'), 'true');
+      });
+      await check('move by drag: a plate parked mid-drag ends its drag at once, its pointer let go, nothing sent', async () => {
+        const order = await ids(0);
+        const from = await grip(order[0]);
+        const to = await plate(order[2]).boundingBox();
+        const before = (await calls()).length;
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move(to.x + to.width * 0.8, to.y + to.height / 2, { steps: 8 });
+        assert.equal(await page.locator('.unit-drop').count(), 1, 'a drag in flight');
+        await page.evaluate((id) => window.__lf.native.chain.park(id, 'probe'), order[0]);
+        await settle();
+        try {
+          assert.equal(await page.locator('.unit-drop, .unit--dragging, .unit-line--drag').count(), 0, 'parked: the drag is gone at once');
+          assert.equal(await plate(order[0]).evaluate((e) => e.hasPointerCapture(1)), false, 'the pointer is let go');
+          await page.mouse.move(to.x + 2, to.y + to.height / 2, { steps: 4 });
+          assert.equal(await page.locator('.unit-drop, .unit--dragging').count(), 0, 'moving on draws no drag');
+          await page.mouse.up();
+          await settle();
+          assert.deepEqual((await calls()).slice(before), [], 'no call');
+        } finally {
+          await page.mouse.up();
+          await page.evaluate((id) => window.__lf.native.chain.reseat(id), order[0]);
+          await settle();
+        }
+      });
+      await check('a move queued behind a held edit says so on its plate at once; it lands when the take ends', async () => {
+        const order = await ids(0);
+        await page.evaluate(() => (window.__lf.native.chain.capture = true));
+        try {
+          await add('a', 'Fake Lookahead');
+          const look = (await ids(0)).at(-1);
+          assert.equal(await plate(look).getAttribute('data-state'), 'waiting', 'the latent plugin waits for the take');
+          await menu(order[0], 'Move right');
+          assert.equal(await plate(order[0]).locator('.unit__status').textContent({ timeout: 1000 }), 'moves when the take ends');
+          assert.match(await label(order[0]), /moves when the take ends/);
+        } finally {
+          await page.evaluate(() => (window.__lf.native.chain.capture = false));
+        }
+        await settle();
+        const now = await ids(0);
+        assert.deepEqual(now.slice(0, 2), [order[1], order[0]], 'the move landed');
+        assert.equal(await plate(order[0]).locator('.unit__status').count(), 0, 'its plate says nothing more');
+        await menu(now.at(-1), 'Remove');
+        await menu(order[0], 'Move left');
+        assert.deepEqual(await ids(0), order);
       });
 
       // ── the OTT face ─────────────────────────────────────────────────────────────────────────────────
@@ -668,6 +769,96 @@ await probe(async ({ open }) => {
         assert.deepEqual(await ids(1), [synth, ott], 'nothing moved');
         assert.equal(await moves(), before, 'no move call');
       });
+      await check('a held source removal: an effect dragged to the front is sent, no refusal, and lands when the take ends', async () => {
+        await add('b', 'ECHO');
+        const [synth, ott, echo] = await ids(1);
+        const moves = async () => (await calls()).filter((x) => x[0] === 'move');
+        const before = (await moves()).length;
+        await page.evaluate(() => (window.__lf.native.chain.capture = true));
+        try {
+          await menu(synth, 'Remove');
+          assert.equal((await chains())[1].units[0].held, true, 'the source’s removal waits for the take');
+          const from = await grip(echo);
+          const to = await plate(synth).boundingBox();
+          await page.mouse.move(from.x, from.y);
+          await page.mouse.down();
+          await page.mouse.move(to.x + 4, to.y + to.height / 2, { steps: 8 });
+          assert.equal(await page.locator('.unit-drop').count(), 1, 'a marker at the front');
+          await page.mouse.up();
+          await settle();
+          assert.equal(await tag('b'), null, 'no refusal');
+          assert.deepEqual((await moves()).slice(before), [['move', echo, 0]], 'one move, to the front');
+        } finally {
+          await page.mouse.up();
+          await page.evaluate(() => (window.__lf.native.chain.capture = false));
+        }
+        await settle();
+        assert.deepEqual(await ids(1), [echo, ott], 'the source gone, the ECHO heads');
+        // B as it was: a synth heading the OTT
+        await menu(echo, 'Remove');
+        await add('b', 'Bass');
+        assert.equal((await ids(1)).length, 2);
+      });
+      await check('a reloading source keeps LIVE away and counts as the source a replacement on a full chain takes', async () => {
+        const liveB = page.locator('.slot--b .slot__live');
+        const [synth] = await ids(1);
+        await menu(synth, 'Remove');
+        await add('b', 'Fake Synth');
+        const [src] = await ids(1);
+        assert.equal((await chains())[1].units[0].source, true, 'the plugin instrument heads B');
+        assert.equal(await liveB.count(), 0, 'a source chain: no LIVE');
+        // B full: eight units, its head the plugin instrument (a call queues behind a held reload: fill first)
+        const fills = [];
+        try {
+          for (let k = 0; k < 8 && (await ids(1)).length < 8; k++) {
+            await add('b', 'ECHO');
+            fills.push((await ids(1)).at(-1));
+          }
+          assert.equal((await ids(1)).length, 8);
+          await page.evaluate(() => {
+            window.__lf.native.chain.holdLoading = new Promise((r) => (window.__release = r));
+          });
+          try {
+            // a reload of the seated instrument (its tone imported for it), held in loading
+            await page.evaluate(async (unit) => {
+              const plugin = { format: 'clap', path: 'C:\\Fake\\FakeSynth.clap', id: 'fake.synth' };
+              const out = [0x42, 0x4c, 0x54, 0x4e, 1, 0];
+              const put = (b) => out.push(b.length & 0xff, (b.length >> 8) & 0xff, (b.length >> 16) & 0xff, b.length >>> 24, ...b);
+              for (const f of [plugin.format, plugin.path, plugin.id, 'Probe']) put([...new TextEncoder().encode(f)]);
+              put([1, 2]);
+              let h = 0xcbf29ce484222325n;
+              for (const b of out) h = BigInt.asUintN(64, (h ^ BigInt(b)) * 0x100000001b3n);
+              for (let k = 0n; k < 8n; k++) out.push(Number((h >> (8n * k)) & 0xffn));
+              const chain = window.__lf.platform.chain;
+              const { token } = await chain.importTone(1, new Uint8Array(out), plugin, unit);
+              window.__reload = chain.reload(unit, plugin, Number.MAX_SAFE_INTEGER, token);
+            }, src);
+            await page.waitForFunction((id) => window.__lf.native.chain.chains()[1].units.find((u) => u.id === id)?.state === 'loading', src);
+            await settle();
+            assert.equal(await liveB.count(), 0, 'LIVE stays away while the old instance plays on');
+            const adds = async () => (await calls()).filter((x) => x[0] === 'add').length;
+            const before = await adds();
+            await add('b', 'Bass');
+            assert.equal(await tag('b'), null, 'no refusal in the row');
+            assert.equal(await adds(), before + 1, 'the replacement goes to the host');
+          } finally {
+            await page.evaluate(() => {
+              window.__lf.native.chain.holdLoading = null;
+              window.__release?.();
+            });
+          }
+          await page.waitForTimeout(250);
+          const after = await chains();
+          assert.equal(after[1].units.length, 8, 'the synth replaced the instrument: still eight');
+          assert.equal(after[1].units[0].kind, 'synth');
+        } finally {
+          // B as it was, a red step included: its source heading the OTT
+          await page.waitForTimeout(250);
+          for (const id of fills) await menu(id, 'Remove');
+          await page.waitForTimeout(200);
+        }
+        assert.equal((await ids(1)).length, 2, 'B as it was: a synth heading the OTT');
+      });
       await check('chain mode: notes to the slot, its level as SetSlotGain, never SetInstrumentGain', async () => {
         await page.evaluate(() => window.__lf.setActiveSlot(1));
         await settle();
@@ -738,6 +929,39 @@ await probe(async ({ open }) => {
       await reachUnits('a', 0);
       await reachUnits('b', 1);
     });
+    if (first) {
+      // a resize folds the slot that holds the focus in a portal (its OTT face, its plate menu): the focus
+      // goes to the slot's fold plate, never to the page
+      const wide = { width: 3400, height: 1440 };
+      const foldWith = async (slot, other, open) => {
+        await show(other);
+        await page.setViewportSize(wide);
+        await settle();
+        assert.equal(await page.locator('.slot__fold').count(), 0, `at ${wide.width} both lines show whole`);
+        await open();
+        await page.setViewportSize({ width: W, height: H });
+        await page.waitForTimeout(250);
+        assert.equal(await page.locator(`.slot--${slot} .slot__fold`).count(), 1, `slot ${slot.toUpperCase()} folded`);
+        const on = await page.evaluate((s) => document.activeElement === document.querySelector(`.slot--${s} .slot__fold`), slot);
+        assert.ok(on, `the focus on slot ${slot.toUpperCase()}'s fold plate, not ${await active()}`);
+      };
+      await check('a fold with the focus in the OTT face hands it to the slot’s fold plate', async () => {
+        await foldWith('a', 'b', async () => {
+          await plate(await unitOf('ott', 0)).locator('.unit__name').click();
+          await page.getByRole('dialog', { name: 'OTT, slot A' }).getByRole('slider').first().focus();
+          assert.match(await active(), /ott/, 'the focus in the face');
+        });
+      });
+      await check('a fold with the focus in a plate’s menu hands it to the slot’s fold plate', async () => {
+        await foldWith('b', 'a', async () => {
+          await plate(await unitOf('ott', 1)).locator('.plate__menu').click();
+          await page.getByRole('menuitem', { name: 'Remove', exact: true }).focus();
+          assert.match(await active(), /slot-menu__item/, 'the focus in the menu');
+        });
+      });
+      await page.setViewportSize({ width: W, height: H });
+      await show('a');
+    }
     await show('a');
     await page.evaluate(() => document.activeElement?.blur());
     if (SHOTS) await shot('chain');

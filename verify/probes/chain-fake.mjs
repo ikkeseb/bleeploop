@@ -10,17 +10,18 @@
  *   refused (add and move); a ninth unit refused (at once, or at activation when only it could tell); a
  *   move to another index; a removal through `leaving`; a hold in `loading` (`holdLoading`) and in
  *   `waiting` (a scripted recording lane, and the `capture` seam: a latent edit waits, `held`; a
- *   zero-latency effect in the other slot does not; a held move judged again when it applies; a held
- *   removal settling only once applied); a scripted failure (a `failed` plate in its place, the id free,
- *   removed by hand) and a park (`failed` in place, reseated);
+ *   zero-latency effect in the other slot does not; a held move published at once, its unit `held`, and
+ *   judged again when it applies; a held removal settling only once applied); a scripted failure (a
+ *   `failed` plate in its place, the id free, removed by hand) and a park (`failed` in place, reseated);
+ *   a scripted `failed` plate without `parked` is a failed add (no seat in the sum, no source, gone at once);
  * - the batch: `SetUnitBypass`, `ToggleUnit` and `Toggle.Units` (any on: all off, else all on, one
  *   `Toggled`; none of the kind: nothing) switch the model; `SetUnitParam` clamped as the engine clamps
  *   (ECHO's level 2 reads 1, its time rounds to an index, SYNTH's level stops at 1.5); a param of another
  *   kind and an unseated id dropped;
  * - D29 by unit across both slots (a move keeps the owner; orphaned; unordered); tones by §8 (a tone file
  *   read and identity-checked, its own unit first in either slot, an unmatched tone kept as the slot's file
- *   a new unit starts from, a token bound to its plugin); reload (the old seat counted while it loads, a
- *   latency change held by a take, `since` against a reset frame's seq);
+ *   a new unit starts from, a token bound to its plugin); reload (the old seat counted while it loads, its plate
+ *   `reloading`, a latency change held by a take, `since` against a reset frame's seq);
  * - a warm rig read back from a reset frame; a cold rig ingested from one (the model, its reservations,
  *   its batch); a reset settling a held move and a call still loading;
  * - the meters: one per seated unit on every frame the fake makes; the OTT face's `unitMeters` at about
@@ -328,7 +329,9 @@ await probe(async ({ open }) => {
   await capture(true);
   const synthRep = await mint();
   assert.deepEqual(await call('add', 1, synthRep, { kind: 'synth' }, 2), { ok: 'waiting' }, 'SYNTH replacing a zero-latency source moves the sum');
+  m = await mark();
   await start('__heldMove', 'move', srcB, 0);
+  await waitFrames(m, (f) => f.chains && unit(f.chains, srcB)?.held === true, 'the queued move published at once, its unit held');
   await start('__heldRm', 'remove', lookB);
   await page.waitForTimeout(50);
   assert.deepEqual([await settled('__heldMove'), await settled('__heldRm')], [false, false], 'both wait behind the held add');
@@ -498,8 +501,10 @@ await probe(async ({ open }) => {
   await start('__reloadL', 'reload', lookE, LOOKAHEAD, (await lastFrame()).seq, tokenL);
   await waitFrames(m, (f) => f.chains && unit(f.chains, lookE)?.state === 'loading', 'the reload loading');
   assert.equal((await last())[0].latency, 64, 'the old seat counts while the new one loads');
+  assert.equal(unit(await last(), lookE).reloading, true, 'the plate says its old instance plays on, applied');
   await unhold();
   assert.deepEqual(await settle('__reloadL'), { ok: 'reloaded' });
+  assert.equal(unit(await last(), lookE).reloading, undefined, 'landed: no longer reloading');
   const tokenToAmp = (await call('importTone', 0, ampTone, AMP)).ok.token;
   await capture(true);
   m = await mark();
@@ -507,6 +512,7 @@ await probe(async ({ open }) => {
   await waitFrames(m, (f) => f.chains && unit(f.chains, lookE)?.state === 'waiting', 'the reseat waiting');
   c = await last();
   assert.deepEqual([c[0].latency, c[0].held, await settled('__reloadAmp')], [64, true, false], 'a reseat that moves the sum waits for the take');
+  assert.equal(unit(c, lookE).reloading, true, 'waiting, the old instance still applied');
   await capture(false);
   assert.deepEqual(await settle('__reloadAmp'), { ok: 'reloaded' });
   c = await last();
@@ -680,6 +686,33 @@ await probe(async ({ open }) => {
     { id: cold[2], kind: 'echo', bypass: false, params: { echoTime: 3, echoFeedback: 0.4, echoLevel: 0.5 }, plugin: undefined },
   ], 'the next reset frame reads it back');
   for (const id of cold) assert.deepEqual(await call('remove', id), { ok: null });
+
+  // ── A scripted `failed` plate: parked only when it says so; else a failed add (no seat, no latency, no
+  // source, its id free), as the decoder and the UI read it ─────────────────────────────────────────
+  const [ghost, after] = [0x7100_0001, 0x7100_0002];
+  const ghostRig = [
+    {
+      units: [
+        { id: ghost, kind: 'plugin', plugin: SYNTH, bypass: false, source: true, name: 'Fake Synth', latency: 128, state: 'failed', error: 'the DLL did not load' },
+        { id: after, kind: 'echo', params: { echoTime: 0, echoFeedback: 0.2, echoLevel: 0.3 }, bypass: false, source: false, name: 'ECHO', latency: 0, state: 'seated' },
+      ],
+      latency: 0,
+      held: false,
+    },
+    { units: [], latency: 0, held: false },
+  ];
+  await emit({ reset: true, settings: [], events: emptyLanes(), chains: ghostRig });
+  m = await mark();
+  await send({ Action: { ToggleUnit: after } });
+  await waitFrames(m, (f) => f.chains && unit(f.chains, after)?.bypass === true, 'the batch on the scripted rig');
+  c = await last();
+  assert.equal(c[0].latency, 0, 'a failed add has no seat in the sum');
+  assert.deepEqual(await call('move', after, 0), { ok: null }, 'no source heads the chain: an effect may go to the front');
+  assert.deepEqual(ids(await last(), 0), [after, ghost]);
+  m = await mark();
+  assert.deepEqual(await call('remove', ghost), { ok: null });
+  assert.deepEqual(trail(await chainFrames(m), ghost), ['gone'], 'it goes at once, no removal through leaving');
+  assert.deepEqual(await call('remove', after), { ok: null });
 
   // ── Every ChainHost call recorded in order, with every argument ───────────────────────────────────
   const recorded = await page.evaluate(() => window.__lf.native.chain.calls.map((c) => c.map((a) => (a instanceof Uint8Array ? [...a] : a))));

@@ -53,7 +53,12 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
   // ── focus: a report that moves or removes the focused plate, or a fold that unmounts the line, hands
   // focus to a surviving control (the same control on the moved plate, else its neighbour's menu, else `+`)
   let lastFocus: { unit: number; cls: string; index: number } | null = null;
+  // whether the focus is the line's: in a plate, in a plate's portal (its menu, Parameters, the OTT face:
+  // Solid's delegation brings their focus events through the plate), or on the `+`
+  let owned = false;
+  let addButton: HTMLButtonElement | undefined;
   const onFocusIn = (e: FocusEvent) => {
+    owned = true;
     const t = e.target as HTMLElement;
     const p = t.closest<HTMLElement>('.unit');
     if (!p) {
@@ -68,8 +73,13 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
   let lostAt = -Infinity;
   const onFocusOut = (e: FocusEvent) => {
     const to = e.relatedTarget as Node | null;
-    if (to && !wrap.contains(to)) lastFocus = null;
-    else if (!to) lostAt = performance.now();
+    if (!to) {
+      lostAt = performance.now();
+      return;
+    }
+    // focus going elsewhere: the focusin that follows says whether it is still the line's
+    owned = false;
+    if (!wrap.contains(to)) lastFocus = null;
   };
   const focusLost = () => !document.activeElement || document.activeElement === document.body;
   const restoreFocus = () => {
@@ -89,8 +99,11 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
     ),
   );
   onCleanup(() => {
-    // the slot folded under the focus: its fold plate takes it
-    if (lastFocus && (wrap.contains(document.activeElement) || focusLost())) {
+    // the slot folded under the focus (a portal of a plate is gone already, its focus just lost): its fold
+    // plate takes it
+    const a = document.activeElement;
+    const held = a !== null && (wrap.contains(a) || a === addButton);
+    if (owned && (held || (focusLost() && performance.now() - lostAt < 1000))) {
       const slot = wrap.closest('.slot');
       queueMicrotask(() => {
         const fold = slot?.querySelector<HTMLElement>('.slot__fold');
@@ -172,7 +185,7 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
         </i>
       </div>
       <i class="slot__sig" classList={{ 'is-dim': chain().units.length > 0 && !props.live && head()?.source !== true }} aria-hidden="true" />
-      <AddBay slot={props.slot} returnFocus={props.returnFocus} />
+      <AddBay slot={props.slot} returnFocus={props.returnFocus} button={(el) => (addButton = el)} onFocusIn={onFocusIn} onFocusOut={onFocusOut} />
       <Show when={chainRefusal(props.slot)}>
         <span class="pc__err unit-err" role="status" data-slot={props.slot} title={chainRefusal(props.slot) ?? ''}>
           {chainRefusal(props.slot)}
@@ -195,9 +208,10 @@ function transition(prev: UnitState | undefined, u: UnitState, held: boolean): s
   return status ? `${name} ${status}` : null;
 }
 
-/** Whether sound passes plate `u`: it is seated and on, and an input-fed chain is live. */
+/** Whether sound passes plate `u`: it is seated (or reloading: its old instance plays on) and on, and an
+ * input-fed chain is live. */
 function sounding(u: UnitState, live: boolean, head: UnitState | undefined): boolean {
-  return u.state === 'seated' && !u.bypass && (live || head?.source === true);
+  return (u.state === 'seated' || u.reloading === true) && !u.bypass && (live || head?.source === true);
 }
 
 /** The x (in the line's box) of the drop marker before plate `gap` (or after the last). */
@@ -246,14 +260,16 @@ function gapOf(mids: readonly number[], x: number): number {
   return k < 0 ? mids.length : k;
 }
 
-/** Swallow the click a drag's release makes (a pointer's, never a keyboard's), only in this task. */
-function swallowNextClick(): void {
+/** Swallow the click a drag's release makes: pointer `id`'s (never a keyboard's, never another pointer's),
+ * only in this task. */
+function swallowNextClick(id: number): void {
   const eat = (e: MouseEvent) => {
-    if (e.detail === 0) return;
+    if (e.detail === 0 || (e instanceof PointerEvent && e.pointerId !== id)) return;
+    window.removeEventListener('click', eat, { capture: true });
     e.preventDefault();
     e.stopPropagation();
   };
-  window.addEventListener('click', eat, { capture: true, once: true });
+  window.addEventListener('click', eat, { capture: true });
   setTimeout(() => window.removeEventListener('click', eat, { capture: true }), 0);
 }
 
@@ -335,7 +351,7 @@ function UnitPlate(props: {
     const to = p.phase === 'drag' && order() === p.order ? target(contentX(e.clientX)) : null;
     end();
     if (p.phase === 'pending') return;
-    swallowNextClick();
+    swallowNextClick(p.id);
     if (to !== null) void moveUnit(u().id, to);
   };
   const onWinCancel = (e: PointerEvent) => {
@@ -343,7 +359,13 @@ function UnitPlate(props: {
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== 'Escape' || !press) return;
-    if (press.phase !== 'drag') {
+    if (press.phase === 'cancelled') {
+      // a held Escape's repeats: the press still waits for its release, whose click it eats
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (press.phase === 'pending') {
       // a press not yet a drag lets Escape through to whatever else it closes
       end();
       return;
@@ -360,9 +382,11 @@ function UnitPlate(props: {
     if (press && e.pointerId === press.id && press.phase === 'drag') end();
   };
   onCleanup(end);
-  // a report that unseats the plate or leaves it alone in its chain ends its drag
+  // a report that unseats the plate (parked, withdrawn, leaving) or leaves it alone in its chain ends its
+  // press at once: its capture and its listeners go with it. Read before `press`, which is no signal.
   createEffect(() => {
-    if (press && (!seated() || props.count() < 2)) end();
+    const movable = seated() && props.count() >= 2;
+    if (!movable && press) end();
   });
   const onDown = (e: PointerEvent) => {
     if (press || e.button !== 0 || !seated() || props.count() < 2) return;
@@ -687,7 +711,13 @@ function PluginParamRows(props: { unit: number }) {
 
 /** The `+` bay at the chain's end: a menu of the built-in effects, the built-in instruments and the
  * scanned plugins; a refusal comes back as the slot's tag beside it. */
-function AddBay(props: { slot: 0 | 1; returnFocus?: (el: HTMLElement | undefined) => void }) {
+function AddBay(props: {
+  slot: 0 | 1;
+  returnFocus?: (el: HTMLElement | undefined) => void;
+  button: (el: HTMLButtonElement) => void;
+  onFocusIn: (e: FocusEvent) => void;
+  onFocusOut: (e: FocusEvent) => void;
+}) {
   const pop = createRowPopover(props.returnFocus);
   const letter = slotLetter(props.slot);
   const id = `unit-add-${props.slot}`;
@@ -710,13 +740,18 @@ function AddBay(props: { slot: 0 | 1; returnFocus?: (el: HTMLElement | undefined
     <>
       <button
         type="button"
-        ref={pop.trigger}
+        ref={(el) => {
+          pop.trigger(el);
+          props.button(el);
+        }}
         class="unit-add slot-pop__trigger"
         aria-label={`Add to slot ${letter}'s chain`}
         aria-haspopup="menu"
         aria-expanded={pop.open()}
         aria-controls={id}
         title="Add an effect, an instrument or a plugin"
+        onFocusIn={props.onFocusIn}
+        onFocusOut={props.onFocusOut}
         onClick={(e) => {
           e.stopPropagation();
           pop.toggle();

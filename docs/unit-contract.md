@@ -129,6 +129,7 @@ type UnitState = UnitRecord & { // an interface cannot extend the union
   state: 'loading' | 'waiting' | 'seated' | 'leaving' | 'failed';
   parked?: boolean; // `failed` by a park (§3): its seat kept, a restart may reseat it; absent: a failed add
   held?: boolean;   // an edit of this unit waits for a take (a removal while `leaving`, a queued move)
+  reloading?: boolean; // `loading`/`waiting` by a reload (§3): the old instance still applied; absent: an add
 };
 interface UnitMeter { unit: UnitId; out: [number, number]; bands?: [BandMeter, BandMeter, BandMeter] }
 interface BandMeter { gain: number; gainMin: number; gainMax: number; level: number; levelPeak: number }

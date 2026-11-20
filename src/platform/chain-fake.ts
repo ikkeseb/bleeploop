@@ -437,6 +437,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     const units = chains[slot].map((u) => {
       const s = structuredClone(u.state);
       if (waits.has(s.id)) s.held = true;
+      if (u.reloading) s.reloading = true;
       return s;
     });
     const latency = chains[slot].filter(applied).reduce((s, u) => s + u.state.latency, 0);
@@ -860,7 +861,11 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
           },
           drop: (r) => d.reject(new Error(r)),
         };
-        if (heldOrNow(slot, h, false)) return new Later(d.promise);
+        if (heldOrNow(slot, h, false)) {
+          // its plate says so at once: it moves when the take ends
+          emitChains();
+          return new Later(d.promise);
+        }
         apply();
         emitChains();
       });
@@ -1012,6 +1017,14 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
           // `since`) and its tone; any other is new as of this frame.
           const same = prev !== undefined && prev.state.kind === state.kind && (state.kind !== 'plugin' || (prev.state.kind === 'plugin' && sameRef(prev.state.plugin, state.plugin)));
           const u: Unit = { state: structuredClone(state), slot: slot as Slot, addedSeq: same ? prev.addedSeq : f.seq, inst: 0, tone: same ? prev.tone : null };
+          // A scripted reload in flight: its old instance applied (`chainState` says so on the plate).
+          delete u.state.reloading;
+          if (state.reloading === true) u.reloading = true;
+          // A `failed` plate not parked is a failed add (unit contract §2): no seat, no instance, its id free.
+          if (state.state === 'failed' && state.parked !== true) {
+            u.noSeat = true;
+            return u;
+          }
           // The scripted rig's plugin instances load in chain order, slot A first, each landed (rig recall).
           if (state.kind === 'plugin') {
             u.inst = claim(state.plugin.path);
@@ -1019,7 +1032,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
           }
           return u;
         });
-        c.units.forEach((u) => reserved.set(u.id, slot as Slot));
+        c.units.filter((u) => u.state !== 'failed' || u.parked === true).forEach((u) => reserved.set(u.id, slot as Slot));
       });
     } else if (f.reset) f.chains = snapshot();
     if (f.reset) {
