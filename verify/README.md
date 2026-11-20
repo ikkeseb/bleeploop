@@ -10,7 +10,7 @@ those are verified by running the app and measuring it (`docs/VERIFY.md`, `STATU
 | | `guards/` | `probes/` |
 |---|---|---|
 | Runs in | plain Node: no browser, no audio hardware | headless Chromium against the real UI on a Vite dev server, on the engine fake |
-| Command | `pnpm verify` (part of `pnpm check`, the pre-push hook) | `pnpm probe <name>` · `--all` · `--ci` · `--list` |
+| Command | `pnpm verify` (part of `pnpm check`; CI runs it on every push) | `pnpm probe <name>` · `--all` · `--ci` · `--list` |
 | CI | `ci.yml` | `browser-lifecycle.yml` runs `pnpm probe --ci` |
 | Speed | a few seconds for all | seconds to minutes each |
 | Sees | the real source's logic, file formats, the engine wire, repository contracts | the running UI through `window.__lf` and the DOM: the commands a gesture sends, the screen a feed frame draws, IndexedDB, the export's archive, rendered layout |
@@ -62,7 +62,7 @@ tests hold to the same rule (the lf-engine briefing, `src-tauri/crates/lf-engine
 3. Track checks with a `passed`/`failed` counter, print `=== RESULT: N/N checks passed, M failed ===`
    and `process.exit(failed === 0 ? 0 : 1)`. The runner fails a guard that exits non-zero, prints no RESULT line or more than one, or reports a failure or zero checks in it; a guard still running after 60 s is killed and fails.
 4. Plant realistic bugs in the covered code; each must turn the guard red. Revert them.
-5. Run the new guard alone: `node verify/guards/<name>.mjs`. The pre-push hook runs the whole set.
+5. Run the new guard alone: `node verify/guards/<name>.mjs`. CI runs the whole set (`pnpm verify`).
 
 ## Probes
 

@@ -95,7 +95,7 @@ function exercise(stdin, { status = '', gitFailure, gateResult = { status: 0 } }
   const calls = [];
   const result = runPrePush(stdin, (command, args, options) => {
     calls.push({ command, args, options });
-    if (command === 'pnpm check') return gateResult;
+    if (command === 'pnpm check:push') return gateResult;
     assert.equal(command, 'git');
     assert.deepEqual(options.stdio, ['ignore', 'pipe', 'inherit']);
     assert.equal(options.encoding, 'utf8');
@@ -112,13 +112,13 @@ function exercise(stdin, { status = '', gitFailure, gateResult = { status: 0 } }
     assert.match(args[2], /^[a-f0-9]{40}\^\{commit\}$/);
     return { status: 0, stdout: `${peel(args[2].slice(0, 40))}\n` };
   });
-  return { result, calls, gates: calls.filter((call) => call.command === 'pnpm check') };
+  return { result, calls, gates: calls.filter((call) => call.command === 'pnpm check:push') };
 }
 
-check('delete plus multiple HEAD refs run pnpm check exactly once', () => {
+check('delete plus multiple HEAD refs run pnpm check:push exactly once', () => {
   const { result, gates, calls } = exercise(deletion + update() + update(TAG, 'refs/tags/v1'));
   assert.equal(result.code, 0);
-  assert.deepEqual(gates, [{ command: 'pnpm check', args: [], options: { stdio: 'inherit', shell: true } }]);
+  assert.deepEqual(gates, [{ command: 'pnpm check:push', args: [], options: { stdio: 'inherit', shell: true } }]);
   assert.equal(calls.filter((call) => call.args[1] === '--verify').length, 2);
 });
 check('empty and delete-only pushes run no subprocess', () => {
