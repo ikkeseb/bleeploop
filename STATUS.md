@@ -168,7 +168,8 @@ settles.
 - An older session opened after pan per lane: does every lane open centred?
 - The right cluster grew from 240 to 264 px for pan: is it still fine at 1000 px wide?
 - A session export: does the toast say where the zip went, and do a stem and the master open in a
-  DAW?
+  DAW, the stem (format 3: two-channel 32-bit float since the stereo engine) as stereo? (machine: the
+  `import` guard, `export-refs`, and `release:smoke`'s export from a guitar take on the EVO 4)
 - The UPDATE pill and its panel (the download in MB with a bar, the signature check, the installer;
   machine: `verify/probes/app-update.mjs`), over a real GitHub download: do the numbers climb at a
   watchable rate? Only a real install answers.
