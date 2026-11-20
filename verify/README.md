@@ -81,7 +81,8 @@ so a probe proves gesture → command and frame → screen, never the engine
 (`verify/probes/engine-seam.mjs` is the pattern). The chain per slot, which the native engine does not
 speak yet, is modelled whole (`src/platform/chain-fake.ts`, `docs/unit-contract.md` §10): the platform's
 `chain` answers add, remove, move and reload with `chains` frames, the batch's unit commands switch the
-model, an OTT unit feeds `unitMeters` on the fake's own 60 Hz timer, and its seams sit on
+model, each seated unit gets a meter on every frame the fake makes (an active OTT's bands on the fake's
+own 60 Hz timer), the unit commands never reach `input_send` where the chain is unavailable, and its seams sit on
 `__lf.native.chain` (`verify/probes/chain-fake.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
 outbox's batches (`__lf.native.batches`, each with its epoch; their input events flattened in
 `__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls (`__lf.native.midiCalls`,

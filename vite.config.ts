@@ -27,8 +27,9 @@ const freshDocument: Plugin = {
 };
 
 /**
- * A production build fails when the browser rig's engine fake (`src/platform/host.web.ts`) renders any
- * code into a chunk: it is DEV-only, and the release must not ship its probe hooks (`src/platform/index.ts`).
+ * A production build fails when the browser rig's engine fake (`src/platform/host.web.ts`) or its chain model
+ * (`src/platform/chain-fake.ts`) renders any code into a chunk: both are DEV-only, and the release must not
+ * ship their probe hooks (`src/platform/index.ts`).
  */
 const noEngineFake: Plugin = {
   name: 'no-engine-fake',
@@ -38,8 +39,9 @@ const noEngineFake: Plugin = {
       if (chunk.type !== 'chunk') continue;
       for (const [id, module] of Object.entries(chunk.modules)) {
         // A module id may carry a query (`?worker`, `?v=…`): match the path before it.
-        if (/[\\/]src[\\/]platform[\\/]host\.web\.ts$/.test(id.split('?')[0]) && module.renderedLength > 0) {
-          this.error(`The engine fake (src/platform/host.web.ts) leaked into ${chunk.fileName} (${module.renderedLength} bytes): it is DEV-only (src/platform/index.ts selects it outside import.meta.env.PROD).`);
+        const fake = /[\\/]src[\\/]platform[\\/](host\.web|chain-fake)\.ts$/.exec(id.split('?')[0]);
+        if (fake && module.renderedLength > 0) {
+          this.error(`The engine fake (src/platform/${fake[1]}.ts) leaked into ${chunk.fileName} (${module.renderedLength} bytes): it is DEV-only (src/platform/index.ts selects it outside import.meta.env.PROD).`);
         }
       }
     }

@@ -23,7 +23,7 @@ import type {
   ToneImport,
   UpdateProgress,
 } from './host';
-import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
+import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: verify/guards/boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
@@ -337,6 +337,10 @@ const tauriMidi: MidiHost = {
 /** The outbox's batches over Tauri IPC (`input_send`, synchronous on the main thread natively). */
 const tauriInput: InputHost = {
   async send(epoch, items) {
+    // Unit contract §2: the native engine does not speak the chain yet. The outbox never queues a unit
+    // command here (`src/platform/index.ts` `enqueueEngine`); a batch that carries one anyway is refused
+    // whole, before any IPC.
+    if (items.some((item) => 'engine' in item && isUnitCommand(item.engine))) throw new Error(NO_CHAIN);
     return decodeDropped(await invoke<unknown>('input_send', { epoch, items }));
   },
 };

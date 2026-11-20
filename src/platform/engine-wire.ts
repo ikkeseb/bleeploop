@@ -335,6 +335,20 @@ export type EngineCommand =
   /** A built-in unit's parameter, clamped as the unit clamps it; one of another kind is dropped. */
   | { SetUnitParam: [UnitId, UnitParamId, number] };
 
+/**
+ * A batch command only a chain host takes (unit contract §2): `SetUnitBypass`, `SetUnitParam`, and the
+ * actions `ToggleUnit` and `Toggle.Units` (pressed or `ActionOn`). The native engine does not speak the
+ * chain yet: the outbox refuses these before they are queued wherever `ChainHost.available` is false
+ * (`src/platform/index.ts`), and the Tauri host's `input_send` refuses a batch that carries one.
+ */
+export function isUnitCommand(c: EngineCommand): boolean {
+  if (typeof c !== 'object') return false;
+  if ('SetUnitBypass' in c || 'SetUnitParam' in c) return true;
+  const action = 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
+  if (action === null || typeof action !== 'object') return false;
+  return 'ToggleUnit' in action || ('Toggle' in action && typeof action.Toggle === 'object' && 'Units' in action.Toggle);
+}
+
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
  * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
  * on a device with two or more). */
@@ -859,7 +873,9 @@ function decodeUnitState(v: unknown, what: string): UnitState {
 function decodeChainState(v: unknown, what: string): ChainState {
   const o = obj(v, what);
   const units = array(o.units, `${what}.units`).map((u, k) => decodeUnitState(u, `${what}.units[${k}]`));
-  if (units.length > MAX_UNITS) fail(`${what}.units holds at most ${MAX_UNITS}`, units.length);
+  // Unit contract §4: at most `MAX_UNITS` units, plus the one install in flight that resolves at activation
+  // as the source replacing the seated one (its plate shows `loading` beside the eight it may replace).
+  if (units.length > MAX_UNITS + 1) fail(`${what}.units holds at most ${MAX_UNITS} and one install`, units.length);
   return { units, latency: int(o.latency, `${what}.latency`), held: bool(o.held, `${what}.held`) };
 }
 

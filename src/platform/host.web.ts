@@ -652,7 +652,7 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
 /** A command as the fake applies it: the chain's (`chain-fake.ts`), a lane's mix, the toggles (GO LIVE's
  * included) and the tuner. */
 function applyCommand(c: EngineCommand): void {
-  if (chainFake.command(c)) return;
+  if (chainFake().command(c)) return;
   applyMixCommand(c);
   applyToggleCommand(c);
   applyTunerCommand(c);
@@ -873,15 +873,21 @@ function runCommand(command: EngineCommand): void {
 /** The fake device's four canned inputs (unit contract §10); the pick shape is §7's. */
 const FAKE_INPUTS: readonly string[] = ['Fake input 1', 'Fake input 2', 'Fake input 3', 'Fake input 4'];
 
-/** The chain per slot, modelled (`chain-fake.ts`): its frames go to the feed's subscribers. */
-const chainFake = /* @__PURE__ */ createChainFake({
-  forced: () => engineForced(),
-  capturing: () => capturing(),
-  deliver: (frame) => {
-    for (const onFrame of engineSubscribers) onFrame(frame);
-  },
-  meter: () => lastMeter,
-});
+/** The chain per slot, modelled (`chain-fake.ts`): its frames go to the feed's subscribers. Made on first
+ * use, never at module load: made at module scope, even under a `@__PURE__` annotation, it shipped this
+ * file and the chain fake in the production bundle (measured on 5bae0142; `vite.config.ts` `no-engine-fake`). */
+let chainFakeMade: ReturnType<typeof createChainFake> | null = null;
+function chainFake(): ReturnType<typeof createChainFake> {
+  chainFakeMade ??= createChainFake({
+    forced: () => engineForced(),
+    capturing: () => capturing(),
+    deliver: (frame) => {
+      for (const onFrame of engineSubscribers) onFrame(frame);
+    },
+    meter: () => lastMeter,
+  });
+  return chainFakeMade;
+}
 
 /** The canned plugins feed the picker: asked by a probe's init script, with the engine fake on. */
 const chainPluginsOn = (): boolean => engineForced() && (globalThis as { __lfChainFake?: unknown }).__lfChainFake === true;
@@ -970,7 +976,9 @@ export const webEngineFake: EngineFake = {
   },
   slotInputPicks: [],
   inputs: FAKE_INPUTS,
-  chain: chainFake,
+  get chain() {
+    return chainFake();
+  },
   async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.shares.push(endpoint);
@@ -1011,12 +1019,12 @@ export const webEngineFake: EngineFake = {
     applyToggleFrame(frame);
     if (frame.live) [fakeLive[0], fakeLive[1]] = frame.live;
     if (frame.meter) lastMeter = { peak: [frame.meter.peak[0], frame.meter.peak[1]], clip: [false, false] };
-    chainFake.scripted(frame);
+    chainFake().scripted(frame);
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.
     echoChanges();
     // A scripted lane that stopped capturing releases the chain's held edits.
-    chainFake.judge();
+    chainFake().judge();
   },
 };
 
@@ -1024,7 +1032,9 @@ export const webPlatform: Platform = {
   kind: 'web',
   pluginHost: webPluginHost,
   engine: webEngineFake,
-  chain: chainFake.host,
+  get chain() {
+    return chainFake().host;
+  },
   exports: webExports,
   logs: webLogFolder,
   updates: webUpdates,
