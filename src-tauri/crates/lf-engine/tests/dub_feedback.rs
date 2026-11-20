@@ -11,6 +11,7 @@
 mod common;
 
 use common::dub::{pos_fn, ramp};
+use common::mono;
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneState};
@@ -184,7 +185,7 @@ fn undo_gives_back_the_loop_before_the_dub_and_redo_the_faded_one() {
     dub(&mut rig, 2, 5);
     let faded = rig.pcm(0);
     assert!(rig.lane(0).can_undo);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), old, "the undo target is the loop at dub start");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), old, "the undo target is the loop at dub start");
     rig.press(Command::Undo(0));
     assert_eq!(rig.pcm(0), old, "UNDO: the loop before the dub, bit for bit");
     rig.press(Command::Undo(0));

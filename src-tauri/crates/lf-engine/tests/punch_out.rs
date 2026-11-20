@@ -6,6 +6,7 @@
 mod common;
 
 use common::dub::{pos_fn, ramp};
+use common::mono;
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneInfo, LaneState, TRACK_COUNT};
@@ -303,7 +304,7 @@ fn an_overdub_layer_ends_at_the_punch_out_and_is_kept() {
     assert_eq!(rig.pcm(0), want, "the layer through the last rendered frame, ramped at both ends");
     rig.idle();
     assert_eq!(rig.pcm(0), want);
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(before), "the undo target is the loop before it");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(before), "the undo target is the loop before it");
     plays_on_in_place(&mut rig);
 }
 
@@ -325,7 +326,7 @@ fn an_overdub_punched_out_before_its_window_opens_keeps_the_undo_target() {
     rig.idle();
     let layered = rig.pcm(0);
     assert_ne!(layered, base);
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(base.clone()));
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(base.clone()));
 
     rig.press(Command::RecDub(0));
     rig.advance(100); // inside `align`: its window has not opened
@@ -333,7 +334,7 @@ fn an_overdub_punched_out_before_its_window_opens_keeps_the_undo_target() {
     assert!(rig.state(0) == LaneState::Playing && rig.window().is_none() && rig.lane(0).can_undo);
     rig.idle();
     assert_eq!(rig.pcm(0), layered, "the loop is untouched");
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(base.clone()), "the undo target is the one before");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(base.clone()), "the undo target is the one before");
     rig.press(Command::Undo(0));
     rig.idle();
     assert_eq!(rig.pcm(0), base, "undo takes the earlier layer off");

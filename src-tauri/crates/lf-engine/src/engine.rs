@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitInfo, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -55,7 +55,7 @@ use crate::looper::{Applied, Cx, Looper};
 use crate::overview::Overview;
 use crate::scope::{Scope, ScopeBin, SCOPE_MASTER, SCOPE_MONITOR, SCOPE_SOURCES};
 use crate::session::{SessionEnd, SessionPort};
-use crate::slots::{Rack, SlotPort};
+use crate::slots::{Rack, SlotPort, UnitClock};
 use crate::tuner::{TunerFrame, TunerTap};
 
 /// Commands the engine holds for a future frame (a stamped command's, a wait for a block job).
@@ -75,6 +75,10 @@ pub struct EngineConfig {
     pub max_loop_seconds: f64,
     /// The largest block `process` accepts.
     pub max_block: usize,
+    /// The largest input side ([`ProcessContext::input_frames`]) a block may report: every record line
+    /// holds it plus [`crate::api::max_chain_latency`] plus a block, sized here, off the callback. A block
+    /// that reports more is taken at this, and counted ([`Diag::input_clamped`]).
+    pub max_input_frames: Frame,
     pub command_capacity: usize,
     pub event_capacity: usize,
     /// Mix [`Taps::looper`] every block (the lanes before their FX plus the click): what the looper's
@@ -87,7 +91,9 @@ impl EngineConfig {
     /// The command ring holds a new engine's settings replay (about a hundred commands) and the UI's
     /// batch after it with room to spare; the engine takes up to `MAX_PENDING` a block, the rest wait.
     pub fn new(sample_rate: u32) -> Self {
-        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, command_capacity: 1024, event_capacity: 4096, looper_tap: false }
+        // A quarter second of input side: an ASIO driver at its largest block with its safety offset and
+        // converters, and the WASAPI join's pipe, stay well inside it.
+        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, max_input_frames: sample_rate as Frame / 4, command_capacity: 1024, event_capacity: 4096, looper_tap: false }
     }
 }
 
@@ -132,15 +138,15 @@ impl Feed {
 pub struct Taps<'a> {
     /// The master bus's two sides: everything but the wet signal, under the master volume.
     pub bus: [&'a [f32]; 2],
-    /// The wet signal and the input sends under the master volume and the tuner's mute.
-    pub monitor: &'a [f32],
+    /// The wet signal and the input sends under the master volume and the tuner's mute, left and right.
+    pub monitor: [&'a [f32]; 2],
     /// The record tap: what a capture writes (the wet signal, the input sends, the instruments' record
-    /// path).
-    pub record: &'a [f32],
+    /// path), a stereo frame each.
+    pub record: &'a [Pair],
     /// The lanes before their FX plus the click, under the master volume: what the looper plays,
     /// without the FX's colour (a bypassed chain is not bit-transparent, as in Tone). Empty unless
-    /// [`EngineConfig::looper_tap`].
-    pub looper: &'a [f32],
+    /// [`EngineConfig::looper_tap`]. Left and right.
+    pub looper: [&'a [f32]; 2],
 }
 
 /// Counters the owner reports (Stage 4 mirrors them into the diag).
@@ -161,6 +167,8 @@ pub struct Diag {
     /// Tuner frames the full ring refused ([`TunerTap::dropped`]): no fault, a reader that stopped
     /// reading makes them, and the epoch tells it where its input broke.
     pub tuner_dropped: u64,
+    /// Blocks whose input side exceeded [`EngineConfig::max_input_frames`] and were taken at it.
+    pub input_clamped: u64,
 }
 
 /// One chunk the scope still owes its master column: the frames it covered, and every source's
@@ -225,13 +233,15 @@ pub struct Engine {
     instruments: Instruments,
     rack: Rack,
     session: SessionEnd,
-    /// The instrument plugin slots' mono output (the master bus takes it on both sides).
-    slot_bus: Vec<f32>,
+    /// The source chains' output, left and right (the master bus takes it).
+    slot_bus: [Vec<f32>; 2],
     /// The slots' frames rendered so far in this block (they render ahead, up to a slot command).
     slots_done: usize,
-    wet: Vec<f32>,
-    /// The wet signal at the take's alignment (`slots`): what the record tap and the input sends take.
-    aligned: Vec<f32>,
+    wet: [Vec<f32>; 2],
+    /// The wet signal at the take's alignment (`slots`): what the record tap takes; the input sends take
+    /// its mean (`aligned_mean`) until they become units (E3).
+    aligned: [Vec<f32>; 2],
+    aligned_mean: Vec<f32>,
     /// The input sends' output (zeros where they were silent).
     sends: Vec<f32>,
     /// The sends' frames rendered so far in this block (ahead of the AUTO scan, like the instruments').
@@ -239,11 +249,11 @@ pub struct Engine {
     /// The sends sounded somewhere in this block: only then does the monitor take them.
     sends_sounded: bool,
     /// The record tap: the wet signal plus the input sends and the instruments' record path.
-    record: Vec<f32>,
+    record: Vec<Pair>,
     /// The instruments' frames rendered so far in this block (they render ahead of an AUTO scan).
     instruments_done: usize,
     instrument: [Vec<f32>; 2],
-    lanes: [[f32; QUANTUM]; TRACK_COUNT],
+    lanes: [[[f32; QUANTUM]; 2]; TRACK_COUNT],
     /// A fading lane's ramp over the chunk (`Looper::render`), for its FX.
     fades: [[f32; QUANTUM]; TRACK_COUNT],
     click: [f32; QUANTUM],
@@ -252,10 +262,12 @@ pub struct Engine {
     mix: [Vec<f32>; 2],
     /// The wet signal and the input sends under the master volume and the tuner's mute: what joins the
     /// output after the limiter.
-    monitor: Vec<f32>,
+    monitor: [Vec<f32>; 2],
     /// The looper's own mix under the master volume: the lanes before their FX, and the click. Empty
     /// unless [`EngineConfig::looper_tap`].
-    looper_mix: Vec<f32>,
+    looper_mix: [Vec<f32>; 2],
+    /// Each slot's input pair's mean over a chunk, for the tuner while it is on.
+    tuner_in: [Vec<f32>; SLOT_COUNT],
     /// The live scope taps: off until the UI asks for them ([`Command::SetScope`]).
     scope: Scope,
     /// This block's chunks waiting for their master column ([`ScopeChunk`]); never longer than the
@@ -299,6 +311,7 @@ pub struct Engine {
     skipped: Frame,
     commands_dropped: u64,
     xruns: u64,
+    input_clamped: u64,
 }
 
 impl Engine {
@@ -311,7 +324,7 @@ impl Engine {
         let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(config.sample_rate as f32, vec![l, r]));
         let (white, pink) = (table(white), table(pink));
         let ir = effects::reverb_ir(config.sample_rate, &white);
-        let (rack, slots) = Rack::new(config.sample_rate, config.max_block);
+        let (rack, slots) = Rack::new(config.sample_rate, config.max_block, config.max_input_frames);
         let looper = Looper::new(config.sample_rate, capacity);
         let overview = looper.overview().clone();
         let (session_port, session) = crate::session::channel();
@@ -332,25 +345,27 @@ impl Engine {
             commands_taken: 0,
             fx: LaneFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             input_fx: InputFx::new(config.sample_rate, [&ir[0], &ir[1]]),
-            instruments: Instruments::new(config.sample_rate, config.max_block, &white, &pink),
+            instruments: Instruments::new(config.sample_rate, config.max_block, config.max_input_frames, &white, &pink),
             rack,
             session,
-            slot_bus: vec![0.0; config.max_block],
+            slot_bus: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
             slots_done: 0,
-            wet: vec![0.0; config.max_block],
-            aligned: vec![0.0; config.max_block],
+            wet: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
+            aligned: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
+            aligned_mean: vec![0.0; config.max_block],
             sends: vec![0.0; config.max_block],
             sends_done: 0,
             sends_sounded: false,
-            record: vec![0.0; config.max_block],
+            record: vec![[0.0; 2]; config.max_block],
             instruments_done: 0,
             instrument: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
-            lanes: [[0.0; QUANTUM]; TRACK_COUNT],
+            lanes: [[[0.0; QUANTUM]; 2]; TRACK_COUNT],
             fades: [[0.0; QUANTUM]; TRACK_COUNT],
             click: [0.0; QUANTUM],
             mix: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
-            monitor: vec![0.0; config.max_block],
-            looper_mix: vec![0.0; if config.looper_tap { config.max_block } else { 0 }],
+            monitor: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
+            looper_mix: std::array::from_fn(|_| vec![0.0; if config.looper_tap { config.max_block } else { 0 }]),
+            tuner_in: std::array::from_fn(|_| vec![0.0; config.max_block]),
             scope,
             scope_chunks: scope_chunks(config.max_block),
             tuner,
@@ -373,6 +388,7 @@ impl Engine {
             skipped: 0,
             commands_dropped: 0,
             xruns: 0,
+            input_clamped: 0,
         };
         (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port, scope: scope_rx, tuner: tuner_rx })
     }
@@ -419,7 +435,13 @@ impl Engine {
     /// The last block before the limiter. The output is `limiter(bus) + monitor` on each side.
     pub fn taps(&self) -> Taps<'_> {
         let n = self.rendered;
-        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n.min(self.looper_mix.len())], record: &self.record[..n] }
+        let looper = n.min(self.looper_mix[0].len());
+        Taps {
+            bus: [&self.mix[0][..n], &self.mix[1][..n]],
+            monitor: [&self.monitor[0][..n], &self.monitor[1][..n]],
+            looper: [&self.looper_mix[0][..looper], &self.looper_mix[1][..looper]],
+            record: &self.record[..n],
+        }
     }
 
     /// The last block's Share mix (the header): the device output without the click.
@@ -437,6 +459,7 @@ impl Engine {
             slot_protocol_errors: self.rack.protocol_errors,
             scope_dropped: self.scope.dropped(),
             tuner_dropped: self.tuner.dropped(),
+            input_clamped: self.input_clamped,
         }
     }
 
@@ -446,13 +469,18 @@ impl Engine {
         self.feed.notes.take_reader()
     }
 
-    /// A plugin slot's unit: its kind and latency, `None` while the slot is empty.
+    /// A slot's chain: its role and its latency sum, `None` while it seats nothing.
     pub fn slot(&self, slot: usize) -> Option<(SlotKind, Frame)> {
         self.rack.installed(slot)
     }
 
-    /// Frames the wet signal lags the input at the record tap: the largest live effect's latency (0 with
-    /// none), as latched at the last block start (it holds while a capture runs).
+    /// A slot's chain, head first: each seat's id and what it is.
+    pub fn chain(&self, slot: usize) -> impl Iterator<Item = (UnitId, UnitInfo)> + '_ {
+        self.rack.chain(slot)
+    }
+
+    /// Frames the wet signal lags the input at the record tap: the largest latency sum of a live
+    /// input-fed chain (0 with none), as latched at the last block start (it holds while a capture runs).
     pub fn live_latency(&self) -> Frame {
         self.rack.record_latency()
     }
@@ -461,7 +489,8 @@ impl Engine {
     /// at once, without crossfades (a removed unit gets its released notes in one silent frame, then
     /// stops here, on the caller's thread).
     pub fn service_slots_idle(&mut self) {
-        self.rack.service_idle();
+        self.rack.service_idle(self.next_frame);
+        self.rack.offer(&mut self.feed);
     }
 
     /// While no device runs and the host holds the engine: run a session job on the port at once (a load
@@ -491,6 +520,7 @@ impl Engine {
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.publish(&mut cx, self.replayed);
         offer_tuner(cx.feed, cx.now, &self.tuner, &mut self.tuner_owed);
+        self.rack.offer(cx.feed);
     }
 
     /// Each lane's mix as the engine applies it ([`Looper::mix`], as its [`Event::Mix`] carries it) and
@@ -594,7 +624,8 @@ impl Engine {
     /// it back on its port (a sample-rate change; the host re-activates each at the new rate and
     /// installs it into the new engine).
     pub fn evict_slots(&mut self) {
-        self.rack.evict();
+        self.rack.evict(self.next_frame);
+        self.rack.offer(&mut self.feed);
     }
 
     /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out after
@@ -613,16 +644,17 @@ impl Engine {
         self.looper.publish(&mut cx, self.replayed);
     }
 
-    /// Render one block with every slot reading `input`, the mono device input: [`Engine::process_inputs`].
+    /// Render one block with every slot reading `input` on both sides, the mono device input:
+    /// [`Engine::process_inputs`].
     pub fn process(&mut self, ctx: &ProcessContext, input: &[f32], left: &mut [f32], right: &mut [f32]) {
-        self.process_inputs(ctx, [input; SLOT_COUNT], left, right);
+        self.process_inputs(ctx, [[input, input]; SLOT_COUNT], left, right);
     }
 
-    /// Render one block: `inputs[s]` is slot `s`'s mono input (its capture channel), `left`/`right` the
-    /// output (every one the same length).
-    pub fn process_inputs(&mut self, ctx: &ProcessContext, inputs: [&[f32]; SLOT_COUNT], left: &mut [f32], right: &mut [f32]) {
+    /// Render one block: `inputs[s]` is slot `s`'s input pair (its capture channels; a mono pick is the
+    /// same channel on both sides), `left`/`right` the output (every one the same length).
+    pub fn process_inputs(&mut self, ctx: &ProcessContext, inputs: [[&[f32]; 2]; SLOT_COUNT], left: &mut [f32], right: &mut [f32]) {
         let n = left.len();
-        assert!(n <= self.config.max_block && right.len() == n && inputs.iter().all(|x| x.len() == n), "block larger than max_block");
+        assert!(n <= self.config.max_block && right.len() == n && inputs.iter().flatten().all(|x| x.len() == n), "block larger than max_block");
         let start = ctx.frame;
         let end = start + n as Frame;
         let first = !self.started;
@@ -645,7 +677,7 @@ impl Engine {
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish. An atomic read.
         self.replayed |= self.commands.is_empty();
-        self.rack.begin_block(start, first);
+        self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() });
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
         // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
         // records (a skip or a repeat), and a change reaches both once nothing captures.
@@ -661,7 +693,15 @@ impl Engine {
             self.looper.input_gap(lost_from, start, if ctx.damaged { end } else { start }, live_latency);
         }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
-        let record_delay = ctx.input_frames + live_latency;
+        // The record lines hold the configured input side at most: a block past it lags its sources'
+        // record path by that much only, counted.
+        let input_frames = if ctx.input_frames > self.config.max_input_frames {
+            self.input_clamped += 1;
+            self.config.max_input_frames
+        } else {
+            ctx.input_frames
+        };
+        let record_delay = input_frames + live_latency;
         self.rendered = n;
         // A block always folds and clears its own chunks; a block the host's `catch_unwind` cut short
         // left its own behind, and they name frames this one does not render.
@@ -709,6 +749,7 @@ impl Engine {
             self.looper.publish(&mut cx, self.replayed);
             offer_toggles(cx.feed, f, &mut self.toggles_owed, cx.clock, &self.looper, &self.input_fx, &self.rack);
             offer_tuner(cx.feed, f, &self.tuner, &mut self.tuner_owed);
+            self.rack.offer(cx.feed);
             self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), self.clock.meter(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), self.clock.meter(), f);
 
@@ -729,11 +770,12 @@ impl Engine {
             if self.slots_done < k_next {
                 let until = first_slot_pending(&self.pending, f).map_or(end, |at| at.min(end));
                 let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
+                let ([wl, wr], [al, ar], [bl, br]) = (&mut self.wet, &mut self.aligned, &mut self.slot_bus);
                 self.rack.render(
-                    inputs.map(|x| &x[a..b]),
-                    &mut self.wet[a..b],
-                    &mut self.aligned[a..b],
-                    &mut self.slot_bus[a..b],
+                    inputs.map(|[l, r]| [&l[a..b], &r[a..b]]),
+                    [&mut wl[a..b], &mut wr[a..b]],
+                    [&mut al[a..b], &mut ar[a..b]],
+                    [&mut bl[a..b], &mut br[a..b]],
                     &mut self.record[a..b],
                     record_delay,
                 );
@@ -750,10 +792,17 @@ impl Engine {
                 // it aligned, so what they record lands with the take; a live slot quicker than the
                 // latched latency hears its own echo that difference late.
                 let (a, b) = (self.sends_done, k_next);
-                if self.input_fx.render(start + a as Frame, &self.aligned[a..b], &mut self.sends[a..b]) {
+                // The sends are mono until they become units (E3): the aligned pair's mean in (equal
+                // sides give the side itself, bit for bit), their output on both sides.
+                let [al, ar] = &self.aligned;
+                for ((m, &l), &r) in self.aligned_mean[a..b].iter_mut().zip(&al[a..b]).zip(&ar[a..b]) {
+                    *m = 0.5 * (l + r);
+                }
+                if self.input_fx.render(start + a as Frame, &self.aligned_mean[a..b], &mut self.sends[a..b]) {
                     self.sends_sounded = true;
                     for (r, &y) in self.record[a..b].iter_mut().zip(&self.sends[a..b]) {
-                        *r += y;
+                        r[0] += y;
+                        r[1] += y;
                     }
                 }
                 self.sends_done = b;
@@ -764,15 +813,23 @@ impl Engine {
             }
             let k1 = (next - start) as usize;
             let len = k1 - k0;
-            // The tuner's tap: this chunk's raw input of both slots, while on (nothing past the flag
-            // while off).
-            self.tuner.chunk(f, inputs.map(|x| &x[k0..k1]));
+            // The tuner's tap: this chunk's raw input of both slots, each pair's mean, while on (nothing
+            // past the flag while off).
+            if self.tuner.on() {
+                for (mean, [l, r]) in self.tuner_in.iter_mut().zip(inputs) {
+                    for ((m, &a), &b) in mean[k0..k1].iter_mut().zip(&l[k0..k1]).zip(&r[k0..k1]) {
+                        *m = 0.5 * (a + b);
+                    }
+                }
+                let [t0, t1] = &self.tuner_in;
+                self.tuner.chunk(f, [&t0[k0..k1], &t1[k0..k1]]);
+            }
             let (l, r) = (&mut mix_l[k0..k1], &mut mix_r[k0..k1]);
             l.copy_from_slice(&self.instrument[0][k0..k1]);
             r.copy_from_slice(&self.instrument[1][k0..k1]);
-            for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.slot_bus[k0..k1]) {
-                *l += x;
-                *r += x;
+            for ((l, r), (&a, &b)) in l.iter_mut().zip(r.iter_mut()).zip(self.slot_bus[0][k0..k1].iter().zip(&self.slot_bus[1][k0..k1])) {
+                *l += a;
+                *r += b;
             }
             let fading = self.looper.render(f, len, &mut self.lanes, &mut self.fades);
             self.fx.render(f, &self.lanes, fading, &self.fades, l, r);
@@ -791,17 +848,19 @@ impl Engine {
             self.clock.render_click(f, click);
             if self.config.looper_tap {
                 // The test tap, under the master volume's glide below, frame for frame.
-                let looper_mix = &mut self.looper_mix[k0..k1];
-                looper_mix.copy_from_slice(click);
-                for lane in &self.lanes {
-                    for (m, &x) in looper_mix.iter_mut().zip(&lane[..len]) {
-                        *m += x;
+                for (c, looper_mix) in self.looper_mix.iter_mut().enumerate() {
+                    let looper_mix = &mut looper_mix[k0..k1];
+                    looper_mix.copy_from_slice(click);
+                    for lane in &self.lanes {
+                        for (m, &x) in looper_mix.iter_mut().zip(&lane[c][..len]) {
+                            *m += x;
+                        }
                     }
-                }
-                let mut g = self.master_gain;
-                for m in looper_mix.iter_mut() {
-                    *m = (g * *m as f64) as f32;
-                    g = crate::glide(g, target, self.master_coef);
+                    let mut g = self.master_gain;
+                    for m in looper_mix.iter_mut() {
+                        *m = (g * *m as f64) as f32;
+                        g = crate::glide(g, target, self.master_coef);
+                    }
                 }
             }
             for ((l, r), &c) in l.iter_mut().zip(r.iter_mut()).zip(click.iter()) {
@@ -809,19 +868,24 @@ impl Engine {
                 *r += c;
             }
             self.looper.capture(f, &self.record[k0..k1], align);
-            let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
+            let ([wet_l, wet_r], sends, sounded) = (&self.wet, &self.sends[k0..k1], self.sends_sounded);
+            let [mon_l, mon_r] = &mut self.monitor;
             // The tuner mutes the monitor alone, gliding from the frame it switched on: a gain of exactly
             // 1 (off, landed) leaves every bit as it was.
             let monitor_target = if self.tuner.on() { 0.0 } else { 1.0 };
-            for (((l, r), o), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(wet.iter().zip(sends)) {
+            for (k, (l, r)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
                 let g = self.master_gain;
                 self.monitor_gain = crate::glide(self.monitor_gain, monitor_target, self.monitor_coef);
                 let m = self.monitor_gain;
                 *l = (g * *l as f64) as f32;
                 *r = (g * *r as f64) as f32;
-                *o = (g * w as f64 * m) as f32;
+                let (o_l, o_r) = (&mut mon_l[k0 + k], &mut mon_r[k0 + k]);
+                *o_l = (g * wet_l[k0 + k] as f64 * m) as f32;
+                *o_r = (g * wet_r[k0 + k] as f64 * m) as f32;
                 if sounded {
-                    *o += (g * y as f64 * m) as f32;
+                    let y = (g * sends[k] as f64 * m) as f32;
+                    *o_l += y;
+                    *o_r += y;
                 }
                 self.master_gain = crate::glide(self.master_gain, target, self.master_coef);
             }
@@ -844,9 +908,10 @@ impl Engine {
                 for (i, &[min, max]) in self.fx.envelope().iter().enumerate() {
                     (chunk.lo[i], chunk.hi[i]) = (min, max);
                 }
-                for &x in &self.monitor[k0..k1] {
-                    chunk.lo[SCOPE_MONITOR] = chunk.lo[SCOPE_MONITOR].min(x);
-                    chunk.hi[SCOPE_MONITOR] = chunk.hi[SCOPE_MONITOR].max(x);
+                // Both sides folded: the lowest and the highest of either.
+                for (&a, &b) in self.monitor[0][k0..k1].iter().zip(&self.monitor[1][k0..k1]) {
+                    chunk.lo[SCOPE_MONITOR] = chunk.lo[SCOPE_MONITOR].min(a.min(b));
+                    chunk.hi[SCOPE_MONITOR] = chunk.hi[SCOPE_MONITOR].max(a.max(b));
                 }
                 if self.scope_chunks.len() < self.scope_chunks.capacity() {
                     self.scope_chunks.push(chunk);
@@ -864,16 +929,17 @@ impl Engine {
         left.copy_from_slice(mix_l);
         right.copy_from_slice(mix_r);
         self.limiter.process(start, left, right);
-        for ((l, r), m) in left.iter_mut().zip(right.iter_mut()).zip(&self.monitor[..n]) {
-            *l += m;
-            *r += m;
+        let [mon_l, mon_r] = &self.monitor;
+        for ((l, r), (a, b)) in left.iter_mut().zip(right.iter_mut()).zip(mon_l[..n].iter().zip(&mon_r[..n])) {
+            *l += a;
+            *r += b;
         }
         let [share_l, share_r] = &mut self.share;
         let (share_l, share_r) = (&mut share_l[..n], &mut share_r[..n]);
         self.share_limiter.process(start, share_l, share_r);
-        for ((l, r), m) in share_l.iter_mut().zip(share_r.iter_mut()).zip(&self.monitor[..n]) {
-            *l += m;
-            *r += m;
+        for ((l, r), (a, b)) in share_l.iter_mut().zip(share_r.iter_mut()).zip(mon_l[..n].iter().zip(&mon_r[..n])) {
+            *l += a;
+            *r += b;
         }
         // The scope's master column: what the device takes, now that it is final. Each chunk in the
         // order it played, so the columns stay one sequence (`crate::scope`).
@@ -1397,9 +1463,10 @@ mod tests {
         let (mut l, mut r) = ([0.0f32; QUANTUM], [0.0f32; QUANTUM]);
         let render = |e: &mut Engine, f: Frame, heard: bool, l: &mut [f32; QUANTUM], r: &mut [f32; QUANTUM]| {
             if heard {
-                for (k, x) in e.lanes[0].iter_mut().enumerate() {
+                for (k, x) in e.lanes[0][0].iter_mut().enumerate() {
                     *x = (((f as usize + k) * 37 % 101) as f32 / 50.0 - 1.0) * 0.5;
                 }
+                e.lanes[0][1] = e.lanes[0][0];
             } else {
                 let fading = e.looper.render(f, QUANTUM, &mut e.lanes, &mut e.fades);
                 assert_eq!(fading, [false; TRACK_COUNT]);
@@ -1420,7 +1487,7 @@ mod tests {
         let master = frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
         let mut mix = LaneMix::default();
         mix.fx[FxKind::Delay.index()] = FxState { bypassed: false, params: [1.0, MAX_FEEDBACK, 1.0] };
-        let track = LoadTrack { index: 0, buf: vec![0.0; e.looper.capacity() as usize], peaks: Vec::new(), reversed: false, playing: true, mix };
+        let track = LoadTrack { index: 0, buf: vec![[0.0; 2]; e.looper.capacity() as usize], peaks: Vec::new(), reversed: false, playing: true, mix };
         let mut load = Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master, tracks: vec![track], result: None };
         let mut cx = Cx { now: loaded, align: 0, clock: &mut e.clock, feed: &mut e.feed, fx: &mut e.fx };
         assert_eq!(e.looper.load(&mut cx, &mut load), Ok(()));

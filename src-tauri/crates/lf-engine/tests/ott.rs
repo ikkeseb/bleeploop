@@ -40,7 +40,7 @@ use common::{Delay, Opts, Rig};
 use lf_engine::dsp::compressor::Compressor;
 use lf_engine::dsp::ott::{ceiling, gain_db, release_scale, MonoOtt, Setting, StereoOtt, CEILING, CEILING_KNEE, DEFAULT_DEPTH, FADE_SECONDS, HIGH_SPLIT, LOW_SPLIT, MAKEUP_DB};
 use lf_engine::grid::Frame;
-use lf_engine::{Action, Command, InputSend, InputSendParam, Instrument, NoteTarget, SlotEvent, SlotKind, SlotProcessor, Toggle};
+use lf_engine::{Action, Command, InputSend, InputSendParam, Instrument, NoteTarget, SlotEvent, Toggle, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 
@@ -941,16 +941,14 @@ struct Square {
     amp: f32,
 }
 
-impl SlotProcessor for Square {
-    fn kind(&self) -> SlotKind {
-        SlotKind::Instrument
+impl UnitProcessor for Square {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: true, latency: 0 }
     }
 
-    fn latency(&self) -> Frame {
-        0
-    }
-
-    fn process(&mut self, frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+    /// A mono source: the same square on both sides.
+    fn process(&mut self, cx: &UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let (frame, [out, right]) = (cx.frame, out);
         for (k, y) in out.iter_mut().enumerate() {
             let f = frame + k as Frame;
             *y = if f < self.start {
@@ -961,6 +959,7 @@ impl SlotProcessor for Square {
                 -self.amp
             };
         }
+        right.copy_from_slice(out);
     }
 
     fn stop(&mut self) {}

@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, UnitProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
@@ -170,7 +170,7 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
     }
     for (slot, port) in ports.iter_mut().enumerate() {
         if let Some(port) = port.as_mut() {
-            while let Some(unit) = port.returned() {
+            while let Some((_, unit)) = port.returned() {
                 park(core, slot, unit);
             }
         }
@@ -181,7 +181,7 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
 /// Keep an evicted unit for its plugin owner (the slot's holder), and free the slot. A unit its owner
 /// abandoned (`SlotHost::abandon`) leaks, as does a second one, which the slot protocol rules out (one
 /// unit per slot): never a drop here (a drop calls its DLL).
-fn park(core: &Core, slot: usize, unit: Box<dyn SlotProcessor>) {
+fn park(core: &Core, slot: usize, unit: Box<dyn UnitProcessor>) {
     let owner = core.holder[slot].swap(0, AcqRel);
     if owner == 0 || owner == ORPHAN {
         log::warn!("[engine_io] slot {slot}: an evicted unit has no owner left; leaking it");

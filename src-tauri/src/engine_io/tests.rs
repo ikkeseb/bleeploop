@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, TimedCommand, UnitProcessor, SLOT_COUNT};
 
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
@@ -213,19 +213,18 @@ impl Unit {
     }
 }
 
-impl SlotProcessor for Unit {
-    fn kind(&self) -> SlotKind {
-        SlotKind::Effect
+impl UnitProcessor for Unit {
+    fn info(&self) -> lf_engine::UnitInfo {
+        lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: 0 }
     }
-    fn latency(&self) -> Frame {
-        0
-    }
-    fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+    fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
         let call = self.calls.fetch_add(1, SeqCst) + 1;
         if self.panic_at == Some(call) {
             panic!("the unit fails on call {call} (on purpose)");
         }
-        out.fill(self.level);
+        for o in out {
+            o.fill(self.level);
+        }
     }
     fn stop(&mut self) {
         self.stops.fetch_add(1, SeqCst);

@@ -39,7 +39,7 @@ struct Row {
 fn loaded(row: &Row, lane_seconds: f64) -> Rig {
     let mut rig = Rig::with(Opts { sr: row.rate, start: row.rate as Frame, loop_seconds: lane_seconds, ..Opts::default() });
     let mut buf = Vec::with_capacity(rig.engine.looper().capacity() as usize);
-    buf.resize(rig.engine.looper().capacity() as usize, 0.0f32);
+    buf.resize(rig.engine.looper().capacity() as usize, [0.0f32; 2]);
     let track = LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() };
     let load = Load { bpm: row.bpm, meter: Meter::FOUR_FOUR, bars: row.bars, master: row.master, tracks: vec![track], result: None };
     assert!(rig.session().send(Box::new(SessionJob::Load(load))).is_ok(), "the port takes the load");

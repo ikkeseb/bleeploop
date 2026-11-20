@@ -26,8 +26,14 @@
 //! loop, and nothing from before either comes back through a delay turned on later. A parameter is clamped
 //! to its def's range; a change sounds from the next quantum boundary, as a live Web Audio param does.
 //!
-//! Each lane's pan ([`pan_gains`], the engine's own) places the chain's direct output between the two
-//! sides; the reverb send is taken before it and stays unpanned. A `SetPan` glides the position frame by
+//! A lane is stereo, so its chain runs once per channel: two instances under one set of controls (every
+//! setting, state, bypass, grid and history change reaches both on the same frame), and a lane with equal
+//! sides plays through each exactly what the mono chain played. The reverb send is the mean of the two
+//! channels' sends (for equal sides, the send itself, bit for bit).
+//!
+//! Each lane's pan ([`pan_gains`], the engine's own) is a balance on the chain's direct output: its
+//! left gain on the left channel, its right gain on the right, so a lane with equal sides is placed
+//! exactly as the mono lane was; the reverb send is taken before it and stays unpanned. A `SetPan` glides the position frame by
 //! frame (`crate::glide`, over [`PAN_TAU_SECONDS`]) and each frame plays at the gains of the position it
 //! has reached, so a move lands on the same frame at any block size; a settled position plays at gains
 //! computed once, and the centre adds the direct output as it did before pan, bit for bit. Construction,
@@ -99,7 +105,8 @@ impl Pan {
 
 pub struct LaneFx {
     sample_rate: u32,
-    /// One per lane, on the heap (a chain is ~80 kB of render buffers).
+    /// Two per lane, left then right (lane `i`'s at `2 i` and `2 i + 1`), on the heap (a chain is
+    /// ~80 kB of render buffers).
     chains: Vec<FxChain>,
     bus: ReverbBus,
     /// Device frames the DSP clock is behind.
@@ -115,8 +122,8 @@ pub struct LaneFx {
     /// rendered before the taps existed.
     env: [[f32; 2]; TRACK_COUNT],
     env_on: bool,
-    out: [f32; QUANTUM],
-    send: [f32; QUANTUM],
+    out: [[f32; QUANTUM]; 2],
+    send: [[f32; QUANTUM]; 2],
     sends: [f32; QUANTUM],
     wet: [[f32; QUANTUM]; 2],
 }
@@ -136,7 +143,7 @@ impl LaneFx {
         let start = Ctl::at(0, sr);
         LaneFx {
             sample_rate,
-            chains: (0..TRACK_COUNT).map(|_| FxChain::new(sr, None, start)).collect(),
+            chains: (0..2 * TRACK_COUNT).map(|_| FxChain::new(sr, None, start)).collect(),
             bus: ReverbBus::new(sr, ir, 0),
             offset: 0,
             timing: None,
@@ -144,8 +151,8 @@ impl LaneFx {
             pan_coef: (-1.0 / (PAN_TAU_SECONDS * sample_rate as f64)).exp(),
             env: [[0.0; 2]; TRACK_COUNT],
             env_on: false,
-            out: [0.0; QUANTUM],
-            send: [0.0; QUANTUM],
+            out: [[0.0; QUANTUM]; 2],
+            send: [[0.0; QUANTUM]; 2],
             sends: [0.0; QUANTUM],
             wet: [[0.0; QUANTUM]; 2],
         }
@@ -163,8 +170,14 @@ impl LaneFx {
         Ctl::at(self.dsp(frame), self.sample_rate as f32)
     }
 
+    /// Lane `lane`'s chain, its left instance (the right one holds the same controls).
     pub fn chain(&self, lane: usize) -> &FxChain {
-        &self.chains[lane]
+        &self.chains[2 * lane]
+    }
+
+    /// Lane `lane`'s two instances, left then right.
+    fn pair(&mut self, lane: usize) -> &mut [FxChain] {
+        &mut self.chains[2 * lane..2 * lane + 2]
     }
 
     /// Clamped to the param's range; an integer param (semitones, a division index) rounds half up, as
@@ -172,7 +185,9 @@ impl LaneFx {
     pub fn set_param(&mut self, lane: usize, param: FxParam, value: f64, frame: Frame) {
         if value.is_finite() {
             let ctl = self.ctl(frame);
-            self.chains[lane].set_param(param, clamped(param.def(), value), ctl);
+            for chain in self.pair(lane) {
+                chain.set_param(param, clamped(param.def(), value), ctl);
+            }
         }
     }
 
@@ -180,7 +195,7 @@ impl LaneFx {
     /// is no number keeps the chain's). Ramped as a CLEAR's and a COPY's are (`FxChain::set_state`).
     pub fn set_state(&mut self, lane: usize, states: &[FxState; 5], frame: Frame) {
         let mut states = *states;
-        let current = self.chains[lane].get_state();
+        let current = self.chains[2 * lane].get_state();
         for kind in FxKind::ALL {
             let (state, now) = (&mut states[kind.index()], &current[kind.index()]);
             for ((v, def), &old) in state.params.iter_mut().zip(kind.params()).zip(&now.params) {
@@ -188,19 +203,25 @@ impl LaneFx {
             }
         }
         let ctl = self.ctl(frame);
-        self.chains[lane].set_state(&states, ctl);
+        for chain in self.pair(lane) {
+            chain.set_state(&states, ctl);
+        }
     }
 
     pub fn set_bypass(&mut self, lane: usize, kind: FxKind, bypassed: bool, frame: Frame) {
         let ctl = self.ctl(frame);
-        self.chains[lane].set_bypass(kind, bypassed, ctl);
+        for chain in self.pair(lane) {
+            chain.set_bypass(kind, bypassed, ctl);
+        }
     }
 
     /// CLEAR: the lane's FX back to the defaults, its chain's history silenced ([`LaneFx::clear_history`]),
     /// its pan centred at once.
     pub fn reset(&mut self, lane: usize, frame: Frame) {
         let ctl = self.ctl(frame);
-        self.chains[lane].set_state(&default_fx_states(), ctl);
+        for chain in self.pair(lane) {
+            chain.set_state(&default_fx_states(), ctl);
+        }
         self.clear_history(lane, frame);
         self.pans[lane] = Pan::seeded(0.0);
     }
@@ -245,13 +266,17 @@ impl LaneFx {
     /// the erased loop's echoes never come back through a delay turned on or a feedback raised later.
     pub fn clear_history(&mut self, lane: usize, frame: Frame) {
         let f = self.dsp(frame);
-        self.chains[lane].clear_history(f);
+        for chain in self.pair(lane) {
+            chain.clear_history(f);
+        }
     }
 
     /// COPY: lane `to` takes lane `from`'s FX, and its pan target at once (no glide).
     pub fn copy(&mut self, from: usize, to: usize, frame: Frame) {
-        let (state, ctl) = (self.chains[from].get_state(), self.ctl(frame));
-        self.chains[to].set_state(&state, ctl);
+        let (state, ctl) = (self.chains[2 * from].get_state(), self.ctl(frame));
+        for chain in self.pair(to) {
+            chain.set_state(&state, ctl);
+        }
         self.pans[to] = Pan::seeded(self.pans[from].target);
     }
 
@@ -288,55 +313,62 @@ impl LaneFx {
         }
     }
 
-    /// Render frames `frame..frame + n`, inside one quantum: lane `i`'s signal is `lanes[i]`; the chains'
-    /// outputs, each at its pan's gains, and the bus's are added to `left`/`right`. A lane `fading` (FADE)
-    /// has its ramp in `fades[i]`: its signal is already ramped, and its delay feeds its echoes back under
-    /// the ramp too, so the echoes it held before the fade die with it instead of ringing on past the bar
-    /// line at their old level (`FxChain::process_fading`). The shared reverb bus is fed the fading send,
-    /// unpanned; a lane that does not fade is untouched.
-    pub fn render(&mut self, frame: Frame, lanes: &[[f32; QUANTUM]; TRACK_COUNT], fading: [bool; TRACK_COUNT], fades: &[[f32; QUANTUM]; TRACK_COUNT], left: &mut [f32], right: &mut [f32]) {
+    /// Render frames `frame..frame + n`, inside one quantum: lane `i`'s signal is the pair `lanes[i]`;
+    /// the chains' outputs, each at its pan's gains, and the bus's are added to `left`/`right`. A lane
+    /// `fading` (FADE) has its ramp in `fades[i]`: its signal is already ramped, and its delay feeds its
+    /// echoes back under the ramp too, so the echoes it held before the fade die with it instead of
+    /// ringing on past the bar line at their old level (`FxChain::process_fading`). The shared reverb bus
+    /// is fed the fading send, unpanned; a lane that does not fade is untouched.
+    pub fn render(&mut self, frame: Frame, lanes: &[[[f32; QUANTUM]; 2]; TRACK_COUNT], fading: [bool; TRACK_COUNT], fades: &[[f32; QUANTUM]; TRACK_COUNT], left: &mut [f32], right: &mut [f32]) {
         let n = left.len();
         let f = self.dsp(frame);
         debug_assert!(n <= QUANTUM && (f % QUANTUM as u64) as usize + n <= QUANTUM, "a render crosses a quantum");
         let sends = &mut self.sends[..n];
         sends.fill(0.0);
         let mut any_send = false;
-        for (i, (chain, lane)) in self.chains.iter_mut().zip(lanes).enumerate() {
-            let (out, send) = (&mut self.out[..n], &mut self.send[..n]);
-            chain.process_fading(f, &lane[..n], fading[i].then(|| &fades[i][..n]), out, send);
+        for (i, (pair, lane)) in self.chains.chunks_exact_mut(2).zip(lanes).enumerate() {
+            let [out_l, out_r] = &mut self.out;
+            let [send_l, send_r] = &mut self.send;
+            let (out_l, out_r, send_l, send_r) = (&mut out_l[..n], &mut out_r[..n], &mut send_l[..n], &mut send_r[..n]);
+            let fade = fading[i].then(|| &fades[i][..n]);
+            pair[0].process_fading(f, &lane[0][..n], fade, out_l, send_l);
+            pair[1].process_fading(f, &lane[1][..n], fade, out_r, send_r);
             if self.env_on {
                 // The lane as the player hears it before the master: after its FX and its fade, before
-                // its pan (`env`, for the scope's columns). `out` is read once more here, so the fold
-                // rides the cache line the chain just wrote.
+                // its pan, both sides folded (`env`, for the scope's columns). `out` is read once more
+                // here, so the fold rides the cache lines the chains just wrote.
                 let mut env = [0.0f32; 2];
-                for &x in out.iter() {
-                    env[0] = env[0].min(x);
-                    env[1] = env[1].max(x);
+                for (&a, &b) in out_l.iter().zip(out_r.iter()) {
+                    env[0] = env[0].min(a.min(b));
+                    env[1] = env[1].max(a.max(b));
                 }
                 self.env[i] = env;
             }
-            any_send |= !chain.send_silent();
-            for (s, &x) in sends.iter_mut().zip(send.iter()) {
-                *s += x;
+            any_send |= !pair[0].send_silent() || !pair[1].send_silent();
+            // The mean of the two sends: equal sides send exactly the one send (`x + x` and the half
+            // are exact).
+            for (s, (&a, &b)) in sends.iter_mut().zip(send_l.iter().zip(send_r.iter())) {
+                *s += 0.5 * (a + b);
             }
             let pan = &mut self.pans[i];
             let target = pan.target as f64;
+            let frames = left.iter_mut().zip(right.iter_mut()).zip(out_l.iter().zip(out_r.iter()));
             if pan.at == target && pan.gains == [1.0, 1.0] {
-                for ((l, r), &x) in left.iter_mut().zip(right.iter_mut()).zip(out.iter()) {
-                    *l += x;
-                    *r += x;
+                for ((l, r), (&a, &b)) in frames {
+                    *l += a;
+                    *r += b;
                 }
             } else if pan.at == target {
                 let [gl, gr] = pan.gains;
-                for ((l, r), &x) in left.iter_mut().zip(right.iter_mut()).zip(out.iter()) {
-                    *l += (gl * x as f64) as f32;
-                    *r += (gr * x as f64) as f32;
+                for ((l, r), (&a, &b)) in frames {
+                    *l += (gl * a as f64) as f32;
+                    *r += (gr * b as f64) as f32;
                 }
             } else {
-                for ((l, r), &x) in left.iter_mut().zip(right.iter_mut()).zip(out.iter()) {
+                for ((l, r), (&a, &b)) in frames {
                     let [gl, gr] = pan_gains(pan.at);
-                    *l += (gl * x as f64) as f32;
-                    *r += (gr * x as f64) as f32;
+                    *l += (gl * a as f64) as f32;
+                    *r += (gr * b as f64) as f32;
                     pan.at = crate::glide(pan.at, target, self.pan_coef);
                 }
                 if pan.at == target {
@@ -358,8 +390,8 @@ impl LaneFx {
 mod tests {
     use super::*;
 
-    /// [`LaneFx::render`] as it was before pan (`ff03884a`), every lane unfaded: each chain's output added
-    /// to both sides, then the bus's.
+    /// [`LaneFx::render`] as it was before pan (`ff03884a`) and before stereo lanes, every lane unfaded:
+    /// each mono chain's output (each lane's left instance) added to both sides, then the bus's.
     fn render_before_pan(fx: &mut LaneFx, frame: Frame, lanes: &[[f32; QUANTUM]; TRACK_COUNT], left: &mut [f32], right: &mut [f32]) {
         let n = left.len();
         let f = fx.dsp(frame);
@@ -367,8 +399,8 @@ mod tests {
         let sends = &mut sends[..n];
         sends.fill(0.0);
         let mut any_send = false;
-        for (chain, lane) in chains.iter_mut().zip(lanes) {
-            let (out, send) = (&mut out[..n], &mut send[..n]);
+        for (chain, lane) in chains.iter_mut().step_by(2).zip(lanes) {
+            let (out, send) = (&mut out[0][..n], &mut send[0][..n]);
             chain.process_fading(f, &lane[..n], None, out, send);
             any_send |= !chain.send_silent();
             for (s, &x) in sends.iter_mut().zip(send.iter()) {
@@ -389,7 +421,8 @@ mod tests {
     }
 
     /// Two copies of the same five busy lanes (every effect but the stutter on, the reverb bus fed): one
-    /// rendered by [`LaneFx::render`], the other by the render before pan, `edit(fx, frame)` applied to
+    /// rendered by [`LaneFx::render`] with both sides of each lane equal, the other by the mono render
+    /// before pan, `edit(fx, frame)` applied to
     /// both before each quantum (the reference ignores what it does to pans). Per quantum: whether the bits
     /// matched, and where the rendered copy's pans had got to after it.
     fn against_before_pan(mut edit: impl FnMut(&mut LaneFx, Frame)) -> Vec<(bool, [f64; TRACK_COUNT])> {
@@ -426,7 +459,8 @@ mod tests {
                     side.fill(0.0);
                 }
                 let [al, ar] = &mut a;
-                panned.render(frame, &lanes, fading, &fades, al, ar);
+                let pairs: [[[f32; QUANTUM]; 2]; TRACK_COUNT] = lanes.map(|lane| [lane, lane]);
+                panned.render(frame, &pairs, fading, &fades, al, ar);
                 let [bl, br] = &mut b;
                 render_before_pan(&mut before, frame, &lanes, bl, br);
                 let bits = |x: &[[f32; QUANTUM]; 2]| x.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();

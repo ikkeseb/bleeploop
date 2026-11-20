@@ -1875,7 +1875,7 @@ mod tests {
                 }
                 let ctx = lf_engine::ProcessContext { frame: self.at, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
                 let mut rt = self.feed.host.core.rt.lock().unwrap();
-                rt.engine.as_mut().expect("an engine").process_inputs(&ctx, [&x, &x], &mut l, &mut r);
+                rt.engine.as_mut().expect("an engine").process_inputs(&ctx, [[&x, &x], [&x, &x]], &mut l, &mut r);
                 self.at += TUNER_BLOCK as Frame;
             }
         }

@@ -8,6 +8,7 @@
 mod common;
 
 use common::{code, Rig};
+use common::mono;
 use lf_engine::grid::{Frame, Grid, Meter};
 use lf_engine::{Command, LaneState};
 
@@ -60,7 +61,7 @@ fn an_onset_starts_the_take_with_its_attack_and_anchors_the_grid() {
         assert!(!info.auto_armed && info.state == LaneState::Recording && rig.locked());
         let start = rig.start_frame();
         assert!(start <= at && at - start <= 2 * 192, "the soft attack is retained: start {start}, onset {at}");
-        let take = rig.engine.looper().take_pcm(0);
+        let take = mono(rig.engine.looper().take_pcm(0));
         assert_eq!(take.len() as Frame, rig.frame - start, "everything from the retained start");
         let input = onset_at(at);
         assert!(take.iter().enumerate().all(|(k, &x)| x == input(start + k as Frame)), "one contiguous run from the start");
@@ -183,7 +184,7 @@ fn a_trigger_after_a_gap_leaves_the_tap_in_the_same_quantum_starts_the_take_ther
         assert!(!rig.lane(0).auto_armed, "block {block}: triggered");
         let start = rig.start_frame();
         assert_eq!(start, d + LATENCY, "block {block}: the take starts where the gap left the tap");
-        let take = rig.engine.looper().take_pcm(0);
+        let take = mono(rig.engine.looper().take_pcm(0));
         assert_eq!(take.len() as Frame, rig.frame - start, "block {block}: everything from the start");
         assert!(take.iter().enumerate().all(|(k, &x)| x == input(start + k as Frame - LATENCY)), "block {block}: one contiguous run from the start");
         rig.advance_to(start + rig.fpb() + 1);

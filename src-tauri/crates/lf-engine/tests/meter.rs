@@ -231,7 +231,7 @@ fn load_of(rig: &Rig, s: &Snapshot, meter: Meter, bars: Frame) -> Load {
         .map(|k| {
             let t = s.tracks[k].unwrap();
             let mut buf = s.pcm[k * master..(k + 1) * master].to_vec();
-            buf.resize(capacity, 0.0);
+            buf.resize(capacity, [0.0; 2]);
             LoadTrack { index: t.index, buf, peaks: Vec::new(), reversed: false, playing: true, mix: t.mix }
         })
         .collect();
@@ -254,7 +254,7 @@ fn a_snapshot_carries_its_meter_and_a_load_brings_it_back() {
         // Locked with the tempo: a meter sent now is dropped.
         rig.set(Command::SetMeter(other_than(meter)));
         assert_eq!(rig.meter(), meter, "the meter locks with the loop");
-        let pcm = vec![0.0; rig.master() as usize];
+        let pcm = vec![[0.0; 2]; rig.master() as usize];
         let SessionJob::Snapshot(s) = run_job(&mut rig, SessionJob::Snapshot(Snapshot::new(pcm))) else { panic!("no snapshot came back") };
         assert_eq!((s.result, s.meter, s.bpm), (Some(Ok(())), meter, BPM));
         rig.press(Command::ClearAll);
@@ -270,7 +270,7 @@ fn a_snapshot_carries_its_meter_and_a_load_brings_it_back() {
         assert_eq!(load_result(&mut rig, load), Ok(()));
         assert_eq!((rig.meter(), rig.locked(), rig.master()), (meter, true, s.master), "{meter:?}: the load sets and locks it");
         assert!(rig.events[mark..].iter().any(|e| matches!(*e, Event::Transport { meter: m, locked: true, .. } if m == meter)));
-        assert_eq!(rig.pcm(0), s.pcm[..s.master as usize].to_vec());
+        assert_eq!(rig.pcm2(0), s.pcm[..s.master as usize].to_vec());
     }
 }
 
@@ -511,9 +511,9 @@ fn four_four_renders() {
 
     // The export's wet master: a two-bar loop at 100 with a lane's delay at a quarter note.
     let master = 2 * 115_200;
-    let mut buf = vec![0.0f32; master];
+    let mut buf = vec![[0.0f32; 2]; master];
     for p in (0..master).step_by(24_000) {
-        buf[p] = 0.25;
+        buf[p] = [0.25; 2];
     }
     let mut mix = LaneMix::default();
     mix.fx[FxKind::Delay.index()].params = [3.0, 0.6, 0.5];

@@ -4,6 +4,8 @@
 //! `engine_slot` into a test device's engine, where the production `activate_component` activates it
 //! and a plugin-requested restart cycles it on the owner. No DLL, audio device or GUI required.
 use super::*;
+#[allow(unused_imports)]
+use crate::host::clap::ProcessMono;
 use rtrb::RingBuffer;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::thread::ThreadId;
@@ -504,6 +506,8 @@ fn wait_for(pred: impl Fn() -> bool) -> bool {
 
 mod engine {
     use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
     use super::super::super::super::state::ToneRestore;
     use super::super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
     use super::super::controller_tests::FixtureController;
@@ -1276,7 +1280,9 @@ mod engine {
 #[test]
 fn a_unit_whose_plugin_refuses_to_start_latches_the_fault_and_stays_silent() {
     use super::engine::Vst3Unit;
-    use lf_engine::SlotProcessor;
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
+    use lf_engine::UnitProcessor;
 
     let fixture = ComWrapper::new(FixtureComponent::new());
     let s: &FixtureComponent = &fixture;
@@ -1292,7 +1298,7 @@ fn a_unit_whose_plugin_refuses_to_start_latches_the_fault_and_stays_silent() {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [1.0f32; 64]);
         for frame in 0..3 {
-            unit.process(frame * 64, &input, &[], &mut out);
+            unit.process_mono(frame * 64, &input, &[], &mut out);
             assert!(out.iter().all(|&x| x == 0.0), "silent");
         }
         unit.stop();
@@ -1317,7 +1323,9 @@ fn a_unit_whose_plugin_refuses_to_start_latches_the_fault_and_stays_silent() {
 #[test]
 fn a_unit_whose_plugin_does_not_implement_set_processing_plays() {
     use super::engine::Vst3Unit;
-    use lf_engine::SlotProcessor;
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
+    use lf_engine::UnitProcessor;
 
     let fixture = ComWrapper::new(FixtureComponent::new());
     let s: &FixtureComponent = &fixture;
@@ -1333,7 +1341,7 @@ fn a_unit_whose_plugin_does_not_implement_set_processing_plays() {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
         for frame in 0..3 {
-            unit.process(frame * 64, &input, &[], &mut out);
+            unit.process_mono(frame * 64, &input, &[], &mut out);
             assert!(out.iter().all(|&x| x == 0.5), "heard");
         }
         unit.stop();
@@ -1356,7 +1364,9 @@ fn a_unit_whose_plugin_does_not_implement_set_processing_plays() {
 #[test]
 fn a_unit_discards_the_output_of_a_failed_process_call() {
     use super::engine::Vst3Unit;
-    use lf_engine::SlotProcessor;
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
+    use lf_engine::UnitProcessor;
 
     let fixture = ComWrapper::new(FixtureComponent::new());
     let s: &FixtureComponent = &fixture;
@@ -1372,9 +1382,9 @@ fn a_unit_discards_the_output_of_a_failed_process_call() {
     let (unit, out) = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
-        unit.process(0, &input[..64], &[], &mut out[..64]);
+        unit.process_mono(0, &input[..64], &[], &mut out[..64]);
         assert!(out[..64].iter().all(|&x| x == 0.5), "heard before the failure");
-        unit.process(64, &input, &[], &mut out);
+        unit.process_mono(64, &input, &[], &mut out);
         unit.stop();
         (unit, out)
     })
@@ -1399,7 +1409,9 @@ fn a_unit_discards_the_output_of_a_failed_process_call() {
 #[test]
 fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     use super::engine::Vst3Unit;
-    use lf_engine::{SlotEvent, SlotEventKind, SlotProcessor};
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
+    use lf_engine::{SlotEvent, SlotEventKind, UnitProcessor};
 
     let fixture = ComWrapper::new(FixtureComponent::new());
     let s: &FixtureComponent = &fixture;
@@ -1413,7 +1425,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     let (unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
-        unit.process(0, &input[..64], &[], &mut out[..64]); // starts processing: one call
+        unit.process_mono(0, &input[..64], &[], &mut out[..64]); // starts processing: one call
         params.push(ParamEvent { id: 100, value: 0.5 }).unwrap();
         let notes = [
             SlotEvent { offset: 10, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } },
@@ -1423,7 +1435,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
         let mut runs = 0;
         let allocations = super::super::engine_slot::rt_allocations(|| {
             runs += 1;
-            unit.process(200, &input, &notes, &mut out)
+            unit.process_mono(200, &input, &notes, &mut out)
         });
         assert_eq!(allocations, 0, "process allocates nothing");
         assert!(out.iter().all(|&x| x == 0.5), "both channels at 0.5, summed to mono");

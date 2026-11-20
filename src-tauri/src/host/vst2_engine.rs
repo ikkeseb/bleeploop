@@ -1,5 +1,5 @@
 //! OWNS: a 64-bit VST2 plugin in the engine: `Vst2Unit` (the effect's process call with its rows,
-//! pointer arrays, event list and time info, as an `lf_engine::SlotProcessor`) and what its owner
+//! pointer arrays, event list and time info, as an `lf_engine::UnitProcessor`) and what its owner
 //! thread does with the plugin (`Vst2Plugin`, which the shared owner loop `engine_slot::serve`
 //! drives): the load, resume, a restart and a re-activation after an eviction, and the teardown's
 //! order, keeping the plugin's tone as `engine_slot` describes: its bank chunk
@@ -33,7 +33,7 @@ use super::super::vst2::{
     open_effect, time_info, validate, EffectInfo, HostContext, OpenError, ProcessingScope, Vst2Effect, Vst2Module,
 };
 use super::super::vst2_abi::*;
-use super::{ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
+use super::{pair_from, pair_into, ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use lf_engine::grid::Frame;
 use lf_engine::slots::MAX_SLOT_EVENTS;
-use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 use rtrb::Consumer;
 use windows::Win32::Foundation::HWND;
 
@@ -262,17 +262,15 @@ impl Vst2Unit {
     }
 }
 
-impl SlotProcessor for Vst2Unit {
-    fn kind(&self) -> SlotKind {
-        self.kind
+impl UnitProcessor for Vst2Unit {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: self.kind == SlotKind::Instrument, latency: self.latency }
     }
 
-    fn latency(&self) -> Frame {
-        self.latency
-    }
-
-    fn process(&mut self, _frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
-        out.fill(0.0);
+    fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let [out_l, out_r] = out;
+        out_l.fill(0.0);
+        out_r.fill(0.0);
         // The plugin's layout is no longer the one these rows were built for: silence, and no call,
         // until the owner has cycled it and rebuilt them.
         if self.ctx.halted() {
@@ -286,7 +284,7 @@ impl SlotProcessor for Vst2Unit {
             ProcessingScope::enter(&self.ctx, self.time.get())
         };
         self.drain_params();
-        let n = out.len();
+        let n = out_l.len();
         let (mut at, mut next) = (0, 0);
         // A call longer than the plugin's block size goes in slices; each note lands in its own.
         while at < n {
@@ -305,10 +303,9 @@ impl SlotProcessor for Vst2Unit {
                     return;
                 }
             }
-            // The mono input feeds the first two inputs; any other declared input stays silent.
-            for row in self.in_rows.iter_mut().take(2) {
-                row[..len].copy_from_slice(&input[at..at + len]);
-            }
+            // The pair feeds the first two inputs (one declared input takes its mean); any other
+            // declared input stays silent.
+            pair_into(input, &mut self.in_rows, at, len);
             // The accumulating call adds into every output; the replacing one may leave the pair
             // this unit reads untouched while it has nothing to say.
             let cleared = if self.replacing { 2 } else { self.out_rows.len() };
@@ -320,17 +317,8 @@ impl SlotProcessor for Vst2Unit {
             // least `len` frames (`len` ≤ `max_frames`), all owned by this unit for the call.
             unsafe { (self.process)(self.effect, self.in_ptrs.as_mut_ptr(), self.out_ptrs.as_mut_ptr(), len as i32) };
             // The first stereo pair is the slot's sound; a multi-output instrument's other pins are
-            // auxiliaries, and averaging them in would only dilute it.
-            let mono = &mut out[at..at + len];
-            match self.out_rows.as_slice() {
-                [left, right, ..] => {
-                    for (sample, (l, r)) in mono.iter_mut().zip(left.iter().zip(right.iter())) {
-                        *sample = (l + r) * 0.5;
-                    }
-                }
-                [only] => mono.copy_from_slice(&only[..len]),
-                [] => {}
-            }
+            // auxiliaries.
+            pair_from(&self.out_rows, [&mut *out_l, &mut *out_r], at, len);
             self.position = self.position.wrapping_add(len as u64);
             self.ctx.set_sample_pos(self.position);
             at += len;

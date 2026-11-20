@@ -237,8 +237,8 @@ fn the_feed_and_the_applied_mixes_carry_the_target_once_per_change_not_the_glide
 /// A one-bar session at 120 BPM: lane 0 a constant LEVEL loop, PLAYING, at `mix`.
 fn session(rig: &Rig, mix: LaneMix) -> Load {
     let master = frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
-    let mut buf = vec![0.0f32; rig.engine.looper().capacity() as usize];
-    buf[..master as usize].fill(LEVEL);
+    let mut buf = vec![[0.0f32; 2]; rig.engine.looper().capacity() as usize];
+    buf[..master as usize].fill([LEVEL; 2]);
     let track = LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix };
     Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master, tracks: vec![track], result: None }
 }
@@ -278,12 +278,12 @@ fn a_load_seeds_its_pan_and_a_snapshot_pins_it() {
         assert!((rig.bus_right[k] as f64 - gr * x).abs() < 1e-6, "frame {k} after the anchor: right {} for left {}", rig.bus_right[k], rig.bus[k]);
     }
 
-    let pcm = vec![0.0; rig.master() as usize];
+    let pcm = vec![[0.0; 2]; rig.master() as usize];
     let SessionJob::Snapshot(s) = run(&mut rig, SessionJob::Snapshot(Snapshot::new(pcm))) else { unreachable!() };
     assert_eq!(s.result, Some(Ok(())));
     assert_eq!(s.tracks[0].map(|t| t.mix.pan), Some(0.5), "the snapshot carries the lane's pan");
     rig.press(Command::SetPan(0, -0.25));
-    let pcm = vec![0.0; rig.master() as usize];
+    let pcm = vec![[0.0; 2]; rig.master() as usize];
     let SessionJob::Snapshot(s) = run(&mut rig, SessionJob::Snapshot(Snapshot::new(pcm))) else { unreachable!() };
     assert_eq!(s.tracks[0].map(|t| t.mix.pan), Some(-0.25), "its target, pinned while the glide still moves");
 }
@@ -292,9 +292,9 @@ fn a_load_seeds_its_pan_and_a_snapshot_pins_it() {
 fn the_wet_master_renders_each_lanes_pan() {
     const MASTER: usize = 96_000;
     let track = |mix: LaneMix| {
-        let mut buf = vec![0.0f32; MASTER];
+        let mut buf = vec![[0.0f32; 2]; MASTER];
         for p in [1_000, 30_000, 70_000] {
-            buf[p] = 0.25;
+            buf[p] = [0.25; 2];
         }
         LoadTrack { index: 1, buf, peaks: Vec::new(), reversed: false, playing: true, mix }
     };

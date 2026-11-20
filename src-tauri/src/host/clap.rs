@@ -767,6 +767,70 @@ fn query_ports(instance: &mut PluginInstance<LfHost>, is_input: bool) -> Result<
         .collect()
 }
 
+/// The engine's stereo pair into a plugin's input channels, frames `at..at + len` into each channel's
+/// first `len` (`docs/unit-contract.md` §7): a one-channel side takes the pair's mean, a wider one the
+/// pair as it is on its first two channels and silence on any other.
+fn pair_into(input: [&[f32]; 2], chans: &mut [Vec<f32>], at: usize, len: usize) {
+    let [l, r] = [&input[0][at..at + len], &input[1][at..at + len]];
+    match chans {
+        [] => {}
+        [only] => {
+            for (y, (&a, &b)) in only[..len].iter_mut().zip(l.iter().zip(r)) {
+                *y = 0.5 * (a + b);
+            }
+        }
+        [left, right, rest @ ..] => {
+            left[..len].copy_from_slice(l);
+            right[..len].copy_from_slice(r);
+            for ch in rest {
+                ch[..len].fill(0.0);
+            }
+        }
+    }
+}
+
+/// A plugin's output channels into the engine's stereo pair at `at..at + len`: a one-channel side on
+/// both, a wider one's first two channels as left and right (a multi-output instrument's auxiliaries
+/// are not the slot's sound); no channel leaves silence.
+fn pair_from(chans: &[Vec<f32>], out: [&mut [f32]; 2], at: usize, len: usize) {
+    let [l, r] = out;
+    match chans {
+        [] => {
+            l[at..at + len].fill(0.0);
+            r[at..at + len].fill(0.0);
+        }
+        [only] => {
+            l[at..at + len].copy_from_slice(&only[..len]);
+            r[at..at + len].copy_from_slice(&only[..len]);
+        }
+        [left, right, ..] => {
+            l[at..at + len].copy_from_slice(&left[..len]);
+            r[at..at + len].copy_from_slice(&right[..len]);
+        }
+    }
+}
+
+/// The fixtures' mono call on a unit (`clap_restart_fixture.rs`, `vst3_restart_fixture.rs`,
+/// `vst2_engine_tests.rs`): `input` on both sides, the left side out. A fixture that proves the two sides
+/// apart calls `process` itself.
+#[cfg(test)]
+pub(crate) trait ProcessMono {
+    fn process_mono(&mut self, frame: lf_engine::grid::Frame, input: &[f32], events: &[lf_engine::SlotEvent], out: &mut [f32]);
+}
+
+#[cfg(test)]
+impl<T: lf_engine::UnitProcessor + ?Sized> ProcessMono for T {
+    fn process_mono(&mut self, frame: lf_engine::grid::Frame, input: &[f32], events: &[lf_engine::SlotEvent], out: &mut [f32]) {
+        // On the stack: a fixture may count the calls' allocations.
+        let mut right = [0.0f32; 4096];
+        let cx = lf_engine::UnitCx { frame, dsp_frame: frame, bpm: 120.0, meter: lf_engine::grid::Meter::FOUR_FOUR };
+        let n = out.len();
+        self.process(&cx, [input, input], events, [out, &mut right[..n]]);
+    }
+}
+
+/// The engine spike's mono wet (`engine_spike.rs`, a DEV premise probe, not a unit): every channel's
+/// mean.
 fn sum_to_mono(out_bufs: &[Vec<f32>], mono: &mut [f32], block: usize, chans: usize) {
     if chans <= 1 {
         mono[..block].copy_from_slice(&out_bufs[0][..block]);

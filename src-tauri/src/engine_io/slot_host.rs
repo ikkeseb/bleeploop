@@ -11,6 +11,11 @@
 //! [`Core::evicted`] until its owner takes it back ([`SlotHost::take_evicted`]), re-activates it at
 //! the new [`SlotHost::rate`] and installs it again.
 //!
+//! A slot seats one plugin unit here, under the slot's own [`UnitId`] (slot + 1: unique across the two
+//! slots while each seats one); the chain host that mints an id per unit and reads each
+//! `Event::Seat` is E2's (`docs/unit-contract.md` §9). An install the engine refuses (a latency past
+//! `lf_engine::max_chain_latency`) comes back on the port as a removed unit would.
+//!
 //! Each [`EngineHost::slot`](super::EngineHost::slot) call is one owner's handle, with its own token:
 //! a unit comes back (on the port, or evicted) only to the handle that installed it or a clone. An
 //! owner that gives up on its unit ([`SlotHost::abandon`]: a `remove` timed out, so it leaks the
@@ -21,7 +26,7 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lf_engine::{SlotPort, SlotProcessor};
+use lf_engine::{SlotPort, UnitId, UnitProcessor};
 
 use super::Core;
 
@@ -50,6 +55,11 @@ impl SlotHost {
         self.slot
     }
 
+    /// The id this slot's unit is seated under.
+    fn unit_id(&self) -> UnitId {
+        self.slot as UnitId + 1
+    }
+
     /// The engine's sample rate: what a unit is activated at. `None` before a device first opened.
     pub fn rate(&self) -> Option<u32> {
         self.core.rate()
@@ -65,7 +75,7 @@ impl SlotHost {
     /// the unit goes to [`SlotHost::take_evicted`] instead, for its owner to re-activate. Gives the unit
     /// back with the reason when no engine exists yet, the slot already holds a unit (an orphan still
     /// in the engine included: try again once it is out), or the port is full.
-    pub fn install(&self, unit: Box<dyn SlotProcessor>, rate: u32) -> Result<(), (Box<dyn SlotProcessor>, String)> {
+    pub fn install(&self, unit: Box<dyn UnitProcessor>, rate: u32) -> Result<(), (Box<dyn UnitProcessor>, String)> {
         {
             // Under the port lock: a rebuild holds every port while it publishes the new rate and
             // replaces the ports, so the rate and the port read here belong to one engine.
@@ -88,7 +98,7 @@ impl SlotHost {
                 *waiting = Some((self.token, unit));
                 return Ok(());
             }
-            if let Err(unit) = port.install(unit) {
+            if let Err(unit) = port.install(self.unit_id(), unit) {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
             self.core.holder[self.slot].store(self.token, Release);
@@ -100,7 +110,7 @@ impl SlotHost {
     /// Take the slot's unit back: the engine releases its notes, crossfades it to bypass and stops it.
     /// `Ok(None)` when the slot holds none; `Err` when it does not come back within `timeout` (the
     /// unit stays the engine's, and a later `remove` or `take_evicted` can still recover it).
-    pub fn remove(&self, timeout: Duration) -> Result<Option<Box<dyn SlotProcessor>>, String> {
+    pub fn remove(&self, timeout: Duration) -> Result<Option<Box<dyn UnitProcessor>>, String> {
         {
             let mut port = self.core.ports[self.slot].lock().map_err(|_| "slot port poisoned".to_string())?;
             if self.core.holder[self.slot].load(Acquire) != self.token {
@@ -109,7 +119,7 @@ impl SlotHost {
                 return Ok(self.take_evicted());
             }
             let port = port.as_mut().ok_or_else(|| "no engine holds this slot".to_string())?;
-            if !port.remove() {
+            if !port.remove(self.unit_id()) {
                 return Err(format!("slot {}'s port is full", self.slot));
             }
         }
@@ -131,7 +141,7 @@ impl SlotHost {
 
     /// This owner's unit, if the device side evicted it (a new engine at another rate): re-activate it
     /// at [`SlotHost::rate`] and install it again. The plugin owner polls this every turn.
-    pub fn take_evicted(&self) -> Option<Box<dyn SlotProcessor>> {
+    pub fn take_evicted(&self) -> Option<Box<dyn UnitProcessor>> {
         let mut waiting = self.core.evicted[self.slot].lock().ok()?;
         if waiting.as_ref().is_some_and(|(owner, _)| *owner == self.token) {
             waiting.take().map(|(_, unit)| unit)
@@ -161,7 +171,7 @@ impl SlotHost {
     /// included).
     fn reap(&self, port: &mut SlotPort) {
         if self.core.holder[self.slot].load(Acquire) == ORPHAN {
-            if let Some(unit) = port.returned() {
+            if let Some((_, unit)) = port.returned() {
                 log::warn!("[engine_io] slot {}: an abandoned unit came back; leaking it", self.slot);
                 std::mem::forget(unit);
                 self.core.holder[self.slot].store(0, Release);
@@ -170,12 +180,12 @@ impl SlotHost {
     }
 
     /// This owner's unit, if the engine handed it back on the port.
-    fn returned(&self) -> Option<Box<dyn SlotProcessor>> {
+    fn returned(&self) -> Option<Box<dyn UnitProcessor>> {
         let mut port = self.core.ports[self.slot].lock().ok()?;
         if self.core.holder[self.slot].load(Acquire) != self.token {
             return None;
         }
-        let unit = port.as_mut()?.returned();
+        let unit = port.as_mut()?.returned().map(|(_, unit)| unit);
         if unit.is_some() {
             self.core.holder[self.slot].store(0, Release);
         }
@@ -210,8 +220,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use lf_engine::grid::Frame;
-    use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
+    use lf_engine::{SlotEvent, UnitProcessor};
 
     use crate::engine_io::test_rig::TestDevice;
 
@@ -222,16 +231,15 @@ mod tests {
         stops: Arc<AtomicUsize>,
     }
 
-    impl SlotProcessor for Constant {
-        fn kind(&self) -> SlotKind {
-            SlotKind::Effect
+    impl UnitProcessor for Constant {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: 0 }
         }
-        fn latency(&self) -> Frame {
-            0
-        }
-        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
             self.calls.fetch_add(1, SeqCst);
-            out.fill(self.level);
+            for o in out {
+                o.fill(self.level);
+            }
         }
         fn stop(&mut self) {
             self.stops.fetch_add(1, SeqCst);

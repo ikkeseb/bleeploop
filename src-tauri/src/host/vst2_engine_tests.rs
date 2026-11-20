@@ -4,6 +4,8 @@
 //! thread standing in for the owner. No audio device and no visible window: the device renders to
 //! memory and an editor's host window is never shown.
 use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat, REMOVE_TIMEOUT};
+#[allow(unused_imports)]
+use crate::host::clap::ProcessMono;
 use super::super::super::editor_window::client_size;
 use super::super::super::state::ToneRestore;
 use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, ToneKeeper};
@@ -984,7 +986,7 @@ fn a_unit_slices_a_long_call_places_each_note_and_allocates_nothing() {
     let (unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
-        unit.process(0, &input[..64], &[], &mut out[..64]);
+        unit.process_mono(0, &input[..64], &[], &mut out[..64]);
         params.push(ParamEvent { id: 1, value: 0.5 }).unwrap();
         let notes = [
             SlotEvent { offset: 10, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } },
@@ -995,7 +997,7 @@ fn a_unit_slices_a_long_call_places_each_note_and_allocates_nothing() {
         let mut runs = 0;
         let allocations = engine_slot::rt_allocations(|| {
             runs += 1;
-            unit.process(200, &input, &notes, &mut out)
+            unit.process_mono(200, &input, &notes, &mut out)
         });
         assert_eq!(allocations, 0, "process allocates nothing");
         assert!(out.iter().all(|&x| x == 0.5), "0.75 and 0.25, their mean to mono");
@@ -1061,12 +1063,12 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [1.0f32; 200]);
         probe.grow_in_process.store(4, Relaxed);
-        unit.process(0, &input, &note, &mut out);
+        unit.process_mono(0, &input, &note, &mut out);
         assert!(out[..64].iter().all(|&x| x == 0.5), "the slice the plugin rendered is kept");
         assert!(out[64..].iter().all(|&x| x == 0.0), "the rest of the call is silent");
         params.push(ParamEvent { id: 0, value: 0.5 }).unwrap();
         out.fill(1.0);
-        unit.process(200, &input, &note, &mut out);
+        unit.process_mono(200, &input, &note, &mut out);
         assert!(out.iter().all(|&x| x == 0.0), "and so is every later call");
         (unit, params)
     })
@@ -1086,7 +1088,7 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
     unit.rearm(&info, 64);
     let unit = std::thread::spawn(move || {
         let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
-        unit.process(400, &input, &[], &mut out);
+        unit.process_mono(400, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.5), "it plays again");
         unit
     })
@@ -1099,7 +1101,7 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
     let unit = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
-        unit.process(464, &input, &[], &mut out);
+        unit.process_mono(464, &input, &[], &mut out);
         unit
     })
     .join()
@@ -1113,7 +1115,7 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
         let flood = [SlotEvent { offset: 3, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } }; MAX_SLOT_EVENTS + 5];
-        unit.process(528, &input, &flood, &mut out);
+        unit.process_mono(528, &input, &flood, &mut out);
         unit
     })
     .join()
@@ -1561,14 +1563,14 @@ fn a_plugin_that_grows_its_pins_inside_a_process_call_reads_and_writes_only_the_
     let unit = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.3f32; 64], [0.0f32; 64]);
-        unit.process(0, &input, &[], &mut out);
+        unit.process_mono(0, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.3), "an effect: the input, echoed");
         probe.grow_before_render.store(40 << 8 | 64, Relaxed);
         out.fill(0.0);
-        unit.process(64, &input, &[], &mut out);
+        unit.process_mono(64, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.3), "the slot's own output for the call it grew in is intact");
         out.fill(1.0);
-        unit.process(128, &input, &[], &mut out);
+        unit.process_mono(128, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.0), "the next call is halted: silence");
         unit
     })
@@ -1600,7 +1602,7 @@ fn a_single_output_plugin_plays_its_one_output() {
     let unit = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 100], [0.0f32; 100]);
-        unit.process(0, &input, &[], &mut out);
+        unit.process_mono(0, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.75), "the one output, as it is");
         unit
     })
@@ -1634,12 +1636,12 @@ fn the_keys_a_halt_left_down_are_released_in_the_first_slice_after_the_cycle() {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
         // Three keys go down (one in each word of the set); one comes up again the normal way.
-        unit.process(0, &input, &[on(0, 60), on(5, 100), on(9, 67), off(20, 67)], &mut out);
+        unit.process_mono(0, &input, &[on(0, 60), on(5, 100), on(9, 67), off(20, 67)], &mut out);
         // The plugin reports a layout change from inside its next call...
         probe.grow_in_process.store(4, Relaxed);
-        unit.process(64, &input, &[], &mut out);
+        unit.process_mono(64, &input, &[], &mut out);
         // ...and the engine's note-offs for the removal find the unit halted.
-        unit.process(128, &input, &[off(0, 60), off(0, 100)], &mut out);
+        unit.process_mono(128, &input, &[off(0, 60), off(0, 100)], &mut out);
         unit
     })
     .join()
@@ -1660,11 +1662,11 @@ fn the_keys_a_halt_left_down_are_released_in_the_first_slice_after_the_cycle() {
         let mut runs = 0;
         let allocations = engine_slot::rt_allocations(|| {
             runs += 1;
-            unit.process(192, &input, &[on(7, 72)], &mut out)
+            unit.process_mono(192, &input, &[on(7, 72)], &mut out)
         });
         assert_eq!(allocations, 0, "the call that releases them allocates nothing");
         // A slice with nothing to say: no releases are left, so no event call.
-        unit.process(256, &input, &[], &mut out);
+        unit.process_mono(256, &input, &[], &mut out);
         (unit, runs)
     })
     .join()

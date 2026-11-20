@@ -17,6 +17,7 @@
 mod common;
 
 use common::dub::{pos_fn, ramp};
+use common::mono;
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::overview::PEAK_FRAMES;
@@ -146,7 +147,7 @@ fn a_multi_pass_dub_fades_out_to_its_last_pass_not_to_the_undo_target() {
     common::dub::dub(&mut want, (start, end), n, 0.5, &pos, input);
     let got = rig.pcm(0);
     assert_eq!(off(&got, &want), Vec::<usize>::new());
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), pre, "the undo target is the loop at dub start");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), pre, "the undo target is the loop at dub start");
     // The same ramp toward the undo target instead: every faded write lands elsewhere.
     let mut unfaded = pre.clone();
     for f in start..end {
@@ -189,7 +190,7 @@ fn a_stopped_devices_punch_out_finishes_the_ramp_on_the_frames_it_retained() {
         rig.set_level(0.0);
         rig.idle();
         assert_eq!(off(&rig.pcm(0), &want), Vec::<usize>::new(), "{case}: and as rendering resumes");
-        assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), pre, "{case}");
+        assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), pre, "{case}");
     }
 }
 
@@ -219,7 +220,7 @@ fn a_damaged_dub_restores_the_loop_and_the_previous_undo_target_bit_for_bit() {
         assert_eq!(rig.rejected(), 1, "gap at {gap_at}");
         assert_eq!(rig.state(0), LaneState::Playing);
         assert_eq!(off(&rig.pcm(0), &layered), Vec::<usize>::new(), "gap at {gap_at}: the loop before the layer");
-        assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "gap at {gap_at}: and the undo target before it");
+        assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "gap at {gap_at}: and the undo target before it");
         rig.press(Command::Undo(0));
         rig.idle();
         assert_eq!(rig.pcm(0), take);
@@ -310,7 +311,7 @@ fn a_snapshot_spanning_a_punch_out_says_so_and_one_after_it_holds_the_faded_loop
     rig.idle();
     let pre = rig.pcm(0);
     let mut dest = Vec::with_capacity(master as usize);
-    dest.resize(master as usize, 0.0f32);
+    dest.resize(master as usize, [0.0f32; 2]);
     assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(dest)))).is_ok());
     rig.advance(1);
     rig.set_level(0.5);
@@ -331,7 +332,7 @@ fn a_snapshot_spanning_a_punch_out_says_so_and_one_after_it_holds_the_faded_loop
     common::dub::dub(&mut want, (start, start + 2 * n), n, 1.0, pos_fn(rig.anchor(), master, 0), |_| 0.5);
     assert_eq!(off(&rig.pcm(0), &want), Vec::<usize>::new(), "the layer, faded in and out");
     let mut dest = Vec::with_capacity(master as usize);
-    dest.resize(master as usize, 0.0f32);
+    dest.resize(master as usize, [0.0f32; 2]);
     assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(dest)))).is_ok());
     let mut back = None;
     while back.is_none() {
@@ -340,7 +341,7 @@ fn a_snapshot_spanning_a_punch_out_says_so_and_one_after_it_holds_the_faded_loop
     }
     let Some(SessionJob::Snapshot(s)) = back.map(|b| *b) else { panic!("no snapshot came back") };
     assert_eq!(s.result, Some(Ok(())));
-    assert_eq!(off(&s.pcm[..master as usize], &rig.pcm(0)), Vec::<usize>::new(), "the snapshot holds the faded loop");
+    assert_eq!(off(&mono(&s.pcm[..master as usize]), &rig.pcm(0)), Vec::<usize>::new(), "the snapshot holds the faded loop");
 }
 
 #[test]

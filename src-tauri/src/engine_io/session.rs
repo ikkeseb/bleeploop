@@ -128,7 +128,7 @@ impl EngineHost {
         for _ in 0..ATTEMPTS {
             let mut pcm = Vec::with_capacity(need);
             // Written through: the engine copies into these pages, which must not fault on its thread.
-            pcm.resize(need, 0.0f32);
+            pcm.resize(need, [0.0f32; 2]);
             let SessionJob::Snapshot(s) = self.session_job(&mut stale, SessionJob::Snapshot(Snapshot::new(pcm)))? else {
                 return Err("the engine answered a snapshot with a load".to_string());
             };
@@ -163,7 +163,7 @@ impl EngineHost {
             .iter()
             .flatten()
             .enumerate()
-            .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true, t.mix))
+            .map(|(k, t)| load_pair_track(t.index, &s.pcm[k * samples..(k + 1) * samples], samples, t.reversed, true, t.mix))
             .collect();
         let load = Load { bpm: s.bpm, meter: s.meter, bars: s.master / fpb, master: s.master, tracks, result: None };
         let started = Instant::now();
@@ -207,7 +207,9 @@ impl EngineHost {
             if t.frames != master || usize::from(t.index) >= TRACK_COUNT || t.state == TrackState::Overdubbing {
                 return Err(format!("session: track {} does not fit", t.index));
             }
-            let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            // A one-channel track plays on both sides (`docs/unit-contract.md` §8; the two-channel stems
+            // of format v3 are the next step).
+            let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| [f32::from_le_bytes([b[0], b[1], b[2], b[3]]); 2]);
             tracks.push(load_track(t.index, play, capacity, t.reversed, t.state == TrackState::Playing, t.mix.0));
         }
         let load = Load { bpm: header.bpm, meter: header.meter, bars: header.bars, master, tracks, result: None };
@@ -346,22 +348,27 @@ thread_local! {
     pub(super) static FAIL_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// One lane of a load from its loop in play order (`play`, the loop's samples): a buffer `capacity`
-/// long holding it in buffer order (the engine reads a reversed lane's buffer backwards, so its play
-/// order goes back reversed), and its peaks, with its `mix`. The one place that turns a saved loop into
-/// a lane: the import's load and the export's render both take it.
-fn load_track(index: u8, play: impl ExactSizeIterator<Item = f32>, capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
+/// One lane of a load from its loop in play order (`play`, the loop's stereo frames): a buffer
+/// `capacity` long holding it in buffer order (the engine reads a reversed lane's buffer backwards, so
+/// its play order goes back reversed), and its peaks (both sides folded), with its `mix`. The one place
+/// that turns a saved loop into a lane: the import's load and the export's render both take it.
+fn load_track(index: u8, play: impl ExactSizeIterator<Item = lf_engine::Pair>, capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
     let samples = play.len().min(capacity);
     let mut buf = Vec::with_capacity(capacity);
-    buf.resize(capacity, 0.0f32);
+    buf.resize(capacity, [0.0f32; 2]);
     for (x, y) in buf.iter_mut().zip(play) {
         *x = y;
     }
     if reversed {
         buf[..samples].reverse();
     }
-    let peaks = buf[..samples].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)))).collect();
+    let peaks = buf[..samples].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &[l, r]| (lo.min(l.min(r)), hi.max(l.max(r))))).collect();
     LoadTrack { index, buf, peaks, reversed, playing, mix }
+}
+
+/// [`load_track`] from a snapshot's stereo frames.
+fn load_pair_track(index: u8, play: &[lf_engine::Pair], capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
+    load_track(index, play.iter().copied(), capacity, reversed, playing, mix)
 }
 
 /// `[u32 LE length][header][rest]`.
@@ -404,13 +411,15 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
         master_error,
     };
     let json = serde_json::to_vec(&header).unwrap_or_default();
-    let samples = &s.pcm[..s.count * master];
+    // Until the two-channel stems of format v3 (the next step), each track's bytes stay one channel: the
+    // mean of its two sides, which is a mono loop's own samples bit for bit.
+    let samples = s.pcm[..s.count * master].iter().map(|&[l, r]| 0.5 * (l + r));
     let stereo = wet.as_ref().map_or(0, |_| 2 * master);
-    let mut out = Vec::with_capacity(4 + json.len() + 4 * (samples.len() + stereo));
+    let mut out = Vec::with_capacity(4 + json.len() + 4 * (s.count * master + stereo));
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
     out.extend_from_slice(&json);
-    let wet = wet.iter().flat_map(|m| m.left.iter().chain(&m.right));
-    for x in samples.iter().chain(wet) {
+    let wet = wet.iter().flat_map(|m| m.left.iter().chain(&m.right)).copied();
+    for x in samples.chain(wet) {
         out.extend_from_slice(&x.to_le_bytes());
     }
     out

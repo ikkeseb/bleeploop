@@ -10,6 +10,8 @@
 
 mod common;
 
+use common::pairs;
+
 use lf_engine::dsp::compressor::Compressor;
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
@@ -29,7 +31,7 @@ fn lane(index: u8, impulses: &[(usize, f32)]) -> LoadTrack {
     for &(p, a) in impulses {
         buf[p] = a;
     }
-    LoadTrack { index, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
+    LoadTrack { index, buf: pairs(&buf), peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
 }
 
 /// A one-bar session at 120 BPM.
@@ -122,7 +124,7 @@ fn busy_lane(index: u8) -> LoadTrack {
         seed ^= seed << 13;
         seed ^= seed >> 17;
         seed ^= seed << 5;
-        *x = (seed as f32 / u32::MAX as f32 - 0.5) * 0.2;
+        *x = [(seed as f32 / u32::MAX as f32 - 0.5) * 0.2; 2];
     }
     t
 }
@@ -136,7 +138,7 @@ fn the_master_is_exactly_the_loop_long_on_both_channels() {
     let tracks = || {
         (0..2u8)
             .map(|i| {
-                let buf = (0..master).map(|k| ((k as f32 * 0.01 * (i + 1) as f32).sin()) * 0.1).collect();
+                let buf = (0..master).map(|k| [((k as f32 * 0.01 * (i + 1) as f32).sin()) * 0.1; 2]).collect();
                 LoadTrack { index: i * 2, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
             })
             .collect::<Vec<_>>()
@@ -223,7 +225,7 @@ fn take(ott: bool) -> Vec<f32> {
 
 /// Lane 0 holding `buf`, PLAYING.
 fn recorded(buf: &[f32]) -> LoadTrack {
-    LoadTrack { index: 0, buf: buf.to_vec(), peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
+    LoadTrack { index: 0, buf: pairs(buf), peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
 }
 
 #[test]
@@ -287,8 +289,8 @@ fn a_delay_at_full_feedback_warms_for_every_echo_and_no_more() {
     // One impulse at the loop's end: its echoes reach furthest into the passes after it.
     // A 4n delay at `feedback`, fully wet.
     let session = |feedback: f64| {
-        let mut buf = vec![0.0f32; master as usize];
-        buf[master as usize - 1] = A;
+        let mut buf = vec![[0.0f32; 2]; master as usize];
+        buf[master as usize - 1] = [A; 2];
         let mix = delay(0.0, feedback, 1.0);
         Load { bpm, meter: Meter::FOUR_FOUR, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix }], result: None }
     };
@@ -351,7 +353,7 @@ fn every_refusal_is_an_error_with_a_sentence() {
         ("bars and length disagree", wet_master(RATE, Load { bars: 2, ..load(vec![lane(0, &[])]) }, &[])),
         ("bpm out of range", wet_master(RATE, Load { bpm: 0, ..load(vec![lane(0, &[])]) }, &[])),
         ("no loop", wet_master(RATE, Load { master: 0, ..load(vec![lane(0, &[])]) }, &[])),
-        ("a short buffer", wet_master(RATE, load(vec![LoadTrack { buf: vec![0.0; 10], ..lane(0, &[]) }]), &[])),
+        ("a short buffer", wet_master(RATE, load(vec![LoadTrack { buf: vec![[0.0; 2]; 10], ..lane(0, &[]) }]), &[])),
         ("a NaN sample", wet_master(RATE, load(vec![lane(0, &[(5, f32::NAN)])]), &[])),
         ("a lane twice", wet_master(RATE, load(vec![lane(0, &[]), lane(0, &[])]), &[])),
         ("a lane out of range", wet_master(RATE, load(vec![lane(9, &[])]), &[])),

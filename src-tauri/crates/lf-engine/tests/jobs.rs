@@ -7,6 +7,7 @@
 mod common;
 
 use common::{code, Opts, Rig};
+use common::mono;
 use lf_engine::grid::Frame;
 use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::{Command, Event, LaneState};
@@ -192,7 +193,7 @@ fn a_device_jump_moves_the_jobs_instead_of_owing_their_work_to_one_callback() {
         rig.idle();
     }
     assert!((0..4).all(|i| rig.lane(i).can_undo));
-    let loops: Vec<(Vec<f32>, Vec<f32>)> = (0..4).map(|i| (rig.pcm(i), rig.engine.looper().undo_pcm(i).unwrap())).collect();
+    let loops: Vec<(Vec<f32>, Vec<f32>)> = (0..4).map(|i| (rig.pcm(i), rig.engine.looper().undo_pcm(i).map(mono).unwrap())).collect();
     rig.set(Command::SetFixedLength(true));
     rig.set(Command::SetFixedBars(8.0));
     rig.press(Command::RecDub(4));
@@ -216,6 +217,6 @@ fn a_device_jump_moves_the_jobs_instead_of_owing_their_work_to_one_callback() {
     let tiled = |pcm: &[f32]| (0..8 * master as usize).map(|k| pcm[k % pcm.len()]).collect::<Vec<f32>>();
     for (i, (live, undo)) in loops.iter().enumerate() {
         assert_eq!(rig.pcm(i), tiled(live), "lane {i}: its loop tiled, bit-exact");
-        assert_eq!(rig.engine.looper().undo_pcm(i), Some(tiled(undo)), "lane {i}: its undo target tiled, bit-exact");
+        assert_eq!(rig.engine.looper().undo_pcm(i).map(mono), Some(tiled(undo)), "lane {i}: its undo target tiled, bit-exact");
     }
 }

@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, Toggle, HOLD_CONTROLS, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Pair, Refusal, Toggle, HOLD_CONTROLS, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -270,8 +270,8 @@ impl Recorder {
 struct DubWrite {
     frame: Frame,
     pos: usize,
-    old: f32,
-    new: f32,
+    old: Pair,
+    new: Pair,
 }
 
 /// The record tap's last frames, for a later take that snaps back to the boundary just behind its press
@@ -280,7 +280,7 @@ struct DubWrite {
 /// of alignment (`push`), an input gap and a punch-out (`cut`), and the frames a capture window took
 /// (`capture`), so a snapped take never doubles audio another lane recorded.
 struct Lookback {
-    buf: Vec<f32>,
+    buf: Vec<Pair>,
     from: Frame,
     end: Frame,
     align: Frame,
@@ -288,10 +288,10 @@ struct Lookback {
 
 impl Lookback {
     fn new(frames: Frame) -> Self {
-        Lookback { buf: vec![0.0; frames.max(1) as usize], from: Frame::MIN, end: Frame::MIN, align: 0 }
+        Lookback { buf: vec![[0.0; 2]; frames.max(1) as usize], from: Frame::MIN, end: Frame::MIN, align: 0 }
     }
 
-    fn push(&mut self, f0: Frame, input: &[f32], align: Frame) {
+    fn push(&mut self, f0: Frame, input: &[Pair], align: Frame) {
         if f0 != self.end || align != self.align {
             self.cut(f0);
             self.align = align;
@@ -321,7 +321,7 @@ impl Lookback {
     }
 
     /// Copy the held frames `[lo, lo + out.len())` into `out`.
-    fn copy(&self, lo: Frame, out: &mut [f32]) {
+    fn copy(&self, lo: Frame, out: &mut [Pair]) {
         let len = self.buf.len() as Frame;
         let (mut f, mut dst) = (lo, out);
         while !dst.is_empty() {
@@ -445,7 +445,7 @@ impl Job {
     /// samples: a fill's own kept positions (below `TakeFill::untouched`, never rewritten), a copy's or a
     /// restore's buffer (an undo copy runs ahead of the writer, and a lane's commands wait for the jobs
     /// on it), a TRIM's undo target.
-    fn ahead(&self, bufs: &[Vec<f32>], buf: usize, idx: usize) -> Option<f32> {
+    fn ahead(&self, bufs: &[Vec<Pair>], buf: usize, idx: usize) -> Option<Pair> {
         if self.writes() != buf {
             return None;
         }
@@ -460,7 +460,7 @@ impl Job {
             return None;
         }
         Some(match self.kind {
-            JobKind::Fill { buf, fill } => fill.source(idx as Frame).map_or(0.0, |s| bufs[buf][s as usize]),
+            JobKind::Fill { buf, fill } => fill.source(idx as Frame).map_or([0.0; 2], |s| bufs[buf][s as usize]),
             JobKind::Copy { src, .. } | JobKind::Restore { src, .. } => bufs[src][idx],
             JobKind::LaneCopy { src, shift, .. } => bufs[src][((idx as Frame + v.modulus - shift) % v.modulus) as usize],
             JobKind::Trim { src, fill, reversed, .. } => {
@@ -499,7 +499,7 @@ pub struct Cx<'a> {
 pub struct Looper {
     sample_rate: u32,
     capacity: Frame,
-    bufs: Vec<Vec<f32>>,
+    bufs: Vec<Vec<Pair>>,
     free: usize,
     lanes: [Lane; TRACK_COUNT],
     rec: Option<Recorder>,
@@ -550,7 +550,7 @@ pub struct Looper {
     tail_len: usize,
     /// Each lane's outgoing cache (`Voice`): `punch` samples a lane, lane `i` at `[i * punch, (i + 1) *
     /// punch)`.
-    cache: Vec<f64>,
+    cache: Vec<[f64; 2]>,
 }
 
 impl Looper {
@@ -560,7 +560,7 @@ impl Looper {
         let bufs = (0..2 * TRACK_COUNT + 1)
             .map(|_| {
                 let mut buf = Vec::with_capacity(capacity as usize);
-                buf.resize(capacity as usize, 0.0f32);
+                buf.resize(capacity as usize, [0.0f32; 2]);
                 buf
             })
             .collect();
@@ -600,7 +600,7 @@ impl Looper {
             tail: vec![DubWrite::default(); punch_frames(sample_rate) as usize],
             tail_next: 0,
             tail_len: 0,
-            cache: vec![0.0; TRACK_COUNT * punch_frames(sample_rate) as usize],
+            cache: vec![[0.0; 2]; TRACK_COUNT * punch_frames(sample_rate) as usize],
         }
     }
 
@@ -679,29 +679,29 @@ impl Looper {
 
     /// The committed loop of lane `i` as it plays forward: its logical buffer, read through its
     /// orientation (empty before a commit). Not for the audio thread: it allocates.
-    pub fn loop_pcm(&self, i: usize) -> Vec<f32> {
+    pub fn loop_pcm(&self, i: usize) -> Vec<Pair> {
         let t = &self.lanes[i];
         self.oriented(t.live, t.reversed, t.length)
     }
 
     /// The undo target of lane `i`, oriented, when it has one.
-    pub fn undo_pcm(&self, i: usize) -> Option<Vec<f32>> {
+    pub fn undo_pcm(&self, i: usize) -> Option<Vec<Pair>> {
         let t = &self.lanes[i];
         t.undo_valid.then(|| self.oriented(t.spare, t.spare_reversed, t.length))
     }
 
     /// Lane `i`'s whole live buffer, past its loop too.
-    pub fn live_buffer(&self, i: usize) -> &[f32] {
+    pub fn live_buffer(&self, i: usize) -> &[Pair] {
         &self.bufs[self.lanes[i].live]
     }
 
     /// The take in flight on lane `i`: its captured frames, in capture order.
-    pub fn take_pcm(&self, i: usize) -> Vec<f32> {
+    pub fn take_pcm(&self, i: usize) -> Vec<Pair> {
         let t = &self.lanes[i];
         self.bufs[t.live][..t.written.min(self.capacity) as usize].to_vec()
     }
 
-    fn oriented(&self, buf: usize, reversed: bool, len: Frame) -> Vec<f32> {
+    fn oriented(&self, buf: usize, reversed: bool, len: Frame) -> Vec<Pair> {
         let data = &self.bufs[buf][..len as usize];
         if reversed { data.iter().rev().copied().collect() } else { data.to_vec() }
     }
@@ -1840,9 +1840,12 @@ impl Looper {
                 continue;
             }
             faded = Some(faded.map_or((w.pos, 1), |(p, c)| (p, c + 1)));
-            if w.new != w.old && data[w.pos].to_bits() == w.new.to_bits() {
-                let b = to_end as f32 / n as f32;
-                data[w.pos] = w.old + b * (w.new - w.old);
+            // Per channel, as a mono loop did: a side a later write changed keeps that write.
+            let b = to_end as f32 / n as f32;
+            for c in 0..2 {
+                if w.new[c] != w.old[c] && data[w.pos][c].to_bits() == w.new[c].to_bits() {
+                    data[w.pos][c] = w.old[c] + b * (w.new[c] - w.old[c]);
+                }
             }
         }
         // One touch per run of positions (two across the loop point): peaks and a snapshot's write count.
@@ -1908,7 +1911,7 @@ impl Looper {
             self.lanes[i].voice.from_level *= r2;
             if r2 != 1.0 {
                 let n = self.punch as usize;
-                self.cache[i * n..(i + 1) * n].iter_mut().for_each(|y| *y *= r2);
+                self.cache[i * n..(i + 1) * n].iter_mut().for_each(|y| *y = y.map(|y| y * r2));
             }
         }
         self.lanes[i].stop_at = None;
@@ -2235,11 +2238,12 @@ impl Looper {
         let shift = (now - self.lanes[i].voice.cached).clamp(0, n as Frame) as usize;
         let cache = &mut self.cache[row..row + n];
         cache.copy_within(shift.., 0);
-        cache[n - shift..].fill(0.0);
+        cache[n - shift..].fill([0.0; 2]);
         if fade_out {
             // What the cache still held was heard too: it fades out with the rest.
             for (k, y) in cache.iter_mut().enumerate() {
-                *y *= 1.0 - k as f64 / n as f64;
+                let g = 1.0 - k as f64 / n as f64;
+                *y = y.map(|y| y * g);
             }
         }
         if master > 0 {
@@ -2256,7 +2260,9 @@ impl Looper {
                         idx %= extending;
                     }
                     let x = self.settled_sample(src.buf, idx as usize);
-                    self.cache[row + k] += w * x as f64;
+                    let y = &mut self.cache[row + k];
+                    y[0] += w * x[0] as f64;
+                    y[1] += w * x[1] as f64;
                 }
                 pos += 1;
                 if pos == master {
@@ -2270,7 +2276,7 @@ impl Looper {
     }
 
     /// Buffer `buf`'s sample at `idx` once the block jobs writing it are past it (`Job::ahead`).
-    fn settled_sample(&self, buf: usize, idx: usize) -> f32 {
+    fn settled_sample(&self, buf: usize, idx: usize) -> Pair {
         self.jobs.iter().flatten().find_map(|j| j.ahead(&self.bufs, buf, idx)).unwrap_or(self.bufs[buf][idx])
     }
 
@@ -2405,7 +2411,7 @@ impl Looper {
     /// AUTO listening: scan `input` (from frame `f0`). On a trigger, the take begins and the frames
     /// before the returned index are the last ones rendered under the listening state. The history drops
     /// what it can no longer join on the frame the last input gap leaves the tap, not on the device's.
-    pub fn scan_auto(&mut self, cx: &mut Cx, f0: Frame, input: &[f32]) -> Option<usize> {
+    pub fn scan_auto(&mut self, cx: &mut Cx, f0: Frame, input: &[Pair]) -> Option<usize> {
         let rec = self.rec?;
         if !self.lanes[rec.lane].auto_armed {
             return None;
@@ -2434,7 +2440,7 @@ impl Looper {
     /// copy, `skip`), which the rejection would then restore as the loop before the layer.
     /// Every frame also feeds the lookback (`Lookback`), taken under the alignment `align` a take armed
     /// now would start with.
-    pub fn capture(&mut self, f0: Frame, input: &[f32], align: Frame) {
+    pub fn capture(&mut self, f0: Frame, input: &[Pair], align: Frame) {
         self.lookback.push(f0, input, align);
         let Some(rec) = self.rec.as_mut() else { return };
         let Some(start) = rec.start else { return };
@@ -2469,7 +2475,7 @@ impl Looper {
                 let (fb, n, cap) = (lane.feedback, self.punch, self.tail.len());
                 for (f, &x) in (lo..hi).zip(&input[(lo - f0) as usize..(hi - f0) as usize]) {
                     let old = data[pos as usize];
-                    let new = punch_in(old, x, fb, f - start, n);
+                    let new = [punch_in(old[0], x[0], fb, f - start, n), punch_in(old[1], x[1], fb, f - start, n)];
                     data[pos as usize] = new;
                     self.tail[self.tail_next] = DubWrite { frame: f, pos: pos as usize, old, new };
                     self.tail_next = (self.tail_next + 1) % cap;
@@ -2495,13 +2501,14 @@ impl Looper {
     /// reverb send) is fed the fading loop, and the FX take it for the delay's feedback too
     /// (`LaneFx::render`). D23's edges (`Voice`) sum in over their N frames: the level ramp on what the
     /// lane plays and the outgoing cache; a lane past both plays as it always has, bit for bit.
-    pub fn render<const Q: usize>(&mut self, f0: Frame, n: usize, out: &mut [[f32; Q]; TRACK_COUNT], fades: &mut [[f32; Q]; TRACK_COUNT]) -> [bool; TRACK_COUNT] {
+    pub fn render<const Q: usize>(&mut self, f0: Frame, n: usize, out: &mut [[[f32; Q]; 2]; TRACK_COUNT], fades: &mut [[f32; Q]; TRACK_COUNT]) -> [bool; TRACK_COUNT] {
         let (master, ramp_n) = (self.master, self.punch);
         let silent_lane = self.rec.filter(|r| r.stop_playback).map(|r| r.lane);
         let mut fading = [false; TRACK_COUNT];
-        for (i, (out, fade)) in out.iter_mut().zip(fades.iter_mut()).enumerate() {
-            let (out, fade) = (&mut out[..n], &mut fade[..n]);
-            out.fill(0.0);
+        for (i, ([out_l, out_r], fade)) in out.iter_mut().zip(fades.iter_mut()).enumerate() {
+            let (out_l, out_r, fade) = (&mut out_l[..n], &mut out_r[..n], &mut fade[..n]);
+            out_l.fill(0.0);
+            out_r.fill(0.0);
             let t = &mut self.lanes[i];
             let target = if t.muted { 0.0 } else { t.volume as f64 };
             // Only a committed lane plays, and a lane commits only onto a master.
@@ -2511,7 +2518,7 @@ impl Looper {
             let (ramp_end, cache_end) = (v.from + ramp_n, v.cached + ramp_n);
             let edge = if master > 0 { ramp_end.max(cache_end) } else { Frame::MIN };
             if !playing && f0 >= edge {
-                for _ in 0..out.len() {
+                for _ in 0..n {
                     t.gain = crate::glide(t.gain, target, self.gain_coef);
                 }
                 continue;
@@ -2525,7 +2532,7 @@ impl Looper {
             let ramp = t.fade_from.zip(t.stop_at).map(|(from, to)| (to, 1.0 / (to - from).max(1) as f64));
             fading[i] = ramp.is_some();
             if f0 >= edge {
-                for (k, sample) in out.iter_mut().enumerate() {
+                for k in 0..n {
                     let mut idx = if t.audible.reversed { master - 1 - pos } else { pos };
                     if idx >= extending {
                         idx %= extending;
@@ -2536,7 +2543,9 @@ impl Looper {
                         g *= r * r;
                         fade[k] = (r * r) as f32;
                     }
-                    *sample = (g * data[idx as usize] as f64) as f32;
+                    let [l, r] = data[idx as usize];
+                    out_l[k] = (g * l as f64) as f32;
+                    out_r[k] = (g * r as f64) as f32;
                     t.gain = crate::glide(t.gain, target, self.gain_coef);
                     pos += 1;
                     if pos == master {
@@ -2548,7 +2557,7 @@ impl Looper {
             // D23's edge, frame by frame: what each frame takes depends only on its frame, so a frame past
             // both parts is the loop above's, whichever slice it falls in.
             let (src_data, cache) = (&self.bufs[v.src.buf], &self.cache[i * ramp_n as usize..(i + 1) * ramp_n as usize]);
-            for (k, sample) in out.iter_mut().enumerate() {
+            for k in 0..n {
                 let f = f0 + k as Frame;
                 let mut g = t.gain;
                 if let Some((to, inv)) = ramp {
@@ -2568,19 +2577,21 @@ impl Looper {
                     if idx >= extending {
                         idx %= extending;
                     }
-                    data[idx as usize] as f64
+                    data[idx as usize].map(|x| x as f64)
                 } else {
-                    0.0
+                    [0.0; 2]
                 };
-                *sample = if f < cache_end {
-                    (g * (level * x + cache[(f - v.cached) as usize])) as f32
-                } else if d < ramp_n {
-                    (g * (level * x)) as f32
-                } else if playing {
-                    (g * x) as f32
-                } else {
-                    0.0
-                };
+                for (c, out) in [&mut *out_l, &mut *out_r].into_iter().enumerate() {
+                    out[k] = if f < cache_end {
+                        (g * (level * x[c] + cache[(f - v.cached) as usize][c])) as f32
+                    } else if d < ramp_n {
+                        (g * (level * x[c])) as f32
+                    } else if playing {
+                        (g * x[c]) as f32
+                    } else {
+                        0.0
+                    };
+                }
                 t.gain = crate::glide(t.gain, target, self.gain_coef);
                 pos += 1;
                 if pos == master {
@@ -2748,7 +2759,7 @@ impl Looper {
 }
 
 /// Two distinct buffers of the pool, one to read and one to write.
-fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
+fn pair(bufs: &mut [Vec<Pair>], src: usize, dst: usize) -> (&[Pair], &mut [Pair]) {
     assert_ne!(src, dst);
     if src < dst {
         let (a, b) = bufs.split_at_mut(dst);
@@ -2763,7 +2774,7 @@ fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
 /// source at a time. Every source position lies below [`TakeFill::untouched`], which the fill never
 /// writes, and a piece's source ends at or before the period, at or before the piece (or is the piece
 /// itself, below the period), so the copies never overlap what they read.
-fn fill_run(data: &mut [f32], fill: TakeFill, a: usize, b: usize) {
+fn fill_run<T: Copy + Default>(data: &mut [T], fill: TakeFill, a: usize, b: usize) {
     let period = fill.period as usize;
     let kept = fill.untouched() as usize;
     let mut p = a;
@@ -2774,7 +2785,7 @@ fn fill_run(data: &mut [f32], fill: TakeFill, a: usize, b: usize) {
         if copied > 0 && q != p {
             data.copy_within(q..q + copied, p);
         }
-        data[p + copied..p + n].fill(0.0);
+        data[p + copied..p + n].fill(T::default());
         p += n;
     }
 }
@@ -2782,7 +2793,7 @@ fn fill_run(data: &mut [f32], fill: TakeFill, a: usize, b: usize) {
 /// Positions `[a, b)` of `dst` from `src` read `shift` positions earlier around a loop of `m`:
 /// `dst[p] = src[(p - shift) mod m]`, at most two pieces (`shift` 0: a plain copy). The buffers are
 /// distinct, so nothing overlaps.
-fn shifted_run(src: &[f32], dst: &mut [f32], m: usize, shift: usize, a: usize, b: usize) {
+fn shifted_run<T: Copy>(src: &[T], dst: &mut [T], m: usize, shift: usize, a: usize, b: usize) {
     let mut p = a;
     while p < b {
         let s = (p + m - shift) % m;
@@ -2796,7 +2807,7 @@ fn shifted_run(src: &[f32], dst: &mut [f32], m: usize, shift: usize, a: usize, b
 /// loop's heard position `fill.source(h)`, which is always inside the kept bars. A buffer pair that plays
 /// `reversed` holds heard position `h` at `master - 1 - h` in both. A piece of the period at a time; the
 /// two buffers are distinct, so nothing overlaps.
-fn trim_run(src: &[f32], dst: &mut [f32], fill: TakeFill, reversed: bool, a: usize, b: usize) {
+fn trim_run<T: Copy>(src: &[T], dst: &mut [T], fill: TakeFill, reversed: bool, a: usize, b: usize) {
     let (period, m) = (fill.period as usize, fill.master as usize);
     let mut h = a;
     while h < b {
