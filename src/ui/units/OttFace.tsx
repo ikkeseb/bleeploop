@@ -93,7 +93,7 @@ export function OttFace(props: {
     const scale = Math.max(0.3, Math.min(ui, room(layout)));
     const centre = r.left + r.width / 2;
     const left = Math.max(8, Math.min(centre - TIE_AT * scale, window.innerWidth - 8 - layout.w * scale));
-    setBox({ left, top, scale, tieX: centre - 16, tieY: r.bottom + 4, layout });
+    setBox({ left, top, scale, tieX: centre - 16, tieY: r.bottom, layout });
   };
   onMount(() => {
     place();
