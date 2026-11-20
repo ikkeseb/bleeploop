@@ -17,6 +17,7 @@ import {
   type EngineToggle,
   type FeedFrame,
   type FxParamId,
+  type InputPick,
   type LaneMix,
   type LaneState,
   type LoadHeader,
@@ -25,6 +26,7 @@ import {
   type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 import { decodeInputItem, decodeMidiEvent, type Dropped, type ImportReport, type InputEvent, type InputItem, type MidiEvent } from './midi-wire.ts';
+import { CANNED_PLUGINS, createChainFake, type ChainFake } from './chain-fake.ts';
 
 const NO_NATIVE_HOST =
   'Native VST host is unavailable in the browser build. Use the built-in synths.';
@@ -35,7 +37,9 @@ const webPluginHost: PluginHost = {
     /* no-op — no native host in the browser build */
   },
   async scanPlugins() {
-    return [];
+    // The chain fake's canned plugins feed the picker when a probe's init script asks for them
+    // (`window.__lfChainFake`, with the engine fake on); otherwise the browser build lists none.
+    return chainPluginsOn() ? CANNED_PLUGINS.map((p) => ({ ...p.descriptor })) : [];
   },
   async scanPluginPaths() {
     return [];
@@ -261,6 +265,12 @@ export interface EngineFake extends EngineHost {
   readonly shares: (string | null)[];
   /** Every `setSlotInputChannel()` pick, in order: [slot, channel]. */
   readonly slotInputChannels: [number, number | null][];
+  /** Every pick `setSlotInputPick()` took, in order: [slot, pick] (unit contract §7's shape). */
+  readonly slotInputPicks: [number, InputPick][];
+  /** The fake device's four canned inputs (unit contract §10), channel 0 first: a pick past them is refused. */
+  readonly inputs: readonly string[];
+  /** The chain per slot (`chain-fake.ts`): its `ChainHost`, its record and its probe seams. */
+  readonly chain: ChainFake;
   /**
    * Probe seam, the engine's report: while set, the `Mix` each application owes waits (applied, not yet
    * reported), queued in order, one per changed lane per application (a lane going A, B, A owes three);
@@ -506,7 +516,8 @@ function flushEchoes(): void {
 /** Each toggled setting as the fake holds it, by `toggleKey`: a setter sets it, a toggle switches it. A
  * slot's GO LIVE is held in `fakeLive` instead. */
 const fakeToggles = new Map<string, boolean>();
-const toggleKey = (t: EngineToggle): string => (typeof t === 'string' ? t : 'Send' in t ? `Send:${t.Send}` : `Live:${t.Live}`);
+const toggleKey = (t: EngineToggle): string =>
+  typeof t === 'string' ? t : 'Send' in t ? `Send:${t.Send}` : 'Units' in t ? `Units:${t.Units}` : `Live:${t.Live}`;
 const toggleValue = (t: EngineToggle): boolean =>
   typeof t === 'object' && 'Live' in t ? fakeLive[t.Live] : (fakeToggles.get(toggleKey(t)) ?? false);
 function setToggleValue(t: EngineToggle, on: boolean): void {
@@ -638,8 +649,10 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
   }
 }
 
-/** A command as the fake applies it: a lane's mix, the toggles (GO LIVE's included) and the tuner. */
+/** A command as the fake applies it: the chain's (`chain-fake.ts`), a lane's mix, the toggles (GO LIVE's
+ * included) and the tuner. */
 function applyCommand(c: EngineCommand): void {
+  if (chainFake.command(c)) return;
   applyMixCommand(c);
   applyToggleCommand(c);
   applyTunerCommand(c);
@@ -857,6 +870,22 @@ function runCommand(command: EngineCommand): void {
   else applyCommand(command);
 }
 
+/** The fake device's four canned inputs (unit contract §10); the pick shape is §7's. */
+const FAKE_INPUTS: readonly string[] = ['Fake input 1', 'Fake input 2', 'Fake input 3', 'Fake input 4'];
+
+/** The chain per slot, modelled (`chain-fake.ts`): its frames go to the feed's subscribers. */
+const chainFake = /* @__PURE__ */ createChainFake({
+  forced: () => engineForced(),
+  capturing: () => capturing(),
+  deliver: (frame) => {
+    for (const onFrame of engineSubscribers) onFrame(frame);
+  },
+  meter: () => lastMeter,
+});
+
+/** The canned plugins feed the picker: asked by a probe's init script, with the engine fake on. */
+const chainPluginsOn = (): boolean => engineForced() && (globalThis as { __lfChainFake?: unknown }).__lfChainFake === true;
+
 /**
  * The engine host's browser stand-in: the browser build has no engine (`available` false) unless a DEV
  * probe forces this fake on. Forced on, it answers `open()` with a canned device, records every batch in `sent` and hands a
@@ -864,8 +893,9 @@ function runCommand(command: EngineCommand): void {
  * a lane's mix, reported as the engine's `Mix` once it changes (a mix command, a scripted COPY, CLEAR or
  * MUTE, a load), a toggle (`{Action:{Toggle}}`), switched or refused as the engine's gate would on the
  * looper the scripted frames show, answered by `Toggled` or `Refused`, and the tuner (`{Action:'Tuner'}`,
- * `SetTuner`), answered by `Tuner` or `Refused` (`applyTunerCommand`); every other state a probe asserts
- * on is scripted.
+ * `SetTuner`), answered by `Tuner` or `Refused` (`applyTunerCommand`), and the chain per slot, modelled
+ * whole (`chain-fake.ts`: the platform's `chain`, the unit commands, the OTT's meters); every other state
+ * a probe asserts on is scripted.
  */
 export const webEngineFake: EngineFake = {
   get available() {
@@ -929,6 +959,18 @@ export const webEngineFake: EngineFake = {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.slotInputChannels.push([slot, channel]);
   },
+  async setSlotInputPick(slot, pick) {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+    const lacking = (c: number) => !Number.isSafeInteger(c) || c < 0 || c >= FAKE_INPUTS.length;
+    if (slot !== 0 && slot !== 1) throw new Error(`slot ${slot} does not exist`);
+    if (pick !== null && (Array.isArray(pick) ? pick.some(lacking) : lacking(pick))) {
+      throw new Error(`The device lacks input ${JSON.stringify(pick)}`);
+    }
+    webEngineFake.slotInputPicks.push([slot, Array.isArray(pick) ? [pick[0], pick[1]] : pick]);
+  },
+  slotInputPicks: [],
+  inputs: FAKE_INPUTS,
+  chain: chainFake,
   async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.shares.push(endpoint);
@@ -969,9 +1011,12 @@ export const webEngineFake: EngineFake = {
     applyToggleFrame(frame);
     if (frame.live) [fakeLive[0], fakeLive[1]] = frame.live;
     if (frame.meter) lastMeter = { peak: [frame.meter.peak[0], frame.meter.peak[1]], clip: [false, false] };
+    chainFake.scripted(frame);
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.
     echoChanges();
+    // A scripted lane that stopped capturing releases the chain's held edits.
+    chainFake.judge();
   },
 };
 
@@ -979,6 +1024,7 @@ export const webPlatform: Platform = {
   kind: 'web',
   pluginHost: webPluginHost,
   engine: webEngineFake,
+  chain: chainFake.host,
   exports: webExports,
   logs: webLogFolder,
   updates: webUpdates,

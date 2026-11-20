@@ -78,7 +78,11 @@ engine's gate would on the scripted looper and answers with `Toggled` or `Refuse
 which it answers with `Tuner` or `Refused` (it does not close the tuner when a scripted take starts:
 that rule is the engine's, `tests/tuner.rs`),
 so a probe proves gesture → command and frame → screen, never the engine
-(`verify/probes/engine-seam.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
+(`verify/probes/engine-seam.mjs` is the pattern). The chain per slot, which the native engine does not
+speak yet, is modelled whole (`src/platform/chain-fake.ts`, `docs/unit-contract.md` §10): the platform's
+`chain` answers add, remove, move and reload with `chains` frames, the batch's unit commands switch the
+model, an OTT unit feeds `unitMeters` on the fake's own 60 Hz timer, and its seams sit on
+`__lf.native.chain` (`verify/probes/chain-fake.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
 outbox's batches (`__lf.native.batches`, each with its epoch; their input events flattened in
 `__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls (`__lf.native.midiCalls`,
 each with the page's epoch), answers a learn or its cancel with a `learning` event and nothing else, and

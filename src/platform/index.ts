@@ -5,7 +5,7 @@
  */
 import { isTauri } from '@tauri-apps/api/core';
 import type { MidiSubscription, Platform } from './host';
-import type { EngineCommand, NoteTarget } from './engine-wire';
+import type { EngineCommand, NoteTarget, UnitId } from './engine-wire';
 import { encodeInput, encodeItem, type Dropped, type InputItem, type MidiEvent } from './midi-wire';
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
@@ -340,6 +340,25 @@ export const input = {
 
 /** The web engine fake a probe scripts through `__lf.native`; null under Tauri and in a production build. */
 export const engineFake: EngineFake | null = import.meta.env.PROD || underTauri ? null : webEngineFake;
+
+/**
+ * A new unit's id (unit contract §1): 32 random bits, never 0, so a project opened later never lands a
+ * tone on another's unit by count. On the DEV fake a probe injects the mint (`__lf.native.chain.mint`);
+ * an injected id is checked as the wire checks one.
+ * @public the chain UI's `+` will mint with it; until then the chain-fake probe does
+ */
+export function mintUnitId(): UnitId {
+  const injected = engineFake?.chain.mint;
+  if (injected) {
+    const id = injected();
+    if (!Number.isSafeInteger(id) || id < 1 || id > 0xffff_ffff) throw new Error(`mintUnitId: ${id} is not a non-zero u32`);
+    return id;
+  }
+  const word = new Uint32Array(1);
+  do crypto.getRandomValues(word);
+  while (word[0] === 0);
+  return word[0];
+}
 
 export * from './host';
 export * from './engine-wire';

@@ -7,6 +7,7 @@ import type {
   AsioStatusReport,
   AudioInputDevice,
   AudioOutputDevice,
+  ChainHost,
   EngineHost,
   ExportFiles,
   InputHost,
@@ -178,6 +179,10 @@ const tauriEngineHost: EngineHost = {
   },
   async setSlotInputChannel(slot, channel) {
     await invoke('engine_set_slot_input_channel', { slot, channel });
+  },
+  async setSlotInputPick() {
+    // Unit contract §7: the stereo pick is not on the native side yet; never sent to it as if understood.
+    throw new Error(NO_STEREO_PICK);
   },
   async setShare(endpoint) {
     await invoke('engine_set_share', { endpoint });
@@ -384,6 +389,29 @@ const tauriUpdates: AppUpdates = {
   },
 };
 
+const NO_CHAIN = 'The native engine does not have the chain yet.';
+const NO_STEREO_PICK = 'The native engine does not take a stereo input pick yet.';
+const noChain = async (): Promise<never> => {
+  throw new Error(NO_CHAIN);
+};
+
+/** The chain per slot (`docs/unit-contract.md` §2): the native engine does not speak it yet, so every
+ * call is refused here, before any IPC, and nothing is logged (the caller reads the rejection). */
+const tauriChainHost: ChainHost = {
+  available: false,
+  add: noChain,
+  remove: noChain,
+  reload: noChain,
+  move: noChain,
+  openEditor: noChain,
+  closeEditor: noChain,
+  listParams: noChain,
+  setParameter: noChain,
+  takeTone: noChain,
+  importTone: noChain,
+  forgetTone: noChain,
+};
+
 /**
  * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, native `midi` and `input`,
  * the export's save (`exports`), the release log's folder (`logs`) and the updater (`updates`).
@@ -392,6 +420,7 @@ export const tauriPlatform: Platform = {
   kind: 'tauri',
   pluginHost: tauriPluginHost,
   engine: tauriEngineHost,
+  chain: tauriChainHost,
   midi: tauriMidi,
   input: tauriInput,
   exports: tauriExports,
