@@ -84,11 +84,13 @@
 //!   converted to the new endpoint's format; the capture across another format: unmeasured). On cpal's
 //!   `DeviceChanged` (and on an open of the same request) the owner names the new endpoint in the
 //!   status; at the engine's rate the run follows it, so nothing reopens and no take ends
-//!   (`transition::follows`). The capture keeps the width it opened at: on a narrower input endpoint
-//!   each slot's pick is read again against its inputs (a pick it lacks reads auto, logged; the status
-//!   says so), and a wider one, whose inputs past that width the stream cannot read, reopens there at
-//!   once, at the engine's rate. At another rate, or with a capture to start where the run has none, an
-//!   open of the same request reopens there (refused while the loops cannot play at the new rate).
+//!   (`transition::follows`). The capture keeps the width it opened at, and each slot's pick is read
+//!   again against the new input endpoint's inputs, whatever the rate, in the same status that names it
+//!   (a pick it lacks reads auto, logged). A wider endpoint plays on while no pick reads past the
+//!   stream's width; one that does (a saved pick the endpoint has, or a live one) reopens there, once, at
+//!   the engine's rate. At another rate, or with a capture to start where the run has none, an open of
+//!   the same request reopens there; neither the player's nor the owner's reopen of the running device
+//!   rebuilds the engine at another rate while it holds audio (unless the player forces it).
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,

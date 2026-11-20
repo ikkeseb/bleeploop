@@ -1,6 +1,6 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), when the device that runs
-//! follows a WASAPI default Windows moved rather than reopening there ([`follows`]), where a lost device
+//! follows a WASAPI default Windows moved rather than reopening there ([`follows`], [`reads_past`]), where a lost device
 //! falls back to ([`fallbacks`]), which capture channel a request selects for each slot
 //! ([`input_channel`], [`open_channels`]), which buffer an ASIO open and its preopen ask the driver for
 //! ([`asio_block`], [`preopen_block`]), and the rate it runs at ([`open_rate`]). `owner.rs` carries out
@@ -101,13 +101,19 @@ pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers
 /// `moved` names, and a restart would only end a take. It reopens only for what the running streams
 /// cannot give: another engine rate (a fresh open runs the endpoint's own), a capture where the run
 /// has none (`input_open` false: none opened, or none to open) and Windows now offers another, or a
-/// capture wider than the one that runs (`running.in_channels`, the width it opened at): a channel
-/// past it is one the stream cannot read, and the slots' picks are judged against the endpoint's
-/// inputs. A narrower one plays on; the owner reads its picks again against the new width.
-pub(crate) fn follows(running: &Spec, input_open: bool, moved: &Spec) -> bool {
+/// slot's pick (`picks`, read on `moved`'s inputs) on a channel past the width the capture opened at
+/// (`running.in_channels`), one the stream cannot read ([`reads_past`]). A wider endpoint whose extra
+/// inputs no pick reads plays on, as a narrower one does; the owner reads the picks again against it.
+pub(crate) fn follows(running: &Spec, input_open: bool, moved: &Spec, picks: [Option<InputPick>; SLOT_COUNT]) -> bool {
     let capture_to_start = !input_open && moved.in_channels > 0 && moved.endpoints.input != running.endpoints.input;
-    let wider = input_open && moved.in_channels > running.in_channels;
-    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start && !wider
+    let past = input_open && moved.in_channels > 0 && reads_past(moved.in_channels, picks, running.in_channels);
+    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start && !past
+}
+
+/// Whether `picks`, as an open on an input with `inputs` channels reads them ([`open_channels`]: auto
+/// is input 2 there), name a channel past `width`, the channels a running capture opened with.
+pub(crate) fn reads_past(inputs: usize, picks: [Option<InputPick>; SLOT_COUNT], width: usize) -> bool {
+    open_channels(inputs, picks).0.iter().any(|pick| pick.sides().iter().any(|&c| c as usize >= width))
 }
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
@@ -250,15 +256,21 @@ mod tests {
             endpoints: Endpoints { input: Some(name.into()), output: Some(name.into()) },
         };
         let running = spec("Mic", 48_000, 48_000, 2);
-        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 2)), "rerouted: the stream plays there already");
-        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1)), "a mono mic: the capture runs on at its width");
-        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2)), "a mic at another rate: the capture runs on at the rate it opened at");
-        assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0)), "no capture default left: nothing to reopen for");
-        assert!(!follows(&running, true, &spec("Interface", 48_000, 48_000, 4)), "a wider capture: inputs the running stream cannot read");
-        assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2)), "another engine rate opens at the endpoint's own");
-        assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2)), "a capture the run lacks starts there");
+        let (stereo, auto, upper) = ([Some(Pair([0, 1])), None], [None, None], [Some(Pair([0, 1])), Some(Pair([2, 3]))]);
+        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 2), stereo), "rerouted: the stream plays there already");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1), stereo), "a mono mic: the capture runs on at its width");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2), stereo), "a mic at another rate: the capture runs on at the rate it opened at");
+        assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0), upper), "no capture default left: nothing to reopen for");
+        assert!(follows(&running, true, &spec("Interface", 48_000, 48_000, 4), stereo), "a wider capture whose extra inputs no pick reads");
+        assert!(!follows(&running, true, &spec("Interface", 48_000, 48_000, 4), upper), "a pick on inputs 3+4: past the running stream's two");
+        assert!(follows(&running, true, &spec("Interface", 48_000, 48_000, 2), upper), "the pick the endpoint lacks reads auto, input 2");
+        let mono = spec("Mic", 48_000, 48_000, 1);
+        assert!(!follows(&mono, true, &spec("Interface", 48_000, 48_000, 2), auto), "auto is input 2 on a stereo endpoint: past a mono stream");
+        assert!(follows(&mono, true, &spec("Interface", 48_000, 48_000, 2), [Some(Mono(0)); SLOT_COUNT]), "input 1 the mono stream reads");
+        assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2), stereo), "another engine rate opens at the endpoint's own");
+        assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2), stereo), "a capture the run lacks starts there");
         let output_moved = Spec { endpoints: Endpoints { input: Some("Mic".into()), output: Some("Headset".into()) }, ..spec("Headset", 48_000, 48_000, 2) };
-        assert!(follows(&running, false, &output_moved), "the capture that did not open is where it was");
+        assert!(follows(&running, false, &output_moved, upper), "the capture that did not open is where it was");
     }
 
     #[test]

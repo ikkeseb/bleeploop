@@ -283,32 +283,35 @@ fn every_slots_pick_travels_in_one_word() {
 
 /// A mono pick meters its one channel on both sides: the output callback publishing such blocks while
 /// the feed takes the meter as fast as it can, every take holds both sides of the same blocks, never a
-/// peak on one side whose other half lands in the next take.
+/// peak on one side whose other half lands in the next take. The writer publishes until the reader has
+/// taken `TAKES` nonempty meters, so how the two threads are scheduled decides only how long it runs.
 #[test]
 fn a_slots_two_peaks_are_published_and_taken_together() {
+    const TAKES: u32 = 100_000;
     let core = Arc::new(Core::new());
     let done = Arc::new(AtomicBool::new(false));
     let writer = {
         let (core, done) = (core.clone(), done.clone());
         std::thread::spawn(move || {
-            for k in 0..2_000_000u32 {
+            let mut k = 0u32;
+            while !done.load(Relaxed) {
                 let block = [(k % 1000 + 1) as f32 / 1000.0];
                 meter(&core, 0, [&block, &block]);
+                k = k.wrapping_add(1);
             }
-            done.store(true, Relaxed);
         })
     };
-    let (mut takes, mut split) = (0u64, None);
-    while !done.load(Relaxed) {
+    let (mut takes, mut split) = (0u32, None);
+    while takes < TAKES && split.is_none() {
         let ([[l, r], _], _) = core.take_meter();
-        takes += u64::from(l > 0.0);
-        if l != r && split.is_none() {
+        takes += u32::from(l > 0.0 || r > 0.0);
+        if l != r {
             split = Some((l, r));
         }
     }
+    done.store(true, Relaxed);
     writer.join().unwrap();
-    assert!(takes > 1000, "the feed took the meter while it moved ({takes} takes)");
-    assert_eq!(split, None, "a take held one side of a block without the other");
+    assert_eq!(split, None, "a take held one side of a block without the other (after {takes} takes)");
 }
 
 const RATE: u32 = 48_000;

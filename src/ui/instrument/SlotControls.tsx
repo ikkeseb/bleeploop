@@ -14,7 +14,7 @@ import { SYNTHS } from '../state/instruments';
 import { volumeDb } from '../looper/shared';
 import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
-import type { InputPick as Pick, ReadPick } from '../../platform';
+import { pickSides, type InputPick as Pick, type ReadPick } from '../../platform';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
 import { slotLetter } from '../state/slot-tones';
 import { Icon } from './icons';
@@ -45,15 +45,27 @@ export function InputPick(props: { slot: 0 | 1 }) {
     if (p !== null && !list.some((c) => pickKey(c) === pickKey(p))) list.push(p);
     return list;
   });
-  // Auto names the input the engine reads for the slot (its status), so a guitar on the other jack shows.
-  const auto = () => {
+  // What the engine reads for the slot (its status), named after the pick where it is not the pick:
+  // Auto, so a guitar on the other jack shows, and a pick the device that runs lacks (saved on one with
+  // more inputs), which stays the player's and reads auto here.
+  const read = () => {
     const d = engineDevice();
-    const read = pick() === null && d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
-    return read === undefined ? 'Auto' : `Auto · ${pickName(read)}`;
+    return d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
   };
+  const named = (p: Pick, name: string) => {
+    const r = p === null || lacking(p) ? read() : undefined;
+    return r === undefined ? name : `${name} · ${pickName(r)}`;
+  };
+  // Judged on the device's inputs, not on its status: a status may be older than a switch just made.
+  const lacking = (p: ReadPick) => {
+    const n = inputChannelCount(engineDevice());
+    return n > 0 && (pickSides(p)?.some((c) => c >= n) ?? false);
+  };
+  // A slot with a pick of its own keeps Auto plain: the status reads that pick's channel, or its fallback.
+  const auto = () => (pick() === null ? named(null, 'Auto') : 'Auto');
   const shown = () => {
     const p = pick();
-    return p === null ? auto() : pickName(p);
+    return p === null ? auto() : named(p, pickName(p));
   };
   return (
     <span class="slot__inwin k-win" onClick={(e) => e.stopPropagation()}>
@@ -67,7 +79,7 @@ export function InputPick(props: { slot: 0 | 1 }) {
         onChange={(e) => setEngineSlotInputChannel(props.slot, keyPick(e.currentTarget.value))}
       >
         <option value="">{auto()}</option>
-        <For each={channels()}>{(c) => <option value={pickKey(c)}>{pickName(c)}</option>}</For>
+        <For each={channels()}>{(c) => <option value={pickKey(c)}>{named(c, pickName(c))}</option>}</For>
       </select>
     </span>
   );

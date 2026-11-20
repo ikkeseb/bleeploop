@@ -1,6 +1,5 @@
 import { createSignal } from 'solid-js';
 import {
-  pickSides,
   platform,
   samePick,
   type AsioDeviceInfo,
@@ -57,7 +56,8 @@ export const usingAsio = () => asioAvailable() && asioEnabled();
 
 // Each slot's input pick (null = auto, a channel, or a pair), saved with the device picks. A pick is
 // device-bound: an input device change or prune resets both to the install's default
-// (`defaultSlotInputChannels`), and a device without it, either side of a pair, resets that one to Auto.
+// (`defaultSlotInputChannels`). A device without it, either side of a pair, keeps it: the slot reads
+// auto there and shows both (`SlotControls.tsx`), and a device that has it again reads it again.
 const [slotInputChannels, setSlotInputChannelsSig] = createSignal(readAudioDeviceSettings().slotInputChannels);
 
 /** Save and show each slot's input pick. */
@@ -127,13 +127,13 @@ export async function refreshOutputDevices(): Promise<boolean> {
 /**
  * Refresh BOTH native device lists and prune any persisted device id no longer present (an interface
  * unplugged since it was last picked), resetting it to '' so a later arm falls back to the default
- * device instead of failing on a stale id; and each slot's channel pick the device lacks, or both with
- * a pruned input device (counted on `running`, the device that runs: `inputChannelCount`; with none
- * running, the open resolves them).
+ * device instead of failing on a stale id, and both slots' channel picks with a pruned input device.
+ * A slot's pick the device lacks is not pruned: it stays what the player asked for, the device reads
+ * auto for it, and the slot shows both (`SlotControls.tsx`); a device that has it again reads it again.
  * Called once at startup — so pruning happens before the user can arm — and again whenever the Audio
  * Settings popover opens (to catch a mid-session unplug). No-op in the web build.
  */
-export async function refreshAndPruneDevices(running: DeviceStatus | null = null): Promise<void> {
+export async function refreshAndPruneDevices(): Promise<void> {
   if (!platform.pluginHost.available) return;
   const inputRefreshSucceeded = await refreshInputDevices();
   const outputRefreshSucceeded = await refreshOutputDevices();
@@ -146,16 +146,6 @@ export async function refreshAndPruneDevices(running: DeviceStatus | null = null
     // This endpoint belongs to WASAPI. Its disappearance cannot invalidate the cached ASIO channel.
     writeAudioDeviceSettings({ inputDeviceId: '', ...(usingAsio() ? {} : { inputChannel: '' }) });
     if (!usingAsio()) saveSlotInputChannels(defaultSlotInputChannels());
-  }
-  // A slot pick past the running device's inputs, either side of a pair (saved on a device with more),
-  // is not what the slot reads. With no device running (startup) the picks go to the open as saved: the
-  // device side reads auto for one it lacks and logs the fallback, and the open's status resets the
-  // saved pick (`dropLackingPicks`, `engine-store.ts`).
-  const inputs = running ? inputChannelCount(running) : 0;
-  if (inputs > 0) {
-    const picks = slotInputChannels();
-    const past = (pick: InputPick): boolean => pickSides(pick)?.some((c) => c >= inputs) ?? false;
-    saveSlotInputChannels([past(picks[0]) ? null : picks[0], past(picks[1]) ? null : picks[1]]);
   }
   if (
     outputRefreshSucceeded &&

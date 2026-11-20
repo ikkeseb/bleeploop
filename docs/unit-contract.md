@@ -325,7 +325,9 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   `[[&[f32]; 2]; SLOT_COUNT]`; `callback.rs`, `pipes.rs`). One shape in request, archive and fake: `null`
   (auto: input 2, mono), a channel number, or `[left, right]` (`DeviceRequest.inputChannels`,
   `setSlotInputChannel`, `SlotControls.tsx`, `audio-settings.ts`). A pick the device lacks, either side of
-  a pair, opens as auto, flagged (`transition.rs` `open_channels`). The feed's `meter` has a peak per channel.
+  a pair, opens as auto, flagged (`transition.rs` `open_channels`); the request and the saved pick keep it,
+  so a device that has it again reads it, and the slot shows it with the input it reads ("In 4 · In 2").
+  The feed's `meter` has a peak per channel.
 - **Latency sums within a chain,** bypassed units included. A take aligns on the largest sum across live
   input-fed chains (plus the driver's report and the limiter's pre-delay); each live chain's wet reaches
   the record tap delayed by what its own sum lacks of it.

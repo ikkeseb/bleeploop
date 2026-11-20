@@ -13,7 +13,8 @@
  *   the rail's DIAGNOSTICS claims audio only (`audio ok`); PLUGINS with no plugin says what to do;
  * - under ASIO the input and output device selects are disabled and name the ASIO device, and a slot's
  *   input pick offers the ASIO device's inputs; pruning an unplugged Windows endpoint leaves the slots'
- *   input picks alone;
+ *   input picks alone; a pair saved on a device with more inputs goes to the startup open as saved and
+ *   stays saved (the slot's window that names it with its fallback: `slot-sources`);
  * - a startup whose plugin host fails says so, leaves native selection closed and a following manual
  *   scan does nothing.
  *
@@ -174,8 +175,8 @@ await probe(async ({ open }) => {
   await page.screenshot({ path: 'logs/layout/audio-settings.png' });
 
   // A launch under ASIO (four inputs) with a pair saved on a device with more: the startup open sends
-  // it as saved, so the device side sees the pick it lacks (and logs its fallback to auto), and the
-  // open's status resets the saved pick to Auto.
+  // it as saved, so the device side sees the pick it lacks (and logs its fallback to auto); the pick
+  // stays saved, as asked, while the status says the slot reads auto (input 2).
   const lacking = await open({
     viewport: { width: 960, height: 600 },
     init: async (p) => {
@@ -188,13 +189,16 @@ await probe(async ({ open }) => {
     },
   });
   await lacking.page.waitForFunction(() => window.__startup.calls.includes('init'), undefined, { timeout: 10000 });
+  await lacking.page.waitForFunction(() => window.__startup.picks.length > 0, undefined, { timeout: 10000 });
   const unpruned = await lacking.page.evaluate(async () => {
     const { readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
-    return { opened: window.__startup.picks[0], saved: readAudioDeviceSettings().slotInputChannels };
+    const { engineDevice } = await import('/src/ui/state/engine-store.ts');
+    for (let i = 0; i < 400 && !engineDevice(); i++) await new Promise((r) => setTimeout(r, 25));
+    return { opened: window.__startup.picks[0], saved: readAudioDeviceSettings().slotInputChannels, reads: engineDevice()?.inputChannels };
   });
   console.log(JSON.stringify({ unpruned }));
-  assert.deepEqual(unpruned, { opened: '[[0,5],2]', saved: [null, 2] },
-    'the startup open sends the saved pair the device lacks; its status, not a prune before it, resets it');
+  assert.deepEqual(unpruned, { opened: '[[0,5],2]', saved: [[0, 5], 2], reads: [1, 2] },
+    'the startup open sends the saved pair the device lacks; it reads auto there, and the pick stays saved as asked');
 
   // A launch whose plugin host fails to start.
   const failed = await open({

@@ -8,7 +8,6 @@ import {
   decodeSnapshot,
   encodeSessionBytes,
   platform,
-  samePick,
   sendEngine,
   type DeviceEvent,
   type DeviceRequest,
@@ -25,7 +24,6 @@ import {
   type LaneInfo,
   type LaneMix,
   type LaneState,
-  type ReadPick,
   type ScopeUpdate,
   type TimeSignature,
   type TunerUpdate,
@@ -859,14 +857,10 @@ function applyFrameNow(f: FeedFrame): void {
   }
   // The device and its clock first: the anchor is read after the frame's events, so a take the events
   // start snaps to the grid it carries.
-  if (f.status !== undefined) {
-    const before = device();
-    setDevice(f.status);
-    // The owner reopened on its own (a lost device back, a fallback): check the picks against it. A
-    // status of the same device may be older than a channel switch, so it is not read for this.
-    const moved = !before || before.backend !== f.status?.backend || before.inputName !== f.status.inputName;
-    if (f.status && moved) dropLackingPicks(slotInputChannels(), f.status.inputChannels);
-  }
+  // A slot's saved pick stays the one the player asked for, on any device: one the device lacks reads
+  // auto there (the status says what each slot reads, `SlotControls.tsx` shows both), and a device that
+  // has it again reads it again, as the device side keeps it.
+  if (f.status !== undefined) setDevice(f.status);
   if (f.anchor) plain.clock = f.anchor;
   if (f.reset) adoptSettings(f.settings ?? []);
   // GO LIVE as the engine applied it (a page's first reset disarmed it first: `engineResync`).
@@ -1672,7 +1666,7 @@ type Running = DeviceChoice & { status: DeviceStatus };
  * fails, or one that fails to open puts its picks back. */
 let opened: DeviceChoice | null = null;
 
-/** `choice` with each slot's input pick `picks` (switched in place, or dropped as lacking). */
+/** `choice` with each slot's input pick `picks` (switched in place). */
 function withSlotPicks(choice: DeviceChoice, picks: readonly [InputPick, InputPick]): DeviceChoice {
   const { backend, input, output, buffer, sampleRate } = choice.request;
   return {
@@ -1680,25 +1674,6 @@ function withSlotPicks(choice: DeviceChoice, picks: readonly [InputPick, InputPi
     picks: { ...choice.picks, slotInputChannels: [picks[0], picks[1]] },
   };
 }
-
-/**
- * Reset to Auto each slot's saved pick the device does not give that slot: `asked` is the pick each
- * slot asked for (null = auto), `inUse` what the device's status says each slot reads (a device without
- * the pick, either side of a pair, reads auto). So a slot's input never names a channel it does not read.
- */
-function dropLackingPicks(asked: readonly InputPick[], inUse: readonly ReadPick[] | undefined): void {
-  if (!inUse) return;
-  const picks = slotInputChannels();
-  const lacking = (s: 0 | 1) => picks[s] !== null && samePick(asked[s], picks[s]) && !samePick(inUse[s], asked[s]);
-  if (!lacking(0) && !lacking(1)) return;
-  const kept: [InputPick, InputPick] = [lacking(0) ? null : picks[0], lacking(1) ? null : picks[1]];
-  saveSlotInputChannels(kept); // the device side logs the fallback
-  if (opened) opened = withSlotPicks(opened, kept);
-}
-
-/** The pick each slot of `request` asks for. */
-const askedChannels = (request: DeviceRequest): InputPick[] =>
-  'inputChannels' in request ? request.inputChannels : [request.inputChannel, request.inputChannel];
 
 /** The device the saved picks name. */
 function picked(): DeviceChoice {
@@ -1771,7 +1746,6 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     setDevice(runs.status);
     setEngineRate(runs.status.sampleRate);
     opened = { request: runs.request, picks: runs.picks };
-    dropLackingPicks(askedChannels(runs.request), runs.status.inputChannels);
     return { status: runs.status, declined: false };
   } catch (err) {
     console.error('[engine] device open failed', err);
