@@ -5,8 +5,9 @@
 // A static check of the real source. A loop's draw modules are everything its roots reach through
 // relative sibling imports: for the stage, `stage-loop.ts` (the rAF loop) and `views.ts` (the looks it
 // draws); for the looper, `waveform.ts`, whole (its register calls run from Solid, read no signal
-// either); for the tuner, `tuner-loop.ts` and the pitch arithmetic it calls (`TunerView.tsx`, its Solid
-// side, hands it a callback it calls when the note, the in-tune or the no-signal state changes). Each
+// either), and the looks it draws (`wave-looks.ts`); for the tuner, `tuner-loop.ts` and the pitch
+// arithmetic it calls (`TunerView.tsx`, its Solid side, hands it a callback it calls when the note, the
+// in-tune or the no-signal state changes). Each
 // may import only its siblings and, from `../state/audio`, the looper facade,
 // `PEAK_FRAMES` and types; none may import `solid-js`; and on the looper facade it may touch only the
 // plain getters (`PLAIN`), since the same object also carries signal accessors (`selectedTrack`,
@@ -224,7 +225,7 @@ check('the Solid side stays out of the stage walk', () => {
   assert.ok(!stage.has('stage-store'), 'stage-store.ts (signals) is imported by a draw module');
 });
 const looperLoop = walk(LOOPER);
-check('the looper walk holds waveform.ts, not its Solid-side sibling', () => assert.deepStrictEqual([...looperLoop.keys()], ['waveform']));
+check('the looper walk holds waveform.ts and its looks, not its Solid-side sibling', () => assert.deepStrictEqual([...looperLoop.keys()].sort(), ['wave-looks', 'waveform']));
 const tunerLoop = walk(TUNER);
 check('the tuner walk holds its loop and the pitch arithmetic', () => assert.deepStrictEqual([...tunerLoop.keys()].sort(), ['pitch', 'tuner-loop']));
 

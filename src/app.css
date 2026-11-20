@@ -1,9 +1,11 @@
 @font-face {
-  font-family: 'Geist';
-  src: url('./assets/fonts/Geist-Variable.woff2') format('woff2');
-  font-weight: 100 900;
+  font-family: 'Instrument Sans';
+  src: url('./assets/fonts/InstrumentSans-Variable.ttf') format('truetype');
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
   font-display: block;
 }
+/* Geist Mono stays only for the wave's bar numbers (`looper/waveform.ts`), until that file takes --font-num */
 @font-face {
   font-family: 'Geist Mono';
   src: url('./assets/fonts/GeistMono-Variable.woff2') format('woff2');
@@ -12,111 +14,129 @@
 }
 
 :root {
-  /* ===== Token system — "Instrument", refined (owner-approved base 2026-09-23). Matte and flat:
-     surfaces separate by TONE, one step per level (ground --bg → card --surf-1 → key face --key), with at
-     most one hairline per edge (a card's is its top light, --hair); never bevels, drop shadows (the
-     floating panels' --panel-drop excepted), backdrop blur or glow. The main screen carries NO halo of any
-     kind: a lit LED is a solid dot, a lit control a lit legend.
-     Colour is spent only on sound, and a lane spends it in three places: its wave, its state word with
-     its dot, and its main button's ring (a flat filled disc while it captures). A selection is its
-     identity glyph lit warm-white and its body one tone up.
-     KEYS — every pressable word (the command bar's toggles and steppers, the slot's keys and pickers, a
-     lane's keys, the FX drawer's keys and its DUB FEEDBACK pane) is ONE family: a caps legend on a very
-     quiet face (--key: a tone off its surface, no border, so a key reads as pressable from the chair), the same height and radius as its
-     row's neighbours (--r-ctl in the bar, the slots and the drawer; --r-sm on a lane). Three legend
-     levels, so a glance tells them apart: at rest --legend (quieter than --dim), engaged --engaged (lit
-     warm-white) on a face a step up (--key-on), disabled --faint on the quieter off face (--key-off; tone,
-     never an opacity fade), so a row never mixes keys and bare words. Hover lifts the face (--key-hover);
-     press sinks it (--pressed). A key with a lamp (the record modes, a lane's FX and MUTE, the drawer's
-     effects) lights it warm-white while its setting is on: one engaged recipe, lamp + lit legend + the
-     face a step up. On but locked (a mode that is on and cannot act now) is its own third look: the lamp
-     stays lit, a padlock follows the --faint legend, and the face is an engaged rim with no fill. An unlit
-     lamp is an empty socket ring (--led-socket-shade), never a grey dot. A two-step confirm (SURE?) and a
-     fade under way are chrome, so they take the engaged recipe, never a hue. A split key (CLICK | 70,
-     FIXED | − 4 BARS +) is two faces joined by a 1 px gap. Icon tools stay bare glyphs;
-     engaged, they wear --key-on like a key. The cyan focus-visible ring always.
-     STATE WORDS are coloured caps with a dot; the two live-capture words, REC and OVERDUB, are a FILLED
-     flat badge (STATUS D14: a carrier that survives greyscale and every colour-vision type), and CLIP is
-     the one other filled flag (an alarm). Type: caps labels 10.5 px / 600 / 0.08em (state words 11 px),
-     changing numbers in Geist Mono with tabular figures (a lane's dB and pan 12 px), the lane number and
-     the BPM in a light display weight. Radii come from one scale (--r-*). Motion: --motion on colour,
-     face, border and opacity of controls and chrome; a lane's SOUND state lands on the frame the feed
-     switches it (a hardware REC LED), and reduced motion turns transitions off. --cyan survives for
-     LISTEN, focus and key-down.
-     THE DISPLAY — the looper is one machine: its five lanes are rows of one matte body (no gaps, no
-     card per lane, a faint --row-line between rows), and their wave wells are one true-black glass pane
-     (--glass) down the wave column, the heads on the body to its left and the mix to its right. Inside
-     the pane a hairline (--glass-line) divides the rows; only the pane's outer corners round (--r-well),
-     its one light is a 1 px inner top highlight (--glass-top) and a barely-there sheen (--glass-sheen):
-     no reflection, no glow, no motion. Where the FX drawer opens the pane parts, each part rounded, and
-     the drawer sits on the body between them. A selection lights its identity glyph, never an edge, a
-     box, a rail, a hue or a glow: every lane number rests --faint in a light weight whatever the lane's
-     state, and the selected lane's turns --engaged a weight up, as a selected slot's letter does; the
-     selected row's body (and its open drawer's) and a selected slot card lift one quiet tone (--surf-sel;
-     the glass stays --glass). Every row draws the loop's bar and beat lines under its wave; the bar
-     numbers stand once, along the pane's top row, and not on a one-bar loop. A wave is drawn
-     as sound (`looper/waveform.ts`): one smooth anti-aliased filled body, no rim, in its state colour
-     while it sounds; stopped, a solid grey body; muted, a darker grey body under a crisp grey contour;
-     fading, the take's grey shape with the sounding colour, a step down, sinking into it on the
-     engine's ramp; and one crisp playhead per row, so equal-length loops line up into one line down
-     the pane.
-     SIZE — the chrome is sized for the chair: --ui scales the main screen's type and key heights one step
-     up on a wide display (2200 px and over, a 27" 2560 screen read from 1.5 m), and is 1 everywhere else.
-     A size that should follow it is written calc(N * var(--ui)). The lanes and their FX drawer take a
-     larger step (--ui-lane, which they set as their --ui): they have the room the command bar lacks, and
-     their legends are the ones read from the guitar. ===== */
-  --bg: #0a0b0e;
-  --surf-1: #121419; /* card */
-  --surf-2: #171a20; /* control face (the lane core, a popover's fields) */
-  --surf-3: #1d2028; /* a solid lifted face (a popover's hover) */
-  --key: rgba(255, 255, 255, 0.042); /* a key at rest: a face that reads as pressable from the chair, no border */
-  --key-off: rgba(255, 255, 255, 0.022); /* a disabled key's face: quieter than at rest (--faint holds 4.5:1 on it) */
-  --key-hover: rgba(255, 255, 255, 0.055); /* a key under the pointer */
-  --key-on: rgba(255, 246, 232, 0.14); /* an engaged key: a clear step up, faintly warm, under the lit legend */
-  --sunk: #0c0d11; /* the well floor and the display window */
-  --card: var(--surf-1); /* card fill: flat, one tone over the ground */
-  --hair: rgba(255, 255, 255, 0.05); /* the top edge light: a card's one hairline */
-  --surf-sel: #17191f; /* the selected lane's body and slot card: one tone over --surf-1, --faint still 4.5:1 on it */
-  --r-sm: 6px; /* radius: a control 24 px tall or less (lane keys, steppers, cue, badges) */
-  --r-ctl: 8px; /* radius: a control 26-34 px tall (bar toggles, selects, slot and drawer keys) */
-  --r-well: 10px; /* radius: a sunk well or display window */
-  --r-card: 14px; /* radius: a card (the command bar, a slot, a lane, the FX drawer) */
-  --motion: 150ms cubic-bezier(0.2, 0.7, 0.3, 1); /* the one control transition: short, ease-out */
-  --panel: #101216; /* floating panel (popovers, toasts): opaque, a lane never reads through it */
-  --panel-drop: 0 20px 48px -14px rgba(0, 0, 0, 0.72); /* the one drop shadow: a floating panel over the lanes */
-  --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6); /* :active — the control face sinks into --sunk */
-  --option: #14171d; /* a themed <select>'s open option list */
+  /* ===== The panel: the redesign the owner accepted on 2026-11-20 (references in docs/redesign/ while
+     the build is open). One instrument read in three bands, each with one job: the command bar (time and
+     the whole machine), the slot row (what is played in), the five lanes (the loops).
+     DEPTH only on what is pressed, turned or slid. A key is a low cap (--cap, its 1 px top light and
+     falling face --cap-light), a side wall (--cap-wall) and a short contact shadow (--cap-contact),
+     radius --r-sm, never a pill or a bare 1 px outline; held it sinks onto its wall, hovered its cap
+     lifts a tone, disabled it drops to --cap-off with a --faint legend (tone, never an opacity fade).
+     Everything else is FLAT: a neutral-cool charcoal panel (--surf-1, never brown or navy) lit from above
+     (--band-light: each band a touch lighter at its top) under a fine static grain (--grain), print, and
+     dark recessed glass (--glass, one faint reflection along its top edge). Bands and lanes part by a
+     milled groove (--groove). No wells round groups, no group captions, no box round a value but the
+     small value window.
+     COLOUR is sound only: REC --rec, OVERDUB --dub, PLAYING --play, the meter ladder's --meter-*. Engaged
+     chrome is warm white (--engaged): a lit LED, a lit legend, a value being changed, a two-step confirm,
+     a fade under way. An LED is a small solid shape with a tight bloom in its own colour (6 px at most);
+     unlit, a dark lens (--led-socket*). That bloom is the main screen's only halo: no glow boxes, no lit
+     or ruled edge, no standing motion (spectacle is the stage view's).
+     KEYS have three silhouettes: latched (an LED bar over the legend, lit while the setting is on),
+     momentary (no LED, a lower, quieter cap), destructive (sunk below the panel; the first press arms it:
+     its floor rises a step and it reads CONFIRM or CLR? in lit warm white with no glyph, the ✕ being the
+     resting key's alone). A key carries its own value as a second, smaller line in the numerals (bright
+     while its mode is on), changed by a drag or a scroll on the key: no value fields or steppers beside it.
+     D14: REC and OVERDUB carry a mark that survives greyscale and every colour-vision type: the lane's lit
+     key shows a round rec lamp beside its light bar while it captures, a playing lane the plain bar (until
+     the lane head is rebuilt, today's filled REC / OVERDUB badge carries it). CLIP is the one other filled
+     flag (an alarm). THE WAVE is the glass's face: colour its state, brightness its importance, one crisp
+     playhead per row; its look (stripes by default) is switchable, and `looper/waveform.ts` owns the looks.
+     TYPE: Instrument Sans in three roles, one line each to change: legends (--font-legend: 600, caps,
+     0.06em, never under 12 px at the base scale), numerals (--font-num: 500, tabular figures, which the
+     body sets for every read-out), names (--font-name: 650-700). Sizes: 12 captions and units · 14 legends
+     and values · 16 state words and unit names · 22 the display's second figure · 40 the tempo · 64 the
+     lane numbers. --sans and --mono are today's components' names for the roles until each is rebuilt.
+     SIZE: --ui scales the chrome's type and key heights a step up from 2200 px (a 27" 2560 screen read
+     from 1.5 m), 1 elsewhere; a size that follows it is calc(N * var(--ui)). The lanes and the FX drawer
+     take a larger step (--ui-lane, set as their --ui). MOTION: --motion on colour, face, border and
+     opacity; a lane's sound state lands on the frame the feed switches it; reduced motion turns
+     transitions off. FOCUS: the --cyan focus-visible ring, always.
+     RECIPES (after the base rules), one family:
+     .k-key a key cap: --latch with a .k-led over its legend, --mo momentary, --clr sunk destructive,
+       --armed its armed state; on is aria-pressed="true" or .is-on, disabled :disabled.
+     .k-key--value a key that carries its value: .k-key__l the legend over .k-key__v the value line.
+     .k-led an LED bar (--dot round), lit by .is-on or its latched key being on, in --led-c.
+     .k-bezel > .k-glass the recessed glass window; .k-win the small value window.
+     .k-meter the LED ladder, lit up to --level (0-100 %): green, amber from -12 dB, red from -3 dB.
+     .k-fader an <input type="range"> drawn as the recessed fader slot and its cap.
+     .k-knob a knurled knob; --a turns its pointer (-135deg to 135deg). ===== */
+
+  /* the panel: tone steps, lit from above (hex: `stage/visual.ts` mixes --bg and --surf-1) */
+  --bg: #111317; /* the ground under the bands */
+  --surf-1: #16181c; /* the panel: a band, a card */
+  --surf-2: #1b1e22; /* a face set into the panel (the lane core, a popover's fields) */
+  --surf-3: #2a2d32; /* a solid lifted face (a popover's hover) */
+  --surf-sel: #1d2024; /* the selected lane's strip and slot: one tone up, --faint still 4.5:1 on it */
+  --card: var(--surf-1);
+  --band-light: linear-gradient(rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0)); /* a band's top-down light */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='1.6 0 0 0 -.7 1.6 0 0 0 -.7 1.6 0 0 0 -.7 0 0 0 0 .05'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)'/%3E%3C/svg%3E");
+  --groove: inset 0 2px 0 #08090b, inset 0 3px 0 rgba(255, 255, 255, 0.035); /* milled along a top edge */
+  --hair: rgba(255, 255, 255, 0.06); /* a card's one top light */
+  --row-line: #0b0c0e; /* the dark line between two looper rows on the body, a groove's floor */
   --edge: rgba(255, 255, 255, 0.07); /* card + control border */
   --line-2: rgba(255, 255, 255, 0.12); /* hover border */
+  /* today's key faces, flat: --legend 8:1 at rest, --faint 4.5:1 on --key and --key-off */
+  --key: #26292d; /* a key at rest: a cap's tone */
+  --key-off: #1c1f23; /* a disabled key's face: below the panel's caps */
+  --key-hover: #303338; /* a key under the pointer */
+  --key-on: #3a3d42; /* an engaged key: a clear step up, under the lit legend */
+  --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6); /* :active on a flat face: it sinks */
+  /* the cap (the recipes): a light-from-above face, its wall and its contact shadow */
+  --cap: linear-gradient(#32363c, #26292e);
+  --cap-hover: linear-gradient(#3b3f46, #2c3035);
+  --cap-held: linear-gradient(#2a2e33, #23262a);
+  --cap-off: linear-gradient(#1d2024, #191b1f);
+  --cap-light: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 -1px 0 rgba(0, 0, 0, 0.28);
+  --cap-wall: 0 3px 0 #15171a;
+  --cap-contact: 0 4px 0 #050607, 0 5px 8px rgba(0, 0, 0, 0.55);
+  --recess: 0 -1px 0 rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 2px 3px rgba(0, 0, 0, 0.9); /* a sunk window */
+  /* glass: recessed, dark, not black */
+  --glass: #07090b;
+  --sunk: #0b0d10; /* a well floor, a value window, a display */
   --well: var(--sunk);
-  --glass: #030304; /* the looper's display: one true-black glass pane under the five waves, darker than --sunk */
-  --glass-line: rgba(255, 255, 255, 0.06); /* the hairline between two rows inside the pane */
-  --glass-top: rgba(255, 255, 255, 0.075); /* the pane's one inner top highlight */
-  --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 62%); /* the pane's barely-there sheen, top to bottom */
-  --row-line: rgba(255, 255, 255, 0.04); /* the faint divider between two looper rows on the body */
-  --text: #eef1f8;
-  --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
-  --faint: #7d818d; /* the floor for read text: 4.5:1 on a card and on a key's resting face (contact-sheet pins it) */
-  --legend: #b0b4be; /* a key's legend at rest: just under --dim, plainly over --faint (available reads apart from unavailable), far under --engaged */
-  --engaged: #f4efe6; /* warm white: engaged / selected chrome */
-  /* an LED's unlit socket: the lane's state LED, its FX lamp, the command bar's mode lamps. Unlit it is an
-     empty ring, quiet enough to vanish from the chair and never a grey dot that reads as dust; lit, a
-     solid dot in its colour, no halo */
-  --led-socket: transparent;
-  --led-socket-shade: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
-  /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
+  --glass-line: rgba(255, 255, 255, 0.05); /* the hairline between two rows inside the pane */
+  --glass-top: rgba(255, 255, 255, 0.07); /* the pane's one inner top highlight */
+  --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 30%); /* its reflection, top down */
+  --r-sm: 4px; /* radius: a key, a lane control */
+  --r-ctl: 5px; /* radius: a plate, a select, a slot or drawer control */
+  --r-well: 6px; /* radius: the glass, a well */
+  --r-card: 8px; /* radius: a band's card (the command bar, a slot, the lanes, the FX drawer) */
+  --motion: 150ms cubic-bezier(0.2, 0.7, 0.3, 1); /* the one control transition: short, ease-out */
+  --panel: #1f2226; /* a floating panel (popovers, toasts): opaque, a lane never reads through it */
+  --panel-drop: 0 0 0 1px #07080a, 0 12px 28px rgba(0, 0, 0, 0.65), 0 3px 6px rgba(0, 0, 0, 0.4); /* the one drop shadow */
+  --option: #1e2125; /* a themed <select>'s open option list */
+  /* print: --text, then --legend (a key at rest), --dim (secondary), --faint (the floor for read text) */
+  --text: #e9ecef;
+  --legend: #c3c8cf;
+  --dim: #a9afb7; /* INVARIANT: --caret-svg bakes this hex (%23a9afb7) inline — retune BOTH together */
+  --faint: #8a9098;
+  --engaged: #fff3e0; /* warm white: engaged chrome, a lit LED */
+  --led: var(--engaged); /* a lit LED's default colour (.k-led's --led-c) */
+  /* an LED's unlit lens (the lane's state LED, its FX lamp, the bar's mode lamps): a dark recessed shape */
+  --led-socket: #0a0b0d;
+  --led-socket-shade: inset 0 1px 1px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.08);
+  /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23a9afb7
      below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
-  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23b9bcc6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
-  --rec: #ff3b52; /* stays alarming */
-  --dub: #ffae2a; /* kept: the stage view's dub census (stage-view probe) needs its red-blue spread */
-  --play: #45d295; /* green, a step off neon (was #36e39a); 10:1 on --bg */
-  --cyan: #46d4e8;
+  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23a9afb7' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
+  /* sound (hex: the canvases read them) */
+  --rec: #ff3b52;
+  --dub: #ffae2a; /* the stage view's dub census (stage-view probe) needs its red-blue spread */
+  --play: #45d295;
+  --meter-g: #4fd98f; /* the LED ladder: green to -12 dB */
+  --meter-y: #ffb02e; /* amber, -12 to -3 dB */
+  --meter-r: #ff4a5a; /* red, above -3 dB */
+  --meter-g-off: #1b2620; /* the same segments unlit: visible, dark */
+  --meter-y-off: #2e2716;
+  --meter-r-off: #4a2026;
+  --cyan: #46d4e8; /* focus, LISTEN, key-down */
   --violet: #7f6bff;
 
-  /* Geist + Geist Mono (OFL-1.1, vendored in src/assets/fonts; licence in licenses/). Sans for words,
-     mono only for changing numeric read-outs (dB, gain, meters). */
-  --mono: 'Geist Mono', ui-monospace, Consolas, monospace;
-  --sans: 'Geist', system-ui, 'Segoe UI', sans-serif;
+  /* type: Instrument Sans (OFL-1.1, vendored in src/assets/fonts; licence in licenses/) in three roles */
+  --font-legend: 'Instrument Sans', system-ui, 'Segoe UI', sans-serif;
+  --font-num: 'Instrument Sans', system-ui, 'Segoe UI', sans-serif;
+  --font-name: 'Instrument Sans', system-ui, 'Segoe UI', sans-serif;
+  --sans: var(--font-legend); /* today's components: words */
+  --mono: var(--font-num); /* today's components: changing numerals (no longer a monospace) */
 
   --ui: 1; /* the chrome's size step (SIZE above) */
   --ui-lane: 1; /* the lanes' and the FX drawer's size step (SIZE above) */
@@ -149,14 +169,13 @@ body,
 body {
   color: var(--text);
   font-family: var(--sans);
+  font-variant-numeric: tabular-nums; /* every read-out holds its width as its figures change (TYPE) */
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
   user-select: none;
-  /* one warm, faint top light over --bg — the whole app sits on one surface. */
-  background:
-    radial-gradient(120% 70% at 50% -30%, rgba(255, 244, 228, 0.035), transparent 60%),
-    var(--bg);
+  /* the panel under its grain, lit from above: the whole app sits on one surface */
+  background: var(--grain), linear-gradient(#16181c, var(--bg) 40%);
 }
 
 /* Keyboard-only focus ring. :focus-visible (not :focus) keeps mouse clicks ring-free while making
@@ -878,6 +897,372 @@ optgroup {
   scrollbar-width: thin;
 }
 
+/* ===== RECIPES: the panel's parts, one family (the header's DEPTH, KEYS and RECIPES; drawn after
+   docs/redesign/controls.html). A piece sets a part's size through its custom properties (--kh, --s,
+   --level, --a) and never re-draws its depth. ===== */
+
+/* the key: a cap on a wall over a contact shadow; legends 600 caps */
+.k-key {
+  --kh: calc(38px * var(--ui));
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: var(--kh);
+  min-width: var(--kh);
+  margin: 0;
+  padding: 0 calc(12px * var(--ui));
+  border: 0;
+  border-radius: var(--r-sm);
+  appearance: none;
+  background: var(--cap);
+  box-shadow: var(--cap-light), var(--cap-wall), var(--cap-contact);
+  color: var(--text);
+  font: 600 calc(14px * var(--ui)) / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--motion), transform 0.06s;
+}
+.k-key:hover:not(:disabled) {
+  background: var(--cap-hover);
+}
+/* held: the cap sinks onto its wall */
+.k-key:active:not(:disabled) {
+  transform: translateY(3px);
+  background: var(--cap-held);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 -1px 0 rgba(0, 0, 0, 0.28), 0 1px 0 #050607, 0 2px 3px rgba(0, 0, 0, 0.5);
+}
+.k-key:disabled {
+  cursor: default;
+  color: var(--faint);
+  background: var(--cap-off);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 3px 0 #111316, 0 4px 0 #050607, 0 5px 6px rgba(0, 0, 0, 0.35);
+}
+/* latched: the LED bar over the legend, lit while the key is on */
+.k-key--latch {
+  --led-top: calc(6px * var(--ui));
+  padding-top: calc(4px * var(--ui));
+}
+.k-key--latch > .k-led {
+  position: absolute;
+  top: var(--led-top);
+  left: 50%;
+  translate: -50% 0;
+}
+/* momentary: no LED, a lower and quieter cap */
+.k-key--mo {
+  --kh: calc(32px * var(--ui));
+  gap: 4px;
+  padding: 0 calc(6px * var(--ui));
+  font-size: calc(12px * var(--ui));
+  color: var(--dim);
+  background: linear-gradient(#2a2d32, #222428);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.25), 0 2px 0 #131518, 0 3px 0 #050607, 0 4px 6px rgba(0, 0, 0, 0.45);
+}
+.k-key--mo:hover:not(:disabled) {
+  color: var(--text);
+  background: linear-gradient(#33373d, #292c31);
+}
+.k-key--mo:active:not(:disabled) {
+  transform: translateY(2px);
+  background: linear-gradient(#24272b, #1f2125);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 0 #050607, 0 2px 3px rgba(0, 0, 0, 0.45);
+}
+.k-key--mo:disabled {
+  background: linear-gradient(#1c1f22, #18191c);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 2px 0 #111316, 0 3px 0 #050607;
+}
+/* destructive: sunk below the panel, its cap a floor inside the hole; armed, the floor rises a step and
+   the legend (CONFIRM, CLR?: the markup drops the ✕) lights warm white */
+.k-key--clr {
+  isolation: isolate;
+  font-size: calc(12px * var(--ui));
+  color: var(--dim);
+  background: #060708;
+  box-shadow: inset 0 2px 0 rgba(0, 0, 0, 0.95), inset 0 3px 6px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.075);
+}
+.k-key--clr::before {
+  content: '';
+  position: absolute;
+  inset: 4px 4px 3px;
+  z-index: -1;
+  border-radius: 3px;
+  background: linear-gradient(#1f2226, #191b1f);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.k-key--clr:hover:not(:disabled),
+.k-key--clr:active:not(:disabled) {
+  transform: none;
+  background: #060708;
+  box-shadow: inset 0 2px 0 rgba(0, 0, 0, 0.95), inset 0 3px 6px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.075);
+}
+.k-key--clr:hover:not(:disabled)::before {
+  background: linear-gradient(#262a2e, #1f2226);
+}
+.k-key--clr:active:not(:disabled)::before {
+  background: linear-gradient(#17191c, #141619);
+}
+.k-key--clr:disabled {
+  color: var(--faint);
+  background: #060708;
+  box-shadow: inset 0 2px 0 rgba(0, 0, 0, 0.95), 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.k-key--clr:disabled::before {
+  background: linear-gradient(#16181b, #131518);
+}
+.k-key--clr.k-key--armed {
+  color: var(--engaged);
+}
+.k-key--clr.k-key--armed::before,
+.k-key--clr.k-key--armed:hover:not(:disabled)::before {
+  background: linear-gradient(#2b2e33, #22252a);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+/* a key that carries its value: the legend over a smaller numeral line, the pair centred in the cap
+   (under the LED on a latched key), changed by a drag or a scroll on the key */
+.k-key--value {
+  --kh: calc(52px * var(--ui));
+  flex-direction: column;
+  gap: calc(3px * var(--ui));
+}
+.k-key--value.k-key--latch {
+  --led-top: calc(9px * var(--ui));
+  padding-top: calc(12px * var(--ui));
+}
+.k-key__l {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.k-key__v {
+  font: 500 calc(12px * var(--ui)) / 1 var(--font-num);
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--dim);
+}
+.k-key__u {
+  /* a unit word inside the value (4 BARS): the legend face at the value's size */
+  font-family: var(--font-legend);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+:is(.k-key.is-on, .k-key[aria-pressed='true']) .k-key__v {
+  color: var(--text);
+}
+
+/* the LED: a small solid shape; unlit a dark lens, lit a tight bloom in its own colour (6 px reach) */
+.k-led {
+  --led-c: var(--led);
+  flex: none;
+  display: block;
+  width: calc(16px * var(--ui));
+  height: 3px;
+  border-radius: 1px;
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
+  transition: background-color var(--motion), box-shadow var(--motion);
+}
+.k-led--dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.k-led.is-on,
+:is(.k-key.is-on, .k-key[aria-pressed='true']) > .k-led {
+  background: var(--led-c);
+  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--led-c) 50%, transparent), 0 0 2px color-mix(in srgb, var(--led-c) 90%, transparent);
+}
+.k-key:disabled > .k-led {
+  background: #08090a;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.9);
+}
+
+/* the glass: a dark recessed window in its bezel, one faint reflection along its top edge */
+.k-bezel {
+  padding: 4px;
+  border-radius: calc(var(--r-sm) * 2);
+  background: linear-gradient(180deg, #050607 0%, #0b0d10 50%, #22262b 100%);
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.k-bezel > .k-glass {
+  width: 100%;
+  height: 100%;
+}
+.k-glass {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--glass);
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 8px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.k-glass::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 4px;
+  right: 4px;
+  height: 18px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(rgba(255, 255, 255, 0.04), transparent);
+  pointer-events: none;
+}
+/* the small value window: the one box a value may stand in (a level and pan, an input, the master) */
+.k-win {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: calc(28px * var(--ui));
+  padding: 0 9px;
+  border-radius: 3px;
+  background: var(--glass);
+  box-shadow: var(--recess);
+  color: var(--text);
+  font: 500 calc(14px * var(--ui)) / 1 var(--font-num);
+}
+.k-win.is-off {
+  color: var(--faint);
+}
+
+/* the LED-ladder meter: the unlit ladder visible under the lit one, lit from the left up to --level
+   (0-100 %, written as a plain style property, never through a signal: invariant 6). The x scale is the
+   piece's: the zones sit where its dB map puts -12 and -3 (--meter-y-at, --meter-r-at; the mockup's map:
+   -54..-24 dB over 0-36 %, -24..-12 over 36-58 %, -12..+3 over 58-100 %) */
+.k-meter {
+  --level: 0%;
+  --meter-y-at: 58%;
+  --meter-r-at: 83.2%;
+  --meter-seg: linear-gradient(90deg, #000 0 2px, transparent 2px) 0 0 / 4px 100% repeat-x;
+  position: relative;
+  height: 7px;
+}
+.k-meter::before,
+.k-meter::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  -webkit-mask: var(--meter-seg);
+  mask: var(--meter-seg);
+}
+.k-meter::before {
+  background: linear-gradient(90deg, var(--meter-g-off) 0 var(--meter-y-at), var(--meter-y-off) 0 var(--meter-r-at), var(--meter-r-off) 0);
+}
+.k-meter::after {
+  background: linear-gradient(90deg, var(--meter-g) 0 var(--meter-y-at), var(--meter-y) 0 var(--meter-r-at), var(--meter-r) 0);
+  clip-path: inset(0 calc(100% - var(--level)) 0 0);
+}
+
+/* the fader: an <input type="range"> as a recessed slot and a cap with one white line; its scale (the
+   ticks and the 0 dB mark) is the piece's print */
+.k-fader {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  height: calc(24px * var(--ui));
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.k-fader::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 4px;
+  background: #020304;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 4px rgba(0, 0, 0, 0.8), 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.k-fader::-moz-range-track {
+  height: 8px;
+  border-radius: 4px;
+  background: #020304;
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 4px rgba(0, 0, 0, 0.8), 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.k-fader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 30px;
+  height: 20px;
+  margin-top: -6px;
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, transparent 14px, #f4f6f8 14px 16px, transparent 16px) 50% 50% / 100% 14px no-repeat,
+    linear-gradient(#3c4047, #2a2d33);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 -1px 0 rgba(0, 0, 0, 0.3), 0 3px 0 #16181b, 0 4px 0 #040506, 0 6px 8px rgba(0, 0, 0, 0.6);
+}
+.k-fader::-moz-range-thumb {
+  width: 30px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, transparent 14px, #f4f6f8 14px 16px, transparent 16px) 50% 50% / 100% 14px no-repeat,
+    linear-gradient(#3c4047, #2a2d33);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 -1px 0 rgba(0, 0, 0, 0.3), 0 3px 0 #16181b, 0 4px 0 #040506, 0 6px 8px rgba(0, 0, 0, 0.6);
+}
+.k-fader:disabled {
+  cursor: default;
+}
+.k-fader:disabled::-webkit-slider-thumb {
+  background:
+    linear-gradient(90deg, transparent 14px, #4a4f56 14px 16px, transparent 16px) 50% 50% / 100% 14px no-repeat,
+    linear-gradient(#202327, #1b1d21);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 3px 0 #111316, 0 4px 0 #040506;
+}
+.k-fader:disabled::-moz-range-thumb {
+  background:
+    linear-gradient(90deg, transparent 14px, #4a4f56 14px 16px, transparent 16px) 50% 50% / 100% 14px no-repeat,
+    linear-gradient(#202327, #1b1d21);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 3px 0 #111316, 0 4px 0 #040506;
+}
+
+/* the knob: a knurled skirt, a domed cap and one white pointer, turned by --a (-135deg to 135deg); its
+   tick ring is the piece's print */
+.k-knob {
+  --s: calc(40px * var(--ui));
+  --a: 0deg;
+  --knurl: 3.5deg;
+  position: relative;
+  flex: none;
+  width: var(--s);
+  height: var(--s);
+  border-radius: 50%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0) 42%, rgba(0, 0, 0, 0.5)),
+    repeating-conic-gradient(#2a2e34 0 var(--knurl), #0a0b0d var(--knurl) calc(var(--knurl) * 2));
+  box-shadow: 0 1px 0 #000, 0 calc(var(--s) * 0.07) calc(var(--s) * 0.14) rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.6);
+}
+.k-knob::before,
+.k-knob::after {
+  content: '';
+  position: absolute;
+  inset: max(4px, calc(var(--s) * 0.075));
+  border-radius: 50%;
+}
+.k-knob::before {
+  background:
+    radial-gradient(120% 85% at 50% 0%, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0) 62%),
+    linear-gradient(#2c3037, #16181c);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.15), inset 0 -1px 1px rgba(0, 0, 0, 0.55);
+}
+.k-knob::after {
+  background: linear-gradient(#f6f7f9, #f6f7f9) 50% 4% / 2px 36% no-repeat;
+  rotate: var(--a);
+}
+.k-knob[aria-disabled='true'] {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 42%, rgba(0, 0, 0, 0.5)),
+    repeating-conic-gradient(#1b1e22 0 var(--knurl), #08090a var(--knurl) calc(var(--knurl) * 2));
+}
+.k-knob[aria-disabled='true']::before {
+  background: linear-gradient(#202328, #141619);
+}
+.k-knob[aria-disabled='true']::after {
+  background: linear-gradient(#4a4f56, #4a4f56) 50% 4% / 2px 36% no-repeat;
+}
+
 /* FORCED COLORS (Windows high contrast): the engaged recipe (a lit legend on a face a step up) and the
    selection's (a lit number or letter, a tone up) are colours, which forced colours flatten, so on and
    off would look alike. One system outline marks every engaged key, the selected slot and the selected
@@ -885,6 +1270,8 @@ optgroup {
    own outline across the wave column. */
 @media (forced-colors: active) {
   .lp-pb.is-on,
+  .k-key.is-on,
+  .k-key[aria-pressed='true'],
   .transport__tgl.is-on,
   .tgl.on-green,
   .fxp-mod__toggle--on,

@@ -49,7 +49,13 @@ const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 await probe(async ({ open }) => {
   const { page } = await open({
     viewport: { width: 1600, height: 900 },
-    init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
+    // The plain look (`src/ui/looper/wave-looks.ts`): its body places each bin to the device px, where the
+    // stripes snap a burst to the stripe its slice falls in, so "sits at its frame" holds within 1 px here.
+    init: (p) =>
+      p.addInitScript(() => {
+        window.__lfEngineFake = true;
+        localStorage.setItem('lf.waveLook', 'plain');
+      }),
   });
   let seq = 0;
   const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });

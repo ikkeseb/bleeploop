@@ -60,6 +60,8 @@ const OLDER_INSTALL = {
   [pluginGain(1, DELAY)]: '0.65',
   // rig-recall.ts `writeRig`
   'lf.rigRecall': JSON.stringify([AMP_SIM, null]),
+  // wave-looks.ts: the wave's look (the I key)
+  'lf.waveLook': 'dense',
   // engine-store.ts: the master and click levels, FADE's bars, the meter (3/4), the input sends
   'lf.masterVolume': '0.8',
   'lf.clickVolume': '0.45',

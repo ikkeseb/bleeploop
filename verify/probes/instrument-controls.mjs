@@ -84,10 +84,10 @@ await probe(async ({ open }) => {
     [emptyPluginCopy, emptyPluginCopy],
     'both empty native slots must show the plugin installation hint',
   );
-  // The hint is prose: Geist, not the mono kept for changing numerals.
+  // The hint is prose: Instrument Sans, not the mono kept for the wave's bar numbers.
   const noteFonts = await page.locator('[role="note"]').evaluateAll((els) => els.map((el) => getComputedStyle(el).fontFamily));
   console.log('install hint fonts', JSON.stringify(noteFonts));
-  assert.ok(noteFonts.every((f) => f.startsWith('Geist') && !f.includes('Mono')), `the install hint is set in ${noteFonts[0]}`);
+  assert.ok(noteFonts.every((f) => f.startsWith('"Instrument Sans"') || f.startsWith('Instrument Sans')), `the install hint is set in ${noteFonts[0]}`);
 
   // The keyboard's hide cap is the app's one close glyph, ✕ (the FX drawer, a MIDI binding, a plugin folder).
   assert.equal((await page.getByRole('button', { name: 'Hide keyboard', exact: true }).textContent()).trim(), '✕', 'hide keyboard reads ✕');

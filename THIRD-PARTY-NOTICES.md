@@ -15,13 +15,21 @@ tables to the direct runtime dependencies and their locked versions.
 | [solid-js](https://github.com/solidjs/solid) | 1.9.15 | MIT | UI reactivity runtime |
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.1 | Apache-2.0 OR MIT | Tauri JS bindings |
 
-### Geist and Geist Mono: SIL Open Font License 1.1
+### Instrument Sans: SIL Open Font License 1.1
 
-The UI typefaces, Geist and Geist Mono (Copyright (c) 2023 Vercel, in collaboration with
-basement.studio), are vendored unmodified as variable WOFF2 files from the `geist` npm package 1.7.2
-in `src/assets/fonts/` and bundled into the app. They are licensed under the SIL Open Font License
-1.1, not the repository's MIT licence. The licence text is `licenses/OFL-1.1-Geist.txt`; the installer
-puts it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
+The UI typeface, Instrument Sans (Copyright 2022 The Instrument Sans Project Authors), is vendored
+unmodified as a variable TrueType file (version 1.000) in `src/assets/fonts/` and bundled into the
+app. It is licensed under the SIL Open Font License 1.1, not the repository's MIT licence. The licence
+text is `licenses/OFL-1.1-InstrumentSans.txt`; the installer puts it beside the exe. Upstream:
+<https://github.com/Instrument/instrument-sans>.
+
+### Geist Mono: SIL Open Font License 1.1
+
+Geist Mono (Copyright (c) 2023 Vercel, in collaboration with basement.studio), which still draws the
+wave's bar numbers, is vendored unmodified as a variable WOFF2 file from the `geist` npm package 1.7.2
+in `src/assets/fonts/` and bundled into the app. It is licensed under the SIL Open Font License 1.1,
+not the repository's MIT licence. The licence text is `licenses/OFL-1.1-Geist.txt`; the installer puts
+it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
 
 ### Lucide icon: ISC
 

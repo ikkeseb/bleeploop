@@ -146,6 +146,7 @@ function Reference(props: { hidden: boolean }) {
               <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd>
             </span>
             <span class="help__label">Select a track</span>
+            <span class="help__caps"><kbd class="help__kbd">i</kbd></span><span class="help__label">Step the wave's look</span>
           </div>
           <p class="help__sub">In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there.</p>
         </section>

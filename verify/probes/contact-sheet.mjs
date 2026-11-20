@@ -635,7 +635,7 @@ await probe(async ({ browser, open }) => {
       });
       console.log(JSON.stringify({ tag, scene, fixedFace }));
       if (!fixedFace.disabled) fail(`${tag} ${scene}: FIXED is not greyed out under RETAKE over a loop`);
-      else if (fixedFace.color !== 'rgb(125, 129, 141)' || fixedFace.glow !== 'none') fail(`${tag} ${scene}: greyed-out FIXED draws a lit legend (${fixedFace.color}, ${fixedFace.glow})`);
+      else if (fixedFace.color !== 'rgb(138, 144, 152)' || fixedFace.glow !== 'none') fail(`${tag} ${scene}: greyed-out FIXED draws a lit legend (${fixedFace.color}, ${fixedFace.glow})`);
 
       // A reload's reset frame from an engine that remembers every input send on.
       scene = '11-engine-in-fx';
@@ -849,7 +849,7 @@ await probe(async ({ browser, open }) => {
             slotTop: [shadow('.slot--active'), shadow('.slot:not(.slot--active)')],
           };
         });
-        const LIT = 'rgb(244, 239, 230) 500', REST = 'rgb(125, 129, 141) 300';
+        const LIT = 'rgb(255, 243, 224) 500', REST = 'rgb(138, 144, 152) 300';
         const nums = [REST, REST, LIT, REST, REST];
         if (sel.nums.join() !== nums.join()) fail(`${tag} ${scene}: the lane numbers read ${sel.nums.join(' | ')}, not ${nums.join(' | ')}`);
         if (sel.labels.join() !== '1,2,3,4,5') fail(`${tag} ${scene}: the lane numbers are ${sel.labels.join(', ')}, not 1-5`);

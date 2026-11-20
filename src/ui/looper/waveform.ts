@@ -1,5 +1,23 @@
 import { PEAK_FRAMES, clock, looper, sampleRate, type PeakView, type TrackState } from '../state/audio';
 import { masterBars } from './shared';
+import {
+  PART_AHEAD,
+  PART_HOT,
+  PART_ON,
+  TONE_DUB,
+  TONE_MUTED,
+  TONE_PLAY,
+  TONE_REC,
+  TONE_STOPPED,
+  cutAt,
+  paint,
+  prepare,
+  rgbOf,
+  waveInput,
+  waveLook,
+  type WaveInput,
+  type WaveLook,
+} from './wave-looks';
 
 /**
  * Waveform + bar-grid + playhead renderer.
@@ -10,12 +28,15 @@ import { masterBars } from './shared';
  * A SINGLE requestAnimationFrame loop drives every registered track canvas. It reads the looper's
  * pre-computed peak arrays through non-reactive getters (`looper.peaksInto` / `phaseValue` / `stateOf`
  * / `recHeadFrac` / `recSpanFrames` / `masterFramesValue` — NO Solid signals in the per-frame path, per
- * invariant 6) and never scans raw PCM. Per track the waveform (one filled body) AND its bar grid are
- * rasterised into an off-screen canvas and cached; the bitmap is re-rasterised ONLY when the peaks change
- * (version bump), the track state changes (colour), the master loop length changes (grid geometry), a
- * recording take's span changes (bin placement), or the element resizes. Every frame the loop just
- * blits that cached bitmap and draws the playhead — so the steady-state per-frame cost is a `drawImage`
- * + a few `fillRect`s per track, holding 60fps with flat GC even with all five tracks live.
+ * invariant 6) and never scans raw PCM. Per track the waveform AND its bar grid are rasterised into an
+ * off-screen canvas and cached, in the look the player picked (`wave-looks.ts`: the stripes, the dense
+ * wave, the light bars, or this file's own smooth body, `plain`); a look that turns the part to come down
+ * caches that part as a second bitmap. The bitmaps are re-rasterised ONLY when the peaks change (version
+ * bump), the track state changes (colour), the master loop length changes (grid geometry), a recording
+ * take's span changes (bin placement), the look changes, or the element resizes. Every frame the loop
+ * repaints only what moved (`repaint`): the playhead's old and new columns, the played/to-come cut's
+ * step, the dense look's trail, blitted from the cached bitmaps — a few small `drawImage`s and a
+ * `fillRect` per track, holding 60fps with flat GC even with all five tracks live.
  *
  * The bar grid is derived from `masterBars()` (the shared bar-math in `shared.ts`) so it can
  * never disagree with the spoken loop length. That is the ONLY place Solid signals are read
@@ -36,10 +57,11 @@ const GRID_BEAT = 'rgba(148,168,215,.065)'; // beat lines — a whisper
 const GRID_BAR = 'rgba(148,168,215,.11)'; //   bar lines — readable, a step over the beats
 const GRID_NUM = 'rgba(148,168,215,.56)'; //   the ruler's bar numbers (the top row's only): read from the chair, never brighter than a wave
 /**
- * The wave is one filled, anti-aliased BODY in its colour, the take's level, its own edge the only edge
- * (no second silhouette around it). Alpha per look (of the colour): a sounding take is saturated; a
- * stopped one is a solid grey (--dim) body, quieter than any sounding take; a muted one is a darker grey
- * body under a crisp grey contour (`MUTED_EDGE`), quieter than stopped and plainly there.
+ * The plain look: the wave is one filled, anti-aliased BODY in its colour, the take's level, its own
+ * edge the only edge (no second silhouette around it). Alpha per state (of the colour): a sounding take
+ * is saturated; a stopped one is a solid grey (--dim) body, quieter than any sounding take; a muted one
+ * is a darker grey body under a crisp grey contour (`MUTED_EDGE`), quieter than stopped and plainly
+ * there. The other looks keep the same order of states (`wave-looks.ts`).
  */
 const LOOK_SOUNDING = 0.94;
 const LOOK_STOPPED = 0.42;
@@ -63,7 +85,7 @@ const ZOOM = 1.3;
  * edge to edge, so a full-scale take keeps a little clear air above and below it. */
 const WAVE_REACH = 0.94;
 /** The playhead's width in CSS px, one width in every state: on a lane this many CSS px wide or wider
- * (a 2560 display) `PLAYHEAD_CSS_WIDE`, else `PLAYHEAD_CSS` (`drawPlayhead`). */
+ * (a 2560 display) `PLAYHEAD_CSS_WIDE`, else `PLAYHEAD_CSS` (`repaint`). */
 const PLAYHEAD_WIDE = 1600;
 const PLAYHEAD_CSS = 2;
 const PLAYHEAD_CSS_WIDE = 2.5;
@@ -89,6 +111,8 @@ interface LaneColors {
   playhead: string;
   rec: string;
   mid: string;
+  /** The same tokens as packed RGB, for the looks' gradients, with the glass under them. */
+  rgb: WaveInput['rgb'];
 }
 
 interface Lane {
@@ -138,6 +162,36 @@ interface Lane {
   lastFading: boolean;
   /** While the lane fades (`drawFade`, made on its first fade): its take in its sounding colour, no grid. */
   fading: Fade | null;
+  /** The look at the last rasterise (`wave-looks.ts`). */
+  lastLook: WaveLook | '';
+  /** The take as the looks other than `plain` read it (`wave-looks.ts`), reused by every rasterise. */
+  wi: WaveInput;
+  /** A look that draws the part to come turned down (`split`): `wave` holds the take as played, `ahead`
+   * the same take as to come, both over the grid; each frame shows `wave` left of the cut, `ahead` right
+   * of it (`repaint`). Made on the first split rasterise. */
+  split: boolean;
+  ahead: Fade | null;
+  /** The dense look's trail (`trail`): `hot` the take at full burn (no grid), laid over the played part
+   * behind the head through `mask`'s ramp (`trailW` device px wide) on the scratch `burn` (`drawTrail`). */
+  trail: boolean;
+  hot: Fade | null;
+  burn: Fade | null;
+  mask: HTMLCanvasElement | null;
+  trailW: number;
+  /** What the last frame drew over the bitmaps (`repaint`): the head's left edge (-1: none) and width,
+   * the cut, the trail's span, so the next frame repaints only what moved. */
+  lastHX: number;
+  lastHW: number;
+  lastCut: number;
+  lastT0: number;
+  lastT1: number;
+  headColor: string;
+  /** The loop as an overdub began (`keepBase`): the layer laid since is what the peaks gained over it
+   * (`layerOf`, into `nu`). */
+  baseMin: Float32Array;
+  baseMax: Float32Array;
+  baseCount: number;
+  nu: Float64Array;
 }
 
 interface Fade {
@@ -360,15 +414,26 @@ const peakScratch: PeakView = { min: null, max: null, count: 0, version: 0 };
 function readColors(el: HTMLElement): LaneColors {
   const cs = getComputedStyle(el);
   const v = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
+  const dim = v('--dim', '#bcc3d4');
+  const rec = v('--rec', '#ff4757');
+  const dub = v('--dub', '#ffb02e');
+  const play = v('--play', '#2be48a');
   return {
-    empty: v('--dim', '#bcc3d4'),
-    recording: v('--rec', '#ff4757'),
-    overdubbing: v('--dub', '#ffb02e'),
-    playing: v('--play', '#2be48a'),
-    stopped: v('--dim', '#bcc3d4'),
+    empty: dim,
+    recording: rec,
+    overdubbing: dub,
+    playing: play,
+    stopped: dim,
     playhead: v('--text', '#eef1f8'),
-    rec: v('--rec', '#ff4757'),
+    rec,
     mid: v('--faint', '#7c8498'),
+    rgb: {
+      play: rgbOf(play, 0x2be48a),
+      rec: rgbOf(rec, 0xff4757),
+      dub: rgbOf(dub, 0xffb02e),
+      dim: rgbOf(dim, 0xbcc3d4),
+      glass: rgbOf(v('--glass', '#030304'), 0x030304),
+    },
   };
 }
 
@@ -723,24 +788,165 @@ function drawTake(
   ctx.globalAlpha = 1;
 }
 
-/** The lane's fade canvas (`Lane.fading`), made on its first fade and resized with the lane: the
- * cached path only (`rasterise`), so the draw loop allocates nothing. */
-function fadeFor(lane: Lane): Fade | null {
-  const { dw, dh } = lane;
-  let f = lane.fading;
+/** A lane's extra bitmap (`f`, made here when null: a fade's, the looks' to-come and trail ones), sized to
+ * `w` x `h`: the cached path only (`rasterise`), so the draw loop allocates nothing. Null: no context. */
+function layerFor(f: Fade | null, w: number, h: number): Fade | null {
   if (!f) {
     const take = document.createElement('canvas');
     const tctx = take.getContext('2d');
-    // No context: the lane draws its fade as a plain playing take.
     if (!tctx) return null;
     f = { take, tctx };
-    lane.fading = f;
   }
-  if (f.take.width !== dw || f.take.height !== dh) {
-    f.take.width = dw;
-    f.take.height = dh;
+  if (f.take.width !== w || f.take.height !== h) {
+    f.take.width = w;
+    f.take.height = h;
   }
   return f;
+}
+
+/** The lane's fade canvas (`Lane.fading`), made on its first fade and resized with the lane. Null (no
+ * context): the lane draws its fade as a plain playing take. */
+function fadeFor(lane: Lane): Fade | null {
+  lane.fading = layerFor(lane.fading, lane.dw, lane.dh);
+  return lane.fading;
+}
+
+/** The dense look's trail reach behind the head, CSS px, and its ramp's power (brightest at the head). */
+const TRAIL_CSS = 84;
+const TRAIL_POW = 2.2;
+
+/** The trail's ramp: `tw` px wide, 1 tall, alpha (1 − d/tw)^TRAIL_POW at a distance d left of the head
+ * (its right edge). Null: no context. */
+function trailMask(tw: number): HTMLCanvasElement | null {
+  const c = document.createElement('canvas');
+  c.width = tw;
+  c.height = 1;
+  const g = c.getContext('2d');
+  if (!g) return null;
+  const img = g.createImageData(tw, 1);
+  for (let i = 0; i < tw; i++) {
+    img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = 255;
+    img.data[4 * i + 3] = Math.round(255 * Math.pow(1 - (tw - i - 0.5) / tw, TRAIL_POW));
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+/** Keep the loop as an overdub begins (`view`'s bins), so `layerOf` can tell the layer laid since. */
+function keepBase(lane: Lane, view: PeakView): void {
+  const { min, max, count } = view;
+  lane.baseCount = 0;
+  if (!min || !max) return;
+  if (lane.baseMin.length < count) {
+    const size = Math.max(256, count, 2 * lane.baseMin.length);
+    lane.baseMin = new Float32Array(size);
+    lane.baseMax = new Float32Array(size);
+  }
+  for (let p = 0; p < count; p++) {
+    lane.baseMin[p] = min[p];
+    lane.baseMax[p] = max[p];
+  }
+  lane.baseCount = count;
+}
+
+/** The layer an overdub has laid over the loop it began on, per bin on the display's scale: the level the
+ * bin gained, as two uncorrelated parts sum (√(now² − then²); a bin that lost level, under a DUB FEEDBACK
+ * below 1, adds none). The feed carries one summed buffer per lane, so this is read, not sent. */
+function layerOf(lane: Lane, min: Float32Array, max: Float32Array, count: number): Float64Array {
+  if (lane.nu.length < lane.levels.length) lane.nu = new Float64Array(lane.levels.length);
+  const nu = lane.nu;
+  const last = count - 1;
+  const bl = lane.baseCount - 1;
+  for (let p = 0; p < count; p++) {
+    const now = level(min, max, p, last);
+    const was = p <= bl ? level(lane.baseMin, lane.baseMax, p, bl) : 0;
+    const d = now * now - was * was;
+    nu[p] = d > 0 ? shown(Math.sqrt(d) * BODY_K) : 0;
+  }
+  return nu;
+}
+
+/**
+ * Draw the take in a look other than `plain` (`wave-looks.ts`) from the bins `rasterise` put on the
+ * display's scale: into `wave` as played and, where the look splits (a running loop, no fade), into
+ * `ahead` as to come over a copy of the grid and, for the dense look's trail, into `hot` at full burn. A
+ * fade draws the take grey in `wave` and sounding in `f`, as the plain look does.
+ */
+function drawLook(
+  lane: Lane,
+  look: WaveLook,
+  count: number,
+  across: number,
+  min: Float32Array,
+  max: Float32Array,
+  state: TrackState,
+  muted: boolean,
+  capturing: boolean,
+  f: Fade | null,
+): void {
+  const { wctx, dw, dh, dpr } = lane;
+  const w = lane.wi;
+  w.dw = dw;
+  w.dh = dh;
+  w.dpr = dpr;
+  w.A = (dh / 2) * WAVE_REACH;
+  w.count = count;
+  w.across = across;
+  w.hs = lane.shownMax;
+  w.ls = lane.shownMin;
+  w.lv = lane.levels;
+  w.sl = lane.slopes;
+  w.z = lane.levels.length;
+  w.bars = lane.gridBars;
+  w.nu = state === 'OVERDUBBING' && lane.baseCount > 0 ? layerOf(lane, min, max, count) : null;
+  const n = prepare(look, w);
+  if (f) {
+    f.tctx.clearRect(0, 0, dw, dh);
+    paint(look, w, wctx, n, TONE_STOPPED, PART_ON);
+    paint(look, w, f.tctx, n, TONE_PLAY, PART_ON);
+    return;
+  }
+  const tone =
+    muted && !capturing
+      ? TONE_MUTED
+      : state === 'RECORDING'
+        ? TONE_REC
+        : state === 'OVERDUBBING'
+          ? TONE_DUB
+          : state === 'PLAYING'
+            ? TONE_PLAY
+            : TONE_STOPPED;
+  const mul = muted && capturing ? MUTED_CAPTURE : 1;
+  if (state === 'PLAYING' || state === 'OVERDUBBING') {
+    lane.ahead = layerFor(lane.ahead, dw, dh);
+    if (lane.ahead) {
+      const a = lane.ahead.tctx;
+      a.clearRect(0, 0, dw, dh);
+      a.drawImage(lane.wave, 0, 0); // the grid, before the played take lands on it
+      a.globalAlpha = mul;
+      paint(look, w, a, n, tone, PART_AHEAD);
+      a.globalAlpha = 1;
+      lane.split = true;
+    }
+    if (look === 'dense' && tone !== TONE_MUTED && lane.split) {
+      const tw = Math.max(1, Math.round(TRAIL_CSS * dpr));
+      lane.hot = layerFor(lane.hot, dw, dh);
+      lane.burn = layerFor(lane.burn, tw, dh);
+      if (!lane.mask || lane.mask.width !== tw) lane.mask = trailMask(tw);
+      if (lane.hot && lane.burn && lane.mask) {
+        const h = lane.hot.tctx;
+        h.clearRect(0, 0, dw, dh);
+        h.globalAlpha = mul;
+        paint(look, w, h, n, tone, PART_HOT);
+        h.globalAlpha = 1;
+        lane.trailW = tw;
+        lane.trail = true;
+      }
+    }
+  }
+  wctx.globalAlpha = mul;
+  paint(look, w, wctx, n, tone, PART_ON);
+  wctx.globalAlpha = 1;
 }
 
 /**
@@ -770,6 +976,8 @@ function rasterise(
   const { wctx, dw, dh, dpr } = lane;
   wctx.clearRect(0, 0, dw, dh);
   wctx.globalAlpha = 1;
+  lane.split = false;
+  lane.trail = false;
 
   const midY = dh / 2;
   const A = midY * WAVE_REACH; // peak amplitude in px — headroom so loud transients never reach the row's edge
@@ -830,24 +1038,29 @@ function rasterise(
     slopes(hs, 1, count, sl, 0, z);
     slopes(ls, -1, count, sl, 2 * z, 3 * z);
     slopes(lv, 1, count, sl, 4 * z, 5 * z);
-    const n = envelope(lane.cols, dw, cols, count, across, ls, hs, lv, sl, z);
-    // A vertex every 2 device px where a bin spans 4 or more (the cubic is near-straight over 2 px),
-    // else one per column, which keeps every bin's extremes.
-    const step = across * 4 <= dw ? 2 : 1;
     const capturing = state === 'RECORDING' || state === 'OVERDUBBING';
     const f = fade ? fadeFor(lane) : null;
-    if (f) {
-      // A fading lane's take twice: grey, as it will be once stopped, and in its sounding colour on its
-      // own canvas, which `drawFade` lays over it at the level it sounds at now.
-      f.tctx.clearRect(0, 0, dw, dh);
-      drawTake(wctx, lane.cols, n, end, midY, A, step, lane.colors.stopped, LOOK_STOPPED, 0);
-      drawTake(f.tctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, false), LOOK_SOUNDING, 0);
+    const look = waveLook();
+    if (look !== 'plain') {
+      drawLook(lane, look, count, across, min, max, state, muted, capturing, f);
     } else {
-      const hushed = muted && !capturing;
-      const body = hushed ? LOOK_MUTED : state === 'STOPPED' ? LOOK_STOPPED : LOOK_SOUNDING;
-      const mul = muted && capturing ? MUTED_CAPTURE : 1;
-      const edge = hushed ? (lane.cssW >= PLAYHEAD_WIDE ? MUTED_EDGE.wide : MUTED_EDGE.width) * dpr : 0;
-      drawTake(wctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, muted), body, edge, mul);
+      const n = envelope(lane.cols, dw, cols, count, across, ls, hs, lv, sl, z);
+      // A vertex every 2 device px where a bin spans 4 or more (the cubic is near-straight over 2 px),
+      // else one per column, which keeps every bin's extremes.
+      const step = across * 4 <= dw ? 2 : 1;
+      if (f) {
+        // A fading lane's take twice: grey, as it will be once stopped, and in its sounding colour on its
+        // own canvas, which `drawFade` lays over it at the level it sounds at now.
+        f.tctx.clearRect(0, 0, dw, dh);
+        drawTake(wctx, lane.cols, n, end, midY, A, step, lane.colors.stopped, LOOK_STOPPED, 0);
+        drawTake(f.tctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, false), LOOK_SOUNDING, 0);
+      } else {
+        const hushed = muted && !capturing;
+        const body = hushed ? LOOK_MUTED : state === 'STOPPED' ? LOOK_STOPPED : LOOK_SOUNDING;
+        const mul = muted && capturing ? MUTED_CAPTURE : 1;
+        const edge = hushed ? (lane.cssW >= PLAYHEAD_WIDE ? MUTED_EDGE.wide : MUTED_EDGE.width) * dpr : 0;
+        drawTake(wctx, lane.cols, n, end, midY, A, step, waveColor(lane.colors, state, muted), body, edge, mul);
+      }
     }
   }
 
@@ -866,40 +1079,123 @@ function rasterise(
   }
 }
 
-/** Draw the moving playhead for a track over the (already-blitted) waveform. */
-function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
-  const { ctx, dw, dh } = lane;
-  let x = -1;
-  let color = lane.colors.playhead;
-
+/** The moving head's x for a track (device px; -1: none), its colour into `lane.headColor`. */
+function headOf(lane: Lane, state: TrackState, waiting: boolean): number {
+  const { dw } = lane;
+  lane.headColor = lane.colors.playhead;
   if (state === 'RECORDING' && waiting) {
     // Armed for the downbeat: an amber (--dub; the lane's ARMED --sc is red, which an armed take never draws) head rides the master phase in
     // sync with the other lanes. A count-in (a first take's, or a later take's from stopped loops, which
     // restart from the top on its downbeat) and AUTO LISTEN have no phase to ride → no head at all.
     if (looper.masterFramesValue() > 0 && !looper.countingValue()) {
-      x = looper.phaseValue() * dw;
-      color = lane.colors.overdubbing;
+      lane.headColor = lane.colors.overdubbing;
+      return looper.phaseValue() * dw;
     }
-  } else if (state === 'RECORDING') {
+    return -1;
+  }
+  if (state === 'RECORDING') {
     // The head sweeps the same span the bins are placed over (`recSpanFrames`); -1 (no track yet): the
     // right edge.
     const frac = looper.recHeadFrac(lane.index);
-    x = frac < 0 ? dw - lane.dpr : frac * dw;
-    color = lane.colors.rec;
-  } else if (state === 'PLAYING' || state === 'OVERDUBBING') {
-    // An overdub's head stays warm white like a playing one: the take is amber already, an amber head
-    // would vanish inside its body, and the heads line up down the display as one line.
-    x = looper.phaseValue() * dw;
+    lane.headColor = lane.colors.rec;
+    return frac < 0 ? dw - lane.dpr : frac * dw;
   }
+  // An overdub's head stays warm white like a playing one: the take is amber already, an amber head
+  // would vanish inside its body, and the heads line up down the display as one line.
+  if (state === 'PLAYING' || state === 'OVERDUBBING') return looper.phaseValue() * dw;
   // STOPPED / EMPTY: no playhead.
+  return -1;
+}
 
-  if (x < 0) return;
-  // One crisp solid line, no glow columns, one width in every state: 2 CSS px, 2.5 on a wide lane (3
-  // device px on a 2560 display at 100 %), so the head is found from the chair.
-  const coreW = Math.max(1, Math.round(lane.dpr * (lane.cssW >= PLAYHEAD_WIDE ? PLAYHEAD_CSS_WIDE : PLAYHEAD_CSS)));
-  const px = Math.round(x - coreW / 2);
-  ctx.fillStyle = color;
-  ctx.fillRect(px < 0 ? 0 : px > dw - coreW ? dw - coreW : px, 0, coreW, dh);
+/**
+ * Draw a lane's frame over what the last one left: the cached bitmaps (`wave` left of the cut, `ahead`
+ * right of it on a split look), the dense look's trail and one crisp head. `full` (the bitmap changed, a
+ * resize) or a cut that went back (the loop wrapped) repaints the row; otherwise only the columns that
+ * moved: the old and new head, the cut's step, the trail's old and new span. A fade (`to` >= 0) repaints
+ * the row each frame (`drawFade`). Integer blits, no allocation.
+ */
+function repaint(lane: Lane, state: TrackState, waiting: boolean, full: boolean, to: number): void {
+  const { ctx, dw, dh } = lane;
+  const x = headOf(lane, state, waiting);
+  let hx = -1;
+  let hw = 0;
+  if (x >= 0) {
+    // One crisp solid line, no glow columns, one width in every state: 2 CSS px, 2.5 on a wide lane (3
+    // device px on a 2560 display at 100 %), so the head is found from the chair.
+    hw = Math.max(1, Math.round(lane.dpr * (lane.cssW >= PLAYHEAD_WIDE ? PLAYHEAD_CSS_WIDE : PLAYHEAD_CSS)));
+    const px = Math.round(x - hw / 2);
+    hx = px < 0 ? 0 : px > dw - hw ? dw - hw : px;
+  }
+  const cut = lane.split && x >= 0 ? cutAt(lane.wi, x) : dw;
+  let t0 = 0;
+  let t1 = 0;
+  if (lane.trail && x >= 0) {
+    t1 = Math.round(x);
+    t1 = t1 < 0 ? 0 : t1 > dw ? dw : t1;
+    t0 = t1 - lane.trailW < 0 ? 0 : t1 - lane.trailW;
+  }
+  const fading = to >= 0 && lane.fading !== null && lane.fading.take.width === dw;
+  let x0 = 0;
+  let x1 = dw;
+  if (!full && !fading && cut >= lane.lastCut) {
+    x0 = dw;
+    x1 = 0;
+    if (lane.lastHX >= 0) {
+      x0 = lane.lastHX;
+      x1 = lane.lastHX + lane.lastHW;
+    }
+    if (hx >= 0) {
+      if (hx < x0) x0 = hx;
+      if (hx + hw > x1) x1 = hx + hw;
+    }
+    if (cut > lane.lastCut) {
+      if (lane.lastCut < x0) x0 = lane.lastCut;
+      if (cut > x1) x1 = cut;
+    }
+    if (lane.lastT1 > lane.lastT0) {
+      if (lane.lastT0 < x0) x0 = lane.lastT0;
+      if (lane.lastT1 > x1) x1 = lane.lastT1;
+    }
+    if (t1 > t0) {
+      if (t0 < x0) x0 = t0;
+      if (t1 > x1) x1 = t1;
+    }
+  }
+  lane.lastHX = hx;
+  lane.lastHW = hw;
+  lane.lastCut = cut;
+  lane.lastT0 = t0;
+  lane.lastT1 = t1;
+  if (x1 <= x0) return;
+  if (fading && lane.fading) {
+    ctx.clearRect(0, 0, dw, dh);
+    drawFade(lane, lane.fading, to, fadeFrom[lane.index] ?? 0);
+  } else {
+    ctx.clearRect(x0, 0, x1 - x0, dh);
+    const c = cut < x0 ? x0 : cut > x1 ? x1 : cut;
+    if (c > x0) ctx.drawImage(lane.wave, x0, 0, c - x0, dh, x0, 0, c - x0, dh);
+    if (x1 > c && lane.ahead) ctx.drawImage(lane.ahead.take, c, 0, x1 - c, dh, c, 0, x1 - c, dh);
+    if (t1 > t0) drawTrail(lane, t0, t1);
+  }
+  if (hx >= 0) {
+    ctx.fillStyle = lane.headColor;
+    ctx.fillRect(hx, 0, hw, dh);
+  }
+}
+
+/** The dense look's trail over [t0, t1) (its right end the head): the take at full burn (`hot`) masked by
+ * the ramp's matching part on the scratch `burn`, laid over the played take. Three blits. */
+function drawTrail(lane: Lane, t0: number, t1: number): void {
+  const { hot, burn, mask, dh } = lane;
+  if (!hot || !burn || !mask) return;
+  const w = t1 - t0;
+  const g = burn.tctx;
+  g.globalCompositeOperation = 'copy';
+  g.drawImage(hot.take, t0, 0, w, dh, 0, 0, w, dh);
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(mask, lane.trailW - w, 0, w, 1, 0, 0, w, dh);
+  g.globalCompositeOperation = 'source-over';
+  lane.ctx.drawImage(burn.take, 0, 0, w, dh, t0, 0, w, dh);
 }
 
 /** Lane `index` fades out and stops at device frame `stopAt` (null: it does not fade). From a Solid
@@ -951,6 +1247,7 @@ function frame(now: number): void {
     const to = fadeTo[lane.index] ?? -1;
     const fade = to >= 0 && state === 'PLAYING' && !muted && master > 0 && peakScratch.count > 0;
 
+    const look = waveLook();
     const dirty =
       sizeChanged ||
       peakScratch.version !== lane.lastVersion ||
@@ -959,8 +1256,10 @@ function frame(now: number): void {
       muted !== lane.lastMuted ||
       master !== lane.lastMasterFrames ||
       span !== lane.lastSpan ||
-      fade !== lane.lastFading;
+      fade !== lane.lastFading ||
+      look !== lane.lastLook;
     if (dirty) {
+      if (state === 'OVERDUBBING' && lane.lastState !== 'OVERDUBBING') keepBase(lane, peakScratch);
       rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, state, master, muted, span, fade);
       lane.lastFading = fade;
       lane.lastVersion = peakScratch.version;
@@ -969,22 +1268,16 @@ function frame(now: number): void {
       lane.lastMuted = muted;
       lane.lastMasterFrames = master;
       lane.lastSpan = span;
+      lane.lastLook = look;
     }
 
-    // Blit + playhead only when the bitmap changed this frame OR the lane carries a MOVING playhead
-    // (RECORDING/PLAYING/OVERDUBBING). A static lane (EMPTY/STOPPED) has no playhead — drawPlayhead
-    // early-returns at x<0 — so re-blitting it every frame is pixel-identical wasted work (clearRect +
-    // drawImage per idle lane). The moving→STOPPED edge is itself a state change, so it lands in `dirty`
-    // that frame and re-rasterises playhead-free (erasing the last playhead) before the lane goes quiet.
-    // Still no signal reads and no allocation here (invariant 6).
+    // Draw only when the bitmap changed this frame OR the lane carries a MOVING playhead
+    // (RECORDING/PLAYING/OVERDUBBING), and then only what moved (`repaint`). A static lane (EMPTY/STOPPED)
+    // has no playhead, so redrawing it every frame is pixel-identical wasted work. The moving→STOPPED edge
+    // is itself a state change, so it lands in `dirty` that frame and repaints the row playhead-free
+    // before the lane goes quiet. Still no signal reads and no allocation here (invariant 6).
     const moving = state === 'RECORDING' || state === 'PLAYING' || state === 'OVERDUBBING';
-    if (dirty || moving) {
-      const { ctx, dw, dh } = lane;
-      ctx.clearRect(0, 0, dw, dh);
-      if (fade && lane.fading && lane.fading.take.width === dw) drawFade(lane, lane.fading, to, fadeFrom[lane.index] ?? 0);
-      else ctx.drawImage(lane.wave, 0, 0);
-      drawPlayhead(lane, state, waiting);
-    }
+    if (dirty || moving) repaint(lane, state, waiting, dirty, fade ? to : -1);
   }
   drawDial();
   drawMeter();
@@ -1002,13 +1295,14 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     return;
   }
 
+  const colors = readColors(canvas);
   const lane: Lane = {
     index,
     canvas,
     ctx,
     wave,
     wctx,
-    colors: readColors(canvas),
+    colors,
     dw: 0,
     dh: 0,
     cssW: -1,
@@ -1030,6 +1324,25 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     slopes: new Float32Array(0),
     lastFading: false,
     fading: null,
+    lastLook: '',
+    wi: waveInput(colors.rgb),
+    split: false,
+    ahead: null,
+    trail: false,
+    hot: null,
+    burn: null,
+    mask: null,
+    trailW: 0,
+    lastHX: -1,
+    lastHW: 0,
+    lastCut: 0,
+    lastT0: 0,
+    lastT1: 0,
+    headColor: colors.playhead,
+    baseMin: new Float32Array(0),
+    baseMax: new Float32Array(0),
+    baseCount: 0,
+    nu: new Float64Array(0),
   };
   syncSize(lane);
   lanes.set(canvas, lane);

@@ -225,9 +225,8 @@ function createScope(): ViewDraw {
     glow = Math.max(core + 2, Math.round(14 * dpr));
     edge = Math.round(6 * dpr);
     grow = Math.max(1, Math.round(2 * dpr));
-    // Geist Mono in a full-screen performance view reads as an instrument panel; the app's own rule
-    // reserving it for changing numerals is written for the command bar (the spec's call).
-    nameFont = `${Math.round(12 * dpr)}px 'Geist Mono', ui-monospace, monospace`;
+    // The app's numerals face (`--font-num` in src/app.css), as the panel prints its read-outs.
+    nameFont = `500 ${Math.round(12 * dpr)}px 'Instrument Sans', system-ui, sans-serif`;
     nameX = px + Math.round(11 * dpr);
     laneTopCss = (top + HERO * unit) / dpr;
     laneCss = unit / dpr;

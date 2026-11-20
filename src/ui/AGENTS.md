@@ -4,11 +4,15 @@ The root `AGENTS.md` routes here: read this before any work in this subtree (`CL
 is a one-line adapter). UI-only edits are safe while the dev app runs,
 `state/` excepted (the root `AGENTS.md` rule).
 
-- **Type and tokens:** Geist for words, Geist Mono only for changing numeric read-outs (both vendored,
-  `src/assets/fonts/`); no display or retro font. The surface language ("Instrument": matte tone steps,
-  colour only for sound, warm-white = engaged) and its tokens live in the `src/app.css` header; use
-  the tokens. `looper/waveform.ts` reads the colour tokens once per lane mount: a token edit over
-  HMR shows stale canvas colours until a page reload.
+- **Type and tokens:** Instrument Sans (vendored, `src/assets/fonts/`) in three roles, `--font-legend`,
+  `--font-num` and `--font-name`, so a change of face is one line; no display or retro font. Geist Mono
+  stays only for the wave's bar numbers in `looper/waveform.ts`, until that file takes `--font-num`.
+  The surface language ("the panel": depth only on what is pressed, turned or slid; flat panel, print
+  and dark glass for the rest; colour only for sound; warm white = engaged), its tokens and the shared
+  recipes (`.k-key`, `.k-led`, `.k-glass`, `.k-win`, `.k-meter`, `.k-fader`, `.k-knob`) live in the
+  `src/app.css` header: build a part from a recipe and the tokens, never a new depth of its own. The
+  canvases (`looper/waveform.ts`, `stage/visual.ts`) read the colour tokens once per mount, as
+  `#rrggbb`: a token edit over HMR shows stale canvas colours until a page reload.
 - **The rendered app is the looper-UI spec.** Before looper-UI work, run `pnpm probe contact-sheet`
   and compare against `logs/contact-sheet/index.html` (fixed scenes at three window sizes). What
   binds: guitar first, the looper as the hero with five lanes, one command bar for the whole

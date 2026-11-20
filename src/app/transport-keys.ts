@@ -3,7 +3,14 @@ import { DRUM_KIT } from '../ui/state/drum-kit';
 import * as layoutStore from '../ui/layout/layout-store';
 import { stageOpen } from '../ui/stage/stage-store';
 import { looper } from '../ui/state/audio';
+import { cycleWaveLook } from '../ui/looper/wave-looks';
+import { dismissToast, notifyNote, toasts } from '../notify';
 import { runAction, selectTrack, type ActionId } from './actions';
+
+/** The key that steps the wave's look (`wave-looks.ts`): not a looper action, so no pedal and no MIDI
+ * learn; free of the note keys, the drum pads and the table below. */
+const WAVE_LOOK_KEY = 'i';
+const WAVE_TOAST = 'Wave: ';
 
 export interface TransportKeysOptions {
   /** Escape was pressed — the app closes the tuner, else cancels a pending MIDI learn, else closes
@@ -32,10 +39,10 @@ export interface TransportKeys {
  * Transport key → named action (`actions.ts`), on the selected track. The arrows and PageUp/PageDown
  * are what page-turner footswitches send; Backspace/Delete are a keyboard's take-back keys (CLEAR
  * wants a second press, see actions.ts); B opens and closes the stage view, and V steps its look while
- * it is open; N opens and closes the tuner. None is a note-play key, Esc or a digit; V alone is also a
- * drum pad (Hi Tom, DRUM_KIT),
- * so outside the stage view it is left to the pads (see the handler). A letter matches either case.
- * Help's Looper keys section lists this table.
+ * it is open; N opens and closes the tuner; I steps the wave's look (not an action: `WAVE_LOOK_KEY`).
+ * None is a note-play key, Esc or a digit; V alone is also a drum pad (Hi Tom, DRUM_KIT), so outside
+ * the stage view it is left to the pads (see the handler). A letter matches either case. Help's Looper
+ * keys section lists this table.
  */
 export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   ' ': 'recDub',
@@ -104,6 +111,15 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     if (action && (action !== 'stageNextView' || stageOpen())) {
       e.preventDefault();
       runAction(action);
+      return;
+    }
+
+    // I steps the wave's look on the main screen, and says which in one note toast (the last one
+    // replaced, so a run of presses leaves one).
+    if (e.key.toLowerCase() === WAVE_LOOK_KEY && !stageOpen()) {
+      e.preventDefault();
+      for (const t of toasts()) if (t.message.startsWith(WAVE_TOAST)) dismissToast(t.id);
+      notifyNote(WAVE_TOAST + cycleWaveLook());
       return;
     }
 

@@ -122,7 +122,7 @@ function createOrbit(): ViewDraw {
     bold = Math.max(2, Math.round(2 * dpr));
     heavy = Math.max(line + 1, Math.round(2.5 * dpr));
     tab = Math.min(T * 0.8, 18 * dpr);
-    tabFont = `600 ${Math.round(tab * 0.78)}px Geist, system-ui, sans-serif`;
+    tabFont = `600 ${Math.round(tab * 0.78)}px 'Instrument Sans', system-ui, sans-serif`;
     cx = Math.round((s.w / 2) * dpr);
     cy = Math.round((top + half) * dpr);
     side = Math.ceil(half * dpr) * 2;

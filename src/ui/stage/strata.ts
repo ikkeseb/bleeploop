@@ -85,7 +85,7 @@ function createStrata(): ViewDraw {
     glow = Math.round(22 * dpr);
     edge = Math.round(6 * dpr);
     numbersX = Math.round(16 * dpr);
-    gridFont = `${Math.round(11 * dpr)}px 'Geist Mono', ui-monospace, monospace`;
+    gridFont = `500 ${Math.round(11 * dpr)}px 'Instrument Sans', system-ui, sans-serif`;
     topCss = top / dpr;
     rowCss = rowH / dpr;
     s.countX = s.w / 2;
@@ -97,7 +97,7 @@ function createStrata(): ViewDraw {
     numbers.height = rowH * LANES;
     const n = numbers.getContext('2d');
     if (n) {
-      n.font = `600 ${size}px Geist, system-ui, sans-serif`;
+      n.font = `600 ${size}px 'Instrument Sans', system-ui, sans-serif`;
       n.textBaseline = 'top';
       n.fillStyle = s.pal.faint;
       for (let i = 0; i < LANES; i++) n.fillText(DIGITS[i], 0, i * rowH + Math.round(9 * dpr));
