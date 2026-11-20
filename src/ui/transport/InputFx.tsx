@@ -1,6 +1,7 @@
 import { For, Show } from 'solid-js';
 import type { InputSendId } from '../../platform';
 import { formatVal } from '../looper/FxPanel';
+import { master } from '../state/audio';
 import { engineInputSends, type InputSendParamDef } from '../state/engine-store';
 import { BarPopoverPanel, createBarPopover } from './BarPopover';
 import '../looper/fxpanel.css';
@@ -17,6 +18,11 @@ import './input-fx.css';
  * is off shows what it adds instead of its params. The pill reads engaged (warm white) while any send is
  * on. A param reads and speaks its value as the drawer's do (FxPanel.tsx `formatVal`): a level in percent,
  * the ring's frequency in Hz or kHz.
+ *
+ * OTT, the built-in three-band compressor, is the list's fourth row, on its AMOUNT while on. MOCKUP: the UI
+ * presents it as an input effect (after the slot's instrument or amp sim, heard and recorded), but the engine
+ * still runs it on the master bus (`master`, `state/audio.ts`). A master setting the UI owns, so its key shows
+ * its own press, unlike the sends' engine toggle. The pill reads engaged while any send or the OTT is on.
  */
 
 const SENDS: readonly { id: InputSendId; label: string; blurb: string }[] = [
@@ -64,20 +70,24 @@ function SendParam(props: { def: InputSendParamDef; send: string }) {
   );
 }
 
+const OTT_BLURB = 'Evens out loud and quiet, in three bands';
+
 function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
   const sends = engineInputSends;
   const pop = createBarPopover(props.returnFocus);
+  const ottAmount = () => Math.round(master.ottAmount() * 100);
+  const anyOn = () => sends.anyOn() || master.ott();
   return (
     <>
       <button
         ref={pop.trigger}
         class="transport__tgl bar-pop__trigger"
-        classList={{ 'is-on': sends.anyOn() }}
+        classList={{ 'is-on': anyOn() }}
         aria-label="Input effects"
         aria-haspopup="dialog"
         aria-expanded={pop.open()}
         aria-controls="lf-infx-popover"
-        title="Echo, reverb and ring mod on the live input: heard and recorded, the dry sound untouched"
+        title="Echo, reverb, ring mod and OTT on the live input: heard and recorded"
         onClick={pop.toggle}
       >
         IN FX
@@ -106,6 +116,36 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
               </div>
             )}
           </For>
+          <div class="fxp-mod" classList={{ 'fxp-mod--on': master.ott() }}>
+            <button
+              class="fxp-mod__toggle"
+              classList={{ 'fxp-mod__toggle--on': master.ott() }}
+              aria-pressed={master.ott()}
+              aria-label="Input OTT"
+              onClick={() => master.setOtt(!master.ott())}
+            >
+              OTT
+            </button>
+            <Show when={master.ott()} fallback={<span class="infx__blurb">{OTT_BLURB}</span>}>
+              <div class="fxp-mod__params">
+                <label class="fxp-param">
+                  <span class="fxp-param__label">Amount</span>
+                  <input
+                    type="range"
+                    class="lf-range fxp-param__range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={ottAmount()}
+                    aria-label="OTT amount"
+                    aria-valuetext={`${ottAmount()} percent`}
+                    onInput={(e) => master.setOttAmount(Number(e.currentTarget.value) / 100)}
+                  />
+                  <span class="fxp-param__val">{ottAmount()} %</span>
+                </label>
+              </div>
+            </Show>
+          </div>
         </div>
       </BarPopoverPanel>
     </>

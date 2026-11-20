@@ -14,9 +14,9 @@
  */
 const SPACER_MIN_PX = 8;
 const BRAND_DOT_PX = 11; // the folded brand's width (app.css `.cmd--stack-brand .brand`)
-// The master group's own rungs, tightest last (transport.css "Master rungs"): the OTT pill's padding,
-// the volume slider's width, the volume's numeric value, the OTT pill's AMOUNT read-out (the toggle stays).
-const MASTER_RUNGS = ['cmd--fit-ott', 'cmd--fit-vol', 'cmd--fit-val', 'cmd--fit-ott-min'] as const;
+// The master group's own rungs, tightest last (transport.css "Master rungs"): the volume slider's width,
+// then the volume's numeric value.
+const MASTER_RUNGS = ['cmd--fit-vol', 'cmd--fit-val'] as const;
 
 export function installCmdFit(bar: HTMLElement): () => void {
   const measure = (): void => {
@@ -69,8 +69,7 @@ export function installCmdFit(bar: HTMLElement): () => void {
     bar.classList.toggle('cmd--stack-pair', stackPair);
     bar.classList.toggle('cmd--stack-brand', stackBrand);
     // Master rungs: if row 1 still overflows with the brand folded, the master group gives up width
-    // itself, one rung at a time, until it fits (the OTT pill keeps its place and its direct on/off
-    // press). Each rung's saving is read off the group's box as it lands; the pass began without them,
+    // itself, one rung at a time, until it fits. Each rung's saving is read off the group's box as it lands; the pass began without them,
     // so a rung never decides from its own effect.
     if (stackBrand && master) {
       let over = row1 - tools - gap - pair - (brand - BRAND_DOT_PX) - width;
