@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitInfo, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -173,6 +173,8 @@ pub struct Diag {
     /// is aligned on the clamped side, so what the engine records of its own sources (the built-in
     /// synths, a source chain) stays on the grid and the device's input lands late by the excess.
     pub input_clamped: u64,
+    /// Unit commands ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]) that named an id no seat holds.
+    pub unit_commands_dropped: u64,
 }
 
 /// One chunk the scope still owes its master column: the frames it covered, and every source's
@@ -464,6 +466,7 @@ impl Engine {
             scope_dropped: self.scope.dropped(),
             tuner_dropped: self.tuner.dropped(),
             input_clamped: self.input_clamped,
+            unit_commands_dropped: self.rack.unit_commands_dropped,
         }
     }
 
@@ -478,8 +481,9 @@ impl Engine {
         self.rack.installed(slot)
     }
 
-    /// A slot's chain, head first: each seat's id and what it is.
-    pub fn chain(&self, slot: usize) -> impl Iterator<Item = (UnitId, UnitInfo)> + '_ {
+    /// A slot's chain as applied, head first (a withdrawn seat included, a leaving one not): what its
+    /// [`Event::Chain`] carries.
+    pub fn chain(&self, slot: usize) -> impl Iterator<Item = ChainSeat> + '_ {
         self.rack.chain(slot)
     }
 
@@ -489,11 +493,13 @@ impl Engine {
         self.rack.record_latency()
     }
 
-    /// While no device runs and the host holds the engine: apply the slot ports' installs and removals
-    /// at once, without crossfades (a removed unit gets its released notes in one silent frame, then
-    /// stops here, on the caller's thread).
+    /// While no device runs and the host holds the engine: apply the slot ports' messages at once,
+    /// without crossfades (a leaving unit gets its released notes in one silent frame, then stops here,
+    /// on the caller's thread). An edit of a chain's sum or role still waits while a capture holds the
+    /// alignment.
     pub fn service_slots_idle(&mut self) {
-        self.rack.service_idle(self.next_frame);
+        let hold = self.capture_holds();
+        self.rack.service_idle(self.next_frame, hold);
         self.rack.offer(&mut self.feed);
     }
 
@@ -682,11 +688,12 @@ impl Engine {
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish. An atomic read.
         self.replayed |= self.commands.is_empty();
-        self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() });
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
-        // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
-        // records (a skip or a repeat), and a change reaches both once nothing captures.
-        let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
+        // compensation holds with it, so no live flag changed meanwhile moves what it records (a skip or
+        // a repeat), and a change reaches both once nothing captures. An edit of a chain's latency sum or
+        // role waits in its port for the same (`slots`).
+        let open = !self.capture_holds();
+        self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() }, !open);
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
         if ctx.xrun || ctx.damaged {
@@ -973,6 +980,11 @@ impl Engine {
         }
     }
 
+    /// A capture's alignment is fixed: a take's window has its start.
+    fn capture_holds(&self) -> bool {
+        self.looper.recorder().is_some_and(|(_, start, _)| start.is_some())
+    }
+
     /// Move the ring's commands into the table, an unstamped or late one due at `now`. Take no more than
     /// the table holds: the rest waits in the ring for the next block, late but never dropped (a lost
     /// NoteOff would hang its note). Nor past a load on the port ([`crate::session`]). The ring is counted
@@ -1253,6 +1265,15 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             } else {
                 set_tuner(cx.feed, now, at.tuner, at.tuner_owed, on);
             }
+            Applied::Done
+        }
+        // A unit's bypass: a rig control, no looper press (no CLEAR is disarmed), on its frame.
+        Command::SetUnitBypass(unit, bypassed) => {
+            at.rack.set_unit_bypass(unit, Some(bypassed), now);
+            Applied::Done
+        }
+        Command::Action(Action::ToggleUnit(unit)) | Command::ActionOn(_, Action::ToggleUnit(unit)) => {
+            at.rack.set_unit_bypass(unit, None, now);
             Applied::Done
         }
         Command::Action(action) => {

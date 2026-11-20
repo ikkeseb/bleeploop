@@ -161,6 +161,12 @@ pub enum Command {
     /// only when the value changes. On while a take exists leaves it off, with no refusal. No
     /// [`Toggle`]: the engine closes the tuner on its own, so it is never kept or replayed.
     SetTuner(bool),
+    /// A seated unit's bypass, outright (initialization, a script; `docs/unit-contract.md` §2), on the
+    /// command's frame through [`UnitProcessor::set_bypass`]: a unit that bypasses itself gets it, any
+    /// other is bypassed by its seat's crossfade to its input delayed by its latency, still called. The
+    /// chain's latency stays. Answered by [`Event::Chain`]; an id no seat holds is dropped and counted
+    /// ([`crate::Diag::unit_commands_dropped`]).
+    SetUnitBypass(UnitId, bool),
 }
 
 impl Command {
@@ -194,6 +200,9 @@ impl Command {
                 | Command::Action(Action::Toggle(Toggle::Live(_) | Toggle::Send(InputSend::Ott)))
                 | Command::ActionOn(_, Action::Toggle(Toggle::Live(_) | Toggle::Send(InputSend::Ott)))
                 | Command::SetInputSend(InputSend::Ott, _)
+                | Command::SetUnitBypass(..)
+                | Command::Action(Action::ToggleUnit(_))
+                | Command::ActionOn(_, Action::ToggleUnit(_))
         ) || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
     }
 
@@ -463,6 +472,11 @@ pub enum Action {
     /// disarms a pending pedal CLEAR and waits behind a held looper command. No lane: as
     /// `Command::ActionOn` its lane is ignored.
     Tuner,
+    /// A unit's plate lamp: switch its bypass from the value the engine has when the press applies, as
+    /// [`Command::SetUnitBypass`] does (answered by [`Event::Chain`]; an unseated id is dropped and
+    /// counted). A rig control, no looper press: it disarms no pending CLEAR, as GO LIVE's toggle does
+    /// not. No lane: as `Command::ActionOn` its lane is ignored.
+    ToggleUnit(UnitId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -682,9 +696,31 @@ pub enum Event {
     /// came to exist, a stopped device). One the full ring refuses is owed and offered again at the
     /// next publish, at the value then. The UI shows the tuner exactly while the last one said on.
     Tuner { frame: Frame, on: bool },
-    /// The engine's answer to a slot port's message ([`crate::SlotPort`]): an install or a removal applied
-    /// on `frame` (a block start), or refused. Owed until the ring takes it, as a lane's `Mix` is.
+    /// The engine's answer to a slot port's message ([`crate::SlotPort`]), once per message: applied on
+    /// `frame` (a block start), refused, or waiting (an edit held until no capture holds the alignment,
+    /// then applied with no second answer: [`Event::Chain`] shows it). Owed until the ring takes it, as a
+    /// lane's `Mix` is.
     Seat { frame: Frame, slot: u8, unit: UnitId, op: SeatOp, outcome: SeatOutcome },
+    /// Slot `slot`'s chain as applied, head first: its first `len` seats (a withdrawn seat included, a
+    /// leaving one not), each unit's id, kind, bypass and latency. Sent on `frame` whenever an edit, a
+    /// move's reorder or a bypass command applies (one per change, at the chain as it then stands);
+    /// owed until the ring takes it, as [`Event::Seat`] is, and offered after the slot's seat answers.
+    Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
+}
+
+/// One seat of an [`Event::Chain`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainSeat {
+    pub unit: UnitId,
+    pub kind: UnitKind,
+    pub bypassed: bool,
+    /// The latency the seat sums to its chain (a withdrawn seat's last), in frames: at most
+    /// [`max_chain_latency`], so a `u32` (it keeps [`Event`] within `tests/mix_feed.rs`'s size bound).
+    pub latency: u32,
+}
+
+impl ChainSeat {
+    pub const EMPTY: ChainSeat = ChainSeat { unit: 0, kind: UnitKind::Plugin, bypassed: false, latency: 0 };
 }
 
 /// The callback's view of the device.
@@ -792,6 +828,15 @@ pub trait UnitProcessor: Send {
     /// one silent frame carrying a removal's released notes while no device runs (on the thread that
     /// holds the engine, just before [`UnitProcessor::stop`]).
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
+    /// The bypass, on its frame (`cx.frame`, before the frames from it are rendered): an install that
+    /// arrives bypassed, [`Command::SetUnitBypass`], [`Action::ToggleUnit`]. True: the unit bypasses
+    /// itself (`docs/unit-contract.md` §3: ECHO, REVERB and RING MOD close their input and ring out, the
+    /// OTT crossfades) and its seat passes its output on; false (the default): the seat crossfades to its
+    /// input delayed by the unit's latency over 10 ms and back, the unit still called. Either way the
+    /// chain's latency stays. Never allocates, locks or waits.
+    fn set_bypass(&mut self, _cx: &UnitCx, _bypassed: bool) -> bool {
+        false
+    }
     /// Called once, after the last `process` and before the unit leaves the engine (CLAP
     /// `stop_processing`, VST3 `setProcessing(0)`); on the audio thread while a device runs, or on the
     /// thread that holds the engine while none does. May come without any `process` before it.
@@ -803,9 +848,12 @@ pub trait UnitProcessor: Send {
 /// What a port message asked ([`Event::Seat`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeatOp {
-    /// An install at the end of the chain.
+    /// An install at an index, a source's at the head; a replacement or a withdrawn seat's reseat.
     Install,
     Remove,
+    /// The unit leaves and its seat stays (`docs/unit-contract.md` §3 lifecycle).
+    Withdraw,
+    Move,
 }
 
 /// Why a port message did nothing: the unit of a refused install comes straight back on the port,
@@ -818,9 +866,12 @@ pub enum SeatRefusal {
     Latency,
     /// The id is 0 or already seated in either slot.
     Id,
-    /// A source goes only at the head of an empty chain, and nothing goes after a source but an effect.
+    /// A source goes only at the head (a seated source is replaced only when the install names it in
+    /// `replaces`), and no effect goes ahead of a source; a move cannot take a source from the head or
+    /// put an effect ahead of it.
     Placement,
-    /// A removal of an id the slot does not seat.
+    /// A removal, withdrawal or move of an id the slot does not seat (a withdrawal: one it seats a unit
+    /// in), or an install that `replaces` one; or an install whose unit panicked when its kind was read.
     Unknown,
 }
 
@@ -829,4 +880,8 @@ pub enum SeatRefusal {
 pub enum SeatOutcome {
     Applied,
     Refused(SeatRefusal),
+    /// Held in its port, the slot's later messages behind it, until no capture holds the alignment: an
+    /// install, removal or reseat that changes the chain's latency sum or its role
+    /// (`docs/unit-contract.md` §7). It applies at the first block start after, with no second answer.
+    Waiting,
 }
