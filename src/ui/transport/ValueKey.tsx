@@ -6,7 +6,9 @@ import { createValueDrag } from './value-drag';
  * line, the press its own (a mode's toggle, FADE's fade) and the value changed on the key itself
  * (`value-drag.ts`). While it changes, the value line is lit and the scale window under the key shows
  * the range. One accessible name, the state through aria-pressed on a latched key; the value rides in
- * the description, which says how to change it.
+ * the description, which says how to change it. A key whose press is refused while its value is live
+ * stays enabled to assistive tech (its value is what it offers then) and its description says the press
+ * is unavailable; it wears the disabled face.
  */
 export interface ValueKeyProps {
   /** The accessible name: one name, never flipped with the state. */
@@ -23,9 +25,11 @@ export interface ValueKeyProps {
   on: boolean;
   /** The press is refused (the mode cannot be switched now, FADE has nothing to fade). */
   pressDisabled: boolean;
-  /** The value takes gestures now. A value live while its press is refused leaves the key focusable
-   * (aria-disabled), so the value can still be set before it is used. */
+  /** The value takes gestures now. A value live while its press is refused leaves the key focusable and
+   * enabled, so the value can still be set before it is used. */
   adjustable: boolean;
+  /** Why the press is refused, for the description while the value stays live (FADE: nothing plays). */
+  pressRefusal?: string;
   step: (dir: 1 | -1, big: boolean) => void;
   pxPerStep: number;
   /** The scale window's content: the range, the value placed on it. */
@@ -36,8 +40,17 @@ export interface ValueKeyProps {
 
 export function ValueKey(props: ValueKeyProps) {
   const drag = createValueDrag({ enabled: () => props.adjustable, step: (d, b) => props.step(d, b), pxPerStep: props.pxPerStep });
-  // A press refused while the value stays live: focusable, aria-disabled, the disabled face (transport.css).
+  // A press refused while the value stays live: focusable and enabled (the value is live), the disabled
+  // face (transport.css), the refusal in the description.
   const softDisabled = () => props.pressDisabled && props.adjustable;
+  const description = () =>
+    [
+      props.valueText,
+      softDisabled() ? `${props.pressRefusal ?? 'The press is unavailable now'}, the value can still be changed` : '',
+      props.adjustable ? 'Drag up or down, scroll, or use the arrow keys to change it' : '',
+    ]
+      .filter(Boolean)
+      .join('. ');
   return (
     <button
       ref={drag.ref}
@@ -45,8 +58,7 @@ export function ValueKey(props: ValueKeyProps) {
       classList={{ 'is-on': props.on, 'is-adjusting': drag.adjusting(), 'is-soft-off': softDisabled() }}
       aria-label={props.label}
       aria-pressed={props.latched ? props.on : undefined}
-      aria-disabled={softDisabled() ? 'true' : undefined}
-      aria-description={`${props.valueText}${props.adjustable ? '. Drag up or down, scroll, or use the arrow keys to change it' : ''}`}
+      aria-description={description()}
       disabled={props.pressDisabled && !props.adjustable}
       title={props.title}
       {...drag.handlers}

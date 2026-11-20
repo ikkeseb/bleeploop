@@ -1,5 +1,6 @@
 import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js';
 import { Portal } from 'solid-js/web';
+import { runAction } from '../../app/actions';
 import { looper } from '../state/audio';
 import { stageOpen } from '../stage/stage-store';
 import { copyGate, editGate, reverseGate, trimGate, undoGate, why, type Gate } from './gates';
@@ -35,7 +36,9 @@ type Item = {
 };
 
 /** REV and UNDO, the lane's own keys at full width; folded, the menu's first rows. `word` carries the
- * state REV toggles, as the key's lit legend does. */
+ * state REV toggles, as the key's lit legend does. They are the named actions (`src/app/actions.ts`), as a
+ * pedal reaches them: the engine gates them on the lane named, and the selection stays where the press on
+ * the lane put it. */
 const FOLDED: readonly Item[] = [
   {
     glyph: '⇄',
@@ -44,7 +47,7 @@ const FOLDED: readonly Item[] = [
     label: (t) => `Track ${t} reverse`,
     title: 'Reverse / forward (toggle)',
     gate: reverseGate,
-    run: (i) => looper.reverse(i),
+    run: (i) => runAction('reverse', i),
   },
   {
     glyph: '↶',
@@ -53,7 +56,7 @@ const FOLDED: readonly Item[] = [
     label: (t) => `Track ${t} undo or redo the last overdub or trim`,
     title: 'Undo / redo the last overdub or trim',
     gate: undoGate,
-    run: (i) => looper.undoLastOverdub(i),
+    run: (i) => runAction('undo', i),
   },
 ];
 

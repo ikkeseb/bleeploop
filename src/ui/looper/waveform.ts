@@ -223,10 +223,10 @@ interface Fade {
 let numFamily = '';
 
 /** The bar-number font at a given device-pixel ratio and row height (CSS px): the numerals' face
- * (`numFamily`) at 500, 11 px in a short row up to 14 px in a tall one (a 2560 display), so the pane's one
- * ruler reads from the chair without shouting over the take. */
+ * (`numFamily`) at 500, 12 px in a short row (a legend's floor, the app.css header's TYPE) up to 14 px in a
+ * tall one (a 2560 display), so the pane's one ruler reads from the chair without shouting over the take. */
 function gridFontFor(dpr: number, cssH: number): string {
-  const px = Math.min(14, Math.max(11, cssH * 0.075));
+  const px = Math.min(14, Math.max(12, cssH * 0.075));
   return `500 ${(px * dpr).toFixed(1)}px ${numFamily}`;
 }
 
@@ -426,8 +426,43 @@ export function unregisterPhaseDial(): void {
   stopIfIdle();
 }
 
+/**
+ * The display's BAR.BEAT (Transport.tsx) is read off the same clock as the progress line, every frame:
+ * the loop's phase, so a new clock anchor that moves the playhead moves the position with it (a read that
+ * waited for the next beat once kept the bar a correction left behind). `grid` is plain: the loop's beats
+ * (0 without a loop) and the beats a bar, kept by a Transport effect; the text is written only when it
+ * changes (no signal, invariant 6).
+ */
+let position: { el: HTMLElement; grid: { total: number; beats: number }; last: string } | null = null;
+
+function drawPosition(): void {
+  if (!position) return;
+  const { total, beats } = position.grid;
+  let text = '—';
+  if (total > 0 && beats > 0 && looper.masterFramesValue() > 0) {
+    // a hair over, so a phase that lands a rounding error under a beat line counts that beat
+    const at = Math.floor(looper.phaseValue() * total + 1e-6) % total;
+    text = `${Math.floor(at / beats) + 1}.${(at % beats) + 1}`;
+  }
+  if (text === position.last) return;
+  position.last = text;
+  position.el.textContent = text;
+}
+
+/** Register the display's position read-out (Transport.tsx). Starts the shared rAF loop if nothing else has. */
+export function registerPositionReadout(el: HTMLElement, grid: { total: number; beats: number }): void {
+  position = { el, grid, last: '' };
+  if (rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
+/** Unregister the position read-out; stops the loop when nothing else is registered. */
+export function unregisterPositionReadout(): void {
+  position = null;
+  stopIfIdle();
+}
+
 function stopIfIdle(): void {
-  if (lanes.size === 0 && dial === null && meter === null && !cardMeters[0] && !cardMeters[1] && rafId !== 0) {
+  if (lanes.size === 0 && dial === null && position === null && meter === null && !cardMeters[0] && !cardMeters[1] && rafId !== 0) {
     cancelAnimationFrame(rafId);
     rafId = 0;
   }
@@ -532,6 +567,9 @@ function drawGrid(lane: Lane, bars: number): void {
   // whenever a loop exists), and not at all on a one-bar loop, where a lone 1 says nothing. Each number
   // hangs off the top of the bar line it names, as on a ruler: its left edge a hair right of the line, in
   // the numerals' face, every digit one advance wide (as tabular figures), in --faint (6.2:1 on the glass).
+  // A long loop's bars grow narrower than their numbers: the ruler then names every 2nd, 4th, 8th … bar
+  // (1, 3, 5 … or 1, 5, 9 …), the fewest skipped for the widest number and a digit's air to fit in the
+  // stride; every bar and beat line stays.
   if (lane.index !== 0 || bars < 2) return;
   wctx.font = lane.gridFont;
   if (lane.rulerFont !== lane.gridFont) measureRuler(lane);
@@ -541,7 +579,12 @@ function drawGrid(lane: Lane, bars: number): void {
   const pad = 1 + Math.round(4 * dpr);
   const base = Math.round(RULER_TOP * dpr + lane.rulerAsc);
   const adv = lane.digitW;
-  for (let b = 0; b < bars; b++) {
+  let widest = 1;
+  for (let m = bars; m >= 10; m = (m / 10) | 0) widest++;
+  const need = (widest + 1) * adv + pad;
+  let every = 1;
+  while (every < bars && (every * dw) / bars < need) every *= 2;
+  for (let b = 0; b < bars; b += every) {
     let n = b + 1;
     let digits = 1;
     for (let m = n; m >= 10; m = (m / 10) | 0) digits++;
@@ -1415,6 +1458,7 @@ function frame(now: number): void {
     if (dirty || moving) repaint(lane, state, waiting, dirty, fade ? to : -1);
   }
   drawDial();
+  drawPosition();
   drawMeter();
   for (const m of cardMeters) if (m) drawCardMeter(m, now);
   rafId = requestAnimationFrame(frame);

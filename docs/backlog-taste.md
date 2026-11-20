@@ -32,12 +32,9 @@ added a line.
 - **FADE (unheard):** the level is r² of a linear ramp from the press to the first bar line at or
   after its bars (2 bars pressed mid-bar lasts up to almost 3). A natural ending? Start on the next bar
   instead? The bars ride on FADE's key (a drag or a scroll changes them): is that findable?
-- **Command bar with an UPDATE offer:** the values ride on the mode keys and the bar holds two rows from
-  960 px (`docs/redesign/narrow.html`), the tool icons two columns down its right edge. The UPDATE pill
-  adds a column beside them, so while an offer stands the two-row bar runs past the window's right edge
-  below about 1080 px and the tools at its end are cut off (browser rig, 2026-11-20: 82 px over at 960,
-  42 at 1000, 2 at 1040). A control cut off is a defect; the fix is a design call: the tool icons behind
-  one menu, or the pill elsewhere?
+- **Command bar with an UPDATE offer (unseen):** where two rows with UPDATE beside the tools would run past
+  the window (below about 1080 px), the gaps narrow and UPDATE takes a row over the tools, now three
+  columns (`app/cmd-fit.ts` `.cmd--tight`). Findable, and calm enough?
 - **From the designer walk, small calls:** the input effects' settings, each in its plate's
   menu: right, once seen in the browser or the dev build? DUB FEEDBACK's slider
   in the one-row FX drawer is 80 px at 1000 px wide: widen the dub module?

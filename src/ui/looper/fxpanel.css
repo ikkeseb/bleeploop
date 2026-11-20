@@ -166,7 +166,7 @@
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   font-family: var(--mono);
-  font-size: calc(11px * var(--ui));
+  font-size: calc(12px * var(--ui));
   padding: 4px 24px 4px 9px;
   cursor: pointer;
   transition: color var(--motion), background-color var(--motion);

@@ -651,6 +651,27 @@
 .cmd--stack .transport__gap {
   display: none;
 }
+/* the fourth rung (app/cmd-fit.ts `.cmd--tight`): the two rows still overflow (UPDATE offered at 960 to
+   ~1080 px). The gaps narrow, and UPDATE takes a row of its own over the tools, now three columns of
+   slightly smaller cells (still 24 px targets): the cluster loses the pill's column. */
+.cmd--stack.cmd--tight {
+  column-gap: calc(14px * var(--ui));
+  padding-left: calc(12px * var(--ui));
+  padding-right: calc(10px * var(--ui));
+}
+.cmd--stack.cmd--tight .tools:has(> .tool-pill) {
+  grid-template-columns: repeat(3, calc(24px * var(--ui)));
+  grid-auto-rows: calc(24px * var(--ui));
+  row-gap: calc(2px * var(--ui));
+}
+.cmd--stack.cmd--tight .tool-pill {
+  grid-row: 1;
+  grid-column: 1 / -1;
+  height: 100%;
+  margin: 0 0 calc(2px * var(--ui));
+  padding: 0;
+  font-size: calc(12px * var(--ui));
+}
 .cmd--stack .transport__disp {
   height: calc(58px * var(--ui));
 }
