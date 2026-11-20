@@ -96,10 +96,13 @@ await probe(async ({ open }) => {
     const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}-${W}x${H}.png` }) : null);
     const echoFace = () => page.getByRole('dialog', { name: 'ECHO, slot A' });
     const ottFace = () => page.getByRole('dialog', { name: 'OTT, slot A' });
+    /** Open `kind`'s face from its plate's name, unless it is open (a red check before may have closed it). */
     const openFace = async (kind) => {
+      const face = kind === 'echo' ? echoFace() : ottFace();
+      if (await face.count()) return;
       await show();
       await plate(await unitOf(kind)).locator('.unit__name').click();
-      await (kind === 'echo' ? echoFace() : ottFace()).waitFor({ timeout: 2000 });
+      await face.waitFor({ timeout: 2000 });
       await settle();
     };
     const closeFace = async () => {
@@ -200,6 +203,7 @@ await probe(async ({ open }) => {
         assert.deepEqual(await echoFace().getByRole('slider').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label'))), ['ECHO time', 'ECHO feedback', 'ECHO level']);
       });
       await check('the ECHO face: TIME sends the engine’s index and reads the feed’s, with its length at the tempo', async () => {
+        await openFace('echo');
         const echo = await unitOf('echo');
         const time = page.getByRole('slider', { name: 'ECHO time' });
         const lastTime = async () => (await sent()).filter((c) => c.SetUnitParam && c.SetUnitParam[0] === echo && c.SetUnitParam[1] === 'echoTime').at(-1)?.SetUnitParam[2];
@@ -238,6 +242,7 @@ await probe(async ({ open }) => {
         assert.equal(await time.getAttribute('aria-valuetext'), '1/8., 375 ms');
       });
       await check('the ECHO face: FEEDBACK (0 to 95 %) and LEVEL send SetUnitParam and read the feed’s value', async () => {
+        await openFace('echo');
         const echo = await unitOf('echo');
         const fb = page.getByRole('slider', { name: 'ECHO feedback' });
         await fb.focus();
@@ -258,6 +263,7 @@ await probe(async ({ open }) => {
         assert.match(await page.locator('.echo .uface__ctl:has([data-param="echoLevel"]) .uface__val').textContent(), new RegExp(`^${Math.round(took * 100)}`));
       });
       await check('the ECHO face: the power switch is the unit’s bypass, and the face shows it', async () => {
+        await openFace('echo');
         const echo = await unitOf('echo');
         const pwr = page.locator('.echo .uface__pwr');
         assert.equal(await pwr.getAttribute('aria-pressed'), 'true');
@@ -274,6 +280,7 @@ await probe(async ({ open }) => {
         assert.equal(await pwr.getAttribute('aria-pressed'), 'true', 'on again');
       });
       await check('the ECHO face: scripted unitMeters light the tape and OUT, the trace slides into the past, and clears', async () => {
+        await openFace('echo');
         const echo = await unitOf('echo');
         await page.evaluate(() => (window.__lf.native.chain.meterTimer = false));
         await emit({ unitMeters: [] });
@@ -295,6 +302,7 @@ await probe(async ({ open }) => {
         await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
       });
       await check('the move: a drag on the panel moves the face, the strap goes, nothing sent, the face stays open', async () => {
+        await openFace('echo');
         const before = await echoFace().boundingBox();
         const n = (await sent()).length;
         const p = await panelPoint('.echo');
@@ -307,6 +315,7 @@ await probe(async ({ open }) => {
 
       });
       await check('the move: kept per kind (closed and opened again at its place; the OTT at its own home)', async () => {
+        await openFace('echo');
         const moved = await echoFace().boundingBox();
         await closeFace();
         await openFace('echo');
@@ -340,6 +349,7 @@ await probe(async ({ open }) => {
         assert.ok(Math.abs(back.x - home.x) < 1 && Math.abs(back.y - home.y) < 1 && (await page.locator('.uface-tie').count()) === 1, 'Home: home');
       });
       await check('the resize: a corner drag scales the face; past its base size the narrow face, never under it; up to the window', async () => {
+        await openFace('echo');
         const p = await panelPoint('.echo');
         await drag(p.x, p.y, -200, 40);
         const b0 = await echoFace().boundingBox();
@@ -368,6 +378,7 @@ await probe(async ({ open }) => {
         assert.equal(Math.round((await echoFace().boundingBox()).width), 900, 'Home: its first size too');
       });
       await check('a window resize pulls a moved face back into the window', async () => {
+        await openFace('echo');
         const p = await panelPoint('.echo');
         await drag(p.x, p.y, 2000, 2000);
         const b = await echoFace().boundingBox();
