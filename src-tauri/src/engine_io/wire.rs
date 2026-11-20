@@ -122,6 +122,8 @@ enum CommandDef {
     SetClickVolume(f32),
     SetMasterVolume(f32),
     SetMasterMute(bool),
+    SetMasterOtt(bool),
+    SetMasterOttAmount(f32),
     SetLoopEndStop(bool),
     SetFadeBars(u32),
     SetFixedLength(bool),
@@ -630,7 +632,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 48;
+    const COMMANDS: usize = 50;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -682,6 +684,8 @@ mod tests {
             SetMeter(_) => 45,
             CopyWide(_) => 46,
             SetTuner(_) => 47,
+            SetMasterOtt(_) => 48,
+            SetMasterOttAmount(_) => 49,
         }
     }
 

@@ -54,6 +54,7 @@ const keys = (o) => Object.keys(o).sort();
 const COMMANDS = [
   'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMeter', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
+  'SetMasterOtt', 'SetMasterOttAmount',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',

@@ -13,15 +13,24 @@
  * its metrics change every child's width without touching the bar's box or its DOM).
  */
 const SPACER_MIN_PX = 8;
+const BRAND_DOT_PX = 11; // the folded brand's width (app.css `.cmd--stack-brand .brand`)
+// The master group's own rungs, tightest last (transport.css "Master rungs"): the OTT pill's padding,
+// the volume slider's width, the volume's numeric value, the OTT pill's AMOUNT read-out (the toggle stays).
+const MASTER_RUNGS = ['cmd--fit-ott', 'cmd--fit-vol', 'cmd--fit-val', 'cmd--fit-ott-min'] as const;
 
 export function installCmdFit(bar: HTMLElement): () => void {
   const measure = (): void => {
+    // The master rungs change the master group's width, so every pass starts without them: the widths
+    // below are intrinsic, and the rungs are re-added one by one at the end (no paint in between).
+    for (const rung of MASTER_RUNGS) if (bar.classList.contains(rung)) bar.classList.remove(rung);
     const cs = getComputedStyle(bar);
     const gap = parseFloat(cs.columnGap) || 0;
     let need = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
     let modes = 0;
     let tools = 0;
     let pair = 0;
+    let brand = 0;
+    let master: HTMLElement | null = null;
     let n = 0;
     for (const child of Array.from(bar.children) as HTMLElement[]) {
       if (child.classList.contains('cmd__sr')) continue; // visually-hidden live region (absolute)
@@ -33,6 +42,8 @@ export function installCmdFit(bar: HTMLElement): () => void {
       if (child.classList.contains('transport__modes')) modes = w;
       if (child.classList.contains('tools')) tools = w;
       if (child.classList.contains('transport__pair')) pair += w + gap;
+      if (child.classList.contains('brand')) brand = w;
+      if (child.classList.contains('transport__master')) master = child;
       need += w;
       n++;
     }
@@ -57,6 +68,19 @@ export function installCmdFit(bar: HTMLElement): () => void {
     bar.classList.toggle('cmd--stack-tools', stackTools);
     bar.classList.toggle('cmd--stack-pair', stackPair);
     bar.classList.toggle('cmd--stack-brand', stackBrand);
+    // Master rungs: if row 1 still overflows with the brand folded, the master group gives up width
+    // itself, one rung at a time, until it fits (the OTT pill keeps its place and its direct on/off
+    // press). Each rung's saving is read off the group's box as it lands; the pass began without them,
+    // so a rung never decides from its own effect.
+    if (stackBrand && master) {
+      let over = row1 - tools - gap - pair - (brand - BRAND_DOT_PX) - width;
+      for (const rung of MASTER_RUNGS) {
+        if (over <= 0) break;
+        const before = master.getBoundingClientRect().width;
+        bar.classList.add(rung);
+        over -= before - master.getBoundingClientRect().width;
+      }
+    }
   };
   let raf = 0;
   const schedule = (): void => {

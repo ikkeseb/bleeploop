@@ -184,6 +184,8 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::SetClickVolume(_)
         | Command::SetMasterVolume(_)
         | Command::SetMasterMute(_)
+        | Command::SetMasterOtt(_)
+        | Command::SetMasterOttAmount(_)
         | Command::SetLoopEndStop(_)
         | Command::SetFadeBars(_)
         | Command::SetFixedLength(_)
@@ -329,6 +331,8 @@ mod tests {
             Command::SetBpm(120.0),
             Command::SetMetronome(true),
             Command::SetMasterVolume(0.5),
+            Command::SetMasterOtt(true),
+            Command::SetMasterOttAmount(0.5),
             Command::SetVolume(0, 0.5),
             Command::SetFxBypass(0, FxKind::Delay, true),
             Command::SetSlotLive(0, true),

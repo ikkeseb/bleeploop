@@ -68,6 +68,13 @@ pub enum Command {
     /// The master output level (0..1) and its mute (`master.ts`).
     SetMasterVolume(f32),
     SetMasterMute(bool),
+    /// The master OTT on or off ([`crate::dsp::ott`]): off by default, and then the master bus passes
+    /// it bit for bit. A switch crossfades over 10 ms from its frame. A setting like the master volume:
+    /// no [`Toggle`], no pedal, no [`Event::Toggled`], and it never disarms a pending CLEAR.
+    SetMasterOtt(bool),
+    /// The master OTT's AMOUNT, 0..1 (clamped, default 0.5), glided to over about 20 ms; a value that is
+    /// no number is dropped and the AMOUNT stays.
+    SetMasterOttAmount(f32),
     SetLoopEndStop(bool),
     /// FADE's length in bars: 1, 2, 4 or 8 (another count snaps down to one of them, at least 1).
     SetFadeBars(u32),

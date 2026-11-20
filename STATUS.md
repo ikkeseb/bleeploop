@@ -109,6 +109,9 @@ never the owner's guitar, latency, a driver, a pedal or feel.
   gap? `wide`
 - Pan hard left, centre, hard right: does a hard pan play +3 dB on its side and leave the other side
   silent? `pan`
+- Master OTT, the built-in multiband compressor on the loops and synths, off, then on at its default
+  AMOUNT (50 %), then at 100 %: is the jam denser without pumping or hiss lifted between the notes, and
+  is 50 % the right default? `master-ott`
 
 ### With the app open, no guitar
 
@@ -180,6 +183,10 @@ settles.
 Guitar in, ASIO, a pedal where named: feel, latency, devices, drivers, plugins, MIDI hardware, and
 anything else that needs the interface or a real plugin.
 
+- The master OTT (its pill left of the master volume) on a real jam with the amp-sim: the live guitar
+  never passes it, only its loops do; does the guitar sound the same live and then thicker once
+  looped, and is that difference fine or a reason to move the OTT after the slot? Toggle it on a held
+  bass note: any thump or hollow moment? Between notes, is the amp-sim's hiss lifted on the loops?
 - The amp-sim live: does the master fader scale the wet sound, never the recorded level?
 - GO LIVE pressed once mid-note (the 5 ms edges, D23): is the click gone?
 - An attack played right on a DUB's punch-in (D23): does it still sound whole?

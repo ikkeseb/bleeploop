@@ -4,8 +4,9 @@
 //! input sends (`input_fx`: ECHO, REVERB, RING MOD) read the aligned wet signal and render wet only. The record
 //! tap is the aligned wet signal plus the sends' output plus the built-in instruments and the
 //! instrument plugin slots (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays
-//! through its FX chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built
-//! in and plugin) and the click sum on the stereo master bus: master volume, then the master limiter
+//! through its FX chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus and the instruments (built
+//! in and plugin) sum on the stereo master bus and pass the master OTT (`dsp::ott`, off by default and
+//! then bit-transparent), then the click joins: master volume, then the master limiter
 //! (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
 //! after the limiter, under the same master volume and the tuner's mute (theirs alone: `tuner`): the
 //! played instrument is heard without the limiter's pre-delay, as the old native monitor was, and like
@@ -39,6 +40,7 @@ use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
 use crate::dsp::noise::NoiseTables;
+use crate::dsp::ott::Ott;
 use crate::dsp::param::QUANTUM;
 use crate::dsp::rng::Mulberry32;
 use crate::effects::{self, LaneFx};
@@ -274,6 +276,9 @@ pub struct Engine {
     share_limiter: Compressor,
     master_volume: f32,
     master_muted: bool,
+    /// The master OTT ([`crate::dsp::ott`]) on the bus before the Share mix splits off: off by default,
+    /// and then bit-transparent.
+    ott: Ott,
     master_gain: f64,
     master_coef: f64,
     started: bool,
@@ -358,6 +363,7 @@ impl Engine {
             share_limiter: Compressor::master_limiter(config.sample_rate as f32),
             master_volume: 1.0,
             master_muted: false,
+            ott: Ott::new(config.sample_rate),
             master_gain: 1.0,
             master_coef: (-1.0 / (MASTER_TAU_SECONDS * config.sample_rate as f64)).exp(),
             started: false,
@@ -555,6 +561,7 @@ impl Engine {
             input_fx: &mut self.input_fx,
             master_volume: &mut self.master_volume,
             master_muted: &mut self.master_muted,
+            ott: &mut self.ott,
             toggles_owed: &mut self.toggles_owed,
             scope: &mut self.scope,
             tuner: &mut self.tuner,
@@ -677,6 +684,7 @@ impl Engine {
                 input_fx: &mut self.input_fx,
                 master_volume: &mut self.master_volume,
                 master_muted: &mut self.master_muted,
+                ott: &mut self.ott,
                 toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
                 tuner: &mut self.tuner,
@@ -770,6 +778,9 @@ impl Engine {
             }
             let fading = self.looper.render(f, len, &mut self.lanes, &mut self.fades);
             self.fx.render(f, &self.lanes, fading, &self.fades, l, r);
+            // The master OTT: on the loops, the instruments and the reverb, before the Share mix and the
+            // click (no pumping on it), with the limiter after it. Off and settled it leaves every bit.
+            self.ott.process(l, r);
             // The Share mix: the bus before the click, under the master volume's glide below, frame for
             // frame.
             let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
@@ -1083,6 +1094,7 @@ struct Apply<'a> {
     input_fx: &'a mut InputFx,
     master_volume: &'a mut f32,
     master_muted: &'a mut bool,
+    ott: &'a mut Ott,
     /// The engine's `toggles_owed`.
     toggles_owed: &'a mut [u32; Toggle::COUNT],
     scope: &'a mut Scope,
@@ -1196,6 +1208,15 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetMasterMute(on) => {
             *at.master_muted = on;
+            Applied::Done
+        }
+        Command::SetMasterOtt(on) => {
+            at.ott.set_on(on);
+            Applied::Done
+        }
+        // `set_amount` drops a value that is no number.
+        Command::SetMasterOttAmount(v) => {
+            at.ott.set_amount(v);
             Applied::Done
         }
         Command::SetLoopEndStop(on) => {

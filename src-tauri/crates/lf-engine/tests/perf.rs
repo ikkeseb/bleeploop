@@ -20,6 +20,8 @@
 //! - The master at 64 and 128 frames: the Stage 2 engine quiet and in sustained gain reduction, and one
 //!   master limiter alone, under and over its threshold on every frame, each block's median beside the
 //!   mean (no bar of its own).
+//! - The master OTT alone (`dsp::ott`): 128-frame blocks at 48 kHz, on active audio and on a decay into
+//!   silence, on and off (it runs either way); each mean under 40 µs (1.5 % of the 2667 µs block).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
@@ -51,6 +53,7 @@ use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
 use lf_engine::dsp::compressor::{Compressor, Params};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
+use lf_engine::dsp::ott::Ott;
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
 use lf_engine::looper::{job_frames, JOB_RATE};
@@ -199,6 +202,54 @@ fn the_master_cost_at_64_and_128_frames() {
                 std::hint::black_box(&left);
             }
             row(name, block, times);
+        }
+    }
+}
+
+/// The master OTT alone, per 128-frame block at 48 kHz: 20 s of active audio (a chord of sines with an
+/// amplitude that swings 40 dB, so every band moves between its upward and downward sides), then 30 s of
+/// its decay into digital silence (the filters and envelopes ring down past where a float would turn
+/// subnormal). On and off; each mean must stay under 40 µs.
+#[test]
+#[ignore]
+fn the_master_otts_cost() {
+    const N: usize = 128;
+    let active = |f: usize| {
+        let t = f as f32 / RATE;
+        let swing = 10f32.powf(-1.0 + (t * 0.7).sin());
+        swing * 0.3 * ((t * 110.0 * std::f32::consts::TAU).sin() + (t * 1310.0 * std::f32::consts::TAU).sin() + (t * 5200.0 * std::f32::consts::TAU).sin())
+    };
+    for on in [true, false] {
+        let mut ott = Ott::new(RATE as u32);
+        ott.set_amount(1.0);
+        ott.set_on(on);
+        let (mut left, mut right) = (vec![0.0f32; N], vec![0.0f32; N]);
+        for (name, seconds, signal) in [("active audio", 20usize, true), ("decay into silence", 30, false)] {
+            let blocks = seconds * RATE as usize / N;
+            let mut times = Vec::with_capacity(blocks);
+            for b in 0..blocks {
+                for (k, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                    *l = if signal { active(b * N + k) } else { 0.0 };
+                    *r = 0.8 * *l;
+                }
+                let t = Instant::now();
+                ott.process(&mut left, &mut right);
+                times.push(t.elapsed().as_secs_f64());
+                std::hint::black_box(&left);
+            }
+            let mean = times.iter().sum::<f64>() / blocks as f64;
+            times.sort_by(f64::total_cmp);
+            let (median, p999, worst) = (times[blocks / 2], times[blocks * 999 / 1000], times[blocks - 1]);
+            println!(
+                "OTT {}, {name:<18}: mean {:.1} µs, median {:.1} µs, p99.9 {:.1} µs, worst {:.1} µs (of a {:.0} µs block)",
+                if on { "on " } else { "off" },
+                mean * 1e6,
+                median * 1e6,
+                p999 * 1e6,
+                worst * 1e6,
+                N as f64 / RATE as f64 * 1e6
+            );
+            assert!(mean < 40e-6, "the OTT {name} costs {:.1} µs a block", mean * 1e6);
         }
     }
 }

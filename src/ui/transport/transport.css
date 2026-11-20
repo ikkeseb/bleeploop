@@ -512,7 +512,7 @@
   min-width: 0;
 }
 
-/* ---- master output (mute icon + thin flat slider + mono value) ---- */
+/* ---- master output (the OTT split pill + mute icon + thin flat slider + mono value) ---- */
 .transport__master {
   display: flex;
   align-items: center;
@@ -619,19 +619,24 @@
   .transport__modes {
     gap: 4px;
   }
+  /* the master's OTT pill tightens with the modes: it shares row 1 with ALL to IN FX */
   .transport__pair,
-  .transport__modes .transport__tgl {
+  .transport__modes .transport__tgl,
+  .transport__master .transport__tgl {
     padding-left: 9px;
     padding-right: 9px;
   }
-  .transport__modes .transport__tgl--led {
+  .transport__modes .transport__tgl--led,
+  .transport__master .transport__tgl--led {
     gap: 5px;
     padding-left: 8px;
   }
-  .transport__modes .transport__split > .transport__tgl:first-child {
+  .transport__modes .transport__split > .transport__tgl:first-child,
+  .transport__master .transport__split > .transport__tgl:first-child {
     padding-right: 8px;
   }
-  .transport__modes .transport__readout {
+  .transport__modes .transport__readout,
+  .transport__master .transport__readout {
     gap: 3px;
     padding-left: 6px;
     padding-right: 6px;
@@ -639,6 +644,39 @@
   .transport__readout-k {
     display: none;
   }
+}
+/* Master rungs (app/cmd-fit.ts, after the brand's fold): when row 1 still overflows, the master group
+   gives up width itself, one rung at a time, so the OTT pill keeps its place and its one-press on/off
+   (the owner A/Bs it on a playing jam). First the OTT pill's padding and tracking, then the volume
+   slider down to a 48 px track, last the volume's numeric value (the slider and its aria-valuetext still
+   say it). Specificity beats the media rung above, which they tighten further. */
+.cmd--fit-ott .transport__master .transport__split > .transport__tgl:first-child {
+  gap: 4px;
+  padding-left: 6px;
+  padding-right: 6px;
+  letter-spacing: 0.03em;
+}
+.cmd--fit-ott .transport__master .transport__readout {
+  gap: 2px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.cmd--fit-vol .transport__master .transport__volume {
+  flex: 0 0 48px;
+  width: 48px;
+  min-width: 48px;
+}
+.cmd--fit-val .transport__volume-val {
+  display: none;
+}
+/* Last, the OTT pill keeps only its toggle (lamp and press unchanged): the AMOUNT read-out leaves the
+   row and the tab order, its popover closes and the toggle's title carries the amount (Transport.tsx). */
+.cmd--fit-ott-min .transport__master .transport__readout {
+  display: none;
+}
+.cmd--fit-ott-min .transport__master .transport__split > .transport__tgl:first-child {
+  border-top-right-radius: var(--r-ctl);
+  border-bottom-right-radius: var(--r-ctl);
 }
 /* The Tauri minimum's band: with every mode on and the seven tool icons, row 2 runs about 15 px short at
    960 px while FIXED's stepper carries its unit (about 24 px spare at 1000), so both steppers show the

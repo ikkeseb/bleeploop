@@ -63,8 +63,13 @@ The bus topology is `src-tauri/crates/lf-engine/src/engine.rs`'s header; the eng
 crate briefing (`src-tauri/crates/lf-engine/src/lib.rs`); the device side's are
 `src-tauri/src/engine_io/mod.rs`. In short:
 
-- **Master bus:** each lane through its FX chain, the shared reverb bus, the instruments (built-in
-  or a plugin slot's) and the click, × master volume → the master limiter → out.
+- **Master bus:** each lane through its FX chain, the shared reverb bus and the instruments (built-in
+  or a plugin slot's) → the master OTT (off by default: a 3-band upward/downward compressor with no
+  lookahead, so no latency; `src-tauri/crates/lf-engine/src/dsp/ott.rs`), the Share mix splitting off
+  there, then the click joins, × master volume → the master limiter → out. The OTT sits beside the
+  plugin slots rather than in one, reaches every loop and instrument and the Share mix, and never the
+  click, the record tap or the live monitor (which joins after the limiter, so the guitar is OTT'd
+  once it is a loop).
 - **Live input:** each slot's input → the slot while it is live (an effect, or dry when empty) → the
   wet signal; the input sends (ECHO, REVERB, RING MOD) render wet only from it. The monitor (wet +
   sends) joins the output after the limiter under the same master volume: unlimited, and without the

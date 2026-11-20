@@ -207,6 +207,11 @@ export type EngineCommand =
   | { SetClickVolume: number }
   | { SetMasterVolume: number }
   | { SetMasterMute: boolean }
+  /** The master OTT (a built-in multiband upward/downward compressor on the master bus, before the click
+   * and the limiter; the live monitor does not pass through it): on or off, crossfaded. */
+  | { SetMasterOtt: boolean }
+  /** The master OTT's AMOUNT, 0..1 (default 0.5); the engine clamps it and glides there. */
+  | { SetMasterOttAmount: number }
   | { SetLoopEndStop: boolean }
   /** FADE's length: 1, 2, 4 or 8 bars. */
   | { SetFadeBars: number }
@@ -726,11 +731,12 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
 
 const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff', 'Press'] as const;
 const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Clear', 'SelectTrack'] as const;
-const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope', 'SetTuner'] as const;
+const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetMasterOtt', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope', 'SetTuner'] as const;
 const NUMBER_COMMANDS = [
   'SetBpm',
   'SetClickVolume',
   'SetMasterVolume',
+  'SetMasterOttAmount',
   'SetFixedBars',
   'SetAutoSensitivity',
   'PitchBend',

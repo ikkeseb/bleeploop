@@ -186,9 +186,9 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     Ok(WetMaster { left, right, warmup })
 }
 
-/// A setting the render applies: the master's volume and mute (a lane's mix is its track's).
+/// A setting the render applies: the master's volume, mute and OTT (a lane's mix is its track's).
 fn is_master_mix(command: &Command) -> bool {
-    matches!(command, Command::SetMasterVolume(_) | Command::SetMasterMute(_))
+    matches!(command, Command::SetMasterVolume(_) | Command::SetMasterMute(_) | Command::SetMasterOtt(_) | Command::SetMasterOttAmount(_))
 }
 
 /// Whole loop passes (at least one) that cover the session's longest tail: on each lane, its enabled

@@ -76,6 +76,8 @@ enum Key {
     ClickVolume,
     MasterVolume,
     MasterMute,
+    MasterOtt,
+    MasterOttAmount,
     /// An input send's param, by `InputSendParam as usize`; before the sends' on/off, so a send that
     /// comes on in a new engine comes on with its values.
     InputSendParam(usize),
@@ -129,6 +131,8 @@ fn key(command: &Command) -> Option<Key> {
         Command::SetClickVolume(_) => Key::ClickVolume,
         Command::SetMasterVolume(_) => Key::MasterVolume,
         Command::SetMasterMute(_) => Key::MasterMute,
+        Command::SetMasterOtt(_) => Key::MasterOtt,
+        Command::SetMasterOttAmount(_) => Key::MasterOttAmount,
         Command::SetInputSendParam(param, _) => Key::InputSendParam(param as usize),
         Command::SetInputSend(send, _) => Key::InputSend(send as usize),
         Command::SetLoopEndStop(_) => Key::LoopEndStop,
@@ -420,6 +424,22 @@ mod tests {
             ],
             "the note target is replayed before the wheels it hands over, a send's values before the send"
         );
+    }
+
+    #[test]
+    fn master_ott_replays_its_latest_settings_after_clear_all() {
+        let mut s = Settings::default();
+        assert!(s.record(&Command::SetMasterOtt(true)));
+        assert!(s.record(&Command::SetMasterOttAmount(0.75)));
+        assert!(s.record(&Command::SetMasterOtt(false)));
+        assert!(s.record(&Command::SetMasterOttAmount(0.5)));
+        assert!(s.record(&Command::SetVolume(0, 0.25)));
+
+        assert!(!s.record(&Command::ClearAll));
+        assert!(s.mixed(0, 100, 0, &CompactMix::from(&LaneMix::default())));
+        s.follow(1);
+
+        assert_eq!(replay(&s), [Command::SetMasterOtt(false), Command::SetMasterOttAmount(0.5)]);
     }
 
     /// Lane `lane`'s mix as an `Event::Mix` carries it, from a fresh lane's with `edit` applied.

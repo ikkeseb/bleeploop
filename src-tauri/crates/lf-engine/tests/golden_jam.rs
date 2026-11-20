@@ -72,6 +72,12 @@ fn settle(rig: &mut Rig) {
 
 /// The whole jam; returns its output before the limiter and as heard.
 fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
+    let mut rig = jam_rig(sr, block);
+    [rig.output.take().unwrap().1, std::mem::take(&mut rig.heard)]
+}
+
+/// The whole jam, its rig kept with every channel it rendered.
+fn jam_rig(sr: u32, block: usize) -> Rig {
     let mut rig = Rig::with(Opts { sr, start: sr as Frame, loop_seconds: 20.0, block, align: 0 });
     rig.keep_output();
     let beat = (60.0 / BPM as f64 * sr as f64).round() as Frame;
@@ -411,7 +417,7 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     assert!(rig.state(0) == LaneState::Stopped && rig.lane(0).length == expected_master, "the take survives, whole bars");
 
     assert_eq!(rig.engine.diag().events_dropped, 0);
-    [rig.output.take().unwrap().1, std::mem::take(&mut rig.heard)]
+    rig
 }
 
 #[test]
@@ -425,5 +431,27 @@ fn golden_jam_at_44k1_and_48k_bit_identical_across_block_sizes() {
                 assert_eq!(first, None, "sr={sr} block={block}: the {tap} output differs from block 128");
             }
         }
+    }
+}
+
+/// A measurement, not a gate: the jam's device output and Share mix (both sides each) hashed at 44.1
+/// and 48 kHz, for comparing one build with another bit for bit (a change that must leave the default
+/// sound alone, the master OTT while off). No hash is pinned: the maths library's last bits differ by
+/// platform. `cargo test -p lf-engine --test golden_jam -- --ignored --nocapture golden_jam_hashes`
+#[test]
+#[ignore = "a measurement: prints hashes to compare across builds"]
+fn golden_jam_hashes() {
+    use sha2::{Digest, Sha256};
+    let hash = |channels: [&[f32]; 2]| -> String {
+        let mut h = Sha256::new();
+        for x in channels.iter().flat_map(|c| c.iter()) {
+            h.update(x.to_le_bytes());
+        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    };
+    for sr in [44100, 48000] {
+        let rig = jam_rig(sr, 128);
+        println!("sr={sr} device {}", hash([&rig.heard, &rig.heard_right]));
+        println!("sr={sr} share  {}", hash([&rig.share, &rig.share_right]));
     }
 }

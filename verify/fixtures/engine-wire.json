@@ -50,6 +50,8 @@
     { "SetClickVolume": 0.8 },
     { "SetMasterVolume": 0.75 },
     { "SetMasterMute": false },
+    { "SetMasterOtt": true },
+    { "SetMasterOttAmount": 0.5 },
     { "SetLoopEndStop": true },
     { "SetFadeBars": 4 },
     { "SetFixedLength": true },

@@ -930,3 +930,38 @@ fn pan() {
         },
     );
 }
+
+#[test]
+#[ignore]
+fn master_ott() {
+    let mut rig = rig_at(120.0);
+    let level = 0.2;
+    first_take(&mut rig, 0, 1, riff(&RIFF_A, 1.0, 120.0, level));
+    later_take(&mut rig, 1, riff(&RIFF_B, 1.0, 120.0, level));
+    later_take(&mut rig, 2, riff(&LAYER, 1.0, 120.0, level));
+    let m = rig.master();
+    rig.advance_to(rig.next_boundary());
+    let b = rig.frame;
+    let mut clip = Clip::begin(&mut rig);
+    rig.send_at(b + m, Command::SetMasterOtt(true));
+    rig.send_at(b + 2 * m, Command::SetMasterOttAmount(1.0));
+    rig.advance_to(b + 3 * m + secs(0.3));
+    clip.mark("OTT off", b);
+    clip.mark("OTT on, AMOUNT 50 %", b + m);
+    clip.mark("AMOUNT 100 %", b + 2 * m);
+    clip.finish(
+        &rig,
+        Meta {
+            id: "master-ott",
+            group: 2,
+            order: 4,
+            title: "The master OTT: off, on at its default, at full AMOUNT",
+            question: "Three lanes, one loop each: OTT off, on at the default AMOUNT (50 %), then at 100 %. Does it make the jam denser without pumping or lifting hiss between the notes, and is 50 % the right default?",
+            cannot_tell: "A synthetic string, no amp and no room: the hiss and noise a real rig adds are not in it, and the live guitar never passes the OTT (only its loops do).",
+            status: "\"Master OTT\"",
+            stereo: false,
+            max_seconds: 8.0,
+            settings: json!({ "bpm": 120, "meter": "4/4", "loop_bars": 1, "lanes": 3, "ott": ["off", 0.5, 1.0] }),
+        },
+    );
+}

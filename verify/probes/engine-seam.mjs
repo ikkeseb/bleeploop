@@ -113,7 +113,7 @@ await probe(async ({ open }) => {
   });
   const boot = await sentAtLeast(1);
   console.log('first reset sent', JSON.stringify(boot));
-  for (const expected of [{ SetMasterVolume: 1 }, { SetClickVolume: 0.7 }]) {
+  for (const expected of [{ SetMasterVolume: 1 }, { SetMasterOttAmount: 0.5 }, { SetMasterOtt: false }, { SetClickVolume: 0.7 }]) {
     assert.ok(boot.some((c) => JSON.stringify(c) === JSON.stringify(expected)), `the first reset sends ${JSON.stringify(expected)}`);
   }
   const bootInput = await inputSent();
@@ -136,6 +136,24 @@ await probe(async ({ open }) => {
   await page.getByRole('button', { name: 'Metronome click' }).click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Click' } }], "CLICK sends the engine's toggle");
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "CLICK shows the engine's Toggled");
+
+  // The master OTT is a master setting the UI owns, as the master volume is: a press sends the value and
+  // shows it at once, and the AMOUNT read-out (live while OTT is on) opens its slider.
+  await clearSent();
+  const OTT = 'OTT: multiband compressor on the loops and synths (not the live input)';
+  const ott = page.getByRole('button', { name: OTT, exact: true });
+  await ott.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetMasterOtt: true }], 'OTT sends SetMasterOtt');
+  assert.equal(await ott.getAttribute('aria-pressed'), 'true', 'OTT shows on at once');
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.masterOtt')), '1', 'OTT on is kept');
+  await clearSent();
+  await page.getByRole('button', { name: 'OTT amount' }).click();
+  await page.getByRole('slider', { name: 'OTT amount' }).fill('80');
+  assert.deepEqual(await sentAtLeast(1), [{ SetMasterOttAmount: 0.8 }], 'the AMOUNT slider sends SetMasterOttAmount');
+  await page.keyboard.press('Escape');
+  await clearSent();
+  await ott.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetMasterOtt: false }], 'a second press turns OTT off');
 
   await clearSent();
   await lanes.nth(0).locator('.lp-core').click();
@@ -329,6 +347,7 @@ await probe(async ({ open }) => {
     reset: true,
     settings: [
       { SetMasterVolume: 0.6 },
+      { SetMasterOtt: true },
       { SetInputSend: ['echo', false] },
       { SetMetronome: true },
       { SetVolume: [0, 0.5] },
@@ -343,7 +362,13 @@ await probe(async ({ open }) => {
   assert.equal(await page.getByRole('slider', { name: 'Track 1 volume' }).inputValue(), '50', "the engine's lane volume is adopted");
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "the engine's click is adopted");
   assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
-  assert.ok(!adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMetronome !== undefined), 'adopted settings are not pushed back');
+  assert.equal(await page.getByRole('button', { name: OTT, exact: true }).getAttribute('aria-pressed'), 'true', "the engine's OTT is adopted");
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.masterOtt')), '1', "the engine's OTT is kept");
+  assert.ok(
+    !adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMasterOtt !== undefined || c.SetMetronome !== undefined),
+    'adopted settings are not pushed back',
+  );
+  assert.ok(adopted.some((c) => c.SetMasterOttAmount === 0.8), 'the kept OTT amount the engine lacks is sent');
   assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
   assert.equal(await engaged(), false, "the engine's echo (off) is adopted");
   assert.ok(!adopted.some((c) => c.SetInputSend?.[0] === 'echo'), 'the adopted send is not pushed back');

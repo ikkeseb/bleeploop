@@ -36,7 +36,7 @@
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
 //! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
-//! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
+//! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter, the master OTT | Tone.js on Blink's Web Audio (the OTT: the engine's own) |
 //!
 //! # Rules
 //!
@@ -167,8 +167,8 @@
 //! in Tone), which the rig turns on ([`EngineConfig::looper_tap`]; the host leaves it off,
 //! `tests/share_mix.rs` shows it changes no output bit). `tests/slots.rs`'s fake units record what they
 //! saw in preallocated buffers (never allocating in `process`) and are handed back to the test to drop.
-//! `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a
-//! multiply's burst, a TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the
+//! `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, the
+//! master OTT, a multiply's burst, a TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the
 //! golden jam at 44.1 and 48 kHz, bit-identical across block sizes 1, 32, 64, 127, 128, 480 and 1024;
 //! `tests/gestures.rs` runs proptest gesture scripts (one recorder; a whole-bar master; every lane one
 //! master long; undo twice is identity; undo after an N-cycle dub gives back the pre-dub loop; finite

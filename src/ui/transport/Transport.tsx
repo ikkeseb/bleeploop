@@ -18,12 +18,14 @@ import './transport.css';
  * the record modes CLICK / FIXED / RETAKE / AUTO REC / END STOP (each with its lamp; CLICK's volume and
  * AUTO's sensitivity in a popover off their pill) · loop ring-dial readout · ■/▶ ALL + FADE and its bars
  * + ✕ ALL (two-step) + the record level (raw input is a slot set to Off and live) · IN FX (`InputFx.tsx`) ·
- * spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
+ * spacer · master OTT (its AMOUNT in a popover off the pill) + mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
  * cluster (`SessionTools.tsx`).
  *
  * The ALL / loop-readout / master controls live here alone — this command-bar cluster is their
  * single home (the looper zone has no head row).
  */
+const OTT_TITLE = 'OTT: multiband compressor on the loops and synths (not the live input)';
+
 export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
   const anyStopping = createMemo(() =>
     Array.from({ length: looper.trackCount }, (_, i) => looper.track(i)().stopAt !== null).some(Boolean),
@@ -169,8 +171,24 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   const clickPopDisabled = () => !clock.metronomeOn();
   const sensPop = createBarPopover(props.returnFocus);
   const sensPopDisabled = () => !looper.autoRecordEnabled() || clock.bpmLocked();
+  // The master OTT's AMOUNT, the same way: live while OTT is on.
+  const ottAmount = () => Math.round(master.ottAmount() * 100);
+  const ottPop = createBarPopover(props.returnFocus);
+  // The bar's last master rung (`cmd--fit-ott-min`, app/cmd-fit.ts) hides the read-out: read off its box
+  // (display:none has none), the popover closes with it and the toggle's title carries the amount.
+  const [ottFolded, setOttFolded] = createSignal(false);
+  const watchOttReadout = (el: HTMLButtonElement): void => {
+    ottPop.trigger(el);
+    const ro = new ResizeObserver(([e]) => setOttFolded(e.contentRect.width === 0 && e.contentRect.height === 0));
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  };
+  const ottTitle = () => (ottFolded() ? `${OTT_TITLE}. Amount ${ottAmount()} %` : OTT_TITLE);
   createEffect(() => {
     if (clickPopDisabled()) clickPop.close(false);
+  });
+  createEffect(() => {
+    if (!master.ott() || ottFolded()) ottPop.close(false);
   });
   createEffect(() => {
     if (sensPopDisabled()) sensPop.close(false);
@@ -624,9 +642,57 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
       {/* flexible spacer — pushes master + the app.tsx tool icons to the far right */}
       <div class="transport__grow" />
 
-      {/* Master output level — on engine.masterGain (post record-tap, pre limiter). Mute + slider +
-          value; both go through the `master` module so the DEV single-clock gate stays consistent. */}
-      <div class="transport__master" role="group" aria-label="Master volume">
+      {/* Master output — OTT (the built-in multiband compressor on the master bus, before the click and the
+          limiter; the live monitor bypasses it), then the level on engine.masterGain (post record-tap, pre
+          limiter): mute + slider + value. All go through the `master` module, UI-owned settings the engine
+          keeps and replays. OTT is a split pill as CLICK is: the toggle, and its AMOUNT read-out opening a
+          popover. */}
+      <div class="transport__master" role="group" aria-label="Master output">
+        <div class="transport__split" role="group" aria-label="Master OTT">
+          <button
+            class="transport__tgl transport__tgl--led"
+            classList={{ 'is-on': master.ott() }}
+            aria-label={ottTitle()}
+            aria-pressed={master.ott()}
+            onClick={() => master.setOtt(!master.ott())}
+            title={ottTitle()}
+          >
+            OTT
+          </button>
+          <button
+            ref={watchOttReadout}
+            class="transport__tgl transport__readout bar-pop__trigger"
+            classList={{ 'is-on': master.ott() }}
+            aria-label="OTT amount"
+            aria-haspopup="dialog"
+            aria-expanded={ottPop.open()}
+            aria-controls="lf-ott-popover"
+            disabled={!master.ott()}
+            onClick={ottPop.toggle}
+            title="OTT amount"
+          >
+            <span class="transport__readout-v">{ottAmount()}</span>
+          </button>
+          <BarPopoverPanel pop={ottPop} id="lf-ott-popover" label="OTT amount" class="bar-pop--param">
+            <label class="fxp-param">
+              <span class="fxp-param__label">Amount</span>
+              <input
+                class="lf-range fxp-param__range"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={ottAmount()}
+                style={{ '--fill': `${ottAmount()}%` }}
+                disabled={!master.ott()}
+                aria-label="OTT amount"
+                aria-valuetext={`${ottAmount()} percent`}
+                onInput={(e) => master.setOttAmount(Number(e.currentTarget.value) / 100)}
+              />
+              <span class="fxp-param__val">{ottAmount()}</span>
+            </label>
+          </BarPopoverPanel>
+        </div>
         <button
           class="transport__master-mute"
           classList={{ 'is-muted': master.muted() }}
