@@ -17,6 +17,13 @@
 //! output joins the master bus and goes to the record tap delayed like a built-in instrument's, less the
 //! plugin's own latency (`instruments`). Outputs are mono, as today's bridge is.
 //!
+//! Each slot runs its own instance of the input OTT (`dsp::ott`, mono) on its output, after the slot's
+//! gain and before that output splits into the wet signal, the bus and the record lines: an effect's,
+//! an instrument's and an empty live slot's dry input alike, so what is heard and what is recorded are
+//! the same processed signal. An instrument slot's bypass fading out of the wet over its install or
+//! removal does not pass it. Every instance always runs (off and settled, bit-transparent) and takes
+//! the engine's one OTT setting on the same frame ([`Rack::set_ott`]).
+//!
 //! Lifecycle never stops the audio. The host builds and activates a unit off the audio thread and
 //! installs it: the unit crossfades in from bypass (its slot's gated input, what an empty slot passes)
 //! over the frames of `FADE_SECONDS`, counted, so both ends land on an exact frame and are bit-exact. An
@@ -35,7 +42,8 @@
 //! limiter, a capture) ever sees it.
 //!
 //! The engine renders the slots once per range, not per chunk: from where they stopped up to the next
-//! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
+//! frame a slot command waits for (a note, the target, a slot's live flag or gain, the OTT's switch or
+//! a control), so a plugin sees
 //! one call per device block unless a stamped slot command splits it. Those commands therefore apply
 //! at the start of a render call (every event offset is 0 in practice); an install or removal applies
 //! at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
@@ -43,6 +51,7 @@
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use crate::api::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SLOT_COUNT};
+use crate::dsp::ott::{MonoOtt, Setting};
 use crate::grid::Frame;
 
 /// The crossfade into and out of bypass: 10 ms, the web monitor's declick (`audio_output.rs`).
@@ -144,6 +153,8 @@ struct Slot {
     wet_line: Vec<f32>,
     dw: usize,
     write: usize,
+    /// The input OTT on this slot's output, after its gain.
+    ott: MonoOtt,
 }
 
 /// The live gate at frame `f` heading for `live` (1 or 0), its ramp of `n` frames ending at `end` from
@@ -268,6 +279,7 @@ impl Rack {
                 wet_line: vec![0.0; line],
                 dw: 0,
                 write: 0,
+                ott: MonoOtt::new(sample_rate),
             }
         });
         let ports: [SlotPort; SLOT_COUNT] = match ports.try_into() {
@@ -518,6 +530,18 @@ impl Rack {
         }
     }
 
+    /// The input OTT's setting, on every slot's instance from the next frame rendered.
+    pub(crate) fn set_ott(&mut self, setting: Setting) {
+        for s in self.slots.iter_mut() {
+            s.ott.set(setting);
+        }
+    }
+
+    /// Whether the input OTT is on, as last set.
+    pub(crate) fn ott_on(&self) -> bool {
+        self.slots[0].ott.on()
+    }
+
     /// Render both slots over `wet.len()` frames from the cursor, slot `s` reading `inputs[s]`: `wet`,
     /// `aligned` and `bus` are overwritten (the effects' outputs as heard and at the take's alignment,
     /// and the instruments'), `record` gets `aligned` plus the instruments' record path, `delay` frames
@@ -598,6 +622,8 @@ impl Rack {
                 }
                 s.gain = crate::glide(s.gain, s.gain_target, self.gain_coef);
                 let (y, dry) = if s.gain == 1.0 { (y, dry) } else { ((s.gain * y as f64) as f32, (s.gain * dry as f64) as f32) };
+                // The input OTT, on the output before it splits: heard and recorded the same.
+                let [y] = s.ott.frame([y]);
                 if instrument && !gone {
                     bus[k] += y;
                     wet[k] += dry;

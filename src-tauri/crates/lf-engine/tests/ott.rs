@@ -1,15 +1,28 @@
-//! The master OTT (`dsp::ott`, `Command::SetMasterOtt`, `Command::SetMasterOttAmount`): the engine's own
-//! design, so these pin its properties rather than a reference render. With every band at unity the
-//! three bands null against an AP88 · AP2500 cascade (magnitude and phase) and are flat 20 Hz–20 kHz,
-//! at 44.1 and 48 kHz; the static gain curve's points and the ceiling's shape; on, an AMOUNT change and
-//! an on/off fade reversed mid-fade, all on frames off the 128-frame quanta, render bit-identical at
-//! block sizes 1, 64, 127 and 480, and an AMOUNT change is heard from its own frame; the fade lands
-//! exactly on its last frame; finite output for silence, a full-scale square and near-denormal input,
-//! and exact silence once a decay has settled; a hard square onset (a plugin instrument) and a
-//! five-lane jam leave the device and the Share under −0.3 dBFS; a loud onset after quiet overshoots
-//! under 3 dB and −66 dBFS hiss is lifted under 6 dB at AMOUNT 1; off (the default, or switched off and
-//! settled) leaves the device output and the Share mix bit for bit as they were, and the click never
-//! passes it; a non-finite AMOUNT is dropped and one past 1 clamps.
+//! The input OTT (`dsp::ott`; `Command::SetInputSend` with `InputSend::Ott`, the `Ott*`
+//! `InputSendParam`s): the engine's own design, so these pin its properties rather than a reference
+//! render.
+//!
+//! The processor: with every band at unity the three bands null against an AP88 · AP2500 cascade
+//! (magnitude and phase) and are flat 20 Hz–20 kHz, at 44.1 and 48 kHz; the static gain curve's points
+//! and the ceiling's shape (a hard clip fails it); the fade lands exactly on its last frame and a switch
+//! inside it turns from the weight reached; finite output for silence, a full-scale square and
+//! near-denormal input, and exact silence once a decay has settled; a loud onset after quiet overshoots
+//! under 3 dB and −66 dBFS hiss is lifted under 6 dB at DEPTH 1; DEPTH 0 is unity on every band; UP 0
+//! lifts no quiet signal and DOWN 0 cuts no loud one; TIME scales every band's release (0.5× at 0.25,
+//! 4× at 1); every glided control set while off and settled is in force from the first frame on; a
+//! control that is no number is dropped and one out of range clamps.
+//!
+//! In the engine: what is heard is what is recorded (the take is the monitor, OTT and all, shifted by
+//! the alignment); each slot's instance is a standalone OTT on the slot's output with every control on
+//! its frame, after the slot's gain; a stamped toggle inside a block switches it on its setter's frame
+//! at any block size; off (the default, settings moved while off, or switched off and settled) leaves the
+//! monitor and the take bit for bit; a control lands on its own frame on the monitor and the bus; the
+//! OTT on, every control moved and a fade reversed off the quanta render bit-identical at block sizes 1,
+//! 64, 127 and 480; the built-in instruments' instance is on what the bus hears and the take records;
+//! the loops and the click never pass it; a plugin instrument's hard square onset leaves the device and
+//! the Share under −0.3 dBFS and a square on the live input leaves the (unlimited) monitor under the
+//! ceiling; an impulse and a pluck arrive on the same frame with the OTT on as off, on the monitor and in
+//! the take (the crossover network's group delay is printed beside it).
 //!
 //! `measurements` (ignored) prints the numbers the design was accepted on: run it with
 //! `cargo test -p lf-engine --release --test ott -- --ignored --nocapture measurements`.
@@ -20,21 +33,21 @@ mod common;
 #[path = "listen/pluck.rs"]
 mod pluck;
 
-use std::f64::consts::{FRAC_1_SQRT_2, PI};
+use std::f64::consts::{FRAC_1_SQRT_2, LN_10, PI};
 use std::rc::Rc;
 
-use common::{Opts, Rig};
+use common::{Delay, Opts, Rig};
 use lf_engine::dsp::compressor::Compressor;
-use lf_engine::dsp::ott::{ceiling, gain_db, Ott, CEILING, CEILING_KNEE, DEFAULT_AMOUNT, FADE_SECONDS, MAKEUP_DB};
+use lf_engine::dsp::ott::{ceiling, gain_db, release_scale, MonoOtt, Setting, StereoOtt, CEILING, CEILING_KNEE, DEFAULT_DEPTH, FADE_SECONDS, HIGH_SPLIT, LOW_SPLIT, MAKEUP_DB};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Instrument, LaneState, NoteTarget, SlotEvent, SlotKind, SlotProcessor};
+use lf_engine::{Action, Command, InputSend, InputSendParam, Instrument, NoteTarget, SlotEvent, SlotKind, SlotProcessor, Toggle};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 
 // ── Signals and helpers ─────────────────────────────────────────────────────────────────────────────
 
-/// A cookbook 2nd-order section in f64 (transposed direct form II): the reference cascade and the
-/// pink noise's band limits.
+/// A cookbook 2nd-order section in f64 (transposed direct form II): the reference cascade, the pink
+/// noise's band limits and the group delay's coefficients.
 #[derive(Clone, Copy)]
 struct Section {
     b: [f64; 3],
@@ -68,6 +81,18 @@ impl Section {
         self.s[0] = self.b[1] * x - self.a[0] * y + self.s[1];
         self.s[1] = self.b[2] * x - self.a[1] * y;
         y
+    }
+
+    /// The section's group delay at `freq`, frames: −dφ/dω = Re(B'/B) − Re(A'/A) on the unit circle,
+    /// where X' = Σ k · x_k · z^−k.
+    fn group_delay(&self, freq: f64, sr: f64) -> f64 {
+        let w = 2.0 * PI * freq / sr;
+        let z = |k: f64| Complex::from_polar(1.0, -w * k);
+        let b = z(0.0) * self.b[0] + z(1.0) * self.b[1] + z(2.0) * self.b[2];
+        let bd = z(1.0) * self.b[1] + z(2.0) * (2.0 * self.b[2]);
+        let a = z(0.0) + z(1.0) * self.a[0] + z(2.0) * self.a[1];
+        let ad = z(1.0) * self.a[0] + z(2.0) * (2.0 * self.a[1]);
+        (bd / b).re - (ad / a).re
     }
 }
 
@@ -129,31 +154,44 @@ fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0.0f32, |m, v| m.max(v.abs()))
 }
 
-/// An OTT at `sr` with AMOUNT `amount`, on or off, settled (its AMOUNT glide and on/off fade done)
-/// over a second of silence.
-fn settled(sr: u32, amount: f32, on: bool) -> Ott {
-    let mut ott = Ott::new(sr);
-    ott.set_amount(amount);
-    ott.set_on(on);
+/// A stereo OTT at `sr` with DEPTH `depth`, on or off, settled (its glide and on/off fade done) over a
+/// second of silence.
+fn settled(sr: u32, depth: f64, on: bool) -> StereoOtt {
+    let mut ott = StereoOtt::new(sr);
+    ott.set(Setting::Depth(depth));
+    ott.set(Setting::On(on));
     let (mut l, mut r) = (vec![0.0f32; sr as usize], vec![0.0f32; sr as usize]);
     ott.process(&mut l, &mut r);
     ott
 }
 
 /// `left`/`right` through `ott` in place, 128 frames a call.
-fn run(ott: &mut Ott, left: &mut [f32], right: &mut [f32]) {
+fn run(ott: &mut StereoOtt, left: &mut [f32], right: &mut [f32]) {
     for (l, r) in left.chunks_mut(128).zip(right.chunks_mut(128)) {
         ott.process(l, r);
     }
 }
 
-/// The first frame where two renders differ, by bits (the OTT never makes a -0.0 the bus did not have).
+/// The first frame where two renders differ, by bits.
 fn first_difference(a: &[f32], b: &[f32]) -> Option<usize> {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits())
 }
 
-// ── The split ──────────────────────────────────────────────────────────────────────────────────────
+/// The first frame where two renders differ in value (a −0.0 and a 0.0 are the same sample): the
+/// record tap sums the slots' paths onto a 0.0, which the monitor does not.
+fn first_value_difference(a: &[f32], b: &[f32]) -> Option<usize> {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).position(|(x, y)| x != y)
+}
+
+/// The linear gain a band gets at DEPTH `depth` when its shaped curve is 0 dB: the makeup alone,
+/// computed as `dsp::ott` computes it.
+fn makeup(depth: f64) -> f64 {
+    (depth * (0.0 + MAKEUP_DB) * (LN_10 / 20.0)).exp()
+}
+
+// ── The split, the curve, the ceiling ──────────────────────────────────────────────────────────────
 
 /// Unity bands against the reference AP88 → AP2500 cascade, on white noise with an impulse in it: the
 /// largest residual, dB against the input's peak.
@@ -167,7 +205,7 @@ fn null_depth(sr: u32) -> f64 {
     run(&mut ott, &mut l, &mut r);
     // `max` folds a NaN away: an output that is no number must fail here, not pass as a deep null.
     assert!(l.iter().chain(&r).all(|v| v.is_finite()), "sr={sr}: a sample that is no number");
-    let (mut ap_lo, mut ap_hi) = (Section::new(Kind::Allpass, 88.0, sr as f64), Section::new(Kind::Allpass, 2500.0, sr as f64));
+    let (mut ap_lo, mut ap_hi) = (Section::new(Kind::Allpass, LOW_SPLIT, sr as f64), Section::new(Kind::Allpass, HIGH_SPLIT, sr as f64));
     let mut worst = 0.0f64;
     for (k, &v) in x.iter().enumerate() {
         let want = ap_hi.tick(ap_lo.tick(v as f64)) as f32;
@@ -261,37 +299,642 @@ fn the_gain_curve_holds_its_static_points() {
     }
 }
 
+// ── The processor ──────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_switch_inside_a_fade_turns_from_the_weight_reached() {
+    let mut ott = settled(48000, DEFAULT_DEPTH, false);
+    let step = 1.0 / (FADE_SECONDS * 48000.0);
+    let (mut l, mut r) = (vec![0.1f32; 200], vec![0.1f32; 200]);
+    ott.set(Setting::On(true));
+    ott.process(&mut l[..160], &mut r[..160]);
+    assert!((ott.weight() - 160.0 * step).abs() < 1e-12);
+    ott.set(Setting::On(false));
+    ott.process(&mut l[160..], &mut r[160..]);
+    assert!((ott.weight() - 120.0 * step).abs() < 1e-12, "weight {}", ott.weight());
+}
+
+#[test]
+fn the_fade_lands_exactly_on_its_last_frame() {
+    // Counted, not accumulated: 480 frames at 48 kHz reach exactly 1 and exactly 0 (summing 1/480 left
+    // 2.9e-15 on the off fade's last frame and settled one frame later).
+    let fade = (FADE_SECONDS * 48000.0) as usize;
+    let mut ott = settled(48000, DEFAULT_DEPTH, false);
+    let (mut l, mut r) = (vec![0.1f32; fade], vec![0.1f32; fade]);
+    ott.set(Setting::On(true));
+    ott.process(&mut l[..fade - 1], &mut r[..fade - 1]);
+    assert!(ott.weight() < 1.0);
+    ott.process(&mut l[fade - 1..], &mut r[fade - 1..]);
+    assert_eq!(ott.weight(), 1.0);
+    ott.set(Setting::On(false));
+    ott.process(&mut l[..fade - 1], &mut r[..fade - 1]);
+    assert!(ott.weight() > 0.0);
+    ott.process(&mut l[fade - 1..], &mut r[fade - 1..]);
+    assert_eq!(ott.weight(), 0.0);
+    // Its last frame is already the input itself.
+    let mut x = [0.123f32];
+    let mut mono = MonoOtt::new(48000);
+    mono.set(Setting::On(true));
+    mono.process(&mut vec![0.2f32; fade]);
+    mono.set(Setting::On(false));
+    mono.process(&mut vec![0.2f32; fade - 1]);
+    mono.process(&mut x);
+    assert_eq!(x[0].to_bits(), 0.123f32.to_bits(), "the off fade's last frame is the dry sample");
+}
+
+#[test]
+fn silence_a_full_scale_square_and_near_denormal_input_stay_finite() {
+    let sr = 48000;
+    let mut ott = settled(sr, 1.0, true);
+    let square: Vec<f32> = (0..2 * sr as usize).map(|k| if (k / 240) % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    let tiny: Vec<f32> = (0..sr as usize).map(|k| if k % 2 == 0 { 1e-38 } else { -1e-40 }).collect();
+    let silence = vec![0.0f32; 20 * sr as usize];
+    for (name, x) in [("silence", &silence[..sr as usize]), ("a full-scale square", &square[..]), ("near-denormal input", &tiny[..]), ("a decay into silence", &silence[..])] {
+        let (mut l, mut r) = (x.to_vec(), x.to_vec());
+        run(&mut ott, &mut l, &mut r);
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()), "{name}: a sample that is no number");
+        // The crossovers' phase turns a square's edges into spikes (the cascade alone peaks at +5.2
+        // dBFS) and the makeup rides on them (+2.8 dBFS for this square at DEPTH 1 without the
+        // ceiling): the ceiling holds them under −1.5 dBFS.
+        assert!(peak(&l).max(peak(&r)) as f64 <= CEILING, "{name}: peak {}", peak(&l));
+    }
+    // Twenty seconds after the input stopped every state has been flushed: exact silence.
+    let (mut l, mut r) = (vec![0.0f32; 128], vec![0.0f32; 128]);
+    ott.process(&mut l, &mut r);
+    assert!(l.iter().chain(&r).all(|&v| v == 0.0));
+}
+
+/// White hiss at −66 dBFS RMS, the same on both sides, `n` frames at 48 kHz.
+fn hiss(n: usize) -> Vec<f32> {
+    let mut noise = Noise(5);
+    let a = 10f64.powf(-66.0 / 20.0) * 3f64.sqrt();
+    (0..n).map(|_| (a * noise.next()) as f32).collect()
+}
+
+/// What the OTT at `depth` adds to −66 dBFS RMS hiss, dB of RMS over seconds 2–4 (makeup included).
+fn hiss_lift(depth: f64) -> f64 {
+    let x = hiss(4 * 48000);
+    let mut ott = settled(48000, depth, true);
+    let (mut l, mut r) = (x.clone(), x.clone());
+    run(&mut ott, &mut l, &mut r);
+    db(rms(&l[2 * 48000..])) - db(rms(&x[2 * 48000..]))
+}
+
+/// Plucks at −40 dBFS peak for 2 s, then one at −3 dBFS peak (E2), 48 kHz: the signal and the loud
+/// note's first frame.
+fn quiet_to_loud() -> (Vec<f32>, usize) {
+    let sr = 48000;
+    let quiet = pluck::once(&[pluck::n(0.0, 52, 0.9), pluck::n(1.0, 55, 0.9), pluck::n(2.0, 57, 0.9), pluck::n(3.0, 59, 0.9)], 24000.0, sr, 2 * sr as usize, 0.01);
+    let loud = pluck::once(&[pluck::accent(0.0, 40, 2.0)], 24000.0, sr, sr as usize, 0.708);
+    (quiet.iter().chain(loud.iter()).copied().collect(), quiet.len())
+}
+
+/// The input's and the output's peak over the first 50 ms from `onset`.
+fn onset_peaks(x: &[f32], out: &[f32], onset: usize) -> (f64, f64) {
+    let w = onset..onset + 48000 / 20;
+    (peak(&x[w.clone()]) as f64, peak(&out[w]) as f64)
+}
+
+#[test]
+fn an_onset_after_quiet_and_steady_hiss_ride_no_lift() {
+    // The gain falls fast: a loud pluck after quiet ones leaves no more than 3 dB over its input's peak,
+    // the makeup and the crossovers' phase included (11.1 dB with the slow attacks this replaced).
+    let (x, onset) = quiet_to_loud();
+    let mut ott = settled(48000, 1.0, true);
+    let (mut l, mut r) = (x.clone(), x.clone());
+    run(&mut ott, &mut l, &mut r);
+    let (pi, po) = onset_peaks(&x, &l, onset);
+    assert!(db(po) - db(pi) < 3.0, "the onset overshoots {:+.1} dB", db(po) - db(pi));
+    // The noise floor: hiss at −66 dBFS RMS gets no more than 6 dB, the makeup included (15.8 dB before).
+    let lift = hiss_lift(1.0);
+    assert!(lift < 6.0, "hiss lifted {lift:+.1} dB");
+}
+
+/// `x` (mono, both sides) through a fresh, settled OTT with `settings` applied before it switches on;
+/// every frame's band gains.
+fn band_gains(x: &[f32], settings: &[Setting]) -> Vec<[f64; 3]> {
+    let mut ott = StereoOtt::new(48000);
+    for &s in settings {
+        ott.set(s);
+    }
+    ott.set(Setting::On(true));
+    x.iter()
+        .map(|&v| {
+            ott.frame([v, v]);
+            ott.gains()
+        })
+        .collect()
+}
+
+#[test]
+fn depth_zero_is_unity_on_every_band() {
+    let x: Vec<f32> = pluck::periodic(&pluck::RIFF_B, 12000.0, 48000, 8.0, 0.9).iter().copied().collect();
+    for (k, g) in band_gains(&x, &[Setting::Depth(0.0)]).iter().enumerate() {
+        assert_eq!(*g, [1.0; 3], "frame {k}");
+    }
+}
+
+#[test]
+fn up_zero_lifts_no_quiet_signal() {
+    // A 1 kHz sine at −50 dBFS: its mid band sits where the curve lifts (+9.3 dB at 3:1 under −36), its
+    // other bands are near nothing. With UP at 0 every band gets the makeup alone, exactly; at UP 1
+    // the mid band rides well over it.
+    let x = sine(1000.0, -50.0, 2 * 48000, 48000);
+    let settled_from = 48000;
+    let flat = band_gains(&x, &[Setting::Depth(1.0), Setting::Upward(0.0)]);
+    for (k, g) in flat.iter().enumerate().skip(settled_from) {
+        assert_eq!(*g, [makeup(1.0); 3], "frame {k}: a band lifted with UP at 0");
+    }
+    let lifted = band_gains(&x, &[Setting::Depth(1.0)]);
+    let mid = lifted[settled_from..].iter().map(|g| g[1]).fold(f64::INFINITY, f64::min);
+    assert!(db(mid / makeup(1.0)) > 6.0, "at UP 1 the quiet mid band is lifted only {:+.1} dB", db(mid / makeup(1.0)));
+}
+
+#[test]
+fn down_zero_cuts_no_loud_signal() {
+    // A 1 kHz sine at −6 dBFS: its mid band sits 18 dB over the knee (−13.5 dB of cut at 4:1). With DOWN
+    // at 0 no band gets less than the makeup, and the mid band exactly it; at DOWN 1 it is cut.
+    let x = sine(1000.0, -6.0, 2 * 48000, 48000);
+    let settled_from = 48000;
+    let flat = band_gains(&x, &[Setting::Depth(1.0), Setting::Downward(0.0)]);
+    for (k, g) in flat.iter().enumerate().skip(settled_from) {
+        assert!(g.iter().all(|&g| g >= makeup(1.0)), "frame {k}: a band cut with DOWN at 0: {g:?}");
+        assert_eq!(g[1], makeup(1.0), "frame {k}: the loud mid band");
+    }
+    let cut = band_gains(&x, &[Setting::Depth(1.0)]);
+    let mid = cut[settled_from..].iter().map(|g| g[1]).fold(0.0, f64::max);
+    assert!(db(mid / makeup(1.0)) < -10.0, "at DOWN 1 the loud mid band is cut only {:+.1} dB", db(mid / makeup(1.0)));
+}
+
+/// A sine at `freq` (in band `band`: 0 low, 1 mid, 2 high), −6 dBFS for a second, then −40 dBFS,
+/// through the OTT at DEPTH 1 and TIME `time`: seconds from the step to the first frame that band's gain
+/// is back at the makeup (its envelope fallen under −27 dBFS, where the downward curve ends).
+fn recovery(freq: f64, band: usize, time: f64) -> f64 {
+    let sr = 48000;
+    let step = sr as usize;
+    let x: Vec<f32> = (0..7 * step)
+        .map(|k| {
+            let a = if k < step { 10f64.powf(-6.0 / 20.0) } else { 10f64.powf(-40.0 / 20.0) };
+            (a * (2.0 * PI * freq * k as f64 / sr as f64).sin()) as f32
+        })
+        .collect();
+    let gains = band_gains(&x, &[Setting::Depth(1.0), Setting::Time(time)]);
+    let back = (step..x.len()).find(|&k| gains[k][band] >= makeup(1.0)).expect("the gain never came back");
+    (back - step) as f64 / sr as f64
+}
+
+#[test]
+fn time_scales_every_bands_release() {
+    assert_eq!([release_scale(0.0), release_scale(0.5), release_scale(1.0)], [0.25, 1.0, 4.0]);
+    for (name, freq, band) in [("low, 50 Hz", 50.0, 0), ("mid, 1 kHz", 1000.0, 1), ("high, 6 kHz", 6000.0, 2)] {
+        let times = [0.25, 0.5, 1.0].map(|t| recovery(freq, band, t));
+        println!("{name}: recovery from −6 to −40 dBFS (DEPTH 1): TIME 0.25 {:.3} s, TIME 0.5 {:.3} s, TIME 1 {:.3} s", times[0], times[1], times[2]);
+        assert!(times[0] < times[1] && times[1] < times[2], "{name}: a longer TIME recovers no slower: {times:?}");
+        // Release only: the attack is the same at every TIME, so the recovery scales as the release does.
+        for (i, want) in [(0, 0.5), (2, 4.0)] {
+            let ratio = times[i] / times[1];
+            assert!((ratio / want - 1.0).abs() < 0.02, "{name}: TIME {}: {ratio:.3}× the default's recovery, want {want}×", [0.25, 0.5, 1.0][i]);
+        }
+    }
+}
+
+#[test]
+fn every_glided_control_set_while_off_and_settled_is_taken_at_once() {
+    // As a new engine's replay sends them: the controls, then the switch. It must come on at them, as an
+    // OTT whose glides ran to the end while it was on, then went off and settled.
+    let signal = sine(220.0, -12.0, 4_800, 48_000);
+    let controls = [Setting::Depth(1.0), Setting::Upward(0.3), Setting::Downward(0.6), Setting::Time(0.9)];
+    let mut at_once = MonoOtt::new(48_000);
+    for c in controls {
+        at_once.set(c);
+    }
+    at_once.set(Setting::On(true));
+    let mut a = signal.clone();
+    at_once.process(&mut a);
+
+    let mut glided = MonoOtt::new(48_000);
+    glided.set(Setting::On(true));
+    for c in controls {
+        glided.set(c);
+    }
+    glided.process(&mut vec![0.0f32; 48_000]);
+    glided.set(Setting::On(false));
+    glided.process(&mut vec![0.0f32; 48_000]);
+    assert_eq!(glided.weight(), 0.0);
+    glided.set(Setting::On(true));
+    let mut b = signal;
+    glided.process(&mut b);
+    assert_eq!(first_difference(&a, &b), None, "the controls set while off are in force from the first frame on");
+}
+
+#[test]
+fn a_control_that_is_no_number_is_dropped_and_one_out_of_range_clamps() {
+    let mut ott = MonoOtt::new(48000);
+    let set = [Setting::Depth(0.8), Setting::Time(0.7), Setting::Upward(0.6), Setting::Downward(0.4)];
+    for s in set {
+        ott.set(s);
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for s in [Setting::Depth(bad), Setting::Time(bad), Setting::Upward(bad), Setting::Downward(bad)] {
+            ott.set(s);
+        }
+    }
+    assert_eq!(ott.controls(), [0.8, 0.7, 0.6, 0.4], "a value that is no number moved a control");
+    for s in [Setting::Depth(3.0), Setting::Time(3.0), Setting::Upward(3.0), Setting::Downward(3.0)] {
+        ott.set(s);
+    }
+    assert_eq!(ott.controls(), [1.0; 4]);
+    for s in [Setting::Depth(-1.0), Setting::Time(-1.0), Setting::Upward(-1.0), Setting::Downward(-1.0)] {
+        ott.set(s);
+    }
+    assert_eq!(ott.controls(), [0.0; 4]);
+}
+
 // ── The engine ─────────────────────────────────────────────────────────────────────────────────────
 
-/// Commands to send at frames past the jam's start.
+/// Commands to send at frames past the run's first frame.
 type Script = Vec<(Frame, Command)>;
 
-/// A short jam on the bus, in blocks of `block`: a held lead chord and a looping take of a pluck riff,
-/// `script` sent at its frames past the start, two seconds rendered.
-fn jam(block: usize, script: &Script, click: bool) -> Rig {
-    let mut rig = Rig::with(Opts { block, loop_seconds: 10.0, ..Opts::default() });
-    let riff = pluck::periodic(&pluck::RIFF_A, 12000.0, 48000, 8.0, 0.3);
-    rig.set_input(move |f| riff[f as usize % riff.len()]);
-    rig.record_first_take(0, 1, 2400);
-    rig.set_level(0.0);
-    rig.idle();
-    assert_eq!(rig.state(0), LaneState::Playing);
-    rig.set(Command::SetMetronome(click));
-    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
+const PHYS: Frame = 1123; // input + output latency as the driver reports it
+const PLUGIN: Frame = 57; // the amp-sim's reported latency
+const LIMITER: Frame = 288; // the master limiter's pre-delay at 48 kHz
+/// Where a take's REC is pressed, frames past the run's first frame; its count-in is 4 beats of 24 000.
+const PRESS: Frame = 24_000;
+
+/// The riff the player plays, looped from frame 0: a pluck phrase at 0.3 peak, one bar at 120 BPM.
+fn riff() -> impl Fn(Frame) -> f32 + 'static {
+    let p = pluck::periodic(&pluck::RIFF_A, 12000.0, 48000, 8.0, 0.3);
+    move |f| p[f as usize % p.len()]
+}
+
+fn ott(depth: f64) -> Script {
+    vec![(1_000, Command::SetInputSendParam(InputSendParam::OttDepth, depth)), (1_001, Command::SetInputSend(InputSend::Ott, true))]
+}
+
+/// The rig as a host runs it with the player's input: `input` from the first frame, every output kept
+/// from it, `script` sent at its frames past it; with `plugin`, an amp-sim (57 frames of latency) in the
+/// live slot 0, else that slot live and empty. Nothing is rendered yet.
+fn rig(block: usize, script: &Script, plugin: bool, input: impl Fn(Frame) -> f32 + 'static) -> (Rig, Frame) {
+    let mut rig = Rig::with(Opts { align: PHYS + LIMITER, block, ..Default::default() });
+    if plugin {
+        rig.install(0, Box::new(Delay::new(PLUGIN)));
+    }
+    rig.set_input(input);
     let t0 = rig.frame;
+    rig.keep_output();
     for (at, command) in script {
         rig.send_at(t0 + at, *command);
     }
-    rig.keep_output();
-    rig.send_at(t0 + 300, Command::NoteOn(64, 0.8));
-    rig.send_at(t0 + 301, Command::NoteOn(71, 0.8));
-    rig.send_at(t0 + 40_000, Command::NoteOff(64));
-    rig.advance(96_000);
+    (rig, t0)
+}
+
+/// `script` over `frames` of [`rig`].
+fn play(block: usize, script: &Script, plugin: bool, frames: Frame) -> Rig {
+    let (mut rig, _) = rig(block, script, plugin, riff());
+    rig.advance(frames);
     rig
 }
 
+struct Take {
+    rig: Rig,
+    t0: Frame,
+    /// The take's first frame (the loop's frame 0), absolute.
+    start: Frame,
+    pcm: Vec<f32>,
+}
+
+/// A FIXED one-bar first take on lane 0 of [`rig`], REC pressed at `PRESS`, rendered to its commit.
+fn take(block: usize, script: &Script, plugin: bool, input: impl Fn(Frame) -> f32 + 'static) -> Take {
+    let (mut rig, t0) = rig(block, script, plugin, input);
+    rig.send_at(t0, Command::SetFixedLength(true));
+    rig.send_at(t0, Command::SetFixedBars(1.0));
+    rig.send_at(t0 + PRESS, Command::RecDub(0));
+    rig.advance_to(t0 + PRESS + 1);
+    let start = rig.start_frame();
+    let downbeat = t0 + PRESS + 4 * 24_000;
+    assert_eq!(start, downbeat + PHYS + if plugin { PLUGIN } else { 0 } + LIMITER, "the OTT adds nothing to the alignment");
+    rig.advance_to(rig.end_frame() + 1);
+    let pcm = rig.pcm(0);
+    assert_eq!(pcm.len(), 96_000, "one bar");
+    Take { rig, t0, start, pcm }
+}
+
+impl Take {
+    /// The monitor over the take's frames.
+    fn heard(&self) -> &[f32] {
+        let s = (self.start - self.t0) as usize;
+        &self.rig.monitor[s..s + self.pcm.len()]
+    }
+}
+
+#[test]
+fn what_is_heard_is_what_is_recorded() {
+    // An amp-sim in the live slot, the OTT on: the take is the monitor's signal, OTT and all, from the
+    // take's first frame, which is the alignment (input and output latency, the plugin's, the limiter's
+    // pre-delay) after the downbeat. Sample for sample, in value: the record tap sums the slots' paths
+    // onto a 0.0, which can turn a −0.0 into a 0.0.
+    let off = take(128, &Script::new(), true, riff());
+    for depth in [DEFAULT_DEPTH, 1.0] {
+        let on = take(128, &ott(depth), true, riff());
+        assert_eq!(first_value_difference(&on.pcm, on.heard()), None, "DEPTH {depth}: the take is not what was heard");
+        assert!(first_difference(&on.pcm, &off.pcm).is_some(), "DEPTH {depth}: the take carries no OTT");
+    }
+    assert_eq!(first_value_difference(&off.pcm, off.heard()), None, "off: the take is not what was heard");
+}
+
+/// The OTT setting `command` changes, if any.
+fn setting(command: &Command) -> Option<Setting> {
+    Some(match *command {
+        Command::SetInputSend(InputSend::Ott, on) => Setting::On(on),
+        Command::SetInputSendParam(InputSendParam::OttDepth, v) => Setting::Depth(v),
+        Command::SetInputSendParam(InputSendParam::OttTime, v) => Setting::Time(v),
+        Command::SetInputSendParam(InputSendParam::OttUpward, v) => Setting::Upward(v),
+        Command::SetInputSendParam(InputSendParam::OttDownward, v) => Setting::Downward(v),
+        _ => return None,
+    })
+}
+
+/// `x` through a standalone mono OTT, `script`'s settings applied on their frames.
+fn standalone(x: &[f32], script: &Script) -> Vec<f32> {
+    let mut ott = MonoOtt::new(48000);
+    x.iter()
+        .enumerate()
+        .map(|(k, &v)| {
+            for (_, s) in script.iter().filter(|(at, _)| *at as usize == k) {
+                if let Some(s) = setting(s) {
+                    ott.set(s);
+                }
+            }
+            ott.frame([v])[0]
+        })
+        .collect()
+}
+
+#[test]
+fn a_slots_ott_is_a_standalone_ott_on_its_output_every_control_on_its_frame() {
+    // Every control moved to a value of its own (so a control routed to another fails), a fade reversed
+    // midway: the monitor is the slot's output with the OTT off, through a standalone OTT.
+    let script: Script = vec![
+        (1_001, Command::SetInputSend(InputSend::Ott, true)),
+        (9_333, Command::SetInputSendParam(InputSendParam::OttDepth, 1.0)),
+        (15_013, Command::SetInputSendParam(InputSendParam::OttTime, 0.8)),
+        (21_017, Command::SetInputSendParam(InputSendParam::OttUpward, 0.6)),
+        (27_011, Command::SetInputSendParam(InputSendParam::OttDownward, 0.3)),
+        (40_077, Command::SetInputSend(InputSend::Ott, false)),
+        (40_237, Command::SetInputSend(InputSend::Ott, true)),
+        (50_005, Command::SetInputSendParam(InputSendParam::OttDepth, 0.2)),
+    ];
+    let frames = 72_000;
+    let off = play(128, &Script::new(), true, frames);
+    let on = play(128, &script, true, frames);
+    assert_eq!(first_value_difference(&on.monitor, &standalone(&off.monitor, &script)), None);
+}
+
+#[test]
+fn a_stamped_toggle_inside_a_block_switches_the_slots_ott_on_its_frame() {
+    // A press of the OTT's toggle, stamped on a frame inside a block: the rack's render-ahead
+    // splits at it (`Command::reaches_slots`), so it switches on the frame its setter would.
+    let at: Frame = 1_001;
+    let frames = 24_000;
+    let off = play(128, &Script::new(), true, frames);
+    let setter = play(128, &vec![(at, Command::SetInputSend(InputSend::Ott, true))], true, frames);
+    assert_eq!(first_difference(&setter.monitor, &off.monitor), Some(at as usize), "the setter switches on its frame");
+    let toggle: Script = vec![(at, Command::Action(Action::Toggle(Toggle::Send(InputSend::Ott))))];
+    for block in [64, 256, 480] {
+        assert_ne!(at % block as Frame, 0, "block {block}: the toggle's frame is on a block start");
+        let pressed = play(block, &toggle, true, frames);
+        assert_eq!(first_difference(&pressed.monitor, &setter.monitor), None, "block {block}: the toggle is not its setter on its frame");
+    }
+}
+
+#[test]
+fn a_slots_ott_sits_after_its_gain() {
+    // The slot at −12 dB: the monitor is the gained slot output through a standalone OTT, not the OTT's
+    // output turned down (the OTT is level-dependent, so the order is heard).
+    let gain: Script = vec![(0, Command::SetSlotGain(0, 0.25))];
+    let controls: Script = vec![(1_000, Command::SetInputSendParam(InputSendParam::OttDepth, 1.0)), (1_001, Command::SetInputSend(InputSend::Ott, true))];
+    let script: Script = gain.iter().chain(&controls).copied().collect();
+    let frames = 72_000;
+    let off = play(128, &gain, true, frames);
+    let on = play(128, &script, true, frames);
+    assert_eq!(first_value_difference(&on.monitor, &standalone(&off.monitor, &script)), None, "the OTT is not on the gained output");
+    // OTT then gain, from where the gain's glide has settled.
+    let ungained = play(128, &Script::new(), true, frames);
+    let before: Vec<f32> = standalone(&ungained.monitor, &controls).iter().map(|v| v * 0.25).collect();
+    let settled = 24_000;
+    let worst = on.monitor[settled..].iter().zip(&before[settled..]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let top = peak(&on.monitor[settled..]);
+    println!("OTT after the gain vs before it: worst difference {worst:.4} against a peak of {top:.4}");
+    assert!(worst > 0.05 * top, "OTT-then-gain is indistinguishable here ({worst} against {top}): the test cannot see the order");
+}
+
+#[test]
+fn off_leaves_the_monitor_and_the_take_untouched() {
+    let off = take(128, &Script::new(), true, riff());
+    // Settings moved while off: nothing changes.
+    let moved = take(
+        128,
+        &vec![
+            (5, Command::SetInputSendParam(InputSendParam::OttDepth, 1.0)),
+            (6_007, Command::SetInputSend(InputSend::Ott, false)),
+            (7_001, Command::SetInputSendParam(InputSendParam::OttTime, 0.9)),
+            (8_003, Command::SetInputSendParam(InputSendParam::OttUpward, 0.1)),
+            (9_000, Command::SetInputSendParam(InputSendParam::OttDownward, 0.0)),
+            (130_011, Command::SetInputSendParam(InputSendParam::OttDepth, 0.0)),
+        ],
+        true,
+        riff(),
+    );
+    for (name, a, b) in [("monitor", &moved.rig.monitor, &off.rig.monitor), ("record tap", &moved.rig.record, &off.rig.record), ("take", &moved.pcm, &off.pcm)] {
+        assert_eq!(first_difference(a, b), None, "the {name} moved with the OTT off");
+    }
+    // On, then off before the take: from the fade's last frame on, the monitor is the dry one again, bit
+    // for bit, and so is the take.
+    let fade = (FADE_SECONDS * 48000.0) as usize;
+    let back = take(128, &vec![(1_000, Command::SetInputSend(InputSend::Ott, true)), (20_000, Command::SetInputSend(InputSend::Ott, false))], true, riff());
+    assert_eq!(first_difference(&back.rig.monitor, &off.rig.monitor), Some(1_000), "it was on from its frame");
+    let dry = 20_000 + fade - 1;
+    assert_eq!(first_difference(&back.rig.monitor[dry..], &off.rig.monitor[dry..]), None, "off and settled: the dry monitor");
+    assert_eq!(first_difference(&back.pcm, &off.pcm), None, "off and settled: the dry take");
+}
+
+/// [`play`] with the Lead selected and a chord held from frame 300 to 40 000, then ringing out, two
+/// seconds.
+fn with_chord(block: usize, script: &Script) -> Rig {
+    let mut s: Script = vec![
+        (0, Command::SetMetronome(false)),
+        (0, Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead))),
+        (300, Command::NoteOn(64, 0.8)),
+        (301, Command::NoteOn(71, 0.8)),
+        (40_000, Command::NoteOff(64)),
+        (40_000, Command::NoteOff(71)),
+    ];
+    s.extend(script.iter().copied());
+    play(block, &s, false, 96_000)
+}
+
+#[test]
+fn a_control_lands_on_its_frame() {
+    // The OTT on from frame 1 001; each control moved at 30 077 (off the quanta) against the same run
+    // without it: bit for bit the same before it, on the monitor (the slot's instance) and the bus (the
+    // instruments'). DEPTH glides from its frame, so it is heard on it; TIME, UP and DOWN change what
+    // the envelopes or the curve's sides do, so they are heard when those next matter.
+    let at = 30_077usize;
+    let on = ott(DEFAULT_DEPTH);
+    let base = with_chord(128, &on);
+    for (name, command) in [
+        ("DEPTH", Command::SetInputSendParam(InputSendParam::OttDepth, 1.0)),
+        ("TIME", Command::SetInputSendParam(InputSendParam::OttTime, 1.0)),
+        ("UP", Command::SetInputSendParam(InputSendParam::OttUpward, 0.0)),
+        ("DOWN", Command::SetInputSendParam(InputSendParam::OttDownward, 0.0)),
+    ] {
+        let mut moved = on.clone();
+        moved.push((at as Frame, command));
+        let rig = with_chord(128, &moved);
+        for (tap, x, y) in [("monitor", &base.monitor, &rig.monitor), ("bus left", &base.bus, &rig.bus), ("bus right", &base.bus_right, &rig.bus_right)] {
+            let first = first_difference(x, y);
+            if name == "DEPTH" {
+                assert_eq!(first, Some(at), "{name}: the {tap}");
+            } else {
+                assert!(first.is_some_and(|k| (at..at + 48_000).contains(&k)), "{name}: the {tap} first moved at {first:?}, not within a second of {at}");
+            }
+        }
+    }
+}
+
+#[test]
+fn on_every_control_moved_and_a_reversed_fade_render_the_same_at_any_block_size() {
+    // A take through the amp-sim with the Lead playing over it, the OTT's every change off the quanta,
+    // and a second past the commit, the live riff over the loop.
+    let fade = (FADE_SECONDS * 48000.0) as Frame;
+    let script: Script = vec![
+        (0, Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead))),
+        (300, Command::NoteOn(64, 0.8)),
+        (301, Command::NoteOn(71, 0.8)),
+        (1_001, Command::SetInputSend(InputSend::Ott, true)),
+        (9_333, Command::SetInputSendParam(InputSendParam::OttDepth, 1.0)),
+        (12_345, Command::SetInputSendParam(InputSendParam::OttTime, 0.3)),
+        (20_011, Command::SetInputSendParam(InputSendParam::OttUpward, 0.7)),
+        (25_013, Command::SetInputSendParam(InputSendParam::OttDownward, 0.6)),
+        (30_077, Command::SetInputSend(InputSend::Ott, false)),
+        // Mid-fade: it turns back from the weight reached.
+        (30_077 + fade / 3, Command::SetInputSend(InputSend::Ott, true)),
+        (40_000, Command::NoteOff(64)),
+        (50_005, Command::SetInputSendParam(InputSendParam::OttDepth, 0.2)),
+        (130_003, Command::NoteOn(67, 0.9)),
+        (150_017, Command::SetInputSendParam(InputSendParam::OttTime, 0.95)),
+        (180_001, Command::NoteOff(67)),
+    ];
+    let render = |block: usize| {
+        let mut t = take(block, &script, true, riff());
+        t.rig.advance(48_000);
+        t
+    };
+    let reference = render(128);
+    let plain = take(128, &Script::new(), true, riff());
+    let n = plain.rig.monitor.len();
+    assert!(first_difference(&reference.rig.monitor[..n], &plain.rig.monitor).is_some_and(|k| k >= 1_001), "the OTT changed the monitor from its frame on");
+    for block in [1, 64, 127, 480] {
+        let t = render(block);
+        let r = &reference.rig;
+        for (name, a, b) in [
+            ("monitor", &t.rig.monitor, &r.monitor),
+            ("record tap", &t.rig.record, &r.record),
+            ("bus left", &t.rig.bus, &r.bus),
+            ("bus right", &t.rig.bus_right, &r.bus_right),
+            ("device left", &t.rig.heard, &r.heard),
+            ("device right", &t.rig.heard_right, &r.heard_right),
+            ("share left", &t.rig.share, &r.share),
+            ("share right", &t.rig.share_right, &r.share_right),
+            ("take", &t.pcm, &reference.pcm),
+        ] {
+            assert_eq!(first_difference(a, b), None, "block {block}: the {name} differs from block 128");
+        }
+    }
+}
+
+/// The Lead's chord on a silent input, the click off, the device's input side 400 frames: the OTT on
+/// at DEPTH `depth` from the first kept frame (None: off). 1.5 s.
+fn lead(depth: Option<f64>) -> Rig {
+    let mut rig = Rig::new();
+    rig.input_latency = 400;
+    rig.set(Command::SetMetronome(false));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
+    let t0 = rig.frame;
+    rig.keep_output();
+    if let Some(d) = depth {
+        rig.send_at(t0, Command::SetInputSendParam(InputSendParam::OttDepth, d));
+        rig.send_at(t0, Command::SetInputSend(InputSend::Ott, true));
+    }
+    rig.send_at(t0 + 300, Command::NoteOn(64, 0.9));
+    rig.send_at(t0 + 301, Command::NoteOn(71, 0.9));
+    rig.send_at(t0 + 302, Command::NoteOn(40, 1.0));
+    rig.send_at(t0 + 40_000, Command::NoteOff(64));
+    rig.advance(72_000);
+    rig
+}
+
+#[test]
+fn the_built_in_instruments_ott_is_on_what_is_heard_and_what_is_recorded() {
+    // Nothing but the Lead on the bus: the bus is the instruments' sum after their OTT, and the record
+    // tap is that sum's mono half, the input side less one quantum (272 frames) late.
+    let lag = 400 - 128;
+    let off = lead(None);
+    for depth in [None, Some(DEFAULT_DEPTH), Some(1.0)] {
+        let rig = lead(depth);
+        let mono: Vec<f32> = rig.bus.iter().zip(&rig.bus_right).map(|(&l, &r)| 0.5 * (l + r)).collect();
+        let n = mono.len() - lag;
+        assert_eq!(first_value_difference(&rig.record[lag..], &mono[..n]), None, "DEPTH {depth:?}: the take records what the bus hears");
+        if let Some(d) = depth {
+            let mut ott = StereoOtt::new(48000);
+            ott.set(Setting::Depth(d));
+            ott.set(Setting::On(true));
+            let (mut l, mut r) = (off.bus.clone(), off.bus_right.clone());
+            ott.process(&mut l, &mut r);
+            assert_eq!(first_value_difference(&rig.bus, &l), None, "DEPTH {d}: the bus, left, is the OTT on the instruments");
+            assert_eq!(first_value_difference(&rig.bus_right, &r), None, "DEPTH {d}: the bus, right");
+            assert!(first_difference(&rig.bus, &off.bus).is_some(), "DEPTH {d}: the OTT is on the bus");
+        }
+    }
+}
+
+#[test]
+fn the_loops_and_the_click_never_pass_it() {
+    // A count-in over an empty looper: the device carries the click alone, the same to the bit.
+    let count_in = |on: bool| {
+        let mut rig = Rig::new();
+        rig.set(Command::SetInputSendParam(InputSendParam::OttDepth, 1.0));
+        rig.set(Command::SetInputSend(InputSend::Ott, on));
+        rig.keep_output();
+        rig.press(Command::RecDub(0));
+        rig.advance(rig.seconds(1.5));
+        rig
+    };
+    let (off, on) = (count_in(false), count_in(true));
+    assert!(peak(&off.heard) > 0.05, "the count-in clicks");
+    assert_eq!(first_difference(&on.heard, &off.heard), None, "the click");
+    // A loop playing (recorded with the OTT off) over a silent input, the click on.
+    let looping = |on: bool| {
+        let mut rig = Rig::new();
+        rig.set_input(riff());
+        rig.record_first_take(0, 1, 2400);
+        rig.set_level(0.0);
+        rig.idle();
+        rig.advance(rig.seconds(1.0));
+        rig.set(Command::SetInputSendParam(InputSendParam::OttDepth, 1.0));
+        rig.set(Command::SetInputSend(InputSend::Ott, on));
+        rig.keep_output();
+        rig.advance(rig.master());
+        rig
+    };
+    let (off, on) = (looping(false), looping(true));
+    assert!(peak(&off.heard) > 0.1, "the loop plays");
+    assert_eq!(first_difference(&on.heard, &off.heard), None, "the loop");
+    assert_eq!(first_difference(&on.heard_right, &off.heard_right), None, "the loop, right");
+}
+
 /// A plugin instrument that plays a square at ±`amp`, `half` frames a half period, from device frame
-/// `start` (silent before): a hard synth onset on the bus before the OTT, with no click and no monitor.
+/// `start` (silent before): a hard synth onset through its slot's OTT, with no click and no monitor.
 struct Square {
     start: Frame,
     half: Frame,
@@ -327,16 +970,21 @@ impl SlotProcessor for Square {
     }
 }
 
-/// A square at ±`amp` and `freq` Hz out of a second of silence through the engine at 48 kHz, the OTT on
-/// at `amount` (None: off) and settled before it: the device's and the Share's peaks after their
-/// limiters and the bus's before them, linear, over the onset and two seconds after it.
-fn square_onset(freq: f64, amp: f32, amount: Option<f32>) -> (f64, f64, f64) {
+/// The OTT on at `depth` (None: off), settled.
+fn ott_on(rig: &mut Rig, depth: Option<f64>) {
+    if let Some(d) = depth {
+        rig.set(Command::SetInputSendParam(InputSendParam::OttDepth, d));
+        rig.set(Command::SetInputSend(InputSend::Ott, true));
+    }
+}
+
+/// A square at ±`amp` and `freq` Hz out of a second of silence from a plugin instrument in slot 1,
+/// 48 kHz, the OTT at `depth`: the device's and the Share's peaks after their limiters and the bus's
+/// before them, linear, over the onset and two seconds after it.
+fn square_onset(freq: f64, amp: f32, depth: Option<f64>) -> (f64, f64, f64) {
     let mut rig = Rig::new();
     rig.set(Command::SetMetronome(false));
-    if let Some(a) = amount {
-        rig.set(Command::SetMasterOttAmount(a));
-        rig.set(Command::SetMasterOtt(true));
-    }
+    ott_on(&mut rig, depth);
     let start = rig.frame + rig.seconds(1.0);
     rig.install(1, Box::new(Square { start, half: (48000.0 / (2.0 * freq)).round() as Frame, amp }));
     rig.advance(rig.seconds(0.5));
@@ -349,205 +997,125 @@ fn square_onset(freq: f64, amp: f32, amount: Option<f32>) -> (f64, f64, f64) {
     (both(&rig.heard, &rig.heard_right), both(&rig.share, &rig.share_right), both(&rig.bus, &rig.bus_right))
 }
 
-#[test]
-fn on_an_amount_change_and_a_reversed_fade_render_the_same_at_any_block_size() {
-    let fade = (FADE_SECONDS * 48000.0) as Frame;
-    let script: Script = vec![
-        (1_001, Command::SetMasterOtt(true)),
-        (9_333, Command::SetMasterOttAmount(1.0)),
-        (30_077, Command::SetMasterOtt(false)),
-        // Mid-fade: it turns back from the weight reached.
-        (30_077 + fade / 3, Command::SetMasterOtt(true)),
-        (50_005, Command::SetMasterOttAmount(0.2)),
-        (70_011, Command::SetMasterOtt(false)),
-    ];
-    let reference = jam(128, &script, true);
-    let off = jam(128, &Script::new(), true);
-    assert!(first_difference(&reference.bus, &off.bus).is_some_and(|k| k >= 1_001), "the OTT changed the bus from its frame on");
-    for block in [1, 64, 127, 480] {
-        let rig = jam(block, &script, true);
-        for (name, a, b) in [
-            ("bus left", &rig.bus, &reference.bus),
-            ("bus right", &rig.bus_right, &reference.bus_right),
-            ("device left", &rig.heard, &reference.heard),
-            ("device right", &rig.heard_right, &reference.heard_right),
-            ("share left", &rig.share, &reference.share),
-            ("share right", &rig.share_right, &reference.share_right),
-        ] {
-            assert_eq!(first_difference(a, b), None, "block {block}: the {name} differs from block 128");
-        }
-    }
-}
-
-#[test]
-fn an_amount_change_lands_on_its_frame() {
-    // The same jam, on from frame 1 001, with and without an AMOUNT change at 30 077 (off the quanta):
-    // bit for bit the same before it, different from it on. An engine that dropped AMOUNT commands, or
-    // applied one at a block or quantum start, fails here.
-    let at = 30_077;
-    let on: Script = vec![(1_001, Command::SetMasterOtt(true))];
-    let mut moved = on.clone();
-    moved.push((at, Command::SetMasterOttAmount(1.0)));
-    let (a, b) = (jam(128, &on, false), jam(128, &moved, false));
-    for (name, x, y) in [("left", &a.bus, &b.bus), ("right", &a.bus_right, &b.bus_right)] {
-        assert_eq!(first_difference(x, y), Some(at as usize), "the {name} bus");
-        let late = at as usize + 4_800..at as usize + 9_600;
-        assert!(first_difference(&x[late.clone()], &y[late]).is_some(), "the {name} bus 100 ms on");
-    }
-}
-
-#[test]
-fn a_switch_inside_a_fade_turns_from_the_weight_reached() {
-    let mut ott = settled(48000, DEFAULT_AMOUNT, false);
-    let step = 1.0 / (FADE_SECONDS * 48000.0);
-    let (mut l, mut r) = (vec![0.1f32; 200], vec![0.1f32; 200]);
-    ott.set_on(true);
-    ott.process(&mut l[..160], &mut r[..160]);
-    assert!((ott.weight() - 160.0 * step).abs() < 1e-12);
-    ott.set_on(false);
-    ott.process(&mut l[160..], &mut r[160..]);
-    assert!((ott.weight() - 120.0 * step).abs() < 1e-12, "weight {}", ott.weight());
-}
-
-#[test]
-fn the_fade_lands_exactly_on_its_last_frame() {
-    // Counted, not accumulated: 480 frames at 48 kHz reach exactly 1 and exactly 0 (summing 1/480 left
-    // 2.9e-15 on the off fade's last frame and settled one frame later).
-    let fade = (FADE_SECONDS * 48000.0) as usize;
-    let mut ott = settled(48000, DEFAULT_AMOUNT, false);
-    let (mut l, mut r) = (vec![0.1f32; fade], vec![0.1f32; fade]);
-    ott.set_on(true);
-    ott.process(&mut l[..fade - 1], &mut r[..fade - 1]);
-    assert!(ott.weight() < 1.0);
-    ott.process(&mut l[fade - 1..], &mut r[fade - 1..]);
-    assert_eq!(ott.weight(), 1.0);
-    ott.set_on(false);
-    ott.process(&mut l[..fade - 1], &mut r[..fade - 1]);
-    assert!(ott.weight() > 0.0);
-    ott.process(&mut l[fade - 1..], &mut r[fade - 1..]);
-    assert_eq!(ott.weight(), 0.0);
-}
-
-#[test]
-fn off_leaves_the_device_output_and_the_share_mix_untouched() {
-    let off = jam(128, &Script::new(), true);
-    // Settings moved while off: nothing changes.
-    let moved = jam(128, &vec![(5, Command::SetMasterOttAmount(1.0)), (6_007, Command::SetMasterOtt(false)), (9_000, Command::SetMasterOttAmount(0.0))], true);
-    for (name, a, b) in [
-        ("device left", &moved.heard, &off.heard),
-        ("device right", &moved.heard_right, &off.heard_right),
-        ("share left", &moved.share, &off.share),
-        ("share right", &moved.share_right, &off.share_right),
-    ] {
-        assert_eq!(first_difference(a, b), None, "the {name} moved with the OTT off");
-    }
-    // On, then off: from the fade's end the bus is the dry bus again, bit for bit (the limiters after it
-    // carry their own memory of what it did).
-    let fade = (FADE_SECONDS * 48000.0) as usize;
-    let back = jam(128, &vec![(1_000, Command::SetMasterOtt(true)), (20_000, Command::SetMasterOtt(false))], true);
-    assert_eq!(first_difference(&back.bus[1_000..], &off.bus[1_000..]), Some(0), "it was on from its frame");
-    // The fade's last frame (its 480th, from the command's) is already the dry bus.
-    let dry = 20_000 + fade - 1;
-    assert_eq!(first_difference(&back.bus[dry..], &off.bus[dry..]), None, "off and settled: the dry bus");
-    assert_eq!(first_difference(&back.bus_right[dry..], &off.bus_right[dry..]), None);
-}
-
-#[test]
-fn the_click_never_passes_the_ott() {
-    // A count-in over an empty looper: the bus carries the click alone, and with the OTT on it is the
-    // same click to the bit.
-    let count_in = |on: bool| {
-        let mut rig = Rig::new();
-        rig.set(Command::SetMasterOttAmount(1.0));
-        rig.set(Command::SetMasterOtt(on));
-        rig.keep_output();
-        rig.press(Command::RecDub(0));
-        rig.advance(rig.seconds(1.5));
-        rig
-    };
-    let (off, on) = (count_in(false), count_in(true));
-    assert!(peak(&off.heard) > 0.05, "the count-in clicks");
-    assert_eq!(first_difference(&on.heard, &off.heard), None);
-}
-
-#[test]
-fn a_non_finite_amount_is_dropped_and_one_past_one_clamps() {
-    let set = vec![(10, Command::SetMasterOttAmount(0.8)), (11, Command::SetMasterOtt(true))];
-    let mut with = set.clone();
-    with.extend([(2_003, Command::SetMasterOttAmount(f32::NAN)), (2_004, Command::SetMasterOttAmount(f32::INFINITY)), (2_005, Command::SetMasterOttAmount(f32::NEG_INFINITY))]);
-    let (a, b) = (jam(128, &set, false), jam(128, &with, false));
-    assert_eq!(first_difference(&a.bus, &b.bus), None, "a value that is no number changed the AMOUNT");
-    let one = jam(128, &vec![(10, Command::SetMasterOttAmount(1.0)), (11, Command::SetMasterOtt(true))], false);
-    let over = jam(128, &vec![(10, Command::SetMasterOttAmount(3.0)), (11, Command::SetMasterOtt(true))], false);
-    assert_eq!(first_difference(&one.bus, &over.bus), None, "3 is 1");
-    let mut ott = Ott::new(48000);
-    ott.set_amount(0.8);
-    ott.set_amount(f32::NAN);
-    assert_eq!(ott.amount(), 0.8);
-}
-
-#[test]
-fn silence_a_full_scale_square_and_near_denormal_input_stay_finite() {
-    let sr = 48000;
-    let mut ott = settled(sr, 1.0, true);
-    let square: Vec<f32> = (0..2 * sr as usize).map(|k| if (k / 240) % 2 == 0 { 1.0 } else { -1.0 }).collect();
-    let tiny: Vec<f32> = (0..sr as usize).map(|k| if k % 2 == 0 { 1e-38 } else { -1e-40 }).collect();
-    let silence = vec![0.0f32; 20 * sr as usize];
-    for (name, x) in [("silence", &silence[..sr as usize]), ("a full-scale square", &square[..]), ("near-denormal input", &tiny[..]), ("a decay into silence", &silence[..])] {
-        let (mut l, mut r) = (x.to_vec(), x.to_vec());
-        run(&mut ott, &mut l, &mut r);
-        assert!(l.iter().chain(&r).all(|v| v.is_finite()), "{name}: a sample that is no number");
-        // The crossovers' phase turns a square's edges into spikes (the cascade alone peaks at +5.2
-        // dBFS) and the makeup rides on them (+2.8 dBFS for this square at AMOUNT 1 without the
-        // ceiling): the ceiling holds them under −1.5 dBFS.
-        assert!(peak(&l).max(peak(&r)) as f64 <= CEILING, "{name}: peak {}", peak(&l));
-    }
-    // Twenty seconds after the input stopped every state has been flushed: exact silence.
-    let (mut l, mut r) = (vec![0.0f32; 128], vec![0.0f32; 128]);
-    ott.process(&mut l, &mut r);
-    assert!(l.iter().chain(&r).all(|&v| v == 0.0));
+/// A square at ±`amp` and `freq` Hz on the live input (slot 0, empty) out of a second of silence, the
+/// OTT at `depth`: the monitor's peak, which no limiter follows.
+fn live_square(freq: f64, amp: f32, depth: Option<f64>) -> f64 {
+    let mut rig = Rig::new();
+    rig.set(Command::SetMetronome(false));
+    ott_on(&mut rig, depth);
+    let start = rig.frame + rig.seconds(1.0);
+    let half = (48000.0 / (2.0 * freq)).round() as Frame;
+    rig.set_input(move |f| if f < start { 0.0 } else if ((f - start) / half) % 2 == 0 { amp } else { -amp });
+    rig.keep_output();
+    rig.advance(rig.seconds(3.0));
+    assert!(rig.monitor.iter().all(|v| v.is_finite()), "a sample that is no number");
+    peak(&rig.monitor) as f64
 }
 
 /// −0.3 dBFS: what the ceiling guarantees at the device and in the Share mix, after the limiter's
-/// +0.57 dB makeup (measured −0.93 dBFS for every hard square onset below).
+/// +0.57 dB makeup.
 const DEVICE_CEILING_DB: f64 = -0.3;
 
 #[test]
-fn a_hard_onset_leaves_the_device_and_the_share_under_full_scale() {
-    // A square out of silence, a plugin instrument on the bus: the OTT's makeup on the crossovers' phase
-    // spikes took the device to +1.05 dBFS at AMOUNT 1 (±0.8, 200 Hz) before the ceiling.
+fn a_hard_onset_leaves_the_device_the_share_and_the_monitor_under_full_scale() {
+    // A square out of silence: the OTT's makeup on the crossovers' phase spikes took the device to +1.05
+    // dBFS at DEPTH 1 (±0.8, 200 Hz) before the ceiling, where the OTT sat on the master.
     for (amp, freq) in [(0.8f32, 100.0), (0.8, 200.0), (1.0, 200.0)] {
-        for amount in [0.0f32, 0.5, 1.0] {
-            let (device, share, _) = square_onset(freq, amp, Some(amount));
+        for depth in [0.0, 0.5, 1.0] {
+            let (device, share, _) = square_onset(freq, amp, Some(depth));
             for (name, x) in [("device", device), ("Share", share)] {
-                assert!(db(x) <= DEVICE_CEILING_DB, "±{amp} {freq} Hz at AMOUNT {amount}: the {name} at {:+.2} dBFS", db(x));
+                assert!(db(x) <= DEVICE_CEILING_DB, "a plugin instrument's ±{amp} {freq} Hz at DEPTH {depth}: the {name} at {:+.2} dBFS", db(x));
             }
+            // The monitor has no limiter: the ceiling alone holds the live input under −1.5 dBFS.
+            let monitor = live_square(freq, amp, Some(depth));
+            assert!(monitor <= CEILING, "±{amp} {freq} Hz on the input at DEPTH {depth}: the monitor at {:+.2} dBFS", db(monitor));
         }
     }
 }
 
+// ── Latency ────────────────────────────────────────────────────────────────────────────────────────
+
+/// Where the impulse and the pluck land, frames past the take's first frame.
+const IMPULSE: usize = 20_000;
+const PLUCK: usize = 50_000;
+
+/// The first frame from `from` with |x| over −60 dBFS (0.001), and the loudest frame within `len` of
+/// `from`, both counted from `from`.
+fn arrival(x: &[f32], from: usize, len: usize) -> (usize, usize) {
+    let w = &x[from..from + len];
+    let first = w.iter().position(|v| v.abs() > 0.001).expect("nothing arrived");
+    let loudest = w.iter().enumerate().fold((0, 0.0f32), |m, (k, v)| if v.abs() > m.1 { (k, v.abs()) } else { m }).0;
+    (first, loudest)
+}
+
+/// The crossover network's group delay at `freq` (the unity bands' sum, AP88 · AP2500), frames: from
+/// the coefficients, and measured on the OTT at DEPTH 0 (−dφ/dω between `freq` ∓ 1 Hz).
+fn crossover_delay(freq: f64) -> (f64, f64) {
+    let sr = 48000.0;
+    let computed = Section::new(Kind::Allpass, LOW_SPLIT, sr).group_delay(freq, sr) + Section::new(Kind::Allpass, HIGH_SPLIT, sr).group_delay(freq, sr);
+    let phase = |f: f64| {
+        let x = sine(f, -12.0, 96_000, 48_000);
+        let mut ott = settled(48_000, 0.0, true);
+        let (mut l, mut r) = (x.clone(), x.clone());
+        run(&mut ott, &mut l, &mut r);
+        // A whole second: a whole number of periods of an integer frequency.
+        let dft = |v: &[f32]| (48_000..96_000).fold(Complex::new(0.0, 0.0), |acc, k| acc + Complex::from_polar(v[k] as f64, -2.0 * PI * f * k as f64 / sr));
+        (dft(&l) / dft(&x)).arg()
+    };
+    let mut d = phase(freq + 1.0) - phase(freq - 1.0);
+    d = (d + PI).rem_euclid(2.0 * PI) - PI;
+    (computed, -d / (2.0 * PI * 2.0 / sr))
+}
+
 #[test]
-fn a_five_lane_jam_leaves_the_device_under_full_scale() {
-    let mut rig = five_lanes();
-    rig.set(Command::SetMasterOttAmount(1.0));
-    rig.set(Command::SetMasterOtt(true));
-    rig.advance(rig.seconds(0.5));
-    rig.keep_output();
-    rig.advance(rig.master());
-    let device = peak(&rig.heard).max(peak(&rig.heard_right)) as f64;
-    assert!(rig.heard.iter().chain(&rig.heard_right).all(|v| v.is_finite()));
-    assert!(db(device) <= DEVICE_CEILING_DB, "the device at {:+.2} dBFS", db(device));
+fn the_ott_adds_no_latency_samples() {
+    // An impulse at 0.5 and a plucked E3 played into a live empty slot during a take, the OTT off and on
+    // at its defaults: each arrives on the same frame on the monitor and in the take. The crossovers
+    // turn the phase, a group delay of their own below (most of it at the low split), which moves no
+    // first sample: the high band passes an impulse's first frame at about 0.62 of it.
+    let start = 48_000 + PRESS + 4 * 24_000 + PHYS + LIMITER;
+    let note = pluck::once(&[pluck::accent(0.0, 52, 2.0)], 24000.0, 48_000, 48_000, 0.3);
+    let input = move |f: Frame| {
+        let k = f - start;
+        let impulse = if k == IMPULSE as Frame { 0.5 } else { 0.0 };
+        let pluck = if k >= PLUCK as Frame { note.get((k - PLUCK as Frame) as usize).copied().unwrap_or(0.0) } else { 0.0 };
+        impulse + pluck
+    };
+    let input = Rc::new(input);
+    let mut seen = Vec::new();
+    for (name, script) in [("off", Script::new()), ("on at the defaults", vec![(1_000, Command::SetInputSend(InputSend::Ott, true))])] {
+        let i = input.clone();
+        let t = take(128, &script, false, move |f| i(f));
+        assert_eq!(t.start, start);
+        let s = (t.start - t.t0) as usize;
+        let rows = [
+            ("impulse, monitor", arrival(&t.rig.monitor, s + IMPULSE, 4_800)),
+            ("impulse, take", arrival(&t.pcm, IMPULSE, 4_800)),
+            ("pluck, monitor", arrival(&t.rig.monitor, s + PLUCK, 9_600)),
+            ("pluck, take", arrival(&t.pcm, PLUCK, 9_600)),
+        ];
+        for (what, (first, loudest)) in rows {
+            println!("OTT {name:<18} {what:<17}: first frame over −60 dBFS +{first}, loudest +{loudest} ({:.2} ms)", loudest as f64 / 48.0);
+        }
+        seen.push(rows.map(|r| r.1 .0));
+    }
+    assert_eq!(seen[0], seen[1], "the first arrivals (impulse monitor, impulse take, pluck monitor, pluck take) moved with the OTT on");
+    for f in [100.0, 1000.0, 5000.0] {
+        let (computed, measured) = crossover_delay(f);
+        println!("crossover group delay at {f:>4} Hz: {computed:.2} frames ({:.3} ms) from the coefficients, {measured:.2} measured", computed / 48.0);
+        assert!((computed - measured).abs() < 0.05 * computed.abs().max(1.0), "at {f} Hz: computed {computed:.3}, measured {measured:.3}");
+    }
 }
 
 // ── Measurements ───────────────────────────────────────────────────────────────────────────────────
 
-/// The input's and output's RMS per band over `window`, frame by frame through `ott` (one frame a
-/// call, so its band taps can be read); returns `(band in, band out)` RMS, dBFS, and the output.
-fn by_band(ott: &mut Ott, l: &[f32], r: &[f32], window: std::ops::Range<usize>) -> ([f64; 3], [f64; 3], Vec<f32>, Vec<f32>) {
+/// The input's and output's RMS per band over `window`, frame by frame through `ott` (so its band taps
+/// can be read); returns `(band in, band out)` RMS, dBFS, and the output.
+fn by_band(ott: &mut StereoOtt, l: &[f32], r: &[f32], window: std::ops::Range<usize>) -> ([f64; 3], [f64; 3], Vec<f32>, Vec<f32>) {
     let (mut pin, mut pout) = ([0.0f64; 3], [0.0f64; 3]);
     let (mut ol, mut or) = (l.to_vec(), r.to_vec());
     for k in 0..l.len() {
-        ott.process(&mut ol[k..k + 1], &mut or[k..k + 1]);
+        [ol[k], or[k]] = ott.frame([l[k], r[k]]);
         if window.contains(&k) {
             let (bands, gains) = (ott.bands(), ott.gains());
             for b in 0..3 {
@@ -590,17 +1158,17 @@ fn phasor(x: &[f32], from: usize, len: usize, freq: f64, sr: u32) -> Complex<f64
 /// The on/off crossfade's dip on a sustained sine at `freq`: on at 1 s, off at 2 s. Returns the deepest
 /// momentary drop in each fade from the analytic envelope, and the phasor model's, dB against the dry
 /// level.
-fn crossfade_dip(freq: f64, level: f64, amount: f32) -> (f64, f64, f64) {
+fn crossfade_dip(freq: f64, level: f64, depth: f64) -> (f64, f64, f64) {
     let sr = 48000;
     let n = 3 * sr as usize;
     let x = sine(freq, level, n, sr);
-    let mut ott = settled(sr, amount, false);
+    let mut ott = settled(sr, depth, false);
     let (mut l, mut r) = (x.clone(), x.clone());
     let s = sr as usize;
     run(&mut ott, &mut l[..s], &mut r[..s]);
-    ott.set_on(true);
+    ott.set(Setting::On(true));
     run(&mut ott, &mut l[s..2 * s], &mut r[s..2 * s]);
-    ott.set_on(false);
+    ott.set(Setting::On(false));
     run(&mut ott, &mut l[2 * s..], &mut r[2 * s..]);
     let env = envelope(&l);
     let dry = 10f64.powf(level / 20.0);
@@ -616,7 +1184,7 @@ fn crossfade_dip(freq: f64, level: f64, amount: f32) -> (f64, f64, f64) {
 
 /// Harmonic distortion of a sustained sine through `ott`: the harmonics 2 to 10 against the
 /// fundamental, dB, from a Blackman-Harris-windowed FFT of 2^16 settled frames.
-fn thd(ott: &mut Ott, freq: f64, level: f64, sr: u32) -> f64 {
+fn thd(ott: &mut StereoOtt, freq: f64, level: f64, sr: u32) -> f64 {
     let n = 1 << 16;
     let settle = 3 * sr as usize;
     let x = sine(freq, level, settle + n, sr);
@@ -639,95 +1207,21 @@ fn thd(ott: &mut Ott, freq: f64, level: f64, sr: u32) -> f64 {
     10.0 * (harmonics / fundamental).log10()
 }
 
-/// Five lanes, each its own riff (a pluck phrase at 0.25 peak), a two-bar loop at 120 BPM.
-fn five_lanes() -> Rig {
-    let mut rig = Rig::with(Opts { loop_seconds: 20.0, ..Opts::default() });
-    let unit = 12000.0;
-    let riffs: [Rc<Vec<f32>>; 5] = [
-        pluck::periodic(&pluck::RIFF_A, unit, 48000, 16.0, 0.25),
-        pluck::periodic(&pluck::RIFF_B, unit, 48000, 16.0, 0.25),
-        pluck::periodic(&pluck::RIFF_C, unit, 48000, 16.0, 0.25),
-        pluck::periodic(&pluck::LAYER, unit, 48000, 16.0, 0.25),
-        pluck::periodic(&pluck::STABS, unit, 48000, 16.0, 0.25),
-    ];
-    let first = riffs[0].clone();
-    rig.set_input(move |f| first[f as usize % first.len()]);
-    let master = rig.record_first_take(0, 2, 2400);
-    rig.set_level(0.0);
-    rig.idle();
-    for (i, p) in riffs.iter().enumerate().skip(1) {
-        rig.press(Command::RecDub(i as u8));
-        let start = rig.start_frame();
-        let p = p.clone();
-        rig.set_input(move |f| if f >= start { p[(f - start) as usize % p.len()] } else { 0.0 });
-        rig.advance_to(start + master + 2400);
-        rig.press(Command::RecDub(i as u8));
-        rig.advance(rig.seconds(0.25));
-        rig.set_level(0.0);
-        rig.idle();
-        assert_eq!(rig.state(i), LaneState::Playing, "lane {i}");
-    }
-    rig
-}
-
-/// White hiss at −66 dBFS RMS, the same on both sides, `n` frames at 48 kHz.
-fn hiss(n: usize) -> Vec<f32> {
-    let mut noise = Noise(5);
-    let a = 10f64.powf(-66.0 / 20.0) * 3f64.sqrt();
-    (0..n).map(|_| (a * noise.next()) as f32).collect()
-}
-
-/// What the OTT at `amount` adds to −66 dBFS RMS hiss, dB of RMS over seconds 2–4 (makeup included).
-fn hiss_lift(amount: f32) -> f64 {
-    let x = hiss(4 * 48000);
-    let mut ott = settled(48000, amount, true);
-    let (mut l, mut r) = (x.clone(), x.clone());
-    run(&mut ott, &mut l, &mut r);
-    db(rms(&l[2 * 48000..])) - db(rms(&x[2 * 48000..]))
-}
-
-/// Plucks at −40 dBFS peak for 2 s, then one at −3 dBFS peak (E2), 48 kHz: the signal and the loud
-/// note's first frame.
-fn quiet_to_loud() -> (Vec<f32>, usize) {
-    let sr = 48000;
-    let quiet = pluck::once(&[pluck::n(0.0, 52, 0.9), pluck::n(1.0, 55, 0.9), pluck::n(2.0, 57, 0.9), pluck::n(3.0, 59, 0.9)], 24000.0, sr, 2 * sr as usize, 0.01);
-    let loud = pluck::once(&[pluck::accent(0.0, 40, 2.0)], 24000.0, sr, sr as usize, 0.708);
-    (quiet.iter().chain(loud.iter()).copied().collect(), quiet.len())
-}
-
-/// The input's and the output's peak over the first 50 ms from `onset`.
-fn onset_peaks(x: &[f32], out: &[f32], onset: usize) -> (f64, f64) {
-    let w = onset..onset + 48000 / 20;
-    (peak(&x[w.clone()]) as f64, peak(&out[w]) as f64)
-}
-
-#[test]
-fn an_onset_after_quiet_and_steady_hiss_ride_no_lift() {
-    // The gain falls fast: a loud pluck after quiet ones leaves no more than 3 dB over its input's peak
-    // before the limiter, the makeup and the crossovers' phase included (11.1 dB with the slow attacks
-    // this replaced).
-    let (x, onset) = quiet_to_loud();
-    let mut ott = settled(48000, 1.0, true);
-    let (mut l, mut r) = (x.clone(), x.clone());
-    run(&mut ott, &mut l, &mut r);
-    let (pi, po) = onset_peaks(&x, &l, onset);
-    assert!(db(po) - db(pi) < 3.0, "the onset overshoots {:+.1} dB", db(po) - db(pi));
-    // The noise floor: hiss at −66 dBFS RMS gets no more than 6 dB, the makeup included (15.8 dB before).
-    let lift = hiss_lift(1.0);
-    assert!(lift < 6.0, "hiss lifted {lift:+.1} dB");
-}
-
 #[test]
 #[ignore = "a measurement: prints the numbers the OTT was accepted on"]
 fn measurements() {
-    println!("makeup M = {MAKEUP_DB:+.2} dB, default AMOUNT {DEFAULT_AMOUNT}");
+    println!("makeup M = {MAKEUP_DB:+.2} dB, default DEPTH {DEFAULT_DEPTH}");
 
-    println!("\n## Split (unity bands, AMOUNT 0, on)");
+    println!("\n## Split (unity bands, DEPTH 0, on)");
     for sr in [44100, 48000] {
         println!("sr={sr}: null against AP88 · AP2500 {:.1} dB re peak; flatness 20 Hz-20 kHz: max |dev| {:.6} dB", null_depth(sr), flatness(sr));
     }
+    for f in [100.0, 1000.0, 5000.0] {
+        let (computed, measured) = crossover_delay(f);
+        println!("group delay at {f} Hz: {computed:.2} frames ({:.3} ms at 48 kHz), measured {measured:.2}", computed / 48.0);
+    }
 
-    println!("\n## A full-scale 100 Hz square out of a second of silence, AMOUNT 1, 48 kHz, before the limiter");
+    println!("\n## A full-scale 100 Hz square out of a second of silence, DEPTH 1, 48 kHz, the OTT alone");
     {
         let mut ott = settled(48000, 1.0, true);
         let square: Vec<f32> = (0..2 * 48000).map(|k| if (k / 240) % 2 == 0 { 1.0 } else { -1.0 }).collect();
@@ -736,20 +1230,27 @@ fn measurements() {
         let mut off = settled(48000, 0.0, true);
         let (mut ol, mut or) = (square.clone(), square);
         run(&mut off, &mut ol, &mut or);
-        // Without the ceiling: +2.8 dBFS, and +5.2 at AMOUNT 0 (the crossovers' phase alone).
-        println!("  peak {:+.1} dBFS (AMOUNT 0: {:+.1} dBFS), the ceiling's", db(peak(&l) as f64), db(peak(&ol) as f64));
+        // Without the ceiling: +2.8 dBFS, and +5.2 at DEPTH 0 (the crossovers' phase alone).
+        println!("  peak {:+.1} dBFS (DEPTH 0: {:+.1} dBFS), the ceiling's", db(peak(&l) as f64), db(peak(&ol) as f64));
     }
 
-    println!("\n## A square out of a second of silence through the engine (a plugin instrument on the bus, no click, no monitor), 48 kHz: peak dBFS");
+    println!("\n## A square out of a second of silence through the engine, 48 kHz: peak dBFS");
     for (amp, freq) in [(0.8f32, 100.0), (0.8, 200.0), (1.0, 100.0), (1.0, 200.0)] {
-        for amount in [None, Some(0.0f32), Some(0.5), Some(1.0)] {
-            let (device, share, bus) = square_onset(freq, amp, amount);
-            let name = amount.map_or("OTT off".to_string(), |a| format!("AMOUNT {a}"));
-            println!("  ±{amp} {freq} Hz, {name:<10}: device {:+.2}, Share {:+.2}; bus before the limiters {:+.2}", db(device), db(share), db(bus));
+        for depth in [None, Some(0.0), Some(0.5), Some(1.0)] {
+            let (device, share, bus) = square_onset(freq, amp, depth);
+            let monitor = live_square(freq, amp, depth);
+            let name = depth.map_or("OTT off".to_string(), |d| format!("DEPTH {d}"));
+            println!(
+                "  ±{amp} {freq} Hz, {name:<9}: a plugin instrument: device {:+.2}, Share {:+.2}, bus before the limiters {:+.2}; on the live input: monitor {:+.2}",
+                db(device),
+                db(share),
+                db(bus),
+                db(monitor)
+            );
         }
     }
 
-    println!("\n## Calibration: pink noise at -18 dBFS RMS, AMOUNT 1, RMS over seconds 2-12, 48 kHz, before the limiter");
+    println!("\n## Calibration: pink noise at -18 dBFS RMS, DEPTH 1, RMS over seconds 2-12, 48 kHz, the OTT alone");
     let sr = 48000;
     let n = 12 * sr as usize;
     let settled_from = 2 * sr as usize;
@@ -776,27 +1277,34 @@ fn measurements() {
             inputs.push((format!("sine {f} Hz {level} dBFS"), sine(f, level, n, sr)));
         }
     }
-    for amount in [0.5f32, 1.0] {
-        println!("AMOUNT {amount}:");
+    for depth in [0.5, 1.0] {
+        println!("DEPTH {depth}:");
         for (name, x) in &inputs {
-            let mut ott = settled(sr, amount, true);
+            let mut ott = settled(sr, depth, true);
             let (bi, bo, ol, _) = by_band(&mut ott, x, x, window.clone());
             let finite = ol.iter().all(|v| v.is_finite());
             println!(
                 "  {name:<26} low {:6.1} -> {:6.1}  mid {:6.1} -> {:6.1}  high {:6.1} -> {:6.1}  | RMS {:6.1} -> {:6.1}, peak {:6.1} -> {:6.1}{}",
-                bi[0], bo[0], bi[1], bo[1], bi[2], bo[2],
-                db(rms(&x[window.clone()])), db(rms(&ol[window.clone()])),
-                db(peak(&x[window.clone()]) as f64), db(peak(&ol[window.clone()]) as f64),
+                bi[0],
+                bo[0],
+                bi[1],
+                bo[1],
+                bi[2],
+                bo[2],
+                db(rms(&x[window.clone()])),
+                db(rms(&ol[window.clone()])),
+                db(peak(&x[window.clone()]) as f64),
+                db(peak(&ol[window.clone()]) as f64),
                 if finite { "" } else { "  NON-FINITE" }
             );
         }
     }
 
     println!("\n## On/off crossfade dip (10 ms linear), sustained sine at -12 dBFS, 48 kHz: deepest momentary drop vs the dry level");
-    for amount in [0.0f32, DEFAULT_AMOUNT, 1.0] {
+    for depth in [0.0, DEFAULT_DEPTH, 1.0] {
         for f in [85.0, 2580.0] {
-            let (on, off, model) = crossfade_dip(f, -12.0, amount);
-            println!("  AMOUNT {amount}, {f} Hz: switching on {on:.1} dB, switching off {off:.1} dB (phasor model {model:.1} dB)");
+            let (on, off, model) = crossfade_dip(f, -12.0, depth);
+            println!("  DEPTH {depth}, {f} Hz: switching on {on:.1} dB, switching off {off:.1} dB (phasor model {model:.1} dB)");
         }
     }
 
@@ -805,8 +1313,8 @@ fn measurements() {
     let note = pluck::once(&[pluck::held(0.0, 52, 16.0, 4.0)], 24000.0, sr, n, 0.5);
     let hiss = hiss(n);
     let x: Vec<f32> = note.iter().zip(&hiss).map(|(a, b)| a + b).collect();
-    for amount in [DEFAULT_AMOUNT, 1.0] {
-        let mut ott = settled(sr, amount, true);
+    for depth in [DEFAULT_DEPTH, 1.0] {
+        let mut ott = settled(sr, depth, true);
         let (mut ol, mut or) = (x.clone(), x.clone());
         run(&mut ott, &mut ol, &mut or);
         let win = sr as usize / 10;
@@ -825,9 +1333,9 @@ fn measurements() {
             }
         }
         let tail = 8 * sr as usize..n;
-        let hiss_alone = hiss_lift(amount);
+        let hiss_alone = hiss_lift(depth);
         println!(
-            "  AMOUNT {amount}: per second (RMS in->out over 100 ms) {}; largest lift over the tail {swell:+.1} dB; largest rise of the output between 100 ms windows after 0.5 s {worst_rise:+.2} dB; lift at the hiss (seconds 8-10) {:+.1} dB; hiss alone {hiss_alone:+.1} dB",
+            "  DEPTH {depth}: per second (RMS in->out over 100 ms) {}; largest lift over the tail {swell:+.1} dB; largest rise of the output between 100 ms windows after 0.5 s {worst_rise:+.2} dB; lift at the hiss (seconds 8-10) {:+.1} dB; hiss alone {hiss_alone:+.1} dB",
             rows.join(", "),
             db(rms(&ol[tail.clone()])) - db(rms(&x[tail]))
         );
@@ -835,8 +1343,8 @@ fn measurements() {
 
     println!("\n## Quiet-to-loud: plucks at -40 dBFS peak for 2 s, then one at -3 dBFS peak (48 kHz)");
     let (x, onset) = quiet_to_loud();
-    for amount in [DEFAULT_AMOUNT, 1.0] {
-        let mut ott = settled(sr, amount, true);
+    for depth in [DEFAULT_DEPTH, 1.0] {
+        let mut ott = settled(sr, depth, true);
         let (mut ol, mut or) = (x.clone(), x.clone());
         run(&mut ott, &mut ol, &mut or);
         let (pi, po) = onset_peaks(&x, &ol, onset);
@@ -848,57 +1356,25 @@ fn measurements() {
         let after = peak(&ll[onset..]) as f64;
         let settled_out = peak(&ol[onset + sr as usize / 2..]) as f64 / peak(&x[onset + sr as usize / 2..]) as f64;
         println!(
-            "  AMOUNT {amount}: first 50 ms of the loud note: in peak {:.1} dBFS, out peak {:.1} dBFS before the limiter (overshoot {:+.1} dB; half a second later the gain is {:+.1} dB); after the limiter {:.1} dBFS",
-            db(pi), db(po), db(po) - db(pi), db(settled_out), db(after)
+            "  DEPTH {depth}: first 50 ms of the loud note: in peak {:.1} dBFS, out peak {:.1} dBFS (overshoot {:+.1} dB; half a second later the gain is {:+.1} dB); through a master limiter {:.1} dBFS",
+            db(pi),
+            db(po),
+            db(po) - db(pi),
+            db(settled_out),
+            db(after)
         );
+    }
+
+    println!("\n## TIME: recovery from -6 to -40 dBFS (1 kHz, DEPTH 1)");
+    for time in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        println!("  TIME {time}: release × {:.3}, back at the makeup after {:.3} s", release_scale(time), recovery(1000.0, 1, time));
     }
 
     println!("\n## THD, low E (82.4 Hz) at -12 dBFS, 48 kHz (harmonics 2-10 against the fundamental)");
     let mut dry = settled(sr, 0.0, false);
     println!("  off (the method's floor): {:.1} dB", thd(&mut dry, 82.4, -12.0, sr));
-    for amount in [DEFAULT_AMOUNT, 1.0] {
-        let mut ott = settled(sr, amount, true);
-        println!("  AMOUNT {amount}: {:.1} dB", thd(&mut ott, 82.4, -12.0, sr));
+    for depth in [DEFAULT_DEPTH, 1.0] {
+        let mut ott = settled(sr, depth, true);
+        println!("  DEPTH {depth}: {:.1} dB", thd(&mut ott, 82.4, -12.0, sr));
     }
-
-    println!("\n## Five-lane jam (five pluck riffs at 0.25 peak, a two-bar loop at 120 BPM), two loops each, 48 kHz");
-    let mut rig = five_lanes();
-    let m = rig.master();
-    for (name, setting) in [("OTT off", None), ("OTT on, AMOUNT 0", Some(0.0f32)), ("OTT on, AMOUNT 0.5", Some(0.5)), ("OTT on, AMOUNT 1", Some(1.0))] {
-        if let Some(a) = setting {
-            rig.set(Command::SetMasterOttAmount(a));
-            rig.set(Command::SetMasterOtt(true));
-        }
-        rig.advance(rig.seconds(0.5));
-        rig.keep_output();
-        rig.advance(2 * m);
-        let bus = peak(&rig.bus).max(peak(&rig.bus_right)) as f64;
-        let device = peak(&rig.heard).max(peak(&rig.heard_right)) as f64;
-        println!(
-            "  {name:<20} before the limiter: peak {:.2} dBFS, RMS {:.2} dBFS; device output: peak {:.2} dBFS, RMS {:.2} dBFS",
-            db(bus), db(rms(&rig.bus)), db(device), db(rms(&rig.heard))
-        );
-    }
-}
-
-#[test]
-fn an_amount_set_while_off_and_settled_is_taken_at_once() {
-    // As a new engine's replay sends it: the amount, then the switch. It must come on at the amount, as
-    // an OTT whose glide had all the time it wanted.
-    let signal = sine(220.0, -12.0, 4_800, 48_000);
-    let mut at_once = Ott::new(48_000);
-    at_once.set_amount(1.0);
-    at_once.set_on(true);
-    let (mut l1, mut r1) = (signal.clone(), signal.clone());
-    at_once.process(&mut l1, &mut r1);
-
-    let mut glided = Ott::new(48_000);
-    glided.set_amount(1.0);
-    let mut silence = vec![0.0f32; 48_000];
-    let mut silence_r = silence.clone();
-    glided.process(&mut silence, &mut silence_r);
-    glided.set_on(true);
-    let (mut l2, mut r2) = (signal.clone(), signal);
-    glided.process(&mut l2, &mut r2);
-    assert_eq!((l1, r1), (l2, r2), "the amount set while off is in force from the first frame on");
 }

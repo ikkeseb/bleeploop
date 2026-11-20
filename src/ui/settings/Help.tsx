@@ -226,9 +226,10 @@ function Manual(props: { hidden: boolean }) {
         <h3 class="help__h">Guitar <span class="help__tag">the main way to play</span></h3>
         <ul class="help__list">
           <li>Pick an amp plugin as a slot's source, pick its input (<span class="help__note">In 1</span>, <span class="help__note">In 2</span>…) and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot hears its input and monitors it natively</li>
-          <li>Raw input (a hardware synth, a mic): set a slot's source to <span class="help__note">Off</span>, pick its input and use GO LIVE. It is heard and recorded dry, and an Off slot plays no notes. Both slots can be live at once, each on its own input</li>
+          <li>Raw input (a hardware synth, a mic): set a slot's source to <span class="help__note">Off</span>, pick its input and use GO LIVE. It is heard and recorded dry (through the OTT when that is on), and an Off slot plays no notes. Both slots can be live at once, each on its own input</li>
           <li>Each slot's volume sets its synth, plugin or input level. Synths and plugins feed the looper directly; the bar beside IN FX shows record level</li>
-          <li><span class="help__note">IN FX</span> puts <span class="help__note">ECHO</span>, <span class="help__note">REVERB</span> and <span class="help__note">RING MOD</span> on the live input, before the looper: what they add is heard and recorded, the dry sound stays untouched. The pill lights while any of them is on</li>
+          <li><span class="help__note">IN FX</span> puts <span class="help__note">ECHO</span>, <span class="help__note">REVERB</span> and <span class="help__note">RING MOD</span> on the live input, before the looper: what they add is heard and recorded, the dry sound stays untouched (the OTT, below, works on the sound itself). The pill lights while any of them, or the OTT, is on</li>
+          <li><span class="help__note">OTT</span>, IN FX's fourth row, evens out loud and quiet in three bands on what you play, after the slot's plugin or synth: you hear it as you play and it is recorded into the loop. <span class="help__note">DEPTH</span> sets how hard it works, <span class="help__note">TIME</span> how fast it lets go, <span class="help__note">UP</span> how much it lifts the quiet parts and <span class="help__note">DOWN</span> how much it tames the loud ones</li>
         </ul>
       </section>
 

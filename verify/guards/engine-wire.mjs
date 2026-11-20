@@ -54,7 +54,6 @@ const keys = (o) => Object.keys(o).sort();
 const COMMANDS = [
   'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMeter', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
-  'SetMasterOtt', 'SetMasterOttAmount',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',
@@ -64,7 +63,7 @@ const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'CopyWide',
   'Halve', 'Hold', 'Release', 'FadeAll', 'Tuner', 'Toggle',
 ];
-const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Live:0', 'Live:1'];
+const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Send:ott', 'Live:0', 'Live:1'];
 const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
   'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing',

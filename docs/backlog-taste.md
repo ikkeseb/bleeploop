@@ -60,11 +60,16 @@ added a line.
   locks at the first take's count-in until CLEAR ALL, so the loops would need a real-time stretch in
   the engine; candidates, unevaluated: Signalsmith Stretch (MIT, crates `signalsmith-stretch`,
   `ssstretch`), Bungee (MPL-2.0), Rubber Band (GPL).
-- **Parked by the owner (2026-10-16): a built-in compressor** right after a slot's plugin, one knob, no
-  look-ahead (no added latency), recorded with the take: the density OTT gives the guitar in Ableton,
-  for the loudness the EVO 4 lacks at a Windows volume the owner tolerates (`STATUS.md`, the EVO 4).
-  The engine's `dsp::compressor` already runs the master limiter. Larger alternative: a plugin chain
-  in a slot (amp-sim → OTT).
+- **Asked by the owner (2026-11-20): a chain per slot, and BleepLoop's own plugins**: several effects and
+  plugins in series on a slot, as on an Ableton track (the owner plays the amp-sim with OTT after it),
+  and native BleepLoop plugins with their own interface; VST3 is enough for the owner if it is the best
+  format (Ableton Live 12 loads VST2 and VST3, not CLAP). Built so far: the input OTT (one setting, inline after each slot; `docs/ARCHITECTURE.md`
+  § Audio architecture), the parked one-knob compressor's place. Not started: a chain needs N units per
+  slot in `slots.rs` (latency summed into the record alignment, a mid-chain insert crossfaded, an
+  editor and saved state per unit, rig and session recall per unit); an own plugin can share
+  `lf-engine`'s DSP through a VST3 shell (`nih-plug` is in maintenance mode; its community fork and
+  Coupler's MIT/Apache `vst3` bindings are the candidates; the VST 3 SDK is MIT since 3.8). Waits on
+  the owner's word on scope.
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
   first take (it meets the bar math every meter shares, `grid.rs`); more built-in
   synths (they fill layers, they do not compete with

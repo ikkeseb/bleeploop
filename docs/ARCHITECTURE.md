@@ -64,16 +64,21 @@ crate briefing (`src-tauri/crates/lf-engine/src/lib.rs`); the device side's are
 `src-tauri/src/engine_io/mod.rs`. In short:
 
 - **Master bus:** each lane through its FX chain, the shared reverb bus and the instruments (built-in
-  or a plugin slot's) → the master OTT (off by default: a 3-band upward/downward compressor with a
-  soft ceiling at −1.5 dBFS and no lookahead, so no latency;
-  `src-tauri/crates/lf-engine/src/dsp/ott.rs`), the Share mix splitting off there, then the click
-  joins, × master volume → the master limiter → out. The OTT sits beside the plugin slots rather than
-  in one, reaches every loop and instrument and the Share mix, and never the click, the record tap or
-  the live monitor (which joins after the limiter, so the guitar is OTT'd once it is a loop).
+  or a plugin slot's), the Share mix splitting off there, then the click joins, × master volume → the
+  master limiter → out.
 - **Live input:** each slot's input → the slot while it is live (an effect, or dry when empty) → the
-  wet signal; the input sends (ECHO, REVERB, RING MOD) render wet only from it. The monitor (wet +
-  sends) joins the output after the limiter under the same master volume: unlimited, and without the
-  limiter's pre-delay. The record tap is the wet signal, aligned, plus the sends and the instruments.
+  input OTT → the wet signal; the input sends (ECHO, REVERB, RING MOD) render wet only from it. The
+  monitor (wet + sends) joins the output after the limiter under the same master volume: unlimited, and
+  without the limiter's pre-delay. The record tap is the wet signal, aligned, plus the sends and the
+  instruments.
+- **The input OTT** (off by default; IN FX's fourth row): a three-band upward/downward compressor with
+  a soft ceiling at −1.5 dBFS and no lookahead, so no added latency samples; its crossovers turn the
+  phase, which delays the lows (about 4.6 ms at 100 Hz, 0.24 ms at 1 kHz; `src-tauri/crates/lf-engine/src/dsp/ott.rs`).
+  One setting, one instance per source: on each plugin slot's output after its gain (an effect, an
+  instrument, or an empty slot's dry input) and on the built-in synths' sum, each before the split into
+  what is heard and what is recorded, so the monitor and the loop carry the same compressed signal. It
+  never reaches the loops' playback, the click or the export's master. The ceiling holds per source: two
+  live slots still sum unlimited on the monitor, as they did without it.
 
 - **One clock, no trim:** a lane plays loop position `(f - anchor) mod master` at device frame `f`;
   a take starts the driver's reported input + output latency (+ the largest live effect's latency +

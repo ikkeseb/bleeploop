@@ -18,8 +18,8 @@
 //!
 //! `--scene heavy` loads the engine for the soak, set up once the loop plays and held through the soak
 //! and every phase after it (`HEAVY_FX`, `HEAVY_SENDS`, `CHORD`): lane 0's loop copied to all five lanes,
-//! every lane's five effects on, the three input sends on, every loaded slot live on input `--in`, a
-//! four-note chord held on the Pad and the click on. Its soak is judged on the max alone: a loaded
+//! every lane's five effects on, the three input sends and the input OTT on, every loaded slot live on
+//! input `--in`, a four-note chord held on the Pad and the click on. Its soak is judged on the max alone: a loaded
 //! scene's p99.9 sits higher by design, and the question it answers is the deadline. Its clean run
 //! (ASIO 64, `--profile=rig`, both plugins, `--mute`, a 600 s soak, an idle machine, 2026-10-07):
 //! every fault counter 0 over ~413 000 callbacks, block time p50 < 26 %, p99.9 < 53 %, max < 76 %,
@@ -717,7 +717,7 @@ impl Probe {
         self.send(Command::SetMetronome(true))?;
         self.hold(HOLD);
         say(format!(
-            "heavy scene: {TRACK_COUNT} lanes playing, every effect on each, 3 input sends, slots live [{}], Pad chord {CHORD:?}, click on",
+            "heavy scene: {TRACK_COUNT} lanes playing, every effect on each, 3 input sends and the input OTT, slots live [{}], Pad chord {CHORD:?}, click on",
             live.join(", ")
         ));
         Ok(())

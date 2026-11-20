@@ -59,6 +59,10 @@
 //!   phase holds still, so the phase depends only on the frames the ring rendered, never on how the
 //!   blocks split them.
 //!
+//! The input OTT is switched as a fourth row of IN FX ([`InputSend::Ott`]) but is no send: it sits on
+//! each source before this module reads the wet signal (`slots`, `instruments`, `dsp::ott`), so the
+//! sends hear the OTT's output, and nothing here handles it.
+//!
 //! While all three are silent [`InputFx::render`] says so and the engine adds nothing: the record tap
 //! and the monitor are then bit-identical to never having had a send on. Everything is allocated in
 //! [`InputFx::new`]; rendering and the controls never allocate.
@@ -433,14 +437,18 @@ impl InputFx {
         Ctl::at(self.dsp(frame), self.sample_rate as f32)
     }
 
+    /// Whether a send is on. The OTT is no send of these (the engine switches it on the slots and the
+    /// instruments): false.
     pub fn is_on(&self, send: InputSend) -> bool {
         match send {
             InputSend::Echo => self.echo.on,
             InputSend::Reverb => self.reverb.on,
             InputSend::Ring => self.ring.on,
+            InputSend::Ott => false,
         }
     }
 
+    /// A send's parameter as set; the OTT's are not kept here: no number.
     pub fn param(&self, param: InputSendParam) -> f64 {
         match param {
             InputSendParam::EchoTime => self.echo.time as f64,
@@ -449,6 +457,7 @@ impl InputFx {
             InputSendParam::ReverbLevel => self.reverb.level,
             InputSendParam::RingFreq => self.ring.freq,
             InputSendParam::RingLevel => self.ring.level,
+            InputSendParam::OttDepth | InputSendParam::OttTime | InputSendParam::OttUpward | InputSendParam::OttDownward => f64::NAN,
         }
     }
 
@@ -469,6 +478,8 @@ impl InputFx {
             InputSend::Echo => self.echo.set_on(on, ctl),
             InputSend::Reverb => self.reverb.set_on(on, ctl),
             InputSend::Ring => self.ring.set_on(on, ctl),
+            // The engine routes the OTT to the slots and the instruments.
+            InputSend::Ott => {}
         }
     }
 
@@ -482,6 +493,7 @@ impl InputFx {
             InputSend::Echo => self.echo.set_param(param, value, ctl),
             InputSend::Reverb => self.reverb.set_level(value, ctl),
             InputSend::Ring => self.ring.set_param(param, value, ctl),
+            InputSend::Ott => {}
         }
     }
 

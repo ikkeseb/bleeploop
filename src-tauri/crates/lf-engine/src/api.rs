@@ -68,13 +68,6 @@ pub enum Command {
     /// The master output level (0..1) and its mute (`master.ts`).
     SetMasterVolume(f32),
     SetMasterMute(bool),
-    /// The master OTT on or off ([`crate::dsp::ott`]): off by default, and then the master bus passes
-    /// it bit for bit. A switch crossfades over 10 ms from its frame. A setting like the master volume:
-    /// no [`Toggle`], no pedal, no [`Event::Toggled`], and it never disarms a pending CLEAR.
-    SetMasterOtt(bool),
-    /// The master OTT's AMOUNT, 0..1 (clamped, default 0.5), glided to over about 20 ms; a value that is
-    /// no number is dropped and the AMOUNT stays.
-    SetMasterOttAmount(f32),
     SetLoopEndStop(bool),
     /// FADE's length in bars: 1, 2, 4 or 8 (another count snaps down to one of them, at least 1).
     SetFadeBars(u32),
@@ -125,8 +118,12 @@ pub enum Command {
     SetInstrumentGain(Instrument, f32),
     /// An input send on or off (`input_fx`): the ECHO, the REVERB or the RING MOD on the wet signal,
     /// heard and recorded. Off closes its input and lets its tail ring out. A rig setting, not a lane's.
+    /// [`InputSend::Ott`] switches the input OTT instead ([`crate::dsp::ott`]): off by default, and then
+    /// bit-transparent; a switch crossfades over 10 ms from its frame.
     SetInputSend(InputSend, bool),
-    /// An input send's parameter, clamped to its range ([`InputSendParam::range`]).
+    /// An input send's parameter, clamped to its range ([`InputSendParam::range`]); a value that is no
+    /// number is ignored. A send's sounds from the next 128-frame quantum boundary, the OTT's from its
+    /// own frame.
     SetInputSendParam(InputSendParam, f64),
     /// The live scope taps on or off ([`crate::scope`]): the UI asks for columns while the stage view
     /// is open and drops them when it closes. Off (the default) the engine folds nothing and pushes
@@ -154,9 +151,10 @@ impl Command {
         )
     }
 
-    /// A command a plugin slot hears: the note target, the notes, and the slot's live flag and gain.
-    /// Like the instrument commands it never waits behind the looper, and the engine renders the slots
-    /// up to its frame before applying it.
+    /// A command a plugin slot hears: the note target, the notes, the slot's live flag and gain, and the
+    /// input OTT's switch and controls (each slot runs an instance on its output). Like the instrument
+    /// commands it never waits behind the looper, and the engine renders the slots up to its frame
+    /// before applying it.
     pub fn reaches_slots(&self) -> bool {
         matches!(
             self,
@@ -166,14 +164,15 @@ impl Command {
                 | Command::AllNotesOff
                 | Command::SetSlotLive(..)
                 | Command::SetSlotGain(..)
-                | Command::Action(Action::Toggle(Toggle::Live(_)))
-                | Command::ActionOn(_, Action::Toggle(Toggle::Live(_)))
-        )
+                | Command::Action(Action::Toggle(Toggle::Live(_) | Toggle::Send(InputSend::Ott)))
+                | Command::ActionOn(_, Action::Toggle(Toggle::Live(_) | Toggle::Send(InputSend::Ott)))
+                | Command::SetInputSend(InputSend::Ott, _)
+        ) || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
     }
 
-    /// A command for the input sends, an input send's toggle included. It never waits behind the looper
-    /// either: it touches only the sends, which no block job moves, and the player hears the echo come on
-    /// as they switch it. (A toggle that passes a held command disarms a pending CLEAR in its own turn:
+    /// A command for the input sends or the input OTT, a toggle included. It never waits behind the
+    /// looper either: it touches only the sends and the OTT, which no block job moves, and the player
+    /// hears the echo come on as they switch it. (A toggle that passes a held command disarms a pending CLEAR in its own turn:
     /// `engine.rs` `apply_due`.)
     pub fn is_input_send(&self) -> bool {
         matches!(
@@ -186,7 +185,8 @@ impl Command {
     }
 }
 
-/// The three input sends (`input_fx`), on the live input before the record tap.
+/// The three input sends (`input_fx`), on the live input before the record tap, and the input OTT,
+/// switched as they are (IN FX's fourth row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputSend {
     /// A tempo-synced feedback delay.
@@ -194,14 +194,18 @@ pub enum InputSend {
     Reverb,
     /// A ring modulator: the input times a sine carrier.
     Ring,
+    /// The input OTT ([`crate::dsp::ott`]). No send: it is inline, on each source's own sound before
+    /// what is heard and what is recorded split (each plugin slot's output, the built-in instruments'
+    /// sum), so `input_fx` never sees it and keeps its three sends.
+    Ott,
 }
 
 impl InputSend {
-    pub const ALL: [InputSend; 3] = [InputSend::Echo, InputSend::Reverb, InputSend::Ring];
+    pub const ALL: [InputSend; 4] = [InputSend::Echo, InputSend::Reverb, InputSend::Ring, InputSend::Ott];
 
     /// The key the UI sends (`src/platform/engine-wire.ts`).
     pub fn key(self) -> &'static str {
-        ["echo", "reverb", "ring"][self as usize]
+        ["echo", "reverb", "ring", "ott"][self as usize]
     }
 
     pub fn from_key(key: &str) -> Option<InputSend> {
@@ -210,7 +214,7 @@ impl InputSend {
 }
 
 /// A setting a hands-free press switches ([`Action::Toggle`]): the click, END STOP, FIXED, RETAKE, AUTO REC,
-/// each input send and each plugin slot's GO LIVE. The engine owns each one's value; a press says "switch
+/// each input send and the input OTT, and each plugin slot's GO LIVE. The engine owns each one's value; a press says "switch
 /// it" and the engine reads the value it switches when the press applies, so two producers (a pedal, a
 /// click on screen) never undo each other by sending what each last saw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,7 +232,7 @@ pub enum Toggle {
 }
 
 impl Toggle {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
     pub const ALL: [Toggle; Toggle::COUNT] = [
         Toggle::Click,
         Toggle::EndStop,
@@ -238,6 +242,7 @@ impl Toggle {
         Toggle::Send(InputSend::Echo),
         Toggle::Send(InputSend::Reverb),
         Toggle::Send(InputSend::Ring),
+        Toggle::Send(InputSend::Ott),
         Toggle::Live(0),
         Toggle::Live(1),
     ];
@@ -256,7 +261,7 @@ impl Toggle {
             Toggle::Retake => 3,
             Toggle::AutoRec => 4,
             Toggle::Send(send) => 5 + send as usize,
-            Toggle::Live(slot) => 8 + usize::from(slot),
+            Toggle::Live(slot) => 9 + usize::from(slot),
         }
     }
 
@@ -275,9 +280,11 @@ impl Toggle {
     }
 }
 
-/// An input send's parameter. The echo's time is an index into the lane delay's divisions
-/// (`dsp::fx::DIVISIONS`: 1/4, 1/8, 1/8., 1/16); the ring's frequency is its carrier's, in Hz;
-/// feedback and the levels are linear.
+/// An input send's parameter, or the input OTT's. The echo's time is an index into the lane delay's
+/// divisions (`dsp::fx::DIVISIONS`: 1/4, 1/8, 1/8., 1/16); the ring's frequency is its carrier's, in
+/// Hz; feedback and the levels are linear. The OTT's four are 0..1 ([`crate::dsp::ott::Setting`]):
+/// DEPTH, TIME (the release, a quarter to four times), UP and DOWN (the curve's upward and downward
+/// parts).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputSendParam {
     EchoTime,
@@ -286,21 +293,29 @@ pub enum InputSendParam {
     ReverbLevel,
     RingFreq,
     RingLevel,
+    OttDepth,
+    OttTime,
+    OttUpward,
+    OttDownward,
 }
 
 impl InputSendParam {
-    pub const ALL: [InputSendParam; 6] = [
+    pub const ALL: [InputSendParam; 10] = [
         InputSendParam::EchoTime,
         InputSendParam::EchoFeedback,
         InputSendParam::EchoLevel,
         InputSendParam::ReverbLevel,
         InputSendParam::RingFreq,
         InputSendParam::RingLevel,
+        InputSendParam::OttDepth,
+        InputSendParam::OttTime,
+        InputSendParam::OttUpward,
+        InputSendParam::OttDownward,
     ];
 
     /// The key the UI sends (`src/platform/engine-wire.ts`).
     pub fn key(self) -> &'static str {
-        ["echoTime", "echoFeedback", "echoLevel", "reverbLevel", "ringFreq", "ringLevel"][self as usize]
+        ["echoTime", "echoFeedback", "echoLevel", "reverbLevel", "ringFreq", "ringLevel", "ottDepth", "ottTime", "ottUpward", "ottDownward"][self as usize]
     }
 
     pub fn from_key(key: &str) -> Option<InputSendParam> {
@@ -312,6 +327,7 @@ impl InputSendParam {
             InputSendParam::EchoTime | InputSendParam::EchoFeedback | InputSendParam::EchoLevel => InputSend::Echo,
             InputSendParam::ReverbLevel => InputSend::Reverb,
             InputSendParam::RingFreq | InputSendParam::RingLevel => InputSend::Ring,
+            InputSendParam::OttDepth | InputSendParam::OttTime | InputSendParam::OttUpward | InputSendParam::OttDownward => InputSend::Ott,
         }
     }
 
@@ -324,6 +340,10 @@ impl InputSendParam {
             InputSendParam::ReverbLevel => (0.0, 1.0, 0.5),
             InputSendParam::RingFreq => (20.0, 1500.0, 440.0),
             InputSendParam::RingLevel => (0.0, 1.0, 0.5),
+            InputSendParam::OttDepth => (0.0, 1.0, crate::dsp::ott::DEFAULT_DEPTH),
+            InputSendParam::OttTime => (0.0, 1.0, crate::dsp::ott::DEFAULT_TIME),
+            InputSendParam::OttUpward => (0.0, 1.0, crate::dsp::ott::DEFAULT_UPWARD),
+            InputSendParam::OttDownward => (0.0, 1.0, crate::dsp::ott::DEFAULT_DOWNWARD),
         }
     }
 }

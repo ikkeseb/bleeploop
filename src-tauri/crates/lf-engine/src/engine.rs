@@ -1,13 +1,17 @@
 //! OWNS: the engine's callback: the command and event rings, the block split, and the bus topology.
 //! Each slot's input → that slot while it is live (`slots`: an effect, or an empty slot passing it dry)
-//! → the wet signal, heard at once and, for the record tap, aligned on the largest live latency. The
-//! input sends (`input_fx`: ECHO, REVERB, RING MOD) read the aligned wet signal and render wet only. The record
-//! tap is the aligned wet signal plus the sends' output plus the built-in instruments and the
-//! instrument plugin slots (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays
-//! through its FX chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus and the instruments (built
-//! in and plugin) sum on the stereo master bus and pass the master OTT (`dsp::ott`, off by default and
-//! then bit-transparent), then the click joins: master volume, then the master limiter
-//! (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
+//! → the input OTT (`dsp::ott`: one instance per slot, on its output after its gain; off by default and
+//! then bit-transparent) → the wet signal, heard at once and, for the record tap, aligned on the
+//! largest live latency. The input sends (`input_fx`: ECHO, REVERB, RING MOD) read the aligned wet
+//! signal and render wet only. The record tap is the aligned wet signal plus the sends' output plus the
+//! built-in instruments and the instrument plugin slots (`instruments`, `slots`: delayed onto the
+//! guitar's grid; each through its own instance of the input OTT before it splits, so what is heard and
+//! what is recorded carry the same OTT). The one OTT setting reaches every instance on its frame:
+//! `Command::SetInputSend` and `Command::SetInputSendParam` route [`crate::api::InputSend::Ott`] and its
+//! controls to the slots and the instruments, never to `input_fx`. Each lane plays through its FX
+//! chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus and the
+//! instruments (built in and plugin) sum on the stereo master bus, then the click joins: master volume,
+//! then the master limiter (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
 //! after the limiter, under the same master volume and the tuner's mute (theirs alone: `tuner`): the
 //! played instrument is heard without the limiter's pre-delay, as the old native monitor was, and like
 //! it is not limited; the sends are heard on the frame they are recorded. Ported from `engine.ts` and
@@ -35,12 +39,12 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, Command, CompactMix, Event, NoteTarget, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
 use crate::dsp::noise::NoiseTables;
-use crate::dsp::ott::Ott;
+use crate::dsp::ott::Setting;
 use crate::dsp::param::QUANTUM;
 use crate::dsp::rng::Mulberry32;
 use crate::effects::{self, LaneFx};
@@ -276,9 +280,6 @@ pub struct Engine {
     share_limiter: Compressor,
     master_volume: f32,
     master_muted: bool,
-    /// The master OTT ([`crate::dsp::ott`]) on the bus before the Share mix splits off: off by default,
-    /// and then bit-transparent.
-    ott: Ott,
     master_gain: f64,
     master_coef: f64,
     started: bool,
@@ -363,7 +364,6 @@ impl Engine {
             share_limiter: Compressor::master_limiter(config.sample_rate as f32),
             master_volume: 1.0,
             master_muted: false,
-            ott: Ott::new(config.sample_rate),
             master_gain: 1.0,
             master_coef: (-1.0 / (MASTER_TAU_SECONDS * config.sample_rate as f64)).exp(),
             started: false,
@@ -561,7 +561,6 @@ impl Engine {
             input_fx: &mut self.input_fx,
             master_volume: &mut self.master_volume,
             master_muted: &mut self.master_muted,
-            ott: &mut self.ott,
             toggles_owed: &mut self.toggles_owed,
             scope: &mut self.scope,
             tuner: &mut self.tuner,
@@ -684,8 +683,7 @@ impl Engine {
                 input_fx: &mut self.input_fx,
                 master_volume: &mut self.master_volume,
                 master_muted: &mut self.master_muted,
-                ott: &mut self.ott,
-                toggles_owed: &mut self.toggles_owed,
+                    toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
                 tuner: &mut self.tuner,
                 tuner_owed: &mut self.tuner_owed,
@@ -778,9 +776,6 @@ impl Engine {
             }
             let fading = self.looper.render(f, len, &mut self.lanes, &mut self.fades);
             self.fx.render(f, &self.lanes, fading, &self.fades, l, r);
-            // The master OTT: on the loops, the instruments and the reverb, before the Share mix and the
-            // click (no pumping on it), with the limiter after it. Off and settled it leaves every bit.
-            self.ott.process(l, r);
             // The Share mix: the bus before the click, under the master volume's glide below, frame for
             // frame.
             let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
@@ -1011,9 +1006,36 @@ fn toggle_value(clock: &Clock, looper: &Looper, input_fx: &InputFx, rack: &Rack,
         Toggle::Fixed => looper.fixed_length(),
         Toggle::Retake => looper.retake(),
         Toggle::AutoRec => looper.auto_record(),
+        Toggle::Send(InputSend::Ott) => rack.ott_on(),
         Toggle::Send(send) => input_fx.is_on(send),
         Toggle::Live(slot) => rack.live(usize::from(slot)),
     }
+}
+
+/// An input send on or off at `now`; the input OTT, which is no send, on every instance (each slot's,
+/// the instruments'), from the same frame.
+fn set_send(at: &mut Apply, send: InputSend, on: bool, now: Frame) {
+    match send {
+        InputSend::Ott => set_ott(at, Setting::On(on)),
+        _ => at.input_fx.set_on(send, on, now),
+    }
+}
+
+/// The input OTT's one setting, on every instance.
+fn set_ott(at: &mut Apply, setting: Setting) {
+    at.rack.set_ott(setting);
+    at.instruments.set_ott(setting);
+}
+
+/// The input OTT's control `param` sets to `value`, or `None` for a send's parameter.
+fn ott_control(param: InputSendParam, value: f64) -> Option<Setting> {
+    Some(match param {
+        InputSendParam::OttDepth => Setting::Depth(value),
+        InputSendParam::OttTime => Setting::Time(value),
+        InputSendParam::OttUpward => Setting::Upward(value),
+        InputSendParam::OttDownward => Setting::Downward(value),
+        _ => return None,
+    })
 }
 
 /// [`Action::Toggle`]: switch `t` from the value it has now, gated as the UI gates it
@@ -1038,7 +1060,7 @@ fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
         Toggle::Fixed => looper.set_fixed_length(on),
         Toggle::Retake => looper.set_retake(on),
         Toggle::AutoRec => looper.set_auto_record(on),
-        Toggle::Send(send) => at.input_fx.set_on(send, on, now),
+        Toggle::Send(send) => set_send(at, send, on, now),
         Toggle::Live(slot) => set_slot_live(looper, at.rack, usize::from(slot), on, now),
     }
     toggled(cx.feed, now, at.toggles_owed, t, on);
@@ -1094,7 +1116,6 @@ struct Apply<'a> {
     input_fx: &'a mut InputFx,
     master_volume: &'a mut f32,
     master_muted: &'a mut bool,
-    ott: &'a mut Ott,
     /// The engine's `toggles_owed`.
     toggles_owed: &'a mut [u32; Toggle::COUNT],
     scope: &'a mut Scope,
@@ -1208,15 +1229,6 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetMasterMute(on) => {
             *at.master_muted = on;
-            Applied::Done
-        }
-        Command::SetMasterOtt(on) => {
-            at.ott.set_on(on);
-            Applied::Done
-        }
-        // `set_amount` drops a value that is no number.
-        Command::SetMasterOttAmount(v) => {
-            at.ott.set_amount(v);
             Applied::Done
         }
         Command::SetLoopEndStop(on) => {
@@ -1340,12 +1352,15 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             Applied::Done
         }
         Command::SetInputSend(send, on) => {
-            at.input_fx.set_on(send, on, now);
+            set_send(at, send, on, now);
             toggled(cx.feed, now, at.toggles_owed, Toggle::Send(send), on);
             Applied::Done
         }
         Command::SetInputSendParam(param, value) => {
-            at.input_fx.set_param(param, value, now);
+            match ott_control(param, value) {
+                Some(setting) => set_ott(at, setting),
+                None => at.input_fx.set_param(param, value, now),
+            }
             Applied::Done
         }
         Command::SetScope(on) => {

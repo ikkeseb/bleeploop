@@ -695,7 +695,7 @@ export const fakeMixModel = {
 /**
  * The fake's stand-in for the engine's wet master: the stems summed dry under each track's volume and
  * mute (its snapshot mix) and the master volume and mute the UI last sent (`sent`, as the engine host
- * keeps them; the master OTT's two settings are recorded in `sent` too, and not applied). NOT the engine's
+ * keeps them). NOT the engine's
  * sound (no FX, no reverb, no OTT, no limiter); it only lets the browser tier's
  * export run, so no probe may claim to test the master's sound with it.
  */

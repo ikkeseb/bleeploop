@@ -10,9 +10,10 @@
 //! muted one is out through its mute), each at its track's [`LaneMix`](crate::api::LaneMix) (its volume,
 //! mute, pan and FX, as the snapshot took them at its pin), which the load sets on its frame; then it
 //! applies there, from the host's settings, the master's volume and mute. Every other setting is
-//! skipped (a lane's mix there included, the click, the instruments, the input sends, the plugin slots,
-//! the looper's modes), and the click is switched off, so the render has no click, no instrument, no
-//! input sends, no plugin unit and a silent input. It renders contiguous blocks on one clock from frame
+//! skipped (a lane's mix there included, the click, the instruments, the input sends and the input OTT,
+//! the plugin slots, the looper's modes), and the click is switched off, so the render has no click, no
+//! instrument, no input sends, no plugin unit and a silent input. The input OTT is in what the lanes
+//! recorded, so the render applies none of its own. It renders contiguous blocks on one clock from frame
 //! 0, so the output is the same at any block size.
 //!
 //! Warm-up: whole loop passes, at least one, that cover the longest lane's tail: its enabled delay's
@@ -186,9 +187,9 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     Ok(WetMaster { left, right, warmup })
 }
 
-/// A setting the render applies: the master's volume, mute and OTT (a lane's mix is its track's).
+/// A setting the render applies: the master's volume and mute (a lane's mix is its track's).
 fn is_master_mix(command: &Command) -> bool {
-    matches!(command, Command::SetMasterVolume(_) | Command::SetMasterMute(_) | Command::SetMasterOtt(_) | Command::SetMasterOttAmount(_))
+    matches!(command, Command::SetMasterVolume(_) | Command::SetMasterMute(_))
 }
 
 /// Whole loop passes (at least one) that cover the session's longest tail: on each lane, its enabled

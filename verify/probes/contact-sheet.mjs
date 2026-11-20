@@ -639,7 +639,7 @@ await probe(async ({ browser, open }) => {
 
       // A reload's reset frame from an engine that remembers every input send on.
       scene = '11-engine-in-fx';
-      await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }]);
+      await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }, { SetInputSend: ['ott', true] }]);
       await page.getByRole('button', { name: 'Input effects', exact: true }).click();
       await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
       await page.waitForTimeout(250);
@@ -647,10 +647,13 @@ await probe(async ({ browser, open }) => {
       // The sends' read-outs follow the drawer's units (InputFx.tsx shares FxPanel.tsx `formatVal`), at the
       // defaults shot and at their widest.
       const sendDefs = await page.evaluate(() => import('/src/ui/state/engine-store.ts').then(({ engineInputSends }) => {
-        const sends = { echo: 'Echo', reverb: 'Reverb', ring: 'Ring mod' };
+        const sends = { echo: 'Echo', reverb: 'Reverb', ring: 'Ring mod', ott: 'OTT' };
         return Object.fromEntries(engineInputSends.params.map((d) => [`${sends[d.send]} ${d.label.toLowerCase()}`, d]));
       }));
-      const SEND_WIDEST = [['echoFeedback', 0.95], ['echoLevel', 1], ['reverbLevel', 1], ['ringFreq', 1500], ['ringLevel', 1]];
+      const SEND_WIDEST = [
+        ['echoFeedback', 0.95], ['echoLevel', 1], ['reverbLevel', 1], ['ringFreq', 1500], ['ringLevel', 1],
+        ['ottDepth', 1], ['ottTime', 1], ['ottUpward', 1], ['ottDownward', 1],
+      ];
       const setSends = (values) => page.evaluate(async (values) => {
         const { engineInputSends } = await import('/src/ui/state/engine-store.ts');
         for (const [key, v] of values) engineInputSends.setValue(key, v);
@@ -662,7 +665,7 @@ await probe(async ({ browser, open }) => {
       await setSends(SEND_WIDEST.map(([key]) => [key, Object.values(sendDefs).find((d) => d.key === key).default]));
       console.log(JSON.stringify({ tag, scene, sendVals }));
       for (const [when, vals] of Object.entries(sendVals)) {
-        if (vals.length !== 6) fail(`${tag} ${scene}: ${vals.length} send params in IN FX (${when}), not 6`);
+        if (vals.length !== 10) fail(`${tag} ${scene}: ${vals.length} send params in IN FX (${when}), not 10`);
         for (const v of vals) if (v.problem) fail(`${tag} ${scene}: ${v.name} reads ${JSON.stringify(v.text)} (${when}): ${v.problem}`);
       }
       // The drum ribbon's pad keys read 11 px at the chrome's size step (no scene shoots the drum synth).

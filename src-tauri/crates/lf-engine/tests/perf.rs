@@ -7,8 +7,8 @@
 //!
 //! - Stage 2: five lanes (one overdubbing), the click and the master limiter under 10 % of the block's
 //!   real time (with the Stage 3 sound wired in and idle: bypassed FX, silent instruments).
-//! - Stage 3: that engine with every effect on, every input send on and the drum kit playing, plus
-//!   the other synths beside it (below), under 50 %.
+//! - Stage 3: that engine with every effect on, every input send and the input OTT on and the drum kit
+//!   playing, plus the other synths beside it (below), under 50 %.
 //! - The input sends (F15, F24): what ECHO, REVERB and RING MOD on the live input add to the Stage 2 engine, printed
 //!   beside it (no bar of their own; the Stage 3 bar carries them).
 //! - A lane's pan: the Stage 2 engine with every lane centred, then every lane panned and resting, then
@@ -20,8 +20,10 @@
 //! - The master at 64 and 128 frames: the Stage 2 engine quiet and in sustained gain reduction, and one
 //!   master limiter alone, under and over its threshold on every frame, each block's median beside the
 //!   mean (no bar of its own).
-//! - The master OTT alone (`dsp::ott`): 128-frame blocks at 48 kHz, on active audio and on a decay into
-//!   silence, on and off (it runs either way); each mean under 40 µs (1.5 % of the 2667 µs block).
+//! - The input OTT alone (`dsp::ott`), its three instances as the engine runs them (one mono per plugin
+//!   slot, frame by frame; one stereo on the built-in instruments, per block): 128-frame blocks at
+//!   48 kHz, on active audio and on a decay into silence, on and off (they run either way); each mean
+//!   under 80 µs (3 % of the 2667 µs block: the 40 µs one stereo instance had on the master bus, twice).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
@@ -53,7 +55,7 @@ use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
 use lf_engine::dsp::compressor::{Compressor, Params};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
-use lf_engine::dsp::ott::Ott;
+use lf_engine::dsp::ott::{MonoOtt, Setting, StereoOtt};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
 use lf_engine::looper::{job_frames, JOB_RATE};
@@ -61,6 +63,10 @@ use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteT
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 64;
+/// The input OTT's bar, µs per 128-frame block for its three instances: measured 25.6–29.7 µs mean on
+/// the dev PC (Windows release, 2026-11-20), so about 3× headroom, as the master OTT's 40 µs had over its
+/// ~10 µs.
+const BAR_OTT_US: f64 = 80.0;
 
 /// Five lanes playing a 4-bar loop, lane 0 overdubbing, the click on; returns the rig and its master.
 fn five_lanes_one_overdubbing() -> (Rig, Frame) {
@@ -206,13 +212,15 @@ fn the_master_cost_at_64_and_128_frames() {
     }
 }
 
-/// The master OTT alone, per 128-frame block at 48 kHz: 20 s of active audio (a chord of sines with an
-/// amplitude that swings 40 dB, so every band moves between its upward and downward sides), then 30 s of
-/// its decay into digital silence (the filters and envelopes ring down past where a float would turn
-/// subnormal). On and off; each mean must stay under 40 µs.
+/// The input OTT alone, its three instances as the engine runs them, per 128-frame block at 48 kHz: one
+/// mono instance per plugin slot, called frame by frame (`slots`), and the stereo one on the built-in
+/// instruments, called per block (`instruments`). 20 s of active audio (a chord of sines with an
+/// amplitude that swings 40 dB, so every band moves between its upward and downward sides), then 30 s
+/// of its decay into digital silence (the filters and envelopes ring down past where a float would turn
+/// subnormal). On and off, at DEPTH 1; each mean must stay under [`BAR_OTT_US`].
 #[test]
 #[ignore]
-fn the_master_otts_cost() {
+fn the_input_otts_cost() {
     const N: usize = 128;
     let active = |f: usize| {
         let t = f as f32 / RATE;
@@ -220,28 +228,36 @@ fn the_master_otts_cost() {
         swing * 0.3 * ((t * 110.0 * std::f32::consts::TAU).sin() + (t * 1310.0 * std::f32::consts::TAU).sin() + (t * 5200.0 * std::f32::consts::TAU).sin())
     };
     for on in [true, false] {
-        let mut ott = Ott::new(RATE as u32);
-        ott.set_amount(1.0);
-        ott.set_on(on);
+        let mut slots = [MonoOtt::new(RATE as u32), MonoOtt::new(RATE as u32)];
+        let mut instruments = StereoOtt::new(RATE as u32);
+        for s in [Setting::Depth(1.0), Setting::On(on)] {
+            slots.iter_mut().for_each(|o| o.set(s));
+            instruments.set(s);
+        }
+        let (mut a, mut b) = (vec![0.0f32; N], vec![0.0f32; N]);
         let (mut left, mut right) = (vec![0.0f32; N], vec![0.0f32; N]);
         for (name, seconds, signal) in [("active audio", 20usize, true), ("decay into silence", 30, false)] {
             let blocks = seconds * RATE as usize / N;
             let mut times = Vec::with_capacity(blocks);
-            for b in 0..blocks {
-                for (k, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
-                    *l = if signal { active(b * N + k) } else { 0.0 };
-                    *r = 0.8 * *l;
+            for blk in 0..blocks {
+                for k in 0..N {
+                    let x = if signal { active(blk * N + k) } else { 0.0 };
+                    (a[k], b[k], left[k], right[k]) = (x, 0.7 * x, 0.9 * x, 0.8 * x);
                 }
                 let t = Instant::now();
-                ott.process(&mut left, &mut right);
+                for k in 0..N {
+                    [a[k]] = slots[0].frame([a[k]]);
+                    [b[k]] = slots[1].frame([b[k]]);
+                }
+                instruments.process(&mut left, &mut right);
                 times.push(t.elapsed().as_secs_f64());
-                std::hint::black_box(&left);
+                std::hint::black_box((&a, &b, &left));
             }
             let mean = times.iter().sum::<f64>() / blocks as f64;
             times.sort_by(f64::total_cmp);
             let (median, p999, worst) = (times[blocks / 2], times[blocks * 999 / 1000], times[blocks - 1]);
             println!(
-                "OTT {}, {name:<18}: mean {:.1} µs, median {:.1} µs, p99.9 {:.1} µs, worst {:.1} µs (of a {:.0} µs block)",
+                "input OTT ×3 {}, {name:<18}: mean {:.1} µs, median {:.1} µs, p99.9 {:.1} µs, worst {:.1} µs (of a {:.0} µs block)",
                 if on { "on " } else { "off" },
                 mean * 1e6,
                 median * 1e6,
@@ -249,7 +265,7 @@ fn the_master_otts_cost() {
                 worst * 1e6,
                 N as f64 / RATE as f64 * 1e6
             );
-            assert!(mean < 40e-6, "the OTT {name} costs {:.1} µs a block", mean * 1e6);
+            assert!(mean < BAR_OTT_US * 1e-6, "the three OTTs {name} cost {:.1} µs a block", mean * 1e6);
         }
     }
 }
@@ -503,7 +519,7 @@ fn the_lanes_pan_cost() {
 }
 
 /// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.
-const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + input sends + drum kit + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass"];
+const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + input sends + input OTT + drum kit + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass"];
 
 /// The Stage 3 acceptance load, the worst a session can ask of the built-in sound at once:
 ///
@@ -557,6 +573,9 @@ impl Stage3 {
             }
         }
         input_sends_on(&mut rig);
+        // The input OTT on at full DEPTH: on both slots' output and on the drum kit.
+        rig.set(Command::SetInputSendParam(InputSendParam::OttDepth, 1.0));
+        rig.set(Command::SetInputSend(InputSend::Ott, true));
         rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Drums)));
         let engine_frame = rig.frame;
         let mut engine_input = [0.0f32; BLOCK];

@@ -42,13 +42,14 @@ pub enum ActionId {
     InFxEcho,
     InFxReverb,
     InFxRing,
+    InFxOtt,
     TunerToggle,
 }
 
 impl ActionId {
     /// Every action, in `ACTION_LABELS` order.
     #[cfg(test)]
-    pub const ALL: [ActionId; 27] = [
+    pub const ALL: [ActionId; 28] = [
         ActionId::RecDub,
         ActionId::PlayStop,
         ActionId::Undo,
@@ -75,6 +76,7 @@ impl ActionId {
         ActionId::InFxEcho,
         ActionId::InFxReverb,
         ActionId::InFxRing,
+        ActionId::InFxOtt,
         ActionId::TunerToggle,
     ];
 
@@ -204,14 +206,14 @@ pub fn parse_bindings(json: &str) -> Result<Parsed, String> {
 mod tests {
     use super::*;
 
-    // actions.ts ActionId and ACTION_LABELS: the 27 ids, in the picker's order, the first nine lanes.
+    // actions.ts ActionId and ACTION_LABELS: the 28 ids, in the picker's order, the first nine lanes.
     #[test]
-    fn the_27_actions_serialize_as_the_ts_ids_in_label_order_and_the_first_nine_are_lanes() {
+    fn the_28_actions_serialize_as_the_ts_ids_in_label_order_and_the_first_nine_are_lanes() {
         let ids = [
             "recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "copyWide", "halveTrack",
             "nextTrack", "prevTrack", "playAll", "stopAll", "fadeAll", "goLive", "stageView", "stageNextView", "tapTempo",
             "clickToggle", "endStopToggle", "fixedToggle", "retakeToggle", "autoRecToggle", "inFxEcho",
-            "inFxReverb", "inFxRing", "tunerToggle",
+            "inFxReverb", "inFxRing", "inFxOtt", "tunerToggle",
         ];
         for (action, id) in ActionId::ALL.into_iter().zip(ids) {
             assert_eq!(serde_json::to_value(action).unwrap(), id);
@@ -219,7 +221,7 @@ mod tests {
         }
         let lanes: Vec<bool> = ActionId::ALL.iter().map(|a| a.is_lane()).collect();
         assert_eq!(ids.len(), ActionId::ALL.len());
-        assert_eq!(lanes, [[true; 9].as_slice(), &[false; 18]].concat());
+        assert_eq!(lanes, [[true; 9].as_slice(), &[false; 19]].concat());
     }
 
     // midi-actions.ts fromStored: a record saved before targets and HOLD reads with neither; a target is

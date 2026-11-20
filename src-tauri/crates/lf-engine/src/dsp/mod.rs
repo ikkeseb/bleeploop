@@ -35,8 +35,9 @@
 //!   modulation, the bass and the drum kit ([`synth`]); the per-track FX chain with its filter, pitch shift,
 //!   stutter and feedback delay, and the shared reverb bus ([`fx`]); the reverb IR ([`reverb_ir`]); the
 //!   master limiter ([`compressor`]).
-//! - The master OTT ([`ott`]): the engine's own three-band compressor, with no Tone or Blink reference
-//!   (its properties and measurements: `tests/ott.rs`).
+//! - The input OTT ([`ott`]): the engine's own three-band compressor, one instance on each plugin slot's
+//!   output and one on the built-in instruments' sum, with no Tone or Blink reference (its properties
+//!   and measurements: `tests/ott.rs`).
 //!
 //! The crate briefing (`lib.rs`) lists what is not built yet.
 

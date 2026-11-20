@@ -436,7 +436,7 @@ fn golden_jam_at_44k1_and_48k_bit_identical_across_block_sizes() {
 
 /// A measurement, not a gate: the jam's device output and Share mix (both sides each) hashed at 44.1
 /// and 48 kHz, for comparing one build with another bit for bit (a change that must leave the default
-/// sound alone, the master OTT while off). No hash is pinned: the maths library's last bits differ by
+/// sound alone, the input OTT while off). No hash is pinned: the maths library's last bits differ by
 /// platform. `cargo test -p lf-engine --test golden_jam -- --ignored --nocapture golden_jam_hashes`
 #[test]
 #[ignore = "a measurement: prints hashes to compare across builds"]

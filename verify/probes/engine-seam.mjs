@@ -12,7 +12,7 @@
  *   a PC key (its note to native MIDI's router, `__lf.native.inputSent`, by its owner `key:<code>`), the
  *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14; its bars
  *   show only while FIXED is on), IN FX
- *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged),
+ *   (ECHO, RING MOD and OTT switches and parameters, their persisted values, the engaged pill and an adopted OTT depth clamped on screen),
  *   ⧉ COPY and ↔ WIDE in the lane's EDIT menu (`Copy`, `CopyWide`; the `copyWide` action is the engine's
  *   `CopyWide`, on its own selection or a named track);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
@@ -113,7 +113,11 @@ await probe(async ({ open }) => {
   });
   const boot = await sentAtLeast(1);
   console.log('first reset sent', JSON.stringify(boot));
-  for (const expected of [{ SetMasterVolume: 1 }, { SetMasterOttAmount: 0.5 }, { SetMasterOtt: false }, { SetClickVolume: 0.7 }]) {
+  for (const expected of [
+    { SetMasterVolume: 1 }, { SetClickVolume: 0.7 }, { SetInputSend: ['ott', false] },
+    { SetInputSendParam: ['ottDepth', 0.5] }, { SetInputSendParam: ['ottTime', 0.5] },
+    { SetInputSendParam: ['ottUpward', 1] }, { SetInputSendParam: ['ottDownward', 1] },
+  ]) {
     assert.ok(boot.some((c) => JSON.stringify(c) === JSON.stringify(expected)), `the first reset sends ${JSON.stringify(expected)}`);
   }
   const bootInput = await inputSent();
@@ -136,24 +140,6 @@ await probe(async ({ open }) => {
   await page.getByRole('button', { name: 'Metronome click' }).click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Click' } }], "CLICK sends the engine's toggle");
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "CLICK shows the engine's Toggled");
-
-  // The master OTT is a master setting the UI owns, as the master volume is: a press sends the value and
-  // shows it at once, and the AMOUNT read-out (live while OTT is on) opens its slider.
-  await clearSent();
-  const OTT = 'OTT: multiband compressor on the loops and synths (not the live input)';
-  const ott = page.getByRole('button', { name: OTT, exact: true });
-  await ott.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetMasterOtt: true }], 'OTT sends SetMasterOtt');
-  assert.equal(await ott.getAttribute('aria-pressed'), 'true', 'OTT shows on at once');
-  assert.equal(await page.evaluate(() => localStorage.getItem('lf.masterOtt')), '1', 'OTT on is kept');
-  await clearSent();
-  await page.getByRole('button', { name: 'OTT amount' }).click();
-  await page.getByRole('slider', { name: 'OTT amount' }).fill('80');
-  assert.deepEqual(await sentAtLeast(1), [{ SetMasterOttAmount: 0.8 }], 'the AMOUNT slider sends SetMasterOttAmount');
-  await page.keyboard.press('Escape');
-  await clearSent();
-  await ott.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetMasterOtt: false }], 'a second press turns OTT off');
 
   await clearSent();
   await lanes.nth(0).locator('.lp-core').click();
@@ -290,6 +276,32 @@ await probe(async ({ open }) => {
   assert.equal(await engaged(), false, 'IN FX starts off');
   await infx.click();
   await dialog.waitFor();
+  const ott = dialog.getByRole('button', { name: 'Input OTT', exact: true });
+  const depth = dialog.getByRole('slider', { name: 'OTT depth' });
+  await clearSent();
+  await ott.click();
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'ott' } } }], "OTT sends the engine's toggle");
+  assert.equal(await ott.getAttribute('aria-pressed'), 'true');
+  assert.equal(await engaged(), true, 'OTT alone lights IN FX');
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.ott')), '1');
+  await clearSent();
+  await depth.fill('0.8');
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: ['ottDepth', 0.8] }]);
+  // TIME, UP and DOWN send their own params and are kept, as DEPTH is, so a restart sends all four.
+  for (const [name, key, v] of [['OTT time', 'ottTime', '0.2'], ['OTT up', 'ottUpward', '0.3'], ['OTT down', 'ottDownward', '0.6']]) {
+    await clearSent();
+    await dialog.getByRole('slider', { name }).fill(v);
+    assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: [key, Number(v)] }], `${name} sends ${key}`);
+  }
+  assert.deepEqual(
+    await page.evaluate(() => ['ottDepth', 'ottTime', 'ottUpward', 'ottDownward'].map((k) => localStorage.getItem(`lf.inputSend.${k}`))),
+    ['0.8', '0.2', '0.3', '0.6'],
+    'all four OTT controls are kept',
+  );
+  await clearSent();
+  await ott.click();
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'ott' } } }], 'a second press toggles it off');
+  assert.equal(await engaged(), false, 'disabling the only effect clears IN FX');
   await clearSent();
   await page.getByRole('button', { name: 'Input echo' }).click();
   assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'echo' } } }], "ECHO sends the engine's toggle");
@@ -347,7 +359,7 @@ await probe(async ({ open }) => {
     reset: true,
     settings: [
       { SetMasterVolume: 0.6 },
-      { SetMasterOtt: true },
+      { SetInputSend: ['ott', true] },
       { SetInputSend: ['echo', false] },
       { SetMetronome: true },
       { SetVolume: [0, 0.5] },
@@ -362,29 +374,35 @@ await probe(async ({ open }) => {
   assert.equal(await page.getByRole('slider', { name: 'Track 1 volume' }).inputValue(), '50', "the engine's lane volume is adopted");
   assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "the engine's click is adopted");
   assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
-  assert.equal(await page.getByRole('button', { name: OTT, exact: true }).getAttribute('aria-pressed'), 'true', "the engine's OTT is adopted");
-  assert.equal(await page.evaluate(() => localStorage.getItem('lf.masterOtt')), '1', "the engine's OTT is kept");
+  await infx.click();
+  assert.equal(await ott.getAttribute('aria-pressed'), 'true', "the engine's OTT is adopted");
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.ott')), '1', "the engine's OTT is kept");
   assert.ok(
-    !adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMasterOtt !== undefined || c.SetMetronome !== undefined),
+    !adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetInputSend?.[0] === 'ott' || c.SetMetronome !== undefined),
     'adopted settings are not pushed back',
   );
-  assert.ok(adopted.some((c) => c.SetMasterOttAmount === 0.8), 'the kept OTT amount the engine lacks is sent');
+  assert.ok(adopted.some((c) => c.SetInputSendParam?.[0] === 'ottDepth' && c.SetInputSendParam[1] === 0.8), 'the kept OTT depth the engine lacks is sent');
   assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
-  assert.equal(await engaged(), false, "the engine's echo (off) is adopted");
+  assert.equal(await engaged(), true, "the adopted OTT lights IN FX");
+  assert.equal(await dialog.getByRole('button', { name: 'Input echo' }).getAttribute('aria-pressed'), 'false');
   assert.ok(!adopted.some((c) => c.SetInputSend?.[0] === 'echo'), 'the adopted send is not pushed back');
   assert.ok(adopted.some((c) => JSON.stringify(c) === JSON.stringify({ SetInputSendParam: ['echoLevel', 0.8] })), 'the kept echo level the engine lacks is sent');
   assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.echo')), '0', "the engine's echo is kept");
 
-  // An OTT amount past one comes back as the engine holds it, clamped (`Ott::set_amount`).
+  // The adopted depth is clamped in the store as well as on the slider.
   await emit({
     reset: true,
-    settings: [{ SetMasterOttAmount: 3 }],
+    settings: [{ SetInputSendParam: ['ottDepth', 3] }],
     events: [laneEvent(0, committed), transport(BAR, true, 120), { Selected: { frame: BAR, lane: 0 } }],
     anchor: { frame: BAR, atMs: Date.now(), rate: RATE, grid: 0 },
     meter: { peak: [0, 0], clip: [false, false] },
   });
-  assert.equal(await page.evaluate(() => localStorage.getItem('lf.masterOttAmount')), '1', 'an adopted OTT amount is clamped to one');
-  assert.equal((await page.getByRole('button', { name: 'OTT amount' }).textContent()).trim(), '100', 'and shown as 100');
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.ottDepth')), '1', 'an adopted OTT depth is clamped to one');
+  assert.equal(await depth.inputValue(), '1');
+  assert.equal(await depth.getAttribute('aria-valuetext'), '100 %');
+  assert.equal(await dialog.locator('.fxp-param', { has: page.getByRole('slider', { name: 'OTT depth' }) }).locator('.fxp-param__val').textContent(), '100 %');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
 
   // ── FIXED past the loop (F14 multiply): a bar at a time up to the loop, whole loops above it ─────
   await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });

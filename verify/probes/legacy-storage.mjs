@@ -7,7 +7,7 @@
  *
  * - full older install: `OLDER_INSTALL`, every `lf.` key the app writes with a non-default value (surveyed
  *   from `src/`). After the boot settles, and again after a reload, every seeded key holds its exact text,
- *   no `lf.guitarFirst` exists, nothing else was added, and the screen is the returning one: no amp-sim ask,
+ *   only the new OTT switch is added (off), and the screen is the returning one: no amp-sim ask,
  *   slot B not folded, slot A Off and slot B on Pad as stored, slot A's input on the stored In 2 (and the
  *   device opened with the stored picks), the keyboard at the top with the stored weights, no start line
  *   on the empty looper;
@@ -86,7 +86,7 @@ const MINIMAL_INSTALL = { 'lf.masterVolume': '0.8' };
  * branch's rule aside (`src/ui/state/engine-store.ts`): the meter the reset frame's `Transport` shows
  * (`applyEvent`, no kept meter to ask for), and each input send's state as the engine's `Toggled` answers
  * the boot's own `SetInputSend` (`adoptSettings` sends what the engine lacks; `applyToggle` keeps it). */
-const BOOT_ADDS = { 'lf.inputSend.echo': '0', 'lf.inputSend.reverb': '0', 'lf.inputSend.ring': '0', 'lf.meter': '0' };
+const BOOT_ADDS = { 'lf.inputSend.echo': '0', 'lf.inputSend.reverb': '0', 'lf.inputSend.ring': '0', 'lf.inputSend.ott': '0', 'lf.meter': '0' };
 
 await probe(async ({ browser, open }) => {
   let seq = 0;
@@ -164,7 +164,7 @@ await probe(async ({ browser, open }) => {
       }
       const stored = await storage(page);
       assert.equal(stored['lf.guitarFirst'], undefined, `${when}: lf.guitarFirst was written`);
-      assertKept(stored, OLDER_INSTALL, {}, when);
+      assertKept(stored, OLDER_INSTALL, { 'lf.inputSend.ott': '0' }, when);
       const l = await look(page);
       assertReturning(l, ['Off', 'Pad'], when);
       assert.equal(l.placement, 'top', `${when}: the keyboard placement`);

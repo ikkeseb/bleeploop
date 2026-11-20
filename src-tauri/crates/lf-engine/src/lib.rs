@@ -25,8 +25,8 @@
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume, the Share mix (the master without the click) | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR, COPY and WIDE COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
-//! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
-//! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
+//! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor (the input OTT is switched beside them but sits in `slots` and `instruments`) | — (engine only) |
+//! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, the input OTT on their sum, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`scope`] | the live scope taps, while the UI asks for them ([`Command::SetScope`]): per lane after its FX, per monitor and per master, a min/max envelope in 4 ms columns on its own ring | — (engine only) |
 //! | [`tuner`] | the tuner's on flag and its tap: both slots' raw input, frame by frame, on its own ring for a pitch detector off the audio thread, with an epoch that changes wherever the input breaks | — (engine only) |
@@ -34,9 +34,9 @@
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
-//! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
-//! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter, the master OTT | Tone.js on Blink's Web Audio (the OTT: the engine's own) |
+//! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter, the input OTT | Tone.js on Blink's Web Audio (the OTT: the engine's own) |
 //!
 //! # Rules
 //!
@@ -147,7 +147,7 @@
 //!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,
 //!   crossfades to bypass, stops the unit once and hands it back, and an eviction hands back every unit,
 //!   a waiting install included. The slots render ahead to the next slot command, so a plugin sees one
-//!   call per block unless a stamped note, target, live flag or gain splits it there.
+//!   call per block unless a stamped note, target, live flag, gain or input OTT command splits it there.
 //! - **The tuner mutes the monitor and nothing else** ([`tuner`]): the wet signal and the input sends glide
 //!   to silence over about 2 ms from its frame and back when it closes; loops, the click and the record
 //!   tap play on. It and a take never coexist: pressed on while one exists it is refused, and a take that
@@ -168,7 +168,7 @@
 //! `tests/share_mix.rs` shows it changes no output bit). `tests/slots.rs`'s fake units record what they
 //! saw in preallocated buffers (never allocating in `process`) and are handed back to the test to drop.
 //! `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, the
-//! master OTT, a multiply's burst, a TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the
+//! input OTT, a multiply's burst, a TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the
 //! golden jam at 44.1 and 48 kHz, bit-identical across block sizes 1, 32, 64, 127, 128, 480 and 1024;
 //! `tests/gestures.rs` runs proptest gesture scripts (one recorder; a whole-bar master; every lane one
 //! master long; undo twice is identity; undo after an N-cycle dub gives back the pre-dub loop; finite

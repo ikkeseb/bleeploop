@@ -2,7 +2,7 @@
 //! sample rate, one that replaced a faulted engine), so the settings survive a rebuild and a setting sent
 //! before the first open is kept; a reset frame hands them to the UI.
 //!
-//! A setting is a command that sets a value (the tempo, the meter, the click, the master, the input sends, the
+//! A setting is a command that sets a value (the tempo, the meter, the click, the master, the input sends and the input OTT, the
 //! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK, pan and FX, the note target, the
 //! wheels, a built-in instrument's level, a plugin slot's live flag and gain, the selected lane);
 //! everything else (the looper's gestures, notes) acts once and is not kept. Every setting but a lane's
@@ -20,7 +20,7 @@
 //! what its event ring still holds, then each lane's mix read from the engine itself
 //! (`Engine::applied_mixes`), so a mix the full ring refused is not lost.
 //!
-//! A toggled setting (the click, END STOP, FIXED, RETAKE, AUTO REC, each input send, each slot's GO LIVE:
+//! A toggled setting (the click, END STOP, FIXED, RETAKE, AUTO REC, each input send, the input OTT, each slot's GO LIVE:
 //! `lf_engine::Toggle`) is switched by an action (`Action::Toggle`), which the engine judges and applies
 //! against its own value, so the memory takes its value from what the engine applied. Its setter is kept as sent
 //! (initialization, a replay, a script), and the engine answers every applied command of the setting,
@@ -76,13 +76,11 @@ enum Key {
     ClickVolume,
     MasterVolume,
     MasterMute,
-    /// The OTT's amount before its switch, so an OTT that comes on in a new engine comes on at it.
-    MasterOttAmount,
-    MasterOtt,
-    /// An input send's param, by `InputSendParam as usize`; before the sends' on/off, so a send that
-    /// comes on in a new engine comes on with its values.
+    /// An input send's param or the input OTT's control, by `InputSendParam as usize`; before the
+    /// sends' and the OTT's on/off, so one that comes on in a new engine comes on with its values (the
+    /// OTT takes a control set while it is off and settled at once: `lf_engine::dsp::ott`).
     InputSendParam(usize),
-    /// An input send, by `InputSend as usize`.
+    /// An input send or the input OTT, by `InputSend as usize`.
     InputSend(usize),
     LoopEndStop,
     FadeBars,
@@ -132,8 +130,6 @@ fn key(command: &Command) -> Option<Key> {
         Command::SetClickVolume(_) => Key::ClickVolume,
         Command::SetMasterVolume(_) => Key::MasterVolume,
         Command::SetMasterMute(_) => Key::MasterMute,
-        Command::SetMasterOtt(_) => Key::MasterOtt,
-        Command::SetMasterOttAmount(_) => Key::MasterOttAmount,
         Command::SetInputSendParam(param, _) => Key::InputSendParam(param as usize),
         Command::SetInputSend(send, _) => Key::InputSend(send as usize),
         Command::SetLoopEndStop(_) => Key::LoopEndStop,
@@ -428,19 +424,94 @@ mod tests {
     }
 
     #[test]
-    fn master_ott_replays_its_latest_settings_after_clear_all() {
+    fn the_input_ott_replays_its_latest_controls_before_its_switch_after_clear_all() {
         let mut s = Settings::default();
-        assert!(s.record(&Command::SetMasterOtt(false)));
-        assert!(s.record(&Command::SetMasterOttAmount(0.5)));
-        assert!(s.record(&Command::SetMasterOtt(true)));
-        assert!(s.record(&Command::SetMasterOttAmount(0.75)));
+        assert!(s.record(&Command::SetInputSend(InputSend::Ott, false)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::OttDepth, 0.5)));
+        assert!(s.record(&Command::SetInputSend(InputSend::Ott, true)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::OttDownward, 0.25)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::OttTime, 0.8)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::OttDepth, 0.75)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::OttUpward, 0.6)));
         assert!(s.record(&Command::SetVolume(0, 0.25)));
 
         assert!(!s.record(&Command::ClearAll));
         assert!(s.mixed(0, 100, 0, &CompactMix::from(&LaneMix::default())));
         s.follow(1);
 
-        assert_eq!(replay(&s), [Command::SetMasterOttAmount(0.75), Command::SetMasterOtt(true)], "the latest of each, the amount before the switch");
+        assert_eq!(
+            replay(&s),
+            [
+                Command::SetInputSendParam(InputSendParam::OttDepth, 0.75),
+                Command::SetInputSendParam(InputSendParam::OttTime, 0.8),
+                Command::SetInputSendParam(InputSendParam::OttUpward, 0.6),
+                Command::SetInputSendParam(InputSendParam::OttDownward, 0.25),
+                Command::SetInputSend(InputSend::Ott, true)
+            ],
+            "the latest of each, every control before the switch"
+        );
+    }
+
+    #[test]
+    fn the_input_ott_keeps_its_switch_and_every_control_through_other_settings_and_overwrites() {
+        use lf_engine::dsp::ott::{DEFAULT_DEPTH, DEFAULT_DOWNWARD, DEFAULT_TIME, DEFAULT_UPWARD};
+        use lf_engine::{Engine, EngineConfig, InputSend, ProcessContext, TimedCommand};
+        let (depth, time, up, down) = (0.9, 0.3, 0.4, 0.7);
+        assert!(depth != DEFAULT_DEPTH && time != DEFAULT_TIME && up != DEFAULT_UPWARD && down != DEFAULT_DOWNWARD);
+        let mut s = Settings::default();
+        for c in [
+            Command::SetInputSendParam(InputSendParam::OttTime, 0.1),
+            Command::SetBpm(97.0),
+            Command::SetInputSend(InputSend::Ott, true),
+            Command::SetInputSendParam(InputSendParam::OttDepth, 0.2),
+            Command::SetInputSendParam(InputSendParam::EchoLevel, 0.3),
+            Command::SetInputSendParam(InputSendParam::OttUpward, 0.0),
+            Command::SetSlotGain(0, 0.5),
+            Command::SetInputSendParam(InputSendParam::OttDownward, 0.1),
+            Command::SetInputSend(InputSend::Ott, false),
+            Command::SetInputSendParam(InputSendParam::OttDownward, down),
+            Command::SetVolume(1, 0.8),
+            Command::SetInputSendParam(InputSendParam::OttDepth, depth),
+            Command::SetInputSendParam(InputSendParam::OttUpward, up),
+            Command::SetInputSend(InputSend::Echo, true),
+            Command::SetInputSendParam(InputSendParam::OttTime, time),
+            Command::SetInputSend(InputSend::Ott, true),
+            Command::SetMasterVolume(0.6),
+        ] {
+            assert!(s.record(&c), "{c:?} is a setting");
+        }
+        let replayed = replay(&s);
+        let ott: Vec<Command> = replayed
+            .iter()
+            .copied()
+            .filter(|c| matches!(c, Command::SetInputSend(InputSend::Ott, _)) || matches!(c, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott))
+            .collect();
+        assert_eq!(
+            ott,
+            [
+                Command::SetInputSendParam(InputSendParam::OttDepth, depth),
+                Command::SetInputSendParam(InputSendParam::OttTime, time),
+                Command::SetInputSendParam(InputSendParam::OttUpward, up),
+                Command::SetInputSendParam(InputSendParam::OttDownward, down),
+                Command::SetInputSend(InputSend::Ott, true)
+            ],
+            "the latest of each, every control before the switch"
+        );
+        let switch = replayed.iter().position(|c| matches!(c, Command::SetInputSend(InputSend::Ott, _))).unwrap();
+        assert!(replayed[switch + 1..].iter().all(|c| !matches!(c, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)), "an OTT control after its switch");
+
+        // Replayed into a fresh engine: its OTT is on. (The engine exposes no reader of the OTT's
+        // controls, so their values are pinned by the replay above only.)
+        let (mut engine, mut handle) = Engine::new(EngineConfig { max_loop_seconds: 1.0, ..EngineConfig::new(48_000) });
+        let k = Toggle::Send(InputSend::Ott).index();
+        assert!(!engine.toggles()[k], "a fresh engine's OTT is off");
+        for command in replayed {
+            handle.commands.push(TimedCommand { frame: None, command }).expect("command ring full");
+        }
+        let input = [0.0f32; 128];
+        let (mut l, mut r) = ([0.0f32; 128], [0.0f32; 128]);
+        engine.process(&ProcessContext { frame: 0, xrun: false, damaged: false, align_frames: 0, input_frames: 0 }, &input, &mut l, &mut r);
+        assert!(engine.toggles()[k], "the replayed engine's OTT is off");
     }
 
     /// Lane `lane`'s mix as an `Event::Mix` carries it, from a fresh lane's with `edit` applied.

@@ -24,7 +24,7 @@ use std::rc::Rc;
 use common::Rig;
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::{frames_per_bar, Frame, Grid, Meter};
-use lf_engine::{Action, Command, Event, InputSend, LaneState};
+use lf_engine::{Action, Command, Event, InputSend, InputSendParam, LaneState};
 use pluck::{Note, DOT, LAYER, RIFF_A, RIFF_A2, RIFF_B, RIFF_B2, RIFF_C, SIX_EIGHT, STABS};
 use serde_json::json;
 use sheet::{Clip, Meta};
@@ -933,35 +933,59 @@ fn pan() {
 
 #[test]
 #[ignore]
-fn master_ott() {
-    let mut rig = rig_at(120.0);
-    let level = 0.2;
-    first_take(&mut rig, 0, 1, riff(&RIFF_A, 1.0, 120.0, level));
-    later_take(&mut rig, 1, riff(&RIFF_B, 1.0, 120.0, level));
-    later_take(&mut rig, 2, riff(&LAYER, 1.0, 120.0, level));
-    let m = rig.master();
-    rig.advance_to(rig.next_boundary());
-    let b = rig.frame;
+fn input_ott() {
+    // Three takes of one phrase, each played in through the live slot and then looped alone once: OTT
+    // off, then on at DEPTH 50 %, then at 100 %. Six bars at 160 BPM fit the 10 s a clip may run; the
+    // click is off, so the clip is the phrase alone.
+    let bpm = 160.0;
+    let mut rig = rig_at(bpm);
+    rig.set(Command::SetMetronome(false));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    let p = riff(&RIFF_A, 1.0, bpm, PEAK);
+    let press = rig.frame;
+    rig.press(Command::RecDub(0));
+    let m = rig.meter();
+    let downbeat = Grid::tempo(press, 0, rig.bpm(), rig.sr, m).beat_frame(m.pulses_per_bar());
+    let (bar, align) = (rig.fpb(), rig.align);
+    // Each take's first frame, as heard (the alignment after its downbeat): the phrase is played there.
+    let at = |k: Frame| downbeat + 2 * k * bar + align;
+    rig.set_input(again(p, vec![at(0), at(1), at(2)]));
+    for (k, depth) in [(1, 0.5), (2, 1.0)] {
+        let b = downbeat + 2 * k * bar;
+        // Into the OTT a moment before the phrase, while the input is silent: its fade is done by then.
+        rig.send_at(b - secs(0.1), Command::SetInputSendParam(InputSendParam::OttDepth, depth));
+        rig.send_at(b - secs(0.1), Command::SetInputSend(InputSend::Ott, true));
+        // The next lane's take is armed during the loop before it, and that loop is muted from its end.
+        rig.send_at(b - bar / 2, Command::RecDub(k as u8));
+        rig.send_at(b, Command::SetMute(k as u8 - 1, true));
+    }
+    rig.advance_to(downbeat);
     let mut clip = Clip::begin(&mut rig);
-    rig.send_at(b + m, Command::SetMasterOtt(true));
-    rig.send_at(b + 2 * m, Command::SetMasterOttAmount(1.0));
-    rig.advance_to(b + 3 * m + secs(0.3));
-    clip.mark("OTT off", b);
-    clip.mark("OTT on, AMOUNT 50 %", b + m);
-    clip.mark("AMOUNT 100 %", b + 2 * m);
+    rig.advance_to(downbeat + 6 * bar + secs(0.4));
+    for lane in 0..3 {
+        assert!(rig.state(lane) == LaneState::Playing && rig.lane(lane).length == bar, "lane {lane} holds one bar");
+    }
+    clip.mark_out("played in, OTT off", at(0));
+    clip.mark("its loop", downbeat + bar);
+    clip.mark_out("played in, DEPTH 50 %", at(1));
+    clip.mark("its loop", downbeat + 3 * bar);
+    clip.mark_out("played in, DEPTH 100 %", at(2));
+    clip.mark("its loop", downbeat + 5 * bar);
+    clip.b_half_out(at(1));
     clip.finish(
         &rig,
         Meta {
-            id: "master-ott",
+            id: "input-ott",
             group: 2,
             order: 4,
-            title: "The master OTT: off, on at its default, at full AMOUNT",
-            question: "Three lanes, one loop each: OTT off, on at the default AMOUNT (50 %), then at 100 %. Does it make the jam denser without pumping or lifting hiss between the notes, and is 50 % the right default?",
-            cannot_tell: "A synthetic string, no amp and no room: the hiss and noise a real rig adds are not in it, and the live guitar never passes the OTT (only its loops do).",
-            status: "\"Master OTT\"",
+            title: "The input OTT: off, then DEPTH 50 %, then 100 %",
+            question: "The input OTT (IN FX's fourth row) on a plucked phrase played in and looped: off, then DEPTH 50 %, then 100 %: is it denser without pumping or hiss lifted between the notes, and is 50 % the right default?",
+            cannot_tell: "A synthetic string, no amp-sim and no room: the hiss a real rig adds is not in it, nor how the OTT sits on your amp-sim's sound.",
+            status: "\"The input OTT on what you play: denser without pumping, and is 50 % the right default?\"",
             stereo: false,
-            max_seconds: 8.0,
-            settings: json!({ "bpm": 120, "meter": "4/4", "loop_bars": 1, "lanes": 3, "ott": ["off", 0.5, 1.0] }),
+            max_seconds: 10.0,
+            settings: json!({ "bpm": 160, "meter": "4/4", "loop_bars": 1, "ott": ["off", 0.5, 1.0], "ott_time": 0.5, "ott_up": 1.0, "ott_down": 1.0 }),
         },
     );
 }

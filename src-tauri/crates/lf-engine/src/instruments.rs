@@ -30,11 +30,17 @@
 //!
 //! The capture is mono: the stereo instruments are summed at half level (a Web Audio speakers downmix
 //! into the one-channel capture).
+//!
+//! The input OTT (`dsp::ott`, one stereo instance, its detectors linked) sits on the instruments' sum
+//! after every level and before the record path takes it, so what is heard on the bus and what is
+//! recorded are the same processed signal. It always runs (off and settled, bit-transparent) and takes
+//! the engine's one OTT setting on the frame the plugin slots' instances do ([`Instruments::set_ott`]).
 
 use std::sync::Arc;
 
 use crate::api::Instrument;
 use crate::dsp::buffer_source::AudioBuffer;
+use crate::dsp::ott::{Setting, StereoOtt};
 use crate::dsp::param::QUANTUM;
 use crate::dsp::rng::Mulberry32;
 use crate::dsp::synth::{Bass, DrumKit, PolyKind, PolySynth};
@@ -107,6 +113,8 @@ pub struct Instruments {
     /// The record path's delay line: the instruments' mono sum, `delay` frames late.
     line: Vec<f32>,
     write: usize,
+    /// The input OTT on the sum, after the levels.
+    ott: StereoOtt,
 }
 
 impl Instruments {
@@ -128,6 +136,7 @@ impl Instruments {
             mono: vec![0.0; max_block],
             line: vec![0.0; sample_rate as usize * MAX_RECORD_DELAY_SECONDS + max_block],
             write: 0,
+            ott: StereoOtt::new(sample_rate),
         }
     }
 
@@ -138,6 +147,11 @@ impl Instruments {
     /// `instrument`'s level (linear, 0..): it glides there from the frame it is set.
     pub fn set_gain(&mut self, instrument: Instrument, gain: f32) {
         self.levels[instrument as usize].target = if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 };
+    }
+
+    /// The input OTT's setting, from the next frame rendered.
+    pub fn set_ott(&mut self, setting: Setting) {
+        self.ott.set(setting);
     }
 
     pub fn set_offset(&mut self, offset: Frame) {
@@ -230,9 +244,9 @@ impl Instruments {
         }
     }
 
-    /// Render frames `frame..frame + left.len()` of all six, each at its level, into `left`/`right`
-    /// (overwritten), and the record path's frames into `record` (added): the mono sum `delay` less
-    /// [`LEAD`] frames late.
+    /// Render frames `frame..frame + left.len()` of all six, each at its level, then the input OTT, into
+    /// `left`/`right` (overwritten), and the record path's frames into `record` (added): the mono sum
+    /// `delay` less [`LEAD`] frames late.
     pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [f32]) {
         let n = left.len();
         let f = self.at(frame).1;
@@ -255,6 +269,7 @@ impl Instruments {
             *l += x;
             *r += x;
         }
+        self.ott.process(left, right);
         let len = self.line.len();
         let delay = (delay - LEAD).clamp(0, (len - 1) as Frame) as usize;
         for ((&l, &r), rec) in left.iter().zip(right.iter()).zip(record.iter_mut()) {

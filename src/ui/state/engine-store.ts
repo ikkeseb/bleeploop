@@ -181,9 +181,6 @@ const MAX_FIXED_BARS = 32; // the bar selector bound, the engine's `MAX_FIXED_BA
 const LANE_BUFFER_SECONDS = 60;
 const MASTER_KEY = 'lf.masterVolume'; // the saved master level, sent to every engine the feed resets
 const CLICK_KEY = 'lf.clickVolume'; // the saved click level, the same way
-/** The master OTT (on/off, AMOUNT 0..1): a master setting kept and replayed as the master level is. */
-const OTT_KEY = 'lf.masterOtt';
-const OTT_AMOUNT_KEY = 'lf.masterOttAmount';
 
 /** Per lane: it waits behind a count-in the engine runs (the reducer's, set as the events arrive:
  * `applyEvent`'s `Beat`, `applyLane`, `endCount`). */
@@ -222,12 +219,10 @@ const [metronome, setMetronomeSignal] = createSignal(false);
 const [clickVolume, setClickVolumeSignal] = createSignal(readStoredNumber(CLICK_KEY, 0.7, 0, 1));
 const [masterVolume, setMasterVolumeSignal] = createSignal(readStoredNumber(MASTER_KEY, 1, 0, 1));
 const [masterMuted, setMasterMutedSignal] = createSignal(false);
-const [masterOtt, setMasterOttSignal] = createSignal(readStoredNumber(OTT_KEY, 0, 0, 1) === 1);
-const [masterOttAmount, setMasterOttAmountSignal] = createSignal(readStoredNumber(OTT_AMOUNT_KEY, 0.5, 0, 1));
 /** The tuner is on, as the engine's last `Tuner` event said: never flipped by a press, never kept. */
 const [tunerOn, setTunerOnSignal] = createSignal(false);
 
-// ── The input sends (ECHO, REVERB, RING MOD on the live input): a rig setting, not a session's, so kept in
+// ── The input sends (ECHO, REVERB, RING MOD) and the inline OTT, on the live input: a rig setting, not a session's, so kept in
 // localStorage like the master and click levels, restored at boot and sent to an engine that lacks them ─
 
 /** An input send param's range and default (Rust `InputSendParam::range`); the echo's time is an index
@@ -245,8 +240,12 @@ const INPUT_SEND_PARAMS: readonly InputSendParamDef[] = [
   { key: 'reverbLevel', send: 'reverb', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
   { key: 'ringFreq', send: 'ring', label: 'Freq', min: 20, max: 1500, step: 1, default: 440, unit: 'Hz' },
   { key: 'ringLevel', send: 'ring', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
+  { key: 'ottDepth', send: 'ott', label: 'Depth', min: 0, max: 1, step: 0.01, default: 0.5 },
+  { key: 'ottTime', send: 'ott', label: 'Time', min: 0, max: 1, step: 0.01, default: 0.5 },
+  { key: 'ottUpward', send: 'ott', label: 'Up', min: 0, max: 1, step: 0.01, default: 1 },
+  { key: 'ottDownward', send: 'ott', label: 'Down', min: 0, max: 1, step: 0.01, default: 1 },
 ];
-const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring'];
+const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring', 'ott'];
 const inputSendKey = (id: string) => `lf.inputSend.${id}`;
 
 const inputSendOn = Object.fromEntries(
@@ -280,7 +279,7 @@ function adoptInputSendParam(key: InputSendParamId, value: number): void {
 export const engineInputSends = {
   params: INPUT_SEND_PARAMS,
   on: (id: InputSendId): boolean => inputSendOn[id][0](),
-  /** The send's switch, as a press: the engine's toggle (`toggleSetting`). */
+  /** The key's switch, as a press: the engine's toggle (`toggleSetting`), the OTT's as the sends'. */
   toggle: (id: InputSendId): void => toggleSetting({ Send: id }),
   /** On or off outright: initialization and scripts, not a control. */
   setOn: (id: InputSendId, on: boolean): void => {
@@ -1123,8 +1122,6 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   // A lane's mix from the settings, for a lane the reset frame has no `Mix` for (its Mix events follow).
   const laneMixes = Array.from({ length: ENGINE_LANES }, () => ({ volume: 1, muted: false, dubFeedback: 1, pan: 0, fx: defaultFx() }));
   let masterKnown = false;
-  let ottKnown = false;
-  let ottAmountKnown = false;
   let clickKnown = false;
   let fadeKnown = false;
   // The host keeps a known meter, including 4/4 after a SetMeter (`settings.rs`); its value comes on
@@ -1137,17 +1134,6 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
       masterKnown = true;
       setMasterVolumeSignal(c.SetMasterVolume);
       writeStoredNumber(MASTER_KEY, c.SetMasterVolume);
-    } else if ('SetMasterOtt' in c) {
-      ottKnown = true;
-      setMasterOttSignal(c.SetMasterOtt);
-      writeStoredNumber(OTT_KEY, c.SetMasterOtt ? 1 : 0);
-    } else if ('SetMasterOttAmount' in c) {
-      // As the engine reads it (`Ott::set_amount`): clamped to 0..1 (the feed's decoder refuses a value
-      // that is no number).
-      const amount = Math.max(0, Math.min(1, c.SetMasterOttAmount));
-      ottAmountKnown = true;
-      setMasterOttAmountSignal(amount);
-      writeStoredNumber(OTT_AMOUNT_KEY, amount);
     } else if ('SetClickVolume' in c) {
       clickKnown = true;
       setClickVolumeSignal(c.SetClickVolume);
@@ -1189,9 +1175,6 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   laneMixes.forEach((m, i) => adoptMix(i, m));
   const lacking: EngineCommand[] = [];
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
-  // AMOUNT before on/off, so an OTT that comes on comes on at its kept amount.
-  if (!ottAmountKnown) lacking.push({ SetMasterOttAmount: masterOttAmount() });
-  if (!ottKnown) lacking.push({ SetMasterOtt: masterOtt() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
   if (!fadeKnown) lacking.push({ SetFadeBars: fadeBars() });
   const kept = storedMeter();
@@ -1624,19 +1607,6 @@ export const engineMaster = {
   setMuted: (on: boolean): void => {
     setMasterMutedSignal(on);
     sendEngine({ SetMasterMute: on });
-  },
-  ott: masterOtt,
-  setOtt: (on: boolean): void => {
-    setMasterOttSignal(on);
-    writeStoredNumber(OTT_KEY, on ? 1 : 0);
-    sendEngine({ SetMasterOtt: on });
-  },
-  ottAmount: masterOttAmount,
-  setOttAmount: (v: number): void => {
-    const clamped = Math.max(0, Math.min(1, v));
-    setMasterOttAmountSignal(clamped);
-    writeStoredNumber(OTT_AMOUNT_KEY, clamped);
-    sendEngine({ SetMasterOttAmount: clamped });
   },
 };
 

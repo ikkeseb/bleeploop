@@ -1,8 +1,9 @@
 //! The export's wet master rendered by the engine ([`lf_engine::render`]), which replaced the Tone render
 //! (`src/session/render.ts`, removed): its length, its alignment with the stems (frame 0 is loop position
 //! 0: the limiter's pre-delay is compensated, which the Tone export did not), a reversed lane, every lane
-//! playing (a STOPPED one too), each lane's mix and the master's settings, its OTT among them (a lane's mix
-//! in the settings changes nothing), a delay's echo wrapping to the head, the warm-up's steady state (a
+//! playing (a STOPPED one too), each lane's mix and the master's settings (a lane's mix in the settings
+//! changes nothing), the input OTT in what a lane recorded and none of the render's own, a delay's echo
+//! wrapping to the head, the warm-up's steady state (a
 //! delay with the reverb after it, a delay at full feedback), no click and no instrument whatever the
 //! settings say, the same bits at any block size, and every refusal an `Err`. A snapshot's mix into the
 //! render: `tests/session.rs`.
@@ -13,7 +14,7 @@ use lf_engine::dsp::compressor::Compressor;
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::render::{wet_master, wet_master_with, RenderOptions, WetMaster, TAIL_THRESHOLD};
-use lf_engine::{Command, InputSend, Instrument, LaneMix, Load, LoadTrack, NoteTarget};
+use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneMix, Load, LoadTrack, NoteTarget};
 
 const RATE: u32 = 48_000;
 const BPM: u32 = 120;
@@ -203,20 +204,42 @@ fn every_lane_plays_a_muted_one_is_silent_and_the_volumes_scale() {
 }
 
 // d2)
-#[test]
-fn the_master_ott_reaches_the_render_on_and_at_its_amount_and_off_is_dry() {
-    let busy = || vec![busy_lane(0)];
-    let dry = render(busy(), &[], &[]);
-    let on_full = render(busy(), &[], &[Command::SetMasterOttAmount(1.0), Command::SetMasterOtt(true)]);
-    let on_default = render(busy(), &[], &[Command::SetMasterOtt(true)]);
-    let off_full = render(busy(), &[], &[Command::SetMasterOttAmount(1.0)]);
-    for (x, y) in [(&on_full.left, &dry.left), (&on_full.right, &dry.right)] {
-        let diff = max_diff(x, y);
-        assert!(diff > 1e-3, "the OTT, on at AMOUNT 1, is in the master: {diff} off the dry render");
+/// A one-bar take at 120 BPM of a busy input (a 110 Hz sine under a hash of the frame) through the rig's
+/// live, empty slot 0, the input OTT on at DEPTH 1 or off: the lane's loop as recorded.
+fn take(ott: bool) -> Vec<f32> {
+    let mut rig = common::Rig::new();
+    rig.set(Command::SetMetronome(false));
+    if ott {
+        rig.set(Command::SetInputSendParam(InputSendParam::OttDepth, 1.0));
+        rig.set(Command::SetInputSend(InputSend::Ott, true));
     }
-    let diff = max_diff(&on_full.left, &on_default.left);
-    assert!(diff > 1e-3, "the OTT's AMOUNT is in the master: AMOUNT 1 is {diff} off the default");
-    assert_eq!((off_full.left, off_full.right), (dry.left, dry.right), "an OTT that is off leaves the master bit for bit");
+    rig.set_input(|f| {
+        let hash = ((f.wrapping_mul(7919)).rem_euclid(1000)) as f32 / 1000.0 - 0.5;
+        0.3 * (f as f32 * 2.0 * std::f32::consts::PI * 110.0 / 48000.0).sin() + 0.1 * hash
+    });
+    assert_eq!(rig.record_first_take(0, 1, 2400), MASTER as Frame);
+    rig.pcm(0)
+}
+
+/// Lane 0 holding `buf`, PLAYING.
+fn recorded(buf: &[f32]) -> LoadTrack {
+    LoadTrack { index: 0, buf: buf.to_vec(), peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
+}
+
+#[test]
+fn the_recorded_loop_carries_the_input_ott_and_the_render_adds_none() {
+    // The OTT is on what is played, before it splits into the monitor and the take: a take with it on is
+    // not the take with it off, and the export renders each lane as it was recorded, through its own FX
+    // alone. The OTT's settings in the render's settings change nothing, bit for bit.
+    let (on, off) = (take(true), take(false));
+    assert!(max_diff(&on, &off) > 1e-3, "the take carries the OTT");
+    let ott = [Command::SetInputSendParam(InputSendParam::OttDepth, 1.0), Command::SetInputSend(InputSend::Ott, true)];
+    for mix in [LaneMix::default(), delay_and_reverb(0.3)] {
+        let plain = render(vec![recorded(&on)], &[(0, mix)], &[]);
+        assert!(render(vec![recorded(&on)], &[(0, mix)], &ott) == plain, "the OTT's settings reached the render");
+        let dry = render(vec![recorded(&off)], &[(0, mix)], &ott);
+        assert!(max_diff(&plain.left, &dry.left) > 1e-3, "the OTT a lane recorded is in its render");
+    }
 }
 
 // e)

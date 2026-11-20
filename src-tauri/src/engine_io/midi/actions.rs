@@ -69,6 +69,7 @@ fn engine_global(action: ActionId) -> Option<Action> {
         ActionId::InFxEcho => Action::Toggle(Toggle::Send(InputSend::Echo)),
         ActionId::InFxReverb => Action::Toggle(Toggle::Send(InputSend::Reverb)),
         ActionId::InFxRing => Action::Toggle(Toggle::Send(InputSend::Ring)),
+        ActionId::InFxOtt => Action::Toggle(Toggle::Send(InputSend::Ott)),
         ActionId::TunerToggle => Action::Tuner,
         _ => return None,
     })
@@ -184,8 +185,6 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::SetClickVolume(_)
         | Command::SetMasterVolume(_)
         | Command::SetMasterMute(_)
-        | Command::SetMasterOtt(_)
-        | Command::SetMasterOttAmount(_)
         | Command::SetLoopEndStop(_)
         | Command::SetFadeBars(_)
         | Command::SetFixedLength(_)
@@ -266,6 +265,7 @@ mod tests {
             (Fire::Run { action: InFxEcho, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Echo))), pressed()),
             (Fire::Run { action: InFxReverb, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Reverb))), pressed()),
             (Fire::Run { action: InFxRing, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Ring))), pressed()),
+            (Fire::Run { action: InFxOtt, target: None }, a(Action::Toggle(Toggle::Send(InputSend::Ott))), pressed()),
             (Fire::Run { action: TunerToggle, target: None }, a(Action::Tuner), pressed()),
             (Fire::HoldPress { target: None, control: 3 }, a(Action::Hold(3)), pressed()),
             (Fire::HoldPress { target: Some(4), control: 3 }, vec![Command::SelectTrack(4), Command::ActionOn(4, Action::Hold(3))], pressed()),
@@ -331,13 +331,13 @@ mod tests {
             Command::SetBpm(120.0),
             Command::SetMetronome(true),
             Command::SetMasterVolume(0.5),
-            Command::SetMasterOtt(true),
-            Command::SetMasterOttAmount(0.5),
             Command::SetVolume(0, 0.5),
             Command::SetFxBypass(0, FxKind::Delay, true),
             Command::SetSlotLive(0, true),
             Command::SetInputSend(InputSend::Echo, true),
             Command::SetInputSendParam(InputSendParam::EchoLevel, 0.2),
+            Command::SetInputSend(InputSend::Ott, true),
+            Command::SetInputSendParam(InputSendParam::OttDepth, 0.5),
             Command::SetInstrumentGain(Instrument::Lead, 0.5),
         ];
         let live = [Command::Action(Action::Toggle(Toggle::Live(0))), Command::ActionOn(1, Action::Toggle(Toggle::Live(1)))];

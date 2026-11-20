@@ -7,22 +7,26 @@ import '../looper/fxpanel.css';
 import './input-fx.css';
 
 /**
- * IN FX: the input sends, ECHO, REVERB and RING MOD on the live input (the amp-sim's output, or the dry
- * input of an Off slot). What they add is heard and recorded on the same frame; the dry signal never passes
- * through them (`src-tauri/crates/lf-engine/src/input_fx.rs`). A rig setting, kept in localStorage by the
- * engine store.
+ * IN FX: what the live input gets on its way to the monitor and the looper (the slot's output: the
+ * amp-sim's, a synth's, or the dry input of an Off slot). Rows one to three are the sends, ECHO, REVERB
+ * and RING MOD: what they add is heard and recorded on the same frame, and the dry signal never passes
+ * through them (`src-tauri/crates/lf-engine/src/input_fx.rs`). Row four is the OTT, inline: a three-band
+ * upward/downward compressor on each slot's output and the built-in synths' (`dsp/ott.rs`), so what is
+ * heard and what is recorded is the same compressed sound. All four ride the input-send wire and are a
+ * rig setting, kept in localStorage by the engine store; each key sends the engine's toggle and shows its
+ * Toggled answer, so a pedal and a click never undo each other.
  *
- * The command-bar pill opens its popover (`BarPopover.tsx`) with the three sends stacked as rows in FxPanel's
- * faces (the same key-face toggle, sliders and division select; the layout is `input-fx.css`'s); a send that
- * is off shows what it adds instead of its params. The pill reads engaged (warm white) while any send is
- * on. A param reads and speaks its value as the drawer's do (FxPanel.tsx `formatVal`): a level in percent,
- * the ring's frequency in Hz or kHz.
+ * The command-bar pill opens its popover (`BarPopover.tsx`) with the rows in FxPanel's faces (the same
+ * key-face toggle, sliders and division select; the layout is `input-fx.css`'s); a row that is off shows
+ * what it does instead of its params. The pill reads engaged (warm white) while any row is on. A param
+ * reads and speaks its value as the drawer's do (FxPanel.tsx `formatVal`): a level in percent, the
+ * ring's frequency in Hz or kHz; the OTT's DEPTH, TIME, UP and DOWN in percent.
  */
-
-const SENDS: readonly { id: InputSendId; label: string; blurb: string }[] = [
-  { id: 'echo', label: 'Echo', blurb: 'Repeats in time with the tempo' },
-  { id: 'reverb', label: 'Reverb', blurb: 'A room around the note' },
-  { id: 'ring', label: 'Ring mod', blurb: 'Metallic, bell-like overtones' },
+const SENDS: readonly { id: InputSendId; label: string; name: string; blurb: string }[] = [
+  { id: 'echo', label: 'Echo', name: 'Input echo', blurb: 'Repeats in time with the tempo' },
+  { id: 'reverb', label: 'Reverb', name: 'Input reverb', blurb: 'A room around the note' },
+  { id: 'ring', label: 'Ring mod', name: 'Input ring mod', blurb: 'Metallic, bell-like overtones' },
+  { id: 'ott', label: 'OTT', name: 'Input OTT', blurb: 'Evens out loud and quiet, in three bands' },
 ];
 
 function SendParam(props: { def: InputSendParamDef; send: string }) {
@@ -77,7 +81,7 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
         aria-haspopup="dialog"
         aria-expanded={pop.open()}
         aria-controls="lf-infx-popover"
-        title="Echo, reverb and ring mod on the live input: heard and recorded, the dry sound untouched"
+        title="Echo, reverb, ring mod and OTT on the live input: heard and recorded"
         onClick={pop.toggle}
       >
         IN FX
@@ -91,7 +95,7 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
                   class="fxp-mod__toggle"
                   classList={{ 'fxp-mod__toggle--on': sends.on(send.id) }}
                   aria-pressed={sends.on(send.id)}
-                  aria-label={`Input ${send.label.toLowerCase()}`}
+                  aria-label={send.name}
                   onClick={() => sends.toggle(send.id)}
                 >
                   {send.label}

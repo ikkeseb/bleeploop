@@ -80,10 +80,11 @@ export type FxParamId = 'cutoff' | 'q' | 'semitones' | 'rate' | 'time' | 'feedba
 /** Where the notes go: a built-in instrument, a plugin slot's plugin, or nowhere (`'Off'`: a slot whose
  * source is off; switching to it releases the held notes as any switch does). */
 export type NoteTarget = { Builtin: InstrumentId } | { Slot: number } | 'Off';
-/** The input sends (Rust `lf_engine::InputSend`, `InputSendParam`): ECHO, REVERB and RING MOD on the live
- * input. */
-export type InputSendId = 'echo' | 'reverb' | 'ring';
-export type InputSendParamId = 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel' | 'ringFreq' | 'ringLevel';
+/** The input effects share one switch wire. Echo, reverb and ring mod are sends; OTT runs inline. */
+export type InputSendId = 'echo' | 'reverb' | 'ring' | 'ott';
+export type InputSendParamId =
+  | 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel' | 'ringFreq' | 'ringLevel'
+  | 'ottDepth' | 'ottTime' | 'ottUpward' | 'ottDownward';
 export type AudioBackend = 'Wasapi' | 'Asio';
 
 /**
@@ -160,8 +161,11 @@ const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'r
 const FX_PARAMS: readonly FxParamId[] = ['cutoff', 'q', 'semitones', 'rate', 'time', 'feedback', 'mix', 'amount'];
 /** Each effect's params, in `FX_KINDS` (chain) order and its defs' order (`FX_PARAM_DEFS`). */
 const FX_KIND_PARAMS: readonly (readonly FxParamId[])[] = [['cutoff', 'q'], ['semitones'], ['rate'], ['time', 'feedback', 'mix'], ['amount']];
-const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring'];
-const INPUT_SEND_PARAMS: readonly InputSendParamId[] = ['echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel', 'ringFreq', 'ringLevel'];
+const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring', 'ott'];
+const INPUT_SEND_PARAMS: readonly InputSendParamId[] = [
+  'echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel', 'ringFreq', 'ringLevel',
+  'ottDepth', 'ottTime', 'ottUpward', 'ottDownward',
+];
 const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
 
 /** Lanes and plugin slots (`lf_engine::TRACK_COUNT`, `SLOT_COUNT`). */
@@ -207,11 +211,6 @@ export type EngineCommand =
   | { SetClickVolume: number }
   | { SetMasterVolume: number }
   | { SetMasterMute: boolean }
-  /** The master OTT (a built-in multiband upward/downward compressor on the master bus, before the click
-   * and the limiter; the live monitor does not pass through it): on or off, crossfaded. */
-  | { SetMasterOtt: boolean }
-  /** The master OTT's AMOUNT, 0..1 (default 0.5); the engine clamps it and glides there. */
-  | { SetMasterOttAmount: number }
   | { SetLoopEndStop: boolean }
   /** FADE's length: 1, 2, 4 or 8 bars. */
   | { SetFadeBars: number }
@@ -731,12 +730,11 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
 
 const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff', 'Press'] as const;
 const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'CopyWide', 'Clear', 'SelectTrack'] as const;
-const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetMasterOtt', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope', 'SetTuner'] as const;
+const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope', 'SetTuner'] as const;
 const NUMBER_COMMANDS = [
   'SetBpm',
   'SetClickVolume',
   'SetMasterVolume',
-  'SetMasterOttAmount',
   'SetFixedBars',
   'SetAutoSensitivity',
   'PitchBend',

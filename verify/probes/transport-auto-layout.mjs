@@ -233,7 +233,7 @@ await probe(async ({ browser, open }) => {
     await page.evaluate((f) => window.__lf.native.emit(f), {
       seq: 1,
       reset: true,
-      settings: ['echo', 'reverb', 'ring'].map((id) => ({ SetInputSend: [id, true] })),
+      settings: ['echo', 'reverb', 'ring', 'ott'].map((id) => ({ SetInputSend: [id, true] })),
       events: [
         ...[0, 1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info: EMPTY } })),
         { Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
@@ -252,8 +252,8 @@ await probe(async ({ browser, open }) => {
     }));
     console.log(JSON.stringify({ infxSends: `${width}x${height}`, ...sends }));
     await page.close();
-    assert.deepEqual(sends.on, ['true', 'true', 'true'], `${width}x${height}: not every send shows on`);
-    assert.equal(sends.sliders.length, 5, `${width}x${height}: the sends' sliders`);
+    assert.deepEqual(sends.on, ['true', 'true', 'true', 'true'], `${width}x${height}: not every send shows on`);
+    assert.equal(sends.sliders.length, 9, `${width}x${height}: the sends' sliders`);
     for (const [name, w] of sends.sliders) assert.ok(w >= MIN_SLIDER, `${width}x${height}: the IN FX slider "${name}" is ${w.toFixed(1)} px long (at least ${MIN_SLIDER})`);
     assert.ok(sends.bottom <= height, `${width}x${height}: the IN FX popover's bottom edge ${sends.bottom} is below the window`);
   }
