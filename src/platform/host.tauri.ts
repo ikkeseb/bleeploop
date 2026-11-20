@@ -7,6 +7,7 @@ import type {
   AsioStatusReport,
   AudioInputDevice,
   AudioOutputDevice,
+  ChainHost,
   EngineHost,
   ExportFiles,
   InputHost,
@@ -22,7 +23,7 @@ import type {
   ToneImport,
   UpdateProgress,
 } from './host';
-import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
+import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: verify/guards/boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
@@ -179,6 +180,10 @@ const tauriEngineHost: EngineHost = {
   async setSlotInputChannel(slot, channel) {
     await invoke('engine_set_slot_input_channel', { slot, channel });
   },
+  async setSlotInputPick() {
+    // Unit contract §7: the stereo pick is not on the native side yet; never sent to it as if understood.
+    throw new Error(NO_STEREO_PICK);
+  },
   async setShare(endpoint) {
     await invoke('engine_set_share', { endpoint });
   },
@@ -332,6 +337,10 @@ const tauriMidi: MidiHost = {
 /** The outbox's batches over Tauri IPC (`input_send`, synchronous on the main thread natively). */
 const tauriInput: InputHost = {
   async send(epoch, items) {
+    // Unit contract §2: the native engine does not speak the chain yet. The outbox never queues a unit
+    // command here (`src/platform/index.ts` `enqueueEngine`); a batch that carries one anyway is refused
+    // whole, before any IPC.
+    if (items.some((item) => 'engine' in item && isUnitCommand(item.engine))) throw new Error(NO_CHAIN);
     return decodeDropped(await invoke<unknown>('input_send', { epoch, items }));
   },
 };
@@ -384,6 +393,29 @@ const tauriUpdates: AppUpdates = {
   },
 };
 
+const NO_CHAIN = 'The native engine does not have the chain yet.';
+const NO_STEREO_PICK = 'The native engine does not take a stereo input pick yet.';
+const noChain = async (): Promise<never> => {
+  throw new Error(NO_CHAIN);
+};
+
+/** The chain per slot (`docs/unit-contract.md` §2): the native engine does not speak it yet, so every
+ * call is refused here, before any IPC, and nothing is logged (the caller reads the rejection). */
+const tauriChainHost: ChainHost = {
+  available: false,
+  add: noChain,
+  remove: noChain,
+  reload: noChain,
+  move: noChain,
+  openEditor: noChain,
+  closeEditor: noChain,
+  listParams: noChain,
+  setParameter: noChain,
+  takeTone: noChain,
+  importTone: noChain,
+  forgetTone: noChain,
+};
+
 /**
  * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, native `midi` and `input`,
  * the export's save (`exports`), the release log's folder (`logs`) and the updater (`updates`).
@@ -392,6 +424,7 @@ export const tauriPlatform: Platform = {
   kind: 'tauri',
   pluginHost: tauriPluginHost,
   engine: tauriEngineHost,
+  chain: tauriChainHost,
   midi: tauriMidi,
   input: tauriInput,
   exports: tauriExports,
