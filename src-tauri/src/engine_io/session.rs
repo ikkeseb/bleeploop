@@ -24,10 +24,10 @@
 //!
 //! A snapshot asked WITH the master (an export; a recovery autosave never asks) also carries the wet
 //! stereo master, rendered offline from those same loops by `lf_engine::render` with the tracks' `mix`
-//! and the master volume and mute this host keeps (`settings`): the header gains `"master":{"frames"}`
-//! (`frames` = `masterLengthFrames`) and the PCM gains its left block then its right block, after the
-//! tracks', frame 0 at loop position 0 like the stems. A render that fails leaves the stems as they are:
-//! no `master`, and `"masterError"` holds its sentence instead.
+//! and the master volume and mute this host keeps (`settings`), read when the export is asked: the
+//! header gains `"master":{"frames"}` (`frames` = `masterLengthFrames`) and the PCM gains its left block
+//! then its right block, after the tracks', frame 0 at loop position 0 like the stems. A render that
+//! fails leaves the stems as they are: no `master`, and `"masterError"` holds its sentence instead.
 //!
 //! Only the loops cross here, once per save and off the RT path (invariant 3). Settings, rig recall and
 //! MIDI bindings stay in the UI's storage; each plugin's tone lives natively (`host/tone.rs`) and
@@ -114,10 +114,18 @@ impl EngineHost {
     /// The committed loops as they stand, as bytes (the module doc's layout); with `master`, the wet
     /// master rendered from them too (an export's: the render may take seconds). Err while no engine
     /// exists, or when the loops keep changing under the copy; a render that fails is the header's
-    /// `masterError`, never an Err.
+    /// `masterError`, never an Err. The loops are copied at once; the master renders one export at a
+    /// time (`Core::master_render`): a second export waits for the first's render, never refused, so
+    /// at most one render engine and its lane pool exist beside the live engine.
     pub fn snapshot(&self, master: bool) -> Result<Vec<u8>, String> {
         let s = self.copy_loops()?;
-        let wet = master.then(|| self.render_master(&s));
+        // The master's volume and mute as the stems were copied: a change while this export waits for
+        // another's render is not in this one's master.
+        let settings = master.then(|| self.settings());
+        let wet = settings.map(|settings| {
+            let _one = self.core.master_render.lock().unwrap_or_else(|e| e.into_inner());
+            self.render_master(&s, &settings)
+        });
         Ok(snapshot_bytes(&s, wet))
     }
 
@@ -128,7 +136,7 @@ impl EngineHost {
         for _ in 0..ATTEMPTS {
             let mut pcm = Vec::with_capacity(need);
             // Written through: the engine copies into these pages, which must not fault on its thread.
-            pcm.resize(need, 0.0f32);
+            pcm.resize(need, [0.0f32; 2]);
             let SessionJob::Snapshot(s) = self.session_job(&mut stale, SessionJob::Snapshot(Snapshot::new(pcm)))? else {
                 return Err("the engine answered a snapshot with a load".to_string());
             };
@@ -144,9 +152,9 @@ impl EngineHost {
     }
 
     /// The wet master of snapshot `s`, with each track's mix from its pin and the master volume and mute
-    /// this host keeps: the loops go in as a load does (`load_track`), on this thread, off the engine's
-    /// lock.
-    fn render_master(&self, s: &Snapshot) -> Result<WetMaster, String> {
+    /// in `settings` (this host's kept settings at the ask): the loops go in as a load does
+    /// (`load_track`), on this thread, off the engine's lock.
+    fn render_master(&self, s: &Snapshot, settings: &[lf_engine::Command]) -> Result<WetMaster, String> {
         #[cfg(test)]
         if FAIL_RENDER.with(|f| f.get()) {
             return Err("a test planted this render failure".to_string());
@@ -163,13 +171,12 @@ impl EngineHost {
             .iter()
             .flatten()
             .enumerate()
-            .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true, t.mix))
+            .map(|(k, t)| load_pair_track(t.index, &s.pcm[k * samples..(k + 1) * samples], samples, t.reversed, true, t.mix))
             .collect();
         let load = Load { bpm: s.bpm, meter: s.meter, bars: s.master / fpb, master: s.master, tracks, result: None };
         let started = Instant::now();
-        let settings = self.settings();
         // A panic is a failed render too: the stems still go out.
-        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, &settings)))
+        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, settings)))
             .unwrap_or_else(|_| Err("export render: the render panicked".to_string()));
         match &wet {
             Ok(m) => log::info!("[engine_io] export master rendered: {} frames, {} warm-up passes, {} ms", s.master, m.warmup, started.elapsed().as_millis()),
@@ -207,7 +214,9 @@ impl EngineHost {
             if t.frames != master || usize::from(t.index) >= TRACK_COUNT || t.state == TrackState::Overdubbing {
                 return Err(format!("session: track {} does not fit", t.index));
             }
-            let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            // A one-channel track plays on both sides (`docs/unit-contract.md` §8; the two-channel stems
+            // of format v3 are the next step).
+            let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| [f32::from_le_bytes([b[0], b[1], b[2], b[3]]); 2]);
             tracks.push(load_track(t.index, play, capacity, t.reversed, t.state == TrackState::Playing, t.mix.0));
         }
         let load = Load { bpm: header.bpm, meter: header.meter, bars: header.bars, master, tracks, result: None };
@@ -346,22 +355,27 @@ thread_local! {
     pub(super) static FAIL_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// One lane of a load from its loop in play order (`play`, the loop's samples): a buffer `capacity`
-/// long holding it in buffer order (the engine reads a reversed lane's buffer backwards, so its play
-/// order goes back reversed), and its peaks, with its `mix`. The one place that turns a saved loop into
-/// a lane: the import's load and the export's render both take it.
-fn load_track(index: u8, play: impl ExactSizeIterator<Item = f32>, capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
+/// One lane of a load from its loop in play order (`play`, the loop's stereo frames): a buffer
+/// `capacity` long holding it in buffer order (the engine reads a reversed lane's buffer backwards, so
+/// its play order goes back reversed), and its peaks (both sides folded), with its `mix`. The one place
+/// that turns a saved loop into a lane: the import's load and the export's render both take it.
+fn load_track(index: u8, play: impl ExactSizeIterator<Item = lf_engine::Pair>, capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
     let samples = play.len().min(capacity);
     let mut buf = Vec::with_capacity(capacity);
-    buf.resize(capacity, 0.0f32);
+    buf.resize(capacity, [0.0f32; 2]);
     for (x, y) in buf.iter_mut().zip(play) {
         *x = y;
     }
     if reversed {
         buf[..samples].reverse();
     }
-    let peaks = buf[..samples].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)))).collect();
+    let peaks = buf[..samples].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &[l, r]| (lo.min(l.min(r)), hi.max(l.max(r))))).collect();
     LoadTrack { index, buf, peaks, reversed, playing, mix }
+}
+
+/// [`load_track`] from a snapshot's stereo frames.
+fn load_pair_track(index: u8, play: &[lf_engine::Pair], capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
+    load_track(index, play.iter().copied(), capacity, reversed, playing, mix)
 }
 
 /// `[u32 LE length][header][rest]`.
@@ -404,13 +418,16 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
         master_error,
     };
     let json = serde_json::to_vec(&header).unwrap_or_default();
-    let samples = &s.pcm[..s.count * master];
+    // Until the two-channel stems of format v3 (the next step), each track's bytes stay one channel: the
+    // mean of its two sides (`lf_engine::fold`: finite for any finite pair), which is a mono loop's own
+    // samples bit for bit.
+    let samples = s.pcm[..s.count * master].iter().map(|&[l, r]| lf_engine::fold(l, r));
     let stereo = wet.as_ref().map_or(0, |_| 2 * master);
-    let mut out = Vec::with_capacity(4 + json.len() + 4 * (samples.len() + stereo));
+    let mut out = Vec::with_capacity(4 + json.len() + 4 * (s.count * master + stereo));
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
     out.extend_from_slice(&json);
-    let wet = wet.iter().flat_map(|m| m.left.iter().chain(&m.right));
-    for x in samples.iter().chain(wet) {
+    let wet = wet.iter().flat_map(|m| m.left.iter().chain(&m.right)).copied();
+    for x in samples.chain(wet) {
         out.extend_from_slice(&x.to_le_bytes());
     }
     out

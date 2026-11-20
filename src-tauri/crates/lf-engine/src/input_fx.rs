@@ -302,7 +302,7 @@ impl Reverb {
         }
         let [l, r] = &self.wet;
         for (((o, &a), &b), &g) in out.iter_mut().zip(&l[..n]).zip(&r[..n]).zip(&self.levels[at..at + n]) {
-            *o = 0.5 * (a + b) * g;
+            *o = crate::fold(a, b) * g;
         }
         true
     }

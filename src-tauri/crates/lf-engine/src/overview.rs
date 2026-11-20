@@ -175,7 +175,7 @@ impl Overview {
 
     /// `data` (buffer `buf`) changed at positions `lo..hi`: recompute the bins they fall in from what the
     /// buffer holds up to `valid` (past it is an older take), and mark them for the reader.
-    pub(crate) fn touch(&self, buf: usize, data: &[f32], lo: usize, hi: usize, valid: usize) {
+    pub(crate) fn touch(&self, buf: usize, data: &[crate::api::Pair], lo: usize, hi: usize, valid: usize) {
         let p = &self.buffers[buf];
         if lo >= hi || p.min.is_empty() {
             return;
@@ -185,7 +185,8 @@ impl Overview {
         for bin in lo / PEAK_FRAMES..=((hi - 1) / PEAK_FRAMES).min(p.min.len() - 1) {
             let from = bin * PEAK_FRAMES;
             let to = (from + PEAK_FRAMES).min(valid);
-            let (min, max) = data.get(from..to).unwrap_or(&[]).iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+            // A bin folds both channels: the lowest and the highest sample of either side.
+            let (min, max) = data.get(from..to).unwrap_or(&[]).iter().fold((0.0f32, 0.0f32), |(lo, hi), &[l, r]| (lo.min(l.min(r)), hi.max(l.max(r))));
             p.min[bin].store(min.to_bits(), Relaxed);
             p.max[bin].store(max.to_bits(), Relaxed);
             p.dirty[bin / 64].fetch_or(1 << (bin % 64), Release);
@@ -253,10 +254,10 @@ mod tests {
     #[test]
     fn a_touch_recomputes_whole_bins_up_to_the_valid_end_and_marks_them_once() {
         let o = Overview::new(1, 4 * PEAK_FRAMES);
-        let mut data = vec![0.0f32; 4 * PEAK_FRAMES];
-        data[10] = -0.5;
-        data[PEAK_FRAMES + 3] = 0.75;
-        data[PEAK_FRAMES + 600] = 0.9; // past the valid end: an older take
+        let mut data = vec![[0.0f32; 2]; 4 * PEAK_FRAMES];
+        data[10] = [-0.5, 0.0];
+        data[PEAK_FRAMES + 3] = [0.0, 0.75]; // a bin folds both sides
+        data[PEAK_FRAMES + 600] = [0.9, 0.9]; // past the valid end: an older take
         o.touch(0, &data, 5, PEAK_FRAMES + 4, PEAK_FRAMES + 500);
         assert_eq!(o.bin(0, 0), (-0.5, 0.0));
         assert_eq!(o.bin(0, 1), (0.0, 0.75), "the old take past the valid end is not drawn");

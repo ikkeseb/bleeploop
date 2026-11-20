@@ -13,6 +13,7 @@
 mod common;
 
 use common::dub::ramp;
+use common::mono;
 use common::edges::{join, level, out, sample, tail};
 use common::{code, Opts, Rig};
 use lf_engine::grid::{Frame, Grid, Meter};
@@ -241,7 +242,7 @@ fn an_undo_crossfade_outlives_a_trim_on_its_boundary_rewriting_its_loop() {
     rig.idle();
     let trimmed: Vec<f32> = (0..master as usize).map(|k| pre[k % fpb as usize]).collect();
     assert_eq!(rig.pcm(0), trimmed, "the dubbed loop's buffer now holds the trimmed loop");
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(pre.clone()));
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(pre.clone()));
     heard(&rig, b, b + n, |f| sample(1.0, join(f - b, n), trimmed[p(f)], out(f - b, n) * layered[p(f)] as f64), "the dubbed loop fades out as it was heard");
     heard(&rig, b + n, rig.frame, |f| trimmed[p(f)], "the trimmed loop");
 }
@@ -272,7 +273,7 @@ fn an_undo_crossfade_outlives_a_dub_taking_its_buffer() {
     rig.press(Command::RecDub(1));
     rig.idle();
     assert_eq!(rig.pcm(0), pre, "the one-frame layer leaves the loop: its only write is the punch-in's first, the loop itself");
-    assert!(rig.engine.looper().undo_pcm(1).unwrap().iter().all(|&x| x == 0.0), "lane 1's undo copy is its silent loop");
+    assert!(rig.engine.looper().undo_pcm(1).map(mono).unwrap().iter().all(|&x| x == 0.0), "lane 1's undo copy is its silent loop");
     heard(&rig, b - 100, b, |f| layered[p(f)], "before the boundary");
     heard(&rig, b, b + n, |f| sample(1.0, join(f - b, n), pre[p(f)], out(f - b, n) * layered[p(f)] as f64), "the dubbed loop fades out as it was heard");
 }
@@ -459,7 +460,7 @@ fn a_stop_during_a_dub_fades_what_was_heard_and_restores_the_loop_bit_for_bit() 
     rig.advance(master / 2);
     rig.idle();
     assert_eq!(rig.pcm(0), pre, "the layer is discarded: the loop before it, bit for bit");
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), older, "and the undo target from before the layer");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), older, "and the undo target from before the layer");
     heard(&rig, stop, stop + n, |f| sample(1.0, 0.0, 0.0, tail(f - stop, n) * layered[p(f)] as f64), "the layered loop fades out as heard");
     heard(&rig, stop + n, rig.frame, |_| 0.0, "then silence");
 }
@@ -575,7 +576,7 @@ fn a_tail_cached_as_a_restore_starts_plays_the_restored_loop() {
         rig.set_level(0.0);
         let e = rig.frame + 1000;
         at(&mut rig, e, &[Command::RecDub(0), Command::Stop(0), Command::PlayStop(1)]);
-        let live = rig.engine.looper().live_buffer(0);
+        let live = mono(rig.engine.looper().live_buffer(0));
         assert!((e..e + n).all(|f| live[pos_at(anchor, master, f)] != pre[pos_at(anchor, master, f)]), "the layer lies ahead of the read head");
         rig.keep_output();
         rig.advance_to(e + n + 100);
@@ -835,7 +836,7 @@ fn play_stop_closing_a_dub_caches_its_tail_before_the_capture_running_on_reaches
         rig.block = block;
         rig.advance_to(t);
         assert_eq!(rig.state(0), LaneState::Overdubbing);
-        let before = rig.engine.looper().live_buffer(0)[..master as usize].to_vec();
+        let before = mono(rig.engine.looper().live_buffer(0))[..master as usize].to_vec();
         assert!((t..t + n).all(|f| before[p(f)] != -0.5), "block {block}: no position the tail reads holds what the capture writes after the press");
         rig.set_level(-0.5);
         rig.keep_output();
@@ -867,7 +868,7 @@ fn an_undo_forced_back_inside_its_crossfade_keeps_identical_loops_at_unity() {
     rig.press(Command::RecDub(0));
     rig.idle();
     assert!(rig.pcm(0).iter().all(|&x| x == LEVEL), "the silent dub leaves the loop");
-    assert!(rig.engine.looper().undo_pcm(0).unwrap().iter().all(|&x| x == LEVEL), "the undo target is the same loop");
+    assert!(rig.engine.looper().undo_pcm(0).map(mono).unwrap().iter().all(|&x| x == LEVEL), "the undo target is the same loop");
     rig.advance_to(rig.next_boundary() + master / 3);
     let b = rig.next_boundary();
     rig.press(Command::Undo(0));

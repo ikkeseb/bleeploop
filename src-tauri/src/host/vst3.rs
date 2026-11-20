@@ -1,5 +1,5 @@
 use super::{
-    checked_plugin_channels, checked_plugin_params, sum_to_mono, ParamEvent, MAX_EVENTS_PER_BLOCK,
+    checked_plugin_channels, checked_plugin_params, pair_from, pair_into, sum_to_mono, ParamEvent, MAX_EVENTS_PER_BLOCK,
 };
 use super::super::editor_window::{
     client_size, create_host_window, drain_after_editor_teardown, set_client_size, show_host_window_front,

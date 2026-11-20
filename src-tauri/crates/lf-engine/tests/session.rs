@@ -12,6 +12,7 @@
 mod common;
 
 use common::{code, Rig};
+use common::mono;
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_FEEDBACK};
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::overview::PEAK_FRAMES;
@@ -34,7 +35,7 @@ fn run(rig: &mut Rig, job: SessionJob) -> SessionJob {
 /// A snapshot into a destination of `samples` (written through, as the host touches its pages).
 fn snapshot(rig: &mut Rig, samples: usize) -> Snapshot {
     let mut pcm = Vec::with_capacity(samples);
-    pcm.resize(samples, 0.0f32);
+    pcm.resize(samples, [0.0f32; 2]);
     match run(rig, SessionJob::Snapshot(Snapshot::new(pcm))) {
         SessionJob::Snapshot(s) => s,
         SessionJob::Load(_) => unreachable!(),
@@ -75,13 +76,13 @@ fn load_of(s: &Snapshot, capacity: usize, bars: Frame) -> Load {
         .enumerate()
         .map(|(k, t)| {
             let mut buf = Vec::with_capacity(capacity);
-            buf.resize(capacity, 0.0f32);
+            buf.resize(capacity, [0.0f32; 2]);
             let pcm = &s.pcm[k * master..(k + 1) * master];
             buf[..master].copy_from_slice(pcm);
             if t.reversed {
                 buf[..master].reverse();
             }
-            let peaks = buf[..master].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)))).collect();
+            let peaks = buf[..master].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &[l, r]| (lo.min(l.min(r)), hi.max(l.max(r))))).collect();
             LoadTrack { index: t.index, buf, peaks, reversed: t.reversed, playing: t.state == LaneState::Playing, mix: t.mix }
         })
         .collect();
@@ -99,7 +100,7 @@ fn a_snapshot_loads_back_sample_exact_on_a_fresh_grid() {
     let tracks: Vec<_> = s.tracks.iter().flatten().map(|t| (t.index, t.state, t.reversed)).collect();
     assert_eq!(tracks, [(0, LaneState::Playing, false), (1, LaneState::Playing, true), (2, LaneState::Stopped, false)]);
     for (k, want) in loops.iter().enumerate() {
-        assert_eq!(&s.pcm[k * master as usize..(k + 1) * master as usize], &want[..], "lane {k} in play order");
+        assert_eq!(mono(&s.pcm[k * master as usize..(k + 1) * master as usize]), want[..], "lane {k} in play order");
     }
 
     let mut fresh = Rig::new();
@@ -151,7 +152,7 @@ fn an_overdubbing_lane_gives_its_loop_before_the_layer() {
     let s = snapshot(&mut rig, master as usize);
     assert_eq!(s.result, Some(Ok(())));
     assert_eq!(s.tracks[0].map(|t| t.state), Some(LaneState::Overdubbing));
-    assert_eq!(&s.pcm[..master as usize], &before[..], "the committed loop, not the layer in flight");
+    assert_eq!(mono(&s.pcm[..master as usize]), before[..], "the committed loop, not the layer in flight");
 }
 
 #[test]
@@ -167,7 +168,7 @@ fn a_snapshot_whose_loop_is_written_meanwhile_says_so_and_a_short_destination_as
     assert_eq!(snapshot(&mut rig, 10).result, Some(Err(SessionError::TooSmall(master as usize))));
 
     let mut pcm = Vec::with_capacity(master as usize);
-    pcm.resize(master as usize, 0.0f32);
+    pcm.resize(master as usize, [0.0f32; 2]);
     assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
     rig.advance(rig.block as Frame);
     rig.set_level(0.5);
@@ -192,7 +193,7 @@ fn a_load_needs_an_empty_engine_and_a_session_that_fits_it() {
     let capacity = rig.engine.looper().capacity() as usize;
     let SessionJob::Load(load) = run(&mut rig, SessionJob::Load(load_of(&s, capacity, 1))) else { unreachable!() };
     assert_eq!(load.result, Some(Err(SessionError::NotEmpty)));
-    assert_eq!(rig.pcm(0), s.pcm[..master as usize], "a refused load changes nothing");
+    assert_eq!(rig.pcm(0), mono(&s.pcm[..master as usize]), "a refused load changes nothing");
 
     let mut fresh = Rig::new();
     let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load_of(&s, capacity, 3))) else { unreachable!() };
@@ -248,7 +249,7 @@ fn the_output_is_bit_identical_while_a_snapshot_copies_out() {
     let (mut with, mut without) = (five_long_lanes(), five_long_lanes());
     let master = with.master();
     let mut pcm = Vec::with_capacity(5 * master as usize);
-    pcm.resize(5 * master as usize, 0.0f32);
+    pcm.resize(5 * master as usize, [0.0f32; 2]);
     with.keep_output();
     without.keep_output();
     assert!(with.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
@@ -406,7 +407,7 @@ fn a_mix_moved_while_a_snapshot_copies_leaves_the_mix_at_its_pin() {
     assert!(2 * master > 4 * rig.block as Frame * SNAPSHOT_RATE, "the copy spans several blocks");
     let [zero, one] = mix_lanes(&mut rig);
     let mut pcm = Vec::with_capacity(2 * master as usize);
-    pcm.resize(2 * master as usize, 0.0f32);
+    pcm.resize(2 * master as usize, [0.0f32; 2]);
     assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
     // The next block start pins the loops and takes their mix; then the faders, the mutes and the FX move.
     rig.advance(rig.block as Frame);
@@ -648,8 +649,8 @@ fn hot_clear_then_load(s: &Snapshot, pcm: f32) -> (Rig, usize, usize) {
     let capacity = rig.engine.looper().capacity() as usize;
     let mut load = load_of(s, capacity, s.master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR));
     let track = &mut load.tracks[0];
-    track.buf.fill(0.0);
-    track.buf[0] = pcm;
+    track.buf.fill([0.0; 2]);
+    track.buf[0] = [pcm; 2];
     track.peaks.fill((pcm.min(0.0), pcm.max(0.0)));
     track.mix = hot_delay();
     assert_eq!(load_now(&mut rig, load), Some(Ok(())));

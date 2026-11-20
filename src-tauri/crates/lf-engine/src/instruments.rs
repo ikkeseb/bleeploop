@@ -28,8 +28,9 @@
 //! (`dsp::synth::poly`). One quantum is the shortest lead that holds. When the input side plus the
 //! plugin's latency is under it, a recorded note lands the difference late.
 //!
-//! The capture is mono: the stereo instruments are summed at half level (a Web Audio speakers downmix
-//! into the one-channel capture).
+//! The capture is stereo: the record path carries the instruments' two sides as the bus hears them (the
+//! mono capture summed them at half level, which a centred instrument still reads bit for bit; the drum
+//! kit's stereo is recorded now, a deliberate change of E1, `docs/unit-contract.md` §7).
 //!
 //! The input OTT (`dsp::ott`, one stereo instance, its detectors linked) sits on the instruments' sum
 //! after every level and before the record path takes it, so what is heard on the bus and what is
@@ -38,7 +39,7 @@
 
 use std::sync::Arc;
 
-use crate::api::Instrument;
+use crate::api::{max_chain_latency, Instrument, Pair};
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::ott::{Setting, StereoOtt};
 use crate::dsp::param::QUANTUM;
@@ -51,8 +52,6 @@ use crate::grid::Frame;
 const DRUM_SEED: u32 = 1;
 /// Frames between a note on or off being applied and sounding: one render quantum.
 pub const LEAD: Frame = QUANTUM as Frame;
-/// The longest record-path delay: a second of input and plugin latency.
-const MAX_RECORD_DELAY_SECONDS: usize = 1;
 /// Level smoothing, as a plugin slot's gain.
 const GAIN_TAU_SECONDS: f64 = 0.012;
 
@@ -110,17 +109,18 @@ pub struct Instruments {
     bend: f64,
     modulation: f64,
     mono: Vec<f32>,
-    /// The record path's delay line: the instruments' mono sum, `delay` frames late.
-    line: Vec<f32>,
+    /// The record path's delay line: the instruments' stereo sum, `delay` frames late.
+    line: Vec<Pair>,
     write: usize,
     /// The input OTT on the sum, after the levels.
     ott: StereoOtt,
 }
 
 impl Instruments {
-    /// Allocates: build it off the audio thread. `max_block` bounds a render; `white` and `pink` are
-    /// Tone's noise tables (`dsp::noise`).
-    pub fn new(sample_rate: u32, max_block: usize, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
+    /// Allocates: build it off the audio thread. `max_block` bounds a render, `max_input` the device's
+    /// input side (the record line holds it plus [`max_chain_latency`] plus a block); `white` and `pink`
+    /// are Tone's noise tables (`dsp::noise`).
+    pub fn new(sample_rate: u32, max_block: usize, max_input: Frame, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
         let sr = sample_rate as f32;
         Instruments {
             sample_rate: sr,
@@ -134,7 +134,7 @@ impl Instruments {
             bend: 0.0,
             modulation: 0.0,
             mono: vec![0.0; max_block],
-            line: vec![0.0; sample_rate as usize * MAX_RECORD_DELAY_SECONDS + max_block],
+            line: vec![[0.0; 2]; (max_input.max(0) + max_chain_latency(sample_rate)) as usize + max_block],
             write: 0,
             ott: StereoOtt::new(sample_rate),
         }
@@ -245,9 +245,9 @@ impl Instruments {
     }
 
     /// Render frames `frame..frame + left.len()` of all six, each at its level, then the input OTT, into
-    /// `left`/`right` (overwritten), and the record path's frames into `record` (added): the mono sum
+    /// `left`/`right` (overwritten), and the record path's frames into `record` (added): the stereo sum
     /// `delay` less [`LEAD`] frames late.
-    pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [f32]) {
+    pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [Pair]) {
         let n = left.len();
         let f = self.at(frame).1;
         let coef = self.gain_coef;
@@ -273,8 +273,10 @@ impl Instruments {
         let len = self.line.len();
         let delay = (delay - LEAD).clamp(0, (len - 1) as Frame) as usize;
         for ((&l, &r), rec) in left.iter().zip(right.iter()).zip(record.iter_mut()) {
-            self.line[self.write] = 0.5 * (l + r);
-            *rec += self.line[(self.write + len - delay) % len];
+            self.line[self.write] = [l, r];
+            let [a, b] = self.line[(self.write + len - delay) % len];
+            rec[0] += a;
+            rec[1] += b;
             self.write = (self.write + 1) % len;
         }
     }

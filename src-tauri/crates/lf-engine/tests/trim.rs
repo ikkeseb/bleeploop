@@ -10,6 +10,7 @@
 mod common;
 
 use common::{code, Opts, Rig};
+use common::mono;
 use lf_engine::grid::Frame;
 use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::overview::PEAK_FRAMES;
@@ -57,7 +58,7 @@ fn tiled(loop_: &[f32], len: Frame) -> Vec<f32> {
 fn peaks_describe(rig: &Rig, lane: usize, tag: &str) {
     let looper = rig.engine.looper();
     let view = looper.overview().lane(lane);
-    let pcm = &looper.live_buffer(lane)[..view.frames as usize];
+    let pcm = &mono(looper.live_buffer(lane))[..view.frames as usize];
     for (bin, frames) in pcm.chunks(PEAK_FRAMES).enumerate() {
         let want = frames.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
         assert_eq!(looper.overview().bin(view.buf, bin), want, "{tag}: lane {lane} bin {bin}");
@@ -110,12 +111,12 @@ fn a_a_trim_keeps_the_first_bars_as_heard_tiled_and_undo_toggles_it() {
             assert_eq!(rig.pcm(0), trimmed, "{tag}: the first bars as heard, repeated and cut at the loop end");
             let t = rig.lane(0);
             assert_eq!((t.reversed, t.length, rig.master(), t.can_undo), (reversed, master, master, true), "{tag}: length and orientation stay");
-            assert_eq!(rig.engine.looper().undo_pcm(0), Some(before.clone()), "{tag}: the loop before the trim is the undo target");
+            assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(before.clone()), "{tag}: the loop before the trim is the undo target");
             peaks_describe(&rig, 0, &tag);
             rig.press(Command::Undo(0));
             rig.idle();
             assert_eq!(rig.pcm(0), before, "{tag}: UNDO gives back the exact loop");
-            assert_eq!(rig.engine.looper().undo_pcm(0), Some(trimmed.clone()));
+            assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(trimmed.clone()));
             peaks_describe(&rig, 0, &tag);
             rig.press(Command::Undo(0));
             rig.idle();
@@ -136,7 +137,7 @@ fn a_a_trim_keeps_the_first_bars_as_heard_tiled_and_undo_toggles_it() {
     let dubbed = rig.pcm(0);
     assert_eq!(trim(&mut rig, 0, 2), []);
     rig.idle();
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(dubbed.clone()));
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(dubbed.clone()));
     rig.press(Command::Undo(0));
     rig.idle();
     assert_eq!(rig.pcm(0), dubbed);
@@ -189,7 +190,7 @@ fn c_a_trim_during_a_multiply_extension_waits_for_it() {
     rig.idle();
     let grown = tiled(&old, 2 * master);
     assert_eq!(rig.pcm(0), first_tiled(&grown, rig.fpb()), "the grown loop's first bar, repeated");
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(grown), "the undo target is the grown loop");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(grown), "the undo target is the grown loop");
     steps_stay_small(&rig);
 }
 
@@ -228,7 +229,7 @@ fn c_the_jobs_a_multiply_starts_beside_trims_in_flight_fit() {
         let fpb = rig.fpb();
         for (i, before) in before.iter().enumerate() {
             assert_eq!(rig.pcm(i), first_tiled(&tiled(before, 2 * master), fpb), "block={block} lane {i}");
-            assert_eq!(rig.engine.looper().undo_pcm(i), Some(tiled(before, 2 * master)), "block={block} lane {i}'s undo");
+            assert_eq!(rig.engine.looper().undo_pcm(i).map(mono), Some(tiled(before, 2 * master)), "block={block} lane {i}'s undo");
         }
         steps_stay_small(&rig);
     }
@@ -316,7 +317,7 @@ fn f_a_trim_during_an_undo_swap_waits_for_it_and_is_heard_from_the_boundary() {
     rig.advance_to(boundary + master / 2);
     let trimmed = first_tiled(&pre, rig.fpb());
     plays(&rig, from, |f, pos| if f < boundary { dubbed[pos] } else { trimmed[pos] }, "undo, then trim");
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(pre.clone()), "the loop the undo gave back is the undo target");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(pre.clone()), "the loop the undo gave back is the undo target");
     assert_ne!(dubbed, pre);
 }
 
@@ -349,7 +350,7 @@ fn h_a_second_trim_before_the_boundary_is_heard_there_instead_of_the_first() {
                 let twice = first_tiled(&once, second as Frame * fpb);
                 plays(&rig, from, |f, pos| if f < boundary { before[pos] } else { twice[pos] }, &tag);
                 assert_eq!(rig.pcm(0), twice, "{tag}");
-                assert_eq!(rig.engine.looper().undo_pcm(0), Some(once), "{tag}: UNDO gives back the first trim");
+                assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(once), "{tag}: UNDO gives back the first trim");
                 assert_eq!(rig.lane(0).reversed, reversed, "{tag}");
                 steps_stay_small(&rig);
             }

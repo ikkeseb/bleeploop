@@ -1,6 +1,6 @@
 //! OWNS: what crosses the RT boundary: the commands the UI (and, from Stage 4, native MIDI) sends, the
-//! events the engine answers with, the per-callback context and I/O, and the plugin seam
-//! ([`SlotProcessor`]). Commands and events travel only over rtrb rings; a full event ring refuses the
+//! events the engine answers with, the per-callback context and I/O, and the unit seam
+//! ([`UnitProcessor`]: every unit a slot's chain seats, stereo both ways). Commands and events travel only over rtrb rings; a full event ring refuses the
 //! event and counts it, nothing blocks: a one-off event is lost, a lane's state and mix are offered
 //! again at the next publish (`Looper::publish`).
 
@@ -14,6 +14,33 @@ pub const TRACK_COUNT: usize = 5;
 pub const HOLD_CONTROLS: usize = 16;
 /// The plugin slots (`src/ui/state/instrument-slots.ts`: two instrument slots).
 pub const SLOT_COUNT: usize = 2;
+
+/// One stereo frame, `[left, right]`: what the lanes, the record tap and a session's stems hold (mono is
+/// the same sample twice; no width flag travels with a signal).
+pub type Pair = [f32; 2];
+
+/// The units one slot's chain seats at most (`docs/unit-contract.md` §1).
+pub const MAX_UNITS: usize = 8;
+
+/// A pair folded to one channel, its mean: through `f64`, so two finite samples never sum past `f32`'s
+/// range, and equal sides give that side bit for bit (a subnormal included).
+#[inline]
+pub fn fold(l: f32, r: f32) -> f32 {
+    ((l as f64 + r as f64) * 0.5) as f32
+}
+
+/// The most latency one chain may sum to: one second of frames at `sample_rate`. An install past it is
+/// refused ([`SeatRefusal::Latency`]), and every record line is sized for it ([`EngineConfig`]'s input
+/// side plus this plus a block), so no compensation is ever clipped.
+///
+/// [`EngineConfig`]: crate::EngineConfig
+pub fn max_chain_latency(sample_rate: u32) -> Frame {
+    sample_rate as Frame
+}
+
+/// A unit's id: opaque, non-zero, minted by whoever asks for the unit; it names the instance and nothing
+/// else (`docs/unit-contract.md` §1).
+pub type UnitId = u32;
 
 /// A command, applied at `frame` (a device frame: a test's or a probe's; the app's senders, native MIDI
 /// included, stamp none) or, with `None`, at the start of the next block the engine renders.
@@ -655,6 +682,9 @@ pub enum Event {
     /// came to exist, a stopped device). One the full ring refuses is owed and offered again at the
     /// next publish, at the value then. The UI shows the tuner exactly while the last one said on.
     Tuner { frame: Frame, on: bool },
+    /// The engine's answer to a slot port's message ([`crate::SlotPort`]): an install or a removal applied
+    /// on `frame` (a block start), or refused. Owed until the ring takes it, as a lane's `Mix` is.
+    Seat { frame: Frame, slot: u8, unit: UnitId, op: SeatOp, outcome: SeatOutcome },
 }
 
 /// The callback's view of the device.
@@ -679,18 +709,6 @@ pub struct ProcessContext {
     pub input_frames: Frame,
 }
 
-/// What a plugin slot holds, fixed when it is installed (the web UI's synth/effect kind:
-/// `plugin-bridge.ts`, `inChannels > 0`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SlotKind {
-    /// Has an audio input: takes the slot's input while the slot is live; its output is the wet signal
-    /// (heard after the limiter, recorded at the take's alignment). Bypassed, it passes its input dry.
-    Effect,
-    /// No audio input: plays the notes while it is the note target; its output joins the master bus
-    /// and is recorded where a built-in instrument's is. Bypassed, it is silent.
-    Instrument,
-}
-
 /// A note for a plugin slot, `offset` frames into the `process` call that carries it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlotEvent {
@@ -705,31 +723,110 @@ pub enum SlotEventKind {
     NoteOff { key: u8 },
 }
 
-/// The plugin seam (Stage 4): one slot's processor, run inside the engine callback. The host builds and
-/// activates it off the audio thread and installs it through the slot's [`crate::SlotPort`]; the
-/// engine crossfades it in, and on removal crossfades it out, calls [`SlotProcessor::stop`] on the
-/// audio thread and hands it back through the same port. The engine never drops a unit: a drop frees
-/// memory and, for a plugin, calls into its DLL.
-pub trait SlotProcessor: Send {
-    /// Read once, at install.
-    fn kind(&self) -> SlotKind;
-    /// Frames the output lags its input (an effect) or a note (an instrument), as the plugin reported it
-    /// when it was activated. Read once, at install: a plugin whose latency changes is restarted, which
-    /// removes and reinstalls it.
-    fn latency(&self) -> Frame;
-    /// Render `out.len()` frames (= `input.len()`, at most the engine's `max_block`) from device frame
-    /// `frame`. `input` is the slot's mono input while the slot is live and silence otherwise (always
-    /// silence for an instrument); `events` are sorted by offset, every offset `< out.len()`. `out` is
-    /// overwritten with the slot's mono output, every sample finite (the rack's render silences and counts
-    /// a call that is not before routing it; the idle removal's one frame is not checked). Never
-    /// allocates, locks or waits. Called on the audio
-    /// thread, except one silent frame carrying a removal's released notes while no device runs (on the
-    /// thread that holds the engine, just before [`SlotProcessor::stop`]).
-    fn process(&mut self, frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]);
+/// A chain's role, from its head (`docs/unit-contract.md` §The picture): today's rule per unit, lifted
+/// to the chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    /// Its head is an effect (or it is empty): it takes the slot's input while the slot is live; its
+    /// output is the wet signal (heard after the limiter, recorded at the take's alignment).
+    Effect,
+    /// Its head is a source: it takes no input, plays the notes while its slot is the note target, and
+    /// its output joins the master bus and is recorded where a built-in instrument's is.
+    Instrument,
+}
+
+/// What a unit is: a loaded plugin or a built-in (`docs/unit-contract.md` §The picture). E1 seats
+/// plugins and test units; the built-ins become units in E3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitKind {
+    Plugin,
+    Ott,
+    Echo,
+    Reverb,
+    Ring,
+    Synth,
+}
+
+/// A unit as it is installed, read once ([`UnitProcessor::info`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnitInfo {
+    pub kind: UnitKind,
+    /// A source plays notes and takes no input (its format's host calls it an instrument, or it is
+    /// SYNTH): it only heads a chain, and the chain then goes where an instrument goes (the master bus
+    /// and the record tap, on the instruments' record path). Every other unit is an effect.
+    pub source: bool,
+    /// Frames its output lags its input (an effect) or a note (a source), as it reported when it was
+    /// activated. A chain's latency is the sum of its units'.
+    pub latency: Frame,
+}
+
+/// The engine's clock for one `process` call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitCx {
+    /// The call's first device frame.
+    pub frame: Frame,
+    /// The same frame on the DSP clock (the device frame less the frames the device skipped), on which
+    /// the built-in DSP runs.
+    pub dsp_frame: Frame,
+    pub bpm: f64,
+    pub meter: Meter,
+}
+
+/// The unit seam: one unit of a slot's chain, run inside the engine callback. Its host builds and
+/// activates it off the audio thread and installs it through the slot's [`crate::SlotPort`] under its
+/// [`UnitId`]; the engine crossfades it in, and on removal crossfades it out, calls
+/// [`UnitProcessor::stop`] on the audio thread and hands it back through the same port. The engine never
+/// drops a unit: a drop frees memory and, for a plugin, calls into its DLL.
+///
+/// Always two channels; mono is the same samples twice. A plugin with a one-channel side is the
+/// adapter's to fold (`docs/unit-contract.md` §7).
+pub trait UnitProcessor: Send {
+    /// Read once, at install: the kind, whether it is a source, its latency in frames. A plugin whose
+    /// latency changes is restarted, which removes and reinstalls it.
+    fn info(&self) -> UnitInfo;
+    /// Render `out[0].len()` frames (every slice that long, at most the engine's `max_block`) from
+    /// `cx.frame`, planar stereo both ways. `input` is the seat before it (the slot's gated input for the
+    /// chain's first effect; silence for a source); `events` are the slot's notes, sorted by offset,
+    /// every offset `< out[0].len()`. `out` is overwritten, every sample finite (the rack silences and
+    /// counts a call that is not). Never allocates, locks or waits. Called on the audio thread, except
+    /// one silent frame carrying a removal's released notes while no device runs (on the thread that
+    /// holds the engine, just before [`UnitProcessor::stop`]).
+    fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
     /// Called once, after the last `process` and before the unit leaves the engine (CLAP
     /// `stop_processing`, VST3 `setProcessing(0)`); on the audio thread while a device runs, or on the
     /// thread that holds the engine while none does. May come without any `process` before it.
     fn stop(&mut self);
     /// The host's way back to its concrete unit.
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
+}
+
+/// What a port message asked ([`Event::Seat`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeatOp {
+    /// An install at the end of the chain.
+    Install,
+    Remove,
+}
+
+/// Why a port message did nothing: the unit of a refused install comes straight back on the port,
+/// never started or stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeatRefusal {
+    /// The chain already seats [`MAX_UNITS`].
+    Full,
+    /// The chain would sum past [`max_chain_latency`].
+    Latency,
+    /// The id is 0 or already seated in either slot.
+    Id,
+    /// A source goes only at the head of an empty chain, and nothing goes after a source but an effect.
+    Placement,
+    /// A removal of an id the slot does not seat.
+    Unknown,
+}
+
+/// How the engine took a port message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeatOutcome {
+    Applied,
+    Refused(SeatRefusal),
 }

@@ -15,6 +15,7 @@
 mod common;
 
 use common::dub::{pos_fn, ramp};
+use common::mono;
 use common::edges::{join, out, sample, tail};
 use common::{code, Rig};
 use lf_engine::grid::Frame;
@@ -137,18 +138,18 @@ fn overdub_play_stop_commits_the_layer_through_the_press_and_lands_stopped() {
 #[test]
 fn undo_a_the_snapshot_the_session_and_the_toggle() {
     let (mut rig, master) = playing_loop();
-    assert!(!rig.lane(0).can_undo && rig.engine.looper().undo_pcm(0).is_none());
+    assert!(!rig.lane(0).can_undo && rig.engine.looper().undo_pcm(0).map(mono).is_none());
     let pre = rig.pcm(0);
     rig.set_level(DUB);
     rig.advance_to(rig.next_boundary() - master / 2);
     let punch = rig.frame;
     rig.press(Command::RecDub(0));
     rig.advance(master / JOB_RATE + 1);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), pre, "DUB snapshots the pre-dub loop");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), pre, "DUB snapshots the pre-dub loop");
     assert!(!rig.lane(0).can_undo, "no undo while OVERDUBBING");
     rig.advance_to(rig.next_boundary() + 480);
     assert_ne!(rig.pcm(0), pre, "the layer sums in place");
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), pre, "the undo target keeps the pre-session loop");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), pre, "the undo target keeps the pre-session loop");
     rig.advance_to(rig.next_boundary() - master / 2);
     let out = rig.frame;
     rig.press(Command::RecDub(0));
@@ -188,7 +189,7 @@ fn undo_b_a_fresh_session_re_baselines_the_snapshot() {
     rig.advance_to(rig.next_boundary() + master / 4);
     rig.press(Command::RecDub(0));
     rig.advance(master / 4);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), first);
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), first);
     rig.press(Command::RecDub(0));
     rig.set_level(0.0);
     rig.advance(master / JOB_RATE + 2);
@@ -208,10 +209,10 @@ fn undo_c_no_op_without_a_snapshot_while_overdubbing_or_stopping() {
     rig.press(Command::RecDub(0));
     rig.advance_to(rig.next_boundary() + 480);
     let mid = rig.pcm(0);
-    let snapshot = rig.engine.looper().undo_pcm(0);
+    let snapshot = rig.engine.looper().undo_pcm(0).map(mono);
     rig.press(Command::Undo(0));
     assert_eq!(rig.state(0), LaneState::Overdubbing);
-    assert!(rig.engine.looper().undo_pcm(0) == snapshot && layer_sum(&rig.pcm(0), &mid) == DUB as f64);
+    assert!(rig.engine.looper().undo_pcm(0).map(mono) == snapshot && layer_sum(&rig.pcm(0), &mid) == DUB as f64);
     rig.press(Command::RecDub(0));
     rig.set_level(0.0);
     rig.advance(master / JOB_RATE + 2);
@@ -248,7 +249,7 @@ fn undo_d_stopped_undoes_in_place_play_plays_it_clear_drops_it() {
     rig.advance(master);
     plays(&rig, from, rig.frame, |p| pre[p]);
     rig.press(Command::Clear(0));
-    assert!(!rig.lane(0).can_undo && rig.engine.looper().undo_pcm(0).is_none());
+    assert!(!rig.lane(0).can_undo && rig.engine.looper().undo_pcm(0).map(mono).is_none());
     rig.set_input(code);
     assert_eq!(rig.record_first_take(0, 3, 2400), 3 * master, "the lane keeps its full capacity");
 }
@@ -276,7 +277,7 @@ fn undo_e_a_layer_with_an_input_gap_restores_the_loop_and_the_previous_undo_targ
     assert_eq!(rig.pcm(0), first, "the pre-layer loop is back");
     plays(&rig, from, rig.frame, |p| first[p]);
     assert!(rig.state(0) == LaneState::Playing && rig.lane(0).can_undo);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "undo still targets the loop before the kept layer");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "undo still targets the loop before the kept layer");
     rig.press(Command::Undo(0));
     assert_eq!(rig.pcm(0), take);
 }
@@ -359,7 +360,7 @@ fn a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin() {
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "the previous undo target is preserved");
 }
 
 #[test]
@@ -385,7 +386,7 @@ fn a_silent_block_before_a_layer_without_a_plugin_does_not_damage_it() {
     common::dub::dub(&mut want, (b + 512, b + 1024), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, rig.align), |_| 0.0);
     assert_ne!(want, before, "the clean layer changes the loop");
     assert_eq!(rig.pcm(0), want);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), before);
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), before);
 }
 
 #[test]
@@ -413,7 +414,7 @@ fn a_silent_block_shifted_past_a_layers_end_does_not_damage_it() {
     common::dub::dub(&mut want, (b + 512, b + 768), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, rig.align + LATENCY), |_| 0.0);
     assert_ne!(want, before, "the clean layer changes the loop");
     assert_eq!(rig.pcm(0), want);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), before);
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), before);
 }
 
 #[test]
@@ -441,7 +442,7 @@ fn a_shifted_silent_blocks_end_at_a_layers_start_does_not_damage_it() {
     common::dub::dub(&mut want, (b + 1024, b + 1536), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, rig.align + LATENCY), |_| 0.0);
     assert_ne!(want, before, "the clean layer changes the loop");
     assert_eq!(rig.pcm(0), want);
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), before);
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), before);
 }
 
 #[test]
@@ -475,7 +476,7 @@ fn a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin() {
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "the previous undo target is preserved");
 }
 
 #[test]
@@ -519,7 +520,7 @@ fn a_layer_wholly_in_a_jumps_late_frames_is_rejected_through_a_live_plugin() {
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "the previous undo target is preserved");
 }
 
 #[test]
@@ -564,7 +565,7 @@ fn a_jumps_late_frames_reach_back_past_a_gap_the_recorder_is_behind() {
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
-    assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "the previous undo target is preserved");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "the previous undo target is preserved");
 }
 
 #[test]
@@ -600,7 +601,7 @@ fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
             assert_eq!(y, want, "align={align}: silent from the press but for its tail: frame {f}");
         }
         assert_eq!(rig.pcm(0), first, "align={align}: the pre-layer loop is back");
-        assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "align={align}: and the undo target before it");
+        assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).unwrap(), take, "align={align}: and the undo target before it");
     }
 }
 
@@ -804,12 +805,12 @@ fn reverse_d_the_flag_stays_honest_across_dub_reverse_undo_and_dub_is_refused_re
         }
         assert_eq!(rig.pcm(0), cur.0, "step {step}: the loop");
         assert_eq!(rig.lane(0).reversed, cur.1, "step {step}: the flag");
-        let target = rig.engine.looper().undo_pcm(0);
+        let target = rig.engine.looper().undo_pcm(0).map(mono);
         match &undo {
             None => assert!(target.is_none()),
             Some(u) => {
                 rig.advance(master / JOB_RATE + 2);
-                assert_eq!(rig.engine.looper().undo_pcm(0).as_ref(), Some(&u.0), "step {step}: the undo target");
+                assert_eq!(rig.engine.looper().undo_pcm(0).map(mono).as_ref(), Some(&u.0), "step {step}: the undo target");
             }
         }
     }

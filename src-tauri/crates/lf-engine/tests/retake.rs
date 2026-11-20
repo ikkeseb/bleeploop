@@ -18,6 +18,7 @@
 mod common;
 
 use common::{code, Rig};
+use common::mono;
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneState};
 
@@ -67,7 +68,7 @@ fn b_a_rolling_take_slides_one_pass_per_edge_and_commits_nothing() {
             assert_eq!(r.rig.window().map(|w| (w.1, w.2)), Some((Some(r.pass_start(p)), Some(r.pass_start(p + 1)))));
             let info = r.rig.lane(0);
             assert!(info.retake_pass == p as u32 && info.state == LaneState::Recording && r.rig.master() == 0);
-            let take = r.rig.engine.looper().take_pcm(0);
+            let take = mono(r.rig.engine.looper().take_pcm(0));
             assert_eq!(take.len() as Frame, r.len / 2, "pass {p}: half a pass captured");
             assert_eq!(mismatches(&take, r.pass_start(p)), 0, "pass {p} writes from its own downbeat");
         }
@@ -275,7 +276,7 @@ fn g_rec_on_another_lane_approves_a_later_roll_and_records_next() {
         assert_eq!(rig.start_frame(), s1 + 3 * master, "the approving lane records from the pass edge");
         rig.advance_to(s1 + 3 * master + master / 2);
         assert_eq!(rig.lane(2).retake_pass, 1, "RETAKE still on: the approving lane rolls in turn");
-        let take = rig.engine.looper().take_pcm(2);
+        let take = mono(rig.engine.looper().take_pcm(2));
         assert_eq!(take.len() as Frame, master / 2);
         assert_eq!(mismatches(&take, s1 + 3 * master), 0, "seamless: no frame lost at the handoff");
     }

@@ -421,7 +421,7 @@ fn a_join_overrun_rejects_the_layer_its_seam_falls_in_and_keeps_the_loop() {
         j.cycle(1);
     }
     let before = j.engine(|e| e.looper().loop_pcm(0));
-    assert!(before.iter().all(|&x| x != 0.0), "a clean one-bar loop");
+    assert!(before.iter().all(|&[l, r]| l != 0.0 && r == l), "a clean one-bar loop");
     // The layer opens 100 frames into the block the seam falls in, after the trimmed pull's two
     // blocks, and is armed well before them.
     let k = j.core.align_frames.load(Relaxed) + j.engine(|e| e.limiter_latency());

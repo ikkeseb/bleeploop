@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{LaneMix, LaneState, TRACK_COUNT};
+use crate::api::{LaneMix, LaneState, Pair, TRACK_COUNT};
 use crate::grid::{Frame, Meter};
 
 /// Loop positions a snapshot copies per rendered frame (as a block job moves).
@@ -101,8 +101,8 @@ pub(crate) struct Pin {
 
 pub struct Snapshot {
     /// The destination, allocated and written through by the host (its pages touched): the tracks'
-    /// loops back to back, `master` samples each, in `tracks` order.
-    pub pcm: Vec<f32>,
+    /// loops back to back, `master` stereo frames each, in `tracks` order.
+    pub pcm: Vec<Pair>,
     pub rate: u32,
     pub master: Frame,
     pub bpm: u32,
@@ -115,13 +115,13 @@ pub struct Snapshot {
     pub result: Option<Result<(), SessionError>>,
     pub(crate) started: bool,
     pub(crate) pins: [Option<Pin>; TRACK_COUNT],
-    /// Samples copied so far, over all tracks.
+    /// Frames copied so far, over all tracks.
     pub(crate) done: usize,
 }
 
 impl Snapshot {
     /// A snapshot into `pcm` (the host's buffer, its pages touched).
-    pub fn new(pcm: Vec<f32>) -> Snapshot {
+    pub fn new(pcm: Vec<Pair>) -> Snapshot {
         Snapshot { pcm, rate: 0, master: 0, bpm: 0, meter: Meter::FOUR_FOUR, tracks: [None; TRACK_COUNT], count: 0, result: None, started: false, pins: [None; TRACK_COUNT], done: 0 }
     }
 }
@@ -130,9 +130,9 @@ impl Snapshot {
 pub struct LoadTrack {
     pub index: u8,
     /// The lane's new buffer: exactly the looper's capacity long, the loop in its first `master`
-    /// samples in buffer order (a reversed lane's play-order PCM reversed back). After the load it holds
-    /// the engine's old buffer, for the host to free.
-    pub buf: Vec<f32>,
+    /// stereo frames in buffer order (a reversed lane's play-order PCM reversed back). After the load it
+    /// holds the engine's old buffer, for the host to free.
+    pub buf: Vec<Pair>,
     /// The buffer's waveform bins (`overview::PEAK_FRAMES` frames each, buffer order): (min, max).
     pub peaks: Vec<(f32, f32)>,
     pub reversed: bool,

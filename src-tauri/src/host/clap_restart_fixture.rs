@@ -5,6 +5,8 @@
 //! (deactivate → activate → processing resumed, on the right threads). No audio device or GUI
 //! required.
 use super::*;
+#[allow(unused_imports)]
+use crate::host::clap::ProcessMono;
 use std::time::Instant;
 use clap_sys::{
     entry::clap_plugin_entry,
@@ -858,6 +860,8 @@ fn a_malformed_param_count_is_an_error_not_an_abort() {
 
 mod engine {
     use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
     use super::super::super::state::ToneRestore;
     use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
     use super::*;
@@ -1497,7 +1501,9 @@ mod engine {
 #[test]
 fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     use super::clap_engine::{ClapUnit, Terms};
-    use lf_engine::{SlotEvent, SlotEventKind, SlotProcessor};
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
+    use lf_engine::{SlotEvent, SlotEventKind, UnitProcessor};
 
     let mut instance = fixture_instance();
     let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
@@ -1515,7 +1521,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     let (mut unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
-        unit.process(0, &input[..64], &[], &mut out[..64]); // starts processing: one call
+        unit.process_mono(0, &input[..64], &[], &mut out[..64]); // starts processing: one call
         params.push(ParamEvent { id: 100, value: 0.5 }).unwrap();
         let notes = [
             SlotEvent { offset: 10, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } },
@@ -1525,7 +1531,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
         let mut runs = 0;
         let allocations = super::engine_slot::rt_allocations(|| {
             runs += 1;
-            unit.process(200, &input, &notes, &mut out)
+            unit.process_mono(200, &input, &notes, &mut out)
         });
         assert_eq!(allocations, 0, "process allocates nothing");
         assert!(out.iter().all(|&x| x == 0.5), "both channels at 0.5, summed to mono");
@@ -1551,6 +1557,8 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
 /// query (`query_ports`), as a load reads them.
 fn bare_unit(instance: &mut PluginInstance<LfHost>, faults: &Arc<AtomicU32>) -> Box<super::clap_engine::ClapUnit> {
     use super::clap_engine::{ClapUnit, Terms};
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
     let (inputs, outputs) = (query_ports(instance, true).unwrap(), query_ports(instance, false).unwrap());
     let config = PluginAudioConfiguration { sample_rate: 48_000.0, min_frames_count: 1, max_frames_count: 64 };
     let stopped = instance.activate(|_, _| (), config).unwrap();
@@ -1566,7 +1574,7 @@ fn bare_unit(instance: &mut PluginInstance<LfHost>, faults: &Arc<AtomicU32>) -> 
 #[cfg(debug_assertions)]
 #[test]
 fn a_unit_passes_every_declared_port_and_plays_only_the_main_output() {
-    use lf_engine::SlotProcessor;
+    use lf_engine::UnitProcessor;
 
     let mut instance = fixture_instance();
     let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
@@ -1577,10 +1585,10 @@ fn a_unit_passes_every_declared_port_and_plays_only_the_main_output() {
         let mut unit = unit;
         let input: [f32; 200] = std::array::from_fn(|i| (i + 1) as f32 / 1000.0);
         let mut out = [1.0f32; 200];
-        let first = super::engine_slot::rt_allocations(|| unit.process(0, &input[..64], &[], &mut out[..64]));
+        let first = super::engine_slot::rt_allocations(|| unit.process_mono(0, &input[..64], &[], &mut out[..64]));
         assert_eq!(first, 0, "the first call allocates nothing");
         assert_eq!(out[..64], input[..64], "the main input echoed; the aux marker never plays");
-        let sliced = super::engine_slot::rt_allocations(|| unit.process(64, &input, &[], &mut out));
+        let sliced = super::engine_slot::rt_allocations(|| unit.process_mono(64, &input, &[], &mut out));
         assert_eq!(sliced, 0, "a sliced call allocates nothing");
         assert_eq!(out, input, "across every slice");
         unit.stop();
@@ -1600,7 +1608,9 @@ fn a_unit_passes_every_declared_port_and_plays_only_the_main_output() {
 #[test]
 fn a_failed_process_call_plays_silence_and_latches_the_fault() {
     use super::engine_slot::FAULT_PROCESS;
-    use lf_engine::SlotProcessor;
+    #[allow(unused_imports)]
+    use crate::host::clap::ProcessMono;
+    use lf_engine::UnitProcessor;
 
     let mut instance = fixture_instance();
     let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
@@ -1612,10 +1622,10 @@ fn a_failed_process_call_plays_silence_and_latches_the_fault() {
     let mut unit = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [1.0f32; 64]);
-        unit.process(0, &input, &[], &mut out);
+        unit.process_mono(0, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.0), "the failed call's output is discarded");
         obs.fail_process.store(false, Relaxed);
-        unit.process(64, &input, &[], &mut out);
+        unit.process_mono(64, &input, &[], &mut out);
         assert!(out.iter().all(|&x| x == 0.5), "the next call that succeeds plays");
         unit.stop();
         unit

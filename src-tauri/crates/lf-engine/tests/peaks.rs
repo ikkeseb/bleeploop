@@ -7,6 +7,7 @@
 mod common;
 
 use common::{code, Rig};
+use common::mono;
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{Command, Event};
 
@@ -14,7 +15,7 @@ use lf_engine::{Command, Event};
 fn peaks_describe(rig: &Rig, lane: usize, tag: &str) {
     let looper = rig.engine.looper();
     let view = looper.overview().lane(lane);
-    let pcm = &looper.live_buffer(lane)[..view.frames as usize];
+    let pcm = &mono(looper.live_buffer(lane))[..view.frames as usize];
     for (bin, frames) in pcm.chunks(PEAK_FRAMES).enumerate() {
         let want = frames.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
         assert_eq!(looper.overview().bin(view.buf, bin), want, "{tag}: bin {bin}");

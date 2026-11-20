@@ -272,9 +272,10 @@ plugin-GUI work.
     module** (`mem::forget`): the unit may still be inside the plugin, and the plugin still calls the
     host. An effect `open_effect` refuses was never called, so it is never closed: its module and
     context stay loaded too.
-  - The slot is mono: the input feeds the first two inputs, the output is the mean of the FIRST
-    stereo pair (never of all pins: a multi-output instrument's auxiliaries would dilute it).
-    Parameter ids are indices `0..numParams`, values 0..1.
+  - The unit is stereo: the pair feeds the first two inputs (one declared input takes its mean), and
+    the FIRST stereo pair is its output (one output pin goes to both sides; a multi-output
+    instrument's auxiliaries are never the slot's sound). Parameter ids are indices `0..numParams`,
+    values 0..1.
 - **Tone recall (briefing: `host/tone.rs`):** a load restores the plugin's stored state before it
   activates (CLAP `state.load`; VST3 `IComponent::setState`, then the controller's
   `setComponentState` and `setState`, through the host `MemStream` in `vst3.rs`; VST2 `effSetChunk`

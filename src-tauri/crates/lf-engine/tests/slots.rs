@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 
 /// Frames of the bypass crossfade at 48 kHz: 10 ms.
 const FADE: usize = 480;
@@ -129,16 +129,15 @@ impl Fake {
     }
 }
 
-impl SlotProcessor for Fake {
-    fn kind(&self) -> SlotKind {
-        self.kind
+/// The fakes are mono units: they read the left side and write the same samples to both (the inputs here
+/// are mono, fed as equal sides).
+impl UnitProcessor for Fake {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: self.kind == SlotKind::Instrument, latency: self.latency }
     }
 
-    fn latency(&self) -> Frame {
-        self.latency
-    }
-
-    fn process(&mut self, frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
+    fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let (frame, input, [out, right]) = (cx.frame, input[0], out);
         let mut log = self.probe.log.lock().unwrap();
         if log.len() + 1 + events.len() < LOG {
             log.push(Seen::Call { frame, len: out.len() });
@@ -159,6 +158,7 @@ impl SlotProcessor for Fake {
         if let Some(y) = out.last_mut() {
             *y += self.last;
         }
+        right.copy_from_slice(out);
     }
 
     fn stop(&mut self) {
@@ -177,7 +177,7 @@ impl Drop for Fake {
 }
 
 /// A unit the engine handed back, as the fake it is.
-fn fake(unit: Box<dyn SlotProcessor>) -> Box<Fake> {
+fn fake(unit: Box<dyn UnitProcessor>) -> Box<Fake> {
     unit.into_any().downcast::<Fake>().ok().expect("the unit is the fake")
 }
 
@@ -465,48 +465,58 @@ fn the_engine_never_drops_a_unit() {
     assert_eq!([&a, &b, &c].map(|p| p.drops.load(SeqCst)), [1, 1, 1], "the test dropped each once");
 }
 
+/// E1 (`docs/unit-contract.md` §9) replaces this file's one unit per slot: a second install seats
+/// after the first, in series (it was handed back and counted), and a refused install is an answer
+/// (`Event::Seat`), no protocol error. Only a unit with nowhere to go is one.
 #[test]
-fn an_install_into_an_occupied_slot_hands_the_new_unit_back_and_counts_it() {
+fn a_second_install_seats_after_the_first_in_series() {
     let (a, b) = (Probe::new(), Probe::new());
     let mut rig = Rig::new();
     rig.install(0, Fake::effect(0.1, 0.0, &a).with_id(1));
     rig.advance(128);
-    rig.install(0, Fake::effect(0.2, 0.0, &b).with_id(2));
+    rig.install(0, Fake::effect(0.2, 1.0, &b).with_id(2));
     rig.advance(128);
-    assert_eq!(fake(rig.returned(0).expect("handed back")).id, 2);
-    assert_eq!(rig.engine.diag().slot_protocol_errors, 1);
-    assert_eq!((b.calls().len(), b.stops()), (0, 0), "the refused unit never ran");
-    assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 0)), "the first one stays");
-    assert_eq!(a.calls().len(), 2);
+    assert!(rig.returned(0).is_none(), "nothing handed back");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0);
+    assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 0)), "one chain, its latency the sum");
+    assert_eq!((a.calls().len(), b.calls().len()), (2, 1), "both run");
+    assert!((b.input_peak() - 0.1).abs() < 1e-6, "the second takes the first's output: {}", b.input_peak());
 }
 
-/// A host that never reads its port: the return ring fills, two more units park, and the next is
-/// leaked and counted rather than dropped. Parked units move on once the host reads.
+/// A host that never reads its port: the chain full, refused installs fill the return ring up to the
+/// places its seated units keep there, and the rest wait in the message ring, untaken, rather than be
+/// parked or leaked. They follow once the host reads, and every one comes back to be dropped by the host.
+/// (Before the review the rack parked two and leaked the next, counted.)
 #[test]
-fn a_unit_with_nowhere_to_go_is_leaked_never_dropped_and_parked_ones_follow_once_read() {
+fn a_unit_with_nowhere_to_go_waits_in_its_port_and_follows_once_the_host_reads() {
     let refused = Probe::new();
     let mut rig = Rig::new();
-    rig.install(0, Fake::effect(0.0, 0.0, &Probe::new()));
+    for _ in 0..lf_engine::MAX_UNITS {
+        rig.install(0, Fake::effect(0.0, 0.0, &Probe::new()));
+    }
     rig.advance(128);
-    for burst in [4, 3] {
+    // The return ring holds 24, eight of them kept for the seated units; a burst is at most the
+    // message ring's 16.
+    for burst in [16, 11] {
         for _ in 0..burst {
             rig.install(0, Fake::effect(0.0, 0.0, &refused));
         }
         rig.advance(128);
     }
-    assert_eq!(rig.engine.diag().slot_protocol_errors, 7 + 1, "seven refused, one of them leaked");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "nothing leaked");
     let mut back = Vec::new();
     while let Some(unit) = rig.returned(0) {
         back.push(unit);
     }
-    assert_eq!(back.len(), 4, "the return ring's four");
+    assert_eq!(back.len(), 24 - lf_engine::MAX_UNITS, "the return ring less the seated units' places");
     rig.advance(128);
     while let Some(unit) = rig.returned(0) {
         back.push(unit);
     }
-    assert_eq!(back.len(), 6, "and the two parked ones");
+    assert_eq!(back.len(), 27, "and those that waited in the port");
     drop(back);
-    assert_eq!(refused.drops.load(SeqCst), 6, "the leaked one is never dropped");
+    assert_eq!(refused.drops.load(SeqCst), 27, "every one back to the host");
+    assert_eq!(rig.engine.diag().slot_protocol_errors, 0);
 }
 
 /// Where a [`Panicky`] unit panics.
@@ -522,18 +532,16 @@ struct Panicky {
     drops: Arc<AtomicUsize>,
 }
 
-impl SlotProcessor for Panicky {
-    fn kind(&self) -> SlotKind {
+impl UnitProcessor for Panicky {
+    fn info(&self) -> UnitInfo {
         assert!(self.at != PanicIn::Kind, "the unit panics in kind()");
-        SlotKind::Effect
+        UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 }
     }
 
-    fn latency(&self) -> Frame {
-        0
-    }
-
-    fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
-        out.fill(0.0);
+    fn process(&mut self, _cx: &UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        for out in out {
+            out.fill(0.0);
+        }
     }
 
     fn stop(&mut self) {
@@ -923,25 +931,39 @@ fn an_instrument_slot_removed_while_its_note_is_on_the_record_path_still_lands_i
     assert_eq!(hits, vec![0], "once, on the loop's frame 0");
 }
 
-/// An input side past the record line's length (over a second) holds the line's longest delay; the
-/// line never wraps round to no delay at all.
+/// An input side past the configured largest (`EngineConfig::max_input_frames`, one second, which the
+/// record lines hold beside a chain's latency) is taken at it and counted, and the take is aligned on
+/// it too: a source's note played on the heard downbeat lands on the loop's first frame, never before
+/// it, and the guitar played with it lands late by the excess. (Before E1 the lines held one second for
+/// the input side and a plugin's latency together; E1's first cut held a quarter second and aligned the
+/// take on the full side, so the note landed the excess early.)
 #[test]
-fn a_record_delay_past_the_line_holds_its_longest() {
-    const IN: Frame = 60_000;
+fn an_input_side_past_the_lines_is_clamped_counted_and_the_take_aligned_on_it() {
     let probe = Probe::new();
-    let mut rig = Rig::with(Opts { align: IN + LIMITER, ..Default::default() });
-    rig.input_latency = IN;
+    let max = Rig::new().engine.config().max_input_frames;
+    assert_eq!(max, 48_000, "a second at the rig's rate");
+    const EXCESS: Frame = 12_000;
+    let input = max + EXCESS;
+    let mut rig = Rig::with(Opts { align: input + LIMITER, ..Default::default() });
+    rig.input_latency = input;
     rig.install(1, Fake::instrument(0.0, 0, &probe));
     rig.set(Command::SelectInstrument(NoteTarget::Slot(1)));
     rig.set(Command::SetFixedLength(true));
     rig.set(Command::SetFixedBars(2.0));
+    let mark = rig.events.len();
     rig.press(Command::RecDub(0));
-    let note = rig.start_frame() + 1000;
-    rig.send_at(note, Command::NoteOn(69, 1.0));
+    let downbeat = rig.count_one(mark) + 4 * 24_000;
+    // The player hears the downbeat the limiter's pre-delay after it (no output side here), and plays
+    // the note and the guitar there; the guitar reaches the engine the whole input side later.
+    rig.send_at(downbeat + LIMITER, Command::NoteOn(69, 1.0));
+    rig.set_input(move |f| if f == downbeat + LIMITER + input { 0.5 } else { 0.0 });
+    assert_eq!(rig.start_frame() - downbeat, max + LIMITER, "the take aligned on the clamped side");
     rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
     let pcm = rig.pcm(0);
-    let hit = pcm.iter().position(|&x| x != 0.0).expect("the note is in the take") as Frame;
-    assert!(hit - 1000 > rig.seconds(1.0), "delayed by the line's second and more: {}", hit - 1000);
+    let hits: Vec<(usize, f32)> = pcm.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, &x)| (k, x)).collect();
+    assert_eq!(hits, vec![(0, 1.0), (EXCESS as usize, 0.5)], "the note on the first frame, the guitar the excess late");
+    assert!(rig.engine.diag().input_clamped > 0, "counted");
 }
 
 #[test]
@@ -1370,16 +1392,13 @@ struct Ringing {
 
 const DECAY: f32 = 0.99;
 
-impl SlotProcessor for Ringing {
-    fn kind(&self) -> SlotKind {
-        SlotKind::Effect
+impl UnitProcessor for Ringing {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 }
     }
 
-    fn latency(&self) -> Frame {
-        0
-    }
-
-    fn process(&mut self, frame: Frame, input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+    fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let (frame, input, [out, right]) = (cx.frame, input[0], out);
         let mut log = self.log.lock().unwrap();
         for (k, (y, &x)) in out.iter_mut().zip(input).enumerate() {
             if log.len() < LOG {
@@ -1388,6 +1407,7 @@ impl SlotProcessor for Ringing {
             *y = self.state;
             self.state = self.state * DECAY + x;
         }
+        right.copy_from_slice(out);
     }
 
     fn stop(&mut self) {}

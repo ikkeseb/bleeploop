@@ -168,7 +168,7 @@ use std::time::{Duration, Instant};
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
 use lf_engine::tuner::TunerFrame;
-use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, UnitProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -504,7 +504,7 @@ impl IoDiag {
 
     /// The glitch diagnostics that count, by name: not faults (no probe fails on them), but the release
     /// log and the probe show them beside the faults.
-    fn diagnostics(&self) -> [(&'static str, u64); 5] {
+    fn diagnostics(&self) -> [(&'static str, u64); 6] {
         [
             ("asio_phase_slips", self.asio_phase_slips),
             ("asio_late_finishes", self.asio_late_finishes),
@@ -515,6 +515,9 @@ impl IoDiag {
             // Tuner frames the full ring refused (a reader that stopped reading): the epoch tells the
             // feed where its input broke, so it is no fault either.
             ("engine.tuner_dropped", self.engine.tuner_dropped),
+            // Blocks whose input side passed the engine's configured largest: their record path lags
+            // by that largest only, so a source chain's take lands late by the difference.
+            ("engine.input_clamped", self.engine.input_clamped),
         ]
     }
 
@@ -634,11 +637,16 @@ pub(crate) struct Core {
     pub(crate) holder: [AtomicU64; SLOT_COUNT],
     /// The next [`SlotHost`]'s token (from 1).
     pub(crate) next_token: AtomicU64,
+    /// The id each slot's unit was last installed under (`SlotHost::install` mints one per install, so
+    /// a reinstall never meets its own removal's id in the engine).
+    pub(crate) unit_ids: [AtomicU32; SLOT_COUNT],
+    /// The next unit id to mint (never 0).
+    pub(crate) next_unit: AtomicU32,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
     pub(crate) fault: AtomicBool,
     /// Units the device side took out on its own (a rebuild), waiting for their plugin owner, with its
     /// token: only that owner's [`SlotHost`] takes one back.
-    pub(crate) evicted: [Mutex<Option<(u64, Box<dyn SlotProcessor>)>>; SLOT_COUNT],
+    pub(crate) evicted: [Mutex<Option<(u64, Box<dyn UnitProcessor>)>>; SLOT_COUNT],
     /// A device callback runs or is about to: the owner sets it just before the streams start and
     /// clears it just after they drop. While it is false, a slot host may take the engine lock itself
     /// (`SlotHost`); while it is true, it waits for the callback to service its port.
@@ -666,6 +674,9 @@ pub(crate) struct Core {
     /// One session job at a time (`session.rs`), and the jobs an earlier call gave up on that are still
     /// in the engine of that generation: (generation, count).
     pub(crate) session_busy: Mutex<(u64, usize)>,
+    /// One export's wet master renders at a time (`EngineHost::snapshot`): each builds a render engine
+    /// with its own lane pool, so a second waits here.
+    pub(crate) master_render: Mutex<()>,
     /// Session jobs this host has handed to an engine: a test waits on it for a job to be enqueued.
     #[cfg(test)]
     pub(crate) session_sent: AtomicU64,
@@ -716,6 +727,9 @@ pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Eve
             Event::Transport { bpm, meter, .. } => _ = settings.transported(gen, bpm, meter),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
             Event::Refused { reason, .. } => settings.refused(gen, reason),
+            // A unit's seating is its chain host's answer (E2, `docs/unit-contract.md` §2); today each
+            // slot seats one unit and its owner reads the port, so nothing past here takes it.
+            Event::Seat { .. } => continue,
             _ => {}
         }
         each(event);
@@ -745,6 +759,8 @@ impl Core {
             ports: std::array::from_fn(|_| Mutex::new(None)),
             holder: std::array::from_fn(|_| AtomicU64::new(0)),
             next_token: AtomicU64::new(1),
+            unit_ids: std::array::from_fn(|_| AtomicU32::new(0)),
+            next_unit: AtomicU32::new(1),
             fault: AtomicBool::new(false),
             evicted: std::array::from_fn(|_| Mutex::new(None)),
             running: AtomicBool::new(false),
@@ -760,6 +776,7 @@ impl Core {
             tuner_breaks: AtomicU64::new(0),
             tuner_fence: AtomicI64::new(0),
             session_busy: Mutex::new((0, 0)),
+            master_render: Mutex::new(()),
             #[cfg(test)]
             session_sent: AtomicU64::new(0),
             engine_diag: EngineDiag::default(),
@@ -835,6 +852,7 @@ pub(crate) struct EngineDiag {
     slot_protocol_errors: AtomicU64,
     scope_dropped: AtomicU64,
     tuner_dropped: AtomicU64,
+    input_clamped: AtomicU64,
 }
 
 impl EngineDiag {
@@ -846,6 +864,7 @@ impl EngineDiag {
         self.slot_protocol_errors.store(d.slot_protocol_errors, Relaxed);
         self.scope_dropped.store(d.scope_dropped, Relaxed);
         self.tuner_dropped.store(d.tuner_dropped, Relaxed);
+        self.input_clamped.store(d.input_clamped, Relaxed);
     }
 
     fn load(&self) -> lf_engine::Diag {
@@ -857,6 +876,7 @@ impl EngineDiag {
             slot_protocol_errors: self.slot_protocol_errors.load(Relaxed),
             scope_dropped: self.scope_dropped.load(Relaxed),
             tuner_dropped: self.tuner_dropped.load(Relaxed),
+            input_clamped: self.input_clamped.load(Relaxed),
         }
     }
 }

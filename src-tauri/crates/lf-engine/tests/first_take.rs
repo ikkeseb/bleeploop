@@ -16,6 +16,7 @@
 mod common;
 
 use common::{code, Opts, Rig};
+use common::mono;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::{Command, LaneState};
 
@@ -207,7 +208,7 @@ fn fixed_b_it_commits_exactly_its_window_at_any_block_size() {
             assert_eq!(rig.master(), target);
             let pcm = rig.pcm(0);
             assert_eq!((pcm[0], pcm[target as usize - 1]), (code(start), code(start + target - 1)));
-            assert_eq!(rig.engine.looper().live_buffer(0)[target as usize], 0.0, "nothing past the window");
+            assert_eq!(mono(rig.engine.looper().live_buffer(0))[target as usize], 0.0, "nothing past the window");
             assert!(pcm.iter().all(|&x| x != MARKER));
             assert!(rig.window().is_none() && rig.locked() && rig.bpm() == bpm);
         }
@@ -249,7 +250,7 @@ fn fixed_f_i_a_manual_stop_commits_completed_bars_and_waits_for_the_tail() {
     until_committed(&mut rig, 48000);
     assert_eq!(rig.master(), 2 * fpb);
     assert_eq!(rig.pcm(0)[(2 * fpb - 1) as usize], code(start + 2 * fpb - 1));
-    assert_eq!(rig.engine.looper().live_buffer(0)[(2 * fpb) as usize], 0.0);
+    assert_eq!(mono(rig.engine.looper().live_buffer(0))[(2 * fpb) as usize], 0.0);
 }
 
 #[test]

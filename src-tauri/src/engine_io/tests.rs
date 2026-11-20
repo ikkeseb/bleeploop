@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, TimedCommand, UnitProcessor, SLOT_COUNT};
 
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
@@ -213,19 +213,18 @@ impl Unit {
     }
 }
 
-impl SlotProcessor for Unit {
-    fn kind(&self) -> SlotKind {
-        SlotKind::Effect
+impl UnitProcessor for Unit {
+    fn info(&self) -> lf_engine::UnitInfo {
+        lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: 0 }
     }
-    fn latency(&self) -> Frame {
-        0
-    }
-    fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+    fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
         let call = self.calls.fetch_add(1, SeqCst) + 1;
         if self.panic_at == Some(call) {
             panic!("the unit fails on call {call} (on purpose)");
         }
-        out.fill(self.level);
+        for o in out {
+            o.fill(self.level);
+        }
     }
     fn stop(&mut self) {
         self.stops.fetch_add(1, SeqCst);
@@ -2410,6 +2409,32 @@ fn a_master_that_fails_to_render_still_answers_the_stems_with_its_error() {
     assert_eq!(pcm, stems, "the stems, and nothing after them");
 }
 
+/// An export renders at the master volume and mute it was asked at: a mute that lands while it waits
+/// for another export's render leaves its master as loud as the same export unwaited.
+#[test]
+fn a_waiting_export_keeps_the_master_level_of_its_ask() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    let (_, _, [alone, _]) = session_with_master(&h.host.snapshot(true).expect("an unwaited export"));
+    let loudest = |x: &[f32]| x.iter().fold(0.0f32, |p, v| p.max(v.abs()));
+    assert!(loudest(&alone) > 0.01, "the unwaited master sounds");
+    let held = h.host.core.master_render.lock().unwrap();
+    std::thread::scope(|s| {
+        let export = s.spawn(|| h.host.snapshot(true));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!export.is_finished(), "the export waits for the render");
+        h.send(Command::SetMasterMute(true));
+        h.play(RATE / 100);
+        drop(held);
+        let (header, _, [left, right]) = session_with_master(&export.join().unwrap().expect("the waited export"));
+        assert!(header.get("masterError").is_none(), "{header}");
+        assert!(left.iter().chain(&right).all(|x| x.is_finite()), "every sample finite");
+        assert!(left == alone, "the master at the level of its ask, not muted after it (peak {} against {})", loudest(&left), loudest(&alone));
+    });
+}
+
 #[test]
 fn the_glitch_watch_logs_a_span_in_which_a_fault_counter_moved() {
     use super::owner::{GlitchWatch, GLITCH_EVERY};
@@ -3005,4 +3030,51 @@ fn a_panic_in_the_wasapi_input_callback_restarts_the_device_and_keeps_the_loop()
     assert!(input_peak(&h) > 0.1, "the input is heard once more");
     assert_eq!(h.host.core.engine_gen.load(SeqCst), engine, "the engine throughout");
     assert!(h.host.take_device_events().is_empty(), "nothing was lost");
+}
+
+/// A one-channel session (the bytes before format v3, which the writer still writes: each stem one
+/// channel) loads through its real bytes onto both sides: the device plays the lane's samples on the
+/// left and the right alike.
+#[test]
+fn a_one_channel_sessions_lane_plays_on_both_sides() {
+    let h = Harness::new();
+    h.fake.set_input(|_| 0.0);
+    h.open(asio(Some(256)));
+    // 240 BPM, one bar of 4/4: a second. A saw, so nearly every frame sounds.
+    let frames = RATE;
+    let pcm: Vec<f32> = (0..frames as usize).map(|k| 0.2 * ((k % 480) as f32 / 480.0 - 0.5)).collect();
+    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    let from = h.frame();
+    h.host.load_session(&session_bytes(&load, &pcm)).expect("the load");
+    h.play(RATE / 2);
+    let played = h.fake.heard_stereo(from..h.frame());
+    // Both sides of every frame finite before they are compared (a NaN passes the check below).
+    assert!(played.iter().flatten().all(|x| x.is_finite()), "every frame of both sides heard and finite");
+    assert!(played.iter().filter(|p| p[0].abs() > 0.01).count() > RATE as usize / 4, "the lane plays");
+    // Alike to the output stage's rounding (the centred lane's two gains differ by an ulp, measured):
+    // a side the decoder lost or garbled would be orders past it.
+    let odd: Vec<(usize, [f32; 2])> = played.iter().copied().enumerate().filter(|(_, p)| (p[0] - p[1]).abs() > 1e-6).take(8).collect();
+    assert!(odd.is_empty(), "on both sides alike: {odd:?} of {}", played.len());
+}
+
+/// One export's master renders at a time (`Core::master_render`): a second export waits for the
+/// first's render, then renders its own, never refused.
+#[test]
+fn exports_render_their_masters_one_at_a_time() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    let host = &h.host;
+    let held = host.core.master_render.lock().unwrap();
+    std::thread::scope(|s| {
+        let export = s.spawn(|| host.snapshot(true));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!export.is_finished(), "the export waits while another master renders");
+        drop(held);
+        let bytes = export.join().unwrap().expect("the export");
+        let (header, _, [left, _]) = session_with_master(&bytes);
+        assert!(header.get("masterError").is_none(), "{header}");
+        assert!(left.iter().any(|x| x.abs() > 0.01), "its own master");
+    });
 }

@@ -1,7 +1,7 @@
 //! OWNS: the engine-mode plugin slot (threads and gotchas: `src-tauri/AGENTS.md`): the load API that
 //! spawns one owner thread per slot, and the handle a caller drives it through. The owner loads a
 //! CLAP, VST3 or VST2 plugin, activates it at the engine's rate and installs its processor into the
-//! engine as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`, `vst2_engine`), so the
+//! engine as an `lf_engine::UnitProcessor` unit (`clap_engine`, `vst3_engine`, `vst2_engine`), so the
 //! plugin renders inside the device callback. The `plugin_*` commands drive it (`engine_io/plugins.rs`).
 //!
 //! One owner loop serves every format (`serve`; what differs is a format's `OwnedPlugin`). It services,
@@ -31,7 +31,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clack_host::entry::PluginEntry;
-use lf_engine::{SlotKind, SlotProcessor};
+use lf_engine::{SlotKind, UnitProcessor};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::super::editor_window::{pump_thread_messages, wait_for_input};
@@ -329,7 +329,7 @@ pub(super) struct Reported {
 /// requests, the tone, the ordered teardown) is `serve`'s, once.
 pub(super) trait OwnedPlugin {
     /// The unit it installs into the engine.
-    type Unit: SlotProcessor + 'static;
+    type Unit: UnitProcessor + 'static;
     /// The format's name in the log.
     const FORMAT: &'static str;
     /// A restart the plugin asked for since the last call, as the log names it.
@@ -360,7 +360,7 @@ pub(super) trait OwnedPlugin {
 
 /// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed. The
 /// engine stops a unit before it leaves; stopping again is a no-op, and covers one that did not.
-pub(super) fn own<U: SlotProcessor + 'static>(unit: Box<dyn SlotProcessor>) -> Box<U> {
+pub(super) fn own<U: UnitProcessor + 'static>(unit: Box<dyn UnitProcessor>) -> Box<U> {
     let mut unit = unit
         .into_any()
         .downcast::<U>()
@@ -390,7 +390,7 @@ pub(super) fn serve<P: OwnedPlugin>(
     };
     // Before the load is reported, so the caller's first `set_param` finds its ids.
     publish_param_ids(&param_ids, &plugin.params().unwrap_or_default());
-    let kind = unit.kind();
+    let kind = if unit.info().source { SlotKind::Instrument } else { SlotKind::Effect };
     let installed = match claim.claim() {
         true => slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e)),
         false => Err((unit, "plugin load cancelled".to_string())),
@@ -881,7 +881,7 @@ impl Drop for EngineSlotHandle {
 #[cfg(test)]
 pub(crate) fn stand_in(
     slot: SlotHost,
-    unit: Box<dyn lf_engine::SlotProcessor>,
+    unit: Box<dyn lf_engine::UnitProcessor>,
     in_engine: impl FnOnce() + Send + 'static,
     leaving: impl FnOnce() + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
@@ -891,12 +891,12 @@ pub(crate) fn stand_in(
 /// Test-only: `stand_in`'s owner.
 #[cfg(test)]
 fn stand_in_owner(
-    unit: Box<dyn lf_engine::SlotProcessor>,
+    unit: Box<dyn lf_engine::UnitProcessor>,
     in_engine: impl FnOnce() + Send + 'static,
     leaving: impl FnOnce() + Send + 'static,
 ) -> impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static {
     move |ctx| {
-        let kind = unit.kind();
+        let kind = if unit.info().source { SlotKind::Instrument } else { SlotKind::Effect };
         let installed = match ctx.slot.rate() {
             _ if !ctx.claim.claim() => Err("plugin load cancelled".to_string()),
             Some(rate) => ctx.slot.install(unit, rate).map_err(|(_, e)| e),
@@ -1004,7 +1004,6 @@ mod tests {
     use std::any::Any;
     use std::sync::mpsc::channel;
 
-    use lf_engine::grid::Frame;
     use lf_engine::SlotEvent;
 
     use super::*;
@@ -1013,15 +1012,14 @@ mod tests {
     /// The fake's unit: a silent instrument.
     struct Silent;
 
-    impl SlotProcessor for Silent {
-        fn kind(&self) -> SlotKind {
-            SlotKind::Instrument
+    impl UnitProcessor for Silent {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: true, latency: 0 }
         }
-        fn latency(&self) -> Frame {
-            0
-        }
-        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
-            out.fill(0.0);
+        fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+            for o in out {
+                o.fill(0.0);
+            }
         }
         fn stop(&mut self) {}
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {

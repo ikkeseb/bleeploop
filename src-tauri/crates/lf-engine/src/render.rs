@@ -108,15 +108,16 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     let samples = master as usize;
     for track in &load.tracks {
         if track.buf.len() < samples {
-            return Err(format!("export render: track {} holds {} samples, fewer than the loop's {samples}", track.index, track.buf.len()));
+            return Err(format!("export render: track {} holds {} frames, fewer than the loop's {samples}", track.index, track.buf.len()));
         }
-        if !track.buf[..samples].iter().all(|x| x.is_finite()) {
+        if !track.buf[..samples].iter().flatten().all(|x| x.is_finite()) {
             return Err(format!("export render: track {} holds a sample that is not a finite number", track.index));
         }
     }
 
     // The engine the size of the session: its lane buffers hold the loop, no more.
-    let config = EngineConfig { max_loop_seconds: master as f64 / rate as f64, max_block: options.block, ..EngineConfig::new(rate) };
+    // No device feeds it: no input side for its record lines to hold.
+    let config = EngineConfig { max_loop_seconds: master as f64 / rate as f64, max_block: options.block, max_input_frames: 0, ..EngineConfig::new(rate) };
     let (mut engine, mut handle) = Engine::new(config);
     let capacity = engine.looper().capacity();
     if capacity < master {
@@ -124,7 +125,7 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     }
     let lanes: Vec<usize> = load.tracks.iter().map(|t| t.index as usize).collect();
     for track in &mut load.tracks {
-        track.buf.resize(capacity as usize, 0.0);
+        track.buf.resize(capacity as usize, [0.0; 2]);
         track.playing = true;
     }
     load.result = None;

@@ -1,5 +1,5 @@
 //! OWNS: a VST3 plugin in the engine: `Vst3Unit` (the processor with its event and parameter lists,
-//! as an `lf_engine::SlotProcessor`) and what its owner thread does with the plugin (`Vst3`, which
+//! as an `lf_engine::UnitProcessor`) and what its owner thread does with the plugin (`Vst3`, which
 //! the shared owner loop `engine_slot::serve` drives): the load, activation, a restart and a
 //! re-activation after an eviction, and the teardown's order, keeping the plugin's tone as `engine_slot` describes: the component's and the edit controller's states in
 //! one container (`save_state`, `restore_state`). It followed the WebView bridge's VST3 owner (deleted in
@@ -18,7 +18,7 @@ use super::*;
 use vst3::Steinberg::kNotImplemented;
 
 use lf_engine::grid::Frame;
-use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
+use lf_engine::{SlotEvent, SlotKind, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 
 use crate::engine_io::SlotHost;
 
@@ -109,17 +109,15 @@ impl Vst3Unit {
     }
 }
 
-impl SlotProcessor for Vst3Unit {
-    fn kind(&self) -> SlotKind {
-        self.kind
+impl UnitProcessor for Vst3Unit {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: self.kind == SlotKind::Instrument, latency: self.latency }
     }
 
-    fn latency(&self) -> Frame {
-        self.latency
-    }
-
-    fn process(&mut self, _frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
-        out.fill(0.0);
+    fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let [out_l, out_r] = out;
+        out_l.fill(0.0);
+        out_r.fill(0.0);
         if !self.processing {
             if self.refused {
                 return;
@@ -136,7 +134,7 @@ impl SlotProcessor for Vst3Unit {
             self.processing = true;
         }
         let chans = self.out_bufs.len();
-        let n = out.len();
+        let n = out_l.len();
         let (mut at, mut next) = (0, 0);
         // A call longer than the plugin's max frames goes in slices; each note lands in its own.
         while at < n {
@@ -152,9 +150,8 @@ impl SlotProcessor for Vst3Unit {
                 self.events.push(note_to_vst3(e.kind, (e.offset as usize - at) as i32));
                 next += 1;
             }
-            for ch in self.in_bufs.iter_mut() {
-                ch[..len].copy_from_slice(&input[at..at + len]);
-            }
+            // The bus the activation granted: stereo as asked, or one channel the pair's mean.
+            pair_into(input, &mut self.in_bufs, at, len);
             // A plugin that reports silence may leave its outputs untouched.
             for ch in self.out_bufs.iter_mut() {
                 ch[..len].fill(0.0);
@@ -190,7 +187,7 @@ impl SlotProcessor for Vst3Unit {
                 // A failed call's output is discarded, as CLAP's: the slice stays silent.
                 self.faults.fetch_or(FAULT_PROCESS, Relaxed);
             } else {
-                sum_to_mono(&self.out_bufs, &mut out[at..at + len], len, chans);
+                pair_from(&self.out_bufs, [&mut *out_l, &mut *out_r], at, len);
             }
             at += len;
         }

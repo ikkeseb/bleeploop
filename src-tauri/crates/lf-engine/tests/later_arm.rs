@@ -318,7 +318,7 @@ fn arm_idle(rig: &mut Rig, lane: u8) -> (Frame, usize, Frame) {
 
 /// What the looper itself played on the frame rendered last: the lanes and the click, no monitor.
 fn looper_tap(rig: &Rig) -> f32 {
-    *rig.engine.taps().looper.last().unwrap()
+    *rig.engine.taps().looper[0].last().unwrap()
 }
 
 fn refusals(rig: &Rig, mark: usize) -> Vec<(u8, Refusal)> {

@@ -923,7 +923,9 @@ impl Render {
             match engine.as_deref_mut() {
                 Some(engine) => {
                     let ctx = ProcessContext { frame: ctx.frame + off as Frame, xrun: ctx.xrun && off == 0, damaged, ..ctx };
-                    engine.process_inputs(&ctx, x, left, right);
+                    // Each slot's pick is one channel today, on both sides of its pair (the pair pick's
+                    // device side is E1's next step).
+                    engine.process_inputs(&ctx, x.map(|x| [x, x]), left, right);
                 }
                 None => {
                     left.fill(0.0);

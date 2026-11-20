@@ -238,6 +238,10 @@ enum EventDef {
         on: bool,
     },
     Tuner { frame: Frame, on: bool },
+    /// Off the wire: the device side drains it (`engine_io::drain`) until the chain host reads it (E2).
+    #[serde(skip)]
+    #[allow(dead_code)]
+    Seat { frame: Frame, slot: u8, unit: lf_engine::UnitId, op: lf_engine::SeatOp, outcome: lf_engine::SeatOutcome },
 }
 
 /// A [`CompactMix`] in the track shape of [`WireLaneMix`].
@@ -755,6 +759,7 @@ mod tests {
             Event::Mix { .. } => 10,
             Event::Toggled { .. } => 11,
             Event::Tuner { .. } => 12,
+            Event::Seat { .. } => unreachable!("a seating answer never reaches the wire"),
         }
     }
 

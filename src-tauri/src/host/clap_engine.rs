@@ -1,5 +1,5 @@
 //! OWNS: a CLAP plugin in the engine: `ClapUnit` (its audio processor as an
-//! `lf_engine::SlotProcessor`) and what its owner thread does with the plugin (`Clap`, which the
+//! `lf_engine::UnitProcessor`) and what its owner thread does with the plugin (`Clap`, which the
 //! shared owner loop `engine_slot::serve` drives): the load, activation, a restart and a
 //! re-activation after an eviction, and the teardown's order, keeping the
 //! plugin's tone as `engine_slot` describes (the `state` extension's blob, captured under the tone
@@ -18,7 +18,7 @@ use clack_host::events::spaces::CoreEventSpace;
 use clack_host::events::UnknownEvent;
 use lf_engine::grid::Frame;
 use lf_engine::slots::MAX_SLOT_EVENTS;
-use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 
 use crate::engine_io::SlotHost;
 
@@ -165,17 +165,15 @@ impl ClapUnit {
     }
 }
 
-impl SlotProcessor for ClapUnit {
-    fn kind(&self) -> SlotKind {
-        self.kind
+impl UnitProcessor for ClapUnit {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: self.kind == SlotKind::Instrument, latency: self.latency }
     }
 
-    fn latency(&self) -> Frame {
-        self.latency
-    }
-
-    fn process(&mut self, _frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
-        out.fill(0.0);
+    fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let [out_l, out_r] = out;
+        out_l.fill(0.0);
+        out_r.fill(0.0);
         self.start();
         let ClapUnit {
             processor,
@@ -195,7 +193,7 @@ impl SlotProcessor for ClapUnit {
         let Some(Processor::Started(started)) = processor.as_mut() else {
             return;
         };
-        let n = out.len();
+        let n = out_l.len();
         let (mut at, mut next) = (0, 0);
         // A call longer than the plugin's max frames goes in slices; each note lands in its own.
         while at < n {
@@ -230,9 +228,10 @@ impl SlotProcessor for ClapUnit {
                 }
                 next += 1;
             }
-            // Port 0 carries the live input; port 0's outputs are what the slot plays.
-            for ch in in_bufs.iter_mut().take(1).flatten() {
-                ch[..len].copy_from_slice(&input[at..at + len]);
+            // Port 0 carries the live pair (a mono port its mean); port 0's outputs are what the slot
+            // plays.
+            if let Some(port) = in_bufs.first_mut() {
+                pair_into(input, port, at, len);
             }
             // A plugin may report silence by leaving its outputs untouched.
             for ch in out_bufs.iter_mut().take(1).flatten() {
@@ -260,7 +259,7 @@ impl SlotProcessor for ClapUnit {
                 // CLAP discards a failed call's output: the slice stays silent.
                 faults.fetch_or(FAULT_PROCESS, Relaxed);
             } else if let Some(main) = out_bufs.first() {
-                sum_to_mono(main, &mut out[at..at + len], len, main.len());
+                pair_from(main, [&mut *out_l, &mut *out_r], at, len);
             }
             *steady = steady.wrapping_add(len as u64);
             at += len;

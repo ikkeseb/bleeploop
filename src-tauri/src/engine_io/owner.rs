@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, UnitProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
@@ -159,29 +159,37 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
 /// dropping it (a drop calls the plugin's DLL off its owner thread). Such a slot stays held
 /// (`Core::holder`), so its owner's teardown leaks the plugin instead of unloading it.
 fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], old: &mut Engine) -> bool {
-    let clean = catch_unwind(AssertUnwindSafe(|| {
-        old.service_slots_idle();
-        old.evict_slots();
-    }))
-    .is_ok();
-    if !clean {
-        core.counters.panics.fetch_add(1, Relaxed);
-        log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
-    }
-    for (slot, port) in ports.iter_mut().enumerate() {
-        if let Some(port) = port.as_mut() {
-            while let Some(unit) = port.returned() {
-                park(core, slot, unit);
+    // An install the engine has no place to return yet waits in its port: each pass reads the returns,
+    // which makes room, until a pass hands nothing back.
+    loop {
+        let clean = catch_unwind(AssertUnwindSafe(|| {
+            old.service_slots_idle();
+            old.evict_slots();
+        }))
+        .is_ok();
+        if !clean {
+            core.counters.panics.fetch_add(1, Relaxed);
+            log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
+        }
+        let mut back = 0;
+        for (slot, port) in ports.iter_mut().enumerate() {
+            if let Some(port) = port.as_mut() {
+                while let Some((_, unit)) = port.returned() {
+                    park(core, slot, unit);
+                    back += 1;
+                }
             }
         }
+        if !clean || back == 0 {
+            return clean;
+        }
     }
-    clean
 }
 
 /// Keep an evicted unit for its plugin owner (the slot's holder), and free the slot. A unit its owner
 /// abandoned (`SlotHost::abandon`) leaks, as does a second one, which the slot protocol rules out (one
 /// unit per slot): never a drop here (a drop calls its DLL).
-fn park(core: &Core, slot: usize, unit: Box<dyn SlotProcessor>) {
+fn park(core: &Core, slot: usize, unit: Box<dyn UnitProcessor>) {
     let owner = core.holder[slot].swap(0, AcqRel);
     if owner == 0 || owner == ORPHAN {
         log::warn!("[engine_io] slot {slot}: an evicted unit has no owner left; leaking it");

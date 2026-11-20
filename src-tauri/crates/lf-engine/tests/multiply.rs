@@ -16,6 +16,7 @@
 mod common;
 
 use common::{code, Opts, Rig};
+use common::mono;
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::{Frame, Grid, Meter};
 use lf_engine::looper::{job_frames, JOB_RATE};
@@ -48,7 +49,7 @@ fn tiled(loop_: &[f32], len: Frame) -> Vec<f32> {
 fn peaks_describe(rig: &Rig, lane: usize, tag: &str) {
     let looper = rig.engine.looper();
     let view = looper.overview().lane(lane);
-    let pcm = &looper.live_buffer(lane)[..view.frames as usize];
+    let pcm = &mono(looper.live_buffer(lane))[..view.frames as usize];
     for (bin, frames) in pcm.chunks(PEAK_FRAMES).enumerate() {
         let want = frames.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
         assert_eq!(looper.overview().bin(view.buf, bin), want, "{tag}: lane {lane} bin {bin}");
@@ -242,7 +243,7 @@ fn d_undo_after_a_multiply_gives_the_loop_from_before_the_dub_tiled() {
     rig.idle();
     let dubbed = rig.pcm(0);
     assert_ne!(dubbed, pre);
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(pre.clone()));
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(pre.clone()));
     let (_, end) = arm_fixed(&mut rig, 1, 4.0);
     rig.advance_to(end + 1);
     assert_eq!(rig.master(), 4 * master);
@@ -251,7 +252,7 @@ fn d_undo_after_a_multiply_gives_the_loop_from_before_the_dub_tiled() {
     assert!(rig.engine.holding(), "UNDO waits for the lane's extension");
     rig.idle();
     assert_eq!(rig.pcm(0), tiled(&pre, 4 * master), "UNDO: the pre-dub loop, tiled to the new master");
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(tiled(&dubbed, 4 * master)), "and the dubbed loop to redo, tiled");
+    assert_eq!(rig.engine.looper().undo_pcm(0).map(mono), Some(tiled(&dubbed, 4 * master)), "and the dubbed loop to redo, tiled");
     peaks_describe(&rig, 0, "undone");
     rig.press(Command::Undo(0));
     rig.idle();
@@ -429,7 +430,7 @@ fn g_a_copy_still_running_at_the_commit_ends_extended() {
 /// Hand a snapshot into `samples` to the engine and render until it comes back (`tests/session.rs`).
 fn snapshot(rig: &mut Rig, samples: usize) -> Snapshot {
     let mut pcm = Vec::with_capacity(samples);
-    pcm.resize(samples, 0.0f32);
+    pcm.resize(samples, [0.0f32; 2]);
     assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
     for _ in 0..100_000 {
         rig.advance(rig.block as Frame);
@@ -460,7 +461,7 @@ fn h_a_snapshot_after_a_multiply_holds_the_new_master_on_every_track() {
     for k in 0..3 {
         let t = s.tracks[k].unwrap();
         let pcm = &s.pcm[k * 4 * master as usize..(k + 1) * 4 * master as usize];
-        assert_eq!(pcm, &rig.pcm(t.index as usize)[..], "track {}: its loop in play order, the new master long", t.index);
+        assert_eq!(pcm, &rig.pcm2(t.index as usize)[..], "track {}: its loop in play order, the new master long", t.index);
     }
     assert!(s.tracks[1].unwrap().reversed);
 }
@@ -483,7 +484,7 @@ fn i_the_most_jobs_a_multiply_starts_fit_and_every_step_stays_small() {
             rig.idle();
         }
         let before: Vec<Vec<f32>> = (0..2).map(|i| rig.pcm(i)).collect();
-        let undo: Vec<Vec<f32>> = (0..2).map(|i| rig.engine.looper().undo_pcm(i).unwrap()).collect();
+        let undo: Vec<Vec<f32>> = (0..2).map(|i| rig.engine.looper().undo_pcm(i).map(mono).unwrap()).collect();
         rig.set_input(|f| -code(f));
         let (_, end) = arm_fixed(&mut rig, 4, 4.0);
         // Two COPYs still running into lanes 2 and 3 at the commit.
@@ -496,7 +497,7 @@ fn i_the_most_jobs_a_multiply_starts_fit_and_every_step_stays_small() {
         rig.idle();
         for i in 0..2 {
             assert_eq!(rig.pcm(i), tiled(&before[i], 4 * master), "block={block} lane {i}");
-            assert_eq!(rig.engine.looper().undo_pcm(i), Some(tiled(&undo[i], 4 * master)), "block={block} lane {i}'s undo");
+            assert_eq!(rig.engine.looper().undo_pcm(i).map(mono), Some(tiled(&undo[i], 4 * master)), "block={block} lane {i}'s undo");
             assert_eq!(rig.pcm(i + 2), tiled(&before[i], 4 * master), "block={block}: lane {}'s copy", i + 2);
         }
         steps_stay_small(&rig);

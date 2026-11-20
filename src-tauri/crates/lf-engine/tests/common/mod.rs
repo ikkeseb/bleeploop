@@ -12,7 +12,7 @@ pub mod refs;
 use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::scope::ScopeBin;
-use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
+use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, Pair, ProcessContext, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor};
 
 // Every `process` call in every scenario runs under assert_no_alloc: the audio path never allocates.
 // The check runs in debug builds; the crate's default `disable_release` makes it a no-op in release.
@@ -29,6 +29,24 @@ pub fn violation_count() -> u32 {
     0
 }
 
+/// A loop's left side, once it proved both sides equal: what a mono input records (the regression bar,
+/// `docs/unit-contract.md` §7).
+pub fn mono(pcm: impl AsRef<[Pair]>) -> Vec<f32> {
+    pcm.as_ref()
+        .iter()
+        .enumerate()
+        .map(|(k, &[l, r])| {
+            assert_eq!(l.to_bits(), r.to_bits(), "the sides differ at position {k}");
+            l
+        })
+        .collect()
+}
+
+/// A mono signal as a pair of equal sides.
+pub fn pairs(mono: &[f32]) -> Vec<Pair> {
+    mono.iter().map(|&x| [x, x]).collect()
+}
+
 /// A take's frame code: exact in f32 and unique over 2^22 frames.
 pub fn code(frame: Frame) -> f32 {
     ((frame.rem_euclid(1 << 22)) + 1) as f32 / (1 << 23) as f32
@@ -40,34 +58,32 @@ pub fn frame_of(sample: f32, near: Frame) -> Frame {
     f + ((near - f) as f64 / (1 << 22) as f64).round() as Frame * (1 << 22)
 }
 
-/// A plugin stand-in: an effect whose output is its input `latency` frames late.
+/// A plugin stand-in: an effect whose output is its input `latency` frames late, each side.
 pub struct Delay {
     pub latency: Frame,
-    line: Vec<f32>,
+    line: [Vec<f32>; 2],
 }
 
 impl Delay {
     pub fn new(latency: Frame) -> Self {
-        Delay { latency, line: vec![0.0; latency as usize] }
+        Delay { latency, line: [vec![0.0; latency as usize], vec![0.0; latency as usize]] }
     }
 }
 
-impl SlotProcessor for Delay {
-    fn kind(&self) -> SlotKind {
-        SlotKind::Effect
+impl UnitProcessor for Delay {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: false, latency: self.latency }
     }
 
-    fn latency(&self) -> Frame {
-        self.latency
-    }
-
-    fn process(&mut self, _frame: Frame, input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
-        for (w, &x) in out.iter_mut().zip(input) {
-            if self.line.is_empty() {
-                *w = x;
-            } else {
-                *w = self.line.remove(0);
-                self.line.push(x);
+    fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        for ((line, input), out) in self.line.iter_mut().zip(input).zip(out) {
+            for (w, &x) in out.iter_mut().zip(input) {
+                if line.is_empty() {
+                    *w = x;
+                } else {
+                    *w = line.remove(0);
+                    line.push(x);
+                }
             }
         }
     }
@@ -97,13 +113,22 @@ pub struct Rig {
     input: Box<dyn Fn(Frame) -> f32>,
     /// Slot 1's own input ([`Rig::set_inputs`]); `None`: both slots read `input`.
     input_b: Option<Box<dyn Fn(Frame) -> f32>>,
+    /// Each slot's own pair ([`Rig::set_stereo_inputs`]), over `input` and `input_b`; `None`: each slot
+    /// reads its mono input on both sides, and the rig checks every block's monitor and record tap
+    /// carry equal sides.
+    stereo: Option<[Box<dyn Fn(Frame) -> Pair>; 2]>,
+    /// The ids the rig minted for each slot's installs, in order ([`Rig::install`]).
+    ids: [Vec<UnitId>; 2],
+    next_id: UnitId,
     pub events: Vec<Event>,
     /// The events stay in the ring after each block (a feed that stopped reading) until
     /// [`Rig::read_events`].
     pub hold_events: bool,
     /// From `keep_output`, what the looper plays before the limiter: the lanes before their FX, the
-    /// click and the monitor (`Taps::looper` + `Taps::monitor`), and the frame it starts at.
+    /// click and the monitor (`Taps::looper` + `Taps::monitor`), left, and the frame it starts at.
     pub output: Option<(Frame, Vec<f32>)>,
+    /// The same, right.
+    pub output_right: Vec<f32>,
     /// The rendered channels over the same frames, and the engine's taps (`Engine::taps`): the bus's
     /// two sides and the monitor.
     pub heard: Vec<f32>,
@@ -111,8 +136,10 @@ pub struct Rig {
     pub bus: Vec<f32>,
     pub bus_right: Vec<f32>,
     pub monitor: Vec<f32>,
-    /// The record tap over the same frames (`Taps::record`).
+    pub monitor_right: Vec<f32>,
+    /// The record tap over the same frames (`Taps::record`), left and right.
     pub record: Vec<f32>,
+    pub record_right: Vec<f32>,
     /// The Share mix's two sides over the same frames (`Engine::share`).
     pub share: Vec<f32>,
     pub share_right: Vec<f32>,
@@ -120,6 +147,8 @@ pub struct Rig {
     damaged_next: bool,
     in_buf: Vec<f32>,
     in_buf_b: Vec<f32>,
+    in_buf_r: Vec<f32>,
+    in_buf_b_r: Vec<f32>,
     left: Vec<f32>,
     right: Vec<f32>,
 }
@@ -195,21 +224,29 @@ impl Rig {
             input_latency: 0,
             input: Box::new(|_| 0.0),
             input_b: None,
+            stereo: None,
+            ids: [Vec::new(), Vec::new()],
+            next_id: 1,
             events: Vec::new(),
             hold_events: false,
             output: None,
+            output_right: Vec::new(),
             heard: Vec::new(),
             heard_right: Vec::new(),
             bus: Vec::new(),
             bus_right: Vec::new(),
             monitor: Vec::new(),
+            monitor_right: Vec::new(),
             record: Vec::new(),
+            record_right: Vec::new(),
             share: Vec::new(),
             share_right: Vec::new(),
             gap_next: false,
             damaged_next: false,
             in_buf: vec![0.0; 4096],
             in_buf_b: vec![0.0; 4096],
+            in_buf_r: vec![0.0; 4096],
+            in_buf_b_r: vec![0.0; 4096],
             left: vec![0.0; 4096],
             right: vec![0.0; 4096],
         }
@@ -218,17 +255,25 @@ impl Rig {
     pub fn set_input(&mut self, signal: impl Fn(Frame) -> f32 + 'static) {
         self.input = Box::new(signal);
         self.input_b = None;
+        self.stereo = None;
     }
 
     pub fn set_level(&mut self, level: f32) {
         self.input = Box::new(move |_| level);
         self.input_b = None;
+        self.stereo = None;
     }
 
     /// Each slot its own input, as two capture channels: slot 0 reads `a`, slot 1 `b`.
     pub fn set_inputs(&mut self, a: impl Fn(Frame) -> f32 + 'static, b: impl Fn(Frame) -> f32 + 'static) {
         self.input = Box::new(a);
         self.input_b = Some(Box::new(b));
+        self.stereo = None;
+    }
+
+    /// Each slot its own stereo pair: slot 0 reads `a`, slot 1 `b` (two pairs of capture channels).
+    pub fn set_stereo_inputs(&mut self, a: impl Fn(Frame) -> Pair + 'static, b: impl Fn(Frame) -> Pair + 'static) {
+        self.stereo = Some([Box::new(a), Box::new(b)]);
     }
 
     pub fn keep_output(&mut self) {
@@ -238,7 +283,10 @@ impl Rig {
         self.bus.clear();
         self.bus_right.clear();
         self.monitor.clear();
+        self.monitor_right.clear();
         self.record.clear();
+        self.record_right.clear();
+        self.output_right.clear();
         self.share.clear();
         self.share_right.clear();
     }
@@ -260,20 +308,52 @@ impl Rig {
         self.gap_next = true;
     }
 
-    /// Install `unit` into `slot`: it applies at the next block start (engaged at once before the first
-    /// block, crossfading in after it).
-    pub fn install(&mut self, slot: usize, unit: Box<dyn SlotProcessor>) {
-        if self.handle.slots[slot].install(unit).is_err() {
+    /// Install `unit` at the end of `slot`'s chain under an id the rig mints: it applies at the next
+    /// block start (engaged at once before the first block, crossfading in after it).
+    pub fn install(&mut self, slot: usize, unit: Box<dyn UnitProcessor>) {
+        self.install_id(slot, unit);
+    }
+
+    /// [`Rig::install`], answering the id it minted.
+    pub fn install_id(&mut self, slot: usize, unit: Box<dyn UnitProcessor>) -> UnitId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.install_as(slot, id, unit);
+        id
+    }
+
+    /// Install `unit` into `slot` under `id`.
+    pub fn install_as(&mut self, slot: usize, id: UnitId, unit: Box<dyn UnitProcessor>) {
+        if self.handle.slots[slot].install(id, unit).is_err() {
             panic!("slot {slot}'s message ring is full");
         }
+        self.ids[slot].push(id);
     }
 
-    /// Ask for `slot`'s unit back; it returns on [`Rig::returned`] once it has crossfaded out.
+    /// Ask for the unit last installed into `slot` back; it returns on [`Rig::returned`] once it has
+    /// crossfaded out.
     pub fn remove(&mut self, slot: usize) {
-        assert!(self.handle.slots[slot].remove(), "slot {slot}'s message ring is full");
+        let id = self.ids[slot].pop().unwrap_or(0);
+        self.remove_id(slot, id);
     }
 
-    pub fn returned(&mut self, slot: usize) -> Option<Box<dyn SlotProcessor>> {
+    /// Ask for unit `id` back from `slot`.
+    pub fn remove_id(&mut self, slot: usize, id: UnitId) {
+        self.ids[slot].retain(|&i| i != id);
+        assert!(self.handle.slots[slot].remove(id), "slot {slot}'s message ring is full");
+    }
+
+    pub fn returned(&mut self, slot: usize) -> Option<Box<dyn UnitProcessor>> {
+        self.returned_id(slot).map(|(_, unit)| unit)
+    }
+
+    /// The host's end of `slot`, as the device side holds it.
+    pub fn port(&mut self, slot: usize) -> &mut lf_engine::SlotPort {
+        &mut self.handle.slots[slot]
+    }
+
+    /// A unit handed back on `slot`'s port, with its id.
+    pub fn returned_id(&mut self, slot: usize) -> Option<(UnitId, Box<dyn UnitProcessor>)> {
         self.handle.slots[slot].returned()
     }
 
@@ -363,30 +443,46 @@ impl Rig {
     }
 
     fn render(&mut self, n: usize) {
-        for k in 0..n {
-            self.in_buf[k] = (self.input)(self.frame + k as Frame);
-        }
-        if let Some(b) = self.input_b.as_ref() {
+        if let Some([a, b]) = self.stereo.as_ref() {
             for k in 0..n {
-                self.in_buf_b[k] = b(self.frame + k as Frame);
+                [self.in_buf[k], self.in_buf_r[k]] = a(self.frame + k as Frame);
+                [self.in_buf_b[k], self.in_buf_b_r[k]] = b(self.frame + k as Frame);
+            }
+        } else {
+            for k in 0..n {
+                self.in_buf[k] = (self.input)(self.frame + k as Frame);
+            }
+            if let Some(b) = self.input_b.as_ref() {
+                for k in 0..n {
+                    self.in_buf_b[k] = b(self.frame + k as Frame);
+                }
             }
         }
         let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), damaged: std::mem::take(&mut self.damaged_next), align_frames: self.align - self.engine.limiter_latency(), input_frames: self.input_latency };
         let violations = violation_count();
         let engine = &mut self.engine;
         let (input, left, right) = (&self.in_buf[..n], &mut self.left[..n], &mut self.right[..n]);
-        let input_b = if self.input_b.is_some() { &self.in_buf_b[..n] } else { input };
-        assert_no_alloc(|| engine.process_inputs(&ctx, [input, input_b], left, right));
+        let input_b = if self.input_b.is_some() || self.stereo.is_some() { &self.in_buf_b[..n] } else { input };
+        // Mono inputs are fed as pairs of equal sides, as the device side hands a mono pick.
+        let inputs = if self.stereo.is_some() { [[input, &self.in_buf_r[..n]], [input_b, &self.in_buf_b_r[..n]]] } else { [[input, input], [input_b, input_b]] };
+        assert_no_alloc(|| engine.process_inputs(&ctx, inputs, left, right));
         assert_eq!(violation_count(), violations, "process allocated at frame {}", self.frame);
+        let taps = self.engine.taps();
+        if self.stereo.is_none() {
+            // The regression bar (`docs/unit-contract.md` §7): equal sides in, equal sides on the monitor.
+            assert!(taps.monitor[0].iter().zip(taps.monitor[1]).all(|(a, b)| a.to_bits() == b.to_bits()), "the monitor's sides differ at frame {}", self.frame);
+        }
         if let Some((_, out)) = self.output.as_mut() {
-            let taps = self.engine.taps();
-            out.extend(taps.looper.iter().zip(taps.monitor).map(|(b, m)| b + m));
+            out.extend(taps.looper[0].iter().zip(taps.monitor[0]).map(|(b, m)| b + m));
+            self.output_right.extend(taps.looper[1].iter().zip(taps.monitor[1]).map(|(b, m)| b + m));
             self.heard.extend_from_slice(&self.left[..n]);
             self.heard_right.extend_from_slice(&self.right[..n]);
             self.bus.extend_from_slice(taps.bus[0]);
             self.bus_right.extend_from_slice(taps.bus[1]);
-            self.monitor.extend_from_slice(taps.monitor);
-            self.record.extend_from_slice(taps.record);
+            self.monitor.extend_from_slice(taps.monitor[0]);
+            self.monitor_right.extend_from_slice(taps.monitor[1]);
+            self.record.extend(taps.record.iter().map(|p| p[0]));
+            self.record_right.extend(taps.record.iter().map(|p| p[1]));
             let [share, share_right] = self.engine.share();
             self.share.extend_from_slice(share);
             self.share_right.extend_from_slice(share_right);
@@ -449,7 +545,15 @@ impl Rig {
         self.window().and_then(|w| w.2).expect("no window end")
     }
 
+    /// Lane `i`'s loop, its left side, once it proved both sides bit-equal: what a mono take records
+    /// (the regression bar), so a fault on one side alone (an overdub, a reverse, a trim, an undo, a
+    /// fade) shows. A stereo scenario reads [`Rig::pcm2`].
     pub fn pcm(&self, i: usize) -> Vec<f32> {
+        mono(self.engine.looper().loop_pcm(i))
+    }
+
+    /// Lane `i`'s loop, both sides.
+    pub fn pcm2(&self, i: usize) -> Vec<Pair> {
         self.engine.looper().loop_pcm(i)
     }
 

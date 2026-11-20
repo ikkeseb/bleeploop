@@ -474,7 +474,7 @@ mod tests {
     use std::sync::Barrier;
 
     use lf_engine::grid::Frame;
-    use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
+    use lf_engine::{SlotEvent, UnitProcessor};
 
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
@@ -482,15 +482,14 @@ mod tests {
     /// A stand-in owner's unit: a silent effect.
     struct Silent;
 
-    impl SlotProcessor for Silent {
-        fn kind(&self) -> SlotKind {
-            SlotKind::Effect
+    impl UnitProcessor for Silent {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: 0 }
         }
-        fn latency(&self) -> Frame {
-            0
-        }
-        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
-            out.fill(0.0);
+        fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+            for o in out {
+                o.fill(0.0);
+            }
         }
         fn stop(&mut self) {}
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
@@ -505,21 +504,20 @@ mod tests {
         entered: Arc<AtomicBool>,
     }
 
-    impl SlotProcessor for Held {
-        fn kind(&self) -> SlotKind {
-            SlotKind::Effect
+    impl UnitProcessor for Held {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: 0 }
         }
-        fn latency(&self) -> Frame {
-            0
-        }
-        fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
             if self.hold.load(Acquire) {
                 self.entered.store(true, Release);
                 while self.hold.load(Acquire) {
                     std::thread::yield_now();
                 }
             }
-            out.fill(0.0);
+            for o in out {
+                o.fill(0.0);
+            }
         }
         fn stop(&mut self) {}
         fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
