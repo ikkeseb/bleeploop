@@ -903,8 +903,10 @@ fn an_instrument_slots_note_played_on_the_heard_click_lands_on_the_grid() {
     assert_eq!(take(IN + PLUGIN + 100), 100, "100 frames more than the input side: 100 late");
 }
 
-/// The record path lags an instrument slot's output: a removal that completes while its note is still
-/// on the way leaves the note where it was headed, played once.
+/// The record path lags an instrument slot's output: a removal asked while its note is still on the way
+/// leaves the note where it was headed, played once. Changed by E2 (`docs/unit-contract.md` §7): the
+/// removal changes the chain's role and latency, so it waits in its port until the take ends (E1
+/// completed it mid-take), and the unit comes back after.
 #[test]
 fn an_instrument_slot_removed_while_its_note_is_on_the_record_path_still_lands_it_on_the_grid() {
     const IN: Frame = 2000;
@@ -924,11 +926,13 @@ fn an_instrument_slot_removed_while_its_note_is_on_the_record_path_still_lands_i
     rig.advance_to(note + LATENCY + 1); // the note has sounded
     rig.remove(1);
     rig.advance(FADE as Frame + 128);
-    assert!(rig.returned(1).is_some(), "removed before the note reaches the take");
+    assert!(rig.returned(1).is_none(), "the removal waits for the take");
     rig.advance_to(rig.end_frame() + 1);
     let pcm = rig.pcm(0);
     let hits: Vec<usize> = pcm.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, _)| k).collect();
     assert_eq!(hits, vec![0], "once, on the loop's frame 0");
+    rig.advance(FADE as Frame + 256);
+    assert!(rig.returned(1).is_some(), "removed once the take ended");
 }
 
 /// An input side past the configured largest (`EngineConfig::max_input_frames`, one second, which the
@@ -1452,7 +1456,7 @@ fn going_off_live_ramps_an_effects_input_to_silence_and_leaves_its_tail_ringing(
 
 /// A live toggle inside each 10 ms bypass crossfade: the crossfade runs its frames as ever, its dry side
 /// the gated input, and the gate splits the plugin's calls only at the commands, never where a ramp
-/// ends. The removal completes as ever.
+/// ends. The removal completes as ever, its unit called for no frame past its fade.
 #[test]
 fn a_live_toggle_inside_each_bypass_crossfade_composes_with_it_and_adds_no_plugin_call() {
     let probe = Probe::new();
@@ -1482,8 +1486,9 @@ fn a_live_toggle_inside_each_bypass_crossfade_composes_with_it_and_adds_no_plugi
     let splits = [off, toggles[1].0];
     let mut want = Vec::new();
     let mut at = installed;
+    // A leaving unit is called for its fade and no frame past it: the last call ends with the removal's.
     while at < removed + FADE as Frame {
-        let end = at + 128;
+        let end = (at + 128).min(removed + FADE as Frame);
         let mut from = at;
         for &x in splits.iter().filter(|&&x| x > at && x < end) {
             want.push((from, (x - from) as usize));

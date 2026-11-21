@@ -12,7 +12,7 @@
 //!
 //! A latent unit that comes or goes mid-take moves nothing the take records outside its own crossfade:
 //! the alignment holds for the capture and each chain's wet follows its own sum (`Rack::latch_record`).
-//! What E1 leaves to E2: a chain that grows past the take's alignment mid-take (E2 holds that edit).
+//! E2 holds such an edit in its port until the take ends (`tests/chain.rs`).
 
 mod common;
 
@@ -300,7 +300,9 @@ fn unequal_latencies_on_two_live_inputs_land_on_one_loop_frame_each_heard_at_its
 }
 
 /// A latent unit added to the 17-frame chain mid-take and removed again, each between two impulses:
-/// every impulse lands on its loop frame, on both sides, and the middle one is heard 50 frames later.
+/// every impulse lands on its loop frame, on both sides. Changed by E2 (`docs/unit-contract.md` §7): the
+/// install changes the chain's sum, so it waits in its port for the take to end, the removal behind it,
+/// and every impulse is heard at the chain's 17 frames (E1 heard the middle one 50 frames later).
 #[test]
 fn a_unit_that_comes_and_goes_mid_take_moves_no_impulse() {
     let install = |rig: &mut Rig| rig.install(1, Lag::new(50, [1.0; 2]));
@@ -314,7 +316,7 @@ fn a_unit_that_comes_and_goes_mid_take_moves_no_impulse() {
         assert!(ps.iter().all(|&p| pcm[p] == [1.0, 1.0]), "block {block}: at its gain");
         let x: Vec<usize> = at.iter().map(|&k| (start + k - from) as usize).collect();
         assert_eq!(nonzero(&l), x.iter().map(|x| x + 96).collect::<Vec<_>>(), "block {block}: slot 0 heard as before");
-        assert_eq!(nonzero(&r), vec![x[0] + 17, x[1] + 67, x[2] + 17], "block {block}: slot 1 heard through what it seats");
+        assert_eq!(nonzero(&r), vec![x[0] + 17, x[1] + 17, x[2] + 17], "block {block}: slot 1 heard through what it seats, the edit held");
     }
 }
 
@@ -471,7 +473,11 @@ fn full_rings_keep_every_answer_and_every_unit_until_the_host_reads_again() {
             break;
         }
     }
-    rig.advance(rig.block as Frame);
+    // Changed by E2: each slot's `Event::Chain` shares the 8-event ring with the other slot's owed
+    // answers, so the last of them may take more than one block to drain (none is lost: it stays owed).
+    for _ in 0..64 {
+        rig.advance(rig.block as Frame);
+    }
     let mut answered: Vec<(u8, u32, SeatOp)> = rig.events.iter().filter_map(|e| match *e {
         Event::Seat { slot, unit, op, outcome, .. } => {
             assert_eq!(outcome, SeatOutcome::Applied, "unit {unit}: {op:?}");

@@ -172,7 +172,8 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::ActionOn(..)
         | Command::Press
         | Command::SelectTrack(_)
-        | Command::SetTuner(_) => UiRoute::Queue,
+        | Command::SetTuner(_)
+        | Command::SetUnitBypass(..) => UiRoute::Queue,
         Command::NoteOn(..)
         | Command::NoteOff(_)
         | Command::PitchBend(_)

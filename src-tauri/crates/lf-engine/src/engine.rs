@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitInfo, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -173,6 +173,8 @@ pub struct Diag {
     /// is aligned on the clamped side, so what the engine records of its own sources (the built-in
     /// synths, a source chain) stays on the grid and the device's input lands late by the excess.
     pub input_clamped: u64,
+    /// Unit commands ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]) that named an id no seat holds.
+    pub unit_commands_dropped: u64,
 }
 
 /// One chunk the scope still owes its master column: the frames it covered, and every source's
@@ -220,6 +222,9 @@ struct Pending {
     command: Command,
     /// Waiting for a block job: every command sent after it waits behind it, so presses keep their order.
     held: bool,
+    /// A bypass command whose chain had no place among what its slot owes (`Rack::bypass_room`): it
+    /// waits for the next block, and every bypass command sent after it waits behind it.
+    owed: bool,
 }
 
 pub struct Engine {
@@ -464,6 +469,7 @@ impl Engine {
             scope_dropped: self.scope.dropped(),
             tuner_dropped: self.tuner.dropped(),
             input_clamped: self.input_clamped,
+            unit_commands_dropped: self.rack.unit_commands_dropped,
         }
     }
 
@@ -478,8 +484,9 @@ impl Engine {
         self.rack.installed(slot)
     }
 
-    /// A slot's chain, head first: each seat's id and what it is.
-    pub fn chain(&self, slot: usize) -> impl Iterator<Item = (UnitId, UnitInfo)> + '_ {
+    /// A slot's chain as applied, head first (a withdrawn seat included, a leaving one not): what its
+    /// [`Event::Chain`] carries.
+    pub fn chain(&self, slot: usize) -> impl Iterator<Item = ChainSeat> + '_ {
         self.rack.chain(slot)
     }
 
@@ -489,11 +496,14 @@ impl Engine {
         self.rack.record_latency()
     }
 
-    /// While no device runs and the host holds the engine: apply the slot ports' installs and removals
-    /// at once, without crossfades (a removed unit gets its released notes in one silent frame, then
-    /// stops here, on the caller's thread).
+    /// While no device runs and the host holds the engine: apply the slot ports' messages at once,
+    /// without crossfades (a leaving unit gets its released notes in one silent frame, then stops here,
+    /// on the caller's thread). An edit of a chain's sum or role still waits while a capture holds the
+    /// alignment.
     pub fn service_slots_idle(&mut self) {
-        self.rack.service_idle(self.next_frame);
+        let hold = self.capture_holds();
+        self.reserve_bypasses();
+        self.rack.service_idle(self.next_frame, hold);
         self.rack.offer(&mut self.feed);
     }
 
@@ -565,16 +575,8 @@ impl Engine {
     /// instead would apply notes and slot commands to units the rebuild hands on to the new engine. Not
     /// for the audio thread.
     pub fn unapplied_transport(&mut self) -> impl Iterator<Item = Command> {
-        let mut table: Vec<_> = self.pending.iter().flatten().map(|p| (p.seq, p.command)).collect();
-        table.sort_by_key(|&(seq, _)| seq);
-        let slots = self.commands.slots();
-        let ring: Vec<_> = self.commands.read_chunk(slots).map(|chunk| {
-            let (a, b) = chunk.as_slices();
-            a.iter().chain(b).map(|c| c.command).collect()
-        }).unwrap_or_default();
         let (mut bpm, mut meter) = (None, None);
-        // The table holds what the ring gave first, in its order; the ring holds what came after.
-        for command in table.into_iter().map(|(_, c)| c).chain(ring) {
+        for command in self.unapplied() {
             match command {
                 Command::SetBpm(_) => bpm = Some(command),
                 Command::SetMeter(_) => meter = Some(command),
@@ -582,6 +584,28 @@ impl Engine {
             }
         }
         bpm.into_iter().chain(meter)
+    }
+
+    /// The unit commands sent and not applied yet ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]
+    /// pressed or on a named lane), in the order they were sent: still in the table (a bypass waiting
+    /// for a place among what its slot owes, or one stamped ahead) or in the command ring, peeked at
+    /// without taking anything. A rebuild replays them on the new engine once the units are reseated
+    /// (`docs/unit-contract.md` §2). Not for the audio thread.
+    pub fn unapplied_unit_commands(&mut self) -> impl Iterator<Item = Command> {
+        self.unapplied().filter(|c| c.unit_bypass().is_some())
+    }
+
+    /// Every command sent and not applied yet, in send order: the table holds what the ring gave first,
+    /// in its order (by sequence); the ring holds what came after. Allocates.
+    fn unapplied(&mut self) -> impl Iterator<Item = Command> {
+        let mut table: Vec<_> = self.pending.iter().flatten().map(|p| (p.seq, p.command)).collect();
+        table.sort_by_key(|&(seq, _)| seq);
+        let slots = self.commands.slots();
+        let ring: Vec<_> = self.commands.read_chunk(slots).map(|chunk| {
+            let (a, b) = chunk.as_slices();
+            a.iter().chain(b).map(|c| c.command).collect()
+        }).unwrap_or_default();
+        table.into_iter().map(|(_, c)| c).chain(ring)
     }
 
     /// While no device runs and the caller holds the engine: apply `command` at once, at the frame the
@@ -682,13 +706,29 @@ impl Engine {
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish. An atomic read.
         self.replayed |= self.commands.is_empty();
-        self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() });
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
-        // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
-        // records (a skip or a repeat), and a change reaches both once nothing captures.
-        let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
-        self.rack.latch_record(open);
-        let live_latency = self.rack.record_latency();
+        // compensation holds with it, so no live flag changed meanwhile moves what it records (a skip or
+        // a repeat), and a change reaches both once nothing captures. An edit of a chain's latency sum or
+        // role waits in its port for the same (`slots`).
+        let open = !self.capture_holds();
+        // A capture that holds at the block start can end on its first frame (its end or a pass edge is
+        // due there): the ports wait for that frame's looper events, so a message is judged against
+        // what holds after them (`release_hold` below).
+        let ending = !open && self.looper.next_event().is_some_and(|at| at <= start);
+        // What the slots owe the event ring gets the block's first offer, ahead of every other event of
+        // the block (a setting's answer, a lane's state): a feed that frees one place a block still
+        // drains it. A slot with a bypass command waiting for a place keeps the next one for it.
+        self.rack.offer(&mut self.feed);
+        self.reserve_bypasses();
+        self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() }, !open, !ending);
+        if let Some(blind) = self.rack.latch_record(open, ctx.input_frames.min(self.config.max_input_frames)) {
+            // The record tap's timing changed (an edit, a live flag; the alignment or one slot's delay
+            // to it) while no capture held it: what AUTO listening retained came at the old one, its
+            // onset is dated by the new one, and the tap carries what was on its way at the old one
+            // until the change has passed through every path it moved.
+            self.looper.cut_listening_until(start + blind);
+        }
+        let mut live_latency = self.rack.record_latency();
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
             // The tuner's input breaks here: its next frame starts a new epoch (`crate::tuner`).
@@ -706,8 +746,9 @@ impl Engine {
             self.input_clamped += 1;
         }
         let input_frames = ctx.input_frames - excess;
-        let align = ctx.align_frames - excess + live_latency + self.limiter.latency() as Frame;
-        let record_delay = input_frames + live_latency;
+        let base_align = ctx.align_frames - excess + self.limiter.latency() as Frame;
+        let mut align = base_align + live_latency;
+        let mut record_delay = input_frames + live_latency;
         self.rendered = n;
         // A block always folds and clears its own chunks; a block the host's `catch_unwind` cut short
         // left its own behind, and they name frames this one does not render.
@@ -723,18 +764,37 @@ impl Engine {
         while f < end {
             let mut cx = Cx { now: f, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
             self.looper.events(&mut cx);
+            let holds = self.looper.recorder().is_some_and(|(_, window, _)| window.is_some());
+            if f == start && !open && (ending || !holds) {
+                // The capture that held at the block start ended on its first frame (a handoff or a
+                // RETAKE pass hands it on, and it holds): the ports are served here, before this frame's
+                // commands, the edits it held applying, and the alignment follows them, as at any block
+                // start nothing captures on.
+                self.rack.release_hold(start, first, holds);
+                if !holds {
+                    if let Some(blind) = self.rack.latch_record(true, input_frames) {
+                        self.looper.cut_listening_until(start + blind);
+                    }
+                    live_latency = self.rack.record_latency();
+                    align = base_align + live_latency;
+                    record_delay = input_frames + live_latency;
+                    cx.align = align;
+                }
+            }
+            // A move's reorder due on this frame applies before its slot commands, as at a block start.
+            self.rack.reorders_due(f);
             let mut at = Apply {
                 instruments: &mut self.instruments,
                 rack: &mut self.rack,
                 input_fx: &mut self.input_fx,
                 master_volume: &mut self.master_volume,
                 master_muted: &mut self.master_muted,
-                    toggles_owed: &mut self.toggles_owed,
+                toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
                 tuner: &mut self.tuner,
                 tuner_owed: &mut self.tuner_owed,
             };
-            apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
+            apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at, end);
             if f == start {
                 // The session job after the commands due on the block's first frame: a setting sent
                 // before a snapshot or a load is ordered before it (a load's mix overrides it).
@@ -927,6 +987,9 @@ impl Engine {
             }
             f = next;
         }
+        // The replies a render call owed after the last offer (a reorder in the final range), while the
+        // ring has room: the host settles them after this block.
+        self.rack.offer(&mut self.feed);
         for slot in 0..SLOT_COUNT {
             self.looper.overview().set_slot_gate_open(slot, self.rack.gate_open(slot));
         }
@@ -973,6 +1036,17 @@ impl Engine {
         }
     }
 
+    /// Each slot with a bypass command waiting for a place among what it owes keeps the next place for
+    /// it, ahead of its port's messages (`Rack::reserve_bypasses`).
+    fn reserve_bypasses(&mut self) {
+        self.rack.reserve_bypasses(self.pending.iter().flatten().filter(|p| p.owed).filter_map(|p| p.command.unit_bypass()));
+    }
+
+    /// A capture's alignment is fixed: a take's window has its start.
+    fn capture_holds(&self) -> bool {
+        self.looper.recorder().is_some_and(|(_, start, _)| start.is_some())
+    }
+
     /// Move the ring's commands into the table, an unstamped or late one due at `now`. Take no more than
     /// the table holds: the rest waits in the ring for the next block, late but never dropped (a lost
     /// NoteOff would hang its note). Nor past a load on the port ([`crate::session`]). The ring is counted
@@ -992,16 +1066,27 @@ impl Engine {
     }
 
     fn hold(&mut self, frame: Frame, command: Command) {
-        insert(&mut self.pending, &mut self.commands_dropped, Pending { frame, seq: self.commands_taken, command, held: false });
+        insert(&mut self.pending, &mut self.commands_dropped, Pending { frame, seq: self.commands_taken, command, held: false, owed: false });
     }
 }
 
 /// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
-/// for a block job goes back in, held from the next frame on.
-fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, looper: &mut Looper, cx: &mut Cx, at: &mut Apply) {
+/// for a block job goes back in, held from the next frame on. A bypass command whose chain has no place
+/// among what its slot owes, once what is owed was offered, goes back in for `block_end`, the next
+/// block (the host reads the event ring between blocks).
+fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, looper: &mut Looper, cx: &mut Cx, at: &mut Apply, block_end: Frame) {
     let f = cx.now;
     while let Some(k) = due(pending, f) {
         let p = pending[k].take().unwrap();
+        if let Some(unit) = p.command.unit_bypass() {
+            if !at.rack.bypass_room(unit) {
+                at.rack.offer(cx.feed);
+            }
+            if !at.rack.bypass_room(unit) {
+                insert(pending, dropped, Pending { frame: block_end.max(f + 1), owed: true, ..p });
+                continue;
+            }
+        }
         if let Command::Action(Action::Toggle(t @ Toggle::Send(_))) | Command::ActionOn(_, Action::Toggle(t @ Toggle::Send(_))) = p.command {
             if pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
                 // An input send's toggle passed a looper command held for a block job (`due`): the send
@@ -1035,14 +1120,18 @@ fn insert(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, p: Pe
 /// it waits behind that one. Due commands run in the order they were sent. A command for the
 /// instruments, the plugin slots or the input sends never waits behind the looper: it touches nothing a
 /// block job moves, and a note must sound when it is played (in the web app notes go straight to the
-/// synth), an echo when it is switched on.
+/// synth), an echo when it is switched on. A bypass command waits behind one sent before it that waits
+/// for a place among what its slot owes.
 fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
     let barrier = pending.iter().flatten().filter(|p| p.held && p.frame > f).map(|p| p.seq).min();
+    let owed = pending.iter().flatten().filter(|p| p.owed && p.frame > f).map(|p| p.seq).min();
     pending
         .iter()
         .enumerate()
         .filter_map(|(k, p)| {
-            p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots() || p.command.is_input_send())).map(|p| (p.seq, k))
+            p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots() || p.command.is_input_send()))
+                .filter(|p| p.command.unit_bypass().is_none() || owed.is_none_or(|b| p.seq < b))
+                .map(|p| (p.seq, k))
         })
         .min()
         .map(|(_, k)| k)
@@ -1253,6 +1342,15 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             } else {
                 set_tuner(cx.feed, now, at.tuner, at.tuner_owed, on);
             }
+            Applied::Done
+        }
+        // A unit's bypass: a rig control, no looper press (no CLEAR is disarmed), on its frame.
+        Command::SetUnitBypass(unit, bypassed) => {
+            at.rack.set_unit_bypass(unit, Some(bypassed), now);
+            Applied::Done
+        }
+        Command::Action(Action::ToggleUnit(unit)) | Command::ActionOn(_, Action::ToggleUnit(unit)) => {
+            at.rack.set_unit_bypass(unit, None, now);
             Applied::Done
         }
         Command::Action(action) => {

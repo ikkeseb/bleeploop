@@ -519,6 +519,8 @@ pub struct Looper {
     /// edge runs after them may lie in them. The device frames first, then the frames of the record tap.
     gap: [(Frame, Frame); 2],
     detector: Detector,
+    /// AUTO listening hears the record tap from this frame on (`cut_listening_until`).
+    blind: Frame,
     /// The record tap's last quarter beat at the slowest tempo, for a later take's snap (D31).
     lookback: Lookback,
     gain_coef: f64,
@@ -579,6 +581,7 @@ impl Looper {
             job_work: 0,
             gap: [(Frame::MIN, Frame::MIN); 2],
             detector: Detector::new(sample_rate),
+            blind: Frame::MIN,
             // The largest grace a snap reaches back over, and a frame to spare.
             lookback: Lookback::new(late_grace_max(sample_rate) + 1),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
@@ -1362,8 +1365,8 @@ impl Looper {
             }
             Action::FadeAll => return self.fade_all(cx, i),
             // The engine runs a toggle itself (`engine.rs` `toggle`): it reaches the click and the input
-            // sends too. Nothing sends it here. Nor the tuner's press (`engine.rs`).
-            Action::Toggle(_) | Action::Tuner => {}
+            // sends too. Nothing sends it here. Nor the tuner's press, nor a unit's lamp (`engine.rs`).
+            Action::Toggle(_) | Action::Tuner | Action::ToggleUnit(_) => {}
         }
         Applied::Done
     }
@@ -2414,6 +2417,16 @@ impl Looper {
         }
     }
 
+    /// The record tap's timing changed while nothing captures: AUTO listening drops what it retained
+    /// under the old one, as an input gap drops it, and neither triggers on nor retains the tap before
+    /// `until`, the first frame at which all of it was rendered at the new timing, so the onset it
+    /// copies is one run under the alignment its take starts with (its alignment is fixed from the
+    /// onset: `begin_auto`).
+    pub fn cut_listening_until(&mut self, until: Frame) {
+        self.detector.reset();
+        self.blind = self.blind.max(until);
+    }
+
     /// AUTO listening: scan `input` (from frame `f0`). On a trigger, the take begins and the frames
     /// before the returned index are the last ones rendered under the listening state. The history drops
     /// what it can no longer join on the frame the last input gap leaves the tap, not on the device's.
@@ -2422,6 +2435,12 @@ impl Looper {
         if !self.lanes[rec.lane].auto_armed {
             return None;
         }
+        // The tap before the end of a timing change's blind window (`cut_listening_until`) is not heard.
+        let blind = self.blind.saturating_sub(f0).clamp(0, input.len() as Frame) as usize;
+        if blind == input.len() {
+            return None;
+        }
+        let (f0, input) = (f0 + blind as Frame, &input[blind..]);
         let live = self.lanes[rec.lane].live;
         let threshold = autorec::threshold(self.auto_sensitivity);
         let gap_end = self.gap[1].1;
@@ -2437,7 +2456,7 @@ impl Looper {
         self.lanes[rec.lane].written = copied as Frame;
         self.overview.touch(live, &self.bufs[live], 0, copied, copied);
         self.begin_auto(cx, onset);
-        Some(at)
+        Some(blind + at)
     }
 
     /// Write the record tap for frames `[f0, f0 + input.len())` into the recorder's window. An overdub

@@ -148,6 +148,9 @@ enum CommandDef {
     SetInputSendParam(#[serde(with = "input_send_param")] InputSendParam, f64),
     SetScope(bool),
     SetTuner(bool),
+    /// Off the wire until the chain host's stage mirrors it (`docs/unit-contract.md` §2).
+    #[serde(skip)]
+    SetUnitBypass(lf_engine::UnitId, bool),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -171,6 +174,9 @@ enum ActionDef {
     FadeAll,
     Toggle(#[serde(with = "ToggleDef")] Toggle),
     Tuner,
+    /// Off the wire until the chain host's stage mirrors it (`docs/unit-contract.md` §2).
+    #[serde(skip)]
+    ToggleUnit(lf_engine::UnitId),
 }
 
 /// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, `{"Send":"echo"}` (a send
@@ -242,6 +248,10 @@ enum EventDef {
     #[serde(skip)]
     #[allow(dead_code)]
     Seat { frame: Frame, slot: u8, unit: lf_engine::UnitId, op: lf_engine::SeatOp, outcome: lf_engine::SeatOutcome },
+    /// Off the wire, as `Seat`.
+    #[serde(skip)]
+    #[allow(dead_code)]
+    Chain { frame: Frame, slot: u8, len: u8, seats: [lf_engine::ChainSeat; lf_engine::MAX_UNITS] },
 }
 
 /// A [`CompactMix`] in the track shape of [`WireLaneMix`].
@@ -687,6 +697,7 @@ mod tests {
             SetMeter(_) => 45,
             CopyWide(_) => 46,
             SetTuner(_) => 47,
+            SetUnitBypass(..) => unreachable!("off the wire until the chain host's stage"),
         }
     }
 
@@ -713,6 +724,7 @@ mod tests {
             Action::Toggle(_) => 15,
             Action::CopyWide => 16,
             Action::Tuner => 17,
+            Action::ToggleUnit(_) => unreachable!("off the wire until the chain host's stage"),
         }
     }
 
@@ -760,7 +772,7 @@ mod tests {
             Event::Mix { .. } => 10,
             Event::Toggled { .. } => 11,
             Event::Tuner { .. } => 12,
-            Event::Seat { .. } => unreachable!("a seating answer never reaches the wire"),
+            Event::Seat { .. } | Event::Chain { .. } => unreachable!("a seating answer never reaches the wire"),
         }
     }
 
