@@ -21,7 +21,7 @@
 //!   effect, its context and its module loaded with it (`engine_slot::serve`'s teardown).
 
 use super::engine_slot::{
-    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
+    own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
     FAULT_EVENTS, FAULT_PARAM,
 };
 use super::super::editor_window::{
@@ -49,6 +49,7 @@ use lf_engine::{SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitInfo, UnitKind, 
 use rtrb::Consumer;
 use windows::Win32::Foundation::HWND;
 
+use crate::engine_io::unit_host::Terms;
 use crate::engine_io::SlotHost;
 
 /// Entries in each pointer array a process call gets: the most pins `vst2::validate` accepts. The
@@ -376,11 +377,18 @@ impl Vst2Plugin {
         unsafe { self.effect.dispatch(opcode, index, value, std::ptr::null_mut(), opt) }
     }
 
-    /// Give the plugin the engine's current rate and largest block, the context first (the plugin
-    /// may ask the host from inside either call). Plugin suspended.
+    /// `configure_at` the slot's current rate and largest block (the load, and a test).
     fn configure(&mut self, slot: &SlotHost) -> Result<(u32, usize), String> {
-        let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
-        let block = slot.max_block().max(1);
+        self.configure_at(slot.rate().unwrap_or(0), slot.max_block())
+    }
+
+    /// Give the plugin the engine's `rate` (0: no device, refused) and largest block `max_block`, the
+    /// context first (the plugin may ask the host from inside either call). Plugin suspended.
+    fn configure_at(&mut self, rate: u32, max_block: usize) -> Result<(u32, usize), String> {
+        if rate == 0 {
+            return Err("no audio device is open".to_string());
+        }
+        let block = max_block.max(1);
         self.ctx.set_rate(f64::from(rate), block as i32)?;
         // SAFETY: neither opcode reads a pointer.
         unsafe {
@@ -758,17 +766,30 @@ impl OwnedPlugin for Vst2Plugin {
 
     /// Re-activate the plugin at the engine's current terms and install its unit, rows rebuilt. On
     /// failure the unit comes back to the caller and the plugin is left suspended.
-    fn reinstall(&mut self, mut unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
+    fn reinstall(&mut self, unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
+        let terms = slot_terms(slot);
+        let unit = self.reactivate(unit, terms)?;
+        slot.install(unit, terms.rate).map_err(|(unit, e)| {
+            // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
+            self.suspend();
+            (own(unit), e)
+        })
+    }
+
+    /// Suspend, configure at `terms`, resume, and rebuild the unit's rows for what the plugin now
+    /// declares. On failure the unit comes back and the plugin is left suspended.
+    fn reactivate(
+        &mut self,
+        mut unit: Box<Vst2Unit>,
+        terms: Terms,
+    ) -> Result<Box<Vst2Unit>, (Box<Vst2Unit>, String)> {
         self.suspend();
-        let activated = self.configure(slot).and_then(|terms| Ok((self.resume()?, terms)));
+        let activated =
+            self.configure_at(terms.rate, terms.max_block).and_then(|(_, block)| Ok((self.resume()?, block)));
         match activated {
-            Ok((info, (rate, block))) => {
+            Ok((info, block)) => {
                 unit.rearm(&info, block);
-                slot.install(unit, rate).map_err(|(unit, e)| {
-                    // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
-                    self.suspend();
-                    (own(unit), e)
-                })
+                Ok(unit)
             }
             Err(e) => Err((unit, e)),
         }

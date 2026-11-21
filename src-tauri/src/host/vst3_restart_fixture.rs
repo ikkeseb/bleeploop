@@ -1249,6 +1249,53 @@ mod engine {
         assert_eq!(stored(&dir), Some((b"imported".to_vec(), Vec::new())), "the store keeps the import");
     }
 
+    /// `reactivate` at terms unlike the load's (48 kHz, 64 frames) deactivates the component, sets it up
+    /// at the new rate and block and activates it, and hands the unit back re-armed: one process call
+    /// takes a whole block of the new size. Refused terms (rate 0, no device) hand the unit back with
+    /// why and leave the component inactive.
+    #[test]
+    fn reactivate_rearms_the_unit_at_new_terms_and_a_refusal_leaves_the_plugin_inactive() {
+        use super::super::engine::Vst3;
+        use crate::engine_io::unit_host::Terms;
+        use engine_slot::OwnedPlugin;
+        use lf_engine::UnitProcessor;
+
+        let made = Arc::new(Made::default());
+        let factory = ComWrapper::new(FixtureFactory { output_level: 0.5, ..FixtureFactory::new(made.clone()) });
+        let opened = (None, factory.to_com_ptr::<IPluginFactory>().unwrap());
+        let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
+        let (mut plugin, unit) = Vst3::bare(opened, &id, 48_000, 64).unwrap();
+        let s = made.component();
+
+        let terms = Terms { generation: 7, rate: 44_100, max_block: 512 };
+        let unit = plugin.reactivate(unit, terms).unwrap_or_else(|(_, e)| panic!("reactivate failed: {e}"));
+        assert_eq!((s.deactivations.load(Relaxed), s.activations.load(Relaxed)), (1, 2), "deactivated, then activated");
+        assert_eq!(f64::from_bits(s.setup_rate.load(Relaxed)), 44_100.0);
+        assert_eq!(s.setup_max_frames.load(Relaxed), 512);
+        let unit = std::thread::spawn(move || {
+            let mut unit = unit;
+            let (input, mut out) = ([0.0f32; 512], [0.0f32; 512]);
+            unit.process_mono(0, &input, &[], &mut out);
+            assert!(out.iter().all(|&x| x == 0.5), "the whole block heard");
+            unit.stop();
+            unit
+        })
+        .join()
+        .unwrap();
+        assert_eq!(s.processes.load(Relaxed), 1, "a 512-frame block in one call: re-armed for the new max");
+
+        let refused = Terms { generation: 8, rate: 0, max_block: 512 };
+        let (back, why) = match plugin.reactivate(unit, refused) {
+            Ok(_) => panic!("rate 0 must be refused"),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(why, "no audio device is open");
+        assert!(!s.active.load(Relaxed), "the component is left inactive");
+        assert_eq!((s.deactivations.load(Relaxed), s.activations.load(Relaxed)), (2, 2));
+        plugin.release(Some(back));
+        assert!(!s.contract_violation.load(Relaxed));
+    }
+
     #[test]
     fn an_eviction_reactivates_the_plugin_at_the_new_rate() {
         let _one = engine_slot::one_engine_test_at_a_time();

@@ -41,6 +41,7 @@ use super::{
     load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
     EVENT_RING_CAP,
 };
+use crate::engine_io::unit_host::Terms;
 use crate::engine_io::SlotHost;
 
 /// The plugin formats this host knows, and the ONE place a format is told from a path or a stored
@@ -334,21 +335,16 @@ pub(super) trait OwnedPlugin {
     const FORMAT: &'static str;
     /// A restart the plugin asked for since the last call, as the log names it.
     fn take_restart(&mut self) -> Option<String>;
-    /// Deactivate what the unit holds, activate again at the engine's current terms and install it.
-    /// On failure the unit comes back to the caller, and the plugin is left inactive.
+    /// Deactivate what the unit holds, activate again at the engine's current terms and install it:
+    /// `reactivate` at the slot's terms ([`slot_terms`]), then the install. On failure the unit comes
+    /// back to the caller, and the plugin is left inactive.
     fn reinstall(&mut self, unit: Box<Self::Unit>, slot: &SlotHost) -> Result<(), (Box<Self::Unit>, String)>;
-    /// A chain unit's owner, after a withdrawal or an eviction: deactivate what the unit holds and
-    /// activate again at `terms` (`UnitHost::terms`), handing the unit back for the owner to submit. On
-    /// failure the unit comes back with why, and the plugin is left inactive. E2 P3 implements it for
-    /// the three formats (and `reinstall` becomes it plus the install); until then no caller reaches it.
-    #[allow(dead_code)] // E2 S0: P3's chain owner is its first caller.
-    fn reactivate(
-        &mut self,
-        _unit: Box<Self::Unit>,
-        _terms: crate::engine_io::unit_host::Terms,
-    ) -> Result<Box<Self::Unit>, (Box<Self::Unit>, String)> {
-        todo!("E2 P3: OwnedPlugin::reactivate")
-    }
+    /// After a withdrawal, an eviction or a plugin-asked restart: deactivate what the unit holds and
+    /// activate again at `terms` (a chain owner's `UnitHost::terms`, the legacy owner's
+    /// [`slot_terms`]; `generation` is not the plugin's business), handing the unit back re-armed for
+    /// them, for the owner to install or submit. A `rate` of 0 is no device: refused. On failure the
+    /// unit comes back with why, and the plugin is left inactive (VST2: suspended).
+    fn reactivate(&mut self, unit: Box<Self::Unit>, terms: Terms) -> Result<Box<Self::Unit>, (Box<Self::Unit>, String)>;
     /// The turn's plugin side, before the requests: deliver what the plugin asked for, and tell
     /// `sink` the parameters its own editor moved.
     fn turn(&mut self, sink: &EventSink) -> Reported;
@@ -368,6 +364,12 @@ pub(super) trait OwnedPlugin {
     fn quiesce(&mut self) {}
     /// The unit is out of the engine, or never was in it: tear down in the format's order.
     fn release(self, unit: Option<Box<Self::Unit>>);
+}
+
+/// The legacy owner's terms: the slot's rate (0 = no device open, which `reactivate` refuses) and
+/// largest block. The generation is a chain owner's, unused here.
+pub(super) fn slot_terms(slot: &SlotHost) -> Terms {
+    Terms { generation: 0, rate: slot.rate().unwrap_or(0), max_block: slot.max_block() }
 }
 
 /// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed. The
@@ -1089,9 +1091,13 @@ mod tests {
             self.0.restart.swap(false, Relaxed).then(|| "restart".to_string())
         }
         fn reinstall(&mut self, unit: Box<Silent>, slot: &SlotHost) -> Result<(), (Box<Silent>, String)> {
-            self.0.reinstalling.take();
+            let unit = self.reactivate(unit, slot_terms(slot))?;
             let rate = slot.rate().expect("the test device is open");
             slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
+        }
+        fn reactivate(&mut self, unit: Box<Silent>, _terms: Terms) -> Result<Box<Silent>, (Box<Silent>, String)> {
+            self.0.reinstalling.take();
+            Ok(unit)
         }
         fn turn(&mut self, _sink: &EventSink) -> Reported {
             Reported::default()

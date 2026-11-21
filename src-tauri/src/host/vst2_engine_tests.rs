@@ -1547,6 +1547,55 @@ fn a_cycle_whose_unit_the_engine_refuses_leaves_the_plugin_suspended() {
     assert_rendered_only_while_started(holder);
 }
 
+/// `reactivate` at terms unlike the load's (48 kHz, 64 frames) cycles the plugin at the new rate and
+/// block, the context first, and hands the unit back with its rows rebuilt: one process call takes a
+/// whole block of the new size. Refused terms (rate 0, no device) hand the unit back with why and leave
+/// the plugin suspended, uncalled past the suspend.
+#[test]
+fn reactivate_rearms_the_unit_at_new_terms_and_a_refusal_leaves_the_plugin_suspended() {
+    use crate::engine_io::unit_host::Terms;
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let slot = device.host().slot(0);
+    let probe = Probe::new();
+    probe.set_level(0.5);
+    let mut plugin = plugin_here(&slot, instrument(probe));
+    let (unit, _params, faults) = unit_here(&mut plugin, &slot, 64);
+    let before = probe.opcodes().len();
+
+    let terms = Terms { generation: 7, rate: 44_100, max_block: 512 };
+    let unit = plugin.reactivate(unit, terms).unwrap_or_else(|(_, e)| panic!("reactivate failed: {e}"));
+    assert_eq!(probe.opcodes()[before..], cycle_calls(512), "stopped, suspended, configured, resumed");
+    assert_eq!((f32::from_bits(probe.rate.load(Relaxed)), probe.host_rate_at_resume.load(Relaxed)), (44_100.0, 44_100));
+    assert!(plugin.running);
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 512], [0.0f32; 512]);
+        unit.process_mono(0, &input, &[], &mut out);
+        assert!(out.iter().all(|&x| x == 0.5), "the whole block heard");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!((probe.processes.load(Relaxed), probe.last_frames.load(Relaxed)), (1, 512), "one call: re-armed for the new block");
+    assert_eq!(faults.load(Relaxed), 0);
+
+    let before = probe.opcodes().len();
+    let refused = Terms { generation: 8, rate: 0, max_block: 512 };
+    let (unit, why) = match plugin.reactivate(unit, refused) {
+        Ok(_) => panic!("rate 0 must be refused"),
+        Err(refusal) => refusal,
+    };
+    assert_eq!(why, "no audio device is open");
+    assert!(!plugin.running, "suspended");
+    assert_eq!(probe.opcodes()[before..], [(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0)], "and nothing after");
+    drop(unit);
+    drop(plugin);
+    assert_eq!(probe.count(EFF_STOP_PROCESS, 0), 2, "the close did not stop it again");
+    assert_rendered_only_while_started(probe);
+}
+
 /// The unit on its own: the plugin raises its pin counts (2 in, 2 out to 40 in, 64 out) INSIDE a
 /// process call and at once reads every input row and fills every output row it now declares.
 /// Each of those rows is the unit's own scratch memory: the inputs read silence, the writes land

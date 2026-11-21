@@ -1608,6 +1608,54 @@ fn a_unit_passes_every_declared_port_and_plays_only_the_main_output() {
     assert!(!s.contract_violation.load(Relaxed));
 }
 
+/// `reactivate` at terms unlike the activation's (48 kHz, 64 frames) deactivates the plugin, activates
+/// it at the new rate and block, and hands the unit back re-armed: one process call takes a whole
+/// block of the new size. Refused terms (rate 0, no device) hand the unit back with why and leave the
+/// plugin inactive.
+#[test]
+fn reactivate_rearms_the_unit_at_new_terms_and_a_refusal_leaves_the_plugin_inactive() {
+    use super::clap_engine::Clap;
+    use super::engine_slot::OwnedPlugin;
+    use crate::engine_io::unit_host::Terms;
+    use lf_engine::UnitProcessor;
+
+    let mut instance = fixture_instance();
+    let obs = unsafe { state(instance.raw_instance() as *const clap_plugin) }.obs.clone();
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = bare_unit(&mut instance, &faults);
+    // SAFETY: as `fixture_instance`: the static entry outlives every instance.
+    let entry = unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }.unwrap();
+    let mut plugin = Clap::bare(instance, entry);
+
+    let terms = Terms { generation: 7, rate: 44_100, max_block: 512 };
+    let unit = plugin.reactivate(unit, terms).unwrap_or_else(|(_, e)| panic!("reactivate failed: {e}"));
+    assert_eq!((obs.deactivations.load(Relaxed), obs.activations.load(Relaxed)), (1, 2), "deactivated, then activated");
+    assert_eq!(f64::from_bits(obs.activated_rate.load(Relaxed)), 44_100.0);
+    assert_eq!(obs.activated_max_frames.load(Relaxed), 512);
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 512], [0.0f32; 512]);
+        unit.process_mono(0, &input, &[], &mut out);
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(obs.processes.load(Relaxed), 1, "a 512-frame block in one call: re-armed for the new max");
+    assert_eq!(faults.load(Relaxed), 0);
+
+    let refused = Terms { generation: 8, rate: 0, max_block: 512 };
+    let (back, why) = match plugin.reactivate(unit, refused) {
+        Ok(_) => panic!("rate 0 must be refused"),
+        Err(refusal) => refusal,
+    };
+    assert_eq!(why, "no audio device is open");
+    assert!(!obs.active.load(Relaxed), "the plugin is left inactive");
+    assert_eq!((obs.deactivations.load(Relaxed), obs.activations.load(Relaxed)), (2, 2));
+    plugin.release(Some(back));
+    assert!(!obs.contract_violation.load(Relaxed));
+}
+
 /// CLAP discards the output of a process call that returns an error: the unit plays nothing from
 /// that slice, though the plugin wrote it, and latches the fault.
 #[test]
