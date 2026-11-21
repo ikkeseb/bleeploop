@@ -259,7 +259,7 @@ pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
 pub use overview::{LaneView, Overview};
 pub use render::{wet_master, wet_master_with, RenderOptions, WetMaster};
 pub use session::{Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, SnapshotTrack};
-pub use slots::{SlotPort, Ticket};
+pub use slots::{Left, Returned, SlotPort, Ticket};
 
 /// Within this of its target a gain glide takes the target itself: -120 dB of full scale, a step far
 /// under any converter's noise floor, reached about 14 time constants into a glide from 1 (some 170 ms

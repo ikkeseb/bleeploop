@@ -173,7 +173,8 @@ fn key(command: &Command) -> Option<Key> {
         | Command::AllNotesOff
         | Command::SetTuner(_)
         // No per-unit key (`docs/unit-contract.md` §2): a unit enters an engine carrying its bypass.
-        | Command::SetUnitBypass(..) => return None,
+        | Command::SetUnitBypass(..)
+        | Command::SetUnitParam(..) => return None,
     })
 }
 

@@ -151,6 +151,9 @@ enum CommandDef {
     /// Off the wire until the chain host's stage mirrors it (`docs/unit-contract.md` §2).
     #[serde(skip)]
     SetUnitBypass(lf_engine::UnitId, bool),
+    /// Off the wire until the chain host's stage mirrors it (`docs/unit-contract.md` §2).
+    #[serde(skip)]
+    SetUnitParam(lf_engine::UnitId, lf_engine::UnitParam, f64),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -252,6 +255,10 @@ enum EventDef {
     #[serde(skip)]
     #[allow(dead_code)]
     Chain { frame: Frame, slot: u8, len: u8, seats: [lf_engine::ChainSeat; lf_engine::MAX_UNITS] },
+    /// Off the wire, as `Seat`.
+    #[serde(skip)]
+    #[allow(dead_code)]
+    UnitParam { frame: Frame, unit: lf_engine::UnitId, param: lf_engine::UnitParam, value: f64 },
 }
 
 /// A [`CompactMix`] in the track shape of [`WireLaneMix`].
@@ -697,7 +704,7 @@ mod tests {
             SetMeter(_) => 45,
             CopyWide(_) => 46,
             SetTuner(_) => 47,
-            SetUnitBypass(..) => unreachable!("off the wire until the chain host's stage"),
+            SetUnitBypass(..) | SetUnitParam(..) => unreachable!("off the wire until the chain host's stage"),
         }
     }
 
@@ -772,7 +779,7 @@ mod tests {
             Event::Mix { .. } => 10,
             Event::Toggled { .. } => 11,
             Event::Tuner { .. } => 12,
-            Event::Seat { .. } | Event::Chain { .. } => unreachable!("a seating answer never reaches the wire"),
+            Event::Seat { .. } | Event::Chain { .. } | Event::UnitParam { .. } => unreachable!("a seating answer never reaches the wire"),
         }
     }
 

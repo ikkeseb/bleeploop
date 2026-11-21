@@ -769,7 +769,7 @@ pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Eve
             Event::Refused { reason, .. } => settings.refused(gen, reason),
             // A unit's seating is its chain host's answer (E2, `docs/unit-contract.md` §2); today each
             // slot seats one unit and its owner reads the port, so nothing past here takes it.
-            Event::Seat { .. } | Event::Chain { .. } => continue,
+            Event::Seat { .. } | Event::Chain { .. } | Event::UnitParam { .. } => continue,
             _ => {}
         }
         each(event);
@@ -903,6 +903,7 @@ pub(crate) struct EngineDiag {
     tuner_dropped: AtomicU64,
     input_clamped: AtomicU64,
     unit_commands_dropped: AtomicU64,
+    unit_params_dropped: AtomicU64,
 }
 
 impl EngineDiag {
@@ -916,6 +917,7 @@ impl EngineDiag {
         self.tuner_dropped.store(d.tuner_dropped, Relaxed);
         self.input_clamped.store(d.input_clamped, Relaxed);
         self.unit_commands_dropped.store(d.unit_commands_dropped, Relaxed);
+        self.unit_params_dropped.store(d.unit_params_dropped, Relaxed);
     }
 
     fn load(&self) -> lf_engine::Diag {
@@ -929,6 +931,7 @@ impl EngineDiag {
             tuner_dropped: self.tuner_dropped.load(Relaxed),
             input_clamped: self.input_clamped.load(Relaxed),
             unit_commands_dropped: self.unit_commands_dropped.load(Relaxed),
+            unit_params_dropped: self.unit_params_dropped.load(Relaxed),
         }
     }
 }

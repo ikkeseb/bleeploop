@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitParam, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -173,8 +173,10 @@ pub struct Diag {
     /// is aligned on the clamped side, so what the engine records of its own sources (the built-in
     /// synths, a source chain) stays on the grid and the device's input lands late by the excess.
     pub input_clamped: u64,
-    /// Unit commands ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]) that named an id no seat holds.
+    /// Unit commands ([`Command::SetUnitBypass`], [`Action::ToggleUnit`], [`Command::SetUnitParam`]) that named an id no seat holds.
     pub unit_commands_dropped: u64,
+    /// [`Command::SetUnitParam`] commands whose unit answered `None` (not a parameter of that unit).
+    pub unit_params_dropped: u64,
 }
 
 /// One chunk the scope still owes its master column: the frames it covered, and every source's
@@ -470,6 +472,7 @@ impl Engine {
             tuner_dropped: self.tuner.dropped(),
             input_clamped: self.input_clamped,
             unit_commands_dropped: self.rack.unit_commands_dropped,
+            unit_params_dropped: self.rack.unit_params_dropped,
         }
     }
 
@@ -556,6 +559,12 @@ impl Engine {
         })
     }
 
+    /// The `Event::UnitParam` answers the engine still owes: the value the unit last applied, per seat
+    /// and parameter, that the event ring has not taken yet. Not for the audio thread.
+    pub fn unsent_unit_params(&self) -> impl Iterator<Item = (UnitId, UnitParam, f64)> + '_ {
+        self.rack.unsent_unit_params()
+    }
+
     /// Each toggled setting as the engine applies it, in [`Toggle::ALL`] order.
     pub fn toggles(&self) -> [bool; Toggle::COUNT] {
         Toggle::ALL.map(|t| toggle_value(&self.clock, &self.looper, &self.input_fx, &self.rack, t))
@@ -586,13 +595,13 @@ impl Engine {
         bpm.into_iter().chain(meter)
     }
 
-    /// The unit commands sent and not applied yet ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]
-    /// pressed or on a named lane), in the order they were sent: still in the table (a bypass waiting
-    /// for a place among what its slot owes, or one stamped ahead) or in the command ring, peeked at
-    /// without taking anything. A rebuild replays them on the new engine once the units are reseated
-    /// (`docs/unit-contract.md` §2). Not for the audio thread.
+    /// The unit commands sent and not applied yet ([`Command::SetUnitBypass`], [`Command::SetUnitParam`],
+    /// [`Action::ToggleUnit`] pressed or on a named lane), in the order they were sent: still in the table
+    /// (a bypass waiting for a place among what its slot owes, or one stamped ahead) or in the command
+    /// ring, peeked at without taking anything. A rebuild replays them on the new engine once the units
+    /// are reseated (`docs/unit-contract.md` §2). Not for the audio thread.
     pub fn unapplied_unit_commands(&mut self) -> impl Iterator<Item = Command> {
-        self.unapplied().filter(|c| c.unit_bypass().is_some())
+        self.unapplied().filter(|c| c.unit().is_some())
     }
 
     /// Every command sent and not applied yet, in send order: the table holds what the ring gave first,
@@ -1039,7 +1048,7 @@ impl Engine {
     /// Each slot with a bypass command waiting for a place among what it owes keeps the next place for
     /// it, ahead of its port's messages (`Rack::reserve_bypasses`).
     fn reserve_bypasses(&mut self) {
-        self.rack.reserve_bypasses(self.pending.iter().flatten().filter(|p| p.owed).filter_map(|p| p.command.unit_bypass()));
+        self.rack.reserve_bypasses(self.pending.iter().flatten().filter(|p| p.owed).filter_map(|p| bypass_unit(p.command)));
     }
 
     /// A capture's alignment is fixed: a take's window has its start.
@@ -1070,6 +1079,12 @@ impl Engine {
     }
 }
 
+/// The unit a bypass command names ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]): a param
+/// command folds its answer and never waits for owed room.
+fn bypass_unit(command: Command) -> Option<UnitId> {
+    command.unit().filter(|_| !matches!(command, Command::SetUnitParam(..)))
+}
+
 /// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
 /// for a block job goes back in, held from the next frame on. A bypass command whose chain has no place
 /// among what its slot owes, once what is owed was offered, goes back in for `block_end`, the next
@@ -1078,7 +1093,7 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
     let f = cx.now;
     while let Some(k) = due(pending, f) {
         let p = pending[k].take().unwrap();
-        if let Some(unit) = p.command.unit_bypass() {
+        if let Some(unit) = bypass_unit(p.command) {
             if !at.rack.bypass_room(unit) {
                 at.rack.offer(cx.feed);
             }
@@ -1130,7 +1145,7 @@ fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
         .enumerate()
         .filter_map(|(k, p)| {
             p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots() || p.command.is_input_send()))
-                .filter(|p| p.command.unit_bypass().is_none() || owed.is_none_or(|b| p.seq < b))
+                .filter(|p| bypass_unit(p.command).is_none() || owed.is_none_or(|b| p.seq < b))
                 .map(|p| (p.seq, k))
         })
         .min()
@@ -1351,6 +1366,10 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::Action(Action::ToggleUnit(unit)) | Command::ActionOn(_, Action::ToggleUnit(unit)) => {
             at.rack.set_unit_bypass(unit, None, now);
+            Applied::Done
+        }
+        Command::SetUnitParam(unit, param, value) => {
+            at.rack.set_unit_param(unit, param, value, now);
             Applied::Done
         }
         Command::Action(action) => {

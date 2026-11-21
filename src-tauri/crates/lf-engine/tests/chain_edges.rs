@@ -15,9 +15,9 @@ use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{
-    Action, ChainSeat, Command, Engine, EngineConfig, Event, ProcessContext, SeatOp, SeatOutcome,
-    SeatRefusal, SlotEvent, SlotKind, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind,
-    UnitProcessor, MAX_UNITS,
+    Action, ChainSeat, Command, Engine, EngineConfig, Event, Left, ProcessContext, SeatOp,
+    SeatOutcome, SeatRefusal, SlotEvent, SlotKind, TimedCommand, UnitCx, UnitId, UnitInfo,
+    UnitKind, UnitProcessor, MAX_UNITS,
 };
 
 const BLOCKS: [usize; 6] = [1, 32, 64, 128, 480, 1024];
@@ -175,7 +175,7 @@ fn rig(block: usize) -> Rig {
 }
 
 fn put(rig: &mut Rig, slot: usize, id: UnitId, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Box<Unit>) -> lf_engine::Ticket {
-    rig.port(slot).install_at(id, at, bypassed, replaces, unit).unwrap_or_else(|_| panic!("slot {slot}'s message ring is full"))
+    rig.port(slot).install_at(id, 0, at, bypassed, replaces, unit).unwrap_or_else(|_| panic!("slot {slot}'s message ring is full"))
 }
 
 fn answers(rig: &Rig, slot: u8) -> Vec<(Frame, UnitId, SeatOp, SeatOutcome)> {
@@ -205,7 +205,11 @@ fn ids(seats: &[ChainSeat]) -> Vec<UnitId> {
 fn take_returns(rig: &mut Rig, slot: usize, kept: &mut Vec<Box<dyn UnitProcessor>>) -> Vec<(UnitId, bool, Option<SeatRefusal>)> {
     let mut out = Vec::new();
     while let Some(r) = rig.port(slot).returned_unit() {
-        out.push((r.id, r.bypassed, r.refused));
+        let refused = match r.left {
+            Left::Refused(why) => Some(why),
+            _ => None,
+        };
+        out.push((r.id, r.bypassed, refused));
         kept.push(r.unit);
     }
     out
@@ -555,7 +559,7 @@ fn n7_holding_is_visible_before_ticket_is_answered() {
 
         for k in 1..=iters {
             let u = unit.take().expect("unit returned");
-            let ticket = port.install_at(1, MAX_UNITS, false, None, u).ok().expect("push install");
+            let ticket = port.install_at(1, 0, MAX_UNITS, false, None, u).ok().expect("push install");
             phase.store(2 * k - 1, Ordering::Release);
 
             // Spin until ticket is answered, then IMMEDIATELY read port.holding(). Every wait is bounded:

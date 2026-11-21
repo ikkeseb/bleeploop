@@ -42,6 +42,11 @@ pub fn max_chain_latency(sample_rate: u32) -> Frame {
 /// else (`docs/unit-contract.md` §1).
 pub type UnitId = u32;
 
+/// An install's token: opaque, carried back on [`crate::Returned`] so the host can tell two instances of
+/// the same [`UnitId`] apart (a same-id reload evicted mid-crossfade). The device side never sends `0`;
+/// the legacy [`crate::SlotPort::install`] sends `0`.
+pub type InstallToken = u64;
+
 /// A command, applied at `frame` (a device frame: a test's or a probe's; the app's senders, native MIDI
 /// included, stamp none) or, with `None`, at the start of the next block the engine renders.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -167,6 +172,12 @@ pub enum Command {
     /// chain's latency stays. Answered by [`Event::Chain`]; an id no seat holds is dropped and counted
     /// ([`crate::Diag::unit_commands_dropped`]).
     SetUnitBypass(UnitId, bool),
+    /// A seated unit's parameter (`docs/unit-contract.md` §2), on the command's frame through
+    /// [`UnitProcessor::set_param`]. Answered by [`Event::UnitParam`] with the value the unit applied
+    /// (clamped), owed per seat and param when the event ring is full (folded to the latest value). An
+    /// id no seat holds is dropped and counted ([`crate::Diag::unit_commands_dropped`]); a param the
+    /// unit answers `None` to is dropped and counted ([`crate::Diag::unit_params_dropped`]).
+    SetUnitParam(UnitId, UnitParam, f64),
 }
 
 impl Command {
@@ -184,10 +195,14 @@ impl Command {
         )
     }
 
-    /// The unit a bypass command names ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]).
-    pub fn unit_bypass(&self) -> Option<UnitId> {
+    /// The unit a unit command names ([`Command::SetUnitBypass`], [`Command::SetUnitParam`],
+    /// [`Action::ToggleUnit`] pressed or on a named lane).
+    pub fn unit(&self) -> Option<UnitId> {
         match *self {
-            Command::SetUnitBypass(unit, _) | Command::Action(Action::ToggleUnit(unit)) | Command::ActionOn(_, Action::ToggleUnit(unit)) => Some(unit),
+            Command::SetUnitBypass(unit, _)
+            | Command::SetUnitParam(unit, ..)
+            | Command::Action(Action::ToggleUnit(unit))
+            | Command::ActionOn(_, Action::ToggleUnit(unit)) => Some(unit),
             _ => None,
         }
     }
@@ -209,6 +224,7 @@ impl Command {
                 | Command::ActionOn(_, Action::Toggle(Toggle::Live(_) | Toggle::Send(InputSend::Ott)))
                 | Command::SetInputSend(InputSend::Ott, _)
                 | Command::SetUnitBypass(..)
+                | Command::SetUnitParam(..)
                 | Command::Action(Action::ToggleUnit(_))
                 | Command::ActionOn(_, Action::ToggleUnit(_))
         ) || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
@@ -423,6 +439,67 @@ impl Instrument {
 
     pub fn id(self) -> &'static str {
         ["lead", "pad", "piano", "organ", "bass", "drum"][self as usize]
+    }
+}
+
+/// A built-in unit's parameter (`docs/unit-contract.md` §2): the ten input-send/OTT parameters,
+/// SYNTH's selected instrument, and each instrument's output gain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitParam {
+    Send(InputSendParam),
+    Instrument,
+    Gain(Instrument),
+}
+
+impl UnitParam {
+    pub const COUNT: usize = InputSendParam::ALL.len() + 1 + Instrument::ALL.len();
+
+    pub const ALL: [UnitParam; Self::COUNT] = [
+        UnitParam::Send(InputSendParam::EchoTime),
+        UnitParam::Send(InputSendParam::EchoFeedback),
+        UnitParam::Send(InputSendParam::EchoLevel),
+        UnitParam::Send(InputSendParam::ReverbLevel),
+        UnitParam::Send(InputSendParam::RingFreq),
+        UnitParam::Send(InputSendParam::RingLevel),
+        UnitParam::Send(InputSendParam::OttDepth),
+        UnitParam::Send(InputSendParam::OttTime),
+        UnitParam::Send(InputSendParam::OttUpward),
+        UnitParam::Send(InputSendParam::OttDownward),
+        UnitParam::Instrument,
+        UnitParam::Gain(Instrument::Lead),
+        UnitParam::Gain(Instrument::Pad),
+        UnitParam::Gain(Instrument::Piano),
+        UnitParam::Gain(Instrument::Organ),
+        UnitParam::Gain(Instrument::Bass),
+        UnitParam::Gain(Instrument::Drums),
+    ];
+
+    pub fn index(self) -> usize {
+        match self {
+            UnitParam::Send(p) => p as usize,
+            UnitParam::Instrument => InputSendParam::ALL.len(),
+            UnitParam::Gain(i) => InputSendParam::ALL.len() + 1 + i as usize,
+        }
+    }
+
+    /// The wire key (`docs/unit-contract.md` §2).
+    pub fn key(self) -> &'static str {
+        match self {
+            UnitParam::Send(p) => p.key(),
+            UnitParam::Instrument => "instrument",
+            UnitParam::Gain(i) => match i {
+                Instrument::Lead => "gainLead",
+                Instrument::Pad => "gainPad",
+                Instrument::Piano => "gainPiano",
+                Instrument::Organ => "gainOrgan",
+                Instrument::Bass => "gainBass",
+                Instrument::Drums => "gainDrum",
+            },
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<UnitParam> {
+        UnitParam::ALL.into_iter().find(|p| p.key() == key)
     }
 }
 
@@ -704,11 +781,11 @@ pub enum Event {
     /// came to exist, a stopped device). One the full ring refuses is owed and offered again at the
     /// next publish, at the value then. The UI shows the tuner exactly while the last one said on.
     Tuner { frame: Frame, on: bool },
-    /// The engine's answer to a slot port's message ([`crate::SlotPort`]), once per message: applied on
+    /// The engine's answer to a slot port's message ([`crate::SlotPort`]): applied on
     /// `frame` (a block start; a move that dips, on its reorder's frame), refused, or waiting (an edit held
-    /// until no capture holds the alignment, then applied with no second answer: [`Event::Chain`] shows
-    /// it; or, should its unit panic as it applies, refused after all, that refusal its one second
-    /// answer). Owed until the ring takes it, as a lane's `Mix` is. In order within a slot, not across
+    /// until no capture holds the alignment). Every held (`Waiting`) message gets exactly one second
+    /// `Event::Seat` when it resolves — `Applied` on its frame (ahead of its [`Event::Chain`]) or
+    /// `Refused(why)`. Owed until the ring takes it, as a lane's `Mix` is. In order within a slot, not across
     /// the two: the slots take turns at the ring, so a newer reply of one slot can arrive ahead of an
     /// older one of the other (a reader orders each slot's replies by that slot alone).
     Seat { frame: Frame, slot: u8, unit: UnitId, op: SeatOp, outcome: SeatOutcome },
@@ -720,6 +797,11 @@ pub enum Event {
     /// every bypass command sent after it, until the ring has taken enough. Ordered per slot, with that
     /// slot's [`Event::Seat`]s, as they are.
     Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
+    /// A unit parameter as the unit applied it ([`Command::SetUnitParam`], clamped by
+    /// [`UnitProcessor::set_param`]), on the command's frame. Owed per seat and parameter when the full
+    /// ring refuses it (a later value for the same parameter overwrites it), offered again at the next
+    /// publish.
+    UnitParam { frame: Frame, unit: UnitId, param: UnitParam, value: f64 },
 }
 
 /// One seat of an [`Event::Chain`].
@@ -842,6 +924,13 @@ pub trait UnitProcessor: Send {
     /// one silent frame carrying a removal's released notes while no device runs (on the thread that
     /// holds the engine, just before [`UnitProcessor::stop`]).
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
+    /// A built-in unit's parameter, on its frame (`cx.frame`, before the frames from it are rendered):
+    /// `Some(applied)` when the unit took it (clamped to its own range), `None` when `param` is not a
+    /// parameter of this unit. A plugin's own parameters stay on its owner's ring and leave this `None`.
+    /// Never allocates, locks or waits.
+    fn set_param(&mut self, _cx: &UnitCx, _param: UnitParam, _value: f64) -> Option<f64> {
+        None
+    }
     /// The bypass, on its frame (`cx.frame`, before the frames from it are rendered): an install that
     /// arrives bypassed, [`Command::SetUnitBypass`], [`Action::ToggleUnit`]. True: the unit bypasses
     /// itself (`docs/unit-contract.md` §3: ECHO, REVERB and RING MOD close their input and ring out, the
@@ -896,6 +985,7 @@ pub enum SeatOutcome {
     Refused(SeatRefusal),
     /// Held in its port, the slot's later messages behind it, until no capture holds the alignment: an
     /// install, removal or reseat that changes the chain's latency sum or its role
-    /// (`docs/unit-contract.md` §7). It applies at the first block start after, with no second answer.
+    /// (`docs/unit-contract.md` §7). When the hold ends it resolves with one second [`Event::Seat`]:
+    /// `Applied` on its frame (before its [`Event::Chain`]) or `Refused(why)`.
     Waiting,
 }
