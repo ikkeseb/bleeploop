@@ -323,6 +323,26 @@ await probe(async ({ open }) => {
   assert.deepEqual(await settle('__rmLook'), { ok: null });
   assert.equal(unit(await last(), look), undefined, 'released, the removal applies');
   assert.deepEqual(await call('remove', quiet), { ok: null });
+  // A held add, then its removal: the engine's port is ordered, so the install is not withdrawn. The unit
+  // seats, then leaves; `remove` settles once both applied.
+  await capture(true);
+  const ghostHeld = await mint();
+  m = await mark();
+  assert.deepEqual(await call('add', 0, ghostHeld, { kind: 'plugin', plugin: LOOKAHEAD }, 1), { ok: 'waiting' }, 'a latent unit waits for the take');
+  await start('__rmHeldAdd', 'remove', ghostHeld);
+  await page.waitForFunction((id) => window.__lf.native.chain.chains()[0].units.find((u) => u.id === id)?.state === 'leaving', ghostHeld);
+  c = await last();
+  assert.deepEqual([c[0].held, c[0].latency, unit(c, ghostHeld).held], [true, 0, true], 'during the take: held, the unit not in the sum');
+  await page.waitForTimeout(50);
+  assert.equal(await settled('__rmHeldAdd'), false, 'the removal waits behind the held add');
+  await capture(false);
+  assert.deepEqual(await settle('__rmHeldAdd'), { ok: null });
+  assert.equal(unit(await last(), ghostHeld), undefined, 'the final chain lacks the unit');
+  assert.deepEqual(
+    trail(await chainFrames(m), ghostHeld).filter((s, i, a) => s !== a[i - 1]),
+    ['loading', 'waiting', 'leaving', 'gone'],
+    'the held add was not withdrawn: it left through the removal',
+  );
   // A held move is judged again when it applies: its unit was replaced by the held edit before it.
   const srcB = await mint();
   const lookB = await mint();
