@@ -114,7 +114,8 @@ pub const MAX_SLOT_EVENTS: usize = 256;
 const MSG_CAPACITY: usize = 2 * MAX_UNITS;
 /// Units on their way back: every seat and every message's install at once.
 const RETURN_CAPACITY: usize = MAX_UNITS + MSG_CAPACITY;
-/// Answers ([`Event::Seat`]) one slot owes the event ring: one per message.
+/// What one slot owes the event ring: an answer ([`Event::Seat`]) and a chain ([`Event::Chain`]) per
+/// message.
 const OWED_CAPACITY: usize = 2 * MSG_CAPACITY;
 
 type Unit = Box<dyn UnitProcessor>;
@@ -347,6 +348,14 @@ struct Answer {
     outcome: SeatOutcome,
 }
 
+/// What a slot owes the event ring, in the order it applied.
+#[derive(Clone, Copy)]
+enum Owed {
+    Seat(Answer),
+    /// The chain as one applied change left it, on that change's frame.
+    Chain { frame: Frame, len: u8, seats: [ChainSeat; MAX_UNITS] },
+}
+
 /// A message taken from the ring and not yet applied: judged now, or held for a take.
 struct Taken {
     msg: SlotMsg,
@@ -404,9 +413,10 @@ struct Slot {
     write: usize,
     /// The input OTT on this slot's output, after its gain.
     ott: StereoOtt,
-    /// Answers the event ring has not taken yet, oldest first.
-    owed: Vec<Answer>,
-    /// The chain changed on this frame and the ring has not taken its [`Event::Chain`] yet.
+    /// Answers and chains the event ring has not taken yet, oldest first.
+    owed: Vec<Owed>,
+    /// The chain changed on this frame past the room among the owed (bypass commands come any number a
+    /// block): its [`Event::Chain`] follows them, the changes from here on folded into it.
     chain_owed: Option<Frame>,
     /// A move waiting for its dip to reach silence: the unit and its index.
     reorder: Option<(UnitId, usize)>,
@@ -632,7 +642,7 @@ impl Slot {
     /// ring.
     fn can_take(&self) -> bool {
         let Ok(msg) = self.end.rx.peek() else { return false };
-        self.owed.len() < OWED_CAPACITY && (!matches!(msg, SlotMsg::Install { .. }) || self.end.tx.slots() > self.units())
+        self.owed_room() && (!matches!(msg, SlotMsg::Install { .. }) || self.end.tx.slots() > self.units())
     }
 
     fn queue(&mut self, kind: SlotEventKind, offset: u32, dropped: &mut u64) {
@@ -652,13 +662,36 @@ impl Slot {
         self.notes = [0; 2];
     }
 
+    /// Room among the owed for one more: a move under way keeps a place for its answer.
+    fn owed_room(&self) -> bool {
+        self.owed.len() + (self.reorder.is_some() as usize) < OWED_CAPACITY
+    }
+
     /// Owe `answer` to the event ring: [`Slot::can_take`] reserved its place.
     fn answer(&mut self, answer: Answer, errors: &mut u64) {
         if self.owed.len() < OWED_CAPACITY {
-            self.owed.push(answer);
+            self.owed.push(Owed::Seat(answer));
         } else {
             *errors += 1;
         }
+    }
+
+    /// Owe the chain as it now stands, on `frame`, after what is owed already; past the room among the
+    /// owed, folded into one [`Event::Chain`] after them.
+    fn owe_chain(&mut self, frame: Frame) {
+        if self.chain_owed.is_none() && self.owed_room() {
+            let (len, seats) = self.summary();
+            self.owed.push(Owed::Chain { frame, len, seats });
+        } else {
+            self.chain_owed = Some(frame);
+        }
+    }
+
+    /// A move's reorder applied on `frame`: its answer and its chain, owed there.
+    fn reordered(&mut self, id: UnitId, frame: Frame, errors: &mut u64) {
+        self.answer(Answer { frame, unit: id, op: SeatOp::Move, outcome: SeatOutcome::Applied }, errors);
+        self.end.taken.fetch_add(1, Release);
+        self.owe_chain(frame);
     }
 
     /// The chain as [`Event::Chain`] carries it.
@@ -765,7 +798,7 @@ impl Slot {
     fn finish_idle(&mut self, cx: &UnitCx, zeros: &[f32], n: u32, errors: &mut u64) {
         if let Some((id, to)) = self.reorder.take() {
             self.apply_reorder(id, to);
-            self.chain_owed = Some(cx.frame);
+            self.reordered(id, cx.frame, errors);
         }
         self.dip = None;
         for seat in self.seats[..self.len].iter_mut() {
@@ -968,24 +1001,29 @@ impl Rack {
                         s.end.holding.store(true, Release);
                         break;
                     }
-                    Verdict::Apply { .. } => {
-                        self.apply(i, frame, engaged, fade);
-                        SeatOutcome::Applied
-                    }
+                    Verdict::Apply { .. } => match self.apply(i, frame, engaged, fade) {
+                        Some(changed) => (SeatOutcome::Applied, changed),
+                        // A move's dip: answered on its reorder ([`Slot::reordered`]).
+                        None => (SeatOutcome::Waiting, false),
+                    },
                     Verdict::Refuse(why) => {
                         let s = &mut self.slots[i];
                         if let Some(Taken { msg: SlotMsg::Install { id, bypassed, unit, .. }, .. }) = s.taken.take() {
                             s.give_back(Back { id, unit, refused: Some(why), bypassed }, &mut self.protocol_errors);
                         }
-                        SeatOutcome::Refused(why)
+                        (SeatOutcome::Refused(why), false)
                     }
                 };
+                let (outcome, changed) = outcome;
                 let s = &mut self.slots[i];
                 s.taken = None;
                 s.end.holding.store(false, Release);
-                if !answered {
+                if !answered && !matches!(outcome, SeatOutcome::Waiting) {
                     s.answer(Answer { frame, unit, op, outcome }, &mut self.protocol_errors);
                     s.end.taken.fetch_add(1, Release);
+                }
+                if changed {
+                    s.owe_chain(frame);
                 }
             }
             if !fade {
@@ -1078,13 +1116,14 @@ impl Rack {
         }
     }
 
-    /// Apply slot `i`'s taken message, which [`Rack::judge`] passed, at `frame`.
-    fn apply(&mut self, i: usize, frame: Frame, engaged: bool, fade: bool) {
+    /// Apply slot `i`'s taken message, which [`Rack::judge`] passed, at `frame`: whether the chain
+    /// changed, or `None` for a move that dips first (its answer and its chain come on its reorder).
+    fn apply(&mut self, i: usize, frame: Frame, engaged: bool, fade: bool) -> Option<bool> {
         let n = self.fade_frames;
         let rendered = self.rendered;
         let cx = self.unit_cx(frame);
         let s = &mut self.slots[i];
-        let Some(t) = s.taken.take() else { return };
+        let Some(t) = s.taken.take() else { return Some(false) };
         match t.msg {
             SlotMsg::Install { id, at, bypassed, replaces, unit } => {
                 let info = t.info.unwrap_or(UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 });
@@ -1137,7 +1176,7 @@ impl Rack {
                 }
             }
             SlotMsg::Remove { id } => {
-                let Some(k) = s.find(id) else { return };
+                let Some(k) = s.find(id) else { return Some(false) };
                 s.release_all(0, &mut self.events_dropped);
                 let seat = &mut s.seats[k];
                 seat.removing = true;
@@ -1147,7 +1186,7 @@ impl Rack {
                 }
             }
             SlotMsg::Withdraw { id } => {
-                let Some(k) = s.find(id) else { return };
+                let Some(k) = s.find(id) else { return Some(false) };
                 // A source's notes are released; the seat fades to its bypass.
                 if s.seats[k].info.source {
                     s.release_all(0, &mut self.events_dropped);
@@ -1160,10 +1199,10 @@ impl Rack {
                 }
             }
             SlotMsg::Move { id, to } => {
-                let Some(k) = s.find(id) else { return };
+                let Some(k) = s.find(id) else { return Some(false) };
                 let to = to.min(s.chain_len() - 1);
                 if s.chain().position(|p| p == k) == Some(to) {
-                    return;
+                    return Some(false);
                 }
                 if !fade || !rendered {
                     s.apply_reorder(id, to);
@@ -1171,19 +1210,19 @@ impl Rack {
                     // Down from where the dip is now (rising after an earlier move, or level) to silence.
                     let up = s.dip.map_or(n as Frame, |at| (frame - at).clamp(0, n as Frame));
                     s.dip = Some(frame + up);
-                    s.reorder = Some((id, to));
-                    if up == 0 {
-                        // Silent already: the reorder lands on this frame.
-                        s.apply_reorder(id, to);
-                        s.reorder = None;
+                    if up > 0 {
+                        s.reorder = Some((id, to));
+                        return None;
                     }
+                    // Silent already: the reorder lands on this frame.
+                    s.apply_reorder(id, to);
                 }
             }
         }
         if s.chain().next().is_some() {
             s.line_latency = s.latency();
         }
-        s.chain_owed = Some(frame);
+        Some(true)
     }
 
     /// The bypass of unit `id` at `now`: `Some` outright, `None` switched from the engine's value. On a
@@ -1210,14 +1249,24 @@ impl Rack {
                 }
             }
         }
-        s.chain_owed = Some(now);
+        s.owe_chain(now);
     }
 
-    /// The answers the event ring has not taken, offered in order until it refuses one; each slot's
-    /// owed [`Event::Chain`] after its seat answers.
+    /// What each slot owes the event ring, offered in order until it refuses one; a chain folded past
+    /// the room among the owed after them.
     pub(crate) fn offer(&mut self, feed: &mut Feed) {
         for (i, s) in self.slots.iter_mut().enumerate() {
-            let taken = s.owed.iter().take_while(|a| feed.push(Event::Seat { frame: a.frame, slot: i as u8, unit: a.unit, op: a.op, outcome: a.outcome })).count();
+            let slot = i as u8;
+            let taken = s
+                .owed
+                .iter()
+                .take_while(|o| {
+                    feed.push(match **o {
+                        Owed::Seat(a) => Event::Seat { frame: a.frame, slot, unit: a.unit, op: a.op, outcome: a.outcome },
+                        Owed::Chain { frame, len, seats } => Event::Chain { frame, slot, len, seats },
+                    })
+                })
+                .count();
             s.owed.drain(..taken);
             if let (true, Some(frame)) = (s.owed.is_empty(), s.chain_owed) {
                 let (len, seats) = s.summary();
@@ -1234,6 +1283,12 @@ impl Rack {
         self.clock = clock;
         self.service(start, first, true, hold);
         self.cursor = start;
+    }
+
+    /// At block start `start`, after the capture that held the alignment ended on that frame: the ports'
+    /// messages it held apply now.
+    pub(crate) fn release_hold(&mut self, start: Frame, first: bool) {
+        self.service(start, first, true, false);
     }
 
     /// With no device running (the host holds the engine): apply the ports' messages at once, at `frame`
@@ -1259,7 +1314,7 @@ impl Rack {
                     seat.fade = 0;
                 }
                 s.finish_idle(&cx, &self.zeros, n, &mut self.protocol_errors);
-                s.chain_owed = Some(frame);
+                s.owe_chain(frame);
             }
         }
     }
@@ -1470,22 +1525,28 @@ impl Rack {
             // from there the chain is input-fed (an empty slot passes what an empty slot does).
             let mut to_bus = if s.source_head() { m } else { 0 };
             // A move's reorder inside this call splits it there: every unit is called once on each side.
+            // One the device jumped past (it never delivered the reorder's frame) applies on this call's
+            // first frame, the dip rising on from where the device clock puts it.
             let split = match (s.reorder, s.dip) {
-                (Some(_), Some(at)) if at >= frame && at < frame + m as Frame => (at - frame) as usize,
+                (Some(_), Some(at)) if at < frame + m as Frame => (at - frame).max(0) as usize,
                 _ => m,
             };
             let len = s.len;
             let first = s.events.iter().take_while(|e| (e.offset as usize) < split).count();
             run_chain(&mut s.seats[..len], gated, zeros, &mut s.dry, &mut s.tail, &s.events[..first], &self_cx(&self.clock, frame), (0, split), fade_frames, &mut to_bus, &mut self.protocol_errors);
+            let mut reordered = None;
             if split < m {
                 if let Some((id, to)) = s.reorder.take() {
                     reorder(&mut s.seats[..len], id, to);
-                    s.chain_owed = Some(frame + split as Frame);
+                    reordered = Some(id);
                 }
                 for e in s.events[first..].iter_mut() {
                     e.offset -= split as u32;
                 }
                 run_chain(&mut s.seats[..len], gated, zeros, &mut s.dry, &mut s.tail, &s.events[first..], &self_cx(&self.clock, frame + split as Frame), (split, m), fade_frames, &mut to_bus, &mut self.protocol_errors);
+            }
+            if let Some(id) = reordered {
+                s.reordered(id, frame + split as Frame, &mut self.protocol_errors);
             }
             s.events.clear();
             let dipping = s.dip.is_some();

@@ -335,13 +335,103 @@ fn a_move_dips_to_silence_reorders_on_the_dips_frame_and_carries_every_units_sta
             assert_every_frame_once(&calls, F0, end, &format!("block {block}: {what}"));
             assert!(calls.iter().any(|c| c.0 == at), "block {block}: {what} is called from the reorder's frame");
         }
-        assert_eq!(answers(&rig, 0).last(), Some(&(s, 2, SeatOp::Move, SeatOutcome::Applied)), "block {block}");
+        assert_eq!(answers(&rig, 0).last(), Some(&(at, 2, SeatOp::Move, SeatOutcome::Applied)), "block {block}: answered on the reorder");
         let last = chains(&rig, 0).last().cloned().expect("the reorder was sent");
         assert_eq!((last.0, ids(&last.1)), (at, vec![2, 1]), "block {block}: the order changed on the dip's frame");
         rig.engine.evict_slots();
         let mut kept = Vec::new();
         assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2);
         assert_eq!((pg.drops(), pc.drops()), (0, 0));
+    }
+}
+
+/// A device-frame jump past a move's reorder (the device never delivered the frame its dip reaches
+/// silence): the overdue reorder applies on the resumed block's first frame, the dip rises on from
+/// where the device clock puts it, and the slot takes its next message.
+#[test]
+fn a_jump_past_a_moves_reorder_applies_it_where_the_device_resumes() {
+    for block in BLOCKS {
+        let (pg, pc) = (Probe::new(), Probe::new());
+        let mut rig = rig(block);
+        rig.set_level(0.25);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &pg));
+        put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Clip(0.3), &pc));
+        rig.advance(5000);
+        let s = rig.frame;
+        assert!(rig.port(0).move_to(2, 0));
+        rig.advance(64);
+        rig.skip(512);
+        let r = rig.frame;
+        let at = s + FADE as Frame;
+        assert!(r > at);
+        rig.keep_output();
+        rig.advance(2000);
+        let what = format!("block {block}");
+        // The clip first, then the gain: 2 × 0.25 clipped at 0.3.
+        assert_frames(&rig.monitor, r, |f| if f - at >= FADE as Frame { 0.5 } else { 0.5 * ((f - at) as f32 / FADE as f32) }, &format!("{what}: the new order, rising"));
+        let last = chains(&rig, 0).last().cloned().expect("the reorder was sent");
+        assert_eq!((last.0, ids(&last.1)), (r, vec![2, 1]), "{what}: reordered where the device resumed");
+        assert!(rig.port(0).remove(1));
+        let t = rig.frame;
+        rig.advance(block as Frame);
+        assert_eq!(answers(&rig, 0).last(), Some(&(t, 1, SeatOp::Remove, SeatOutcome::Applied)), "{what}: the slot takes its next message");
+        rig.advance(1000);
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+        assert_eq!((pg.drops(), pc.drops()), (0, 0));
+    }
+}
+
+/// A move answers `Applied` and sends its chain on the reorder's frame, when the order changes, and
+/// sends no chain when its dip starts (nothing has changed there yet).
+#[test]
+fn a_moves_answer_and_its_chain_land_on_the_reorder_and_not_before() {
+    for block in BLOCKS {
+        let (pg, pc) = (Probe::new(), Probe::new());
+        let mut rig = rig(block);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &pg));
+        put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Clip(0.3), &pc));
+        rig.advance(5000);
+        let s = rig.frame;
+        assert!(rig.port(0).move_to(2, 0));
+        rig.advance(2000);
+        let at = s + FADE as Frame;
+        let what = format!("block {block}");
+        let moved: Vec<(Frame, Vec<UnitId>)> = chains(&rig, 0).into_iter().filter(|c| c.0 >= s).map(|c| (c.0, ids(&c.1))).collect();
+        assert_eq!(moved, vec![(at, vec![2, 1])], "{what}: one chain, the reorder's");
+        assert_eq!(answers(&rig, 0).last(), Some(&(at, 2, SeatOp::Move, SeatOutcome::Applied)), "{what}: answered on the reorder");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2);
+    }
+}
+
+/// Every applied change is its own [`Event::Chain`], on its frame, with the chain as that change left it:
+/// two installs taken at one block start send two, and two bypass commands on one frame send both
+/// values, in order.
+#[test]
+fn each_applied_change_sends_its_own_chain() {
+    for block in BLOCKS {
+        let p = Probe::new();
+        let mut rig = rig(block);
+        rig.advance(1000);
+        let s = rig.frame;
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &p));
+        put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Gain(3.0), &p));
+        rig.advance(1000);
+        let what = format!("block {block}");
+        let got: Vec<(Frame, Vec<UnitId>)> = chains(&rig, 0).into_iter().map(|c| (c.0, ids(&c.1))).collect();
+        assert_eq!(got, vec![(s, vec![1]), (s, vec![1, 2])], "{what}: one chain per install");
+        let t = rig.frame + 7;
+        rig.send_at(t, Command::SetUnitBypass(2, true));
+        rig.send_at(t, Command::Action(lf_engine::Action::ToggleUnit(2)));
+        rig.advance(1000);
+        let flips: Vec<(Frame, bool)> = chains(&rig, 0).into_iter().filter(|c| c.0 > s).map(|c| (c.0, c.1[1].bypassed)).collect();
+        assert_eq!(flips, vec![(t, true), (t, false)], "{what}: both bypass values, in order");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2);
     }
 }
 
@@ -586,9 +676,79 @@ fn an_edit_that_moves_the_alignment_waits_for_the_take_and_applies_on_the_first_
             }
             assert_eq!(h.answers[h.answers.len() - want.len()..], want[..], "{what}: answered waiting once");
             assert!(applied >= h.end && applied <= h.end + block as Frame, "{what}: applied at {applied}, the first block after the take ending at {}", h.end);
-            assert_eq!(h.chains.iter().filter(|c| c.0 > h.start).count(), 1, "{what}: nothing applied before");
+            let after: Vec<Frame> = h.chains.iter().filter(|c| c.0 > h.start).map(|c| c.0).collect();
+            assert_eq!(after, vec![applied; want.len()], "{what}: nothing applied before, one chain per message applied");
             assert_eq!(h.holding, (true, false), "{what}: the port held it, then let it go");
         }
+    }
+}
+
+/// A take ending on a block's first frame: the edit it held applies on that frame, in the block that
+/// starts where the take ends (its end is resolved before the hold is judged), not a block later. A
+/// RETAKE roll's pass edge there hands the capture on: the edit stays held across it.
+#[test]
+fn a_held_edit_applies_in_the_block_that_starts_where_the_take_ends() {
+    for retake in [false, true] {
+        for block in BLOCKS {
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(17, 1.0), &p));
+            rig.set(Command::SetRetake(retake));
+            let start = arm(&mut rig, 1.0);
+            let end = rig.end_frame();
+            rig.advance_to(start + EDIT);
+            put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+            rig.advance_to(end);
+            let what = format!("block {block}, RETAKE {retake}");
+            assert!(rig.port(0).holding(), "{what}: held through the take");
+            rig.advance(block as Frame);
+            let applied: Vec<Frame> = chains(&rig, 0).iter().map(|c| c.0).filter(|&f| f > start).collect();
+            if retake {
+                assert!(rig.port(0).holding() && applied.is_empty(), "{what}: the roll holds it on");
+                assert_eq!(rig.window().and_then(|w| w.1), Some(end), "{what}: the next pass starts there");
+            } else {
+                assert_eq!(rig.state(0), LaneState::Playing, "{what}");
+                assert_eq!((rig.port(0).holding(), applied), (false, vec![end]), "{what}: applied where the take ended");
+            }
+            rig.engine.evict_slots();
+            drop(rig);
+            assert_eq!(p.drops(), 2, "{what}: every unit back to the port, none dropped before");
+        }
+    }
+}
+
+/// Silence, then a soft 0.01 attack for 300 frames, then 0.2: AUTO REC's onset at `at`.
+fn onset_at(at: Frame) -> impl Fn(Frame) -> f32 {
+    move |f| if f < at { 0.0 } else if f < at + 300 { 0.01 } else { 0.2 }
+}
+
+/// AUTO REC listening across an edit that changes the alignment: the alignment is fixed from the onset
+/// (`lf-engine`'s rule), so the edit applies at once, and what AUTO retained before it, at the old
+/// alignment, is cut as an input gap cuts it: the onset it copies starts on the edit's frame, one run
+/// under the alignment the take starts with.
+#[test]
+fn auto_listening_across_an_alignment_change_keeps_nothing_from_before_it() {
+    for block in BLOCKS {
+        let p = Probe::new();
+        let mut rig = rig(block);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(17, 1.0), &p));
+        rig.set(Command::SetAutoRecord(true));
+        rig.press(Command::RecDub(0));
+        assert!(rig.lane(0).auto_armed);
+        let at = rig.frame + 3000;
+        rig.set_input(onset_at(at));
+        rig.advance_to(at + 100);
+        let edit = rig.frame;
+        put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+        rig.advance_to(at + 2000);
+        let what = format!("block {block}");
+        assert!(!rig.lane(0).auto_armed, "{what}: the onset triggered");
+        assert_eq!(answers(&rig, 0).last(), Some(&(edit, 2, SeatOp::Install, SeatOutcome::Applied)), "{what}: listening holds no edit");
+        assert_eq!(rig.engine.live_latency(), 67, "{what}");
+        assert_eq!(rig.start_frame(), edit, "{what}: the retained onset starts at the alignment change");
+        rig.engine.evict_slots();
+        drop(rig);
+        assert_eq!(p.drops(), 2, "{what}");
     }
 }
 

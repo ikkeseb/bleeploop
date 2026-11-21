@@ -2408,6 +2408,13 @@ impl Looper {
         }
     }
 
+    /// The record tap's alignment changed while nothing captures: AUTO listening drops what it retained
+    /// under the old one, as an input gap drops it, so the onset it copies is one run under the alignment
+    /// its take starts with (its alignment is fixed from the onset: `begin_auto`).
+    pub fn cut_listening(&mut self) {
+        self.detector.reset();
+    }
+
     /// AUTO listening: scan `input` (from frame `f0`). On a trigger, the take begins and the frames
     /// before the returned index are the last ones rendered under the listening state. The history drops
     /// what it can no longer join on the frame the last input gap leaves the tap, not on the device's.

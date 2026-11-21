@@ -697,16 +697,18 @@ pub enum Event {
     /// next publish, at the value then. The UI shows the tuner exactly while the last one said on.
     Tuner { frame: Frame, on: bool },
     /// The engine's answer to a slot port's message ([`crate::SlotPort`]), once per message: applied on
-    /// `frame` (a block start), refused, or waiting (an edit held until no capture holds the alignment,
-    /// then applied with no second answer: [`Event::Chain`] shows it). Owed until the ring takes it, as a
+    /// `frame` (a block start; a move that dips, on its reorder's frame), refused, or waiting (an edit held
+    /// until no capture holds the alignment, then applied with no second answer: [`Event::Chain`] shows
+    /// it). Owed until the ring takes it, as a
     /// lane's `Mix` is.
     Seat { frame: Frame, slot: u8, unit: UnitId, op: SeatOp, outcome: SeatOutcome },
     /// Slot `slot`'s chain as applied, head first: its first `len` seats (a withdrawn seat included, a
-    /// leaving one not), each unit's id, kind, bypass and latency. Owed whenever an edit, a move's
-    /// reorder or a bypass command applies, on its frame, until the ring takes it, as [`Event::Seat`]
-    /// is, and offered after the slot's seat answers; changes before it is offered fold into one, at
-    /// the chain as it then stands and the last change's frame (the port's messages of one block start,
-    /// a reorder and the bypass command that follows it before the next chunk).
+    /// leaving one not), each unit's id, kind, bypass and latency. Sent on `frame` whenever an edit, a
+    /// move's reorder or a bypass command applies (one per change, at the chain as that change left it,
+    /// after the message's own [`Event::Seat`]); owed until the ring takes it, as [`Event::Seat`] is.
+    /// Past the slot's room for owed events (bypass commands can come any number a block) the changes
+    /// fold into one, sent after what is owed, at the chain as it then stands and the last change's
+    /// frame.
     Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
 }
 

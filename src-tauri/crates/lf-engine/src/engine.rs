@@ -693,9 +693,15 @@ impl Engine {
         // a repeat), and a change reaches both once nothing captures. An edit of a chain's latency sum or
         // role waits in its port for the same (`slots`).
         let open = !self.capture_holds();
+        let latched = self.rack.record_latency();
         self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() }, !open);
         self.rack.latch_record(open);
-        let live_latency = self.rack.record_latency();
+        let mut live_latency = self.rack.record_latency();
+        if live_latency != latched {
+            // The record tap's alignment changed (an edit, a live flag) while no capture held it: what
+            // AUTO listening retained came at the old one, and its onset is dated by the new one.
+            self.looper.cut_listening();
+        }
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
             // The tuner's input breaks here: its next frame starts a new epoch (`crate::tuner`).
@@ -713,8 +719,9 @@ impl Engine {
             self.input_clamped += 1;
         }
         let input_frames = ctx.input_frames - excess;
-        let align = ctx.align_frames - excess + live_latency + self.limiter.latency() as Frame;
-        let record_delay = input_frames + live_latency;
+        let base_align = ctx.align_frames - excess + self.limiter.latency() as Frame;
+        let mut align = base_align + live_latency;
+        let mut record_delay = input_frames + live_latency;
         self.rendered = n;
         // A block always folds and clears its own chunks; a block the host's `catch_unwind` cut short
         // left its own behind, and they name frames this one does not render.
@@ -730,6 +737,17 @@ impl Engine {
         while f < end {
             let mut cx = Cx { now: f, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
             self.looper.events(&mut cx);
+            if f == start && !open && !self.looper.recorder().is_some_and(|(_, window, _)| window.is_some()) {
+                // The capture ended on this block's first frame (a handoff or a RETAKE pass hands it
+                // on, and it holds): the edits it held apply here, before this frame's commands, and the
+                // alignment follows them, as at any block start nothing captures on.
+                self.rack.release_hold(start, first);
+                self.rack.latch_record(true);
+                live_latency = self.rack.record_latency();
+                align = base_align + live_latency;
+                record_delay = input_frames + live_latency;
+                cx.align = align;
+            }
             let mut at = Apply {
                 instruments: &mut self.instruments,
                 rack: &mut self.rack,
