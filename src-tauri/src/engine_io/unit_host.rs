@@ -751,9 +751,9 @@ pub(crate) fn drain_if_stale(core: &Core) {
 }
 
 /// Wait for `op` to leave `Pending`/`Held`; `bound` counts only while the model shows `op`'s slot
-/// holding nothing; with `closing` set, `Held` (or waiting behind a held op) returns `Ok(OpState::Held)`
-/// at once.
-pub(crate) fn wait_op_inner(core: &Core, op: Op, bound: Duration) -> Result<OpState, String> {
+/// holding nothing; with `closing` or `return_on_held` set, `Held` (or waiting behind a held op)
+/// returns `Ok(OpState::Held)` at once.
+pub(crate) fn wait_op_inner(core: &Core, op: Op, bound: Duration, return_on_held: bool) -> Result<OpState, String> {
     let mut unheld = Duration::ZERO;
     let mut last = Instant::now();
     loop {
@@ -770,13 +770,13 @@ pub(crate) fn wait_op_inner(core: &Core, op: Op, bound: Duration) -> Result<OpSt
         match state {
             OpState::Applied | OpState::Refused(_) | OpState::Rebuilt => return Ok(state),
             OpState::Held => {
-                if closing {
+                if closing || return_on_held {
                     return Ok(OpState::Held);
                 }
             }
             OpState::Pending => {
                 if slot_held {
-                    if closing {
+                    if closing || return_on_held {
                         return Ok(OpState::Held);
                     }
                 } else {
@@ -1277,7 +1277,7 @@ impl EngineHost {
     /// holding nothing; with closing set, `Held` returns at once. Drains for itself when the feed is
     /// stale (the stash).
     pub fn wait_op(&self, op: Op, bound: Duration) -> Result<OpState, String> {
-        wait_op_inner(&self.core, op, bound)
+        wait_op_inner(&self.core, op, bound, false)
     }
 
     /// The feed: frame `seq` carried the model's revision `rev`.

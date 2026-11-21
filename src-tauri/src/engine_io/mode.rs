@@ -130,7 +130,8 @@ impl EngineApp {
         midi.as_ref().map(f).ok_or_else(|| "native MIDI is not running".to_string())
     }
 
-    /// On exit and before the updater's installer (`update.rs`): stop native MIDI (its ports close, what
+    /// On exit and before the updater's installer (`update.rs`): mark the host closing (so held
+    /// removals fail fast instead of waiting on an open take), stop native MIDI (its ports close, what
     /// they and the UI held is released while the device still plays, a bindings write still due is
     /// made, and its rebuild hook leaves the host), stop the feed, save every slot's tone
     /// (`save_tones_on_exit`, bounded on its own), unload the plugins while the device still plays (each
@@ -142,13 +143,17 @@ impl EngineApp {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
-                // Taken out under its lock (a call in flight finishes first), dropped after it.
-                let midi = app.midi.lock().unwrap_or_else(|e| e.into_inner()).take();
-                drop(midi);
-                feed.stop();
-                app.save_tones_on_exit();
-                app.unload_all();
-                host.shutdown();
+                run_shutdown(
+                    host,
+                    feed,
+                    || {
+                        // Taken out under its lock (a call in flight finishes first), dropped after it.
+                        let midi = app.midi.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        drop(midi);
+                    },
+                    || app.save_tones_on_exit(),
+                    || app.unload_all(),
+                );
             }
             let _ = done_tx.send(());
         });
@@ -158,6 +163,24 @@ impl EngineApp {
             Err(e) => log::error!("[engine_io] no thread for the engine's shutdown ({e}); exiting without it"),
         }
     }
+}
+
+/// Run the shutdown sequence on the host and feed: mark the host closing first (so held removals
+/// fail fast), then tear down native MIDI, stop the feed, save tones, unload plugins, and shut down
+/// the host.
+pub(super) fn run_shutdown(
+    host: &EngineHost,
+    feed: &FeedThread,
+    stop_midi: impl FnOnce(),
+    save_tones: impl FnOnce(),
+    unload_all: impl FnOnce(),
+) {
+    host.set_closing();
+    stop_midi();
+    feed.stop();
+    save_tones();
+    unload_all();
+    host.shutdown();
 }
 
 /// The app's one state, for a command.

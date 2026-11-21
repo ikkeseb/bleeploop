@@ -159,7 +159,7 @@ impl SlotHost {
             (UnitHost::new(self.core.clone(), self.slot, id, install), id, op)
         };
 
-        match wait_op_inner(&self.core, op, SETTLE) {
+        match wait_op_inner(&self.core, op, SETTLE, true) {
             Ok(OpState::Applied | OpState::Rebuilt | OpState::Held) => Ok(()),
             Ok(OpState::Refused(why)) => {
                 // Take the refused box back and free the slot immediately.
@@ -242,7 +242,7 @@ impl SlotHost {
             (UnitHost::new(self.core.clone(), self.slot, id, install), id, op)
         };
 
-        let waited = wait_op_inner(&self.core, op, timeout);
+        let waited = wait_op_inner(&self.core, op, timeout, false);
         match waited {
             Ok(OpState::Applied | OpState::Rebuilt) => {}
             Ok(OpState::Refused(_)) => {
@@ -258,7 +258,10 @@ impl SlotHost {
                 }
                 return Err(format!("slot {}'s unit did not come back within {} ms", self.slot, timeout.as_millis()));
             }
-            Ok(OpState::Held | OpState::Pending) | Err(_) => {
+            Ok(OpState::Held) => {
+                return Err(format!("slot {}'s unit removal is held while closing", self.slot));
+            }
+            Ok(OpState::Pending) | Err(_) => {
                 return Err(format!("slot {}'s unit did not come back within {} ms", self.slot, timeout.as_millis()));
             }
         }

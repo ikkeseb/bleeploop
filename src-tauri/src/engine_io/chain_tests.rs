@@ -938,3 +938,322 @@ fn shutdown_with_take_open_and_feed_stopped_ends_inside_3s() {
     assert_eq!(stops.load(SeqCst), 1);
     u.release();
 }
+
+/// 16. Finding 1: a legacy install of a latent unit during a take returns within the settle bound
+///     (not after the take), seats when the take ends, and a refusal at the take's end reaches
+///     `take_evicted` with its reason.
+#[test]
+fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal() {
+    // Part A: latent legacy unit installed during an open take returns within SETTLE while the
+    // take is still recording, and seats once the take ends.
+    {
+        let device = TestDevice::start(48_000, 64, Duration::from_millis(5), |_| 0.0);
+        let host = device.host();
+        let slot = host.slot(0);
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        start_take(&device);
+
+        let settle = Duration::from_secs(2);
+        let began = Instant::now();
+        let installed = std::thread::scope(|s| {
+            let installer = s.spawn(|| slot.install(LatentUnit::new(11, 64, stops.clone()), 48_000));
+            let deadline = Instant::now() + settle;
+            while !installer.is_finished() && Instant::now() < deadline {
+                let mut ev = Vec::new();
+                host.drain_feed(&mut ev);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let finished_in_time = installer.is_finished();
+            let elapsed = began.elapsed();
+            if !finished_in_time {
+                // End the take so the scoped thread can unwind cleanly before asserting.
+                stop_take(&device);
+                while !installer.is_finished() {
+                    let mut ev = Vec::new();
+                    host.drain_feed(&mut ev);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let res = installer.join().unwrap();
+            (finished_in_time, elapsed, res)
+        });
+        assert!(
+            installed.0 && installed.1 < settle,
+            "legacy install during take must return within SETTLE (2 s), took {} ms",
+            installed.1.as_millis()
+        );
+        assert!(installed.2.is_ok(), "held legacy install returns Ok");
+
+        // Still recording and still held (not seated yet).
+        let mut ev = Vec::new();
+        let (_, ov) = host.drain_feed(&mut ev);
+        assert_eq!(ov.unwrap().lane(0).state, LaneState::Recording, "take is still open when install returns");
+        assert!(engine_chain_ids(&device, 0).is_empty(), "latent unit must not seat while take is open");
+
+        // End the take: the unit seats in slot 0.
+        stop_take(&device);
+        let seat_deadline = Instant::now() + Duration::from_secs(2);
+        let id = host.core.legacy_unit_id(0);
+        assert_ne!(id, 0);
+        while engine_chain_ids(&device, 0) != vec![(id, false)] {
+            let mut ev = Vec::new();
+            host.drain_feed(&mut ev);
+            assert!(Instant::now() < seat_deadline, "held legacy unit never seated after take ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let back = slot.remove(Duration::from_secs(2)).expect("remove").expect("unit");
+        assert_eq!(back.into_any().downcast::<LatentUnit>().unwrap().tag, 11);
+        assert_eq!(stops.load(SeqCst), 1);
+    }
+
+    // Part B: a legacy install held behind an open take whose verdict at the take's end is
+    // Refused(Latency) returns within SETTLE, then delivers Back::Refused { why: Latency }
+    // through the mailbox and `take_evicted`, freeing the slot.
+    {
+        let device = TestDevice::start(48_000, 64, Duration::from_millis(5), |_| 0.0);
+        let host = device.host();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        // Seat a 64-frame blocker directly on slot 0 (no table row) and hold its removal during a
+        // take so the legacy install queues behind the held op and is judged when the take ends.
+        let blocker_id: UnitId = 999;
+        let blocker_tok: u64 = 999_999;
+        let blocker_op = {
+            let mut port = host.core.ports[0].lock().unwrap();
+            let mut state = host.core.state.lock().unwrap();
+            let gen = host.core.engine_gen.load(std::sync::atomic::Ordering::Acquire);
+            assert!(port
+                .as_mut()
+                .unwrap()
+                .install_at(blocker_id, blocker_tok, 0, false, None, LatentUnit::new(99, 64, stops.clone()))
+                .is_ok());
+            let op = state.model.mint_op(blocker_tok, gen, 0);
+            state.model.push_pending(
+                0,
+                super::chain::PendingOp {
+                    op,
+                    unit: blocker_id,
+                    seat_op: lf_engine::SeatOp::Install,
+                    state: OpState::Pending,
+                    kind: super::chain::PendingKind::Install {
+                        token: blocker_tok,
+                        is_reload: false,
+                        replaces: None,
+                        at: 0,
+                        source: false,
+                    },
+                },
+            );
+            op
+        };
+        assert_eq!(host.wait_op(blocker_op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        start_take(&device);
+
+        // Hold blocker's removal during the take.
+        let rem_op = {
+            let mut port = host.core.ports[0].lock().unwrap();
+            let mut state = host.core.state.lock().unwrap();
+            let gen = host.core.engine_gen.load(std::sync::atomic::Ordering::Acquire);
+            assert!(port.as_mut().unwrap().remove(blocker_id));
+            let op = state.model.mint_op(blocker_tok, gen, 0);
+            state.model.push_pending(
+                0,
+                super::chain::PendingOp {
+                    op,
+                    unit: blocker_id,
+                    seat_op: lf_engine::SeatOp::Remove,
+                    state: OpState::Pending,
+                    kind: super::chain::PendingKind::Remove { was_parked: false, owner_token: None },
+                },
+            );
+            op
+        };
+        let held_deadline = Instant::now() + Duration::from_secs(2);
+        while {
+            let mut ev = Vec::new();
+            host.drain_feed(&mut ev);
+            host.core.state.lock().unwrap().model.poll(rem_op) != OpState::Held
+        } {
+            assert!(Instant::now() < held_deadline, "blocker remove never entered Held");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Legacy install of an over-budget latent unit while slot 0 is held: must return Ok within
+        // SETTLE (before the take ends), then be refused with SeatRefusal::Latency at take's end.
+        let slot = host.slot(0);
+        let past = max_chain_latency(48_000) + 1;
+        let settle = Duration::from_secs(2);
+        let began = Instant::now();
+        let installed = std::thread::scope(|s| {
+            let installer = s.spawn(|| slot.install(LatentUnit::new(77, past, stops.clone()), 48_000));
+            let deadline = Instant::now() + settle;
+            while !installer.is_finished() && Instant::now() < deadline {
+                let mut ev = Vec::new();
+                host.drain_feed(&mut ev);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let finished_in_time = installer.is_finished();
+            let elapsed = began.elapsed();
+            if !finished_in_time {
+                stop_take(&device);
+                while !installer.is_finished() {
+                    let mut ev = Vec::new();
+                    host.drain_feed(&mut ev);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let res = installer.join().unwrap();
+            (finished_in_time, elapsed, res)
+        });
+        assert!(
+            installed.0 && installed.1 < settle,
+            "held legacy install (to be refused) must return within SETTLE, took {} ms",
+            installed.1.as_millis()
+        );
+        assert!(installed.2.is_ok(), "held legacy install returns Ok");
+
+        // End the take: blocker leaves and the over-budget legacy install is refused with Latency.
+        stop_take(&device);
+        let ref_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut ev = Vec::new();
+            host.drain_feed(&mut ev);
+            {
+                let mut port = host.core.ports[0].lock().unwrap();
+                let mut state = host.core.state.lock().unwrap();
+                if let Some(p) = port.as_mut() {
+                    state.table.reap_port(0, p);
+                }
+                if state.table.legacy_has_evicted(0) {
+                    break;
+                }
+            }
+            assert!(Instant::now() < ref_deadline, "refused legacy unit never reached mailbox after take ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Verify the mailbox holds Back::Refused { why: SeatRefusal::Latency }, zero protocol errors,
+        // and `take_evicted` hands the unit back and frees the slot.
+        assert_eq!(host.core.chain_protocol_errors.load(SeqCst), 0);
+        {
+            let state = host.core.state.lock().unwrap();
+            let id = state.table.legacy_unit_id(0);
+            let row = state.table.active_row_for_id(id).expect("legacy row present");
+            assert!(
+                matches!(row.mailbox.front(), Some(Back::Refused { why: SeatRefusal::Latency, .. })),
+                "expected Back::Refused(Latency) in mailbox"
+            );
+        }
+        let back = slot.take_evicted().expect("refusal at take's end reaches take_evicted");
+        assert_eq!(back.into_any().downcast::<LatentUnit>().unwrap().tag, 77);
+        assert!(!host.core.legacy_occupied(0), "slot freed after take_evicted");
+    }
+}
+
+/// 17. Finding 2: shutdown through `mode::run_shutdown` (without setting `closing` by hand) with
+///     a take open and a held legacy removal sets `closing` first, fails the held removal fast, and
+///     ends inside 3 s.
+#[test]
+fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_inside_3s() {
+    let fake = FakeDriver(Fake::new());
+    let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 2.0 }, fake).unwrap();
+    host.open(
+        DeviceRequest {
+            backend: AudioBackend::Asio,
+            input: None,
+            output: None,
+            input_channels: [None; lf_engine::SLOT_COUNT],
+            buffer: Some(256),
+            sample_rate: None,
+        },
+        false,
+    )
+    .unwrap();
+    let feed = super::feed::FeedThread::spawn(host.clone()).unwrap();
+
+    let stops = Arc::new(AtomicUsize::new(0));
+    let slot = host.slot(0);
+    assert!(slot.install(LatentUnit::new(1, 64, stops.clone()), 48_000).is_ok());
+
+    // Record a 1-bar loop, then open an indefinite overdub take on lane 0 so the capture holds
+    // alignment indefinitely (far past 3 s) without needing a large loop buffer.
+    host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SetFixedLength(true) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SetFixedBars(1.0) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let playing = {
+            let ends = host.core.ends.lock().unwrap();
+            ends.as_ref().is_some_and(|e| e.overview.lane(0).state == LaneState::Playing)
+        };
+        if playing {
+            break;
+        }
+        assert!(Instant::now() < deadline, "initial 1-bar loop never committed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let overdubbing = {
+            let ends = host.core.ends.lock().unwrap();
+            ends.as_ref().is_some_and(|e| e.overview.lane(0).state == LaneState::Overdubbing)
+        };
+        if overdubbing {
+            break;
+        }
+        assert!(Instant::now() < deadline, "overdub take never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Run `mode::run_shutdown` WITHOUT calling `host.set_closing()` by hand, with a held legacy
+    // removal inside the `unload_all` step (matching `plugins::unload_all` + `teardown`). A
+    // watchdog stops the overdub past 3.2 s so a broken shutdown fails cleanly instead of hanging.
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done_wd = done.clone();
+    let host_wd = host.clone();
+    let watchdog = std::thread::spawn(move || {
+        let limit = Instant::now() + Duration::from_millis(3200);
+        while !done_wd.load(std::sync::atomic::Ordering::Acquire) {
+            if Instant::now() >= limit {
+                let _ = host_wd.send(TimedCommand { frame: None, command: Command::Stop(0) });
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    let began = Instant::now();
+    let mut remove_res = None;
+    super::mode::run_shutdown(
+        &host,
+        &feed,
+        || {},
+        || {},
+        || {
+            let _ = host.silence_slot(0, Duration::from_secs(1));
+            let res = slot.remove(Duration::from_secs(10));
+            if res.is_err() {
+                slot.abandon();
+            }
+            remove_res = Some(res);
+        },
+    );
+    let elapsed = began.elapsed();
+    done.store(true, std::sync::atomic::Ordering::Release);
+    let _ = watchdog.join();
+
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "mode::run_shutdown with held legacy removal took {} ms (must be < 3000 ms)",
+        elapsed.as_millis()
+    );
+    assert!(
+        remove_res.expect("unload ran").is_err(),
+        "held legacy removal must fail fast while closing"
+    );
+    assert_eq!(stops.load(SeqCst), 1, "host.shutdown stopped and evicted the abandoned unit");
+}
