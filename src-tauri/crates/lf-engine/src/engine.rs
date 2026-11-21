@@ -574,16 +574,8 @@ impl Engine {
     /// instead would apply notes and slot commands to units the rebuild hands on to the new engine. Not
     /// for the audio thread.
     pub fn unapplied_transport(&mut self) -> impl Iterator<Item = Command> {
-        let mut table: Vec<_> = self.pending.iter().flatten().map(|p| (p.seq, p.command)).collect();
-        table.sort_by_key(|&(seq, _)| seq);
-        let slots = self.commands.slots();
-        let ring: Vec<_> = self.commands.read_chunk(slots).map(|chunk| {
-            let (a, b) = chunk.as_slices();
-            a.iter().chain(b).map(|c| c.command).collect()
-        }).unwrap_or_default();
         let (mut bpm, mut meter) = (None, None);
-        // The table holds what the ring gave first, in its order; the ring holds what came after.
-        for command in table.into_iter().map(|(_, c)| c).chain(ring) {
+        for command in self.unapplied() {
             match command {
                 Command::SetBpm(_) => bpm = Some(command),
                 Command::SetMeter(_) => meter = Some(command),
@@ -591,6 +583,28 @@ impl Engine {
             }
         }
         bpm.into_iter().chain(meter)
+    }
+
+    /// The unit commands sent and not applied yet ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]
+    /// pressed or on a named lane), in the order they were sent: still in the table (a bypass waiting
+    /// for a place among what its slot owes, or one stamped ahead) or in the command ring, peeked at
+    /// without taking anything. A rebuild replays them on the new engine once the units are reseated
+    /// (`docs/unit-contract.md` §2). Not for the audio thread.
+    pub fn unapplied_unit_commands(&mut self) -> impl Iterator<Item = Command> {
+        self.unapplied().filter(|c| c.unit_bypass().is_some())
+    }
+
+    /// Every command sent and not applied yet, in send order: the table holds what the ring gave first,
+    /// in its order (by sequence); the ring holds what came after. Allocates.
+    fn unapplied(&mut self) -> impl Iterator<Item = Command> {
+        let mut table: Vec<_> = self.pending.iter().flatten().map(|p| (p.seq, p.command)).collect();
+        table.sort_by_key(|&(seq, _)| seq);
+        let slots = self.commands.slots();
+        let ring: Vec<_> = self.commands.read_chunk(slots).map(|chunk| {
+            let (a, b) = chunk.as_slices();
+            a.iter().chain(b).map(|c| c.command).collect()
+        }).unwrap_or_default();
+        table.into_iter().map(|(_, c)| c).chain(ring)
     }
 
     /// While no device runs and the caller holds the engine: apply `command` at once, at the frame the
@@ -701,11 +715,12 @@ impl Engine {
         // what holds after them (`release_hold` below).
         let ending = !open && self.looper.next_event().is_some_and(|at| at <= start);
         self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() }, !open, !ending);
-        if self.rack.latch_record(open) {
+        if let Some(blind) = self.rack.latch_record(open, ctx.input_frames.min(self.config.max_input_frames)) {
             // The record tap's timing changed (an edit, a live flag; the alignment or one slot's delay
-            // to it) while no capture held it: what AUTO listening retained came at the old one, and
-            // its onset is dated by the new one.
-            self.looper.cut_listening();
+            // to it) while no capture held it: what AUTO listening retained came at the old one, its
+            // onset is dated by the new one, and the tap carries what was on its way at the old one
+            // until the change has passed through every path it moved.
+            self.looper.cut_listening_until(start + blind);
         }
         let mut live_latency = self.rack.record_latency();
         if ctx.xrun || ctx.damaged {
@@ -751,8 +766,8 @@ impl Engine {
                 // start nothing captures on.
                 self.rack.release_hold(start, first, holds);
                 if !holds {
-                    if self.rack.latch_record(true) {
-                        self.looper.cut_listening();
+                    if let Some(blind) = self.rack.latch_record(true, input_frames) {
+                        self.looper.cut_listening_until(start + blind);
                     }
                     live_latency = self.rack.record_latency();
                     align = base_align + live_latency;

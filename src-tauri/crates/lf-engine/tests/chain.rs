@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{ChainSeat, Command, Event, LaneState, NoteTarget, Pair, ProcessContext, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS};
+use lf_engine::{ChainSeat, Command, Event, InputSend, LaneState, NoteTarget, Pair, ProcessContext, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS};
 use proptest::prelude::*;
 
 const BLOCKS: [usize; 7] = [1, 32, 64, 127, 128, 480, 1024];
@@ -733,8 +733,9 @@ fn onset_at(at: Frame) -> impl Fn(Frame) -> f32 {
 
 /// AUTO REC listening across an edit that changes the alignment: the alignment is fixed from the onset
 /// (`lf-engine`'s rule), so the edit applies at once, and what AUTO retained before it, at the old
-/// alignment, is cut as an input gap cuts it: the onset it copies starts on the edit's frame, one run
-/// under the alignment the take starts with.
+/// alignment, is cut as an input gap cuts it, and the tap is not heard until the change has passed
+/// through every path it moved (slot 1's compensation, 17 → 67 frames): the onset it copies starts
+/// there, one run under the alignment the take starts with.
 #[test]
 fn auto_listening_across_an_alignment_change_keeps_nothing_from_before_it() {
     for block in BLOCKS {
@@ -754,7 +755,7 @@ fn auto_listening_across_an_alignment_change_keeps_nothing_from_before_it() {
         assert!(!rig.lane(0).auto_armed, "{what}: the onset triggered");
         assert_eq!(answers(&rig, 0).last(), Some(&(edit, 2, SeatOp::Install, SeatOutcome::Applied)), "{what}: listening holds no edit");
         assert_eq!(rig.engine.live_latency(), 67, "{what}");
-        assert_eq!(rig.start_frame(), edit, "{what}: the retained onset starts at the alignment change");
+        assert_eq!(rig.start_frame(), edit + 67, "{what}: the retained onset starts where the alignment change has passed");
         rig.engine.evict_slots();
         drop(rig);
         assert_eq!(p.drops(), 2, "{what}");
@@ -1550,5 +1551,391 @@ fn a_slots_replies_arrive_in_order_once_and_by_the_end_of_their_block() {
             let mut kept = Vec::new();
             assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
         }
+    }
+}
+
+// ── The record tap's timing change, on the play path and to AUTO ─────────────────────────────────────
+
+/// A steady signal on live slot 0 (empty: its wet is its input) with RING MOD on, beside live slot 1
+/// (silent) whose chain holds the alignment: when slot 1's chain gains latency, slot 0's compensation
+/// grows, and what its line carries to the input sends and the record tap plays on with no frame of
+/// silence (the record tap is the aligned wet plus the ring mod on it).
+#[test]
+fn a_compensation_change_leaves_no_silence_on_the_way_to_the_input_sends() {
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let p = Probe::new();
+        let mut rig = rig(block);
+        rig.set_inputs(|_| 0.5, |_| 0.0);
+        put(&mut rig, 1, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(100, 1.0), &p));
+        rig.set(Command::SetSlotLive(1, true));
+        rig.set(Command::SetInputSend(InputSend::Ring, true));
+        rig.advance(4000);
+        assert_eq!(rig.engine.live_latency(), 100, "{what}");
+        rig.keep_output();
+        let e = rig.frame;
+        put(&mut rig, 1, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+        rig.advance(2000);
+        assert_eq!(rig.engine.live_latency(), 150, "{what}: the alignment followed the edit");
+        let zeros = nonzero(&rig.record.iter().map(|&r| (r == 0.0) as u8 as f32).collect::<Vec<_>>());
+        assert!(zeros.is_empty(), "{what}: the record tap and the sends' input fell silent at frames {:?} (the change at {e})", zeros.iter().take(4).map(|&k| e + k as Frame).collect::<Vec<_>>());
+        rig.engine.evict_slots();
+        drop(rig);
+        assert_eq!(p.drops(), 2, "{what}");
+    }
+}
+
+/// AUTO listening on live slot 0 (empty) beside live slot 1 (silent, a 100-frame chain that holds the
+/// alignment): on `e` slot 1's chain becomes 150 frames, so slot 0's compensation goes 100 → 150 and
+/// the record tap carries input from before `e` until `e + 150`. A loud pulse that reaches the tap in
+/// the last 60 frames before that (input `e - 60..e`) triggers nothing; one that reaches it on the first
+/// 60 frames after (input `e..e + 60`) triggers a take that starts there, retaining nothing earlier.
+#[test]
+fn a_loud_attack_inside_a_timing_changes_blind_window_triggers_no_auto_and_one_just_after_does() {
+    for block in BLOCKS {
+        for after in [false, true] {
+            let what = format!("block {block}, after {after}");
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put(&mut rig, 1, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(100, 1.0), &p));
+            rig.set(Command::SetSlotLive(1, true));
+            rig.set(Command::SetAutoRecord(true));
+            rig.press(Command::RecDub(0));
+            assert!(rig.lane(0).auto_armed, "{what}");
+            let e = rig.frame + 3000;
+            let pulse = if after { e..e + 60 } else { e - 60..e };
+            rig.set_inputs(move |f| if pulse.contains(&f) { 0.5 } else { 0.0 }, |_| 0.0);
+            rig.advance_to(e);
+            assert_eq!(rig.engine.live_latency(), 100, "{what}");
+            put(&mut rig, 1, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+            rig.advance_to(e + 2000);
+            assert_eq!(answers(&rig, 1).last(), Some(&(e, 2, SeatOp::Install, SeatOutcome::Applied)), "{what}: listening holds no edit");
+            assert_eq!(rig.engine.live_latency(), 150, "{what}");
+            if after {
+                assert!(!rig.lane(0).auto_armed, "{what}: the pulse past the window triggered");
+                assert_eq!(rig.start_frame(), e + 150, "{what}: the take starts where the window ends");
+            } else {
+                assert!(rig.lane(0).auto_armed, "{what}: the pulse inside the window triggered nothing");
+            }
+            rig.engine.evict_slots();
+            drop(rig);
+            assert_eq!(p.drops(), 2, "{what}");
+        }
+    }
+}
+
+// ── The second half of the fix round ─────────────────────────────────────────────────────────────────
+
+/// A leaving unit (removed, withdrawn, or replaced) is called for its fade's 480 frames from the frame it
+/// starts leaving and for no frame past them, every frame once, at every block size, then stopped once.
+#[test]
+fn a_leaving_unit_is_called_for_its_fade_and_no_frame_past_it() {
+    for op in ["remove", "withdraw", "replace"] {
+        for block in BLOCKS {
+            let what = format!("{op}, block {block}");
+            let (p, q) = (Probe::new(), Probe::new());
+            let mut rig = rig(block);
+            rig.set_level(0.125);
+            put(&mut rig, 0, 1, 0, false, None, Unit::new(Dsp::Gain(2.0), &p));
+            rig.advance_to(F0 + 3000);
+            let s = rig.frame;
+            match op {
+                "remove" => assert!(rig.port(0).remove(1)),
+                "withdraw" => assert!(rig.port(0).withdraw(1)),
+                _ => put(&mut rig, 0, 1, 0, false, Some(1), Unit::new(Dsp::Gain(3.0), &q)),
+            }
+            rig.advance(3000);
+            let calls = p.calls();
+            assert_every_frame_once(&calls, F0, s + FADE as Frame, &what);
+            let &(frame, len) = calls.last().unwrap();
+            assert_eq!(frame + len as Frame, s + FADE as Frame, "{what}: the last call ends with the fade");
+            assert_eq!((p.stops(), p.seen().last()), (1, Some(&Seen::Stop)), "{what}: stopped once, after its last call");
+            let mut kept = Vec::new();
+            assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 1, "{what}");
+            rig.engine.evict_slots();
+            take_returns(&mut rig, 0, &mut kept);
+        }
+    }
+}
+
+/// A replacement that changes the seat's latency (a 1-frame lag into a 65-frame one, on the saw)
+/// crossfades what the old unit sounded into what the new one sounds, each against its own bypass at its
+/// own latency: bypassed and reloaded under its id (both bypasses: the input 1 frame late into 65), a
+/// bypassed unit replaced by one that plays, and two that play (the new unit's own line starts empty).
+#[test]
+fn a_replacement_that_changes_latency_crossfades_both_audible_outputs() {
+    let x = |f: Frame| saw(f);
+    for (case, old_bypassed, id, new_bypassed) in [("reload, bypassed", true, 1, true), ("bypassed into playing", true, 2, false), ("playing into playing", false, 2, false)] {
+        for block in BLOCKS {
+            let what = format!("{case}, block {block}");
+            let p = Probe::new();
+            let mut rig = rig(block);
+            rig.set_input(saw);
+            put(&mut rig, 0, 1, 0, old_bypassed, None, Unit::new(Dsp::Lag(1, 1.0), &p));
+            rig.advance_to(F0 + 2000);
+            let s = rig.frame;
+            put(&mut rig, 0, id, 0, new_bypassed, Some(1), Unit::new(Dsp::Lag(65, 1.0), &p));
+            rig.keep_output();
+            rig.advance(1500);
+            let new = move |f: Frame| if new_bypassed || f - s >= 65 { x(f - 65) } else { 0.0 };
+            assert_frames(&rig.monitor, s, |f| xfade(x(f - 1), new(f), ((f - s) as u32).min(FADE)), &what);
+            rig.engine.evict_slots();
+            let mut kept = Vec::new();
+            take_returns(&mut rig, 0, &mut kept);
+        }
+    }
+}
+
+/// A head seat whose role flips (a withdrawn 50-frame effect reseated as a source, withdrawn again and
+/// reseated as an effect) starts its bypass line empty: what the first effect left in it never plays.
+#[test]
+fn a_role_change_starts_the_seats_bypass_line_empty() {
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let p = Probe::new();
+        let mut rig = rig(block);
+        rig.set_input(|f| 0.25 + 0.5 * saw(f));
+        put(&mut rig, 0, 1, 0, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+        rig.advance(2000);
+        assert!(rig.port(0).withdraw(1));
+        rig.advance(1000);
+        put(&mut rig, 0, 1, 0, false, None, Unit::source_lat(0.0, 50, &p));
+        rig.advance(1000);
+        assert!(rig.port(0).withdraw(1));
+        rig.advance(1000);
+        let s = rig.frame;
+        put(&mut rig, 0, 1, 0, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+        rig.keep_output();
+        rig.advance(1000);
+        assert_eq!(ids(&chains(&rig, 0).last().unwrap().1), vec![1], "{what}");
+        assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 50)), "{what}: an effect again");
+        assert_eq!(nonzero(&rig.monitor[..50]), Vec::<usize>::new(), "{what}: nothing from before the reseat at {s} plays");
+        assert_frames(&rig.monitor[50..], s + 50, |f| 0.25 + 0.5 * saw(f - 50), &what);
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 3, "{what}");
+    }
+}
+
+/// A source installed in the batch that removes the head effect waits, unanswered, for that effect to
+/// have gone, then lands at the head: on silent input the monitor stays silent throughout, and the
+/// source reaches the bus.
+#[test]
+fn a_source_installed_while_the_head_effect_leaves_waits_and_lands_at_the_head() {
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let p = Probe::new();
+        let mut rig = rig(block);
+        put(&mut rig, 0, 1, 0, false, None, Unit::new(Dsp::Gain(1.0), &p));
+        rig.advance(2000);
+        let s = rig.frame;
+        assert!(rig.port(0).remove(1));
+        put(&mut rig, 0, 2, 0, false, None, Unit::new(Dsp::Level(0.25), &p));
+        rig.keep_output();
+        rig.advance(3000);
+        assert_eq!(nonzero(&rig.monitor), Vec::<usize>::new(), "{what}: the source never plays into the wet");
+        assert_eq!(*rig.bus.last().unwrap(), 0.25, "{what}: the source is on the bus");
+        let applied: Vec<_> = answers(&rig, 0).into_iter().filter(|a| a.1 == 2).collect();
+        assert_eq!(applied.len(), 1, "{what}: answered once, {applied:?}");
+        let (at, _, op, outcome) = applied[0];
+        assert_eq!((op, outcome), (SeatOp::Install, SeatOutcome::Applied), "{what}");
+        assert!(at >= s + FADE as Frame && at < s + FADE as Frame + block as Frame, "{what}: applied at {at}, on the first block start once the head left ({})", s + FADE as Frame);
+        assert_eq!(rig.engine.slot(0), Some((SlotKind::Instrument, 0)), "{what}");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+    }
+}
+
+/// A source added at the head of a live chain whose effect mutes ([×0]), and removed again: the input
+/// it fades against goes through that effect, so neither the monitor nor the bus ever hears it, and a
+/// lone source still fades against the input around it.
+#[test]
+fn a_source_at_the_head_never_carries_the_input_around_a_muted_effect() {
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let p = Probe::new();
+        let mut rig = rig(block);
+        rig.set_level(0.5);
+        put(&mut rig, 0, 1, 0, false, None, Unit::new(Dsp::Gain(0.0), &p));
+        rig.advance(2000);
+        rig.keep_output();
+        put(&mut rig, 0, 2, 0, false, None, Unit::new(Dsp::Level(0.0), &p));
+        rig.advance(1000);
+        assert_eq!(rig.engine.slot(0), Some((SlotKind::Instrument, 0)), "{what}");
+        assert!(rig.port(0).remove(2));
+        rig.advance(1000);
+        assert_eq!(rig.engine.slot(0), Some((SlotKind::Effect, 0)), "{what}");
+        assert_eq!(nonzero(&rig.monitor), Vec::<usize>::new(), "{what}: the monitor");
+        assert_eq!(nonzero(&rig.bus), Vec::<usize>::new(), "{what}: the bus");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+        // Alone, a silent source fades the input out of the wet over its fade.
+        let s = rig.frame;
+        put(&mut rig, 0, 3, 0, false, None, Unit::new(Dsp::Level(0.0), &p));
+        rig.keep_output();
+        rig.advance(1000);
+        assert_frames(&rig.monitor, s, |f| xfade(0.5, 0.0, ((f - s) as u32).min(FADE)), &format!("{what}: a lone source"));
+        rig.engine.evict_slots();
+        take_returns(&mut rig, 0, &mut kept);
+    }
+}
+
+fn notes(p: &Probe) -> Vec<(Frame, SlotEventKind)> {
+    p.seen().into_iter().filter_map(|e| if let Seen::Note { frame, kind } = e { Some((frame, kind)) } else { None }).collect()
+}
+
+const ON60: SlotEventKind = SlotEventKind::NoteOn { key: 60, velocity: 1.0 };
+const ON64: SlotEventKind = SlotEventKind::NoteOn { key: 64, velocity: 1.0 };
+const OFF60: SlotEventKind = SlotEventKind::NoteOff { key: 60 };
+const OFF64: SlotEventKind = SlotEventKind::NoteOff { key: 64 };
+
+/// Notes are kept per unit, on `[source, effect]` holding 60: removing the effect releases its 60 alone
+/// (the source keeps it, and the player's NoteOff reaches it later), and a NoteOn during the effect's
+/// fade reaches only the source; a replaced source releases its own 60 and the new one gets no NoteOff
+/// for a key it never held, but the NoteOns played during the crossfade; an idle removal releases the
+/// leaving effect alone, and the source still gets the player's NoteOff once rendering resumes.
+#[test]
+fn notes_are_kept_per_unit_and_a_leaving_unit_gets_only_its_own_releases() {
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let (ps, pe, pn) = (Probe::new(), Probe::new(), Probe::new());
+        let mut rig = rig(block);
+        put(&mut rig, 0, 1, 0, false, None, Unit::new(Dsp::Level(0.25), &ps));
+        put(&mut rig, 0, 2, 1, false, None, Unit::new(Dsp::Gain(1.0), &pe));
+        rig.set(Command::SelectInstrument(NoteTarget::Slot(0)));
+        rig.advance(500);
+        let on = rig.frame;
+        rig.set(Command::NoteOn(60, 1.0));
+        rig.advance(1000);
+        let r = rig.frame;
+        assert!(rig.port(0).remove(2));
+        rig.advance(100);
+        let on64 = rig.frame;
+        rig.set(Command::NoteOn(64, 1.0));
+        rig.advance(1000);
+        let off = rig.frame;
+        rig.set(Command::NoteOff(60));
+        rig.advance(500);
+        assert_eq!(notes(&pe), vec![(on, ON60), (r, OFF60)], "{what}: the effect: its own release, once, and nothing played after it began leaving");
+        assert_eq!(notes(&ps), vec![(on, ON60), (on64, ON64), (off, OFF60)], "{what}: the source keeps its note until the player's NoteOff");
+
+        // The source (holding 64) replaced: its 64 released, the new source gets only what is played on.
+        let s = rig.frame;
+        put(&mut rig, 0, 3, 0, false, Some(1), Unit::new(Dsp::Level(0.25), &pn));
+        rig.advance(100);
+        let on60 = rig.frame;
+        rig.set(Command::NoteOn(60, 1.0));
+        rig.advance(100);
+        let off64 = rig.frame;
+        rig.set(Command::NoteOff(64));
+        rig.advance(1000);
+        assert_eq!(notes(&ps)[3..], [(s, OFF64)], "{what}: the replaced source releases its own key, once");
+        assert_eq!(notes(&pn), vec![(on60, ON60)], "{what}: the new source: what was played on it, no NoteOff for a key it never held (64 at {off64})");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        take_returns(&mut rig, 0, &mut kept);
+
+        // Idle: [source, effect] holding 60, the effect removed while no device runs.
+        let (ps, pe) = (Probe::new(), Probe::new());
+        put(&mut rig, 0, 4, 0, false, None, Unit::new(Dsp::Level(0.25), &ps));
+        put(&mut rig, 0, 5, 1, false, None, Unit::new(Dsp::Gain(1.0), &pe));
+        rig.advance(500);
+        let on = rig.frame;
+        rig.set(Command::NoteOn(60, 1.0));
+        rig.advance(500);
+        let idle = rig.frame;
+        assert!(rig.port(0).remove(5));
+        rig.engine.service_slots_idle();
+        assert_eq!(notes(&pe), vec![(on, ON60), (idle, OFF60)], "{what}: idle, the effect releases its own key");
+        assert_eq!(pe.stops(), 1, "{what}");
+        rig.advance(500);
+        let off = rig.frame;
+        rig.set(Command::NoteOff(60));
+        rig.advance(500);
+        assert_eq!(notes(&ps), vec![(on, ON60), (off, OFF60)], "{what}: idle, the source keeps its note until the player's NoteOff");
+        rig.engine.evict_slots();
+        take_returns(&mut rig, 0, &mut kept);
+    }
+}
+
+/// An eviction returns a waiting install however full what its slot owes is: on a stalled event ring,
+/// refused removals fill the owed answers so the slot takes no message, and the install queued behind
+/// the removals left on its port still comes back (unstarted, its ticket answered), so the host's eviction loop sees it.
+#[test]
+fn an_eviction_returns_a_waiting_install_however_full_the_owed_answers_are() {
+    for block in [64, 1024] {
+        let what = format!("block {block}");
+        let p = Probe::new();
+        let mut rig = Rig::with_event_capacity(Opts { block, ..Opts::default() }, 4);
+        rig.advance(1000);
+        rig.hold_events = true;
+        rig.advance(block as Frame);
+        // 40 removals of ids the slot does not seat, 8 a block: 4 answers reach the ring, the owed take 30.
+        for round in 0..5 {
+            for k in 0..8 {
+                assert!(rig.port(0).remove(100 + 8 * round + k), "{what}");
+            }
+            rig.advance(block as Frame);
+        }
+        let ticket = rig.port(0).install_at(7, 0, true, None, Unit::new(Dsp::Gain(1.0), &p)).ok().expect("the ring has room");
+        rig.advance(4 * block as Frame);
+        assert!(!ticket.answered(), "{what}: the install waits for a place for its answer");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept), vec![(7, true, None)], "{what}: the install came back with its bypass");
+        assert!(ticket.answered(), "{what}");
+        assert_eq!((p.calls().len(), p.stops()), (0, 0), "{what}: never started");
+        rig.engine.evict_slots();
+        assert!(take_returns(&mut rig, 0, &mut kept).is_empty(), "{what}");
+        assert_eq!(p.drops(), 0, "{what}");
+    }
+}
+
+/// The unit commands sent and not applied yet, in send order, for a rebuild's replay: on a stalled
+/// event ring, bypass commands past the slot's owed room wait in the engine's table, and more sent after
+/// them wait in the command ring; the peek returns both, in order, without the other commands and
+/// without taking any (each still applies once the ring drains).
+#[test]
+fn the_unapplied_unit_commands_are_peeked_in_send_order() {
+    for block in [64, 1024] {
+        let what = format!("block {block}");
+        let p = Probe::new();
+        let mut rig = Rig::with_event_capacity(Opts { block, ..Opts::default() }, 4);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &p));
+        rig.advance(1000);
+        rig.hold_events = true;
+        let sent: Vec<Command> = (0..48)
+            .map(|k| match k % 3 {
+                0 => Command::SetUnitBypass(1, true),
+                1 => toggle_unit(1),
+                _ => Command::SetUnitBypass(1, false),
+            })
+            .collect();
+        let t = rig.frame + 7;
+        for &c in &sent {
+            rig.send_at(t, c);
+        }
+        rig.advance(1100);
+        let applied = bypasses(&p);
+        assert!(applied < 48, "{what}: application held back ({applied} applied)");
+        let later = [Command::SetMetronome(false), Command::ActionOn(2, lf_engine::Action::ToggleUnit(1)), Command::SetUnitBypass(1, true)];
+        for c in later {
+            rig.queue(c);
+        }
+        let want: Vec<Command> = sent[applied..].iter().copied().chain([later[1], later[2]]).collect();
+        assert_eq!(rig.engine.unapplied_unit_commands().collect::<Vec<_>>(), want, "{what}");
+        assert_eq!(rig.engine.unapplied_unit_commands().count(), want.len(), "{what}: the peek takes nothing");
+        rig.hold_events = false;
+        rig.read_events();
+        for _ in 0..64 {
+            rig.advance(block as Frame);
+        }
+        assert_eq!(bypasses(&p), 50, "{what}: every one applied once");
+        assert_eq!(rig.engine.unapplied_unit_commands().count(), 0, "{what}");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 1, "{what}");
     }
 }

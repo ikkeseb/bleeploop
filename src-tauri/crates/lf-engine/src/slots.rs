@@ -21,7 +21,8 @@
 //! ([`Rack::latch_record`]): it holds while a capture runs, so a slot going live or not never moves
 //! what records mid-take (a slot off live feeds its line silence, and what was on the way drains in
 //! place). A chain headed by a source takes no input and plays the notes while its slot is the note
-//! target; its output joins the master bus and goes to the record tap delayed like a built-in
+//! target (notes are kept per unit: a unit gets a NoteOff only for a key it holds, a leaving unit none
+//! but the releases of what it holds, once, as it starts leaving, and a new one holds none); its output joins the master bus and goes to the record tap delayed like a built-in
 //! instrument's, less the chain's own latency (`instruments`). An install that would sum a chain past
 //! [`max_chain_latency`] is refused, and every line holds the device's input side plus that plus a
 //! block ([`Rack::new`]), so no delay is ever clipped.
@@ -42,8 +43,8 @@
 //! is seated is refused unless the install names it in `replaces`, and an install that `replaces` a
 //! seated unit (a source, or a reload under its own id) takes its seat in one crossfade from the old
 //! unit's output to the new one's, which stops and goes back once it ends. No effect goes ahead of a
-//! source; a ninth unit is refused. A **removal** releases the notes the slot holds, fades the seat to
-//! its undelayed input, stops the unit once after its last call and hands it back; the slot stays live.
+//! source; a ninth unit is refused. A **removal** fades the seat to its undelayed input, calls the unit
+//! for that fade and no frame past it, stops it once and hands it back; the slot stays live.
 //! A **move** dips the chain's output to silence over the fade's frames, reorders the chain on the frame
 //! the dip ends and brings it back over as many: every unit is called for every frame once, the call
 //! split on that frame, so a tail rings on through its new successors. A **withdrawal** (a restart, an
@@ -224,8 +225,8 @@ impl SlotPort {
         Ok(Ticket { seq: self.sent, taken: self.taken.clone() })
     }
 
-    /// Ask for unit `id` back: the slot releases its notes, the seat crossfades to its input, the unit
-    /// stops and arrives on [`SlotPort::returned`]. Answered by an [`Event::Seat`]; nothing comes back
+    /// Ask for unit `id` back: the unit releases the notes it holds, the seat crossfades to its input,
+    /// the unit stops and arrives on [`SlotPort::returned`]. Answered by an [`Event::Seat`]; nothing comes back
     /// for an id the slot does not seat (nor for a withdrawn seat, whose unit is back already). False
     /// when the ring is full.
     pub fn remove(&mut self, id: UnitId) -> bool {
@@ -321,6 +322,16 @@ struct Seat {
     /// back once it ends.
     outgoing: Option<(UnitId, Unit, bool)>,
     swap: u32,
+    /// The replaced unit's latency and where its bypass crossfade stood when it was replaced: what it
+    /// sounds while it crossfades out.
+    old_latency: usize,
+    old_wet: u32,
+    /// The keys the unit holds (bit per key), and those the outgoing unit held: a NoteOff reaches a unit
+    /// only for a key it holds, and a leaving unit gets the releases of what it holds, once.
+    held: [u64; 2],
+    old_held: [u64; 2],
+    /// One unit's events over a call (allocated with the rack: a whole queue, or every key's release).
+    ev: Vec<SlotEvent>,
     /// The unit's output over a render call, then the seat's (the crossfades applied in place).
     out: [Vec<f32>; 2],
     /// The outgoing unit's output over a render call.
@@ -386,6 +397,9 @@ enum Verdict {
     Refuse(SeatRefusal),
     /// Applies; `edit`: it changes the chain's latency sum or its role (held while a capture runs).
     Apply { edit: bool },
+    /// Cannot apply yet, unanswered: a new source while the physical head is still leaving (it goes at
+    /// physical index 0, the head's record path, once that seat has gone).
+    Wait,
 }
 
 struct Slot {
@@ -424,6 +438,8 @@ struct Slot {
     /// the chain's own, as [`Rack::latch_record`] last took them.
     wet_line: Vec<Pair>,
     dw: usize,
+    /// The source record line's delay less the input side, as [`Rack::latch_record`] last took it.
+    ld: Frame,
     write: usize,
     /// The input OTT on this slot's output, after its gain.
     ott: StereoOtt,
@@ -490,6 +506,55 @@ fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
     }
 }
 
+/// The events one unit gets over a call into `ev`: a playing unit every NoteOn of the slot's `events`
+/// (it holds the key from there) and a NoteOff only for a key it holds; a leaving one (removed,
+/// withdrawn, replaced) none of them, only the releases of what it holds, at the call's first frame,
+/// once.
+fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent], playing: bool) {
+    ev.clear();
+    let bit = |key: u8| ((key / 64) as usize, 1u64 << (key % 64));
+    if playing {
+        for e in events {
+            let (w, b) = match e.kind {
+                SlotEventKind::NoteOn { key, .. } | SlotEventKind::NoteOff { key } => bit(key),
+            };
+            match e.kind {
+                SlotEventKind::NoteOn { .. } => held[w] |= b,
+                SlotEventKind::NoteOff { .. } if held[w] & b != 0 => held[w] &= !b,
+                SlotEventKind::NoteOff { .. } => continue,
+            }
+            ev.push(*e);
+        }
+    } else {
+        for key in 0..128u8 {
+            let (w, b) = bit(key);
+            if held[w] & b != 0 {
+                ev.push(SlotEvent { offset: 0, kind: SlotEventKind::NoteOff { key } });
+            }
+        }
+        *held = [0; 2];
+    }
+}
+
+/// Call `unit` on the first `input[0].len()` frames of `out` (the events inside them), the rest of `out`
+/// silent. A non-finite sample would stick in every filter, echo, limiter and loop after it: the whole
+/// call's output goes silent, counted.
+fn process_for(unit: &mut dyn UnitProcessor, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2], errors: &mut u64) {
+    let k = input[0].len();
+    let [ol, or] = out;
+    if k > 0 {
+        let inside = events.iter().take_while(|e| (e.offset as usize) < k).count();
+        unit.process(cx, input, &events[..inside], [&mut ol[..k], &mut or[..k]]);
+        if !ol[..k].iter().chain(&or[..k]).all(|y| y.is_finite()) {
+            ol[..k].fill(0.0);
+            or[..k].fill(0.0);
+            *errors += 1;
+        }
+    }
+    ol[k..].fill(0.0);
+    or[k..].fill(0.0);
+}
+
 /// Render seats `seats` (the chain, physical order) over frames `a..b` of a render call: each unit
 /// called once on its slice, then each seat's crossfades frame by frame, its output left in its `out`,
 /// the chain's in `tail`. `to_bus` falls to the frame a leaving source head is gone.
@@ -499,25 +564,29 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
     if a == b {
         return;
     }
-    for k in 0..seats.len() {
+    let seats_len = seats.len();
+    for k in 0..seats_len {
         let (before, rest) = seats.split_at_mut(k);
         let seat = &mut rest[0];
         let seat_in: [&[f32]; 2] = if k == 0 { [&gated[0][a..b], &gated[1][a..b]] } else { [&before[k - 1].out[0][a..b], &before[k - 1].out[1][a..b]] };
         // A source takes no input.
         let source = seat.info.source;
         let x = if source { [&zeros[a..b], &zeros[a..b]] } else { seat_in };
+        // A leaving unit is called for what is left of its fade and no frame past it (one, to carry its
+        // releases, should its fade have none left): the frames after weigh it 0, and it is stopped once
+        // the call ends.
+        let left = |frames: u32, releases: bool| (frames as usize).max(releases as usize).min(b - a);
+        let playing = !seat.removing && !seat.withdrawing;
         {
             let [ol, or] = &mut seat.out;
             match seat.unit.as_mut() {
                 Some(unit) => {
-                    unit.process(cx, x, events, [&mut ol[a..b], &mut or[a..b]]);
-                    // A non-finite sample would stick in every filter, echo, limiter and loop after it:
-                    // the whole call's output goes silent, counted.
-                    if !ol[a..b].iter().chain(&or[a..b]).all(|y| y.is_finite()) {
-                        ol[a..b].fill(0.0);
-                        or[a..b].fill(0.0);
-                        *errors += 1;
-                    }
+                    unit_events(&mut seat.ev, &mut seat.held, events, playing);
+                    let unit_len = match (seat.removing, seat.withdrawing) {
+                        (false, false) => b - a,
+                        (removing, withdrawing) => left(if removing { seat.fade } else { u32::MAX }.min(if withdrawing { seat.wet } else { u32::MAX }), !seat.ev.is_empty()),
+                    };
+                    process_for(unit.as_mut(), cx, [&x[0][..unit_len], &x[1][..unit_len]], &seat.ev, [&mut ol[a..b], &mut or[a..b]], errors);
                 }
                 None => {
                     ol[a..b].fill(0.0);
@@ -527,29 +596,33 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
         }
         if let Some((_, old, _)) = seat.outgoing.as_mut() {
             let [ol, or] = &mut seat.old;
-            old.process(cx, x, events, [&mut ol[a..b], &mut or[a..b]]);
-            if !ol[a..b].iter().chain(&or[a..b]).all(|y| y.is_finite()) {
-                ol[a..b].fill(0.0);
-                or[a..b].fill(0.0);
-                *errors += 1;
-            }
+            unit_events(&mut seat.ev, &mut seat.old_held, events, false);
+            let old_len = left(n - seat.swap, !seat.ev.is_empty());
+            process_for(old.as_mut(), cx, [&x[0][..old_len], &x[1][..old_len]], &seat.ev, [&mut ol[a..b], &mut or[a..b]], errors);
         }
         let swapping = seat.outgoing.is_some();
         let latency = seat.info.latency as usize;
+        let old_latency = if swapping { seat.old_latency } else { latency };
         let cap = seat.line.len();
         for j in a..b {
-            // What the unit (or, mid-replacement, the old into the new) sounds, then its bypass.
-            let mut core = [seat.out[0][j], seat.out[1][j]];
-            if swapping {
-                core = [crossfade(seat.old[0][j], core[0], seat.swap, n), crossfade(seat.old[1][j], core[1], seat.swap, n)];
-            }
+            // What the seat sounds: the unit against its bypass, and mid-replacement the old unit against
+            // its own bypass (at its latency, where its bypass crossfade stood) into that.
+            let (core, old) = ([seat.out[0][j], seat.out[1][j]], [seat.old[0][j], seat.old[1][j]]);
             if source {
                 // A source and its slot's input go different ways (the bus, the wet), so each fades
                 // against silence there; once gone, the seat passes the gated input.
-                let inner = [crossfade(0.0, core[0], seat.wet, n), crossfade(0.0, core[1], seat.wet, n)];
+                let mut inner = [crossfade(0.0, core[0], seat.wet, n), crossfade(0.0, core[1], seat.wet, n)];
+                if swapping {
+                    inner = [0, 1].map(|c| crossfade(crossfade(0.0, old[c], seat.old_wet, n), inner[c], seat.swap, n));
+                }
                 if seat.removing && seat.fade == 0 {
                     *to_bus = (*to_bus).min(j);
                     (seat.out[0][j], seat.out[1][j]) = (gated[0][j], gated[1][j]);
+                } else if k + 1 < seats_len {
+                    // Seats after it: the input it fades against goes through them, never around them.
+                    seat.out[0][j] = crossfade(gated[0][j], inner[0], seat.fade, n);
+                    seat.out[1][j] = crossfade(gated[1][j], inner[1], seat.fade, n);
+                    (dry[0][j], dry[1][j]) = (0.0, 0.0);
                 } else {
                     seat.out[0][j] = crossfade(0.0, inner[0], seat.fade, n);
                     seat.out[1][j] = crossfade(0.0, inner[1], seat.fade, n);
@@ -558,18 +631,23 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
                 }
             } else {
                 let input = [seat_in[0][j - a], seat_in[1][j - a]];
-                // The bypass line runs whether or not the seat is bypassed, so it is warm when it is.
-                let delayed = if latency == 0 {
+                // The bypass line runs whether or not the seat is bypassed, so it is warm when it is, and
+                // while either unit of a replacement has a latency.
+                let delayed = if latency == 0 && old_latency == 0 {
                     seat.filled = 0;
-                    input
+                    [input, input]
                 } else {
                     seat.line[seat.line_at] = input;
-                    let d = if seat.filled >= latency { seat.line[(seat.line_at + cap - latency) % cap] } else { [0.0; 2] };
+                    let at = |l: usize| if l == 0 { input } else if seat.filled >= l { seat.line[(seat.line_at + cap - l) % cap] } else { [0.0; 2] };
+                    let d = [at(latency), at(old_latency)];
                     seat.line_at = (seat.line_at + 1) % cap;
                     seat.filled = (seat.filled + 1).min(cap);
                     d
                 };
-                let inner = [crossfade(delayed[0], core[0], seat.wet, n), crossfade(delayed[1], core[1], seat.wet, n)];
+                let mut inner = [crossfade(delayed[0][0], core[0], seat.wet, n), crossfade(delayed[0][1], core[1], seat.wet, n)];
+                if swapping {
+                    inner = [0, 1].map(|c| crossfade(crossfade(delayed[1][c], old[c], seat.old_wet, n), inner[c], seat.swap, n));
+                }
                 seat.out[0][j] = crossfade(input[0], inner[0], seat.fade, n);
                 seat.out[1][j] = crossfade(input[1], inner[1], seat.fade, n);
             }
@@ -788,25 +866,28 @@ impl Slot {
         }
     }
 
-    /// An idle removal, withdrawal or replacement, or an eviction: no block will carry the notes the
-    /// units were just released from, so one silent frame from `frame` (the next the engine would
-    /// render) does, to every unit leaving, and a restarted unit holds no note.
+    /// An idle removal, withdrawal or replacement, or an eviction: no block will carry the releases of
+    /// the units leaving, so one silent frame from `frame` (the next the engine would render) does, to
+    /// each that holds a key, and a restarted unit holds no note. The slot's own events stay queued for
+    /// the units that stay.
     fn flush(&mut self, cx: &UnitCx, zeros: &[f32]) {
-        if self.events.is_empty() {
-            return;
-        }
         for seat in self.seats[..self.len].iter_mut() {
             let [l, r] = &mut seat.out;
             if seat.removing || seat.withdrawing {
                 if let Some(unit) = seat.unit.as_mut() {
-                    unit.process(cx, [&zeros[..1], &zeros[..1]], &self.events, [&mut l[..1], &mut r[..1]]);
+                    unit_events(&mut seat.ev, &mut seat.held, &[], false);
+                    if !seat.ev.is_empty() {
+                        unit.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
+                    }
                 }
             }
             if let Some((_, old, _)) = seat.outgoing.as_mut() {
-                old.process(cx, [&zeros[..1], &zeros[..1]], &self.events, [&mut l[..1], &mut r[..1]]);
+                unit_events(&mut seat.ev, &mut seat.old_held, &[], false);
+                if !seat.ev.is_empty() {
+                    old.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
+                }
             }
         }
-        self.events.clear();
     }
 
     /// No device runs: every transition under way ends at once (a move's reorder, a seat's leaving, a
@@ -914,6 +995,11 @@ impl Rack {
                         withdrawing: false,
                         outgoing: None,
                         swap: 0,
+                        old_latency: 0,
+                        old_wet: 0,
+                        held: [0; 2],
+                        old_held: [0; 2],
+                        ev: Vec::with_capacity(MAX_SLOT_EVENTS + 128),
                         out: [vec![0.0; block], vec![0.0; block]],
                         old: [vec![0.0; block], vec![0.0; block]],
                         line: vec![[0.0; 2]; max_latency as usize + 1],
@@ -938,6 +1024,7 @@ impl Rack {
                 line: vec![[0.0; 2]; line],
                 wet_line: vec![[0.0; 2]; line],
                 dw: 0,
+                ld: 0,
                 write: 0,
                 ott: StereoOtt::new(sample_rate),
                 owed: Vec::with_capacity(OWED_CAPACITY),
@@ -1034,6 +1121,7 @@ impl Rack {
                         }
                         break;
                     }
+                    Verdict::Wait => break,
                     Verdict::Apply { .. } => match self.apply(i, frame, engaged, fade) {
                         Some(changed) => (SeatOutcome::Applied, changed),
                         // A move's dip: answered on its reorder ([`Slot::reordered`]).
@@ -1126,6 +1214,9 @@ impl Rack {
                 }
                 let after = sum - before + info.latency;
                 let new_role = if t == 0 { info.source } else { role };
+                if info.source && into.is_none() && s.len > 0 && s.seats[0].removing {
+                    return Verdict::Wait;
+                }
                 Verdict::Apply { edit: after != sum || new_role != role }
             }
             Some(&SlotMsg::Remove { id }) => match s.find(id) {
@@ -1187,18 +1278,20 @@ impl Rack {
                 let into = replaces.and_then(|r| s.find(r)).or_else(|| s.find(id));
                 let k = match into {
                     Some(k) => {
-                        // A replacement releases what the slot holds, as a removal does; the old unit
-                        // crossfades out of the seat (at once, idle) and goes back.
+                        // The old unit crossfades out of the seat (at once, idle) and goes back, taking
+                        // the keys it holds with it (released as it leaves); the new one holds none.
                         let seat = &mut s.seats[k];
                         if let Some(old) = seat.unit.take() {
                             seat.outgoing = Some((seat.id, old, seat.bypassed));
                             seat.swap = if fade { 0 } else { n };
+                            (seat.old_latency, seat.old_wet) = (seat.info.latency as usize, seat.wet);
+                            seat.old_held = seat.held;
                         }
-                        if seat.outgoing.is_some() {
-                            s.release_all(0, &mut self.events_dropped);
-                        }
+                        seat.held = [0; 2];
+                        // The line holds this seat's input while its latency was above 0 and it was an
+                        // effect: a role change or a line that was not running starts it empty.
                         let seat = &mut s.seats[k];
-                        if seat.info.latency == 0 || info.latency == 0 {
+                        if seat.info.latency == 0 || seat.info.source != info.source {
                             seat.filled = 0;
                         }
                         (seat.id, seat.info, seat.unit) = (id, info, Some(unit));
@@ -1216,7 +1309,7 @@ impl Rack {
                         (seat.id, seat.info, seat.unit) = (id, info, Some(unit));
                         (seat.removing, seat.engaged, seat.fade) = (false, true, if engaged { n } else { 0 });
                         (seat.withdrawing, seat.outgoing, seat.swap) = (false, None, n);
-                        (seat.line_at, seat.filled) = (0, 0);
+                        (seat.line_at, seat.filled, seat.held) = (0, 0, [0; 2]);
                         s.len += 1;
                         s.seats[p..=k].rotate_right(1);
                         p
@@ -1225,15 +1318,16 @@ impl Rack {
                 let seat = &mut s.seats[k];
                 seat.bypassed = bypassed;
                 seat.wet_on = !bypassed || handled;
-                // A new seat starts at its bypass (its lifecycle fade carries it in); a reseat fades in
-                // from its bypass, a replacement keeps where its crossfade is.
-                if into.is_none() || !fade || !rendered {
+                // A new seat starts at its bypass (its lifecycle fade carries it in), and so does a
+                // replacement (the swap carries it in from the old unit's); a reseat fades in from its
+                // bypass.
+                if into.is_none() || !fade || !rendered || seat.outgoing.is_some() {
                     seat.wet = if seat.wet_on { n } else { 0 };
                 }
             }
             SlotMsg::Remove { id } => {
                 let Some(k) = s.find(id) else { return Some(false) };
-                s.release_all(0, &mut self.events_dropped);
+                // Its unit gets the releases of what it holds as it leaves; the others keep theirs.
                 let seat = &mut s.seats[k];
                 seat.removing = true;
                 seat.engaged = false;
@@ -1243,10 +1337,7 @@ impl Rack {
             }
             SlotMsg::Withdraw { id } => {
                 let Some(k) = s.find(id) else { return Some(false) };
-                // A source's notes are released; the seat fades to its bypass.
-                if s.seats[k].info.source {
-                    s.release_all(0, &mut self.events_dropped);
-                }
+                // Its unit gets the releases of what it holds as it leaves; the seat fades to its bypass.
                 let seat = &mut s.seats[k];
                 seat.withdrawing = true;
                 seat.wet_on = false;
@@ -1366,9 +1457,11 @@ impl Rack {
     }
 
     /// Stop every unit and hand it back with its bypass (a sample-rate change: the host re-activates
-    /// and reinstalls), with every install still waiting on a port that the return ring has room for:
-    /// the host reads its returns and evicts again until none comes back, so nothing is left for the
-    /// engine's drop.
+    /// and reinstalls), with every install still waiting on a port that the return ring has room for,
+    /// however full what its slot owes the event ring is: one that found no place for its answer goes
+    /// back unstarted and unanswered (its return is its answer; its ticket is answered), and the
+    /// messages ahead of it leave with no effect (the slot seats nothing now). The host reads its
+    /// returns and evicts again until none comes back, so nothing is left for the engine's drop.
     pub(crate) fn evict(&mut self, frame: Frame) {
         self.service_idle(frame, false);
         let (cx, n) = (self.unit_cx(frame), self.fade_frames);
@@ -1383,6 +1476,25 @@ impl Rack {
                 s.finish_idle(&cx, &self.zeros, n, &mut self.protocol_errors);
                 s.owe_chain(frame, &mut self.protocol_errors);
             }
+            if let Some(t) = s.taken.take() {
+                if !t.answered {
+                    s.end.taken.fetch_add(1, Release);
+                }
+                if let SlotMsg::Install { id, bypassed, unit, .. } = t.msg {
+                    s.give_back(Back { id, unit, refused: None, bypassed }, &mut self.protocol_errors);
+                }
+                s.end.holding.store(false, Release);
+            }
+            while let Ok(msg) = s.end.rx.peek() {
+                if matches!(msg, SlotMsg::Install { .. }) && s.end.tx.slots() == 0 {
+                    break;
+                }
+                let Ok(msg) = s.end.rx.pop() else { break };
+                s.end.taken.fetch_add(1, Release);
+                if let SlotMsg::Install { id, bypassed, unit, .. } = msg {
+                    s.give_back(Back { id, unit, refused: None, bypassed }, &mut self.protocol_errors);
+                }
+            }
         }
     }
 
@@ -1395,29 +1507,33 @@ impl Rack {
     /// (the live latency); shut, it holds what it last took. The engine shuts it while a capture's
     /// alignment is fixed, which took the same live latency, and no chain's sum or role changes then
     /// (an edit that would waits: [`Rack::service`]). Either way each slot's wet is delayed by what its
-    /// own chain's latency lacks of that alignment. Whether the record tap's timing changed: the
-    /// alignment, or one slot's delay to it (another slot can hold the alignment while this one's chain
-    /// changes). What a changed slot's line holds for the tap's next frames went through its chain at
-    /// the old timing: it is silenced, so nothing from before the change reaches the tap after it.
-    pub(crate) fn latch_record(&mut self, open: bool) -> bool {
+    /// own chain's latency lacks of that alignment. Whether the record tap's timing changed (the
+    /// alignment, or one path's delay to it: another slot can hold the alignment while this one's chain
+    /// changes), as the frames from here until every sample reaching the tap was rendered at the new
+    /// timing: the largest old or new delay of a path that changed, `side` (the input side) counted on
+    /// the delayed record paths (a source chain's, the instruments'). The audio itself is left as it
+    /// was, so nothing on the play path (the input sends take the aligned wet) drops out.
+    pub(crate) fn latch_record(&mut self, open: bool, side: Frame) -> Option<Frame> {
         let before = self.record_latency;
         if open {
             self.record_latency = self.live_latency();
         }
-        let mut changed = self.record_latency != before;
+        let rec = self.record_latency;
+        let mut blind = (rec != before).then(|| side + rec.max(before));
         for s in self.slots.iter_mut() {
             let own = if !s.source_chain() { s.latency() } else { 0 };
-            let dw = (self.record_latency - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
+            let dw = (rec - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
             if dw != s.dw {
-                let len = s.wet_line.len();
-                for k in 1..=dw {
-                    s.wet_line[(s.write + len - k) % len] = [0.0; 2];
-                }
-                changed = true;
+                blind = Some(blind.unwrap_or(0).max(dw.max(s.dw) as Frame));
             }
             s.dw = dw;
+            let ld = rec - s.line_latency;
+            if ld != s.ld {
+                blind = Some(blind.unwrap_or(0).max((side + ld.max(s.ld)).max(0)));
+            }
+            s.ld = ld;
         }
-        changed
+        blind
     }
 
     /// The live latency the record tap is aligned on, as last latched.

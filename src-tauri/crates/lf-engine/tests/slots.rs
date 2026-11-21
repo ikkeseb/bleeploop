@@ -1456,7 +1456,7 @@ fn going_off_live_ramps_an_effects_input_to_silence_and_leaves_its_tail_ringing(
 
 /// A live toggle inside each 10 ms bypass crossfade: the crossfade runs its frames as ever, its dry side
 /// the gated input, and the gate splits the plugin's calls only at the commands, never where a ramp
-/// ends. The removal completes as ever.
+/// ends. The removal completes as ever, its unit called for no frame past its fade.
 #[test]
 fn a_live_toggle_inside_each_bypass_crossfade_composes_with_it_and_adds_no_plugin_call() {
     let probe = Probe::new();
@@ -1486,8 +1486,9 @@ fn a_live_toggle_inside_each_bypass_crossfade_composes_with_it_and_adds_no_plugi
     let splits = [off, toggles[1].0];
     let mut want = Vec::new();
     let mut at = installed;
+    // A leaving unit is called for its fade and no frame past it: the last call ends with the removal's.
     while at < removed + FADE as Frame {
-        let end = at + 128;
+        let end = (at + 128).min(removed + FADE as Frame);
         let mut from = at;
         for &x in splits.iter().filter(|&&x| x > at && x < end) {
             want.push((from, (x - from) as usize));
