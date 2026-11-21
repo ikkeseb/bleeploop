@@ -1,7 +1,7 @@
 //! Tests for E2 P2: the table, the model, the gate, the rebuild handoff, and legacy `SlotHost`.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release, SeqCst}};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ use lf_engine::{
 use super::chain::{PlateState, PluginRef};
 use super::fake_driver::{Fake, FakeDriver};
 use super::test_rig::TestDevice;
-use super::unit_host::{Activated, Back, BuiltinFactory, Op, OpState, Params, Removal, Spec, SubmitError, Terms, Unit};
+use super::unit_host::{Activated, Back, BuiltinFactory, Op, OpState, Params, Removal, Spec, SubmitError, Terms, Unit, GATE_DEADLINE};
 use super::{DeviceRequest, EngineHost, HostConfig};
 use crate::audio_output::AudioBackend;
 
@@ -57,16 +57,58 @@ impl UnitProcessor for LatentUnit {
     }
 }
 
+const MAX_RECORDED_PARAMS: usize = 32;
+
+/// Preallocated, lock-free recorder for `ClampEcho::set_param` on the audio thread (invariant 5).
+struct ParamRecorder {
+    values: [AtomicU64; MAX_RECORDED_PARAMS],
+    len: AtomicUsize,
+}
+
+impl ParamRecorder {
+    fn new() -> Arc<Self> {
+        Arc::new(ParamRecorder {
+            values: std::array::from_fn(|_| AtomicU64::new(0)),
+            len: AtomicUsize::new(0),
+        })
+    }
+
+    fn record(&self, value: f64) {
+        let idx = self.len.load(Relaxed);
+        if idx < MAX_RECORDED_PARAMS {
+            self.values[idx].store(value.to_bits(), Relaxed);
+            self.len.store(idx + 1, Release);
+        }
+    }
+
+    fn snapshot(&self) -> Vec<f64> {
+        let n = self.len.load(Acquire).min(MAX_RECORDED_PARAMS);
+        (0..n).map(|i| f64::from_bits(self.values[i].load(Relaxed))).collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len.load(Acquire) == 0
+    }
+}
+
 /// A clamping built-in fake (E2 test-only `BuiltinFactory`): clamps `EchoLevel` to `0.0..=1.0`
-/// (so 2.0 -> 1.0) and optionally logs every `set_param` value applied on the audio thread.
+/// (so 2.0 -> 1.0) and records every `set_param` value applied on the audio thread without locking
+/// or allocating.
 struct ClampEcho {
     level: f64,
-    applied: Arc<Mutex<Vec<f64>>>,
+    latency: Frame,
+    applied: Arc<ParamRecorder>,
+}
+
+impl ClampEcho {
+    fn new(level: f64, latency: Frame, applied: Arc<ParamRecorder>) -> Box<Self> {
+        Box::new(ClampEcho { level, latency, applied })
+    }
 }
 
 impl UnitProcessor for ClampEcho {
     fn info(&self) -> UnitInfo {
-        UnitInfo { kind: UnitKind::Echo, source: false, latency: 0 }
+        UnitInfo { kind: UnitKind::Echo, source: false, latency: self.latency }
     }
     fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
         let g = self.level as f32;
@@ -80,7 +122,7 @@ impl UnitProcessor for ClampEcho {
         if param == UnitParam::Send(InputSendParam::EchoLevel) {
             let c = value.clamp(0.0, 1.0);
             self.level = c;
-            self.applied.lock().unwrap().push(c);
+            self.applied.record(c);
             Some(c)
         } else {
             None
@@ -93,7 +135,7 @@ impl UnitProcessor for ClampEcho {
 }
 
 struct ClampFactory {
-    applied: Arc<Mutex<Vec<f64>>>,
+    applied: Arc<ParamRecorder>,
 }
 
 impl BuiltinFactory for ClampFactory {
@@ -108,7 +150,7 @@ impl BuiltinFactory for ClampFactory {
             }
         }
         let clamped = vec![(UnitParam::Send(InputSendParam::EchoLevel), level)];
-        Ok((Box::new(ClampEcho { level, applied: self.applied.clone() }), clamped))
+        Ok((ClampEcho::new(level, 0, self.applied.clone()), clamped))
     }
 }
 
@@ -345,12 +387,13 @@ fn unrelated_bypass_during_latency_changing_reseat_keeps_op_held_and_bound_intac
 }
 
 /// 4. A full event ring with the last applied param outside it: across a rebuild, both the model
-///    and the rebuilt clamping fake read the clamped applied value (1.0 for sent 2.0).
+///    and the rebuilt clamping fake read the clamped applied value (1.0 for sent 2.0), verified by
+///    rendering a block through the rebuilt fake.
 #[test]
 fn full_event_ring_keeps_last_applied_param_across_rebuild() {
-    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 1.0);
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.25);
     let host = device.host();
-    let applied_log = Arc::new(Mutex::new(Vec::new()));
+    let applied_log = ParamRecorder::new();
     let factory = ClampFactory { applied: applied_log.clone() };
 
     let init_params = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.25)];
@@ -373,7 +416,7 @@ fn full_event_ring_keeps_last_applied_param_across_rebuild() {
     })
     .unwrap();
     assert!(device.wait_blocks(10));
-    assert_eq!(*applied_log.lock().unwrap(), vec![1.0], "engine applied clamped 1.0");
+    assert_eq!(applied_log.snapshot(), vec![1.0], "engine applied clamped 1.0");
 
     // Rebuild WITHOUT draining the old event ring.
     device.rebuild_at(44_100, 256);
@@ -383,7 +426,8 @@ fn full_event_ring_keeps_last_applied_param_across_rebuild() {
     let model_params = snap.chains[0].units[0].params.as_ref().expect("built-in params").0.clone();
     assert_eq!(model_params, vec![(UnitParam::Send(InputSendParam::EchoLevel), 1.0)]);
 
-    // Rebuild the fake from the model's params at the new terms and verify it reads 1.0 too.
+    // Rebuild the fake from the model's params at the new terms, render audio through it, and
+    // verify both metadata and the rendered output reflect the clamped 1.0 gain (not initial 0.25).
     let Back::Evicted { unit: old_unit, .. } = u.take_back().expect("evicted") else { panic!("expected Evicted") };
     drop(old_unit);
     let t2 = u.terms().unwrap();
@@ -393,6 +437,19 @@ fn full_event_ring_keeps_last_applied_param_across_rebuild() {
     assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
     let snap2 = host.core.chain_snapshot();
     assert_eq!(snap2.chains[0].units[0].params.as_ref().unwrap().0, vec![(UnitParam::Send(InputSendParam::EchoLevel), 1.0)]);
+
+    host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+    assert!(device.wait_blocks(15));
+    let out = device.output.lock().unwrap();
+    let tail = &out[out.len().saturating_sub(64)..];
+    assert_eq!(tail.len(), 64);
+    for &sample in tail {
+        assert!(
+            (sample - 0.25).abs() < 1e-3,
+            "rebuilt fake must render input 0.25 * clamped level 1.0 = 0.25, got {sample}"
+        );
+    }
+    drop(out);
     u.release();
 }
 
@@ -556,7 +613,7 @@ fn two_toggle_units_one_unanswered_one_unapplied_each_flip_once_across_rebuild()
 fn unanswered_toggle_and_per_unit_change_after_it_both_kept_across_rebuild() {
     let mut device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
     let host = device.host().clone();
-    let applied_log = Arc::new(Mutex::new(Vec::new()));
+    let applied_log = ParamRecorder::new();
     let factory = ClampFactory { applied: applied_log.clone() };
 
     let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.25)];
@@ -608,7 +665,7 @@ fn unanswered_toggle_and_per_unit_change_after_it_both_kept_across_rebuild() {
 fn second_rebuild_with_non_empty_gate_keeps_order() {
     let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
     let host = device.host();
-    let applied_log = Arc::new(Mutex::new(Vec::new()));
+    let applied_log = ParamRecorder::new();
     let factory = ClampFactory { applied: applied_log.clone() };
 
     let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.1)];
@@ -640,7 +697,7 @@ fn second_rebuild_with_non_empty_gate_keeps_order() {
     assert!(device.wait_blocks(10));
     host.drain_feed(&mut ev);
 
-    assert_eq!(*applied_log.lock().unwrap(), vec![0.3, 0.8, 0.9], "gate order preserved across second rebuild");
+    assert_eq!(applied_log.snapshot(), vec![0.3, 0.8, 0.9], "gate order preserved across second rebuild");
     u.release();
 }
 
@@ -658,19 +715,26 @@ fn late_submit_after_gate_deadline_at_same_rate_is_refused_stale() {
     let op1 = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), old_terms));
     assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
 
-    // Rebuild at the SAME rate (48_000) -> generation bumps, rate stays 48_000.
+    // Rebuild at the SAME rate (48_000) under a controllable clock -> generation bumps, rate stays 48_000.
+    let t0 = Instant::now();
+    host.core.state.lock().unwrap().model.set_clock(t0);
     device.rebuild_at(48_000, 256);
     let Back::Evicted { unit: back, .. } = u.take_back().expect("evicted") else { panic!("evicted") };
     host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
     assert!(host.core.state.lock().unwrap().gate.has(10), "command entered the gate while reseating");
 
-    // Advance past the gate deadline deterministically, then flush gate -> plate fails and gated command drops.
-    host.core.state.lock().unwrap().gate_deadline = Duration::from_millis(5);
-    std::thread::sleep(Duration::from_millis(20));
+    // Just before the gate deadline: plate has not failed yet and the command stays gated.
+    host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE - Duration::from_millis(1));
     let mut ev = Vec::new();
+    let before = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(before.chains.chains[0].units[0].state, PlateState::Seated);
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 0);
+
+    // Advance across the gate deadline deterministically, then flush gate -> plate fails and gated command drops.
+    host.core.state.lock().unwrap().model.advance_clock(Duration::from_millis(1));
     let drain = host.drain_feed_taps(&mut ev, None, None);
     assert_eq!(drain.chains.chains[0].units[0].state, PlateState::Failed);
-    assert!(host.core.gate_dropped.load(SeqCst) >= 1, "gated command dropped after deadline");
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 1, "gated command dropped after deadline");
 
     // Late submit with old terms (same rate, old generation) is refused `Stale`.
     let (back, err) = u.submit(back, old_terms).err().expect("stale terms must be refused");
@@ -827,12 +891,33 @@ fn move_with_held_removal_ahead_of_it() {
 
     // While R's removal is Held at plate index 0 (`[R, A, B]`), move B to plate index 1 (ahead of A).
     let op_mv = host.move_unit(20, 1).unwrap();
+    assert!(device.wait_blocks(5));
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    // While the removal is still held, the move stays queued behind it and neither engine nor model
+    // order has shifted yet.
+    assert_eq!(ur.poll(op_rem), OpState::Held, "removal stays Held during take");
+    assert_eq!(ub.poll(op_mv), OpState::Pending, "move stays queued behind the held removal");
+    assert_eq!(
+        engine_chain_ids(&device, 0),
+        vec![(5, false), (10, false), (20, false)],
+        "engine order unchanged while removal is still held"
+    );
+    let held_snap = host.core.chain_snapshot();
+    assert!(held_snap.chains[0].held);
+    assert_eq!(
+        held_snap.chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![5, 10, 20],
+        "model order unchanged while removal is still held"
+    );
+
     stop_take(&device);
     assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
     assert_eq!(host.wait_op(op_mv, Duration::from_secs(2)).unwrap(), OpState::Applied);
 
     assert_eq!(engine_chain_ids(&device, 0), vec![(20, false), (10, false)]);
     let snap = host.core.chain_snapshot();
+    assert!(!snap.chains[0].held);
     assert_eq!(snap.chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>(), vec![20, 10]);
     ur.release();
     ua.release();
@@ -1065,7 +1150,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
                     unit: blocker_id,
                     seat_op: lf_engine::SeatOp::Remove,
                     state: OpState::Pending,
-                    kind: super::chain::PendingKind::Remove { was_parked: false, owner_token: None },
+                    kind: super::chain::PendingKind::Remove { owner_token: None },
                 },
             );
             op
@@ -1074,7 +1159,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
         while {
             let mut ev = Vec::new();
             host.drain_feed(&mut ev);
-            host.core.state.lock().unwrap().model.poll(rem_op) != OpState::Held
+            host.core.state.lock().unwrap().poll(rem_op) != OpState::Held
         } {
             assert!(Instant::now() < held_deadline, "blocker remove never entered Held");
             std::thread::sleep(Duration::from_millis(5));
@@ -1263,9 +1348,9 @@ fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_inside_3s() {
 ///     the unit rebuilt from it carry the new value (not the one before it).
 #[test]
 fn param_answer_in_the_undrained_ring_survives_a_rebuild() {
-    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.25);
     let host = device.host();
-    let applied_log = Arc::new(Mutex::new(Vec::new()));
+    let applied_log = ParamRecorder::new();
     let factory = ClampFactory { applied: applied_log.clone() };
     let level = UnitParam::Send(InputSendParam::EchoLevel);
 
@@ -1282,7 +1367,7 @@ fn param_answer_in_the_undrained_ring_survives_a_rebuild() {
     // The engine applies 0.7 and its ring takes the answer; nothing drains it before the rebuild.
     host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.7) }).unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while applied_log.lock().unwrap().is_empty() {
+    while applied_log.is_empty() {
         assert!(Instant::now() < deadline, "the engine never applied the param");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -1303,6 +1388,19 @@ fn param_answer_in_the_undrained_ring_survives_a_rebuild() {
     let op2 = ok_op(u.submit(rebuilt, t2));
     assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
     assert_eq!(host.core.chain_snapshot().chains[0].units[0].params.as_ref().unwrap().0, vec![(level, 0.7)]);
+
+    host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
+    assert!(device.wait_blocks(15));
+    let out = device.output.lock().unwrap();
+    let tail = &out[out.len().saturating_sub(64)..];
+    assert_eq!(tail.len(), 64);
+    for &sample in tail {
+        assert!(
+            (sample - 0.175).abs() < 1e-3,
+            "rebuilt fake must render input 0.25 * 0.7 = 0.175, got {sample}"
+        );
+    }
+    drop(out);
     u.release();
 }
 
@@ -1337,7 +1435,8 @@ fn refused_install_reaped_before_a_rebuild_settles_refused_once() {
         assert!(Instant::now() < deadline, "the refused box never came back");
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(u.poll(op), OpState::Pending, "its Seat has not reached the model");
+    // Inspect the model directly so we do not trigger stale-feed draining on the intentionally full ring.
+    assert_eq!(host.core.state.lock().unwrap().poll(op), OpState::Pending, "its Seat has not reached the model");
 
     device.rebuild_at(44_100, 256);
     assert_eq!(u.poll(op), OpState::Refused(SeatRefusal::Latency), "settled from what the row received");
@@ -1434,4 +1533,298 @@ fn a_drain_mid_swap_never_pairs_the_new_chains_with_the_old_generation() {
     let after = host.drain_feed_taps(&mut ev, None, None);
     assert_eq!((after.gen, after.chains.chains[0].latency), (before.gen + 1, 0), "after the publish: the new pair");
     u.release();
+}
+
+/// 22. Review round C, finding 1a: unit commands sent between a withdrawal and its reseat are
+///     held in the gate and all reach the reseated unit in order (none dropped on the empty seat).
+#[test]
+fn commands_sent_between_withdrawal_and_reseat_reach_reseated_unit_in_order() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host();
+    let applied_log = ParamRecorder::new();
+    let level = UnitParam::Send(InputSendParam::EchoLevel);
+
+    let init = vec![(level, 0.25)];
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op1 = ok_op(u.submit(ClampEcho::new(0.25, 0, applied_log.clone()), t));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+
+    // Withdraw unit 10; send one command immediately (while Withdraw is in flight), wait for the
+    // withdrawn box, then send bypass + param commands while the seat is empty.
+    let op_w = u.withdraw().unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.4) }).unwrap();
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let back = loop {
+        if let Some(b) = u.take_back() {
+            break b;
+        }
+        assert!(Instant::now() < deadline, "withdrawn box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let Back::Withdrawn { unit: box_w, .. } = back else {
+        panic!("expected Back::Withdrawn");
+    };
+
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.8) }).unwrap();
+    assert!(device.wait_blocks(5));
+    host.drain_feed(&mut ev);
+    assert!(applied_log.is_empty(), "commands must stay gated while seat is withdrawn");
+
+    // Reseat unit 10: gated commands flush in order once the reseat applies.
+    let op_reseat = ok_op(u.submit(box_w, t));
+    assert_eq!(host.wait_op(op_reseat, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    host.drain_feed(&mut ev);
+    assert!(device.wait_blocks(10));
+    host.drain_feed(&mut ev);
+
+    assert_eq!(applied_log.snapshot(), vec![0.4, 0.8], "all param commands reach the reseated unit in order");
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "bypass command reached the reseated unit");
+    assert_eq!(host.diag().engine.unit_commands_dropped, 0, "no unit command dropped on the empty seat");
+    let snap = host.core.chain_snapshot();
+    assert!(snap.chains[0].units[0].bypass);
+    assert_eq!(snap.chains[0].units[0].params.as_ref().unwrap().0, vec![(level, 0.8)]);
+    u.release();
+}
+
+/// 23. Review round C, finding 1b: after a rebuild, a timely submit that is then held across the
+///     gate deadline keeps its gated commands and does not fail its plate.
+#[test]
+fn timely_submit_held_across_gate_deadline_keeps_gated_commands() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host();
+    let applied_log = ParamRecorder::new();
+    let level = UnitParam::Send(InputSendParam::EchoLevel);
+
+    let init = vec![(level, 0.25)];
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+    u.activated(Activated { name: "echo".into(), source: false, latency: 64 });
+    let t1 = u.terms().unwrap();
+    let op1 = ok_op(u.submit(ClampEcho::new(0.25, 64, applied_log.clone()), t1));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Rebuild under a controllable clock, then open a take on the new engine so the latent reseat is Held.
+    let t0 = Instant::now();
+    host.core.state.lock().unwrap().model.set_clock(t0);
+    device.rebuild_at(44_100, 256);
+    let Back::Evicted { unit: old_box, .. } = u.take_back().expect("evicted") else { panic!("expected Evicted") };
+    start_take(&device);
+
+    // Commands sent while reseating enter the gate.
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.6) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+
+    // Timely submit before the deadline: held because of the open take.
+    let t2 = u.terms().unwrap();
+    let op2 = ok_op(u.submit(old_box, t2));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while u.poll(op2) != OpState::Held {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        assert!(Instant::now() < deadline, "reseat never entered Held");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // Advance the controllable clock past GATE_DEADLINE while the timely submit is still Held;
+    // flush the gate via a feed drain and send another unit command after the deadline.
+    host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(5));
+    let mut ev = Vec::new();
+    let mid = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 0, "timely submit must not drop gated commands");
+    assert_eq!(mid.chains.chains[0].units[0].state, PlateState::Waiting, "plate stays Waiting, not Failed");
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.9) }).unwrap();
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 0, "post-deadline command stays gated while submit is held");
+
+    // End the take: reseat applies and all gated commands reach the unit in order.
+    stop_take(&device);
+    assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    host.drain_feed(&mut ev);
+    assert!(device.wait_blocks(10));
+    host.drain_feed(&mut ev);
+
+    assert_eq!(applied_log.snapshot(), vec![0.6, 0.9], "all gated param commands reached the reseated unit in order");
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "gated bypass command reached the reseated unit");
+    u.release();
+}
+
+/// 24. Review round C, finding 2: a remove queued behind a withdraw always delivers one terminal
+///     box (`Back::Removed`) or `Back::Dismissed`, never leaving the owner waiting.
+#[test]
+fn remove_queued_behind_withdraw_delivers_terminal_box_or_dismissed() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    // Part A: withdraw and remove queued back-to-back while the withdrawing row still holds its box.
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("w")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op_in = ok_op(u.submit(LatentUnit::new(101, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.stop();
+    let op_w = u.withdraw().unwrap();
+    let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+    device.resume();
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(15));
+
+    let mut backs = Vec::new();
+    while let Some(b) = u.take_back() {
+        backs.push(b);
+    }
+    let has_terminal = backs.iter().any(|b| matches!(b, Back::Removed(_) | Back::Dismissed));
+    assert!(
+        has_terminal,
+        "owner must receive Back::Removed or Back::Dismissed after remove queued behind withdraw; got {} item(s)",
+        backs.len()
+    );
+    let terminal_count = backs.iter().filter(|b| matches!(b, Back::Removed(_) | Back::Dismissed)).count();
+    assert_eq!(terminal_count, 1, "owner gets exactly one terminal signal");
+    let box_count = backs
+        .iter()
+        .filter(|b| matches!(b, Back::Removed(_) | Back::Withdrawn { .. }))
+        .count();
+    assert_eq!(box_count, 1, "owner gets its unit box back once");
+    u.release();
+
+    // Part B: withdraw finishes and owner takes Back::Withdrawn (not parked), then remove_unit
+    // removes the empty seat -> owner receives Back::Dismissed.
+    let u2 = host.unit(0, 20, Spec::Plugin(plugin_ref("w2")), 0, false).unwrap();
+    let op_in2 = ok_op(u2.submit(LatentUnit::new(202, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let op_w2 = u2.withdraw().unwrap();
+    assert_eq!(host.wait_op(op_w2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let back_w2 = loop {
+        if let Some(b) = u2.take_back() {
+            break b;
+        }
+        assert!(Instant::now() < deadline, "withdrawn box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(matches!(back_w2, Back::Withdrawn { .. }));
+    let Removal::Sent(op_rem2) = host.remove_unit(20).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(op_rem2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(matches!(u2.take_back(), Some(Back::Dismissed)), "owner gets Back::Dismissed for withdrawn seat");
+    assert!(u2.take_back().is_none());
+    u2.release();
+
+    // Part C: latent unit with withdraw + remove queued during an open take (Withdraw completes
+    // while Remove is Held): owner still gets one terminal Back::Removed, never left waiting.
+    let u3 = host.unit(0, 30, Spec::Plugin(plugin_ref("w3")), 0, false).unwrap();
+    u3.activated(Activated { name: "w3".into(), source: false, latency: 64 });
+    let op_in3 = ok_op(u3.submit(LatentUnit::new(303, 64, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in3, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    start_take(&device);
+    let op_w3 = u3.withdraw().unwrap();
+    let Removal::Sent(op_rem3) = host.remove_unit(30).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(op_w3, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(15));
+    stop_take(&device);
+    assert_eq!(host.wait_op(op_rem3, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut backs3 = Vec::new();
+    while let Some(b) = u3.take_back() {
+        backs3.push(b);
+    }
+    assert!(
+        backs3.iter().filter(|b| matches!(b, Back::Removed(_) | Back::Dismissed)).count() == 1,
+        "held remove behind withdraw delivers one terminal signal"
+    );
+    u3.release();
+}
+
+/// 25. Review round C, finding 3: `poll` stays idempotent past 1,024 later completions (and across
+///     a rebuild) while the row has not been released.
+#[test]
+fn poll_remains_idempotent_past_1024_completions() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    device.stop();
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let ua = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 0, false).unwrap();
+    let ub = host.unit(0, 20, Spec::Plugin(plugin_ref("b")), 1, false).unwrap();
+    let uc = host.unit(0, 30, Spec::Plugin(plugin_ref("c")), 2, false).unwrap();
+    let t = ua.terms().unwrap();
+
+    let op_applied = ok_op(ua.submit(LatentUnit::new(1, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_applied, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let past = max_chain_latency(48_000) + 1;
+    let op_refused = ok_op(ub.submit(LatentUnit::new(2, past, stops.clone()), t));
+    assert_eq!(host.wait_op(op_refused, Duration::from_secs(2)).unwrap(), OpState::Refused(SeatRefusal::Latency));
+    assert!(matches!(ub.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
+
+    let op_c = ok_op(uc.submit(LatentUnit::new(3, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_c, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Run 1,100 later completions on slot 0 (move C back and forth while idle).
+    let mut ev = Vec::new();
+    for i in 0..1100usize {
+        let target = if i % 2 == 0 { 0 } else { 1 };
+        let op_mv = host.move_unit(30, target).unwrap();
+        super::unit_host::service_if_idle(&host.core);
+        ev.clear();
+        host.drain_feed(&mut ev);
+        assert_eq!(uc.poll(op_mv), OpState::Applied);
+    }
+
+    assert_eq!(ua.poll(op_applied), OpState::Applied, "Applied outcome must survive >1024 later completions");
+    assert_eq!(uc.poll(op_c), OpState::Applied, "same-row Applied outcome must survive >1024 later completions");
+    assert_eq!(
+        ub.poll(op_refused),
+        OpState::Refused(SeatRefusal::Latency),
+        "Refused outcome must survive >1024 later completions"
+    );
+
+    // Across a rebuild, already-settled ops must still report their terminal outcome, never Rebuilt.
+    device.rebuild_at(44_100, 256);
+    assert_eq!(ua.poll(op_applied), OpState::Applied, "Applied outcome must not flip to Rebuilt");
+    assert_eq!(uc.poll(op_c), OpState::Applied, "same-row Applied outcome must not flip to Rebuilt");
+    assert_eq!(
+        ub.poll(op_refused),
+        OpState::Refused(SeatRefusal::Latency),
+        "Refused outcome must not flip to Rebuilt"
+    );
+    assert!(ua.take_back().is_some());
+    assert!(uc.take_back().is_some());
+    ua.release();
+    ub.release();
+    uc.release();
+}
+
+/// 26. Review round C, finding 6: with no feed ticking, an install submitted through `UnitHost`
+///     reads `Applied` from repeated `poll`s alone (both running and idle).
+#[test]
+fn poll_alone_settles_install_with_no_feed_ticking() {
+    // Part A: running device, no feed drain, no wait_op.
+    {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host();
+        let u = host.unit(0, 10, Spec::Plugin(plugin_ref("run")), 0, false).unwrap();
+        let t = u.terms().unwrap();
+        let op = ok_op(u.submit(LatentUnit::new(1, 0, Arc::new(AtomicUsize::new(0))), t));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while u.poll(op) != OpState::Applied {
+            assert!(Instant::now() < deadline, "running: poll alone never reached Applied with no feed ticking");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        u.release();
+    }
+    // Part B: idle (stopped) device, no feed drain, no wait_op.
+    {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        device.stop();
+        let host = device.host();
+        let u = host.unit(0, 10, Spec::Plugin(plugin_ref("idle")), 0, false).unwrap();
+        let t = u.terms().unwrap();
+        let op = ok_op(u.submit(LatentUnit::new(2, 0, Arc::new(AtomicUsize::new(0))), t));
+        assert_eq!(u.poll(op), OpState::Applied, "idle: poll alone must service and drain to Applied");
+        u.release();
+    }
 }

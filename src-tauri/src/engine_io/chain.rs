@@ -24,8 +24,9 @@ use super::unit_host::{Activated, Back, Op, OpState, Params, Spec, Table};
 /// unit's plugin and its tone are one key.
 pub(crate) type PluginRef = crate::host::tone::ToneIdentity;
 
-/// Maximum settled op outcomes kept for idempotent [`super::unit_host::UnitHost::poll`] calls.
-const MAX_SETTLED_OPS: usize = 1024;
+/// Bound on settled op outcomes kept for ops without a live row (e.g. a `Remove` op whose owner
+/// already called `release`, or a rowless test op). Live rows keep all their own outcomes until release.
+const MAX_UNOWNED_SETTLED_OPS: usize = 256;
 
 /// Where a unit stands for the command gate ([`super::unit_host::Gate`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +105,6 @@ pub(crate) enum PendingKind {
         source: bool,
     },
     Remove {
-        was_parked: bool,
         owner_token: Option<InstallToken>,
     },
     Withdraw,
@@ -202,12 +202,16 @@ pub(crate) struct Model {
     pub(crate) rev: u64,
     next_op: u64,
     slots: [SlotModel; SLOT_COUNT],
-    settled: BTreeMap<u64, OpState>,
+    /// Settled outcomes for ops with no live row (a `Remove` whose owner already released, or rowless test ops).
+    settled_unowned: VecDeque<(u64, OpState)>,
     cached_rev: u64,
     cached_chains: Arc<[ChainState; SLOT_COUNT]>,
     /// The last snapshot of the generation before `generation`, frozen as the model advanced: the feed
     /// gets it while the swap has not yet published the new generation ([`Model::snapshot_for`]).
     outgoing: ChainRev,
+    /// Controllable test clock for `reseating_since` and `expire_reseats`.
+    #[cfg(test)]
+    clock: Option<Instant>,
 }
 
 impl Model {
@@ -222,26 +226,53 @@ impl Model {
             rev: 0,
             next_op: 1,
             slots: std::array::from_fn(|_| SlotModel::default()),
-            settled: BTreeMap::new(),
+            settled_unowned: VecDeque::new(),
             cached_rev: 0,
             outgoing: ChainRev { generation: 0, rev: 0, chains: empty.clone() },
             cached_chains: empty,
+            #[cfg(test)]
+            clock: None,
         }
+    }
+
+    fn now(&self, wall: Instant) -> Instant {
+        #[cfg(test)]
+        if let Some(t) = self.clock {
+            return t;
+        }
+        wall
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, now: Instant) {
+        self.clock = Some(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_clock(&mut self, by: Duration) {
+        let base = self.clock.unwrap_or_else(Instant::now);
+        self.clock = Some(base + by);
     }
 
     fn bump_rev(&mut self) {
         self.rev += 1;
     }
 
-    fn record_settled(&mut self, op_n: u64, state: OpState) {
-        self.settled.insert(op_n, state);
-        while self.settled.len() > MAX_SETTLED_OPS {
-            if let Some(oldest) = self.settled.keys().next().copied() {
-                self.settled.remove(&oldest);
-            } else {
-                break;
-            }
+    fn record_settled(&mut self, table: &mut Table, op: Op, state: OpState) {
+        if !table.record_settled(op, state) {
+            self.record_unowned_settled(op.n(), state);
         }
+    }
+
+    pub(crate) fn record_unowned_settled(&mut self, op_n: u64, state: OpState) {
+        if let Some((_, existing)) = self.settled_unowned.iter_mut().find(|(n, _)| *n == op_n) {
+            *existing = state;
+            return;
+        }
+        if self.settled_unowned.len() >= MAX_UNOWNED_SETTLED_OPS {
+            self.settled_unowned.pop_front();
+        }
+        self.settled_unowned.push_back((op_n, state));
     }
 
     pub(crate) fn mint_op(&mut self, install: InstallToken, generation: u64, slot: usize) -> Op {
@@ -258,8 +289,11 @@ impl Model {
         self.slots.get(slot).is_some_and(SlotModel::held)
     }
 
-    pub(crate) fn poll(&self, op: Op) -> OpState {
-        if let Some(&state) = self.settled.get(&op.n()) {
+    pub(crate) fn poll(&self, table: &Table, op: Op) -> OpState {
+        if let Some(state) = table.settled(op) {
+            return state;
+        }
+        if let Some(&(_, state)) = self.settled_unowned.iter().rev().find(|&&(n, _)| n == op.n()) {
             return state;
         }
         let slot = usize::from(op.slot());
@@ -323,6 +357,7 @@ impl Model {
         }
     }
 
+    /// The seq of the first feed frame that told `id`'s plate (`EngineHost::told`).
     pub(crate) fn told(&self, id: UnitId) -> Option<u64> {
         self.find_plate(id).and_then(|(_, p)| p.told_seq)
     }
@@ -550,6 +585,14 @@ impl Model {
             .any(|p| p.unit == id && matches!(p.kind, PendingKind::Install { .. }))
     }
 
+    /// Whether `id` currently has a pending withdraw in `slot`'s queue.
+    pub(crate) fn has_pending_withdraw(&self, slot: usize, id: UnitId) -> bool {
+        self.slots[slot]
+            .pending
+            .iter()
+            .any(|p| p.unit == id && matches!(p.kind, PendingKind::Withdraw))
+    }
+
     /// Translate plate index `to_plate` for moving `id` within `slot` into the engine index when
     /// the pushed `Move` executes (accounting for failed plates and pending removals/installs ahead).
     /// Also returns the plates that follow the target, the mover excluded (`PendingKind::Move::before`).
@@ -621,7 +664,7 @@ impl Model {
             }
             SeatOutcome::Applied => {
                 let head = self.slots[s].pending.pop_front().expect("checked head");
-                self.record_settled(head.op.n(), OpState::Applied);
+                self.record_settled(table, head.op, OpState::Applied);
                 let mut rev_bump = false;
                 match head.kind {
                     PendingKind::Install { token, is_reload, replaces, .. } => {
@@ -657,15 +700,14 @@ impl Model {
                             rev_bump |= !plate.legacy;
                         }
                     }
-                    PendingKind::Remove { was_parked, owner_token } => {
+                    PendingKind::Remove { owner_token } => {
                         if let Some(pos) = self.slots[s].find(unit) {
                             rev_bump |= !self.slots[s].plates[pos].legacy;
                             self.slots[s].plates.remove(pos);
                         }
-                        if was_parked {
-                            if let Some(tok) = owner_token {
-                                table.post_back(tok, Back::Dismissed);
-                            }
+                        if let Some(tok) = owner_token {
+                            table.note_remove_settled(tok, head.op.n(), OpState::Applied);
+                            table.finish_remove(tok);
                         }
                     }
                     PendingKind::Withdraw => {
@@ -692,7 +734,7 @@ impl Model {
             }
             SeatOutcome::Refused(why) => {
                 let head = self.slots[s].pending.pop_front().expect("checked head");
-                self.record_settled(head.op.n(), OpState::Refused(why));
+                self.record_settled(table, head.op, OpState::Refused(why));
                 let mut rev_bump = false;
                 match head.kind {
                     PendingKind::Install { token, is_reload, .. } => {
@@ -715,11 +757,15 @@ impl Model {
                             rev_bump |= !plate.legacy;
                         }
                     }
-                    PendingKind::Remove { .. } | PendingKind::Withdraw | PendingKind::Move { .. } => {
+                    PendingKind::Remove { owner_token } => {
+                        if let Some(tok) = owner_token {
+                            table.note_remove_settled(tok, head.op.n(), OpState::Refused(why));
+                            table.cancel_remove(tok);
+                        }
                         if let Some(pos) = self.slots[s].find(unit) {
                             let plate = &mut self.slots[s].plates[pos];
                             plate.held = false;
-                            if matches!(head.kind, PendingKind::Remove { .. }) && plate.state == PlateState::Leaving {
+                            if plate.state == PlateState::Leaving {
                                 plate.state = if plate.parked {
                                     PlateState::Failed
                                 } else if plate.seated_in_engine {
@@ -728,6 +774,13 @@ impl Model {
                                     PlateState::Failed
                                 };
                             }
+                            rev_bump |= !plate.legacy;
+                        }
+                    }
+                    PendingKind::Withdraw | PendingKind::Move { .. } => {
+                        if let Some(pos) = self.slots[s].find(unit) {
+                            let plate = &mut self.slots[s].plates[pos];
+                            plate.held = false;
                             rev_bump |= !plate.legacy;
                         }
                     }
@@ -863,6 +916,7 @@ impl Model {
         table: &mut Table,
         now: Instant,
     ) {
+        let now = self.now(now);
         // Index returned boxes by install token for pending-op settling.
         let ret_info: BTreeMap<InstallToken, (Left, bool)> =
             returned.iter().map(|(_, r)| (r.token, (r.left, r.bypassed))).collect();
@@ -878,6 +932,7 @@ impl Model {
         }
 
         let mut rev_bump = false;
+        let mut removed_owners: Vec<InstallToken> = Vec::new();
         // 1. Settle every pending op in push order per slot.
         for s in 0..SLOT_COUNT {
             while let Some(head) = self.slots[s].pending.pop_front() {
@@ -888,7 +943,7 @@ impl Model {
                         let left = ret_info.get(&token).copied().or_else(|| table.received(token));
                         match left {
                             Some((Left::Refused(why), _)) => {
-                                self.record_settled(head.op.n(), OpState::Refused(why));
+                                self.record_settled(table, head.op, OpState::Refused(why));
                                 if is_reload {
                                     table.clear_superseded_for_failed_reload(head.unit, token);
                                     if let Some(pos) = self.slots[s].find(head.unit) {
@@ -902,10 +957,10 @@ impl Model {
                                 }
                             }
                             Some((Left::Unsent, _)) | None => {
-                                self.record_settled(head.op.n(), OpState::Rebuilt);
+                                self.record_settled(table, head.op, OpState::Rebuilt);
                             }
                             Some((Left::Evicted | Left::Removed | Left::Withdrawn | Left::Replaced, bypassed)) => {
-                                self.record_settled(head.op.n(), OpState::Applied);
+                                self.record_settled(table, head.op, OpState::Applied);
                                 table.promote_reload(token);
                                 if let Some(old_id) = replaces {
                                     if old_id != head.unit {
@@ -939,23 +994,22 @@ impl Model {
                             }
                         }
                     }
-                    PendingKind::Remove { was_parked, owner_token } => {
-                        self.record_settled(head.op.n(), OpState::Applied);
+                    PendingKind::Remove { owner_token } => {
+                        self.record_settled(table, head.op, OpState::Applied);
                         if let Some(pos) = self.slots[s].find(head.unit) {
                             rev_bump |= !self.slots[s].plates[pos].legacy;
                             self.slots[s].plates.remove(pos);
                         }
-                        if was_parked {
-                            if let Some(tok) = owner_token {
-                                table.post_back(tok, Back::Dismissed);
-                            }
+                        if let Some(tok) = owner_token {
+                            table.note_remove_settled(tok, head.op.n(), OpState::Applied);
+                            removed_owners.push(tok);
                         }
                     }
                     PendingKind::Withdraw => {
-                        self.record_settled(head.op.n(), OpState::Applied);
+                        self.record_settled(table, head.op, OpState::Applied);
                     }
                     PendingKind::Move { before, .. } => {
-                        self.record_settled(head.op.n(), OpState::Applied);
+                        self.record_settled(table, head.op, OpState::Applied);
                         if let Some(pos) = self.slots[s].find(head.unit) {
                             let mut plate = self.slots[s].plates.remove(pos);
                             plate.held = false;
@@ -986,6 +1040,12 @@ impl Model {
                 }
             }
             table.file_returned_rebuild(slot, ret, is_pending_remove);
+        }
+
+        // Settle any pending removal whose box was already out of the engine before this handoff
+        // (and therefore did not come back in `returned` above).
+        for tok in removed_owners {
+            table.finish_remove(tok);
         }
 
         // 3. Transition every remaining plate to the new (empty) engine.
@@ -1024,6 +1084,7 @@ impl Model {
     /// Expire any reseating plate that was not re-submitted within `deadline` of its swap:
     /// its plate reads `failed`, and its id is returned so the gate drops and counts its commands.
     pub(crate) fn expire_reseats(&mut self, now: Instant, deadline: Duration) -> Vec<UnitId> {
+        let now = self.now(now);
         let mut expired = Vec::new();
         let mut rev_bump = false;
         for slot in &mut self.slots {
@@ -1048,12 +1109,18 @@ impl Model {
     }
 
     pub(crate) fn unit_gate_status(&self, id: UnitId) -> GateStatus {
-        let Some((_, plate)) = self.find_plate(id) else {
+        let Some((slot, plate)) = self.find_plate(id) else {
             return GateStatus::Gone;
         };
+        if plate.parked && !self.has_pending_install(slot, id) {
+            return GateStatus::Gone;
+        }
+        if plate.withdrawn || self.has_pending_withdraw(slot, id) {
+            return GateStatus::Reseating;
+        }
         if plate.seated_in_engine {
             GateStatus::Seated
-        } else if plate.reseating_since.is_some() {
+        } else if plate.reseating_since.is_some() || self.has_pending_install(slot, id) {
             GateStatus::Reseating
         } else {
             GateStatus::Gone

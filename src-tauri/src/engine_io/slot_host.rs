@@ -17,7 +17,7 @@
 //! instead of going unseen, and a held removal during a take waits for the take to end instead of
 //! timing out and leaking the plugin.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -108,8 +108,11 @@ impl SlotHost {
                     abandoned: false,
                     released: false,
                     id_freed: false,
+                    removing: false,
                     in_engine: RowEngineState::Out,
                     mailbox,
+                    settled: BTreeMap::new(),
+                    last_remove_settled: None,
                     legacy_owner: self.token,
                 });
                 return Ok(());
@@ -135,8 +138,11 @@ impl SlotHost {
                 abandoned: false,
                 released: false,
                 id_freed: false,
+                removing: false,
                 in_engine: RowEngineState::Queued { generation: gen },
                 mailbox: VecDeque::new(),
+                settled: BTreeMap::new(),
+                last_remove_settled: None,
                 legacy_owner: self.token,
             });
             let op = state.model.mint_op(install, gen, self.slot);
@@ -213,7 +219,7 @@ impl SlotHost {
             if let Some(back) = row.mailbox.pop_front() {
                 let unit = unpack_back(self.slot, back);
                 state.model.remove_plate(self.slot, id);
-                state.table.release_row(install);
+                let _ = state.table.release_row(install);
                 return Ok(unit);
             }
             let Some(port) = port_guard.as_mut() else {
@@ -224,6 +230,7 @@ impl SlotHost {
             }
             let gen = self.core.engine_gen.load(Acquire);
             if let Some(row) = state.table.row_mut(install) {
+                row.removing = true;
                 if row.in_engine.generation() == Some(gen) {
                     row.in_engine = RowEngineState::Removing { generation: gen };
                 }
@@ -236,7 +243,7 @@ impl SlotHost {
                     unit: id,
                     seat_op: SeatOp::Remove,
                     state: OpState::Pending,
-                    kind: PendingKind::Remove { was_parked: false, owner_token: Some(install) },
+                    kind: PendingKind::Remove { owner_token: Some(install) },
                 },
             );
             (UnitHost::new(self.core.clone(), self.slot, id, install), id, op)
@@ -301,7 +308,7 @@ impl SlotHost {
         let back = row.mailbox.pop_front()?;
         let unit = unpack_back(self.slot, back);
         state.model.remove_plate(self.slot, id);
-        state.table.release_row(install);
+        let _ = state.table.release_row(install);
         unit
     }
 
@@ -316,7 +323,7 @@ impl SlotHost {
             let install = row.token;
             state.model.remove_plate(self.slot, id);
             state.table.abandon_row(install);
-            state.table.release_row(install);
+            let _ = state.table.release_row(install);
         }
         if let Some(port) = port_guard.as_mut() {
             state.table.reap_port(self.slot, port);

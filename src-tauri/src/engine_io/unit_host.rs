@@ -57,6 +57,10 @@ impl Op {
         Op { install, n, generation, slot }
     }
 
+    pub(crate) fn install(self) -> InstallToken {
+        self.install
+    }
+
     pub(crate) fn n(self) -> u64 {
         self.n
     }
@@ -189,8 +193,15 @@ pub(crate) struct Row {
     pub(crate) released: bool,
     /// True after `UnitHost::failed` freed `id` on a failed add (before `release`).
     pub(crate) id_freed: bool,
+    /// True while a removal for this row has been queued and its terminal box/`Dismissed` has not
+    /// yet been filed into `mailbox`.
+    pub(crate) removing: bool,
     pub(crate) in_engine: RowEngineState,
     pub(crate) mailbox: VecDeque<Back>,
+    /// Terminal outcomes of ops belonging to this row, kept until the row is released so `poll` stays idempotent.
+    pub(crate) settled: BTreeMap<u64, OpState>,
+    /// Last settled `Remove` op for this row, handed off on `release` so a concurrent `wait_op` still reads it.
+    pub(crate) last_remove_settled: Option<(u64, OpState)>,
     /// Legacy `SlotHost` owner id (0 for chain rows).
     pub(crate) legacy_owner: u64,
 }
@@ -351,6 +362,62 @@ impl Table {
         }
     }
 
+    pub(crate) fn record_settled(&mut self, op: Op, state: OpState) -> bool {
+        if let Some(row) = self.row_mut(op.install()) {
+            if !row.released {
+                row.settled.insert(op.n(), state);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn note_remove_settled(&mut self, token: InstallToken, op_n: u64, state: OpState) {
+        if let Some(row) = self.row_mut(token) {
+            row.last_remove_settled = Some((op_n, state));
+        }
+    }
+
+    pub(crate) fn settled(&self, op: Op) -> Option<OpState> {
+        self.row(op.install()).and_then(|r| r.settled.get(&op.n()).copied())
+    }
+
+    /// Settle a row whose `Remove` op applied: if its box has already left the engine (`Out`) and was
+    /// not yet turned into a terminal `Back::Removed`, convert any unclaimed non-terminal box in its
+    /// mailbox to `Back::Removed`, else post `Back::Dismissed`. If the box is still in the engine or
+    /// port (`in_engine != Out`), leave `row.removing = true` so `file_returned` converts it on arrival.
+    pub(crate) fn finish_remove(&mut self, token: InstallToken) {
+        let Some(row) = self.row_mut(token) else { return };
+        if !row.removing || row.in_engine != RowEngineState::Out {
+            return;
+        }
+        row.removing = false;
+        if row.abandoned || row.released || row.superseded {
+            return;
+        }
+        for back in &mut row.mailbox {
+            if matches!(back, Back::Withdrawn { .. } | Back::Evicted { .. } | Back::Refused { .. }) {
+                let old = std::mem::replace(back, Back::Dismissed);
+                match old {
+                    Back::Withdrawn { unit, .. }
+                    | Back::Evicted { unit, .. }
+                    | Back::Refused { unit, .. } => {
+                        *back = Back::Removed(unit);
+                        return;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        row.mailbox.push_back(Back::Dismissed);
+    }
+
+    pub(crate) fn cancel_remove(&mut self, token: InstallToken) {
+        if let Some(row) = self.row_mut(token) {
+            row.removing = false;
+        }
+    }
+
     pub(crate) fn post_back(&mut self, token: InstallToken, back: Back) {
         if let Some(row) = self.row_mut(token) {
             if row.abandoned || row.released {
@@ -391,7 +458,8 @@ impl Table {
         let back = if row.superseded {
             // The outgoing row of a same-id reload never re-activates.
             Back::Superseded(ret.unit)
-        } else if pending_remove {
+        } else if pending_remove || row.removing {
+            row.removing = false;
             Back::Removed(ret.unit)
         } else {
             match ret.left {
@@ -422,12 +490,16 @@ impl Table {
             .count()
     }
 
-    /// Release row `token`: leak any unclaimed boxes in its mailbox; remove the row immediately if
-    /// its box is already out of the engine (otherwise keep as a tombstone so a late box leaks).
-    pub(crate) fn release_row(&mut self, token: InstallToken) {
-        let Some(pos) = self.rows.iter().position(|r| r.token == token) else { return };
+    /// Release row `token`: leak any unclaimed boxes in its mailbox, drop its settled op outcomes,
+    /// and remove the row immediately if its box is already out of the engine (otherwise keep as a
+    /// tombstone so a late box leaks). Returns the row's last settled `Remove` op, if any, so a
+    /// concurrent `wait_op` caller can still read it.
+    pub(crate) fn release_row(&mut self, token: InstallToken) -> Option<(u64, OpState)> {
+        let pos = self.rows.iter().position(|r| r.token == token)?;
         let row = &mut self.rows[pos];
         row.released = true;
+        row.settled.clear();
+        let remove_settled = row.last_remove_settled.take();
         while let Some(back) = row.mailbox.pop_front() {
             forget_back(back);
         }
@@ -435,6 +507,7 @@ impl Table {
             self.rows.remove(pos);
             self.received.remove(&token);
         }
+        remove_settled
     }
 
     /// Abandon row `token`: leak any boxes already waiting and mark it so any future box leaks.
@@ -578,6 +651,10 @@ impl HostState {
             gate: Gate::new(),
             gate_deadline: GATE_DEADLINE,
         }
+    }
+
+    pub(crate) fn poll(&self, op: Op) -> OpState {
+        self.model.poll(&self.table, op)
     }
 }
 
@@ -795,7 +872,7 @@ pub(crate) fn wait_op_inner(core: &Core, op: Op, bound: Duration, return_on_held
         let closing = core.closing.load(Acquire);
         let (state, slot_held) = {
             let st = core.state.lock().unwrap_or_else(|e| e.into_inner());
-            (st.model.poll(op), st.model.slot_held(usize::from(op.slot())))
+            (st.poll(op), st.model.slot_held(usize::from(op.slot())))
         };
         match state {
             OpState::Applied | OpState::Refused(_) | OpState::Rebuilt => return Ok(state),
@@ -903,7 +980,7 @@ impl UnitHost {
         let Some(row) = state.table.row(self.install) else {
             return Err((unit, SubmitError::Superseded));
         };
-        if row.superseded || row.released || row.abandoned {
+        if row.superseded || row.released || row.abandoned || row.removing {
             return Err((unit, SubmitError::Superseded));
         }
         let is_reload = row.is_reload;
@@ -941,6 +1018,8 @@ impl UnitHost {
         state.table.mark_queued(self.install, cur_terms.generation);
         if !is_reload {
             if let Some((_, plate)) = state.model.find_plate_mut(self.id) {
+                // Submitting in time meets the reseat deadline; a submit held past it keeps its gate.
+                plate.reseating_since = None;
                 if plate.state == PlateState::Failed && !plate.parked {
                     // Late submit after GATE_DEADLINE still seats it.
                     plate.state = PlateState::Loading;
@@ -985,7 +1064,7 @@ impl UnitHost {
         let Some(row) = state.table.row(self.install) else {
             return Err(SubmitError::Superseded);
         };
-        if row.superseded || row.released || row.abandoned {
+        if row.superseded || row.released || row.abandoned || row.removing {
             return Err(SubmitError::Superseded);
         }
         if row.in_engine.generation() != Some(gen) {
@@ -1011,10 +1090,20 @@ impl UnitHost {
         Ok(op)
     }
 
-    /// Where `op` stands. Idempotent.
+    /// Where `op` stands. Idempotent. While `op` has not settled, services the port if no device
+    /// runs and drains the engine's event ring when the feed is stale, without sleeping.
     pub fn poll(&self, op: Op) -> OpState {
+        let current = {
+            let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.poll(op)
+        };
+        if !matches!(current, OpState::Pending | OpState::Held) {
+            return current;
+        }
+        service_if_idle(&self.core);
+        drain_if_stale(&self.core);
         let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.model.poll(op)
+        state.poll(op)
     }
 
     /// The next box in this row's mailbox; every owner turn.
@@ -1073,7 +1162,9 @@ impl UnitHost {
         if is_reload {
             state.model.cancel_reloading(self.slot, self.id);
         }
-        state.table.release_row(self.install);
+        if let Some((op_n, op_state)) = state.table.release_row(self.install) {
+            state.model.record_unowned_settled(op_n, op_state);
+        }
     }
 }
 
@@ -1128,8 +1219,11 @@ impl EngineHost {
             abandoned: false,
             released: false,
             id_freed: false,
+            removing: false,
             in_engine: RowEngineState::Out,
             mailbox: VecDeque::new(),
+            settled: BTreeMap::new(),
+            last_remove_settled: None,
             legacy_owner: 0,
         });
         Ok(UnitHost::new(self.core.clone(), slot, id, token))
@@ -1166,8 +1260,11 @@ impl EngineHost {
             abandoned: false,
             released: false,
             id_freed: false,
+            removing: false,
             in_engine: RowEngineState::Out,
             mailbox: VecDeque::new(),
+            settled: BTreeMap::new(),
+            last_remove_settled: None,
             legacy_owner: 0,
         });
         Ok(UnitHost::new(self.core.clone(), slot, id, token))
@@ -1238,13 +1335,14 @@ impl EngineHost {
             return Err(format!("slot {slot}'s port is full"));
         }
         let gen = self.core.engine_gen.load(Acquire);
-        let was_parked = parked || (!has_pending_install && state.table.row(owner_token.unwrap_or(0)).is_some_and(|r| r.in_engine == RowEngineState::Out));
-        if !was_parked {
-            if let Some(tok) = owner_token {
-                if let Some(row) = state.table.row_mut(tok) {
-                    if row.in_engine.generation() == Some(gen) {
-                        row.in_engine = RowEngineState::Removing { generation: gen };
-                    }
+        if let Some(tok) = owner_token {
+            if let Some(row) = state.table.row_mut(tok) {
+                row.removing = true;
+                if matches!(
+                    row.in_engine,
+                    RowEngineState::Queued { generation } | RowEngineState::Seated { generation } if generation == gen
+                ) {
+                    row.in_engine = RowEngineState::Removing { generation: gen };
                 }
             }
         }
@@ -1257,7 +1355,7 @@ impl EngineHost {
                 unit: id,
                 seat_op: SeatOp::Remove,
                 state: OpState::Pending,
-                kind: PendingKind::Remove { was_parked, owner_token },
+                kind: PendingKind::Remove { owner_token },
             },
         );
         Ok(Removal::Sent(op))
@@ -1314,7 +1412,7 @@ impl EngineHost {
         state.model.chain_told(rev, seq);
     }
 
-    /// The seq of the last frame that told `id`'s plate: a reload's `since` is checked against it.
+    /// The seq of the first frame that told `id`'s plate: a reload's `since` is checked against it.
     pub fn told(&self, id: UnitId) -> Option<u64> {
         let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         state.model.told(id)
