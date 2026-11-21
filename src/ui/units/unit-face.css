@@ -1,0 +1,381 @@
+/* A built-in unit's face (UnitFace.tsx), the family every face shares, as the accepted
+   docs/redesign/ott.css draws it, on the app.css header's tokens: one piece of gear, 900x540, its glass on
+   top, its name, power switch and maker's mark at its foot left, programmed knobs on one row (the owner
+   chose them over a rendered cap). Each face's own (its glass, its knobs' places) is in its own sheet
+   (ott-face.css, echo-face.css). It opens hanging under the slot row from its plate; the player moves it
+   and scales it from its corner grip; free-standing, it lets every press beside it through. Where the window cannot hold it, it reflows narrow (`.uface--narrow`,
+   900x382), never scaling its type under the base size. */
+
+/* the faces' layer (FaceHost.tsx): over the row's tags (30) and the lanes, under the row's popovers (40);
+   it takes no pointer, a face does. Each face's place is its own layer in it, the last touched on top. */
+.uface-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+}
+.uface-layer[hidden] {
+  display: none;
+}
+.uface-place {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.uface-place > .uface {
+  pointer-events: auto;
+}
+
+.uface {
+  position: fixed;
+  width: 900px;
+  height: 540px;
+  transform-origin: 0 0;
+  border-radius: 10px;
+  isolation: isolate;
+  overflow: hidden;
+  outline: none;
+  color: var(--text);
+  background: var(--grain), linear-gradient(#1d2025, #17191d 46%, #141619);
+  background-blend-mode: overlay, normal;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.45), 0 0 0 1px #07080a, 0 2px 2px rgba(0, 0, 0, 0.6),
+    0 10px 18px rgba(0, 0, 0, 0.45), 0 30px 60px rgba(0, 0, 0, 0.5);
+  font: 600 13px / 1 var(--font-legend);
+  /* the panel carries the face: a press and drag on it moves it */
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.uface--moving {
+  cursor: grabbing;
+}
+.uface:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+.uface > * {
+  position: absolute;
+}
+.uface__u {
+  margin-left: 0.22em;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* ---- the glass: the main screen's bezel and glass, grown ---- */
+.uface__bezel {
+  left: 20px;
+  top: 20px;
+  width: 860px;
+  height: 240px;
+  padding: 4px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #050607 0%, #0b0d10 50%, #22262b 100%);
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.uface__glass {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--glass);
+  box-shadow: inset 0 2px 0 #000, inset 0 3px 8px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.uface__glass::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 1px;
+  height: 22px;
+  pointer-events: none;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(rgba(255, 255, 255, 0.035), transparent);
+}
+.uface__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  transition: opacity var(--motion);
+}
+/* bypassed: the glass reports nothing, so it sits back */
+.uface--byp .uface__canvas {
+  opacity: 0.4;
+}
+.uface__glass > span {
+  position: absolute;
+  z-index: 2;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ---- identity: the name, the power switch (the unit's bypass), the maker ---- */
+.uface__wm {
+  left: 18px;
+  top: 398px;
+  font: 700 76px / 1 var(--font-name);
+  letter-spacing: -0.035em;
+  color: #f2f0eb;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.55);
+}
+.uface__pwr {
+  left: 22px;
+  top: 501px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  appearance: none;
+  cursor: pointer;
+  background: linear-gradient(#383c43, #25282d);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 2px 0 #101215, 0 3px 4px rgba(0, 0, 0, 0.55);
+}
+.uface__pwr:hover:not(:disabled) {
+  background: linear-gradient(#41454d, #2b2e33);
+}
+.uface__pwr:disabled {
+  cursor: default;
+}
+.uface__pwr::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: var(--led-socket);
+  box-shadow: var(--led-socket-shade);
+  transition: background-color var(--motion), box-shadow var(--motion);
+}
+.uface__pwr.is-on::after {
+  background: var(--play);
+  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--play) 50%, transparent);
+}
+.uface__pwr:focus-visible,
+.uface__close:focus-visible,
+.uface__knob:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+.uface__maker {
+  left: 58px;
+  top: 508px;
+  font: 700 12px / 1 var(--font-legend);
+  letter-spacing: 0.26em;
+  color: var(--dim);
+}
+.uface__close {
+  right: 3px;
+  top: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.uface__close:hover {
+  color: var(--engaged);
+}
+/* the corner grip: three printed ridges, the face's size from its corner */
+.uface__grip {
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 0 52%, #4a5058 52% 57%, transparent 57% 66%, #4a5058 66% 71%, transparent 71% 80%, #4a5058 80% 85%, transparent 85%);
+  border-bottom-right-radius: 10px;
+}
+.uface__grip:hover {
+  background: linear-gradient(135deg, transparent 0 52%, #8f96a0 52% 57%, transparent 57% 66%, #8f96a0 66% 71%, transparent 71% 80%, #8f96a0 80% 85%, transparent 85%);
+}
+
+/* ---- the controls: knob centre at (--x, --y); legend and value on one line across the row ---- */
+.uface__ctl {
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+}
+.uface__ctl > * {
+  position: absolute;
+}
+.uface__knob {
+  left: var(--x);
+  top: var(--y);
+  width: var(--s);
+  height: var(--s);
+  margin: calc(var(--s) / -2) 0 0 calc(var(--s) / -2);
+  border-radius: 50%;
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+.uface__knob[aria-disabled='true'] {
+  cursor: default;
+}
+.uface__lgd,
+.uface__val {
+  left: var(--x);
+  transform: translateX(-50%);
+  text-align: center;
+  white-space: nowrap;
+}
+.uface__lgd {
+  top: 482px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 600 13px / 1 var(--font-legend);
+  letter-spacing: 0.1em;
+  color: var(--legend);
+}
+.uface__val {
+  top: 504px;
+  font: 500 16px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  transition: color var(--motion);
+}
+.uface__val.is-adjusting {
+  color: var(--engaged);
+}
+.uface__val .uface__u {
+  font-size: 13px;
+}
+.uface__ctl--hero .uface__lgd {
+  font-size: 15px;
+  letter-spacing: 0.14em;
+  color: var(--text);
+}
+.uface__ctl--hero .uface__val {
+  font-size: 19px;
+}
+.uface__tri {
+  width: 0;
+  height: 0;
+  border-left: 4.5px solid transparent;
+  border-right: 4.5px solid transparent;
+}
+
+/* printed ticks and the LED ring round the knob, centred on it */
+.uface__ticks,
+.uface__ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  overflow: visible;
+  pointer-events: none;
+}
+.uface__ring > i {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #23262b;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.85), 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.uface__ring > i.is-on {
+  background: var(--engaged);
+  box-shadow: 0 0 5px 1px rgba(255, 226, 186, 0.42), 0 0 1.5px rgba(255, 244, 228, 0.95);
+}
+
+/* the programmed knob: knurled body, cap, pointer */
+.uface__body,
+.uface__cap,
+.uface__ptr {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.uface__body {
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0) 42%, rgba(0, 0, 0, 0.5)),
+    repeating-conic-gradient(#2a2e34 0 var(--kd), #0a0b0d var(--kd) calc(var(--kd) * 2));
+  box-shadow: 0 1px 0 #000, 0 calc(var(--s) * 0.06) calc(var(--s) * 0.13) rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.6);
+}
+.uface__cap {
+  inset: calc(var(--s) * 0.075);
+  background: radial-gradient(120% 85% at 50% 0%, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 62%), linear-gradient(#2c3037, #16181c);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.15), inset 0 -1px 1px rgba(0, 0, 0, 0.55);
+}
+.uface__ptr {
+  inset: calc(var(--s) * 0.075);
+  transform: rotate(var(--a, 0deg));
+}
+.uface__ptr::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 3%;
+  width: var(--pw, 2px);
+  height: 36%;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: #f6f7f9;
+}
+.uface__knob:hover:not([aria-disabled='true']) .uface__cap {
+  background: radial-gradient(120% 85% at 50% 0%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 62%), linear-gradient(#30353c, #191b1f);
+}
+/* the hero: a chamfer between the knurl and the cap, and a wider top face */
+.uface__ctl--hero .uface__cap {
+  inset: calc(var(--s) * 0.085);
+  background: radial-gradient(110% 80% at 50% 0%, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0) 60%),
+    radial-gradient(circle at 50% 50%, #23262b 0 66%, #1d2024 67%, #191b1f 100%), #1b1d21;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75), 0 0 0 2px rgba(255, 255, 255, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -2px 3px rgba(0, 0, 0, 0.5);
+}
+.uface__ctl--hero .uface__ptr {
+  inset: calc(var(--s) * 0.085);
+}
+.uface__ctl--hero .uface__ptr::after {
+  top: 2.5%;
+  height: 30%;
+}
+
+/* ---- the narrow reflow (face-place.ts `NARROW`, where the window cannot hold the full face):
+   900x382, a shorter glass, smaller knobs on one row, every legend and number at its full size ---- */
+.uface.uface--narrow {
+  height: 382px;
+}
+.uface--narrow .uface__bezel {
+  height: 186px;
+}
+.uface--narrow .uface__wm {
+  top: 258px;
+  font-size: 52px;
+}
+.uface--narrow .uface__pwr {
+  top: 343px;
+}
+.uface--narrow .uface__maker {
+  top: 350px;
+}
+.uface--narrow .uface__lgd {
+  top: 331px;
+}
+.uface--narrow .uface__val {
+  top: 352px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .uface__canvas,
+  .uface__pwr::after,
+  .uface__val {
+    transition: none;
+  }
+}

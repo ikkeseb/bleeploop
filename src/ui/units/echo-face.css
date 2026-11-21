@@ -1,0 +1,97 @@
+/* The ECHO's face (EchoFace.tsx) on the family's frame (unit-face.css), as the accepted face B, the tape,
+   draws it: the glass's print (NOW, the bars back, TIME's span, the channels, OUT; the canvas draws the
+   tape, the heads and the ladders, echo-loop.ts) and TIME's four positions round the hero knob. */
+
+.echo__ago {
+  transform: translateX(-50%);
+  font: 500 12px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+.echo__now {
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.1em;
+  color: var(--legend);
+}
+.echo__span {
+  transform: translateX(-50%);
+  font: 500 13px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--engaged);
+}
+.echo__span .uface__u {
+  color: color-mix(in srgb, var(--engaged) 62%, var(--faint));
+}
+.echo__ch {
+  transform: translateX(-50%);
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.echo__out {
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.1em;
+  color: var(--legend);
+}
+
+/* TIME's positions: a dot each on a ring past the knob's edge, the note value and its length past it; the
+   one the knob points at lit warm white */
+.echo__steps {
+  left: var(--x);
+  top: var(--y);
+  width: 0;
+  height: 0;
+}
+.echo__dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: #23262b;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.85), 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: background-color var(--motion), box-shadow var(--motion);
+}
+.echo__dot.is-on {
+  background: var(--engaged);
+  box-shadow: 0 0 5px 1px rgba(255, 226, 186, 0.42), 0 0 1.5px rgba(255, 244, 228, 0.95);
+}
+.echo__st {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+  transform: translate(-50%, -50%);
+  font: 500 16px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color var(--motion);
+}
+.echo__st small {
+  font: 500 12px / 1 var(--font-num);
+  color: var(--faint);
+}
+.echo__st:hover:not(.is-off) {
+  color: var(--text);
+}
+.echo__st.is-on {
+  color: var(--engaged);
+}
+.echo__st.is-on small {
+  color: color-mix(in srgb, var(--engaged) 62%, var(--faint));
+}
+.echo__st.is-off {
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .echo__dot,
+  .echo__st {
+    transition: none;
+  }
+}

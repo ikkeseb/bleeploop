@@ -59,9 +59,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   line through a plain feed that Solid effects write. `verify/guards/stage-draw.mjs` checks both loops,
   the grid's exception by name and only inside its master-length gate, and the tuner's
   (`tuner/tuner-loop.ts`), which tells its Solid side the note, the in-tune state and the no-signal
-  state through a callback, on change only; and the OTT's (`units/ott-loop.ts`: its face's glass and its
-  plate's miniature), which reads the units' meter mirror (`units/unit-meters.ts`) the engine store writes
-  from the feed's `unitMeters`, never a signal. The tuner overlay shows exactly while the feed's last
+  state through a callback, on change only; and the unit faces' (`units/ott-loop.ts`: the OTT face's glass
+  and its plate's miniature; `units/echo-loop.ts`: the ECHO face's tape, its params and tempo a plain view
+  the face's effect writes), which read the units' meter mirror (`units/unit-meters.ts`) the engine store
+  writes from the feed's `unitMeters`, never a signal. The tuner overlay shows exactly while the feed's last
   `Tuner` event said on (every reset frame turns it off before its events apply); Esc and its close
   send `SetTuner(false)`, never a local flip.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
@@ -90,13 +91,18 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   effect pick's auto-start) `SetSlotLive`; the cap shows the feed's `live` (`state/native-io.ts`).
 - **The chain seam:** while `platform.chain.available` (the DEV fake with `__lfChainFake`; the native engine
   once it speaks the chain) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
-  `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's face; otherwise the row is
-  the fixed topology (`instrument/InstrumentSlot.tsx`), and the feed's `chains` apply to nothing. A plate moves
+  `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's and the ECHO's faces (one
+  frame, `units/UnitFace.tsx`: home just under the plate, nothing drawn between them, moved and scaled by
+  the player, kept per kind in `lf.unitFaces`; free-standing, drawn by `units/FaceHost.tsx` apart from the
+  row, so a press beside one plays the looper, a fold leaves it open, and the stage view hides and keeps it,
+  its draw loops idle meanwhile; one per kind, the last touched on top); otherwise the row is the fixed topology
+  (`instrument/InstrumentSlot.tsx`), and the feed's
+  `chains` apply to nothing. A plate moves
   when the feed says so, never on drop; a drop is judged at its release, from the plates' places when the drag
   began. A refusal the contract makes certain (a ninth unit, a source moved, an effect ahead of a source) is the
   slot's tag with nothing sent (`addRefusal`, `moveRefusal`), judged against the chain as the edits already
   sent leave it (a reloading source is still the source); the host resolves the rest. A gesture reaches only a
-  seated unit, and a popover of a unit that stops being seated closes.
+  seated unit, and a popover or a face of a unit that stops being seated closes.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.

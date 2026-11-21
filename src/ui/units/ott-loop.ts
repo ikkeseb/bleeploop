@@ -54,7 +54,10 @@ export function registerOttGlass(canvas: HTMLCanvasElement, values: HTMLElement[
   const g: Glass = { canvas, values, unit, drawn: -1, laid: '' };
   glasses.add(g);
   start();
-  return () => glasses.delete(g);
+  return () => {
+    glasses.delete(g);
+    stop();
+  };
 }
 
 /** Draw an OTT plate's miniature (three band bars, `--g0`..`--g2` in dB) for `unit` while it is mounted. */
@@ -62,20 +65,44 @@ export function registerOttMini(el: HTMLElement, unit: number): () => void {
   const m: Mini = { el, unit, drawn: -1 };
   minis.add(m);
   start();
-  return () => minis.delete(m);
+  return () => {
+    minis.delete(m);
+    stop();
+  };
+}
+
+/** Whether the faces are hidden (the stage view): no frame is queued while they are. */
+let suspended = false;
+
+/** Stop the draws (the glasses' and the plates' miniatures) while the stage view hides the faces, and draw
+ * again on `false`; what is drawn stays. */
+export function suspendOttDraw(on: boolean): void {
+  suspended = on;
+  if (on) {
+    if (rafId !== 0) cancelAnimationFrame(rafId);
+    rafId = 0;
+  } else if (glasses.size + minis.size > 0) start();
 }
 
 function start(): void {
-  if (rafId === 0) rafId = requestAnimationFrame(frame);
+  if (rafId === 0 && !suspended) rafId = requestAnimationFrame(frame);
+}
+
+function stop(): void {
+  if (glasses.size === 0 && minis.size === 0 && rafId !== 0) {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
 }
 
 function frame(): void {
   rafId = 0;
-  if (glasses.size === 0 && minis.size === 0) return;
+  if ((glasses.size === 0 && minis.size === 0) || suspended) return;
   for (const g of glasses) {
     const v = unitMeters.get(g.unit);
     const version = v ? v.version : 0;
-    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}:${g.canvas.dataset.y0}:${g.canvas.dataset.px}`;
+    // its size as drawn too: the face's own scale moves it, not its layout size
+    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${Math.round(g.canvas.getBoundingClientRect().width)}:${g.canvas.dataset.y0}:${g.canvas.dataset.px}`;
     // a glass not laid out yet draws on a later frame
     if ((version !== g.drawn || laid !== g.laid) && drawGlass(g, v)) {
       g.drawn = version;

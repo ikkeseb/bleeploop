@@ -13,6 +13,7 @@ import { Help } from './ui/settings/Help';
 import { UpdatePanel } from './ui/settings/UpdatePanel';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
+import { FaceHost } from './ui/units/FaceHost';
 import { Confirm } from './ui/confirm/Confirm';
 import { StageView } from './ui/stage/StageView';
 import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
@@ -599,6 +600,9 @@ export function App() {
           </div>
         </div>
       </Show>
+
+      {/* The open unit faces (the chain's OTT and ECHO): free-standing, over the row and the lanes; inert under the tuner. */}
+      <FaceHost inert={looper.tunerOn()} returnFocus={(el) => transportKeys?.returnFocus(el)} />
 
       {/* Error-toast surface: the ONE user-visible channel for failures that otherwise
           reach only console.error (invisible in a release WebView2 build). Rendered once, above the

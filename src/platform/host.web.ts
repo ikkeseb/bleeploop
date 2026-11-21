@@ -526,8 +526,16 @@ function setToggleValue(t: EngineToggle, on: boolean): void {
 }
 /** What the fake knows of the looper for the toggles' gate, as the scripted frames left it: each lane's
  * state, the master, the tempo's lock, the selected lane (a refusal's lane: the scripted `Selected`, not
- * a `SelectTrack` the UI sent, which the fake does not answer). */
-const gateView = { states: /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'), master: 0, locked: false, selected: 0 };
+ * a `SelectTrack` the UI sent, which the fake does not answer); and the tempo and meter the chain's ECHO
+ * meters run at (the last scripted `Transport`; 120 at first, a reset without one keeps the tempo in 4/4). */
+const gateView = {
+  states: /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'),
+  master: 0,
+  locked: false,
+  selected: 0,
+  bpm: 120,
+  meter: FOUR_FOUR,
+};
 
 /** The setters that set a toggled setting outright: the setting and the value. */
 function setterToggle(c: EngineCommand): [EngineToggle, boolean] | null {
@@ -634,6 +642,8 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
     gateView.master = 0;
     gateView.locked = false;
     gateView.selected = 0;
+    // a reset without a Transport keeps the tempo in 4/4, as the UI's store does (`engine-store.ts`)
+    gateView.meter = FOUR_FOUR;
     fakeToggles.clear();
     fakeTuner = false;
     frame.settings?.forEach(applyToggleCommand);
@@ -643,6 +653,8 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
     else if (ev.type === 'Transport') {
       gateView.master = ev.master;
       gateView.locked = ev.locked;
+      gateView.bpm = ev.bpm;
+      gateView.meter = ev.meter;
     } else if (ev.type === 'Selected') gateView.selected = ev.lane;
     else if (ev.type === 'Toggled' && !(typeof ev.toggle === 'object' && 'Live' in ev.toggle)) fakeToggles.set(toggleKey(ev.toggle), ev.on);
     else if (ev.type === 'Tuner') fakeTuner = ev.on;
@@ -907,6 +919,7 @@ function chainFake(): ReturnType<typeof createChainFake> {
       for (const onFrame of engineSubscribers) onFrame(frame);
     },
     meter: () => lastMeter,
+    tempo: () => ({ bpm: gateView.bpm, ...gateView.meter }),
   });
   return chainFakeMade;
 }
@@ -922,7 +935,7 @@ const chainPluginsOn = (): boolean => engineForced() && (globalThis as { __lfCha
  * MUTE, a load), a toggle (`{Action:{Toggle}}`), switched or refused as the engine's gate would on the
  * looper the scripted frames show, answered by `Toggled` or `Refused`, and the tuner (`{Action:'Tuner'}`,
  * `SetTuner`), answered by `Tuner` or `Refused` (`applyTunerCommand`), and the chain per slot, modelled
- * whole (`chain-fake.ts`: the platform's `chain`, the unit commands, the OTT's meters); every other state
+ * whole (`chain-fake.ts`: the platform's `chain`, the unit commands, the OTT's and the ECHO's meters); every other state
  * a probe asserts on is scripted.
  */
 export const webEngineFake: EngineFake = {

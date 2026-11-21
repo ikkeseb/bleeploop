@@ -19,11 +19,13 @@
  * - the batch (§2, §6): `SetUnitBypass`, `ToggleUnit`, `Toggle.Units` (answered by one `Toggled`) and
  *   `SetUnitParam` (clamped as the unit clamps it) switch the model, answered by `chains`; a command naming
  *   an id that is not seated, or a param of another kind, is dropped and counted (`dropped`);
- * - the meters (§2): one per seated unit on every frame it makes; the OTT face's on the fake's own 60 Hz
- *   timer while an OTT is seated and on, from the accepted mockup's simulated guitar part through the same
- *   curve (`docs/redesign/ott.js`, SIM-BEGIN to SIM-END), following each OTT's four params;
+ * - the meters (§2): one per seated unit on every frame it makes; the faces' on the fake's own 60 Hz timer
+ *   while an OTT or an ECHO is seated and on: the OTT's bands from the accepted mockup's simulated guitar
+ *   part through the same curve (`docs/redesign/ott.js`, SIM-BEGIN to SIM-END), following its four params;
+ *   the ECHO's `out` per channel from a plucked note on every bar's downbeat through an echo of its own
+ *   params at the tempo the scripted frames set;
  * - a reset frame carrying `chains` replaces the model and answers every call and held edit begun before it
- *   refused; one without carries the model; either restarts the OTTs' followers.
+ *   refused; one without carries the model; either restarts the OTTs' followers and the ECHOs' lines.
 
  * Pure of DOM and Solid: a Node guard can import it (no timer starts at module load).
  */
@@ -56,6 +58,8 @@ interface ChainFakeDeps {
   deliver(frame: FeedFrame): void;
   /** The input meter the scripted frames last carried, for the frames the fake makes. */
   meter(): FeedFrame['meter'];
+  /** The tempo and meter the scripted frames last set (the ECHO's repeats run at it). */
+  tempo(): { bpm: number; beats: number; num: number; den: number };
 }
 
 /** A canned plugin for the picker (`webPluginHost.scanPlugins` under `__lfChainFake`) and the chain: its
@@ -99,7 +103,8 @@ export interface ChainFake {
   closeWindow(unit: UnitId): void;
   /** Probe seam: the meters' own 60 Hz timer (on by default); off, `meterTick` emits one frame. */
   meterTimer: boolean;
-  /** Whether the 60 Hz interval is live now: only while the timer is on and an OTT is seated and on. */
+  /** Whether the 60 Hz interval is live now: only while the timer is on and an OTT or an ECHO is seated
+   * and on. */
   readonly meterTimerRunning: boolean;
   /** Emit one `unitMeters` frame now, one sixtieth of a second of the simulated part later. */
   meterTick(): void;
@@ -267,6 +272,41 @@ function simFrame(sim: OttSim, p: OttParams, unit: UnitId): UnitMeter {
   return { unit, out: [out, out], bands: bands as [BandMeter, BandMeter, BandMeter] };
 }
 
+// ── The ECHO face's signal: a plucked note every bar and its repeats, through the unit's own params ──
+
+/** A division's length in quarter notes, by the engine's index (`dsp::fx::division_beats`: 1/4, 1/8, 1/8.,
+ * 1/16). */
+const DIVISION_QUARTERS = [1, 0.5, 0.75, 0.25] as const;
+/** The plucked note's peak, and how long it and each repeat ring (s). */
+const PLUCK = 0.5;
+const RING = 1.5;
+/** The note's envelope `d` seconds after its onset: a 5 ms rise, a fast and a slow decay. */
+const pluck = (d: number): number => (d < 0.005 ? d / 0.005 : 1) * (0.85 * Math.exp(-d / 0.06) + 0.15 * Math.exp(-d / 0.3));
+type EchoParams = { time: number; feedback: number; level: number };
+type Tempo = ReturnType<ChainFakeDeps['tempo']>;
+/** The insert's output (the note plus its echo, unit contract §5) at `t` seconds, its envelope summed in
+ * power: the repeat `k` at `k` times the division, at LEVEL · sqrt(1 - FB²) · FB^(k-1) (`input_fx.rs`). */
+function echoAmp(t: number, p: EchoParams, tempo: Tempo): number {
+  const bar = (60 / tempo.bpm) * tempo.beats;
+  const T = (bar / ((tempo.num * 4) / tempo.den)) * DIVISION_QUARTERS[p.time];
+  const g1 = p.level * Math.sqrt(1 - p.feedback * p.feedback);
+  let e2 = 0;
+  // the notes whose repeats can still be heard: FB^k under 1e-4 by then, or 30 s at most
+  const reach = p.feedback > 0 ? Math.min(30, (Math.log(1e-4) / Math.log(p.feedback) + 1) * T + RING) : T + RING;
+  for (let n = Math.max(0, Math.floor((t - reach) / bar)); n * bar <= t; n++) {
+    const d = t - n * bar;
+    if (d < RING) e2 += (PLUCK * pluck(d)) ** 2;
+    for (let k = Math.max(1, Math.ceil((d - RING) / T)); k * T <= d; k++) e2 += (PLUCK * g1 * p.feedback ** (k - 1) * pluck(d - k * T)) ** 2;
+  }
+  return Math.sqrt(e2);
+}
+/** One feed frame (1/60 s) of an ECHO: its output's peak over the frame, per channel (R a touch under L). */
+function echoFrame(frame: number, p: EchoParams, tempo: Tempo): [number, number] {
+  let peak = 0;
+  for (let s = 0; s < 8; s++) peak = Math.max(peak, echoAmp((frame - 1 + (s + 1) / 8) / 60, p, tempo));
+  return [peak, peak * 0.94];
+}
+
 // ── Tones (unit contract §1, §8): today's file, `src-tauri/src/host/tone.rs` `encode`/`decode` ─────────
 
 const TONE_MAGIC = [0x42, 0x4c, 0x54, 0x4e]; // "BLTN"
@@ -390,8 +430,10 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
   /** One structure call at a time per slot (unit contract §2). */
   const tails: [Promise<unknown>, Promise<unknown>] = [Promise.resolve(), Promise.resolve()];
   const sims = new Map<UnitId, OttSim>();
-  /** The last reading of each active OTT: a `chains` frame repeats it, no time passing. */
+  /** The last reading of each active OTT and ECHO: a `chains` frame repeats it, no time passing. */
   const lastBands = new Map<UnitId, UnitMeter>();
+  /** Each active ECHO's frames run: its signal's clock. */
+  const echoFrames = new Map<UnitId, number>();
   /** Parked session tones by token (unit contract §8), each bound to its plugin and slot. */
   const parked = new Map<number, { plugin: PluginRef; slot: Slot; state: Uint8Array }>();
   /** The slot-and-plugin files (unit contract §1): a removed unit's tone, an import's unmatched one. */
@@ -566,6 +608,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     if (reserved.get(u.state.id) === u.slot && !u.noSeat) reserved.delete(u.state.id);
     sims.delete(u.state.id);
     lastBands.delete(u.state.id);
+    echoFrames.delete(u.state.id);
     if (!u.noSeat) windowClosed(u.state.id);
     if (u.state.kind === 'plugin' && !u.noSeat) {
       if (u.tone) slotTones.set(toneKey(u.slot, u.state.plugin), u.tone);
@@ -1036,17 +1079,23 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
       });
     } else if (f.reset) f.chains = snapshot();
     if (f.reset) {
-      // Unit contract §3: a unit entering an engine resets its audio state: the OTT's followers restart.
+      // Unit contract §3: a unit entering an engine resets its audio state: the OTT's followers restart, the
+      // ECHO's line empties.
       sims.clear();
       lastBands.clear();
+      echoFrames.clear();
       f.unitMeters ??= meters(false);
     }
     syncTimer();
   }
 
-  // ── The meters (unit contract §2, §10): one per seated unit; the OTT face's from the simulated part ──
+  // ── The meters (unit contract §2, §10): one per seated unit; the faces' from their simulated parts ──
 
-  const active = (u: Unit) => u.state.kind === 'ott' && sounding(u) && !u.state.bypass;
+  const active = (u: Unit) => (u.state.kind === 'ott' || u.state.kind === 'echo') && sounding(u) && !u.state.bypass;
+  function echoParams(u: Unit): EchoParams {
+    const p = u.state.kind === 'echo' ? (u.state.params ?? {}) : {};
+    return { time: Math.min(3, Math.max(0, Math.round(p.echoTime ?? 1))), feedback: p.echoFeedback ?? 0.4, level: p.echoLevel ?? 0.5 };
+  }
   function ottParams(u: Unit): OttParams {
     const p = u.state.kind === 'ott' ? (u.state.params ?? {}) : {};
     return { depth: p.ottDepth ?? 0.5, time: p.ottTime ?? 0.5, up: p.ottUpward ?? 1, down: p.ottDownward ?? 1 };
@@ -1056,16 +1105,29 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     [0, 1, 2].map(() => ({ gain: 0, gainMin: 0, gainMax: 0, level: LEVEL_FLOOR, levelPeak: LEVEL_FLOOR })) as [BandMeter, BandMeter, BandMeter];
   /**
    * One meter per seated unit, chain order, slot A first (unit contract §2). The fake has no sound: a unit
-   * reads silent, an OTT that is bypassed reads its bands at rest; an active OTT reads the simulated part,
-   * one sixtieth of a second further when `advance` (the timer's frame), else its last reading with no time
-   * passing (a `chains` frame between two ticks).
+   * reads silent, an OTT that is bypassed reads its bands at rest; an active OTT or ECHO reads its simulated
+   * part, one sixtieth of a second further when `advance` (the timer's frame), else its last reading with no
+   * time passing (a `chains` frame between two ticks).
    */
   function meters(advance: boolean): UnitMeter[] {
     return all()
       .filter(sounding)
       .map((u): UnitMeter => {
         const unit = u.state.id;
+        // A bypassed ECHO reads silent here, though the engine's passes its dry and rings its tail out (unit
+        // contract §5, Bypass): the fake models what the face draws (the tape at rest), not the sound.
         if (!active(u)) return u.state.kind === 'ott' ? { unit, out: [0, 0], bands: restBands() } : { unit, out: [0, 0] };
+        if (u.state.kind === 'echo') {
+          if (!advance) {
+            const last = lastBands.get(unit);
+            return { unit, out: last ? [last.out[0], last.out[1]] : [0, 0] };
+          }
+          const n = (echoFrames.get(unit) ?? 0) + 1;
+          echoFrames.set(unit, n);
+          const m: UnitMeter = { unit, out: echoFrame(n, echoParams(u), deps.tempo()) };
+          lastBands.set(unit, m);
+          return m;
+        }
         if (!advance) {
           const last = lastBands.get(unit);
           if (!last?.bands) return { unit, out: [0, 0], bands: restBands() };
@@ -1084,7 +1146,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     if (!all().some(active)) return;
     deps.deliver(frame({ unitMeters: meters(true) }));
   }
-  /** Run the timer exactly while it is on and an OTT is seated and on (unit contract §10). */
+  /** Run the timer exactly while it is on and an OTT or an ECHO is seated and on (unit contract §10). */
   function syncTimer(): void {
     const want = fake.meterTimer && deps.forced() && all().some(active);
     if (want && timer === null) timer = setInterval(tick, 1000 / 60);
