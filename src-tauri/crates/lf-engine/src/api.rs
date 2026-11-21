@@ -184,6 +184,14 @@ impl Command {
         )
     }
 
+    /// The unit a bypass command names ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]).
+    pub fn unit_bypass(&self) -> Option<UnitId> {
+        match *self {
+            Command::SetUnitBypass(unit, _) | Command::Action(Action::ToggleUnit(unit)) | Command::ActionOn(_, Action::ToggleUnit(unit)) => Some(unit),
+            _ => None,
+        }
+    }
+
     /// A command a plugin slot hears: the note target, the notes, the slot's live flag and gain, and the
     /// input OTT's switch and controls (each slot runs an instance on its output). Like the instrument
     /// commands it never waits behind the looper, and the engine renders the slots up to its frame
@@ -706,9 +714,8 @@ pub enum Event {
     /// leaving one not), each unit's id, kind, bypass and latency. Sent on `frame` whenever an edit, a
     /// move's reorder or a bypass command applies (one per change, at the chain as that change left it,
     /// after the message's own [`Event::Seat`]); owed until the ring takes it, as [`Event::Seat`] is.
-    /// Past the slot's room for owed events (bypass commands can come any number a block) the changes
-    /// fold into one, sent after what is owed, at the chain as it then stands and the last change's
-    /// frame.
+    /// Never folded: a bypass command whose chain has no place among what its slot owes waits, with
+    /// every bypass command sent after it, until the ring has taken enough.
     Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
 }
 

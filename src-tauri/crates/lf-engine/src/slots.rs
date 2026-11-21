@@ -71,9 +71,10 @@
 //! ([`Rack::set_ott`]).
 //!
 //! Lifecycle never stops the audio, and nothing here drops a unit. A message leaves its ring only once
-//! its answer has a place among those the slot owes the event ring and, an install, once the return
-//! ring has a place for it beside every unit the slot holds: a full ring keeps the message waiting, in
-//! order, and nothing owed is ever dropped. A slot takes no message while a move's reorder, a
+//! its answer and its chain have their places among those the slot owes the event ring and, an install,
+//! once the return ring has a place for it beside every unit the slot holds: a full ring keeps the
+//! message waiting, in order (a bypass command too, in the engine's table), and nothing owed is ever
+//! dropped or folded; the slots take turns at the event ring. A slot takes no message while a move's reorder, a
 //! replacement's crossfade, a withdrawal or a leaving source is under way (at most the fade's frames).
 //! With no device running the ports are serviced at once, without fades, and one silent frame of
 //! `process` carries a leaving unit's release. An eviction hands back every seat with its bypass and
@@ -115,8 +116,9 @@ const MSG_CAPACITY: usize = 2 * MAX_UNITS;
 /// Units on their way back: every seat and every message's install at once.
 const RETURN_CAPACITY: usize = MAX_UNITS + MSG_CAPACITY;
 /// What one slot owes the event ring: an answer ([`Event::Seat`]) and a chain ([`Event::Chain`]) per
-/// message.
-const OWED_CAPACITY: usize = 2 * MSG_CAPACITY;
+/// message, and one place kept for an eviction's chain. A bypass's chain takes a free place, or its
+/// command waits ([`Rack::bypass_room`]).
+const OWED_CAPACITY: usize = 2 * MSG_CAPACITY + 1;
 
 type Unit = Box<dyn UnitProcessor>;
 
@@ -348,6 +350,16 @@ struct Answer {
     outcome: SeatOutcome,
 }
 
+/// Owe `o` to the event ring, after what is owed already: its place was kept ([`Slot::room`]). Should
+/// it ever have none, it is counted, never written over another.
+fn owe(owed: &mut Vec<Owed>, o: Owed, errors: &mut u64) {
+    if owed.len() < OWED_CAPACITY {
+        owed.push(o);
+    } else {
+        *errors += 1;
+    }
+}
+
 /// What a slot owes the event ring, in the order it applied.
 #[derive(Clone, Copy)]
 enum Owed {
@@ -413,11 +425,9 @@ struct Slot {
     write: usize,
     /// The input OTT on this slot's output, after its gain.
     ott: StereoOtt,
-    /// Answers and chains the event ring has not taken yet, oldest first.
+    /// Answers and chains the event ring has not taken yet, oldest first: none is ever dropped or
+    /// folded into another ([`Slot::room`]).
     owed: Vec<Owed>,
-    /// The chain changed on this frame past the room among the owed (bypass commands come any number a
-    /// block): its [`Event::Chain`] follows them, the changes from here on folded into it.
-    chain_owed: Option<Frame>,
     /// A move waiting for its dip to reach silence: the unit and its index.
     reorder: Option<(UnitId, usize)>,
     /// The move's dip: down to silence on this frame (the reorder's), back up over the fade's frames
@@ -642,7 +652,7 @@ impl Slot {
     /// ring.
     fn can_take(&self) -> bool {
         let Ok(msg) = self.end.rx.peek() else { return false };
-        self.owed_room() && (!matches!(msg, SlotMsg::Install { .. }) || self.end.tx.slots() > self.units())
+        self.room(2) && (!matches!(msg, SlotMsg::Install { .. }) || self.end.tx.slots() > self.units())
     }
 
     fn queue(&mut self, kind: SlotEventKind, offset: u32, dropped: &mut u64) {
@@ -662,36 +672,32 @@ impl Slot {
         self.notes = [0; 2];
     }
 
-    /// Room among the owed for one more: a move under way keeps a place for its answer.
-    fn owed_room(&self) -> bool {
-        self.owed.len() + (self.reorder.is_some() as usize) < OWED_CAPACITY
+    /// Room among the owed for `n` more beside the places kept: a taken message's answer and chain (its
+    /// chain alone once it answered `Waiting`), a move's answer and chain for its reorder, and an
+    /// eviction's chain.
+    fn room(&self, n: usize) -> bool {
+        let taken = self.taken.as_ref().map_or(0, |t| if t.answered { 1 } else { 2 });
+        let kept = taken + 2 * self.reorder.is_some() as usize + 1;
+        self.owed.len() + kept + n <= OWED_CAPACITY
     }
 
-    /// Owe `answer` to the event ring: [`Slot::can_take`] reserved its place.
     fn answer(&mut self, answer: Answer, errors: &mut u64) {
-        if self.owed.len() < OWED_CAPACITY {
-            self.owed.push(Owed::Seat(answer));
-        } else {
-            *errors += 1;
-        }
+        owe(&mut self.owed, Owed::Seat(answer), errors);
     }
 
-    /// Owe the chain as it now stands, on `frame`, after what is owed already; past the room among the
-    /// owed, folded into one [`Event::Chain`] after them.
-    fn owe_chain(&mut self, frame: Frame) {
-        if self.chain_owed.is_none() && self.owed_room() {
-            let (len, seats) = self.summary();
-            self.owed.push(Owed::Chain { frame, len, seats });
-        } else {
-            self.chain_owed = Some(frame);
-        }
+    /// Owe the chain as it now stands, on `frame`.
+    fn owe_chain(&mut self, frame: Frame, errors: &mut u64) {
+        let (len, seats) = self.summary();
+        owe(&mut self.owed, Owed::Chain { frame, len, seats }, errors);
     }
 
-    /// A move's reorder applied on `frame`: its answer and its chain, owed there.
-    fn reordered(&mut self, id: UnitId, frame: Frame, errors: &mut u64) {
-        self.answer(Answer { frame, unit: id, op: SeatOp::Move, outcome: SeatOutcome::Applied }, errors);
-        self.end.taken.fetch_add(1, Release);
-        self.owe_chain(frame);
+    /// A move's reorder applied on `frame`: its answer, its ticket and its chain, owed there before any
+    /// unit is called in the new order (a panic there unwinds past none of them). The fields alone, so
+    /// a render call can owe them while it reads the slot's input.
+    fn reordered(owed: &mut Vec<Owed>, end: &SlotEnd, (len, seats): (u8, [ChainSeat; MAX_UNITS]), id: UnitId, frame: Frame, errors: &mut u64) {
+        owe(owed, Owed::Seat(Answer { frame, unit: id, op: SeatOp::Move, outcome: SeatOutcome::Applied }), errors);
+        end.taken.fetch_add(1, Release);
+        owe(owed, Owed::Chain { frame, len, seats }, errors);
     }
 
     /// The chain as [`Event::Chain`] carries it.
@@ -798,7 +804,8 @@ impl Slot {
     fn finish_idle(&mut self, cx: &UnitCx, zeros: &[f32], n: u32, errors: &mut u64) {
         if let Some((id, to)) = self.reorder.take() {
             self.apply_reorder(id, to);
-            self.reordered(id, cx.frame, errors);
+            let summary = self.summary();
+            Slot::reordered(&mut self.owed, &self.end, summary, id, cx.frame, errors);
         }
         self.dip = None;
         for seat in self.seats[..self.len].iter_mut() {
@@ -861,6 +868,8 @@ pub(crate) struct Rack {
     /// The device frame the next render call starts at.
     cursor: Frame,
     clock: UnitClock,
+    /// The slot [`Rack::offer`] offers first.
+    offer_first: usize,
     pub(crate) events_dropped: u64,
     pub(crate) protocol_errors: u64,
     /// Bypass commands naming an id no seat holds.
@@ -922,7 +931,6 @@ impl Rack {
                 write: 0,
                 ott: StereoOtt::new(sample_rate),
                 owed: Vec::with_capacity(OWED_CAPACITY),
-                chain_owed: None,
                 reorder: None,
                 dip: None,
             }
@@ -943,6 +951,7 @@ impl Rack {
             record_latency: 0,
             cursor: 0,
             clock: UnitClock { skipped: 0, bpm: 120.0, meter: Meter::FOUR_FOUR },
+            offer_first: 0,
             events_dropped: 0,
             protocol_errors: 0,
             unit_commands_dropped: 0,
@@ -970,6 +979,19 @@ impl Rack {
         let cx = self.unit_cx(frame);
         let n = self.fade_frames;
         for i in 0..SLOT_COUNT {
+            // A move's reorder due by this frame (a device jump past it) applies before the port is
+            // served, so a message waiting behind it is taken in this block.
+            if fade {
+                let s = &mut self.slots[i];
+                if let (Some((id, to)), Some(at)) = (s.reorder, s.dip) {
+                    if at <= frame {
+                        s.reorder = None;
+                        s.apply_reorder(id, to);
+                        let summary = s.summary();
+                        Slot::reordered(&mut s.owed, &s.end, summary, id, frame, &mut self.protocol_errors);
+                    }
+                }
+            }
             loop {
                 if !fade {
                     let (s, zeros, errors) = (&mut self.slots[i], &self.zeros, &mut self.protocol_errors);
@@ -1023,7 +1045,7 @@ impl Rack {
                     s.end.taken.fetch_add(1, Release);
                 }
                 if changed {
-                    s.owe_chain(frame);
+                    s.owe_chain(frame, &mut self.protocol_errors);
                 }
             }
             if !fade {
@@ -1228,7 +1250,7 @@ impl Rack {
     /// The bypass of unit `id` at `now`: `Some` outright, `None` switched from the engine's value. On a
     /// seat that holds its unit, through [`UnitProcessor::set_bypass`]; a withdrawn seat keeps the value
     /// (the reseat brings its own). Answered by [`Event::Chain`]; an id no seat holds is dropped and
-    /// counted.
+    /// counted. The engine applies it only while its chain has a place ([`Rack::bypass_room`]).
     pub(crate) fn set_unit_bypass(&mut self, id: UnitId, bypassed: Option<bool>, now: Frame) {
         let (n, rendered, cx) = (self.fade_frames, self.rendered, self.unit_cx(now));
         let found = (0..SLOT_COUNT).find_map(|i| self.slots[i].find(id).map(|k| (i, k)));
@@ -1249,13 +1271,23 @@ impl Rack {
                 }
             }
         }
-        s.owe_chain(now);
+        s.owe_chain(now, &mut self.protocol_errors);
     }
 
-    /// What each slot owes the event ring, offered in order until it refuses one; a chain folded past
-    /// the room among the owed after them.
+    /// Whether a bypass command on unit `id` can apply now: its chain has a place among what its slot
+    /// owes (an id no seat holds needs none: it is dropped). One that cannot waits, with every bypass
+    /// command sent after it (the engine's table), so none is folded or lost.
+    pub(crate) fn bypass_room(&self, id: UnitId) -> bool {
+        self.slots.iter().find(|s| s.find(id).is_some()).is_none_or(|s| s.room(1))
+    }
+
+    /// What each slot owes the event ring, each slot's in order until the ring refuses one. The slots
+    /// take turns at the first offer (the one after the last that got a place goes first), so a slot
+    /// that owes something every block starves no other.
     pub(crate) fn offer(&mut self, feed: &mut Feed) {
-        for (i, s) in self.slots.iter_mut().enumerate() {
+        let first = self.offer_first;
+        for i in (0..SLOT_COUNT).map(|k| (first + k) % SLOT_COUNT) {
+            let s = &mut self.slots[i];
             let slot = i as u8;
             let taken = s
                 .owed
@@ -1268,27 +1300,28 @@ impl Rack {
                 })
                 .count();
             s.owed.drain(..taken);
-            if let (true, Some(frame)) = (s.owed.is_empty(), s.chain_owed) {
-                let (len, seats) = s.summary();
-                if feed.push(Event::Chain { frame, slot: i as u8, len, seats }) {
-                    s.chain_owed = None;
-                }
+            if taken > 0 {
+                self.offer_first = (i + 1) % SLOT_COUNT;
             }
         }
     }
 
-    /// At a block start: service the ports and start the render cursor. `hold`: a capture holds the
-    /// alignment.
-    pub(crate) fn begin_block(&mut self, start: Frame, first: bool, clock: UnitClock, hold: bool) {
+    /// At a block start: service the ports (unless `serve` is off: a capture's end may be due on this
+    /// frame, and [`Rack::release_hold`] serves them once it is resolved) and start the render cursor.
+    /// `hold`: a capture holds the alignment.
+    pub(crate) fn begin_block(&mut self, start: Frame, first: bool, clock: UnitClock, hold: bool, serve: bool) {
         self.clock = clock;
-        self.service(start, first, true, hold);
+        if serve {
+            self.service(start, first, true, hold);
+        }
         self.cursor = start;
     }
 
-    /// At block start `start`, after the capture that held the alignment ended on that frame: the ports'
-    /// messages it held apply now.
-    pub(crate) fn release_hold(&mut self, start: Frame, first: bool) {
-        self.service(start, first, true, false);
+    /// At block start `start`, after that frame's looper events resolved the capture that held the
+    /// alignment there: the ports' messages apply now, `hold` if a capture still holds it (a RETAKE pass
+    /// or a handoff took it on).
+    pub(crate) fn release_hold(&mut self, start: Frame, first: bool, hold: bool) {
+        self.service(start, first, true, hold);
     }
 
     /// With no device running (the host holds the engine): apply the ports' messages at once, at `frame`
@@ -1314,7 +1347,7 @@ impl Rack {
                     seat.fade = 0;
                 }
                 s.finish_idle(&cx, &self.zeros, n, &mut self.protocol_errors);
-                s.owe_chain(frame);
+                s.owe_chain(frame, &mut self.protocol_errors);
             }
         }
     }
@@ -1328,15 +1361,29 @@ impl Rack {
     /// (the live latency); shut, it holds what it last took. The engine shuts it while a capture's
     /// alignment is fixed, which took the same live latency, and no chain's sum or role changes then
     /// (an edit that would waits: [`Rack::service`]). Either way each slot's wet is delayed by what its
-    /// own chain's latency lacks of that alignment.
-    pub(crate) fn latch_record(&mut self, open: bool) {
+    /// own chain's latency lacks of that alignment. Whether the record tap's timing changed: the
+    /// alignment, or one slot's delay to it (another slot can hold the alignment while this one's chain
+    /// changes). What a changed slot's line holds for the tap's next frames went through its chain at
+    /// the old timing: it is silenced, so nothing from before the change reaches the tap after it.
+    pub(crate) fn latch_record(&mut self, open: bool) -> bool {
+        let before = self.record_latency;
         if open {
             self.record_latency = self.live_latency();
         }
+        let mut changed = self.record_latency != before;
         for s in self.slots.iter_mut() {
             let own = if !s.source_chain() { s.latency() } else { 0 };
-            s.dw = (self.record_latency - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
+            let dw = (self.record_latency - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
+            if dw != s.dw {
+                let len = s.wet_line.len();
+                for k in 1..=dw {
+                    s.wet_line[(s.write + len - k) % len] = [0.0; 2];
+                }
+                changed = true;
+            }
+            s.dw = dw;
         }
+        changed
     }
 
     /// The live latency the record tap is aligned on, as last latched.
@@ -1534,19 +1581,16 @@ impl Rack {
             let len = s.len;
             let first = s.events.iter().take_while(|e| (e.offset as usize) < split).count();
             run_chain(&mut s.seats[..len], gated, zeros, &mut s.dry, &mut s.tail, &s.events[..first], &self_cx(&self.clock, frame), (0, split), fade_frames, &mut to_bus, &mut self.protocol_errors);
-            let mut reordered = None;
             if split < m {
                 if let Some((id, to)) = s.reorder.take() {
                     reorder(&mut s.seats[..len], id, to);
-                    reordered = Some(id);
+                    let summary = s.summary();
+                    Slot::reordered(&mut s.owed, &s.end, summary, id, frame + split as Frame, &mut self.protocol_errors);
                 }
                 for e in s.events[first..].iter_mut() {
                     e.offset -= split as u32;
                 }
                 run_chain(&mut s.seats[..len], gated, zeros, &mut s.dry, &mut s.tail, &s.events[first..], &self_cx(&self.clock, frame + split as Frame), (split, m), fade_frames, &mut to_bus, &mut self.protocol_errors);
-            }
-            if let Some(id) = reordered {
-                s.reordered(id, frame + split as Frame, &mut self.protocol_errors);
             }
             s.events.clear();
             let dipping = s.dip.is_some();

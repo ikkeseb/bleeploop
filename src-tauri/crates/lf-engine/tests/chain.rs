@@ -12,12 +12,13 @@
 mod common;
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{ChainSeat, Command, Event, LaneState, NoteTarget, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS};
+use lf_engine::{ChainSeat, Command, Event, LaneState, NoteTarget, Pair, ProcessContext, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS};
 use proptest::prelude::*;
 
 const BLOCKS: [usize; 7] = [1, 32, 64, 127, 128, 480, 1024];
@@ -94,12 +95,19 @@ struct Unit {
     at: usize,
     count: u64,
     probe: Probe,
+    /// It panics in a call that reaches this frame.
+    panic_from: Frame,
 }
 
 impl Unit {
     fn new(dsp: Dsp, probe: &Probe) -> Box<Unit> {
         let lag = if let Dsp::Lag(n, _) = dsp { n } else { 0 };
-        Box::new(Unit { dsp, source: matches!(dsp, Dsp::Level(_)), self_bypass: false, bypassed: false, line: [vec![0.0; lag], vec![0.0; lag]], at: 0, count: 0, probe: probe.clone() })
+        Box::new(Unit { dsp, source: matches!(dsp, Dsp::Level(_)), self_bypass: false, bypassed: false, line: [vec![0.0; lag], vec![0.0; lag]], at: 0, count: 0, probe: probe.clone(), panic_from: Frame::MAX })
+    }
+
+    fn panicking_from(mut self: Box<Self>, frame: Frame) -> Box<Unit> {
+        self.panic_from = frame;
+        self
     }
 
     fn self_bypassing(mut self: Box<Self>) -> Box<Unit> {
@@ -122,6 +130,7 @@ impl UnitProcessor for Unit {
 
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]) {
         let len = out[0].len();
+        assert!(cx.frame + (len as Frame) <= self.panic_from, "the unit panics at frame {}", self.panic_from);
         {
             let mut log = self.probe.log.lock().unwrap();
             if log.len() + 1 + events.len() < LOG {
@@ -1142,5 +1151,404 @@ proptest! {
         }
         prop_assert!(a.heard[0].iter().zip(&b.heard[0]).chain(a.heard[1].iter().zip(&b.heard[1])).all(|(x, y)| x.to_bits() == y.to_bits()), "bit-identical across block sizes");
         prop_assert_eq!(a.heard[0].len(), b.heard[0].len());
+    }
+}
+
+// ── Owed replies ─────────────────────────────────────────────────────────────────────────────────────
+
+/// One reply of a slot's raw stream, in the order the event ring gave them: an [`Event::Seat`], or an
+/// [`Event::Chain`] as (unit, bypassed) per seat.
+#[derive(Clone, Debug, PartialEq)]
+enum Reply {
+    Seat(Frame, UnitId, SeatOp, SeatOutcome),
+    Chain(Frame, Vec<(UnitId, bool)>),
+}
+
+fn replies(rig: &Rig, slot: u8) -> Vec<Reply> {
+    rig.events
+        .iter()
+        .filter_map(|e| match *e {
+            Event::Seat { frame, slot: s, unit, op, outcome } if s == slot => Some(Reply::Seat(frame, unit, op, outcome)),
+            Event::Chain { frame, slot: s, len, seats } if s == slot => Some(Reply::Chain(frame, seats[..len as usize].iter().map(|c| (c.unit, c.bypassed)).collect())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn bypasses(p: &Probe) -> usize {
+    p.seen().iter().filter(|s| matches!(s, Seen::Bypass { .. })).count()
+}
+
+fn toggle_unit(id: UnitId) -> Command {
+    Command::Action(lf_engine::Action::ToggleUnit(id))
+}
+
+/// Bypass commands past the room among what a slot owes, all on one frame, the event ring with room:
+/// each sends its own chain on that frame, in order (what the slot owes is offered between them).
+#[test]
+fn bypass_commands_past_the_owed_room_on_one_frame_each_send_their_chain() {
+    for block in BLOCKS {
+        let p = Probe::new();
+        let mut rig = rig(block);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &p));
+        rig.advance(1000);
+        let t = rig.frame + 7;
+        for _ in 0..34 {
+            rig.send_at(t, toggle_unit(1));
+        }
+        rig.advance(2000);
+        let what = format!("block {block}");
+        let got: Vec<Reply> = replies(&rig, 0).into_iter().filter(|r| matches!(r, Reply::Chain(f, _) if *f >= t)).collect();
+        let want: Vec<Reply> = (0..34).map(|k| Reply::Chain(t, vec![(1, k % 2 == 0)])).collect();
+        assert_eq!(got, want, "{what}: 34 chains on the commands' frame, in order");
+        assert_eq!(bypasses(&p), 34, "{what}");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 1);
+    }
+}
+
+/// An event ring that stopped reading: bypass commands apply only while their chains have a place among
+/// what the slot owes, the rest wait in order, and once the ring drains every one applies and sends its
+/// chain, none lost.
+#[test]
+fn a_stalled_event_ring_holds_bypass_commands_back_and_loses_none() {
+    for block in BLOCKS {
+        let p = Probe::new();
+        let mut rig = Rig::with_event_capacity(Opts { block, ..Opts::default() }, 4);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &p));
+        rig.advance(1000);
+        rig.hold_events = true;
+        let t = rig.frame + 7;
+        for _ in 0..48 {
+            rig.send_at(t, toggle_unit(1));
+        }
+        rig.advance(1100);
+        let what = format!("block {block}");
+        let held = bypasses(&p);
+        assert!(held < 48, "{what}: application held back ({held} applied)");
+        rig.hold_events = false;
+        rig.read_events();
+        // The ring takes at most 4 a block.
+        for _ in 0..64 {
+            rig.advance(block as Frame);
+        }
+        let got: Vec<(Frame, bool)> = replies(&rig, 0).into_iter().filter_map(|r| if let Reply::Chain(f, s) = r { (f >= t).then(|| (f, s[0].1)) } else { None }).collect();
+        assert_eq!(got.iter().map(|g| g.1).collect::<Vec<_>>(), (0..48).map(|k| k % 2 == 0).collect::<Vec<_>>(), "{what}: every value, in order");
+        assert!(got.windows(2).all(|w| w[0].0 <= w[1].0) && got[0].0 == t, "{what}: in frame order from the commands' frame");
+        assert_eq!(bypasses(&p), 48, "{what}");
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 1);
+    }
+}
+
+/// A port edit's chain is owed with its answer, never folded into a later change's: whatever depth bypass
+/// commands filled what the slot owes on a stalled ring, an install and a bypass after it each send
+/// their own chain, the install's right after its answer.
+#[test]
+fn a_port_edits_chain_is_its_own_whatever_the_slot_owes() {
+    for block in [1, 128, 480] {
+        for n in 20..44 {
+            let p = Probe::new();
+            let mut rig = Rig::with_event_capacity(Opts { block, ..Opts::default() }, 4);
+            put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &p));
+            rig.advance(1000);
+            rig.hold_events = true;
+            let t = rig.frame + 3;
+            for _ in 0..n {
+                rig.send_at(t, toggle_unit(1));
+            }
+            rig.advance(block as Frame + 3);
+            put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Gain(1.0), &p));
+            rig.send_at(rig.frame + 1, toggle_unit(1));
+            rig.advance(1000);
+            rig.hold_events = false;
+            rig.read_events();
+            // The ring takes at most 4 a block.
+            for _ in 0..64 {
+                rig.advance(block as Frame);
+            }
+            let what = format!("block {block}, {n} bypass commands");
+            let r = replies(&rig, 0);
+            assert_eq!(r.iter().filter(|x| matches!(x, Reply::Chain(..))).count(), 1 + n + 1 + 1, "{what}: one chain per change");
+            let k = r.iter().position(|x| matches!(x, Reply::Seat(_, 2, SeatOp::Install, SeatOutcome::Applied))).expect("the install was answered");
+            let Reply::Seat(f2, ..) = r[k] else { unreachable!() };
+            match &r[k + 1] {
+                Reply::Chain(f, seats) => assert_eq!((*f, seats.iter().map(|s| s.0).collect::<Vec<_>>()), (f2, vec![1, 2]), "{what}: the install's own chain"),
+                other => panic!("{what}: the install's answer is followed by {other:?}"),
+            }
+            rig.engine.evict_slots();
+            let mut kept = Vec::new();
+            assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2);
+        }
+    }
+}
+
+/// An event ring that frees one entry per block, slot 0 owing a new answer every block: slot 1's answer
+/// still gets its turn (the first offer goes round the slots).
+#[test]
+fn a_slot_owing_an_answer_every_block_starves_no_other_slot() {
+    for block in BLOCKS {
+        let mut rig = Rig::with_event_capacity(Opts { block, ..Opts::default() }, 1);
+        assert!(rig.port(1).remove(98));
+        for _ in 0..24 {
+            assert!(rig.port(0).remove(99));
+            rig.advance(block as Frame);
+        }
+        let what = format!("block {block}");
+        let got: Vec<(UnitId, SeatOp, SeatOutcome)> = answers(&rig, 1).into_iter().map(|a| (a.1, a.2, a.3)).collect();
+        assert_eq!(got, vec![(98, SeatOp::Remove, SeatOutcome::Refused(SeatRefusal::Unknown))], "{what}: slot 1 answered");
+        assert!(answers(&rig, 0).len() > 2, "{what}: slot 0's answers flow too");
+    }
+}
+
+/// One block as the device callback renders it, under `catch_unwind` (its guard), silent input: false
+/// on a panic. Not under `assert_no_alloc`: the unwind allocates.
+fn guarded_block(rig: &mut Rig) -> bool {
+    let n = rig.block;
+    let ctx = ProcessContext { frame: rig.frame, xrun: false, damaged: false, align_frames: rig.align - rig.engine.limiter_latency(), input_frames: 0 };
+    let (input, mut left, mut right) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let engine = &mut rig.engine;
+    let ok = catch_unwind(AssertUnwindSafe(|| engine.process(&ctx, &input, &mut left, &mut right))).is_ok();
+    rig.frame += n as Frame;
+    ok
+}
+
+/// A unit that panics in its first call after a move's reorder: the move's answer and its chain were
+/// owed before any unit was called in the new order, so the owner's eviction of the faulted engine
+/// delivers them, in order, before the eviction's own chain.
+#[test]
+fn a_moves_answer_and_chain_survive_a_panic_right_after_its_reorder() {
+    for block in BLOCKS {
+        let (pg, pc) = (Probe::new(), Probe::new());
+        let mut rig = rig(block);
+        let at = F0 + 5000 + FADE as Frame;
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &pg));
+        put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Clip(0.3), &pc).panicking_from(at));
+        rig.advance(5000);
+        assert!(rig.port(0).move_to(2, 0));
+        let what = format!("block {block}");
+        let blocks = (0..2 * FADE as usize / block + 2).take_while(|_| guarded_block(&mut rig)).count();
+        assert!(blocks <= 2 * FADE as usize / block, "{what}: the unit panicked");
+        assert!(rig.frame > at && rig.frame - (block as Frame) <= at, "{what}: in the reorder's block");
+        assert!(catch_unwind(AssertUnwindSafe(|| rig.engine.evict_slots())).is_ok());
+        rig.read_events();
+        let r = replies(&rig, 0);
+        let k = r.iter().position(|x| matches!(x, Reply::Seat(_, 2, SeatOp::Move, _))).expect("the move was answered");
+        assert_eq!(r[k..k + 2], [Reply::Seat(at, 2, SeatOp::Move, SeatOutcome::Applied), Reply::Chain(at, vec![(2, false), (1, false)])], "{what}: its answer, then its chain");
+        assert!(matches!(&r[k + 2..], [Reply::Chain(_, empty)] if empty.is_empty()), "{what}: then the eviction's chain alone: {:?}", &r[k + 2..]);
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+        assert_eq!((pg.drops(), pc.drops()), (0, 0), "{what}");
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ending {
+    /// The take ends: nothing captures on.
+    Take,
+    /// A RETAKE roll's pass edge: the next pass captures on.
+    RetakePass,
+    /// RETAKE's REC on another lane: that lane captures on from the pass edge.
+    Handoff,
+}
+
+/// A fresh edit that moves the alignment, sent for the block that starts where a capture ends: the end
+/// is resolved before the port is served, so the edit applies there with one `Applied`. A RETAKE pass
+/// edge or a handoff to another lane there hands the capture on: the edit waits, answered `Waiting` once.
+#[test]
+fn a_fresh_edit_on_a_captures_end_frame_applies_unless_the_capture_goes_on() {
+    for ending in [Ending::Take, Ending::RetakePass, Ending::Handoff] {
+        for block in BLOCKS {
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(17, 1.0), &p));
+            rig.set(Command::SetRetake(ending != Ending::Take));
+            arm(&mut rig, 1.0);
+            let mut end = rig.end_frame();
+            if ending == Ending::Handoff {
+                rig.advance_to(end + 1000);
+                rig.press(Command::RecDub(1));
+                end = rig.end_frame();
+            }
+            rig.advance_to(end);
+            put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+            rig.advance(block as Frame);
+            let what = format!("block {block}, {ending:?}");
+            let got: Vec<(Frame, UnitId, SeatOp, SeatOutcome)> = answers(&rig, 0).into_iter().filter(|a| a.1 == 2).collect();
+            if ending == Ending::Take {
+                assert_eq!(got, vec![(end, 2, SeatOp::Install, SeatOutcome::Applied)], "{what}: applied once, on the take's end");
+                assert!(!rig.port(0).holding(), "{what}");
+                assert_eq!(chains(&rig, 0).last().map(|c| (c.0, ids(&c.1))), Some((end, vec![1, 2])), "{what}");
+            } else {
+                assert_eq!(got, vec![(end, 2, SeatOp::Install, SeatOutcome::Waiting)], "{what}: waiting, once");
+                assert!(rig.port(0).holding(), "{what}");
+                let lane = if ending == Ending::Handoff { 1 } else { 0 };
+                assert_eq!(rig.window().map(|w| (w.0, w.1)), Some((lane, Some(end))), "{what}: the capture goes on from there");
+            }
+            rig.engine.evict_slots();
+            drop(rig);
+            assert_eq!(p.drops(), 2, "{what}: every unit back to the port, none dropped before");
+        }
+    }
+}
+
+/// AUTO listening on slot 0 (a 17-frame chain) beside live slot 1 (a 100-frame chain, silent): the
+/// alignment is slot 1's 100 frames throughout, and on `e` slot 0's chain becomes 67 frames, its
+/// compensation at the record tap 83 → 33. Slot 0's input, a quarter on the right: with `burst`, a loud
+/// attack its first chain has passed into its compensation line before `e`; a soft onset (0.01) from
+/// `e + soft`, 0.2 from `e + loud`. The take is stopped at `e + 4000`. Returns whether AUTO still listened
+/// at `e + 900`, the take's start and its loop.
+fn auto_beside_a_longer_chain(block: usize, burst: bool, soft: Frame, loud: Frame) -> (Frame, bool, Frame, Vec<Pair>) {
+    let p = Probe::new();
+    let mut rig = rig(block);
+    put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(17, 1.0), &p));
+    put(&mut rig, 1, 3, MAX_UNITS, false, None, Unit::new(Dsp::Lag(100, 1.0), &p));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set(Command::SetAutoRecord(true));
+    rig.press(Command::RecDub(0));
+    assert!(rig.lane(0).auto_armed);
+    let e = rig.frame + 3000;
+    let x = move |f: Frame| if burst && (e - 50..e - 17).contains(&f) { 0.5 } else if f >= e + loud { 0.2 } else if f >= e + soft { 0.01 } else { 0.0 };
+    rig.set_stereo_inputs(move |f| [x(f), 0.25 * x(f)], |_| [0.0; 2]);
+    rig.advance_to(e);
+    assert_eq!(rig.engine.live_latency(), 100);
+    put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+    rig.advance(900);
+    let listening = rig.lane(0).auto_armed;
+    rig.advance_to(e + 4000);
+    assert_eq!(rig.engine.live_latency(), 100);
+    assert!(!rig.lane(0).auto_armed, "the onset triggered");
+    let start = rig.start_frame();
+    rig.press(Command::RecDub(0));
+    let stop = rig.frame + 5 * 48_000;
+    while rig.state(0) != LaneState::Playing && rig.frame < stop {
+        rig.advance(block as Frame);
+    }
+    rig.idle();
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let out = (e, listening, start, rig.pcm2(0));
+    assert!(out.3.len() > 2000, "the take holds the onset");
+    rig.engine.evict_slots();
+    drop(rig);
+    assert_eq!(p.drops(), 3);
+    out
+}
+
+/// AUTO listening across a change of one path's compensation at the record tap, the alignment itself
+/// unchanged (another live slot holds it): what it retained before is cut, and what that path's line
+/// held from before the change never reaches it. An earlier loud attack still in the line leaves no
+/// trace (no trigger, the same take frame for frame, both sides), and a soft onset begun before the
+/// change is retained only from the change on.
+#[test]
+fn auto_listening_across_one_paths_compensation_change_keeps_nothing_from_before_it() {
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let (e, listening, start, take) = auto_beside_a_longer_chain(block, true, 1000, 1300);
+        let (_, quiet_listening, quiet_start, quiet_take) = auto_beside_a_longer_chain(block, false, 1000, 1300);
+        assert!(listening && quiet_listening, "{what}: the attack from before the change triggers nothing");
+        assert!(start > e + 600, "{what}: the take starts on the onset, at {start} (the change at {e})");
+        assert_eq!((start, take.len()), (quiet_start, quiet_take.len()), "{what}: the same take as with no attack");
+        assert!(take.iter().zip(&quiet_take).all(|(a, b)| a[0].to_bits() == b[0].to_bits() && a[1].to_bits() == b[1].to_bits()), "{what}: frame for frame, both sides");
+        assert!(take.iter().any(|s| s[1] != s[0]) && take.iter().all(|s| s[0].abs() < 0.3), "{what}: a stereo take, no attack in it");
+        let (e, _, start, _) = auto_beside_a_longer_chain(block, false, -300, 500);
+        assert!(start >= e, "{what}: the soft onset retained from the change on, not from {start} (the change at {e})");
+    }
+}
+
+/// A port message sent while a move dips, before a device jump past its reorder: the reorder applies
+/// where the device resumes, before the port is served, so the message applies in that block.
+#[test]
+fn a_message_sent_before_a_jump_past_a_reorder_applies_in_the_resumed_block() {
+    for block in BLOCKS {
+        let (pg, pc) = (Probe::new(), Probe::new());
+        let mut rig = rig(block);
+        put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &pg));
+        put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Clip(0.3), &pc));
+        rig.advance(5000);
+        assert!(rig.port(0).move_to(2, 0));
+        rig.advance(64);
+        assert!(rig.port(0).remove(1));
+        rig.skip(512);
+        let r = rig.frame;
+        rig.advance(block as Frame);
+        let what = format!("block {block}");
+        let got: Vec<Reply> = replies(&rig, 0).into_iter().filter(|x| !matches!(x, Reply::Seat(_, _, SeatOp::Install, _) | Reply::Chain(F0, _))).collect();
+        let want = vec![
+            Reply::Seat(r, 2, SeatOp::Move, SeatOutcome::Applied),
+            Reply::Chain(r, vec![(2, false), (1, false)]),
+            Reply::Seat(r, 1, SeatOp::Remove, SeatOutcome::Applied),
+            Reply::Chain(r, vec![(2, false)]),
+        ];
+        assert_eq!(got, want, "{what}: the reorder, then the removal, both where the device resumed");
+        rig.advance(1000);
+        rig.engine.evict_slots();
+        let mut kept = Vec::new();
+        assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+    }
+}
+
+/// A slot's raw reply stream through two installs, a move and a removal, read after every block (and
+/// with the event ring stalled across the reorder): each message's answer before its chain, nothing
+/// twice, a dipping move's both on its reorder, each delivered by the end of the block it is dated in
+/// whenever the ring has room, and never dated past it.
+#[test]
+fn a_slots_replies_arrive_in_order_once_and_by_the_end_of_their_block() {
+    for stall in [false, true] {
+        for block in BLOCKS {
+            let (pg, pc) = (Probe::new(), Probe::new());
+            let mut rig = rig(block);
+            put(&mut rig, 0, 1, MAX_UNITS, false, None, Unit::new(Dsp::Gain(2.0), &pg));
+            put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Clip(0.3), &pc));
+            let what = format!("block {block}, stalled {stall}");
+            let step = |rig: &mut Rig| {
+                rig.advance(block as Frame);
+                if !rig.hold_events {
+                    let r = replies(rig, 0);
+                    assert!(r.iter().all(|x| match x {
+                        Reply::Seat(f, ..) | Reply::Chain(f, _) => *f < rig.frame,
+                    }), "{what}: a reply dated past the block it came with");
+                    let pending = rig.port(0).holding();
+                    assert!(!pending, "{what}");
+                }
+            };
+            while rig.frame < F0 + 5000 {
+                step(&mut rig);
+            }
+            let s = rig.frame;
+            assert!(rig.port(0).move_to(2, 0));
+            let at = s + FADE as Frame;
+            rig.hold_events = stall;
+            while rig.frame <= at {
+                step(&mut rig);
+                if !stall && rig.frame > at {
+                    assert!(replies(&rig, 0).contains(&Reply::Seat(at, 2, SeatOp::Move, SeatOutcome::Applied)), "{what}: answered by the end of the reorder's block");
+                }
+            }
+            while rig.frame < at + 2 * FADE as Frame {
+                step(&mut rig);
+            }
+            rig.hold_events = false;
+            rig.read_events();
+            assert!(rig.port(0).remove(1));
+            let t = rig.frame;
+            step(&mut rig);
+            let want = vec![
+                Reply::Seat(F0, 1, SeatOp::Install, SeatOutcome::Applied),
+                Reply::Chain(F0, vec![(1, false)]),
+                Reply::Seat(F0, 2, SeatOp::Install, SeatOutcome::Applied),
+                Reply::Chain(F0, vec![(1, false), (2, false)]),
+                Reply::Seat(at, 2, SeatOp::Move, SeatOutcome::Applied),
+                Reply::Chain(at, vec![(2, false), (1, false)]),
+                Reply::Seat(t, 1, SeatOp::Remove, SeatOutcome::Applied),
+                Reply::Chain(t, vec![(2, false)]),
+            ];
+            assert_eq!(replies(&rig, 0), want, "{what}: the raw stream");
+            rig.advance(1000);
+            rig.engine.evict_slots();
+            let mut kept = Vec::new();
+            assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+        }
     }
 }
