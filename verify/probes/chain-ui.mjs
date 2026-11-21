@@ -945,7 +945,7 @@ await probe(async ({ open }) => {
         const on = await page.evaluate((s) => document.activeElement === document.querySelector(`.slot--${s} .slot__fold`), slot);
         assert.ok(on, `the focus on slot ${slot.toUpperCase()}'s fold plate, not ${await active()}`);
       };
-      await check('a fold under an open OTT face leaves the face open, the focus in it (a face is free-standing)', async () => {
+      await check('a fold under an open OTT face leaves the face open, the focus in it; Escape then returns focus to the fold plate', async () => {
         await show('b');
         await page.setViewportSize(wide);
         await settle();
@@ -957,8 +957,11 @@ await probe(async ({ open }) => {
         assert.equal(await page.locator('.slot--a .slot__fold').count(), 1, 'slot A folded');
         assert.equal(await face.count(), 1, 'the face open');
         assert.match(await active(), /uface__knob/, 'the focus still in the face');
-        await face.locator('.uface__close').click();
+        await page.keyboard.press('Escape');
         await settle();
+        assert.equal(await face.count(), 0, 'Escape closed the face');
+        const onFold = await page.evaluate(() => document.activeElement === document.querySelector('.slot--a .slot__fold'));
+        assert.ok(onFold, `focus returned to slot A fold plate, not ${await active()}`);
       });
       await check('a fold with the focus in a plate’s menu hands it to the slot’s fold plate', async () => {
         await foldWith('b', 'a', async () => {

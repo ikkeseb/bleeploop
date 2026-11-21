@@ -674,6 +674,9 @@ await probe(async ({ open }) => {
   await emit({ events: [{ Transport: { frame: 0, master: 0, bpm: 60, meter: { num: 4, den: 4, beats: 4 }, locked: false } }] });
   const at60 = await echoTicks({ echoTime: 1, echoFeedback: 0.5, echoLevel: 1 }, 60);
   assert.ok(!rises(at60, 0.25) && rises(at60, 0.5), 'the scripted tempo: 1/8 at 60 BPM is 0.5 s');
+  await emit({ reset: true, settings: [], events: emptyLanes() });
+  const afterReset = await echoTicks({ echoTime: 1, echoFeedback: 0.5, echoLevel: 1 }, 60);
+  assert.ok(!rises(afterReset, 0.25) && rises(afterReset, 0.5), 'a reset without a Transport keeps the scripted tempo (60 BPM)');
   await emit({ events: [{ Transport: { frame: 0, master: 0, bpm: 120, meter: { num: 4, den: 4, beats: 4 }, locked: false } }] });
   // the timer runs while an ECHO is seated and on, and stops when it is bypassed
   await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));

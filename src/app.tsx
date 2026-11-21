@@ -601,8 +601,8 @@ export function App() {
         </div>
       </Show>
 
-      {/* The open unit faces (the chain's OTT and ECHO): free-standing, over the row and the lanes. */}
-      <FaceHost />
+      {/* The open unit faces (the chain's OTT and ECHO): free-standing, over the row and the lanes; inert under the tuner. */}
+      <FaceHost inert={looper.tunerOn()} returnFocus={(el) => transportKeys?.returnFocus(el)} />
 
       {/* Error-toast surface: the ONE user-visible channel for failures that otherwise
           reach only console.error (invisible in a release WebView2 build). Rendered once, above the

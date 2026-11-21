@@ -54,7 +54,10 @@ export function registerOttGlass(canvas: HTMLCanvasElement, values: HTMLElement[
   const g: Glass = { canvas, values, unit, drawn: -1, laid: '' };
   glasses.add(g);
   start();
-  return () => glasses.delete(g);
+  return () => {
+    glasses.delete(g);
+    stop();
+  };
 }
 
 /** Draw an OTT plate's miniature (three band bars, `--g0`..`--g2` in dB) for `unit` while it is mounted. */
@@ -62,11 +65,21 @@ export function registerOttMini(el: HTMLElement, unit: number): () => void {
   const m: Mini = { el, unit, drawn: -1 };
   minis.add(m);
   start();
-  return () => minis.delete(m);
+  return () => {
+    minis.delete(m);
+    stop();
+  };
 }
 
 function start(): void {
   if (rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
+function stop(): void {
+  if (glasses.size === 0 && minis.size === 0 && rafId !== 0) {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
 }
 
 function frame(): void {

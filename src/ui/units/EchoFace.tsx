@@ -133,41 +133,57 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
   const [held, setHeld] = createSignal<number | null>(null);
   const pos = () => held() ?? props.step;
   const enabled = () => props.unit().state === 'seated';
-  let sent: { step: number; at: number } | null = null;
+  let pending: number[] = [];
+  let sentAt = 0;
   createEffect(
     on(
       () => props.step,
       (s) => {
-        if (sent?.step === s) sent = null;
+        const i = pending.indexOf(s);
+        if (i >= 0) pending.splice(0, i + 1);
       },
+      { defer: true },
     ),
   );
-  /** Where the engine will stand once what was sent lands. */
-  const committed = (): number => (sent && performance.now() - sent.at < PENDING_MS ? sent.step : props.step);
+  /** Where the engine will stand once what was sent lands (kept for the whole drag; expires after PENDING_MS outside a drag). */
+  const committed = (): number => {
+    if (pending.length === 0) return props.step;
+    if (drag === null && performance.now() - sentAt >= PENDING_MS) {
+      pending.length = 0;
+      return props.step;
+    }
+    return pending[pending.length - 1];
+  };
   const send = (p: number): number => {
     const q = Math.min(ECHO_STEPS.length - 1, Math.max(0, Math.round(p)));
     if (q !== committed()) {
       setUnitParam(props.unit().id, 'echoTime', ECHO_STEPS[q].index);
-      sent = { step: q, at: performance.now() };
+      pending.push(q);
+      sentAt = performance.now();
     }
     return q;
   };
   const length = (p: number) => ms(stepSeconds(props.tempo, p));
-  let drag: { id: number; y: number; from: number } | null = null;
-  const letGo = () => {
+  let drag: { id: number; y: number; from: number; el: HTMLElement } | null = null;
+  const letGo = (returnToFrame = false) => {
+    const el = drag?.el;
     drag = null;
     setHeld(null);
+    if (returnToFrame && el && document.activeElement === el) {
+      el.closest<HTMLElement>('.uface')?.focus({ preventScroll: true });
+    }
   };
   createEffect(() => {
-    if (!enabled()) letGo();
+    if (!enabled()) letGo(true);
   });
-  onCleanup(letGo);
+  onCleanup(() => letGo(false));
   const onDown = (e: PointerEvent) => {
     if (!enabled() || e.button !== 0) return;
     e.preventDefault();
-    (e.currentTarget as HTMLElement).focus();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    drag = { id: e.pointerId, y: e.clientY, from: committed() };
+    const el = e.currentTarget as HTMLElement;
+    el.focus({ preventScroll: true });
+    el.setPointerCapture(e.pointerId);
+    drag = { id: e.pointerId, y: e.clientY, from: committed(), el };
     setHeld(drag.from);
   };
   const onMove = (e: PointerEvent) => {
@@ -176,7 +192,7 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
     if (p !== held()) setHeld(send(p));
   };
   const onUp = (e: PointerEvent) => {
-    if (drag?.id === e.pointerId) letGo();
+    if (drag?.id === e.pointerId) letGo(true);
   };
   const onKey = (e: KeyboardEvent) => {
     if (!enabled()) return;
@@ -188,12 +204,18 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
     e.preventDefault();
     e.stopPropagation();
   };
-  // a wheel's notches, however many one event carries, are one send
+  // a wheel's notches, however many one event carries, are one send; lines and pages normalize to pixels
   let wheelAcc = 0;
   const wheel = (e: WheelEvent) => {
     if (!enabled()) return;
     e.preventDefault();
-    wheelAcc += e.deltaY;
+    const dy =
+      e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? e.deltaY * WHEEL_STEP
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? e.deltaY * WHEEL_STEP * ECHO_STEPS.length
+          : e.deltaY;
+    wheelAcc += dy;
     const n = Math.trunc(wheelAcc / WHEEL_STEP);
     if (n === 0) return;
     wheelAcc -= n * WHEEL_STEP;
@@ -215,6 +237,7 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
                 classList={{ 'is-on': pos() === i(), 'is-off': !enabled() }}
                 data-control
                 style={at(geo().size / 2 + geo().labels, STEP_ANGLES[i()])}
+                onPointerDown={(e) => e.preventDefault()}
                 onClick={() => enabled() && send(i())}
               >
                 {s.label}

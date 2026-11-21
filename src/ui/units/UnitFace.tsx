@@ -13,13 +13,14 @@ import './unit-face.css';
  * unit's face may stand beside it, the last touched on top. It closes by its close, by Escape with the focus
  * in it, or by its plate's name again; a keyboard close hands the focus back to the plate's name.
  *
- * It opens at its home, hanging under the slot row from its plate by a strap of the plate's own panel; the
+ * It opens at its home, just under the slot row below its plate (with nothing drawn between them); the
  * player may move it anywhere in the window (a press and drag on the face's panel, its glass included) and
  * scale it from its corner grip, and it keeps that place and size per unit kind, across launches
- * (`lf.unitFaces`). Moved off home the strap goes (it means "hangs from this plate"), and so it does while
- * the plate is folded away; a move released near home lands home. Its type never goes under the base size:
+ * (`lf.unitFaces`). A move released near home lands home; a move or nudge keeps the displayed fit for the
+ * current viewport without storing it as the size preference. Its type never goes under the base size:
  * shrunk past it, the narrow face takes over (`face-place.ts`). It never leaves the window: a window resize
- * pulls it back in, and a window too short for it under the plate takes it off the strap. With the face
+ * pulls it back in, and a window too short for it under the plate (or a scrolled plate above the margin)
+ * fits it to the window instead. With the face
  * itself focused, the arrow keys move it (8 px, Shift 40 px), + and - scale it, Home sends it home at its
  * first size. The frame draws the name, the power switch (the unit's bypass), the maker's mark and the
  * close; the face draws its glass and its controls (`children`), on the narrow face or the full one.
@@ -37,17 +38,14 @@ export function UnitFace(props: {
   let frame!: HTMLDivElement;
   const id = () => props.unit().id;
   const plateEl = () => plateOf(id())?.el;
-  // the plate's box as last measured (a folded plate's last place: the face stays where it stood), and
-  // whether the plate is there to hang from
+  // the plate's box as last measured (a folded plate's last place: the face stays where it stood)
   const [plateBox, setPlateBox] = createSignal<FaceInput['plate']>({ left: 0, width: 0, bottom: 0 });
-  const [attached, setAttached] = createSignal(false);
   const [win, setWin] = createSignal({ w: window.innerWidth, h: window.innerHeight });
   const [ui, setUi] = createSignal(1);
   const measure = () => {
     const el = plateOf(id())?.el;
     const r = el?.isConnected ? el.getBoundingClientRect() : null;
     if (r && r.width > 0) setPlateBox({ left: r.left, width: r.width, bottom: r.bottom });
-    setAttached(r !== null && r.width > 0);
     setWin({ w: window.innerWidth, h: window.innerHeight });
     // the chrome's size step (`--ui`, a step up on the wide display)
     setUi(Number(getComputedStyle(document.documentElement).getPropertyValue('--ui')) || 1);
@@ -80,16 +78,25 @@ export function UnitFace(props: {
     cancelAnimationFrame(raf);
   });
 
-  // what the player set (kept), and a drag's own while it runs
+  // what the player set (kept), a drag's own while it runs, and the displayed fit held for this viewport
+  // after a move or nudge (so release never jumps, without storing it as the size preference)
+  const [fitHold, setFitHold] = createSignal<{ narrow: boolean; k: number; w: number; h: number; ui: number } | null>(null);
+  const activeHold = (): Kept['size'] => {
+    const h = fitHold();
+    return h && h.w === win().w && h.h === win().h && h.ui === ui() ? { narrow: h.narrow, k: h.k } : null;
+  };
   const [live, setLive] = createSignal<Kept | null>(null);
   const kept = () => live() ?? faces()[props.kind] ?? EMPTY;
-  const input = (k: Kept = kept()): FaceInput => ({
-    plate: plateBox(),
-    win: win(),
-    ui: ui(),
-    size: k.size ? { narrow: k.size.narrow, scale: k.size.k * ui() } : null,
-    at: k.at,
-  });
+  const input = (k: Kept = kept(), useHold = live() === null): FaceInput => {
+    const size = k.at && useHold ? (activeHold() ?? k.size) : k.size;
+    return {
+      plate: plateBox(),
+      win: win(),
+      ui: ui(),
+      size: size ? { narrow: size.narrow, scale: size.k * ui() } : null,
+      at: k.at,
+    };
+  };
   const box = createMemo(() => placeFace(input()));
   /** The size as kept: its scale a multiple of the size step, so a place kept on one display fits another. */
   const keepSize = (b: FaceBox): Kept['size'] => ({ narrow: b.narrow, k: b.scale / ui() });
@@ -125,11 +132,11 @@ export function UnitFace(props: {
     const base = faces()[props.kind] ?? EMPTY;
     if (press.resize) {
       const corner = { x: s.left + WIDE.w * s.scale + dx, y: s.top + (s.narrow ? NARROW : WIDE).h * s.scale + dy };
-      const size = sizeFromCorner(s, input(base), corner.x, corner.y);
-      // a face at home grows from its strap; a moved one from its top-left
+      const size = sizeFromCorner(s, input(base, false), corner.x, corner.y);
+      // a face at home grows under its plate; a moved one from its top-left
       setLive({ at: s.home ? null : { x: s.left, y: s.top }, size: { narrow: size.narrow, k: size.scale / ui() } });
     } else {
-      // the face keeps the size it is drawn at under the hand; let go, it keeps the size the player set
+      // the face keeps the size it is drawn at under the hand
       setLive({ at: { x: s.left + dx, y: s.top + dy }, size: keepSize(s) });
     }
   };
@@ -142,9 +149,16 @@ export function UnitFace(props: {
     if (!p.moved) return;
     const b = box();
     const base = faces()[props.kind] ?? EMPTY;
-    if (p.resize) commit({ at: b.home ? null : { x: b.left, y: b.top }, size: keepSize(b) });
-    else if (nearHome(input(), b)) commit({ at: null, size: base.size });
-    else commit({ at: { x: b.left, y: b.top }, size: base.size });
+    if (p.resize) {
+      setFitHold(null);
+      commit({ at: b.home ? null : { x: b.left, y: b.top }, size: keepSize(b) });
+    } else if (nearHome(input(base, false), b)) {
+      setFitHold(null);
+      commit({ at: null, size: base.size });
+    } else {
+      setFitHold({ ...keepSize(b)!, w: win().w, h: win().h, ui: ui() });
+      commit({ at: { x: b.left, y: b.top }, size: base.size });
+    }
   };
   const onCancel = (e: PointerEvent) => {
     if (!press || e.pointerId !== press.id) return;
@@ -171,27 +185,24 @@ export function UnitFace(props: {
     const base = faces()[props.kind] ?? EMPTY;
     const step = e.shiftKey ? 40 : 8;
     const nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-    if (nudge) commit({ at: { x: b.left + nudge[0], y: b.top + nudge[1] }, size: base.size });
-    else if (e.key === '+' || e.key === '=' || e.key === '-') {
+    if (nudge) {
+      setFitHold({ ...keepSize(b)!, w: win().w, h: win().h, ui: ui() });
+      commit({ at: { x: b.left + nudge[0], y: b.top + nudge[1] }, size: base.size });
+    } else if (e.key === '+' || e.key === '=' || e.key === '-') {
+      setFitHold(null);
       const size = stepSize({ narrow: b.narrow, scale: b.scale }, ui(), e.key !== '-');
       commit({ at: base.at, size: { narrow: size.narrow, k: size.scale / ui() } });
-    } else if (e.key === 'Home') commit(EMPTY);
-    else return;
+    } else if (e.key === 'Home') {
+      setFitHold(null);
+      commit(EMPTY);
+    } else return;
     e.preventDefault();
     e.stopPropagation();
   };
 
   const powered = () => !props.unit().bypass;
-  const strap = () => box().home && attached();
-  const tie = () => {
-    const p = plateBox();
-    return { left: `${p.left + p.width / 2 - 16}px`, top: `${p.bottom}px` };
-  };
   return (
     <div class="uface-place" style={{ 'z-index': faceLayer(id()) + 1 }}>
-      <Show when={strap()}>
-        <i class="uface-tie" aria-hidden="true" style={tie()} />
-      </Show>
       <div
         ref={(el) => {
           frame = el;
@@ -200,7 +211,7 @@ export function UnitFace(props: {
           queueMicrotask(() => el.focus());
         }}
         class={`uface ${props.kind}`}
-        classList={{ 'uface--byp': !powered(), 'uface--narrow': box().narrow, 'uface--moving': moving(), 'uface--moved': !strap() }}
+        classList={{ 'uface--byp': !powered(), 'uface--narrow': box().narrow, 'uface--moving': moving() }}
         role="dialog"
         aria-label={`${props.name}, slot ${props.slotLetter()}`}
         aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown + - Home Escape"
@@ -334,22 +345,27 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
     setUnitParam(props.unit().id, k.param, x);
     return x;
   };
-  let drag: { id: number; y: number; from: number } | null = null;
-  const letGo = () => {
+  let drag: { id: number; y: number; from: number; el: HTMLElement } | null = null;
+  const letGo = (returnToFrame = false) => {
+    const el = drag?.el;
     drag = null;
     setHeld(null);
+    if (returnToFrame && el && document.activeElement === el) {
+      el.closest<HTMLElement>('.uface')?.focus({ preventScroll: true });
+    }
   };
   // disabled under a drag (the unit unseated): the drag ends, the knob reads the feed
   createEffect(() => {
-    if (!enabled()) letGo();
+    if (!enabled()) letGo(true);
   });
-  onCleanup(letGo);
+  onCleanup(() => letGo(false));
   const onDown = (e: PointerEvent) => {
     if (!enabled() || e.button !== 0) return;
     e.preventDefault();
-    (e.currentTarget as HTMLElement).focus();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    drag = { id: e.pointerId, y: e.clientY, from: value() };
+    const el = e.currentTarget as HTMLElement;
+    el.focus({ preventScroll: true });
+    el.setPointerCapture(e.pointerId);
+    drag = { id: e.pointerId, y: e.clientY, from: value(), el };
     setHeld(value());
   };
   const onMove = (e: PointerEvent) => {
@@ -358,7 +374,7 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
     setHeld(send(v));
   };
   const onUp = (e: PointerEvent) => {
-    if (drag?.id === e.pointerId) letGo();
+    if (drag?.id === e.pointerId) letGo(true);
   };
   const onKey = (e: KeyboardEvent) => {
     if (!enabled()) return;

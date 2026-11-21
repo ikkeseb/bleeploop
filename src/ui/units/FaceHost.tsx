@@ -12,10 +12,11 @@ import { closeFace, openFaces, plateOf, type OpenFace } from './face-store';
  * its plate's line (a slot folded under it), and the row's popovers stay its own. Its layer sits over the
  * row and the lanes and under the row's popovers; it takes no pointer itself, so everything beside a face
  * plays as ever. A face closes when its unit stops being seated or leaves its chain (the focus that was in
- * it goes to the plate's menu, the control that survives every state), and when the stage view opens over
- * the row.
+ * it goes to the plate's menu, or a surviving chain control / fold button through `returnFocus`). While the
+ * stage view is open the face layer is hidden and inert, and the same faces return on exit; under the tuner
+ * the layer is inert too.
  */
-export function FaceHost() {
+export function FaceHost(props: { inert?: boolean; returnFocus?: (el: HTMLElement | undefined) => void }) {
   const find = (unit: number): { u: UnitState; slot: 0 | 1 } | null => {
     for (const slot of [0, 1] as const) {
       const u = slotChain(slot).units.find((x) => x.id === unit);
@@ -23,25 +24,53 @@ export function FaceHost() {
     }
     return null;
   };
+  const slots = new Map<number, 0 | 1>();
+  const fallback = (slot: 0 | 1): HTMLElement | undefined => {
+    const root = document.querySelector(`.slot--${slot === 1 ? 'b' : 'a'}`);
+    return (
+      root?.querySelector<HTMLElement>('.slot__fold:not(:disabled)') ??
+      root?.querySelector<HTMLElement>('.unit .plate__menu:not(:disabled)') ??
+      root?.querySelector<HTMLElement>('.unit-add:not(:disabled)') ??
+      root?.querySelector<HTMLElement>('.slot__id:not(:disabled)') ??
+      undefined
+    );
+  };
+  const handFocus = (unit: number, slot: 0 | 1, to: 'name' | 'menu') => {
+    const p = plateOf(unit);
+    if (p?.el.isConnected) {
+      p.focus(to);
+      if (document.activeElement && document.activeElement !== document.body && p.el.contains(document.activeElement)) return;
+    }
+    const el = fallback(slot);
+    if (props.returnFocus) props.returnFocus(el);
+    else el?.focus();
+  };
   createEffect(() => {
     for (const f of openFaces()) {
       const at = find(f.unit);
-      if (at?.u.state === 'seated' && !stageOpen()) continue;
+      if (at) slots.set(f.unit, at.slot);
+      if (at?.u.state === 'seated') continue;
+      const slot = at?.slot ?? slots.get(f.unit) ?? 0;
+      slots.delete(f.unit);
       const inside = document.activeElement?.closest(`#${f.kind}-face-${f.unit}`) != null;
       closeFace(f.unit);
-      if (inside) queueMicrotask(() => plateOf(f.unit)?.focus('menu'));
+      if (inside) queueMicrotask(() => handFocus(f.unit, slot, 'menu'));
     }
   });
   return (
     <Portal>
-      <div class="uface-layer">
-        <For each={openFaces()}>{(f) => <Face face={f} find={find} />}</For>
+      <div class="uface-layer" hidden={stageOpen()} inert={props.inert || stageOpen()}>
+        <For each={openFaces()}>{(f) => <Face face={f} find={find} handFocus={handFocus} />}</For>
       </div>
     </Portal>
   );
 }
 
-function Face(props: { face: OpenFace; find: (unit: number) => { u: UnitState; slot: 0 | 1 } | null }) {
+function Face(props: {
+  face: OpenFace;
+  find: (unit: number) => { u: UnitState; slot: 0 | 1 } | null;
+  handFocus: (unit: number, slot: 0 | 1, to: 'name' | 'menu') => void;
+}) {
   const f = props.face;
   // the unit as the feed last told it (a face closing on its unit's departure draws its last state)
   let last: { u: UnitState; slot: 0 | 1 } | null = null;
@@ -49,8 +78,9 @@ function Face(props: { face: OpenFace; find: (unit: number) => { u: UnitState; s
   const unit = () => at()!.u;
   const slotLetter = () => (at()?.slot === 1 ? 'B' : 'A');
   const close = (keyboard: boolean) => {
+    const slot = at()?.slot ?? 0;
     closeFace(f.unit);
-    if (keyboard) plateOf(f.unit)?.focus('name');
+    if (keyboard) props.handFocus(f.unit, slot, 'name');
   };
   return (
     <Switch>

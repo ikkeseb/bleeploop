@@ -1,13 +1,14 @@
 /**
  * Where a unit's face stands and how large it is (`UnitFace.tsx`), as plain arithmetic. A face opens at
- * its home, hanging from its plate under the slot row (the plate's centre over `TIE_AT` on the face); the
+ * its home, just under the slot row below its plate (the plate's centre over `TIE_AT` on the face); the
  * player may move it anywhere in the window and scale it from its corner. Two layouts, one family: the
  * full face (900x540) and its narrow reflow (900x382, a shorter glass, smaller knobs, the same legends).
  * The scale never takes the type under its base size (the chrome's size step `ui`): where the full face
  * would go under it, the narrow one takes over, and the narrow one at `ui` is the floor. Where home has no
- * room for the narrow face at `ui` (a short window), the face leaves its strap and fits the window from
- * home's place; only a window that cannot hold the narrow face at `ui` at all scales it under. The face
- * never leaves the window: every placement clamps it in, its every control inside.
+ * room for the narrow face at `ui` (a short window) or the scrolled plate puts home above the viewport
+ * margin, the face detaches and fits the window from home's place; only a window that cannot hold the narrow
+ * face at `ui` at all scales it under. The face never leaves the window: every placement clamps it in, its
+ * every control inside.
  */
 
 interface FaceLayout {
@@ -21,7 +22,7 @@ const TIE_AT = 333;
 /** The gap from the plate's foot to a face at home, and the window's margin round a face. */
 const DROP = 19;
 const MARGIN = 8;
-/** A move released this close to home lands home (its strap back). */
+/** A move released this close to home lands home. */
 const SNAP = 12;
 
 /** The size the player picked: the layout and its scale. */
@@ -77,12 +78,12 @@ export function placeFace(i: FaceInput): FaceBox {
   if (!i.at) {
     const top = i.plate.bottom + DROP;
     const room = (l: FaceLayout) => Math.min((i.win.w - 2 * MARGIN) / l.w, (i.win.h - top - MARGIN) / l.h);
-    if (room(NARROW) >= i.ui - 1e-9) {
+    if (top >= MARGIN && room(NARROW) >= i.ui - 1e-9) {
       const { narrow, scale } = fit(want, i.ui, room);
       const home = homeOf(i, narrow ? NARROW : WIDE, scale);
       return { ...home, scale, narrow, home: true };
     }
-    // no room under the plate: off the strap, fitted to the window from home's place
+    // no room under the plate, or plate scrolled above the margin: detach and fit to the window
     return placeFace({ ...i, at: { x: i.plate.left + i.plate.width / 2 - TIE_AT * i.ui, y: top } });
   }
   const room = (l: FaceLayout) => Math.min((i.win.w - 2 * MARGIN) / l.w, (i.win.h - 2 * MARGIN) / l.h);
@@ -117,13 +118,23 @@ export function sizeFromCorner(start: FaceBox, i: FaceInput, cx: number, cy: num
     return [left + l.w * s, start.top + l.h * s];
   };
   const wide = nearest((s) => corner(WIDE, s), px, py);
-  if (wide < i.ui * 0.97) return { narrow: true, scale: Math.max(i.ui, nearest((s) => corner(NARROW, s), px, py)) };
-  return { narrow: false, scale: Math.max(i.ui, wide) };
+  const narrow = nearest((s) => corner(NARROW, s), px, py);
+  if (start.narrow) {
+    // start in the displayed narrow layout; switch to full only after deliberate downward growth
+    const startBottom = start.top + NARROW.h * start.scale;
+    const tallEnough = py - start.top >= WIDE.h * Math.max(i.ui, start.scale * 0.95);
+    if (wide.scale >= i.ui && py - startBottom >= 48 * i.ui && (tallEnough || wide.dist < narrow.dist)) {
+      return { narrow: false, scale: Math.max(i.ui, wide.scale) };
+    }
+    return { narrow: true, scale: Math.max(i.ui, narrow.scale) };
+  }
+  if (wide.scale < i.ui * 0.97) return { narrow: true, scale: Math.max(i.ui, narrow.scale) };
+  return { narrow: false, scale: Math.max(i.ui, wide.scale) };
 }
 
-/** The scale whose point `at(s)` lands nearest (`px`, `py`): `at` is linear but for a few clamps, so each of
- * many short spans is solved as a line, and the nearest of them wins. */
-function nearest(at: (s: number) => [number, number], px: number, py: number): number {
+/** The scale whose point `at(s)` lands nearest (`px`, `py`), and its squared distance: `at` is linear but
+ * for a few clamps, so each of many short spans is solved as a line, and the nearest of them wins. */
+function nearest(at: (s: number) => [number, number], px: number, py: number): { scale: number; dist: number } {
   const LO = 0.1;
   const HI = 6;
   const N = 120;
@@ -141,7 +152,7 @@ function nearest(at: (s: number) => [number, number], px: number, py: number): n
     const d = (x - px) ** 2 + (y - py) ** 2;
     if (d < bestD) [best, bestD] = [t, d];
   }
-  return best;
+  return { scale: best, dist: bestD };
 }
 
 /** One keyboard step of the face's size: up or down by a tenth; down from the full face's base size the

@@ -92,9 +92,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 - **The chain seam:** while `platform.chain.available` (the DEV fake with `__lfChainFake`; the native engine
   once it speaks the chain) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
   `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's and the ECHO's faces (one
-  frame, `units/UnitFace.tsx`: home under the plate, moved and scaled by the player, kept per kind in
-  `lf.unitFaces`; free-standing, drawn by `units/FaceHost.tsx` apart from the row, so a press beside one
-  plays the looper and a fold leaves it open; one per kind, the last touched on top); otherwise the row is the fixed topology (`instrument/InstrumentSlot.tsx`), and the feed's
+  frame, `units/UnitFace.tsx`: home just under the plate, nothing drawn between them, moved and scaled by
+  the player, kept per kind in `lf.unitFaces`; free-standing, drawn by `units/FaceHost.tsx` apart from the
+  row, so a press beside one plays the looper, a fold leaves it open, and the stage view hides and keeps it;
+  one per kind, the last touched on top); otherwise the row is the fixed topology
+  (`instrument/InstrumentSlot.tsx`), and the feed's
   `chains` apply to nothing. A plate moves
   when the feed says so, never on drop; a drop is judged at its release, from the plates' places when the drag
   began. A refusal the contract makes certain (a ninth unit, a source moved, an effect ahead of a source) is the

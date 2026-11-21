@@ -74,8 +74,18 @@ export function RowPopoverPanel(props: {
               })
             }
             onClick={(e) => e.stopPropagation()}
+            onFocusOut={(e) => {
+              const to = e.relatedTarget as Node | null;
+              if (to && !e.currentTarget.contains(to)) props.pop.close(false);
+            }}
             onKeyDown={(e) => {
-              if (props.role !== 'menu' || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+              if (props.role !== 'menu') return;
+              if (e.key === 'Tab') {
+                e.preventDefault();
+                props.pop.close(true);
+                return;
+              }
+              if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
               const list = items(e.currentTarget);
               if (!list.length) return;
               e.preventDefault();

@@ -14,6 +14,9 @@
   z-index: 35;
   pointer-events: none;
 }
+.uface-layer[hidden] {
+  display: none;
+}
 .uface-place {
   position: absolute;
   inset: 0;
@@ -21,17 +24,6 @@
 }
 .uface-place > .uface {
   pointer-events: auto;
-}
-/* the strap: a strap of the open plate's own panel (its colour, its side walls) from the plate's foot down
-   into the face at home, so the face reads as fastened to that plate; a moved face has none */
-.uface-tie {
-  position: fixed;
-  width: 32px;
-  height: 20px;
-  z-index: 1;
-  background: linear-gradient(#262a30, #23262c);
-  box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.07), inset -1px 0 0 rgba(0, 0, 0, 0.35), 1px 0 0 #0d0f12, -1px 0 0 #0d0f12;
-  pointer-events: none;
 }
 
 .uface {
