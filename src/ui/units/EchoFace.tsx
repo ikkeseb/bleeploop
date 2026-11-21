@@ -1,8 +1,7 @@
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from 'solid-js';
 import type { UnitState } from '../../platform';
 import { clock } from '../state/audio';
 import { setUnitParam } from '../state/chain';
-import type { RowPopover } from '../instrument/RowPopover';
 import { FaceKnob, KnobBody, UnitFace, knobStyle, paramOf, type KnobDef } from './UnitFace';
 import { echoGeometry, registerEchoGlass, type EchoView } from './echo-loop';
 import { ECHO_FEEDBACK_MAX, ECHO_STEPS, barSeconds, stepOfIndex, stepSeconds, type EchoTempo } from './echo-time';
@@ -15,21 +14,16 @@ import './echo-face.css';
  * bars, the read heads at each repeat, lit as loud as it, the ruler counting beats back from NOW, OUT's
  * ladders. Under it TIME, the hero: a four-position selector ordered by length (`echo-time.ts` maps it
  * to the engine's index), each position with its length at the tempo; then FEEDBACK (0 to 95 %) and
- * LEVEL. Every control sends `SetUnitParam` and shows the feed's value. On the narrow face (900x382) the
+ * LEVEL. Every control sends `SetUnitParam` and shows the feed's value (a knob follows the hand while a drag
+ * holds it). On the narrow face (900x382) the
  * glass is shorter, the knobs smaller, TIME's positions print their note values alone (its length stays
  * in its read-out), every legend at its full size.
  */
 
-const KNOBS: Record<'wide' | 'narrow', readonly KnobDef[]> = {
-  wide: [
-    { param: 'echoFeedback', label: 'FEEDBACK', name: 'feedback', def: 0.4, max: ECHO_FEEDBACK_MAX, x: 650, y: 424, size: 92 },
-    { param: 'echoLevel', label: 'LEVEL', name: 'level', def: 0.5, x: 806, y: 424, size: 92 },
-  ],
-  narrow: [
-    { param: 'echoFeedback', label: 'FEEDBACK', name: 'feedback', def: 0.4, max: ECHO_FEEDBACK_MAX, x: 610, y: 287, size: 60 },
-    { param: 'echoLevel', label: 'LEVEL', name: 'level', def: 0.5, x: 770, y: 287, size: 60 },
-  ],
-};
+const KNOBS: readonly KnobDef[] = [
+  { param: 'echoFeedback', label: 'FEEDBACK', name: 'feedback', def: 0.4, max: ECHO_FEEDBACK_MAX, wide: { x: 650, y: 424, size: 92 }, narrow: { x: 610, y: 287, size: 60 } },
+  { param: 'echoLevel', label: 'LEVEL', name: 'level', def: 0.5, wide: { x: 806, y: 424, size: 92 }, narrow: { x: 770, y: 287, size: 60 } },
+];
 /** TIME's place and size, full and narrow; its positions' dots and labels at these radii past its edge. */
 const TIME = {
   wide: { x: 398, y: 386, size: 172, dots: 14, labels: 38 },
@@ -44,13 +38,7 @@ const GLASS = { w: 852, wide: 232, narrow: 178 };
 
 const ms = (s: number): number => Math.round(s * 1000);
 
-export function EchoFace(props: {
-  pop: RowPopover;
-  unit: () => UnitState;
-  /** The plate's element: the face hangs from it. */
-  plate: () => HTMLElement | undefined;
-  slotLetter: string;
-}) {
+export function EchoFace(props: { unit: () => UnitState; slotLetter: () => string; close: (keyboard: boolean) => void }) {
   const tempo = (): EchoTempo => {
     const m = clock.meter();
     return { bpm: clock.bpm(), beats: m.beats, num: m.num, den: m.den };
@@ -65,12 +53,12 @@ export function EchoFace(props: {
     view.tempo = tempo();
   });
   return (
-    <UnitFace pop={props.pop} unit={props.unit} plate={props.plate} slotLetter={props.slotLetter} kind="echo" name="ECHO">
+    <UnitFace unit={props.unit} slotLetter={props.slotLetter} close={props.close} kind="echo" name="ECHO">
       {(narrow) => (
         <>
           <Glass unit={props.unit().id} view={view} narrow={narrow()} step={step()} tempo={tempo()} />
           <TimeKnob unit={props.unit} narrow={narrow()} step={step()} tempo={tempo()} />
-          <For each={KNOBS[narrow() ? 'narrow' : 'wide']}>{(k) => <FaceKnob def={k} unit={props.unit} unitName="ECHO" />}</For>
+          <For each={KNOBS}>{(k) => <FaceKnob def={k} narrow={narrow} unit={props.unit} unitName="ECHO" />}</For>
         </>
       )}
     </UnitFace>
@@ -130,59 +118,86 @@ function Glass(props: { unit: number; view: EchoView; narrow: boolean; step: num
 /** Pixels of vertical drag a step of TIME; a mouse wheel's notch is one step. */
 const STEP_PX = 36;
 const WHEEL_STEP = 50;
+/** How long a step sent is the base of the next one before the feed has it (ms): the feed answers within
+ * frames, and a step it never reports (refused, or another's since) stops counting. */
+const PENDING_MS = 500;
 
 /** TIME, the hero: a stepped knob over four positions, by length, each printed round it with its length at
- * the tempo, the one it points at lit; a position is pressable. A slider to assistive tech and the keyboard
- * (its value the face's position, its text the note value and its length). */
+ * the tempo, the one it points at lit; a position is pressable (by the pointer: the slider is TIME's one
+ * focus). A slider to assistive tech and the keyboard (its value the face's position, its text the note
+ * value and its length). It shows the feed's step, the hand's while a drag holds it. Each step sent is the
+ * base of the next until the feed reports it, so a drag that turns back before the feed answers sends its
+ * way back, and keys or a wheel pressed quickly count from where the last left it. */
 function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number; tempo: EchoTempo }) {
   const geo = () => TIME[props.narrow ? 'narrow' : 'wide'];
   const [held, setHeld] = createSignal<number | null>(null);
   const pos = () => held() ?? props.step;
   const enabled = () => props.unit().state === 'seated';
+  let sent: { step: number; at: number } | null = null;
+  createEffect(
+    on(
+      () => props.step,
+      (s) => {
+        if (sent?.step === s) sent = null;
+      },
+    ),
+  );
+  /** Where the engine will stand once what was sent lands. */
+  const committed = (): number => (sent && performance.now() - sent.at < PENDING_MS ? sent.step : props.step);
   const send = (p: number): number => {
     const q = Math.min(ECHO_STEPS.length - 1, Math.max(0, Math.round(p)));
-    if (q !== props.step) setUnitParam(props.unit().id, 'echoTime', ECHO_STEPS[q].index);
+    if (q !== committed()) {
+      setUnitParam(props.unit().id, 'echoTime', ECHO_STEPS[q].index);
+      sent = { step: q, at: performance.now() };
+    }
     return q;
   };
   const length = (p: number) => ms(stepSeconds(props.tempo, p));
   let drag: { id: number; y: number; from: number } | null = null;
+  const letGo = () => {
+    drag = null;
+    setHeld(null);
+  };
+  createEffect(() => {
+    if (!enabled()) letGo();
+  });
+  onCleanup(letGo);
   const onDown = (e: PointerEvent) => {
     if (!enabled() || e.button !== 0) return;
     e.preventDefault();
     (e.currentTarget as HTMLElement).focus();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    drag = { id: e.pointerId, y: e.clientY, from: pos() };
-    setHeld(pos());
+    drag = { id: e.pointerId, y: e.clientY, from: committed() };
+    setHeld(drag.from);
   };
   const onMove = (e: PointerEvent) => {
-    if (!drag || drag.id !== e.pointerId) return;
+    if (!drag || drag.id !== e.pointerId || !enabled()) return;
     const p = Math.min(ECHO_STEPS.length - 1, Math.max(0, drag.from + Math.round((drag.y - e.clientY) / STEP_PX)));
     if (p !== held()) setHeld(send(p));
   };
   const onUp = (e: PointerEvent) => {
-    if (drag?.id !== e.pointerId) return;
-    drag = null;
-    setHeld(null);
+    if (drag?.id === e.pointerId) letGo();
   };
   const onKey = (e: KeyboardEvent) => {
     if (!enabled()) return;
     const by = { ArrowUp: 1, ArrowRight: 1, PageUp: 1, ArrowDown: -1, ArrowLeft: -1, PageDown: -1 }[e.key];
-    if (by !== undefined) send(pos() + by);
+    if (by !== undefined) send(committed() + by);
     else if (e.key === 'Home') send(0);
     else if (e.key === 'End') send(ECHO_STEPS.length - 1);
     else return;
     e.preventDefault();
     e.stopPropagation();
   };
+  // a wheel's notches, however many one event carries, are one send
   let wheelAcc = 0;
   const wheel = (e: WheelEvent) => {
     if (!enabled()) return;
     e.preventDefault();
     wheelAcc += e.deltaY;
-    while (Math.abs(wheelAcc) >= WHEEL_STEP) {
-      send(pos() + (wheelAcc < 0 ? 1 : -1));
-      wheelAcc -= Math.sign(wheelAcc) * WHEEL_STEP;
-    }
+    const n = Math.trunc(wheelAcc / WHEEL_STEP);
+    if (n === 0) return;
+    wheelAcc -= n * WHEEL_STEP;
+    send(committed() - n);
   };
   const at = (r: number, deg: number) => {
     const q = (deg * Math.PI) / 180;
@@ -195,20 +210,18 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
           {(s, i) => (
             <>
               <i class="echo__dot" classList={{ 'is-on': pos() === i() }} style={at(geo().size / 2 + geo().dots, STEP_ANGLES[i()])} />
-              <button
-                type="button"
+              <span
                 class="echo__st"
-                classList={{ 'is-on': pos() === i() }}
-                tabindex={-1}
-                disabled={!enabled()}
+                classList={{ 'is-on': pos() === i(), 'is-off': !enabled() }}
+                data-control
                 style={at(geo().size / 2 + geo().labels, STEP_ANGLES[i()])}
-                onClick={() => send(i())}
+                onClick={() => enabled() && send(i())}
               >
                 {s.label}
                 <Show when={!props.narrow}>
                   <small>{length(i())}</small>
                 </Show>
-              </button>
+              </span>
             </>
           )}
         </For>
@@ -229,6 +242,7 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
         onPointerMove={onMove}
         onPointerUp={onUp}
         onPointerCancel={onUp}
+        on:lostpointercapture={onUp}
         onKeyDown={onKey}
         onDblClick={() => enabled() && send(stepOfIndex(DEF.time))}
         ref={(el) => {

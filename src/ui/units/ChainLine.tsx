@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createResource, createSignal, on, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createResource, createSignal, on, onCleanup, onMount } from 'solid-js';
 import { platform, type PluginParamDesc, type UnitParamId, type UnitState } from '../../platform';
 import {
   addUnit,
@@ -26,8 +26,7 @@ import { Icon } from '../instrument/icons';
 import { PlateMenu, type PlateMenuItem } from '../instrument/PlateMenu';
 import { RowPopoverPanel, createRowPopover } from '../instrument/RowPopover';
 import { chainCompact, chainScroll } from '../instrument/row-fit';
-import { EchoFace } from './EchoFace';
-import { OttFace } from './OttFace';
+import { faceOpen, registerPlate, toggleFace, type FaceKind } from './face-store';
 import { registerOttMini } from './ott-loop';
 import '../looper/fxpanel.css';
 import '../transport/input-fx.css';
@@ -54,7 +53,7 @@ export function ChainLine(props: { slot: 0 | 1; live: boolean; returnFocus?: (el
   // ── focus: a report that moves or removes the focused plate, or a fold that unmounts the line, hands
   // focus to a surviving control (the same control on the moved plate, else its neighbour's menu, else `+`)
   let lastFocus: { unit: number; cls: string; index: number } | null = null;
-  // whether the focus is the line's: in a plate, in a plate's portal (its menu, Parameters, a unit's face:
+  // whether the focus is the line's: in a plate, in a plate's portal (its menu, its Parameters popover:
   // Solid's delegation brings their focus events through the plate), or on the `+`
   let owned = false;
   let addButton: HTMLButtonElement | undefined;
@@ -391,7 +390,7 @@ function UnitPlate(props: {
   });
   const onDown = (e: PointerEvent) => {
     if (press || e.button !== 0 || !seated() || props.count() < 2) return;
-    // Solid's delegated events reach the plate from its portals too (a face's knobs, a popover):
+    // Solid's delegated events reach the plate from its portals too (its menu, a popover):
     // only a press on the plate itself is a drag
     if (!plate?.contains(e.target as Node)) return;
     // the lamp, the editor glyph and the menu are their own presses
@@ -404,10 +403,10 @@ function UnitPlate(props: {
   };
 
   // ── a popover open on a unit that stops being seated (withdrawn, parked, leaving) closes; focus that was
-  // in it goes to the plate's menu, the control that survives every state ──
+  // in it goes to the plate's menu, the control that survives every state (a face: `FaceHost.tsx`) ──
   createEffect(() => {
     if (!pop.open() || seated()) return;
-    const inside = document.activeElement?.closest('.slot-pop, .uface') != null;
+    const inside = document.activeElement?.closest('.slot-pop') != null;
     pop.close(false);
     if (!inside) return;
     queueMicrotask(() => {
@@ -417,15 +416,41 @@ function UnitPlate(props: {
     });
   });
 
-  const isOtt = () => u().kind === 'ott';
-  const params = () => u().kind === 'plugin' || u().kind === 'synth' || isOtt() || u().kind in KIND_SENDS;
+  // the OTT and the ECHO open their own face (`FaceHost.tsx`), free-standing; the rest their popover
+  const face = (): FaceKind | null => {
+    const k = u().kind;
+    return k === 'ott' || k === 'echo' ? k : null;
+  };
+  const isOpen = () => (face() ? faceOpen(u().id) : pop.open());
+  const openParams = () => {
+    const k = face();
+    if (k) toggleFace(u().id, k);
+    else pop.toggle();
+  };
+  let nameEl: HTMLElement | undefined;
+  createEffect(() => {
+    const id = u().id;
+    if (!plate || !face()) return;
+    const el = plate;
+    onCleanup(
+      registerPlate(id, {
+        el,
+        focus: (to) => {
+          const target = to === 'name' ? nameEl : (el.querySelector<HTMLElement>('.plate__menu') ?? undefined);
+          if (props.returnFocus) props.returnFocus(target);
+          else target?.focus();
+        },
+      }),
+    );
+  });
+  const params = () => u().kind === 'plugin' || u().kind === 'synth' || face() !== null || u().kind in KIND_SENDS;
   const items = (): PlateMenuItem[][] => {
     const i = props.index();
     const gone = u().state === 'leaving';
     const first: PlateMenuItem[] = [];
     if (u().kind === 'plugin')
       first.push({ key: 'editor', label: 'Editor', icon: 'win', checked: editorOpen(u().id), disabled: !seated(), onSelect: () => void toggleEditor(u().id) });
-    if (params()) first.push({ key: 'params', label: 'Parameters', icon: 'params', checked: pop.open(), disabled: !seated(), onSelect: () => seated() && pop.toggle() });
+    if (params()) first.push({ key: 'params', label: 'Parameters', icon: 'params', checked: isOpen(), disabled: !seated(), onSelect: () => seated() && openParams() });
     return [
       first,
       [
@@ -446,7 +471,7 @@ function UnitPlate(props: {
         'unit--failed': u().state === 'failed',
         'unit--parked': u().state === 'failed' && u().parked === true,
         'unit--held': u().held === true,
-        'unit--open': pop.open(),
+        'unit--open': isOpen(),
         'unit--dragging': dragging(),
       }}
       role="listitem"
@@ -479,15 +504,18 @@ function UnitPlate(props: {
         <Show when={params()} fallback={<span class="plate__name">{name()}</span>}>
           <button
             type="button"
-            ref={pop.trigger}
+            ref={(el) => {
+              pop.trigger(el);
+              nameEl = el;
+            }}
             class="unit__name slot-pop__trigger"
             aria-haspopup="dialog"
-            aria-expanded={pop.open()}
+            aria-expanded={isOpen()}
             aria-label={`${name()}: parameters`}
             disabled={!seated()}
             onClick={(e) => {
               e.stopPropagation();
-              if (seated()) pop.toggle();
+              if (seated()) openParams();
             }}
           >
             <span class="plate__name" classList={{ 'plate__name--fx': u().kind !== 'plugin' && u().kind !== 'synth' }}>
@@ -510,21 +538,10 @@ function UnitPlate(props: {
         returnFocus={props.returnFocus}
         groups={items()}
       />
-      <Show when={pop.open()}>
-        <Switch
-          fallback={
-            <RowPopoverPanel pop={pop} id={`unit-${u().id}-params`} label={`${name()} parameters`} role="dialog" class="infx-pop">
-              <UnitParams unit={u} />
-            </RowPopoverPanel>
-          }
-        >
-          <Match when={isOtt()}>
-            <OttFace pop={pop} unit={u} plate={() => plate} slotLetter={letter} />
-          </Match>
-          <Match when={u().kind === 'echo'}>
-            <EchoFace pop={pop} unit={u} plate={() => plate} slotLetter={letter} />
-          </Match>
-        </Switch>
+      <Show when={pop.open() && !face()}>
+        <RowPopoverPanel pop={pop} id={`unit-${u().id}-params`} label={`${name()} parameters`} role="dialog" class="infx-pop">
+          <UnitParams unit={u} />
+        </RowPopoverPanel>
       </Show>
     </div>
   );

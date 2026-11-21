@@ -1,6 +1,5 @@
 import { For, onCleanup, onMount } from 'solid-js';
 import type { UnitState } from '../../platform';
-import type { RowPopover } from '../instrument/RowPopover';
 import { FaceKnob, UnitFace, type KnobDef } from './UnitFace';
 import { registerOttGlass } from './ott-loop';
 import './ott-face.css';
@@ -15,36 +14,22 @@ import './ott-face.css';
 
 /** The glass's 0 dB line and pixels per dB, full and narrow (`ott-loop.ts` reads them off the canvas). */
 const GLASS = { wide: { y0: 120, px: 7 }, narrow: { y0: 92, px: 5 } };
-const KNOBS: Record<'wide' | 'narrow', readonly KnobDef[]> = {
-  wide: [
-    { param: 'ottDepth', label: 'DEPTH', name: 'depth', def: 0.5, x: 318, y: 386, size: 172, hero: true },
-    { param: 'ottTime', label: 'TIME', name: 'time', def: 0.5, x: 528, y: 424, size: 92 },
-    { param: 'ottUpward', label: 'UP', name: 'upward', def: 1, x: 690, y: 424, size: 92, tri: 'up' },
-    { param: 'ottDownward', label: 'DOWN', name: 'downward', def: 1, x: 812, y: 424, size: 92, tri: 'dn' },
-  ],
-  narrow: [
-    { param: 'ottDepth', label: 'DEPTH', name: 'depth', def: 0.5, x: 300, y: 275, size: 96, hero: true },
-    { param: 'ottTime', label: 'TIME', name: 'time', def: 0.5, x: 500, y: 287, size: 60 },
-    { param: 'ottUpward', label: 'UP', name: 'upward', def: 1, x: 655, y: 287, size: 60, tri: 'up' },
-    { param: 'ottDownward', label: 'DOWN', name: 'downward', def: 1, x: 790, y: 287, size: 60, tri: 'dn' },
-  ],
-};
+const KNOBS: readonly KnobDef[] = [
+  { param: 'ottDepth', label: 'DEPTH', name: 'depth', def: 0.5, wide: { x: 318, y: 386, size: 172 }, narrow: { x: 300, y: 275, size: 96 }, hero: true },
+  { param: 'ottTime', label: 'TIME', name: 'time', def: 0.5, wide: { x: 528, y: 424, size: 92 }, narrow: { x: 500, y: 287, size: 60 } },
+  { param: 'ottUpward', label: 'UP', name: 'upward', def: 1, wide: { x: 690, y: 424, size: 92 }, narrow: { x: 655, y: 287, size: 60 }, tri: 'up' },
+  { param: 'ottDownward', label: 'DOWN', name: 'downward', def: 1, wide: { x: 812, y: 424, size: 92 }, narrow: { x: 790, y: 287, size: 60 }, tri: 'dn' },
+];
 
-export function OttFace(props: {
-  pop: RowPopover;
-  unit: () => UnitState;
-  /** The plate's element: the face hangs from it. */
-  plate: () => HTMLElement | undefined;
-  slotLetter: string;
-}) {
+export function OttFace(props: { unit: () => UnitState; slotLetter: () => string; close: (keyboard: boolean) => void }) {
   return (
-    <UnitFace pop={props.pop} unit={props.unit} plate={props.plate} slotLetter={props.slotLetter} kind="ott" name="OTT">
+    <UnitFace unit={props.unit} slotLetter={props.slotLetter} close={props.close} kind="ott" name="OTT">
       {(narrow) => {
         const g = () => GLASS[narrow() ? 'narrow' : 'wide'];
         return (
           <>
             <Glass unit={props.unit().id} y0={g().y0} px={g().px} />
-            <For each={KNOBS[narrow() ? 'narrow' : 'wide']}>{(k) => <FaceKnob def={k} unit={props.unit} unitName="OTT" />}</For>
+            <For each={KNOBS}>{(k) => <FaceKnob def={k} narrow={narrow} unit={props.unit} unitName="OTT" />}</For>
           </>
         );
       }}

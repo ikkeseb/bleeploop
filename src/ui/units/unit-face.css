@@ -3,11 +3,24 @@
    top, its name, power switch and maker's mark at its foot left, programmed knobs on one row (the owner
    chose them over a rendered cap). Each face's own (its glass, its knobs' places) is in its own sheet
    (ott-face.css, echo-face.css). It opens hanging under the slot row from its plate; the player moves it
-   and scales it from its corner grip. Where the window cannot hold it, it reflows narrow (`.uface--narrow`,
+   and scales it from its corner grip; free-standing, it lets every press beside it through. Where the window cannot hold it, it reflows narrow (`.uface--narrow`,
    900x382), never scaling its type under the base size. */
 
-.uface-backdrop {
-  z-index: 45; /* over the row's tags (30) and its popovers' layer */
+/* the faces' layer (FaceHost.tsx): over the row's tags (30) and the lanes, under the row's popovers (40);
+   it takes no pointer, a face does. Each face's place is its own layer in it, the last touched on top. */
+.uface-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+}
+.uface-place {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.uface-place > .uface {
+  pointer-events: auto;
 }
 /* the strap: a strap of the open plate's own panel (its colour, its side walls) from the plate's foot down
    into the face at home, so the face reads as fastened to that plate; a moved face has none */

@@ -32,6 +32,8 @@ interface Glass {
   unit: number;
   view: EchoView;
   drawn: number;
+  /** The mirror's view the glass was last drawn from. */
+  src: UnitMeterView | undefined;
   /** The view, size and scale the glass was last drawn at. */
   laid: string;
   /** The last draw lit something (a column or a ladder cell): the tape still runs. */
@@ -86,10 +88,16 @@ export function echoGeometry(W: number, H: number) {
 
 /** Draw an ECHO face's glass for `unit` while it is mounted; `view` is read on every frame. */
 export function registerEchoGlass(canvas: HTMLCanvasElement, unit: number, view: EchoView): () => void {
-  const g: Glass = { canvas, unit, view, drawn: -1, laid: '', lit: false };
+  const g: Glass = { canvas, unit, view, drawn: -1, src: undefined, laid: '', lit: false };
   glasses.add(g);
   if (rafId === 0) rafId = requestAnimationFrame(frame);
-  return () => glasses.delete(g);
+  return () => {
+    glasses.delete(g);
+    if (glasses.size === 0 && rafId !== 0) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+  };
 }
 
 function frame(): void {
@@ -100,16 +108,19 @@ function frame(): void {
     const v = unitMeters.get(g.unit);
     const version = v ? v.version : 0;
     const w = g.view;
-    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}:${w.step}:${w.feedback}:${w.level}:${w.tempo.bpm}:${w.tempo.num}/${w.tempo.den}`;
-    // silent and still: nothing to draw again (a silent frame moves the version and lights nothing)
-    const newest = v && v.outCount > 0 ? (v.outCount - 1) % OUT_HISTORY : -1;
-    const loud = v !== undefined && newest >= 0 && (v.outL[newest] > 0 || v.outR[newest] > 0);
-    if (!g.lit && laid === g.laid && (version === g.drawn || !loud)) continue;
+    // its size as drawn (the face's own scale moves it, not its layout size), its view and the tempo
+    const shown = Math.round(g.canvas.getBoundingClientRect().width);
+    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${shown}:${w.step}:${w.feedback}:${w.level}:${w.tempo.bpm}:${w.tempo.beats}:${w.tempo.num}/${w.tempo.den}`;
+    // silent and still: nothing to draw again (a silent frame moves the version and lights nothing; a loud
+    // one since the last draw, however many silent ones followed it, is drawn)
+    const fresh = v !== g.src || (v !== undefined && v.loud > g.drawn);
+    if (!g.lit && laid === g.laid && !fresh) continue;
     const lit = drawGlass(g, v, now - LAG);
     // a glass not laid out yet draws on a later frame
     if (lit === null) continue;
     g.lit = lit;
     g.drawn = version;
+    g.src = v;
     g.laid = laid;
   }
   rafId = requestAnimationFrame(frame);

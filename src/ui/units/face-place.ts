@@ -4,9 +4,10 @@
  * player may move it anywhere in the window and scale it from its corner. Two layouts, one family: the
  * full face (900x540) and its narrow reflow (900x382, a shorter glass, smaller knobs, the same legends).
  * The scale never takes the type under its base size (the chrome's size step `ui`): where the full face
- * would go under it, the narrow one takes over, and the narrow one at `ui` is the floor. Only past the
- * app's minimum window (no room for the narrow face at `ui`) does a face scale under it. The face never
- * leaves the window: every placement clamps it in.
+ * would go under it, the narrow one takes over, and the narrow one at `ui` is the floor. Where home has no
+ * room for the narrow face at `ui` (a short window), the face leaves its strap and fits the window from
+ * home's place; only a window that cannot hold the narrow face at `ui` at all scales it under. The face
+ * never leaves the window: every placement clamps it in, its every control inside.
  */
 
 interface FaceLayout {
@@ -59,8 +60,10 @@ function fit(want: FaceSize, ui: number, room: (l: FaceLayout) => number): { nar
     if (s >= ui - 1e-9) return { narrow: false, scale: s };
   }
   const r = room(NARROW);
-  return { narrow: true, scale: r >= ui ? clamp(want.scale, ui, r) : Math.max(0.3, r) };
+  return { narrow: true, scale: r >= ui ? clamp(want.scale, ui, r) : Math.max(FLOOR, r) };
 }
+/** The smallest scale a window too small for the narrow face at `ui` may take (never zero). */
+const FLOOR = 0.05;
 
 /** Home's top-left for a face of `scale` and layout `l`. */
 function homeOf(i: FaceInput, l: FaceLayout, scale: number): { left: number; top: number } {
@@ -74,9 +77,13 @@ export function placeFace(i: FaceInput): FaceBox {
   if (!i.at) {
     const top = i.plate.bottom + DROP;
     const room = (l: FaceLayout) => Math.min((i.win.w - 2 * MARGIN) / l.w, (i.win.h - top - MARGIN) / l.h);
-    const { narrow, scale } = fit(want, i.ui, room);
-    const home = homeOf(i, narrow ? NARROW : WIDE, scale);
-    return { ...home, scale, narrow, home: true };
+    if (room(NARROW) >= i.ui - 1e-9) {
+      const { narrow, scale } = fit(want, i.ui, room);
+      const home = homeOf(i, narrow ? NARROW : WIDE, scale);
+      return { ...home, scale, narrow, home: true };
+    }
+    // no room under the plate: off the strap, fitted to the window from home's place
+    return placeFace({ ...i, at: { x: i.plate.left + i.plate.width / 2 - TIE_AT * i.ui, y: top } });
   }
   const room = (l: FaceLayout) => Math.min((i.win.w - 2 * MARGIN) / l.w, (i.win.h - 2 * MARGIN) / l.h);
   const { narrow, scale } = fit(want, i.ui, room);
@@ -93,28 +100,55 @@ export function nearHome(i: FaceInput, box: FaceBox): boolean {
 }
 
 /**
- * The size a corner drag asks for: the face's corner follows the pointer at (`cx`, `cy`). The scale is the
- * best fit of the corner to the pointer (the anchor stays: the face's top, and its left, or at home the
- * plate's centre over `TIE_AT`). A box much wider than tall asks for the narrow face, and so does a full
- * face pushed under its base size; the narrow face never goes under it.
+ * The size a corner drag asks for: the face's corner, as the face is placed at that size (its top, and its
+ * left: a moved face's own, at home the plate's centre over `TIE_AT`, either clamped into the window),
+ * lands nearest the pointer at (`cx`, `cy`), itself held inside the window. Its first pixels of drag move it
+ * by pixels, from wherever the face is drawn. A full face pushed under its base size asks for the narrow
+ * face (its shape alone never does: a corner held at the window's edge would ask for it); the narrow face
+ * never goes under its base size.
  */
 export function sizeFromCorner(start: FaceBox, i: FaceInput, cx: number, cy: number): FaceSize {
-  const ax = start.home ? TIE_AT : 0;
-  const anchorX = start.home ? i.plate.left + i.plate.width / 2 : start.left;
-  const bw = cx - anchorX;
-  const bh = cy - start.top;
-  // least squares: the scale whose corner, (w - ax, h) times it, lands nearest the pointer
-  const fitOf = (l: FaceLayout) => (bw * (l.w - ax) + bh * l.h) / ((l.w - ax) ** 2 + l.h ** 2);
-  const wide = fitOf(WIDE);
-  const aspect = (bw * WIDE.w) / (WIDE.w - ax) / Math.max(1, bh);
-  if (aspect > 2 || wide < i.ui * 0.97) return { narrow: true, scale: Math.max(i.ui, fitOf(NARROW)) };
+  const px = Math.min(cx, i.win.w - MARGIN);
+  const py = Math.min(cy, i.win.h - MARGIN);
+  const centre = i.plate.left + i.plate.width / 2;
+  const corner = (l: FaceLayout, s: number): [number, number] => {
+    const want = start.home ? centre - TIE_AT * s : start.left;
+    const left = Math.max(MARGIN, Math.min(want, i.win.w - MARGIN - l.w * s));
+    return [left + l.w * s, start.top + l.h * s];
+  };
+  const wide = nearest((s) => corner(WIDE, s), px, py);
+  if (wide < i.ui * 0.97) return { narrow: true, scale: Math.max(i.ui, nearest((s) => corner(NARROW, s), px, py)) };
   return { narrow: false, scale: Math.max(i.ui, wide) };
 }
 
+/** The scale whose point `at(s)` lands nearest (`px`, `py`): `at` is linear but for a few clamps, so each of
+ * many short spans is solved as a line, and the nearest of them wins. */
+function nearest(at: (s: number) => [number, number], px: number, py: number): number {
+  const LO = 0.1;
+  const HI = 6;
+  const N = 120;
+  let best = LO;
+  let bestD = Infinity;
+  for (let k = 0; k < N; k++) {
+    const s0 = LO + ((HI - LO) * k) / N;
+    const s1 = LO + ((HI - LO) * (k + 1)) / N;
+    const [x0, y0] = at(s0);
+    const [x1, y1] = at(s1);
+    const bx = (x1 - x0) / (s1 - s0);
+    const by = (y1 - y0) / (s1 - s0);
+    const t = clamp(s0 + (bx * (px - x0) + by * (py - y0)) / (bx * bx + by * by || 1), s0, s1);
+    const [x, y] = at(t);
+    const d = (x - px) ** 2 + (y - py) ** 2;
+    if (d < bestD) [best, bestD] = [t, d];
+  }
+  return best;
+}
+
 /** One keyboard step of the face's size: up or down by a tenth; down from the full face's base size the
- * narrow face takes over. */
+ * narrow face takes over, and up from the narrow face's the full face is back. */
 export function stepSize(cur: FaceSize, ui: number, up: boolean): FaceSize {
-  if (up) return { narrow: cur.narrow, scale: cur.scale * 1.1 };
+  // up from the narrow face at its base size: the full face again
+  if (up) return cur.narrow && cur.scale <= ui + 1e-9 ? { narrow: false, scale: ui } : { narrow: cur.narrow, scale: cur.scale * 1.1 };
   const s = cur.scale / 1.1;
   if (!cur.narrow && s < ui - 1e-9) return { narrow: true, scale: ui };
   return { narrow: cur.narrow, scale: Math.max(ui, s) };

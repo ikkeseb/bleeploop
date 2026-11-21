@@ -93,13 +93,14 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   once it speaks the chain) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
   `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's and the ECHO's faces (one
   frame, `units/UnitFace.tsx`: home under the plate, moved and scaled by the player, kept per kind in
-  `lf.unitFaces`); otherwise the row is the fixed topology (`instrument/InstrumentSlot.tsx`), and the feed's
+  `lf.unitFaces`; free-standing, drawn by `units/FaceHost.tsx` apart from the row, so a press beside one
+  plays the looper and a fold leaves it open; one per kind, the last touched on top); otherwise the row is the fixed topology (`instrument/InstrumentSlot.tsx`), and the feed's
   `chains` apply to nothing. A plate moves
   when the feed says so, never on drop; a drop is judged at its release, from the plates' places when the drag
   began. A refusal the contract makes certain (a ninth unit, a source moved, an effect ahead of a source) is the
   slot's tag with nothing sent (`addRefusal`, `moveRefusal`), judged against the chain as the edits already
   sent leave it (a reloading source is still the source); the host resolves the rest. A gesture reaches only a
-  seated unit, and a popover of a unit that stops being seated closes.
+  seated unit, and a popover or a face of a unit that stops being seated closes.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.

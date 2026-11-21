@@ -527,7 +527,7 @@ function setToggleValue(t: EngineToggle, on: boolean): void {
 /** What the fake knows of the looper for the toggles' gate, as the scripted frames left it: each lane's
  * state, the master, the tempo's lock, the selected lane (a refusal's lane: the scripted `Selected`, not
  * a `SelectTrack` the UI sent, which the fake does not answer); and the tempo and meter the chain's ECHO
- * meters run at (the last scripted `Transport`, 120 in 4/4 from a reset). */
+ * meters run at (the last scripted `Transport`; 120 at first, a reset without one keeps the tempo in 4/4). */
 const gateView = {
   states: /* @__PURE__ */ Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'),
   master: 0,
@@ -642,7 +642,7 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
     gateView.master = 0;
     gateView.locked = false;
     gateView.selected = 0;
-    gateView.bpm = 120;
+    // a reset without a Transport keeps the tempo in 4/4, as the UI's store does (`engine-store.ts`)
     gateView.meter = FOUR_FOUR;
     fakeToggles.clear();
     fakeTuner = false;

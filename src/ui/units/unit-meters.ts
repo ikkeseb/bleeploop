@@ -41,6 +41,9 @@ export interface UnitMeterView {
   outR: Float32Array;
   /** When each frame arrived (`performance.now()`, ms): it covers the time since the frame before it. */
   outAt: Float64Array;
+  /** The `version` of the last frame whose output was not silent (0: none yet): a draw loop that skips a
+   * silent glass sees a loud frame that came and went between two of its draws. */
+  loud: number;
 }
 
 const ring = (): [Float32Array, Float32Array, Float32Array] => [new Float32Array(HISTORY), new Float32Array(HISTORY), new Float32Array(HISTORY)];
@@ -87,6 +90,7 @@ export function applyUnitMeters(meters: readonly { unit: number; out: readonly [
         outL: new Float32Array(OUT_HISTORY),
         outR: new Float32Array(OUT_HISTORY),
         outAt: new Float64Array(OUT_HISTORY),
+        loud: 0,
       };
       unitMeters.set(m.unit, v);
     }
@@ -114,6 +118,7 @@ export function applyUnitMeters(meters: readonly { unit: number; out: readonly [
       v.count++;
     }
     v.version++;
+    if (m.out[0] > 0 || m.out[1] > 0) v.loud = v.version;
   }
 }
 

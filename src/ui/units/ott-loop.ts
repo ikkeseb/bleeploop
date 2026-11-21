@@ -75,7 +75,8 @@ function frame(): void {
   for (const g of glasses) {
     const v = unitMeters.get(g.unit);
     const version = v ? v.version : 0;
-    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}:${g.canvas.dataset.y0}:${g.canvas.dataset.px}`;
+    // its size as drawn too: the face's own scale moves it, not its layout size
+    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${Math.round(g.canvas.getBoundingClientRect().width)}:${g.canvas.dataset.y0}:${g.canvas.dataset.px}`;
     // a glass not laid out yet draws on a later frame
     if ((version !== g.drawn || laid !== g.laid) && drawGlass(g, v)) {
       g.drawn = version;

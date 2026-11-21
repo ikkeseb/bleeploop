@@ -292,7 +292,7 @@ function echoAmp(t: number, p: EchoParams, tempo: Tempo): number {
   const g1 = p.level * Math.sqrt(1 - p.feedback * p.feedback);
   let e2 = 0;
   // the notes whose repeats can still be heard: FB^k under 1e-4 by then, or 30 s at most
-  const reach = p.feedback > 0 ? Math.min(30, (Math.log(1e-4) / Math.log(p.feedback) + 1) * T + RING) : RING;
+  const reach = p.feedback > 0 ? Math.min(30, (Math.log(1e-4) / Math.log(p.feedback) + 1) * T + RING) : T + RING;
   for (let n = Math.max(0, Math.floor((t - reach) / bar)); n * bar <= t; n++) {
     const d = t - n * bar;
     if (d < RING) e2 += (PLUCK * pluck(d)) ** 2;
@@ -1114,6 +1114,8 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
       .filter(sounding)
       .map((u): UnitMeter => {
         const unit = u.state.id;
+        // A bypassed ECHO reads silent here, though the engine's passes its dry and rings its tail out (unit
+        // contract §5, Bypass): the fake models what the face draws (the tape at rest), not the sound.
         if (!active(u)) return u.state.kind === 'ott' ? { unit, out: [0, 0], bands: restBands() } : { unit, out: [0, 0] };
         if (u.state.kind === 'echo') {
           if (!advance) {

@@ -63,10 +63,8 @@
   align-items: center;
   gap: 5px;
   padding: 2px 4px;
-  border: 0;
   border-radius: var(--r-sm);
   transform: translate(-50%, -50%);
-  background: none;
   font: 500 16px / 1 var(--font-num);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -78,7 +76,7 @@
   font: 500 12px / 1 var(--font-num);
   color: var(--faint);
 }
-.echo__st:hover:not(:disabled) {
+.echo__st:hover:not(.is-off) {
   color: var(--text);
 }
 .echo__st.is-on {
@@ -87,7 +85,7 @@
 .echo__st.is-on small {
   color: color-mix(in srgb, var(--engaged) 62%, var(--faint));
 }
-.echo__st:disabled {
+.echo__st.is-off {
   cursor: default;
 }
 

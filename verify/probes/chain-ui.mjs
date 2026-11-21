@@ -17,7 +17,7 @@
  *   parked mid-drag each leave no drag behind and send nothing; the release eats only its own pointer's
  *   click; a move queued behind a held edit says so on its plate at once;
  * - the plate's menu keeps its focused entry through a `chains` report; a resize that folds a slot with the
- *   focus in its OTT face or a plate's menu hands the focus to its fold plate;
+ *   focus in a plate's menu hands the focus to its fold plate, while an open OTT face stays open, its focus kept;
  * - bypass: the lamp sends `ToggleUnit`, the plate shows the feed's bypass; remove by the menu, focus to a
  *   surviving plate's menu;
  * - states on the plate, in its accessible name and said in the slot's live region: `loading`, `waiting`
@@ -945,12 +945,20 @@ await probe(async ({ open }) => {
         const on = await page.evaluate((s) => document.activeElement === document.querySelector(`.slot--${s} .slot__fold`), slot);
         assert.ok(on, `the focus on slot ${slot.toUpperCase()}'s fold plate, not ${await active()}`);
       };
-      await check('a fold with the focus in the OTT face hands it to the slot’s fold plate', async () => {
-        await foldWith('a', 'b', async () => {
-          await plate(await unitOf('ott', 0)).locator('.unit__name').click();
-          await page.getByRole('dialog', { name: 'OTT, slot A' }).getByRole('slider').first().focus();
-          assert.match(await active(), /uface__knob/, 'the focus in the face');
-        });
+      await check('a fold under an open OTT face leaves the face open, the focus in it (a face is free-standing)', async () => {
+        await show('b');
+        await page.setViewportSize(wide);
+        await settle();
+        await plate(await unitOf('ott', 0)).locator('.unit__name').click();
+        const face = page.getByRole('dialog', { name: 'OTT, slot A' });
+        await face.getByRole('slider').first().focus();
+        await page.setViewportSize({ width: W, height: H });
+        await page.waitForTimeout(250);
+        assert.equal(await page.locator('.slot--a .slot__fold').count(), 1, 'slot A folded');
+        assert.equal(await face.count(), 1, 'the face open');
+        assert.match(await active(), /uface__knob/, 'the focus still in the face');
+        await face.locator('.uface__close').click();
+        await settle();
       });
       await check('a fold with the focus in a plate’s menu hands it to the slot’s fold plate', async () => {
         await foldWith('b', 'a', async () => {

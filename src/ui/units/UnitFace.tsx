@@ -1,54 +1,83 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
-import { Portal } from 'solid-js/web';
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from 'solid-js';
 import type { UnitParamId, UnitState } from '../../platform';
-import { setUnitParam, toggleUnit } from '../state/chain';
-import { EscapeCloses } from '../looper/shared';
-import type { RowPopover } from '../instrument/RowPopover';
+import { setUnitParam, slotChain, toggleUnit } from '../state/chain';
 import { NARROW, WIDE, nearHome, placeFace, sizeFromCorner, stepSize, type FaceAt, type FaceBox, type FaceInput } from './face-place';
+import { faceLayer, plateOf, raiseFace, type FaceKind } from './face-store';
 import './unit-face.css';
 
 /**
  * A built-in unit's face, the frame every face shares (the OTT's, the ECHO's): one piece of gear opened
- * from its plate (Parameters, or a press on its name). It opens at its home, hanging under the slot row
- * from its plate by a strap of the plate's own panel; the player may move it anywhere in the window (a
- * press and drag on the face's panel, its glass included) and scale it from its corner grip, and it keeps
- * that place and size per unit kind, across launches (`lf.unitFaces`). Moved off home the strap goes (it
- * means "hangs from this plate"); a move released near home lands home. Its type never goes under the
- * base size: shrunk past it, the narrow face takes over (`face-place.ts`). It never leaves the window: a
- * window resize pulls it back in. Non-modal, as the row's popovers: Escape, its close or a press outside
- * closes it, a keyboard close hands focus back to the plate's name. With the face itself focused, the
- * arrow keys move it (8 px, Shift 40 px), + and - scale it, Home sends it home at its first size.
- * The frame draws the name, the power switch (the unit's bypass), the maker's mark and the close; the
- * face draws its glass and its controls (`children`), on the narrow face or the full one.
+ * from its plate (Parameters, or a press on its name), drawn by `FaceHost.tsx` while it is open
+ * (`face-store.ts`). Free-standing: no backdrop, so the looper and the row under and beside it play as
+ * ever, a press outside never closes it, a slot folded under it leaves it open where it stands, and another
+ * unit's face may stand beside it, the last touched on top. It closes by its close, by Escape with the focus
+ * in it, or by its plate's name again; a keyboard close hands the focus back to the plate's name.
+ *
+ * It opens at its home, hanging under the slot row from its plate by a strap of the plate's own panel; the
+ * player may move it anywhere in the window (a press and drag on the face's panel, its glass included) and
+ * scale it from its corner grip, and it keeps that place and size per unit kind, across launches
+ * (`lf.unitFaces`). Moved off home the strap goes (it means "hangs from this plate"), and so it does while
+ * the plate is folded away; a move released near home lands home. Its type never goes under the base size:
+ * shrunk past it, the narrow face takes over (`face-place.ts`). It never leaves the window: a window resize
+ * pulls it back in, and a window too short for it under the plate takes it off the strap. With the face
+ * itself focused, the arrow keys move it (8 px, Shift 40 px), + and - scale it, Home sends it home at its
+ * first size. The frame draws the name, the power switch (the unit's bypass), the maker's mark and the
+ * close; the face draws its glass and its controls (`children`), on the narrow face or the full one.
  */
 export function UnitFace(props: {
-  pop: RowPopover;
   unit: () => UnitState;
-  /** The plate's element: the face hangs from it at home. */
-  plate: () => HTMLElement | undefined;
-  slotLetter: string;
+  slotLetter: () => string;
   /** The unit's kind: the face's class and the key its place is kept under. */
-  kind: 'ott' | 'echo';
+  kind: FaceKind;
   /** The name printed on the face. */
   name: string;
+  close: (keyboard: boolean) => void;
   children: (narrow: () => boolean) => JSX.Element;
 }) {
   let frame!: HTMLDivElement;
+  const id = () => props.unit().id;
+  const plateEl = () => plateOf(id())?.el;
+  // the plate's box as last measured (a folded plate's last place: the face stays where it stood), and
+  // whether the plate is there to hang from
   const [plateBox, setPlateBox] = createSignal<FaceInput['plate']>({ left: 0, width: 0, bottom: 0 });
+  const [attached, setAttached] = createSignal(false);
   const [win, setWin] = createSignal({ w: window.innerWidth, h: window.innerHeight });
   const [ui, setUi] = createSignal(1);
   const measure = () => {
-    const r = props.plate()?.getBoundingClientRect();
-    if (r) setPlateBox({ left: r.left, width: r.width, bottom: r.bottom });
+    const el = plateOf(id())?.el;
+    const r = el?.isConnected ? el.getBoundingClientRect() : null;
+    if (r && r.width > 0) setPlateBox({ left: r.left, width: r.width, bottom: r.bottom });
+    setAttached(r !== null && r.width > 0);
     setWin({ w: window.innerWidth, h: window.innerHeight });
     // the chrome's size step (`--ui`, a step up on the wide display)
     setUi(Number(getComputedStyle(document.documentElement).getPropertyValue('--ui')) || 1);
   };
   measure();
+  // measured again whenever the plate can have moved: the window, a scroll, the plate's own size, a chain
+  // report (a reorder, a plate before it come or gone), the plate mounted again (its slot unfolded)
+  let raf = 0;
+  const later = () => {
+    if (raf === 0) raf = requestAnimationFrame(() => ((raf = 0), measure()));
+  };
+  const plateSize = new ResizeObserver(later);
+  createEffect(
+    on(plateEl, (el) => {
+      plateSize.disconnect();
+      if (el) plateSize.observe(el);
+      measure();
+    }),
+  );
+  createEffect(on([() => slotChain(0), () => slotChain(1)], later, { defer: true }));
   onMount(() => {
     measure();
     window.addEventListener('resize', measure);
-    onCleanup(() => window.removeEventListener('resize', measure));
+    document.addEventListener('scroll', later, { capture: true, passive: true });
+  });
+  onCleanup(() => {
+    window.removeEventListener('resize', measure);
+    document.removeEventListener('scroll', later, { capture: true });
+    plateSize.disconnect();
+    cancelAnimationFrame(raf);
   });
 
   // what the player set (kept), and a drag's own while it runs
@@ -69,9 +98,8 @@ export function UnitFace(props: {
     keep(props.kind, k);
   };
 
-  // ── the move and the resize: one press per pointer; a release eats its own click (never a close) ──
+  // ── the move and the resize: one press per pointer ──
   let press: { id: number; x: number; y: number; start: FaceBox; resize: boolean; moved: boolean } | null = null;
-  let swallow = false;
   const [moving, setMoving] = createSignal(false);
   const begin = (e: PointerEvent, resize: boolean) => {
     if (press || e.button !== 0) return;
@@ -83,7 +111,7 @@ export function UnitFace(props: {
   };
   const onDown = (e: PointerEvent) => {
     // the controls are their own presses; the rest of the panel, the glass included, carries the face
-    if ((e.target as HTMLElement).closest('button, [role="slider"], .uface__grip')) return;
+    if ((e.target as HTMLElement).closest('button, [role="slider"], [data-control]')) return;
     begin(e, false);
   };
   const onMove = (e: PointerEvent) => {
@@ -101,7 +129,8 @@ export function UnitFace(props: {
       // a face at home grows from its strap; a moved one from its top-left
       setLive({ at: s.home ? null : { x: s.left, y: s.top }, size: { narrow: size.narrow, k: size.scale / ui() } });
     } else {
-      setLive({ at: { x: s.left + dx, y: s.top + dy }, size: base.size ?? keepSize(s) });
+      // the face keeps the size it is drawn at under the hand; let go, it keeps the size the player set
+      setLive({ at: { x: s.left + dx, y: s.top + dy }, size: keepSize(s) });
     }
   };
   const onUp = (e: PointerEvent) => {
@@ -111,13 +140,11 @@ export function UnitFace(props: {
     setMoving(false);
     if (frame.hasPointerCapture(e.pointerId)) frame.releasePointerCapture(e.pointerId);
     if (!p.moved) return;
-    swallow = true;
-    setTimeout(() => (swallow = false));
     const b = box();
     const base = faces()[props.kind] ?? EMPTY;
     if (p.resize) commit({ at: b.home ? null : { x: b.left, y: b.top }, size: keepSize(b) });
     else if (nearHome(input(), b)) commit({ at: null, size: base.size });
-    else commit({ at: { x: b.left, y: b.top }, size: base.size ?? keepSize(p.start) });
+    else commit({ at: { x: b.left, y: b.top }, size: base.size });
   };
   const onCancel = (e: PointerEvent) => {
     if (!press || e.pointerId !== press.id) return;
@@ -131,13 +158,20 @@ export function UnitFace(props: {
   });
 
   const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      // with the focus anywhere in the face: it closes, and the Escape is spent here
+      e.preventDefault();
+      e.stopPropagation();
+      props.close(true);
+      return;
+    }
     // the face itself: a control's keys are its own
     if (e.target !== frame || e.altKey || e.ctrlKey || e.metaKey) return;
     const b = box();
     const base = faces()[props.kind] ?? EMPTY;
     const step = e.shiftKey ? 40 : 8;
     const nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-    if (nudge) commit({ at: { x: b.left + nudge[0], y: b.top + nudge[1] }, size: base.size ?? keepSize(b) });
+    if (nudge) commit({ at: { x: b.left + nudge[0], y: b.top + nudge[1] }, size: base.size });
     else if (e.key === '+' || e.key === '=' || e.key === '-') {
       const size = stepSize({ narrow: b.narrow, scale: b.scale }, ui(), e.key !== '-');
       commit({ at: base.at, size: { narrow: size.narrow, k: size.scale / ui() } });
@@ -147,71 +181,65 @@ export function UnitFace(props: {
     e.stopPropagation();
   };
 
-  const on = () => !props.unit().bypass;
-  const id = () => props.unit().id;
+  const powered = () => !props.unit().bypass;
+  const strap = () => box().home && attached();
   const tie = () => {
     const p = plateBox();
     return { left: `${p.left + p.width / 2 - 16}px`, top: `${p.bottom}px` };
   };
   return (
-    <Portal>
-      <EscapeCloses close={() => props.pop.close(true)} />
+    <div class="uface-place" style={{ 'z-index': faceLayer(id()) + 1 }}>
+      <Show when={strap()}>
+        <i class="uface-tie" aria-hidden="true" style={tie()} />
+      </Show>
       <div
-        class="slot-pop__backdrop uface-backdrop"
-        onClick={() => {
-          if (!swallow) props.pop.close(false);
+        ref={(el) => {
+          frame = el;
+          // a press anywhere in it, a control's included, brings it to the top
+          el.addEventListener('pointerdown', () => raiseFace(id()), true);
+          queueMicrotask(() => el.focus());
         }}
+        class={`uface ${props.kind}`}
+        classList={{ 'uface--byp': !powered(), 'uface--narrow': box().narrow, 'uface--moving': moving(), 'uface--moved': !strap() }}
+        role="dialog"
+        aria-label={`${props.name}, slot ${props.slotLetter()}`}
+        aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown + - Home Escape"
+        id={`${props.kind}-face-${id()}`}
+        tabindex={-1}
+        style={{ left: `${box().left}px`, top: `${box().top}px`, scale: String(box().scale) }}
+        onFocusIn={() => raiseFace(id())}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onCancel}
+        on:lostpointercapture={onCancel}
+        onKeyDown={onKey}
       >
-        <Show when={box().home}>
-          <i class="uface-tie" aria-hidden="true" style={tie()} />
-        </Show>
-        <div
-          ref={(el) => {
-            frame = el;
-            queueMicrotask(() => el.focus());
-          }}
-          class={`uface ${props.kind}`}
-          classList={{ 'uface--byp': !on(), 'uface--narrow': box().narrow, 'uface--moving': moving(), 'uface--moved': !box().home }}
-          role="dialog"
-          aria-label={`${props.name}, slot ${props.slotLetter}`}
-          aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown + - Home"
-          id={`${props.kind}-face-${id()}`}
-          tabindex={-1}
-          style={{ left: `${box().left}px`, top: `${box().top}px`, scale: String(box().scale) }}
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={onDown}
-          onPointerMove={onMove}
-          onPointerUp={onUp}
-          onPointerCancel={onCancel}
-          on:lostpointercapture={onCancel}
-          onKeyDown={onKey}
-        >
-          {props.children(() => box().narrow)}
-          <span class="uface__wm" aria-hidden="true">
-            {props.name}
-          </span>
-          <button
-            type="button"
-            class="uface__pwr"
-            classList={{ 'is-on': on() }}
-            aria-pressed={on()}
-            aria-label={`${props.name} in slot ${props.slotLetter} on`}
-            title={on() ? 'On: press to bypass' : 'Bypassed: press to switch on'}
-            disabled={props.unit().state !== 'seated'}
-            onClick={() => toggleUnit(id())}
-          />
-          <span class="uface__maker" aria-hidden="true">
-            BLEEPLOOP
-          </span>
-          <button type="button" class="uface__close" aria-label={`Close the ${props.name}`} onClick={(e) => props.pop.close(e.detail === 0)}>
-            <svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-              <path d="M2 2l8 8M10 2L2 10" />
-            </svg>
-          </button>
-          <i class="uface__grip" aria-hidden="true" title="Drag to resize" onPointerDown={(e) => begin(e, true)} />
-        </div>
+        {props.children(() => box().narrow)}
+        <span class="uface__wm" aria-hidden="true">
+          {props.name}
+        </span>
+        <button
+          type="button"
+          class="uface__pwr"
+          classList={{ 'is-on': powered() }}
+          aria-pressed={powered()}
+          aria-label={`${props.name} in slot ${props.slotLetter()} on`}
+          title={powered() ? 'On: press to bypass' : 'Bypassed: press to switch on'}
+          disabled={props.unit().state !== 'seated'}
+          onClick={() => toggleUnit(id())}
+        />
+        <span class="uface__maker" aria-hidden="true">
+          BLEEPLOOP
+        </span>
+        <button type="button" class="uface__close" aria-label={`Close the ${props.name}`} onClick={(e) => props.close(e.detail === 0)}>
+          <svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M2 2l8 8M10 2L2 10" />
+          </svg>
+        </button>
+        <i class="uface__grip" aria-hidden="true" data-control title="Drag to resize" onPointerDown={(e) => begin(e, true)} />
       </div>
-    </Portal>
+    </div>
   );
 }
 
@@ -253,9 +281,17 @@ function keep(kind: string, k: Kept): void {
 
 // ── a programmed knob, the family's ─────────────────────────────────────────────────────────────────
 
+/** A knob's centre and size on the face. */
+interface KnobGeo {
+  x: number;
+  y: number;
+  size: number;
+}
 /** A knob on a face: the param it sends, its legend and accessible name, its default and its top (the
- * engine's ceiling: FEEDBACK's 0.95), its centre and size on the face, the hero's LED ring or a small
- * one's ticks, and a band triangle beside its legend (the OTT's UP and DOWN). It reads in percent. */
+ * engine's ceiling: FEEDBACK's 0.95), its centre and size on the full face and on the narrow one, the hero's
+ * LED ring or a small one's ticks, and a band triangle beside its legend (the OTT's UP and DOWN). It reads
+ * in percent. One def per knob for both layouts: a reflow moves the knob, never mounts another (the focus
+ * stays on it). */
 export interface KnobDef {
   param: UnitParamId;
   label: string;
@@ -263,9 +299,8 @@ export interface KnobDef {
   name: string;
   def: number;
   max?: number;
-  x: number;
-  y: number;
-  size: number;
+  wide: KnobGeo;
+  narrow: KnobGeo;
   hero?: boolean;
   tri?: 'up' | 'dn';
 }
@@ -281,10 +316,12 @@ const DRAG_PX = 220;
 
 /** A programmed knob: its body, knurl, cap and pointer, the hero's LED ring or a small one's printed ticks,
  * its legend and value on the face's one row. A slider to assistive tech and the keyboard. Sends
- * `SetUnitParam` and shows the feed's value, its own only while a drag holds it. */
-export function FaceKnob(props: { def: KnobDef; unit: () => UnitState; unitName: string }) {
+ * `SetUnitParam` and shows the feed's value; only while a drag holds it does it follow the hand, and the
+ * drag's end (a release, a lost capture, the knob disabled under it) hands it back to the feed. */
+export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () => UnitState; unitName: string }) {
   const k = props.def;
   const max = k.max ?? 1;
+  const geo = () => (props.narrow() ? k.narrow : k.wide);
   const [held, setHeld] = createSignal<number | null>(null);
   const value = () => held() ?? paramOf(props.unit(), k.param, k.def);
   const pct = () => Math.round(value() * 100);
@@ -298,6 +335,15 @@ export function FaceKnob(props: { def: KnobDef; unit: () => UnitState; unitName:
     return x;
   };
   let drag: { id: number; y: number; from: number } | null = null;
+  const letGo = () => {
+    drag = null;
+    setHeld(null);
+  };
+  // disabled under a drag (the unit unseated): the drag ends, the knob reads the feed
+  createEffect(() => {
+    if (!enabled()) letGo();
+  });
+  onCleanup(letGo);
   const onDown = (e: PointerEvent) => {
     if (!enabled() || e.button !== 0) return;
     e.preventDefault();
@@ -307,14 +353,12 @@ export function FaceKnob(props: { def: KnobDef; unit: () => UnitState; unitName:
     setHeld(value());
   };
   const onMove = (e: PointerEvent) => {
-    if (!drag || drag.id !== e.pointerId) return;
+    if (!drag || drag.id !== e.pointerId || !enabled()) return;
     const v = drag.from + ((drag.y - e.clientY) / DRAG_PX) * max * (e.shiftKey ? 0.25 : 1);
     setHeld(send(v));
   };
   const onUp = (e: PointerEvent) => {
-    if (drag?.id !== e.pointerId) return;
-    drag = null;
-    setHeld(null);
+    if (drag?.id === e.pointerId) letGo();
   };
   const onKey = (e: KeyboardEvent) => {
     if (!enabled()) return;
@@ -334,11 +378,18 @@ export function FaceKnob(props: { def: KnobDef; unit: () => UnitState; unitName:
   const angle = () => `${-135 + 270 * travel()}deg`;
   // the hero's ring of LED dots, lit up to its value; a small knob's eleven printed ticks
   const RING = 31;
-  const ringR = k.size / 2 + 13;
-  const ringW = k.size + 40;
-  const tickW = k.size + 36;
+  const ringW = () => geo().size + 40;
+  const dot = (i: number) => {
+    const t = ((-135 + (270 * i) / (RING - 1)) * Math.PI) / 180;
+    const r = geo().size / 2 + 13;
+    return { left: `${(ringW() / 2 + r * Math.sin(t)).toFixed(2)}px`, top: `${(ringW() / 2 - r * Math.cos(t)).toFixed(2)}px` };
+  };
   return (
-    <div class="uface__ctl" classList={{ 'uface__ctl--hero': k.hero }} style={{ '--x': `${k.x}px`, '--y': `${k.y}px`, '--s': `${k.size}px` }}>
+    <div
+      class="uface__ctl"
+      classList={{ 'uface__ctl--hero': k.hero }}
+      style={{ '--x': `${geo().x}px`, '--y': `${geo().y}px`, '--s': `${geo().size}px` }}
+    >
       <div
         class="uface__knob"
         role="slider"
@@ -350,11 +401,12 @@ export function FaceKnob(props: { def: KnobDef; unit: () => UnitState; unitName:
         aria-valuetext={`${pct()} %`}
         aria-disabled={!enabled()}
         data-param={k.param}
-        style={knobStyle(angle(), k.size, k.hero)}
+        style={knobStyle(angle(), geo().size, k.hero)}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
         onPointerCancel={onUp}
+        on:lostpointercapture={onUp}
         onKeyDown={onKey}
         onDblClick={() => enabled() && send(k.def)}
         ref={(el) => {
@@ -362,18 +414,10 @@ export function FaceKnob(props: { def: KnobDef; unit: () => UnitState; unitName:
           onCleanup(() => el.removeEventListener('wheel', wheel));
         }}
       >
-        <Show when={k.hero} fallback={<Ticks size={k.size} w={tickW} />}>
-          <div class="uface__ring" style={{ width: `${ringW}px`, height: `${ringW}px` }} aria-hidden="true">
+        <Show when={k.hero} fallback={<Ticks size={geo().size} />}>
+          <div class="uface__ring" style={{ width: `${ringW()}px`, height: `${ringW()}px` }} aria-hidden="true">
             <For each={Array.from({ length: RING }, (_, i) => i)}>
-              {(i) => {
-                const t = ((-135 + (270 * i) / (RING - 1)) * Math.PI) / 180;
-                return (
-                  <i
-                    classList={{ 'is-on': i / (RING - 1) <= travel() + 1e-6 }}
-                    style={{ left: `${(ringW / 2 + ringR * Math.sin(t)).toFixed(2)}px`, top: `${(ringW / 2 - ringR * Math.cos(t)).toFixed(2)}px` }}
-                  />
-                );
-              }}
+              {(i) => <i classList={{ 'is-on': i / (RING - 1) <= travel() + 1e-6 }} style={dot(i)} />}
             </For>
           </div>
         </Show>
@@ -412,22 +456,23 @@ export function KnobBody() {
 }
 
 /** A small knob's eleven printed ticks, the middle and both ends longer. */
-function Ticks(props: { size: number; w: number }) {
+function Ticks(props: { size: number }) {
+  const w = () => props.size + 36;
+  const c = () => w() / 2;
   return (
-    <svg class="uface__ticks" width={props.w} height={props.w} aria-hidden="true">
+    <svg class="uface__ticks" width={w()} height={w()} aria-hidden="true">
       <For each={Array.from({ length: 11 }, (_, i) => i)}>
         {(i) => {
           const q = ((-135 + 27 * i) * Math.PI) / 180;
           const major = i === 0 || i === 10 || i === 5;
-          const c = props.w / 2;
-          const r0 = props.size / 2 + 4;
-          const r1 = r0 + 6 + (major ? 1.5 : 0);
+          const r0 = () => props.size / 2 + 4;
+          const r1 = () => r0() + 6 + (major ? 1.5 : 0);
           return (
             <line
-              x1={c + r0 * Math.sin(q)}
-              y1={c - r0 * Math.cos(q)}
-              x2={c + r1 * Math.sin(q)}
-              y2={c - r1 * Math.cos(q)}
+              x1={c() + r0() * Math.sin(q)}
+              y1={c() - r0() * Math.cos(q)}
+              x2={c() + r1() * Math.sin(q)}
+              y2={c() - r1() * Math.cos(q)}
               stroke={major ? '#8f96a0' : '#555c65'}
               stroke-width="1.4"
               stroke-linecap="round"
