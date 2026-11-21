@@ -638,11 +638,9 @@ pub(crate) struct FeedDrain {
     /// That engine's sample rate (0: no engine).
     pub(crate) rate: u32,
     /// The chain model's snapshot read in the same `settings` + `ends` acquisition as the events, of the
-    /// generation `gen` names (mid-swap, the old one's last: `Model::snapshot_for`; read by P6).
-    #[allow(dead_code)]
+    /// generation `gen` names (mid-swap, the old one's last: `Model::snapshot_for`).
     pub(crate) chains: chain::ChainRev,
-    /// True if [`Core::stash`] overflowed while the feed was stale (the feed sends a reset; read by P6).
-    #[allow(dead_code)]
+    /// True if [`Core::stash`] overflowed while the feed was stale (the feed sends a reset).
     pub(crate) stash_lost: bool,
 }
 
