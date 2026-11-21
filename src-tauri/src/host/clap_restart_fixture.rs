@@ -1780,9 +1780,13 @@ mod unit_owner {
     use super::*;
     use crate::engine_io::chain::{ChainState, PlateState, UnitState};
     use crate::engine_io::test_rig::TestDevice;
-    use crate::engine_io::unit_host::{OpState, Removal, Spec};
+    use crate::engine_io::unit_host::{Activated, Back, OpState, Removal, Spec};
     use crate::engine_io::EngineHost;
-    use lf_engine::{UnitId, SLOT_COUNT};
+    use lf_engine::grid::Frame;
+    use lf_engine::{
+        Command, LaneState, SlotEvent, SlotKind, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor,
+        SLOT_COUNT,
+    };
 
     fn device(rate: u32) -> TestDevice {
         TestDevice::start(rate, 256, Duration::from_millis(5), |_| 0.1)
@@ -1793,6 +1797,82 @@ mod unit_owner {
             format: "clap".to_string(),
             path: "bleeploop-restart-fixture.clap".to_string(),
             id: "bleeploop.restart-fixture".to_string(),
+        }
+    }
+
+    fn installed(device: &TestDevice, slot: usize) -> Option<(SlotKind, Frame)> {
+        device.host().core.rt.lock().unwrap().engine.as_ref().unwrap().slot(slot)
+    }
+
+    fn request_restart(obs: &Observed) {
+        let host = unsafe { *obs.host.load(Relaxed) };
+        std::thread::spawn(move || unsafe { (host.request_restart.unwrap())(&host) })
+            .join()
+            .unwrap();
+    }
+
+    fn start_take(device: &TestDevice) {
+        let host = device.host();
+        host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
+        host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
+        host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut ev = Vec::new();
+            let (_, ov) = host.drain_feed(&mut ev);
+            if let Some(ov) = ov {
+                let l = ov.lane(0);
+                if l.state == LaneState::Recording && l.frames > 0 {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "recording take never started");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn stop_take(device: &TestDevice) {
+        let host = device.host();
+        host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut ev = Vec::new();
+            let (_, ov) = host.drain_feed(&mut ev);
+            if let Some(ov) = ov {
+                if ov.lane(0).state != LaneState::Recording {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "recording take never stopped");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn is_recording(device: &TestDevice) -> bool {
+        let mut ev = Vec::new();
+        let (_, ov) = device.host().drain_feed(&mut ev);
+        ov.is_some_and(|ov| ov.lane(0).state == LaneState::Recording)
+    }
+
+    /// Tiny pass-through unit with a fixed latency, submitted straight through `UnitHost` in tests.
+    struct FixedLatencyUnit {
+        latency: Frame,
+    }
+
+    impl UnitProcessor for FixedLatencyUnit {
+        fn info(&self) -> UnitInfo {
+            UnitInfo { kind: UnitKind::Plugin, source: false, latency: self.latency }
+        }
+
+        fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+            out[0].copy_from_slice(input[0]);
+            out[1].copy_from_slice(input[1]);
+        }
+
+        fn stop(&mut self) {}
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
         }
     }
 
@@ -1830,6 +1910,10 @@ mod unit_owner {
 
         fn plate(&self, slot: usize, id: UnitId) -> Option<UnitState> {
             self.chains.lock().unwrap()[slot].units.iter().find(|u| u.id == id).cloned()
+        }
+
+        fn chain(&self, slot: usize) -> ChainState {
+            self.chains.lock().unwrap()[slot].clone()
         }
     }
 
@@ -1999,5 +2083,286 @@ mod unit_owner {
             "plate reads failed after load error"
         );
         assert_eq!(obs2.activations.load(Relaxed), 0, "nothing activated on load error");
+    }
+
+    #[test]
+    fn a_restart_that_changes_latency_mid_take_reseats_after_the_take() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let ident = identity();
+        let unit_id: UnitId = 1;
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.latency.store(0, Relaxed);
+        obs.param_count.store(2, Relaxed);
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident), 0, false).unwrap();
+        let (handle, answer) = unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            None,
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", None),
+        )
+        .expect("unit seats");
+        assert_eq!(answer, Answer::Seated { name: "Restart fixture".to_string(), tone: None });
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
+        assert_eq!(installed(&device, 0), Some((SlotKind::Effect, 0)));
+
+        start_take(&device);
+        obs.latency.store(128, Relaxed);
+        request_restart(&obs);
+
+        assert!(
+            wait_for(|| obs.deactivations.load(Relaxed) == 1
+                && obs.activations.load(Relaxed) == 2
+                && feed.chain(0).held),
+            "withdrawal applies at once and reseat is held while the take lasts"
+        );
+        assert!(is_recording(&device), "the take is still recording");
+        assert_eq!(obs.stops.load(Relaxed), 1);
+        assert_eq!(obs.starts.load(Relaxed), 1);
+
+        let params = handle.list_params().expect("list_params answers during the hold");
+        assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101]);
+
+        for _ in 0..10 {
+            assert!(device.wait_blocks(1));
+            assert_eq!(
+                installed(&device, 0),
+                Some((SlotKind::Effect, 0)),
+                "slot engine latency stays 0 on every read while the take lasts"
+            );
+        }
+
+        let processed_before = obs.processes.load(Relaxed);
+        stop_take(&device);
+
+        assert!(
+            wait_for(|| feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Seated && p.latency == 128 && !p.held)
+                && !feed.chain(0).held
+                && installed(&device, 0) == Some((SlotKind::Effect, 128))
+                && obs.starts.load(Relaxed) == 2
+                && obs.processes.load(Relaxed) > processed_before + 8),
+            "after stop_take the unit is seated at 128 and processing again"
+        );
+
+        let Removal::Sent(rm_op) = device.host().remove_unit(unit_id).expect("remove_unit") else {
+            panic!("seated unit removal must be Sent");
+        };
+        assert_eq!(device.host().wait_op(rm_op, PATIENCE).expect("wait_op"), OpState::Applied);
+        assert!(wait_for(|| handle.is_finished()));
+        handle.stop().expect("owner ended cleanly");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+        assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "no RT call off the device thread");
+    }
+
+    #[test]
+    fn a_withdraw_queued_behind_another_units_held_install_waits_it_out() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let ident_a = identity();
+        let ident_b = ToneIdentity {
+            format: "clap".to_string(),
+            path: "dummy-b.clap".to_string(),
+            id: "bleeploop.dummy-b".to_string(),
+        };
+        let unit_a: UnitId = 1;
+        let unit_b: UnitId = 2;
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.latency.store(0, Relaxed);
+        obs.param_count.store(2, Relaxed);
+
+        let a_host = device.host().unit(0, unit_a, Spec::Plugin(ident_a), 0, false).unwrap();
+        let (handle, answer) = unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            a_host,
+            0,
+            Arc::new(|_| {}),
+            None,
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", None),
+        )
+        .expect("unit A seats");
+        assert_eq!(answer, Answer::Seated { name: "Restart fixture".to_string(), tone: None });
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
+
+        start_take(&device);
+
+        // Submit unit B (latency 64) straight through its UnitHost: held by the active take.
+        let b_host = device.host().unit(0, unit_b, Spec::Plugin(ident_b), 1, false).unwrap();
+        b_host.activated(Activated { name: "Held B".to_string(), source: false, latency: 64 });
+        let b_terms = b_host.terms().expect("engine open");
+        let b_op = b_host
+            .submit(Box::new(FixedLatencyUnit { latency: 64 }), b_terms)
+            .map_err(|(_, e)| e)
+            .expect("submit B");
+        assert!(wait_for(|| b_host.poll(b_op) == OpState::Held && feed.chain(0).held), "B is held");
+
+        // Ask A's plugin to restart: its withdrawal queues behind B's held install.
+        request_restart(&obs);
+
+        let hold_until = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < hold_until {
+            let params = handle.list_params().expect("A keeps answering list_params during the hold");
+            assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101]);
+            assert_eq!(
+                obs.activations.load(Relaxed),
+                1,
+                "A's withdrawal waits behind B's held install (still activated once)"
+            );
+            assert_eq!(obs.deactivations.load(Relaxed), 0, "A has not deactivated while B holds the port");
+            assert!(!handle.is_finished(), "A's owner does not give up");
+            assert_eq!(b_host.poll(b_op), OpState::Held, "B stays held while the take lasts");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let processed_before = obs.processes.load(Relaxed);
+        stop_take(&device);
+
+        assert!(wait_for(|| b_host.poll(b_op) == OpState::Applied), "B applies after stop_take");
+        assert!(
+            wait_for(|| obs.deactivations.load(Relaxed) == 1
+                && obs.activations.load(Relaxed) == 2
+                && obs.starts.load(Relaxed) == 2
+                && obs.processes.load(Relaxed) > processed_before + 8
+                && feed.plate(0, unit_a).is_some_and(|p| p.state == PlateState::Seated && !p.held)),
+            "A's withdrawal and reseat apply after B, and A processes again"
+        );
+
+        let Removal::Sent(b_rm) = device.host().remove_unit(unit_b).expect("remove B") else {
+            panic!("seated unit B removal must be Sent");
+        };
+        assert_eq!(device.host().wait_op(b_rm, PATIENCE).expect("wait_op B"), OpState::Applied);
+        assert!(
+            wait_for(|| matches!(b_host.take_back(), Some(Back::Removed(_)))),
+            "B's box comes back through take_back"
+        );
+        b_host.release();
+
+        let Removal::Sent(a_rm) = device.host().remove_unit(unit_a).expect("remove A") else {
+            panic!("seated unit A removal must be Sent");
+        };
+        assert_eq!(device.host().wait_op(a_rm, PATIENCE).expect("wait_op A"), OpState::Applied);
+        assert!(wait_for(|| handle.is_finished()));
+        handle.stop().expect("owner ended cleanly");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+        assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "no RT call off the device thread");
+    }
+
+    #[test]
+    fn an_eviction_reactivates_the_unit_at_the_new_terms_and_reseats_it() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let ident = identity();
+        let unit_id: UnitId = 3;
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.latency.store(0, Relaxed);
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident), 0, false).unwrap();
+        let (handle, answer) = unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            None,
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", None),
+        )
+        .expect("unit seats");
+        assert_eq!(answer, Answer::Seated { name: "Restart fixture".to_string(), tone: None });
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
+
+        let processed_before = obs.processes.load(Relaxed);
+        device.rebuild_at(44_100, 512);
+
+        assert!(
+            wait_for(|| obs.activations.load(Relaxed) == 2
+                && obs.deactivations.load(Relaxed) == 1
+                && f64::from_bits(obs.activated_rate.load(Relaxed)) == 44_100.0
+                && obs.activated_max_frames.load(Relaxed) == 512
+                && obs.starts.load(Relaxed) == 2
+                && obs.processes.load(Relaxed) > processed_before + 8
+                && feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Seated)),
+            "evicted unit reactivates at 44.1 kHz / 512 frames, reseats, and processes"
+        );
+        assert_eq!(installed(&device, 0), Some((SlotKind::Effect, 0)));
+
+        let Removal::Sent(rm_op) = device.host().remove_unit(unit_id).expect("remove_unit") else {
+            panic!("seated unit removal must be Sent");
+        };
+        assert_eq!(device.host().wait_op(rm_op, PATIENCE).expect("wait_op"), OpState::Applied);
+        assert!(wait_for(|| handle.is_finished()));
+        handle.stop().expect("owner ended cleanly");
+        assert_eq!(obs.deactivations.load(Relaxed), 2, "deactivated by reactivate and by release");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+    }
+
+    #[test]
+    fn a_refused_reseat_parks_and_a_removal_dismisses_it() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("unit-owner-parked-dismiss");
+        let ident = identity();
+        let unit_id: UnitId = 9;
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.latency.store(0, Relaxed);
+        obs.param_count.store(2, Relaxed);
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident.clone()), 0, false).unwrap();
+        let (handle, answer) = unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            Some(dir.unit_binding(unit_id, 0, ident.clone())),
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", None),
+        )
+        .expect("unit seats");
+        assert_eq!(answer, Answer::Seated { name: "Restart fixture".to_string(), tone: None });
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
+
+        // Save a tone into `unit-<id>.tone` so we verify Dismissed retires it into the slot file.
+        *obs.saved.lock().unwrap() = b"parked-tone-v1".to_vec();
+        let _ = handle.take_tone().expect("take_tone");
+        let unit_file = dir.0.join(ToneIdentity::unit_file_name(unit_id));
+        assert!(unit_file.exists(), "unit-<id>.tone exists before restart");
+
+        obs.latency.store(lf_engine::max_chain_latency(48_000) as u32 + 1, Relaxed);
+        request_restart(&obs);
+
+        assert!(
+            wait_for(|| feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Failed && p.parked)),
+            "refused reseat parks the unit: plate reads failed and parked"
+        );
+        let params = handle.list_params().expect("list_params still answers while parked");
+        assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101]);
+
+        let Removal::Sent(rm_op) = device.host().remove_unit(unit_id).expect("remove_unit") else {
+            panic!("parked unit removal must be Sent");
+        };
+        assert_eq!(device.host().wait_op(rm_op, PATIENCE).expect("wait_op"), OpState::Applied);
+
+        assert!(wait_for(|| handle.is_finished()), "owner gets Dismissed and ends");
+        handle.stop().expect("owner ended cleanly");
+
+        assert_eq!(obs.deactivations.load(Relaxed), 2, "deactivated twice: reactivate and release");
+        assert!(obs.destroy_seq.load(Relaxed) > 0, "destroyed once");
+        assert!(wait_for(|| feed.plate(0, unit_id).is_none()), "plate is gone");
+        assert!(!unit_file.exists(), "unit tone file is gone after retire");
+        let retired = dir.store().load(0, &ident).expect("load retired slot tone").expect("slot tone exists");
+        assert_eq!(retired.state, b"parked-tone-v1", "unit tone retired into the slot file");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+        assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "no RT call off the device thread");
     }
 }

@@ -93,22 +93,33 @@ pub(super) struct UnitCtx {
 
 /// Where the owner's unit box stands relative to the engine.
 enum Seat<U> {
-    /// Held by the owner, activated at `terms`, waiting to submit (initial submit or `PortFull`).
-    InHand { unit: Box<U>, terms: Terms },
+    /// Held by the owner and owed a seat (initial load, `Withdrawn`, `Evicted`, `Stale`/`PortFull`/
+    /// `NoEngine`, or a parked unit woken by a restart). `activated_at` is `Some(terms)` only when
+    /// the unit is already activated at those exact terms and has not returned from the engine or
+    /// been asked to restart since.
+    Owed { unit: Box<U>, activated_at: Option<Terms> },
     /// Submitted to the engine; `op` is the install port message being polled.
-    InFlight { op: Op },
+    Installing { op: Op },
     /// Applied in the engine.
     Seated,
-    /// Out of the engine and parked (refused reseat, or round 1's placeholder for Withdrawn/Evicted).
+    /// Withdrawal sent (`UnitHost::withdraw`); the unit box is still in the engine until
+    /// `Back::Withdrawn` (or `Evicted`/`Removed`/`Superseded`) arrives.
+    Withdrawing,
+    /// Out of the engine and parked (refused reseat or failed reactivate): the seat stays,
+    /// `host.parked(why)` was reported. Retries on the next plugin-asked restart; ends on
+    /// `Back::Dismissed`.
     Parked { unit: Box<U> },
-    /// Transient placeholder while `submit_in_hand` holds the unit box across `submit`/`reactivate`.
+    /// Out of the engine while the host is closing (`SubmitError::Closing`): kept in hand with no
+    /// retry until shutdown releases it.
+    Closing { unit: Box<U> },
+    /// Transient placeholder while moving the unit box across `reactivate`/`submit`.
     InTransit,
 }
 
 impl<U> Seat<U> {
     fn take_unit(&mut self) -> Option<Box<U>> {
         match std::mem::replace(self, Seat::InTransit) {
-            Seat::InHand { unit, .. } | Seat::Parked { unit } => Some(unit),
+            Seat::Owed { unit, .. } | Seat::Parked { unit } | Seat::Closing { unit } => Some(unit),
             other => {
                 *self = other;
                 None
@@ -157,85 +168,125 @@ fn send_answer(ready: &mut Option<SyncSender<Result<Answer, String>>>, slot: usi
     }
 }
 
-fn drain_restart<P: OwnedPlugin>(plugin: &mut P, slot: usize, id: UnitId) {
+/// Poll the plugin for a restart request and act on (or remember) it against `seat`.
+fn note_restart<P: OwnedPlugin>(
+    host: &UnitHost,
+    plugin: &mut P,
+    seat: &mut Seat<P::Unit>,
+    pending_restart: &mut Option<String>,
+) {
     if let Some(why) = plugin.take_restart() {
         log::info!(
-            "[plugin_host] engine slot {slot} unit {id}: ignoring restart request ({why}); reseat not built yet"
+            "[plugin_host] engine slot {} unit {}: plugin requested restart ({why})",
+            host.slot(),
+            host.id()
         );
+        *pending_restart = Some(why);
+    }
+    apply_pending_restart(host, seat, pending_restart);
+}
+
+/// Act on a pending restart request against the current `seat`.
+fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart: &mut Option<String>) {
+    let Some(why) = pending_restart.as_deref() else {
+        return;
+    };
+    let slot = host.slot();
+    let id = host.id();
+    match seat {
+        Seat::Seated => match host.withdraw() {
+            Ok(_op) => {
+                *seat = Seat::Withdrawing;
+                *pending_restart = None;
+            }
+            Err(SubmitError::PortFull) => {
+                // Keep pending_restart set and retry `withdraw()` on the next turn.
+            }
+            Err(SubmitError::Stale) => {
+                log::info!(
+                    "[plugin_host] engine slot {slot} unit {id}: dropping restart ({why}); engine rebuilt (eviction will reactivate)"
+                );
+                *pending_restart = None;
+            }
+            Err(err @ (SubmitError::Superseded | SubmitError::Closing | SubmitError::NoEngine)) => {
+                log::info!(
+                    "[plugin_host] engine slot {slot} unit {id}: dropping restart ({why}); withdraw refused ({err:?})"
+                );
+                *pending_restart = None;
+            }
+        },
+        Seat::Installing { .. } => {
+            // Op in flight: remember the restart and withdraw once seated.
+        }
+        Seat::Withdrawing => {
+            // Already withdrawing: the upcoming `Back::Withdrawn` will reactivate with latest state.
+            *pending_restart = None;
+        }
+        Seat::Owed { activated_at, .. } => {
+            *activated_at = None;
+            *pending_restart = None;
+        }
+        Seat::Parked { .. } => {
+            if let Seat::Parked { unit } = std::mem::replace(seat, Seat::InTransit) {
+                log::info!("[plugin_host] engine slot {slot} unit {id}: retrying parked unit on restart ({why})");
+                *seat = Seat::Owed { unit, activated_at: None };
+            }
+            *pending_restart = None;
+        }
+        Seat::Closing { .. } | Seat::InTransit => {
+            *pending_restart = None;
+        }
     }
 }
 
-/// Submit the unit held in `Seat::InHand`, retrying on `SubmitError::Stale` by reactivating at the
-/// fresh `host.terms()`. `PortFull` leaves the unit in hand for the next turn.
-fn submit_in_hand<P: OwnedPlugin>(
+/// Submit the unit held in `Seat::Owed`: with `host.terms()` present, reactivate at them unless
+/// already activated at those exact terms (a box from the engine always has `activated_at: None`),
+/// publish `host.activated(..)`, and call `host.submit(unit, fresh)`.
+fn submit_owed<P: OwnedPlugin>(
     host: &UnitHost,
     plugin: &mut P,
     name: &str,
     seat: &mut Seat<P::Unit>,
     ever_seated: bool,
+    answering_caller: bool,
 ) -> Option<Exit<P::Unit>> {
-    let (mut unit, mut terms) = match std::mem::replace(seat, Seat::InTransit) {
-        Seat::InHand { unit, terms } => (unit, terms),
+    let (mut unit, mut activated_at) = match std::mem::replace(seat, Seat::InTransit) {
+        Seat::Owed { unit, activated_at } => (unit, activated_at),
         other => {
             *seat = other;
             return None;
         }
     };
-    const MAX_STALE_RETRIES: usize = 8;
-    for attempt in 0..MAX_STALE_RETRIES {
-        match host.submit(unit, terms) {
-            Ok(op) => {
-                *seat = Seat::InFlight { op };
-                return None;
+
+    let Some(fresh) = host.terms() else {
+        if !ever_seated && answering_caller {
+            return Some(Exit::FailedBeforeSeat {
+                unit: Some(unit),
+                why: "no audio device is open".to_string(),
+            });
+        }
+        *seat = Seat::Owed { unit, activated_at };
+        return None;
+    };
+
+    if activated_at != Some(fresh) {
+        match plugin.reactivate(unit, fresh) {
+            Ok(rearmed) => {
+                let info = rearmed.info();
+                host.activated(Activated {
+                    name: name.to_string(),
+                    source: info.source,
+                    latency: info.latency,
+                });
+                unit = rearmed;
+                activated_at = Some(fresh);
             }
-            Err((returned, SubmitError::PortFull)) => {
-                *seat = Seat::InHand { unit: own(returned), terms };
-                return None;
-            }
-            Err((returned, SubmitError::Stale)) => {
-                let returned = own(returned);
-                let Some(fresh) = host.terms() else {
-                    let why = "no audio device is open".to_string();
-                    if !ever_seated {
-                        return Some(Exit::FailedBeforeSeat { unit: Some(returned), why });
-                    }
-                    host.parked(why);
-                    *seat = Seat::Parked { unit: returned };
-                    return None;
-                };
-                if attempt + 1 == MAX_STALE_RETRIES {
-                    *seat = Seat::InHand { unit: returned, terms };
-                    return None;
-                }
-                match plugin.reactivate(returned, fresh) {
-                    Ok(rearmed) => {
-                        let info = rearmed.info();
-                        host.activated(Activated {
-                            name: name.to_string(),
-                            source: info.source,
-                            latency: info.latency,
-                        });
-                        unit = rearmed;
-                        terms = fresh;
-                    }
-                    Err((returned, why)) => {
-                        if !ever_seated {
-                            return Some(Exit::FailedBeforeSeat { unit: Some(returned), why });
-                        }
-                        host.parked(why);
-                        *seat = Seat::Parked { unit: returned };
-                        return None;
-                    }
-                }
-            }
-            Err((returned, err)) => {
-                let returned = own(returned);
-                let why = submit_error_reason(err);
+            Err((returned, why)) => {
                 if !ever_seated {
                     return Some(Exit::FailedBeforeSeat { unit: Some(returned), why });
                 }
                 log::warn!(
-                    "[plugin_host] engine slot {} unit {}: submit failed ({why}); parking",
+                    "[plugin_host] engine slot {} unit {}: reactivate failed ({why}); parking",
                     host.slot(),
                     host.id()
                 );
@@ -245,7 +296,44 @@ fn submit_in_hand<P: OwnedPlugin>(
             }
         }
     }
-    unreachable!()
+
+    match host.submit(unit, fresh) {
+        Ok(op) => {
+            *seat = Seat::Installing { op };
+            None
+        }
+        Err((returned, SubmitError::PortFull)) => {
+            *seat = Seat::Owed { unit: own(returned), activated_at };
+            None
+        }
+        Err((returned, SubmitError::Stale)) => {
+            *seat = Seat::Owed { unit: own(returned), activated_at: None };
+            None
+        }
+        Err((returned, SubmitError::NoEngine)) => {
+            let returned = own(returned);
+            if !ever_seated && answering_caller {
+                return Some(Exit::FailedBeforeSeat {
+                    unit: Some(returned),
+                    why: submit_error_reason(SubmitError::NoEngine),
+                });
+            }
+            *seat = Seat::Owed { unit: returned, activated_at };
+            None
+        }
+        Err((returned, SubmitError::Closing)) => {
+            let returned = own(returned);
+            if !ever_seated && answering_caller {
+                return Some(Exit::FailedBeforeSeat {
+                    unit: Some(returned),
+                    why: submit_error_reason(SubmitError::Closing),
+                });
+            }
+            *seat = Seat::Closing { unit: returned };
+            None
+        }
+        Err((returned, SubmitError::Superseded)) => Some(Exit::Returned { unit: own(returned), retire: false }),
+    }
 }
 
 /// End before the unit ever applied a seat: fail the plate, release the plugin and its unit (if
@@ -438,8 +526,9 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         );
     }
 
-    let mut seat = Seat::InHand { unit, terms };
+    let mut seat = Seat::Owed { unit, activated_at: Some(terms) };
     let mut ever_seated = false;
+    let mut pending_restart: Option<String> = None;
     let save = |tone: &mut ToneKeeper, plugin: &mut P, why: &str| keep_tone(tone, slot, why, &name, || plugin.state());
 
     // A panic in the loop must not unwind past a unit the engine still runs (dropping the plugin
@@ -469,34 +558,33 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                         seat = Seat::Parked { unit };
                     }
                     Back::Withdrawn { unit, .. } => {
-                        log::warn!(
-                            "[plugin_host] engine slot {slot} unit {id}: withdrawn; reseat not built yet, parking"
-                        );
-                        host.parked("reseat not built yet".to_string());
-                        seat = Seat::Parked { unit: own(unit) };
+                        seat = Seat::Owed { unit: own(unit), activated_at: None };
+                        pending_restart = None;
                     }
                     Back::Evicted { unit, .. } => {
-                        log::warn!(
-                            "[plugin_host] engine slot {slot} unit {id}: evicted; reseat not built yet, parking"
-                        );
-                        host.parked("reseat not built yet".to_string());
-                        seat = Seat::Parked { unit: own(unit) };
+                        seat = Seat::Owed { unit: own(unit), activated_at: None };
+                        pending_restart = None;
                     }
                 }
             }
 
-            if matches!(seat, Seat::InHand { .. }) {
-                if let Some(exit) = submit_in_hand(&host, &mut plugin, &name, &mut seat, ever_seated) {
+            note_restart(&host, &mut plugin, &mut seat, &mut pending_restart);
+
+            if matches!(seat, Seat::Owed { .. }) {
+                if let Some(exit) =
+                    submit_owed(&host, &mut plugin, &name, &mut seat, ever_seated, ready.is_some())
+                {
                     return exit;
                 }
             }
 
-            if let Seat::InFlight { op } = seat {
+            if let Seat::Installing { op } = seat {
                 match host.poll(op) {
                     OpState::Applied => {
                         seat = Seat::Seated;
                         ever_seated = true;
                         send_answer(&mut ready, slot, id, Answer::Seated { name: name.clone(), tone: restored });
+                        apply_pending_restart(&host, &mut seat, &mut pending_restart);
                     }
                     OpState::Held => {
                         send_answer(&mut ready, slot, id, Answer::Waiting { name: name.clone(), tone: restored });
@@ -508,7 +596,6 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                 }
             }
 
-            drain_restart(&mut plugin, slot, id);
             let Reported { relist, changed } = plugin.turn(&sink);
             if relist {
                 publish_param_ids(&param_ids, &plugin.params().unwrap_or_default());
@@ -521,7 +608,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             // Every turn, editor or not (JUCE message thread + hosted editor close box).
             pump_thread_messages();
             let closed = plugin.idle();
-            drain_restart(&mut plugin, slot, id);
+            note_restart(&host, &mut plugin, &mut seat, &mut pending_restart);
             if closed {
                 sink(EngineSlotEvent::EditorClosed);
                 let _ = save(&mut tone, &mut plugin, "editor closed");
@@ -538,7 +625,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                 }
             };
             if request.is_some() {
-                drain_restart(&mut plugin, slot, id);
+                note_restart(&host, &mut plugin, &mut seat, &mut pending_restart);
             }
             if let Some(request) = request.and_then(|r| take_uncancelled(r, slot as u8)) {
                 match request {
