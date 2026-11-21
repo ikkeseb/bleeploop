@@ -13,6 +13,7 @@ use super::super::engine_slot::{
     own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported,
     Restore, Setup, FAULT_PROCESS, FAULT_START,
 };
+use super::super::unit_owner::{serve_unit, UnitCtx};
 use super::super::super::tone;
 use super::*;
 use vst3::Steinberg::kNotImplemented;
@@ -367,24 +368,32 @@ fn sync_controller(plugin: &Vst3Plugin, slot: usize) -> Result<(), String> {
 /// The module and factory an owner loads from.
 pub(super) type Opened = (Option<Vst3Module>, ComPtr<IPluginFactory>);
 
+/// Load the VST3 bundle at `path` and resolve its factory.
+fn open_bundle(path: String) -> Result<Opened, String> {
+    let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(&path))
+        .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
+    let wide: Vec<u16> = binary.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: FFI module load and its standard factory entry; the out-of-process scan vetted the
+    // bundle. The module guard owns the library at once, so every later error unloads it.
+    unsafe {
+        let module = Vst3Module::load(PCWSTR(wide.as_ptr()))?;
+        let gpf = GetProcAddress(module.handle(), s!("GetPluginFactory"))
+            .ok_or_else(|| "GetPluginFactory not exported".to_string())?;
+        let get_factory: unsafe extern "system" fn() -> *mut IPluginFactory = std::mem::transmute(gpf);
+        let factory =
+            ComPtr::from_raw(get_factory()).ok_or_else(|| "GetPluginFactory returned null".to_string())?;
+        Ok((Some(module), factory))
+    }
+}
+
 /// The production owner: load the bundle at `path`.
 pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(), String> {
-    run_with(ctx, id, move || {
-        let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(&path))
-            .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
-        let wide: Vec<u16> = binary.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        // SAFETY: FFI module load and its standard factory entry; the out-of-process scan vetted the
-        // bundle. The module guard owns the library at once, so every later error unloads it.
-        unsafe {
-            let module = Vst3Module::load(PCWSTR(wide.as_ptr()))?;
-            let gpf = GetProcAddress(module.handle(), s!("GetPluginFactory"))
-                .ok_or_else(|| "GetPluginFactory not exported".to_string())?;
-            let get_factory: unsafe extern "system" fn() -> *mut IPluginFactory = std::mem::transmute(gpf);
-            let factory =
-                ComPtr::from_raw(get_factory()).ok_or_else(|| "GetPluginFactory returned null".to_string())?;
-            Ok((Some(module), factory))
-        }
-    })
+    run_with(ctx, id, move || open_bundle(path))
+}
+
+/// The chain-unit production owner: load the bundle at `path`.
+pub(in super::super) fn run_unit(ctx: UnitCtx, path: String, id: &str) -> Result<(), String> {
+    run_unit_with(ctx, id, move || open_bundle(path))
 }
 
 /// Create class `target` (`id`) from the factory, initialise it, create its edit controller and give it
@@ -502,6 +511,15 @@ pub(super) fn run_with(
     open: impl FnOnce() -> Result<Opened, String>,
 ) -> Result<(), String> {
     serve(ctx, |setup| load(id, open, setup))
+}
+
+/// The chain-unit VST3 owner (`unit_owner::serve_unit`). `open` yields the module and factory.
+pub(super) fn run_unit_with(
+    ctx: UnitCtx,
+    id: &str,
+    open: impl FnOnce() -> Result<Opened, String>,
+) -> Result<(), String> {
+    serve_unit(ctx, |setup| load(id, open, setup))
 }
 
 /// A loaded VST3 plugin as its owner holds it. Torn down in the live order (`release`): the editor,

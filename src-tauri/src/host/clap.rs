@@ -860,6 +860,8 @@ mod vst3_host;
 // engine's callback, each with its own owner thread (`engine_io/plugins.rs` routes to them).
 #[path = "engine_slot.rs"]
 pub(crate) mod engine_slot;
+#[path = "unit_owner.rs"]
+pub(crate) mod unit_owner;
 #[path = "clap_engine.rs"]
 mod clap_engine;
 #[path = "vst2_engine.rs"]

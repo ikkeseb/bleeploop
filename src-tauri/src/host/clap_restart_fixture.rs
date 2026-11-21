@@ -1770,3 +1770,234 @@ fn a_mono_unit_folds_input_to_the_mean_and_copies_output_to_both_sides() {
     instance.deactivate(unit.take_stopped().unwrap());
     assert!(!s.contract_violation.load(Relaxed));
 }
+
+// ── chain unit owner (`unit_owner::serve_unit`) over the same CLAP fixture ──────────────────────
+
+mod unit_owner {
+    use super::super::engine_slot::{self, PluginFormat};
+    use super::super::unit_owner::{self, Answer, UnitCtx};
+    use super::super::super::tone::{self, TempDir, ToneIdentity};
+    use super::*;
+    use crate::engine_io::chain::{ChainState, PlateState, UnitState};
+    use crate::engine_io::test_rig::TestDevice;
+    use crate::engine_io::unit_host::{OpState, Removal, Spec};
+    use crate::engine_io::EngineHost;
+    use lf_engine::{UnitId, SLOT_COUNT};
+
+    fn device(rate: u32) -> TestDevice {
+        TestDevice::start(rate, 256, Duration::from_millis(5), |_| 0.1)
+    }
+
+    fn identity() -> ToneIdentity {
+        ToneIdentity {
+            format: "clap".to_string(),
+            path: "bleeploop-restart-fixture.clap".to_string(),
+            id: "bleeploop.restart-fixture".to_string(),
+        }
+    }
+
+    fn rendered_above(device: &TestDevice, level: f32) -> bool {
+        device.output.lock().unwrap().iter().rev().take(256).all(|&x| x > level)
+    }
+
+    /// Feed stand-in: drains engine events every ~2 ms so `UnitHost::poll` and `chains` advance.
+    struct FeedStandIn {
+        stop: Arc<AtomicBool>,
+        chains: Arc<Mutex<Arc<[ChainState; SLOT_COUNT]>>>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FeedStandIn {
+        fn start(host: EngineHost) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let initial = host.drain_feed_taps(&mut Vec::new(), None, None).chains.chains;
+            let chains = Arc::new(Mutex::new(initial));
+            let (stop_t, chains_t) = (stop.clone(), chains.clone());
+            let join = std::thread::Builder::new()
+                .name("lf-test-feed".to_string())
+                .spawn(move || {
+                    let mut ev = Vec::new();
+                    while !stop_t.load(Acquire) {
+                        ev.clear();
+                        let drain = host.drain_feed_taps(&mut ev, None, None);
+                        *chains_t.lock().unwrap() = drain.chains.chains;
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                })
+                .expect("spawn feed stand-in");
+            FeedStandIn { stop, chains, join: Some(join) }
+        }
+
+        fn plate(&self, slot: usize, id: UnitId) -> Option<UnitState> {
+            self.chains.lock().unwrap()[slot].units.iter().find(|u| u.id == id).cloned()
+        }
+    }
+
+    impl Drop for FeedStandIn {
+        fn drop(&mut self) {
+            self.stop.store(true, Release);
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    fn unit_runner(
+        obs: Vec<Arc<Observed>>,
+        plugin_id: &'static str,
+        ended: Option<Arc<AtomicBool>>,
+    ) -> impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static {
+        move |ctx| {
+            let res = super::super::clap_engine::run_unit(ctx, plugin_id, move || {
+                OBSERVE.with(|o| *o.borrow_mut() = obs);
+                // SAFETY: static fixture entry whose callbacks obey the CLAP ABI.
+                unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }
+                    .map_err(|e| e.to_string())
+            });
+            if let Some(flag) = ended {
+                flag.store(true, Release);
+            }
+            res
+        }
+    }
+
+    #[test]
+    fn a_unit_owner_seats_serves_and_on_removed_saves_retires_and_tears_down() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("unit-owner-remove");
+        let ident = identity();
+        let unit_id: UnitId = 7;
+
+        let obs = Arc::new(Observed::default());
+        obs.output_level.store(0.25f32.to_bits(), Relaxed);
+        obs.param_count.store(3, Relaxed);
+
+        let unit_host = device
+            .host()
+            .unit(0, unit_id, Spec::Plugin(ident.clone()), 0, false)
+            .expect("reserve chain unit");
+        let (handle, answer) = unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            Some(dir.unit_binding(unit_id, 0, ident.clone())),
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", None),
+        )
+        .expect("unit owner seats");
+
+        assert_eq!(answer, Answer::Seated { name: "Restart fixture".to_string(), tone: None });
+        assert_eq!(handle.name(), "Restart fixture");
+        assert!(
+            wait_for(|| feed
+                .plate(0, unit_id)
+                .is_some_and(|p| p.state == PlateState::Seated && p.name == "Restart fixture")),
+            "plate reads seated with the fixture's name"
+        );
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8), "the engine processes the unit");
+        assert!(wait_for(|| rendered_above(&device, 0.2)), "its output reaches the device");
+
+        let params = handle.list_params().expect("list_params answers");
+        assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101, 102]);
+
+        // Change state and save explicitly: lands in `unit-<id>.tone`.
+        *obs.saved.lock().unwrap() = b"unit-tone-v1".to_vec();
+        let taken = tone::decode(&handle.take_tone().expect("take_tone")).expect("valid tone bytes");
+        assert_eq!(taken.state, b"unit-tone-v1");
+        let unit_file = dir.0.join(ToneIdentity::unit_file_name(unit_id));
+        assert!(unit_file.exists(), "unit-<id>.tone exists after take_tone");
+        let on_disk = tone::decode(&std::fs::read(&unit_file).unwrap()).unwrap();
+        assert_eq!(on_disk.state, b"unit-tone-v1");
+
+        // Mark dirty with a newer state right before removal so Removed saves AND retires it.
+        *obs.saved.lock().unwrap() = b"unit-tone-v2".to_vec();
+        obs.dirty_on_callback.store(true, Relaxed);
+        let host_ptr = obs.host.load(Relaxed);
+        assert!(!host_ptr.is_null());
+        // SAFETY: live fixture clap_host pointer; request_callback is thread-safe.
+        unsafe { ((*host_ptr).request_callback.unwrap())(host_ptr) };
+
+        let Removal::Sent(rm_op) = device.host().remove_unit(unit_id).expect("remove_unit") else {
+            panic!("seated unit removal must be Sent");
+        };
+        assert_eq!(device.host().wait_op(rm_op, PATIENCE).expect("wait_op"), OpState::Applied);
+
+        assert!(wait_for(|| handle.is_finished()), "owner ends by itself after Back::Removed");
+        handle.stop().expect("owner ended cleanly");
+
+        assert_eq!((obs.starts.load(Relaxed), obs.stops.load(Relaxed)), (1, 1));
+        assert_eq!(obs.deactivations.load(Relaxed), 1);
+        let (stop, deactivate, destroy) =
+            (obs.stop_seq.load(Relaxed), obs.deactivate_seq.load(Relaxed), obs.destroy_seq.load(Relaxed));
+        assert!(
+            0 < stop && stop < deactivate && deactivate < destroy,
+            "stop {stop} < deactivate {deactivate} < destroy {destroy}"
+        );
+        assert!(!unit_file.exists(), "unit file is gone after retire");
+        let retired = dir.store().load(0, &ident).expect("load retired slot tone").expect("slot tone exists");
+        assert_eq!(retired.state, b"unit-tone-v2", "slot file holds the saved state after retire");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+        assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "no RT call off the device thread");
+    }
+
+    #[test]
+    fn an_install_the_engine_refuses_fails_its_plate_and_releases_the_plugin() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let ident = identity();
+
+        // Part 1: engine refuses an install whose latency exceeds max_chain_latency.
+        let obs = Arc::new(Observed::default());
+        obs.latency.store(lf_engine::max_chain_latency(48_000) as u32 + 1, Relaxed);
+        let ended = Arc::new(AtomicBool::new(false));
+        let unit_host = device.host().unit(0, 1, Spec::Plugin(ident.clone()), 0, false).unwrap();
+        let err = match unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            None,
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", Some(ended.clone())),
+        ) {
+            Err(e) => e,
+            Ok((_, ans)) => panic!("expected latency refusal, got {ans:?}"),
+        };
+        assert!(err.contains("Latency"), "error should name the refusal: {err}");
+        assert!(ended.load(Acquire), "owner thread has ended");
+        assert!(
+            wait_for(|| feed.plate(0, 1).is_some_and(|p| p.state == PlateState::Failed && !p.parked)),
+            "plate reads failed"
+        );
+        assert_eq!(obs.activations.load(Relaxed), 1, "activated once");
+        assert_eq!(obs.deactivations.load(Relaxed), 1, "deactivated once");
+        assert!(obs.destroy_seq.load(Relaxed) > 0, "destroyed once");
+        assert_eq!(obs.starts.load(Relaxed), obs.stops.load(Relaxed), "started as often as stopped");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+
+        // Part 2: load error (an id the entry does not hold).
+        let obs2 = Arc::new(Observed::default());
+        let ended2 = Arc::new(AtomicBool::new(false));
+        let unit_host2 = device.host().unit(0, 2, Spec::Plugin(ident), 0, false).unwrap();
+        let err2 = match unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host2,
+            0,
+            Arc::new(|_| {}),
+            None,
+            unit_runner(vec![obs2.clone()], "bleeploop.no-such-plugin", Some(ended2.clone())),
+        ) {
+            Err(e) => e,
+            Ok((_, ans)) => panic!("expected load error, got {ans:?}"),
+        };
+        assert!(!err2.is_empty(), "load error message");
+        assert!(ended2.load(Acquire), "owner thread has ended after load error");
+        assert!(
+            wait_for(|| feed.plate(0, 2).is_some_and(|p| p.state == PlateState::Failed && !p.parked)),
+            "plate reads failed after load error"
+        );
+        assert_eq!(obs2.activations.load(Relaxed), 0, "nothing activated on load error");
+    }
+}

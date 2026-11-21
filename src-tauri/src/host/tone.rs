@@ -840,7 +840,6 @@ impl ToneKeeper {
     }
 }
 
-#[allow(dead_code)]
 impl ToneKeeper {
     /// The unit left for good: its file becomes the slot's ([`ToneStore::retire`]).
     pub(crate) fn retire(&mut self) {

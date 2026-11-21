@@ -21,9 +21,10 @@
 //!   effect, its context and its module loaded with it (`engine_slot::serve`'s teardown).
 
 use super::engine_slot::{
-    own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
-    FAULT_EVENTS, FAULT_PARAM,
+    own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Place,
+    Reported, Restore, Setup, FAULT_EVENTS, FAULT_PARAM,
 };
+use super::unit_owner::{serve_unit, UnitCtx};
 use super::super::editor_window::{
     create_host_window, drain_after_editor_teardown, set_client_size, show_host_window_front, HostWindow,
 };
@@ -377,8 +378,8 @@ impl Vst2Plugin {
         unsafe { self.effect.dispatch(opcode, index, value, std::ptr::null_mut(), opt) }
     }
 
-    /// `configure_at` the slot's current rate and largest block (the load, and a test).
-    fn configure(&mut self, slot: &SlotHost) -> Result<(u32, usize), String> {
+    /// `configure_at` the place's current rate and largest block (the load, and a test).
+    fn configure(&mut self, slot: &dyn Place) -> Result<(u32, usize), String> {
         self.configure_at(slot.rate().unwrap_or(0), slot.max_block())
     }
 
@@ -658,22 +659,30 @@ pub(super) struct Opened {
     pub(super) file_stem: String,
 }
 
+/// Load the VST2 DLL at `path` and resolve its entry.
+fn open_dll(path: String) -> Result<Opened, String> {
+    let path = std::path::Path::new(&path);
+    let module = Vst2Module::load(path)?;
+    let entry = module.entry();
+    let file_stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Opened { module: Some(module), entry, file_stem })
+}
+
 /// The production owner: load the DLL at `path`.
 pub(super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(), String> {
-    run_with(ctx, id, move || {
-        let path = std::path::Path::new(&path);
-        let module = Vst2Module::load(path)?;
-        let entry = module.entry();
-        let file_stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Opened { module: Some(module), entry, file_stem })
-    })
+    run_with(ctx, id, move || open_dll(path))
+}
+
+/// The chain-unit production owner: load the DLL at `path`.
+pub(super) fn run_unit(ctx: UnitCtx, path: String, id: &str) -> Result<(), String> {
+    run_unit_with(ctx, id, move || open_dll(path))
 }
 
 /// Create the instance for `id` (the effect's unique id as 8 hex digits) on a context of its own,
 /// bound to this thread as its owner. An instance this host refuses was never called, so it cannot
 /// be closed: its module and its context stay loaded for the rest of the process. A shell (several
 /// plugins in one file) is refused here as the scan refuses it, and closed like any open instance.
-fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost) -> Result<Vst2Plugin, String> {
+fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &dyn Place) -> Result<Vst2Plugin, String> {
     let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
     let ctx = HostContext::new(f64::from(rate), slot.max_block().max(1) as i32)?;
     ctx.bind_owner();
@@ -752,6 +761,11 @@ fn load(
 /// in production, an in-process entry in the tests); returns the teardown's result.
 pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Opened, String>) -> Result<(), String> {
     serve(ctx, |setup| load(id, open, setup))
+}
+
+/// The chain-unit VST2 owner (`unit_owner::serve_unit`). `open` yields the module and its entry.
+pub(super) fn run_unit_with(ctx: UnitCtx, id: &str, open: impl FnOnce() -> Result<Opened, String>) -> Result<(), String> {
+    serve_unit(ctx, |setup| load(id, open, setup))
 }
 
 impl OwnedPlugin for Vst2Plugin {

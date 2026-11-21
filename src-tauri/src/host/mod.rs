@@ -55,6 +55,9 @@ pub(crate) use scan::scan_one;
 #[cfg(windows)]
 #[allow(unused_imports)] // the native engine's plugin slots (the `plugin_*` commands)
 pub(crate) use clap::engine_slot;
+#[cfg(windows)]
+#[allow(unused_imports)] // chain unit owners (E2 P4)
+pub(crate) use clap::unit_owner;
 
 #[cfg(debug_assertions)]
 #[global_allocator]

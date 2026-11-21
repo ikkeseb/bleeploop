@@ -10,6 +10,7 @@ use super::engine_slot::{
     own, restore_tone, serve, slot_terms, Editor, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
     FAULT_PARAM, FAULT_PROCESS, FAULT_START,
 };
+use super::unit_owner::{serve_unit, UnitCtx};
 use crate::host::tone::MAX_STATE_BYTES;
 use super::*;
 
@@ -417,6 +418,15 @@ pub(super) fn run(
     open: impl FnOnce() -> Result<PluginEntry, String>,
 ) -> Result<(), String> {
     serve(ctx, |setup| load(id, open, setup))
+}
+
+/// The chain-unit CLAP owner (`unit_owner::serve_unit`): clack's main thread for one chain unit.
+pub(super) fn run_unit(
+    ctx: UnitCtx,
+    id: &str,
+    open: impl FnOnce() -> Result<PluginEntry, String>,
+) -> Result<(), String> {
+    serve_unit(ctx, |setup| load(id, open, setup))
 }
 
 /// Instantiate the plugin, restore the stored tone, activate it and build its unit.

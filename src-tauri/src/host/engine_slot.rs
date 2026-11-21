@@ -112,14 +112,14 @@ pub(super) const REMOVE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 
 
 /// How long an owner round trip with a typed reply waits, like the live commands. (Tests wait 30 s, for
 /// the same reason as `REMOVE_TIMEOUT`.)
-const ASK_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 30 } else { 5 });
+pub(super) const ASK_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 30 } else { 5 });
 
 /// The owner's poll while no hosted editor is open: plugin callbacks, restarts and evictions are
 /// serviced within this.
 pub(super) const OWNER_POLL: Duration = Duration::from_millis(20);
 
 /// How long `load` waits for the owner's report.
-const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The fault bits a unit latches on the audio thread; the owner reports each once per load.
 pub(super) const FAULT_START: u32 = 1 << 0;
@@ -166,7 +166,7 @@ impl LoadClaim {
     }
 
     /// The caller, on its timeout: false when the owner has claimed the load first.
-    fn abandon(&self) -> bool {
+    pub(super) fn abandon(&self) -> bool {
         self.0.compare_exchange(Self::OPEN, Self::ABANDONED, AcqRel, Acquire).is_ok()
     }
 }
@@ -296,9 +296,30 @@ pub(super) struct Loaded<P: OwnedPlugin> {
     pub(super) tone: Option<ToneRestore>,
 }
 
-/// What a format's load may use: the owner's slot, the unit's ends and the tone it restores.
+/// Where a plugin loads: the legacy [`SlotHost`] or a chain unit's slot and engine terms.
+pub(super) trait Place {
+    fn slot(&self) -> usize;
+    fn rate(&self) -> Option<u32>;
+    fn max_block(&self) -> usize;
+}
+
+impl Place for SlotHost {
+    fn slot(&self) -> usize {
+        SlotHost::slot(self)
+    }
+
+    fn rate(&self) -> Option<u32> {
+        SlotHost::rate(self)
+    }
+
+    fn max_block(&self) -> usize {
+        SlotHost::max_block(self)
+    }
+}
+
+/// What a format's load may use: the owner's place, the unit's ends and the tone it restores.
 pub(super) struct Setup<'a> {
-    pub(super) slot: &'a SlotHost,
+    pub(super) slot: &'a dyn Place,
     pub(super) params: Consumer<ParamEvent>,
     pub(super) params_tx: Arc<Mutex<Producer<ParamEvent>>>,
     pub(super) sink: &'a EventSink,
