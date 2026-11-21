@@ -194,6 +194,11 @@ anything else that needs the interface or a real plugin.
   the right start, and do TIME, UP and DOWN each do what their name says? Toggle it on a held note:
   any thump or hollow moment? Between notes, is the amp-sim's hiss lifted?
 - The amp-sim live: does the master fader scale the wet sound, never the recorded level?
+- A plugin with latency (not a zero-latency amp-sim) loaded or unloaded during a take now waits for the
+  take's end: does the take stay on the click, and does the wait read as clear rather than broken?
+  (machine: `lf-engine` `tests/chain.rs`)
+- AUTO REC armed while you change a slot's plugin listens again from the change, a moment later: does
+  AUTO still feel immediate, and is no take started by sound from before the change?
 - A slot's input on a pair (its input window's `In 1+2`, beside the single inputs): a stereo source on
   two inputs, LIVE, then a take: is each side heard and looped on its own side, with no lag between
   them, and does the slot meter read the louder side? (machine: `engine_io/tests.rs`'s pair tests on

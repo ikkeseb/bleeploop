@@ -197,6 +197,13 @@
 //!
 //! # Open threads
 //!
+//! - **The owed answers are fair only under a host that drains the event ring** (read from source by a
+//!   review, not rendered; declined for E2). A reader that frees one or two places a block through a
+//!   sustained flood of bypass commands can starve a port edit (the place a waiting bypass keeps goes to
+//!   the next bypass) or a setting's reply (the rack's replies are offered first). A bypassed seat
+//!   reloaded within one fade of its install, at a higher latency, crossfades into a bypass line with too
+//!   little history and dips. Next check: a test with a reader freeing one place a block under a bypass
+//!   every block, counting the blocks until a port edit and a `SetMetronome` reply are delivered.
 //! - **A damaged block rejects on its unshifted interval too, behind a live plugin** (read from source,
 //!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
 //!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
