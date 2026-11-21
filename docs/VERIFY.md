@@ -211,7 +211,7 @@ blocks until the verdict, so an agent harness should run it in the background.
 ### The owner's loopback run (`release:smoke` with the cable, EVO 4)
 
 The owner cables and sets the levels; an agent may run step 2 from WSL (the `pnpm` wrapper) while the
-owner watches EVO Control. Last passed 7/7 with an input take for v0.8.8 on 2026-10-26 (v0.8.9 went out without one, on the owner's word), the owner's
+owner watches EVO Control. Last passed 8/8 with an input take for v0.9.0 on 2026-11-21 (v0.8.9 went out without one, on the owner's word), the owner's
 guitar standing in for the cable (step 1); with the cable on 2026-10-16 (8a18e5ad, ASIO 128 at
 44.1 kHz).
 
@@ -226,7 +226,7 @@ guitar standing in for the cable (step 1); with the cable on 2026-10-16 (8a18e5a
    output ring at 7 dots: the window is narrow, since the take's slot is live and the cable closes a
    loop through the app. 4 dots read flat (2 of 60 px), 6 dots 6 of 60 (under the 15 % bar), 7 dots
    passed (18 of 60 px, meter max 0.78), about 9 ran away.
-   The owner's guitar in input 1 stands in for the cable when the cable stays out (v0.8.6 to v0.8.8): the
+   The owner's guitar in input 1 stands in for the cable when the cable stays out (v0.8.6 to v0.8.8, v0.9.0): the
    headphones stay in, since nothing is cabled at the rear and the owner must hear the click; one string
    plucked on the beat through the one bar passed; a steady strum fills the bar and
    reads as run away (475 of 672 columns), since that bar is the click's few peaks.
