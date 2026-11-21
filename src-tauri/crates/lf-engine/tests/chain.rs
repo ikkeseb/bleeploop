@@ -1651,6 +1651,42 @@ fn a_loud_attack_inside_a_timing_changes_blind_window_triggers_no_auto_and_one_j
     }
 }
 
+/// The blind window of the test above ends mid-quantum and the attack triggers in the same quantum (at
+/// 8 kHz the detector's RMS window is 32 frames, so it fits): the scan resumes at the window's end, so
+/// the take starts there (the silence up to the attack retained, from the first frame the tap is
+/// heard), records the pulse at the frame it reached the tap, not shifted by the blind part of the
+/// quantum, and the frames before the trigger's index render as listening.
+#[test]
+fn a_trigger_in_the_quantum_where_the_blind_window_ends_records_the_take_from_the_windows_end() {
+    let p = Probe::new();
+    let mut rig = Rig::with(Opts { sr: 8000, start: 8000, block: 128, ..Opts::default() });
+    put(&mut rig, 1, 1, MAX_UNITS, false, None, Unit::new(Dsp::Lag(100, 1.0), &p));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set(Command::SetAutoRecord(true));
+    rig.press(Command::RecDub(0));
+    assert!(rig.lane(0).auto_armed);
+    // The edit appends a 12-frame lag to slot 1's 100: the window ends at `w`, the 80-frame fade plus the
+    // 112-frame longest path after `e`, 64 frames into the 128-frame quantum that starts at `e`; the
+    // pulse reaches the tap 5 frames after that (112 frames after its input).
+    let e = 8000 + 2432;
+    let w = e + 80 + 112;
+    assert_eq!(w % 128, 0, "the window ends mid-quantum");
+    rig.set_inputs(move |f| if f + 112 >= w + 5 { 0.5 } else { 0.0 }, |_| 0.0);
+    rig.advance_to(e);
+    put(&mut rig, 1, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(12, 1.0), &p));
+    rig.advance_to(e + 1000);
+    assert!(!rig.lane(0).auto_armed, "the pulse past the window triggered");
+    let start = rig.start_frame();
+    assert_eq!(start, w, "the take starts where the window ends");
+    let take: Vec<f32> = rig.engine.looper().take_pcm(0).iter().map(|x| x[0]).collect();
+    let first = take.iter().position(|&x| x != 0.0).expect("the pulse was recorded");
+    assert_eq!(start + first as Frame, w + 5, "the pulse lands at the frame it reached the tap");
+    assert!(take[..first].iter().all(|&x| x == 0.0) && take[first..].iter().all(|&x| x == 0.5), "one contiguous run from the window's end");
+    rig.engine.evict_slots();
+    drop(rig);
+    assert_eq!(p.drops(), 2);
+}
+
 // ── The second half of the fix round ─────────────────────────────────────────────────────────────────
 
 /// A leaving unit (removed, withdrawn, or replaced) is called for its fade's 480 frames from the frame it
