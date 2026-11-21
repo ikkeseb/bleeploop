@@ -118,6 +118,9 @@ enum Seat<U> {
     /// Out of the engine while the host is closing (`SubmitError::Closing`): kept in hand with no
     /// retry until shutdown releases it.
     Closing { unit: Box<U> },
+    /// Out of the engine while a removal is pending or settled (`SubmitError::Removing`): kept in
+    /// hand with no further `submit` until `Back::Dismissed`/`Back::Removed` (or shutdown) arrives.
+    Removing { unit: Box<U> },
     /// Transient placeholder while moving the unit box across `reactivate`/`submit`.
     InTransit,
 }
@@ -125,7 +128,9 @@ enum Seat<U> {
 impl<U> Seat<U> {
     fn take_unit(&mut self) -> Option<Box<U>> {
         match std::mem::replace(self, Seat::InTransit) {
-            Seat::Owed { unit, .. } | Seat::Parked { unit } | Seat::Closing { unit } => Some(unit),
+            Seat::Owed { unit, .. } | Seat::Parked { unit } | Seat::Closing { unit } | Seat::Removing { unit } => {
+                Some(unit)
+            }
             other => {
                 *self = other;
                 None
@@ -140,7 +145,7 @@ enum Exit<U> {
     Stopped,
     /// `Back::Removed` (`retire = true`) or `Back::Superseded` (`retire = false`) arrived.
     Returned { unit: Box<U>, retire: bool },
-    /// `Back::Dismissed` arrived (the player removed a parked seat).
+    /// `Back::Dismissed` arrived (the seat was removed while its box was out of the engine).
     Dismissed,
     /// Refused or fatally failed before ever seating.
     FailedBeforeSeat { unit: Option<Box<U>>, why: String },
@@ -241,7 +246,7 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
             }
             *pending_restart = None;
         }
-        Seat::Closing { .. } | Seat::InTransit => {
+        Seat::Closing { .. } | Seat::Removing { .. } | Seat::InTransit => {
             *pending_restart = None;
         }
     }
@@ -340,7 +345,11 @@ fn submit_owed<P: OwnedPlugin>(
             *seat = Seat::Closing { unit: returned };
             None
         }
-        Err((returned, SubmitError::Superseded | SubmitError::Removing)) => Some(Exit::Returned { unit: own(returned), retire: false }),
+        Err((returned, SubmitError::Removing)) => {
+            *seat = Seat::Removing { unit: own(returned) };
+            None
+        }
+        Err((returned, SubmitError::Superseded)) => Some(Exit::Returned { unit: own(returned), retire: false }),
     }
 }
 
@@ -713,7 +722,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             }
             let mut in_hand = seat.take_unit();
             let mut retire = false;
-            while let Some(back) = host.take_back() {
+            while let Some(back) = host.take_back_for_shutdown() {
                 match back {
                     Back::Removed(u) => {
                         in_hand = Some(own(u));
@@ -732,7 +741,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                 }
             }
             // A unit out of the engine (including a dismissed seat, whose box is already in hand or
-            // ahead of `Dismissed` in the mailbox) takes the ordered release.
+            // ahead of `Dismissed` in the mailbox, or a box held in `Leave::Pending` during a
+            // pending removal) takes the ordered release.
             if in_hand.is_some() {
                 ordered_release(
                     host,
