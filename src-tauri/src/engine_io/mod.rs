@@ -143,6 +143,8 @@
 //! asio` too); on the rig, `pnpm native:engine` runs `probe.rs`'s bar.
 
 mod callback;
+pub(crate) mod chain;
+pub mod chain_cmds;
 mod cpal_driver;
 mod driver;
 #[cfg(test)]
@@ -171,6 +173,7 @@ pub(crate) mod test_rig;
 #[cfg(test)]
 mod tests;
 mod transition;
+pub(crate) mod unit_host;
 pub mod wire;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};

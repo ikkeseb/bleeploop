@@ -373,6 +373,29 @@ pub fn run() {
             engine_io::mode::engine_snapshot,
             #[cfg(windows)]
             engine_io::mode::engine_load_session,
+            // A slot's chain of units (`engine_io/chain_cmds.rs`): the UI's `ChainHost`.
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_add,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_remove,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_reload,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_move,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_open_editor,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_close_editor,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_list_params,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_set_param,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_tone_take,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_tone_import,
+            #[cfg(windows)]
+            engine_io::chain_cmds::chain_tone_forget,
             // Native MIDI (`engine_io/midi_mode.rs`): the UI's one ordered input path (its engine
             // commands and note input, synchronous), its subscription, and the learn UI's calls.
             #[cfg(windows)]

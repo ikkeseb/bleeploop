@@ -102,6 +102,26 @@ impl ToneIdentity {
     }
 }
 
+// E2 S0, the seam: tones by unit (P5 fills the bodies, P4 calls them); unused until then.
+#[allow(dead_code)]
+impl ToneIdentity {
+    /// A chain unit's own file: `unit-<id>.tone`, one per unit, whatever its plugin
+    /// ([`ToneIdentity::file_name`] stays the slot's).
+    pub(crate) fn unit_file_name(unit: lf_engine::UnitId) -> String {
+        let _ = unit;
+        todo!("E2 P5")
+    }
+}
+
+/// Whose tone a load reads and a save writes: a legacy slot's (its file per slot and plugin), or a chain
+/// unit's (its own file, the slot's file as the fallback a new unit starts from).
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ToneKey {
+    Slot { slot: usize, identity: ToneIdentity },
+    Unit { unit: lf_engine::UnitId, slot: usize, identity: ToneIdentity },
+}
+
 /// One tone: whose it is, the plugin's name (a session import names it in its toast) and the state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Tone {
@@ -447,6 +467,37 @@ impl ToneStore {
     }
 }
 
+// E2 S0, the seam: tones by unit (P5 fills the bodies, P4 calls them); unused until then.
+#[allow(dead_code)]
+impl ToneStore {
+    /// A load's read by key ([`ToneStore::load_for_restore`] by slot stays): for a unit, its own file,
+    /// else the slot's file, read only; and the import count it belongs to.
+    pub(crate) fn load_for_restore_key(&self, key: &ToneKey) -> (Result<Option<Tone>, String>, u64) {
+        let _ = key;
+        todo!("E2 P5")
+    }
+
+    /// A tone file's bytes checked against `expected`, the plugin session.json names: nothing written.
+    pub(crate) fn check(bytes: &[u8], expected: &ToneIdentity) -> Result<Tone, String> {
+        let _ = (bytes, expected);
+        todo!("E2 P5")
+    }
+
+    /// A parked tone redeemed by the unit `key` names: written to the unit's file under its write lock
+    /// and counted, so the outgoing load's save is dropped from here on.
+    pub(crate) fn redeem(&self, key: &ToneKey, tone: Tone) -> Result<Imported, String> {
+        let _ = (key, tone);
+        todo!("E2 P5")
+    }
+
+    /// The unit `key` names left for good (its owner got `Back::Removed`): its file becomes the slot's,
+    /// counted, so the next unit of that plugin in the slot starts from it.
+    pub(crate) fn retire(&self, key: &ToneKey) -> Result<(), String> {
+        let _ = key;
+        todo!("E2 P5")
+    }
+}
+
 /// Write `bytes` to a temporary file beside `path`, flush it to disk, then rename it over `path`: a
 /// reader sees the old file or the new one, never half of either. The temporary name is unique per
 /// write, and a failed write removes it. The plugin folder list (`folders.rs`) is written this way too.
@@ -536,6 +587,42 @@ impl<const SLOTS: usize> ToneHandoff<SLOTS> {
         if self.parked[slot].as_ref().is_some_and(|(parked, _)| *parked == token) {
             self.parked[slot] = None;
         }
+    }
+}
+
+/// The chain's tone tokens: a session import's tone parked for the unit reload that redeems it. A token
+/// binds to the plugin identity alone; at most [`MAX_PARKED_TONES`] are parked. (Legacy keeps
+/// [`ToneHandoff`].)
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub(crate) struct ToneTokens {
+    last: u32,
+    parked: Vec<(u32, Tone)>,
+}
+
+/// [`ToneTokens`]' bound: one per unit the chains can seat.
+#[allow(dead_code)]
+pub(crate) const MAX_PARKED_TONES: usize = lf_engine::SLOT_COUNT * lf_engine::MAX_UNITS;
+
+// E2 S0, the seam (P5 fills the bodies).
+#[allow(dead_code)]
+impl ToneTokens {
+    /// Park `tone`; the token a reload passes.
+    pub(crate) fn park(&mut self, tone: Tone) -> u32 {
+        let _ = tone;
+        todo!("E2 P5")
+    }
+
+    /// The tone parked under `token`, when it belongs to `identity`.
+    pub(crate) fn take(&mut self, token: u32, identity: &ToneIdentity) -> Option<Tone> {
+        let _ = (token, identity);
+        todo!("E2 P5")
+    }
+
+    /// The reload `token` was for did not happen: drop its tone, if it is still parked.
+    pub(crate) fn forget(&mut self, token: u32) {
+        let _ = token;
+        todo!("E2 P5")
     }
 }
 
@@ -663,6 +750,15 @@ impl ToneKeeper {
                 .then_some("a session import replaced this slot's tone after this load"),
         };
         Ok(Saved { bytes, not_stored })
+    }
+}
+
+// E2 S0, the seam (P5 fills the body, once `ToneBinding` carries a `ToneKey`).
+#[allow(dead_code)]
+impl ToneKeeper {
+    /// The unit left for good: its file becomes the slot's ([`ToneStore::retire`]).
+    pub(crate) fn retire(&mut self) {
+        todo!("E2 P5")
     }
 }
 

@@ -337,6 +337,18 @@ pub(super) trait OwnedPlugin {
     /// Deactivate what the unit holds, activate again at the engine's current terms and install it.
     /// On failure the unit comes back to the caller, and the plugin is left inactive.
     fn reinstall(&mut self, unit: Box<Self::Unit>, slot: &SlotHost) -> Result<(), (Box<Self::Unit>, String)>;
+    /// A chain unit's owner, after a withdrawal or an eviction: deactivate what the unit holds and
+    /// activate again at `terms` (`UnitHost::terms`), handing the unit back for the owner to submit. On
+    /// failure the unit comes back with why, and the plugin is left inactive. E2 P3 implements it for
+    /// the three formats (and `reinstall` becomes it plus the install); until then no caller reaches it.
+    #[allow(dead_code)] // E2 S0: P3's chain owner is its first caller.
+    fn reactivate(
+        &mut self,
+        _unit: Box<Self::Unit>,
+        _terms: crate::engine_io::unit_host::Terms,
+    ) -> Result<Box<Self::Unit>, (Box<Self::Unit>, String)> {
+        todo!("E2 P3: OwnedPlugin::reactivate")
+    }
     /// The turn's plugin side, before the requests: deliver what the plugin asked for, and tell
     /// `sink` the parameters its own editor moved.
     fn turn(&mut self, sink: &EventSink) -> Reported;
