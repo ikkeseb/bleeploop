@@ -466,8 +466,10 @@ The UI is built against `src/platform/host.web.ts` first. The fake models the ch
 
 ## Still to measure
 
-- **Memory at an export and the worst callback** with stereo lanes: an export holds copies beyond §7's
-  pool (snapshot, bytes, WAVs, zip, render engine). Measured in E1: `tests/perf.rs`, a five-lane export.
+- **Memory at an export and the worst callback** with stereo lanes: measured (`tests/perf.rs`, the
+  five-lane 60 s export): about 737 MB of the engine's own buffers held at the render's peak (live pool,
+  snapshot, load, render engine), before the WAVs and the zip. The timings there were taken on a busy PC
+  (Stage 3 read 50.8 % against its 50 % bar): a quiet rerun settles them.
 - **The lane FX per channel** (the pitch shifter above all) and two SYNTH banks: E1's and E3's perf bars;
   if one fails, a mono-linked FX path or one shared bank is the fallback.
 - **What each real plugin grants** when asked for stereo (the amp-sim included): read from none.
