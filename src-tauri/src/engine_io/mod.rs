@@ -757,8 +757,9 @@ pub trait RebuildHook: Send + Sync {
     /// Hold back fresh input and stop sending.
     fn pause(&self);
     /// The engine of generation `generation` replaced the old one. Returns what the input path meant to
-    /// send and never did that the settings memory keeps (the latest note target and wheels): recorded
-    /// before the replay, so the new engine gets them through the replay alone.
+    /// send and never did that survives the swap: the latest note target and wheels for the settings
+    /// memory (recorded before the replay, so the new engine gets them through the replay alone) and
+    /// any queued unit commands in queue order for the host's unit-command gate.
     fn rebuild(&self, generation: u64) -> Vec<Command>;
     /// The replay is queued: input flows again.
     fn resume(&self);

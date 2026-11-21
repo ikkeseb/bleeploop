@@ -213,7 +213,7 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
 mod tests {
     use super::*;
     use lf_engine::dsp::fx::FxKind;
-    use lf_engine::{Instrument, InputSendParam, NoteTarget};
+    use lf_engine::{InputSendParam, Instrument, NoteTarget, UnitParam};
 
     use super::super::queue::Class;
 
@@ -347,6 +347,19 @@ mod tests {
             for c in commands {
                 assert_eq!(ui_route(c), route, "{c:?}");
             }
+        }
+    }
+
+    #[test]
+    fn all_four_unit_command_forms_route_to_the_queue() {
+        let unit_commands = [
+            Command::SetUnitBypass(10, true),
+            Command::SetUnitParam(10, UnitParam::Send(InputSendParam::EchoLevel), 0.5),
+            Command::Action(Action::ToggleUnit(10)),
+            Command::ActionOn(1, Action::ToggleUnit(10)),
+        ];
+        for c in &unit_commands {
+            assert_eq!(ui_route(c), UiRoute::Queue, "{c:?}");
         }
     }
 }

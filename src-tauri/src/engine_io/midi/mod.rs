@@ -46,10 +46,11 @@
 //!   player hears why a press did nothing); a pedal's is counted only.
 //! - **The rebuild handshake** (the rule: **A rebuild needs no WebView**; [`super::RebuildHook`],
 //!   registered at start): the queue pauses, folds its target and wheels into the settings memory
-//!   before the replay and drops the old engine's one-shots and their releases; the router forgets
-//!   what the old engine sounded, learn its HOLD presses; the queue resumes after the replay. The
-//!   handshake itself sends nothing and calls no UI sink (its caller holds every slot port): the port
-//!   thread, woken, does both afterwards.
+//!   before the replay, keeps queued unit commands in order for the host's unit-command gate, and
+//!   drops the old engine's other one-shots and their releases; the router forgets what the old
+//!   engine sounded, learn its HOLD presses; the queue resumes after the replay. The handshake itself
+//!   sends nothing and calls no UI sink (its caller holds every slot port): the port thread, woken,
+//!   does both afterwards.
 //! - **Which stored bindings are live** is decided on one port snapshot (`ports::resolve`) at every
 //!   change of the port list or the bindings: exact ids first, by name only where it is unambiguous,
 //!   every ordinal (legacy) record of one name counting as one identity (the import never guesses). A
@@ -1038,13 +1039,15 @@ impl Core {
     }
 
     /// The engine was replaced: the queue empties (no batch spans the two engines: each is built and
-    /// admitted under this lock), and what the old engine sounded or held is forgotten.
+    /// admitted under this lock), what the old engine sounded or held is forgotten, and the folded
+    /// target/wheels followed by any queued unit commands (in queue order) are returned for the
+    /// settings memory and unit-command gate.
     fn rebuild(&self) -> Vec<Command> {
         let mut st = self.lock();
-        let fold = st.queue.rebuild();
+        let (fold, units) = st.queue.rebuild();
         st.router.engine_rebuilt();
         st.learn.clear_holds();
-        fold.commands().collect()
+        fold.commands().chain(units).collect()
     }
 
     /// The replay is queued. Like `pause` and `rebuild`, this changes the core's own state and
