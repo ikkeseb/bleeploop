@@ -89,7 +89,11 @@
     { "SetInputSendParam": ["ottUpward", 1] },
     { "SetInputSendParam": ["ottDownward", 0.75] },
     { "SetScope": true },
-    { "SetTuner": false }
+    { "SetTuner": false },
+    { "SetUnitBypass": [7, true] },
+    { "SetUnitParam": [7, "echoLevel", 0.5] },
+    { "Action": { "ToggleUnit": 7 } },
+    { "ActionOn": [2, { "ToggleUnit": 9 }] }
   ],
   "events": [
     {
@@ -271,6 +275,69 @@
       "seq": 0,
       "reset": true,
       "live": [true, false],
+      "chains": [
+        {
+          "units": [
+            {
+              "id": 1,
+              "kind": "plugin",
+              "plugin": { "format": "vst3", "path": "C:\\Fake\\FakeAmp.vst3", "id": "fake.amp" },
+              "bypass": false,
+              "source": true,
+              "name": "Fake Amp",
+              "latency": 64,
+              "state": "seated"
+            },
+            {
+              "id": 2,
+              "kind": "echo",
+              "params": { "echoLevel": 0.5 },
+              "bypass": true,
+              "source": false,
+              "name": "ECHO",
+              "latency": 0,
+              "state": "seated"
+            },
+            {
+              "id": 3,
+              "kind": "plugin",
+              "plugin": { "format": "clap", "path": "C:\\Fake\\FakeCab.clap", "id": "fake.cab" },
+              "bypass": false,
+              "source": false,
+              "name": "Fake Cab",
+              "latency": 0,
+              "state": "failed",
+              "error": "the restart failed",
+              "parked": true
+            },
+            {
+              "id": 4,
+              "kind": "reverb",
+              "params": { "reverbLevel": 0.35 },
+              "bypass": false,
+              "source": false,
+              "name": "REVERB",
+              "latency": 0,
+              "state": "leaving",
+              "held": true
+            },
+            {
+              "id": 5,
+              "kind": "plugin",
+              "plugin": { "format": "vst3", "path": "C:\\Fake\\FakeComp.vst3", "id": "fake.comp" },
+              "bypass": false,
+              "source": false,
+              "name": "Fake Comp",
+              "latency": 0,
+              "state": "loading",
+              "reloading": true
+            }
+          ],
+          "latency": 64,
+          "held": true
+        },
+        { "units": [], "latency": 0, "held": false }
+      ],
       "events": [
         { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "meter": { "num": 6, "den": 8, "beats": 2 }, "locked": true } },
         {
@@ -432,6 +499,10 @@
     {
       "seq": 2,
       "reset": false,
+      "chains": [
+        { "units": [], "latency": 0, "held": false },
+        { "units": [], "latency": 0, "held": false }
+      ],
       "events": [],
       "device": [{ "Lost": { "backend": "Asio", "reason": "the stream stopped" } }],
       "status": null,

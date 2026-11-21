@@ -2,8 +2,9 @@
 // bytes' TS codec (`engine_snapshot`'s stems and an export's master: `src-tauri/src/engine_io/session.rs`
 // owns the layout; its engine_io tests read the Rust half).
 //
-// `verify/fixtures/engine-wire.json` holds one example of every command, engine event and device event,
-// plus device requests, statuses, feed frames, snapshot headers and load headers (each track's mix in
+// `verify/fixtures/engine-wire.json` holds one example of every command (including the chain's unit
+// commands), engine event and device event, plus device requests, statuses, feed frames (including
+// per-slot `chains`), snapshot headers and load headers (each track's mix in
 // session.json's track shape); `src-tauri/src/engine_io/wire.rs`'s cargo test parses each entry and writes it back
 // unchanged. This guard runs the REAL TS decoders
 // (`src/platform/engine-wire.ts`) over the same entries: every entry parses, every field the Rust side
@@ -26,6 +27,7 @@ import {
   decodeOpenError,
   decodeSnapshot,
   encodeSessionBytes,
+  isUnitCommand,
   splitSessionBytes,
 } from '../../src/platform/engine-wire.ts';
 import { FX_PARAM_RANGES, defaultLaneMix, fakeMixModel } from '../../src/platform/host.web.ts';
@@ -57,11 +59,11 @@ const COMMANDS = [
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',
-  'SetTuner',
+  'SetTuner', 'SetUnitBypass', 'SetUnitParam',
 ];
 const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'CopyWide',
-  'Halve', 'Hold', 'Release', 'FadeAll', 'Tuner', 'Toggle',
+  'Halve', 'Hold', 'Release', 'FadeAll', 'Tuner', 'Toggle', 'ToggleUnit',
 ];
 const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Send:ott', 'Live:0', 'Live:1'];
 const REFUSALS = [
@@ -93,6 +95,15 @@ check('the fixture toggles every toggled setting', () => {
     .filter((a) => a?.Toggle !== undefined)
     .map((a) => (typeof a.Toggle === 'string' ? a.Toggle : a.Toggle.Send !== undefined ? `Send:${a.Toggle.Send}` : `Live:${a.Toggle.Live}`));
   assert.deepEqual([...new Set(toggles)].sort(), [...TOGGLES].sort());
+});
+check('isUnitCommand is true for the fixture\'s four unit commands only', () => {
+  const unit = fixture.commands.filter((c) => isUnitCommand(c));
+  assert.deepEqual(unit, [
+    { SetUnitBypass: [7, true] },
+    { SetUnitParam: [7, 'echoLevel', 0.5] },
+    { Action: { ToggleUnit: 7 } },
+    { ActionOn: [2, { ToggleUnit: 9 }] },
+  ]);
 });
 
 // ── Events: every field the Rust side writes is read ────────────────────────────────────────────────
@@ -188,6 +199,7 @@ for (const f of fixture.feed) {
     if ('status' in f) assert.deepEqual(decoded.status, f.status);
     if ('settings' in f) assert.deepEqual(decoded.settings, f.settings);
     if ('live' in f) assert.deepEqual(decoded.live, f.live);
+    if ('chains' in f) assert.deepEqual(decoded.chains, f.chains);
     assert.deepEqual(decoded.anchor, f.anchor);
     assert.deepEqual(decoded.meter, f.meter);
     assert.deepEqual(decoded.peaks, f.peaks);
@@ -195,18 +207,14 @@ for (const f of fixture.feed) {
     assert.deepEqual(decoded.tuner, f.tuner ?? null);
   });
 }
-check('a chains frame decodes whole: parked, held and reloading kept, absent where absent', () => {
-  const plugin = { format: 'vst3', path: 'C:\\Fake\\FakeAmp.vst3', id: 'fake.amp' };
-  const echo = { kind: 'echo', params: { echoLevel: 0.5 }, bypass: false, source: false, name: 'ECHO', latency: 0 };
-  const units = [
-    { id: 1, kind: 'plugin', plugin, bypass: false, source: true, name: 'Fake Amp', latency: 64, state: 'loading', reloading: true },
-    { id: 2, ...echo, state: 'failed', error: 'the restart failed', parked: true },
-    { id: 3, ...echo, state: 'leaving', held: true },
-    { id: 4, ...echo, state: 'seated', held: true },
-    { id: 5, ...echo, state: 'failed', error: 'the DLL did not load' },
-  ];
-  const chains = [{ units, latency: 64, held: true }, { units: [], latency: 0, held: false }];
-  assert.deepEqual(decodeFeedFrame({ ...structuredClone(fixture.feed[1]), chains: structuredClone(chains) }).chains, chains);
+check('every reset frame carries chains, and non-reset frames both carry and omit it', () => {
+  assert.ok(fixture.feed.filter((f) => f.reset).every((f) => 'chains' in f), 'every reset frame carries chains');
+  assert.ok(fixture.feed.some((f) => !f.reset && 'chains' in f), 'a non-reset frame carries chains');
+  assert.ok(fixture.feed.some((f) => !f.reset && !('chains' in f)), 'a non-reset frame omits chains');
+  const units = fixture.feed.flatMap((f) => f.chains ?? []).flatMap((c) => c.units);
+  for (const flag of ['parked', 'held', 'reloading', 'error']) {
+    assert.ok(units.some((u) => flag in u) && units.some((u) => !(flag in u)), `${flag} present and absent`);
+  }
 });
 check('the fixture has a frame carrying scope columns and frames carrying none', () => {
   const carried = fixture.feed.filter((f) => f.scope !== undefined);

@@ -402,7 +402,7 @@ impl Feed {
         self.kept_notices.clear();
         self.sent = Some(Instant::now());
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, catch_up, events, device, status, anchor, meter, live, peaks, scope, tuner, settings })
+        Some(FeedFrame { seq: self.seq - 1, reset, catch_up, events, device, status, anchor, meter, live, chains: None, peaks, scope, tuner, settings })
     }
 
     /// Read this tick's tuner frames, oldest first, and keep the newest reading. `analyse` false — a tick
