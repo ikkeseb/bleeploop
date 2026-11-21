@@ -207,8 +207,10 @@ impl SlotPort {
 
     /// Hand an activated unit to the slot under `id`, to seat at index `at` of its chain (clamped to its
     /// end; a source goes to the head), `bypassed` or not; `replaces`, a seated unit whose seat it
-    /// takes in one crossfade (a source replaced, or a reload under its own id). An `id` the slot holds
-    /// withdrawn reseats that seat. It applies at the next block start, or waits for a take to end
+    /// takes in one crossfade (a source replaced, or a reload under its own id; one of the other role is
+    /// refused as `Placement`). An `id` the slot holds withdrawn reseats that seat; a reseat or reload
+    /// under its own id keeps the seat's latest bypass, not `bypassed`. It applies at the next block
+    /// start, or waits for a take to end
     /// (`docs/unit-contract.md` §7), and is answered once by an [`Event::Seat`] (a refused one comes
     /// back on [`SlotPort::returned`], its reason on [`SlotPort::refused`]). The ticket tells when the
     /// engine has answered it. Gives the unit back when the message ring is full (the engine is not
@@ -455,7 +457,13 @@ fn crossfade(from: f32, to: f32, fade: u32, n: u32) -> f32 {
     } else if fade == 0 {
         from
     } else {
-        from + (fade as f32 / n as f32) * (to - from)
+        let (t, d) = (fade as f32 / n as f32, to - from);
+        if from.is_finite() && to.is_finite() && !d.is_finite() {
+            // Extreme finite ends: the span overflows, so weigh the ends instead, inside them.
+            (from * (1.0 - t) + to * t).max(from.min(to)).min(from.max(to))
+        } else {
+            from + t * d
+        }
     }
 }
 
@@ -631,9 +639,11 @@ impl Slot {
     }
 
     /// A transition that indices or the role would shift under: a move's reorder, a replacement's
-    /// crossfade, a withdrawal, or a leaving source. The slot's messages wait for its end.
+    /// crossfade, a withdrawal, a leaving source, or a leaving seat of a full chain (its place is
+    /// free once it has gone, not before). The slot's messages wait for its end.
     fn busy(&self) -> bool {
-        self.reorder.is_some() || self.seats[..self.len].iter().any(|s| s.outgoing.is_some() || s.withdrawing || (s.removing && s.info.source))
+        self.reorder.is_some()
+            || self.seats[..self.len].iter().any(|s| s.outgoing.is_some() || s.withdrawing || (s.removing && (s.info.source || self.len == MAX_UNITS)))
     }
 
     /// Hand a unit back on the return ring. Never full: a message is taken only while the ring has a
@@ -963,11 +973,11 @@ impl Rack {
         UnitCx { frame, dsp_frame: frame - self.clock.skipped, bpm: self.clock.bpm, meter: self.clock.meter }
     }
 
-    /// Whether `id` is spoken for in a slot other than `i`: seated there (leaving included), or the
-    /// install it has taken from its ring and not applied.
+    /// Whether `id` is spoken for in a slot other than `i`: seated there (leaving included), held there
+    /// as an outgoing unit, or the install it has taken from its ring and not applied.
     fn claimed_elsewhere(&self, i: usize, id: UnitId) -> bool {
         self.slots.iter().enumerate().filter(|&(j, _)| j != i).any(|(_, s)| {
-            s.seats[..s.len].iter().any(|seat| seat.id == id) || s.taken.as_ref().is_some_and(|t| matches!(t.msg, SlotMsg::Install { id: x, .. } if x == id))
+            s.seats[..s.len].iter().any(|seat| seat.id == id || seat.outgoing.as_ref().is_some_and(|&(x, ..)| x == id)) || s.taken.as_ref().is_some_and(|t| matches!(t.msg, SlotMsg::Install { id: x, .. } if x == id))
         })
     }
 
@@ -1015,12 +1025,13 @@ impl Rack {
                 let (unit, op, answered) = (t.msg.id(), t.msg.op(), t.answered);
                 let outcome = match verdict {
                     Verdict::Apply { edit: true } if hold => {
+                        // `holding` first: a host that sees the answer must see the hold with it.
+                        s.end.holding.store(true, Release);
                         if !answered {
                             t.answered = true;
                             s.answer(Answer { frame, unit, op, outcome: SeatOutcome::Waiting }, &mut self.protocol_errors);
                             s.end.taken.fetch_add(1, Release);
                         }
-                        s.end.holding.store(true, Release);
                         break;
                     }
                     Verdict::Apply { .. } => match self.apply(i, frame, engaged, fade) {
@@ -1088,8 +1099,9 @@ impl Rack {
                     (None, Some(_)) => return Verdict::Refuse(SeatRefusal::Id),
                     (None, None) => None,
                 };
-                // A leaving seat with this id still holds its unit: a new one waits for no seat of its.
-                if into.is_none() && s.seats[..s.len].iter().any(|seat| seat.id == id) {
+                // A leaving seat with this id still holds its unit: a new one waits for no seat of its,
+                // whichever seat it goes to (a slot with an outgoing unit takes no message).
+                if s.seats[..s.len].iter().enumerate().any(|(k, seat)| into != Some(k) && seat.id == id) {
                     return Verdict::Refuse(SeatRefusal::Id);
                 }
                 let (t, before) = match into {
@@ -1098,16 +1110,21 @@ impl Rack {
                     None if info.source => (0, 0),
                     None => (at.min(s.chain_len()), 0),
                 };
+                // A replacement keeps its seat's role: the crossfade and the seat's line assume it.
+                if replaces.is_some() && into.is_some_and(|k| s.seats[k].info.source != info.source) {
+                    return Verdict::Refuse(SeatRefusal::Placement);
+                }
                 // A source only at the head (one there is replaced only when named); no effect ahead of
                 // a source.
                 let head_source = role && into.is_none_or(|k| s.chain().next() != Some(k));
                 if (info.source && t > 0) || (info.source && into.is_none() && role) || (!info.source && t == 0 && head_source) {
                     return Verdict::Refuse(SeatRefusal::Placement);
                 }
-                let after = sum - before + info.latency;
+                // Against the budget first: the sum itself could overflow on a port's latency.
                 if info.latency > max_latency - (sum - before) {
                     return Verdict::Refuse(SeatRefusal::Latency);
                 }
+                let after = sum - before + info.latency;
                 let new_role = if t == 0 { info.source } else { role };
                 Verdict::Apply { edit: after != sum || new_role != role }
             }
@@ -1145,9 +1162,27 @@ impl Rack {
         let rendered = self.rendered;
         let cx = self.unit_cx(frame);
         let s = &mut self.slots[i];
+        // An install's bypass is set while the slot still holds the message: a unit that panics there
+        // leaves the chain as it was, and the message (its info unread) is refused `Unknown` and goes
+        // back, answered once. A same-id reseat or reload keeps its seat's latest bypass.
+        let mut install_bypass = None;
+        if let Some(&SlotMsg::Install { id, bypassed, replaces, .. }) = s.taken.as_ref().map(|t| &t.msg) {
+            let kept = replaces.and_then(|r| s.find(r)).or_else(|| s.find(id)).filter(|&k| s.seats[k].id == id).map(|k| s.seats[k].bypassed);
+            let target = kept.unwrap_or(bypassed);
+            let mut handled = false;
+            if let Some(t) = s.taken.as_mut() {
+                let info = t.info.take();
+                if let (SlotMsg::Install { unit, .. }, true) = (&mut t.msg, target || target != bypassed) {
+                    handled = unit.set_bypass(&cx, target);
+                }
+                t.info = info;
+            }
+            install_bypass = Some((target, handled));
+        }
         let Some(t) = s.taken.take() else { return Some(false) };
         match t.msg {
-            SlotMsg::Install { id, at, bypassed, replaces, unit } => {
+            SlotMsg::Install { id, at, replaces, unit, .. } => {
+                let (bypassed, handled) = install_bypass.unwrap_or_default();
                 let info = t.info.unwrap_or(UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 });
                 let into = replaces.and_then(|r| s.find(r)).or_else(|| s.find(id));
                 let k = match into {
@@ -1189,7 +1224,6 @@ impl Rack {
                 };
                 let seat = &mut s.seats[k];
                 seat.bypassed = bypassed;
-                let handled = bypassed && seat.unit.as_mut().is_some_and(|u| u.set_bypass(&cx, true));
                 seat.wet_on = !bypassed || handled;
                 // A new seat starts at its bypass (its lifecycle fade carries it in); a reseat fades in
                 // from its bypass, a replacement keeps where its crossfade is.
@@ -1249,7 +1283,7 @@ impl Rack {
 
     /// The bypass of unit `id` at `now`: `Some` outright, `None` switched from the engine's value. On a
     /// seat that holds its unit, through [`UnitProcessor::set_bypass`]; a withdrawn seat keeps the value
-    /// (the reseat brings its own). Answered by [`Event::Chain`]; an id no seat holds is dropped and
+    /// (a same-id reseat keeps it). Answered by [`Event::Chain`]; an id no seat holds is dropped and
     /// counted. The engine applies it only while its chain has a place ([`Rack::bypass_room`]).
     pub(crate) fn set_unit_bypass(&mut self, id: UnitId, bypassed: Option<bool>, now: Frame) {
         let (n, rendered, cx) = (self.fade_frames, self.rendered, self.unit_cx(now));
