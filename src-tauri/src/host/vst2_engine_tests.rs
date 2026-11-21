@@ -1596,6 +1596,38 @@ fn reactivate_rearms_the_unit_at_new_terms_and_a_refusal_leaves_the_plugin_suspe
     assert_rendered_only_while_started(probe);
 }
 
+/// A legacy cycle (`reinstall`, through `reactivate_with`) reads the slot's terms only once the plugin
+/// is suspended: a device swap that lands during the suspend is the one the plugin is configured at,
+/// and the engine takes the unit at once instead of evicting it for a second cycle.
+#[test]
+fn a_cycle_reads_the_terms_after_the_suspend_and_installs_at_a_swap_that_landed_there() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let slot = device.host().slot(0);
+    let probe = Probe::new();
+    let mut plugin = plugin_here(&slot, instrument(probe));
+    let (unit, _params, _) = unit_here(&mut plugin, &slot, 4096);
+    let before = probe.opcodes().len();
+
+    let (unit, rate) = plugin
+        .reactivate_with(unit, || {
+            assert_eq!(probe.opcodes()[before..], [(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0)], "read after the suspend");
+            device.rebuild_at(44_100, 512);
+            slot_terms(&slot)
+        })
+        .unwrap_or_else(|(_, e)| panic!("reactivate failed: {e}"));
+    assert_eq!(rate, 44_100);
+    assert_eq!(probe.opcodes()[before..], cycle_calls(512), "the plugin calls and their order unchanged");
+    assert_eq!(f32::from_bits(probe.rate.load(Relaxed)), 44_100.0);
+    assert!(slot.install(unit, rate).is_ok(), "the engine takes the unit at the swapped rate");
+    assert!(slot.take_evicted().is_none(), "no second cycle");
+
+    let back = slot.remove(REMOVE_TIMEOUT).expect("the unit comes back").map(own::<Vst2Unit>);
+    drop(back);
+    drop(plugin);
+    assert_rendered_only_while_started(probe);
+}
+
 /// The unit on its own: the plugin raises its pin counts (2 in, 2 out to 40 in, 64 out) INSIDE a
 /// process call and at once reads every input row and fills every output row it now declares.
 /// Each of those rows is the unit's own scratch memory: the inputs read silence, the writes land

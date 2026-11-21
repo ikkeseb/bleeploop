@@ -489,6 +489,29 @@ impl Clap {
     }
 }
 
+impl Clap {
+    /// Deactivate, then read `terms` (after the deactivate: a device swap that lands meanwhile is the
+    /// one activated at) and activate at them, re-arming the unit. Returns the rate activated at.
+    fn reactivate_with(
+        &mut self,
+        mut unit: Box<ClapUnit>,
+        terms: impl FnOnce() -> UnitTerms,
+    ) -> Result<(Box<ClapUnit>, u32), (Box<ClapUnit>, String)> {
+        let instance = &mut self.instance;
+        if let Some(stopped) = unit.take_stopped() {
+            instance.deactivate(stopped);
+        }
+        let terms = terms();
+        match activate(instance, terms.rate, terms.max_block) {
+            Ok((stopped, terms)) => {
+                unit.rearm(stopped, &terms);
+                Ok((unit, terms.rate))
+            }
+            Err(e) => Err((unit, e)),
+        }
+    }
+}
+
 impl OwnedPlugin for Clap {
     type Unit = ClapUnit;
     const FORMAT: &'static str = "CLAP";
@@ -499,9 +522,8 @@ impl OwnedPlugin for Clap {
     }
 
     fn reinstall(&mut self, unit: Box<ClapUnit>, slot: &SlotHost) -> Result<(), (Box<ClapUnit>, String)> {
-        let terms = slot_terms(slot);
-        let unit = self.reactivate(unit, terms)?;
-        slot.install(unit, terms.rate).map_err(|(unit, e)| {
+        let (unit, rate) = self.reactivate_with(unit, || slot_terms(slot))?;
+        slot.install(unit, rate).map_err(|(unit, e)| {
             let mut unit = own::<ClapUnit>(unit);
             if let Some(stopped) = unit.take_stopped() {
                 self.instance.deactivate(stopped);
@@ -512,20 +534,10 @@ impl OwnedPlugin for Clap {
 
     fn reactivate(
         &mut self,
-        mut unit: Box<ClapUnit>,
+        unit: Box<ClapUnit>,
         terms: UnitTerms,
     ) -> Result<Box<ClapUnit>, (Box<ClapUnit>, String)> {
-        let instance = &mut self.instance;
-        if let Some(stopped) = unit.take_stopped() {
-            instance.deactivate(stopped);
-        }
-        match activate(instance, terms.rate, terms.max_block) {
-            Ok((stopped, terms)) => {
-                unit.rearm(stopped, &terms);
-                Ok(unit)
-            }
-            Err(e) => Err((unit, e)),
-        }
+        self.reactivate_with(unit, || terms).map(|(unit, _)| unit)
     }
 
     fn turn(&mut self, _sink: &EventSink) -> Reported {

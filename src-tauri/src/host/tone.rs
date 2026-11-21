@@ -552,12 +552,17 @@ impl ToneStore {
     }
 
     /// The unit `key` names left for good (its owner got `Back::Removed`): its file becomes the slot's,
-    /// counted, so the next unit of that plugin in the slot starts from it.
-    pub(crate) fn retire(&self, key: &ToneKey) -> Result<(), String> {
+    /// counted, so the next unit of that plugin in the slot starts from it. Only while the unit file's
+    /// import count is still `revision`, the one its owner loaded at, checked under the file's lock: a
+    /// redeem that landed since belongs to a newer load and is left as it is (`Ok(())`, nothing touched).
+    pub(crate) fn retire(&self, key: &ToneKey, revision: u64) -> Result<(), String> {
         let ToneKey::Unit { unit, slot, identity } = key else { return Ok(()) };
         let unit_file = ToneIdentity::unit_file_name(*unit);
         let unit_entry = self.entry_for(&unit_file);
         let _unit_write = unit_entry.write();
+        if unit_entry.revision.load(Acquire) != revision {
+            return Ok(());
+        }
         let unit_path = self.path_for(&unit_file);
         let bytes = match std::fs::read(&unit_path) {
             Ok(bytes) => bytes,
@@ -841,13 +846,14 @@ impl ToneKeeper {
 }
 
 impl ToneKeeper {
-    /// The unit left for good: its file becomes the slot's ([`ToneStore::retire`]).
+    /// The unit left for good: its file becomes the slot's ([`ToneStore::retire`]), unless a redeem
+    /// replaced it after this load read it (checked again under the file's lock there).
     pub(crate) fn retire(&mut self) {
         if self.superseded() {
             return;
         }
         let Some(b) = &self.binding else { return };
-        if let Err(e) = b.store.retire(&b.key) {
+        if let Err(e) = b.store.retire(&b.key, self.revision) {
             log::warn!("tone retire failed: {e}");
         }
     }
@@ -1368,6 +1374,32 @@ mod tests {
         assert_eq!(fresh.save("Pro-Q 3", || Ok(Some(b"edited".to_vec()))).unwrap().not_stored, None);
         let (stored, _) = dir.store().load_for_restore_key(&key);
         assert_eq!(stored.unwrap().unwrap().state, b"edited");
+    }
+
+    #[test]
+    fn a_redeem_between_a_keepers_load_and_its_retire_is_kept() {
+        let dir = TempDir::new("unit-retire-race");
+        let key = ToneKey::Unit { unit: 5, slot: 0, identity: identity() };
+        let mut keeper = ToneKeeper::new(Some(dir.unit_binding(5, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(keeper.stored().unwrap(), None);
+        assert_eq!(keeper.save("Pro-Q 3", || Ok(Some(b"stale".to_vec()))).unwrap().not_stored, None);
+
+        // The redeem stalls mid-write under the unit file's lock, not counted yet: the keeper's
+        // lock-free check passes, and its retire waits on the lock until the redeem has landed.
+        let (entered, go) = dir.store().stall_next_write();
+        let store = dir.store().clone();
+        let redeem = std::thread::spawn(move || store.redeem(&key, tone(b"redeemed")));
+        entered.recv_timeout(Duration::from_secs(5)).expect("the redeem reached its write");
+        let retire = std::thread::spawn(move || keeper.retire());
+        std::thread::sleep(Duration::from_millis(200));
+        go.send(()).unwrap();
+        assert_eq!(redeem.join().unwrap().unwrap().revision, 1);
+        retire.join().unwrap();
+
+        let (stored, _) = dir.store().load_for_restore_key(&ToneKey::Unit { unit: 5, slot: 0, identity: identity() });
+        assert_eq!(stored.unwrap().unwrap().state, b"redeemed", "the unit file keeps the redeemed bytes");
+        assert!(!dir.0.join(identity().file_name(0)).exists(), "the slot file is untouched");
+        assert_eq!(dir.store().revision(0, &identity()), 0);
     }
 
     #[test]

@@ -805,6 +805,16 @@ fn note_to_vst3(kind: SlotEventKind, offset: i32) -> Event {
 
 type Vst3ModuleEntry = unsafe extern "system" fn() -> bool;
 
+/// Held across every `Vst3Module` load (LoadLibrary + InitDll) and drop (ExitDll + FreeLibrary):
+/// Steinberg's SDK counts module inits with a plain integer, so two owners' concurrent `InitDll`s on
+/// one DLL can leave the count at one, and either one's `ExitDll` would deinit it under the other.
+static MODULE_LOCK: Mutex<()> = Mutex::new(());
+
+/// `MODULE_LOCK`, taken even when a panic poisoned it (it guards no data).
+fn module_lock() -> std::sync::MutexGuard<'static, ()> {
+    MODULE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Owns one loaded VST3 DLL. Successful `InitDll` is paired with `ExitDll`, and the module stays
 /// mapped until every vtbl-bearing COM object has been released (`vst3_engine`'s `Vst3::release`).
 struct Vst3Module {
@@ -815,6 +825,7 @@ struct Vst3Module {
 
 impl Vst3Module {
     fn load(path: PCWSTR) -> Result<Self, String> {
+        let serial = module_lock();
         // SAFETY: loading the vetted plugin DLL and resolving its standard VST3 module entries.
         // The guard owns the returned module reference immediately, so every later error unloads.
         let handle = unsafe { LoadLibraryW(path) }.map_err(|e| format!("LoadLibraryW: {e}"))?;
@@ -828,6 +839,8 @@ impl Vst3Module {
         if let Some(p) = unsafe { GetProcAddress(handle, s!("InitDll")) } {
             let init = unsafe { std::mem::transmute::<_, Vst3ModuleEntry>(p) };
             if !unsafe { init() } {
+                // The lock goes first: `module`'s drop (FreeLibrary) takes it again.
+                drop(serial);
                 return Err("InitDll returned false".to_string());
             }
             module.init_succeeded = true;
@@ -842,6 +855,7 @@ impl Vst3Module {
 
 impl Drop for Vst3Module {
     fn drop(&mut self) {
+        let _serial = module_lock();
         // SAFETY: ExitDll is called only when this guard's matching InitDll succeeded. The owner's
         // teardown releases every module COM object before dropping the guard on successful loads.
         unsafe {
@@ -1232,6 +1246,31 @@ mod resize_tests;
 #[cfg(test)]
 #[path = "vst3_controller_fixture.rs"]
 mod controller_tests;
+
+/// Every `Vst3Module` load waits for `MODULE_LOCK`: one held elsewhere (another owner's load or drop)
+/// keeps it from reaching LoadLibrary until it is released.
+#[cfg(test)]
+mod module_lock_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn a_module_load_waits_for_the_module_lock() {
+        let held = module_lock();
+        let (tx, rx) = mpsc::channel();
+        let loader = std::thread::spawn(move || {
+            let path: Vec<u16> = "Z:\\no\\such\\plugin.vst3\0".encode_utf16().collect();
+            let loaded = Vst3Module::load(PCWSTR(path.as_ptr())).map(|_| ());
+            let _ = tx.send(loaded);
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "the load ran while the lock was held");
+        drop(held);
+        let loaded = rx.recv_timeout(Duration::from_secs(10)).expect("the load finishes once the lock is free");
+        assert!(loaded.is_err(), "no such DLL");
+        loader.join().unwrap();
+    }
+}
 
 // Engine mode: this format's unit and owner (`engine_slot.rs`).
 #[path = "vst3_engine.rs"]

@@ -254,14 +254,14 @@ impl Drop for Vst3Plugin {
 }
 
 impl Vst3Plugin {
-    /// Owner thread, nothing processing: deactivate, then run the one activation sequence at the
-    /// engine's `rate` (0: no device, refused) with its largest block `max_block` as the max. Returns
-    /// what it negotiated, its max block and the rate (`SlotHost::install` checks it).
+    /// Owner thread, nothing processing: deactivate, then read `terms` (after the deactivate: a device
+    /// swap that lands meanwhile is the one activated at) and run the one activation sequence at their
+    /// rate (0: no device, refused) with their largest block as the max. Returns what it negotiated,
+    /// its max block and the rate (`SlotHost::install` checks it).
     fn activate(
         &mut self,
         processor: &ComPtr<IAudioProcessor>,
-        rate: u32,
-        max_block: usize,
+        terms: impl FnOnce() -> Terms,
     ) -> Result<(Activation, u32, u32), String> {
         if self.active {
             // SAFETY: owner thread; the unit is out of the engine and stopped.
@@ -270,6 +270,7 @@ impl Vst3Plugin {
             }
             self.active = false;
         }
+        let Terms { rate, max_block, .. } = terms();
         if rate == 0 {
             return Err("no audio device is open".to_string());
         }
@@ -494,7 +495,7 @@ fn load(
     if restored != Restore::Restored {
         sync_controller(&plugin, slot.slot())?;
     }
-    let (activation, max_frames, rate) = plugin.activate(&processor, slot.rate().unwrap_or(0), slot.max_block())?;
+    let (activation, max_frames, rate) = plugin.activate(&processor, || Terms { generation: 0, rate: slot.rate().unwrap_or(0), max_block: slot.max_block() })?;
     // A restart or a re-list the restore or the activation raised describes the state just
     // activated, as a cycle's does (`reinstall`); the param ids are listed after the load anyway.
     let _ = (restart.take(), restart.take_notify());
@@ -549,9 +550,37 @@ impl Vst3 {
         });
         let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
         let (mut plugin, processor, _) = create(opened, &target, id, &handler)?;
-        let (activation, max_frames, _) = plugin.activate(&processor, rate, max_block)?;
+        let (activation, max_frames, _) = plugin.activate(&processor, || Terms { generation: 0, rate, max_block })?;
         let unit = Vst3Unit::new(processor, activation, max_frames, params, Arc::new(AtomicU32::new(0)))?;
         Ok((Vst3 { editor: Vst3Editor::Closed, plugin, handler, restart, slot: 0 }, unit))
+    }
+}
+
+impl Vst3 {
+    /// `Vst3Plugin::activate` at `terms`, read after the deactivate; returns the rate activated at. A
+    /// restart report the plugin raises from inside the cycle (a `kLatencyChanged` from `setActive(1)`)
+    /// describes the state just activated and is consumed, as the live cycle does.
+    fn reactivate_with(
+        &mut self,
+        mut unit: Box<Vst3Unit>,
+        terms: impl FnOnce() -> Terms,
+    ) -> Result<(Box<Vst3Unit>, u32), (Box<Vst3Unit>, String)> {
+        let activated = self.plugin.activate(&unit.processor, terms);
+        let raised = self.restart.take();
+        if raised != 0 {
+            log::info!(
+                "[plugin_host] engine slot {} restartComponent({}) raised during the cycle describes the state just activated; consumed",
+                self.slot,
+                restart_flag_names(raised)
+            );
+        }
+        match activated {
+            Ok((activation, max_frames, rate)) => {
+                unit.rearm(activation, max_frames);
+                Ok((unit, rate))
+            }
+            Err(e) => Err((unit, e)),
+        }
     }
 }
 
@@ -565,34 +594,16 @@ impl OwnedPlugin for Vst3 {
     }
 
     fn reinstall(&mut self, unit: Box<Vst3Unit>, slot: &SlotHost) -> Result<(), (Box<Vst3Unit>, String)> {
-        let terms = slot_terms(slot);
-        let unit = self.reactivate(unit, terms)?;
-        slot.install(unit, terms.rate).map_err(|(unit, e)| (own(unit), e))
+        let (unit, rate) = self.reactivate_with(unit, || slot_terms(slot))?;
+        slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
     }
 
-    /// A restart report the plugin raises from inside the cycle (a `kLatencyChanged` from
-    /// `setActive(1)`) describes the state just activated and is consumed, as the live cycle does.
     fn reactivate(
         &mut self,
-        mut unit: Box<Vst3Unit>,
+        unit: Box<Vst3Unit>,
         terms: Terms,
     ) -> Result<Box<Vst3Unit>, (Box<Vst3Unit>, String)> {
-        let activated = self.plugin.activate(&unit.processor, terms.rate, terms.max_block);
-        let raised = self.restart.take();
-        if raised != 0 {
-            log::info!(
-                "[plugin_host] engine slot {} restartComponent({}) raised during the cycle describes the state just activated; consumed",
-                self.slot,
-                restart_flag_names(raised)
-            );
-        }
-        match activated {
-            Ok((activation, max_frames, _)) => {
-                unit.rearm(activation, max_frames);
-                Ok(unit)
-            }
-            Err(e) => Err((unit, e)),
-        }
+        self.reactivate_with(unit, || terms).map(|(unit, _)| unit)
     }
 
     fn turn(&mut self, _sink: &EventSink) -> Reported {

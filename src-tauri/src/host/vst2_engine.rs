@@ -768,6 +768,27 @@ pub(super) fn run_unit_with(ctx: UnitCtx, id: &str, open: impl FnOnce() -> Resul
     serve_unit(ctx, |setup| load(id, open, setup))
 }
 
+impl Vst2Plugin {
+    /// Suspend, then read `terms` (after the suspend: a device swap that lands meanwhile is the one
+    /// configured at), configure, resume and rebuild the unit's rows. Returns the rate configured at.
+    fn reactivate_with(
+        &mut self,
+        mut unit: Box<Vst2Unit>,
+        terms: impl FnOnce() -> Terms,
+    ) -> Result<(Box<Vst2Unit>, u32), (Box<Vst2Unit>, String)> {
+        self.suspend();
+        let terms = terms();
+        let activated = self.configure_at(terms.rate, terms.max_block).and_then(|t| Ok((self.resume()?, t)));
+        match activated {
+            Ok((info, (rate, block))) => {
+                unit.rearm(&info, block);
+                Ok((unit, rate))
+            }
+            Err(e) => Err((unit, e)),
+        }
+    }
+}
+
 impl OwnedPlugin for Vst2Plugin {
     type Unit = Vst2Unit;
     const FORMAT: &'static str = "VST2";
@@ -781,9 +802,8 @@ impl OwnedPlugin for Vst2Plugin {
     /// Re-activate the plugin at the engine's current terms and install its unit, rows rebuilt. On
     /// failure the unit comes back to the caller and the plugin is left suspended.
     fn reinstall(&mut self, unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
-        let terms = slot_terms(slot);
-        let unit = self.reactivate(unit, terms)?;
-        slot.install(unit, terms.rate).map_err(|(unit, e)| {
+        let (unit, rate) = self.reactivate_with(unit, || slot_terms(slot))?;
+        slot.install(unit, rate).map_err(|(unit, e)| {
             // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
             self.suspend();
             (own(unit), e)
@@ -794,19 +814,10 @@ impl OwnedPlugin for Vst2Plugin {
     /// declares. On failure the unit comes back and the plugin is left suspended.
     fn reactivate(
         &mut self,
-        mut unit: Box<Vst2Unit>,
+        unit: Box<Vst2Unit>,
         terms: Terms,
     ) -> Result<Box<Vst2Unit>, (Box<Vst2Unit>, String)> {
-        self.suspend();
-        let activated =
-            self.configure_at(terms.rate, terms.max_block).and_then(|(_, block)| Ok((self.resume()?, block)));
-        match activated {
-            Ok((info, block)) => {
-                unit.rearm(&info, block);
-                Ok(unit)
-            }
-            Err(e) => Err((unit, e)),
-        }
+        self.reactivate_with(unit, || terms).map(|(unit, _)| unit)
     }
 
     /// What the plugin's own editor moved, with the value the plugin reported: told to the caller,
