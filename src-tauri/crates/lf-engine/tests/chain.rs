@@ -101,12 +101,14 @@ struct Unit {
     panic_from: Frame,
     /// It panics in `set_bypass` (after logging it).
     panic_bypass: bool,
+    /// It panics once in `stop` (after logging it).
+    panic_stop_once: bool,
 }
 
 impl Unit {
     fn new(dsp: Dsp, probe: &Probe) -> Box<Unit> {
         let lag = if let Dsp::Lag(n, _) = dsp { n } else { 0 };
-        Box::new(Unit { dsp, source: matches!(dsp, Dsp::Level(_)), self_bypass: false, bypassed: false, line: [vec![0.0; lag], vec![0.0; lag]], at: 0, count: 0, probe: probe.clone(), panic_from: Frame::MAX, panic_bypass: false })
+        Box::new(Unit { dsp, source: matches!(dsp, Dsp::Level(_)), self_bypass: false, bypassed: false, line: [vec![0.0; lag], vec![0.0; lag]], at: 0, count: 0, probe: probe.clone(), panic_from: Frame::MAX, panic_bypass: false, panic_stop_once: false })
     }
 
     fn panicking_from(mut self: Box<Self>, frame: Frame) -> Box<Unit> {
@@ -116,6 +118,11 @@ impl Unit {
 
     fn panicking_in_bypass(mut self: Box<Self>) -> Box<Unit> {
         self.panic_bypass = true;
+        self
+    }
+
+    fn panicking_in_stop_once(mut self: Box<Self>) -> Box<Unit> {
+        self.panic_stop_once = true;
         self
     }
 
@@ -184,6 +191,10 @@ impl UnitProcessor for Unit {
 
     fn stop(&mut self) {
         self.probe.log.lock().unwrap().push(Seen::Stop);
+        if self.panic_stop_once {
+            self.panic_stop_once = false;
+            panic!("the unit panics in stop");
+        }
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -2648,6 +2659,60 @@ fn every_left_cause_carries_its_install_token_including_mid_crossfade_reload_and
         assert_eq!((p_unsent.calls().len(), p_unsent.stops()), (0, 0), "never started or stopped");
     }
 
+    assert_eq!(p.drops(), 0);
+    drop(kept);
+}
+
+/// An eviction interrupted by a unit's `stop` that panics once: retrying `evict_slots` still hands
+/// the seat back with `Left::Evicted` and its install token (never mislabelled `Left::Removed`).
+#[test]
+fn eviction_retried_after_stop_panic_keeps_left_evicted() {
+    let p = Probe::new();
+    let mut kept = Vec::new();
+    let mut rig = rig(64);
+    put_tok(&mut rig, 0, 1, 501, 0, false, None, Unit::new(Dsp::Gain(1.0), &p).panicking_in_stop_once());
+    rig.advance(1000);
+
+    let panicked = catch_unwind(AssertUnwindSafe(|| rig.engine.evict_slots())).is_err();
+    assert!(panicked, "first evict_slots must unwind on the unit's stop panic");
+    assert!(take_returned(&mut rig, 0, &mut kept).is_empty(), "unit stays in seat after stop panic");
+
+    rig.engine.evict_slots();
+    assert_eq!(
+        take_returned(&mut rig, 0, &mut kept),
+        vec![(1, 501, false, Left::Evicted)],
+        "retry evict_slots hands the seat back as Left::Evicted with its token"
+    );
+    assert_eq!(p.drops(), 0);
+    drop(kept);
+}
+
+/// A same-id reload queued on a port that has reply room when `evict_slots` runs applies in the
+/// idle service first: the old box comes back `Left::Replaced` with its old token, the new box
+/// `Left::Evicted` with its new token, and nothing comes back `Left::Unsent`.
+#[test]
+fn evict_with_queued_same_id_reload_and_reply_room_returns_replaced_and_evicted() {
+    let p = Probe::new();
+    let mut kept = Vec::new();
+    let mut rig = rig(64);
+    put_tok(&mut rig, 0, 5, 401, 0, false, None, Unit::new(Dsp::Gain(1.0), &p));
+    rig.advance(1000);
+
+    let ticket = rig
+        .port(0)
+        .install_at(5, 402, 0, false, Some(5), Unit::new(Dsp::Gain(2.0), &p))
+        .ok()
+        .expect("ring has room");
+    assert!(!ticket.answered(), "reload is queued, not yet serviced");
+
+    rig.engine.evict_slots();
+    let back = take_returned(&mut rig, 0, &mut kept);
+    assert_eq!(
+        back,
+        vec![(5, 401, false, Left::Replaced), (5, 402, false, Left::Evicted)],
+        "old box Replaced with old token, new box Evicted with new token, no Unsent"
+    );
+    assert!(ticket.answered());
     assert_eq!(p.drops(), 0);
     drop(kept);
 }

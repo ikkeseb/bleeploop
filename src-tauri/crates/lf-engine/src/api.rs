@@ -174,8 +174,10 @@ pub enum Command {
     SetUnitBypass(UnitId, bool),
     /// A seated unit's parameter (`docs/unit-contract.md` §2), on the command's frame through
     /// [`UnitProcessor::set_param`]. Answered by [`Event::UnitParam`] with the value the unit applied
-    /// (clamped), owed per seat and param when the event ring is full (folded to the latest value). An
-    /// id no seat holds is dropped and counted ([`crate::Diag::unit_commands_dropped`]); a param the
+    /// (clamped), owed per seat and param when the event ring is full: two values of one param applied
+    /// before the ring takes the first answer fold by design into one answer (the later), so a reader
+    /// takes each answer as the engine's current applied value and never counts answers against sends.
+    /// An id no seat holds is dropped and counted ([`crate::Diag::unit_commands_dropped`]); a param the
     /// unit answers `None` to is dropped and counted ([`crate::Diag::unit_params_dropped`]).
     SetUnitParam(UnitId, UnitParam, f64),
 }
@@ -799,8 +801,9 @@ pub enum Event {
     Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
     /// A unit parameter as the unit applied it ([`Command::SetUnitParam`], clamped by
     /// [`UnitProcessor::set_param`]), on the command's frame. Owed per seat and parameter when the full
-    /// ring refuses it (a later value for the same parameter overwrites it), offered again at the next
-    /// publish.
+    /// ring refuses it, offered again at the next publish: two values of one param applied before the
+    /// ring takes the first answer fold by design into one answer (the later), so a reader takes each
+    /// answer as the engine's current applied value and never counts answers against sends.
     UnitParam { frame: Frame, unit: UnitId, param: UnitParam, value: f64 },
 }
 

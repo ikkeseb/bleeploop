@@ -91,7 +91,7 @@ with its reason), owed until the ring takes it, as a lane's `Mix`; `add` and `re
 `LOAD_TIMEOUT` (`host/engine_slot.rs`) bounds the plugin's setup and stops at the handover;
 `REMOVE_TIMEOUT` counts only while no `waiting` answer came.
 
-**A rebuild keeps every bypass.** The eviction hands back each seat as `(id, unit, bypassed)`, the
+**A rebuild keeps every bypass.** The eviction hands back each seat as `(id, token, unit, bypassed, left)`, the
 final applied values (the unit holds its params), and the reseat restores exactly those; an owed
 `Seat`/`Chain`/`UnitParam` answer only updates the model, never replays. The unit commands the old engine
 never took, in its table or ring (peeked as `unapplied_transport` peeks, `engine.rs`), are pushed after
@@ -295,7 +295,7 @@ pub trait UnitProcessor: Send {
     /// every sample finite. Never allocates, locks or waits.
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
     /// A built-in's parameter, on its frame. A plugin's ride its owner's ring: ignored here.
-    fn set_param(&mut self, _cx: &UnitCx, _param: UnitParam, _value: f64) {}
+    fn set_param(&mut self, _cx: &UnitCx, _param: UnitParam, _value: f64) -> Option<f64> { None } // Some(applied) clamped, None not a param of this unit
     /// The bypass, on its frame. True: the unit bypasses itself (§3); false: the seat's crossfade does.
     fn set_bypass(&mut self, _cx: &UnitCx, _bypassed: bool) -> bool { false }
     /// Hand over and restart the meter fold (§2). False: it shows nothing.

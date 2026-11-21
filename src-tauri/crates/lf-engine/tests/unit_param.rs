@@ -377,3 +377,66 @@ fn set_unit_param_and_owed_offer_do_not_allocate_at_all_block_sizes() {
         drop(back);
     }
 }
+
+/// A same-id reload while the event ring is full keeps the seat's owed `UnitParam` answer:
+/// `unsent_unit_params` still lists it after the reload applies, and `Event::UnitParam` arrives once
+/// the ring frees.
+#[test]
+fn same_id_reload_keeps_owed_unit_param_until_ring_frees() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut rig = Rig::with_event_capacity(Opts { block: 64, ..Opts::default() }, 4);
+    assert!(rig.port(0).install_at(1, 10, 0, false, None, ClampGain::new(0.25, &drops)).is_ok());
+    rig.advance(1000);
+
+    // Fill the 4-slot event ring while leaving room in `s.owed` so the reload can apply.
+    rig.hold_events = true;
+    let t0 = rig.frame + 5;
+    for k in 0..6 {
+        rig.send_at(t0, Command::SetUnitBypass(1, k % 2 == 0));
+    }
+    let t_param = t0 + 10;
+    rig.send_at(t_param, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoLevel), 2.0));
+    rig.advance(128);
+    assert_eq!(
+        rig.engine.unsent_unit_params().collect::<Vec<_>>(),
+        vec![(1, UnitParam::Send(InputSendParam::EchoLevel), 1.0)],
+        "param answer owed while event ring is full"
+    );
+
+    // Apply a same-id reload while the event ring is still full.
+    let ticket = rig
+        .port(0)
+        .install_at(1, 11, 0, false, Some(1), ClampGain::new(0.5, &drops))
+        .ok()
+        .expect("ring has room");
+    rig.advance(1000);
+    assert!(ticket.answered(), "same-id reload applied");
+    let old = rig.port(0).returned_unit().expect("old unit returned");
+    assert_eq!((old.id, old.token, old.left), (1, 10, lf_engine::Left::Replaced));
+
+    // Owed param answer must survive the same-id reload.
+    assert_eq!(
+        rig.engine.unsent_unit_params().collect::<Vec<_>>(),
+        vec![(1, UnitParam::Send(InputSendParam::EchoLevel), 1.0)],
+        "same-id reload preserves owed param answers"
+    );
+
+    // Free the ring and drain: the owed answer arrives.
+    rig.hold_events = false;
+    rig.read_events();
+    for _ in 0..32 {
+        rig.advance(64);
+    }
+    assert_eq!(rig.engine.unsent_unit_params().count(), 0, "drained");
+    assert_eq!(
+        param_events(&rig),
+        vec![(t_param, 1, UnitParam::Send(InputSendParam::EchoLevel), 1.0)],
+        "owed answer arrives once the ring frees"
+    );
+
+    rig.engine.evict_slots();
+    let evicted = rig.port(0).returned_unit().expect("evicted");
+    assert_eq!((evicted.id, evicted.token, evicted.left), (1, 11, lf_engine::Left::Evicted));
+    drop((old, evicted));
+    assert_eq!(drops.load(SeqCst), 2);
+}

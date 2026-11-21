@@ -159,7 +159,9 @@ pub enum Left {
     Withdrawn,
     /// [`crate::Engine::evict_slots`] took a seated unit.
     Evicted,
-    /// [`crate::Engine::evict_slots`] took an install still in the ring or the taken place, never applied.
+    /// [`crate::Engine::evict_slots`] took an install still in the ring or the taken place, never applied
+    /// because it had no place for its answer (an install with reply room applies in `evict`'s idle
+    /// service first and leaves as [`Left::Evicted`], with its predecessor as [`Left::Replaced`]).
     Unsent,
     /// Its install was refused (the unit never started or stopped).
     Refused(SeatRefusal),
@@ -335,6 +337,9 @@ struct Seat {
     engaged: bool,
     /// The seat leaves once `fade` reaches its input; it counts in no index or sum meanwhile.
     removing: bool,
+    /// Marked leaving by [`Rack::evict`]: keeps [`Left::Evicted`] even if a `stop` unwinds and a later
+    /// `service_idle` finishes it.
+    evicting: bool,
     /// The bypass crossfade: frames into the delayed input (0) ↔ the unit's output (n); `wet_on` is the
     /// end it heads for (off while the seat bypasses a unit that does not bypass itself, or has none).
     wet: u32,
@@ -859,12 +864,14 @@ impl Slot {
             unit.stop();
         }
         let seat = &mut self.seats[k];
+        let left = if seat.evicting { Left::Evicted } else { left };
         if let Some(unit) = seat.unit.take() {
             let (id, token, bypassed) = (seat.id, seat.token, seat.bypassed);
             self.give_back(Back { id, token, unit, bypassed, left }, errors);
         }
         let seat = &mut self.seats[k];
         seat.removing = false;
+        seat.evicting = false;
         seat.engaged = false;
         seat.fade = 0;
         seat.params_owed = [None; UnitParam::COUNT];
@@ -1058,6 +1065,7 @@ impl Rack {
                         fade: 0,
                         engaged: false,
                         removing: false,
+                        evicting: false,
                         wet: 0,
                         wet_on: false,
                         bypassed: false,
@@ -1142,7 +1150,8 @@ impl Rack {
     }
 
     /// Apply the ports' messages at `frame`, a block start (or, idle, the frame the next block would
-    /// start at), each answered once. `engaged` installs without a fade (nothing has sounded yet, or no
+    /// start at), each answered by an [`Event::Seat`] (a held message gets `Waiting`, then a second
+    /// `Event::Seat` when the hold ends). `engaged` installs without a fade (nothing has sounded yet, or no
     /// device runs); `fade` off finishes every transition at once; `hold`: a capture holds the
     /// alignment, so an edit of a chain's sum or role waits.
     fn service(&mut self, frame: Frame, engaged: bool, fade: bool, hold: bool) {
@@ -1367,8 +1376,11 @@ impl Rack {
                         if seat.info.source != info.source {
                             seat.filled = 0;
                         }
+                        let same_id = seat.id == id;
                         (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
-                        seat.params_owed = [None; UnitParam::COUNT];
+                        if !same_id {
+                            seat.params_owed = [None; UnitParam::COUNT];
+                        }
                         k
                     }
                     None => {
@@ -1381,7 +1393,7 @@ impl Rack {
                         }
                         let seat = &mut s.seats[k];
                         (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
-                        (seat.removing, seat.engaged, seat.fade) = (false, true, if engaged { n } else { 0 });
+                        (seat.removing, seat.evicting, seat.engaged, seat.fade) = (false, false, true, if engaged { n } else { 0 });
                         (seat.withdrawing, seat.outgoing, seat.swap) = (false, None, n);
                         (seat.line_at, seat.filled, seat.held) = (0, 0, [0; 2]);
                         seat.params_owed = [None; UnitParam::COUNT];
@@ -1625,10 +1637,15 @@ impl Rack {
 
     /// Stop every unit and hand it back with its bypass (a sample-rate change: the host re-activates
     /// and reinstalls), with every install still waiting on a port that the return ring has room for,
-    /// however full what its slot owes the event ring is: one that found no place for its answer goes
-    /// back unstarted and unanswered (its return is its answer; its ticket is answered), and the
-    /// messages ahead of it leave with no effect (the slot seats nothing now). The host reads its
-    /// returns and evicts again until none comes back, so nothing is left for the engine's drop.
+    /// however full what its slot owes the event ring is. It services the ports idle first, so any
+    /// queued or held install with reply room applies before the eviction: a same-id reload queued
+    /// behind its seat comes back as two boxes, the old [`Left::Replaced`] and the new
+    /// [`Left::Evicted`]; only an install that found no place for its answer comes back [`Left::Unsent`],
+    /// unstarted and unanswered (its return is its answer; its ticket is answered), and the messages
+    /// ahead of it leave with no effect (the slot seats nothing now). The device side settles by these
+    /// labels (`Evicted`: reinstall; `Replaced`: tear down; `Unsent`: submit again), so both paths end
+    /// with the reload seated in the new engine. The host reads its returns and evicts again until none
+    /// comes back, so nothing is left for the engine's drop.
     pub(crate) fn evict(&mut self, frame: Frame) {
         self.service_idle(frame, false);
         let (cx, n) = (self.unit_cx(frame), self.fade_frames);
@@ -1638,6 +1655,7 @@ impl Rack {
                 s.edit = s.edit.max(n as Frame);
                 for seat in s.seats[..s.len].iter_mut() {
                     seat.removing = true;
+                    seat.evicting = true;
                     seat.engaged = false;
                     seat.fade = 0;
                 }
