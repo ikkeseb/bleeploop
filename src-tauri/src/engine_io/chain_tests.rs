@@ -269,8 +269,8 @@ fn rebuild_halfway_through_same_id_crossfade_routes_each_box_to_its_row() {
     // Pause rendering so we can step exactly 2 blocks (128 < 480 frames: mid-crossfade).
     device.stop();
     let op2 = ok_op(cand.submit(LatentUnit::new(2, 0, stops.clone()), t1));
-    // From candidate's submit on, the outgoing row may send nothing.
-    assert_eq!(old_host.withdraw(), Err(SubmitError::Superseded));
+    // While the candidate stands in flight, the outgoing row's withdraw is deferred (`Reloading`).
+    assert_eq!(old_host.withdraw(), Err(SubmitError::Reloading));
 
     // Render 2 blocks manually under rt lock: swap crossfade is 128 / 480 frames in flight.
     // Do NOT call `wait_op` while stopped (that would call `service_if_idle`, finishing the fade);
@@ -287,6 +287,7 @@ fn rebuild_halfway_through_same_id_crossfade_routes_each_box_to_its_row() {
     let mut ev = Vec::new();
     host.drain_feed(&mut ev);
     assert_eq!(cand.poll(op2), OpState::Applied);
+    assert_eq!(old_host.withdraw(), Err(SubmitError::Superseded));
     assert!(old_host.take_back().is_none(), "old unit is still crossfading out");
 
     // Rebuild halfway through the crossfade!
@@ -1827,4 +1828,624 @@ fn poll_alone_settles_install_with_no_feed_ticking() {
         assert_eq!(u.poll(op), OpState::Applied, "idle: poll alone must service and drain to Applied");
         u.release();
     }
+}
+
+/// 27. Round D1 / Astra 1 (both branches): a removal queued during reactivation (or immediate
+///     after a rebuild) makes `submit` return `SubmitError::Removing` (never `Superseded`), and
+///     delivers `Back::Dismissed` once the removal settles.
+#[test]
+fn d1_astra1_removal_during_reactivation_and_immediate_returns_removing() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    // Branch 1: withdrawn latent unit, Sent remove while owner holds the box.
+    {
+        let u = host.unit(0, 10, Spec::Plugin(plugin_ref("a1")), 0, false).unwrap();
+        u.activated(Activated { name: "a1".into(), source: false, latency: 64 });
+        let t = u.terms().unwrap();
+        let op_in = ok_op(u.submit(LatentUnit::new(101, 64, stops.clone()), t));
+        assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let op_w = u.withdraw().unwrap();
+        assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let box_w = loop {
+            if let Some(Back::Withdrawn { unit, .. }) = u.take_back() {
+                break unit;
+            }
+            assert!(Instant::now() < deadline, "withdrawn box never arrived");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+
+        start_take(&device);
+        let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+        let (box_w, err) = u.submit(box_w, t).expect_err("submit during pending remove must fail");
+        assert_eq!(err, SubmitError::Removing, "pending remove must return SubmitError::Removing");
+        stop_take(&device);
+        assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        assert!(matches!(u.take_back(), Some(Back::Dismissed)), "removal settle must deliver Back::Dismissed");
+        assert!(u.take_back().is_none());
+        drop(box_w);
+        u.release();
+    }
+
+    // Branch 2: immediate remove after a rebuild while the owner holds the Evicted box.
+    {
+        let u = host.unit(0, 11, Spec::Plugin(plugin_ref("a2")), 0, false).unwrap();
+        let t1 = u.terms().unwrap();
+        let op_in = ok_op(u.submit(LatentUnit::new(102, 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        device.rebuild_at(44_100, 256);
+        let Back::Evicted { unit: box_e, .. } = u.take_back().expect("evicted box") else {
+            panic!("expected Back::Evicted");
+        };
+        let t2 = u.terms().unwrap();
+        assert_eq!(host.remove_unit(11).unwrap(), Removal::Plate);
+        let (box_e, err) = u.submit(box_e, t2).expect_err("submit after immediate remove must fail");
+        assert_eq!(err, SubmitError::Removing, "immediate remove must return SubmitError::Removing");
+        assert!(matches!(u.take_back(), Some(Back::Dismissed)), "immediate remove must deliver Back::Dismissed");
+        assert!(u.take_back().is_none());
+        drop(box_e);
+        u.release();
+    }
+}
+
+/// 28. Round D1 / Astra 2: while a Remove is `Held` behind a withdraw, a returned `Withdrawn` box
+///     stays held outside the mailbox (`take_back()` is `None`) and `host.unit(id)` is refused;
+///     once the Remove applies, `take_back()` delivers `Back::Removed(box)` once with the same tag.
+#[test]
+fn d1_astra2_held_remove_holds_box_and_reserves_id_until_settle() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 30, Spec::Plugin(plugin_ref("lat")), 0, false).unwrap();
+    u.activated(Activated { name: "lat".into(), source: false, latency: 64 });
+    let t = u.terms().unwrap();
+    let op_in = ok_op(u.submit(LatentUnit::new(303, 64, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    start_take(&device);
+    let op_w = u.withdraw().unwrap();
+    let Removal::Sent(op_rem) = host.remove_unit(30).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(15));
+
+    // Poll until op_rem reads Held.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while u.poll(op_rem) != OpState::Held {
+        assert!(Instant::now() < deadline, "remove never reached Held");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(u.take_back().is_none(), "withdrawn box must stay held while Remove is Held");
+    assert!(
+        host.unit(0, 30, Spec::Plugin(plugin_ref("dup")), 0, false).is_err(),
+        "id must remain reserved while Leaving plate stands"
+    );
+
+    stop_take(&device);
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let Back::Removed(box_r) = u.take_back().expect("Removed box after settle") else {
+        panic!("expected Back::Removed after held Remove settled");
+    };
+    assert_eq!(box_r.into_any().downcast::<LatentUnit>().unwrap().tag, 303);
+    assert!(u.take_back().is_none(), "terminal box delivered exactly once");
+    u.release();
+}
+
+/// 29. Round D1 / X1 (Rule 3): a reload candidate submitted after a queued removal returns
+///     `Err(SubmitError::Superseded)`; the engine chain ends empty and the original gets `Removed`.
+#[test]
+fn d1_x1_reload_candidate_submitted_after_queued_remove_is_superseded() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op_in = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let cand = host.reload_unit(10, plugin_ref("v2")).unwrap();
+    device.stop();
+    let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+    let (box2, err) = cand.submit(LatentUnit::new(2, 0, stops.clone()), t).expect_err("candidate submit during Leaving must fail");
+    assert_eq!(err, SubmitError::Superseded);
+    drop(box2);
+    cand.release();
+
+    device.resume();
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(15));
+    assert!(engine_chain_ids(&device, 0).is_empty(), "engine chain must be empty");
+    let Back::Removed(box1) = u.take_back().expect("original gets Removed") else {
+        panic!("expected Back::Removed for original");
+    };
+    assert_eq!(box1.into_any().downcast::<LatentUnit>().unwrap().tag, 1);
+    u.release();
+}
+
+/// 30. Round D1 / B1 (Rule 1): `withdraw` returns `SubmitError::Reloading` while a live candidate
+///     row stands, and succeeds once the candidate releases.
+#[test]
+fn d1_b1_withdraw_returns_reloading_while_candidate_stands() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op_in = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let cand = host.reload_unit(10, plugin_ref("v2")).unwrap();
+    assert_eq!(u.withdraw(), Err(SubmitError::Reloading));
+    cand.release();
+
+    let op_w = u.withdraw().expect("withdraw must succeed once candidate released");
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    u.release();
+}
+
+/// 31. Round D1 / B2 (Rule 2): `reload_unit` refuses a unit with a pending withdrawal.
+#[test]
+fn d1_b2_reload_unit_refuses_pending_withdraw() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op_in = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.stop();
+    let _op_w = u.withdraw().unwrap();
+    assert!(
+        host.reload_unit(10, plugin_ref("v2")).is_err(),
+        "reload_unit must refuse a pending withdraw"
+    );
+    device.resume();
+    u.release();
+}
+
+/// 32. Round D1 / B3 (Rule 4 + Astra CR6): a rebuild promotes a candidate that idle service
+///     already applied, and cancels a candidate still in flight (`Unsent` forced or unsubmitted).
+#[test]
+fn d1_b3_rebuild_promotes_applied_candidate_and_cancels_unsent_candidate() {
+    // Part A: promoted candidate (reply room available -> idle service applies candidate before eviction).
+    {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let orig = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+        orig.activated(Activated { name: "v1".into(), source: false, latency: 0 });
+        let t1 = orig.terms().unwrap();
+        let op1 = ok_op(orig.submit(LatentUnit::new(1, 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let cand = host.reload_unit(10, plugin_ref("v2")).unwrap();
+        cand.activated(Activated { name: "v2".into(), source: false, latency: 0 });
+        device.stop();
+        let op_cand = ok_op(cand.submit(LatentUnit::new(2, 0, stops.clone()), t1));
+        device.rebuild_at(44_100, 256);
+
+        assert_eq!(cand.poll(op_cand), OpState::Applied, "idle-applied candidate stays Applied");
+        let Back::Superseded(box1) = orig.take_back().expect("orig gets Superseded") else {
+            panic!("expected Superseded for original");
+        };
+        assert_eq!(box1.into_any().downcast::<LatentUnit>().unwrap().tag, 1);
+        let Back::Evicted { unit: box2, .. } = cand.take_back().expect("cand gets Evicted") else {
+            panic!("expected Evicted for promoted candidate");
+        };
+        let box2 = box2.into_any().downcast::<LatentUnit>().unwrap();
+        assert_eq!(box2.tag, 2);
+        orig.release();
+
+        let t2 = cand.terms().unwrap();
+        let op2 = ok_op(cand.submit(box2, t2));
+        assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        let snap = host.core.chain_snapshot();
+        let unit = &snap.chains[0].units[0];
+        assert_eq!(unit.state, PlateState::Seated);
+        assert!(!unit.reloading);
+        assert_eq!(unit.plugin.as_ref(), Some(&plugin_ref("v2")));
+        cand.release();
+    }
+
+    // Part B: cancelled candidate (`Unsent` forced by filling owed replies).
+    {
+        let mut device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let orig = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+        orig.activated(Activated { name: "v1".into(), source: false, latency: 0 });
+        let t1 = orig.terms().unwrap();
+        let op1 = ok_op(orig.submit(LatentUnit::new(1, 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        // Seat a helper unit 1, fill event ring, and exhaust owed replies on slot 0.
+        let helper = host.unit(0, 1, Spec::Plugin(plugin_ref("h")), 1, false).unwrap();
+        let op_h = ok_op(helper.submit(LatentUnit::new(50, 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op_h, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        fill_event_ring(&device);
+        device.stop();
+        for _ in 0..8u32 {
+            let _ = helper.withdraw().unwrap();
+            super::unit_host::service_if_idle(&host.core);
+            let Back::Withdrawn { unit, .. } = helper.take_back().expect("helper withdrawn") else {
+                panic!("expected Withdrawn for helper");
+            };
+            let _ = ok_op(helper.submit(unit, t1));
+            super::unit_host::service_if_idle(&host.core);
+        }
+
+        let cand = host.reload_unit(10, plugin_ref("v2")).unwrap();
+        cand.activated(Activated { name: "v2".into(), source: false, latency: 0 });
+        let op_cand = ok_op(cand.submit(LatentUnit::new(2, 0, stops.clone()), t1));
+        super::unit_host::service_if_idle(&host.core);
+        assert!(cand.take_back().is_none(), "candidate stayed queued (owed full)");
+
+        device.rebuild_at(44_100, 256);
+
+        assert_eq!(cand.poll(op_cand), OpState::Rebuilt);
+        let Back::Superseded(box2) = cand.take_back().expect("cand gets Superseded") else {
+            panic!("expected Back::Superseded for cancelled candidate");
+        };
+        assert_eq!(box2.into_any().downcast::<LatentUnit>().unwrap().tag, 2);
+        cand.release();
+
+        let Back::Evicted { unit: box1, .. } = orig.take_back().expect("orig gets Evicted") else {
+            panic!("expected Back::Evicted for original after cancelled reload");
+        };
+        let box1 = box1.into_any().downcast::<LatentUnit>().unwrap();
+        assert_eq!(box1.tag, 1);
+        let t2 = orig.terms().unwrap();
+        let op_res = ok_op(orig.submit(box1, t2));
+        assert_eq!(host.wait_op(op_res, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let snap = host.core.chain_snapshot();
+        let plate10 = snap.chains[0].units.iter().find(|u| u.id == 10).expect("plate 10");
+        assert_eq!(plate10.state, PlateState::Seated);
+        assert!(!plate10.reloading);
+        assert_eq!(plate10.plugin.as_ref(), Some(&plugin_ref("v1")));
+
+        let _ = helper.take_back();
+        helper.release();
+        orig.release();
+    }
+
+    // Part C: unsubmitted candidate across rebuild gets Superseded on later submit.
+    {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let orig = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+        let t1 = orig.terms().unwrap();
+        let op1 = ok_op(orig.submit(LatentUnit::new(1, 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let cand = host.reload_unit(10, plugin_ref("v2")).unwrap();
+        device.rebuild_at(44_100, 256);
+
+        let t2 = orig.terms().unwrap();
+        let (box2, err) = cand.submit(LatentUnit::new(2, 0, stops.clone()), t2).expect_err("unsubmitted candidate must be Superseded after rebuild");
+        assert_eq!(err, SubmitError::Superseded);
+        drop(box2);
+        cand.release();
+
+        let Back::Evicted { unit: box1, .. } = orig.take_back().expect("orig evicted") else {
+            panic!("expected Evicted");
+        };
+        let op2 = ok_op(orig.submit(box1, t2));
+        assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        let snap = host.core.chain_snapshot();
+        assert!(!snap.chains[0].units[0].reloading);
+        assert_eq!(snap.chains[0].units[0].plugin.as_ref(), Some(&plugin_ref("v1")));
+        orig.release();
+    }
+}
+
+/// 33. Round D1 / Astra CR1: removal queued behind a candidate that the engine refuses for latency
+///     retires the original (`Removed`), while the candidate receives `Refused` (even if both boxes
+///     are reaped before either `Event::Seat` drains). Also verifies the applied-candidate branch.
+#[test]
+fn d1_cr1_removal_behind_refused_reload_retires_original_not_candidate() {
+    // Part A: candidate B refused for latency -> A removed; reap both boxes before draining events.
+    {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let a = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+        let t = a.terms().unwrap();
+        let op_a = ok_op(a.submit(LatentUnit::new(1, 0, stops.clone()), t));
+        assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let b = host.reload_unit(10, plugin_ref("v2")).unwrap();
+        device.stop();
+        let past = max_chain_latency(48_000) + 1;
+        let op_b = ok_op(b.submit(LatentUnit::new(2, past, stops.clone()), t));
+        let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+
+        // Service idle without draining Event::Seat: engine refuses B (latency) then removes A.
+        super::unit_host::service_if_idle(&host.core);
+
+        // Reap both boxes BEFORE draining either Event::Seat!
+        let back_a = a.take_back().expect("A's box must be ready");
+        let back_b = b.take_back().expect("B's box must be ready");
+
+        assert!(
+            matches!(back_a, Back::Removed(_)),
+            "original A must receive Back::Removed (retires tone), not Superseded"
+        );
+        assert!(
+            matches!(back_b, Back::Refused { why: SeatRefusal::Latency, .. }),
+            "refused candidate B must receive Back::Refused(Latency), not Removed"
+        );
+
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        assert_eq!(b.poll(op_b), OpState::Refused(SeatRefusal::Latency));
+        assert_eq!(a.poll(op_rem), OpState::Applied);
+        assert!(a.take_back().is_none(), "no duplicate terminal for A");
+        assert!(b.take_back().is_none(), "no duplicate terminal for B");
+        a.release();
+        b.release();
+    }
+
+    // Part B: candidate B applies -> B removed; reap both boxes before draining events.
+    {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let a = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+        let t = a.terms().unwrap();
+        let op_a = ok_op(a.submit(LatentUnit::new(1, 0, stops.clone()), t));
+        assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let b = host.reload_unit(10, plugin_ref("v2")).unwrap();
+        device.stop();
+        let op_b = ok_op(b.submit(LatentUnit::new(2, 0, stops.clone()), t));
+        let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+
+        super::unit_host::service_if_idle(&host.core);
+
+        let back_a = a.take_back().expect("A's box must be ready");
+        let back_b = b.take_back().expect("B's box must be ready");
+
+        assert!(
+            matches!(back_a, Back::Superseded(_)),
+            "replaced original A must receive Back::Superseded (does not retire)"
+        );
+        assert!(
+            matches!(back_b, Back::Removed(_)),
+            "applied then removed candidate B must receive Back::Removed (retires)"
+        );
+
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        assert_eq!(b.poll(op_b), OpState::Applied);
+        assert_eq!(a.poll(op_rem), OpState::Applied);
+        assert!(a.take_back().is_none(), "no duplicate terminal for A");
+        assert!(b.take_back().is_none(), "no duplicate terminal for B");
+        a.release();
+        b.release();
+    }
+}
+
+/// 34. Round D1 / Astra CR2: a failed reload C reserved during A->B's outgoing crossfade must not
+///     clear A's superseded state or allow A to withdraw B.
+#[test]
+fn d1_cr2_failed_reload_during_crossfade_does_not_revive_older_owner() {
+    let mut device = TestDevice::start(48_000, 64, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let a = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+    let t = a.terms().unwrap();
+    let op_a = ok_op(a.submit(LatentUnit::new(1, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let b = host.reload_unit(10, plugin_ref("v2")).unwrap();
+    device.stop();
+    let op_b = ok_op(b.submit(LatentUnit::new(2, 0, stops.clone()), t));
+
+    // Render 2 blocks (128 < 480 frames): B applied, A still crossfading out.
+    {
+        let mut rt = host.core.rt.lock().unwrap();
+        let engine = rt.engine.as_mut().unwrap();
+        let (x, mut l, mut r) = ([0.0f32; 64], [0.0f32; 64], [0.0f32; 64]);
+        for k in 0..2i64 {
+            let ctx = lf_engine::ProcessContext { frame: k * 64, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+            engine.process(&ctx, &x, &mut l, &mut r);
+        }
+    }
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(b.poll(op_b), OpState::Applied);
+    assert!(a.take_back().is_none(), "A is still crossfading out");
+
+    // Reserve C during the outgoing crossfade, fail C, and release C.
+    let c = host.reload_unit(10, plugin_ref("v3")).unwrap();
+    c.failed("load failed".into());
+    c.release();
+
+    // A must remain permanently superseded and must NOT be allowed to withdraw B!
+    assert_eq!(a.withdraw(), Err(SubmitError::Superseded));
+
+    device.resume();
+    assert!(device.wait_blocks(15));
+    assert!(matches!(a.take_back(), Some(Back::Superseded(_))));
+    assert!(b.take_back().is_none(), "B must remain seated in the engine");
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false)]);
+    a.release();
+    b.release();
+}
+
+/// 35. Round D1 / Astra CR3: `Pending { held }` adopts any unclaimed non-terminal mailbox return
+///     on `remove_unit` entry, and a repeat `remove_unit` returns the existing removal op without
+///     dropping the held box.
+#[test]
+fn d1_cr3_pending_held_adopts_unclaimed_refused_box_and_retry_reuses_op() {
+    // Part A: refused initial install -> remove_unit reaps Refused box -> adopts into held until
+    // Remove settles (Refused(Unknown)), then releases Refused back to the owner.
+    {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let u = host.unit(0, 10, Spec::Plugin(plugin_ref("bad")), 0, false).unwrap();
+        let t = u.terms().unwrap();
+        device.stop();
+        let past = max_chain_latency(48_000) + 1;
+        let op_in = ok_op(u.submit(LatentUnit::new(10, past, stops.clone()), t));
+        // Service idle so engine refuses the install and puts the Refused box on the return ring,
+        // WITHOUT draining Event::Seat (so has_pending_install is still true).
+        super::unit_host::service_if_idle(&host.core);
+
+        let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+        // While Remove is pending, the Refused box must stay held (not handed out before Remove settles).
+        assert!(
+            u.take_back().is_none(),
+            "unclaimed Refused box must be adopted into held while Remove is pending"
+        );
+
+        // Now service and drain: Install is Refused(Latency), Remove is Refused(Unknown) -> cancel_remove
+        // restores the Refused box to the mailbox.
+        super::unit_host::service_if_idle(&host.core);
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        assert_eq!(u.poll(op_in), OpState::Refused(SeatRefusal::Latency));
+        assert_eq!(u.poll(op_rem), OpState::Refused(SeatRefusal::Unknown));
+        assert!(matches!(u.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
+        u.failed("latency".into());
+        u.release();
+    }
+
+    // Part B: repeat remove_unit after a withdrawn box entered `held` during a take returns the
+    // existing removal op and does not lose the held box.
+    {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let u = host.unit(0, 31, Spec::Plugin(plugin_ref("lat")), 0, false).unwrap();
+        u.activated(Activated { name: "lat".into(), source: false, latency: 64 });
+        let t = u.terms().unwrap();
+        let op_in = ok_op(u.submit(LatentUnit::new(311, 64, stops.clone()), t));
+        assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        start_take(&device);
+        let op_w = u.withdraw().unwrap();
+        let Removal::Sent(op_rem1) = host.remove_unit(31).unwrap() else { panic!("expected Sent") };
+        assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        assert!(device.wait_blocks(15));
+
+        // Reap Withdrawn into `held`.
+        assert!(u.take_back().is_none());
+        // Retry remove_unit while Remove is still Held and box is in `held`.
+        let Removal::Sent(op_rem2) = host.remove_unit(31).unwrap() else { panic!("expected Sent on retry") };
+        assert_eq!(op_rem2, op_rem1, "retry remove_unit must return existing removal op");
+
+        stop_take(&device);
+        assert_eq!(host.wait_op(op_rem1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        let Back::Removed(box_r) = u.take_back().expect("held box must survive retry remove_unit") else {
+            panic!("expected Back::Removed");
+        };
+        assert_eq!(box_r.into_any().downcast::<LatentUnit>().unwrap().tag, 311);
+        u.release();
+    }
+}
+
+/// 36. Round D1 / Astra CR4: a stopping owner can claim a box held in `Leave::Pending` through
+///     `take_back_for_shutdown` while preserving the removal reservation until `Remove` settles.
+#[test]
+fn d1_cr4_shutdown_claims_held_box_while_preserving_removal_reservation() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 32, Spec::Plugin(plugin_ref("lat")), 0, false).unwrap();
+    u.activated(Activated { name: "lat".into(), source: false, latency: 64 });
+    let t = u.terms().unwrap();
+    let op_in = ok_op(u.submit(LatentUnit::new(322, 64, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    start_take(&device);
+    let op_w = u.withdraw().unwrap();
+    let Removal::Sent(op_rem) = host.remove_unit(32).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(15));
+
+    // Normal take_back still hides the held box while Remove is Held.
+    assert!(u.take_back().is_none());
+    // Teardown claims the held box via take_back_for_shutdown.
+    let Back::Withdrawn { unit: box_s, .. } = u.take_back_for_shutdown().expect("shutdown claims held box") else {
+        panic!("expected held Withdrawn box from take_back_for_shutdown");
+    };
+    assert_eq!(box_s.into_any().downcast::<LatentUnit>().unwrap().tag, 322);
+    assert!(u.take_back_for_shutdown().is_none(), "held box claimed once");
+
+    // Removal reservation still stands (both before and after owner release) while Remove is Held.
+    assert!(host.unit(0, 32, Spec::Plugin(plugin_ref("dup")), 0, false).is_err());
+    u.release();
+    assert!(host.unit(0, 32, Spec::Plugin(plugin_ref("dup2")), 0, false).is_err());
+
+    stop_take(&device);
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    // Once Remove settles and plate is gone, id 32 is free again.
+    let u_new = host.unit(0, 32, Spec::Plugin(plugin_ref("fresh")), 0, false).expect("id free after settle");
+    u_new.release();
+}
+
+/// 37. Round D1 / Astra CR5: adding a new source B under another id that replaces a parked source A
+///     delivers `Back::Dismissed` to A's owner on B's apply.
+#[test]
+fn d1_cr5_different_id_source_replacing_parked_source_delivers_dismissed() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let a = host.unit(0, 10, Spec::Plugin(plugin_ref("src_a")), 0, false).unwrap();
+    a.activated(Activated { name: "src_a".into(), source: true, latency: 0 });
+    let t = a.terms().unwrap();
+    let op_a = ok_op(a.submit(Box::new(LatentUnit { tag: 1, latency: 0, source: true, stops: stops.clone() }), t));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Withdraw A and park it (reactivation failed).
+    let op_w = a.withdraw().unwrap();
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let box_a = loop {
+        if let Some(Back::Withdrawn { unit, .. }) = a.take_back() {
+            break unit;
+        }
+        assert!(Instant::now() < deadline, "withdrawn source box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    a.parked("reactivation failed".into());
+    drop(box_a);
+
+    // Add source B under another id 20: replaces A's empty seat and deletes A's plate.
+    let b = host.unit(0, 20, Spec::Plugin(plugin_ref("src_b")), 0, false).unwrap();
+    b.activated(Activated { name: "src_b".into(), source: true, latency: 0 });
+    let op_b = ok_op(b.submit(Box::new(LatentUnit { tag: 2, latency: 0, source: true, stops: stops.clone() }), t));
+    assert_eq!(host.wait_op(op_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    assert!(
+        matches!(a.take_back(), Some(Back::Dismissed)),
+        "parked source A must receive Back::Dismissed when source B replaces its seat"
+    );
+    assert!(a.take_back().is_none());
+    assert_eq!(engine_chain_ids(&device, 0), vec![(20, false)]);
+    a.release();
+    b.release();
 }

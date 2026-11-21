@@ -26,7 +26,7 @@ use lf_engine::{SeatOp, SeatRefusal, UnitProcessor, MAX_UNITS};
 
 use super::chain::{PendingKind, PendingOp};
 use super::unit_host::{
-    service_if_idle, wait_op_inner, Back, OpState, Row, RowEngineState, Spec, UnitHost,
+    service_if_idle, wait_op_inner, Back, Leave, OpState, Row, RowEngineState, Spec, UnitHost,
 };
 use super::Core;
 
@@ -108,7 +108,7 @@ impl SlotHost {
                     abandoned: false,
                     released: false,
                     id_freed: false,
-                    removing: false,
+                    leave: Leave::Staying,
                     in_engine: RowEngineState::Out,
                     mailbox,
                     settled: BTreeMap::new(),
@@ -138,7 +138,7 @@ impl SlotHost {
                 abandoned: false,
                 released: false,
                 id_freed: false,
-                removing: false,
+                leave: Leave::Staying,
                 in_engine: RowEngineState::Queued { generation: gen },
                 mailbox: VecDeque::new(),
                 settled: BTreeMap::new(),
@@ -230,7 +230,7 @@ impl SlotHost {
             }
             let gen = self.core.engine_gen.load(Acquire);
             if let Some(row) = state.table.row_mut(install) {
-                row.removing = true;
+                row.leave = Leave::Pending { held: None };
                 if row.in_engine.generation() == Some(gen) {
                     row.in_engine = RowEngineState::Removing { generation: gen };
                 }

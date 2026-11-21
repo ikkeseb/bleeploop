@@ -161,6 +161,8 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::Stale => "engine terms changed before submit".to_string(),
         SubmitError::PortFull => "the slot's engine port is full".to_string(),
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
+        SubmitError::Removing => "the unit is being removed".to_string(),
+        SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
         SubmitError::NoEngine => "no audio device is open".to_string(),
     }
@@ -205,7 +207,7 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
                 *seat = Seat::Withdrawing { op };
                 *pending_restart = None;
             }
-            Err(SubmitError::PortFull) => {
+            Err(SubmitError::PortFull | SubmitError::Reloading) => {
                 // Keep pending_restart set and retry `withdraw()` on the next turn.
             }
             Err(SubmitError::Stale) => {
@@ -214,7 +216,7 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
                 );
                 *pending_restart = None;
             }
-            Err(err @ (SubmitError::Superseded | SubmitError::Closing | SubmitError::NoEngine)) => {
+            Err(err @ (SubmitError::Superseded | SubmitError::Removing | SubmitError::Closing | SubmitError::NoEngine)) => {
                 log::info!(
                     "[plugin_host] engine slot {slot} unit {id}: dropping restart ({why}); withdraw refused ({err:?})"
                 );
@@ -308,7 +310,7 @@ fn submit_owed<P: OwnedPlugin>(
             *seat = Seat::Installing { op };
             None
         }
-        Err((returned, SubmitError::PortFull)) => {
+        Err((returned, SubmitError::PortFull | SubmitError::Reloading)) => {
             *seat = Seat::Owed { unit: own(returned), activated_at };
             None
         }
@@ -338,7 +340,7 @@ fn submit_owed<P: OwnedPlugin>(
             *seat = Seat::Closing { unit: returned };
             None
         }
-        Err((returned, SubmitError::Superseded)) => Some(Exit::Returned { unit: own(returned), retire: false }),
+        Err((returned, SubmitError::Superseded | SubmitError::Removing)) => Some(Exit::Returned { unit: own(returned), retire: false }),
     }
 }
 
