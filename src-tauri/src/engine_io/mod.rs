@@ -171,6 +171,8 @@ pub(crate) mod tone;
 #[cfg(test)]
 pub(crate) mod test_rig;
 #[cfg(test)]
+mod chain_tests;
+#[cfg(test)]
 mod tests;
 mod transition;
 pub(crate) mod unit_host;
@@ -185,7 +187,7 @@ use std::time::{Duration, Instant};
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
 use lf_engine::tuner::TunerFrame;
-use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, UnitProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -635,6 +637,12 @@ pub(crate) struct FeedDrain {
     pub(crate) scope_bin: u32,
     /// That engine's sample rate (0: no engine).
     pub(crate) rate: u32,
+    /// The chain model's snapshot read in the same `settings` + `ends` acquisition as the events (read by P6).
+    #[allow(dead_code)]
+    pub(crate) chains: chain::ChainRev,
+    /// True if [`Core::stash`] overflowed while the feed was stale (the feed sends a reset; read by P6).
+    #[allow(dead_code)]
+    pub(crate) stash_lost: bool,
 }
 
 /// Who takes `settings` or `ends` (`lock_at`): the input path (`EngineHost::send_all`), the feed
@@ -673,22 +681,19 @@ pub(crate) struct Core {
     pub(crate) engine_gen: AtomicU64,
     /// Each slot's port into the current engine (`None` before the first device opens).
     pub(crate) ports: [Mutex<Option<SlotPort>>; SLOT_COUNT],
-    /// Whose unit is in the engine for this slot: the installing [`SlotHost`]'s token, set by a
-    /// successful install and cleared (0) when the unit comes back; [`slot_host::ORPHAN`] once its owner
-    /// gave up on it (`SlotHost::abandon`).
-    pub(crate) holder: [AtomicU64; SLOT_COUNT],
-    /// The next [`SlotHost`]'s token (from 1).
-    pub(crate) next_token: AtomicU64,
-    /// The id each slot's unit was last installed under (`SlotHost::install` mints one per install, so
-    /// a reinstall never meets its own removal's id in the engine).
-    pub(crate) unit_ids: [AtomicU32; SLOT_COUNT],
-    /// The next unit id to mint (never 0).
-    pub(crate) next_unit: AtomicU32,
+    /// The install table, chain model and command gate under one lock.
+    /// Lock order: ports → settings → ends → stash → state; nothing is taken under `state`.
+    pub(crate) state: Mutex<unit_host::HostState>,
+    /// Engine events drained by a wait while the feed was stale (`EngineHost::wait_op`).
+    pub(crate) stash: Mutex<chain::Stash>,
+    /// Set during app shutdown so waits that meet `Held` stop at once (`EngineHost::set_closing`).
+    pub(crate) closing: AtomicBool,
+    /// Count of `Event::Seat` protocol mismatches (`Model::on_seat`).
+    pub(crate) chain_protocol_errors: AtomicU64,
+    /// Count of gated unit commands dropped because their unit left or missed `GATE_DEADLINE`.
+    pub(crate) gate_dropped: AtomicU64,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
     pub(crate) fault: AtomicBool,
-    /// Units the device side took out on its own (a rebuild), waiting for their plugin owner, with its
-    /// token: only that owner's [`SlotHost`] takes one back.
-    pub(crate) evicted: [Mutex<Option<(u64, Box<dyn UnitProcessor>)>>; SLOT_COUNT],
     /// A device callback runs or is about to: the owner sets it just before the streams start and
     /// clears it just after they drop. While it is false, a slot host may take the engine lock itself
     /// (`SlotHost`); while it is true, it waits for the callback to service its port.
@@ -761,18 +766,37 @@ pub trait RebuildHook: Send + Sync {
 }
 
 /// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix`, a `Transport`, a
-/// `Toggled` and a toggle's `Refused` are also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
-/// taker keeps), so no rebuild's replay lands between the pop and the projection.
-pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Event>, gen: u64, mut each: impl FnMut(Event)) {
+/// `Toggled` and a toggle's `Refused` are projected into `settings`, and `Seat`, `Chain` and
+/// `UnitParam` into `state` (and never passed to `each`): drained under `settings`, then `ends`, then
+/// `state` (the order every taker keeps), so no rebuild's replay lands between the pop and the projection.
+pub(crate) fn drain(
+    settings: &mut settings::Settings,
+    state: &mut unit_host::HostState,
+    events: &mut Consumer<Event>,
+    gen: u64,
+    protocol_errors: &AtomicU64,
+    mut each: impl FnMut(Event),
+) {
     while let Ok(event) = events.pop() {
         match event {
             Event::Mix { frame, lane, mix } => _ = settings.mixed(gen, frame, lane, &mix),
             Event::Transport { bpm, meter, .. } => _ = settings.transported(gen, bpm, meter),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
             Event::Refused { reason, .. } => settings.refused(gen, reason),
-            // A unit's seating is its chain host's answer (E2, `docs/unit-contract.md` §2); today each
-            // slot seats one unit and its owner reads the port, so nothing past here takes it.
-            Event::Seat { .. } | Event::Chain { .. } | Event::UnitParam { .. } => continue,
+            Event::Seat { slot, unit, op, outcome, .. } => {
+                let unit_host::HostState { table, model, .. } = state;
+                model.on_seat(gen, slot, unit, op, outcome, table, protocol_errors);
+                continue;
+            }
+            Event::Chain { slot, len, seats, .. } => {
+                let n = usize::from(len).min(seats.len());
+                state.model.on_chain(gen, slot, &seats[..n]);
+                continue;
+            }
+            Event::UnitParam { unit, param, value, .. } => {
+                state.model.on_unit_param(gen, unit, param, value);
+                continue;
+            }
             _ => {}
         }
         each(event);
@@ -809,12 +833,12 @@ impl Core {
             settings: Mutex::new(settings::Settings::default()),
             engine_gen: AtomicU64::new(0),
             ports: std::array::from_fn(|_| Mutex::new(None)),
-            holder: std::array::from_fn(|_| AtomicU64::new(0)),
-            next_token: AtomicU64::new(1),
-            unit_ids: std::array::from_fn(|_| AtomicU32::new(0)),
-            next_unit: AtomicU32::new(1),
+            state: Mutex::new(unit_host::HostState::new()),
+            stash: Mutex::new(chain::Stash::new()),
+            closing: AtomicBool::new(false),
+            chain_protocol_errors: AtomicU64::new(0),
+            gate_dropped: AtomicU64::new(0),
             fault: AtomicBool::new(false),
-            evicted: std::array::from_fn(|_| Mutex::new(None)),
             running: AtomicBool::new(false),
             rate: AtomicU32::new(0),
             max_block: AtomicU32::new(0),
@@ -843,6 +867,30 @@ impl Core {
 
     pub(crate) fn rate(&self) -> Option<u32> {
         Some(self.rate.load(Relaxed)).filter(|&r| r != 0)
+    }
+
+    pub(crate) fn chain_snapshot(&self) -> chain::ChainRev {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).model.snapshot()
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn slot_occupied(&self, slot: usize) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).table.slot_occupied(slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_has_evicted(&self, slot: usize) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).table.legacy_has_evicted(slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_occupied(&self, slot: usize) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).table.legacy_slot_occupied(slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_unit_id(&self, slot: usize) -> lf_engine::UnitId {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).table.legacy_unit_id(slot)
     }
 
     /// The tuner's input breaks here, unseen by the engine (a slot's capture channel changed, a device
@@ -1103,6 +1151,22 @@ impl EngineHost {
         for command in commands {
             match ends.as_mut() {
                 Some(ends) => {
+                    if let Some(id) = command.command.unit() {
+                        let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let deadline = state.gate_deadline;
+                        let expired = state.model.expire_reseats(Instant::now(), deadline);
+                        for exp in expired {
+                            let n = state.gate.drop_id(exp);
+                            if n > 0 {
+                                self.core.gate_dropped.fetch_add(n, Relaxed);
+                            }
+                        }
+                        if state.model.unit_gate_status(id) == chain::GateStatus::Reseating || state.gate.has(id) {
+                            state.gate.push(id, command);
+                            mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
+                            continue;
+                        }
+                    }
                     // Kept once the ring took it: a setting the engine never got must not reach a rebuild
                     // or an export either.
                     ends.commands.push(command).map_err(|_| {
@@ -1239,11 +1303,31 @@ impl EngineHost {
     /// both locks are released.
     pub(crate) fn drain_feed_taps(&self, out: &mut Vec<Event>, columns: Option<&mut Vec<ScopeBin>>, tuner: Option<&mut Vec<TunerFrame>>) -> FeedDrain {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
-        let none = |gen| FeedDrain { gen, overview: None, scope_bin: 0, rate: 0 };
-        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return none(self.core.engine_gen.load(Acquire)) };
+        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else {
+            let gen = self.core.engine_gen.load(Acquire);
+            return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot(), stash_lost: false };
+        };
         let gen = self.core.engine_gen.load(Acquire);
-        let Some(ends) = ends.as_mut() else { return none(gen) };
-        drain(&mut settings, &mut ends.events, gen, |e| out.push(e));
+        let mut stash_lost = false;
+        {
+            let mut stash = self.core.stash.lock().unwrap_or_else(|e| e.into_inner());
+            stash.mark_feed_drain(Instant::now());
+            if stash.generation == gen {
+                stash_lost = std::mem::take(&mut stash.lost);
+                out.extend(stash.events.drain(..));
+            } else {
+                stash.reset(gen);
+            }
+        }
+        let Some(ends) = ends.as_mut() else {
+            return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot(), stash_lost };
+        };
+        let chains = {
+            let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            drain(&mut settings, &mut state, &mut ends.events, gen, &self.core.chain_protocol_errors, |e| out.push(e));
+            unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state);
+            state.model.snapshot()
+        };
         let mut scope_bin = 0;
         if let Some(columns) = columns {
             while let Ok(column) = ends.scope.pop() {
@@ -1263,7 +1347,7 @@ impl EngineHost {
                 while ends.tuner.pop().is_ok() {}
             }
         }
-        FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate }
+        FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate, chains, stash_lost }
     }
 
     /// Move the engine's events into `out` (a lane's `Mix` reaches the settings memory on the way). The

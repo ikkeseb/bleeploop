@@ -242,7 +242,7 @@ impl Feed {
         self.tuner_frames.clear();
         // The events and the taps in one acquisition, so this tick's columns and tuner frames are the
         // engine whose events it took: a second drain could straddle a rebuild and mix the two.
-        let FeedDrain { gen, overview, scope_bin, rate } = self.host.drain_feed_taps(&mut self.drained, Some(&mut self.columns), Some(&mut self.tuner_frames));
+        let FeedDrain { gen, overview, scope_bin, rate, .. } = self.host.drain_feed_taps(&mut self.drained, Some(&mut self.columns), Some(&mut self.tuner_frames));
         self.scope_bin = scope_bin;
         if self.gen != Some(gen) {
             self.overview = overview;
