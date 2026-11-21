@@ -721,12 +721,12 @@ impl Engine {
         self.rack.offer(&mut self.feed);
         self.reserve_bypasses();
         self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() }, !open, !ending);
-        if let Some(blind) = self.rack.latch_record(open, ctx.input_frames.min(self.config.max_input_frames)) {
-            // The record tap's timing changed (an edit, a live flag; the alignment or one slot's delay
-            // to it) while no capture held it: what AUTO listening retained came at the old one, its
-            // onset is dated by the new one, and the tap carries what was on its way at the old one
-            // until the change has passed through every path it moved.
-            self.looper.cut_listening_until(start + blind);
+        if let Some(until) = self.rack.latch_record(open, ctx.input_frames.min(self.config.max_input_frames), start) {
+            // The record tap's timing may have changed (a chain edit, a live flag: the alignment or a
+            // slot's delay to it) while no capture held it: what AUTO listening retained came at the old
+            // one, its onset is dated by the new one, and the tap carries what was on its way at the old
+            // one until `until`, past the longest path to it (`Rack::latch_record`).
+            self.looper.cut_listening_until(until);
         }
         let mut live_latency = self.rack.record_latency();
         if ctx.xrun || ctx.damaged {
@@ -772,8 +772,8 @@ impl Engine {
                 // start nothing captures on.
                 self.rack.release_hold(start, first, holds);
                 if !holds {
-                    if let Some(blind) = self.rack.latch_record(true, input_frames) {
-                        self.looper.cut_listening_until(start + blind);
+                    if let Some(until) = self.rack.latch_record(true, input_frames, start) {
+                        self.looper.cut_listening_until(until);
                     }
                     live_latency = self.rack.record_latency();
                     align = base_align + live_latency;

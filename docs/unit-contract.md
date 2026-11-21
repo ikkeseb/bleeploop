@@ -337,7 +337,9 @@ implement it for plugins (`host/clap_engine.rs`, `vst3_engine.rs`, `vst2_engine.
   changes a chain's sum OR its role (input-fed ↔ source, in or out of the live set: a zero-latency source
   included) stays in its port, the slot's later messages behind it, until no capture holds the alignment,
   answered `waiting` (`ChainState.held`); the engine judges it at a block start. Any other edit, a move
-  and a bypass apply at once.
+  and a bypass apply at once. After any edit that can move audio in time, AUTO REC's listening ignores
+  the tap for a fade plus the longest delay any path to it had or has (`Rack::latch_record`): sound
+  rendered at the old timing never starts a take.
 - **One port for plugins and built-ins;** an eviction hands back every seat and every waiting install.
 - **The lanes are stereo:** interleaved `[f32; 2]` frames in the looper's pool (`looper.rs`), one index per
   job, reversal and edge. Eleven 60 s buffers: 126.7 → 253.4 MB at 48 kHz (116.4 → 232.8 at 44.1). Lane FX
