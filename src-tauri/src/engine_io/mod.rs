@@ -1186,10 +1186,25 @@ impl EngineHost {
                                 self.core.gate_dropped.fetch_add(n, Relaxed);
                             }
                         }
-                        if state.model.unit_gate_status(id) == chain::GateStatus::Reseating || state.gate.has(id) {
-                            state.gate.push(id, command);
-                            mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
-                            continue;
+                        match state.model.unit_gate_status(id) {
+                            chain::GateStatus::Reseating => {
+                                state.gate.push(id, command);
+                                mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
+                                continue;
+                            }
+                            chain::GateStatus::Gone => {
+                                let n = state.gate.drop_id(id);
+                                self.core.gate_dropped.fetch_add(n + 1, Relaxed);
+                                mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
+                                continue;
+                            }
+                            chain::GateStatus::Seated => {
+                                if state.gate.has(id) {
+                                    state.gate.push(id, command);
+                                    mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
+                                    continue;
+                                }
+                            }
                         }
                     }
                     // Kept once the ring took it: a setting the engine never got must not reach a rebuild

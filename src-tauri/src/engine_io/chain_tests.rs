@@ -11,7 +11,7 @@ use lf_engine::{
     TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitParam, UnitProcessor,
 };
 
-use super::chain::{PlateState, PluginRef};
+use super::chain::{PlateState, PluginRef, UNOWNED_KEEP};
 use super::fake_driver::{Fake, FakeDriver};
 use super::test_rig::TestDevice;
 use super::unit_host::{Activated, Back, BuiltinFactory, Op, OpState, Params, Removal, Spec, SubmitError, Terms, Unit, GATE_DEADLINE};
@@ -1933,6 +1933,38 @@ fn d1_astra2_held_remove_holds_box_and_reserves_id_until_settle() {
     assert_eq!(box_r.into_any().downcast::<LatentUnit>().unwrap().tag, 303);
     assert!(u.take_back().is_none(), "terminal box delivered exactly once");
     u.release();
+
+    // Part B (D1 review): release the owner row while the Remove is still Held so `is_id_reserved`
+    // is false; `host.unit(id)` must still be refused by the live-plate guard until Remove settles.
+    let u2 = host.unit(0, 31, Spec::Plugin(plugin_ref("lat2")), 0, false).unwrap();
+    u2.activated(Activated { name: "lat2".into(), source: false, latency: 64 });
+    let op_in2 = ok_op(u2.submit(LatentUnit::new(304, 64, stops.clone()), t));
+    assert_eq!(host.wait_op(op_in2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    start_take(&device);
+    let op_w2 = u2.withdraw().unwrap();
+    let Removal::Sent(op_rem2) = host.remove_unit(31).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(op_w2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(15));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while u2.poll(op_rem2) != OpState::Held {
+        assert!(Instant::now() < deadline, "remove 2 never reached Held");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(u2.take_back_for_shutdown().is_some(), "claim held box before releasing owner");
+    u2.release();
+    assert!(
+        !host.core.state.lock().unwrap().table.is_id_reserved(31),
+        "owner row is gone after release"
+    );
+    assert!(
+        host.unit(0, 31, Spec::Plugin(plugin_ref("dup2")), 0, false).is_err(),
+        "id must remain reserved after owner release while Leaving plate stands"
+    );
+    stop_take(&device);
+    assert_eq!(host.wait_op(op_rem2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let fresh = host.unit(0, 31, Spec::Plugin(plugin_ref("fresh")), 0, false).expect("id free after settle");
+    fresh.release();
 }
 
 /// 29. Round D1 / X1 (Rule 3): a reload candidate submitted after a queued removal returns
@@ -2448,4 +2480,691 @@ fn d1_cr5_different_id_source_replacing_parked_source_delivers_dismissed() {
     assert_eq!(engine_chain_ids(&device, 0), vec![(20, false)]);
     a.release();
     b.release();
+}
+
+/// 38. Round D2 / Astra 3: reserving an id drops any stale gated commands left behind by an
+///     earlier immediate removal under the same id.
+#[test]
+fn d2_astra3_unit_reservation_drops_stale_gated_commands_for_same_id() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let applied = ParamRecorder::new();
+
+    let u1 = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: vec![] }, 0, false).unwrap();
+    let t1 = u1.terms().unwrap();
+    let op1 = ok_op(u1.submit(ClampEcho::new(0.5, 0, applied.clone()), t1));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.rebuild_at(44_100, 256);
+    let Back::Evicted { unit: ev_box, .. } = u1.take_back().expect("evicted") else { panic!("expected Evicted") };
+    drop(ev_box);
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    assert!(host.core.state.lock().unwrap().gate.has(10));
+
+    assert_eq!(host.remove_unit(10).unwrap(), Removal::Plate);
+    assert!(matches!(u1.take_back(), Some(Back::Dismissed)));
+    u1.release();
+
+    let u2 = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: vec![] }, 0, false).unwrap();
+    let t2 = u2.terms().unwrap();
+    let op2 = ok_op(u2.submit(ClampEcho::new(0.5, 0, applied), t2));
+    assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert!(device.wait_blocks(5));
+    ev.clear();
+    host.drain_feed(&mut ev);
+
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false)], "stale gated bypass must not reach new unit");
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 1, "stale gated command must be counted as dropped");
+    u2.release();
+}
+
+/// 39. Round D2 / Astra 6(a) + counter-read `push_all` Gone: a withdrawn seat expires after
+///     `GATE_DEADLINE`, drops its gated commands, marks the plate `Failed`, and drops further sends
+///     instead of forwarding them to the still-withdrawn seat; a late submit still seats cleanly.
+#[test]
+fn d2_astra6a_withdrawn_seat_expires_after_deadline_and_push_all_drops_gone() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let applied = ParamRecorder::new();
+
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: vec![] }, 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op1 = ok_op(u.submit(ClampEcho::new(0.5, 0, applied), t));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let t0 = Instant::now();
+    host.core.state.lock().unwrap().model.set_clock(t0);
+    let op_w = u.withdraw().unwrap();
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let box_w = loop {
+        if let Some(Back::Withdrawn { unit, .. }) = u.take_back() {
+            break unit;
+        }
+        assert!(Instant::now() < deadline, "withdrawn box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    assert!(host.core.state.lock().unwrap().gate.has(10), "bypass gated while withdrawn");
+
+    host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(1));
+    let mut ev = Vec::new();
+    let drain = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 1, "withdrawn gate expired and dropped");
+    assert_eq!(drain.chains.chains[0].units[0].state, PlateState::Failed, "expired withdrawn plate reads Failed");
+    assert!(!host.core.state.lock().unwrap().gate.has(10));
+
+    // A further send after expiry must be dropped and counted (not gated, and not forwarded to the
+    // still-withdrawn seat where the engine would retain the bypass).
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 2, "post-expiry send counted as dropped");
+    assert!(!host.core.state.lock().unwrap().gate.has(10), "post-expiry send must not enter gate");
+
+    let op2 = ok_op(u.submit(box_w, t));
+    assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(5));
+    ev.clear();
+    host.drain_feed(&mut ev);
+    assert_eq!(host.core.chain_snapshot().chains[0].units[0].state, PlateState::Seated);
+    assert_eq!(
+        engine_chain_ids(&device, 0),
+        vec![(10, false)],
+        "post-expiry bypass must not have been retained by the withdrawn seat"
+    );
+    u.release();
+}
+
+/// 40. Round D2 / counter-read sharpening 1: delaying Withdraw `Applied` until after a timely
+///     resubmit (held during a take) must not arm `reseating_since` and drop valid commands at 15 s.
+#[test]
+fn d2_cr_timely_resubmit_during_take_not_expired_by_delayed_withdraw_applied() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("p")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let op1 = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), t));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let t0 = Instant::now();
+    host.core.state.lock().unwrap().model.set_clock(t0);
+    start_take(&device);
+
+    // Withdraw during the take, but do NOT drain events yet: the engine applies Withdraw and returns
+    // the box while Event::Seat(Withdraw, Applied) waits in the event ring.
+    let _op_w = u.withdraw().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let box_w = loop {
+        if let Some(Back::Withdrawn { unit, .. }) = u.take_back() {
+            break unit;
+        }
+        assert!(Instant::now() < deadline, "withdrawn box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    drop(box_w);
+
+    // Timely resubmit with changed latency during the take: the engine holds it (`Waiting`).
+    let op_in = ok_op(u.submit(LatentUnit::new(2, 64, stops), t));
+    assert!(device.wait_blocks(10));
+
+    // Now drain: Withdraw Applied arrives AFTER submit, followed by Install Waiting.
+    let mut ev = Vec::new();
+    let drain = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(host.core.state.lock().unwrap().poll(op_in), OpState::Held);
+    assert_eq!(drain.chains.chains[0].units[0].state, PlateState::Waiting);
+
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    assert!(host.core.state.lock().unwrap().gate.has(10));
+
+    host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(1));
+    ev.clear();
+    let after = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 0, "timely held resubmit must not expire");
+    assert_eq!(after.chains.chains[0].units[0].state, PlateState::Waiting);
+    assert!(host.core.state.lock().unwrap().gate.has(10));
+
+    stop_take(&device);
+    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    ev.clear();
+    host.drain_feed_taps(&mut ev, None, None);
+    assert!(device.wait_blocks(5));
+    ev.clear();
+    host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "held resubmit receives its gated bypass");
+    u.release();
+}
+
+/// 41. Round D2 / Astra 6(b): a submit arriving past `GATE_DEADLINE` with no intervening flush
+///     expires the overdue gate before clearing the reseat timer.
+#[test]
+fn d2_astra6b_late_submit_expires_overdue_gate_before_clearing_timer() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("p")), 0, false).unwrap();
+    let t1 = u.terms().unwrap();
+    let op1 = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), t1));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let t0 = Instant::now();
+    host.core.state.lock().unwrap().model.set_clock(t0);
+    device.rebuild_at(44_100, 256);
+    let Back::Evicted { unit: ev_box, .. } = u.take_back().expect("evicted") else { panic!("expected Evicted") };
+    drop(ev_box);
+
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    assert!(host.core.state.lock().unwrap().gate.has(10));
+
+    // Start the take before advancing the clock so `start_take`'s drain does not expire the timer.
+    start_take(&device);
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 0);
+    assert!(host.core.state.lock().unwrap().gate.has(10));
+
+    // Advance past GATE_DEADLINE with NO drain, then submit a latent unit (held by the take).
+    host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(1));
+    let t2 = u.terms().unwrap();
+    let op2 = ok_op(u.submit(LatentUnit::new(2, 64, stops), t2));
+    assert_eq!(host.core.gate_dropped.load(SeqCst), 1, "late submit must expire overdue gate at once");
+    assert!(!host.core.state.lock().unwrap().gate.has(10));
+
+    stop_take(&device);
+    assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false)]);
+    u.release();
+}
+
+/// 42. Round D2 / Astra 4: two pending installs of the same row across a rebuild (one refused and
+///     reaped while the event ring is full, followed by an applied retry) settle independently.
+#[test]
+fn d2_astra4_rebuild_settles_refused_and_applied_installs_of_same_row_separately() {
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    fill_event_ring(&device);
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("retry")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let past = max_chain_latency(48_000) + 1;
+    let op1 = ok_op(u.submit(LatentUnit::new(1, past, stops.clone()), t));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(Back::Refused { why, .. }) = u.take_back() {
+            assert_eq!(why, SeatRefusal::Latency);
+            break;
+        }
+        assert!(Instant::now() < deadline, "refused box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    let op2 = ok_op(u.submit(LatentUnit::new(2, 0, stops), t));
+    assert!(device.wait_blocks(5));
+
+    device.rebuild_at(44_100, 256);
+    assert_eq!(u.poll(op1), OpState::Refused(SeatRefusal::Latency), "first install must settle Refused");
+    assert_eq!(u.poll(op2), OpState::Applied, "second install must settle Applied");
+    assert!(matches!(u.take_back(), Some(Back::Evicted { .. })));
+    u.release();
+}
+
+/// 43. Round D2 / counter-read sharpening 2 (receipts): reaping a refused install while the event
+///     ring is full and releasing its owner before a rebuild still settles that op `Refused`, not `Rebuilt`.
+#[test]
+fn d2_cr_refused_install_receipt_survives_release_across_rebuild() {
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    fill_event_ring(&device);
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("rel")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let past = max_chain_latency(48_000) + 1;
+    let op1 = ok_op(u.submit(LatentUnit::new(1, past, stops), t));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(Back::Refused { why, .. }) = u.take_back() {
+            assert_eq!(why, SeatRefusal::Latency);
+            break;
+        }
+        assert!(Instant::now() < deadline, "refused box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    u.release();
+
+    device.rebuild_at(44_100, 256);
+    assert_eq!(
+        host.wait_op(op1, Duration::from_millis(50)).unwrap(),
+        OpState::Refused(SeatRefusal::Latency),
+        "refused install receipt must outlive owner release until op settles"
+    );
+}
+
+/// 44. Round D2 / Astra 5: two queued moves (`C->0`, then `B->0`) across a rebuild restore the
+///     engine's order `[B, C, A]` in both the model and the rebuilt engine.
+#[test]
+fn d2_astra5_two_queued_moves_restore_engine_order_across_rebuild() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let ua = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 0, false).unwrap();
+    let ub = host.unit(0, 20, Spec::Plugin(plugin_ref("b")), 1, false).unwrap();
+    let uc = host.unit(0, 30, Spec::Plugin(plugin_ref("c")), 2, false).unwrap();
+    let t1 = ua.terms().unwrap();
+    for u in [&ua, &ub, &uc] {
+        let op = ok_op(u.submit(LatentUnit::new(u.id(), 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+
+    device.stop();
+    let op_m1 = host.move_unit(30, 0).unwrap();
+    let op_m2 = host.move_unit(20, 0).unwrap();
+    device.rebuild_at(44_100, 256);
+    assert_eq!(uc.poll(op_m1), OpState::Applied);
+    assert_eq!(ub.poll(op_m2), OpState::Applied);
+
+    let model_ids: Vec<UnitId> = host.core.chain_snapshot().chains[0].units.iter().map(|u| u.id).collect();
+    assert_eq!(model_ids, vec![20, 30, 10], "model must match engine order [B, C, A]");
+
+    let t2 = ua.terms().unwrap();
+    for u in [&ua, &ub, &uc] {
+        let Back::Evicted { unit, .. } = u.take_back().expect("evicted") else { panic!("expected Evicted") };
+        let op = ok_op(u.submit(unit, t2));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+    assert_eq!(engine_chain_ids(&device, 0), vec![(20, false), (30, false), (10, false)]);
+    ua.release();
+    ub.release();
+    uc.release();
+}
+
+/// 45. Round D2 / counter-read sharpening 2 (moves): queueing an over-budget install X at index 0
+///     ahead of `C->1` leaves `[A, C, B]` when idle service refuses X across a rebuild.
+#[test]
+fn d2_cr_move_behind_refused_overbudget_install_restores_engine_order_across_rebuild() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let ua = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 0, false).unwrap();
+    let ub = host.unit(0, 20, Spec::Plugin(plugin_ref("b")), 1, false).unwrap();
+    let uc = host.unit(0, 30, Spec::Plugin(plugin_ref("c")), 2, false).unwrap();
+    let t1 = ua.terms().unwrap();
+    for u in [&ua, &ub, &uc] {
+        let op = ok_op(u.submit(LatentUnit::new(u.id(), 0, stops.clone()), t1));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+
+    device.stop();
+    let ux = host.unit(0, 40, Spec::Plugin(plugin_ref("x")), 0, false).unwrap();
+    let past = max_chain_latency(48_000) + 1;
+    let op_x = ok_op(ux.submit(LatentUnit::new(40, past, stops.clone()), t1));
+    let op_mv = host.move_unit(30, 1).unwrap();
+
+    device.rebuild_at(44_100, 256);
+    assert_eq!(ux.poll(op_x), OpState::Refused(SeatRefusal::Latency));
+    assert_eq!(uc.poll(op_mv), OpState::Applied);
+    assert!(matches!(ux.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
+    ux.failed("latency".into());
+    ux.release();
+
+    let survivors: Vec<UnitId> = host
+        .core
+        .chain_snapshot()
+        .chains[0]
+        .units
+        .iter()
+        .filter(|u| u.id != 40)
+        .map(|u| u.id)
+        .collect();
+    assert_eq!(survivors, vec![10, 30, 20], "survivor order must match engine [A, C, B]");
+
+    let t2 = ua.terms().unwrap();
+    for u in [&ua, &ub, &uc] {
+        let Back::Evicted { unit, .. } = u.take_back().expect("evicted") else { panic!("expected Evicted") };
+        let op = ok_op(u.submit(unit, t2));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false), (30, false), (20, false)]);
+    ua.release();
+    ub.release();
+    uc.release();
+}
+
+/// 46. Round D2 / Astra 8: an unowned settled remove outcome survives >256 later completions within
+///     `UNOWNED_KEEP` (60 s), and may evict once older than `UNOWNED_KEEP`.
+#[test]
+fn d2_astra8_unowned_remove_outcome_survives_count_past_256_until_age_deadline() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    device.stop();
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u10 = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 0, false).unwrap();
+    let u20 = host.unit(0, 20, Spec::Plugin(plugin_ref("b")), 1, false).unwrap();
+    let u30 = host.unit(0, 30, Spec::Plugin(plugin_ref("c")), 2, false).unwrap();
+    let t = u10.terms().unwrap();
+    for u in [&u10, &u20, &u30] {
+        let op = ok_op(u.submit(LatentUnit::new(u.id(), 0, stops.clone()), t));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+
+    let t0 = Instant::now();
+    host.core.state.lock().unwrap().model.set_clock(t0);
+
+    let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+    super::unit_host::service_if_idle(&host.core);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(host.core.state.lock().unwrap().poll(op_rem), OpState::Applied);
+    assert!(matches!(u10.take_back(), Some(Back::Removed(_))));
+    u10.release();
+
+    for i in 0..300usize {
+        let target = if i % 2 == 0 { 1 } else { 0 };
+        let op_mv = host.move_unit(20, target).unwrap();
+        super::unit_host::service_if_idle(&host.core);
+        ev.clear();
+        host.drain_feed(&mut ev);
+        assert_eq!(u20.poll(op_mv), OpState::Applied);
+    }
+
+    assert_eq!(
+        host.wait_op(op_rem, Duration::from_millis(50)).unwrap(),
+        OpState::Applied,
+        "unowned remove outcome must survive >256 completions within 60 s"
+    );
+
+    // Once past UNOWNED_KEEP (60 s), one more completion allows the old entry to evict.
+    host.core.state.lock().unwrap().model.advance_clock(UNOWNED_KEEP + Duration::from_secs(1));
+    let op_mv = host.move_unit(20, 0).unwrap();
+    super::unit_host::service_if_idle(&host.core);
+    ev.clear();
+    host.drain_feed(&mut ev);
+    assert_eq!(u20.poll(op_mv), OpState::Applied);
+    assert_eq!(host.core.state.lock().unwrap().poll(op_rem), OpState::Pending, "expired unowned outcome evicted");
+
+    u20.release();
+    u30.release();
+}
+
+/// 47. Round D2 / should-fix: moves mint with token 0 so `Row::settled` does not grow with moves.
+#[test]
+fn d2_should_fix_moves_do_not_grow_row_settled() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    device.stop();
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let ua = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 0, false).unwrap();
+    let uc = host.unit(0, 30, Spec::Plugin(plugin_ref("c")), 1, false).unwrap();
+    let t = ua.terms().unwrap();
+    for u in [&ua, &uc] {
+        let op = ok_op(u.submit(LatentUnit::new(u.id(), 0, stops.clone()), t));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+
+    let mut ev = Vec::new();
+    for i in 0..100usize {
+        let target = if i % 2 == 0 { 0 } else { 1 };
+        let op_mv = host.move_unit(30, target).unwrap();
+        super::unit_host::service_if_idle(&host.core);
+        ev.clear();
+        host.drain_feed(&mut ev);
+        assert_eq!(uc.poll(op_mv), OpState::Applied);
+    }
+
+    let settled_len = host
+        .core
+        .state
+        .lock()
+        .unwrap()
+        .table
+        .active_row_for_id(30)
+        .expect("row 30")
+        .settled
+        .len();
+    assert!(settled_len <= 1, "moves must not accumulate in Row::settled (got {settled_len})");
+    ua.release();
+    uc.release();
+}
+
+/// 48. Round D2 / should-fix: a legacy install held during a take sets `model.slot_held(0)` true
+///     while `chain_snapshot().chains[0].held` stays false (even when `snapshot()` recomputes).
+#[test]
+fn d2_should_fix_chain_state_held_ignores_legacy_held_op() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    start_take(&device);
+    // Bump `rev` after `start_take`'s drain without taking a snapshot first, so the next
+    // `chain_snapshot()` recomputes while the legacy op is held.
+    let tmp = host.unit(0, 99, Spec::Plugin(plugin_ref("tmp")), 0, false).unwrap();
+    assert_eq!(host.remove_unit(99).unwrap(), Removal::Plate);
+    tmp.release();
+
+    let slot = host.slot(0);
+    let rate = slot.rate().unwrap();
+    slot.install(LatentUnit::new(1, 64, stops), rate).unwrap_or_else(|(_, e)| panic!("legacy install: {e}"));
+    assert!(device.wait_blocks(5));
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+
+    assert!(host.core.state.lock().unwrap().model.slot_held(0), "live slot_held must see held legacy op");
+    assert!(!host.core.chain_snapshot().chains[0].held, "ChainState.held must ignore legacy held ops");
+
+    stop_take(&device);
+    assert!(slot.remove(Duration::from_secs(2)).unwrap().is_some());
+}
+
+/// 49. Round D2 / D1 review 1: `failed()` and `release()` while a Remove is still pending must not
+///     free the id before the Remove settles.
+#[test]
+fn d2_d1r1_failed_and_release_during_pending_remove_keeps_id_reserved() {
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    fill_event_ring(&device);
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("lat")), 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let past = max_chain_latency(48_000) + 1;
+    let _op_in = ok_op(u.submit(LatentUnit::new(1, past, stops), t));
+
+    // Reap Back::Refused before Event::Seat(Install, Refused) drains.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(Back::Refused { why, .. }) = u.take_back() {
+            assert_eq!(why, SeatRefusal::Latency);
+            break;
+        }
+        assert!(Instant::now() < deadline, "refused box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // remove_unit still sees the pending install, sends Remove, marks plate Leaving.
+    let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
+    u.failed("latency".into());
+    u.release();
+
+    // Id 10 must stay reserved while op_rem is pending.
+    assert!(
+        host.unit(0, 10, Spec::Plugin(plugin_ref("dup")), 0, false).is_err(),
+        "id must stay reserved until pending Remove settles"
+    );
+
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Refused(SeatRefusal::Unknown));
+    let fresh = host.unit(0, 10, Spec::Plugin(plugin_ref("fresh")), 0, false).expect("id free after Remove settles");
+    fresh.release();
+}
+
+/// 50. Round D2 / D1 review 2: reserving a same-id reload candidate without submitting it must not
+///     turn a different-id source replacement into `Back::Superseded`.
+#[test]
+fn d2_d1r2_unsubmitted_reload_does_not_turn_different_id_source_replace_into_superseded() {
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let a = host.unit(0, 10, Spec::Plugin(plugin_ref("src_a")), 0, false).unwrap();
+    a.activated(Activated { name: "src_a".into(), source: true, latency: 0 });
+    let t = a.terms().unwrap();
+    let op_a = ok_op(a.submit(Box::new(LatentUnit { tag: 1, latency: 0, source: true, stops: stops.clone() }), t));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Reserve same-id reload B without submitting it.
+    let b = host.reload_unit(10, plugin_ref("src_b")).unwrap();
+
+    // Fill event ring so C's Applied event does not drain before A reaps its box.
+    fill_event_ring(&device);
+
+    let c = host.unit(0, 20, Spec::Plugin(plugin_ref("src_c")), 0, false).unwrap();
+    c.activated(Activated { name: "src_c".into(), source: true, latency: 0 });
+    let op_c = ok_op(c.submit(Box::new(LatentUnit { tag: 2, latency: 0, source: true, stops }), t));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let back_a = loop {
+        if let Some(back) = a.take_back() {
+            break back;
+        }
+        assert!(Instant::now() < deadline, "replaced source A never returned");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(
+        matches!(back_a, Back::Removed(_)),
+        "different-id replacement with only an unsubmitted reload candidate must deliver Removed, not Superseded"
+    );
+
+    assert_eq!(host.wait_op(op_c, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(a.take_back().is_none());
+    a.release();
+    b.release();
+    c.release();
+}
+
+/// 51. Round D2 / D1 review 3: legacy `SlotHost::remove` recovers a late-refused box immediately
+///     without holding it under `Leave::Pending`.
+#[test]
+fn d2_d1r3_legacy_remove_recovers_refused_box_without_holding() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let slot = host.slot(0);
+    let past = max_chain_latency(48_000) + 1;
+
+    // Stall audio callbacks by holding `core.rt` while `running` is true.
+    let mut rt = host.core.rt.lock().unwrap();
+    slot.install(LatentUnit::new(77, past, stops), 48_000).unwrap_or_else(|(_, e)| panic!("timed-out install stands: {e}"));
+    // Restart's remove queues Remove (sets Leave::Pending) and times out while callbacks are stalled.
+    assert!(slot.remove(Duration::from_millis(50)).is_err(), "remove times out while callbacks are stalled");
+
+    // Let the engine process one block (refuses Install and pushes box to return ring), then keep
+    // callbacks stalled (rt still held) before teardown's remove runs.
+    let (x, mut l, mut r) = (vec![0.0f32; 256], vec![0.0f32; 256], vec![0.0f32; 256]);
+    let ctx = lf_engine::ProcessContext { frame: 0, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+    rt.engine.as_mut().unwrap().process(&ctx, &x, &mut l, &mut r);
+
+    // Teardown's remove must recover the refused box immediately without waiting on another Remove.
+    let back = slot
+        .remove(Duration::from_millis(50))
+        .expect("teardown remove must recover refused box immediately")
+        .expect("a unit");
+    assert_eq!(back.into_any().downcast::<LatentUnit>().unwrap().tag, 77);
+    drop(rt);
+}
+
+/// 52. Round D2 / D1 review 4: when a different-id source replacement's `Left::Replaced` box is
+///     reaped before `Event::Seat(Applied)` drains, `finish_replaced` must not queue `Dismissed`
+///     behind the already-delivered `Removed`.
+#[test]
+fn d2_d1r4_different_id_replacement_reaped_first_delivers_no_second_terminal() {
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let a = host.unit(0, 10, Spec::Plugin(plugin_ref("src_a")), 0, false).unwrap();
+    a.activated(Activated { name: "src_a".into(), source: true, latency: 0 });
+    let t = a.terms().unwrap();
+    let op_a = ok_op(a.submit(Box::new(LatentUnit { tag: 1, latency: 0, source: true, stops: stops.clone() }), t));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    fill_event_ring(&device);
+    let c = host.unit(0, 20, Spec::Plugin(plugin_ref("src_c")), 0, false).unwrap();
+    c.activated(Activated { name: "src_c".into(), source: true, latency: 0 });
+    let op_c = ok_op(c.submit(Box::new(LatentUnit { tag: 2, latency: 0, source: true, stops }), t));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(back) = a.take_back() {
+            assert!(matches!(back, Back::Removed(_)), "first terminal must be Removed");
+            break;
+        }
+        assert!(Instant::now() < deadline, "replaced source A never returned");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // Now let C's Applied event drain (which calls finish_replaced(10)).
+    assert_eq!(host.wait_op(op_c, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(a.take_back().is_none(), "one terminal per row, ever: no Dismissed behind Removed");
+    a.release();
+    c.release();
+}
+
+/// 53. Round D2 / D1 review 5: a reload candidate cancelled by a rebuild calling `activated()`
+///     later must not overwrite the next candidate's activation metadata.
+#[test]
+fn d2_d1r5_cancelled_reload_activated_does_not_overwrite_next_candidate() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let a = host.unit(0, 10, Spec::Plugin(plugin_ref("v1")), 0, false).unwrap();
+    a.activated(Activated { name: "v1".into(), source: false, latency: 0 });
+    let t1 = a.terms().unwrap();
+    let op_a = ok_op(a.submit(LatentUnit::new(1, 0, stops.clone()), t1));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Reserve reload candidate B1, then rebuild (cancels B1).
+    let b1 = host.reload_unit(10, plugin_ref("v2")).unwrap();
+    device.rebuild_at(44_100, 256);
+
+    // Reseat A on the new engine.
+    let Back::Evicted { unit: box_a, .. } = a.take_back().expect("evicted A") else { panic!("expected Evicted") };
+    let t2 = a.terms().unwrap();
+    let op_a2 = ok_op(a.submit(box_a, t2));
+    assert_eq!(host.wait_op(op_a2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Start a fresh reload candidate B2 and publish its activation metadata.
+    let b2 = host.reload_unit(10, plugin_ref("v3")).unwrap();
+    b2.activated(Activated { name: "v3".into(), source: false, latency: 0 });
+
+    // Stale cancelled B1 now calls activated(): must touch nothing on the plate.
+    b1.activated(Activated { name: "stale-v2".into(), source: false, latency: 128 });
+    b1.release();
+
+    let op_b2 = ok_op(b2.submit(LatentUnit::new(3, 0, stops), t2));
+    assert_eq!(host.wait_op(op_b2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let unit_state = &host.core.chain_snapshot().chains[0].units[0];
+    assert_eq!(unit_state.name, "v3", "stale cancelled reload must not overwrite next candidate's name");
+    assert_eq!(unit_state.latency, 0, "stale cancelled reload must not overwrite next candidate's latency");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(back) = a.take_back() {
+            assert!(matches!(back, Back::Superseded(_)));
+            break;
+        }
+        assert!(Instant::now() < deadline, "superseded box A never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    a.release();
+    b2.release();
 }

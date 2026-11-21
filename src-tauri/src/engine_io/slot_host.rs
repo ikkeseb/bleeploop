@@ -110,6 +110,7 @@ impl SlotHost {
                     id_freed: false,
                     leave: Leave::Staying,
                     in_engine: RowEngineState::Out,
+                    install_op: None,
                     mailbox,
                     settled: BTreeMap::new(),
                     last_remove_settled: None,
@@ -128,6 +129,7 @@ impl SlotHost {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
             state.model.add_plate(self.slot, id, &Spec::Legacy, MAX_UNITS, false);
+            let op = state.model.mint_op(install, gen, self.slot);
             state.table.insert(Row {
                 token: install,
                 id,
@@ -140,12 +142,12 @@ impl SlotHost {
                 id_freed: false,
                 leave: Leave::Staying,
                 in_engine: RowEngineState::Queued { generation: gen },
+                install_op: Some(op.n()),
                 mailbox: VecDeque::new(),
                 settled: BTreeMap::new(),
                 last_remove_settled: None,
                 legacy_owner: self.token,
             });
-            let op = state.model.mint_op(install, gen, self.slot);
             state.model.push_pending(
                 self.slot,
                 PendingOp {

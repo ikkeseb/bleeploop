@@ -190,12 +190,16 @@ impl RowEngineState {
 pub(crate) enum Leave {
     Staying,
     /// A `Remove` op is pending in the engine: any non-terminal return (`Withdrawn`, `Evicted`,
-    /// `Refused`) is held here outside the mailbox until the removal settles.
+    /// `Refused`) is held here outside the mailbox until the removal settles (chain rows only;
+    /// legacy `SlotHost` rows deliver returning boxes immediately).
     Pending { held: Option<Back> },
     /// Removal settled (or immediate removal / different-id source replacement) while the box was
-    /// still in the engine or already in the owner's hand: any late non-terminal box becomes
-    /// `Back::Removed`, and `submit`/`withdraw` return `SubmitError::Removing`.
+    /// still in the engine: any late non-terminal box becomes `Back::Removed`, and
+    /// `submit`/`withdraw` return `SubmitError::Removing`.
     Settled,
+    /// A terminal `Back` (`Removed`, `Superseded`, or `Dismissed`) has already been delivered for
+    /// this row: no second terminal may ever be posted.
+    Done,
 }
 
 impl Leave {
@@ -226,6 +230,8 @@ pub(crate) struct Row {
     /// Removal state of this row (pending removal holds non-terminal returns outside `mailbox`).
     pub(crate) leave: Leave,
     pub(crate) in_engine: RowEngineState,
+    /// Op number (`Op::n`) of the latest install submitted on this row while it awaits settlement.
+    pub(crate) install_op: Option<u64>,
     pub(crate) mailbox: VecDeque<Back>,
     /// Terminal outcomes of ops belonging to this row, kept until the row is released so `poll` stays idempotent.
     pub(crate) settled: BTreeMap<u64, OpState>,
@@ -248,10 +254,9 @@ pub(crate) struct Table {
     next_token: InstallToken,
     next_legacy_id: UnitId,
     next_legacy_owner: u64,
-    /// What each live row last received from the engine since its last submit (its box's cause and
-    /// bypass), by install token: a rebuild settles a pending install from it when the reader filed
-    /// its box before its `Seat` was drained (`Model::settle_rebuild`).
-    received: BTreeMap<InstallToken, (Left, bool)>,
+    /// Returned-box receipts keyed by install op number (`Op::n`): kept until that install op
+    /// settles (`on_seat` or `Model::settle_rebuild`), even across owner release or a retry submit.
+    received: BTreeMap<u64, (Left, bool)>,
     /// For each live reload candidate token, the specific predecessor row token it was reserved to
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
@@ -339,9 +344,14 @@ impl Table {
     fn has_reload_replacing(&self, predecessor: InstallToken) -> bool {
         self.reload_predecessor.iter().any(|(&cand, &pred)| {
             pred == predecessor
-                && self
-                    .row(cand)
-                    .is_some_and(|r| r.is_reload && !r.released && !r.superseded)
+                && self.row(cand).is_some_and(|r| {
+                    r.is_reload
+                        && !r.released
+                        && !r.superseded
+                        && r.install_op.is_some_and(|op_n| {
+                            !matches!(self.received.get(&op_n), Some((Left::Refused(_), _)))
+                        })
+                })
         })
     }
 
@@ -373,17 +383,33 @@ impl Table {
             .find(|r| r.id == id && !r.released && !r.superseded && !r.is_reload)
     }
 
-    /// Row `token` was submitted to the engine of generation `gen`: it awaits a new answer.
-    pub(crate) fn mark_queued(&mut self, token: InstallToken, gen: u64) {
+    /// Row `token` was submitted to the engine of generation `gen` as `op_n`: it awaits a new answer.
+    pub(crate) fn mark_queued(&mut self, token: InstallToken, gen: u64, op_n: u64) {
         if let Some(row) = self.row_mut(token) {
             row.in_engine = RowEngineState::Queued { generation: gen };
+            row.install_op = Some(op_n);
         }
-        self.received.remove(&token);
     }
 
-    /// What row `token` received since its last submit ([`Table::received`]'s field).
-    pub(crate) fn received(&self, token: InstallToken) -> Option<(Left, bool)> {
-        self.received.get(&token).copied()
+    pub(crate) fn install_op(&self, token: InstallToken) -> Option<u64> {
+        self.row(token).and_then(|r| r.install_op)
+    }
+
+    pub(crate) fn clear_install_op(&mut self, token: InstallToken, op_n: u64) {
+        if let Some(row) = self.row_mut(token) {
+            if row.install_op == Some(op_n) {
+                row.install_op = None;
+            }
+        }
+    }
+
+    pub(crate) fn take_received(&mut self, op_n: u64) -> Option<(Left, bool)> {
+        self.received.remove(&op_n)
+    }
+
+    pub(crate) fn clear_install_receipt(&mut self, token: InstallToken, op_n: u64) {
+        self.received.remove(&op_n);
+        self.clear_install_op(token, op_n);
     }
 
     pub(crate) fn mark_seated(&mut self, token: InstallToken, gen: u64) {
@@ -462,9 +488,12 @@ impl Table {
     /// while the removal is outstanding.
     pub(crate) fn begin_remove(&mut self, token: InstallToken, gen: u64) {
         let Some(row) = self.row_mut(token) else { return };
+        if matches!(row.leave, Leave::Done) {
+            return;
+        }
         let mut held = match std::mem::replace(&mut row.leave, Leave::Staying) {
             Leave::Pending { held } => held,
-            Leave::Staying | Leave::Settled => None,
+            Leave::Staying | Leave::Settled | Leave::Done => None,
         };
         if held.is_none() {
             if let Some(idx) = row
@@ -486,15 +515,15 @@ impl Table {
 
     /// Transfer pending removal ownership to a reload candidate `token` that just promoted while a
     /// `Remove` op stands behind its install. If `token` already received `Left::Removed` before
-    /// `Event::Seat` drained, leave it `Staying` so `finish_remove` will not post a duplicate terminal.
+    /// `Event::Seat` drained, leave it `Done` so `finish_remove` will not post a duplicate terminal.
     pub(crate) fn transfer_remove_to_promoted(&mut self, token: InstallToken, gen: u64) {
-        let already_removed = self
-            .row(token)
-            .is_some_and(|r| r.in_engine == RowEngineState::Out)
-            && self
-                .received
-                .get(&token)
-                .is_some_and(|(left, _)| matches!(left, Left::Removed));
+        let already_removed = self.row(token).is_some_and(|r| {
+            matches!(r.leave, Leave::Done)
+                || (r.in_engine == RowEngineState::Out
+                    && r.install_op
+                        .and_then(|op_n| self.received.get(&op_n))
+                        .is_some_and(|(left, _)| matches!(left, Left::Removed)))
+        });
         if already_removed {
             return;
         }
@@ -504,7 +533,7 @@ impl Table {
     /// Settle a row whose `Remove` op applied: drains any box held in `Leave::Pending` as
     /// `Back::Removed`; if the box is already `Out` with nothing held, delivers `Back::Dismissed`;
     /// if the box is still in the engine (`in_engine != Out`), transitions to `Leave::Settled` so
-    /// `file_returned` converts it to `Back::Removed` on arrival.
+    /// `file_returned` converts it to `Back::Removed` on arrival. Never posts a second terminal.
     pub(crate) fn finish_remove(&mut self, token: InstallToken) {
         let Some(row) = self.row_mut(token) else { return };
         let held = match std::mem::replace(&mut row.leave, Leave::Settled) {
@@ -515,12 +544,14 @@ impl Table {
             }
         };
         if row.abandoned || row.released || row.superseded {
+            row.leave = Leave::Done;
             if let Some(back) = held {
                 forget_back(back);
             }
             return;
         }
         if let Some(back) = held {
+            row.leave = Leave::Done;
             if let Some(unit) = take_nonterminal_unit(back) {
                 row.mailbox.push_back(Back::Removed(unit));
             }
@@ -529,6 +560,7 @@ impl Table {
         if row.in_engine != RowEngineState::Out {
             return;
         }
+        row.leave = Leave::Done;
         for back in &mut row.mailbox {
             if matches!(back, Back::Withdrawn { .. } | Back::Evicted { .. } | Back::Refused { .. }) {
                 let old = std::mem::replace(back, Back::Dismissed);
@@ -544,7 +576,8 @@ impl Table {
     /// Settle every live row of `old_id` when another id's install replaced its seat
     /// (`replaces: Some(old_id)`): a parked/withdrawn owner whose box is already `Out` gets
     /// `Back::Dismissed` (or its unclaimed box converted to `Back::Removed`); a row whose box is
-    /// still in the engine enters `Leave::Settled` so arrival delivers `Back::Removed`.
+    /// still in the engine enters `Leave::Settled` so arrival delivers `Back::Removed`. Never posts
+    /// a second terminal once `Leave::Done` has been reached.
     pub(crate) fn finish_replaced(&mut self, old_id: UnitId) {
         for row in &mut self.rows {
             if row.id != old_id || row.released || row.abandoned || row.superseded {
@@ -555,11 +588,15 @@ impl Table {
                 self.reload_predecessor.remove(&row.token);
                 continue;
             }
+            if matches!(row.leave, Leave::Done) {
+                continue;
+            }
             let held = match std::mem::replace(&mut row.leave, Leave::Settled) {
                 Leave::Pending { held } => held,
-                Leave::Staying | Leave::Settled => None,
+                Leave::Staying | Leave::Settled | Leave::Done => None,
             };
             if let Some(back) = held {
+                row.leave = Leave::Done;
                 if let Some(unit) = take_nonterminal_unit(back) {
                     row.mailbox.push_back(Back::Removed(unit));
                 }
@@ -568,6 +605,7 @@ impl Table {
             if row.in_engine != RowEngineState::Out {
                 continue;
             }
+            row.leave = Leave::Done;
             let mut converted = false;
             for back in &mut row.mailbox {
                 if matches!(back, Back::Withdrawn { .. } | Back::Evicted { .. } | Back::Refused { .. }) {
@@ -627,19 +665,24 @@ impl Table {
             std::mem::forget(ret.unit);
             return;
         };
+        let install_op = {
+            let row = &mut self.rows[pos];
+            row.in_engine = RowEngineState::Out;
+            row.install_op
+        };
+        if let Some(op_n) = install_op {
+            self.received.insert(op_n, (ret.left, ret.bypassed));
+        }
         let row = &mut self.rows[pos];
-        row.in_engine = RowEngineState::Out;
         if row.abandoned || row.released {
             log::warn!("[engine_io] slot {slot}: an abandoned or released unit (id={}) came back; leaking it", ret.id);
             std::mem::forget(ret.unit);
             if row.released {
                 self.rows.remove(pos);
-                self.received.remove(&ret.token);
                 self.reload_predecessor.remove(&ret.token);
             }
             return;
         }
-        self.received.insert(ret.token, (ret.left, ret.bypassed));
 
         // A reload candidate's install refusal always surfaces as `Back::Refused`, never `Superseded`
         // or `Removed`, even if `Event::Seat(Refused)` drained first or a removal was queued behind it.
@@ -650,23 +693,31 @@ impl Table {
             }
         }
 
-        // `Left::Replaced` on a row that a same-id reload candidate was reserved to replace always
+        // `Left::Replaced` on a row that a submitted same-id reload candidate is replacing always
         // delivers `Back::Superseded`, even if reaped before `Event::Seat(Install, Applied)` drains.
         let replaced_by_reload = matches!(ret.left, Left::Replaced)
             && (self.rows[pos].superseded || self.has_reload_replacing(ret.token));
         let row = &mut self.rows[pos];
         if row.superseded || replaced_by_reload {
             row.superseded = true;
-            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Staying) {
+            if matches!(row.leave, Leave::Done) {
+                std::mem::forget(ret.unit);
+                return;
+            }
+            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Done) {
                 forget_back(old);
             }
             row.mailbox.push_back(Back::Superseded(ret.unit));
             return;
         }
 
-        // Terminal engine causes deliver `Back::Removed` immediately and clear `leave`.
+        // Terminal engine causes deliver `Back::Removed` immediately and mark `Leave::Done`.
         if matches!(ret.left, Left::Removed | Left::Replaced) {
-            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Staying) {
+            if matches!(row.leave, Leave::Done) {
+                std::mem::forget(ret.unit);
+                return;
+            }
+            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Done) {
                 forget_back(old);
             }
             row.mailbox.push_back(Back::Removed(ret.unit));
@@ -674,7 +725,11 @@ impl Table {
         }
 
         if pending_remove {
-            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Staying) {
+            if matches!(row.leave, Leave::Done) {
+                std::mem::forget(ret.unit);
+                return;
+            }
+            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Done) {
                 forget_back(old);
             }
             row.mailbox.push_back(Back::Removed(ret.unit));
@@ -687,6 +742,25 @@ impl Table {
             Left::Refused(why) => Back::Refused { unit: ret.unit, why },
             Left::Removed | Left::Replaced => unreachable!(),
         };
+        // Legacy `SlotHost` rows never hold boxes outside the mailbox: a returning box under a
+        // pending removal is delivered immediately so teardown recovers it without waiting.
+        if matches!(row.spec, Spec::Legacy) {
+            match &mut row.leave {
+                Leave::Pending { .. } | Leave::Settled => {
+                    row.leave = Leave::Done;
+                    if let Some(unit) = take_nonterminal_unit(nonterminal) {
+                        row.mailbox.push_back(Back::Removed(unit));
+                    }
+                }
+                Leave::Staying => {
+                    row.mailbox.push_back(nonterminal);
+                }
+                Leave::Done => {
+                    forget_back(nonterminal);
+                }
+            }
+            return;
+        }
         match &mut row.leave {
             Leave::Pending { held } => {
                 if let Some(old) = held.replace(nonterminal) {
@@ -694,13 +768,16 @@ impl Table {
                 }
             }
             Leave::Settled => {
-                row.leave = Leave::Staying;
+                row.leave = Leave::Done;
                 if let Some(unit) = take_nonterminal_unit(nonterminal) {
                     row.mailbox.push_back(Back::Removed(unit));
                 }
             }
             Leave::Staying => {
                 row.mailbox.push_back(nonterminal);
+            }
+            Leave::Done => {
+                forget_back(nonterminal);
             }
         }
     }
@@ -743,7 +820,6 @@ impl Table {
         }
         if row.in_engine == RowEngineState::Out {
             self.rows.remove(pos);
-            self.received.remove(&token);
         }
         remove_settled
     }
@@ -764,7 +840,6 @@ impl Table {
         }
         if row.released && row.in_engine == RowEngineState::Out {
             self.rows.remove(pos);
-            self.received.remove(&token);
         }
     }
 
@@ -1183,13 +1258,21 @@ impl UnitHost {
     /// The name, role and latency onto the plate.
     pub fn activated(&self, a: Activated) {
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
-        let is_reload = state.table.row(self.install).is_some_and(|r| r.is_reload);
+        let Some(row) = state.table.row(self.install) else { return };
+        if row.superseded || row.released || row.abandoned {
+            return;
+        }
+        let is_reload = row.is_reload;
         state.model.set_activated(self.slot, self.id, is_reload, a);
     }
 
     /// A built-in's params as its build clamped them.
     pub fn committed(&self, params: Params) {
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(row) = state.table.row(self.install) else { return };
+        if row.superseded || row.released || row.abandoned || row.is_reload {
+            return;
+        }
         state.model.set_committed(self.slot, self.id, params);
     }
 
@@ -1269,19 +1352,27 @@ impl UnitHost {
             return Err((unit, SubmitError::PortFull));
         }
 
-        state.table.mark_queued(self.install, cur_terms.generation);
-        if !is_reload {
-            if let Some((_, plate)) = state.model.find_plate_mut(self.id) {
-                // Submitting in time meets the reseat deadline; a submit held past it keeps its gate.
-                plate.reseating_since = None;
-                if plate.state == PlateState::Failed && !plate.parked {
-                    // Late submit after GATE_DEADLINE still seats it.
-                    plate.state = PlateState::Loading;
-                    plate.error = None;
-                }
+        // Expire any overdue reseat/withdrawal before clearing the timer so a late submit does not
+        // rescue commands that already outlived `GATE_DEADLINE`.
+        let deadline = state.gate_deadline;
+        let expired = state.model.expire_reseats(Instant::now(), deadline);
+        for exp in expired {
+            let n = state.gate.drop_id(exp);
+            if n > 0 {
+                self.core.gate_dropped.fetch_add(n, Relaxed);
             }
         }
         let op = state.model.mint_op(self.install, cur_terms.generation, self.slot);
+        state.table.mark_queued(self.install, cur_terms.generation, op.n());
+        if let Some((_, plate)) = state.model.find_plate_mut(self.id) {
+            // Submitting in time meets the reseat deadline; a submit held past it keeps its gate.
+            plate.reseating_since = None;
+            if plate.state == PlateState::Failed && !plate.parked {
+                // Late submit after GATE_DEADLINE still seats it.
+                plate.state = PlateState::Loading;
+                plate.error = None;
+            }
+        }
         state.model.push_pending(
             self.slot,
             PendingOp {
@@ -1411,23 +1502,33 @@ impl UnitHost {
     /// stays.
     pub fn parked(&self, why: String) {
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(row) = state.table.row(self.install) else { return };
+        if row.superseded || row.released || row.abandoned || row.is_reload || row.leave.is_leaving() {
+            return;
+        }
         state.model.mark_parked(self.slot, self.id, why);
     }
 
-    /// No seat: the plate reads `failed`, and the id is free.
+    /// No seat: the plate reads `failed`, and the id is free (unless a removal for it is still pending).
     pub fn failed(&self, why: String) {
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
-        let is_reload = state.table.row(self.install).is_some_and(|r| r.is_reload);
-        if is_reload {
+        let Some(row) = state.table.row(self.install) else { return };
+        if row.superseded || row.released || row.abandoned {
+            return;
+        }
+        if row.is_reload {
             if state.table.fail_reload(self.install) {
                 state.model.cancel_reloading(self.slot, self.id);
             }
-        } else {
-            if let Some(row) = state.table.row_mut(self.install) {
-                row.id_freed = true;
-            }
-            state.model.mark_failed(self.slot, self.id, why);
+            return;
         }
+        if row.leave.is_leaving() || state.model.has_pending_remove(self.id) {
+            return;
+        }
+        if let Some(row) = state.table.row_mut(self.install) {
+            row.id_freed = true;
+        }
+        state.model.mark_failed(self.slot, self.id, why);
     }
 
     /// The owner gives up on its unit: its box, if it ever comes, leaks.
@@ -1481,7 +1582,7 @@ impl EngineHost {
         } else if state.table.has_any_legacy() || state.model.has_legacy_plate() {
             return Err("legacy plugin slots are active in this run".to_string());
         }
-        if state.table.is_id_reserved(id) || state.model.has_live_plate(id) {
+        if state.table.is_id_reserved(id) || state.model.has_live_plate(id) || state.model.has_pending_remove(id) {
             return Err(format!("unit id {id} is already reserved"));
         }
         if !is_legacy && state.model.active_seat_count(slot) >= MAX_UNITS {
@@ -1490,6 +1591,12 @@ impl EngineHost {
             if !may_replace_source {
                 return Err(format!("slot {slot} seats no more units"));
             }
+        }
+        // Any gate entries still queued for `id` belong to a unit that is gone (e.g. an immediate
+        // removal after a rebuild): drop and count them before reserving the id again.
+        let dropped = state.gate.drop_id(id);
+        if dropped > 0 {
+            self.core.gate_dropped.fetch_add(dropped, Relaxed);
         }
         let token = state.table.mint_token();
         state.model.add_plate(slot, id, &spec, at, bypassed);
@@ -1505,6 +1612,7 @@ impl EngineHost {
             id_freed: false,
             leave: Leave::Staying,
             in_engine: RowEngineState::Out,
+            install_op: None,
             mailbox: VecDeque::new(),
             settled: BTreeMap::new(),
             last_remove_settled: None,
@@ -1555,6 +1663,7 @@ impl EngineHost {
             id_freed: false,
             leave: Leave::Staying,
             in_engine: RowEngineState::Out,
+            install_op: None,
             mailbox: VecDeque::new(),
             settled: BTreeMap::new(),
             last_remove_settled: None,
@@ -1594,9 +1703,9 @@ impl EngineHost {
         if failed_no_seat {
             state.model.remove_plate(slot, id);
             if let Some(tok) = owner_token {
-                if !state.table.row(tok).is_some_and(|r| r.id_freed) {
+                if !state.table.row(tok).is_some_and(|r| r.id_freed || matches!(r.leave, Leave::Done)) {
                     if let Some(row) = state.table.row_mut(tok) {
-                        row.leave = Leave::Settled;
+                        row.leave = Leave::Done;
                     }
                     state.table.post_back(tok, Back::Dismissed);
                 }
@@ -1610,31 +1719,33 @@ impl EngineHost {
             state.model.remove_plate(slot, id);
             if let Some(tok) = owner_token {
                 if let Some(row) = state.table.row_mut(tok) {
-                    let held = match std::mem::replace(&mut row.leave, Leave::Settled) {
-                        Leave::Pending { held } => held,
-                        Leave::Staying | Leave::Settled => None,
-                    };
-                    let mut converted = false;
-                    if let Some(back) = held {
-                        if let Some(unit) = take_nonterminal_unit(back) {
-                            row.mailbox.push_back(Back::Removed(unit));
-                            converted = true;
+                    if !matches!(row.leave, Leave::Done) {
+                        let held = match std::mem::replace(&mut row.leave, Leave::Done) {
+                            Leave::Pending { held } => held,
+                            Leave::Staying | Leave::Settled | Leave::Done => None,
+                        };
+                        let mut converted = false;
+                        if let Some(back) = held {
+                            if let Some(unit) = take_nonterminal_unit(back) {
+                                row.mailbox.push_back(Back::Removed(unit));
+                                converted = true;
+                            }
                         }
-                    }
-                    if !converted {
-                        for back in &mut row.mailbox {
-                            if matches!(back, Back::Evicted { .. } | Back::Withdrawn { .. } | Back::Refused { .. }) {
-                                let old = std::mem::replace(back, Back::Dismissed);
-                                if let Some(unit) = take_nonterminal_unit(old) {
-                                    *back = Back::Removed(unit);
-                                    converted = true;
-                                    break;
+                        if !converted {
+                            for back in &mut row.mailbox {
+                                if matches!(back, Back::Evicted { .. } | Back::Withdrawn { .. } | Back::Refused { .. }) {
+                                    let old = std::mem::replace(back, Back::Dismissed);
+                                    if let Some(unit) = take_nonterminal_unit(old) {
+                                        *back = Back::Removed(unit);
+                                        converted = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
-                    if !converted {
-                        row.mailbox.push_back(Back::Dismissed);
+                        if !converted {
+                            row.mailbox.push_back(Back::Dismissed);
+                        }
                     }
                 }
             }
@@ -1682,13 +1793,14 @@ impl EngineHost {
         let Some(port) = port_guard.as_mut() else {
             return Err("no audio device is open".to_string());
         };
-        let (to_plate, to_engine, before) = state.model.translate_move(slot, id, to)?;
+        let (to_plate, to_engine) = state.model.translate_move(slot, id, to)?;
         if !port.move_to(id, to_engine) {
             return Err(format!("slot {slot}'s port is full"));
         }
         let gen = self.core.engine_gen.load(Acquire);
-        let owner_token = state.table.active_row_for_id(id).map_or(0, |r| r.token);
-        let op = state.model.mint_op(owner_token, gen, slot);
+        // Moves mint with token 0 so their settled outcomes live in the unowned store instead of
+        // growing `Row::settled` unboundedly over the unit's lifetime.
+        let op = state.model.mint_op(0, gen, slot);
         state.model.push_pending(
             slot,
             PendingOp {
@@ -1696,7 +1808,7 @@ impl EngineHost {
                 unit: id,
                 seat_op: SeatOp::Move,
                 state: OpState::Pending,
-                kind: PendingKind::Move { to_plate, to_engine, before },
+                kind: PendingKind::Move { to_plate, to_engine },
             },
         );
         Ok(op)

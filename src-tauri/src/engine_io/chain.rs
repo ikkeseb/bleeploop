@@ -27,6 +27,9 @@ pub(crate) type PluginRef = crate::host::tone::ToneIdentity;
 /// Bound on settled op outcomes kept for ops without a live row (e.g. a `Remove` op whose owner
 /// already called `release`, or a rowless test op). Live rows keep all their own outcomes until release.
 const MAX_UNOWNED_SETTLED_OPS: usize = 256;
+/// Minimum age on the model's clock before an unowned settled outcome may be evicted past
+/// [`MAX_UNOWNED_SETTLED_OPS`]. Every `wait_op` caller is bounded well below this.
+pub(crate) const UNOWNED_KEEP: Duration = Duration::from_secs(60);
 
 /// Where a unit stands for the command gate ([`super::unit_host::Gate`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,10 +114,6 @@ pub(crate) enum PendingKind {
     Move {
         to_plate: usize,
         to_engine: usize,
-        /// The plates that followed the target when the move was pushed, in plate order (the mover
-        /// excluded): a rebuild lands it ahead of the first that still stands, so ops settled before
-        /// it (a removal ahead of it) do not shift it.
-        before: Vec<UnitId>,
     },
 }
 
@@ -141,6 +140,12 @@ impl SlotModel {
 
     fn held(&self) -> bool {
         self.pending.iter().any(|p| p.state == OpState::Held)
+    }
+
+    fn chain_held(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|p| p.state == OpState::Held && self.find(p.unit).is_some_and(|i| !self.plates[i].legacy))
     }
 
     fn retarget_pending_remove(&mut self, id: UnitId, new_owner: InstallToken) -> bool {
@@ -215,8 +220,8 @@ pub(crate) struct Model {
     pub(crate) rev: u64,
     next_op: u64,
     slots: [SlotModel; SLOT_COUNT],
-    /// Settled outcomes for ops with no live row (a `Remove` whose owner already released, or rowless test ops).
-    settled_unowned: VecDeque<(u64, OpState)>,
+    /// Settled outcomes for ops with no live row (a `Remove` whose owner already released, moves, or rowless test ops).
+    settled_unowned: VecDeque<(u64, OpState, Instant)>,
     cached_rev: u64,
     cached_chains: Arc<[ChainState; SLOT_COUNT]>,
     /// The last snapshot of the generation before `generation`, frozen as the model advanced: the feed
@@ -278,14 +283,20 @@ impl Model {
     }
 
     pub(crate) fn record_unowned_settled(&mut self, op_n: u64, state: OpState) {
-        if let Some((_, existing)) = self.settled_unowned.iter_mut().find(|(n, _)| *n == op_n) {
+        let now = self.now(Instant::now());
+        if let Some((_, existing, at)) = self.settled_unowned.iter_mut().find(|(n, _, _)| *n == op_n) {
             *existing = state;
+            *at = now;
             return;
         }
-        if self.settled_unowned.len() >= MAX_UNOWNED_SETTLED_OPS {
+        while self.settled_unowned.len() >= MAX_UNOWNED_SETTLED_OPS {
+            let Some(&(_, _, oldest)) = self.settled_unowned.front() else { break };
+            if now.saturating_duration_since(oldest) < UNOWNED_KEEP {
+                break;
+            }
             self.settled_unowned.pop_front();
         }
-        self.settled_unowned.push_back((op_n, state));
+        self.settled_unowned.push_back((op_n, state, now));
     }
 
     pub(crate) fn mint_op(&mut self, install: InstallToken, generation: u64, slot: usize) -> Op {
@@ -306,7 +317,7 @@ impl Model {
         if let Some(state) = table.settled(op) {
             return state;
         }
-        if let Some(&(_, state)) = self.settled_unowned.iter().rev().find(|&&(n, _)| n == op.n()) {
+        if let Some(&(_, state, _)) = self.settled_unowned.iter().rev().find(|&&(n, _, _)| n == op.n()) {
             return state;
         }
         let slot = usize::from(op.slot());
@@ -335,7 +346,7 @@ impl Model {
                     }
                     units.push(plate.to_unit_state());
                 }
-                ChainState { units, latency, held: slot.held() }
+                ChainState { units, latency, held: slot.chain_held() }
             });
             self.cached_chains = Arc::new(chains);
             self.cached_rev = self.rev;
@@ -611,6 +622,13 @@ impl Model {
             .map(|p| p.op)
     }
 
+    /// Whether `id` currently has a pending remove in any slot's queue.
+    pub(crate) fn has_pending_remove(&self, id: UnitId) -> bool {
+        self.slots
+            .iter()
+            .any(|s| s.pending.iter().any(|p| p.unit == id && matches!(p.kind, PendingKind::Remove { .. })))
+    }
+
     /// Whether `id` currently has a pending withdraw in `slot`'s queue.
     pub(crate) fn has_pending_withdraw(&self, slot: usize, id: UnitId) -> bool {
         self.slots[slot]
@@ -621,8 +639,7 @@ impl Model {
 
     /// Translate plate index `to_plate` for moving `id` within `slot` into the engine index when
     /// the pushed `Move` executes (accounting for failed plates and pending removals/installs ahead).
-    /// Also returns the plates that follow the target, the mover excluded (`PendingKind::Move::before`).
-    pub(crate) fn translate_move(&self, slot: usize, id: UnitId, to_plate: usize) -> Result<(usize, usize, Vec<UnitId>), String> {
+    pub(crate) fn translate_move(&self, slot: usize, id: UnitId, to_plate: usize) -> Result<(usize, usize), String> {
         let projected: Vec<(UnitId, bool)> = self.slots[slot].projected_engine_ids();
         if !projected.iter().any(|&(x, _)| x == id) {
             return Err(format!("unit {id} is not seated in slot {slot}"));
@@ -634,7 +651,7 @@ impl Model {
             .iter()
             .filter(|x| projected_set.contains(x))
             .count();
-        Ok((clamped_plate, engine_to, without[clamped_plate..].to_vec()))
+        Ok((clamped_plate, engine_to))
     }
 
     /// Project an `Event::Seat` into the model and table.
@@ -701,6 +718,7 @@ impl Model {
                                 table.transfer_remove_to_promoted(token, gen);
                             }
                         }
+                        table.clear_install_receipt(token, head.op.n());
                         if let Some(old_id) = replaces {
                             if old_id != unit {
                                 if let Some(old_pos) = self.slots[s].find(old_id) {
@@ -748,10 +766,17 @@ impl Model {
                         }
                     }
                     PendingKind::Withdraw => {
+                        let has_pending_install = self.has_pending_install(s, unit);
+                        let now = self.now(Instant::now());
                         if let Some(pos) = self.slots[s].find(unit) {
                             let plate = &mut self.slots[s].plates[pos];
                             plate.withdrawn = true;
                             plate.held = false;
+                            // Arm the withdrawal deadline only while this withdrawal still awaits a
+                            // resubmit (not if a timely resubmit is already pending/held, or parked/leaving).
+                            if !has_pending_install && !plate.parked && plate.state != PlateState::Leaving {
+                                plate.reseating_since = Some(now);
+                            }
                             rev_bump |= !plate.legacy;
                         }
                     }
@@ -775,6 +800,7 @@ impl Model {
                 let mut rev_bump = false;
                 match head.kind {
                     PendingKind::Install { token, is_reload, .. } => {
+                        table.clear_install_receipt(token, head.op.n());
                         if is_reload {
                             if table.fail_reload(token) {
                                 if let Some(pos) = self.slots[s].find(unit) {
@@ -869,37 +895,8 @@ impl Model {
         }
         // Reorder the plates whose ids appear in `seats` to match `seats`'s order, keeping
         // non-engine plates (e.g. failed-add plates or loading plates) in their relative slots.
-        let seat_set: BTreeSet<UnitId> = seat_ids.iter().copied().collect();
-        let positions: Vec<usize> = self.slots[s]
-            .plates
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| seat_set.contains(&p.id).then_some(i))
-            .collect();
-        if positions.len() > 1 {
-            let mut by_id: BTreeMap<UnitId, Plate> = BTreeMap::new();
-            for &pos in positions.iter().rev() {
-                let p = self.slots[s].plates.remove(pos);
-                by_id.insert(p.id, p);
-            }
-            let ordered: Vec<Plate> = seat_ids.iter().filter_map(|id| by_id.remove(id)).collect();
-            if ordered.len() == positions.len() {
-                let mut iter = ordered.into_iter();
-                for &pos in &positions {
-                    if let Some(p) = iter.next() {
-                        if !p.legacy {
-                            changed = true;
-                        }
-                        self.slots[s].plates.insert(pos, p);
-                    }
-                }
-            } else {
-                // Fallback if counts mismatched (should not happen): restore remaining.
-                for (pos, p) in positions.into_iter().zip(ordered.into_iter().chain(by_id.into_values())) {
-                    let idx = pos.min(self.slots[s].plates.len());
-                    self.slots[s].plates.insert(idx, p);
-                }
-            }
+        if reorder_plates(&mut self.slots[s].plates, &seat_ids) {
+            changed = true;
         }
         if changed {
             self.bump_rev();
@@ -957,22 +954,33 @@ impl Model {
         now: Instant,
     ) {
         let now = self.now(now);
-        // Index returned boxes by install token for pending-op settling.
-        let ret_info: BTreeMap<InstallToken, (Left, bool)> =
-            returned.iter().map(|(_, r)| (r.token, (r.left, r.bypassed))).collect();
+        // Index returned boxes by each row's latest install op for pending-op settling.
+        let ret_info: BTreeMap<u64, (Left, bool)> = returned
+            .iter()
+            .filter_map(|(_, r)| table.install_op(r.token).map(|op_n| (op_n, (r.left, r.bypassed))))
+            .collect();
 
         let mut rev_bump = false;
         let mut removed_owners: BTreeSet<InstallToken> = BTreeSet::new();
         let mut removed_finish: Vec<InstallToken> = Vec::new();
         let mut replaced_other_ids: Vec<UnitId> = Vec::new();
-        // 1. Settle every pending op in push order per slot.
+        // 1. Settle every pending op in push order per slot, replaying the engine's seat order
+        //    using each op's settled outcome so moves behind refused installs land accurately.
         for s in 0..SLOT_COUNT {
+            let mut engine_order: Vec<(UnitId, bool)> = self.slots[s]
+                .plates
+                .iter()
+                .filter(|p| p.seated_in_engine)
+                .map(|p| (p.id, p.source))
+                .collect();
             while let Some(head) = self.slots[s].pending.pop_front() {
                 match head.kind {
-                    PendingKind::Install { token, is_reload, replaces, .. } => {
-                        // The boxes this handoff collected, else what the row received since this
-                        // submit (a port reader may have filed its box before its `Seat` was drained).
-                        let left = ret_info.get(&token).copied().or_else(|| table.received(token));
+                    PendingKind::Install { token, is_reload, replaces, at, source } => {
+                        // The boxes this handoff collected, else what was filed for this op before
+                        // its `Seat` drained (kept even if the owner already released).
+                        let received = table.take_received(head.op.n());
+                        table.clear_install_op(token, head.op.n());
+                        let left = ret_info.get(&head.op.n()).copied().or(received);
                         match left {
                             Some((Left::Refused(why), _)) => {
                                 self.record_settled(table, head.op, OpState::Refused(why));
@@ -995,6 +1003,25 @@ impl Model {
                             }
                             Some((Left::Evicted | Left::Removed | Left::Withdrawn | Left::Replaced, bypassed)) => {
                                 self.record_settled(table, head.op, OpState::Applied);
+                                if let Some(old_id) = replaces {
+                                    if let Some(pos) = engine_order.iter().position(|&(x, _)| x == old_id) {
+                                        engine_order[pos] = (head.unit, source);
+                                    } else if let Some(pos) = engine_order.iter().position(|&(x, _)| x == head.unit) {
+                                        engine_order[pos].1 = source;
+                                    } else if source {
+                                        engine_order.insert(0, (head.unit, true));
+                                    } else {
+                                        let idx = at.min(engine_order.len());
+                                        engine_order.insert(idx, (head.unit, false));
+                                    }
+                                } else if let Some(pos) = engine_order.iter().position(|&(x, _)| x == head.unit) {
+                                    engine_order[pos].1 = source;
+                                } else if source {
+                                    engine_order.insert(0, (head.unit, true));
+                                } else {
+                                    let idx = at.min(engine_order.len());
+                                    engine_order.insert(idx, (head.unit, false));
+                                }
                                 if is_reload {
                                     table.promote_reload(token);
                                     self.slots[s].retarget_pending_remove(head.unit, token);
@@ -1034,6 +1061,7 @@ impl Model {
                     }
                     PendingKind::Remove { owner_token } => {
                         self.record_settled(table, head.op, OpState::Applied);
+                        engine_order.retain(|&(x, _)| x != head.unit);
                         if let Some(pos) = self.slots[s].find(head.unit) {
                             rev_bump |= !self.slots[s].plates[pos].legacy;
                             self.slots[s].plates.remove(pos);
@@ -1049,18 +1077,31 @@ impl Model {
                     PendingKind::Withdraw => {
                         self.record_settled(table, head.op, OpState::Applied);
                     }
-                    PendingKind::Move { before, .. } => {
-                        self.record_settled(table, head.op, OpState::Applied);
+                    PendingKind::Move { to_engine, .. } => {
+                        if let Some(pos) = engine_order.iter().position(|&(x, _)| x == head.unit) {
+                            let to = to_engine.min(engine_order.len() - 1);
+                            let role = engine_order.first().is_some_and(|&(_, src)| src);
+                            if pos != to && (engine_order[pos].1 || (to == 0 && role)) {
+                                self.record_settled(table, head.op, OpState::Refused(lf_engine::SeatRefusal::Placement));
+                            } else {
+                                let item = engine_order.remove(pos);
+                                engine_order.insert(to, item);
+                                self.record_settled(table, head.op, OpState::Applied);
+                            }
+                        } else {
+                            self.record_settled(table, head.op, OpState::Refused(lf_engine::SeatRefusal::Unknown));
+                        }
                         if let Some(pos) = self.slots[s].find(head.unit) {
-                            let mut plate = self.slots[s].plates.remove(pos);
+                            let plate = &mut self.slots[s].plates[pos];
                             plate.held = false;
                             rev_bump |= !plate.legacy;
-                            // The index as the model holds it after the ops before this one.
-                            let idx = before.iter().find_map(|&id| self.slots[s].find(id)).unwrap_or(self.slots[s].plates.len());
-                            self.slots[s].plates.insert(idx, plate);
                         }
                     }
                 }
+            }
+            let order_ids: Vec<UnitId> = engine_order.iter().map(|&(id, _)| id).collect();
+            if reorder_plates(&mut self.slots[s].plates, &order_ids) {
+                rev_bump = true;
             }
         }
 
@@ -1130,16 +1171,25 @@ impl Model {
         }
     }
 
-    /// Expire any reseating plate that was not re-submitted within `deadline` of its swap:
+    /// Expire any reseating or withdrawn plate that was not re-submitted within `deadline`:
     /// its plate reads `failed`, and its id is returned so the gate drops and counts its commands.
     pub(crate) fn expire_reseats(&mut self, now: Instant, deadline: Duration) -> Vec<UnitId> {
         let now = self.now(now);
         let mut expired = Vec::new();
         let mut rev_bump = false;
-        for slot in &mut self.slots {
-            for plate in &mut slot.plates {
+        for s in 0..SLOT_COUNT {
+            let pending_installs: BTreeSet<UnitId> = self.slots[s]
+                .pending
+                .iter()
+                .filter(|p| matches!(p.kind, PendingKind::Install { .. }))
+                .map(|p| p.unit)
+                .collect();
+            for plate in &mut self.slots[s].plates {
                 if let Some(since) = plate.reseating_since {
-                    if !plate.seated_in_engine && now.saturating_duration_since(since) >= deadline {
+                    if (!plate.seated_in_engine || plate.withdrawn)
+                        && !pending_installs.contains(&plate.id)
+                        && now.saturating_duration_since(since) >= deadline
+                    {
                         plate.reseating_since = None;
                         plate.state = PlateState::Failed;
                         plate.error = Some("unit did not reseat in time".to_string());
@@ -1161,20 +1211,69 @@ impl Model {
         let Some((slot, plate)) = self.find_plate(id) else {
             return GateStatus::Gone;
         };
-        if plate.parked && !self.has_pending_install(slot, id) {
+        let has_pending_install = self.has_pending_install(slot, id);
+        if plate.parked && !has_pending_install {
             return GateStatus::Gone;
         }
-        if plate.withdrawn || self.has_pending_withdraw(slot, id) {
+        if self.has_pending_withdraw(slot, id) || has_pending_install {
             return GateStatus::Reseating;
+        }
+        if plate.withdrawn {
+            return if plate.reseating_since.is_some() {
+                GateStatus::Reseating
+            } else {
+                GateStatus::Gone
+            };
         }
         if plate.seated_in_engine {
             GateStatus::Seated
-        } else if plate.reseating_since.is_some() || self.has_pending_install(slot, id) {
+        } else if plate.reseating_since.is_some() {
             GateStatus::Reseating
         } else {
             GateStatus::Gone
         }
     }
+}
+
+/// Reorder the plates whose ids appear in `order` to match `order`, keeping all other plates in
+/// their existing positions. Returns whether any non-legacy plate moved.
+fn reorder_plates(plates: &mut Vec<Plate>, order: &[UnitId]) -> bool {
+    let order_set: BTreeSet<UnitId> = order.iter().copied().collect();
+    let positions: Vec<usize> = plates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| order_set.contains(&p.id).then_some(i))
+        .collect();
+    if positions.len() <= 1 {
+        return false;
+    }
+    let before_ids: Vec<UnitId> = positions.iter().map(|&i| plates[i].id).collect();
+    let mut by_id: BTreeMap<UnitId, Plate> = BTreeMap::new();
+    for &pos in positions.iter().rev() {
+        let p = plates.remove(pos);
+        by_id.insert(p.id, p);
+    }
+    let ordered: Vec<Plate> = order.iter().filter_map(|id| by_id.remove(id)).collect();
+    let mut changed = false;
+    if ordered.len() == positions.len() {
+        let after_ids: Vec<UnitId> = ordered.iter().map(|p| p.id).collect();
+        let moved = before_ids != after_ids;
+        let mut iter = ordered.into_iter();
+        for &pos in &positions {
+            if let Some(p) = iter.next() {
+                if moved && !p.legacy {
+                    changed = true;
+                }
+                plates.insert(pos, p);
+            }
+        }
+    } else {
+        for (pos, p) in positions.into_iter().zip(ordered.into_iter().chain(by_id.into_values())) {
+            let idx = pos.min(plates.len());
+            plates.insert(idx, p);
+        }
+    }
+    changed
 }
 
 /// The model's snapshot for the feed: `FeedDrain` carries it, read in the same `settings` + `ends`

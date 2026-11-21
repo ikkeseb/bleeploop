@@ -38,9 +38,7 @@ import { notifyError } from '../notify';
 function subscribe<T>(event: string, handler: (payload: T) => void): () => void {
   let unlisten: UnlistenFn | null = null;
   let cancelled = false;
-  void listen<T>(event, (e) => {
-    if (!cancelled) handler(e.payload);
-  }).then((u) => {
+  void listen<T>(event, (e) => handler(e.payload)).then((u) => {
     if (cancelled) u();
     else unlisten = u;
   });
