@@ -111,6 +111,10 @@ pub(crate) enum PendingKind {
     Move {
         to_plate: usize,
         to_engine: usize,
+        /// The plates that followed the target when the move was pushed, in plate order (the mover
+        /// excluded): a rebuild lands it ahead of the first that still stands, so ops settled before
+        /// it (a removal ahead of it) do not shift it.
+        before: Vec<UnitId>,
     },
 }
 
@@ -201,6 +205,9 @@ pub(crate) struct Model {
     settled: BTreeMap<u64, OpState>,
     cached_rev: u64,
     cached_chains: Arc<[ChainState; SLOT_COUNT]>,
+    /// The last snapshot of the generation before `generation`, frozen as the model advanced: the feed
+    /// gets it while the swap has not yet published the new generation ([`Model::snapshot_for`]).
+    outgoing: ChainRev,
 }
 
 impl Model {
@@ -217,6 +224,7 @@ impl Model {
             slots: std::array::from_fn(|_| SlotModel::default()),
             settled: BTreeMap::new(),
             cached_rev: 0,
+            outgoing: ChainRev { generation: 0, rev: 0, chains: empty.clone() },
             cached_chains: empty,
         }
     }
@@ -285,7 +293,24 @@ impl Model {
             self.cached_chains = Arc::new(chains);
             self.cached_rev = self.rev;
         }
-        ChainRev { rev: self.rev, chains: self.cached_chains.clone() }
+        ChainRev { generation: self.generation, rev: self.rev, chains: self.cached_chains.clone() }
+    }
+
+    /// The snapshot for a drain that read engine generation `gen`: between the model's advance and the
+    /// swap's publish of `gen + 1` (under `settings` + `ends`), the old generation's last snapshot, so
+    /// a drain never pairs the new chains with the old engine's generation and overview.
+    pub(crate) fn snapshot_for(&mut self, gen: u64) -> ChainRev {
+        if gen != self.generation && gen == self.outgoing.generation {
+            return self.outgoing.clone();
+        }
+        self.snapshot()
+    }
+
+    /// Move to generation `next` (from then on the old generation's events are ignored), freezing the
+    /// old generation's last snapshot for the feed until the swap publishes `next`.
+    pub(crate) fn advance(&mut self, next: u64) {
+        self.outgoing = self.snapshot();
+        self.generation = next;
     }
 
     pub(crate) fn chain_told(&mut self, rev: u64, seq: u64) {
@@ -527,7 +552,8 @@ impl Model {
 
     /// Translate plate index `to_plate` for moving `id` within `slot` into the engine index when
     /// the pushed `Move` executes (accounting for failed plates and pending removals/installs ahead).
-    pub(crate) fn translate_move(&self, slot: usize, id: UnitId, to_plate: usize) -> Result<(usize, usize), String> {
+    /// Also returns the plates that follow the target, the mover excluded (`PendingKind::Move::before`).
+    pub(crate) fn translate_move(&self, slot: usize, id: UnitId, to_plate: usize) -> Result<(usize, usize, Vec<UnitId>), String> {
         let projected: Vec<(UnitId, bool)> = self.slots[slot].projected_engine_ids();
         if !projected.iter().any(|&(x, _)| x == id) {
             return Err(format!("unit {id} is not seated in slot {slot}"));
@@ -539,7 +565,7 @@ impl Model {
             .iter()
             .filter(|x| projected_set.contains(x))
             .count();
-        Ok((clamped_plate, engine_to))
+        Ok((clamped_plate, engine_to, without[clamped_plate..].to_vec()))
     }
 
     /// Project an `Event::Seat` into the model and table.
@@ -827,7 +853,7 @@ impl Model {
         for &(unit, param, value) in unsent_params {
             self.apply_unit_param(unit, param, value);
         }
-        self.generation = next;
+        self.advance(next);
     }
 
     /// Settle every pending op and plate after `old.evict_slots()` returned `returned`.
@@ -857,7 +883,10 @@ impl Model {
             while let Some(head) = self.slots[s].pending.pop_front() {
                 match head.kind {
                     PendingKind::Install { token, is_reload, replaces, .. } => {
-                        match ret_info.get(&token).copied() {
+                        // The boxes this handoff collected, else what the row received since this
+                        // submit (a port reader may have filed its box before its `Seat` was drained).
+                        let left = ret_info.get(&token).copied().or_else(|| table.received(token));
+                        match left {
                             Some((Left::Refused(why), _)) => {
                                 self.record_settled(head.op.n(), OpState::Refused(why));
                                 if is_reload {
@@ -925,13 +954,14 @@ impl Model {
                     PendingKind::Withdraw => {
                         self.record_settled(head.op.n(), OpState::Applied);
                     }
-                    PendingKind::Move { to_plate, .. } => {
+                    PendingKind::Move { before, .. } => {
                         self.record_settled(head.op.n(), OpState::Applied);
                         if let Some(pos) = self.slots[s].find(head.unit) {
                             let mut plate = self.slots[s].plates.remove(pos);
                             plate.held = false;
                             rev_bump |= !plate.legacy;
-                            let idx = to_plate.min(self.slots[s].plates.len());
+                            // The index as the model holds it after the ops before this one.
+                            let idx = before.iter().find_map(|&id| self.slots[s].find(id)).unwrap_or(self.slots[s].plates.len());
                             self.slots[s].plates.insert(idx, plate);
                         }
                     }
@@ -1036,6 +1066,8 @@ impl Model {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ChainRev {
+    /// The model generation it was read at (`Model::snapshot_for`).
+    pub generation: u64,
     pub rev: u64,
     pub chains: Arc<[ChainState; SLOT_COUNT]>,
 }

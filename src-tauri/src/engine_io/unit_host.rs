@@ -208,6 +208,10 @@ pub(crate) struct Table {
     next_token: InstallToken,
     next_legacy_id: UnitId,
     next_legacy_owner: u64,
+    /// What each live row last received from the engine since its last submit (its box's cause and
+    /// bypass), by install token: a rebuild settles a pending install from it when the reader filed
+    /// its box before its `Seat` was drained (`Model::settle_rebuild`).
+    received: BTreeMap<InstallToken, (Left, bool)>,
 }
 
 impl Table {
@@ -217,6 +221,7 @@ impl Table {
             next_token: 1,
             next_legacy_id: 1,
             next_legacy_owner: 1,
+            received: BTreeMap::new(),
         }
     }
 
@@ -302,6 +307,19 @@ impl Table {
             .find(|r| r.id == id && !r.released && !r.superseded)
     }
 
+    /// Row `token` was submitted to the engine of generation `gen`: it awaits a new answer.
+    pub(crate) fn mark_queued(&mut self, token: InstallToken, gen: u64) {
+        if let Some(row) = self.row_mut(token) {
+            row.in_engine = RowEngineState::Queued { generation: gen };
+        }
+        self.received.remove(&token);
+    }
+
+    /// What row `token` received since its last submit ([`Table::received`]'s field).
+    pub(crate) fn received(&self, token: InstallToken) -> Option<(Left, bool)> {
+        self.received.get(&token).copied()
+    }
+
     pub(crate) fn mark_seated(&mut self, token: InstallToken, gen: u64) {
         if let Some(row) = self.row_mut(token) {
             if row.in_engine == (RowEngineState::Queued { generation: gen }) {
@@ -364,9 +382,12 @@ impl Table {
             std::mem::forget(ret.unit);
             if row.released {
                 self.rows.remove(pos);
+                self.received.remove(&ret.token);
             }
             return;
         }
+        self.received.insert(ret.token, (ret.left, ret.bypassed));
+        let row = &mut self.rows[pos];
         let back = if row.superseded {
             // The outgoing row of a same-id reload never re-activates.
             Back::Superseded(ret.unit)
@@ -412,6 +433,7 @@ impl Table {
         }
         if row.in_engine == RowEngineState::Out {
             self.rows.remove(pos);
+            self.received.remove(&token);
         }
     }
 
@@ -425,6 +447,7 @@ impl Table {
         }
         if row.released && row.in_engine == RowEngineState::Out {
             self.rows.remove(pos);
+            self.received.remove(&token);
         }
     }
 
@@ -621,7 +644,7 @@ pub(crate) fn flush_gate_locked(core: &Core, settings: &mut Settings, ends: &mut
 /// First engine ever (no old engine to evict): advance the model's generation to `next`.
 pub(crate) fn begin_first_engine(core: &Core, next: u64) {
     let mut state = core.state.lock().unwrap_or_else(|e| e.into_inner());
-    state.model.generation = next;
+    state.model.advance(next);
 }
 
 /// The rebuild handoff, in `owner.rs` `swap_engine` with every port held (P2 replaces `evict` with it):
@@ -645,7 +668,14 @@ pub(crate) fn rebuild_handoff(
     let unsent_params: Vec<(UnitId, UnitParam, f64)> = old.unsent_unit_params().collect();
 
     {
+        // Its event ring first, under `ends` (ports → settings → ends → model): a `Seat`, `Chain` or
+        // `UnitParam` there is the only copy (the engine no longer owes it), and from `begin_rebuild`
+        // on the model ignores this generation. Peeked, not popped (`peek_unit_events`).
+        let mut ends = core.ends.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = core.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ends) = ends.as_mut() {
+            super::peek_unit_events(&mut state, &mut ends.events, old_gen, &core.chain_protocol_errors);
+        }
         state.model.begin_rebuild(next, &old_chains, &unsent_params);
     }
 
@@ -908,9 +938,7 @@ impl UnitHost {
         if is_reload {
             state.table.mark_outgoing_superseded(self.id, self.install);
         }
-        if let Some(row) = state.table.row_mut(self.install) {
-            row.in_engine = RowEngineState::Queued { generation: cur_terms.generation };
-        }
+        state.table.mark_queued(self.install, cur_terms.generation);
         if !is_reload {
             if let Some((_, plate)) = state.model.find_plate_mut(self.id) {
                 if plate.state == PlateState::Failed && !plate.parked {
@@ -1253,7 +1281,7 @@ impl EngineHost {
         let Some(port) = port_guard.as_mut() else {
             return Err("no audio device is open".to_string());
         };
-        let (to_plate, to_engine) = state.model.translate_move(slot, id, to)?;
+        let (to_plate, to_engine, before) = state.model.translate_move(slot, id, to)?;
         if !port.move_to(id, to_engine) {
             return Err(format!("slot {slot}'s port is full"));
         }
@@ -1267,7 +1295,7 @@ impl EngineHost {
                 unit: id,
                 seat_op: SeatOp::Move,
                 state: OpState::Pending,
-                kind: PendingKind::Move { to_plate, to_engine },
+                kind: PendingKind::Move { to_plate, to_engine, before },
             },
         );
         Ok(op)

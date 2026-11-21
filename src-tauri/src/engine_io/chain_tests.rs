@@ -1257,3 +1257,181 @@ fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_inside_3s() {
     );
     assert_eq!(stops.load(SeqCst), 1, "host.shutdown stopped and evicted the abandoned unit");
 }
+
+/// 18. Review round B, finding 1: a param answer the event ring took and nobody drained, then a
+///     rebuild: the handoff drains the old ring into the model before it advances, so the model and
+///     the unit rebuilt from it carry the new value (not the one before it).
+#[test]
+fn param_answer_in_the_undrained_ring_survives_a_rebuild() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host();
+    let applied_log = Arc::new(Mutex::new(Vec::new()));
+    let factory = ClampFactory { applied: applied_log.clone() };
+    let level = UnitParam::Send(InputSendParam::EchoLevel);
+
+    let init_params = vec![(level, 0.25)];
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init_params.clone() }, 0, false).unwrap();
+    let t1 = u.terms().unwrap();
+    let (unit1, clamped1) = factory.build(UnitKind::Echo, &init_params, t1).unwrap();
+    u.committed(clamped1);
+    let op1 = ok_op(u.submit(unit1, t1));
+    assert_eq!(host.wait_op(op1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+
+    // The engine applies 0.7 and its ring takes the answer; nothing drains it before the rebuild.
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.7) }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while applied_log.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the engine never applied the param");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(device.wait_blocks(4));
+    {
+        let rt = host.core.rt.lock().unwrap();
+        assert_eq!(rt.engine.as_ref().unwrap().unsent_unit_params().count(), 0, "the ring took the answer");
+    }
+    device.rebuild_at(44_100, 256);
+
+    let model_params = host.core.chain_snapshot().chains[0].units[0].params.as_ref().expect("built-in params").0.clone();
+    assert_eq!(model_params, vec![(level, 0.7)], "the model carries the answer the old ring held");
+    let Back::Evicted { unit: old_unit, .. } = u.take_back().expect("evicted") else { panic!("expected Evicted") };
+    drop(old_unit);
+    let t2 = u.terms().unwrap();
+    let (rebuilt, clamped2) = factory.build(UnitKind::Echo, &model_params, t2).unwrap();
+    assert_eq!(clamped2, vec![(level, 0.7)], "the rebuilt unit carries it too");
+    let op2 = ok_op(u.submit(rebuilt, t2));
+    assert_eq!(host.wait_op(op2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(host.core.chain_snapshot().chains[0].units[0].params.as_ref().unwrap().0, vec![(level, 0.7)]);
+    u.release();
+}
+
+/// 19. Review round B, finding 2: a refused install whose box a port reader filed before its `Seat`
+///     reached the model (the event ring full) settles `Refused` across a rebuild, once: one
+///     `Back::Refused`, no `Rebuilt` retry.
+#[test]
+fn refused_install_reaped_before_a_rebuild_settles_refused_once() {
+    let device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+    let host = device.host();
+    fill_event_ring(&device);
+
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("late")), 0, false).unwrap();
+    let terms = u.terms().unwrap();
+    let past = max_chain_latency(48_000) + 1;
+    let op = ok_op(u.submit(LatentUnit::new(88, past, Arc::new(AtomicUsize::new(0))), terms));
+
+    // Another reader of the port (here the test) files the refused box into the row's mailbox; its
+    // `Seat` is owed behind the full ring, so the op is still pending in the model.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let mut port = host.core.ports[0].lock().unwrap();
+            let mut state = host.core.state.lock().unwrap();
+            if let Some(p) = port.as_mut() {
+                state.table.reap_port(0, p);
+            }
+            if state.table.active_row_for_id(10).is_some_and(|r| !r.mailbox.is_empty()) {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "the refused box never came back");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(u.poll(op), OpState::Pending, "its Seat has not reached the model");
+
+    device.rebuild_at(44_100, 256);
+    assert_eq!(u.poll(op), OpState::Refused(SeatRefusal::Latency), "settled from what the row received");
+    let Back::Refused { unit, why } = u.take_back().expect("the refused box") else { panic!("expected Back::Refused") };
+    assert_eq!(why, SeatRefusal::Latency);
+    assert_eq!(unit.into_any().downcast::<LatentUnit>().unwrap().tag, 88);
+    assert!(u.take_back().is_none(), "one box, once");
+    u.release();
+}
+
+/// 20. Review round B, finding 3: plates `[R, A, B]`, a queued removal of `R`, then a move of `B` ahead
+///     of `A` (plate index 1, engine index 0), both pending at a rebuild: the model ends `[B, A]`, and
+///     so does the rebuilt engine's chain.
+#[test]
+fn pending_move_behind_a_pending_removal_keeps_its_place_across_a_rebuild() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let ur = host.unit(0, 5, Spec::Plugin(plugin_ref("r")), 0, false).unwrap();
+    let ua = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 1, false).unwrap();
+    let ub = host.unit(0, 20, Spec::Plugin(plugin_ref("b")), 2, false).unwrap();
+    let t = ur.terms().unwrap();
+    for u in [&ur, &ua, &ub] {
+        let op = ok_op(u.submit(LatentUnit::new(u.id(), 0, stops.clone()), t));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+    assert_eq!(engine_chain_ids(&device, 0), vec![(5, false), (10, false), (20, false)]);
+
+    // Nothing renders: both messages stay queued in the port until the rebuild.
+    device.stop();
+    let Removal::Sent(op_rem) = host.remove_unit(5).unwrap() else { panic!("expected Sent") };
+    let op_mv = host.move_unit(20, 1).unwrap();
+    device.rebuild_at(44_100, 256);
+    assert_eq!(ur.poll(op_rem), OpState::Applied);
+    assert_eq!(ub.poll(op_mv), OpState::Applied);
+    let ids = |host: &EngineHost| host.core.chain_snapshot().chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>();
+    assert_eq!(ids(&host), vec![20, 10], "the model's order after the rebuild");
+
+    assert!(matches!(ur.take_back(), Some(Back::Removed(_))));
+    ur.release();
+    let t2 = ua.terms().unwrap();
+    for u in [&ua, &ub] {
+        let Some(Back::Evicted { unit, .. }) = u.take_back() else { panic!("expected Evicted") };
+        let op = ok_op(u.submit(unit, t2));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    }
+    assert_eq!(engine_chain_ids(&device, 0), vec![(20, false), (10, false)], "the rebuilt engine's chain");
+    assert_eq!(ids(&host), vec![20, 10]);
+    ua.release();
+    ub.release();
+}
+
+/// 21. Review round B, finding 4: a feed drain between the handoff (the model advanced and settled)
+///     and the swap's publish of the new generation gets the old generation with the old engine's
+///     chains, never the new chains; after the publish, the new generation with the new chains.
+#[test]
+fn a_drain_mid_swap_never_pairs_the_new_chains_with_the_old_generation() {
+    use std::sync::Weak;
+    /// Drains the feed from the hook's `rebuild`: after the handoff, before the publish.
+    struct DrainsMidSwap(Weak<super::Core>, Mutex<Vec<(u64, Frame)>>);
+    impl super::RebuildHook for DrainsMidSwap {
+        fn pause(&self) {}
+        fn rebuild(&self, _generation: u64) -> Vec<Command> {
+            let host = EngineHost { core: self.0.upgrade().expect("the host lives") };
+            let mut ev = Vec::new();
+            let drain = host.drain_feed_taps(&mut ev, None, None);
+            self.1.lock().unwrap().push((drain.gen, drain.chains.chains[0].latency));
+            Vec::new()
+        }
+        fn resume(&self) {}
+    }
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host();
+    let u = host.unit(0, 10, Spec::Plugin(plugin_ref("a")), 0, false).unwrap();
+    u.activated(Activated { name: "a".into(), source: false, latency: 64 });
+    let t = u.terms().unwrap();
+    let op = ok_op(u.submit(LatentUnit::new(1, 64, Arc::new(AtomicUsize::new(0))), t));
+    assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut ev = Vec::new();
+    let before = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!(before.chains.chains[0].latency, 64);
+
+    let hook = Arc::new(DrainsMidSwap(Arc::downgrade(&host.core), Mutex::new(Vec::new())));
+    host.set_rebuild_hook(Some(hook.clone()));
+    device.rebuild_at(44_100, 256);
+    host.set_rebuild_hook(None);
+
+    assert_eq!(
+        *hook.1.lock().unwrap(),
+        vec![(before.gen, 64)],
+        "mid-swap: the old generation with the old engine's chains"
+    );
+    let after = host.drain_feed_taps(&mut ev, None, None);
+    assert_eq!((after.gen, after.chains.chains[0].latency), (before.gen + 1, 0), "after the publish: the new pair");
+    u.release();
+}

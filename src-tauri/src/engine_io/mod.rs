@@ -637,7 +637,8 @@ pub(crate) struct FeedDrain {
     pub(crate) scope_bin: u32,
     /// That engine's sample rate (0: no engine).
     pub(crate) rate: u32,
-    /// The chain model's snapshot read in the same `settings` + `ends` acquisition as the events (read by P6).
+    /// The chain model's snapshot read in the same `settings` + `ends` acquisition as the events, of the
+    /// generation `gen` names (mid-swap, the old one's last: `Model::snapshot_for`; read by P6).
     #[allow(dead_code)]
     pub(crate) chains: chain::ChainRev,
     /// True if [`Core::stash`] overflowed while the feed was stale (the feed sends a reset; read by P6).
@@ -783,24 +784,43 @@ pub(crate) fn drain(
             Event::Transport { bpm, meter, .. } => _ = settings.transported(gen, bpm, meter),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
             Event::Refused { reason, .. } => settings.refused(gen, reason),
-            Event::Seat { slot, unit, op, outcome, .. } => {
-                let unit_host::HostState { table, model, .. } = state;
-                model.on_seat(gen, slot, unit, op, outcome, table, protocol_errors);
-                continue;
-            }
-            Event::Chain { slot, len, seats, .. } => {
-                let n = usize::from(len).min(seats.len());
-                state.model.on_chain(gen, slot, &seats[..n]);
-                continue;
-            }
-            Event::UnitParam { unit, param, value, .. } => {
-                state.model.on_unit_param(gen, unit, param, value);
-                continue;
-            }
+            _ if project_unit_event(state, &event, gen, protocol_errors) => continue,
             _ => {}
         }
         each(event);
     }
+}
+
+/// Project a `Seat`, `Chain` or `UnitParam` of the engine of generation `gen` into `state`'s model
+/// (true), or leave any other event (false).
+fn project_unit_event(state: &mut unit_host::HostState, event: &Event, gen: u64, protocol_errors: &AtomicU64) -> bool {
+    match *event {
+        Event::Seat { slot, unit, op, outcome, .. } => {
+            let unit_host::HostState { table, model, .. } = state;
+            model.on_seat(gen, slot, unit, op, outcome, table, protocol_errors);
+        }
+        Event::Chain { slot, len, seats, .. } => {
+            let n = usize::from(len).min(seats.len());
+            state.model.on_chain(gen, slot, &seats[..n]);
+        }
+        Event::UnitParam { unit, param, value, .. } => state.model.on_unit_param(gen, unit, param, value),
+        _ => return false,
+    }
+    true
+}
+
+/// A rebuild's, before the model advances: project the `Seat`, `Chain` and `UnitParam` events the ring
+/// of generation `gen` holds into the model WITHOUT popping them (the engine no longer owes them; they
+/// are the only copy). The ring stays as full as it was, so the old engine's eviction takes no queued
+/// port message it would not have taken; the swap's own `drain` still pops every one into settings
+/// afterwards, and the model, advanced by then, ignores them.
+pub(crate) fn peek_unit_events(state: &mut unit_host::HostState, events: &mut Consumer<Event>, gen: u64, protocol_errors: &AtomicU64) {
+    let Ok(chunk) = events.read_chunk(events.slots()) else { return };
+    let (head, tail) = chunk.as_slices();
+    for event in head.iter().chain(tail) {
+        project_unit_event(state, event, gen, protocol_errors);
+    }
+    // Dropped uncommitted: the events stay in the ring.
 }
 
 impl Core {
@@ -869,8 +889,14 @@ impl Core {
         Some(self.rate.load(Relaxed)).filter(|&r| r != 0)
     }
 
+    #[cfg(test)]
     pub(crate) fn chain_snapshot(&self) -> chain::ChainRev {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).model.snapshot()
+    }
+
+    /// The model's snapshot of engine generation `gen` (`Model::snapshot_for`): the feed's.
+    pub(crate) fn chain_snapshot_for(&self, gen: u64) -> chain::ChainRev {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).model.snapshot_for(gen)
     }
 
     #[cfg(debug_assertions)]
@@ -1305,7 +1331,7 @@ impl EngineHost {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
         let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else {
             let gen = self.core.engine_gen.load(Acquire);
-            return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot(), stash_lost: false };
+            return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot_for(gen), stash_lost: false };
         };
         let gen = self.core.engine_gen.load(Acquire);
         let mut stash_lost = false;
@@ -1320,13 +1346,13 @@ impl EngineHost {
             }
         }
         let Some(ends) = ends.as_mut() else {
-            return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot(), stash_lost };
+            return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot_for(gen), stash_lost };
         };
         let chains = {
             let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
             drain(&mut settings, &mut state, &mut ends.events, gen, &self.core.chain_protocol_errors, |e| out.push(e));
             unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state);
-            state.model.snapshot()
+            state.model.snapshot_for(gen)
         };
         let mut scope_bin = 0;
         if let Some(columns) = columns {
