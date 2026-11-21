@@ -8,8 +8,9 @@ name: rust-test
 # changes or a file its tests include from outside it (the wire fixtures in verify/fixtures/;
 # verify/guards/ci-paths.mjs holds the paths below to every such include), plus on demand; a change to
 # its markdown alone does not count, and it never delays a TS-only push. The binaries run side by side
-# (scripts/cargo-test.mjs), as the local gate runs them: on the runner's four cores that took 5.5 and
-# 10.5 min in two runs against ~14 one after another (on the dev PC's sixteen, 145 s against 443).
+# (scripts/cargo-test.mjs), as the local gate runs them. A whole run took ~32 min on dev's warm cache
+# (2026-11-21); on a ref whose cache is cold (main after a long gap, a release tag) the build alone took
+# 19 min and the 40 min bound cancelled v0.9.0's first tag run mid-test, hence 60.
 
 on:
   push:
@@ -34,7 +35,7 @@ concurrency:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
