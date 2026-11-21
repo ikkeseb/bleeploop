@@ -745,8 +745,8 @@ fn onset_at(at: Frame) -> impl Fn(Frame) -> f32 {
 /// (`lf-engine`'s rule), so the edit applies at once, and what AUTO retained before it, at the old
 /// alignment, is cut as an input gap cuts it, and the tap is not heard until the change has passed
 /// through every path it moved: the new 50-frame seat fades in over 480 frames against its input at
-/// the old timing, so the onset it copies starts once that fade has ended (`edit + FADE`, the new
-/// chain's delay to the tap being 0), one run under the alignment the take starts with.
+/// the old timing, and the longest path to the tap is the new chain's 67 frames, so the onset it copies
+/// starts once both have passed (`edit + FADE + 67`), one run under the alignment the take starts with.
 #[test]
 fn auto_listening_across_an_alignment_change_keeps_nothing_from_before_it() {
     for block in BLOCKS {
@@ -766,7 +766,7 @@ fn auto_listening_across_an_alignment_change_keeps_nothing_from_before_it() {
         assert!(!rig.lane(0).auto_armed, "{what}: the onset triggered");
         assert_eq!(answers(&rig, 0).last(), Some(&(edit, 2, SeatOp::Install, SeatOutcome::Applied)), "{what}: listening holds no edit");
         assert_eq!(rig.engine.live_latency(), 67, "{what}");
-        assert_eq!(rig.start_frame(), edit + FADE as Frame, "{what}: the retained onset starts where the alignment change has passed");
+        assert_eq!(rig.start_frame(), edit + FADE as Frame + 67, "{what}: the retained onset starts where the alignment change has passed");
         rig.engine.evict_slots();
         drop(rig);
         assert_eq!(p.drops(), 2, "{what}");
@@ -1612,10 +1612,11 @@ fn a_compensation_change_leaves_no_silence_on_the_way_to_the_input_sends() {
 
 /// AUTO listening on live slot 0 (empty) beside live slot 1 (silent, a 100-frame chain that holds the
 /// alignment): on `e` slot 1's chain becomes 150 frames, so slot 0's compensation goes 100 → 150, and
-/// slot 1's new seat fades in against its input at the old timing over 480 frames: the tap is blind
-/// until `e + 480`. A loud pulse on slot 0 that reaches the tap in the last 60 frames before that
-/// (input `e + 270..e + 330`) triggers nothing; one that reaches it on the first 60 frames after (input
-/// `e + 330..e + 390`) triggers a take that starts there, retaining nothing earlier.
+/// slot 1's new seat fades in against its input at the old timing over 480 frames, and the longest path
+/// to the tap is 150 frames: the tap is blind until `e + 480 + 150`. A loud pulse on slot 0 that reaches
+/// the tap in the last 60 frames before that (input `e + 420..e + 480`) triggers nothing; one that
+/// reaches it on the first 60 frames after (input `e + 480..e + 540`) triggers a take that starts
+/// there, retaining nothing earlier.
 #[test]
 fn a_loud_attack_inside_a_timing_changes_blind_window_triggers_no_auto_and_one_just_after_does() {
     for block in BLOCKS {
@@ -1629,7 +1630,7 @@ fn a_loud_attack_inside_a_timing_changes_blind_window_triggers_no_auto_and_one_j
             rig.press(Command::RecDub(0));
             assert!(rig.lane(0).auto_armed, "{what}");
             let e = rig.frame + 3000;
-            let pulse = if after { e + 330..e + 390 } else { e + 270..e + 330 };
+            let pulse = if after { e + 480..e + 540 } else { e + 420..e + 480 };
             rig.set_inputs(move |f| if pulse.contains(&f) { 0.5 } else { 0.0 }, |_| 0.0);
             rig.advance_to(e);
             assert_eq!(rig.engine.live_latency(), 100, "{what}");
@@ -1639,7 +1640,7 @@ fn a_loud_attack_inside_a_timing_changes_blind_window_triggers_no_auto_and_one_j
             assert_eq!(rig.engine.live_latency(), 150, "{what}");
             if after {
                 assert!(!rig.lane(0).auto_armed, "{what}: the pulse past the window triggered");
-                assert_eq!(rig.start_frame(), e + FADE as Frame, "{what}: the take starts where the window ends");
+                assert_eq!(rig.start_frame(), e + FADE as Frame + 150, "{what}: the take starts where the window ends");
             } else {
                 assert!(rig.lane(0).auto_armed, "{what}: the pulse inside the window triggered nothing");
             }
@@ -2310,5 +2311,93 @@ fn auto_stays_blind_while_an_outgoing_paths_old_timing_reaches_the_tap() {
         rig.engine.evict_slots();
         drop(rig);
         assert_eq!(p.drops(), 3, "{what}");
+    }
+}
+
+/// AUTO listening on live slot 0 (a bypassed 0-frame head ahead of a settled 960-frame effect) beside
+/// live slot 1 (silent, a 1100-frame chain that holds the alignment, so slot 0's compensation is 140):
+/// on `e` the head is replaced by a bypassed 17-frame one (the chain 960 → 977, the compensation
+/// 140 → 123). What the old head passed on reaches the tap 960 + 140 frames after it entered, long
+/// after the head's own 480-frame swap and the downstream 960 it still has to run: a loud pulse entering
+/// at `e - 100..e - 40` reaches the tap at `e + 1000..e + 1060`, at the old timing, and triggers
+/// nothing. AUTO is blind through `e + 480 + 1100`; a pulse that reaches the tap from there on (input
+/// `e + 480..e + 540`) triggers a take that starts on it.
+#[test]
+fn auto_stays_blind_for_a_replaced_head_s_old_timing_through_a_settled_effect_after_it() {
+    for block in BLOCKS {
+        for after in [false, true] {
+            let what = format!("block {block}, after {after}");
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put(&mut rig, 0, 1, 0, true, None, Unit::new(Dsp::Lag(0, 1.0), &p));
+            put(&mut rig, 0, 2, MAX_UNITS, false, None, Unit::new(Dsp::Lag(960, 1.0), &p));
+            put(&mut rig, 1, 3, MAX_UNITS, false, None, Unit::new(Dsp::Lag(1100, 1.0), &p));
+            rig.set(Command::SetSlotLive(1, true));
+            rig.set(Command::SetAutoRecord(true));
+            rig.press(Command::RecDub(0));
+            assert!(rig.lane(0).auto_armed, "{what}");
+            let e = rig.frame + 6000;
+            let pulse = if after { e + 480..e + 540 } else { e - 100..e - 40 };
+            rig.set_inputs(move |f| if pulse.contains(&f) { 0.5 } else { 0.0 }, |_| 0.0);
+            rig.advance_to(e);
+            assert_eq!(rig.engine.live_latency(), 1100, "{what}");
+            put(&mut rig, 0, 4, 0, true, Some(1), Unit::new(Dsp::Lag(17, 1.0), &p));
+            rig.advance_to(e + 4000);
+            assert_eq!(answers(&rig, 0).last(), Some(&(e, 4, SeatOp::Install, SeatOutcome::Applied)), "{what}: listening holds no edit");
+            assert_eq!(rig.engine.live_latency(), 1100, "{what}");
+            if after {
+                assert!(!rig.lane(0).auto_armed, "{what}: the pulse past the window triggered nothing");
+                assert_eq!(rig.start_frame(), e + FADE as Frame + 1100, "{what}: the take starts where the window ends");
+            } else {
+                assert!(rig.lane(0).auto_armed, "{what}: the old timing's pulse triggered");
+            }
+            rig.engine.evict_slots();
+            drop(rig);
+            assert_eq!(p.drops(), 4, "{what}");
+        }
+    }
+}
+
+/// AUTO listening on live slot 0 (a bypassed 67-frame effect) beside live slot 1 (silent, a 100-frame
+/// chain that holds the alignment): on `e`, in one batch, the effect is removed and another of the same
+/// 67 frames appended, so the chain's latency sum, the alignment and the compensation are what they were
+/// and nothing differs by arithmetic. A loud pulse that entered at `e - 60..e` reaches the tap at
+/// `e + 40..e + 100`, through the old seat's fade, and triggers nothing: AUTO is blind through
+/// `e + 480 + 167` (the leaving seat's 67 frames ahead of the new seat's 67 are one path, and the
+/// compensation 33); a pulse that reaches the tap from there on (input `e + 547..e + 607`) triggers a
+/// take that starts on it.
+#[test]
+fn auto_stays_blind_across_two_edits_whose_latency_sums_are_equal() {
+    for block in BLOCKS {
+        for after in [false, true] {
+            let what = format!("block {block}, after {after}");
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put(&mut rig, 0, 1, 0, true, None, Unit::new(Dsp::Lag(67, 1.0), &p));
+            put(&mut rig, 1, 3, MAX_UNITS, false, None, Unit::new(Dsp::Lag(100, 1.0), &p));
+            rig.set(Command::SetSlotLive(1, true));
+            rig.set(Command::SetAutoRecord(true));
+            rig.press(Command::RecDub(0));
+            assert!(rig.lane(0).auto_armed, "{what}");
+            let e = rig.frame + 3000;
+            let pulse = if after { e + 547..e + 607 } else { e - 60..e };
+            rig.set_inputs(move |f| if pulse.contains(&f) { 0.5 } else { 0.0 }, |_| 0.0);
+            rig.advance_to(e);
+            assert_eq!(rig.engine.live_latency(), 100, "{what}");
+            assert!(rig.port(0).remove(1), "{what}");
+            put(&mut rig, 0, 2, MAX_UNITS, true, None, Unit::new(Dsp::Lag(67, 1.0), &p));
+            rig.advance_to(e + 2000);
+            assert_eq!(answers(&rig, 0).last(), Some(&(e, 2, SeatOp::Install, SeatOutcome::Applied)), "{what}: listening holds no edit");
+            assert_eq!(rig.engine.live_latency(), 100, "{what}");
+            if after {
+                assert!(!rig.lane(0).auto_armed, "{what}: the pulse past the window triggered nothing");
+                assert_eq!(rig.start_frame(), e + FADE as Frame + 167, "{what}: the take starts where the window ends");
+            } else {
+                assert!(rig.lane(0).auto_armed, "{what}: the pulse inside the window triggered");
+            }
+            rig.engine.evict_slots();
+            let mut kept = Vec::new();
+            assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
+        }
     }
 }

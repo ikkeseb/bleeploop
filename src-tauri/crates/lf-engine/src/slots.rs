@@ -439,8 +439,12 @@ struct Slot {
     /// the chain's own, as [`Rack::latch_record`] last took them.
     wet_line: Vec<Pair>,
     dw: usize,
-    /// The source record line's delay less the input side, as [`Rack::latch_record`] last took it.
-    ld: Frame,
+    /// The most frames any audio can take from this slot's input to the record tap, as
+    /// [`Rack::latch_record`] last took it ([`Slot::reach`]).
+    reach: Frame,
+    /// The frames the crossfades of an edit taken since the last latch run (a move's dip, down and back
+    /// up, twice the fade); 0: none ([`Rack::latch_record`]).
+    edit: Frame,
     write: usize,
     /// The input OTT on this slot's output, after its gain.
     ott: StereoOtt,
@@ -452,8 +456,6 @@ struct Slot {
     /// A bypass command on one of this slot's units waits for a place among the owed: the next place
     /// freed is kept for it, ahead of a port message ([`Slot::room`]).
     reserved: bool,
-    /// The chain's latency as [`Rack::latch_record`] last took it.
-    timing: Frame,
     /// The move's dip: down to silence on this frame (the reorder's), back up over the fade's frames
     /// after it. `None`: no dip.
     dip: Option<Frame>,
@@ -707,19 +709,19 @@ impl Slot {
         self.chain().map(|k| self.seats[k].info.latency).sum()
     }
 
-    /// The frames until every lifecycle crossfade and replacement under way has ended: while one runs,
-    /// the slot's output still carries a path at the chain's old timing (a seat's input fading against
-    /// it, a leaving seat, a replaced unit).
-    fn settling(&self, n: u32) -> Frame {
-        self.seats[..self.len]
-            .iter()
-            .map(|s| {
-                let life = if s.engaged { n - s.fade.min(n) } else { s.fade };
-                let swap = if s.outgoing.is_some() { n - s.swap.min(n) } else { 0 };
-                life.max(swap) as Frame
-            })
-            .max()
-            .unwrap_or(0)
+    /// The most frames any audio can take from the slot's input to the record tap now, given the record
+    /// alignment `rec`, this slot's delay on the wet to the tap `dw` and the input side `side`: the
+    /// whole chain's latency (a leaving or withdrawn seat's, and a replaced unit's if it is more) and
+    /// the wet's delay; a chain that routes to the bus (a source head, leaving or not) also takes the
+    /// record line, `side + rec` ([`Rack::render`]).
+    fn reach(&self, rec: Frame, dw: usize, side: Frame) -> Frame {
+        let span: Frame = self.seats[..self.len].iter().map(|s| s.info.latency.max(if s.outgoing.is_some() { s.old_latency as Frame } else { 0 })).sum();
+        let wet = span + dw as Frame;
+        if self.source_head() {
+            wet.max(span).max(side + rec)
+        } else {
+            wet
+        }
     }
 
     /// A seat takes notes: one holds a unit and is not leaving.
@@ -1057,13 +1059,13 @@ impl Rack {
                 line: vec![[0.0; 2]; line],
                 wet_line: vec![[0.0; 2]; line],
                 dw: 0,
-                ld: 0,
+                reach: 0,
+                edit: 0,
                 write: 0,
                 ott: StereoOtt::new(sample_rate),
                 owed: Vec::with_capacity(OWED_CAPACITY),
                 reorder: None,
                 reserved: false,
-                timing: 0,
                 dip: None,
             }
         });
@@ -1394,6 +1396,8 @@ impl Rack {
                     s.dip = Some(frame + up);
                     if up > 0 {
                         s.reorder = Some((id, to));
+                        // Down to silence, then back up: two fades of the chain's output.
+                        s.edit = s.edit.max(2 * n as Frame);
                         return None;
                     }
                     // Silent already: the reorder lands on this frame.
@@ -1404,6 +1408,7 @@ impl Rack {
         if s.chain().next().is_some() {
             s.line_latency = s.latency();
         }
+        s.edit = s.edit.max(n as Frame);
         Some(true)
     }
 
@@ -1532,6 +1537,7 @@ impl Rack {
         for s in self.slots.iter_mut() {
             if s.len > 0 {
                 s.release_all(0, &mut self.events_dropped);
+                s.edit = s.edit.max(n as Frame);
                 for seat in s.seats[..s.len].iter_mut() {
                     seat.removing = true;
                     seat.engaged = false;
@@ -1569,52 +1575,39 @@ impl Rack {
         self.slots.iter().filter(|s| s.live && s.shut == 0 && !s.source_chain()).map(Slot::latency).max().unwrap_or(0)
     }
 
-    /// At a block start, after the ports were serviced: while `open`, the alignment follows the slots
-    /// (the live latency); shut, it holds what it last took. The engine shuts it while a capture's
+    /// At a block start `now`, after the ports were serviced: while `open`, the alignment follows the
+    /// slots (the live latency); shut, it holds what it last took. The engine shuts it while a capture's
     /// alignment is fixed, which took the same live latency, and no chain's sum or role changes then
     /// (an edit that would waits: [`Rack::service`]). Either way each slot's wet is delayed by what its
-    /// own chain's latency lacks of that alignment. Whether the record tap's timing changed (the
-    /// alignment, or one path's delay to it: another slot can hold the alignment while this one's chain
-    /// changes), as the frames from here until every sample reaching the tap was rendered at the new
-    /// timing: the largest old or new delay of a path that changed, `side` (the input side) counted on
-    /// the delayed record paths (a source chain's, the instruments'). The audio itself is left as it
-    /// was, so nothing on the play path (the input sends take the aligned wet) drops out. A slot whose
-    /// timing changed (its chain's latency, or its delay to the tap) carries its old timing on for as
-    /// long as its crossfades run ([`Slot::settling`]), and that much later through its delay to the
-    /// tap.
-    pub(crate) fn latch_record(&mut self, open: bool, side: Frame) -> Option<Frame> {
+    /// own chain's latency lacks of that alignment. The audio itself is left as it was, so nothing on
+    /// the play path (the input sends take the aligned wet) drops out.
+    ///
+    /// The record tap's timing changed when a chain was edited since the last latch (a seat installed,
+    /// removed, replaced, reseated, withdrawn or moved; a bypass does not: it keeps the seat's
+    /// latency) or the alignment changed. Audio rendered at the old timing then still arrives for a
+    /// while, so this is one conservative rule and no per-path arithmetic: it returns the frame from
+    /// which the tap is all at the new timing, the edit's crossfades (the fade's frames, a move's two)
+    /// after `now` plus the most any path to the tap can take at the old or the new timing
+    /// ([`Slot::reach`], the old one as last latched). Equal sums, latency downstream of an edit and
+    /// crossfades that overlap lie inside that bound; a zero-latency edit blinds it for its fade, which
+    /// is accepted.
+    pub(crate) fn latch_record(&mut self, open: bool, side: Frame, now: Frame) -> Option<Frame> {
         let before = self.record_latency;
         if open {
             self.record_latency = self.live_latency();
         }
-        let (rec, n) = (self.record_latency, self.fade_frames);
-        let mut blind = (rec != before).then(|| side + rec.max(before));
+        let rec = self.record_latency;
+        let mut run = if rec != before { self.fade_frames as Frame } else { 0 };
+        let mut reach = 0;
         for s in self.slots.iter_mut() {
-            let latency = s.latency();
-            let own = if !s.source_chain() { latency } else { 0 };
-            let dw = (rec - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
-            let ld = rec - s.line_latency;
-            let (wet, line) = (dw != s.dw, ld != s.ld);
-            let left = if latency != s.timing || wet || line { s.settling(n) } else { 0 };
-            if wet || line || left > 0 {
-                let mut b = 0;
-                if wet {
-                    b = b.max(dw.max(s.dw) as Frame);
-                }
-                if line {
-                    b = b.max(side + ld.max(s.ld));
-                }
-                if left > 0 {
-                    b = b.max(left + dw as Frame);
-                    if s.source_head() {
-                        b = b.max(side + left + ld);
-                    }
-                }
-                blind = Some(blind.unwrap_or(0).max(b.max(0)));
-            }
-            (s.dw, s.ld, s.timing) = (dw, ld, latency);
+            let own = if !s.source_chain() { s.latency() } else { 0 };
+            s.dw = (rec - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
+            let now_reach = s.reach(rec, s.dw, side);
+            reach = reach.max(s.reach).max(now_reach);
+            s.reach = now_reach;
+            run = run.max(std::mem::take(&mut s.edit));
         }
-        blind
+        (run > 0).then_some(now + run + reach)
     }
 
     /// The live latency the record tap is aligned on, as last latched.
