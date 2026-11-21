@@ -207,6 +207,12 @@
 //!   from source). With the event ring full and 32 replies owed, an install stays queued, the empty slot
 //!   returns zero units, which reads as done, and the rebuild drops the rings with that unit. Next step:
 //!   E2's ownership handshake settles it.
+//! - **A source inserted ahead of an effect while the input plays switches the route hard** (A8;
+//!   read from source, not rendered): the processed input leaves the direct monitor and enters the
+//!   limiter-delayed bus on the source's first frame (a gap), and the source's removal switches it back
+//!   at its fade's end, over the bus audio still in flight; the input sends lose it at once. Sources
+//!   arrive with E3. Next check: a test rendering the switch on a playing input and measuring the gap
+//!   and the overlap at the output.
 //! - **A refusal after `SlotHost::install`'s 2 s wait goes unseen** (`engine_io/slot_host.rs`; read from
 //!   source): the owner reads only `take_evicted()` then, and a rebuild can strip the reason
 //!   (`owner.rs`). Reachable only after a 2 s stall with a refusal (today: a plugin reporting over a

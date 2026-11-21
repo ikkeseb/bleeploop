@@ -397,8 +397,9 @@ enum Verdict {
     Refuse(SeatRefusal),
     /// Applies; `edit`: it changes the chain's latency sum or its role (held while a capture runs).
     Apply { edit: bool },
-    /// Cannot apply yet, unanswered: a new source while the physical head is still leaving (it goes at
-    /// physical index 0, the head's record path, once that seat has gone).
+    /// Cannot apply yet, unanswered: a source (new, or a reseat that turns the head into one) while a
+    /// seat ahead of where it lands is still leaving (it goes at physical index 0, the head's record
+    /// path, once that seat has gone).
     Wait,
 }
 
@@ -448,6 +449,11 @@ struct Slot {
     owed: Vec<Owed>,
     /// A move waiting for its dip to reach silence: the unit and its index.
     reorder: Option<(UnitId, usize)>,
+    /// A bypass command on one of this slot's units waits for a place among the owed: the next place
+    /// freed is kept for it, ahead of a port message ([`Slot::room`]).
+    reserved: bool,
+    /// The chain's latency as [`Rack::latch_record`] last took it.
+    timing: Frame,
     /// The move's dip: down to silence on this frame (the reorder's), back up over the fade's frames
     /// after it. `None`: no dip.
     dip: Option<Frame>,
@@ -631,19 +637,14 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
                 }
             } else {
                 let input = [seat_in[0][j - a], seat_in[1][j - a]];
-                // The bypass line runs whether or not the seat is bypassed, so it is warm when it is, and
-                // while either unit of a replacement has a latency.
-                let delayed = if latency == 0 && old_latency == 0 {
-                    seat.filled = 0;
-                    [input, input]
-                } else {
-                    seat.line[seat.line_at] = input;
-                    let at = |l: usize| if l == 0 { input } else if seat.filled >= l { seat.line[(seat.line_at + cap - l) % cap] } else { [0.0; 2] };
-                    let d = [at(latency), at(old_latency)];
-                    seat.line_at = (seat.line_at + 1) % cap;
-                    seat.filled = (seat.filled + 1).min(cap);
-                    d
-                };
+                // The bypass line runs every frame, bypassed or not and at any latency (0 included), so
+                // a reload or replacement that raises the seat's latency reads real delayed input from
+                // its first frame (A10), never the silence of an empty line.
+                seat.line[seat.line_at] = input;
+                let at = |l: usize| if l == 0 { input } else if seat.filled >= l { seat.line[(seat.line_at + cap - l) % cap] } else { [0.0; 2] };
+                let delayed = [at(latency), at(old_latency)];
+                seat.line_at = (seat.line_at + 1) % cap;
+                seat.filled = (seat.filled + 1).min(cap);
                 let mut inner = [crossfade(delayed[0][0], core[0], seat.wet, n), crossfade(delayed[0][1], core[1], seat.wet, n)];
                 if swapping {
                     inner = [0, 1].map(|c| crossfade(crossfade(delayed[1][c], old[c], seat.old_wet, n), inner[c], seat.swap, n));
@@ -706,6 +707,21 @@ impl Slot {
         self.chain().map(|k| self.seats[k].info.latency).sum()
     }
 
+    /// The frames until every lifecycle crossfade and replacement under way has ended: while one runs,
+    /// the slot's output still carries a path at the chain's old timing (a seat's input fading against
+    /// it, a leaving seat, a replaced unit).
+    fn settling(&self, n: u32) -> Frame {
+        self.seats[..self.len]
+            .iter()
+            .map(|s| {
+                let life = if s.engaged { n - s.fade.min(n) } else { s.fade };
+                let swap = if s.outgoing.is_some() { n - s.swap.min(n) } else { 0 };
+                life.max(swap) as Frame
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// A seat takes notes: one holds a unit and is not leaving.
     fn plays(&self) -> bool {
         self.chain().any(|k| self.seats[k].unit.is_some())
@@ -760,13 +776,17 @@ impl Slot {
         self.notes = [0; 2];
     }
 
-    /// Room among the owed for `n` more beside the places kept: a taken message's answer and chain (its
-    /// chain alone once it answered `Waiting`), a move's answer and chain for its reorder, and an
-    /// eviction's chain.
-    fn room(&self, n: usize) -> bool {
+    /// The places kept among the owed: a taken message's answer and chain (its chain alone once it
+    /// answered `Waiting`), a move's answer and chain for its reorder, and an eviction's chain.
+    fn kept(&self) -> usize {
         let taken = self.taken.as_ref().map_or(0, |t| if t.answered { 1 } else { 2 });
-        let kept = taken + 2 * self.reorder.is_some() as usize + 1;
-        self.owed.len() + kept + n <= OWED_CAPACITY
+        taken + 2 * self.reorder.is_some() as usize + 1
+    }
+
+    /// Room among the owed for a port message's `n` beside the places kept and, while a bypass command
+    /// on this slot waits for a place ([`Rack::reserve_bypasses`]), the first place freed, which is its.
+    fn room(&self, n: usize) -> bool {
+        self.owed.len() + self.kept() + self.reserved as usize + n <= OWED_CAPACITY
     }
 
     fn answer(&mut self, answer: Answer, errors: &mut u64) {
@@ -914,6 +934,19 @@ impl Slot {
         self.finish(n, errors);
     }
 
+    /// A move's reorder due by `frame` (its dip's silence on or before it) applies on `frame`, its answer
+    /// and its chain owed there.
+    fn reorder_due(&mut self, frame: Frame, errors: &mut u64) {
+        if let (Some((id, to)), Some(at)) = (self.reorder, self.dip) {
+            if at <= frame {
+                self.reorder = None;
+                self.apply_reorder(id, to);
+                let summary = self.summary();
+                Slot::reordered(&mut self.owed, &self.end, summary, id, frame, errors);
+            }
+        }
+    }
+
     /// Unit `id` to index `to` of the chain, at once.
     fn apply_reorder(&mut self, id: UnitId, to: usize) {
         reorder(&mut self.seats[..self.len], id, to);
@@ -1029,6 +1062,8 @@ impl Rack {
                 ott: StereoOtt::new(sample_rate),
                 owed: Vec::with_capacity(OWED_CAPACITY),
                 reorder: None,
+                reserved: false,
+                timing: 0,
                 dip: None,
             }
         });
@@ -1079,15 +1114,7 @@ impl Rack {
             // A move's reorder due by this frame (a device jump past it) applies before the port is
             // served, so a message waiting behind it is taken in this block.
             if fade {
-                let s = &mut self.slots[i];
-                if let (Some((id, to)), Some(at)) = (s.reorder, s.dip) {
-                    if at <= frame {
-                        s.reorder = None;
-                        s.apply_reorder(id, to);
-                        let summary = s.summary();
-                        Slot::reordered(&mut s.owed, &s.end, summary, id, frame, &mut self.protocol_errors);
-                    }
-                }
+                self.slots[i].reorder_due(frame, &mut self.protocol_errors);
             }
             loop {
                 if !fade {
@@ -1139,9 +1166,14 @@ impl Rack {
                 let s = &mut self.slots[i];
                 s.taken = None;
                 s.end.holding.store(false, Release);
-                if !answered && !matches!(outcome, SeatOutcome::Waiting) {
+                // A message answered `Waiting` that is refused after all (its unit panicked in its
+                // install-time `set_bypass`) gets that refusal as its terminal answer, in the place kept
+                // for its chain (it changed none); its ticket was answered with the wait.
+                if (!answered && !matches!(outcome, SeatOutcome::Waiting)) || (answered && matches!(outcome, SeatOutcome::Refused(_))) {
                     s.answer(Answer { frame, unit, op, outcome }, &mut self.protocol_errors);
-                    s.end.taken.fetch_add(1, Release);
+                    if !answered {
+                        s.end.taken.fetch_add(1, Release);
+                    }
                 }
                 if changed {
                     s.owe_chain(frame, &mut self.protocol_errors);
@@ -1214,7 +1246,10 @@ impl Rack {
                 }
                 let after = sum - before + info.latency;
                 let new_role = if t == 0 { info.source } else { role };
-                if info.source && into.is_none() && s.len > 0 && s.seats[0].removing {
+                // A source lands at physical index 0, the head's record path: one whose seat would sit
+                // behind a leaving seat (a new source, or a role-changing reseat of the logical head)
+                // waits for it to have gone.
+                if info.source && into.unwrap_or_else(|| s.physical(0)) > 0 {
                     return Verdict::Wait;
                 }
                 Verdict::Apply { edit: after != sum || new_role != role }
@@ -1288,10 +1323,10 @@ impl Rack {
                             seat.old_held = seat.held;
                         }
                         seat.held = [0; 2];
-                        // The line holds this seat's input while its latency was above 0 and it was an
-                        // effect: a role change or a line that was not running starts it empty.
+                        // The line holds this seat's input while it was an effect, at any latency: a
+                        // role change starts it empty.
                         let seat = &mut s.seats[k];
-                        if seat.info.latency == 0 || seat.info.source != info.source {
+                        if seat.info.source != info.source {
                             seat.filled = 0;
                         }
                         (seat.id, seat.info, seat.unit) = (id, info, Some(unit));
@@ -1403,12 +1438,28 @@ impl Rack {
     /// owes (an id no seat holds needs none: it is dropped). One that cannot waits, with every bypass
     /// command sent after it (the engine's table), so none is folded or lost.
     pub(crate) fn bypass_room(&self, id: UnitId) -> bool {
-        self.slots.iter().find(|s| s.find(id).is_some()).is_none_or(|s| s.room(1))
+        self.slots.iter().find(|s| s.find(id).is_some()).is_none_or(|s| s.owed.len() + s.kept() < OWED_CAPACITY)
+    }
+
+    /// The bypass commands that wait for a place among what their slot owes (the engine's table, oldest
+    /// first among them): each such slot keeps the next place freed for the oldest, ahead of its port's
+    /// next message, so a port edit every block never takes the places a waiting bypass needs. Set
+    /// before the ports are served.
+    pub(crate) fn reserve_bypasses(&mut self, waiting: impl Iterator<Item = UnitId>) {
+        for s in self.slots.iter_mut() {
+            s.reserved = false;
+        }
+        for id in waiting {
+            if let Some(s) = self.slots.iter_mut().find(|s| s.find(id).is_some()) {
+                s.reserved = true;
+            }
+        }
     }
 
     /// What each slot owes the event ring, each slot's in order until the ring refuses one. The slots
     /// take turns at the first offer (the one after the last that got a place goes first), so a slot
-    /// that owes something every block starves no other.
+    /// that owes something every block starves no other. The order is per slot only: a turn can put a
+    /// newer reply of one slot ahead of an older one of the other ([`Event::Seat`]).
     pub(crate) fn offer(&mut self, feed: &mut Feed) {
         let first = self.offer_first;
         for i in (0..SLOT_COUNT).map(|k| (first + k) % SLOT_COUNT) {
@@ -1428,6 +1479,19 @@ impl Rack {
             if taken > 0 {
                 self.offer_first = (i + 1) % SLOT_COUNT;
             }
+        }
+    }
+
+    /// Inside a block, before the commands due on `now`: a move's reorder due on it applies first, as at
+    /// a block start ([`Rack::service`]), so a slot command on a reorder's exact frame answers after the
+    /// move at any block size. Only where the slots' render stopped (a slot command's frame): a render
+    /// that passed a reorder's frame applied it there, and one that has not reached it yet will.
+    pub(crate) fn reorders_due(&mut self, now: Frame) {
+        if now != self.cursor {
+            return;
+        }
+        for s in self.slots.iter_mut() {
+            s.reorder_due(now, &mut self.protocol_errors);
         }
     }
 
@@ -1476,12 +1540,14 @@ impl Rack {
                 s.finish_idle(&cx, &self.zeros, n, &mut self.protocol_errors);
                 s.owe_chain(frame, &mut self.protocol_errors);
             }
+            // Each unit's return is published before its ticket is answered, so a host that sees the
+            // answer finds the unit on the port.
             if let Some(t) = s.taken.take() {
-                if !t.answered {
-                    s.end.taken.fetch_add(1, Release);
-                }
                 if let SlotMsg::Install { id, bypassed, unit, .. } = t.msg {
                     s.give_back(Back { id, unit, refused: None, bypassed }, &mut self.protocol_errors);
+                }
+                if !t.answered {
+                    s.end.taken.fetch_add(1, Release);
                 }
                 s.end.holding.store(false, Release);
             }
@@ -1490,10 +1556,10 @@ impl Rack {
                     break;
                 }
                 let Ok(msg) = s.end.rx.pop() else { break };
-                s.end.taken.fetch_add(1, Release);
                 if let SlotMsg::Install { id, bypassed, unit, .. } = msg {
                     s.give_back(Back { id, unit, refused: None, bypassed }, &mut self.protocol_errors);
                 }
+                s.end.taken.fetch_add(1, Release);
             }
         }
     }
@@ -1512,26 +1578,41 @@ impl Rack {
     /// changes), as the frames from here until every sample reaching the tap was rendered at the new
     /// timing: the largest old or new delay of a path that changed, `side` (the input side) counted on
     /// the delayed record paths (a source chain's, the instruments'). The audio itself is left as it
-    /// was, so nothing on the play path (the input sends take the aligned wet) drops out.
+    /// was, so nothing on the play path (the input sends take the aligned wet) drops out. A slot whose
+    /// timing changed (its chain's latency, or its delay to the tap) carries its old timing on for as
+    /// long as its crossfades run ([`Slot::settling`]), and that much later through its delay to the
+    /// tap.
     pub(crate) fn latch_record(&mut self, open: bool, side: Frame) -> Option<Frame> {
         let before = self.record_latency;
         if open {
             self.record_latency = self.live_latency();
         }
-        let rec = self.record_latency;
+        let (rec, n) = (self.record_latency, self.fade_frames);
         let mut blind = (rec != before).then(|| side + rec.max(before));
         for s in self.slots.iter_mut() {
-            let own = if !s.source_chain() { s.latency() } else { 0 };
+            let latency = s.latency();
+            let own = if !s.source_chain() { latency } else { 0 };
             let dw = (rec - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
-            if dw != s.dw {
-                blind = Some(blind.unwrap_or(0).max(dw.max(s.dw) as Frame));
-            }
-            s.dw = dw;
             let ld = rec - s.line_latency;
-            if ld != s.ld {
-                blind = Some(blind.unwrap_or(0).max((side + ld.max(s.ld)).max(0)));
+            let (wet, line) = (dw != s.dw, ld != s.ld);
+            let left = if latency != s.timing || wet || line { s.settling(n) } else { 0 };
+            if wet || line || left > 0 {
+                let mut b = 0;
+                if wet {
+                    b = b.max(dw.max(s.dw) as Frame);
+                }
+                if line {
+                    b = b.max(side + ld.max(s.ld));
+                }
+                if left > 0 {
+                    b = b.max(left + dw as Frame);
+                    if s.source_head() {
+                        b = b.max(side + left + ld);
+                    }
+                }
+                blind = Some(blind.unwrap_or(0).max(b.max(0)));
             }
-            s.ld = ld;
+            (s.dw, s.ld, s.timing) = (dw, ld, latency);
         }
         blind
     }

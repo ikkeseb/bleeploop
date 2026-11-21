@@ -451,6 +451,20 @@ fn n6_cross_role_replaces_is_refused_as_placement() {
 
 // ── N7: holding published before taken ───────────────────────────────────────────────────────────────
 
+/// Spin until `done`; after 10 s, or once the worker has exited, raise `stop` (the worker returns on it)
+/// and fail the test, so a lost phase never hangs the suite.
+fn bounded_wait(what: &str, done: impl Fn() -> bool, worker_alive: impl Fn() -> bool, stop: &AtomicBool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done() {
+        if !worker_alive() || std::time::Instant::now() > deadline {
+            let alive = worker_alive();
+            stop.store(true, Ordering::Release);
+            panic!("{what}: never happened (the worker {})", if alive { "is stuck" } else { "exited" });
+        }
+        std::hint::spin_loop();
+    }
+}
+
 #[test]
 fn n7_holding_is_visible_before_ticket_is_answered() {
     let mut cfg = EngineConfig::new(48_000);
@@ -544,28 +558,22 @@ fn n7_holding_is_visible_before_ticket_is_answered() {
             let ticket = port.install_at(1, MAX_UNITS, false, None, u).ok().expect("push install");
             phase.store(2 * k - 1, Ordering::Release);
 
-            // Spin until ticket is answered, then IMMEDIATELY read port.holding().
-            while !ticket.answered() {
-                std::hint::spin_loop();
-            }
+            // Spin until ticket is answered, then IMMEDIATELY read port.holding(). Every wait is bounded:
+            // a worker that exits or sticks fails the test instead of hanging it.
+            let alive = || !h.is_finished();
+            bounded_wait("the install answered", || ticket.answered(), alive, &race_seen);
             let held = port.holding();
             if !held {
                 race_seen.store(true, Ordering::Release);
                 break;
             }
-            while phase.load(Ordering::Acquire) != 2 * k {
-                std::hint::spin_loop();
-            }
+            bounded_wait("the hold judged", || phase.load(Ordering::Acquire) == 2 * k, alive, &race_seen);
             // Reset for next iteration.
             phase.store(2 * k + 1_000_000, Ordering::Release);
-            while phase.load(Ordering::Acquire) != 2 * k + 2_000_000 {
-                std::hint::spin_loop();
-            }
+            bounded_wait("the held install applied", || phase.load(Ordering::Acquire) == 2 * k + 2_000_000, alive, &race_seen);
             assert!(port.remove(1));
             phase.store(2 * k + 3_000_000, Ordering::Release);
-            while phase.load(Ordering::Acquire) != 2 * k + 4_000_000 {
-                std::hint::spin_loop();
-            }
+            bounded_wait("the removal and the re-arm", || phase.load(Ordering::Acquire) == 2 * k + 4_000_000, alive, &race_seen);
             let (_, returned) = port.returned().expect("removed unit returned");
             unit = Some(returned);
         }

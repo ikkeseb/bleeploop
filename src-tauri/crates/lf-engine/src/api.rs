@@ -707,15 +707,18 @@ pub enum Event {
     /// The engine's answer to a slot port's message ([`crate::SlotPort`]), once per message: applied on
     /// `frame` (a block start; a move that dips, on its reorder's frame), refused, or waiting (an edit held
     /// until no capture holds the alignment, then applied with no second answer: [`Event::Chain`] shows
-    /// it). Owed until the ring takes it, as a
-    /// lane's `Mix` is.
+    /// it; or, should its unit panic as it applies, refused after all, that refusal its one second
+    /// answer). Owed until the ring takes it, as a lane's `Mix` is. In order within a slot, not across
+    /// the two: the slots take turns at the ring, so a newer reply of one slot can arrive ahead of an
+    /// older one of the other (a reader orders each slot's replies by that slot alone).
     Seat { frame: Frame, slot: u8, unit: UnitId, op: SeatOp, outcome: SeatOutcome },
     /// Slot `slot`'s chain as applied, head first: its first `len` seats (a withdrawn seat included, a
     /// leaving one not), each unit's id, kind, bypass and latency. Sent on `frame` whenever an edit, a
     /// move's reorder or a bypass command applies (one per change, at the chain as that change left it,
     /// after the message's own [`Event::Seat`]); owed until the ring takes it, as [`Event::Seat`] is.
     /// Never folded: a bypass command whose chain has no place among what its slot owes waits, with
-    /// every bypass command sent after it, until the ring has taken enough.
+    /// every bypass command sent after it, until the ring has taken enough. Ordered per slot, with that
+    /// slot's [`Event::Seat`]s, as they are.
     Chain { frame: Frame, slot: u8, len: u8, seats: [ChainSeat; MAX_UNITS] },
 }
 

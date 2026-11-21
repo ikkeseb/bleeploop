@@ -502,6 +502,7 @@ impl Engine {
     /// alignment.
     pub fn service_slots_idle(&mut self) {
         let hold = self.capture_holds();
+        self.reserve_bypasses();
         self.rack.service_idle(self.next_frame, hold);
         self.rack.offer(&mut self.feed);
     }
@@ -714,6 +715,11 @@ impl Engine {
         // due there): the ports wait for that frame's looper events, so a message is judged against
         // what holds after them (`release_hold` below).
         let ending = !open && self.looper.next_event().is_some_and(|at| at <= start);
+        // What the slots owe the event ring gets the block's first offer, ahead of every other event of
+        // the block (a setting's answer, a lane's state): a feed that frees one place a block still
+        // drains it. A slot with a bypass command waiting for a place keeps the next one for it.
+        self.rack.offer(&mut self.feed);
+        self.reserve_bypasses();
         self.rack.begin_block(start, first, UnitClock { skipped: self.skipped, bpm: self.clock.bpm() as f64, meter: self.clock.meter() }, !open, !ending);
         if let Some(blind) = self.rack.latch_record(open, ctx.input_frames.min(self.config.max_input_frames)) {
             // The record tap's timing changed (an edit, a live flag; the alignment or one slot's delay
@@ -775,13 +781,15 @@ impl Engine {
                     cx.align = align;
                 }
             }
+            // A move's reorder due on this frame applies before its slot commands, as at a block start.
+            self.rack.reorders_due(f);
             let mut at = Apply {
                 instruments: &mut self.instruments,
                 rack: &mut self.rack,
                 input_fx: &mut self.input_fx,
                 master_volume: &mut self.master_volume,
                 master_muted: &mut self.master_muted,
-                    toggles_owed: &mut self.toggles_owed,
+                toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
                 tuner: &mut self.tuner,
                 tuner_owed: &mut self.tuner_owed,
@@ -1026,6 +1034,12 @@ impl Engine {
             // A damaged block's input is silence or a splice: what follows it does not continue it.
             self.tuner.gap();
         }
+    }
+
+    /// Each slot with a bypass command waiting for a place among what it owes keeps the next place for
+    /// it, ahead of its port's messages (`Rack::reserve_bypasses`).
+    fn reserve_bypasses(&mut self) {
+        self.rack.reserve_bypasses(self.pending.iter().flatten().filter(|p| p.owed).filter_map(|p| p.command.unit_bypass()));
     }
 
     /// A capture's alignment is fixed: a take's window has its start.
