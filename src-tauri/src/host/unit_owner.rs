@@ -30,8 +30,7 @@ use super::engine_slot::{
     PluginFormat, Reported, Setup, ASK_TIMEOUT, LOAD_TIMEOUT, OWNER_POLL,
 };
 use super::{
-    load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
-    EVENT_RING_CAP,
+    owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds, EVENT_RING_CAP,
 };
 use crate::engine_io::unit_host::{Activated, Back, Op, OpState, SubmitError, Terms, UnitHost};
 
@@ -83,13 +82,18 @@ pub(super) struct UnitCtx {
     pub(super) sink: EventSink,
     /// The main window's HWND (0 = none): a floating CLAP editor's transient parent.
     pub(super) editor_parent: usize,
-    /// Rendezvous (`load_ready_channel`): carries the install's answer (`Seated`/`Waiting`) or its
-    /// error before seating.
+    /// Capacity-1 reply channel (`ready_channel`): carries the install's first answer
+    /// (`Seated`/`Waiting`) or its error before seating without blocking the owner.
     pub(super) ready: SyncSender<Result<Answer, String>>,
     /// The plugin's tone: restored at load, saved on edits/requests/teardown, retired on removal.
     pub(super) tone: ToneKeeper,
     /// Set once the plugin loads (before `claim`), so `UnitOwner::name` works even on `Unanswered`.
-    shared_name: Arc<OnceLock<String>>,
+    pub(super) shared_name: Arc<OnceLock<String>>,
+}
+
+/// Capacity-1 first-answer channel so the owner's `try_send` never blocks waiting on its caller.
+pub(super) fn ready_channel() -> (SyncSender<Result<Answer, String>>, Receiver<Result<Answer, String>>) {
+    std::sync::mpsc::sync_channel(1)
 }
 
 /// Where the owner's unit box stands relative to the engine.
@@ -103,9 +107,10 @@ enum Seat<U> {
     Installing { op: Op },
     /// Applied in the engine.
     Seated,
-    /// Withdrawal sent (`UnitHost::withdraw`); the unit box is still in the engine until
-    /// `Back::Withdrawn` (or `Evicted`/`Removed`/`Superseded`) arrives.
-    Withdrawing,
+    /// Withdrawal sent (`UnitHost::withdraw`); `op` is polled each turn so an idle engine still
+    /// services it, while the unit box stays in the engine until `Back::Withdrawn` (or
+    /// `Evicted`/`Removed`/`Superseded`) arrives.
+    Withdrawing { op: Op },
     /// Out of the engine and parked (refused reseat or failed reactivate): the seat stays,
     /// `host.parked(why)` was reported. Retries on the next plugin-asked restart; ends on
     /// `Back::Dismissed`.
@@ -163,7 +168,7 @@ fn submit_error_reason(err: SubmitError) -> String {
 
 fn send_answer(ready: &mut Option<SyncSender<Result<Answer, String>>>, slot: usize, id: UnitId, answer: Answer) {
     if let Some(tx) = ready.take() {
-        if tx.send(Ok(answer)).is_err() {
+        if tx.try_send(Ok(answer)).is_err() {
             log::info!("[plugin_host] engine slot {slot} unit {id}: install answered after caller moved on; serving on");
         }
     }
@@ -196,8 +201,8 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
     let id = host.id();
     match seat {
         Seat::Seated => match host.withdraw() {
-            Ok(_op) => {
-                *seat = Seat::Withdrawing;
+            Ok(op) => {
+                *seat = Seat::Withdrawing { op };
                 *pending_restart = None;
             }
             Err(SubmitError::PortFull) => {
@@ -219,7 +224,7 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
         Seat::Installing { .. } => {
             // Op in flight: remember the restart and withdraw once seated.
         }
-        Seat::Withdrawing => {
+        Seat::Withdrawing { .. } => {
             // Already withdrawing: the upcoming `Back::Withdrawn` will reactivate with latest state.
             *pending_restart = None;
         }
@@ -358,7 +363,7 @@ fn fail_before_seat<P: OwnedPlugin>(
     report_faults(faults, slot, reported);
     host.release();
     if let Some(tx) = ready.take() {
-        let _ = tx.send(Err(why));
+        let _ = tx.try_send(Err(why));
     }
     Ok(())
 }
@@ -483,7 +488,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         host.failed(why.clone());
         host.release();
         if let Some(tx) = ready.take() {
-            let _ = tx.send(Err(why));
+            let _ = tx.try_send(Err(why));
         }
         return Ok(());
     };
@@ -504,7 +509,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             host.failed(e.clone());
             host.release();
             if let Some(tx) = ready.take() {
-                let _ = tx.send(Err(e));
+                let _ = tx.try_send(Err(e));
             }
             return Ok(());
         }
@@ -559,10 +564,15 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                         seat = Seat::Parked { unit };
                     }
                     Back::Withdrawn { unit, .. } => {
+                        ever_seated = true;
                         seat = Seat::Owed { unit: own(unit), activated_at: None };
                         pending_restart = None;
                     }
                     Back::Evicted { unit, .. } => {
+                        if matches!(seat, Seat::Installing { op } if host.poll(op) == OpState::Applied) {
+                            ever_seated = true;
+                            send_answer(&mut ready, slot, id, Answer::Seated { name: name.clone(), tone: restored });
+                        }
                         seat = Seat::Owed { unit: own(unit), activated_at: None };
                         pending_restart = None;
                     }
@@ -579,8 +589,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                 }
             }
 
-            if let Seat::Installing { op } = seat {
-                match host.poll(op) {
+            match seat {
+                Seat::Installing { op } => match host.poll(op) {
                     OpState::Applied => {
                         seat = Seat::Seated;
                         ever_seated = true;
@@ -594,7 +604,11 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                         send_answer(&mut ready, slot, id, Answer::Waiting { name: name.clone(), tone: restored });
                     }
                     OpState::Pending | OpState::Refused(_) | OpState::Rebuilt => {}
+                },
+                Seat::Withdrawing { op } => {
+                    let _ = host.poll(op);
                 }
+                _ => {}
             }
 
             let Reported { relist, changed } = plugin.turn(&sink);
@@ -675,7 +689,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         Ok(Exit::Returned { unit, retire }) => {
             let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, retire, &faults, &mut reported);
             if let Some(tx) = ready.take() {
-                let _ = tx.send(Err("unit left before seating".to_string()));
+                let _ = tx.try_send(Err("unit left before seating".to_string()));
             }
             res
         }
@@ -683,7 +697,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             let unit = seat.take_unit();
             let res = ordered_release(host, plugin, unit, &mut tone, &name, true, true, &faults, &mut reported);
             if let Some(tx) = ready.take() {
-                let _ = tx.send(Err("unit dismissed before seating".to_string()));
+                let _ = tx.try_send(Err("unit dismissed before seating".to_string()));
             }
             res
         }
@@ -697,7 +711,6 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             }
             let mut in_hand = seat.take_unit();
             let mut retire = false;
-            let mut dismissed = false;
             while let Some(back) = host.take_back() {
                 match back {
                     Back::Removed(u) => {
@@ -713,12 +726,12 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                     }
                     Back::Dismissed => {
                         retire = true;
-                        dismissed = true;
                     }
                 }
             }
-            // A dismissed seat holds no box in the engine: release in order, a unit in hand or not.
-            if in_hand.is_some() || dismissed {
+            // A unit out of the engine (including a dismissed seat, whose box is already in hand or
+            // ahead of `Dismissed` in the mailbox) takes the ordered release.
+            if in_hand.is_some() {
                 ordered_release(
                     host,
                     plugin,
@@ -775,6 +788,20 @@ pub(super) fn spawn_unit(
     tone: Option<ToneBinding>,
     run: impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static,
 ) -> Result<(UnitOwner, Answer), String> {
+    spawn_unit_with(format, unit, editor_parent, sink, tone, run, |name, f| {
+        std::thread::Builder::new().name(name).spawn(f)
+    })
+}
+
+pub(super) fn spawn_unit_with(
+    format: PluginFormat,
+    unit: UnitHost,
+    editor_parent: usize,
+    sink: EventSink,
+    tone: Option<ToneBinding>,
+    run: impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static,
+    spawn: impl FnOnce(String, Box<dyn FnOnce() -> Result<(), String> + Send>) -> std::io::Result<JoinHandle<Result<(), String>>>,
+) -> Result<(UnitOwner, Answer), String> {
     let slot = unit.slot();
     let id = unit.id();
     let running = Arc::new(AtomicBool::new(true));
@@ -783,9 +810,10 @@ pub(super) fn spawn_unit(
     let (params_tx, params) = RingBuffer::<ParamEvent>::new(EVENT_RING_CAP);
     let params_tx = Arc::new(Mutex::new(params_tx));
     let (request_tx, requests) = std::sync::mpsc::channel();
-    let (ready, ready_rx) = load_ready_channel();
+    let (ready, ready_rx) = ready_channel();
     let param_ids = ParamIds::default();
     let shared_name = Arc::new(OnceLock::new());
+    let on_spawn_err = unit.clone();
     let ctx = UnitCtx {
         unit,
         running: running.clone(),
@@ -800,10 +828,18 @@ pub(super) fn spawn_unit(
         tone: ToneKeeper::new(tone, edited.clone()),
         shared_name: shared_name.clone(),
     };
-    let owner = std::thread::Builder::new()
-        .name(format!("lf-{}-unit-{id}", format.as_str()))
-        .spawn(move || run(ctx))
-        .map_err(|e| format!("spawn unit owner thread: {e}"))?;
+    let owner = match spawn(format!("lf-{}-unit-{id}", format.as_str()), Box::new(move || run(ctx))) {
+        Ok(owner) => {
+            drop(on_spawn_err);
+            owner
+        }
+        Err(e) => {
+            let why = format!("spawn unit owner thread: {e}");
+            on_spawn_err.failed(why.clone());
+            on_spawn_err.release();
+            return Err(why);
+        }
+    };
 
     let build_handle = |name: String, owner: JoinHandle<Result<(), String>>| UnitOwner {
         slot,

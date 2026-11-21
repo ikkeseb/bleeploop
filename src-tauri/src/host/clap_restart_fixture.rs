@@ -1785,8 +1785,8 @@ mod unit_owner {
     use crate::engine_io::EngineHost;
     use lf_engine::grid::Frame;
     use lf_engine::{
-        Command, LaneState, SlotEvent, SlotKind, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor,
-        SLOT_COUNT,
+        Command, Event, LaneState, SeatOp, SeatOutcome, SlotEvent, SlotKind, TimedCommand, UnitCx, UnitId, UnitInfo,
+        UnitKind, UnitProcessor, SLOT_COUNT,
     };
 
     fn device(rate: u32) -> TestDevice {
@@ -1849,12 +1849,6 @@ mod unit_owner {
         }
     }
 
-    fn is_recording(device: &TestDevice) -> bool {
-        let mut ev = Vec::new();
-        let (_, ov) = device.host().drain_feed(&mut ev);
-        ov.is_some_and(|ov| ov.lane(0).state == LaneState::Recording)
-    }
-
     /// Tiny pass-through unit with a fixed latency, submitted straight through `UnitHost` in tests.
     struct FixedLatencyUnit {
         latency: Frame,
@@ -1885,28 +1879,77 @@ mod unit_owner {
     struct FeedStandIn {
         stop: Arc<AtomicBool>,
         chains: Arc<Mutex<Arc<[ChainState; SLOT_COUNT]>>>,
+        events: Arc<Mutex<Vec<Event>>>,
+        overview: Arc<Mutex<Option<Arc<lf_engine::Overview>>>>,
         join: Option<std::thread::JoinHandle<()>>,
     }
 
     impl FeedStandIn {
         fn start(host: EngineHost) -> Self {
+            Self::start_with_blocks(host, None)
+        }
+
+        fn start_synced(host: EngineHost, blocks: Arc<AtomicU64>) -> Self {
+            Self::start_with_blocks(host, Some(blocks))
+        }
+
+        fn start_with_blocks(host: EngineHost, blocks: Option<Arc<AtomicU64>>) -> Self {
             let stop = Arc::new(AtomicBool::new(false));
-            let initial = host.drain_feed_taps(&mut Vec::new(), None, None).chains.chains;
-            let chains = Arc::new(Mutex::new(initial));
-            let (stop_t, chains_t) = (stop.clone(), chains.clone());
+            let mut first_ev = Vec::new();
+            let first = host.drain_feed_taps(&mut first_ev, None, None);
+            let chains = Arc::new(Mutex::new(first.chains.chains));
+            let events = Arc::new(Mutex::new(first_ev));
+            let overview = Arc::new(Mutex::new(first.overview));
+            let (stop_t, chains_t, events_t, overview_t) =
+                (stop.clone(), chains.clone(), events.clone(), overview.clone());
             let join = std::thread::Builder::new()
                 .name("lf-test-feed".to_string())
                 .spawn(move || {
                     let mut ev = Vec::new();
+                    let mut last_block = blocks.as_ref().map_or(0, |b| b.load(Acquire));
                     while !stop_t.load(Acquire) {
+                        if let Some(b) = blocks.as_ref() {
+                            let cur = b.load(Acquire);
+                            if cur == last_block {
+                                std::thread::sleep(Duration::from_millis(1));
+                                continue;
+                            }
+                            last_block = cur;
+                            // `TestDevice` just entered its per-block sleep: peek `Event::Seat`
+                            // before `drain_feed_taps` projects and strips it.
+                            if let Ok(mut ends) = host.core.ends.lock() {
+                                if let Some(ends) = ends.as_mut() {
+                                    let slots = ends.events.slots();
+                                    if slots > 0 {
+                                        if let Ok(chunk) = ends.events.read_chunk(slots) {
+                                            let (a, b) = chunk.as_slices();
+                                            let mut log = events_t.lock().unwrap();
+                                            for &e in a.iter().chain(b.iter()) {
+                                                if matches!(e, Event::Seat { .. }) {
+                                                    log.push(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         ev.clear();
                         let drain = host.drain_feed_taps(&mut ev, None, None);
                         *chains_t.lock().unwrap() = drain.chains.chains;
-                        std::thread::sleep(Duration::from_millis(2));
+                        if drain.overview.is_some() {
+                            *overview_t.lock().unwrap() = drain.overview;
+                        }
+                        if !ev.is_empty() {
+                            events_t.lock().unwrap().extend_from_slice(&ev);
+                        }
+                        if blocks.is_none() {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
                     }
                 })
                 .expect("spawn feed stand-in");
-            FeedStandIn { stop, chains, join: Some(join) }
+            FeedStandIn { stop, chains, events, overview, join: Some(join) }
         }
 
         fn plate(&self, slot: usize, id: UnitId) -> Option<UnitState> {
@@ -1915,6 +1958,14 @@ mod unit_owner {
 
         fn chain(&self, slot: usize) -> ChainState {
             self.chains.lock().unwrap()[slot].clone()
+        }
+
+        fn lane(&self, lane: usize) -> Option<lf_engine::LaneView> {
+            self.overview.lock().unwrap().as_ref().map(|ov| ov.lane(lane))
+        }
+
+        fn events(&self) -> Vec<Event> {
+            self.events.lock().unwrap().clone()
         }
     }
 
@@ -2090,7 +2141,7 @@ mod unit_owner {
     fn a_restart_that_changes_latency_mid_take_reseats_after_the_take() {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = device(48_000);
-        let feed = FeedStandIn::start(device.host().clone());
+        let feed = FeedStandIn::start_synced(device.host().clone(), device.blocks.clone());
         let ident = identity();
         let unit_id: UnitId = 1;
 
@@ -2113,7 +2164,16 @@ mod unit_owner {
         assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
         assert_eq!(installed(&device, 0), Some((SlotKind::Effect, 0)));
 
-        start_take(&device);
+        // Drive the take without calling `drain_feed` directly so `FeedStandIn` captures every event.
+        let host = device.host();
+        host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
+        host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
+        host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
+        assert!(
+            wait_for(|| feed.lane(0).is_some_and(|l| l.state == LaneState::Recording && l.frames > 0)),
+            "recording take started"
+        );
+
         obs.latency.store(128, Relaxed);
         request_restart(&obs);
 
@@ -2123,7 +2183,10 @@ mod unit_owner {
                 && feed.chain(0).held),
             "withdrawal applies at once and reseat is held while the take lasts"
         );
-        assert!(is_recording(&device), "the take is still recording");
+        assert!(
+            feed.lane(0).is_some_and(|l| l.state == LaneState::Recording),
+            "the take is still recording"
+        );
         assert_eq!(obs.stops.load(Relaxed), 1);
         assert_eq!(obs.starts.load(Relaxed), 1);
 
@@ -2140,7 +2203,12 @@ mod unit_owner {
         }
 
         let processed_before = obs.processes.load(Relaxed);
-        stop_take(&device);
+        // Commit the take on the grid (`RecDub` closes a recording take into `Playing`).
+        host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
+        assert!(
+            wait_for(|| feed.lane(0).is_some_and(|l| l.state == LaneState::Playing && l.frames > 0)),
+            "recording take committed into a playing loop"
+        );
 
         assert!(
             wait_for(|| feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Seated && p.latency == 128 && !p.held)
@@ -2148,7 +2216,62 @@ mod unit_owner {
                 && installed(&device, 0) == Some((SlotKind::Effect, 128))
                 && obs.starts.load(Relaxed) == 2
                 && obs.processes.load(Relaxed) > processed_before + 8),
-            "after stop_take the unit is seated at 128 and processing again"
+            "after the take ends the unit is seated at 128 and processing again"
+        );
+
+        // Verify the take's loop length stayed on the grid (240 BPM @ 48 kHz = 12_000 frames/beat)
+        // and the held reseat landed on the first 256-frame block after the take ended.
+        let events = feed.events();
+        let (commit_frame, loop_frames) = events
+            .iter()
+            .find_map(|e| match *e {
+                Event::Lane { frame, lane: 0, info } if info.state == LaneState::Playing && info.length > 0 => {
+                    Some((frame, info.length))
+                }
+                _ => None,
+            })
+            .expect("captured the take's commit Event::Lane");
+        let beat_frames: Frame = 48_000 * 60 / 240;
+        assert_eq!(
+            loop_frames % beat_frames,
+            0,
+            "committed loop length {loop_frames} must stay on the {beat_frames}-frame beat grid"
+        );
+        let master = events
+            .iter()
+            .rev()
+            .find_map(|e| match *e {
+                Event::Transport { master, .. } if master > 0 => Some(master),
+                _ => None,
+            })
+            .expect("captured committed master loop length");
+        assert_eq!(loop_frames, master, "lane loop length matches the master grid");
+
+        let wait_idx = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    *e,
+                    Event::Seat { slot: 0, unit, op: SeatOp::Install, outcome: SeatOutcome::Waiting, .. }
+                        if unit == unit_id
+                )
+            })
+            .expect("captured the held reseat's Waiting Event::Seat");
+        let reseat_frame = events[wait_idx + 1..]
+            .iter()
+            .find_map(|e| match *e {
+                Event::Seat { frame, slot: 0, unit, op: SeatOp::Install, outcome: SeatOutcome::Applied }
+                    if unit == unit_id =>
+                {
+                    Some(frame)
+                }
+                _ => None,
+            })
+            .expect("captured the held reseat's Applied Event::Seat");
+        let first_block_after = ((commit_frame + 255) / 256) * 256;
+        assert_eq!(
+            reseat_frame, first_block_after,
+            "held reseat must land on the first block after the take ends (commit={commit_frame}, expected={first_block_after}, got={reseat_frame})"
         );
 
         let Removal::Sent(rm_op) = device.host().remove_unit(unit_id).expect("remove_unit") else {
@@ -2672,5 +2795,235 @@ mod unit_owner {
         let retired = dir.store().load(0, &ident).unwrap().expect("the slot's tone");
         assert_eq!(retired.state, b"parked-tone", "the dismissed unit's tone retired into the slot's file");
         assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+    }
+
+    /// Finding 1: a first install applies, then a rebuild evicts it before the owner polls `Applied`.
+    /// The reseat is refused: the unit had been seated, so the plate is parked, the unit kept, and
+    /// the plugin not destroyed.
+    #[test]
+    fn a_first_install_evicted_before_poll_parks_when_reseat_is_refused() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.1);
+        let ident = identity();
+        let unit_id: UnitId = 71;
+
+        // Mark feed fresh so `UnitHost::poll` does not drain the event ring while we stage the
+        // eviction before the owner ever sees `OpState::Applied`.
+        device.host().drain_feed(&mut Vec::new());
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.latency.store(0, Relaxed);
+        obs.param_count.store(2, Relaxed);
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident), 0, false).unwrap();
+        let obs_t = obs.clone();
+        let answered = Arc::new(AtomicBool::new(false));
+        let answered_t = answered.clone();
+        let spawner = std::thread::spawn(move || {
+            let res = unit_owner::spawn_unit(
+                PluginFormat::Clap,
+                unit_host,
+                0,
+                Arc::new(|_| {}),
+                None,
+                unit_runner(vec![obs_t], "bleeploop.restart-fixture", None),
+            );
+            answered_t.store(true, Release);
+            res
+        });
+
+        // Wait for the first install to apply and process in the old engine, still unpolled.
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 0), "first install applied and processed");
+        assert!(!answered.load(Acquire), "owner had not polled Applied before rebuild");
+
+        // Make the reseat on the rebuilt engine refuse on latency, then rebuild to evict.
+        obs.latency.store(lf_engine::max_chain_latency(44_100) as u32 + 1, Relaxed);
+        device.rebuild_at(44_100, 256);
+
+        let feed = FeedStandIn::start(device.host().clone());
+        let (handle, answer) = spawner.join().unwrap().expect("evicted-after-apply unit stays alive, not failed");
+        assert!(matches!(answer, Answer::Seated { .. }), "expected Seated answer, got {answer:?}");
+        assert!(
+            wait_for(|| feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Failed && p.parked)),
+            "refused reseat parks the plate"
+        );
+        assert!(!handle.is_finished(), "owner keeps the unit parked");
+        assert_eq!(obs.destroy_seq.load(Relaxed), 0, "plugin not destroyed");
+        let params = handle.list_params().expect("parked unit keeps serving list_params");
+        assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101]);
+
+        assert_eq!(
+            device.host().remove_unit(unit_id).expect("remove_unit"),
+            Removal::Plate,
+            "evicted unit parked out of the new engine removes as Plate and posts Dismissed"
+        );
+        assert!(wait_for(|| handle.is_finished()));
+        handle.stop().expect("owner released cleanly");
+        assert!(obs.destroy_seq.load(Relaxed) > 0, "destroyed on dismissal");
+        assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
+    }
+
+    /// Finding 2: with the device closed (engine and port alive, no feed ticking), a seated unit's
+    /// plugin-asked restart settles its withdrawal and reseats the unit.
+    #[test]
+    fn a_restart_with_the_device_closed_and_no_feed_settles_and_reseats() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let mut device = device(48_000);
+        let ident = identity();
+        let unit_id: UnitId = 72;
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.latency.store(0, Relaxed);
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident), 0, false).unwrap();
+        let (handle, answer) = unit_owner::spawn_unit(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            None,
+            unit_runner(vec![obs.clone()], "bleeploop.restart-fixture", None),
+        )
+        .expect("unit seats without a feed");
+        assert!(matches!(answer, Answer::Seated { .. }), "{answer:?}");
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 4), "unit processes while device runs");
+
+        // Close the device: engine and port stay alive, no render thread, no feed ticking.
+        device.stop();
+        obs.latency.store(64, Relaxed);
+        request_restart(&obs);
+
+        // Bound wait tightly enough to fail quickly when the withdraw op is dropped.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if obs.activations.load(Relaxed) == 2
+                && obs.deactivations.load(Relaxed) == 1
+                && installed(&device, 0) == Some((SlotKind::Effect, 64))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(obs.deactivations.load(Relaxed), 1, "withdrawal settled while device was closed");
+        assert_eq!(obs.activations.load(Relaxed), 2, "unit reactivated while device was closed");
+        assert_eq!(installed(&device, 0), Some((SlotKind::Effect, 64)), "unit reseated at new latency");
+
+        // Reopen the device: the reseated unit starts processing again.
+        let before = obs.processes.load(Relaxed);
+        device.resume();
+        assert!(wait_for(|| obs.starts.load(Relaxed) == 2 && obs.processes.load(Relaxed) > before + 4));
+
+        remove(&device, unit_id, handle).expect("owner released cleanly");
+    }
+
+    /// Finding 4: the owner's first answer must not block when the caller has not yet received on
+    /// `ready_rx` (capacity-1 channel + non-blocking send).
+    #[test]
+    fn the_first_answer_does_not_block_the_owner_when_caller_has_not_received() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let ident = identity();
+        let unit_id: UnitId = 76;
+
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.param_count.store(2, Relaxed);
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident), 0, false).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let claim = Arc::new(engine_slot::LoadClaim::default());
+        let edited = Arc::new(AtomicBool::new(false));
+        let (_params_tx, params) = RingBuffer::new(64);
+        let params_tx = Arc::new(Mutex::new(_params_tx));
+        let (request_tx, requests) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = unit_owner::ready_channel();
+        let param_ids = super::ParamIds::default();
+        let shared_name = Arc::new(std::sync::OnceLock::new());
+        let ctx = UnitCtx {
+            unit: unit_host,
+            running: running.clone(),
+            claim,
+            requests,
+            params,
+            params_tx,
+            param_ids,
+            sink: Arc::new(|_| {}),
+            editor_parent: 0,
+            ready: ready_tx,
+            tone: super::super::super::tone::ToneKeeper::new(None, edited),
+            shared_name,
+        };
+        let obs_t = obs.clone();
+        let thread = std::thread::spawn(move || unit_runner(vec![obs_t], "bleeploop.restart-fixture", None)(ctx));
+
+        // Do NOT call `ready_rx.recv()` yet: wait until the install is settled `Applied` in the model.
+        assert!(
+            wait_for(|| feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Seated)),
+            "unit install settled as Seated"
+        );
+
+        // Two sequential round-trips guarantee at least one full owner loop turn ran after `Applied`
+        // (so `send_answer` definitely executed) while `ready_rx` is still unreceived.
+        let ask = || {
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+            request_tx.send(super::OwnerRequest::ListParams(reply_tx)).unwrap();
+            reply_rx.recv_timeout(Duration::from_secs(2))
+        };
+        let first = ask();
+        let second = ask();
+        let answer = ready_rx.try_recv();
+        let Removal::Sent(rm_op) = device.host().remove_unit(unit_id).unwrap() else { panic!() };
+        assert_eq!(device.host().wait_op(rm_op, PATIENCE).unwrap(), OpState::Applied);
+        assert!(wait_for(|| thread.is_finished()), "owner tears down on Back::Removed");
+        running.store(false, Release);
+        let _ = request_tx.send(super::OwnerRequest::Wake);
+        thread.join().unwrap().expect("owner ended cleanly");
+
+        let params1 = first.expect("first list_params must not block on ready_tx").expect("list_params 1");
+        let params2 = second.expect("second list_params must not block on ready_tx").expect("list_params 2");
+        assert_eq!(params1.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101]);
+        assert_eq!(params2.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101]);
+        assert!(matches!(answer, Ok(Ok(Answer::Seated { .. }))), "buffered answer: {answer:?}");
+    }
+
+    /// Finding 5: when spawning the owner thread fails, `spawn_unit` fails the plate and releases
+    /// the reservation instead of leaking both.
+    #[test]
+    fn a_thread_spawn_failure_fails_the_plate_and_releases_the_reservation() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let ident = identity();
+        let unit_id: UnitId = 77;
+
+        let unit_host = device.host().unit(0, unit_id, Spec::Plugin(ident.clone()), 0, false).unwrap();
+        let err = match unit_owner::spawn_unit_with(
+            PluginFormat::Clap,
+            unit_host,
+            0,
+            Arc::new(|_| {}),
+            None,
+            |_| Ok(()),
+            |_, _| Err(std::io::Error::other("simulated OS thread limit")),
+        ) {
+            Err(e) => e,
+            Ok((_, ans)) => panic!("expected spawn error, got {ans:?}"),
+        };
+        assert!(err.contains("spawn unit owner thread"), "err: {err}");
+        assert!(
+            wait_for(|| feed.plate(0, unit_id).is_some_and(|p| p.state == PlateState::Failed && !p.parked)),
+            "plate must read failed after thread spawn error, got {:?}",
+            feed.plate(0, unit_id)
+        );
+        // The id reservation must be free so the same id can be reserved again.
+        let retry = device
+            .host()
+            .unit(0, unit_id, Spec::Plugin(ident), 0, false)
+            .expect("id reservation must be released after spawn error");
+        retry.failed("cleanup".to_string());
+        retry.release();
     }
 }
