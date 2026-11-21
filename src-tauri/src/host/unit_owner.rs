@@ -30,7 +30,8 @@ use super::engine_slot::{
     PluginFormat, Reported, Setup, ASK_TIMEOUT, LOAD_TIMEOUT, OWNER_POLL,
 };
 use super::{
-    load_ready_channel, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds, EVENT_RING_CAP,
+    load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
+    EVENT_RING_CAP,
 };
 use crate::engine_io::unit_host::{Activated, Back, Op, OpState, SubmitError, Terms, UnitHost};
 
@@ -696,6 +697,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             }
             let mut in_hand = seat.take_unit();
             let mut retire = false;
+            let mut dismissed = false;
             while let Some(back) = host.take_back() {
                 match back {
                     Back::Removed(u) => {
@@ -711,14 +713,16 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                     }
                     Back::Dismissed => {
                         retire = true;
+                        dismissed = true;
                     }
                 }
             }
-            if let Some(unit) = in_hand {
+            // A dismissed seat holds no box in the engine: release in order, a unit in hand or not.
+            if in_hand.is_some() || dismissed {
                 ordered_release(
                     host,
                     plugin,
-                    Some(unit),
+                    in_hand,
                     &mut tone,
                     &name,
                     !panicked,
@@ -863,21 +867,18 @@ pub(super) fn spawn_unit(
 pub(crate) struct UnitOwner {
     slot: usize,
     id: UnitId,
-    #[allow(dead_code)] // round 3: set_param
     format: PluginFormat,
     name: String,
     running: Arc<AtomicBool>,
     owner: Option<JoinHandle<Result<(), String>>>,
     requests: Sender<OwnerRequest>,
-    #[allow(dead_code)] // round 3: set_param
     params_tx: Arc<Mutex<Producer<ParamEvent>>>,
-    #[allow(dead_code)] // round 3: set_param
     param_ids: ParamIds,
-    #[allow(dead_code)] // round 3: set_param
+    /// The owner's `ToneKeeper` flag: a host parameter set is a change to save.
     edited: Arc<AtomicBool>,
 }
 
-#[allow(dead_code)] // P4 / tests call these methods
+#[allow(dead_code)] // the chain commands (P4) call these; the tests call them now
 impl UnitOwner {
     pub(crate) fn name(&self) -> &str {
         &self.name
@@ -891,6 +892,57 @@ impl UnitOwner {
     /// Save the plugin's tone now, through its owner, into the store; returns the tone file's bytes.
     pub(crate) fn take_tone(&self) -> Result<Vec<u8>, String> {
         self.ask("take_tone", OwnerRequest::SaveTone)
+    }
+
+    /// Set a parameter the plugin listed: the unit applies it at the start of the next block it
+    /// renders, and a VST3 edit controller is told as well (`src-tauri/AGENTS.md` § Plugin hosting,
+    /// "Host-set VST3 params go to BOTH halves"). Err for an id the plugin never listed (an unknown id
+    /// can crash a plugin) or a full ring; the controller only hears what the processor got. The
+    /// ring's lock is held through the controller's request too, so two sets from two threads reach
+    /// both halves in the same order.
+    pub(crate) fn set_param(&self, id: u32, value: f64) -> Result<(), String> {
+        let unit = self.id;
+        let known = self.param_ids.read().map(|set| set.contains(&id)).unwrap_or(false);
+        if !known {
+            return Err(format!("parameter {id} is not one the plugin of unit {unit} listed"));
+        }
+        let mut ring = self
+            .params_tx
+            .lock()
+            .map_err(|_| format!("unit {unit} event queue is unavailable (lock poisoned)"))?;
+        if ring.push(ParamEvent { id, value }).is_err() {
+            return Err(format!("unit {unit} event queue is full; parameter {id} change was dropped"));
+        }
+        self.edited.store(true, Release);
+        if self.format == PluginFormat::Vst3 && self.requests.send(OwnerRequest::SetParamNormalized(id, value)).is_err() {
+            return Err(format!("unit {unit} owner thread gone; parameter {id} reached the processor, not the controller"));
+        }
+        Ok(())
+    }
+
+    /// Ask for a tone save without waiting (the app's exit waits on every reply under one deadline).
+    pub(crate) fn start_tone_save(&self) -> Result<Receiver<Result<Vec<u8>, String>>, String> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        self.requests
+            .send(OwnerRequest::SaveTone(reply_tx))
+            .map_err(|_| "unit owner thread gone".to_string())?;
+        Ok(reply_rx)
+    }
+
+    /// Open the plugin's editor (≤ 5 s; an editor that comes up later is closed again).
+    pub(crate) fn open_editor(&self) -> Result<(), String> {
+        owner_request_5s(&self.requests, "open_editor", OwnerRequest::OpenEditor)
+    }
+
+    pub(crate) fn close_editor(&self) -> Result<(), String> {
+        owner_request_5s(&self.requests, "close_editor", OwnerRequest::CloseEditor)
+    }
+
+    /// Test-only: a stop's first step alone: the owner's loop ends at its next check, unwoken, and
+    /// `stop` still joins it.
+    #[cfg(test)]
+    pub(super) fn stop_serving(&self) {
+        self.running.store(false, Release);
     }
 
     /// Whether the owner thread has exited (e.g. after `Back::Removed` tore it down).

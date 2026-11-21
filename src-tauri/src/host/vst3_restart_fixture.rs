@@ -62,6 +62,8 @@ struct FixtureComponent {
     stop_seq: AtomicUsize,
     deactivate_seq: AtomicUsize,
     terminate_seq: AtomicUsize,
+    /// `terminate` calls.
+    terminates: AtomicUsize,
     /// The component's state: what `getState` writes and `setState` replaces (the tone tests).
     state: Mutex<Vec<u8>>,
     /// Runs once at the end of the next `getState`, its state written, on the thread that called it.
@@ -120,6 +122,7 @@ impl FixtureComponent {
             stop_seq: AtomicUsize::new(0),
             deactivate_seq: AtomicUsize::new(0),
             terminate_seq: AtomicUsize::new(0),
+            terminates: AtomicUsize::new(0),
             state: Mutex::new(Vec::new()),
             on_get_state: Mutex::new(None),
             reject_processing_start: AtomicBool::new(false),
@@ -160,6 +163,7 @@ impl IPluginBaseTrait for FixtureComponent {
     }
     unsafe fn terminate(&self) -> tresult {
         self.tick(&self.terminate_seq);
+        self.terminates.fetch_add(1, Relaxed);
         kResultOk
     }
 }
@@ -525,12 +529,12 @@ mod engine {
         }
         t
     }
-    const COMPONENT_CID: TUID = tuid(b"BleepLoopEngineC");
+    pub(super) const COMPONENT_CID: TUID = tuid(b"BleepLoopEngineC");
     const CONTROLLER_CID: TUID = tuid(b"BleepLoopEngineE");
 
     /// What the factory made on the owner thread, for the test to watch.
     #[derive(Default)]
-    struct Made {
+    pub(super) struct Made {
         component: Mutex<Option<ComWrapper<FixtureComponent>>>,
         controller: Mutex<Option<ComWrapper<FixtureController>>>,
         /// How many components the factory made (a load that discards a refusing instance makes two).
@@ -548,17 +552,17 @@ mod engine {
     }
 
     impl Made {
-        fn component(&self) -> ComWrapper<FixtureComponent> {
+        pub(super) fn component(&self) -> ComWrapper<FixtureComponent> {
             self.component.lock().unwrap().clone().expect("the component was created")
         }
-        fn controller(&self) -> ComWrapper<FixtureController> {
+        pub(super) fn controller(&self) -> ComWrapper<FixtureController> {
             self.controller.lock().unwrap().clone().expect("the controller was created")
         }
     }
 
     /// An in-process `IPluginFactory` with two classes: the fixture component (separated, as a
     /// JUCE plugin is) and its edit controller, a `FixtureController` listing two params.
-    struct FixtureFactory {
+    pub(super) struct FixtureFactory {
         made: Arc<Made>,
         latency: u32,
         output_level: f32,
@@ -576,7 +580,7 @@ mod engine {
 
     impl FixtureFactory {
         /// An instrument with no latency, silent, that takes its tone and starts processing.
-        fn new(made: Arc<Made>) -> Self {
+        pub(super) fn new(made: Arc<Made>) -> Self {
             Self {
                 made,
                 latency: 0,
@@ -1318,6 +1322,121 @@ mod engine {
         assert!(!s.contract_violation.load(Relaxed));
         handle.unload().unwrap();
         assert_eq!(s.deactivations.load(Relaxed), 2);
+    }
+}
+
+// ── the chain unit's owner (`unit_owner::serve_unit`) over the same in-process factory ─────────────
+
+mod unit_owner {
+    use super::super::super::engine_slot::{self, PluginFormat};
+    use super::super::super::unit_owner::{self, Answer, UnitCtx, UnitOwner};
+    use super::super::super::super::tone::ToneIdentity;
+    use super::engine::{FixtureFactory, Made, COMPONENT_CID};
+    use super::*;
+    use crate::engine_io::test_rig::TestDevice;
+    use crate::engine_io::unit_host::{OpState, Removal, Spec};
+    use crate::engine_io::EngineHost;
+    use lf_engine::UnitId;
+
+    /// Drains the engine's events every ~2 ms, so the owner's `UnitHost::poll` sees its install
+    /// settle (the feed thread's part).
+    struct Feed {
+        stop: Arc<AtomicBool>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Feed {
+        fn start(host: EngineHost) -> Feed {
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = stop.clone();
+            let join = std::thread::spawn(move || {
+                let mut events = Vec::new();
+                while !stopping.load(Relaxed) {
+                    events.clear();
+                    host.drain_feed_taps(&mut events, None, None);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            Feed { stop, join: Some(join) }
+        }
+    }
+
+    impl Drop for Feed {
+        fn drop(&mut self) {
+            self.stop.store(true, Relaxed);
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    /// The production chain-unit owner over a fresh in-process factory recording into `made`.
+    fn runner(made: Arc<Made>) -> impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static {
+        move |ctx| {
+            let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
+            super::super::engine::run_unit_with(ctx, &id, move || {
+                let factory = ComWrapper::new(FixtureFactory::new(made));
+                Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
+            })
+        }
+    }
+
+    fn seat(device: &TestDevice, slot: usize, id: UnitId, made: &Arc<Made>) -> UnitOwner {
+        let identity = ToneIdentity { format: "vst3".into(), path: r"C:\fixture.vst3".into(), id: "fixture".into() };
+        let unit_host = device.host().unit(slot, id, Spec::Plugin(identity), 0, false).expect("reserve chain unit");
+        let (owner, answer) =
+            unit_owner::spawn_unit(PluginFormat::Vst3, unit_host, 0, Arc::new(|_| {}), None, runner(made.clone()))
+                .expect("the unit's owner answers");
+        assert_eq!(answer, Answer::Seated { name: "Engine fixture".to_string(), tone: None });
+        owner
+    }
+
+    fn remove(device: &TestDevice, id: UnitId, owner: UnitOwner) {
+        let Removal::Sent(op) = device.host().remove_unit(id).expect("remove_unit") else {
+            panic!("a seated unit's removal is sent");
+        };
+        assert_eq!(device.host().wait_op(op, PATIENCE).expect("wait_op"), OpState::Applied);
+        assert!(wait_for(|| owner.is_finished()), "the owner ends by itself after its removal");
+        owner.stop().expect("released in order");
+    }
+
+    /// (component terminates, controller terminates) of what `made` holds.
+    fn terminated(made: &Made) -> (usize, usize) {
+        (made.component().terminates.load(Relaxed), made.controller().terminates.load(Relaxed))
+    }
+
+    /// Two owners over the in-process factory, two ids: each removal terminates its own component and
+    /// controller exactly once. (`InitDll`/`ExitDll` pair on a real module, which no fixture has.)
+    #[test]
+    fn two_vst3_owners_each_terminate_their_own_halves_once_on_removal() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.1);
+        let _feed = Feed::start(device.host().clone());
+        let (first, second) = (Arc::new(Made::default()), Arc::new(Made::default()));
+        let first_owner = seat(&device, 0, 71, &first);
+        let second_owner = seat(&device, 1, 72, &second);
+        assert!(
+            wait_for(|| first.component().processes.load(Relaxed) > 8 && second.component().processes.load(Relaxed) > 8),
+            "both process"
+        );
+        assert_eq!((terminated(&first), terminated(&second)), ((0, 0), (0, 0)));
+
+        remove(&device, 71, first_owner);
+        assert_eq!(terminated(&first), (1, 1), "the first removal terminates the first's halves once");
+        assert_eq!(terminated(&second), (0, 0), "and leaves the other's alone");
+        let processed = second.component().processes.load(Relaxed);
+        assert!(wait_for(|| second.component().processes.load(Relaxed) > processed + 8), "the other still processes");
+
+        remove(&device, 72, second_owner);
+        assert_eq!(terminated(&second), (1, 1), "the second removal terminates the second's halves once");
+        assert_eq!(terminated(&first), (1, 1), "the first's stay terminated once");
+        for made in [&first, &second] {
+            let s = made.component();
+            let (stop, deactivate, terminate) =
+                (s.stop_seq.load(Relaxed), s.deactivate_seq.load(Relaxed), s.terminate_seq.load(Relaxed));
+            assert!(0 < stop && stop < deactivate && deactivate < terminate, "{stop} < {deactivate} < {terminate}");
+            assert!(!s.contract_violation.load(Relaxed));
+        }
     }
 }
 
