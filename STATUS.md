@@ -36,9 +36,9 @@ D25). Driver latency reports are not guitar latency; after a relevant change, re
 check. A check that needs the device free may run while the owner is away from the PC; one that needs
 the cable needs the owner to cable it.
 
-**Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
-of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
-(they play on ASIO since; the owner counts it resolved).
+**Last play: 2026-11-21** (the published v0.9.0, a short try, not a jam): works; the owner expects some of
+the effects that are new and native in it to need tweaking after more playing (which ones and how, not
+said yet: the next jam's notes). None of § Next jam's checks was answered.
 
 ## Next jam
 
