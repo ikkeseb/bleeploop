@@ -832,7 +832,7 @@ await probe(async ({ open }) => {
     ];
   });
   console.log('refusals', refusals);
-  assert.deepEqual(refusals.slice(0, 2), [false, 'The native engine does not have the chain yet.']);
+  assert.deepEqual(refusals.slice(0, 2), [false, 'The native chain host is off (enable lf.chainNative in DEV).']);
   assert.deepEqual(refusals.slice(2), [false, 'Not available in the browser build.']);
 
   // ── Under Tauri the unit commands never reach `input_send` (the IPC spied) ────────────────────────
@@ -874,8 +874,329 @@ await probe(async ({ open }) => {
   console.log('under Tauri', JSON.stringify(ipc));
   assert.deepEqual([ipc.kind, ipc.available], ['tauri', false]);
   assert.deepEqual([ipc.unitOnly, ipc.mixed], [false, false], 'a call that carried a unit command resolves false');
-  assert.equal(ipc.direct, 'The native engine does not have the chain yet.', 'the IPC boundary refuses a batch with one');
+  assert.equal(ipc.direct, 'The native chain host is off (enable lf.chainNative in DEV).', 'the IPC boundary refuses a batch with one');
   assert.deepEqual(ipc.invokes.filter(([cmd]) => cmd === 'input_send').map(([, items]) => items), [[{ engine: 'PlayAll' }]], 'zero unit commands invoked: only the other command left');
   assert.deepEqual(ipc.invokes.filter(([cmd]) => cmd === 'engine_set_slot_input_channel'), [['engine_set_slot_input_channel', { slot: 0, channel: [0, 1] }]],
     'the stereo pick goes to the native engine as the one input-pick command, its slot and pair whole');
+
+  // ── Full-page Tauri boot, reload & ChainHost IPC spies (flag on vs flag off) ────────────────────
+  const AMP_DESC = { ...AMP, name: 'Fake Amp', isEffect: true };
+  const LOOK_DESC = { ...LOOKAHEAD, name: 'Fake Lookahead', isEffect: true };
+  const SAVED_AMP = { format: AMP.format, path: AMP.path, id: AMP.id, name: AMP_DESC.name };
+
+  /** Runs before the app on every load in the Tauri spy pages: answers boot and chain_* IPC. */
+  function installTauriBootSpy({ descriptors, resetChains }) {
+    const invokes = [];
+    const callbacks = new Map();
+    const listeners = new Map();
+    let nextCb = 1;
+    let nextEvent = 1;
+    const status = {
+      backend: 'Wasapi',
+      sampleRate: 48000,
+      block: 128,
+      inputName: 'Fake In',
+      outputName: 'Fake Out',
+      alignFrames: 256,
+      inputFrames: 128,
+      inputOpen: true,
+    };
+    const lanes = [0, 1, 2, 3, 4].map((lane) => ({
+      Lane: {
+        frame: 0,
+        lane,
+        info: { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 },
+      },
+    }));
+    window.__tauriInvokes = invokes;
+    window.__tauriEmitEvent = (event, payload) => {
+      for (const { id, handler } of listeners.get(event) ?? []) {
+        callbacks.get(handler)?.({ event, id, payload });
+      }
+    };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+    window.__TAURI_INTERNALS__ = {
+      transformCallback(fn) {
+        const id = nextCb++;
+        callbacks.set(id, fn);
+        return id;
+      },
+      unregisterCallback(id) {
+        callbacks.delete(id);
+      },
+      invoke: async (cmd, args, options) => {
+        const isRawBytes = args instanceof Uint8Array;
+        invokes.push({
+          cmd,
+          args: cmd === 'engine_feed' || cmd === 'midi_subscribe' ? null : isRawBytes ? [...args] : args,
+          isRawBytes,
+          headers: options?.headers ?? null,
+        });
+        if (cmd === 'host_init') return 7;
+        if (cmd === 'midi_subscribe') return 1;
+        if (cmd === 'plugin:event|listen') {
+          const id = nextEvent++;
+          const list = listeners.get(args.event) ?? [];
+          list.push({ id, handler: args.handler });
+          listeners.set(args.event, list);
+          return id;
+        }
+        if (cmd === 'plugin:event|unlisten') {
+          const list = listeners.get(args.event);
+          if (list) listeners.set(args.event, list.filter((e) => e.id !== args.eventId));
+          return null;
+        }
+        if (cmd === 'plugin_asio_status') return { status: 'not-compiled', detail: '' };
+        if (cmd === 'plugin_list_input_devices' || cmd === 'plugin_list_output_devices' || cmd === 'plugin_list_loaded' || cmd === 'plugin_list_params') return [];
+        if (cmd === 'engine_open' || cmd === 'engine_status') return status;
+        if (cmd === 'engine_feed') {
+          const cb = callbacks.get(args.channel.id);
+          const frame = {
+            seq: 1,
+            reset: true,
+            catchUp: false,
+            events: lanes,
+            settings: [],
+            device: [],
+            anchor: null,
+            meter: null,
+            peaks: [],
+            scope: null,
+            tuner: null,
+            ...(resetChains ? { chains: resetChains } : {}),
+          };
+          setTimeout(() => cb?.({ index: 0, message: frame }), 0);
+          return null;
+        }
+        if (cmd === 'engine_feed_ack') return false;
+        if (cmd === 'plugin_scan_paths') return descriptors.filter((d) => args.paths.includes(d.path));
+        if (cmd === 'plugin_scan') return descriptors;
+        if (cmd === 'plugin_load') {
+          const descriptor = descriptors.find((d) => d.path === args.path && d.id === args.id) ?? descriptors[0];
+          return { slot: args.slot, descriptor };
+        }
+        if (cmd === 'chain_add') return args.at === 0 ? 'seated' : 'waiting';
+        if (cmd === 'chain_reload') return 'reloaded';
+        if (cmd === 'chain_list_params') return [{ id: 3, name: 'Gain', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
+        if (cmd === 'chain_tone_take') return args.unit === 11 ? new Uint8Array([1, 2, 3]).buffer : new ArrayBuffer(0);
+        if (cmd === 'chain_tone_import') return { token: args[0] === 9 ? 5 : null, name: 'Fake Amp', matches: args[0] === 9 ? [11] : [] };
+        return null;
+      },
+    };
+    globalThis.isTauri = true;
+  }
+
+  // 1) Flag on: page reload with two chain plugins — host_init runs, no plugin_unload, no plugin_load,
+  // and the UI draws the reset frame's chains; then spy every ChainHost call, chain_tone_import's raw
+  // body and headers, unit commands on input_send, and Toggle.Units dropped before the batch.
+  const twoPluginChains = [
+    {
+      units: [
+        { id: 0x101, kind: 'plugin', plugin: AMP, bypass: false, source: false, name: 'Fake Amp', latency: 64, state: 'seated' },
+        { id: 0x102, kind: 'plugin', plugin: LOOKAHEAD, bypass: false, source: false, name: 'Fake Lookahead', latency: 128, state: 'seated' },
+      ],
+      latency: 192,
+      held: false,
+    },
+    { units: [], latency: 0, held: false },
+  ];
+  const { page: chainPage } = await open({
+    viewport: { width: 1920, height: 1080 },
+    storage: {
+      'lf.chainNative': '1',
+      'lf.rigRecall': JSON.stringify([SAVED_AMP, null]),
+    },
+    init: (p) => p.addInitScript(installTauriBootSpy, { descriptors: [AMP_DESC, LOOK_DESC], resetChains: twoPluginChains }),
+  });
+  await chainPage.waitForFunction(() => window.__tauriInvokes?.some((i) => i.cmd === 'plugin_scan'), undefined, { timeout: 5000 });
+  const initialLoadInvokes = await chainPage.evaluate(() => window.__tauriInvokes.map((i) => i.cmd));
+  assert.equal(initialLoadInvokes.filter((c) => c === 'plugin_load').length, 0, 'initial boot skips recallRig (no plugin_load)');
+  // Reload with the same two chain plugins on the host's reset frame.
+  await chainPage.reload();
+  await chainPage.waitForFunction(() => '__lf' in window && window.__tauriInvokes?.some((i) => i.cmd === 'plugin_scan'), undefined, { timeout: 10_000 });
+  await chainPage.waitForSelector('.unit[data-unit="257"]', { timeout: 5000 });
+  await chainPage.waitForSelector('.unit[data-unit="258"]', { timeout: 5000 });
+  const reloadCheck = await chainPage.evaluate(() => ({
+    kind: window.__lf.platform.kind,
+    available: window.__lf.platform.chain.available,
+    invokes: window.__tauriInvokes,
+    chainIds: window.__lf.chainRow()[0].units.map((u) => u.id),
+    plateNames: [...document.querySelectorAll('.unit')].map((el) => el.querySelector('.unit__name')?.textContent?.trim()),
+  }));
+  console.log('reload with two chain plugins', JSON.stringify(reloadCheck.invokes.map((i) => i.cmd)), reloadCheck.plateNames);
+  assert.deepEqual([reloadCheck.kind, reloadCheck.available], ['tauri', true]);
+  assert.ok(reloadCheck.invokes.some((i) => i.cmd === 'host_init'), 'reload boot invokes host_init');
+  assert.equal(reloadCheck.invokes.filter((i) => i.cmd === 'plugin_unload').length, 0, 'reload with chain plugins invokes no plugin_unload');
+  assert.equal(reloadCheck.invokes.filter((i) => i.cmd === 'plugin_load').length, 0, 'reload skips recallRig (no plugin_load)');
+  assert.deepEqual(reloadCheck.chainIds, [0x101, 0x102], 'reset frame chains decoded into chain state');
+  assert.deepEqual(reloadCheck.plateNames, ['Fake Amp', 'Fake Lookahead'], 'UI draws the reset frame chains');
+
+  const ipcOn = await chainPage.evaluate(async ([amp]) => {
+    localStorage.removeItem('lf.chainNative');
+    const availableAfterClear = window.__lf.platform.chain.available;
+    window.__tauriInvokes.length = 0;
+    const plat = await import('/src/platform/index.ts');
+    const chain = window.__lf.platform.chain;
+    const added0 = await chain.add(0, 11, { kind: 'plugin', plugin: amp }, 0);
+    const added1 = await chain.add(1, 12, { kind: 'echo', params: { echoLevel: 0.4 }, bypass: true }, 1, 99);
+    await chain.remove(11);
+    const reloaded = await chain.reload(11, amp, 42, 55);
+    await chain.move(12, 0);
+    await chain.openEditor(11);
+    await chain.closeEditor(11);
+    const closedUnits = [];
+    const stopClosed = chain.onEditorClosed((u) => closedUnits.push(u));
+    await new Promise((r) => setTimeout(r, 0));
+    window.__tauriEmitEvent('chain:editor-closed', { unit: 11 });
+    stopClosed();
+    await new Promise((r) => setTimeout(r, 0));
+    window.__tauriEmitEvent('chain:editor-closed', { unit: 12 });
+    const params = await chain.listParams(11);
+    await chain.setParameter(11, 3, 0.75);
+    const toneSome = await chain.takeTone(11);
+    const toneNone = await chain.takeTone(12);
+    const nonAscii = { format: 'vst3', path: 'C:\\Fak\u00e9\\Amp.vst3', id: 'fake.amp' };
+    const impWithUnit = await chain.importTone(0, new Uint8Array([9, 8, 7]), nonAscii, 11);
+    const impNoUnit = await chain.importTone(1, new Uint8Array([4, 5]), amp);
+    await chain.forgetTone(5);
+
+    const unitOk = await plat.sendEngine(
+      { SetUnitBypass: [5, true] },
+      { SetUnitParam: [5, 'echoLevel', 0.5] },
+      { Action: { ToggleUnit: 5 } },
+      { ActionOn: [2, { ToggleUnit: 5 }] },
+    );
+    const kindOnly = await plat.sendEngine(
+      { Action: { Toggle: { Units: 'echo' } } },
+      { ActionOn: [1, { Toggle: { Units: 'ott' } }] },
+    );
+    const kindMixed = await plat.sendEngine(
+      { Action: { Toggle: { Units: 'echo' } } },
+      { SetUnitBypass: [5, false] },
+    );
+    const directUnit = await window.__lf.platform.input.send(1, [{ engine: { SetUnitBypass: [6, true] } }]).then(() => 'sent', (e) => e.message);
+    const directKind = await window.__lf.platform.input.send(1, [{ engine: { Action: { Toggle: { Units: 'echo' } } } }]).then(() => 'sent', (e) => e.message);
+    return {
+      kind: window.__lf.platform.kind,
+      availableAfterClear,
+      added0,
+      added1,
+      reloaded,
+      closedUnits,
+      params,
+      toneSome: toneSome ? [...toneSome] : null,
+      toneNone,
+      impWithUnit,
+      impNoUnit,
+      unitOk,
+      kindOnly,
+      kindMixed,
+      directUnit,
+      directKind,
+      invokes: [...window.__tauriInvokes],
+    };
+  }, [AMP]);
+  console.log('under Tauri chainNative=1', JSON.stringify(ipcOn.invokes.map((i) => i.cmd)));
+  assert.deepEqual([ipcOn.kind, ipcOn.availableAfterClear], ['tauri', true], 'lf.chainNative=1 enables tauriChainHost, read once per page');
+  assert.equal(ipcOn.added0, 'seated');
+  assert.equal(ipcOn.added1, 'waiting');
+  assert.equal(ipcOn.reloaded, 'reloaded');
+  assert.deepEqual(ipcOn.closedUnits, [11], 'onEditorClosed subscribes to chain:editor-closed and unwraps { unit }');
+  assert.deepEqual(ipcOn.params, [{ id: 3, name: 'Gain', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }]);
+  assert.deepEqual(ipcOn.toneSome, [1, 2, 3]);
+  assert.equal(ipcOn.toneNone, null, 'empty chain_tone_take response resolves null');
+  assert.deepEqual(ipcOn.impWithUnit, { token: 5, name: 'Fake Amp', matches: [11] });
+  assert.deepEqual(ipcOn.impNoUnit, { token: null, name: 'Fake Amp', matches: [] });
+
+  const chainInvokes = ipcOn.invokes.filter((i) => i.cmd.startsWith('chain_'));
+  assert.deepEqual(
+    chainInvokes.map(({ cmd, args, isRawBytes, headers }) => ({ cmd, args, isRawBytes, headers })),
+    [
+      { cmd: 'chain_add', args: { slot: 0, unit: 11, spec: { kind: 'plugin', plugin: AMP }, at: 0, toneToken: null, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_add', args: { slot: 1, unit: 12, spec: { kind: 'echo', params: { echoLevel: 0.4 }, bypass: true }, at: 1, toneToken: 99, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_remove', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_reload', args: { unit: 11, plugin: AMP, since: 42, toneToken: 55, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_move', args: { unit: 12, to: 0, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_open_editor', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_close_editor', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_list_params', args: { unit: 11 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_set_param', args: { unit: 11, paramId: 3, value: 0.75, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_tone_take', args: { unit: 11 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_tone_take', args: { unit: 12 }, isRawBytes: false, headers: null },
+      {
+        cmd: 'chain_tone_import',
+        args: [9, 8, 7],
+        isRawBytes: true,
+        headers: {
+          slot: '0',
+          plugin: '{"format":"vst3","path":"C:\\\\Fak\\u00e9\\\\Amp.vst3","id":"fake.amp"}',
+          epoch: '7',
+          unit: '11',
+        },
+      },
+      {
+        cmd: 'chain_tone_import',
+        args: [4, 5],
+        isRawBytes: true,
+        headers: {
+          slot: '1',
+          plugin: JSON.stringify(AMP),
+          epoch: '7',
+        },
+      },
+      { cmd: 'chain_tone_forget', args: { token: 5, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+    ],
+    'every chain_* command name, argument shape, raw tone body and headers match chain_cmds.rs',
+  );
+  assert.ok(
+    ipcOn.invokes.some((i) => i.cmd === 'plugin:event|listen' && i.args.event === 'chain:editor-closed'),
+    'onEditorClosed registers chain:editor-closed',
+  );
+  assert.ok(
+    ipcOn.invokes.some((i) => i.cmd === 'plugin:event|unlisten' && i.args.event === 'chain:editor-closed'),
+    'onEditorClosed unsubscribe unlistens chain:editor-closed',
+  );
+
+  assert.equal(ipcOn.unitOk, true, 'unit commands (non-Toggle.Units) succeed under Tauri when lf.chainNative=1');
+  assert.deepEqual([ipcOn.kindOnly, ipcOn.kindMixed], [false, false], 'Toggle.Units is dropped before the batch under Tauri');
+  assert.equal(ipcOn.directUnit, 'sent', 'tauriInput.send lets unit commands through when lf.chainNative=1');
+  assert.notEqual(ipcOn.directKind, 'sent', 'tauriInput.send refuses Toggle.Units before IPC');
+  const sentBatchesOn = ipcOn.invokes.filter((i) => i.cmd === 'input_send').map((i) => i.args.items);
+  assert.deepEqual(
+    sentBatchesOn,
+    [
+      [
+        { engine: { SetUnitBypass: [5, true] } },
+        { engine: { SetUnitParam: [5, 'echoLevel', 0.5] } },
+        { engine: { Action: { ToggleUnit: 5 } } },
+        { engine: { ActionOn: [2, { ToggleUnit: 5 }] } },
+      ],
+      [{ engine: { SetUnitBypass: [5, false] } }],
+      [{ engine: { SetUnitBypass: [6, true] } }],
+    ],
+    'unit commands reach input_send and zero Toggle.Units are invoked',
+  );
+
+  // 2) Flag off: boot recalls the saved amp-sim via plugin_load as today.
+  const { page: legacyPage } = await open({
+    viewport: { width: 1920, height: 1080 },
+    storage: {
+      'lf.rigRecall': JSON.stringify([SAVED_AMP, null]),
+    },
+    init: (p) => p.addInitScript(installTauriBootSpy, { descriptors: [AMP_DESC], resetChains: null }),
+  });
+  await legacyPage.waitForFunction(() => window.__tauriInvokes?.some((i) => i.cmd === 'plugin_load'), undefined, { timeout: 5000 });
+  const legacyBoot = await legacyPage.evaluate(() => ({
+    kind: window.__lf.platform.kind,
+    available: window.__lf.platform.chain.available,
+    invokes: window.__tauriInvokes,
+  }));
+  console.log('legacy boot invokes', JSON.stringify(legacyBoot.invokes.map((i) => i.cmd)));
+  assert.deepEqual([legacyBoot.kind, legacyBoot.available], ['tauri', false]);
+  assert.ok(legacyBoot.invokes.some((i) => i.cmd === 'host_init'), 'legacy boot invokes host_init');
+  assert.deepEqual(
+    legacyBoot.invokes.filter((i) => i.cmd === 'plugin_load').map((i) => i.args),
+    [{ slot: 0, path: AMP.path, id: AMP.id, frontendEpoch: 7, toneToken: null }],
+    'flag off boot recalls the saved amp-sim via plugin_load',
+  );
 });
