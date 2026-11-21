@@ -7,8 +7,9 @@ import { EscapeCloses } from '../looper/shared';
  * A slot-row popover: a plate's menu, an input effect's parameters, a folded slot's or folded IN FX's
  * line. Non-modal, as the command bar's popovers: focus moves into the panel on open, Escape or a click
  * outside closes it, and a keyboard close hands focus back to its trigger on the app's behalf
- * (`returnFocus`, the transport keys', so Space after Escape still arms REC). One is open at a time in
- * the row: they share one anchor (`slot.css`, `--slot-pop` on the open trigger), and opening one closes
+ * (`returnFocus`, the transport keys', so Space after Escape still arms REC); a Tab in a menu closes it and
+ * moves on from its trigger, in its own direction, and a menu closes when the focus leaves it. One is open
+ * at a time in the row: they share one anchor (`slot.css`, `--slot-pop` on the open trigger), and opening one closes
  * the other. The panel hangs under its trigger (anchor positioning), flipping to the trigger's right
  * edge near the window's.
  */
@@ -16,6 +17,9 @@ export interface RowPopover {
   open: () => boolean;
   toggle: () => void;
   close: (keyboard: boolean) => void;
+  /** Close on a Tab: the focus goes to the trigger as a plain control (Space and Enter are its own), and the
+   * browser's Tab moves on from it, in its own direction. */
+  leave: () => void;
   /** The trigger's ref: focus returns to it. */
   trigger: (el: HTMLElement) => void;
 }
@@ -40,6 +44,10 @@ export function createRowPopover(returnFocus?: (el: HTMLElement | undefined) => 
     close: (keyboard) => {
       setOpen(false);
       if (keyboard) (returnFocus ?? ((el) => el?.focus()))(trigger);
+    },
+    leave: () => {
+      setOpen(false);
+      trigger?.focus({ preventScroll: true });
     },
     trigger: (el) => (trigger = el),
   };
@@ -75,14 +83,15 @@ export function RowPopoverPanel(props: {
             }
             onClick={(e) => e.stopPropagation()}
             onFocusOut={(e) => {
+              // a menu closes when the focus leaves it; a dialog keeps its own say
               const to = e.relatedTarget as Node | null;
-              if (to && !e.currentTarget.contains(to)) props.pop.close(false);
+              if (props.role === 'menu' && to && !e.currentTarget.contains(to)) props.pop.close(false);
             }}
             onKeyDown={(e) => {
               if (props.role !== 'menu') return;
               if (e.key === 'Tab') {
-                e.preventDefault();
-                props.pop.close(true);
+                // no preventDefault: the browser's Tab moves on from the trigger, Shift+Tab back from it
+                props.pop.leave();
                 return;
               }
               if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;

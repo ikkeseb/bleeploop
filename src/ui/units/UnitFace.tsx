@@ -78,17 +78,16 @@ export function UnitFace(props: {
     cancelAnimationFrame(raf);
   });
 
-  // what the player set (kept), a drag's own while it runs, and the displayed fit held for this viewport
-  // after a move or nudge (so release never jumps, without storing it as the size preference)
-  const [fitHold, setFitHold] = createSignal<{ narrow: boolean; k: number; w: number; h: number; ui: number } | null>(null);
-  const activeHold = (): Kept['size'] => {
-    const h = fitHold();
-    return h && h.w === win().w && h.h === win().h && h.ui === ui() ? { narrow: h.narrow, k: h.k } : null;
-  };
+  // what the player set (kept), a drag's own while it runs, and the displayed fit held after a move or nudge
+  // (so release never jumps, without storing it as the size preference): it holds for the viewport it was
+  // made in and clears at the first change of the window or the size step, never to return with a round trip
+  const [fitHold, setFitHold] = createSignal<{ narrow: boolean; k: number } | null>(null);
+  const viewport = createMemo(() => `${win().w}x${win().h}@${ui()}`);
+  createEffect(on(viewport, () => setFitHold(null), { defer: true }));
   const [live, setLive] = createSignal<Kept | null>(null);
   const kept = () => live() ?? faces()[props.kind] ?? EMPTY;
   const input = (k: Kept = kept(), useHold = live() === null): FaceInput => {
-    const size = k.at && useHold ? (activeHold() ?? k.size) : k.size;
+    const size = k.at && useHold ? (fitHold() ?? k.size) : k.size;
     return {
       plate: plateBox(),
       win: win(),
@@ -156,7 +155,7 @@ export function UnitFace(props: {
       setFitHold(null);
       commit({ at: null, size: base.size });
     } else {
-      setFitHold({ ...keepSize(b)!, w: win().w, h: win().h, ui: ui() });
+      setFitHold(keepSize(b));
       commit({ at: { x: b.left, y: b.top }, size: base.size });
     }
   };
@@ -186,7 +185,7 @@ export function UnitFace(props: {
     const step = e.shiftKey ? 40 : 8;
     const nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
     if (nudge) {
-      setFitHold({ ...keepSize(b)!, w: win().w, h: win().h, ui: ui() });
+      setFitHold(keepSize(b));
       commit({ at: { x: b.left + nudge[0], y: b.top + nudge[1] }, size: base.size });
     } else if (e.key === '+' || e.key === '=' || e.key === '-') {
       setFitHold(null);

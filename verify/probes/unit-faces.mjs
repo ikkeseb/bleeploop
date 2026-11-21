@@ -8,7 +8,7 @@
  *   face orders by length, 1/16 1/8 1/8. 1/4; the engine's index 3 1 2 0) and reads the feed's value and its
  *   length at the tempo, a new tempo included; with the engine holding the commands (`holdApply`), a drag
  *   turned back inside one gesture (even past a >500 ms pause) sends its way back, quick keys count on from
- *   the last step sent even through one-by-one late reports, a wheel event normalizes `deltaMode` and sends
+ *   the last step sent even through one-by-one late reports (an unchanged snapshot answers nothing), a wheel event normalizes `deltaMode` and sends
  *   once, and every read-out stays on the feed once let go; FEEDBACK (0 to 95 %) and LEVEL by the keyboard
  *   and a drag, a knob following the hand only while the drag holds it (a release or a lost capture hands it
  *   back to the feed and returns pointer-only focus to the frame so Space/Enter drive the looper); the power
@@ -27,9 +27,11 @@
  *   narrow face takes over at the base size and never goes under it, grown it stops at the window; a small
  *   corner drag on a narrow face at 1.2x stays narrow and scales smoothly until deliberate growth; at home
  *   from a plate the window clamps (left: slot A's first; right: slot B's) a small corner drag grows it
- *   positively, never the narrow face; - then + by the keys returns to the full face;
- * - a window resize pulls a moved face back into the window; reloading a large saved place into a smaller
- *   window keeps every control reachable; a window too short for the face under its plate or a scrolled plate
+ *   positively, never the narrow face; a moved narrow face at the window's foot grows to full when the corner
+ *   is pulled past it; - then + by the keys returns to the full face;
+ * - a window resize pulls a moved face back into the window; a place saved by a real move and reloaded into a
+ *   smaller window is the saved place, clamped, and a large stored place keeps every control reachable; the
+ *   fit a move holds clears at the first window change (no return with a round trip); a window too short for the face under its plate or a scrolled plate
  *   above the margin detaches it, fitted to the window, every control in reach; a focused knob keeps its
  *   focus across the reflow;
  * - free-standing: no backdrop, a press beside the face reaches the looper (a lane's record key) and the
@@ -37,9 +39,11 @@
  *   Escape in it (returning focus to the plate, the slot's fold button when folded, or a surviving chain
  *   control on feed removal) or its name again, never an Escape elsewhere; the OTT's and the ECHO's open at
  *   once, the last touched on top, no strap; the face at home follows its plate through a reorder; overlays:
- *   the face layer is inert under the tuner, a slot menu closes when keyboard focus leaves it, and Stage View
+ *   the face layer is inert under the tuner, a plate menu closes on Tab or Shift+Tab and moves on from its trigger in that direction, closes when the
+ *   focus leaves it (a legacy row dialog does not), faces keep no slot record once closed, and Stage View
  *   hides and makes faces inert then restores them on exit; where the row folds, a fold leaves the face open
- *   where it stood, in the window, and closing the last OTT cancels its draw loop;
+ *   where it stood, in the window, closing the last OTT cancels its draw loop (its glass or its miniature last), and the stage view queues
+ *   no face draw;
  * - per size (1920x1080, 2560x1440, 1000x700, 960x600): both faces open at home, no strap, every legend at
  *   12 px or more and none clipped (inside the face and inside every box that clips it), their controls
  *   reached by the pointer, the ECHO's tape live on the fake's timer.
@@ -242,6 +246,33 @@ await probe(async ({ open }) => {
         return { lit, litR, newest: lit.length ? Math.max(...lit) : null, meter: cell(MX + 5), meterR: cell(MX + 20) };
       }, frac);
 
+    /** A page of its own at `viewport` with the ECHO's face open in slot A; `kept` is stored as `lf.unitFaces`
+     * before the app loads (none: whatever the page keeps stays, so a reload keeps what a move saved). */
+    const freshFace = async (viewport, keptJson) => {
+      const { page: p2 } = await open({
+        viewport,
+        init: (p) =>
+          p.addInitScript((k) => {
+            window.__lfEngineFake = true;
+            window.__lfChainFake = true;
+            if (k) localStorage.setItem('lf.unitFaces', k);
+          }, keptJson ?? null),
+      });
+      p2.setDefaultTimeout(4000);
+      await openEchoIn(p2);
+      return p2;
+    };
+    /** Slot A's ECHO added and its face opened on `p2` (the engine fake's lanes first). */
+    const openEchoIn = async (p2) => {
+      await p2.evaluate(() => window.__lf.native.emit({ seq: 1, reset: true, settings: [], events: [0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 } } })) }));
+      await p2.locator('.slot--a .unit-add').click();
+      await p2.getByRole('menuitem', { name: /^ECHO/ }).first().click();
+      await p2.waitForTimeout(120);
+      await p2.locator('.slot--a .unit[data-kind="echo"] .unit__name').click();
+      await p2.getByRole('dialog', { name: 'ECHO, slot A' }).waitFor();
+      await p2.waitForTimeout(120);
+    };
+
     // the scene: an OTT and an ECHO in slot A
     await add('OTT');
     await add('ECHO');
@@ -357,6 +388,35 @@ await probe(async ({ open }) => {
         await settle();
         assert.equal((await chains())[0].units.find((u) => u.id === echo).params.echoTime, 0, 'the engine ends at 1/4 (0)');
         assert.equal(await time.getAttribute('aria-valuetext'), '1/4, 500 ms', 'final feed value is 1/4');
+      });
+      await check('TIME’s commands in order: an unchanged snapshot is no answer; a late report retires only what it names (from 1/8: [2, 1], snapshot 1/8, then 2, then Up queues from 1/8)', async () => {
+        await openFace('echo');
+        await timeAt18();
+        // the steps the checks before sent have aged out (a step is the base of the next for 500 ms)
+        await page.waitForTimeout(600);
+        const echo = await unitOf('echo');
+        const time = page.getByRole('slider', { name: 'ECHO time' });
+        await hold(true);
+        const from = (await sent()).length;
+        await time.focus();
+        await page.keyboard.press('ArrowUp');
+        await page.keyboard.press('ArrowDown');
+        assert.deepEqual(await timeSends(from), [2, 1], '1/8. (2), then back to 1/8 (1)');
+        // a chain snapshot that still reports 1/8: new unit objects, the same step
+        await emit({ chains: await chains() });
+        await page.waitForTimeout(40);
+        // the first send's answer arrives late
+        const cs = await chains();
+        const u = cs[0].units.find((x) => x.id === echo);
+        u.params = { ...u.params, echoTime: 2 };
+        await emit({ chains: cs });
+        await page.waitForTimeout(40);
+        await page.keyboard.press('ArrowUp');
+        assert.deepEqual(await timeSends(from), [2, 1, 2], 'the next Up queues from the request 1/8 (to 1/8.: 2), not from the late 2 (to 1/4: 0)');
+        await hold(false);
+        await settle();
+        assert.equal((await chains())[0].units.find((x) => x.id === echo).params.echoTime, 2, 'the engine ends at 1/8. (2)');
+        assert.equal(await time.getAttribute('aria-valuetext'), '1/8., 375 ms', 'the final feed value');
       });
       await check('TIME’s commands in order: a wheel event of several notches is one send, and deltaMode lines/pages normalize', async () => {
         await openFace('echo');
@@ -642,16 +702,41 @@ await probe(async ({ open }) => {
         assert.ok(await page.locator('.echo').evaluate((e) => e.classList.contains('uface--narrow')), 'stays narrow on release');
         assert.ok(Math.abs(b1.height - b0.height) < 1 && Math.abs(b1.y - (b0.y - 30)) < 2, `no jump on release: ${JSON.stringify(b0)} -> ${JSON.stringify(b1)}`);
         assert.equal((await kept()).echo?.size, null, 'size preference stays null');
+        // the nudge alone, from a fresh reflowed home face (the drag's own hold gone with Home)
         await echoFace().focus();
+        await page.keyboard.press('Home');
+        await settle();
+        assert.ok(await page.locator('.echo').evaluate((e) => e.classList.contains('uface--narrow')), 'premise: narrow at home again');
+        const h0 = await echoFace().boundingBox();
         await page.keyboard.press('ArrowUp');
         await settle();
         const b2 = await echoFace().boundingBox();
         assert.ok(await page.locator('.echo').evaluate((e) => e.classList.contains('uface--narrow')), 'stays narrow after nudge');
-        assert.ok(Math.abs(b2.y - (b1.y - 8)) < 2, `nudge up 8 px without jump: ${b1.y} -> ${b2.y}`);
+        assert.ok(Math.abs(b2.height - h0.height) < 1 && Math.abs(b2.y - (h0.y - 8)) < 2, `nudge up 8 px without jump: ${h0.y} -> ${b2.y}, ${h0.height} -> ${b2.height}`);
         assert.equal((await kept()).echo?.size, null, 'size preference still null');
         await page.setViewportSize({ width: W, height: H });
         await page.waitForTimeout(250);
         assert.ok(!(await page.locator('.echo').evaluate((e) => e.classList.contains('uface--narrow'))), 'roomy window restores full face (size was not stored)');
+        await echoFace().focus();
+        await page.keyboard.press('Home');
+      });
+      await check('the move: the displayed fit holds for the window it was made in and clears at the first change; a round trip does not bring it back', async () => {
+        await page.setViewportSize({ width: 1400, height: 600 });
+        await page.waitForTimeout(200);
+        await atHome('echo');
+        const narrow = () => page.locator('.echo').evaluate((e) => e.classList.contains('uface--narrow'));
+        assert.ok(await narrow(), 'premise: narrow at home at 1400x600');
+        const p = await panelPoint('.echo');
+        await drag(p.x, p.y, 30, -30);
+        assert.ok(await narrow(), 'held narrow on release');
+        await page.setViewportSize({ width: W, height: H });
+        await page.waitForTimeout(250);
+        assert.ok(!(await narrow()), 'a roomy window: the full face');
+        await page.setViewportSize({ width: 1400, height: 600 });
+        await page.waitForTimeout(250);
+        assert.ok(!(await narrow()), 'back at 1400x600: the old hold did not return (the moved face has room for the full layout)');
+        await page.setViewportSize({ width: W, height: H });
+        await page.waitForTimeout(250);
         await echoFace().focus();
         await page.keyboard.press('Home');
       });
@@ -723,6 +808,29 @@ await probe(async ({ open }) => {
         await echoFace().focus();
         await page.keyboard.press('Home');
       });
+      await check('the resize: a moved narrow face at 1.2x touching the window’s foot grows to full when the corner is pulled past the foot (1920x700)', async () => {
+        const p2 = await freshFace({ width: 1920, height: 700 }, JSON.stringify({ echo: { at: { x: 400, y: 900 }, size: { narrow: true, k: 1.2 } } }));
+        try {
+          const f = p2.locator('.echo');
+          assert.equal(await f.evaluate((e) => e.classList.contains('uface--narrow')), true, 'premise: narrow');
+          const b0 = await f.boundingBox();
+          assert.ok(Math.abs(b0.y + b0.height - 692) < 1, `premise: touching the foot margin (${b0.y + b0.height})`);
+          assert.ok(Math.abs(b0.width - 1080) < 4, `premise: 1.2x (${b0.width})`);
+          const g = await p2.locator('.echo .uface__grip').boundingBox();
+          const [x, y] = [g.x + g.width / 2, g.y + g.height / 2];
+          await p2.mouse.move(x, y);
+          await p2.mouse.down();
+          await p2.mouse.move(x, y + 150, { steps: 8 });
+          await p2.mouse.up();
+          await p2.waitForTimeout(150);
+          assert.equal(await f.evaluate((e) => e.classList.contains('uface--narrow')), false, 'pulled past the foot: the full face');
+          const b1 = await f.boundingBox();
+          assert.ok(b1.y >= 7.5 && b1.y + b1.height <= 692.5, `fitted to the window: ${b1.y}..${b1.y + b1.height}`);
+          assert.equal((await p2.evaluate(() => JSON.parse(localStorage.getItem('lf.unitFaces')))).echo.size.narrow, false, 'kept as the full face');
+        } finally {
+          await p2.close();
+        }
+      });
       await check('a window resize pulls a moved face back into the window', async () => {
         await atHome('echo');
         const p = await panelPoint('.echo');
@@ -779,6 +887,36 @@ await probe(async ({ open }) => {
           await p2.close();
         }
       });
+      await check('a place saved by a real move and reloaded into a smaller window is the saved place, clamped (1920x1080 to 1000x700)', async () => {
+        const p2 = await freshFace({ width: 1920, height: 1080 }, null);
+        try {
+          const f = p2.locator('.echo');
+          const b0 = await f.boundingBox();
+          // a press on the panel under the name, left of the knobs, carries the face right and down
+          const sc = b0.width / 900;
+          const [x, y] = [b0.x + 120 * sc, b0.y + (b0.height / sc > 400 ? 470 : 325) * sc];
+          await p2.mouse.move(x, y);
+          await p2.mouse.down();
+          await p2.mouse.move(x + 600, y + 300, { steps: 8 });
+          await p2.mouse.up();
+          await p2.waitForTimeout(150);
+          const saved = (await p2.evaluate(() => JSON.parse(localStorage.getItem('lf.unitFaces')))).echo;
+          assert.ok(saved.at && saved.at.x > 400 && saved.at.y > 300, `a real move saved a place: ${JSON.stringify(saved)}`);
+          await p2.setViewportSize({ width: 1000, height: 700 });
+          await p2.reload();
+          await openEchoIn(p2);
+          const b1 = await p2.locator('.echo').boundingBox();
+          const wantLeft = Math.max(8, Math.min(saved.at.x, 1000 - 8 - b1.width));
+          const wantTop = Math.max(8, Math.min(saved.at.y, 700 - 8 - b1.height));
+          assert.ok(wantLeft < saved.at.x - 100 && wantTop < saved.at.y - 100, 'premise: the window clamps both');
+          assert.ok(Math.abs(b1.x - wantLeft) < 1 && Math.abs(b1.y - wantTop) < 1, `the saved place ${JSON.stringify(saved.at)}, clamped to ${wantLeft},${wantTop}; drawn at ${b1.x},${b1.y}`);
+          // not the face's home: the saved place was read, and it is not under the plate
+          const pb = await p2.locator('.slot--a .unit[data-kind="echo"]').boundingBox();
+          assert.ok(Math.abs(b1.y - (pb.y + pb.height + 19)) > 20, `not at home (${b1.y} against the plate’s foot ${pb.y + pb.height})`);
+        } finally {
+          await p2.close();
+        }
+      });
       await check('the OTT face moves the same way: no strap, its place kept', async () => {
         await atHome('ott');
         const before = await ottFace().boundingBox();
@@ -828,6 +966,8 @@ await probe(async ({ open }) => {
         await page.mouse.down();
         await page.mouse.move(tb.x + tb.width / 2, tb.y + tb.height / 2 - 40, { steps: 3 });
         await time.evaluate((el) => el.dispatchEvent(new PointerEvent('lostpointercapture', { pointerId: 1, bubbles: false })));
+        // before the button is released, so a pointer-up cannot stand in for the capture-loss handler
+        assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('uface')), true, 'the capture lost: focus on the frame while the button is still down');
         await page.mouse.up();
         await settle();
         const n3 = (await sent()).length;
@@ -887,6 +1027,46 @@ await probe(async ({ open }) => {
         await settle();
         assert.ok((await sent()).slice(n).some((c) => c.Action === 'RecDub'), 'returnFocus lets Space drive the looper');
       });
+      await check('closing faces keeps no slot record: open, close, unit removed leave none; an open face replaced by another of its kind leaves one', async () => {
+        await closeFace();
+        const records = () => page.evaluate(async () => (await import('/src/ui/units/FaceHost.tsx')).faceSlotRecords());
+        const r0 = await records();
+        await page.locator('.slot--b .unit-add').click();
+        await page.getByRole('menuitem', { name: /^ECHO/ }).first().click();
+        await settle();
+        const echoB = (await chains())[1].units.find((u) => u.kind === 'echo').id;
+        // open, close: no record stays
+        await plate(echoB).locator('.unit__name').click();
+        await page.getByRole('dialog', { name: 'ECHO, slot B' }).waitFor();
+        assert.equal(await records(), r0 + 1, 'an open face keeps its last slot (for the feed’s removal)');
+        await page.getByRole('dialog', { name: 'ECHO, slot B' }).locator('.uface__close').click();
+        await settle();
+        assert.equal(await records(), r0, 'closed: no record stays');
+        // open, close, then the unit leaves the feed: still none
+        const cs = await chains();
+        cs[1].units = cs[1].units.filter((u) => u.id !== echoB);
+        await emit({ chains: cs });
+        await settle();
+        assert.equal(await records(), r0, 'the unit removed after its face closed: no record');
+        // an open face replaced by another of its kind: one record, not two
+        await page.locator('.slot--b .unit-add').click();
+        await page.getByRole('menuitem', { name: /^ECHO/ }).first().click();
+        await settle();
+        const echoB2 = (await chains())[1].units.find((u) => u.kind === 'echo').id;
+        await openFace('echo');
+        assert.equal(await records(), r0 + 1, 'slot A’s ECHO face open: one record');
+        await plate(echoB2).locator('.unit__name').click();
+        await page.getByRole('dialog', { name: 'ECHO, slot B' }).waitFor();
+        await settle();
+        assert.equal(await echoFace().count(), 0, 'premise: slot A’s face was replaced');
+        assert.equal(await records(), r0 + 1, 'replaced by slot B’s: one record');
+        await closeFace();
+        const cs2 = await chains();
+        cs2[1].units = cs2[1].units.filter((u) => u.id !== echoB2);
+        await emit({ chains: cs2 });
+        await settle();
+        assert.equal(await records(), r0, 'closed and removed: none');
+      });
       await check('overlays: face layer is inert under the tuner', async () => {
         await atHome('echo');
         await echoFace().focus();
@@ -904,18 +1084,65 @@ await probe(async ({ open }) => {
         assert.equal(await echoFace().count(), 1, 'face stayed open after tuner closed');
         await closeFace();
       });
-      await check('overlays: slot menu closes when keyboard focus leaves it (Shift+Tab cannot reach face under backdrop)', async () => {
+      await check('overlays: Tab and Shift+Tab in a plate menu close it and move on from its trigger, each in its own direction', async () => {
         await atHome('echo');
-        await page.locator('.slot--a .unit-add').click();
-        await page.locator('.slot-pop').waitFor({ timeout: 2000 });
-        await settle();
+        const trigger = page.locator('.slot--a .unit-add');
+        const who = () => page.evaluate(() => `${document.activeElement?.tagName}|${document.activeElement?.className}|${document.activeElement?.getAttribute('aria-label')}|${document.activeElement?.closest('.unit')?.getAttribute('data-unit')}`);
+        // the controls either side of the trigger, as the browser's own Tab finds them
+        await trigger.focus();
+        await page.keyboard.press('Tab');
+        const after = await who();
+        await trigger.focus();
         await page.keyboard.press('Shift+Tab');
-        await settle();
-        assert.equal(await page.locator('.slot-pop').count(), 0, 'Shift+Tab closed the slot menu');
-        assert.equal(await page.evaluate(() => document.activeElement?.closest('.uface') != null), false, 'Shift+Tab did not reach the face under backdrop');
+        const before = await who();
+        await trigger.focus();
+        const at = await who();
+        assert.notEqual(after, at, 'premise: a control after the trigger');
+        assert.notEqual(before, at, 'premise: a control before the trigger');
+        assert.notEqual(before, after, 'premise: the two differ');
+        for (const [key, want, name] of [['Tab', after, 'after'], ['Shift+Tab', before, 'before']]) {
+          await trigger.click();
+          await page.locator('.slot-pop').waitFor({ timeout: 2000 });
+          await settle();
+          assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('role')?.startsWith('menuitem') ?? false), true, 'premise: focus in the menu');
+          await page.keyboard.press(key);
+          await settle();
+          assert.equal(await page.locator('.slot-pop').count(), 0, `${key} closed the menu`);
+          assert.equal(await who(), want, `${key} lands on the control ${name} its trigger`);
+          assert.equal(await page.evaluate(() => document.activeElement?.closest('.uface') != null), false, `${key} did not reach the face under the backdrop`);
+        }
         await page.keyboard.press('Escape');
         await settle();
-        assert.equal(await echoFace().count(), 1, 'Escape after menu dismiss leaves the face open');
+        assert.equal(await echoFace().count(), 1, 'Escape after a menu dismiss leaves the face open');
+        await closeFace();
+      });
+      await check('overlays: a menu closes when the focus leaves it by the pointer or a script; a legacy row dialog does not', async () => {
+        await atHome('echo');
+        const trigger = page.locator('.slot--a .unit-add');
+        await trigger.click();
+        await page.locator('.slot-pop').waitFor({ timeout: 2000 });
+        await settle();
+        // a control outside takes the focus (a pointer press on one, or a script)
+        await page.evaluate(() => document.querySelector('.slot--a .slot__id, .slot--a .slot__fold, .slot--a .plate__menu')?.focus());
+        await settle();
+        assert.equal(await page.locator('.slot-pop').count(), 0, 'the focus left the menu: it closed');
+        // a legacy row dialog: REVERB’s Parameters
+        await add('REVERB');
+        const reverb = await unitOf('reverb');
+        await plate(reverb).locator('.unit__name').click();
+        const dlg = page.getByRole('dialog', { name: 'REVERB parameters' });
+        await dlg.waitFor({ timeout: 2000 });
+        await settle();
+        await page.evaluate(() => document.querySelector('.slot--a .slot__id, .slot--a .slot__fold, .slot--a .unit-add')?.focus());
+        await settle();
+        assert.equal(await dlg.count(), 1, 'the focus left the dialog: it stays open');
+        await page.keyboard.press('Escape');
+        await settle();
+        assert.equal(await dlg.count(), 0, 'Escape closes it');
+        const cs = await chains();
+        cs[0].units = cs[0].units.filter((u) => u.id !== reverb);
+        await emit({ chains: cs });
+        await settle();
         await closeFace();
       });
       await check('stage view hides and makes faces inert; on exit the same faces return where they were', async () => {
@@ -945,6 +1172,50 @@ await probe(async ({ open }) => {
         assert.ok(Math.abs(oa.x - ob.x) < 1 && Math.abs(oa.y - ob.y) < 1, `OTT back where it was: ${JSON.stringify(ob)} -> ${JSON.stringify(oa)}`);
         await echoFace().focus();
         await page.keyboard.press('Home');
+        await closeFace();
+      });
+      await check('stage view: the faces’ draw loops queue nothing while it hides them, and each draws again on exit', async () => {
+        await atHome('echo');
+        await atHome('ott');
+        await page.evaluate(() => {
+          const origRaf = window.requestAnimationFrame.bind(window);
+          window.__drawSpy = { origRaf, echo: 0, ott: 0 };
+          window.requestAnimationFrame = (cb) => {
+            // the ECHO loop's frame draws glasses; the OTT loop's draws glasses and miniatures
+            const src = String(cb);
+            const kind = src.includes('drawGlass') ? (src.includes('minis') ? 'ott' : 'echo') : null;
+            return origRaf((ts) => {
+              if (kind && window.__drawSpy) window.__drawSpy[kind]++;
+              cb(ts);
+            });
+          };
+        });
+        try {
+          const ran = () => page.evaluate(() => ({ echo: window.__drawSpy.echo, ott: window.__drawSpy.ott }));
+          await page.waitForTimeout(120);
+          const shown = await ran();
+          assert.ok(shown.echo > 0 && shown.ott > 0, `premise: both faces draw while shown ${JSON.stringify(shown)}`);
+          await ottFace().focus();
+          await page.keyboard.press('b');
+          await page.locator('.sv').waitFor({ timeout: 2000 });
+          await settle();
+          const hidden0 = await ran();
+          await page.waitForTimeout(300);
+          assert.deepEqual(await ran(), hidden0, 'no face draw callback ran while the stage view hid the faces');
+          await page.keyboard.press('b');
+          await page.locator('.sv').waitFor({ state: 'detached', timeout: 2000 });
+          await page.waitForTimeout(200);
+          const back = await ran();
+          assert.ok(back.echo > hidden0.echo, `the ECHO draws again after the stage view (${hidden0.echo} -> ${back.echo})`);
+          assert.ok(back.ott > hidden0.ott, `the OTT draws again after the stage view (${hidden0.ott} -> ${back.ott})`);
+          assert.equal((await echoFace().count()) + (await ottFace().count()), 2, 'both faces still open');
+        } finally {
+          await page.evaluate(() => {
+            if (!window.__drawSpy) return;
+            window.requestAnimationFrame = window.__drawSpy.origRaf;
+            delete window.__drawSpy;
+          });
+        }
         await closeFace();
       });
       await check('free-standing: the OTT’s and the ECHO’s faces open at once, the last touched on top, no strap', async () => {
@@ -1280,6 +1551,54 @@ await probe(async ({ open }) => {
         await show();
         await settle();
         await closeFace();
+      });
+      await check(`the OTT draw loop at ${W}x${H} cancels its queued frame when its miniature is the last to go (the face closed first, then the slot folds)`, async () => {
+        await show();
+        await atHome('ott');
+        await page.locator('.ott .uface__close').click();
+        await settle();
+        assert.equal(await ottFace().count(), 0, 'premise: the face is closed (the glass gone, the miniature still drawn)');
+        await page.evaluate(() => {
+          const origRaf = window.requestAnimationFrame.bind(window);
+          const origCancel = window.cancelAnimationFrame.bind(window);
+          window.__ottSpy = { origRaf, origCancel, lastId: 0, cancelled: [], ranAfter: 0, closed: false };
+          window.requestAnimationFrame = (cb) => {
+            const isOtt = String(cb).includes('minis');
+            const id = origRaf((ts) => {
+              if (isOtt && window.__ottSpy.closed) window.__ottSpy.ranAfter++;
+              cb(ts);
+            });
+            if (isOtt) window.__ottSpy.lastId = id;
+            return id;
+          };
+          window.cancelAnimationFrame = (id) => {
+            window.__ottSpy.cancelled.push(id);
+            return origCancel(id);
+          };
+        });
+        try {
+          await page.waitForTimeout(80);
+          assert.ok(await page.evaluate(() => window.__ottSpy.lastId > 0), 'premise: the miniature keeps the loop queued');
+          await page.locator('.slot--b .slot__fold').click();
+          await settle();
+          assert.equal(await page.locator('.slot--a .slot__fold').count(), 1, 'slot A folded (the OTT miniature unregistered)');
+          await page.evaluate(() => {
+            window.__ottSpy.closed = true;
+          });
+          await page.waitForTimeout(100);
+          const res = await page.evaluate(() => ({ lastId: window.__ottSpy.lastId, cancelled: window.__ottSpy.cancelled, ranAfter: window.__ottSpy.ranAfter }));
+          assert.ok(res.cancelled.includes(res.lastId), `queued OTT rAF ${res.lastId} cancelled: ${JSON.stringify(res.cancelled)}`);
+          assert.equal(res.ranAfter, 0, `no OTT draw callback ran after the miniature went (${res.ranAfter})`);
+        } finally {
+          await page.evaluate(() => {
+            if (!window.__ottSpy) return;
+            window.requestAnimationFrame = window.__ottSpy.origRaf;
+            window.cancelAnimationFrame = window.__ottSpy.origCancel;
+            delete window.__ottSpy;
+          });
+        }
+        await show();
+        await settle();
       });
     }
 

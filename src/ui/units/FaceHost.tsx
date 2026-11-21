@@ -1,10 +1,12 @@
-import { For, Match, Switch, createEffect } from 'solid-js';
+import { For, Match, Switch, createEffect, onCleanup } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import type { UnitState } from '../../platform';
 import { slotChain } from '../state/chain';
 import { stageOpen } from '../stage/stage-store';
 import { EchoFace } from './EchoFace';
+import { suspendEchoDraw } from './echo-loop';
 import { OttFace } from './OttFace';
+import { suspendOttDraw } from './ott-loop';
 import { closeFace, openFaces, plateOf, type OpenFace } from './face-store';
 
 /**
@@ -13,9 +15,15 @@ import { closeFace, openFaces, plateOf, type OpenFace } from './face-store';
  * row and the lanes and under the row's popovers; it takes no pointer itself, so everything beside a face
  * plays as ever. A face closes when its unit stops being seated or leaves its chain (the focus that was in
  * it goes to the plate's menu, or a surviving chain control / fold button through `returnFocus`). While the
- * stage view is open the face layer is hidden and inert, and the same faces return on exit; under the tuner
- * the layer is inert too.
+ * stage view is open the face layer is hidden and inert and the faces' draw loops queue nothing, and the
+ * same faces return on exit; under the tuner the layer is inert too.
  */
+/** The slot each open face's unit last stood in (a unit gone from the feed still closes its face by it);
+ * pruned to the open faces. */
+const slots = new Map<number, 0 | 1>();
+/** How many units' last slots are kept. @public (the unit-faces probe: a closed face keeps none) */
+export const faceSlotRecords = (): number => slots.size;
+
 export function FaceHost(props: { inert?: boolean; returnFocus?: (el: HTMLElement | undefined) => void }) {
   const find = (unit: number): { u: UnitState; slot: 0 | 1 } | null => {
     for (const slot of [0, 1] as const) {
@@ -24,7 +32,6 @@ export function FaceHost(props: { inert?: boolean; returnFocus?: (el: HTMLElemen
     }
     return null;
   };
-  const slots = new Map<number, 0 | 1>();
   const fallback = (slot: 0 | 1): HTMLElement | undefined => {
     const root = document.querySelector(`.slot--${slot === 1 ? 'b' : 'a'}`);
     return (
@@ -46,7 +53,9 @@ export function FaceHost(props: { inert?: boolean; returnFocus?: (el: HTMLElemen
     else el?.focus();
   };
   createEffect(() => {
-    for (const f of openFaces()) {
+    const opened = openFaces();
+    for (const unit of slots.keys()) if (!opened.some((f) => f.unit === unit)) slots.delete(unit);
+    for (const f of opened) {
       const at = find(f.unit);
       if (at) slots.set(f.unit, at.slot);
       if (at?.u.state === 'seated') continue;
@@ -56,6 +65,16 @@ export function FaceHost(props: { inert?: boolean; returnFocus?: (el: HTMLElemen
       closeFace(f.unit);
       if (inside) queueMicrotask(() => handFocus(f.unit, slot, 'menu'));
     }
+  });
+  createEffect(() => {
+    const hidden = stageOpen();
+    suspendEchoDraw(hidden);
+    suspendOttDraw(hidden);
+  });
+  onCleanup(() => {
+    suspendEchoDraw(false);
+    suspendOttDraw(false);
+    slots.clear();
   });
   return (
     <Portal>

@@ -90,7 +90,7 @@ export function echoGeometry(W: number, H: number) {
 export function registerEchoGlass(canvas: HTMLCanvasElement, unit: number, view: EchoView): () => void {
   const g: Glass = { canvas, unit, view, drawn: -1, src: undefined, laid: '', lit: false };
   glasses.add(g);
-  if (rafId === 0) rafId = requestAnimationFrame(frame);
+  if (rafId === 0 && !suspended) rafId = requestAnimationFrame(frame);
   return () => {
     glasses.delete(g);
     if (glasses.size === 0 && rafId !== 0) {
@@ -100,9 +100,22 @@ export function registerEchoGlass(canvas: HTMLCanvasElement, unit: number, view:
   };
 }
 
+/** Whether the glasses are hidden (the stage view): no frame is queued while they are. */
+let suspended = false;
+
+/** Stop the glasses' draws while they are hidden, and draw them again on `false`; a glass is not unmounted
+ * meanwhile, and its last picture stays. */
+export function suspendEchoDraw(on: boolean): void {
+  suspended = on;
+  if (on) {
+    if (rafId !== 0) cancelAnimationFrame(rafId);
+    rafId = 0;
+  } else if (glasses.size > 0 && rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
 function frame(): void {
   rafId = 0;
-  if (glasses.size === 0) return;
+  if (glasses.size === 0 || suspended) return;
   const now = performance.now() / 1000;
   for (const g of glasses) {
     const v = unitMeters.get(g.unit);

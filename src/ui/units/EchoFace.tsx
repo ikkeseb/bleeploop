@@ -118,10 +118,11 @@ function Glass(props: { unit: number; view: EchoView; narrow: boolean; step: num
 /** Pixels of vertical drag a step of TIME; a mouse wheel's notch is one step. */
 const STEP_PX = 36;
 const WHEEL_STEP = 50;
-/** How long a step sent is the base of the next one before the feed has it (ms): the feed answers within
- * frames, and a step it never reports (refused, or another's since) stops counting. */
+/** How long a step sent is the base of the next one before the feed has it (ms), each one by its own age:
+ * the feed answers within frames, and a step it never reports (refused, or another's since) stops counting. */
 const PENDING_MS = 500;
-
+/** The most steps held awaiting the feed: a burst past it drops the oldest. */
+const PENDING_MAX = 8;
 /** TIME, the hero: a stepped knob over four positions, by length, each printed round it with its length at
  * the tempo, the one it points at lit; a position is pressable (by the pointer: the slider is TIME's one
  * focus). A slider to assistive tech and the keyboard (its value the face's position, its text the note
@@ -133,38 +134,42 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
   const [held, setHeld] = createSignal<number | null>(null);
   const pos = () => held() ?? props.step;
   const enabled = () => props.unit().state === 'seated';
-  let pending: number[] = [];
-  let sentAt = 0;
+  // the steps sent and not yet reported, each with its time (aged on its own, never by a later send)
+  let pending: { q: number; at: number }[] = [];
+  let lastSeen = props.step;
   createEffect(
     on(
       () => props.step,
       (s) => {
-        const i = pending.indexOf(s);
+        // a new report of the same step (a chain frame with a new unit object) answers nothing
+        if (s === lastSeen) return;
+        lastSeen = s;
+        const i = pending.findIndex((p) => p.q === s);
         if (i >= 0) pending.splice(0, i + 1);
       },
       { defer: true },
     ),
   );
-  /** Where the engine will stand once what was sent lands (kept for the whole drag; expires after PENDING_MS outside a drag). */
+  /** Where the engine will stand once what was sent lands: a drag's last request for the whole drag,
+   * otherwise the newest step sent that is still young, else the feed's. */
   const committed = (): number => {
-    if (pending.length === 0) return props.step;
-    if (drag === null && performance.now() - sentAt >= PENDING_MS) {
-      pending.length = 0;
-      return props.step;
-    }
-    return pending[pending.length - 1];
+    if (drag?.last != null) return drag.last;
+    const now = performance.now();
+    pending = pending.filter((p) => now - p.at < PENDING_MS);
+    return pending.length > 0 ? pending[pending.length - 1].q : props.step;
   };
   const send = (p: number): number => {
     const q = Math.min(ECHO_STEPS.length - 1, Math.max(0, Math.round(p)));
     if (q !== committed()) {
       setUnitParam(props.unit().id, 'echoTime', ECHO_STEPS[q].index);
-      pending.push(q);
-      sentAt = performance.now();
+      pending.push({ q, at: performance.now() });
+      if (pending.length > PENDING_MAX) pending.shift();
+      if (drag) drag.last = q;
     }
     return q;
   };
   const length = (p: number) => ms(stepSeconds(props.tempo, p));
-  let drag: { id: number; y: number; from: number; el: HTMLElement } | null = null;
+  let drag: { id: number; y: number; from: number; el: HTMLElement; last: number | null } | null = null;
   const letGo = (returnToFrame = false) => {
     const el = drag?.el;
     drag = null;
@@ -183,7 +188,7 @@ function TimeKnob(props: { unit: () => UnitState; narrow: boolean; step: number;
     const el = e.currentTarget as HTMLElement;
     el.focus({ preventScroll: true });
     el.setPointerCapture(e.pointerId);
-    drag = { id: e.pointerId, y: e.clientY, from: committed(), el };
+    drag = { id: e.pointerId, y: e.clientY, from: committed(), el, last: null };
     setHeld(drag.from);
   };
   const onMove = (e: PointerEvent) => {

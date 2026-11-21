@@ -103,14 +103,17 @@ export function nearHome(i: FaceInput, box: FaceBox): boolean {
 /**
  * The size a corner drag asks for: the face's corner, as the face is placed at that size (its top, and its
  * left: a moved face's own, at home the plate's centre over `TIE_AT`, either clamped into the window),
- * lands nearest the pointer at (`cx`, `cy`), itself held inside the window. Its first pixels of drag move it
- * by pixels, from wherever the face is drawn. A full face pushed under its base size asks for the narrow
- * face (its shape alone never does: a corner held at the window's edge would ask for it); the narrow face
- * never goes under its base size.
+ * lands nearest the pointer at (`cx`, `cy`), the pointer's x held inside the window and its y as the hand
+ * made it (a corner pulled past the window's foot is deliberate growth, and the placement after fits the
+ * result to the window). Its first pixels of drag move it by pixels, from wherever the face is drawn. A
+ * full face pushed under its base size asks for the narrow face (its shape alone never does: a corner held
+ * at the window's edge would ask for it); the narrow face never goes under its base size.
  */
 export function sizeFromCorner(start: FaceBox, i: FaceInput, cx: number, cy: number): FaceSize {
+  // The pointer's travel is measured as the hand made it: a corner pulled past the window's foot is
+  // deliberate growth, and placement fits the result to the window after (it slides the face up).
   const px = Math.min(cx, i.win.w - MARGIN);
-  const py = Math.min(cy, i.win.h - MARGIN);
+  const py = cy;
   const centre = i.plate.left + i.plate.width / 2;
   const corner = (l: FaceLayout, s: number): [number, number] => {
     const want = start.home ? centre - TIE_AT * s : start.left;

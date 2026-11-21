@@ -71,8 +71,21 @@ export function registerOttMini(el: HTMLElement, unit: number): () => void {
   };
 }
 
+/** Whether the faces are hidden (the stage view): no frame is queued while they are. */
+let suspended = false;
+
+/** Stop the draws (the glasses' and the plates' miniatures) while the stage view hides the faces, and draw
+ * again on `false`; what is drawn stays. */
+export function suspendOttDraw(on: boolean): void {
+  suspended = on;
+  if (on) {
+    if (rafId !== 0) cancelAnimationFrame(rafId);
+    rafId = 0;
+  } else if (glasses.size + minis.size > 0) start();
+}
+
 function start(): void {
-  if (rafId === 0) rafId = requestAnimationFrame(frame);
+  if (rafId === 0 && !suspended) rafId = requestAnimationFrame(frame);
 }
 
 function stop(): void {
@@ -84,7 +97,7 @@ function stop(): void {
 
 function frame(): void {
   rafId = 0;
-  if (glasses.size === 0 && minis.size === 0) return;
+  if ((glasses.size === 0 && minis.size === 0) || suspended) return;
   for (const g of glasses) {
     const v = unitMeters.get(g.unit);
     const version = v ? v.version : 0;
