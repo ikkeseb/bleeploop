@@ -30,7 +30,7 @@ use tauri::Emitter;
 use super::mode::EngineApp;
 use super::{EngineHost, SlotHost};
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
-use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneStore};
+use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneKey, ToneStore};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
@@ -102,7 +102,10 @@ impl LoadTarget<'_> {
         let identity = ToneIdentity { format: format.as_str().to_string(), path: path.clone(), id: id.clone() };
         // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
         let imported = self.reload_tones.lock().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
-        let tone = self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported });
+        let tone = self
+            .tones
+            .clone()
+            .map(|store| ToneBinding { store, key: ToneKey::Slot { slot: usize::from(slot), identity }, imported });
         let began = Instant::now();
         let loaded = (self.open)(format, path.clone(), id.clone(), self.host.slot(usize::from(slot)), tone);
         let mut slots = lock(self.slots)?;

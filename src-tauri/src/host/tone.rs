@@ -102,14 +102,11 @@ impl ToneIdentity {
     }
 }
 
-// E2 S0, the seam: tones by unit (P5 fills the bodies, P4 calls them); unused until then.
-#[allow(dead_code)]
 impl ToneIdentity {
     /// A chain unit's own file: `unit-<id>.tone`, one per unit, whatever its plugin
     /// ([`ToneIdentity::file_name`] stays the slot's).
     pub(crate) fn unit_file_name(unit: lf_engine::UnitId) -> String {
-        let _ = unit;
-        todo!("E2 P5")
+        format!("unit-{unit}.tone")
     }
 }
 
@@ -120,6 +117,21 @@ impl ToneIdentity {
 pub(crate) enum ToneKey {
     Slot { slot: usize, identity: ToneIdentity },
     Unit { unit: lf_engine::UnitId, slot: usize, identity: ToneIdentity },
+}
+
+impl ToneKey {
+    fn file_name(&self) -> String {
+        match self {
+            ToneKey::Slot { slot, identity } => identity.file_name(*slot),
+            ToneKey::Unit { unit, .. } => ToneIdentity::unit_file_name(*unit),
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &ToneIdentity {
+        match self {
+            ToneKey::Slot { identity, .. } | ToneKey::Unit { identity, .. } => identity,
+        }
+    }
 }
 
 /// One tone: whose it is, the plugin's name (a session import names it in its toast) and the state.
@@ -362,18 +374,60 @@ impl ToneStore {
         }
     }
 
-    fn path(&self, slot: usize, identity: &ToneIdentity) -> PathBuf {
-        self.dir.join(identity.file_name(slot))
+    fn path_for(&self, file_name: &str) -> PathBuf {
+        self.dir.join(file_name)
+    }
+
+    fn entry_for(&self, file_name: &str) -> Arc<Entry> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = entries.get(file_name) {
+            return entry.clone();
+        }
+        let entry = Arc::new(Entry::default());
+        entries.insert(file_name.to_string(), entry.clone());
+        entry
+    }
+
+    fn read_file(&self, file_name: &str, identity: &ToneIdentity) -> Result<Option<Tone>, String> {
+        let path = self.path_for(file_name);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let tone = decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        if &tone.identity != identity {
+            return Err(format!("{} holds the tone of {} ({})", path.display(), tone.name, tone.identity.path));
+        }
+        Ok(Some(tone))
+    }
+
+    /// Under the file's write lock only (`Entry::write`).
+    fn write_file(&self, file_name: &str, bytes: &[u8]) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            let stall = self.stall.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some((entered, go)) = stall {
+                let _ = entered.send(());
+                let _ = go.recv();
+            }
+        }
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        write_atomic(&self.path_for(file_name), bytes)
     }
 
     fn entry(&self, slot: usize, identity: &ToneIdentity) -> Arc<Entry> {
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.entry(identity.file_name(slot)).or_default().clone()
+        self.entry_for(&identity.file_name(slot))
     }
 
     /// How many session imports have replaced `identity`'s tone in `slot` this run. Waits on no write.
+    #[allow(dead_code)]
     pub(crate) fn revision(&self, slot: usize, identity: &ToneIdentity) -> u64 {
         self.entry(slot, identity).revision.load(Acquire)
+    }
+
+    fn revision_key(&self, key: &ToneKey) -> u64 {
+        self.entry_for(&key.file_name()).revision.load(Acquire)
     }
 
     /// A load's read: the stored tone (as `load`) and the import count it belongs to, taken together so
@@ -387,17 +441,7 @@ impl ToneStore {
     /// The tone stored for `identity` in `slot`: `Ok(None)` when there is none, `Err` when the file
     /// cannot be read, is corrupt or belongs to another plugin.
     pub(crate) fn load(&self, slot: usize, identity: &ToneIdentity) -> Result<Option<Tone>, String> {
-        let path = self.path(slot, identity);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
-        let tone = decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        if &tone.identity != identity {
-            return Err(format!("{} holds the tone of {} ({})", path.display(), tone.name, tone.identity.path));
-        }
-        Ok(Some(tone))
+        self.read_file(&identity.file_name(slot), identity)
     }
 
     /// A session import: store a tone file's bytes (checked first) for `expected`, the plugin session.json
@@ -405,44 +449,26 @@ impl ToneStore {
     /// saves over it. A tone file of another plugin is refused before anything is written, and a failed
     /// write counts nothing.
     pub(crate) fn import(&self, slot: usize, bytes: &[u8], expected: &ToneIdentity) -> Result<Imported, String> {
-        let tone = decode(bytes)?;
-        if &tone.identity != expected {
-            return Err(format!(
-                "the session's tone file belongs to {} ({}), not to the plugin session.json names ({})",
-                tone.name, tone.identity.path, expected.path
-            ));
-        }
-        let entry = self.entry(slot, &tone.identity);
+        let tone = Self::check(bytes, expected)?;
+        let file_name = tone.identity.file_name(slot);
+        let entry = self.entry_for(&file_name);
         let _write = entry.write();
-        self.write(slot, &tone.identity, bytes)?;
+        self.write_file(&file_name, bytes)?;
         let revision = entry.revision.fetch_add(1, Release) + 1;
         Ok(Imported { revision, tone })
     }
 
-    /// A load's save: store a tone file's bytes for `identity` in `slot` unless a session import replaced
-    /// that tone after the load read it (`revision`, from `load_for_restore`). `Ok(false)`: not stored.
-    fn save_from_load(&self, slot: usize, identity: &ToneIdentity, revision: u64, bytes: &[u8]) -> Result<bool, String> {
-        let entry = self.entry(slot, identity);
+    /// A load's save: store a tone file's bytes for `key` unless a session import/redeem replaced
+    /// that tone after the load read it (`revision`, from `load_for_restore_key`). `Ok(false)`: not stored.
+    fn save_from_load(&self, key: &ToneKey, revision: u64, bytes: &[u8]) -> Result<bool, String> {
+        let file_name = key.file_name();
+        let entry = self.entry_for(&file_name);
         let _write = entry.write();
         if entry.revision.load(Acquire) != revision {
             return Ok(false);
         }
-        self.write(slot, identity, bytes)?;
+        self.write_file(&file_name, bytes)?;
         Ok(true)
-    }
-
-    /// Under the file's write lock only (`Entry::write`).
-    fn write(&self, slot: usize, identity: &ToneIdentity, bytes: &[u8]) -> Result<(), String> {
-        #[cfg(test)]
-        {
-            let stall = self.stall.lock().unwrap_or_else(PoisonError::into_inner).take();
-            if let Some((entered, go)) = stall {
-                let _ = entered.send(());
-                let _ = go.recv();
-            }
-        }
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        write_atomic(&self.path(slot, identity), bytes)
     }
 
     /// Test-only: store a tone file's bytes for `slot` under the identity they carry, as a save from
@@ -450,9 +476,10 @@ impl ToneStore {
     #[cfg(test)]
     pub(crate) fn save_encoded(&self, slot: usize, bytes: &[u8]) -> Result<Tone, String> {
         let tone = decode(bytes)?;
-        let entry = self.entry(slot, &tone.identity);
+        let file_name = tone.identity.file_name(slot);
+        let entry = self.entry_for(&file_name);
         let _write = entry.write();
-        self.write(slot, &tone.identity, bytes)?;
+        self.write_file(&file_name, bytes)?;
         Ok(tone)
     }
 
@@ -467,34 +494,87 @@ impl ToneStore {
     }
 }
 
-// E2 S0, the seam: tones by unit (P5 fills the bodies, P4 calls them); unused until then.
 #[allow(dead_code)]
 impl ToneStore {
     /// A load's read by key ([`ToneStore::load_for_restore`] by slot stays): for a unit, its own file,
     /// else the slot's file, read only; and the import count it belongs to.
     pub(crate) fn load_for_restore_key(&self, key: &ToneKey) -> (Result<Option<Tone>, String>, u64) {
-        let _ = key;
-        todo!("E2 P5")
+        match key {
+            ToneKey::Slot { slot, identity } => self.load_for_restore(*slot, identity),
+            ToneKey::Unit { unit, slot, identity } => {
+                let unit_file = ToneIdentity::unit_file_name(*unit);
+                let unit_entry = self.entry_for(&unit_file);
+                let (own, revision) = {
+                    let _write = unit_entry.write();
+                    (self.read_file(&unit_file, identity), unit_entry.revision.load(Acquire))
+                };
+                match own {
+                    Ok(None) => {
+                        let slot_entry = self.entry(*slot, identity);
+                        let _slot_write = slot_entry.write();
+                        (self.load(*slot, identity), revision)
+                    }
+                    other => (other, revision),
+                }
+            }
+        }
     }
 
     /// A tone file's bytes checked against `expected`, the plugin session.json names: nothing written.
     pub(crate) fn check(bytes: &[u8], expected: &ToneIdentity) -> Result<Tone, String> {
-        let _ = (bytes, expected);
-        todo!("E2 P5")
+        let tone = decode(bytes)?;
+        if &tone.identity != expected {
+            return Err(format!(
+                "the session's tone file belongs to {} ({}), not to the plugin session.json names ({})",
+                tone.name, tone.identity.path, expected.path
+            ));
+        }
+        Ok(tone)
     }
 
     /// A parked tone redeemed by the unit `key` names: written to the unit's file under its write lock
     /// and counted, so the outgoing load's save is dropped from here on.
     pub(crate) fn redeem(&self, key: &ToneKey, tone: Tone) -> Result<Imported, String> {
-        let _ = (key, tone);
-        todo!("E2 P5")
+        let expected = key.identity();
+        if &tone.identity != expected {
+            return Err(format!(
+                "the session's tone file belongs to {} ({}), not to the plugin session.json names ({})",
+                tone.name, tone.identity.path, expected.path
+            ));
+        }
+        let bytes = encode(&tone);
+        let file_name = key.file_name();
+        let entry = self.entry_for(&file_name);
+        let _write = entry.write();
+        self.write_file(&file_name, &bytes)?;
+        let revision = entry.revision.fetch_add(1, Release) + 1;
+        Ok(Imported { revision, tone })
     }
 
     /// The unit `key` names left for good (its owner got `Back::Removed`): its file becomes the slot's,
     /// counted, so the next unit of that plugin in the slot starts from it.
     pub(crate) fn retire(&self, key: &ToneKey) -> Result<(), String> {
-        let _ = key;
-        todo!("E2 P5")
+        let ToneKey::Unit { unit, slot, identity } = key else { return Ok(()) };
+        let unit_file = ToneIdentity::unit_file_name(*unit);
+        let unit_entry = self.entry_for(&unit_file);
+        let _unit_write = unit_entry.write();
+        let unit_path = self.path_for(&unit_file);
+        let bytes = match std::fs::read(&unit_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {e}", unit_path.display())),
+        };
+        let tone = decode(&bytes).map_err(|e| format!("{}: {e}", unit_path.display()))?;
+        if &tone.identity != identity {
+            return Err(format!("{} holds the tone of {} ({})", unit_path.display(), tone.name, tone.identity.path));
+        }
+        let slot_file = identity.file_name(*slot);
+        let slot_entry = self.entry_for(&slot_file);
+        let _slot_write = slot_entry.write();
+        self.write_file(&slot_file, &bytes)?;
+        slot_entry.revision.fetch_add(1, Release);
+        let _ = std::fs::remove_file(&unit_path);
+        Ok(())
     }
 }
 
@@ -541,12 +621,11 @@ impl Debounce {
     }
 }
 
-/// Where a loaded plugin's tone lives: the store, the slot and the plugin's identity.
+/// Where a loaded plugin's tone lives: the store and its key (a legacy slot or a chain unit).
 #[derive(Clone, Debug)]
 pub(crate) struct ToneBinding {
     pub(crate) store: ToneStore,
-    pub(crate) slot: usize,
-    pub(crate) identity: ToneIdentity,
+    pub(crate) key: ToneKey,
     /// The reload a session import asked for: the imported tone, which this load restores as it was
     /// handed over instead of reading the store.
     pub(crate) imported: Option<Imported>,
@@ -604,25 +683,33 @@ pub(crate) struct ToneTokens {
 #[allow(dead_code)]
 pub(crate) const MAX_PARKED_TONES: usize = lf_engine::SLOT_COUNT * lf_engine::MAX_UNITS;
 
-// E2 S0, the seam (P5 fills the bodies).
 #[allow(dead_code)]
 impl ToneTokens {
-    /// Park `tone`; the token a reload passes.
+    /// Park `tone`; the token a reload passes. At [`MAX_PARKED_TONES`], drops the oldest parked tone
+    /// (FIFO) so abandoned tokens never wedge future imports.
     pub(crate) fn park(&mut self, tone: Tone) -> u32 {
-        let _ = tone;
-        todo!("E2 P5")
+        if self.parked.len() >= MAX_PARKED_TONES {
+            self.parked.remove(0);
+        }
+        self.last = self.last.checked_add(1).unwrap_or(1);
+        self.parked.push((self.last, tone));
+        self.last
     }
 
     /// The tone parked under `token`, when it belongs to `identity`.
     pub(crate) fn take(&mut self, token: u32, identity: &ToneIdentity) -> Option<Tone> {
-        let _ = (token, identity);
-        todo!("E2 P5")
+        let pos = self.parked.iter().position(|(t, _)| *t == token)?;
+        if &self.parked[pos].1.identity != identity {
+            return None;
+        }
+        Some(self.parked.remove(pos).1)
     }
 
     /// The reload `token` was for did not happen: drop its tone, if it is still parked.
     pub(crate) fn forget(&mut self, token: u32) {
-        let _ = token;
-        todo!("E2 P5")
+        if let Some(pos) = self.parked.iter().position(|(t, _)| *t == token) {
+            self.parked.remove(pos);
+        }
     }
 }
 
@@ -666,7 +753,7 @@ impl ToneKeeper {
             self.revision = imported.revision;
             return Ok(Some(imported.tone.state));
         }
-        let (stored, revision) = b.store.load_for_restore(b.slot, &b.identity);
+        let (stored, revision) = b.store.load_for_restore_key(&b.key);
         self.revision = revision;
         Ok(stored?.map(|tone| tone.state))
     }
@@ -720,7 +807,7 @@ impl ToneKeeper {
     /// A session import replaced this slot's tone after this load read it. A lock-free read: an
     /// import still writing is not counted yet, and the save that follows checks again under the lock.
     fn superseded(&self) -> bool {
-        self.binding.as_ref().is_some_and(|b| b.store.revision(b.slot, &b.identity) != self.revision)
+        self.binding.as_ref().is_some_and(|b| b.store.revision_key(&b.key) != self.revision)
     }
 
     /// Save now: `take` asks the plugin named `name` for its state (`Ok(None)`: it keeps none). The tone
@@ -738,7 +825,7 @@ impl ToneKeeper {
             return Err(format!("the plugin's state is {} bytes, more than {MAX_STATE_BYTES}", state.len()));
         }
         let identity = match &self.binding {
-            Some(b) => b.identity.clone(),
+            Some(b) => b.key.identity().clone(),
             None => ToneIdentity { format: String::new(), path: String::new(), id: String::new() },
         };
         let name: String = name.chars().take(256).collect();
@@ -746,19 +833,24 @@ impl ToneKeeper {
         let not_stored = match &self.binding {
             None => None,
             Some(_) if self.keep_stored => Some("the stored tone this load could not restore is kept until something changes"),
-            Some(b) => (!b.store.save_from_load(b.slot, &b.identity, self.revision, &bytes)?)
+            Some(b) => (!b.store.save_from_load(&b.key, self.revision, &bytes)?)
                 .then_some("a session import replaced this slot's tone after this load"),
         };
         Ok(Saved { bytes, not_stored })
     }
 }
 
-// E2 S0, the seam (P5 fills the body, once `ToneBinding` carries a `ToneKey`).
 #[allow(dead_code)]
 impl ToneKeeper {
     /// The unit left for good: its file becomes the slot's ([`ToneStore::retire`]).
     pub(crate) fn retire(&mut self) {
-        todo!("E2 P5")
+        if self.superseded() {
+            return;
+        }
+        let Some(b) = &self.binding else { return };
+        if let Err(e) = b.store.retire(&b.key) {
+            log::warn!("tone retire failed: {e}");
+        }
     }
 }
 
@@ -783,7 +875,12 @@ impl TempDir {
 
     /// A binding to the folder's store, for `identity` in `slot`.
     pub(crate) fn binding(&self, slot: usize, identity: ToneIdentity) -> ToneBinding {
-        ToneBinding { store: self.1.clone(), slot, identity, imported: None }
+        ToneBinding { store: self.1.clone(), key: ToneKey::Slot { slot, identity }, imported: None }
+    }
+
+    /// A binding to the folder's store, for chain `unit` of `identity` in `slot`.
+    pub(crate) fn unit_binding(&self, unit: lf_engine::UnitId, slot: usize, identity: ToneIdentity) -> ToneBinding {
+        ToneBinding { store: self.1.clone(), key: ToneKey::Unit { unit, slot, identity }, imported: None }
     }
 }
 
@@ -1155,5 +1252,135 @@ mod tests {
         let taken = handoff.take(0, Some(newer), &identity()).expect("the reload's own load takes it");
         assert_eq!((taken.tone.state.as_slice(), taken.revision), (&b"imported"[..], imported.revision));
         assert!(handoff.take(0, Some(newer), &identity()).is_none(), "once");
+    }
+
+    #[test]
+    fn a_unit_tone_round_trips_through_its_own_file() {
+        assert_eq!(ToneIdentity::unit_file_name(7), "unit-7.tone");
+        let dir = TempDir::new("unit-roundtrip");
+        let mut keeper = ToneKeeper::new(Some(dir.unit_binding(7, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(keeper.stored().unwrap(), None);
+        let saved = keeper.save("Pro-Q 3", || Ok(Some(b"unit state".to_vec()))).unwrap();
+        assert_eq!(saved.not_stored, None);
+        assert!(dir.0.join("unit-7.tone").exists(), "unit has its own file");
+        assert!(!dir.0.join(identity().file_name(0)).exists(), "slot file is untouched");
+
+        let mut reloaded = ToneKeeper::new(Some(dir.unit_binding(7, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(reloaded.stored().unwrap().as_deref(), Some(&b"unit state"[..]));
+    }
+
+    #[test]
+    fn retire_promotes_the_unit_file_to_the_slot_and_the_next_unit_starts_from_it() {
+        let dir = TempDir::new("unit-retire");
+        let mut first = ToneKeeper::new(Some(dir.unit_binding(1, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(first.stored().unwrap(), None);
+        assert_eq!(first.save("Pro-Q 3", || Ok(Some(b"dialed in".to_vec()))).unwrap().not_stored, None);
+        assert_eq!(dir.store().revision(0, &identity()), 0);
+
+        first.retire();
+        assert!(!dir.0.join("unit-1.tone").exists(), "unit file moved into the slot");
+        assert_eq!(dir.store().revision(0, &identity()), 1, "promotion is counted on the slot");
+        assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, b"dialed in");
+
+        // The next unit of the same plugin in the slot starts from the slot's file, read only.
+        let mut next = ToneKeeper::new(Some(dir.unit_binding(2, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(next.stored().unwrap().as_deref(), Some(&b"dialed in"[..]));
+        assert!(!dir.0.join("unit-2.tone").exists(), "fallback read writes nothing");
+
+        // Retiring a unit that never saved its own file leaves the slot's file as it was.
+        next.retire();
+        assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, b"dialed in");
+        assert_eq!(dir.store().revision(0, &identity()), 1);
+    }
+
+    #[test]
+    fn two_units_of_one_plugin_in_one_slot_keep_two_files() {
+        let dir = TempDir::new("two-units");
+        let mut u1 = ToneKeeper::new(Some(dir.unit_binding(10, 0, identity())), Arc::new(AtomicBool::new(false)));
+        let mut u2 = ToneKeeper::new(Some(dir.unit_binding(11, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!((u1.stored().unwrap(), u2.stored().unwrap()), (None, None));
+        assert_eq!(u1.save("Pro-Q 3", || Ok(Some(b"eq pre".to_vec()))).unwrap().not_stored, None);
+        assert_eq!(u2.save("Pro-Q 3", || Ok(Some(b"eq post".to_vec()))).unwrap().not_stored, None);
+
+        let mut names: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["unit-10.tone", "unit-11.tone"]);
+
+        let mut u1_again = ToneKeeper::new(Some(dir.unit_binding(10, 0, identity())), Arc::new(AtomicBool::new(false)));
+        let mut u2_again = ToneKeeper::new(Some(dir.unit_binding(11, 0, identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(u1_again.stored().unwrap().as_deref(), Some(&b"eq pre"[..]));
+        assert_eq!(u2_again.stored().unwrap().as_deref(), Some(&b"eq post"[..]));
+    }
+
+    #[test]
+    fn check_and_tokens_refuse_another_plugins_identity() {
+        let mut other = identity();
+        other.id = "another".into();
+        let checked = ToneStore::check(&encode(&tone(b"ok")), &identity()).unwrap();
+        assert_eq!(checked.state, b"ok");
+        assert!(ToneStore::check(&encode(&tone(b"ok")), &other).is_err());
+
+        let mut tokens = ToneTokens::default();
+        let token = tokens.park(checked);
+        assert!(tokens.take(token, &other).is_none(), "another plugin's identity is refused");
+        assert_eq!(tokens.take(token, &identity()).unwrap().state, b"ok", "its own plugin takes it");
+        assert!(tokens.take(token, &identity()).is_none(), "once");
+
+        let dropped = tokens.park(tone(b"skipped"));
+        tokens.forget(dropped);
+        assert!(tokens.take(dropped, &identity()).is_none());
+    }
+
+    #[test]
+    fn redeem_supersedes_an_earlier_unit_load() {
+        let dir = TempDir::new("unit-redeem");
+        let t0 = Instant::now();
+        let key = ToneKey::Unit { unit: 4, slot: 0, identity: identity() };
+        let edited = Arc::new(AtomicBool::new(false));
+        let mut old = ToneKeeper::new(Some(dir.unit_binding(4, 0, identity())), edited.clone());
+        assert_eq!(old.stored().unwrap(), None);
+
+        // A tone belonging to another plugin is refused without writing or counting.
+        let mut foreign = tone(b"foreign");
+        foreign.identity.id = "another".into();
+        assert!(dir.store().redeem(&key, foreign).is_err());
+        assert!(!dir.0.join("unit-4.tone").exists());
+
+        let imported = dir.store().redeem(&key, tone(b"redeemed")).unwrap();
+        assert_eq!((imported.tone.state.as_slice(), imported.revision), (&b"redeemed"[..], 1));
+
+        // The outgoing load drops its saves from here on.
+        edited.store(true, Relaxed);
+        assert!(!old.poll(t0 + SAVE_QUIET * 4));
+        assert!(!old.dirty());
+        let saved = old.save("Pro-Q 3", || Ok(Some(b"stale".to_vec()))).unwrap();
+        assert!(saved.not_stored.is_some());
+        let (stored, rev) = dir.store().load_for_restore_key(&key);
+        assert_eq!((stored.unwrap().unwrap().state.as_slice(), rev), (&b"redeemed"[..], 1));
+
+        // The reloaded unit restores the imported bytes and can save again.
+        let mut binding = dir.unit_binding(4, 0, identity());
+        binding.imported = Some(imported);
+        let mut fresh = ToneKeeper::new(Some(binding), Arc::new(AtomicBool::new(false)));
+        assert_eq!(fresh.stored().unwrap().as_deref(), Some(&b"redeemed"[..]));
+        assert_eq!(fresh.save("Pro-Q 3", || Ok(Some(b"edited".to_vec()))).unwrap().not_stored, None);
+        let (stored, _) = dir.store().load_for_restore_key(&key);
+        assert_eq!(stored.unwrap().unwrap().state, b"edited");
+    }
+
+    #[test]
+    fn tone_tokens_evicts_oldest_past_max_parked_tones() {
+        let mut tokens = ToneTokens::default();
+        let mut issued = Vec::with_capacity(MAX_PARKED_TONES);
+        for i in 0..MAX_PARKED_TONES {
+            issued.push(tokens.park(tone(&[i as u8])));
+        }
+        let extra = tokens.park(tone(b"extra"));
+        assert!(tokens.take(issued[0], &identity()).is_none(), "oldest parked tone was evicted");
+        assert_eq!(tokens.take(issued[1], &identity()).unwrap().state, &[1]);
+        assert_eq!(tokens.take(extra, &identity()).unwrap().state, b"extra");
     }
 }
