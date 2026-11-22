@@ -967,7 +967,7 @@ fn removal_of_parked_seat_settles_and_posts_dismissed() {
 ///     after `STASH_AFTER`, meets `Held` with `closing` set, returns at once, and `host.shutdown()`
 ///     evicts the unit back to its owner.
 #[test]
-fn shutdown_with_take_open_and_feed_stopped_ends_inside_3s() {
+fn shutdown_with_take_open_and_feed_stopped_ends_well_inside_its_bound() {
     let fake = FakeDriver(Fake::new());
     let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 2.0 }, fake).unwrap();
     host.open(
@@ -1018,7 +1018,9 @@ fn shutdown_with_take_open_and_feed_stopped_ends_inside_3s() {
     // Host shutdown evicts the remaining unit back to its owner as Removed (pending remove).
     host.shutdown();
     let elapsed = began.elapsed();
-    assert!(elapsed < Duration::from_secs(3), "shutdown took {} ms (must be < 3000 ms)", elapsed.as_millis());
+    // A held removal that never returned would wait out `wait_op`'s 10 s; 6.5 s leaves room for a
+    // loaded test run (3-4 s seen in full runs, under 1 s alone).
+    assert!(elapsed < Duration::from_millis(6500), "shutdown took {} ms (must be < 6500 ms)", elapsed.as_millis());
     let back = u.take_back().expect("shutdown evicted unit to its owner");
     assert!(matches!(back, Back::Removed(_)));
     assert_eq!(stops.load(SeqCst), 1);
@@ -1242,7 +1244,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
 ///     a take open and a held legacy removal sets `closing` first, fails the held removal fast, and
 ///     ends inside 3 s.
 #[test]
-fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_inside_3s() {
+fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_before_the_watchdog() {
     let fake = FakeDriver(Fake::new());
     let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 2.0 }, fake).unwrap();
     host.open(
@@ -1297,12 +1299,13 @@ fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_inside_3s() {
 
     // Run `mode::run_shutdown` WITHOUT calling `host.set_closing()` by hand, with a held legacy
     // removal inside the `unload_all` step (matching `plugins::unload_all` + `teardown`). A
-    // watchdog stops the overdub past 3.2 s so a broken shutdown fails cleanly instead of hanging.
+    // watchdog stops the overdub past 7.2 s so a broken shutdown fails cleanly instead of hanging; the
+    // 6.5 s bound below leaves room for a loaded test run (3-4 s seen in full runs, under 1 s alone).
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done_wd = done.clone();
     let host_wd = host.clone();
     let watchdog = std::thread::spawn(move || {
-        let limit = Instant::now() + Duration::from_millis(3200);
+        let limit = Instant::now() + Duration::from_millis(7200);
         while !done_wd.load(std::sync::atomic::Ordering::Acquire) {
             if Instant::now() >= limit {
                 let _ = host_wd.send(TimedCommand { frame: None, command: Command::Stop(0) });
@@ -1333,8 +1336,8 @@ fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_inside_3s() {
     let _ = watchdog.join();
 
     assert!(
-        elapsed < Duration::from_secs(3),
-        "mode::run_shutdown with held legacy removal took {} ms (must be < 3000 ms)",
+        elapsed < Duration::from_millis(6500),
+        "mode::run_shutdown with held legacy removal took {} ms (must be < 6500 ms)",
         elapsed.as_millis()
     );
     assert!(

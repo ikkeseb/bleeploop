@@ -3980,7 +3980,6 @@ mod chain_cmds {
     /// shutdown and `join_all` end within 3 s; the plugin is torn down in order, and its changed tone
     /// is saved, then retired to the slot's file.
     #[test]
-    #[ignore = "defect: join_all's request_stop beats the owner's 20 ms poll for its Back::Removed, so the plugin is abandoned in the engine (leaked) and its tone never retired"]
     fn g_shutdown_with_a_plugin_unit_tears_it_down_in_order_and_retires_its_tone() {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = fx::device(48_000);

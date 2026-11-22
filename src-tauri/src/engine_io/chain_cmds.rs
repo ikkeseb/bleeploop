@@ -65,6 +65,10 @@ const RELOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Combined wait budget for all in-flight chain unit removals during app shutdown.
 const SHUTDOWN_UNLOAD_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Bound for a stopping built-in owner to collect a unit box already on its way back from the engine
+/// before declaring it abandoned (matches production `REMOVE_TIMEOUT`).
+const BUILTIN_STOP_RETURN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The window event a unit's editor sends when the player closed it by its own close, or it went with
 /// its unit.
 pub(crate) const EDITOR_CLOSED: &str = "chain:editor-closed";
@@ -365,7 +369,7 @@ pub(crate) struct Chains {
     /// Serializes cross-slot `host.unit` reservations against `remove`/`move` slot verification so a
     /// freed id cannot move to the other slot between slot lookup and mutation.
     /// Lock order: `order[slot]` -> `id_guard` -> `slots` -> `host.core.ports` -> `host.core.state`;
-    /// separately `registry` -> `pending_reloads` -> `gone` -> `affinity`.
+    /// separately `registry` -> `pending_reloads` -> `gone` -> `host.core.state` (leaf) / `affinity` (leaf).
     id_guard: Mutex<()>,
     affinity: Mutex<Affinity>,
     tokens: Mutex<ToneTokens>,
@@ -373,9 +377,17 @@ pub(crate) struct Chains {
     #[cfg(test)]
     fail_next_spawn: AtomicBool,
     #[cfg(test)]
+    fail_next_late_drop_spawn: AtomicBool,
+    #[cfg(test)]
     before_register_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     before_reload_poll_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    after_retire_remove_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    after_take_pending_reload_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    after_slot_lookup_hook: Mutex<Option<Arc<dyn Fn(usize) + Send + Sync>>>,
 }
 
 impl Chains {
@@ -403,9 +415,17 @@ impl Chains {
             #[cfg(test)]
             fail_next_spawn: AtomicBool::new(false),
             #[cfg(test)]
+            fail_next_late_drop_spawn: AtomicBool::new(false),
+            #[cfg(test)]
             before_register_hook: Mutex::new(None),
             #[cfg(test)]
             before_reload_poll_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_retire_remove_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_take_pending_reload_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_slot_lookup_hook: Mutex::new(None),
         }
     }
 
@@ -424,7 +444,9 @@ impl Chains {
             for (slot, unit, old_token, candidate_token, start_gen, inst) in checks {
                 match reload_outcome(host, unit, old_token, candidate_token, start_gen) {
                     ReloadOutcome::Standing => {}
-                    ReloadOutcome::Reloaded => self.promote_pending_reload(inst, candidate_token),
+                    ReloadOutcome::Reloaded => {
+                        let _ = self.promote_pending_reload(unit, inst, candidate_token);
+                    }
                     ReloadOutcome::Failed(why) => {
                         if self.retire_pending_reload(inst) {
                             log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
@@ -433,23 +455,19 @@ impl Chains {
                 }
             }
         }
-        let mut moved = Vec::new();
+        let mut drop_now = Vec::new();
         {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
             let finished: Vec<UnitId> = reg
                 .iter()
                 .filter_map(|(&id, entry)| entry.owner.is_finished().then_some(id))
                 .collect();
             for id in finished {
                 if let Some(entry) = reg.remove(&id) {
-                    moved.push(entry);
+                    gone.entries.push(entry);
                 }
             }
-        }
-        let mut drop_now = Vec::new();
-        {
-            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
-            gone.entries.extend(moved);
             let mut i = 0;
             while i < gone.entries.len() {
                 if gone.entries[i].owner.is_finished() && Arc::strong_count(&gone.entries[i]) == 1 {
@@ -472,11 +490,11 @@ impl Chains {
         }
     }
 
-    /// Hand `entry` to `gone` for shutdown teardown (`join_all` runs after `host.shutdown()`). If
-    /// `join_all` already completed, returns `Some(entry)` so the caller drops any slot `order` mutex
-    /// first and then disposes of `entry` via [`Self::dispose_late_entry`].
-    fn retire_for_closing(&self, entry: Arc<Entry>) -> Option<Arc<Entry>> {
-        let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
+    /// Hand `entry` to `gone` while holding `gone` (and any source table lock in
+    /// `registry -> pending_reloads -> gone` order). If `join_all` already completed, returns
+    /// `Some(entry)` so the caller drops all table locks and any slot `order` mutex before calling
+    /// [`Self::dispose_late_entry`].
+    fn push_gone_locked(gone: &mut GoneState, entry: Arc<Entry>) -> Option<Arc<Entry>> {
         if gone.joined {
             Some(entry)
         } else {
@@ -485,22 +503,54 @@ impl Chains {
         }
     }
 
-    /// Stop and drop an entry that arrived after `join_all` already ran. Never called while holding a
-    /// slot's `order` mutex; bounds the wait so a command thread never joins without a deadline.
+    /// Stop and drop an entry that arrived after `join_all` already ran. Never called while holding
+    /// table locks or a slot's `order` mutex; bounds the wait so a command thread never joins
+    /// without a deadline, and leaks the entry rather than dropping it on the caller if spawning
+    /// `lf-chain-late-drop` fails.
     fn dispose_late_entry(&self, entry: Arc<Entry>) {
         let aff_handle = entry.owner.affinity_handle();
         entry.owner.request_stop();
+        let (entry_tx, entry_rx) = std::sync::mpsc::sync_channel::<Arc<Entry>>(1);
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
-        let spawned = std::thread::Builder::new()
-            .name("lf-chain-late-drop".to_string())
-            .spawn(move || {
+        let task = move || {
+            if let Ok(entry) = entry_rx.recv() {
                 entry.owner.join();
                 drop(entry);
-                let _ = done_tx.try_send(());
-            });
+            }
+            let _ = done_tx.try_send(());
+        };
+        #[cfg(test)]
+        let spawned = if self.fail_next_late_drop_spawn.swap(false, Acquire) {
+            Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "injected late-drop spawn failure"))
+        } else {
+            std::thread::Builder::new()
+                .name("lf-chain-late-drop".to_string())
+                .spawn(task)
+        };
+        #[cfg(not(test))]
+        let spawned = std::thread::Builder::new()
+            .name("lf-chain-late-drop".to_string())
+            .spawn(task);
         let finished = match spawned {
-            Ok(_) => done_rx.recv_timeout(LATE_JOIN_TIMEOUT).is_ok(),
-            Err(_) => false,
+            Ok(_) => match entry_tx.send(entry) {
+                Ok(()) => done_rx.recv_timeout(LATE_JOIN_TIMEOUT).is_ok(),
+                Err(std::sync::mpsc::SendError(entry)) => {
+                    log::error!(
+                        "[chain_cmds] lf-chain-late-drop exited before taking slot {} entry; leaking it",
+                        entry.slot
+                    );
+                    std::mem::forget(entry);
+                    false
+                }
+            },
+            Err(e) => {
+                log::error!(
+                    "[chain_cmds] could not spawn lf-chain-late-drop for slot {} entry: {e}; leaking it",
+                    entry.slot
+                );
+                std::mem::forget(entry);
+                false
+            }
         };
         if let Some((inst, path)) = aff_handle {
             let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
@@ -512,85 +562,100 @@ impl Chains {
         }
     }
 
-    fn take_pending_reload(&self, inst: u64) -> Option<PendingReload> {
-        let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
-        let pos = pending.iter().position(|c| c.inst == inst)?;
-        Some(pending.swap_remove(pos))
-    }
-
-    fn promote_pending_reload(&self, inst: u64, new_token: InstallToken) {
-        let Some(cand) = self.take_pending_reload(inst) else {
-            return;
-        };
-        let entry = Arc::new(Entry {
-            slot: cand.slot,
-            token: new_token,
-            owner: Owner::Plugin(PluginOwner {
-                plugin: cand.plugin,
-                inst: cand.inst,
-                owner: cand.owner,
-            }),
-        });
-        let replaced = {
+    /// Move reload candidate `inst` from `pending_reloads` into `registry` (or into `gone` if
+    /// closing or superseded), holding `registry -> pending_reloads -> gone` throughout so neither
+    /// `join_all` nor a waiting `reload()` can observe an entry outside the tables. Returns `true`
+    /// only when promotion did not install `new_token` (closing, superseded or retired before promotion).
+    fn promote_pending_reload(&self, unit: UnitId, inst: u64, new_token: InstallToken) -> bool {
+        let (late_entry, aborted) = {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(pos) = pending.iter().position(|c| c.inst == inst) else {
+                // Another caller already moved the candidate: it landed only if the registry holds it
+                // (a sweep that promoted it); a candidate retired meanwhile (a removal, a rebuild,
+                // shutdown) never reached the registry, so the reload did not land.
+                return !reg.get(&unit).is_some_and(|e| e.token == new_token);
+            };
+            let cand = pending.swap_remove(pos);
+            #[cfg(test)]
+            if let Some(hook) = self.after_take_pending_reload_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                hook();
+            }
+            let entry = Arc::new(Entry {
+                slot: cand.slot,
+                token: new_token,
+                owner: Owner::Plugin(PluginOwner {
+                    plugin: cand.plugin,
+                    inst: cand.inst,
+                    owner: cand.owner,
+                }),
+            });
             if self.closing.load(Acquire) {
-                drop(reg);
-                if let Some(late) = self.retire_for_closing(entry) {
-                    self.dispose_late_entry(late);
-                }
-                return;
-            }
-            if reg.get(&cand.unit).is_some_and(|e| e.token != cand.old_token) {
+                (Self::push_gone_locked(&mut gone, entry), true)
+            } else if reg.get(&cand.unit).is_some_and(|e| e.token != cand.old_token) {
                 // Another load already replaced `old_token`: retire this candidate rather than clobbering it.
-                drop(reg);
-                if let Some(late) = self.retire_for_closing(entry) {
-                    self.dispose_late_entry(late);
-                }
-                return;
+                (Self::push_gone_locked(&mut gone, entry), true)
+            } else if let Some(old_entry) = reg.insert(cand.unit, entry) {
+                (Self::push_gone_locked(&mut gone, old_entry), false)
+            } else {
+                (None, false)
             }
-            reg.insert(cand.unit, entry)
         };
-        if let Some(old_entry) = replaced {
-            if let Some(late) = self.retire_for_closing(old_entry) {
-                self.dispose_late_entry(late);
-            }
+        if let Some(late) = late_entry {
+            self.dispose_late_entry(late);
         }
+        aborted
     }
 
     fn retire_pending_reload(&self, inst: u64) -> bool {
-        let Some(cand) = self.take_pending_reload(inst) else {
-            return false;
+        let (retired, late_entry) = {
+            let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(pos) = pending.iter().position(|c| c.inst == inst) else {
+                return false;
+            };
+            let cand = pending.swap_remove(pos);
+            let entry = Arc::new(Entry {
+                slot: cand.slot,
+                token: 0,
+                owner: Owner::Plugin(PluginOwner {
+                    plugin: cand.plugin,
+                    inst: cand.inst,
+                    owner: cand.owner,
+                }),
+            });
+            (true, Self::push_gone_locked(&mut gone, entry))
         };
-        let entry = Arc::new(Entry {
-            slot: cand.slot,
-            token: 0,
-            owner: Owner::Plugin(PluginOwner {
-                plugin: cand.plugin,
-                inst: cand.inst,
-                owner: cand.owner,
-            }),
-        });
-        if let Some(late) = self.retire_for_closing(entry) {
+        if let Some(late) = late_entry {
             self.dispose_late_entry(late);
         }
-        true
+        retired
     }
 
-    /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`).
+    /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`),
+    /// holding `registry -> gone` across the move so `join_all` can never miss it.
     fn retire_to_gone(&self, unit: UnitId, token: Option<InstallToken>) {
-        let removed = {
+        let late_entry = {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
             let matches = reg.get(&unit).is_some_and(|e| token.is_none_or(|t| e.token == t));
             if matches {
-                reg.remove(&unit)
+                if let Some(entry) = reg.remove(&unit) {
+                    #[cfg(test)]
+                    if let Some(hook) = self.after_retire_remove_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        hook();
+                    }
+                    Self::push_gone_locked(&mut gone, entry)
+                } else {
+                    None
+                }
             } else {
                 None
             }
         };
-        if let Some(entry) = removed {
-            if let Some(late) = self.retire_for_closing(entry) {
-                self.dispose_late_entry(late);
-            }
+        if let Some(late) = late_entry {
+            self.dispose_late_entry(late);
         }
     }
 
@@ -724,25 +789,36 @@ impl Chains {
                     token,
                     owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
                 });
-                let displaced = {
+                #[cfg(test)]
+                if let Some(hook) = self.before_register_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    hook();
+                }
+                let (outcome_err, late_entry) = {
                     let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
+                    let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
-                        drop(reg);
-                        let late = self.retire_for_closing(entry);
-                        drop(order);
-                        if let Some(late) = late {
-                            self.dispose_late_entry(late);
-                        }
-                        return Err("the host is closing".to_string());
+                        (
+                            Some("the host is closing".to_string()),
+                            Self::push_gone_locked(&mut gone, entry),
+                        )
+                    } else if !state.table.active_row_for_id(unit).is_some_and(|r| r.token == token) {
+                        let why = late_add_refusal_reason(&state, unit, token);
+                        (Some(why), Self::push_gone_locked(&mut gone, entry))
+                    } else {
+                        let late = reg
+                            .insert(unit, entry)
+                            .and_then(|prev| Self::push_gone_locked(&mut gone, prev));
+                        let err = late.as_ref().map(|_| "the host is closing".to_string());
+                        (err, late)
                     }
-                    reg.insert(unit, entry)
                 };
-                if let Some(prev) = displaced {
-                    if let Some(late) = self.retire_for_closing(prev) {
-                        drop(order);
-                        self.dispose_late_entry(late);
-                        return Err("the host is closing".to_string());
-                    }
+                if let Some(late) = late_entry {
+                    drop(order);
+                    self.dispose_late_entry(late);
+                }
+                if let Some(err) = outcome_err {
+                    return Err(err);
                 }
                 match answer {
                     Answer::Seated { .. } => Ok(Added::Seated),
@@ -885,30 +961,44 @@ impl Chains {
             hook();
         }
 
-        let displaced = {
+        enum BuiltinRegErr {
+            Closing,
+            Inactive(String),
+        }
+        let (reg_err, late_entry) = {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
+            let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
             if self.closing.load(Acquire) {
-                drop(reg);
-                // Drop `start_tx` so the idle owner thread exits without ever touching the engine.
-                drop(start_tx);
-                drop(boxed);
-                unit_host.failed("the host is closing".to_string());
-                unit_host.release();
-                let late = self.retire_for_closing(entry);
-                drop(order);
-                if let Some(late) = late {
-                    self.dispose_late_entry(late);
-                }
-                return Err("the host is closing".to_string());
+                (Some(BuiltinRegErr::Closing), Self::push_gone_locked(&mut gone, entry))
+            } else if !state.table.active_row_for_id(unit).is_some_and(|r| r.token == token) {
+                let why = late_add_refusal_reason(&state, unit, token);
+                (Some(BuiltinRegErr::Inactive(why)), Self::push_gone_locked(&mut gone, entry))
+            } else {
+                let late = reg
+                    .insert(unit, entry.clone())
+                    .and_then(|prev| Self::push_gone_locked(&mut gone, prev));
+                let err = late.as_ref().map(|_| BuiltinRegErr::Closing);
+                (err, late)
             }
-            reg.insert(unit, entry.clone())
         };
-        if let Some(prev) = displaced {
-            if let Some(late) = self.retire_for_closing(prev) {
-                drop(order);
+        if let Some(err) = reg_err {
+            // Drop `start_tx` so the idle owner thread exits without ever touching the engine.
+            drop(start_tx);
+            drop(boxed);
+            let msg = match err {
+                BuiltinRegErr::Closing => {
+                    unit_host.failed("the host is closing".to_string());
+                    "the host is closing".to_string()
+                }
+                BuiltinRegErr::Inactive(why) => why,
+            };
+            unit_host.release();
+            drop(order);
+            if let Some(late) = late_entry {
                 self.dispose_late_entry(late);
-                return Err("the host is closing".to_string());
             }
+            return Err(msg);
         }
 
         if let Err(std::sync::mpsc::SendError((unit_host, boxed, _))) = start_tx.send((unit_host, boxed, terms)) {
@@ -946,6 +1036,10 @@ impl Chains {
         self.sweep(Some(host));
         let (order, token, removal) = loop {
             let slot = find_unit_slot(host, unit)?;
+            #[cfg(test)]
+            if let Some(hook) = self.after_slot_lookup_hook.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                hook(slot);
+            }
             let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
             let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
             let still_in_slot = {
@@ -1004,6 +1098,10 @@ impl Chains {
         self.sweep(Some(host));
         let (order, op) = loop {
             let slot = find_unit_slot(host, unit)?;
+            #[cfg(test)]
+            if let Some(hook) = self.after_slot_lookup_hook.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                hook(slot);
+            }
             let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
             let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
             let still_in_slot = {
@@ -1245,24 +1343,24 @@ impl Chains {
                     token: new_token,
                     owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
                 });
-                let replaced = {
+                let (closing, late_entry) = {
                     let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
-                        drop(reg);
-                        let late = self.retire_for_closing(entry);
-                        drop(order);
-                        if let Some(late) = late {
-                            self.dispose_late_entry(late);
-                        }
-                        return Err("the host is closing".to_string());
+                        (true, Self::push_gone_locked(&mut gone, entry))
+                    } else {
+                        let late = reg
+                            .insert(unit, entry)
+                            .and_then(|old_entry| Self::push_gone_locked(&mut gone, old_entry));
+                        (false, late)
                     }
-                    reg.insert(unit, entry)
                 };
-                if let Some(old_entry) = replaced {
-                    if let Some(late) = self.retire_for_closing(old_entry) {
-                        drop(order);
-                        self.dispose_late_entry(late);
-                    }
+                if let Some(late) = late_entry {
+                    drop(order);
+                    self.dispose_late_entry(late);
+                }
+                if closing {
+                    return Err("the host is closing".to_string());
                 }
                 Ok(Reloaded::Reloaded)
             }
@@ -1271,32 +1369,36 @@ impl Chains {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .landed(inst, &plugin.path, unit);
-                {
+                let (closing, late_entry) = {
                     let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
-                        drop(pending);
                         let entry = Arc::new(Entry {
                             slot,
                             token: new_token,
                             owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
                         });
-                        let late = self.retire_for_closing(entry);
-                        drop(order);
-                        if let Some(late) = late {
-                            self.dispose_late_entry(late);
-                        }
-                        return Err("the host is closing".to_string());
+                        (true, Self::push_gone_locked(&mut gone, entry))
+                    } else {
+                        pending.push(PendingReload {
+                            unit,
+                            slot,
+                            old_token: old,
+                            candidate_token: new_token,
+                            start_gen,
+                            plugin,
+                            inst,
+                            owner,
+                        });
+                        (false, None)
                     }
-                    pending.push(PendingReload {
-                        unit,
-                        slot,
-                        old_token: old,
-                        candidate_token: new_token,
-                        start_gen,
-                        plugin,
-                        inst,
-                        owner,
-                    });
+                };
+                if closing {
+                    drop(order);
+                    if let Some(late) = late_entry {
+                        self.dispose_late_entry(late);
+                    }
+                    return Err("the host is closing".to_string());
                 }
                 drop(order);
 
@@ -1309,7 +1411,12 @@ impl Chains {
                     }
                     match reload_outcome(host, unit, old, new_token, start_gen) {
                         ReloadOutcome::Reloaded => {
-                            self.promote_pending_reload(inst, new_token);
+                            if self.promote_pending_reload(unit, inst, new_token) {
+                                log::warn!(
+                                    "[chain_cmds] slot {slot} unit {unit} reload interrupted before promotion"
+                                );
+                                return Ok(Reloaded::Failed);
+                            }
                             return Ok(Reloaded::Reloaded);
                         }
                         ReloadOutcome::Failed(why) => {
@@ -1350,32 +1457,36 @@ impl Chains {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .landed(inst, &plugin.path, unit);
-                {
+                let (closing, late_entry) = {
                     let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
-                        drop(pending);
                         let entry = Arc::new(Entry {
                             slot,
                             token: new_token,
                             owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
                         });
-                        let late = self.retire_for_closing(entry);
-                        drop(order);
-                        if let Some(late) = late {
-                            self.dispose_late_entry(late);
-                        }
-                        return Err("the host is closing".to_string());
+                        (true, Self::push_gone_locked(&mut gone, entry))
+                    } else {
+                        pending.push(PendingReload {
+                            unit,
+                            slot,
+                            old_token: old,
+                            candidate_token: new_token,
+                            start_gen,
+                            plugin,
+                            inst,
+                            owner,
+                        });
+                        (false, None)
                     }
-                    pending.push(PendingReload {
-                        unit,
-                        slot,
-                        old_token: old,
-                        candidate_token: new_token,
-                        start_gen,
-                        plugin,
-                        inst,
-                        owner,
-                    });
+                };
+                if closing {
+                    drop(order);
+                    if let Some(late) = late_entry {
+                        self.dispose_late_entry(late);
+                    }
+                    return Err("the host is closing".to_string());
                 }
                 Err(format!(
                     "the audio engine did not answer within 30 s: unit {unit} reload stays loading and seats if the engine answers"
@@ -1664,6 +1775,31 @@ fn describe_missing_reload_cause(
             }
         }
     }
+}
+
+fn late_add_refusal_reason(state: &unit_host::HostState, unit: UnitId, token: InstallToken) -> String {
+    if let Some(row) = state.table.row(token) {
+        if let Some(why) = row.settled.values().find_map(|s| match s {
+            OpState::Refused(why) => Some(*why),
+            _ => None,
+        }) {
+            return refusal_reason(why);
+        }
+        if row.superseded {
+            return submit_error_reason(SubmitError::Superseded);
+        }
+        if row.leave.is_leaving() {
+            return submit_error_reason(SubmitError::Removing);
+        }
+    }
+    if let Some((_, plate)) = state.model.find_plate(unit) {
+        if plate.state == PlateState::Failed {
+            if let Some(err) = &plate.error {
+                return err.clone();
+            }
+        }
+    }
+    format!("unit {unit} was refused or replaced before registration")
 }
 
 fn check_plugin_format(plugin: &PluginRef) -> Result<PluginFormat, String> {
@@ -1988,24 +2124,49 @@ fn serve_builtin(
         }
     }
 
-    // Stop requested: drain anything returned (or held in Leave::Pending), abandon only if the box
-    // never came back, then release the reservation.
+    // Stop requested: drain anything returned (or held in Leave::Pending), waiting up to
+    // `BUILTIN_STOP_RETURN_TIMEOUT` while an engine still runs so a removed unit finishing its
+    // fade-out is collected rather than abandoned, then release the reservation.
+    let pending_op = match seat {
+        BuiltinSeat::Installing { op } => Some(op),
+        _ => None,
+    };
     let mut have_box = seat.take_unit().is_some();
     let mut dismissed = false;
-    while let Some(back) = host.take_back_for_shutdown() {
-        match back {
-            Back::Removed(u)
-            | Back::Superseded(u)
-            | Back::Withdrawn { unit: u, .. }
-            | Back::Evicted { unit: u, .. }
-            | Back::Refused { unit: u, .. } => {
-                drop(u);
-                have_box = true;
-            }
-            Back::Dismissed => {
-                dismissed = true;
+    let drain_shutdown = |have_box: &mut bool, dismissed: &mut bool| {
+        while let Some(back) = host.take_back_for_shutdown() {
+            match back {
+                Back::Removed(u)
+                | Back::Superseded(u)
+                | Back::Withdrawn { unit: u, .. }
+                | Back::Evicted { unit: u, .. }
+                | Back::Refused { unit: u, .. } => {
+                    drop(u);
+                    *have_box = true;
+                }
+                Back::Dismissed => {
+                    *dismissed = true;
+                }
             }
         }
+    };
+    if let Some(op) = pending_op {
+        let _ = host.poll(op);
+    }
+    drain_shutdown(&mut have_box, &mut dismissed);
+    if !have_box && !dismissed && host.terms().is_some() && host.removal_in_flight() {
+        let deadline = Instant::now() + BUILTIN_STOP_RETURN_TIMEOUT;
+        while !have_box && !dismissed && Instant::now() < deadline {
+            if let Some(op) = pending_op {
+                let _ = host.poll(op);
+            }
+            drain_shutdown(&mut have_box, &mut dismissed);
+            if have_box || dismissed || host.terms().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drain_shutdown(&mut have_box, &mut dismissed);
     }
     if !have_box && !dismissed {
         host.abandon();

@@ -16,7 +16,7 @@ use std::sync::atomic::{
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clack_host::entry::PluginEntry;
 use lf_engine::{SeatRefusal, UnitId, UnitProcessor};
@@ -33,6 +33,10 @@ use super::{
     owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds, EVENT_RING_CAP,
 };
 use crate::engine_io::unit_host::{Activated, Back, Op, OpState, SubmitError, Terms, UnitHost};
+
+/// Bound for a stopping owner to collect a unit box already on its way back from the engine before
+/// declaring it abandoned (matches production `REMOVE_TIMEOUT`).
+const STOP_RETURN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A chain unit's load place: its slot index and the engine terms read before loading.
 struct ChainPlace {
@@ -722,30 +726,58 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                     P::FORMAT
                 );
             }
+            let pending_op = match seat {
+                Seat::Installing { op } | Seat::Withdrawing { op } => Some(op),
+                _ => None,
+            };
             let mut in_hand = seat.take_unit();
             let mut retire = false;
-            while let Some(back) = host.take_back_for_shutdown() {
-                match back {
-                    Back::Removed(u) => {
-                        in_hand = Some(own(u));
-                        retire = true;
-                    }
-                    Back::Superseded(u) => {
-                        in_hand = Some(own(u));
-                        retire = false;
-                    }
-                    Back::Withdrawn { unit: u, .. } | Back::Evicted { unit: u, .. } | Back::Refused { unit: u, .. } => {
-                        in_hand = Some(own(u));
-                    }
-                    Back::Dismissed => {
-                        retire = true;
+            let mut dismissed = false;
+            let drain_shutdown = |in_hand: &mut Option<Box<P::Unit>>, retire: &mut bool, dismissed: &mut bool| {
+                while let Some(back) = host.take_back_for_shutdown() {
+                    match back {
+                        Back::Removed(u) => {
+                            *in_hand = Some(own(u));
+                            *retire = true;
+                        }
+                        Back::Superseded(u) => {
+                            *in_hand = Some(own(u));
+                            *retire = false;
+                        }
+                        Back::Withdrawn { unit: u, .. }
+                        | Back::Evicted { unit: u, .. }
+                        | Back::Refused { unit: u, .. } => {
+                            *in_hand = Some(own(u));
+                        }
+                        Back::Dismissed => {
+                            *retire = true;
+                            *dismissed = true;
+                        }
                     }
                 }
+            };
+            if let Some(op) = pending_op {
+                let _ = host.poll(op);
+            }
+            drain_shutdown(&mut in_hand, &mut retire, &mut dismissed);
+            if in_hand.is_none() && !dismissed && host.terms().is_some() && host.removal_in_flight() {
+                let deadline = Instant::now() + STOP_RETURN_TIMEOUT;
+                while in_hand.is_none() && !dismissed && Instant::now() < deadline {
+                    if let Some(op) = pending_op {
+                        let _ = host.poll(op);
+                    }
+                    drain_shutdown(&mut in_hand, &mut retire, &mut dismissed);
+                    if in_hand.is_some() || dismissed || host.terms().is_none() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                drain_shutdown(&mut in_hand, &mut retire, &mut dismissed);
             }
             // A unit out of the engine (including a dismissed seat, whose box is already in hand or
             // ahead of `Dismissed` in the mailbox, or a box held in `Leave::Pending` during a
             // pending removal) takes the ordered release.
-            if in_hand.is_some() {
+            if in_hand.is_some() || dismissed {
                 ordered_release(
                     host,
                     plugin,

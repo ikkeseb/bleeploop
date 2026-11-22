@@ -1543,6 +1543,16 @@ impl UnitHost {
         state.table.row_mut(self.install).and_then(|r| r.mailbox.pop_front())
     }
 
+    /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or
+    /// [`Leave::Settled`]): a stopping owner waits for that box, never for a seated unit's.
+    pub fn removal_in_flight(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .table
+            .row(self.install)
+            .is_some_and(|r| matches!(r.leave, Leave::Pending { .. } | Leave::Settled))
+    }
+
     /// Claim the next box in this row's mailbox or a box held in [`Leave::Pending`] during a
     /// pending removal, for a stopping owner's teardown, while preserving the removal reservation.
     pub fn take_back_for_shutdown(&self) -> Option<Back> {

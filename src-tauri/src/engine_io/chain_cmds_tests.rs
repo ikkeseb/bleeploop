@@ -746,7 +746,11 @@ fn j_shutdown_with_held_removal_in_open_take_finishes_within_3s() {
     let rem_chains = chains.clone();
     let rem_host = host.clone();
     let rem_doc = doc_state.clone();
-    let rem_thread = std::thread::spawn(move || rem_chains.remove(&rem_host, (&rem_doc, epoch), 90));
+    let (rem_tx, rem_rx) = std::sync::mpsc::sync_channel(1);
+    let rem_thread = std::thread::spawn(move || {
+        let res = rem_chains.remove(&rem_host, (&rem_doc, epoch), 90);
+        let _ = rem_tx.try_send(res);
+    });
 
     wait_until(Duration::from_secs(3), "removal held before shutdown", || {
         let mut ev = Vec::new();
@@ -755,15 +759,27 @@ fn j_shutdown_with_held_removal_in_open_take_finishes_within_3s() {
         st.model.pending_remove_op(0, 90).is_some() && st.model.slot_held(0)
     });
 
-    let t0 = Instant::now();
-    chains.unload_all(&host);
-    host.shutdown();
-    chains.join_all();
-    let elapsed = t0.elapsed();
+    let sd_chains = chains.clone();
+    let sd_host = host.clone();
+    let (sd_tx, sd_rx) = std::sync::mpsc::sync_channel(1);
+    let sd_thread = std::thread::spawn(move || {
+        let t0 = Instant::now();
+        sd_chains.unload_all(&sd_host);
+        sd_host.shutdown();
+        sd_chains.join_all();
+        let _ = sd_tx.try_send(t0.elapsed());
+    });
+    let elapsed = sd_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown hung past 5 s (must finish within 3 s)");
+    sd_thread.join().unwrap();
     assert!(elapsed < Duration::from_secs(3), "shutdown took {elapsed:?} (must be < 3 s)");
 
     // Background held removal unblocked on closing and finished too.
-    let _ = rem_thread.join().unwrap();
+    let _ = rem_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("background held remove hung after shutdown");
+    rem_thread.join().unwrap();
     assert_eq!(chains.active_entries(), 0, "no owner entries remain after join_all");
     assert_eq!(
         tracker.drops.load(Ordering::SeqCst),
@@ -1430,14 +1446,12 @@ fn p4f1_2b_shutdown_during_owner_startup_drops_box() {
         ClampingBuiltinFactory::new().with_tracker(tracker.clone()),
     )));
 
-    let entered = Arc::new(Barrier::new(2));
-    let resume = Arc::new(Barrier::new(2));
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel::<()>(1);
     {
-        let entered = entered.clone();
-        let resume = resume.clone();
         *chains.before_register_hook.lock().unwrap() = Some(Box::new(move || {
-            entered.wait();
-            resume.wait();
+            let _ = entered_tx.try_send(());
+            let _ = resume_rx.recv_timeout(Duration::from_secs(5));
         }));
     }
 
@@ -1445,17 +1459,24 @@ fn p4f1_2b_shutdown_during_owner_startup_drops_box() {
     let add_host = host.clone();
     let add_doc = doc_state.clone();
     let add_slots = slots.clone();
+    let (add_tx, add_rx) = std::sync::mpsc::sync_channel(1);
     let add_thread = std::thread::spawn(move || {
-        add_builtin(&add_chains, &add_host, (&add_doc, epoch), &add_slots, 0, 202, echo_spec(0.5, false), 0)
+        let res = add_builtin(&add_chains, &add_host, (&add_doc, epoch), &add_slots, 0, 202, echo_spec(0.5, false), 0);
+        let _ = add_tx.try_send(res);
     });
 
     // Wait until `add_builtin` reaches the point right before registry insertion, then run `unload_all`
     // while the device is still playing (BEFORE `host.shutdown()`).
-    entered.wait();
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("add_builtin never reached before_register_hook");
     chains.unload_all(&host);
-    resume.wait();
+    let _ = resume_tx.try_send(());
 
-    let res = add_thread.join().unwrap();
+    let res = add_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("add_builtin did not finish within 5 s");
+    add_thread.join().unwrap();
     assert!(res.is_err(), "add racing with closing must return Err, got: {res:?}");
 
     host.shutdown();
@@ -1526,8 +1547,8 @@ fn p4f1_3b_refused_add_cleanup_does_not_stop_newer_owner() {
 fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
     struct PausingFactory {
         pause_slot1: Arc<AtomicBool>,
-        in_build: Arc<Barrier>,
-        release_build: Arc<Barrier>,
+        in_build_tx: std::sync::mpsc::SyncSender<()>,
+        release_build_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
     }
     impl BuiltinFactory for PausingFactory {
         fn build(&self, kind: UnitKind, params: &Params, _terms: Terms) -> Result<(Unit, Params), String> {
@@ -1535,8 +1556,9 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
                 return Err("fail slot 0 plate".into());
             }
             if self.pause_slot1.swap(false, Ordering::AcqRel) {
-                self.in_build.wait();
-                self.release_build.wait();
+                let _ = self.in_build_tx.try_send(());
+                let rx = self.release_build_rx.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = rx.recv_timeout(Duration::from_secs(5));
             }
             Ok((
                 Box::new(ClampingEcho {
@@ -1556,50 +1578,68 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
     let doc_state = Arc::new(PluginHostState::default());
     let epoch = doc_state.begin_frontend_session();
     let slots = Arc::new(empty_slots());
-    let in_build = Arc::new(Barrier::new(2));
-    let release_build = Arc::new(Barrier::new(2));
+    let (in_build_tx, in_build_rx) = std::sync::mpsc::sync_channel::<()>(2);
+    let (release_build_tx, release_build_rx) = std::sync::mpsc::sync_channel::<()>(2);
     let pause_slot1 = Arc::new(AtomicBool::new(true));
     let chains = Arc::new(Chains::with_factory(Arc::new(PausingFactory {
         pause_slot1: pause_slot1.clone(),
-        in_build: in_build.clone(),
-        release_build: release_build.clone(),
+        in_build_tx,
+        release_build_rx: Arc::new(Mutex::new(release_build_rx)),
     })));
 
     // 1. Create a failed-add plate for id 400 in slot 0 (id is freed).
     let bad = UnitSpec { kind: UnitKind::Reverb, plugin: None, params: None, bypass: false };
     assert!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 400, bad, 0).is_err());
 
-    // 2. Hold slot 0's order mutex and start `remove(400)` on a thread (so it finds slot 0 and waits).
-    let hold_slot0 = chains.order[0].lock().unwrap();
+    // 2. Arm `after_slot_lookup_hook`: pause `remove(400)` right after it resolves slot 0, then
+    //    report the second lookup (slot 1) once it re-checks under `order[0]` and loops.
+    let (looked_tx, looked_rx) = std::sync::mpsc::sync_channel::<usize>(4);
+    let (resume_lookup_tx, resume_lookup_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let resume_lookup_rx = Arc::new(Mutex::new(Some(resume_lookup_rx)));
+    *chains.after_slot_lookup_hook.lock().unwrap() = Some(Arc::new(move |slot| {
+        let _ = looked_tx.try_send(slot);
+        if let Some(rx) = resume_lookup_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+        }
+    }));
+
     let rem_chains = chains.clone();
     let rem_host = host.clone();
     let rem_doc = doc_state.clone();
     let rem_done = Arc::new(AtomicBool::new(false));
     let rem_done_flag = rem_done.clone();
+    let (rem_tx, rem_rx) = std::sync::mpsc::sync_channel(1);
     let rem_thread = std::thread::spawn(move || {
         let r = rem_chains.remove(&rem_host, (&rem_doc, epoch), 400);
         rem_done_flag.store(true, Ordering::Release);
-        r
+        let _ = rem_tx.try_send(r);
     });
-    // Give `rem_thread` a moment to look up slot 0 and block on `order[0]`.
-    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        looked_rx.recv_timeout(Duration::from_secs(5)),
+        Ok(0),
+        "remove(400) did not resolve slot 0 before pausing"
+    );
 
-    // 3. While `rem_thread` is waiting on slot 0, start an add for id 400 in SLOT 1 that pauses in flight
-    //    (holding `order[1]` with plate 400 now in slot 1).
+    // 3. While `rem_thread` is paused right after resolving slot 0, start an add for id 400 in
+    //    SLOT 1 that pauses in flight (holding `order[1]` with plate 400 now in slot 1).
     let add_chains = chains.clone();
     let add_host = host.clone();
     let add_doc = doc_state.clone();
     let add_slots = slots.clone();
+    let (add_tx, add_rx) = std::sync::mpsc::sync_channel(1);
     let add_thread = std::thread::spawn(move || {
-        add_builtin(&add_chains, &add_host, (&add_doc, epoch), &add_slots, 1, 400, echo_spec(0.5, false), 0)
+        let r = add_builtin(&add_chains, &add_host, (&add_doc, epoch), &add_slots, 1, 400, echo_spec(0.5, false), 0);
+        let _ = add_tx.try_send(r);
     });
-    in_build.wait();
+    in_build_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("slot 1 add(400) never reached build pause");
 
-    // 4. Release `order[0]` while slot 1's add is STILL IN FLIGHT.
-    drop(hold_slot0);
-    std::thread::sleep(Duration::from_millis(40));
+    // 4. Resume `rem_thread` while slot 1's add is STILL IN FLIGHT. Under `order[0]`, it must see
+    //    plate 400 moved to slot 1, loop to look up slot 1, and block on `order[1]`.
+    let _ = resume_lookup_tx.try_send(());
+    let retried_slot = looked_rx.recv_timeout(Duration::from_secs(5));
 
-    // `rem_thread` MUST NOT have mutated or removed slot 1's in-flight plate!
     let rem_ran_early = rem_done.load(Ordering::Acquire);
     let slot1_still_has_400 = {
         let st = host.core.state.lock().unwrap();
@@ -1607,50 +1647,77 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
     };
 
     // Release slot 1's build so neither thread hangs regardless of assertion outcome.
-    release_build.wait();
-    let add_res = add_thread.join().unwrap();
-    let rem_res = rem_thread.join().unwrap();
+    let _ = release_build_tx.try_send(());
+    let add_res = add_rx.recv_timeout(Duration::from_secs(5)).expect("slot 1 add(400) hung");
+    let rem_res = rem_rx.recv_timeout(Duration::from_secs(5)).expect("remove(400) hung");
+    add_thread.join().unwrap();
+    rem_thread.join().unwrap();
 
+    assert_eq!(retried_slot, Ok(1), "remove must re-resolve to slot 1 instead of mutating under order[0]");
     assert!(!rem_ran_early, "remove must not finish while slot 1's add of reused id 400 is still in flight");
     assert!(slot1_still_has_400, "slot 1's in-flight plate 400 must not be removed under slot 0's lock");
     assert_eq!(add_res, Ok(Added::Seated), "slot 1's add must seat cleanly before remove acts");
     assert_eq!(rem_res, Ok(()), "remove must then proceed under slot 1's order");
 
     // Repeat for `move_unit`: failed plate 401 in slot 0, reused in slot 1 (alongside unit 402).
+    *chains.after_slot_lookup_hook.lock().unwrap() = None;
     assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 1, 402, echo_spec(0.4, false), 0), Ok(Added::Seated));
     let bad2 = UnitSpec { kind: UnitKind::Reverb, plugin: None, params: None, bypass: false };
     assert!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 401, bad2, 0).is_err());
 
+    let (looked2_tx, looked2_rx) = std::sync::mpsc::sync_channel::<usize>(4);
+    let (resume2_tx, resume2_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let resume2_rx = Arc::new(Mutex::new(Some(resume2_rx)));
+    *chains.after_slot_lookup_hook.lock().unwrap() = Some(Arc::new(move |slot| {
+        let _ = looked2_tx.try_send(slot);
+        if let Some(rx) = resume2_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+        }
+    }));
+
     pause_slot1.store(true, Ordering::Release);
-    let hold_slot0 = chains.order[0].lock().unwrap();
     let mv_chains = chains.clone();
     let mv_host = host.clone();
     let mv_doc = doc_state.clone();
     let mv_done = Arc::new(AtomicBool::new(false));
     let mv_done_flag = mv_done.clone();
+    let (mv_tx, mv_rx) = std::sync::mpsc::sync_channel(1);
     let mv_thread = std::thread::spawn(move || {
         let r = mv_chains.move_unit(&mv_host, (&mv_doc, epoch), 401, 0);
         mv_done_flag.store(true, Ordering::Release);
-        r
+        let _ = mv_tx.try_send(r);
     });
-    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        looked2_rx.recv_timeout(Duration::from_secs(5)),
+        Ok(0),
+        "move_unit(401) did not resolve slot 0 before pausing"
+    );
 
     let add2_chains = chains.clone();
     let add2_host = host.clone();
     let add2_doc = doc_state.clone();
     let add2_slots = slots.clone();
+    let (add2_tx, add2_rx) = std::sync::mpsc::sync_channel(1);
     let add2_thread = std::thread::spawn(move || {
-        add_builtin(&add2_chains, &add2_host, (&add2_doc, epoch), &add2_slots, 1, 401, echo_spec(0.5, false), 1)
+        let r = add_builtin(&add2_chains, &add2_host, (&add2_doc, epoch), &add2_slots, 1, 401, echo_spec(0.5, false), 1);
+        let _ = add2_tx.try_send(r);
     });
-    in_build.wait();
+    in_build_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("slot 1 add(401) never reached build pause");
 
-    drop(hold_slot0);
-    std::thread::sleep(Duration::from_millis(40));
+    let _ = resume2_tx.try_send(());
+    let retried_mv_slot = looked2_rx.recv_timeout(Duration::from_secs(5));
     let mv_ran_early = mv_done.load(Ordering::Acquire);
-    release_build.wait();
+    let _ = release_build_tx.try_send(());
 
-    let add2_res = add2_thread.join().unwrap();
-    let mv_res = mv_thread.join().unwrap();
+    let add2_res = add2_rx.recv_timeout(Duration::from_secs(5)).expect("slot 1 add(401) hung");
+    let mv_res = mv_rx.recv_timeout(Duration::from_secs(5)).expect("move_unit(401) hung");
+    add2_thread.join().unwrap();
+    mv_thread.join().unwrap();
+    *chains.after_slot_lookup_hook.lock().unwrap() = None;
+
+    assert_eq!(retried_mv_slot, Ok(1), "move_unit must re-resolve to slot 1 instead of mutating under order[0]");
     assert!(!mv_ran_early, "move_unit must not run while slot 1's add of reused id 401 is still in flight");
     assert_eq!(add2_res, Ok(Added::Seated));
     assert_eq!(mv_res, Ok(()), "move_unit must then succeed under slot 1's order");
@@ -1748,13 +1815,12 @@ fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
     let chains = Arc::new(Chains::new());
     let (store, dir) = temp_tone_store("p4f2-1a");
 
-    let in_state = Arc::new(Barrier::new(2));
-    let resume_state = Arc::new(Barrier::new(2));
+    let (in_state_tx, in_state_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_state_tx, resume_state_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let resume_state_rx = Arc::new(Mutex::new(Some(resume_state_rx)));
     let owner_exited = Arc::new(AtomicBool::new(false));
     let paused_once = Arc::new(AtomicBool::new(false));
 
-    let in_s = in_state.clone();
-    let res_s = resume_state.clone();
     let p_once = paused_once.clone();
     let exited = owner_exited.clone();
     let fake_open = move |_fmt: PluginFormat,
@@ -1762,8 +1828,8 @@ fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
                           unit_host: UnitHost,
                           sink: EventSink,
                           tone: Option<ToneBinding>| {
-        let in_s = in_s.clone();
-        let res_s = res_s.clone();
+        let in_tx = in_state_tx.clone();
+        let res_rx = resume_state_rx.clone();
         let p_once = p_once.clone();
         spawn_fake_unit(
             unit_host,
@@ -1773,8 +1839,10 @@ fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
                 name: "SlowSave".into(),
                 on_state: Some(Arc::new(move || {
                     if !p_once.swap(true, Ordering::AcqRel) {
-                        in_s.wait();
-                        res_s.wait();
+                        let _ = in_tx.try_send(());
+                        if let Some(rx) = res_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            let _ = rx.recv_timeout(Duration::from_secs(10));
+                        }
                     }
                 })),
                 exited_flag: Some(exited.clone()),
@@ -1798,29 +1866,41 @@ fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
     let take_chains = chains.clone();
     let take_host = host.clone();
     let take_doc = doc_state.clone();
-    let take_thread = std::thread::spawn(move || take_chains.tone_take(&take_host, (&take_doc, epoch), 701));
-    in_state.wait();
+    let (take_done_tx, take_done_rx) = std::sync::mpsc::sync_channel(1);
+    let take_thread = std::thread::spawn(move || {
+        let res = take_chains.tone_take(&take_host, (&take_doc, epoch), 701);
+        let _ = take_done_tx.try_send(res);
+    });
+    in_state_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("tone_take never entered plugin state()");
 
     // Shutdown: unload, close device, then start `join_all` while `tone_take` still holds `Arc<Entry>`.
     chains.unload_all(&host);
     host.shutdown();
-    let join_done = Arc::new(AtomicBool::new(false));
-    let jd = join_done.clone();
+    let (join_done_tx, join_done_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let jc = chains.clone();
     let join_thread = std::thread::spawn(move || {
         jc.join_all();
-        jd.store(true, Ordering::Release);
+        let _ = join_done_tx.try_send(());
     });
 
-    std::thread::sleep(Duration::from_millis(80));
-    let returned_early = join_done.load(Ordering::Acquire);
+    let returned_early = join_done_rx.recv_timeout(Duration::from_millis(80)).is_ok();
     let still_alive_while_blocked = !owner_exited.load(Ordering::Acquire);
 
     // Release the slow save so both threads finish regardless of assertion result.
-    resume_state.wait();
+    let _ = resume_state_tx.try_send(());
+    if !returned_early {
+        join_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("join_all did not finish after unblocking plugin state()");
+    }
     join_thread.join().unwrap();
     let exited_when_join_returned = owner_exited.load(Ordering::Acquire);
-    let _ = take_thread.join().unwrap();
+    let _ = take_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("tone_take did not finish after unblocking plugin state()");
+    take_thread.join().unwrap();
 
     assert!(still_alive_while_blocked, "owner should still be blocked in SaveTone");
     assert!(
@@ -2073,8 +2153,12 @@ fn p4f2_2_readd_failed_plugin_id_never_blocks_registry_and_releases_affinity() {
     assert!(reg_unlocked, "registry mutex must not be held");
     assert!(held_while_running, "p1 affinity stays held while owner1 is still running");
 
-    // Once owner1 exits, sweep BEFORE shutdown and verify p1's affinity releases.
-    wait_until(Duration::from_secs(3), "owner1 exits", || owner1_exited.load(Ordering::Acquire));
+    // Once owner1's OS thread has actually finished (not just set its pre-return flag), sweep
+    // BEFORE shutdown and verify p1's affinity releases.
+    wait_until(Duration::from_secs(3), "owner1 thread finishes", || {
+        owner1_exited.load(Ordering::Acquire)
+            && chains.gone.lock().unwrap().entries.iter().all(|e| e.owner.is_finished())
+    });
     assert_eq!(chains.close_editor(&host, (&doc_state, epoch), 711), Ok(()));
     assert!(
         !chains.affinity_held(&p1.path),
@@ -2209,4 +2293,517 @@ fn p4f2_4_cancelled_waiting_reload_answers_failed_even_if_later_reload_seats_and
     chains.unload_all(&host);
     chains.join_all();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P4 fix r3 item A: `join_all` must never miss an owner moving out of `registry` into `gone`
+/// (in `retire_to_gone`) or moving from `pending_reloads` into `registry`/`gone` (in promotion).
+#[test]
+fn p4f3_a_shutdown_never_misses_owner_moving_between_tables() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let host = start_fake_driver_host();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Arc::new(Chains::new());
+
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+    let owner_exited = Arc::new(AtomicBool::new(false));
+    let exited_flag = owner_exited.clone();
+
+    let open = move |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        let release_rx = release_rx.clone();
+        spawn_fake_unit(
+            uh,
+            sink,
+            tone,
+            FakePluginConfig {
+                name: "GapOwner".into(),
+                on_release: Some(Arc::new(move || {
+                    if let Some(rx) = release_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        let _ = rx.recv_timeout(Duration::from_secs(5));
+                    }
+                })),
+                exited_flag: Some(exited_flag.clone()),
+                ..Default::default()
+            },
+        )
+    };
+    let pref = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\GapOwner.clap".into(),
+        id: "gap.owner".into(),
+    };
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(pref), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, None, 0, 730, spec, 0, None, noop_sink(), &open),
+        Ok(Added::Seated)
+    );
+
+    // Pause `retire_to_gone` right after removing from `registry` (and hold the pause briefly so
+    // `join_all` races against the move).
+    let (in_gap_tx, in_gap_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_gap_tx, resume_gap_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    *chains.after_retire_remove_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = in_gap_tx.try_send(());
+        let _ = resume_gap_rx.recv_timeout(Duration::from_millis(120));
+    }));
+
+    let retire_chains = chains.clone();
+    let (retire_done_tx, retire_done_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let retire_thread = std::thread::spawn(move || {
+        retire_chains.retire_to_gone(730, None);
+        let _ = retire_done_tx.try_send(());
+    });
+
+    in_gap_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("retire_to_gone never reached hook");
+
+    // Shut down engine so owner can receive its evicted box and block in `on_release`.
+    host.shutdown();
+
+    let join_chains = chains.clone();
+    let (join_done_tx, join_done_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let join_thread = std::thread::spawn(move || {
+        join_chains.join_all();
+        let _ = join_done_tx.try_send(());
+    });
+
+    // While `on_release` is blocked, `join_all` MUST NOT return early.
+    let returned_early = join_done_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+    let alive_when_checked = !owner_exited.load(Ordering::Acquire);
+
+    // Always unblock both threads before asserting so the test never hangs.
+    let _ = resume_gap_tx.try_send(());
+    let _ = release_tx.try_send(());
+    retire_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("retire_to_gone did not finish within 5 s");
+    if !returned_early {
+        join_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("join_all did not finish within 5 s");
+    }
+    let _ = retire_thread.join();
+    let _ = join_thread.join();
+
+    assert!(alive_when_checked, "owner should still have been blocked in on_release");
+    assert!(
+        !returned_early,
+        "join_all must wait for an owner moving from registry to gone (never miss it in a lock gap)"
+    );
+    assert!(owner_exited.load(Ordering::Acquire), "owner must have exited before join_all returned");
+}
+
+/// P4 fix r3 item B: a waiting reload answers `Reloaded` only once its candidate's owner is in
+/// `registry`, so an immediate `tone_take` after `Reloaded` reaches the new owner even if a
+/// concurrent sweep took the candidate out of `pending_reloads` first.
+#[test]
+fn p4f3_b_reload_answers_reloaded_only_after_new_owner_is_in_registry() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Arc::new(Chains::new());
+    let (store, dir) = temp_tone_store("p4f3-b");
+
+    let amp = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\ReloadPromote.clap".into(),
+        id: "reload.promote".into(),
+    };
+    let open_old = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(
+            uh,
+            sink,
+            tone,
+            FakePluginConfig {
+                name: "ReloadPromote".into(),
+                state_bytes: b"old-tone".to_vec(),
+                ..Default::default()
+            },
+        )
+    };
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp.clone()), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 0, 735, spec, 0, None, noop_sink(), &open_old),
+        Ok(Added::Seated)
+    );
+    let rev = host.core.state.lock().unwrap().model.snapshot().rev;
+    host.chain_told(rev, 1);
+
+    let bytes = make_tone_bytes(&amp, "ReloadPromote", b"new-tone");
+    let tok = chains
+        .tone_import(&host, (&doc_state, epoch), Some(&store), 0, &bytes, &amp, Some(735))
+        .unwrap()
+        .token
+        .expect("parked tone token");
+
+    // Hold slot 0 with a take so reload enters `pending_reloads` and polls.
+    start_take(&device);
+    let (in_poll_tx, in_poll_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_poll_tx, resume_poll_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    *chains.before_reload_poll_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = in_poll_tx.try_send(());
+        let _ = resume_poll_rx.recv_timeout(Duration::from_secs(5));
+    }));
+
+    let r_chains = chains.clone();
+    let r_host = host.clone();
+    let r_doc = doc_state.clone();
+    let r_store = store.clone();
+    let r_amp = amp.clone();
+    let (reload_done_tx, reload_done_rx) = std::sync::mpsc::sync_channel(1);
+    let reload_thread = std::thread::spawn(move || {
+        let open_new = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            spawn_fake_unit(
+                uh,
+                sink,
+                tone,
+                FakePluginConfig {
+                    name: "ReloadPromote".into(),
+                    latency: 64,
+                    state_bytes: b"new-tone".to_vec(),
+                    ..Default::default()
+                },
+            )
+        };
+        let res = r_chains.reload(
+            &r_host,
+            (&r_doc, epoch),
+            Some(&r_store),
+            735,
+            r_amp,
+            1,
+            tok,
+            noop_sink(),
+            &open_new,
+        );
+        let _ = reload_done_tx.try_send(res);
+    });
+
+    in_poll_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("reload never reached before_reload_poll_hook");
+
+    // End take so candidate seats in engine while reload waiter is paused at poll hook.
+    stop_take(&device);
+    wait_until(Duration::from_secs(5), "reload candidate seated in table", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        let st = host.core.state.lock().unwrap();
+        !st.table.has_reload_row(735) && st.model.find_plate(735).is_some_and(|(_, p)| p.seated_in_engine)
+    });
+
+    // Trigger a concurrent sweep that takes the candidate out of `pending_reloads` and pauses 150 ms
+    // before finishing promotion.
+    let (sweep_took_tx, sweep_took_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    *chains.after_take_pending_reload_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = sweep_took_tx.try_send(());
+        std::thread::sleep(Duration::from_millis(150));
+    }));
+
+    let s_chains = chains.clone();
+    let s_host = host.clone();
+    let s_doc = doc_state.clone();
+    let (sweep_done_tx, sweep_done_rx) = std::sync::mpsc::sync_channel(1);
+    let sweep_thread = std::thread::spawn(move || {
+        let r = s_chains.close_editor(&s_host, (&s_doc, epoch), 735);
+        let _ = sweep_done_tx.try_send(r);
+    });
+
+    sweep_took_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("sweep never entered promote_pending_reload");
+
+    // Release reload's waiter while sweep is paused inside promotion.
+    let _ = resume_poll_tx.try_send(());
+    let reload_res = reload_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("reload did not finish within 5 s");
+
+    // Immediately call `tone_take` as soon as `reload` returns `Reloaded`!
+    let taken_res = chains.tone_take(&host, (&doc_state, epoch), 735);
+
+    let _ = sweep_done_rx.recv_timeout(Duration::from_secs(5));
+    let _ = reload_thread.join();
+    let _ = sweep_thread.join();
+
+    assert_eq!(reload_res, Ok(Reloaded::Reloaded));
+    let taken_bytes = taken_res.expect("immediate tone_take after Reloaded must find the new owner");
+    let decoded = crate::host::tone::decode(&taken_bytes).expect("valid tone payload");
+    assert_eq!(
+        decoded.state, b"new-tone",
+        "immediate tone_take after Reloaded must reach the new candidate owner, not the predecessor"
+    );
+
+    chains.unload_all(&host);
+    chains.join_all();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P4 fix r3 item C: a late add whose `Waiting` install was refused and freed its id must never
+/// overwrite a newer registration of that id in the other slot; it retires its late owner and
+/// answers its refusal.
+#[test]
+fn p4f3_c_late_refused_add_never_overwrites_newer_registration_in_other_slot() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = Arc::new(empty_slots());
+    let chains = Arc::new(Chains::new());
+    let (store, dir) = temp_tone_store("p4f3-c");
+
+    let src_ref = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\LateAddSrc.clap".into(),
+        id: "late.add.src".into(),
+    };
+    let p_slot0 = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\LateSlot0.clap".into(),
+        id: "late.slot0".into(),
+    };
+    let p_slot1 = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\LiveSlot1.clap".into(),
+        id: "live.slot1".into(),
+    };
+
+    // Hold slot 0 with a take + pending source (740) so effect 741 at index 0 answers `Waiting`
+    // and then gets refused (`Placement`) once the take ends.
+    start_take(&device);
+    let open_src = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(uh, sink, tone, FakePluginConfig { name: "LateAddSrc".into(), source: true, ..Default::default() })
+    };
+    let spec_src = UnitSpec { kind: UnitKind::Plugin, plugin: Some(src_ref), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 0, 740, spec_src, 0, None, noop_sink(), &open_src),
+        Ok(Added::Waiting)
+    );
+
+    let (in_reg_tx, in_reg_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_reg_tx, resume_reg_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    *chains.before_register_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = in_reg_tx.try_send(());
+        let _ = resume_reg_rx.recv_timeout(Duration::from_secs(5));
+    }));
+
+    let c0 = chains.clone();
+    let h0 = host.clone();
+    let d0 = doc_state.clone();
+    let s0 = slots.clone();
+    let st0 = store.clone();
+    let p0 = p_slot0.clone();
+    let (add0_tx, add0_rx) = std::sync::mpsc::sync_channel(1);
+    let add0_thread = std::thread::spawn(move || {
+        let open0 = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            spawn_fake_unit(
+                uh,
+                sink,
+                tone,
+                FakePluginConfig {
+                    name: "LateSlot0".into(),
+                    source: false,
+                    state_bytes: b"dead-slot0".to_vec(),
+                    ..Default::default()
+                },
+            )
+        };
+        let spec0 = UnitSpec { kind: UnitKind::Plugin, plugin: Some(p0), params: None, bypass: false };
+        let res = c0.add(&h0, (&d0, epoch), &s0, Some(&st0), 0, 741, spec0, 0, None, noop_sink(), &open0);
+        let _ = add0_tx.try_send(res);
+    });
+
+    in_reg_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("slot 0 add never reached before_register_hook");
+
+    // End the take: slot 0's 741 is refused (`Placement`) and its owner frees id 741 and exits.
+    stop_take(&device);
+    wait_until(Duration::from_secs(5), "slot 0 refused 741 and freed its id", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        let st = host.core.state.lock().unwrap();
+        st.table.active_row_for_id(741).is_none()
+    });
+
+    // Slot 1 re-adds id 741 and seats cleanly.
+    let open1 = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(
+            uh,
+            sink,
+            tone,
+            FakePluginConfig {
+                name: "LiveSlot1".into(),
+                source: false,
+                state_bytes: b"live-slot1".to_vec(),
+                ..Default::default()
+            },
+        )
+    };
+    let spec1 = UnitSpec { kind: UnitKind::Plugin, plugin: Some(p_slot1.clone()), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 1, 741, spec1, 0, None, noop_sink(), &open1),
+        Ok(Added::Seated)
+    );
+
+    // Resume slot 0's late add.
+    let _ = resume_reg_tx.try_send(());
+    let add0_res = add0_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("slot 0 add did not finish within 5 s");
+    let _ = add0_thread.join();
+
+    assert!(add0_res.is_err(), "late refused add in slot 0 must answer Err, got: {add0_res:?}");
+
+    let taken = chains
+        .tone_take(&host, (&doc_state, epoch), 741)
+        .expect("slot 1's live registration for id 741 must stay intact");
+    let decoded = crate::host::tone::decode(&taken).expect("valid tone payload");
+    assert_eq!(decoded.state, b"live-slot1", "registry entry for 741 must still be slot 1's owner");
+    assert_eq!(engine_chain_summary(&device, 1), vec![(741, false)]);
+
+    // Once slot 0's refused owner finishes and is swept, slot 0's affinity releases while slot 1's stays.
+    wait_until(Duration::from_secs(3), "late slot 0 owner finishes", || {
+        chains.gone.lock().unwrap().entries.iter().all(|e| e.owner.is_finished())
+    });
+    assert_eq!(chains.close_editor(&host, (&doc_state, epoch), 741), Ok(()));
+    assert!(!chains.affinity_held(&p_slot0.path), "retired late owner's affinity must release");
+    assert!(chains.affinity_held(&p_slot1.path), "live slot 1 owner's affinity must stay held");
+
+    chains.unload_all(&host);
+    chains.join_all();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P4 fix r3 item D: if spawning `lf-chain-late-drop` fails, `dispose_late_entry` must leak the
+/// entry, mark its affinity leaked, and log an error — never dropping/joining on the caller thread.
+#[test]
+fn p4f3_d_dispose_late_entry_spawn_failure_leaks_without_joining_caller() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let host = start_fake_driver_host();
+    let chains = Arc::new(Chains::new());
+    let pref = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\LateDropFail.clap".into(),
+        id: "late.drop.fail".into(),
+    };
+    let unit_host = host
+        .unit(0, 745, Spec::Plugin(pref.clone()), 0, false)
+        .expect("reserve unit");
+    let token = unit_host.install_token();
+
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+    let owner_exited = Arc::new(AtomicBool::new(false));
+    let exited_flag = owner_exited.clone();
+    let (owner, answer) = spawn_fake_unit(
+        unit_host,
+        noop_sink(),
+        None,
+        FakePluginConfig {
+            name: "LateDropFail".into(),
+            on_release: Some(Arc::new(move || {
+                if let Some(rx) = release_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(5));
+                }
+            })),
+            exited_flag: Some(exited_flag),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake unit");
+    assert!(matches!(answer, Answer::Seated { .. }));
+
+    // Shut down the device so the owner receives its box and blocks inside `on_release`.
+    host.shutdown();
+
+    let inst = {
+        let mut aff = chains.affinity.lock().unwrap();
+        let inst = aff.claim(&pref.path);
+        aff.landed(inst, &pref.path, 745);
+        inst
+    };
+    let entry = Arc::new(super::Entry {
+        slot: 0,
+        token,
+        owner: super::Owner::Plugin(super::PluginOwner { plugin: pref.clone(), inst, owner }),
+    });
+
+    chains.fail_next_late_drop_spawn.store(true, Ordering::Release);
+    let c = chains.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let caller_thread = std::thread::spawn(move || {
+        let log_guard = test_log::watch_current_thread();
+        c.dispose_late_entry(entry);
+        let errors: Vec<String> = log_guard
+            .drain_all()
+            .into_iter()
+            .filter_map(|(lvl, msg)| (lvl == log::Level::Error).then_some(msg))
+            .collect();
+        let _ = done_tx.try_send(errors);
+    });
+
+    // Must return promptly even while the owner thread is blocked inside `on_release`.
+    let errors_res = done_rx.recv_timeout(Duration::from_millis(500));
+
+    // Unblock the owner thread so it exits cleanly regardless of assertion outcome.
+    let _ = release_tx.try_send(());
+    let errors = errors_res.expect("dispose_late_entry must never join on the caller thread when spawn fails");
+    let _ = caller_thread.join();
+
+    assert!(
+        !errors.is_empty(),
+        "dispose_late_entry spawn failure must log at error level"
+    );
+    wait_until(Duration::from_secs(3), "leaked owner thread eventually exits", || {
+        owner_exited.load(Ordering::Acquire)
+    });
+    chains.sweep(None);
+    assert!(
+        chains.affinity_held(&pref.path),
+        "leaked entry's affinity must remain leaked even after sweep"
+    );
+    // Attempting a direct release on the leaked instance must stay a no-op.
+    chains.affinity.lock().unwrap().release(inst, &pref.path);
+    assert!(chains.affinity_held(&pref.path), "leaked affinity instance must never release");
+}
+
+/// P4 fix r3 item F (built-in ECHO): shutdown (`unload_all` + `join_all`) while a removed ECHO is
+/// still finishing its fade-out must collect and drop its box rather than abandoning/leaking it.
+#[test]
+fn p4f3_f_builtin_shutdown_does_not_abandon_removed_echo() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(10), |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let tracker = BoxTracker::new();
+    let chains = Chains::with_factory(Arc::new(
+        ClampingBuiltinFactory::new().with_tracker(tracker.clone()),
+    ));
+
+    assert_eq!(
+        add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 750, echo_spec(0.4, false), 0),
+        Ok(Added::Seated)
+    );
+
+    chains.unload_all(&host);
+    chains.join_all();
+
+    assert_eq!(
+        tracker.drops.load(Ordering::SeqCst),
+        1,
+        "removed built-in ECHO box must be collected and dropped during shutdown, never abandoned/leaked"
+    );
 }
