@@ -375,13 +375,13 @@ impl Table {
     pub(crate) fn active_row_for_id(&self, id: UnitId) -> Option<&Row> {
         self.rows
             .iter()
-            .find(|r| r.id == id && !r.released && !r.superseded && !r.is_reload)
+            .find(|r| r.id == id && !r.released && !r.superseded && !r.is_reload && !r.id_freed)
     }
 
     pub(crate) fn active_row_for_id_mut(&mut self, id: UnitId) -> Option<&mut Row> {
         self.rows
             .iter_mut()
-            .find(|r| r.id == id && !r.released && !r.superseded && !r.is_reload)
+            .find(|r| r.id == id && !r.released && !r.superseded && !r.is_reload && !r.id_freed)
     }
 
     /// Row `token` was submitted to the engine of generation `gen` as `op_n`: it awaits a new answer.
@@ -1287,6 +1287,10 @@ impl UnitHost {
         self.slot
     }
 
+    pub(crate) fn install_token(&self) -> InstallToken {
+        self.install
+    }
+
     /// The engine's terms, read under the port lock; `None` while no engine exists.
     pub fn terms(&self) -> Option<Terms> {
         let port = self.core.ports[self.slot].lock().ok()?;
@@ -1383,6 +1387,7 @@ impl UnitHost {
         };
         let seated_in_engine = plate.seated_in_engine;
         let withdrawn = plate.withdrawn;
+        let my_added_rev = plate.added_rev;
 
         let (at, replaces) = if is_reload {
             (0, Some(self.id))
@@ -1390,6 +1395,21 @@ impl UnitHost {
             (0, None)
         } else if is_source {
             let head = state.model.head_source_id(self.slot, Some(self.id));
+            if let Some(head_id) = head {
+                // An evicted/older source retrying after a rebuild must never replace a newer
+                // source that has already queued or seated in the new engine.
+                let head_is_newer = state
+                    .model
+                    .find_plate(head_id)
+                    .is_some_and(|(_, hp)| hp.added_rev > my_added_rev);
+                if head_is_newer {
+                    if let Some(row) = state.table.row_mut(self.install) {
+                        row.superseded = true;
+                    }
+                    state.model.remove_plate(self.slot, self.id);
+                    return Err((unit, SubmitError::Superseded));
+                }
+            }
             (0, head)
         } else {
             (state.model.engine_index_for_insert(self.slot, self.id), None)

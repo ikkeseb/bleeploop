@@ -3342,3 +3342,109 @@ fn d4_f2_refused_remove_after_rebuild_settles_and_delivers_terminal() {
     let fresh = host.unit(0, 10, Spec::Plugin(plugin_ref("fresh")), 0, false).expect("id 10 free");
     fresh.release();
 }
+
+/// P4 fix r1 finding 3: `active_row_for_id` must ignore rows whose id was freed by `failed()` so a
+/// concurrent add in another slot reserving the same id resolves its own row, never the freed one.
+#[test]
+fn p4f1_3a_active_row_for_id_skips_freed_row() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host();
+
+    let u1 = host
+        .unit(0, 300, Spec::Builtin { kind: UnitKind::Echo, params: vec![] }, 0, false)
+        .expect("reserve u1 in slot 0");
+    let u1_tok = {
+        let st = host.core.state.lock().unwrap();
+        st.table.active_row_for_id(300).expect("u1 active").token
+    };
+    // `failed()` frees the id before `release()`.
+    u1.failed("first add failed".into());
+
+    // A concurrent add in slot 1 reserves the same freed id before `u1.release()` runs.
+    let u2 = host
+        .unit(1, 300, Spec::Builtin { kind: UnitKind::Echo, params: vec![] }, 0, false)
+        .expect("reserve u2 in slot 1 after u1.failed");
+
+    {
+        let st = host.core.state.lock().unwrap();
+        let active = st.table.active_row_for_id(300).expect("u2 active row");
+        assert_ne!(active.token, u1_tok, "active_row_for_id must not return freed u1 row");
+        assert_eq!(active.slot, 1, "active_row_for_id must return slot 1's new row");
+    }
+
+    u2.release();
+    u1.release();
+}
+
+/// P4 fix r1 finding 5: after a rebuild, an evicted source retrying `submit()` after a newer source
+/// has queued (or seated) in the new engine must never replace that newer source.
+#[test]
+fn p4f1_5b_evicted_source_retrying_after_rebuild_never_replaces_newer_source() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    // Seat Source A (id 600) in slot 0.
+    let u_a = host
+        .unit(0, 600, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve source A");
+    u_a.activated(Activated { name: "SynthA".into(), source: true, latency: 0 });
+    let t1 = u_a.terms().unwrap();
+    let mut box_a = LatentUnit::new(1, 0, stops.clone());
+    box_a.source = true;
+    let op_a1 = ok_op(u_a.submit(box_a, t1));
+    assert_eq!(host.wait_op(op_a1, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Rebuild: Source A is evicted into its mailbox.
+    device.rebuild_at(96_000, 512);
+    let Back::Evicted { unit: evicted_a, .. } = u_a.take_back().expect("A evicted on rebuild") else {
+        panic!("expected Back::Evicted for A");
+    };
+    let t2 = u_a.terms().unwrap();
+
+    // Pause audio callbacks so Source B is queued (still pending) when Source A retries!
+    device.stop();
+    let u_b = host
+        .unit(0, 601, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve newer source B");
+    u_b.activated(Activated { name: "SynthB".into(), source: true, latency: 0 });
+    let mut box_b = LatentUnit::new(2, 0, stops.clone());
+    box_b.source = true;
+    let op_b = ok_op(u_b.submit(box_b, t2));
+
+    // Evicted Source A now retries `submit()` after newer Source B has already queued.
+    let retry = u_a.submit(evicted_a, t2);
+    match retry {
+        Err((returned_a, SubmitError::Superseded)) => {
+            drop(returned_a);
+        }
+        Ok(op) => panic!("evicted source A must not enqueue to replace newer source B (got Ok({op:?}))"),
+        Err((_, other)) => panic!("expected SubmitError::Superseded for evicted source A, got {other:?}"),
+    }
+
+    // Service the port: Source B seats cleanly and remains the sole source in slot 0.
+    super::unit_host::service_if_idle(&host.core);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(u_b.poll(op_b), OpState::Applied);
+
+    let chain_ids: Vec<UnitId> = {
+        let rt = host.core.rt.lock().unwrap();
+        rt.engine.as_ref().unwrap().chain(0).map(|s| s.unit).collect()
+    };
+    assert_eq!(chain_ids, vec![601], "newer source B must stand alone in slot 0");
+    let snap = host.core.chain_snapshot();
+    assert_eq!(
+        snap.chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![601],
+        "evicted source A's plate must be gone, leaving only newer source B"
+    );
+
+    u_a.release();
+    let Removal::Sent(rem_b) = host.remove_unit(601).unwrap() else { panic!("expected Sent") };
+    super::unit_host::service_if_idle(&host.core);
+    host.drain_feed(&mut ev);
+    assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    drop(u_b.take_back());
+    u_b.release();
+}

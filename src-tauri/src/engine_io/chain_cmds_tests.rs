@@ -1,6 +1,7 @@
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
@@ -10,11 +11,13 @@ use lf_engine::{
 };
 
 use super::{chain_event, chain_units_exist, Added, Affinity, Chains, Reloaded, EDITOR_CLOSED, PARAM_CHANGED, PARAMS_CHANGED};
+use crate::audio_output::AudioBackend;
 use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec, WireParams};
+use crate::engine_io::fake_driver::{Fake, FakeDriver};
 use crate::engine_io::plugins::EngineSlot;
 use crate::engine_io::test_rig::TestDevice;
-use crate::engine_io::unit_host::{Activated, BuiltinFactory, OpState, Params, Spec, Terms, Unit, UnitHost};
-use crate::engine_io::EngineHost;
+use crate::engine_io::unit_host::{Activated, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost};
+use crate::engine_io::{DeviceRequest, EngineHost, HostConfig};
 use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
 use crate::host::tone::{encode as encode_tone, Tone, ToneBinding, ToneIdentity, ToneStore};
 use crate::host::unit_owner::{self, Answer, UnitOwner};
@@ -47,11 +50,65 @@ fn add_builtin(
     chains.add(host, doc, slots, None, slot, unit, spec, at, None, noop_sink(), &no_open)
 }
 
+/// Tracks box identity, construction count, drops, per-instance `process` calls, and `stop` counts
+/// across rebuilds and shutdown.
+#[derive(Default)]
+pub(crate) struct BoxTracker {
+    next_id: AtomicU64,
+    pub(crate) builds: AtomicUsize,
+    pub(crate) drops: AtomicUsize,
+    calls: Mutex<BTreeMap<u64, Arc<AtomicUsize>>>,
+    stops: Mutex<BTreeMap<u64, Arc<AtomicUsize>>>,
+}
+
+impl BoxTracker {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn alloc(&self) -> (u64, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let stop_count = Arc::new(AtomicUsize::new(0));
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).insert(id, call_count.clone());
+        self.stops.lock().unwrap_or_else(|e| e.into_inner()).insert(id, stop_count.clone());
+        (id, call_count, stop_count)
+    }
+
+    pub(crate) fn calls(&self, instance_id: u64) -> usize {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&instance_id)
+            .map_or(0, |c| c.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn stops(&self, instance_id: u64) -> usize {
+        self.stops
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&instance_id)
+            .map_or(0, |c| c.load(Ordering::SeqCst))
+    }
+}
+
 /// A clamping built-in fake for E2 tests (`BuiltinFactory`): scales audio by `EchoLevel` clamped to
 /// `0.0..=1.0`, reports configurable latency, and optionally refuses a configured kind.
 pub(crate) struct ClampingEcho {
     level: f64,
     latency: Frame,
+    calls: Option<Arc<AtomicUsize>>,
+    stops: Option<Arc<AtomicUsize>>,
+    tracker: Option<Arc<BoxTracker>>,
+}
+
+impl Drop for ClampingEcho {
+    fn drop(&mut self) {
+        if let Some(t) = &self.tracker {
+            t.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl UnitProcessor for ClampingEcho {
@@ -60,6 +117,9 @@ impl UnitProcessor for ClampingEcho {
     }
 
     fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        if let Some(c) = &self.calls {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
         let g = self.level as f32;
         for (o, i) in out.into_iter().zip(input) {
             for (y, &x) in o.iter_mut().zip(i) {
@@ -78,7 +138,11 @@ impl UnitProcessor for ClampingEcho {
         }
     }
 
-    fn stop(&mut self) {}
+    fn stop(&mut self) {
+        if let Some(s) = &self.stops {
+            s.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
         self
@@ -88,11 +152,12 @@ impl UnitProcessor for ClampingEcho {
 pub(crate) struct ClampingBuiltinFactory {
     latency: Frame,
     fail_kind: Option<(UnitKind, String)>,
+    tracker: Option<Arc<BoxTracker>>,
 }
 
 impl ClampingBuiltinFactory {
     pub(crate) fn new() -> Self {
-        Self { latency: 0, fail_kind: None }
+        Self { latency: 0, fail_kind: None, tracker: None }
     }
 
     pub(crate) fn with_latency(mut self, latency: Frame) -> Self {
@@ -102,6 +167,11 @@ impl ClampingBuiltinFactory {
 
     pub(crate) fn failing_kind(mut self, kind: UnitKind, msg: impl Into<String>) -> Self {
         self.fail_kind = Some((kind, msg.into()));
+        self
+    }
+
+    pub(crate) fn with_tracker(mut self, tracker: Arc<BoxTracker>) -> Self {
+        self.tracker = Some(tracker);
         self
     }
 }
@@ -123,7 +193,23 @@ impl BuiltinFactory for ClampingBuiltinFactory {
             }
         }
         let clamped = vec![(UnitParam::Send(InputSendParam::EchoLevel), level)];
-        Ok((Box::new(ClampingEcho { level, latency: self.latency }), clamped))
+        let (calls, stops) = match &self.tracker {
+            Some(t) => {
+                let (_, c, s) = t.alloc();
+                (Some(c), Some(s))
+            }
+            None => (None, None),
+        };
+        Ok((
+            Box::new(ClampingEcho {
+                level,
+                latency: self.latency,
+                calls,
+                stops,
+                tracker: self.tracker.clone(),
+            }),
+            clamped,
+        ))
     }
 }
 
@@ -415,10 +501,38 @@ fn e_run_exclusion_with_legacy_slots_and_chain_units_exist() {
     }
     let _ = Arc::try_unwrap(handle).ok().expect("sole handle").unload();
 
-    // Now chain add succeeds, `chain_units_exist` becomes true, and turns false after removal releases.
+    // Now chain add succeeds, `chain_units_exist` becomes true, legacy `reserve` refuses before calling
+    // the legacy opener, and `chain_units_exist` turns false after removal releases.
     assert!(!chain_units_exist(host));
     assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 42, echo_spec(0.5, false), 0), Ok(Added::Seated));
     assert!(chain_units_exist(host));
+
+    let legacy_opener_called = Arc::new(AtomicBool::new(false));
+    let called_flag = legacy_opener_called.clone();
+    let legacy_err = crate::engine_io::plugins::load_with_opener(
+        &slots,
+        host,
+        &doc_state,
+        0,
+        "C:\\plugins\\Amp.clap".into(),
+        "test.amp".into(),
+        epoch,
+        &move |_, _, _, _, _| {
+            called_flag.store(true, Ordering::SeqCst);
+            Err("legacy opener must not be reached when chain units exist".into())
+        },
+    )
+    .unwrap_err();
+    assert!(
+        legacy_err.contains("chain units are in this run"),
+        "expected legacy reserve exclusion error, got: {legacy_err}"
+    );
+    assert!(
+        !legacy_opener_called.load(Ordering::SeqCst),
+        "legacy reserve must refuse before invoking the legacy opener"
+    );
+    assert!(matches!(slots.lock().unwrap()[0], EngineSlot::Empty));
+
     assert_eq!(chains.remove(host, (&doc_state, epoch), 42), Ok(()));
     wait_until(Duration::from_secs(2), "chain_units_exist becomes false after removal", || {
         !chain_units_exist(host)
@@ -516,7 +630,7 @@ fn h_move_reorders_engine_and_snapshot() {
 }
 
 /// (i) A rebuild (`TestDevice::rebuild_at` at another rate): each built-in comes back seated with its
-/// bypass and level (the owner resubmits).
+/// bypass and level (the owner resubmits the same box instances, never rebuilding equivalent boxes).
 #[test]
 fn i_rebuild_reseats_builtins_with_bypass_and_level() {
     let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.5);
@@ -524,12 +638,22 @@ fn i_rebuild_reseats_builtins_with_bypass_and_level() {
     let doc_state = PluginHostState::default();
     let epoch = doc_state.begin_frontend_session();
     let slots = empty_slots();
-    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new()));
+    let tracker = BoxTracker::new();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_tracker(tracker.clone())));
 
     assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 80, echo_spec(0.25, false), 0), Ok(Added::Seated));
     assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 81, echo_spec(0.8, true), 1), Ok(Added::Seated));
     host.send(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).unwrap();
     assert!(device.wait_blocks(4));
+
+    assert_eq!(tracker.builds.load(Ordering::SeqCst), 2, "two original boxes built");
+    assert_eq!(tracker.drops.load(Ordering::SeqCst), 0, "neither box dropped before rebuild");
+    let calls_before_1 = tracker.calls(1);
+    let calls_before_2 = tracker.calls(2);
+    assert!(calls_before_1 > 0, "original box 1 processed blocks before rebuild");
+    assert!(calls_before_2 > 0, "original box 2 (bypassed, warm) processed blocks before rebuild");
+    assert_eq!(tracker.stops(1), 0);
+    assert_eq!(tracker.stops(2), 0);
 
     device.rebuild_at(96_000, 512);
 
@@ -546,8 +670,26 @@ fn i_rebuild_reseats_builtins_with_bypass_and_level() {
         eng == vec![(80, false), (81, true)] && all_seated
     });
 
-    // Verify rendered output reflects level 0.25 (unit 80 active, unit 81 bypassed) on 0.5 input -> ~0.125.
+    // Verify rendered output reflects level 0.25 (unit 80 active, unit 81 bypassed) on 0.5 input -> ~0.125,
+    // AND verify the exact same two box instances (1 and 2) were evicted once and keep processing in the rebuilt engine.
     assert!(device.wait_blocks(8));
+    assert_eq!(tracker.builds.load(Ordering::SeqCst), 2, "rebuild must resubmit same boxes, not build new ones");
+    assert_eq!(tracker.drops.load(Ordering::SeqCst), 0, "original boxes must survive rebuild intact");
+    assert_eq!(tracker.stops(1), 1, "original box 1 stopped once during eviction");
+    assert_eq!(tracker.stops(2), 1, "original box 2 stopped once during eviction");
+    assert!(
+        tracker.calls(1) > calls_before_1,
+        "original box 1 must keep processing in rebuilt engine ({} vs {})",
+        tracker.calls(1),
+        calls_before_1
+    );
+    assert!(
+        tracker.calls(2) > calls_before_2,
+        "original box 2 (bypassed, warm) must keep processing in rebuilt engine ({} vs {})",
+        tracker.calls(2),
+        calls_before_2
+    );
+
     let tail_peak = {
         let out = device.output.lock().unwrap();
         out.iter().rev().take(256).fold(0.0f32, |m, &s| m.max(s.abs()))
@@ -573,20 +715,23 @@ fn i_rebuild_reseats_builtins_with_bypass_and_level() {
     chains.join_all();
 }
 
-/// (j) Shutdown: two ECHOs and a held removal in an open take. `unload_all` + `host.shutdown()` +
-/// `join_all` ends within 3 s, and every owner thread has finished.
+/// (j) Shutdown: two ECHOs and a held removal in an open take over a real fake-driver device owner.
+/// `unload_all` + `host.shutdown()` + `join_all` ends within 3 s, every owner thread finishes, and
+/// both boxes are evicted and dropped (not abandoned).
 #[test]
 fn j_shutdown_with_held_removal_in_open_take_finishes_within_3s() {
-    let device = start_device();
-    let host = device.host().clone();
+    let host = start_fake_driver_host();
     let doc_state = Arc::new(PluginHostState::default());
     let epoch = doc_state.begin_frontend_session();
     let slots = empty_slots();
-    let chains = Arc::new(Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_latency(64))));
+    let tracker = BoxTracker::new();
+    let chains = Arc::new(Chains::with_factory(Arc::new(
+        ClampingBuiltinFactory::new().with_latency(64).with_tracker(tracker.clone()),
+    )));
 
     assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 90, echo_spec(0.3, false), 0), Ok(Added::Seated));
     assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 91, echo_spec(0.6, false), 1), Ok(Added::Seated));
-    start_take(&device);
+    start_take_on_host(&host);
 
     let rem_chains = chains.clone();
     let rem_host = host.clone();
@@ -594,6 +739,8 @@ fn j_shutdown_with_held_removal_in_open_take_finishes_within_3s() {
     let rem_thread = std::thread::spawn(move || rem_chains.remove(&rem_host, (&rem_doc, epoch), 90));
 
     wait_until(Duration::from_secs(3), "removal held before shutdown", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
         let st = host.core.state.lock().unwrap();
         st.model.pending_remove_op(0, 90).is_some() && st.model.slot_held(0)
     });
@@ -608,6 +755,11 @@ fn j_shutdown_with_held_removal_in_open_take_finishes_within_3s() {
     // Background held removal unblocked on closing and finished too.
     let _ = rem_thread.join().unwrap();
     assert_eq!(chains.active_entries(), 0, "no owner entries remain after join_all");
+    assert_eq!(
+        tracker.drops.load(Ordering::SeqCst),
+        2,
+        "both boxes must be returned by device shutdown and dropped, not abandoned"
+    );
     let st = host.core.state.lock().unwrap();
     assert!(!st.table.has_any_chain(), "every owner thread released its row and exited");
 }
@@ -1075,4 +1227,422 @@ fn r2_g_stale_frontend_epoch_refused_for_reload_editor_param_and_forget() {
 
     let err_forget = chains.tone_forget((&doc_state, old_epoch), 1).unwrap_err();
     assert!(err_forget.contains("stale frontend epoch"), "{err_forget}");
+}
+
+// ── P4 fix round 1 tests: ownership and order in chain commands ──
+
+fn start_fake_driver_host() -> EngineHost {
+    let fake = FakeDriver(Fake::new());
+    let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 2.0 }, fake).unwrap();
+    host.open(
+        DeviceRequest {
+            backend: AudioBackend::Asio,
+            input: None,
+            output: None,
+            input_channels: [None; SLOT_COUNT],
+            buffer: Some(256),
+            sample_rate: None,
+        },
+        false,
+    )
+    .unwrap();
+    host
+}
+
+fn start_take_on_host(host: &EngineHost) {
+    host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut ev = Vec::new();
+        let (_, ov) = host.drain_feed(&mut ev);
+        if ov.is_some_and(|o| {
+            let l = o.lane(0);
+            l.state == LaneState::Recording && l.frames > 0
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "recording take never started");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Finding 1: chain commands never act on a legacy plate (reachable even with app factory `None`).
+#[test]
+fn p4f1_1_chain_commands_refuse_legacy_plate() {
+    let device = start_device();
+    let host = device.host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let chains = Chains::new();
+
+    // Seat a legacy plate in slot 0 with id 1.
+    let legacy_uh = host.unit(0, 1, Spec::Legacy, 0, false).expect("reserve legacy plate");
+    let terms = legacy_uh.terms().expect("terms");
+    let op = legacy_uh.submit(Box::new(StandInPlugin), terms).map_err(|(_, e)| e).expect("submit legacy");
+    assert_eq!(host.wait_op(op, Duration::from_secs(2)), Ok(OpState::Applied));
+
+    let pref = PluginRef { format: "clap".into(), path: "C:\\plugins\\Amp.clap".into(), id: "amp.one".into() };
+    assert!(chains.remove(host, (&doc_state, epoch), 1).is_err(), "chain_remove must refuse legacy plate");
+    assert!(chains.move_unit(host, (&doc_state, epoch), 1, 0).is_err(), "chain_move must refuse legacy plate");
+    assert!(
+        chains.reload(host, (&doc_state, epoch), None, 1, pref, 10, 1, noop_sink(), &no_open).is_err(),
+        "chain_reload must refuse legacy plate"
+    );
+    assert!(chains.open_editor(host, (&doc_state, epoch), 1).is_err(), "chain_open_editor must refuse legacy plate");
+    assert!(chains.close_editor(host, (&doc_state, epoch), 1).is_err(), "chain_close_editor must refuse legacy plate");
+    assert!(chains.list_params(host, 1).is_err(), "chain_list_params must refuse legacy plate");
+    assert!(chains.set_param(host, (&doc_state, epoch), 1, 0, 0.5).is_err(), "chain_set_param must refuse legacy plate");
+    assert!(chains.tone_take(host, 1).is_err(), "chain_tone_take must refuse legacy plate");
+
+    // Legacy unit must remain untouched in the engine.
+    assert_eq!(engine_chain_summary(&device, 0), vec![(1, false)]);
+
+    let Removal::Sent(rem) = host.remove_unit(1).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(rem, Duration::from_secs(2)), Ok(OpState::Applied));
+    drop(legacy_uh.take_back());
+    legacy_uh.release();
+}
+
+/// Finding 2a: owner spawn failure drops the box and releases the reservation row cleanly.
+#[test]
+fn p4f1_2a_spawn_failure_releases_row_and_drops_box() {
+    let device = start_device();
+    let host = device.host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let tracker = BoxTracker::new();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_tracker(tracker.clone())));
+
+    chains.fail_next_spawn.store(true, Ordering::Release);
+    let err = add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 201, echo_spec(0.5, false), 0).unwrap_err();
+    assert!(err.contains("spawn"), "expected spawn error, got: {err}");
+
+    assert_eq!(tracker.drops.load(Ordering::SeqCst), 1, "box must be dropped on spawn failure");
+    {
+        let st = host.core.state.lock().unwrap();
+        assert!(!st.table.is_id_reserved(201), "row must be released on spawn failure");
+        assert!(!st.table.has_any_chain(), "no stranded chain row on spawn failure");
+    }
+    // Same id can now be added cleanly.
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 201, echo_spec(0.5, false), 0), Ok(Added::Seated));
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// Finding 2b: shutdown taking its registry snapshot during owner startup must not leak the box or
+/// leave a stranded owner.
+#[test]
+fn p4f1_2b_shutdown_during_owner_startup_drops_box() {
+    let host = start_fake_driver_host();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = Arc::new(empty_slots());
+    let tracker = BoxTracker::new();
+    let chains = Arc::new(Chains::with_factory(Arc::new(
+        ClampingBuiltinFactory::new().with_tracker(tracker.clone()),
+    )));
+
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    {
+        let entered = entered.clone();
+        let resume = resume.clone();
+        *chains.before_register_hook.lock().unwrap() = Some(Box::new(move || {
+            entered.wait();
+            resume.wait();
+        }));
+    }
+
+    let add_chains = chains.clone();
+    let add_host = host.clone();
+    let add_doc = doc_state.clone();
+    let add_slots = slots.clone();
+    let add_thread = std::thread::spawn(move || {
+        add_builtin(&add_chains, &add_host, (&add_doc, epoch), &add_slots, 0, 202, echo_spec(0.5, false), 0)
+    });
+
+    // Wait until `add_builtin` reaches the point right before registry insertion, then run `unload_all`
+    // while the device is still playing (BEFORE `host.shutdown()`).
+    entered.wait();
+    chains.unload_all(&host);
+    resume.wait();
+
+    let res = add_thread.join().unwrap();
+    assert!(res.is_err(), "add racing with closing must return Err, got: {res:?}");
+
+    host.shutdown();
+    chains.join_all();
+
+    assert_eq!(chains.active_entries(), 0, "no owner entries left after join_all");
+    assert_eq!(
+        tracker.drops.load(Ordering::SeqCst),
+        1,
+        "box must be dropped cleanly, never abandoned/leaked across shutdown gap"
+    );
+    let st = host.core.state.lock().unwrap();
+    assert!(!st.table.has_any_chain(), "every owner released its row");
+}
+
+/// Finding 3b: a refused add's cleanup resolves by its own install token and never stops a newer
+/// owner that reused the freed id in the other slot.
+#[test]
+fn p4f1_3b_refused_add_cleanup_does_not_stop_newer_owner() {
+    let device = start_device();
+    let host = device.host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new()));
+
+    // Simulate a first add in slot 0 that called `failed()` (freeing id 301) before `release()`.
+    let u1 = host
+        .unit(0, 301, Spec::Builtin { kind: UnitKind::Echo, params: vec![] }, 0, false)
+        .expect("reserve first row");
+    let u1_token = {
+        let st = host.core.state.lock().unwrap();
+        st.table.active_row_for_id(301).expect("first row").token
+    };
+    u1.failed("first add refused".into());
+
+    // Before `u1.release()`, a concurrent add in slot 1 reserves id 301 and seats a healthy unit.
+    assert_eq!(
+        add_builtin(&chains, host, (&doc_state, epoch), &slots, 1, 301, echo_spec(0.6, false), 0),
+        Ok(Added::Seated)
+    );
+
+    let reg_token = chains
+        .registry
+        .lock()
+        .unwrap()
+        .get(&301)
+        .expect("slot 1 entry registered")
+        .token;
+    assert_ne!(reg_token, u1_token, "slot 1's entry must record its own install token, not freed u1's token");
+
+    // Simulate first add's error cleanup running with `u1_token`.
+    chains.retire_to_gone(301, Some(u1_token));
+    assert!(
+        chains.registry.lock().unwrap().contains_key(&301),
+        "first add's cleanup must not remove slot 1's newer owner"
+    );
+    assert_eq!(engine_chain_summary(&device, 1), vec![(301, false)]);
+
+    u1.release();
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// Finding 4: `remove` and `move` resolve the slot and unit under that slot's order mutex so an id
+/// reused in the other slot cannot be mutated while its add is still in flight.
+#[test]
+fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
+    struct PausingFactory {
+        pause_slot1: Arc<AtomicBool>,
+        in_build: Arc<Barrier>,
+        release_build: Arc<Barrier>,
+    }
+    impl BuiltinFactory for PausingFactory {
+        fn build(&self, kind: UnitKind, params: &Params, _terms: Terms) -> Result<(Unit, Params), String> {
+            if kind == UnitKind::Reverb {
+                return Err("fail slot 0 plate".into());
+            }
+            if self.pause_slot1.swap(false, Ordering::AcqRel) {
+                self.in_build.wait();
+                self.release_build.wait();
+            }
+            Ok((
+                Box::new(ClampingEcho {
+                    level: 0.5,
+                    latency: 0,
+                    calls: None,
+                    stops: None,
+                    tracker: None,
+                }),
+                params.clone(),
+            ))
+        }
+    }
+
+    let device = start_device();
+    let host = device.host().clone();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = Arc::new(empty_slots());
+    let in_build = Arc::new(Barrier::new(2));
+    let release_build = Arc::new(Barrier::new(2));
+    let pause_slot1 = Arc::new(AtomicBool::new(true));
+    let chains = Arc::new(Chains::with_factory(Arc::new(PausingFactory {
+        pause_slot1: pause_slot1.clone(),
+        in_build: in_build.clone(),
+        release_build: release_build.clone(),
+    })));
+
+    // 1. Create a failed-add plate for id 400 in slot 0 (id is freed).
+    let bad = UnitSpec { kind: UnitKind::Reverb, plugin: None, params: None, bypass: false };
+    assert!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 400, bad, 0).is_err());
+
+    // 2. Hold slot 0's order mutex and start `remove(400)` on a thread (so it finds slot 0 and waits).
+    let hold_slot0 = chains.order[0].lock().unwrap();
+    let rem_chains = chains.clone();
+    let rem_host = host.clone();
+    let rem_doc = doc_state.clone();
+    let rem_done = Arc::new(AtomicBool::new(false));
+    let rem_done_flag = rem_done.clone();
+    let rem_thread = std::thread::spawn(move || {
+        let r = rem_chains.remove(&rem_host, (&rem_doc, epoch), 400);
+        rem_done_flag.store(true, Ordering::Release);
+        r
+    });
+    // Give `rem_thread` a moment to look up slot 0 and block on `order[0]`.
+    std::thread::sleep(Duration::from_millis(30));
+
+    // 3. While `rem_thread` is waiting on slot 0, start an add for id 400 in SLOT 1 that pauses in flight
+    //    (holding `order[1]` with plate 400 now in slot 1).
+    let add_chains = chains.clone();
+    let add_host = host.clone();
+    let add_doc = doc_state.clone();
+    let add_slots = slots.clone();
+    let add_thread = std::thread::spawn(move || {
+        add_builtin(&add_chains, &add_host, (&add_doc, epoch), &add_slots, 1, 400, echo_spec(0.5, false), 0)
+    });
+    in_build.wait();
+
+    // 4. Release `order[0]` while slot 1's add is STILL IN FLIGHT.
+    drop(hold_slot0);
+    std::thread::sleep(Duration::from_millis(40));
+
+    // `rem_thread` MUST NOT have mutated or removed slot 1's in-flight plate!
+    let rem_ran_early = rem_done.load(Ordering::Acquire);
+    let slot1_still_has_400 = {
+        let st = host.core.state.lock().unwrap();
+        st.model.find_plate(400).is_some_and(|(s, _)| s == 1)
+    };
+
+    // Release slot 1's build so neither thread hangs regardless of assertion outcome.
+    release_build.wait();
+    let add_res = add_thread.join().unwrap();
+    let rem_res = rem_thread.join().unwrap();
+
+    assert!(!rem_ran_early, "remove must not finish while slot 1's add of reused id 400 is still in flight");
+    assert!(slot1_still_has_400, "slot 1's in-flight plate 400 must not be removed under slot 0's lock");
+    assert_eq!(add_res, Ok(Added::Seated), "slot 1's add must seat cleanly before remove acts");
+    assert_eq!(rem_res, Ok(()), "remove must then proceed under slot 1's order");
+
+    // Repeat for `move_unit`: failed plate 401 in slot 0, reused in slot 1 (alongside unit 402).
+    assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 1, 402, echo_spec(0.4, false), 0), Ok(Added::Seated));
+    let bad2 = UnitSpec { kind: UnitKind::Reverb, plugin: None, params: None, bypass: false };
+    assert!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 401, bad2, 0).is_err());
+
+    pause_slot1.store(true, Ordering::Release);
+    let hold_slot0 = chains.order[0].lock().unwrap();
+    let mv_chains = chains.clone();
+    let mv_host = host.clone();
+    let mv_doc = doc_state.clone();
+    let mv_done = Arc::new(AtomicBool::new(false));
+    let mv_done_flag = mv_done.clone();
+    let mv_thread = std::thread::spawn(move || {
+        let r = mv_chains.move_unit(&mv_host, (&mv_doc, epoch), 401, 0);
+        mv_done_flag.store(true, Ordering::Release);
+        r
+    });
+    std::thread::sleep(Duration::from_millis(30));
+
+    let add2_chains = chains.clone();
+    let add2_host = host.clone();
+    let add2_doc = doc_state.clone();
+    let add2_slots = slots.clone();
+    let add2_thread = std::thread::spawn(move || {
+        add_builtin(&add2_chains, &add2_host, (&add2_doc, epoch), &add2_slots, 1, 401, echo_spec(0.5, false), 1)
+    });
+    in_build.wait();
+
+    drop(hold_slot0);
+    std::thread::sleep(Duration::from_millis(40));
+    let mv_ran_early = mv_done.load(Ordering::Acquire);
+    release_build.wait();
+
+    let add2_res = add2_thread.join().unwrap();
+    let mv_res = mv_thread.join().unwrap();
+    assert!(!mv_ran_early, "move_unit must not run while slot 1's add of reused id 401 is still in flight");
+    assert_eq!(add2_res, Ok(Added::Seated));
+    assert_eq!(mv_res, Ok(()), "move_unit must then succeed under slot 1's order");
+    assert_eq!(engine_chain_summary(&device, 1), vec![(401, false), (402, false)]);
+
+    chains.unload_all(&host);
+    chains.join_all();
+}
+
+/// Finding 5a: a full port behind a held edit must not hold the slot's order mutex for 15 s or leave
+/// an owner retrying to enqueue after a later command.
+#[test]
+fn p4f1_5a_full_port_add_fails_promptly_and_never_enqueues_after_later_command() {
+    // 20 ms per 256-frame block keeps the recording take open well past any timeout without hitting max_loop_seconds.
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
+    let host = device.host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let tracker = BoxTracker::new();
+    let chains = Chains::with_factory(Arc::new(
+        ClampingBuiltinFactory::new().with_latency(64).with_tracker(tracker.clone()),
+    ));
+
+    // Seat a latent unit (500) and a helper unit (505), open a take so a latency-changing removal
+    // holds the slot's port head, then fill the remaining port capacity behind that held op.
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 500, echo_spec(0.5, false), 0), Ok(Added::Seated));
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 505, echo_spec(0.5, false), 1), Ok(Added::Seated));
+    start_take(&device);
+
+    // Queue a held removal of latent unit 500 first, and wait until the model sees slot 0 held.
+    let Removal::Sent(_held_rem) = host.remove_unit(500).expect("queue held removal") else {
+        panic!("expected Sent removal");
+    };
+    wait_until(Duration::from_secs(3), "slot 0 held during take", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        host.core.state.lock().unwrap().model.slot_held(0)
+    });
+
+    // Push moves behind the held removal until slot 0's port is completely full.
+    let mut pushed = 0;
+    loop {
+        match host.move_unit(505, 0) {
+            Ok(_) => {
+                pushed += 1;
+                assert!(pushed <= 64, "slot port did not fill as expected");
+            }
+            Err(why) => {
+                assert!(why.contains("port is full"), "unexpected error filling port: {why}");
+                break;
+            }
+        }
+    }
+
+    // Adding unit 501 into the full port must fail promptly (NOT hold order for 15 s) and exit cleanly.
+    let t0 = Instant::now();
+    let err = add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 501, echo_spec(0.5, false), 2).unwrap_err();
+    let elapsed = t0.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "full-port add held order too long: {elapsed:?} ({err})");
+    assert!(err.contains("port is full"), "expected port-full error, got: {err}");
+    assert_eq!(tracker.drops.load(Ordering::SeqCst), 1, "failed full-port add must drop its box");
+    assert!(chains.order[0].try_lock().is_ok(), "order mutex must be released immediately on failure");
+
+    // End the take so the port drains, then run a later add (502). Unit 501 must NOT sneak in!
+    stop_take(&device);
+    wait_until(Duration::from_secs(3), "port drained after take", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        !host.core.state.lock().unwrap().model.slot_held(0)
+    });
+
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 502, echo_spec(0.5, false), 1), Ok(Added::Seated));
+    std::thread::sleep(Duration::from_millis(80));
+    let eng = engine_chain_summary(&device, 0);
+    assert_eq!(eng, vec![(505, false), (502, false)], "failed full-port add 501 must never enqueue after later add 502");
+
+    chains.unload_all(host);
+    chains.join_all();
 }

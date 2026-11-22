@@ -49,6 +49,13 @@ const BUILTIN_POLL: Duration = Duration::from_millis(20);
 /// How long a built-in add waits for its owner thread's first answer (`Seated`, `Waiting`, or `Err`).
 const BUILTIN_ADD_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Bound for an initial built-in submit retrying `Stale`/`Reloading` before failing cleanly; strictly
+/// below `BUILTIN_ADD_TIMEOUT` so the owner always exits and answers before the caller releases order.
+const BUILTIN_INITIAL_SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound for stopping/joining a late entry that finished opening after `join_all` already completed.
+const LATE_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Unheld wait bound for `chain_remove` and `chain_move` (mirrors `host::engine_slot::REMOVE_TIMEOUT`).
 const REMOVE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 2 });
 
@@ -332,18 +339,35 @@ const _: fn() = || {
     assert_send_sync::<Chains>();
 };
 
+/// Departing owners awaiting instant drop in `sweep` or final stop/join in `join_all`.
+#[derive(Default)]
+struct GoneState {
+    entries: Vec<Arc<Entry>>,
+    /// True once `join_all` has drained all tables (after `host.shutdown()`).
+    joined: bool,
+}
+
 /// The chain host's per-app state: built-in factory, live unit registry, departing owners, waiting
 /// reload candidates, per-slot call serialization, editor affinity, parked tone tokens, and shutdown
 /// latch.
 pub(crate) struct Chains {
     factory: Option<Arc<dyn BuiltinFactory>>,
     registry: Mutex<BTreeMap<UnitId, Arc<Entry>>>,
-    gone: Mutex<Vec<Arc<Entry>>>,
+    gone: Mutex<GoneState>,
     pending_reloads: Mutex<Vec<PendingReload>>,
     order: [Mutex<()>; SLOT_COUNT],
+    /// Serializes cross-slot `host.unit` reservations against `remove`/`move` slot verification so a
+    /// freed id cannot move to the other slot between slot lookup and mutation.
+    /// Lock order: `order[slot]` -> `id_guard` -> `slots` -> `host.core.ports` -> `host.core.state`;
+    /// separately `registry` -> `pending_reloads` -> `gone` -> `affinity`.
+    id_guard: Mutex<()>,
     affinity: Mutex<Affinity>,
     tokens: Mutex<ToneTokens>,
     closing: AtomicBool,
+    #[cfg(test)]
+    fail_next_spawn: AtomicBool,
+    #[cfg(test)]
+    before_register_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Chains {
@@ -361,12 +385,17 @@ impl Chains {
         Chains {
             factory,
             registry: Mutex::new(BTreeMap::new()),
-            gone: Mutex::new(Vec::new()),
+            gone: Mutex::new(GoneState::default()),
             pending_reloads: Mutex::new(Vec::new()),
             order: std::array::from_fn(|_| Mutex::new(())),
+            id_guard: Mutex::new(()),
             affinity: Mutex::new(Affinity::default()),
             tokens: Mutex::new(ToneTokens::default()),
             closing: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_spawn: AtomicBool::new(false),
+            #[cfg(test)]
+            before_register_hook: Mutex::new(None),
         }
     }
 
@@ -403,11 +432,11 @@ impl Chains {
         let mut drop_now = Vec::new();
         {
             let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
-            gone.extend(moved);
+            gone.entries.extend(moved);
             let mut i = 0;
-            while i < gone.len() {
-                if gone[i].owner.is_finished() && Arc::strong_count(&gone[i]) == 1 {
-                    drop_now.push(gone.swap_remove(i));
+            while i < gone.entries.len() {
+                if gone.entries[i].owner.is_finished() && Arc::strong_count(&gone.entries[i]) == 1 {
+                    drop_now.push(gone.entries.swap_remove(i));
                 } else {
                     i += 1;
                 }
@@ -422,6 +451,46 @@ impl Chains {
             let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
             for (inst, path) in release_after {
                 aff.release(inst, &path);
+            }
+        }
+    }
+
+    /// Hand `entry` to `gone` for shutdown teardown (`join_all` runs after `host.shutdown()`). If
+    /// `join_all` already completed, returns `Some(entry)` so the caller drops any slot `order` mutex
+    /// first and then disposes of `entry` via [`Self::dispose_late_entry`].
+    fn retire_for_closing(&self, entry: Arc<Entry>) -> Option<Arc<Entry>> {
+        let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
+        if gone.joined {
+            Some(entry)
+        } else {
+            gone.entries.push(entry);
+            None
+        }
+    }
+
+    /// Stop and drop an entry that arrived after `join_all` already ran. Never called while holding a
+    /// slot's `order` mutex; bounds the wait so a command thread never joins without a deadline.
+    fn dispose_late_entry(&self, entry: Arc<Entry>) {
+        let aff_handle = entry.owner.affinity_handle();
+        entry.owner.request_stop();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let spawned = std::thread::Builder::new()
+            .name("lf-chain-late-drop".to_string())
+            .spawn(move || {
+                entry.owner.join();
+                drop(entry);
+                let _ = done_tx.try_send(());
+            });
+        let finished = match spawned {
+            Ok(_) => done_rx.recv_timeout(LATE_JOIN_TIMEOUT).is_ok(),
+            Err(_) => false,
+        };
+        if let Some((inst, path)) = aff_handle {
+            let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+            if finished {
+                aff.release(inst, &path);
+            } else {
+                aff.leak(inst, &path);
             }
         }
     }
@@ -449,19 +518,25 @@ impl Chains {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             if self.closing.load(Acquire) {
                 drop(reg);
-                self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+                if let Some(late) = self.retire_for_closing(entry) {
+                    self.dispose_late_entry(late);
+                }
                 return;
             }
             if reg.get(&cand.unit).is_some_and(|e| e.token != cand.old_token) {
                 // Another load already replaced `old_token`: retire this candidate rather than clobbering it.
                 drop(reg);
-                self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+                if let Some(late) = self.retire_for_closing(entry) {
+                    self.dispose_late_entry(late);
+                }
                 return;
             }
             reg.insert(cand.unit, entry)
         };
         if let Some(old_entry) = replaced {
-            self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(old_entry);
+            if let Some(late) = self.retire_for_closing(old_entry) {
+                self.dispose_late_entry(late);
+            }
         }
     }
 
@@ -478,7 +553,9 @@ impl Chains {
                 owner: cand.owner,
             }),
         });
-        self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+        if let Some(late) = self.retire_for_closing(entry) {
+            self.dispose_late_entry(late);
+        }
     }
 
     /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`).
@@ -493,21 +570,10 @@ impl Chains {
             }
         };
         if let Some(entry) = removed {
-            self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
-        }
-    }
-
-    /// Remove and drop `unit`'s entry if it still matches `token` (used when an add fails before seat).
-    fn drop_entry_if_token(&self, unit: UnitId, token: InstallToken) {
-        let removed = {
-            let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            if reg.get(&unit).is_some_and(|e| e.token == token) {
-                reg.remove(&unit)
-            } else {
-                None
+            if let Some(late) = self.retire_for_closing(entry) {
+                self.dispose_late_entry(late);
             }
-        };
-        drop(removed);
+        }
     }
 
     /// Add a unit (built-in or plugin) to `slot` at plate index `at`.
@@ -560,13 +626,14 @@ impl Chains {
             return Err(format!("no slot {slot}"));
         }
 
-        let _order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+        let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Acquire) {
             return Err("the host is closing".to_string());
         }
 
-        // Lock order: order[slot] -> slots -> host.core.state.
-        let (unit_host, token) = {
+        // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
+        let unit_host = {
+            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
             let slots_guard = slots.lock().map_err(|_| "engine slots poisoned".to_string())?;
             for (s, entry) in slots_guard.iter().enumerate() {
                 if !matches!(entry, EngineSlot::Empty) {
@@ -575,7 +642,7 @@ impl Chains {
                     ));
                 }
             }
-            let unit_host = match host.unit(slot, unit, Spec::Plugin(plugin.clone()), at, bypassed) {
+            match host.unit(slot, unit, Spec::Plugin(plugin.clone()), at, bypassed) {
                 Ok(u) => u,
                 Err(why) => {
                     if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
@@ -585,17 +652,9 @@ impl Chains {
                     }
                     return Err(why);
                 }
-            };
-            let token = {
-                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-                state
-                    .table
-                    .active_row_for_id(unit)
-                    .map(|r| r.token)
-                    .ok_or_else(|| format!("unit {unit} row missing after reservation"))?
-            };
-            (unit_host, token)
+            }
         };
+        let token = unit_host.install_token();
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
         let tone = match tones {
@@ -642,24 +701,30 @@ impl Chains {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .landed(inst, &plugin.path, unit);
-                let path_for_close = plugin.path.clone();
                 let entry = Arc::new(Entry {
                     slot,
                     token,
                     owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
                 });
-                {
+                let displaced = {
                     let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
                         drop(reg);
-                        drop(entry);
-                        self.affinity
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .release(inst, &path_for_close);
+                        let late = self.retire_for_closing(entry);
+                        drop(order);
+                        if let Some(late) = late {
+                            self.dispose_late_entry(late);
+                        }
                         return Err("the host is closing".to_string());
                     }
-                    reg.insert(unit, entry);
+                    reg.insert(unit, entry)
+                };
+                if let Some(prev) = displaced {
+                    if let Some(late) = self.retire_for_closing(prev) {
+                        drop(order);
+                        self.dispose_late_entry(late);
+                        return Err("the host is closing".to_string());
+                    }
                 }
                 match answer {
                     Answer::Seated { .. } => Ok(Added::Seated),
@@ -700,13 +765,14 @@ impl Chains {
             return Err(format!("no slot {slot}"));
         }
 
-        let _order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+        let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Acquire) {
             return Err("the host is closing".to_string());
         }
 
-        // Lock order: order[slot] -> slots -> host.core.state.
-        let (unit_host, token) = {
+        // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
+        let unit_host = {
+            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
             let slots_guard = slots.lock().map_err(|_| "engine slots poisoned".to_string())?;
             for (s, entry) in slots_guard.iter().enumerate() {
                 if !matches!(entry, EngineSlot::Empty) {
@@ -715,7 +781,7 @@ impl Chains {
                     ));
                 }
             }
-            let unit_host = match host.unit(slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed) {
+            match host.unit(slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed) {
                 Ok(u) => u,
                 Err(why) => {
                     if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
@@ -725,17 +791,9 @@ impl Chains {
                     }
                     return Err(why);
                 }
-            };
-            let token = {
-                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-                state
-                    .table
-                    .active_row_for_id(unit)
-                    .map(|r| r.token)
-                    .ok_or_else(|| format!("unit {unit} row missing after reservation"))?
-            };
-            (unit_host, token)
+            }
         };
+        let token = unit_host.install_token();
 
         let Some(terms) = unit_host.terms() else {
             let why = "no audio device is open".to_string();
@@ -761,37 +819,36 @@ impl Chains {
             latency: info.latency,
         });
 
-        let initial_seat = match unit_host.submit(boxed, terms) {
-            Ok(op) => BuiltinSeat::Installing { op },
-            Err((returned, SubmitError::Stale | SubmitError::PortFull | SubmitError::Reloading)) => {
-                BuiltinSeat::Owed { unit: returned }
-            }
-            Err((returned, err)) => {
-                drop(returned);
-                let why = submit_error_reason(err);
-                unit_host.failed(why.clone());
-                unit_host.release();
-                return Err(why);
-            }
-        };
-
+        // Spawn the owner BEFORE submitting to the engine; hand `(unit_host, boxed, terms)` across
+        // only AFTER registering in `self.registry` so spawn failure cleanly drops/releases and
+        // shutdown can never snapshot `registry` after `submit()` has handed the box to the engine.
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<(UnitHost, Unit, unit_host::Terms)>(1);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<Added, String>>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
         let owner_stop = stop.clone();
         let owner_wake = wake.clone();
-        let in_engine = matches!(initial_seat, BuiltinSeat::Installing { .. });
+        #[cfg(test)]
+        let spawned = if self.fail_next_spawn.swap(false, Acquire) {
+            Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "injected spawn failure"))
+        } else {
+            std::thread::Builder::new()
+                .name(format!("lf-builtin-unit-{unit}"))
+                .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake))
+        };
+        #[cfg(not(test))]
         let spawned = std::thread::Builder::new()
             .name(format!("lf-builtin-unit-{unit}"))
-            .spawn(move || serve_builtin(unit_host, initial_seat, ready_tx, owner_stop, owner_wake));
+            .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake));
 
         let handle = match spawned {
             Ok(h) => h,
             Err(e) => {
-                // `unit_host` was moved into the closure and dropped only on Err(spawn), which isn't
-                // reachable here because Rust drops the closure; `in_engine` is just for diagnostics.
-                let _ = in_engine;
-                return Err(format!("could not spawn owner for built-in unit {unit}: {e}"));
+                drop(boxed);
+                let why = format!("could not spawn owner for built-in unit {unit}: {e}");
+                unit_host.failed(why.clone());
+                unit_host.release();
+                return Err(why);
             }
         };
 
@@ -805,21 +862,50 @@ impl Chains {
             }),
         });
 
-        {
+        #[cfg(test)]
+        if let Some(hook) = self.before_register_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            hook();
+        }
+
+        let displaced = {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             if self.closing.load(Acquire) {
                 drop(reg);
-                entry.owner.request_stop();
-                entry.owner.join();
+                // Drop `start_tx` so the idle owner thread exits without ever touching the engine.
+                drop(start_tx);
+                drop(boxed);
+                unit_host.failed("the host is closing".to_string());
+                unit_host.release();
+                let late = self.retire_for_closing(entry);
+                drop(order);
+                if let Some(late) = late {
+                    self.dispose_late_entry(late);
+                }
                 return Err("the host is closing".to_string());
             }
-            reg.insert(unit, entry.clone());
+            reg.insert(unit, entry.clone())
+        };
+        if let Some(prev) = displaced {
+            if let Some(late) = self.retire_for_closing(prev) {
+                drop(order);
+                self.dispose_late_entry(late);
+                return Err("the host is closing".to_string());
+            }
+        }
+
+        if let Err(std::sync::mpsc::SendError((unit_host, boxed, _))) = start_tx.send((unit_host, boxed, terms)) {
+            drop(boxed);
+            let why = format!("built-in unit {unit} owner exited before starting");
+            unit_host.failed(why.clone());
+            unit_host.release();
+            self.retire_to_gone(unit, Some(token));
+            return Err(why);
         }
 
         match ready_rx.recv_timeout(BUILTIN_ADD_TIMEOUT) {
             Ok(Ok(added)) => Ok(added),
             Ok(Err(why)) => {
-                self.drop_entry_if_token(unit, token);
+                self.retire_to_gone(unit, Some(token));
                 Err(why)
             }
             Err(_) => Err(format!(
@@ -829,8 +915,9 @@ impl Chains {
         }
     }
 
-    /// Remove `unit` from its chain. Holds the slot's order mutex until the op settles or is held;
-    /// releases it before waiting across a take.
+    /// Remove `unit` from its chain. Resolves the slot and unit under the slot's order mutex (and
+    /// `id_guard`, so a freed id reused in the other slot cannot be mutated under the wrong lock),
+    /// then releases `order` before waiting across a take.
     pub(crate) fn remove(
         &self,
         host: &EngineHost,
@@ -839,13 +926,32 @@ impl Chains {
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
         self.sweep(Some(host));
-        let slot = find_unit_slot(host, unit)?;
-        let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
-        let token = {
-            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            reg.get(&unit).map(|e| e.token)
+        let (order, token, removal) = loop {
+            let slot = find_unit_slot(host, unit)?;
+            let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
+            let still_in_slot = {
+                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                match state.model.find_plate(unit) {
+                    Some((_, p)) if p.legacy => {
+                        return Err(format!("unit {unit} belongs to a legacy plugin slot, not a chain"));
+                    }
+                    Some((s, _)) if s == slot => true,
+                    Some(_) => false,
+                    None => return Err(format!("unit {unit} not found")),
+                }
+            };
+            if !still_in_slot {
+                continue;
+            }
+            let token = {
+                let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                reg.get(&unit).map(|e| e.token)
+            };
+            let removal = host.remove_unit(unit)?;
+            break (order, token, removal);
         };
-        let op = match host.remove_unit(unit)? {
+        let op = match removal {
             Removal::Plate => {
                 drop(order);
                 if token.is_some() {
@@ -867,8 +973,8 @@ impl Chains {
         }
     }
 
-    /// Move `unit` to plate index `to` within its own slot. Holds the slot's order mutex until the op
-    /// settles or is held; releases it before waiting across a take.
+    /// Move `unit` to plate index `to` within its own slot. Resolves the slot and unit under the
+    /// slot's order mutex (and `id_guard`), then releases `order` before waiting across a take.
     pub(crate) fn move_unit(
         &self,
         host: &EngineHost,
@@ -878,9 +984,27 @@ impl Chains {
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
         self.sweep(Some(host));
-        let slot = find_unit_slot(host, unit)?;
-        let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
-        let op = host.move_unit(unit, to)?;
+        let (order, op) = loop {
+            let slot = find_unit_slot(host, unit)?;
+            let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
+            let still_in_slot = {
+                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                match state.model.find_plate(unit) {
+                    Some((_, p)) if p.legacy => {
+                        return Err(format!("unit {unit} belongs to a legacy plugin slot, not a chain"));
+                    }
+                    Some((s, _)) if s == slot => true,
+                    Some(_) => false,
+                    None => return Err(format!("unit {unit} not found")),
+                }
+            };
+            if !still_in_slot {
+                continue;
+            }
+            let op = host.move_unit(unit, to)?;
+            break (order, op);
+        };
         let state = wait_ordered(host, order, op, REMOVE_TIMEOUT)?;
         match state {
             OpState::Applied => Ok(()),
@@ -890,17 +1014,30 @@ impl Chains {
         }
     }
 
-    /// On shutdown, while the device still plays: mark closing (so any add about to register stops on
-    /// the spot), sweep finished entries, send `remove_unit` for every registered unit, and wait for
-    /// all of them under one 2 s deadline (held ops return at once with the host closing).
+    /// On shutdown, while the device still plays: atomically mark closing under the registry locks
+    /// (so no add can slip past the snapshot), sweep finished entries, send `remove_unit` for every
+    /// registered or in-flight non-legacy chain unit, and wait for all of them under one 2 s deadline
+    /// (held ops return at once with the host closing).
     pub(super) fn unload_all(&self, host: &EngineHost) {
-        self.closing.store(true, Release);
         host.set_closing();
-        self.sweep(Some(host));
-        let ids: Vec<UnitId> = {
+        let mut ids = BTreeSet::new();
+        {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            reg.keys().copied().collect()
-        };
+            let pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+            self.closing.store(true, Release);
+            ids.extend(reg.keys().copied());
+            ids.extend(pending.iter().map(|c| c.unit));
+        }
+        self.sweep(Some(host));
+        {
+            let mut state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            let rev = state.model.snapshot();
+            for chain in rev.chains.iter() {
+                for u in &chain.units {
+                    ids.insert(u.id);
+                }
+            }
+        }
         let mut ops = Vec::new();
         for id in ids {
             match host.remove_unit(id) {
@@ -920,21 +1057,17 @@ impl Chains {
         }
     }
 
-    /// After `host.shutdown()`: signal stop to every remaining owner in `registry`, `gone` and
-    /// `pending_reloads` and join their threads.
+    /// After `host.shutdown()`: drain `registry`, `pending_reloads` and `gone` atomically (marking
+    /// `gone.joined` so any late command knows device teardown already ran), signal stop to every
+    /// remaining owner and join their threads.
     pub(super) fn join_all(&self) {
         let mut entries = Vec::new();
         {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
             entries.extend(reg.values().cloned());
             reg.clear();
-        }
-        {
-            let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
-            entries.append(&mut *gone);
-        }
-        {
-            let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
             for cand in pending.drain(..) {
                 entries.push(Arc::new(Entry {
                     slot: cand.slot,
@@ -946,6 +1079,8 @@ impl Chains {
                     }),
                 }));
             }
+            entries.append(&mut gone.entries);
+            gone.joined = true;
         }
         for entry in &entries {
             entry.owner.request_stop();
@@ -985,52 +1120,61 @@ impl Chains {
         self.sweep(Some(host));
         let format = check_plugin_format(&plugin)?;
 
-        let slot = {
-            let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-            match state.model.find_plate(unit) {
-                Some((s, _)) => s,
-                None => return Ok(Reloaded::Moved),
-            }
-        };
-
-        let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
-        if self.closing.load(Acquire) {
-            return Err("the host is closing".to_string());
-        }
-
-        let old = {
-            let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some((plate_slot, plate)) = state.model.find_plate(unit) else {
-                return Ok(Reloaded::Moved);
+        let (slot, order, old, unit_host) = loop {
+            let slot = {
+                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                match state.model.find_plate(unit) {
+                    Some((_, p)) if p.legacy => {
+                        return Err(format!("unit {unit} belongs to a legacy plugin slot, not a chain"));
+                    }
+                    Some((s, _)) => s,
+                    None => return Ok(Reloaded::Moved),
+                }
             };
-            if plate_slot != slot
-                || plate.legacy
-                || plate.kind != UnitKind::Plugin
-                || plate.plugin.as_ref() != Some(&plugin)
-                || plate.state != PlateState::Seated
-            {
-                return Ok(Reloaded::Moved);
+            let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+            if self.closing.load(Acquire) {
+                return Err("the host is closing".to_string());
             }
-            match plate.told_seq {
-                Some(told) if told <= since => {}
-                _ => return Ok(Reloaded::Moved),
-            }
-            match state.table.active_row_for_id(unit) {
-                Some(row) => row.token,
-                None => {
-                    log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: active row missing");
+            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
+            let old = {
+                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                let Some((plate_slot, plate)) = state.model.find_plate(unit) else {
+                    return Ok(Reloaded::Moved);
+                };
+                if plate.legacy {
+                    return Err(format!("unit {unit} belongs to a legacy plugin slot, not a chain"));
+                }
+                if plate_slot != slot {
+                    continue;
+                }
+                if plate.kind != UnitKind::Plugin
+                    || plate.plugin.as_ref() != Some(&plugin)
+                    || plate.state != PlateState::Seated
+                {
+                    return Ok(Reloaded::Moved);
+                }
+                match plate.told_seq {
+                    Some(told) if told <= since => {}
+                    _ => return Ok(Reloaded::Moved),
+                }
+                match state.table.active_row_for_id(unit) {
+                    Some(row) => row.token,
+                    None => {
+                        log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: active row missing");
+                        return Ok(Reloaded::Failed);
+                    }
+                }
+            };
+            let unit_host = match host.reload_unit(unit, plugin.clone()) {
+                Ok(u) => u,
+                Err(why) => {
+                    log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
                     return Ok(Reloaded::Failed);
                 }
-            }
+            };
+            break (slot, order, old, unit_host);
         };
-
-        let unit_host = match host.reload_unit(unit, plugin.clone()) {
-            Ok(u) => u,
-            Err(why) => {
-                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
-                return Ok(Reloaded::Failed);
-            }
-        };
+        let new_token = unit_host.install_token();
 
         let Some(store) = tones else {
             let why = "no app-local data folder to keep tones in".to_string();
@@ -1077,11 +1221,6 @@ impl Chains {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .landed(inst, &plugin.path, unit);
-                let new_token = {
-                    let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-                    state.table.active_row_for_id(unit).map(|r| r.token).unwrap_or(0)
-                };
-                let path_for_close = plugin.path.clone();
                 let entry = Arc::new(Entry {
                     slot,
                     token: new_token,
@@ -1091,17 +1230,20 @@ impl Chains {
                     let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
                         drop(reg);
-                        drop(entry);
-                        self.affinity
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .release(inst, &path_for_close);
+                        let late = self.retire_for_closing(entry);
+                        drop(order);
+                        if let Some(late) = late {
+                            self.dispose_late_entry(late);
+                        }
                         return Err("the host is closing".to_string());
                     }
                     reg.insert(unit, entry)
                 };
                 if let Some(old_entry) = replaced {
-                    self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(old_entry);
+                    if let Some(late) = self.retire_for_closing(old_entry) {
+                        drop(order);
+                        self.dispose_late_entry(late);
+                    }
                 }
                 Ok(Reloaded::Reloaded)
             }
@@ -1110,10 +1252,24 @@ impl Chains {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .landed(inst, &plugin.path, unit);
-                self.pending_reloads
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                {
+                    let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+                    if self.closing.load(Acquire) {
+                        drop(pending);
+                        let entry = Arc::new(Entry {
+                            slot,
+                            token: new_token,
+                            owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
+                        });
+                        let late = self.retire_for_closing(entry);
+                        drop(order);
+                        if let Some(late) = late {
+                            self.dispose_late_entry(late);
+                        }
+                        return Err("the host is closing".to_string());
+                    }
+                    pending.push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                }
                 drop(order);
 
                 let mut unheld = Duration::ZERO;
@@ -1164,10 +1320,24 @@ impl Chains {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .landed(inst, &plugin.path, unit);
-                self.pending_reloads
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                {
+                    let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+                    if self.closing.load(Acquire) {
+                        drop(pending);
+                        let entry = Arc::new(Entry {
+                            slot,
+                            token: new_token,
+                            owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
+                        });
+                        let late = self.retire_for_closing(entry);
+                        drop(order);
+                        if let Some(late) = late {
+                            self.dispose_late_entry(late);
+                        }
+                        return Err("the host is closing".to_string());
+                    }
+                    pending.push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                }
                 Err(format!(
                     "the audio engine did not answer within 30 s: unit {unit} reload stays loading and seats if the engine answers"
                 ))
@@ -1182,6 +1352,7 @@ impl Chains {
         unit: UnitId,
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
+        reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -1207,6 +1378,7 @@ impl Chains {
         unit: UnitId,
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
+        reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -1228,6 +1400,7 @@ impl Chains {
     }
 
     pub(crate) fn list_params(&self, host: &EngineHost, unit: UnitId) -> Result<Vec<ParamDesc>, String> {
+        reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -1249,6 +1422,7 @@ impl Chains {
         value: f64,
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
+        reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -1273,6 +1447,7 @@ impl Chains {
     }
 
     pub(crate) fn tone_take(&self, host: &EngineHost, unit: UnitId) -> Result<Vec<u8>, String> {
+        reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -1358,7 +1533,7 @@ impl Chains {
     #[cfg(test)]
     pub(crate) fn active_entries(&self) -> usize {
         let r = self.registry.lock().unwrap_or_else(|e| e.into_inner()).len();
-        let g = self.gone.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let g = self.gone.lock().unwrap_or_else(|e| e.into_inner()).entries.len();
         r + g
     }
 }
@@ -1419,22 +1594,30 @@ fn current_document(state: &PluginHostState, frontend_epoch: u32) -> Result<(), 
     }
 }
 
+fn reject_if_legacy(host: &EngineHost, unit: UnitId) -> Result<(), String> {
+    let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.model.find_plate(unit).is_some_and(|(_, p)| p.legacy) {
+        return Err(format!("unit {unit} belongs to a legacy plugin slot, not a chain"));
+    }
+    Ok(())
+}
+
 fn find_unit_slot(host: &EngineHost, unit: UnitId) -> Result<usize, String> {
     let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-    state
-        .model
-        .find_plate(unit)
-        .map(|(s, _)| s)
-        .ok_or_else(|| format!("unit {unit} not found"))
+    match state.model.find_plate(unit) {
+        Some((_, p)) if p.legacy => Err(format!("unit {unit} belongs to a legacy plugin slot, not a chain")),
+        Some((s, _)) => Ok(s),
+        None => Err(format!("unit {unit} not found")),
+    }
 }
 
 fn is_unit_leaving(host: &EngineHost, unit: UnitId) -> bool {
     let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-    state
-        .model
-        .find_plate(unit)
-        .is_some_and(|(s, p)| p.state == PlateState::Leaving || state.model.pending_remove_op(s, unit).is_some())
-        || state.model.has_pending_remove(unit)
+    match state.model.find_plate(unit) {
+        Some((_, p)) if p.legacy => false,
+        Some((s, p)) => p.state == PlateState::Leaving || state.model.pending_remove_op(s, unit).is_some(),
+        None => state.model.has_pending_remove(unit),
+    }
 }
 
 /// Wait on `op` while holding `order` until it settles or becomes `Held`; on `Held`, release `order`
@@ -1528,19 +1711,45 @@ fn send_first_answer(ready: &mut Option<SyncSender<Result<Added, String>>>, answ
     }
 }
 
-/// Built-in unit owner loop (`lf-builtin-unit-{id}`): polls every 20 ms without blocking, answers the
-/// caller once (`Seated` / `Waiting` / `Err`), resubmits the same box after evictions/withdrawals,
-/// parks on post-seat refusal, drops the box off the RT thread on terminal return, and drains/abandons
-/// cleanly on stop.
+/// Built-in unit owner loop (`lf-builtin-unit-{id}`): receives its host and box after registration,
+/// performs the first submit, answers the caller once (`Seated` / `Waiting` / `Err`), resubmits the
+/// same box after evictions/withdrawals, parks on post-seat refusal, drops the box off the RT thread
+/// on terminal return, and drains/abandons cleanly on stop.
 fn serve_builtin(
-    host: UnitHost,
-    mut seat: BuiltinSeat,
+    start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms)>,
     ready_tx: SyncSender<Result<Added, String>>,
     stop: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
 ) {
+    let Ok((host, boxed, initial_terms)) = start_rx.recv() else {
+        return;
+    };
     let mut ready = Some(ready_tx);
     let mut ever_seated = false;
+    let initial_deadline = Instant::now() + BUILTIN_INITIAL_SUBMIT_TIMEOUT;
+
+    let mut seat = match host.submit(boxed, initial_terms) {
+        Ok(op) => BuiltinSeat::Installing { op },
+        Err((returned, SubmitError::Stale | SubmitError::Reloading)) => BuiltinSeat::Owed { unit: returned },
+        Err((returned, SubmitError::Closing)) => {
+            drop(returned);
+            host.release();
+            send_first_answer(&mut ready, Err("the host is closing".to_string()));
+            return;
+        }
+        Err((returned, err)) => {
+            // PortFull, NoEngine, Removing, Superseded on initial submit: fail immediately so the
+            // caller releases the slot's order mutex and no background retry can enqueue out of order.
+            drop(returned);
+            let why = submit_error_reason(err);
+            if !matches!(err, SubmitError::Superseded | SubmitError::Removing) {
+                host.failed(why.clone());
+            }
+            host.release();
+            send_first_answer(&mut ready, Err(why));
+            return;
+        }
+    };
 
     while !stop.load(Acquire) {
         while let Some(back) = host.take_back() {
@@ -1587,21 +1796,57 @@ fn serve_builtin(
 
         if matches!(seat, BuiltinSeat::Owed { .. }) {
             let unit = seat.take_unit().expect("checked Owed");
+            if !ever_seated && Instant::now() >= initial_deadline {
+                drop(unit);
+                let why = "built-in unit could not submit before timeout".to_string();
+                host.failed(why.clone());
+                host.release();
+                send_first_answer(&mut ready, Err(why));
+                return;
+            }
             match host.terms() {
                 None => {
+                    if !ever_seated {
+                        drop(unit);
+                        let why = "no audio device is open".to_string();
+                        host.failed(why.clone());
+                        host.release();
+                        send_first_answer(&mut ready, Err(why));
+                        return;
+                    }
                     seat = BuiltinSeat::Owed { unit };
                 }
                 Some(terms) => match host.submit(unit, terms) {
                     Ok(op) => {
                         seat = BuiltinSeat::Installing { op };
                     }
+                    Err((returned, SubmitError::PortFull | SubmitError::NoEngine)) if !ever_seated => {
+                        drop(returned);
+                        let why = "the slot's engine port is full".to_string();
+                        host.failed(why.clone());
+                        host.release();
+                        send_first_answer(&mut ready, Err(why));
+                        return;
+                    }
                     Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading)) => {
                         seat = BuiltinSeat::Owed { unit: returned };
                     }
                     Err((returned, SubmitError::Removing)) => {
+                        if !ever_seated {
+                            drop(returned);
+                            host.release();
+                            send_first_answer(&mut ready, Err(submit_error_reason(SubmitError::Removing)));
+                            return;
+                        }
                         seat = BuiltinSeat::Removing { unit: returned };
                     }
                     Err((returned, SubmitError::Closing)) => {
+                        if !ever_seated {
+                            drop(returned);
+                            host.release();
+                            send_first_answer(&mut ready, Err("the host is closing".to_string()));
+                            return;
+                        }
                         seat = BuiltinSeat::Closing { unit: returned };
                     }
                     Err((returned, SubmitError::Superseded)) => {
@@ -1631,9 +1876,10 @@ fn serve_builtin(
             }
         }
 
+        let poll = if ready.is_some() { Duration::from_millis(1) } else { BUILTIN_POLL };
         let guard = wake.0.lock().unwrap_or_else(|e| e.into_inner());
         if !stop.load(Acquire) {
-            let _ = wake.1.wait_timeout(guard, BUILTIN_POLL);
+            let _ = wake.1.wait_timeout(guard, poll);
         }
     }
 

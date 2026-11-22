@@ -473,6 +473,31 @@ impl EngineApp {
     }
 }
 
+/// Test-only shim exposing `LoadTarget::load` (including its `reserve` exclusion guard) to sibling
+/// tests in `engine_io::chain_cmds::tests`.
+#[cfg(test)]
+pub(super) fn load_with_opener(
+    slots: &Slots,
+    host: &EngineHost,
+    state: &PluginHostState,
+    slot: u8,
+    path: String,
+    id: String,
+    frontend_epoch: u32,
+    open: &dyn Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>) -> Result<EngineSlotHandle, String>,
+) -> Result<PluginInfo, String> {
+    let reload_tones = Mutex::default();
+    let target = LoadTarget {
+        slots,
+        reload_tones: &reload_tones,
+        tones: None,
+        host,
+        open,
+        vacate_wait: Duration::ZERO,
+    };
+    target.load(state, slot, path, id, frontend_epoch, None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
