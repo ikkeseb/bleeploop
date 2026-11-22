@@ -58,7 +58,8 @@
 //! removal, a replacement or a reseat that changes its chain's latency sum or its role (input-fed ↔
 //! source, a zero-latency source included) is judged at a block start, and while a capture holds the
 //! alignment it stays in its port, the slot's later messages behind it, answered `Waiting` once; it
-//! applies at the first block start after, unanswered again (its [`Event::Chain`] shows it). A move, a
+//! resolves at the first block start after with one second [`Event::Seat`] (`Applied` on its frame,
+//! ahead of its [`Event::Chain`], or `Refused`). A move, a
 //! bypass, a withdrawal and an edit that changes neither apply at once. So the latched alignment and
 //! every chain's own sum hold for a whole capture, and the alignment changes on an edit's own frame: a
 //! leaving seat's latency counts nowhere from its removal on, and only its own crossfade records off it.
@@ -98,7 +99,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use crate::api::{max_chain_latency, ChainSeat, Event, Pair, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS, SLOT_COUNT};
+use crate::api::{max_chain_latency, ChainSeat, Event, InstallToken, Pair, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitParam, UnitProcessor, MAX_UNITS, SLOT_COUNT};
 use crate::dsp::ott::{Setting, StereoOtt};
 use crate::engine::Feed;
 use crate::grid::{Frame, Meter};
@@ -124,7 +125,7 @@ const OWED_CAPACITY: usize = 2 * MSG_CAPACITY + 1;
 type Unit = Box<dyn UnitProcessor>;
 
 enum SlotMsg {
-    Install { id: UnitId, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Unit },
+    Install { id: UnitId, token: InstallToken, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Unit },
     Remove { id: UnitId },
     Withdraw { id: UnitId },
     Move { id: UnitId, to: usize },
@@ -147,23 +148,43 @@ impl SlotMsg {
     }
 }
 
+/// Why a unit left the engine ([`Returned::left`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// A removal took it.
+    Removed,
+    /// An install that `replaces` it, or a same-id reload, took its seat.
+    Replaced,
+    /// A withdrawal took it.
+    Withdrawn,
+    /// [`crate::Engine::evict_slots`] took a seated unit.
+    Evicted,
+    /// [`crate::Engine::evict_slots`] took an install still in the ring or the taken place, never applied
+    /// because it had no place for its answer (an install with reply room applies in `evict`'s idle
+    /// service first and leaves as [`Left::Evicted`], with its predecessor as [`Left::Replaced`]).
+    Unsent,
+    /// Its install was refused (the unit never started or stopped).
+    Refused(SeatRefusal),
+}
+
 /// A unit on its way back to the host: removed, withdrawn, replaced or evicted with the bypass its
 /// seat applied, or refused at its install (with the bypass it asked for).
 struct Back {
     id: UnitId,
+    token: InstallToken,
     unit: Unit,
-    refused: Option<SeatRefusal>,
     bypassed: bool,
+    left: Left,
 }
 
 /// A unit the engine handed back ([`SlotPort::returned_unit`]).
 pub struct Returned {
     pub id: UnitId,
+    pub token: InstallToken,
     pub unit: Box<dyn UnitProcessor>,
-    /// The bypass its seat applied when it left (a refused install: the one it asked for).
+    /// The bypass its seat applied when it left (a refused install or unsent install: the one it asked for).
     pub bypassed: bool,
-    /// Why its install was refused; `None` for a unit that was seated.
-    pub refused: Option<SeatRefusal>,
+    pub left: Left,
 }
 
 /// The host's end of one slot (`EngineHandle::slots`). Not real-time: the host blocks on it, the engine
@@ -188,7 +209,7 @@ pub struct Ticket {
 impl Ticket {
     /// The engine has answered the message: applied (a seated install is in its chain), refused (the
     /// unit is on the port's return ring, [`SlotPort::refused`]) or held waiting for a take to end
-    /// ([`SlotPort::holding`]; it applies after, unanswered again).
+    /// ([`SlotPort::holding`]; it resolves after with a second [`Event::Seat`]).
     pub fn answered(&self) -> bool {
         self.taken.load(Acquire) >= self.seq
     }
@@ -203,21 +224,22 @@ impl SlotPort {
     /// Hand an activated unit to the slot under `id`, to seat at its chain's end, not bypassed:
     /// [`SlotPort::install_at`] with `at` past the end.
     pub fn install(&mut self, id: UnitId, unit: Unit) -> Result<Ticket, Unit> {
-        self.install_at(id, MAX_UNITS, false, None, unit)
+        self.install_at(id, 0, MAX_UNITS, false, None, unit)
     }
 
-    /// Hand an activated unit to the slot under `id`, to seat at index `at` of its chain (clamped to its
+    /// Hand an activated unit to the slot under `id` and `token`, to seat at index `at` of its chain (clamped to its
     /// end; a source goes to the head), `bypassed` or not; `replaces`, a seated unit whose seat it
     /// takes in one crossfade (a source replaced, or a reload under its own id; one of the other role is
     /// refused as `Placement`). An `id` the slot holds withdrawn reseats that seat; a reseat or reload
     /// under its own id keeps the seat's latest bypass, not `bypassed`. It applies at the next block
     /// start, or waits for a take to end
-    /// (`docs/unit-contract.md` §7), and is answered once by an [`Event::Seat`] (a refused one comes
+    /// (`docs/unit-contract.md` §7), and is answered by an [`Event::Seat`] (a held message gets a second
+    /// [`Event::Seat`] when it resolves; a refused one comes
     /// back on [`SlotPort::returned`], its reason on [`SlotPort::refused`]). The ticket tells when the
     /// engine has answered it. Gives the unit back when the message ring is full (the engine is not
     /// rendering and has not been serviced, or the host has not read its returns).
-    pub fn install_at(&mut self, id: UnitId, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Unit) -> Result<Ticket, Unit> {
-        self.tx.push(SlotMsg::Install { id, at, bypassed, replaces, unit }).map_err(|PushError::Full(msg)| match msg {
+    pub fn install_at(&mut self, id: UnitId, token: InstallToken, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Unit) -> Result<Ticket, Unit> {
+        self.tx.push(SlotMsg::Install { id, token, at, bypassed, replaces, unit }).map_err(|PushError::Full(msg)| match msg {
             SlotMsg::Install { unit, .. } => unit,
             _ => unreachable!(),
         })?;
@@ -263,18 +285,21 @@ impl SlotPort {
         self.rx.pop().ok().map(|back| (back.id, back.unit))
     }
 
-    /// [`SlotPort::returned`] with its bypass and, a refused install, why.
+    /// [`SlotPort::returned`] with its token, bypass and why it left.
     pub fn returned_unit(&mut self) -> Option<Returned> {
-        self.rx.pop().ok().map(|b| Returned { id: b.id, unit: b.unit, bypassed: b.bypassed, refused: b.refused })
+        self.rx.pop().ok().map(|b| Returned { id: b.id, token: b.token, unit: b.unit, bypassed: b.bypassed, left: b.left })
     }
 
     /// Unit `id` with why the engine refused its install, if that is what the port hands back next.
     pub fn refused(&mut self, id: UnitId) -> Option<(Unit, SeatRefusal)> {
-        if !self.rx.peek().is_ok_and(|b| b.id == id && b.refused.is_some()) {
+        if !self.rx.peek().is_ok_and(|b| b.id == id && matches!(b.left, Left::Refused(_))) {
             return None;
         }
         let back = self.rx.pop().ok()?;
-        back.refused.map(|why| (back.unit, why))
+        match back.left {
+            Left::Refused(why) => Some((back.unit, why)),
+            _ => None,
+        }
     }
 }
 
@@ -301,6 +326,8 @@ fn slot_channel() -> (SlotPort, SlotEnd) {
 /// first `len` exactly while it is in use (holding a unit, withdrawn, or leaving).
 struct Seat {
     id: UnitId,
+    /// The install token this seat's unit arrived with ([`SlotPort::install_at`]).
+    token: InstallToken,
     unit: Option<Unit>,
     /// Read once, at install; a withdrawn seat keeps its unit's.
     info: UnitInfo,
@@ -310,6 +337,9 @@ struct Seat {
     engaged: bool,
     /// The seat leaves once `fade` reaches its input; it counts in no index or sum meanwhile.
     removing: bool,
+    /// Marked leaving by [`Rack::evict`]: keeps [`Left::Evicted`] even if a `stop` unwinds and a later
+    /// `service_idle` finishes it.
+    evicting: bool,
     /// The bypass crossfade: frames into the delayed input (0) ↔ the unit's output (n); `wet_on` is the
     /// end it heads for (off while the seat bypasses a unit that does not bypass itself, or has none).
     wet: u32,
@@ -318,9 +348,9 @@ struct Seat {
     bypassed: bool,
     /// The unit leaves once `wet` reaches the delayed input; the seat stays.
     withdrawing: bool,
-    /// A replaced unit (its id and its bypass), crossfaded out over `swap` (0 old ↔ n new) and handed
-    /// back once it ends.
-    outgoing: Option<(UnitId, Unit, bool)>,
+    /// A replaced unit (its id, its install token, the unit and its bypass), crossfaded out over `swap`
+    /// (0 old ↔ n new) and handed back once it ends.
+    outgoing: Option<(UnitId, InstallToken, Unit, bool)>,
     swap: u32,
     /// The replaced unit's latency and where its bypass crossfade stood when it was replaced: what it
     /// sounds while it crossfades out.
@@ -341,6 +371,9 @@ struct Seat {
     line: Vec<Pair>,
     line_at: usize,
     filled: usize,
+    /// Owed [`Event::UnitParam`] answers for this seat (one per [`UnitParam`]): the latest applied value
+    /// and its frame when the event ring has not taken it yet.
+    params_owed: [Option<(Frame, f64)>; UnitParam::COUNT],
 }
 
 impl Seat {
@@ -388,7 +421,8 @@ struct Taken {
     /// unit that panicked there is never asked again).
     info: Option<UnitInfo>,
     tried: bool,
-    /// Answered already (`Waiting`): it applies with no answer of its own.
+    /// Answered `Waiting` already: its ticket was answered, and it still owes its terminal [`Event::Seat`]
+    /// (`Applied` or `Refused`) when the hold ends.
     answered: bool,
 }
 
@@ -602,7 +636,7 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
                 }
             }
         }
-        if let Some((_, old, _)) = seat.outgoing.as_mut() {
+        if let Some((_, _, old, _)) = seat.outgoing.as_mut() {
             let [ol, or] = &mut seat.old;
             unit_events(&mut seat.ev, &mut seat.old_held, events, false);
             let old_len = left(n - seat.swap, !seat.ev.is_empty());
@@ -758,7 +792,7 @@ impl Slot {
     /// ring.
     fn can_take(&self) -> bool {
         let Ok(msg) = self.end.rx.peek() else { return false };
-        self.room(2) && (!matches!(msg, SlotMsg::Install { .. }) || self.end.tx.slots() > self.units())
+        self.room(3) && (!matches!(msg, SlotMsg::Install { .. }) || self.end.tx.slots() > self.units())
     }
 
     fn queue(&mut self, kind: SlotEventKind, offset: u32, dropped: &mut u64) {
@@ -778,10 +812,11 @@ impl Slot {
         self.notes = [0; 2];
     }
 
-    /// The places kept among the owed: a taken message's answer and chain (its chain alone once it
-    /// answered `Waiting`), a move's answer and chain for its reorder, and an eviction's chain.
+    /// The places kept among the owed: a taken message's answers and chain (`Waiting` + terminal answer
+    /// + chain = 3 before `Waiting`; terminal answer + chain = 2 once it answered `Waiting`), a move's
+    /// answer and chain for its reorder, and an eviction's chain.
     fn kept(&self) -> usize {
-        let taken = self.taken.as_ref().map_or(0, |t| if t.answered { 1 } else { 2 });
+        let taken = self.taken.as_ref().map_or(0, |t| if t.answered { 2 } else { 3 });
         taken + 2 * self.reorder.is_some() as usize + 1
     }
 
@@ -821,22 +856,25 @@ impl Slot {
         (len as u8, seats)
     }
 
-    /// The seat at `k` leaves: its unit stopped while the seat still holds it, then handed back, and the
-    /// seats after it close up. A `stop` that panics unwinds with the unit left in its seat, for the
-    /// owner's eviction (or the engine's drop, off the audio thread).
-    fn finish_removal(&mut self, k: usize, errors: &mut u64) {
+    /// The seat at `k` leaves: its unit stopped while the seat still holds it, then handed back with
+    /// `left` (`Left::Removed` or `Left::Evicted`), and the seats after it close up. A `stop` that panics
+    /// unwinds with the unit left in its seat, for the owner's eviction (or the engine's drop, off the audio thread).
+    fn finish_removal(&mut self, k: usize, left: Left, errors: &mut u64) {
         if let Some(unit) = self.seats[k].unit.as_mut() {
             unit.stop();
         }
         let seat = &mut self.seats[k];
+        let left = if seat.evicting { Left::Evicted } else { left };
         if let Some(unit) = seat.unit.take() {
-            let (id, bypassed) = (seat.id, seat.bypassed);
-            self.give_back(Back { id, unit, refused: None, bypassed }, errors);
+            let (id, token, bypassed) = (seat.id, seat.token, seat.bypassed);
+            self.give_back(Back { id, token, unit, bypassed, left }, errors);
         }
         let seat = &mut self.seats[k];
         seat.removing = false;
+        seat.evicting = false;
         seat.engaged = false;
         seat.fade = 0;
+        seat.params_owed = [None; UnitParam::COUNT];
         self.seats[k..self.len].rotate_left(1);
         self.len -= 1;
         if self.len == 0 {
@@ -854,28 +892,28 @@ impl Slot {
         let seat = &mut self.seats[k];
         seat.withdrawing = false;
         if let Some(unit) = seat.unit.take() {
-            let (id, bypassed) = (seat.id, seat.bypassed);
-            self.give_back(Back { id, unit, refused: None, bypassed }, errors);
+            let (id, token, bypassed) = (seat.id, seat.token, seat.bypassed);
+            self.give_back(Back { id, token, unit, bypassed, left: Left::Withdrawn }, errors);
         }
     }
 
     /// The seat at `k`'s replaced unit leaves (the crossfade reached the new one): stopped, handed back.
     fn finish_swap(&mut self, k: usize, errors: &mut u64) {
-        if let Some((_, old, _)) = self.seats[k].outgoing.as_mut() {
+        if let Some((_, _, old, _)) = self.seats[k].outgoing.as_mut() {
             old.stop();
         }
-        if let Some((id, unit, bypassed)) = self.seats[k].outgoing.take() {
-            self.give_back(Back { id, unit, refused: None, bypassed }, errors);
+        if let Some((id, token, unit, bypassed)) = self.seats[k].outgoing.take() {
+            self.give_back(Back { id, token, unit, bypassed, left: Left::Replaced }, errors);
         }
     }
 
     /// After a render call (or at once, idle): every transition that reached its end finishes.
-    fn finish(&mut self, n: u32, errors: &mut u64) {
+    fn finish(&mut self, n: u32, removal_left: Left, errors: &mut u64) {
         let mut k = 0;
         while k < self.len {
             let seat = &self.seats[k];
             if seat.removing && seat.fade == 0 {
-                self.finish_removal(k, errors);
+                self.finish_removal(k, removal_left, errors);
                 continue;
             }
             if seat.withdrawing && seat.wet == 0 {
@@ -903,7 +941,7 @@ impl Slot {
                     }
                 }
             }
-            if let Some((_, old, _)) = seat.outgoing.as_mut() {
+            if let Some((_, _, old, _)) = seat.outgoing.as_mut() {
                 unit_events(&mut seat.ev, &mut seat.old_held, &[], false);
                 if !seat.ev.is_empty() {
                     old.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
@@ -914,7 +952,7 @@ impl Slot {
 
     /// No device runs: every transition under way ends at once (a move's reorder, a seat's leaving, a
     /// withdrawal, a replacement), the leaving units flushed, stopped and handed back.
-    fn finish_idle(&mut self, cx: &UnitCx, zeros: &[f32], n: u32, errors: &mut u64) {
+    fn finish_idle(&mut self, cx: &UnitCx, zeros: &[f32], n: u32, removal_left: Left, errors: &mut u64) {
         if let Some((id, to)) = self.reorder.take() {
             self.apply_reorder(id, to);
             let summary = self.summary();
@@ -933,7 +971,7 @@ impl Slot {
             }
         }
         self.flush(cx, zeros);
-        self.finish(n, errors);
+        self.finish(n, removal_left, errors);
     }
 
     /// A move's reorder due by `frame` (its dip's silence on or before it) applies on `frame`, its answer
@@ -998,8 +1036,10 @@ pub(crate) struct Rack {
     offer_first: usize,
     pub(crate) events_dropped: u64,
     pub(crate) protocol_errors: u64,
-    /// Bypass commands naming an id no seat holds.
+    /// Unit commands naming an id no seat holds.
     pub(crate) unit_commands_dropped: u64,
+    /// Param commands whose unit answered `None`.
+    pub(crate) unit_params_dropped: u64,
 }
 
 impl Rack {
@@ -1019,11 +1059,13 @@ impl Rack {
                 seats: (0..MAX_UNITS)
                     .map(|_| Seat {
                         id: 0,
+                        token: 0,
                         unit: None,
                         info: UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 },
                         fade: 0,
                         engaged: false,
                         removing: false,
+                        evicting: false,
                         wet: 0,
                         wet_on: false,
                         bypassed: false,
@@ -1040,6 +1082,7 @@ impl Rack {
                         line: vec![[0.0; 2]; max_latency as usize + 1],
                         line_at: 0,
                         filled: 0,
+                        params_owed: [None; UnitParam::COUNT],
                     })
                     .collect(),
                 len: 0,
@@ -1089,6 +1132,7 @@ impl Rack {
             events_dropped: 0,
             protocol_errors: 0,
             unit_commands_dropped: 0,
+            unit_params_dropped: 0,
         };
         (rack, ports)
     }
@@ -1106,7 +1150,8 @@ impl Rack {
     }
 
     /// Apply the ports' messages at `frame`, a block start (or, idle, the frame the next block would
-    /// start at), each answered once. `engaged` installs without a fade (nothing has sounded yet, or no
+    /// start at), each answered by an [`Event::Seat`] (a held message gets `Waiting`, then a second
+    /// `Event::Seat` when the hold ends). `engaged` installs without a fade (nothing has sounded yet, or no
     /// device runs); `fade` off finishes every transition at once; `hold`: a capture holds the
     /// alignment, so an edit of a chain's sum or role waits.
     fn service(&mut self, frame: Frame, engaged: bool, fade: bool, hold: bool) {
@@ -1121,7 +1166,7 @@ impl Rack {
             loop {
                 if !fade {
                     let (s, zeros, errors) = (&mut self.slots[i], &self.zeros, &mut self.protocol_errors);
-                    s.finish_idle(&cx, zeros, n, errors);
+                    s.finish_idle(&cx, zeros, n, Left::Removed, errors);
                 }
                 if self.slots[i].busy() {
                     break;
@@ -1158,8 +1203,8 @@ impl Rack {
                     },
                     Verdict::Refuse(why) => {
                         let s = &mut self.slots[i];
-                        if let Some(Taken { msg: SlotMsg::Install { id, bypassed, unit, .. }, .. }) = s.taken.take() {
-                            s.give_back(Back { id, unit, refused: Some(why), bypassed }, &mut self.protocol_errors);
+                        if let Some(Taken { msg: SlotMsg::Install { id, token, bypassed, unit, .. }, .. }) = s.taken.take() {
+                            s.give_back(Back { id, token, unit, bypassed, left: Left::Refused(why) }, &mut self.protocol_errors);
                         }
                         (SeatOutcome::Refused(why), false)
                     }
@@ -1168,10 +1213,10 @@ impl Rack {
                 let s = &mut self.slots[i];
                 s.taken = None;
                 s.end.holding.store(false, Release);
-                // A message answered `Waiting` that is refused after all (its unit panicked in its
-                // install-time `set_bypass`) gets that refusal as its terminal answer, in the place kept
-                // for its chain (it changed none); its ticket was answered with the wait.
-                if (!answered && !matches!(outcome, SeatOutcome::Waiting)) || (answered && matches!(outcome, SeatOutcome::Refused(_))) {
+                // Every non-Waiting outcome gets an `Event::Seat` — including a held (`Waiting`)
+                // message's terminal `Applied` or `Refused` when the hold ends (its ticket was already
+                // answered with `Waiting`). A move that dips is answered on its reorder.
+                if !matches!(outcome, SeatOutcome::Waiting) {
                     s.answer(Answer { frame, unit, op, outcome }, &mut self.protocol_errors);
                     if !answered {
                         s.end.taken.fetch_add(1, Release);
@@ -1183,7 +1228,7 @@ impl Rack {
             }
             if !fade {
                 let (s, zeros, errors) = (&mut self.slots[i], &self.zeros, &mut self.protocol_errors);
-                s.finish_idle(&cx, zeros, n, errors);
+                s.finish_idle(&cx, zeros, n, Left::Removed, errors);
             }
         }
     }
@@ -1309,7 +1354,7 @@ impl Rack {
         }
         let Some(t) = s.taken.take() else { return Some(false) };
         match t.msg {
-            SlotMsg::Install { id, at, replaces, unit, .. } => {
+            SlotMsg::Install { id, token, at, replaces, unit, .. } => {
                 let (bypassed, handled) = install_bypass.unwrap_or_default();
                 let info = t.info.unwrap_or(UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 });
                 let into = replaces.and_then(|r| s.find(r)).or_else(|| s.find(id));
@@ -1319,7 +1364,7 @@ impl Rack {
                         // the keys it holds with it (released as it leaves); the new one holds none.
                         let seat = &mut s.seats[k];
                         if let Some(old) = seat.unit.take() {
-                            seat.outgoing = Some((seat.id, old, seat.bypassed));
+                            seat.outgoing = Some((seat.id, seat.token, old, seat.bypassed));
                             seat.swap = if fade { 0 } else { n };
                             (seat.old_latency, seat.old_wet) = (seat.info.latency as usize, seat.wet);
                             seat.old_held = seat.held;
@@ -1331,7 +1376,11 @@ impl Rack {
                         if seat.info.source != info.source {
                             seat.filled = 0;
                         }
-                        (seat.id, seat.info, seat.unit) = (id, info, Some(unit));
+                        let same_id = seat.id == id;
+                        (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
+                        if !same_id {
+                            seat.params_owed = [None; UnitParam::COUNT];
+                        }
                         k
                     }
                     None => {
@@ -1343,10 +1392,11 @@ impl Rack {
                             s.events.clear();
                         }
                         let seat = &mut s.seats[k];
-                        (seat.id, seat.info, seat.unit) = (id, info, Some(unit));
-                        (seat.removing, seat.engaged, seat.fade) = (false, true, if engaged { n } else { 0 });
+                        (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
+                        (seat.removing, seat.evicting, seat.engaged, seat.fade) = (false, false, true, if engaged { n } else { 0 });
                         (seat.withdrawing, seat.outgoing, seat.swap) = (false, None, n);
                         (seat.line_at, seat.filled, seat.held) = (0, 0, [0; 2]);
+                        seat.params_owed = [None; UnitParam::COUNT];
                         s.len += 1;
                         s.seats[p..=k].rotate_right(1);
                         p
@@ -1439,6 +1489,48 @@ impl Rack {
         s.owe_chain(now, &mut self.protocol_errors);
     }
 
+    /// Apply `param` = `value` to unit `id` at `now` through [`UnitProcessor::set_param`]. Answered by
+    /// [`Event::UnitParam`] with the applied value, kept per seat and param until the event ring takes
+    /// it (a later value for the same param overwrites it). An unseated id (or a withdrawing/withdrawn
+    /// seat) is dropped and counted on `unit_commands_dropped`; a param the unit answers `None` to is
+    /// dropped and counted on `unit_params_dropped`.
+    pub(crate) fn set_unit_param(&mut self, id: UnitId, param: UnitParam, value: f64, now: Frame) {
+        let cx = self.unit_cx(now);
+        let found = (0..SLOT_COUNT).find_map(|i| self.slots[i].find(id).map(|k| (i, k)));
+        let Some((i, k)) = found else {
+            self.unit_commands_dropped += 1;
+            return;
+        };
+        let seat = &mut self.slots[i].seats[k];
+        if seat.withdrawing {
+            self.unit_commands_dropped += 1;
+            return;
+        }
+        let Some(unit) = seat.unit.as_mut() else {
+            self.unit_commands_dropped += 1;
+            return;
+        };
+        match unit.set_param(&cx, param, value) {
+            Some(applied) => seat.params_owed[param.index()] = Some((now, applied)),
+            None => self.unit_params_dropped += 1,
+        }
+    }
+
+    /// The owed [`Event::UnitParam`] answers: the last value each active seat's unit applied that the
+    /// event ring has not taken yet. Not for the audio thread.
+    pub(crate) fn unsent_unit_params(&self) -> impl Iterator<Item = (UnitId, UnitParam, f64)> + '_ {
+        self.slots.iter().flat_map(|s| {
+            s.chain().flat_map(move |k| {
+                let seat = &s.seats[k];
+                let unit = seat.id;
+                UnitParam::ALL
+                    .into_iter()
+                    .zip(seat.params_owed.iter())
+                    .filter_map(move |(param, cell)| cell.map(|(_, value)| (unit, param, value)))
+            })
+        })
+    }
+
     /// Whether a bypass command on unit `id` can apply now: its chain has a place among what its slot
     /// owes (an id no seat holds needs none: it is dropped). One that cannot waits, with every bypass
     /// command sent after it (the engine's table), so none is folded or lost.
@@ -1481,7 +1573,25 @@ impl Rack {
                 })
                 .count();
             s.owed.drain(..taken);
-            if taken > 0 {
+            let mut moved = taken > 0;
+            if s.owed.is_empty() {
+                'params: for seat in &mut s.seats[..s.len] {
+                    if seat.removing {
+                        continue;
+                    }
+                    let unit = seat.id;
+                    for (param, cell) in UnitParam::ALL.into_iter().zip(seat.params_owed.iter_mut()) {
+                        let Some((frame, value)) = *cell else { continue };
+                        if feed.push(Event::UnitParam { frame, unit, param, value }) {
+                            *cell = None;
+                            moved = true;
+                        } else {
+                            break 'params;
+                        }
+                    }
+                }
+            }
+            if moved {
                 self.offer_first = (i + 1) % SLOT_COUNT;
             }
         }
@@ -1527,10 +1637,15 @@ impl Rack {
 
     /// Stop every unit and hand it back with its bypass (a sample-rate change: the host re-activates
     /// and reinstalls), with every install still waiting on a port that the return ring has room for,
-    /// however full what its slot owes the event ring is: one that found no place for its answer goes
-    /// back unstarted and unanswered (its return is its answer; its ticket is answered), and the
-    /// messages ahead of it leave with no effect (the slot seats nothing now). The host reads its
-    /// returns and evicts again until none comes back, so nothing is left for the engine's drop.
+    /// however full what its slot owes the event ring is. It services the ports idle first, so any
+    /// queued or held install with reply room applies before the eviction: a same-id reload queued
+    /// behind its seat comes back as two boxes, the old [`Left::Replaced`] and the new
+    /// [`Left::Evicted`]; only an install that found no place for its answer comes back [`Left::Unsent`],
+    /// unstarted and unanswered (its return is its answer; its ticket is answered), and the messages
+    /// ahead of it leave with no effect (the slot seats nothing now). The device side settles by these
+    /// labels (`Evicted`: reinstall; `Replaced`: tear down; `Unsent`: submit again), so both paths end
+    /// with the reload seated in the new engine. The host reads its returns and evicts again until none
+    /// comes back, so nothing is left for the engine's drop.
     pub(crate) fn evict(&mut self, frame: Frame) {
         self.service_idle(frame, false);
         let (cx, n) = (self.unit_cx(frame), self.fade_frames);
@@ -1540,17 +1655,18 @@ impl Rack {
                 s.edit = s.edit.max(n as Frame);
                 for seat in s.seats[..s.len].iter_mut() {
                     seat.removing = true;
+                    seat.evicting = true;
                     seat.engaged = false;
                     seat.fade = 0;
                 }
-                s.finish_idle(&cx, &self.zeros, n, &mut self.protocol_errors);
+                s.finish_idle(&cx, &self.zeros, n, Left::Evicted, &mut self.protocol_errors);
                 s.owe_chain(frame, &mut self.protocol_errors);
             }
             // Each unit's return is published before its ticket is answered, so a host that sees the
             // answer finds the unit on the port.
             if let Some(t) = s.taken.take() {
-                if let SlotMsg::Install { id, bypassed, unit, .. } = t.msg {
-                    s.give_back(Back { id, unit, refused: None, bypassed }, &mut self.protocol_errors);
+                if let SlotMsg::Install { id, token, bypassed, unit, .. } = t.msg {
+                    s.give_back(Back { id, token, unit, bypassed, left: Left::Unsent }, &mut self.protocol_errors);
                 }
                 if !t.answered {
                     s.end.taken.fetch_add(1, Release);
@@ -1562,8 +1678,8 @@ impl Rack {
                     break;
                 }
                 let Ok(msg) = s.end.rx.pop() else { break };
-                if let SlotMsg::Install { id, bypassed, unit, .. } = msg {
-                    s.give_back(Back { id, unit, refused: None, bypassed }, &mut self.protocol_errors);
+                if let SlotMsg::Install { id, token, bypassed, unit, .. } = msg {
+                    s.give_back(Back { id, token, unit, bypassed, left: Left::Unsent }, &mut self.protocol_errors);
                 }
                 s.end.taken.fetch_add(1, Release);
             }
@@ -1855,7 +1971,7 @@ impl Rack {
                     s.dip = None;
                 }
             }
-            s.finish(fade_frames, &mut self.protocol_errors);
+            s.finish(fade_frames, Left::Removed, &mut self.protocol_errors);
         }
         for (r, (&l, &rr)) in record.iter_mut().zip(al_l.iter().zip(al_r.iter())) {
             r[0] += l;

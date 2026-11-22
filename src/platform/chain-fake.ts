@@ -374,6 +374,8 @@ interface Unit {
   noSeat?: true;
   /** A reload in flight: the plate reads `loading` (then `waiting`), the old instance plays on, applied. */
   reloading?: true;
+  /** A held add removed while it waits: `leaving`, but not seated yet, so not in the sum or the role. */
+  unseated?: true;
   /** The plugin instance it runs (`inst`), for D29's affinity; the state its tone loaded, if any. */
   inst: number;
   tone: Uint8Array | null;
@@ -386,7 +388,8 @@ interface Held {
   apply(): void;
   /** Settle it refused: the chain it waited in was replaced (a reset frame carrying `chains`). */
   drop(reason: string): void;
-  /** A later removal of its unit withdraws it (an add leaves without a trace; a reload is not taken). */
+  /** A later removal of its unit withdraws it (a reload is not taken). A held add has none: the engine's
+   * port is ordered, so the install applies (the unit seats), then the queued removal. */
   cancel?(): void;
 }
 /** A call's answer that settles later than its turn on the slot (a held edit): the slot's next call
@@ -466,9 +469,9 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
   /** In the chain's sum and role: seated, leaving, parked (a parked seat keeps its latency, unit contract
    * §3) or reloading (the old instance plays until its replacement lands, §3). */
   const applied = (u: Unit) =>
-    !u.noSeat && (u.reloading === true || u.state.state === 'seated' || u.state.state === 'leaving' || u.state.state === 'failed');
+    !u.noSeat && !u.unseated && (u.reloading === true || u.state.state === 'seated' || u.state.state === 'leaving' || u.state.state === 'failed');
   /** Has a seat that sounds: what the batch reaches and the meters cover (unit contract §2 "seated"). */
-  const sounding = (u: Unit) => !u.noSeat && (u.reloading === true || u.state.state === 'seated' || u.state.state === 'leaving');
+  const sounding = (u: Unit) => !u.noSeat && !u.unseated && (u.reloading === true || u.state.state === 'seated' || u.state.state === 'leaving');
   const capturing = () => captureSeam || deps.capturing();
   const toneKey = (slot: Slot, p: PluginRef) => `${slot}|${refName(p)}`;
 
@@ -737,11 +740,16 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
         const kept = appliedStates(others().filter((o) => !(replaces && o.state.source)));
         const after = alignment(u.state.source ? [u.state, ...kept] : [...kept, u.state]);
         const seat = () => {
-          if (!chains[slot].includes(u)) return; // removed while it waited
+          if (!chains[slot].includes(u)) return;
+          const leaving = u.unseated;
           place(u);
+          // Removed while it waited: it seats first, its queued removal applies right behind.
+          if (leaving) {
+            delete u.unseated;
+            u.state.state = 'leaving';
+          }
         };
-        const cancel = () => drop(u);
-        if (heldOrNow(slot, { unit, kind: 'add', apply: seat, drop: () => {}, cancel }, before !== after)) {
+        if (heldOrNow(slot, { unit, kind: 'add', apply: seat, drop: () => {} }, before !== after)) {
           u.state.state = 'waiting';
           emitChains();
           return 'waiting';
@@ -768,14 +776,11 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
         if (g !== gen) return refuse(RESET);
         const u = find(unit);
         if (!u || u.state.state === 'leaving') return;
-        // A held edit of this unit: an add that never applied leaves without a trace; a reload is not taken.
+        // A held reload is not taken. A held add is not withdrawn either: the removal queues behind it.
         const mine = held[slot].filter((h) => h.unit === unit && h.cancel);
         held[slot] = held[slot].filter((h) => !mine.includes(h));
         mine.forEach((h) => h.cancel?.());
-        if (mine.some((h) => h.kind === 'add')) {
-          emitChains();
-          return;
-        }
+        if (u.state.state === 'waiting' && !u.reloading) u.unseated = true;
         const before = alignment(appliedStates(chains[slot]));
         const after = alignment(appliedStates(chains[slot].filter((o) => o !== u)));
         u.state.state = 'leaving';

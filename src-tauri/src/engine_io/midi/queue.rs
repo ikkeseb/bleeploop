@@ -36,11 +36,13 @@
 //!   paused for a rebuild, attacks, actions and HOLD presses are refused (the router records no owner);
 //!   releases, the target and the wheels still go in (every release passes, controller state is kept).
 //! - **A rebuild empties the queue** (a rebuild needs no WebView: `pause`, `rebuild`, then `resume` once
-//!   the settings replay has run): the old engine's attacks, actions, HOLD presses and their releases
-//!   are discarded (the new engine has no voice or capture for them to end; an old release would end
-//!   the new engine's note), and the latest target and wheels, queued or waiting, come back as a
-//!   [`Fold`] for the settings memory, so they reach the new engine through its replay alone. Batches
-//!   are built and admitted under the lock the rebuild takes, so none spans two engines.
+//!   the settings replay has run): the old engine's attacks, non-unit actions, HOLD presses and their
+//!   releases are discarded (the new engine has no voice or capture for them to end; an old release
+//!   would end the new engine's note). Queued unit commands (`Command::unit().is_some()`) stay in
+//!   queue order for the host's unit-command gate, and the latest target and wheels, queued or
+//!   waiting, come back as a [`Fold`] for the settings memory, so they reach the new engine through
+//!   its replay alone. Batches are built and admitted under the lock the rebuild takes, so none spans
+//!   two engines.
 
 use std::collections::VecDeque;
 
@@ -489,16 +491,20 @@ impl Queue {
         self.paused = true;
     }
 
-    /// The engine was replaced: empty the queue, discarding the old engine's one-shots and their
-    /// releases, and hand back the latest target and wheels, queued or waiting, for the settings memory.
-    pub fn rebuild(&mut self) -> Fold {
+    /// The engine was replaced: empty the queue, discarding the old engine's non-unit one-shots and
+    /// their releases, and hand back the latest target and wheels (queued or waiting, as a [`Fold`] for
+    /// the settings memory) beside every queued unit command in queue order (for the host's
+    /// unit-command gate).
+    pub fn rebuild(&mut self) -> (Fold, Vec<Command>) {
         let mut fold = Fold::default();
+        let mut units = Vec::new();
         let mut discarded = 0;
         for e in self.entries.drain(..) {
             match e.command {
                 Command::SelectInstrument(target) => fold.target = Some(target),
                 Command::PitchBend(v) => fold.pitch_bend = Some(v),
                 Command::Modulation(v) => fold.modulation = Some(v),
+                c if c.unit().is_some() => units.push(c),
                 _ => discarded += 1,
             }
         }
@@ -508,7 +514,7 @@ impl Queue {
         self.notes = Reserved::default();
         self.holds = Reserved::default();
         self.counters.discarded += discarded;
-        fold
+        (fold, units)
     }
 
     /// The settings replay has run: admission and draining go on.
@@ -520,7 +526,7 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lf_engine::Instrument;
+    use lf_engine::{InputSendParam, Instrument, UnitParam};
 
     const LEAD: NoteTarget = NoteTarget::Builtin(Instrument::Lead);
     const PAD: NoteTarget = NoteTarget::Builtin(Instrument::Pad);
@@ -764,8 +770,9 @@ mod tests {
         assert_eq!(admit(&mut q, &[Command::NoteOn(61, 0.5)]), Err(Refused::Paused));
         assert_eq!(admit(&mut q, &[Command::Action(Action::Release(0))]), Ok(()), "a release passes");
         assert_eq!(q.drain(&mut |_| panic!("nothing drains while paused")), Drained { sent: 0, left: 8, blocked: false });
-        let fold = q.rebuild();
+        let (fold, units) = q.rebuild();
         assert_eq!(fold, Fold { target: Some(PAD), pitch_bend: Some(0.5), modulation: Some(0.25) });
+        assert!(units.is_empty());
         assert_eq!(fold.commands().collect::<Vec<_>>(), [Command::SelectInstrument(PAD), Command::PitchBend(0.5), Command::Modulation(0.25)]);
         assert_eq!(q.counters().discarded, 4, "NoteOn, Hold, NoteOff, Release");
         assert!(q.is_empty());
@@ -787,7 +794,29 @@ mod tests {
         fill(&mut q);
         admit(&mut q, &[Command::PitchBend(0.9)]).unwrap();
         q.pause();
-        assert_eq!(q.rebuild().pitch_bend, Some(0.9));
+        assert_eq!(q.rebuild().0.pitch_bend, Some(0.9));
+        assert!(q.is_empty());
+    }
+
+    // Unit commands survive a rebuild in queue order for the host's gate, without being counted as
+    // discarded; only the old engine's one-shots (notes, HOLD presses) are discarded.
+    #[test]
+    fn a_rebuild_keeps_unit_commands_in_order_and_discards_only_old_one_shots() {
+        let mut q = Queue::new();
+        let bypass = Command::SetUnitBypass(7, true);
+        let toggle = Command::ActionOn(1, Action::ToggleUnit(9));
+        let param = Command::SetUnitParam(7, UnitParam::Send(InputSendParam::EchoLevel), 0.5);
+        admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
+        admit(&mut q, &[bypass]).unwrap();
+        admit(&mut q, &[Command::Action(Action::Hold(0))]).unwrap();
+        admit(&mut q, &[toggle]).unwrap();
+        admit(&mut q, &[param]).unwrap();
+        admit(&mut q, &[Command::PitchBend(0.5)]).unwrap();
+        q.pause();
+        let (fold, units) = q.rebuild();
+        assert_eq!(fold, Fold { target: None, pitch_bend: Some(0.5), modulation: None });
+        assert_eq!(units, [bypass, toggle, param]);
+        assert_eq!(q.counters().discarded, 2, "only NoteOn and Hold are discarded");
         assert!(q.is_empty());
     }
 }
@@ -1180,8 +1209,9 @@ mod pipeline {
         // The rebuild begins: an attack now is refused and recorded nowhere.
         rig.queue.pause();
         assert_eq!(rig.input(|r, o| r.note_on(&b, 65, 100, o)), Err(Refused::Paused));
-        let fold = rig.queue.rebuild();
+        let (fold, units) = rig.queue.rebuild();
         assert_eq!(fold, Fold { target: None, pitch_bend: Some(0.5), modulation: None });
+        assert!(units.is_empty());
         assert_eq!(rig.queue.counters().discarded, 2, "the queued attack and HOLD press");
         // The settings replay hands the new engine the remembered target and the folded wheel, once.
         rig.engine = Engine::default();

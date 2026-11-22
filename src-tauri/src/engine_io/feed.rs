@@ -1,8 +1,11 @@
 //! OWNS: the feed (its frame: `wire.rs`): what the UI reads back from the
 //! engine, built on its own non-RT thread about 60 times a second ([`FeedFrame`]). Each tick drains the
 //! engine's events and the device's, and reads the device status, the clock anchor, the input meter,
-//! each plugin slot's live flag and the lanes' waveforms; a frame goes out when any of them changed, and at least every `REFRESH`
-//! while a device runs (the UI extrapolates its playhead from the anchor between frames). Never PCM.
+//! each plugin slot's live flag, each slot's chain snapshot (`chains`, from the same drain as the
+//! events: carried on resets and when its revision and content moved, reporting each carrying frame's
+//! `seq` back via `chain_told`) and the lanes' waveforms; a frame goes out when any of them changed,
+//! and at least every `REFRESH` while a device runs (the UI extrapolates its playhead from the
+//! anchor between frames). Never PCM.
 //!
 //! The scope taps (`lf_engine::scope`) are drained every tick whatever the frame carries, held or not:
 //! their ring left to fill would make the next batch a replay of seconds of old sound as a fast light
@@ -49,8 +52,8 @@
 //! while a lane is armed or its arm is owed, then this tick's events; the peaks changed since the last frame sent; scope
 //! with `gap`. The page applies it as it would have live (`applyFrameNow`,
 //! `src/ui/state/engine-store.ts`), so overlays, revisions and the clear token survive. A RESET instead
-//! when the subscriber is new, another engine came meanwhile (latched by the held tick) or the stream
-//! passed `WITHHELD_EVENTS`; every reset carries the notices kept meanwhile (`TakeRejected`,
+//! when the subscriber is new, another engine came meanwhile (latched by the held tick), the stale-feed
+//! stash overflowed (`stash_lost`) or the stream passed `WITHHELD_EVENTS`; every reset carries the notices kept meanwhile (`TakeRejected`,
 //! `PassDropped`, `Refused`, the newest `KEPT_NOTICES`), so a notice outlives another engine or an
 //! overflow. Late is still late: a catch-up's events read the page's state as it is when they arrive.
 //!
@@ -76,6 +79,7 @@ use lf_engine::scope::{ScopeBin, SCOPE_SOURCES};
 use lf_engine::tuner::{tuner_capacity, TunerFrame};
 use lf_engine::{Event, LaneInfo, LaneState, Overview, SLOT_COUNT, TRACK_COUNT};
 
+use super::chain::{ChainRev, ChainState};
 use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, TunerUpdate, WireCommand, WireEvent};
 use super::{DeviceEvent, DeviceStatus, EngineHost, FeedDrain};
 
@@ -154,6 +158,8 @@ pub(crate) struct Feed {
     meter: Option<Meter>,
     /// Each plugin slot's live flag as last sent (`Overview::slot_live`; all off with no engine).
     live: [bool; SLOT_COUNT],
+    /// Each slot's chain revision and snapshot as last sent (`None`: nothing sent yet).
+    chains_sent: Option<(u64, Arc<[ChainState; SLOT_COUNT]>)>,
     sent: Option<Instant>,
     drained: Vec<Event>,
     /// A hold, a full subscriber or nobody subscribed missed ticks: the next frame ends the stream.
@@ -162,6 +168,8 @@ pub(crate) struct Feed {
     overflowed: bool,
     /// Another engine arrived during an unsent tick: the next frame must reset.
     replaced: bool,
+    /// `Core::stash` overflowed while the feed was stale: the next frame must reset.
+    stash_lost: bool,
     /// Notices survive a reset even when its engine or the bounded stream no longer does.
     kept_notices: Vec<Event>,
     /// Each lane's waveform as last sent (`None`: nothing yet, or a reset since).
@@ -210,12 +218,14 @@ impl Feed {
             status: None,
             meter: None,
             live: [false; SLOT_COUNT],
+            chains_sent: None,
             sent: None,
             drained: Vec::with_capacity(256),
             withheld: false,
             withheld_events: Vec::new(),
             overflowed: false,
             replaced: false,
+            stash_lost: false,
             kept_notices: Vec::new(),
             drawn: [None; TRACK_COUNT],
             bins: Vec::new(),
@@ -234,15 +244,19 @@ impl Feed {
         }
     }
 
-    /// Drain the engine's events into the mirror. True when another engine replaced the one the
-    /// mirror followed: the UI must reset.
-    fn drain(&mut self) -> bool {
+    /// Drain the engine's events into the mirror. Returns whether another engine replaced the one
+    /// the mirror followed (the UI must reset), and the chain snapshot paired with that drain's
+    /// generation.
+    fn drain(&mut self) -> (bool, ChainRev) {
         self.drained.clear();
         self.columns.clear();
         self.tuner_frames.clear();
-        // The events and the taps in one acquisition, so this tick's columns and tuner frames are the
-        // engine whose events it took: a second drain could straddle a rebuild and mix the two.
-        let FeedDrain { gen, overview, scope_bin, rate } = self.host.drain_feed_taps(&mut self.drained, Some(&mut self.columns), Some(&mut self.tuner_frames));
+        // The events and the taps in one acquisition, so this tick's columns, tuner frames and
+        // chain snapshot are the engine whose events it took: a second drain could straddle a
+        // rebuild and mix the two.
+        let FeedDrain { gen, overview, scope_bin, rate, chains, stash_lost } =
+            self.host.drain_feed_taps(&mut self.drained, Some(&mut self.columns), Some(&mut self.tuner_frames));
+        self.stash_lost |= stash_lost;
         self.scope_bin = scope_bin;
         if self.gen != Some(gen) {
             self.overview = overview;
@@ -259,7 +273,7 @@ impl Feed {
             }
             self.tuner_epoch = None;
         }
-        self.update_mirror(gen)
+        (self.update_mirror(gen), chains)
     }
 
     /// Apply one drain without reading a device. A generation change drops the old engine's mirror.
@@ -338,10 +352,10 @@ impl Feed {
     }
 
     /// A held, withheld or unsubscribed tick drains the ring into the mirror and keeps the events
-    /// for its next frame. It leaves waveform dirty bits and last-sent status, live and meter alone.
+    /// for its next frame. It leaves waveform dirty bits and last-sent status, live, chains and meter alone.
     pub(crate) fn tick_held(&mut self) {
         self.host.publish_if_idle();
-        let replaced = self.drain();
+        let (replaced, _) = self.drain();
         self.replaced |= replaced;
         self.keep_drained();
         self.scope(false);
@@ -354,11 +368,12 @@ impl Feed {
 
     /// Read everything once; the frame to send, if anything changed or the anchor is due. `reset`: a
     /// new subscriber: the frame carries the whole state. An unsent stream ends with a catch-up,
-    /// unless another engine or an overflow requires a reset.
+    /// unless another engine, an overflow or a lost stash requires a reset.
     pub(crate) fn tick(&mut self, mut reset: bool) -> Option<FeedFrame> {
         // A stopped engine renders no block that would offer again what its full ring refused.
         self.host.publish_if_idle();
-        reset |= self.drain() || self.replaced || self.overflowed;
+        let (replaced, chain_rev) = self.drain();
+        reset |= replaced || self.replaced || self.overflowed || self.stash_lost;
         let catch_up = self.withheld && !reset;
         let mut device = std::mem::take(&mut self.held_device);
         device.extend(self.host.take_device_events());
@@ -376,6 +391,15 @@ impl Feed {
         let now_live: [bool; SLOT_COUNT] = std::array::from_fn(|s| self.overview.as_ref().is_some_and(|o| o.slot_live(s)));
         let live = (reset || now_live != self.live).then_some(now_live);
         self.live = now_live;
+        let chains_moved = match &self.chains_sent {
+            None => true,
+            Some((rev, prev)) => {
+                chain_rev.rev != *rev
+                    && !Arc::ptr_eq(&chain_rev.chains, prev)
+                    && *chain_rev.chains != **prev
+            }
+        };
+        let chains = (reset || chains_moved).then(|| (*chain_rev.chains).clone());
         let peaks = self.peaks(reset);
         // A reset carries no scope: the UI replaces its view with this frame, so the trace starts over.
         self.scope_gap |= catch_up;
@@ -383,8 +407,8 @@ impl Feed {
         // The tick that ends a held stretch, or a reset, reads no old input: it discards and starts over.
         let tuner = self.tuner(!reset && !catch_up);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
-        // A batch of columns or a tuner reading is itself a reason to send: a tick that built one never drops it.
-        if !(reset || catch_up || due || metered || live.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some() || tuner.is_some()) {
+        // A batch of columns, a tuner reading or a chain update is itself a reason to send: a tick that built one never drops it.
+        if !(reset || catch_up || due || metered || live.is_some() || chains.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some() || tuner.is_some()) {
             return None;
         }
         let events = if reset {
@@ -399,10 +423,17 @@ impl Feed {
         self.withheld_events.clear();
         self.overflowed = false;
         self.replaced = false;
+        self.stash_lost = false;
         self.kept_notices.clear();
         self.sent = Some(Instant::now());
+        let seq = self.seq;
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, catch_up, events, device, status, anchor, meter, live, peaks, scope, tuner, settings })
+        let frame = FeedFrame { seq, reset, catch_up, events, device, status, anchor, meter, live, chains, peaks, scope, tuner, settings };
+        if frame.chains.is_some() {
+            self.chains_sent = Some((chain_rev.rev, chain_rev.chains));
+            self.host.chain_told(chain_rev.rev, seq);
+        }
+        Some(frame)
     }
 
     /// Read this tick's tuner frames, oldest first, and keep the newest reading. `analyse` false — a tick
@@ -2264,5 +2295,222 @@ mod tests {
             });
             assert!(stopped.recv_timeout(PATIENCE).is_ok(), "a withheld feed thread still stops");
         });
+    }
+
+    /// A pass-through plugin unit with configurable latency for feed chain tests.
+    struct PassUnit(Frame);
+
+    impl lf_engine::UnitProcessor for PassUnit {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: self.0 }
+        }
+        fn process(&mut self, _cx: &lf_engine::UnitCx, input: [&[f32]; 2], _events: &[lf_engine::SlotEvent], out: [&mut [f32]; 2]) {
+            for (o, i) in out.into_iter().zip(input) {
+                o.copy_from_slice(i);
+            }
+        }
+        fn stop(&mut self) {}
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    fn empty_chains() -> [super::super::chain::ChainState; SLOT_COUNT] {
+        std::array::from_fn(|_| super::super::chain::ChainState { units: Vec::new(), latency: 0, held: false })
+    }
+
+    fn test_plugin_ref(id: &str) -> super::super::chain::PluginRef {
+        super::super::chain::PluginRef { format: "clap".into(), path: format!("C:\\plugins\\{id}.clap"), id: id.into() }
+    }
+
+    #[test]
+    fn a_reset_carries_empty_chains_and_an_unchanged_model_sends_none() {
+        let device = engine();
+        let mut feed = Feed::new(device.host().clone());
+        let (mut sub, sent) = subscriber();
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        {
+            let frames = sent.lock().unwrap();
+            assert_eq!(frames.len(), 1);
+            assert!(frames[0].reset);
+            assert_eq!(frames[0].chains, Some(empty_chains()));
+        }
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 1, "nothing changed: no frame");
+    }
+
+    #[test]
+    fn a_reserved_unit_sends_a_chain_frame_and_reports_told_seq() {
+        use super::super::chain::PlateState;
+        use super::super::unit_host::Spec;
+
+        let device = engine();
+        let host = device.host().clone();
+        let mut feed = Feed::new(host.clone());
+        let (mut sub, sent) = subscriber();
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        let u = host.unit(0, 10, Spec::Plugin(test_plugin_ref("a")), 0, false).unwrap();
+        assert_eq!(host.told(10), None);
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        let seq = {
+            let frames = sent.lock().unwrap();
+            assert_eq!(frames.len(), 2, "the reserved plate alone causes a frame");
+            let frame = &frames[1];
+            assert!(!frame.reset && !frame.catch_up && frame.events.is_empty());
+            let chains = frame.chains.as_ref().expect("frame carries chains");
+            assert_eq!(chains[0].units.len(), 1);
+            assert_eq!(chains[0].units[0].id, 10);
+            assert_eq!(chains[0].units[0].state, PlateState::Loading);
+            assert!(chains[1].units.is_empty());
+            frame.seq
+        };
+        assert_eq!(host.told(10), Some(seq));
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 2, "unchanged tick sends no second chain frame");
+        u.release();
+    }
+
+    #[test]
+    fn a_chain_snapshot_never_rides_another_generations_frame() {
+        use super::super::unit_host::{Activated, OpState, Spec};
+
+        struct TickMidSwap(Mutex<(Feed, Option<Subscriber>)>);
+        impl super::super::RebuildHook for TickMidSwap {
+            fn pause(&self) {}
+            fn rebuild(&self, _generation: u64) -> Vec<Command> {
+                let mut guard = self.0.lock().unwrap();
+                let (feed, sub) = &mut *guard;
+                turn(feed, sub, &Hold::default());
+                Vec::new()
+            }
+            fn resume(&self) {}
+        }
+
+        let device = engine();
+        let host = device.host().clone();
+        let u = host.unit(0, 10, Spec::Plugin(test_plugin_ref("lat")), 0, false).unwrap();
+        u.activated(Activated { name: "lat".into(), source: false, latency: 64 });
+        let t = u.terms().unwrap();
+        let op = u.submit(Box::new(PassUnit(64)), t).unwrap_or_else(|(_, e)| panic!("submit failed: {e:?}"));
+        assert_eq!(host.wait_op(op, PATIENCE).unwrap(), OpState::Applied);
+
+        let (sub, sent) = subscriber();
+        let hook = Arc::new(TickMidSwap(Mutex::new((Feed::new(host.clone()), sub))));
+        {
+            let mut guard = hook.0.lock().unwrap();
+            let (feed, sub) = &mut *guard;
+            turn(feed, sub, &Hold::default());
+        }
+        {
+            let frames = sent.lock().unwrap();
+            assert_eq!(frames.len(), 1);
+            assert!(frames[0].reset);
+            assert_eq!(frames[0].chains.as_ref().unwrap()[0].latency, 64);
+        }
+
+        // Queue one ordinary event on the old engine so the mid-swap tick builds a frame.
+        set_bpm(&device, 140.0);
+
+        host.set_rebuild_hook(Some(hook.clone()));
+        device.rebuild_at(44_100, 256);
+        host.set_rebuild_hook(None);
+
+        let mid_len = {
+            let frames = sent.lock().unwrap();
+            assert!(frames.len() >= 2, "mid-swap tick sent a frame");
+            for frame in &frames[1..] {
+                assert!(!frame.reset, "mid-swap frame is still on the old generation");
+                assert!(
+                    frame.chains.as_ref().is_none_or(|c| c[0].latency == 64),
+                    "mid-swap frame must never carry the new generation's chains: {:?}",
+                    frame.chains
+                );
+            }
+            frames.len()
+        };
+
+        // After the publish: the next frame is a reset carrying the new generation's chains.
+        {
+            let mut guard = hook.0.lock().unwrap();
+            let (feed, sub) = &mut *guard;
+            turn(feed, sub, &Hold::default());
+        }
+        {
+            let frames = sent.lock().unwrap();
+            assert_eq!(frames.len(), mid_len + 1);
+            let after = frames.last().unwrap();
+            assert!(after.reset);
+            assert_eq!(after.chains.as_ref().expect("reset carries new chains")[0].latency, 0);
+        }
+        u.release();
+    }
+
+    #[test]
+    fn stash_lost_forces_a_reset_carrying_chains_even_across_a_held_tick() {
+        let device = engine();
+        let host = device.host().clone();
+        let mut feed = Feed::new(host.clone());
+        let (mut sub, sent) = subscriber();
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        let gen = host.core.engine_gen.load(Acquire);
+        {
+            let mut stash = host.core.stash.lock().unwrap();
+            stash.generation = gen;
+            stash.lost = true;
+        }
+        turn(&mut feed, &mut sub, &Hold::default());
+        {
+            let frames = sent.lock().unwrap();
+            assert_eq!(frames.len(), 2);
+            assert!(frames[1].reset && !frames[1].catch_up);
+            assert_eq!(frames[1].chains, Some(empty_chains()));
+        }
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 2, "latch cleared after the reset");
+
+        // Now with a held tick in between.
+        {
+            let mut stash = host.core.stash.lock().unwrap();
+            stash.generation = gen;
+            stash.lost = true;
+        }
+        feed.tick_held();
+        turn(&mut feed, &mut sub, &Hold::default());
+        {
+            let frames = sent.lock().unwrap();
+            assert_eq!(frames.len(), 3);
+            assert!(frames[2].reset && !frames[2].catch_up);
+            assert_eq!(frames[2].chains, Some(empty_chains()));
+        }
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 3, "latch cleared after the held reset");
+    }
+
+    #[test]
+    fn a_legacy_install_moves_no_chains() {
+        let device = engine();
+        let host = device.host().clone();
+        let mut feed = Feed::new(host.clone());
+        let (mut sub, sent) = subscriber();
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap()[0].chains, Some(empty_chains()));
+
+        let slot = host.slot(0);
+        let rate = slot.rate().unwrap();
+        slot.install(Box::new(PassUnit(0)), rate).unwrap_or_else(|(_, e)| panic!("install failed: {e}"));
+        assert!(device.wait_blocks(4));
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert!(sent.lock().unwrap()[1..].iter().all(|f| f.chains.is_none()), "legacy install moves no chains");
+        let _ = slot.remove(PATIENCE);
     }
 }

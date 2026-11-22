@@ -373,6 +373,30 @@ pub fn run() {
             engine_io::mode::engine_snapshot,
             #[cfg(windows)]
             engine_io::mode::engine_load_session,
+            // A slot's chain of units (`engine_io/chain_cmds.rs`): the UI's `ChainHost`. DEV builds only, in
+            // lockstep with the frontend's DEV flag `lf.chainNative`, until chains reach players.
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_add,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_remove,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_reload,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_move,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_open_editor,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_close_editor,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_list_params,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_set_param,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_tone_take,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_tone_import,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::chain_cmds::chain_tone_forget,
             // Native MIDI (`engine_io/midi_mode.rs`): the UI's one ordered input path (its engine
             // commands and note input, synchronous), its subscription, and the learn UI's calls.
             #[cfg(windows)]

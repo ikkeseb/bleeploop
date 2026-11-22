@@ -34,7 +34,7 @@
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
-//! | [`slots`] | the two slots' chains of units: install at an index, replace, remove, move and withdraw through their ports (each answered once by an [`Event::Seat`], each applied chain an [`Event::Chain`]), the edits held for a take, each unit's bypass, their crossfades, notes, live and gain, each slot's own input pair, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`slots`] | the two slots' chains of units: install at an index, replace, remove, move and withdraw through their ports (each answered by an [`Event::Seat`], and a second when a held message resolves; each applied chain an [`Event::Chain`]), the edits held for a take, each unit's bypass, their crossfades, notes, live and gain, each slot's own input pair, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the unit seam ([`UnitProcessor`], stereo both ways) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter, the input OTT | Tone.js on Blink's Web Audio (the OTT: the engine's own) |
 //!
@@ -204,26 +204,26 @@
 //!   reloaded within one fade of its install, at a higher latency, crossfades into a bypass line with too
 //!   little history and dips. Next check: a test with a reader freeing one place a block under a bypass
 //!   every block, counting the blocks until a port edit and a `SetMetronome` reply are delivered.
+//! - **AUTO's blind window after a chain edit is bounded by the slots' paths alone** (`Slot` reach in
+//!   `slots.rs`, `Looper::cut_listening_until`; read from source by a review of 85aec439, not rendered).
+//!   It may reopen early when a built-in synth's record line (no source head in either slot) carries
+//!   pre-edit audio past the deadline, or when a device-frame jump expires the deadline while fades and
+//!   delay lines still hold rendered frames; it may stay blind longer than needed, summing a settled
+//!   source and a parallel live effect, or budgeting two fades for a move. Next check: a frame-rendered
+//!   test with a synth note held through a chain edit while AUTO listens, then one across a device-frame
+//!   jump, each asserting no take starts from pre-edit audio.
 //! - **A damaged block rejects on its unshifted interval too, behind a live plugin** (read from source,
 //!   not rendered). The tap carries those frames clean, so a window wholly in them is thrown away:
 //!   conservative, as before. Next check: a frame-rendered test of such a window, then whether a damaged
 //!   block with no jump keeps the device interval at all.
 //! - **`tests/perf.rs`'s ignored Stage 2 bar fails on a loaded PC** (11.4 % and 9.1 % against its 10 %).
 //!   Next check: rerun it on a quiet desktop before reading a failure as a regression.
-//! - **An eviction can lose a queued install** (`engine_io/owner.rs`, the eviction's return count; read
-//!   from source). With the event ring full and 32 replies owed, an install stays queued, the empty slot
-//!   returns zero units, which reads as done, and the rebuild drops the rings with that unit. Next step:
-//!   E2's ownership handshake settles it.
 //! - **A source inserted ahead of an effect while the input plays switches the route hard** (A8;
 //!   read from source, not rendered): the processed input leaves the direct monitor and enters the
 //!   limiter-delayed bus on the source's first frame (a gap), and the source's removal switches it back
 //!   at its fade's end, over the bus audio still in flight; the input sends lose it at once. Sources
 //!   arrive with E3. Next check: a test rendering the switch on a playing input and measuring the gap
 //!   and the overlap at the output.
-//! - **A refusal after `SlotHost::install`'s 2 s wait goes unseen** (`engine_io/slot_host.rs`; read from
-//!   source): the owner reads only `take_evicted()` then, and a rebuild can strip the reason
-//!   (`owner.rs`). Reachable only after a 2 s stall with a refusal (today: a plugin reporting over a
-//!   second of latency). Next step: E2's ownership handshake settles it.
 //!
 //! # Beside this crate
 //!
@@ -259,7 +259,7 @@ pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
 pub use overview::{LaneView, Overview};
 pub use render::{wet_master, wet_master_with, RenderOptions, WetMaster};
 pub use session::{Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, SnapshotTrack};
-pub use slots::{SlotPort, Ticket};
+pub use slots::{Left, Returned, SlotPort, Ticket};
 
 /// Within this of its target a gain glide takes the target itself: -120 dB of full scale, a step far
 /// under any converter's noise floor, reached about 14 time constants into a glide from 1 (some 170 ms

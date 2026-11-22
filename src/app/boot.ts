@@ -50,6 +50,12 @@ export function bootEngine(): () => void {
       await platform.pluginHost.init();
       await resyncNativeSlots();
       setNativeHostReady(true);
+      if (platform.chain.available) {
+        // In chain mode the native host owns the chain across reloads and reports it on the reset
+        // frame's `chains`, so legacy `recallRig` is skipped while the full scan still fills the `+` picker.
+        await scanForPlugins();
+        return;
+      }
       const paths = savedRigPaths();
       const rig = paths.length === 0 ? [] : await platform.pluginHost.scanPluginPaths(paths).catch((e: unknown) => {
         // The recall waits for the full scan instead.

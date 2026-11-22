@@ -7,9 +7,10 @@
 //! thread, its hop-1 ring and the device.
 
 use super::engine_slot::{
-    own, restore_tone, serve, Editor, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
+    own, restore_tone, serve, slot_terms, Editor, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
     FAULT_PARAM, FAULT_PROCESS, FAULT_START,
 };
+use super::unit_owner::{serve_unit, UnitCtx};
 use crate::host::tone::MAX_STATE_BYTES;
 use super::*;
 
@@ -20,6 +21,7 @@ use lf_engine::grid::Frame;
 use lf_engine::slots::MAX_SLOT_EVENTS;
 use lf_engine::{SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 
+use crate::engine_io::unit_host::Terms as UnitTerms;
 use crate::engine_io::SlotHost;
 
 enum Processor {
@@ -305,14 +307,18 @@ fn reported_latency(instance: &PluginInstance<LfHost>) -> u32 {
     }
 }
 
-/// Owner thread, instance inactive: query the ports, activate at the engine's current rate with its
-/// largest block as the max frame count, and read the latency the plugin now reports.
+/// Owner thread, instance inactive: query the ports, activate at the engine's `rate` (0: no device,
+/// refused) with its largest block `max_block` as the max frame count, and read the latency the
+/// plugin now reports.
 fn activate(
     instance: &mut PluginInstance<LfHost>,
-    slot: &SlotHost,
+    rate: u32,
+    max_block: usize,
 ) -> Result<(StoppedPluginAudioProcessor<LfHost>, Terms), String> {
-    let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
-    let max_frames = slot.max_block().max(1) as u32;
+    if rate == 0 {
+        return Err("no audio device is open".to_string());
+    }
+    let max_frames = max_block.max(1) as u32;
     let outputs = query_ports(instance, false)?;
     let inputs = query_ports(instance, true)?;
     let config =
@@ -414,6 +420,15 @@ pub(super) fn run(
     serve(ctx, |setup| load(id, open, setup))
 }
 
+/// The chain-unit CLAP owner (`unit_owner::serve_unit`): clack's main thread for one chain unit.
+pub(super) fn run_unit(
+    ctx: UnitCtx,
+    id: &str,
+    open: impl FnOnce() -> Result<PluginEntry, String>,
+) -> Result<(), String> {
+    serve_unit(ctx, |setup| load(id, open, setup))
+}
+
 /// Instantiate the plugin, restore the stored tone, activate it and build its unit.
 fn load(
     id: &str,
@@ -440,14 +455,14 @@ fn load(
     instance.access_shared_handler(|s| s.restart_requested.store(false, Release));
     let _ = take_params_rescan(&mut instance);
     instance.access_handler_mut(|m| m.state_dirty = false);
-    let (stopped, terms) = activate(&mut instance, slot)?;
+    let (stopped, terms) = activate(&mut instance, slot.rate().unwrap_or(0), slot.max_block())?;
     let unit = ClapUnit::new(stopped, &terms, params, faults, tone.edited());
     let plugin = Clap { instance, entry, editor: EditorSlot::Closed, editor_closed, hosted_hwnd, editor_parent };
     Ok(Loaded { plugin, unit, name, rate: terms.rate, tone: restored.report() })
 }
 
 /// A loaded CLAP plugin as its owner holds it.
-struct Clap {
+pub(super) struct Clap {
     /// Before `entry`: the instance is destroyed before its entry unloads.
     instance: PluginInstance<LfHost>,
     entry: PluginEntry,
@@ -459,6 +474,44 @@ struct Clap {
     editor_parent: usize,
 }
 
+#[cfg(test)]
+impl Clap {
+    /// An owner around an instance a test made without a load (`restart_tests`), editor closed.
+    pub(super) fn bare(instance: PluginInstance<LfHost>, entry: PluginEntry) -> Self {
+        Clap {
+            instance,
+            entry,
+            editor: EditorSlot::Closed,
+            editor_closed: Arc::new(EditorClosed::default()),
+            hosted_hwnd: Arc::new(AtomicIsize::new(0)),
+            editor_parent: 0,
+        }
+    }
+}
+
+impl Clap {
+    /// Deactivate, then read `terms` (after the deactivate: a device swap that lands meanwhile is the
+    /// one activated at) and activate at them, re-arming the unit. Returns the rate activated at.
+    fn reactivate_with(
+        &mut self,
+        mut unit: Box<ClapUnit>,
+        terms: impl FnOnce() -> UnitTerms,
+    ) -> Result<(Box<ClapUnit>, u32), (Box<ClapUnit>, String)> {
+        let instance = &mut self.instance;
+        if let Some(stopped) = unit.take_stopped() {
+            instance.deactivate(stopped);
+        }
+        let terms = terms();
+        match activate(instance, terms.rate, terms.max_block) {
+            Ok((stopped, terms)) => {
+                unit.rearm(stopped, &terms);
+                Ok((unit, terms.rate))
+            }
+            Err(e) => Err((unit, e)),
+        }
+    }
+}
+
 impl OwnedPlugin for Clap {
     type Unit = ClapUnit;
     const FORMAT: &'static str = "CLAP";
@@ -468,23 +521,23 @@ impl OwnedPlugin for Clap {
         asked.then(|| "restart at the plugin's request".to_string())
     }
 
-    fn reinstall(&mut self, mut unit: Box<ClapUnit>, slot: &SlotHost) -> Result<(), (Box<ClapUnit>, String)> {
-        let instance = &mut self.instance;
-        if let Some(stopped) = unit.take_stopped() {
-            instance.deactivate(stopped);
-        }
-        let (stopped, terms) = match activate(instance, slot) {
-            Ok(activated) => activated,
-            Err(e) => return Err((unit, e)),
-        };
-        unit.rearm(stopped, &terms);
-        slot.install(unit, terms.rate).map_err(|(unit, e)| {
+    fn reinstall(&mut self, unit: Box<ClapUnit>, slot: &SlotHost) -> Result<(), (Box<ClapUnit>, String)> {
+        let (unit, rate) = self.reactivate_with(unit, || slot_terms(slot))?;
+        slot.install(unit, rate).map_err(|(unit, e)| {
             let mut unit = own::<ClapUnit>(unit);
             if let Some(stopped) = unit.take_stopped() {
-                instance.deactivate(stopped);
+                self.instance.deactivate(stopped);
             }
             (unit, e)
         })
+    }
+
+    fn reactivate(
+        &mut self,
+        unit: Box<ClapUnit>,
+        terms: UnitTerms,
+    ) -> Result<Box<ClapUnit>, (Box<ClapUnit>, String)> {
+        self.reactivate_with(unit, || terms).map(|(unit, _)| unit)
     }
 
     fn turn(&mut self, _sink: &EventSink) -> Reported {

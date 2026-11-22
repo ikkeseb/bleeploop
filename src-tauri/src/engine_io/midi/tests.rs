@@ -1190,3 +1190,92 @@ fn an_engine_rebuild_needs_no_webview() {
     assert_eq!(midi.diag().refused.paused, 1);
     assert_eq!(midi.diag().queue.discarded, 2, "the queued attack and HOLD press");
 }
+
+/// Pass-through, zero-latency fake unit for testing unit commands across a rebuild.
+struct PassUnit;
+
+impl lf_engine::UnitProcessor for PassUnit {
+    fn info(&self) -> lf_engine::UnitInfo {
+        lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: 0 }
+    }
+
+    fn process(&mut self, _cx: &lf_engine::UnitCx, input: [&[f32]; 2], _events: &[lf_engine::SlotEvent], out: [&mut [f32]; 2]) {
+        for (o, i) in out.into_iter().zip(input) {
+            o.copy_from_slice(i);
+        }
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+// A queued MIDI-queue unit command across a rebuild, through `ui_commands` with a full ring:
+// the rebuild hands queued unit commands to the host's gate, so once the evicted units reseat
+// and the gate flushes, each command lands once on the new engine.
+#[test]
+fn queued_unit_commands_survive_a_rebuild_through_ui_commands_with_a_full_ring() {
+    use super::super::chain::PluginRef;
+    use super::super::test_rig::TestDevice;
+    use super::super::unit_host::{Back, OpState, Spec};
+
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let plugin = |id: &str| PluginRef { format: "clap".into(), path: format!("C:\\plugins\\{id}.clap"), id: id.into() };
+
+    let u10 = host.unit(0, 10, Spec::Plugin(plugin("u10")), 0, false).unwrap();
+    let u20 = host.unit(0, 20, Spec::Plugin(plugin("u20")), 1, false).unwrap();
+    let t10 = u10.terms().unwrap();
+    let t20 = u20.terms().unwrap();
+    let op10 = u10.submit(Box::new(PassUnit), t10).unwrap_or_else(|(_, e)| panic!("submit u10: {e:?}"));
+    let op20 = u20.submit(Box::new(PassUnit), t20).unwrap_or_else(|(_, e)| panic!("submit u20: {e:?}"));
+    assert_eq!(host.wait_op(op10, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(host.wait_op(op20, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    let mut ev = Vec::new();
+    host.drain_feed_taps(&mut ev, None, None);
+    // Wait for at least one block to publish the device clock so `EngineSide::running` is true.
+    assert!(device.wait_blocks(1));
+
+    let engine = Arc::new(Recorded { host: host.clone(), sent: Mutex::default(), full: AtomicBool::new(true) });
+    let midi = MidiHost { core: hosted(engine.clone(), store::empty(), None, None, None), wake: None, port_thread: None };
+
+    let queued = vec![Command::SetUnitBypass(10, true), Command::Action(Action::ToggleUnit(20))];
+    assert_eq!(midi.ui_commands(queued), Ok(None), "queued behind the full ring");
+    assert!(engine.sent.lock().unwrap().is_empty(), "neither reached engine 1");
+
+    device.rebuild_at(44_100, 256);
+
+    // Unblock the ring and tick: the rebuild emptied the queue so nothing is sent a second time.
+    engine.full.store(false, Relaxed);
+    midi.core.tick(Instant::now());
+    assert!(engine.sent.lock().unwrap().is_empty(), "rebuild emptied the queue");
+
+    let Back::Evicted { unit: box10, bypassed: byp10 } = u10.take_back().expect("u10 evicted") else { panic!("expected Evicted for u10") };
+    let Back::Evicted { unit: box20, bypassed: byp20 } = u20.take_back().expect("u20 evicted") else { panic!("expected Evicted for u20") };
+    assert!(!byp10 && !byp20, "neither applied before the rebuild");
+
+    let t10_2 = u10.terms().unwrap();
+    let t20_2 = u20.terms().unwrap();
+    let op10_2 = u10.submit(box10, t10_2).unwrap_or_else(|(_, e)| panic!("reseat u10: {e:?}"));
+    let op20_2 = u20.submit(box20, t20_2).unwrap_or_else(|(_, e)| panic!("reseat u20: {e:?}"));
+    assert_eq!(host.wait_op(op10_2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(host.wait_op(op20_2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // A feed drain flushes the gate; render so engine 2 applies both commands, then drain the Chain updates.
+    ev.clear();
+    host.drain_feed_taps(&mut ev, None, None);
+    assert!(device.wait_blocks(10));
+    ev.clear();
+    host.drain_feed_taps(&mut ev, None, None);
+
+    let snap = host.core.chain_snapshot();
+    let units: Vec<(lf_engine::UnitId, bool)> = snap.chains[0].units.iter().map(|u| (u.id, u.bypass)).collect();
+    assert_eq!(units, vec![(10, true), (20, true)], "both units bypassed once after rebuild");
+    assert_eq!(midi.diag().queue.discarded, 0, "kept unit commands are not counted as discarded");
+
+    u10.release();
+    u20.release();
+}

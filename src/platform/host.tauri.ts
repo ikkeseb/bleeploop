@@ -23,7 +23,7 @@ import type {
   ToneImport,
   UpdateProgress,
 } from './host';
-import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand } from './engine-wire';
+import { decodeDeviceStatus, decodeFeedFrame, isKindToggle, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: verify/guards/boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
@@ -49,6 +49,14 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
   };
 }
 
+/** Encode a plugin identity as ASCII JSON (\u-escaped) for a tone-import request header. */
+function asciiPluginHeader({ format, path, id }: PluginRef): string {
+  return JSON.stringify({ format, path, id }).replace(
+    /[\u007f-\uffff]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
 /**
  * Native CLAP, VST3 and VST2 host over Tauri IPC. Each method maps to a `plugin_*` command in Rust.
  * `window`/`app` command args are injected by Tauri — JS passes only the domain args. Audio never
@@ -57,6 +65,11 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
  * host refuses one this page sent before a reload replaced it (`src-tauri/src/engine_io/plugins.rs`).
  */
 let frontendEpoch = 0;
+
+function requireEpoch(): number {
+  if (frontendEpoch === 0) throw new Error('plugin host not initialized');
+  return frontendEpoch;
+}
 
 const tauriPluginHost: PluginHost = {
   available: true,
@@ -114,13 +127,8 @@ const tauriPluginHost: PluginHost = {
     const bytes = await invoke<ArrayBuffer>('plugin_tone_take', { slot });
     return bytes.byteLength > 0 ? new Uint8Array(bytes) : null;
   },
-  importTone(slot, bytes, { format, path, id }) {
-    // A header value must be ASCII: the plugin goes as JSON with every other character \u-escaped.
-    const plugin = JSON.stringify({ format, path, id }).replace(
-      /[\u007f-\uffff]/g,
-      (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
-    );
-    return invoke<ToneImport>('plugin_tone_import', bytes, { headers: { slot: String(slot), plugin } });
+  importTone(slot, bytes, plugin) {
+    return invoke<ToneImport>('plugin_tone_import', bytes, { headers: { slot: String(slot), plugin: asciiPluginHeader(plugin) } });
   },
   async forgetTone(slot, reloadToken) {
     await invoke('plugin_tone_forget', { slot, token: reloadToken });
@@ -333,10 +341,12 @@ const tauriMidi: MidiHost = {
 /** The outbox's batches over Tauri IPC (`input_send`, synchronous on the main thread natively). */
 const tauriInput: InputHost = {
   async send(epoch, items) {
-    // Unit contract §2: the native engine does not speak the chain yet. The outbox never queues a unit
-    // command here (`src/platform/index.ts` `enqueueEngine`); a batch that carries one anyway is refused
-    // whole, before any IPC.
-    if (items.some((item) => 'engine' in item && isUnitCommand(item.engine))) throw new Error(NO_CHAIN);
+    // Unit contract §2: with `lf.chainNative` off, no unit command reaches `input_send`; with it on,
+    // `SetUnitBypass`, `SetUnitParam` and `ToggleUnit` go through while `Toggle.Units` stays off the
+    // native batch until the built-in units land (`src/platform/index.ts` `enqueueEngine`).
+    if (items.some((item) => 'engine' in item && (chainNative ? isKindToggle(item.engine) : isUnitCommand(item.engine)))) {
+      throw new Error(chainNative ? NO_KIND_TOGGLE : NO_CHAIN);
+    }
     return decodeDropped(await invoke<unknown>('input_send', { epoch, items }));
   },
 };
@@ -389,28 +399,135 @@ const tauriUpdates: AppUpdates = {
   },
 };
 
-const NO_CHAIN = 'The native engine does not have the chain yet.';
+/** DEV opt-in for the native chain host (`localStorage['lf.chainNative'] === '1'`), read once per page. */
+function readChainNative(): boolean {
+  if (!import.meta.env.DEV) return false;
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('lf.chainNative') === '1';
+  } catch {
+    return false;
+  }
+}
+
+const chainNative = readChainNative();
+
+const NO_CHAIN = 'The native chain host is off (enable lf.chainNative in DEV).';
+const NO_KIND_TOGGLE = 'Toggle.Units is not on the native engine yet.';
 const noChain = async (): Promise<never> => {
   throw new Error(NO_CHAIN);
 };
 
-/** The chain per slot (`docs/unit-contract.md` §2): the native engine does not speak it yet, so every
- * call is refused here, before any IPC, and nothing is logged (the caller reads the rejection). */
-const tauriChainHost: ChainHost = {
-  available: false,
-  add: noChain,
-  remove: noChain,
-  reload: noChain,
-  move: noChain,
-  openEditor: noChain,
-  closeEditor: noChain,
-  onEditorClosed: () => () => {},
-  listParams: noChain,
-  setParameter: noChain,
-  takeTone: noChain,
-  importTone: noChain,
-  forgetTone: noChain,
-};
+// Tauri does not guarantee two async commands start in the order sent, so structural calls on one
+// slot run one after another (mirroring `chain-fake.ts`'s `onSlot`).
+const chainSlotTails: [Promise<unknown>, Promise<unknown>] = [Promise.resolve(), Promise.resolve()];
+const chainUnitSlots = new Map<UnitId, PluginSlot>();
+function onChainSlot<T>(slot: PluginSlot, op: () => Promise<T>): Promise<T> {
+  const run = chainSlotTails[slot].then(op);
+  chainSlotTails[slot] = run.catch(() => {});
+  return run;
+}
+function onChainUnit<T>(unit: UnitId, op: () => Promise<T>): Promise<T> {
+  const slot = chainUnitSlots.get(unit);
+  return slot === undefined ? op() : onChainSlot(slot, op);
+}
+
+/**
+ * The chain per slot over Tauri IPC (`src-tauri/src/engine_io/chain_cmds.rs`, unit contract §2).
+ * Enabled only in DEV when `localStorage['lf.chainNative'] === '1'` (read once per page); otherwise
+ * `available` is false and every call rejects before any IPC without logging (the caller reads the
+ * rejection).
+ */
+const tauriChainHost: ChainHost = chainNative
+  ? {
+      available: true,
+      async add(slot, unit, spec, at, toneToken) {
+        const frontendEpoch = requireEpoch();
+        return onChainSlot(slot, async () => {
+          const res = await invoke<'seated' | 'waiting'>('chain_add', {
+            slot,
+            unit,
+            spec,
+            at,
+            toneToken: toneToken ?? null,
+            frontendEpoch,
+          });
+          chainUnitSlots.set(unit, slot);
+          return res;
+        });
+      },
+      async remove(unit) {
+        const frontendEpoch = requireEpoch();
+        const slot = chainUnitSlots.get(unit);
+        return onChainUnit(unit, async () => {
+          await invoke('chain_remove', { unit, frontendEpoch });
+          if (slot !== undefined && chainUnitSlots.get(unit) === slot) chainUnitSlots.delete(unit);
+        });
+      },
+      async reload(unit, plugin, since, toneToken) {
+        const frontendEpoch = requireEpoch();
+        return onChainUnit(unit, () =>
+          invoke<'reloaded' | 'moved' | 'failed'>('chain_reload', {
+            unit,
+            plugin,
+            since,
+            toneToken,
+            frontendEpoch,
+          }),
+        );
+      },
+      async move(unit, to) {
+        const frontendEpoch = requireEpoch();
+        return onChainUnit(unit, async () => {
+          await invoke('chain_move', { unit, to, frontendEpoch });
+        });
+      },
+      async openEditor(unit) {
+        await invoke('chain_open_editor', { unit, frontendEpoch: requireEpoch() });
+      },
+      async closeEditor(unit) {
+        await invoke('chain_close_editor', { unit, frontendEpoch: requireEpoch() });
+      },
+      onEditorClosed(cb) {
+        return subscribe<{ unit: UnitId }>('chain:editor-closed', ({ unit }) => cb(unit));
+      },
+      async listParams(unit) {
+        return invoke<PluginParamDesc[]>('chain_list_params', { unit, frontendEpoch: requireEpoch() });
+      },
+      async setParameter(unit, paramId, value) {
+        await invoke('chain_set_param', { unit, paramId, value, frontendEpoch: requireEpoch() });
+      },
+      async takeTone(unit) {
+        const bytes = await invoke<ArrayBuffer>('chain_tone_take', { unit, frontendEpoch: requireEpoch() });
+        return bytes.byteLength > 0 ? new Uint8Array(bytes) : null;
+      },
+      async importTone(slot, bytes, plugin, unit) {
+        const headers: Record<string, string> = {
+          slot: String(slot),
+          plugin: asciiPluginHeader(plugin),
+          epoch: String(requireEpoch()),
+        };
+        if (unit !== undefined) headers.unit = String(unit);
+        return invoke<{ token: number | null; name: string; matches: UnitId[] }>('chain_tone_import', bytes, { headers });
+      },
+      async forgetTone(token) {
+        await invoke('chain_tone_forget', { token, frontendEpoch: requireEpoch() });
+      },
+    }
+  : {
+      available: false,
+      add: noChain,
+      remove: noChain,
+      reload: noChain,
+      move: noChain,
+      openEditor: noChain,
+      closeEditor: noChain,
+      onEditorClosed: () => () => {},
+      listParams: noChain,
+      setParameter: noChain,
+      takeTone: noChain,
+      importTone: noChain,
+      forgetTone: noChain,
+    };
 
 /**
  * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, native `midi` and `input`,

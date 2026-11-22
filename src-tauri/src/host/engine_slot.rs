@@ -41,6 +41,7 @@ use super::{
     load_ready_channel, owner_request_5s, publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, ParamIds,
     EVENT_RING_CAP,
 };
+use crate::engine_io::unit_host::Terms;
 use crate::engine_io::SlotHost;
 
 /// The plugin formats this host knows, and the ONE place a format is told from a path or a stored
@@ -111,14 +112,14 @@ pub(super) const REMOVE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 
 
 /// How long an owner round trip with a typed reply waits, like the live commands. (Tests wait 30 s, for
 /// the same reason as `REMOVE_TIMEOUT`.)
-const ASK_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 30 } else { 5 });
+pub(super) const ASK_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 30 } else { 5 });
 
 /// The owner's poll while no hosted editor is open: plugin callbacks, restarts and evictions are
 /// serviced within this.
 pub(super) const OWNER_POLL: Duration = Duration::from_millis(20);
 
 /// How long `load` waits for the owner's report.
-const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The fault bits a unit latches on the audio thread; the owner reports each once per load.
 pub(super) const FAULT_START: u32 = 1 << 0;
@@ -165,7 +166,7 @@ impl LoadClaim {
     }
 
     /// The caller, on its timeout: false when the owner has claimed the load first.
-    fn abandon(&self) -> bool {
+    pub(super) fn abandon(&self) -> bool {
         self.0.compare_exchange(Self::OPEN, Self::ABANDONED, AcqRel, Acquire).is_ok()
     }
 }
@@ -295,9 +296,30 @@ pub(super) struct Loaded<P: OwnedPlugin> {
     pub(super) tone: Option<ToneRestore>,
 }
 
-/// What a format's load may use: the owner's slot, the unit's ends and the tone it restores.
+/// Where a plugin loads: the legacy [`SlotHost`] or a chain unit's slot and engine terms.
+pub(super) trait Place {
+    fn slot(&self) -> usize;
+    fn rate(&self) -> Option<u32>;
+    fn max_block(&self) -> usize;
+}
+
+impl Place for SlotHost {
+    fn slot(&self) -> usize {
+        SlotHost::slot(self)
+    }
+
+    fn rate(&self) -> Option<u32> {
+        SlotHost::rate(self)
+    }
+
+    fn max_block(&self) -> usize {
+        SlotHost::max_block(self)
+    }
+}
+
+/// What a format's load may use: the owner's place, the unit's ends and the tone it restores.
 pub(super) struct Setup<'a> {
-    pub(super) slot: &'a SlotHost,
+    pub(super) slot: &'a dyn Place,
     pub(super) params: Consumer<ParamEvent>,
     pub(super) params_tx: Arc<Mutex<Producer<ParamEvent>>>,
     pub(super) sink: &'a EventSink,
@@ -334,9 +356,16 @@ pub(super) trait OwnedPlugin {
     const FORMAT: &'static str;
     /// A restart the plugin asked for since the last call, as the log names it.
     fn take_restart(&mut self) -> Option<String>;
-    /// Deactivate what the unit holds, activate again at the engine's current terms and install it.
-    /// On failure the unit comes back to the caller, and the plugin is left inactive.
+    /// Deactivate what the unit holds, activate again at the engine's current terms and install it:
+    /// `reactivate` at the slot's terms ([`slot_terms`]), then the install. On failure the unit comes
+    /// back to the caller, and the plugin is left inactive.
     fn reinstall(&mut self, unit: Box<Self::Unit>, slot: &SlotHost) -> Result<(), (Box<Self::Unit>, String)>;
+    /// After a withdrawal, an eviction or a plugin-asked restart: deactivate what the unit holds and
+    /// activate again at `terms` (a chain owner's `UnitHost::terms`, the legacy owner's
+    /// [`slot_terms`]; `generation` is not the plugin's business), handing the unit back re-armed for
+    /// them, for the owner to install or submit. A `rate` of 0 is no device: refused. On failure the
+    /// unit comes back with why, and the plugin is left inactive (VST2: suspended).
+    fn reactivate(&mut self, unit: Box<Self::Unit>, terms: Terms) -> Result<Box<Self::Unit>, (Box<Self::Unit>, String)>;
     /// The turn's plugin side, before the requests: deliver what the plugin asked for, and tell
     /// `sink` the parameters its own editor moved.
     fn turn(&mut self, sink: &EventSink) -> Reported;
@@ -356,6 +385,12 @@ pub(super) trait OwnedPlugin {
     fn quiesce(&mut self) {}
     /// The unit is out of the engine, or never was in it: tear down in the format's order.
     fn release(self, unit: Option<Box<Self::Unit>>);
+}
+
+/// The legacy owner's terms: the slot's rate (0 = no device open, which `reactivate` refuses) and
+/// largest block. The generation is a chain owner's, unused here.
+pub(super) fn slot_terms(slot: &SlotHost) -> Terms {
+    Terms { generation: 0, rate: slot.rate().unwrap_or(0), max_block: slot.max_block() }
 }
 
 /// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed. The
@@ -1077,9 +1112,13 @@ mod tests {
             self.0.restart.swap(false, Relaxed).then(|| "restart".to_string())
         }
         fn reinstall(&mut self, unit: Box<Silent>, slot: &SlotHost) -> Result<(), (Box<Silent>, String)> {
-            self.0.reinstalling.take();
+            let unit = self.reactivate(unit, slot_terms(slot))?;
             let rate = slot.rate().expect("the test device is open");
             slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
+        }
+        fn reactivate(&mut self, unit: Box<Silent>, _terms: Terms) -> Result<Box<Silent>, (Box<Silent>, String)> {
+            self.0.reinstalling.take();
+            Ok(unit)
         }
         fn turn(&mut self, _sink: &EventSink) -> Reported {
             Reported::default()

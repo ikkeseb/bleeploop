@@ -101,8 +101,9 @@ export type InputSendParamId =
 export type AudioBackend = 'Wasapi' | 'Asio';
 
 // ── The chain per slot (`docs/unit-contract.md` §2): the wire's unit shapes ─────────────────────────
-// The native engine does not speak these yet; the browser fake (`chain-fake.ts`) answers them as the
-// contract says the engine will. Nothing here changes a shape the native side reads today.
+// The native host takes these when the DEV flag `lf.chainNative` is on (`host.tauri.ts`); `Toggle.Units`
+// stays off the native batch until the built-in units land. The browser fake (`chain-fake.ts`) answers
+// all of them as the contract says the engine will.
 
 /** A unit's id: an opaque non-zero u32, minted by whoever asks for the unit (`mintUnitId`). */
 export type UnitId = number;
@@ -358,18 +359,28 @@ export type EngineCommand =
   /** A built-in unit's parameter, clamped as the unit clamps it; one of another kind is dropped. */
   | { SetUnitParam: [UnitId, UnitParamId, number] };
 
+/** Whether `c` is a `Toggle.Units` action (pressed or `ActionOn`): stays off the native batch until the
+ * built-in units land (`src/platform/index.ts` `enqueueEngine`, `src/platform/host.tauri.ts`). */
+export function isKindToggle(c: EngineCommand): boolean {
+  if (typeof c !== 'object') return false;
+  const action = 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
+  return action !== null && typeof action === 'object' && 'Toggle' in action && typeof action.Toggle === 'object' && 'Units' in action.Toggle;
+}
+
 /**
  * A batch command only a chain host takes (unit contract §2): `SetUnitBypass`, `SetUnitParam`, and the
- * actions `ToggleUnit` and `Toggle.Units` (pressed or `ActionOn`). The native engine does not speak the
- * chain yet: the outbox refuses these before they are queued wherever `ChainHost.available` is false
- * (`src/platform/index.ts`), and the Tauri host's `input_send` refuses a batch that carries one.
+ * actions `ToggleUnit` and `Toggle.Units` (pressed or `ActionOn`). The native host takes these when the
+ * DEV flag `lf.chainNative` is on (`host.tauri.ts`), except `Toggle.Units` which stays off the native
+ * batch until the built-in units land. Wherever `ChainHost.available` is false, the outbox drops them
+ * before queuing (`src/platform/index.ts`) and `host.tauri.ts`'s `input_send` refuses a batch that carries
+ * one.
  */
 export function isUnitCommand(c: EngineCommand): boolean {
   if (typeof c !== 'object') return false;
   if ('SetUnitBypass' in c || 'SetUnitParam' in c) return true;
+  if (isKindToggle(c)) return true;
   const action = 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
-  if (action === null || typeof action !== 'object') return false;
-  return 'ToggleUnit' in action || ('Toggle' in action && typeof action.Toggle === 'object' && 'Units' in action.Toggle);
+  return action !== null && typeof action === 'object' && 'ToggleUnit' in action;
 }
 
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The input picks are each

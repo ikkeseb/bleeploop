@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{ChainSeat, Command, Engine, EngineConfig, Event, InputSend, LaneState, NoteTarget, Pair, ProcessContext, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS};
+use lf_engine::{ChainSeat, Command, Engine, EngineConfig, Event, InputSend, InstallToken, LaneState, Left, NoteTarget, Pair, ProcessContext, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, MAX_UNITS};
 use proptest::prelude::*;
 
 const BLOCKS: [usize; 7] = [1, 32, 64, 127, 128, 480, 1024];
@@ -101,12 +101,14 @@ struct Unit {
     panic_from: Frame,
     /// It panics in `set_bypass` (after logging it).
     panic_bypass: bool,
+    /// It panics once in `stop` (after logging it).
+    panic_stop_once: bool,
 }
 
 impl Unit {
     fn new(dsp: Dsp, probe: &Probe) -> Box<Unit> {
         let lag = if let Dsp::Lag(n, _) = dsp { n } else { 0 };
-        Box::new(Unit { dsp, source: matches!(dsp, Dsp::Level(_)), self_bypass: false, bypassed: false, line: [vec![0.0; lag], vec![0.0; lag]], at: 0, count: 0, probe: probe.clone(), panic_from: Frame::MAX, panic_bypass: false })
+        Box::new(Unit { dsp, source: matches!(dsp, Dsp::Level(_)), self_bypass: false, bypassed: false, line: [vec![0.0; lag], vec![0.0; lag]], at: 0, count: 0, probe: probe.clone(), panic_from: Frame::MAX, panic_bypass: false, panic_stop_once: false })
     }
 
     fn panicking_from(mut self: Box<Self>, frame: Frame) -> Box<Unit> {
@@ -116,6 +118,11 @@ impl Unit {
 
     fn panicking_in_bypass(mut self: Box<Self>) -> Box<Unit> {
         self.panic_bypass = true;
+        self
+    }
+
+    fn panicking_in_stop_once(mut self: Box<Self>) -> Box<Unit> {
+        self.panic_stop_once = true;
         self
     }
 
@@ -184,6 +191,10 @@ impl UnitProcessor for Unit {
 
     fn stop(&mut self) {
         self.probe.log.lock().unwrap().push(Seen::Stop);
+        if self.panic_stop_once {
+            self.panic_stop_once = false;
+            panic!("the unit panics in stop");
+        }
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -203,7 +214,12 @@ fn rig(block: usize) -> Rig {
 
 /// Hand `unit` to `slot` under `id` at index `at`.
 fn put(rig: &mut Rig, slot: usize, id: UnitId, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Box<Unit>) {
-    assert!(rig.port(slot).install_at(id, at, bypassed, replaces, unit).is_ok(), "slot {slot}'s message ring is full");
+    assert!(rig.port(slot).install_at(id, 0, at, bypassed, replaces, unit).is_ok(), "slot {slot}'s message ring is full");
+}
+
+/// Hand `unit` to `slot` under `id` and `token` at index `at`.
+fn put_tok(rig: &mut Rig, slot: usize, id: UnitId, token: InstallToken, at: usize, bypassed: bool, replaces: Option<UnitId>, unit: Box<Unit>) {
+    assert!(rig.port(slot).install_at(id, token, at, bypassed, replaces, unit).is_ok(), "slot {slot}'s message ring is full");
 }
 
 /// Every [`Event::Seat`] of `slot`: (frame, unit, op, outcome).
@@ -236,7 +252,21 @@ fn ids(seats: &[ChainSeat]) -> Vec<UnitId> {
 fn take_returns(rig: &mut Rig, slot: usize, kept: &mut Vec<Box<dyn UnitProcessor>>) -> Vec<(UnitId, bool, Option<SeatRefusal>)> {
     let mut out = Vec::new();
     while let Some(r) = rig.port(slot).returned_unit() {
-        out.push((r.id, r.bypassed, r.refused));
+        let refused = match r.left {
+            Left::Refused(why) => Some(why),
+            _ => None,
+        };
+        out.push((r.id, r.bypassed, refused));
+        kept.push(r.unit);
+    }
+    out
+}
+
+/// The units `slot`'s port handed back so far, with token and `Left` cause.
+fn take_returned(rig: &mut Rig, slot: usize, kept: &mut Vec<Box<dyn UnitProcessor>>) -> Vec<(UnitId, InstallToken, bool, Left)> {
+    let mut out = Vec::new();
+    while let Some(r) = rig.port(slot).returned_unit() {
+        out.push((r.id, r.token, r.bypassed, r.left));
         kept.push(r.unit);
     }
     out
@@ -688,15 +718,16 @@ fn an_edit_that_moves_the_alignment_waits_for_the_take_and_applies_on_the_first_
                 continue;
             }
             let op = if edit == Edit::RemoveLatent { SeatOp::Remove } else { SeatOp::Install };
-            let mut want = vec![(sent, 2, op, SeatOutcome::Waiting)];
+            let mut want = vec![(sent, 2, op, SeatOutcome::Waiting), (applied, 2, op, SeatOutcome::Applied)];
             if edit == Edit::AddLatent {
                 // The message behind it is answered when it applies, with it.
                 want.push((applied, 3, SeatOp::Install, SeatOutcome::Applied));
             }
-            assert_eq!(h.answers[h.answers.len() - want.len()..], want[..], "{what}: answered waiting once");
+            assert_eq!(h.answers[h.answers.len() - want.len()..], want[..], "{what}: answered waiting, then applied");
             assert!(applied >= h.end && applied <= h.end + block as Frame, "{what}: applied at {applied}, the first block after the take ending at {}", h.end);
             let after: Vec<Frame> = h.chains.iter().filter(|c| c.0 > h.start).map(|c| c.0).collect();
-            assert_eq!(after, vec![applied; want.len()], "{what}: nothing applied before, one chain per message applied");
+            let want_chains = if edit == Edit::AddLatent { 2 } else { 1 };
+            assert_eq!(after, vec![applied; want_chains], "{what}: nothing applied before, one chain per message applied");
             assert_eq!(h.holding, (true, false), "{what}: the port held it, then let it go");
         }
     }
@@ -1942,7 +1973,7 @@ fn an_eviction_returns_a_waiting_install_however_full_the_owed_answers_are() {
             }
             rig.advance(block as Frame);
         }
-        let ticket = rig.port(0).install_at(7, 0, true, None, Unit::new(Dsp::Gain(1.0), &p)).ok().expect("the ring has room");
+        let ticket = rig.port(0).install_at(7, 0, 0, true, None, Unit::new(Dsp::Gain(1.0), &p)).ok().expect("the ring has room");
         rig.advance(4 * block as Frame);
         assert!(!ticket.answered(), "{what}: the install waits for a place for its answer");
         rig.engine.evict_slots();
@@ -2082,7 +2113,7 @@ fn a_port_edit_every_block_never_takes_the_place_a_waiting_bypass_needs() {
         for _ in 0..100 {
             let id = 100 + edit / 2;
             let pushed = if edit % 2 == 0 {
-                match rig.port(0).install_at(id, MAX_UNITS, false, None, Unit::new(Dsp::Gain(1.0), &q)) {
+                match rig.port(0).install_at(id, 0, MAX_UNITS, false, None, Unit::new(Dsp::Gain(1.0), &q)) {
                     Ok(_) => true,
                     Err(unit) => {
                         kept.push(unit);
@@ -2167,7 +2198,7 @@ fn an_evicted_installs_return_is_on_the_port_before_its_ticket_is_answered() {
         });
         let mut unit: Box<dyn UnitProcessor> = Unit::new(Dsp::Gain(1.0), &p);
         for k in 1..=rounds {
-            let ticket = port.install_at(7, 0, false, None, unit).ok().expect("the message ring has room");
+            let ticket = port.install_at(7, 0, 0, false, None, unit).ok().expect("the message ring has room");
             phase.store(2 * k - 1, Release);
             wait_for("the eviction answers the install", || ticket.answered(), || !worker.is_finished(), abort);
             let back = port.returned_unit();
@@ -2436,4 +2467,288 @@ fn auto_stays_blind_across_two_edits_whose_latency_sums_are_equal() {
             assert_eq!(take_returns(&mut rig, 0, &mut kept).len(), 2, "{what}");
         }
     }
+}
+
+/// Every held (`Waiting`) message gets a second `Event::Seat` when it resolves — `Applied` on its
+/// frame (before its `Event::Chain`) or `Refused(why)` — covering a held install, a held refusal, a
+/// held removal and a held reseat, and `owed_room` keeps a place for that second answer even when
+/// bypasses try to fill the slot's owed queue while the message waits.
+#[test]
+fn a_held_install_removal_reseat_and_refusal_each_answer_twice() {
+    for block in [64, 480, 1024] {
+        let what = format!("block {block}");
+
+        // 1. Held install -> Waiting, then Applied on take end, with owed_room reserving its second answer.
+        {
+            let p = Probe::new();
+            let mut rig = Rig::with_event_capacity(Opts { block, ..Opts::default() }, 4);
+            put_tok(&mut rig, 0, 1, 10, 0, false, None, Unit::new(Dsp::Gain(1.0), &p));
+            arm(&mut rig, 1.0);
+            let end = rig.end_frame();
+            rig.advance(block as Frame);
+            let sent = rig.frame;
+            // Stall events and send a held install, then flood bypasses while waiting: owed_room must
+            // keep room for both the second Seat(Applied) and the Chain when the take ends.
+            rig.hold_events = true;
+            put_tok(&mut rig, 0, 2, 20, MAX_UNITS, false, None, Unit::new(Dsp::Lag(50, 1.0), &p));
+            rig.advance(block as Frame);
+            assert!(rig.port(0).holding(), "{what}: install held");
+            for k in 0..40 {
+                rig.queue(Command::SetUnitBypass(1, k % 2 == 0));
+            }
+            rig.advance_to(end + 2 * block as Frame);
+            assert!(!rig.port(0).holding(), "{what}: install resolved");
+            assert_eq!(rig.engine.diag().slot_protocol_errors, 0, "{what}: owed_room kept a place for the second Seat and Chain");
+            rig.hold_events = false;
+            rig.read_events();
+            for _ in 0..32 {
+                rig.advance(block as Frame);
+            }
+            let got: Vec<(Frame, UnitId, SeatOp, SeatOutcome)> = answers(&rig, 0).into_iter().filter(|a| a.1 == 2).collect();
+            assert_eq!(got.len(), 2, "{what}: held install answered twice: {got:?}");
+            assert_eq!((got[0].0, got[0].2, got[0].3), (sent, SeatOp::Install, SeatOutcome::Waiting), "{what}");
+            let applied = got[1].0;
+            assert!(applied >= end && applied <= end + block as Frame, "{what}: applied at {applied} after end {end}");
+            assert_eq!((got[1].2, got[1].3), (SeatOp::Install, SeatOutcome::Applied), "{what}");
+            // The second Seat(Applied) precedes its Chain on `applied`.
+            let on_applied: Vec<Reply> = replies(&rig, 0).into_iter().filter(|r| matches!(r, Reply::Seat(f, 2, ..) | Reply::Chain(f, _) if *f == applied)).collect();
+            assert!(matches!(on_applied.first(), Some(Reply::Seat(f, 2, SeatOp::Install, SeatOutcome::Applied)) if *f == applied), "{what}: Applied before Chain: {on_applied:?}");
+            assert!(on_applied.iter().any(|r| matches!(r, Reply::Chain(f, seats) if *f == applied && seats.iter().any(|&(id, _)| id == 2))), "{what}: Chain follows Applied: {on_applied:?}");
+            rig.engine.evict_slots();
+            let mut kept = Vec::new();
+            assert_eq!(take_returned(&mut rig, 0, &mut kept).len(), 2, "{what}");
+        }
+
+        // 2. Held install refused at take's end -> Waiting, then Refused(Unknown) with its token.
+        {
+            let p = Probe::new();
+            let mut rig = rig(block);
+            arm(&mut rig, 1.0);
+            let end = rig.end_frame();
+            let sent = rig.frame;
+            put_tok(&mut rig, 0, 1, 21, 0, true, None, Unit::new(Dsp::Lag(10, 1.0), &p).panicking_in_bypass());
+            rig.advance(block as Frame);
+            assert!(rig.port(0).holding(), "{what}: refused install held");
+            rig.advance_to(end - 2 * block as Frame);
+            let mut panicked = false;
+            for _ in 0..8 {
+                if !guarded_block(&mut rig) {
+                    panicked = true;
+                    break;
+                }
+            }
+            assert!(panicked, "{what}: set_bypass panicked at take end");
+            assert!(guarded_block(&mut rig), "{what}: next block recovers");
+            rig.read_events();
+            let got: Vec<(Frame, UnitId, SeatOp, SeatOutcome)> = answers(&rig, 0).into_iter().filter(|a| a.1 == 1).collect();
+            assert_eq!(got.len(), 2, "{what}: held refusal answered twice: {got:?}");
+            assert_eq!((got[0].0, got[0].2, got[0].3), (sent, SeatOp::Install, SeatOutcome::Waiting), "{what}");
+            assert_eq!((got[1].2, got[1].3), (SeatOp::Install, SeatOutcome::Refused(SeatRefusal::Unknown)), "{what}");
+            let mut kept = Vec::new();
+            assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(1, 21, true, Left::Refused(SeatRefusal::Unknown))], "{what}");
+        }
+
+        // 3. Held removal -> Waiting, then Applied on take end, unit returned as Left::Removed with its token.
+        {
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put_tok(&mut rig, 0, 1, 31, 0, false, None, Unit::new(Dsp::Lag(30, 1.0), &p));
+            arm(&mut rig, 1.0);
+            let end = rig.end_frame();
+            rig.advance(block as Frame);
+            let sent = rig.frame;
+            assert!(rig.port(0).remove(1), "{what}");
+            rig.advance(block as Frame);
+            assert!(rig.port(0).holding(), "{what}: removal held");
+            rig.advance_to(end + 2 * block as Frame + FADE as Frame);
+            assert!(!rig.port(0).holding(), "{what}: removal resolved");
+            let got: Vec<(Frame, UnitId, SeatOp, SeatOutcome)> = answers(&rig, 0).into_iter().filter(|a| a.2 == SeatOp::Remove).collect();
+            assert_eq!(got.len(), 2, "{what}: held removal answered twice: {got:?}");
+            assert_eq!((got[0].0, got[0].1, got[0].3), (sent, 1, SeatOutcome::Waiting), "{what}");
+            assert!(got[1].0 >= end && got[1].0 <= end + block as Frame, "{what}: removal applied at {}", got[1].0);
+            assert_eq!((got[1].1, got[1].3), (1, SeatOutcome::Applied), "{what}");
+            let mut kept = Vec::new();
+            assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(1, 31, false, Left::Removed)], "{what}");
+        }
+
+        // 4. Held reseat -> withdraw 0-latency unit, then during take reseat with latent unit -> Waiting, then Applied.
+        {
+            let p = Probe::new();
+            let mut rig = rig(block);
+            put_tok(&mut rig, 0, 1, 41, 0, false, None, Unit::new(Dsp::Gain(1.0), &p));
+            rig.advance(1000);
+            assert!(rig.port(0).withdraw(1), "{what}");
+            rig.advance(1000);
+            let mut kept = Vec::new();
+            assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(1, 41, false, Left::Withdrawn)], "{what}");
+            arm(&mut rig, 1.0);
+            let end = rig.end_frame();
+            rig.advance(block as Frame);
+            let sent = rig.frame;
+            put_tok(&mut rig, 0, 1, 42, 0, false, None, Unit::new(Dsp::Lag(40, 1.0), &p));
+            rig.advance(block as Frame);
+            assert!(rig.port(0).holding(), "{what}: reseat held");
+            rig.advance_to(end + 2 * block as Frame);
+            assert!(!rig.port(0).holding(), "{what}: reseat resolved");
+            let got: Vec<(Frame, UnitId, SeatOp, SeatOutcome)> = answers(&rig, 0).into_iter().filter(|a| a.0 >= sent && a.1 == 1).collect();
+            assert_eq!(got.len(), 2, "{what}: held reseat answered twice: {got:?}");
+            assert_eq!((got[0].0, got[0].2, got[0].3), (sent, SeatOp::Install, SeatOutcome::Waiting), "{what}");
+            assert!(got[1].0 >= end && got[1].0 <= end + block as Frame, "{what}: reseat applied at {}", got[1].0);
+            assert_eq!((got[1].2, got[1].3), (SeatOp::Install, SeatOutcome::Applied), "{what}");
+            rig.engine.evict_slots();
+            assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(1, 42, false, Left::Evicted)], "{what}");
+        }
+    }
+}
+
+/// Every `Left` cause carries the install token its unit was sent with: Removed, Withdrawn, Replaced,
+/// Evicted, Unsent (a queued install on a full owed queue), Refused, legacy `install` (token 0),
+/// and a same-id reload evicted halfway through its crossfade (two boxes, two tokens, one id).
+#[test]
+fn every_left_cause_carries_its_install_token_including_mid_crossfade_reload_and_unsent() {
+    let p = Probe::new();
+    let mut kept = Vec::new();
+
+    // Removed, Withdrawn, Replaced, Refused, Evicted, legacy token 0.
+    {
+        let mut rig = rig(64);
+        // Legacy install -> token 0, then Removed.
+        assert!(rig.port(0).install(10, Unit::new(Dsp::Gain(1.0), &p)).is_ok());
+        // Removed with token 101.
+        put_tok(&mut rig, 0, 1, 101, MAX_UNITS, false, None, Unit::new(Dsp::Gain(1.0), &p));
+        // Withdrawn with token 102.
+        put_tok(&mut rig, 0, 2, 102, MAX_UNITS, true, None, Unit::new(Dsp::Gain(1.0), &p));
+        // Replaced with token 103 -> replaced by id 3 token 104, which is later Evicted.
+        put_tok(&mut rig, 0, 3, 103, MAX_UNITS, false, None, Unit::new(Dsp::Gain(1.0), &p));
+        rig.advance(1000);
+
+        // Refused (duplicate id 1) with token 107.
+        put_tok(&mut rig, 0, 1, 107, MAX_UNITS, true, None, Unit::new(Dsp::Gain(1.0), &p));
+        rig.advance(128);
+        assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(1, 107, true, Left::Refused(SeatRefusal::Id))], "refused carries token");
+
+        // Remove legacy id 10 and id 1.
+        assert!(rig.port(0).remove(10));
+        assert!(rig.port(0).remove(1));
+        rig.advance(1000);
+        assert_eq!(
+            take_returned(&mut rig, 0, &mut kept),
+            vec![(10, 0, false, Left::Removed), (1, 101, false, Left::Removed)],
+            "removed carries token (and legacy install is 0)"
+        );
+
+        // Withdraw id 2.
+        assert!(rig.port(0).withdraw(2));
+        rig.advance(1000);
+        assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(2, 102, true, Left::Withdrawn)], "withdrawn carries token");
+
+        // Replace id 3 (token 103) with id 4 (token 104).
+        put_tok(&mut rig, 0, 4, 104, 0, false, Some(3), Unit::new(Dsp::Gain(2.0), &p));
+        rig.advance(1000);
+        assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(3, 103, false, Left::Replaced)], "replaced carries old token");
+
+        // Evict id 4 (token 104).
+        rig.engine.evict_slots();
+        assert_eq!(take_returned(&mut rig, 0, &mut kept), vec![(4, 104, false, Left::Evicted)], "evicted carries token");
+    }
+
+    // Same-id reload evicted halfway through its crossfade: two boxes, two tokens, one id.
+    {
+        let mut rig = rig(64);
+        put_tok(&mut rig, 0, 5, 201, 0, false, None, Unit::new(Dsp::Gain(1.0), &p));
+        rig.advance(1000);
+        put_tok(&mut rig, 0, 5, 202, 0, false, Some(5), Unit::new(Dsp::Gain(2.0), &p));
+        // Halfway through the 480-frame crossfade: old is still in `outgoing`, new is in `seat.unit`.
+        rig.advance(192);
+        assert!(take_returned(&mut rig, 0, &mut kept).is_empty(), "mid-crossfade: neither unit has left yet");
+        rig.engine.evict_slots();
+        assert_eq!(
+            take_returned(&mut rig, 0, &mut kept),
+            vec![(5, 201, false, Left::Replaced), (5, 202, false, Left::Evicted)],
+            "mid-crossfade reload eviction returns both boxes with their two tokens and one id"
+        );
+    }
+
+    // Unsent: a queued install on a port whose owed queue is full comes back via evict_slots with Left::Unsent and its token.
+    {
+        let p_unsent = Probe::new();
+        let mut rig = Rig::with_event_capacity(Opts { block: 64, ..Opts::default() }, 4);
+        rig.advance(1000);
+        rig.hold_events = true;
+        rig.advance(64);
+        for round in 0..5 {
+            for k in 0..8 {
+                assert!(rig.port(0).remove(100 + 8 * round + k));
+            }
+            rig.advance(64);
+        }
+        let ticket = rig.port(0).install_at(7, 303, 0, true, None, Unit::new(Dsp::Gain(1.0), &p_unsent)).ok().expect("ring has room");
+        rig.advance(256);
+        assert!(!ticket.answered(), "install still queued in ring");
+        rig.engine.evict_slots();
+        assert_eq!(
+            take_returned(&mut rig, 0, &mut kept),
+            vec![(7, 303, true, Left::Unsent)],
+            "queued install returned as Unsent with its token"
+        );
+        assert!(ticket.answered());
+        assert_eq!((p_unsent.calls().len(), p_unsent.stops()), (0, 0), "never started or stopped");
+    }
+
+    assert_eq!(p.drops(), 0);
+    drop(kept);
+}
+
+/// An eviction interrupted by a unit's `stop` that panics once: retrying `evict_slots` still hands
+/// the seat back with `Left::Evicted` and its install token (never mislabelled `Left::Removed`).
+#[test]
+fn eviction_retried_after_stop_panic_keeps_left_evicted() {
+    let p = Probe::new();
+    let mut kept = Vec::new();
+    let mut rig = rig(64);
+    put_tok(&mut rig, 0, 1, 501, 0, false, None, Unit::new(Dsp::Gain(1.0), &p).panicking_in_stop_once());
+    rig.advance(1000);
+
+    let panicked = catch_unwind(AssertUnwindSafe(|| rig.engine.evict_slots())).is_err();
+    assert!(panicked, "first evict_slots must unwind on the unit's stop panic");
+    assert!(take_returned(&mut rig, 0, &mut kept).is_empty(), "unit stays in seat after stop panic");
+
+    rig.engine.evict_slots();
+    assert_eq!(
+        take_returned(&mut rig, 0, &mut kept),
+        vec![(1, 501, false, Left::Evicted)],
+        "retry evict_slots hands the seat back as Left::Evicted with its token"
+    );
+    assert_eq!(p.drops(), 0);
+    drop(kept);
+}
+
+/// A same-id reload queued on a port that has reply room when `evict_slots` runs applies in the
+/// idle service first: the old box comes back `Left::Replaced` with its old token, the new box
+/// `Left::Evicted` with its new token, and nothing comes back `Left::Unsent`.
+#[test]
+fn evict_with_queued_same_id_reload_and_reply_room_returns_replaced_and_evicted() {
+    let p = Probe::new();
+    let mut kept = Vec::new();
+    let mut rig = rig(64);
+    put_tok(&mut rig, 0, 5, 401, 0, false, None, Unit::new(Dsp::Gain(1.0), &p));
+    rig.advance(1000);
+
+    let ticket = rig
+        .port(0)
+        .install_at(5, 402, 0, false, Some(5), Unit::new(Dsp::Gain(2.0), &p))
+        .ok()
+        .expect("ring has room");
+    assert!(!ticket.answered(), "reload is queued, not yet serviced");
+
+    rig.engine.evict_slots();
+    let back = take_returned(&mut rig, 0, &mut kept);
+    assert_eq!(
+        back,
+        vec![(5, 401, false, Left::Replaced), (5, 402, false, Left::Evicted)],
+        "old box Replaced with old token, new box Evicted with new token, no Unsent"
+    );
+    assert!(ticket.answered());
+    assert_eq!(p.drops(), 0);
+    drop(kept);
 }

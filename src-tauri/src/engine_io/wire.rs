@@ -7,8 +7,8 @@
 //! Serde's external tagging with the Rust variant names: a unit variant is its name (`"PlayAll"`), a
 //! newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a struct variant an object with camelCase
 //! fields. A meter (`lf_engine::grid::Meter`, the time signature) travels as `[num, den]` in `SetMeter`
-//! and as `{"num","den","beats"}` in `Transport` and a session header (`meter_obj`). `FxParam`/`FxKind` travel as the TS keys (`src/ui/state/fx-metadata.ts`), an `InputSend` and an
-//! `InputSendParam` as their `key()`, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` /
+//! and as `{"num","den","beats"}` in `Transport` and a session header (`meter_obj`). `FxParam`/`FxKind` travel as the TS keys (`src/ui/state/fx-metadata.ts`), an `InputSend`, an
+//! `InputSendParam` and a `UnitParam` as their `key()`, a `UnitId` as a non-zero number, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` /
 //! `{"Slot":0}` / `"Off"`, a `Frame` (i64) as a JSON number. The
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
 //! is mirrored.
@@ -26,7 +26,8 @@
 //!
 //! The commands that carry it are `mode.rs`'s `engine_*` and `midi_mode.rs`'s `input_send`, the UI's one
 //! ordered batch of engine commands and input events (an [`InputItem`] each); `engine_feed` subscribes
-//! a Tauri `Channel`, one subscriber at a time (a new one replaces it), and its first frame is a `reset`.
+//! a Tauri `Channel`, one subscriber at a time (a new one replaces it), and its first frame is a `reset`
+//! (carrying each slot's `chains` alongside `live` and `settings`).
 //!
 //! Native MIDI's wire (`midi_mode.rs`'s commands) is camelCase throughout: `input_send`'s items are
 //! `{"engine":<a command as above>}` and `{"input":<an InputEvent>}`, an [`InputEvent`] being
@@ -40,13 +41,14 @@ use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
 use lf_engine::grid::{self, Frame};
-use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle, SLOT_COUNT};
+use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle, UnitId, UnitParam, SLOT_COUNT};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::chain::ChainState;
 use super::{DeviceEvent, DeviceStatus};
 
 /// A command as it crosses `input_send` (an [`InputItem::Engine`]). A slot's live flag or GO LIVE toggle
-/// for a slot past `SLOT_COUNT` is refused here, as `engine-wire.ts` refuses it.
+/// for a slot past `SLOT_COUNT`, and a unit command naming unit id 0, are refused here, as `engine-wire.ts` refuses them.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct WireCommand(#[serde(with = "CommandDef")] pub Command);
@@ -58,6 +60,9 @@ impl<'de> Deserialize<'de> for WireCommand {
             if usize::from(slot) >= SLOT_COUNT {
                 return Err(serde::de::Error::custom(format!("no plugin slot {slot}")));
             }
+        }
+        if command.unit() == Some(0) {
+            return Err(serde::de::Error::custom("unit id 0 is reserved"));
         }
         Ok(WireCommand(command))
     }
@@ -148,9 +153,8 @@ enum CommandDef {
     SetInputSendParam(#[serde(with = "input_send_param")] InputSendParam, f64),
     SetScope(bool),
     SetTuner(bool),
-    /// Off the wire until the chain host's stage mirrors it (`docs/unit-contract.md` §2).
-    #[serde(skip)]
-    SetUnitBypass(lf_engine::UnitId, bool),
+    SetUnitBypass(UnitId, bool),
+    SetUnitParam(UnitId, #[serde(with = "unit_param")] UnitParam, f64),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -174,9 +178,7 @@ enum ActionDef {
     FadeAll,
     Toggle(#[serde(with = "ToggleDef")] Toggle),
     Tuner,
-    /// Off the wire until the chain host's stage mirrors it (`docs/unit-contract.md` §2).
-    #[serde(skip)]
-    ToggleUnit(lf_engine::UnitId),
+    ToggleUnit(UnitId),
 }
 
 /// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, `{"Send":"echo"}` (a send
@@ -252,6 +254,10 @@ enum EventDef {
     #[serde(skip)]
     #[allow(dead_code)]
     Chain { frame: Frame, slot: u8, len: u8, seats: [lf_engine::ChainSeat; lf_engine::MAX_UNITS] },
+    /// Off the wire, as `Seat`.
+    #[serde(skip)]
+    #[allow(dead_code)]
+    UnitParam { frame: Frame, unit: lf_engine::UnitId, param: lf_engine::UnitParam, value: f64 },
 }
 
 /// A [`CompactMix`] in the track shape of [`WireLaneMix`].
@@ -440,6 +446,20 @@ mod input_send_param {
     }
 }
 
+/// A `UnitParam` as its key (`UnitParam::key`).
+mod unit_param {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &UnitParam, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v.key())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<UnitParam, D::Error> {
+        let key = String::deserialize(d)?;
+        UnitParam::from_key(&key).ok_or_else(|| serde::de::Error::custom(format!("unknown unit param \"{key}\"")))
+    }
+}
+
 /// Where the feed's playhead comes from: device frame `frame` was rendered at Unix time `at_ms`, the
 /// device runs `rate` frames a second, and loop position 0 plays at `grid + k * master`
 /// (`Looper::anchor`): at device frame `f` a lane plays `(f - grid) mod master`. `at_ms` is when the
@@ -529,6 +549,10 @@ pub struct FeedFrame {
     /// reset frame, and on a frame where it changed; absent otherwise. The UI shows GO LIVE from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<[bool; SLOT_COUNT]>,
+    /// Each plugin slot's chain as the host's model holds it (`chain.rs`): on a reset frame, and on a
+    /// frame where its revision moved; absent otherwise. `unitMeters` stays absent until E3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chains: Option<[ChainState; SLOT_COUNT]>,
     pub peaks: Vec<PeakUpdate>,
     /// Absent unless the stage view asked for the scope and this frame carries columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,7 +669,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 48;
+    const COMMANDS: usize = 50;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -697,13 +721,14 @@ mod tests {
             SetMeter(_) => 45,
             CopyWide(_) => 46,
             SetTuner(_) => 47,
-            SetUnitBypass(..) => unreachable!("off the wire until the chain host's stage"),
+            SetUnitBypass(..) => 48,
+            SetUnitParam(..) => 49,
         }
     }
 
     /// Every `Action` and `Refusal` variant, by position: a new one fails to compile here until the
     /// fixture sends (or answers) it.
-    const ACTIONS: usize = 18;
+    const ACTIONS: usize = 19;
     fn action_index(a: &Action) -> usize {
         match a {
             Action::RecDub => 0,
@@ -724,7 +749,7 @@ mod tests {
             Action::Toggle(_) => 15,
             Action::CopyWide => 16,
             Action::Tuner => 17,
-            Action::ToggleUnit(_) => unreachable!("off the wire until the chain host's stage"),
+            Action::ToggleUnit(_) => 18,
         }
     }
 
@@ -772,7 +797,7 @@ mod tests {
             Event::Mix { .. } => 10,
             Event::Toggled { .. } => 11,
             Event::Tuner { .. } => 12,
-            Event::Seat { .. } | Event::Chain { .. } => unreachable!("a seating answer never reaches the wire"),
+            Event::Seat { .. } | Event::Chain { .. } | Event::UnitParam { .. } => unreachable!("a seating answer never reaches the wire"),
         }
     }
 
@@ -936,6 +961,26 @@ mod tests {
         assert!(frames.iter().filter(|f| f.reset).all(|f| f.tuner.is_none()), "a reset frame carries no reading");
         let reset_tuner = frames.iter().filter(|f| f.reset).flat_map(|f| &f.events).any(|e| matches!(e.0, Event::Tuner { on: true, .. }));
         assert!(reset_tuner, "a reset frame carries the tuner while it is on");
+        assert!(frames.iter().filter(|f| f.reset).all(|f| f.chains.is_some()), "every reset frame carries chains");
+        assert!(frames.iter().any(|f| !f.reset && f.chains.is_some()), "a non-reset frame with chains");
+        assert!(frames.iter().any(|f| !f.reset && f.chains.is_none()), "a non-reset frame without chains");
+        let units: Vec<_> = frames.iter().filter_map(|f| f.chains.as_ref()).flat_map(|c| c.iter()).flat_map(|s| &s.units).collect();
+        assert!(units.iter().any(|u| u.kind == lf_engine::UnitKind::Plugin && u.plugin.is_some() && u.params.is_none()), "a plugin unit carries plugin and no params");
+        assert!(units.iter().any(|u| u.kind != lf_engine::UnitKind::Plugin && u.params.is_some() && u.plugin.is_none()), "a built-in carries params and no plugin");
+        assert!(units.iter().any(|u| u.parked) && units.iter().any(|u| !u.parked), "parked present and absent");
+        assert!(units.iter().any(|u| u.held) && units.iter().any(|u| !u.held), "held present and absent");
+        assert!(units.iter().any(|u| u.reloading) && units.iter().any(|u| !u.reloading), "reloading present and absent");
+        assert!(units.iter().any(|u| u.error.is_some()) && units.iter().any(|u| u.error.is_none()), "error present and absent");
+    }
+
+    #[test]
+    fn unit_commands_refuse_unknown_keys_unit_zero_and_toggle_units() {
+        let parse = |json: &str| serde_json::from_str::<WireCommand>(json).map(|c| c.0);
+        assert!(parse(r#"{"SetUnitParam":[7,"nope",1]}"#).is_err(), "unknown unit param key");
+        assert!(parse(r#"{"SetUnitBypass":[0,true]}"#).is_err(), "unit id 0");
+        assert!(parse(r#"{"Action":{"ToggleUnit":0}}"#).is_err(), "toggle unit id 0");
+        assert!(parse(r#"{"Action":{"Toggle":{"Units":"echo"}}}"#).is_err(), "Toggle.Units not in Rust until E3");
+        assert_eq!(parse(r#"{"SetUnitParam":[7,"gainDrum",0.3]}"#).unwrap(), Command::SetUnitParam(7, UnitParam::Gain(Instrument::Drums), 0.3));
     }
 
     #[test]
@@ -946,10 +991,11 @@ mod tests {
         assert!(same(&unpitched, &serde_json::json!({ "hz": null, "level": -71.2 })), "{unpitched}");
         let frame = FeedFrame {
             seq: 0, reset: false, catch_up: false, events: Vec::new(), device: Vec::new(), status: None, anchor: None, meter: None,
-            live: None, peaks: Vec::new(), scope: None, tuner: None, settings: None,
+            live: None, chains: None, peaks: Vec::new(), scope: None, tuner: None, settings: None,
         };
         let json = serde_json::to_value(&frame).unwrap();
         assert!(json.get("tuner").is_none(), "no reading: the field is absent: {json}");
+        assert!(json.get("chains").is_none(), "no chains change: the field is absent: {json}");
         let read: Value = serde_json::from_str(&serde_json::to_string(&FeedFrame { tuner: Some(TunerUpdate { hz: Some(82.407), level: -18.5 }), ..frame }).unwrap()).unwrap();
         assert!(same(&read["tuner"], &serde_json::json!({ "hz": 82.407, "level": -18.5 })), "{read}");
         let command = |json: &str| serde_json::from_str::<WireCommand>(json).map(|c| c.0);

@@ -30,7 +30,7 @@ use tauri::Emitter;
 use super::mode::EngineApp;
 use super::{EngineHost, SlotHost};
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
-use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneStore};
+use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneKey, ToneStore};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
@@ -102,7 +102,10 @@ impl LoadTarget<'_> {
         let identity = ToneIdentity { format: format.as_str().to_string(), path: path.clone(), id: id.clone() };
         // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
         let imported = self.reload_tones.lock().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
-        let tone = self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported });
+        let tone = self
+            .tones
+            .clone()
+            .map(|store| ToneBinding { store, key: ToneKey::Slot { slot: usize::from(slot), identity }, imported });
         let began = Instant::now();
         let loaded = (self.open)(format, path.clone(), id.clone(), self.host.slot(usize::from(slot)), tone);
         let mut slots = lock(self.slots)?;
@@ -153,6 +156,9 @@ impl LoadTarget<'_> {
             {
                 let mut slots = lock(self.slots)?;
                 current_document(state, frontend_epoch)?;
+                if super::chain_cmds::chain_units_exist(self.host) {
+                    return Err("chain units are in this run: restart the app to load a plugin into a slot".to_string());
+                }
                 match slots[usize::from(slot)] {
                     EngineSlot::Empty => {
                         slots[usize::from(slot)] = EngineSlot::Loading { epoch: frontend_epoch, cancelled: false };
@@ -465,6 +471,31 @@ impl EngineApp {
     pub(crate) fn plugin_gain(&self, slot: u8, gain: f32) -> Result<(), String> {
         self.host()?.send(TimedCommand { frame: None, command: Command::SetSlotGain(slot, gain) })
     }
+}
+
+/// Test-only shim exposing `LoadTarget::load` (including its `reserve` exclusion guard) to sibling
+/// tests in `engine_io::chain_cmds::tests`.
+#[cfg(test)]
+pub(super) fn load_with_opener(
+    slots: &Slots,
+    host: &EngineHost,
+    state: &PluginHostState,
+    slot: u8,
+    path: String,
+    id: String,
+    frontend_epoch: u32,
+    open: &dyn Fn(PluginFormat, String, String, SlotHost, Option<ToneBinding>) -> Result<EngineSlotHandle, String>,
+) -> Result<PluginInfo, String> {
+    let reload_tones = Mutex::default();
+    let target = LoadTarget {
+        slots,
+        reload_tones: &reload_tones,
+        tones: None,
+        host,
+        open,
+        vacate_wait: Duration::ZERO,
+    };
+    target.load(state, slot, path, id, frontend_epoch, None)
 }
 
 #[cfg(test)]

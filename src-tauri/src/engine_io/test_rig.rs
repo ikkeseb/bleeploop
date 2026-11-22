@@ -42,8 +42,21 @@ impl TestDevice {
     /// Build an engine at `rate` (2-second lanes, to keep tests light) and render `block`-frame blocks
     /// every `period`, with `input(frame)` as the device input.
     pub(crate) fn start(rate: u32, block: usize, period: Duration, input: impl Fn(Frame) -> f32 + Send + Sync + 'static) -> TestDevice {
+        let cap = EngineConfig::new(rate).event_capacity;
+        TestDevice::start_with_events(rate, block, period, cap, input)
+    }
+
+    /// [`TestDevice::start`] with an explicit event ring capacity (e.g. a small ring to test full-ring
+    /// recovery without filling 4096 events).
+    pub(crate) fn start_with_events(
+        rate: u32,
+        block: usize,
+        period: Duration,
+        event_capacity: usize,
+        input: impl Fn(Frame) -> f32 + Send + Sync + 'static,
+    ) -> TestDevice {
         let core = Arc::new(Core::new());
-        let config = EngineConfig { max_loop_seconds: 2.0, ..EngineConfig::new(rate) };
+        let config = EngineConfig { max_loop_seconds: 2.0, event_capacity, ..EngineConfig::new(rate) };
         let (engine, handle) = Engine::new(config);
         let [p0, p1] = handle.slots;
         *core.ports[0].lock().unwrap() = Some(p0);

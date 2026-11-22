@@ -10,9 +10,10 @@
 //! tone is torn down and created again from the same module (`load`).
 
 use super::super::engine_slot::{
-    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported,
+    own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported,
     Restore, Setup, FAULT_PROCESS, FAULT_START,
 };
+use super::super::unit_owner::{serve_unit, UnitCtx};
 use super::super::super::tone;
 use super::*;
 use vst3::Steinberg::kNotImplemented;
@@ -20,6 +21,7 @@ use vst3::Steinberg::kNotImplemented;
 use lf_engine::grid::Frame;
 use lf_engine::{SlotEvent, SlotKind, UnitCx, UnitInfo, UnitKind, UnitProcessor};
 
+use crate::engine_io::unit_host::Terms;
 use crate::engine_io::SlotHost;
 
 /// One activated VST3 processor with its event and parameter lists and pre-sized rows, built on
@@ -252,13 +254,14 @@ impl Drop for Vst3Plugin {
 }
 
 impl Vst3Plugin {
-    /// Owner thread, nothing processing: deactivate, then run the one activation sequence at the
-    /// engine's current rate with its largest block as the max. Returns what it negotiated, its max
-    /// block and the rate (`SlotHost::install` checks it).
+    /// Owner thread, nothing processing: deactivate, then read `terms` (after the deactivate: a device
+    /// swap that lands meanwhile is the one activated at) and run the one activation sequence at their
+    /// rate (0: no device, refused) with their largest block as the max. Returns what it negotiated,
+    /// its max block and the rate (`SlotHost::install` checks it).
     fn activate(
         &mut self,
         processor: &ComPtr<IAudioProcessor>,
-        slot: &SlotHost,
+        terms: impl FnOnce() -> Terms,
     ) -> Result<(Activation, u32, u32), String> {
         if self.active {
             // SAFETY: owner thread; the unit is out of the engine and stopped.
@@ -267,8 +270,11 @@ impl Vst3Plugin {
             }
             self.active = false;
         }
-        let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
-        let max_frames = slot.max_block().max(1) as u32;
+        let Terms { rate, max_block, .. } = terms();
+        if rate == 0 {
+            return Err("no audio device is open".to_string());
+        }
+        let max_frames = max_block.max(1) as u32;
         // SAFETY: owner thread; the component is initialised and inactive, and nothing processes.
         let activation = unsafe { activate_component(&self.component, processor, rate as f64, max_frames) }?;
         self.active = true;
@@ -363,24 +369,32 @@ fn sync_controller(plugin: &Vst3Plugin, slot: usize) -> Result<(), String> {
 /// The module and factory an owner loads from.
 pub(super) type Opened = (Option<Vst3Module>, ComPtr<IPluginFactory>);
 
+/// Load the VST3 bundle at `path` and resolve its factory.
+fn open_bundle(path: String) -> Result<Opened, String> {
+    let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(&path))
+        .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
+    let wide: Vec<u16> = binary.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: FFI module load and its standard factory entry; the out-of-process scan vetted the
+    // bundle. The module guard owns the library at once, so every later error unloads it.
+    unsafe {
+        let module = Vst3Module::load(PCWSTR(wide.as_ptr()))?;
+        let gpf = GetProcAddress(module.handle(), s!("GetPluginFactory"))
+            .ok_or_else(|| "GetPluginFactory not exported".to_string())?;
+        let get_factory: unsafe extern "system" fn() -> *mut IPluginFactory = std::mem::transmute(gpf);
+        let factory =
+            ComPtr::from_raw(get_factory()).ok_or_else(|| "GetPluginFactory returned null".to_string())?;
+        Ok((Some(module), factory))
+    }
+}
+
 /// The production owner: load the bundle at `path`.
 pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(), String> {
-    run_with(ctx, id, move || {
-        let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(&path))
-            .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
-        let wide: Vec<u16> = binary.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        // SAFETY: FFI module load and its standard factory entry; the out-of-process scan vetted the
-        // bundle. The module guard owns the library at once, so every later error unloads it.
-        unsafe {
-            let module = Vst3Module::load(PCWSTR(wide.as_ptr()))?;
-            let gpf = GetProcAddress(module.handle(), s!("GetPluginFactory"))
-                .ok_or_else(|| "GetPluginFactory not exported".to_string())?;
-            let get_factory: unsafe extern "system" fn() -> *mut IPluginFactory = std::mem::transmute(gpf);
-            let factory =
-                ComPtr::from_raw(get_factory()).ok_or_else(|| "GetPluginFactory returned null".to_string())?;
-            Ok((Some(module), factory))
-        }
-    })
+    run_with(ctx, id, move || open_bundle(path))
+}
+
+/// The chain-unit production owner: load the bundle at `path`.
+pub(in super::super) fn run_unit(ctx: UnitCtx, path: String, id: &str) -> Result<(), String> {
+    run_unit_with(ctx, id, move || open_bundle(path))
 }
 
 /// Create class `target` (`id`) from the factory, initialise it, create its edit controller and give it
@@ -481,7 +495,7 @@ fn load(
     if restored != Restore::Restored {
         sync_controller(&plugin, slot.slot())?;
     }
-    let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
+    let (activation, max_frames, rate) = plugin.activate(&processor, || Terms { generation: 0, rate: slot.rate().unwrap_or(0), max_block: slot.max_block() })?;
     // A restart or a re-list the restore or the activation raised describes the state just
     // activated, as a cycle's does (`reinstall`); the param ids are listed after the load anyway.
     let _ = (restart.take(), restart.take_notify());
@@ -500,16 +514,74 @@ pub(super) fn run_with(
     serve(ctx, |setup| load(id, open, setup))
 }
 
+/// The chain-unit VST3 owner (`unit_owner::serve_unit`). `open` yields the module and factory.
+pub(super) fn run_unit_with(
+    ctx: UnitCtx,
+    id: &str,
+    open: impl FnOnce() -> Result<Opened, String>,
+) -> Result<(), String> {
+    serve_unit(ctx, |setup| load(id, open, setup))
+}
+
 /// A loaded VST3 plugin as its owner holds it. Torn down in the live order (`release`): the editor,
 /// the unit (it releases the processor), the plugin (its `Drop`, the module last), then the handler
 /// its controller held.
-struct Vst3 {
+pub(super) struct Vst3 {
     editor: Vst3Editor,
     plugin: Vst3Plugin,
     handler: ComWrapper<LfComponentHandler>,
     /// What the plugin's `restartComponent` raised (maybe on a foreign thread), for the owner's turn.
     restart: Arc<RestartFlags>,
     slot: u8,
+}
+
+#[cfg(test)]
+impl Vst3 {
+    /// An owner and its unit made as a load makes them (`create`, then the activation at `rate` and
+    /// `max_block`), with no slot, tone or caller behind them: for a test that drives the owner alone.
+    pub(super) fn bare(opened: Opened, id: &str, rate: u32, max_block: usize) -> Result<(Self, Box<Vst3Unit>), String> {
+        let restart = Arc::new(RestartFlags::default());
+        let (params_tx, params) = rtrb::RingBuffer::<ParamEvent>::new(8);
+        let handler = ComWrapper::new(LfComponentHandler {
+            event_tx: Arc::new(Mutex::new(params_tx)),
+            edited: Arc::new(AtomicBool::new(false)),
+            param_changed: Box::new(|_, _| {}),
+            restart: restart.clone(),
+        });
+        let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
+        let (mut plugin, processor, _) = create(opened, &target, id, &handler)?;
+        let (activation, max_frames, _) = plugin.activate(&processor, || Terms { generation: 0, rate, max_block })?;
+        let unit = Vst3Unit::new(processor, activation, max_frames, params, Arc::new(AtomicU32::new(0)))?;
+        Ok((Vst3 { editor: Vst3Editor::Closed, plugin, handler, restart, slot: 0 }, unit))
+    }
+}
+
+impl Vst3 {
+    /// `Vst3Plugin::activate` at `terms`, read after the deactivate; returns the rate activated at. A
+    /// restart report the plugin raises from inside the cycle (a `kLatencyChanged` from `setActive(1)`)
+    /// describes the state just activated and is consumed, as the live cycle does.
+    fn reactivate_with(
+        &mut self,
+        mut unit: Box<Vst3Unit>,
+        terms: impl FnOnce() -> Terms,
+    ) -> Result<(Box<Vst3Unit>, u32), (Box<Vst3Unit>, String)> {
+        let activated = self.plugin.activate(&unit.processor, terms);
+        let raised = self.restart.take();
+        if raised != 0 {
+            log::info!(
+                "[plugin_host] engine slot {} restartComponent({}) raised during the cycle describes the state just activated; consumed",
+                self.slot,
+                restart_flag_names(raised)
+            );
+        }
+        match activated {
+            Ok((activation, max_frames, rate)) => {
+                unit.rearm(activation, max_frames);
+                Ok((unit, rate))
+            }
+            Err(e) => Err((unit, e)),
+        }
+    }
 }
 
 impl OwnedPlugin for Vst3 {
@@ -521,26 +593,17 @@ impl OwnedPlugin for Vst3 {
         (flags != 0).then(|| format!("restartComponent({})", restart_flag_names(flags)))
     }
 
-    /// A restart report the plugin raises from inside the cycle (a `kLatencyChanged` from
-    /// `setActive(1)`) describes the state just activated and is consumed, as the live cycle does.
-    fn reinstall(&mut self, mut unit: Box<Vst3Unit>, slot: &SlotHost) -> Result<(), (Box<Vst3Unit>, String)> {
-        let activated = self.plugin.activate(&unit.processor, slot);
-        let raised = self.restart.take();
-        if raised != 0 {
-            log::info!(
-                "[plugin_host] engine slot {} restartComponent({}) raised during the cycle describes the state just activated; consumed",
-                slot.slot(),
-                restart_flag_names(raised)
-            );
-        }
-        let rate = match activated {
-            Ok((activation, max_frames, rate)) => {
-                unit.rearm(activation, max_frames);
-                rate
-            }
-            Err(e) => return Err((unit, e)),
-        };
+    fn reinstall(&mut self, unit: Box<Vst3Unit>, slot: &SlotHost) -> Result<(), (Box<Vst3Unit>, String)> {
+        let (unit, rate) = self.reactivate_with(unit, || slot_terms(slot))?;
         slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
+    }
+
+    fn reactivate(
+        &mut self,
+        unit: Box<Vst3Unit>,
+        terms: Terms,
+    ) -> Result<Box<Vst3Unit>, (Box<Vst3Unit>, String)> {
+        self.reactivate_with(unit, || terms).map(|(unit, _)| unit)
     }
 
     fn turn(&mut self, _sink: &EventSink) -> Reported {

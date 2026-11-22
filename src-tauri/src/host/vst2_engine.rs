@@ -21,9 +21,10 @@
 //!   effect, its context and its module loaded with it (`engine_slot::serve`'s teardown).
 
 use super::engine_slot::{
-    own, restore_tone, serve, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
-    FAULT_EVENTS, FAULT_PARAM,
+    own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Place,
+    Reported, Restore, Setup, FAULT_EVENTS, FAULT_PARAM,
 };
+use super::unit_owner::{serve_unit, UnitCtx};
 use super::super::editor_window::{
     create_host_window, drain_after_editor_teardown, set_client_size, show_host_window_front, HostWindow,
 };
@@ -49,6 +50,7 @@ use lf_engine::{SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitInfo, UnitKind, 
 use rtrb::Consumer;
 use windows::Win32::Foundation::HWND;
 
+use crate::engine_io::unit_host::Terms;
 use crate::engine_io::SlotHost;
 
 /// Entries in each pointer array a process call gets: the most pins `vst2::validate` accepts. The
@@ -376,11 +378,18 @@ impl Vst2Plugin {
         unsafe { self.effect.dispatch(opcode, index, value, std::ptr::null_mut(), opt) }
     }
 
-    /// Give the plugin the engine's current rate and largest block, the context first (the plugin
-    /// may ask the host from inside either call). Plugin suspended.
-    fn configure(&mut self, slot: &SlotHost) -> Result<(u32, usize), String> {
-        let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
-        let block = slot.max_block().max(1);
+    /// `configure_at` the place's current rate and largest block (the load, and a test).
+    fn configure(&mut self, slot: &dyn Place) -> Result<(u32, usize), String> {
+        self.configure_at(slot.rate().unwrap_or(0), slot.max_block())
+    }
+
+    /// Give the plugin the engine's `rate` (0: no device, refused) and largest block `max_block`, the
+    /// context first (the plugin may ask the host from inside either call). Plugin suspended.
+    fn configure_at(&mut self, rate: u32, max_block: usize) -> Result<(u32, usize), String> {
+        if rate == 0 {
+            return Err("no audio device is open".to_string());
+        }
+        let block = max_block.max(1);
         self.ctx.set_rate(f64::from(rate), block as i32)?;
         // SAFETY: neither opcode reads a pointer.
         unsafe {
@@ -650,22 +659,30 @@ pub(super) struct Opened {
     pub(super) file_stem: String,
 }
 
+/// Load the VST2 DLL at `path` and resolve its entry.
+fn open_dll(path: String) -> Result<Opened, String> {
+    let path = std::path::Path::new(&path);
+    let module = Vst2Module::load(path)?;
+    let entry = module.entry();
+    let file_stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Opened { module: Some(module), entry, file_stem })
+}
+
 /// The production owner: load the DLL at `path`.
 pub(super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(), String> {
-    run_with(ctx, id, move || {
-        let path = std::path::Path::new(&path);
-        let module = Vst2Module::load(path)?;
-        let entry = module.entry();
-        let file_stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Opened { module: Some(module), entry, file_stem })
-    })
+    run_with(ctx, id, move || open_dll(path))
+}
+
+/// The chain-unit production owner: load the DLL at `path`.
+pub(super) fn run_unit(ctx: UnitCtx, path: String, id: &str) -> Result<(), String> {
+    run_unit_with(ctx, id, move || open_dll(path))
 }
 
 /// Create the instance for `id` (the effect's unique id as 8 hex digits) on a context of its own,
 /// bound to this thread as its owner. An instance this host refuses was never called, so it cannot
 /// be closed: its module and its context stay loaded for the rest of the process. A shell (several
 /// plugins in one file) is refused here as the scan refuses it, and closed like any open instance.
-fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost) -> Result<Vst2Plugin, String> {
+fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &dyn Place) -> Result<Vst2Plugin, String> {
     let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
     let ctx = HostContext::new(f64::from(rate), slot.max_block().max(1) as i32)?;
     ctx.bind_owner();
@@ -746,6 +763,32 @@ pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Op
     serve(ctx, |setup| load(id, open, setup))
 }
 
+/// The chain-unit VST2 owner (`unit_owner::serve_unit`). `open` yields the module and its entry.
+pub(super) fn run_unit_with(ctx: UnitCtx, id: &str, open: impl FnOnce() -> Result<Opened, String>) -> Result<(), String> {
+    serve_unit(ctx, |setup| load(id, open, setup))
+}
+
+impl Vst2Plugin {
+    /// Suspend, then read `terms` (after the suspend: a device swap that lands meanwhile is the one
+    /// configured at), configure, resume and rebuild the unit's rows. Returns the rate configured at.
+    fn reactivate_with(
+        &mut self,
+        mut unit: Box<Vst2Unit>,
+        terms: impl FnOnce() -> Terms,
+    ) -> Result<(Box<Vst2Unit>, u32), (Box<Vst2Unit>, String)> {
+        self.suspend();
+        let terms = terms();
+        let activated = self.configure_at(terms.rate, terms.max_block).and_then(|t| Ok((self.resume()?, t)));
+        match activated {
+            Ok((info, (rate, block))) => {
+                unit.rearm(&info, block);
+                Ok((unit, rate))
+            }
+            Err(e) => Err((unit, e)),
+        }
+    }
+}
+
 impl OwnedPlugin for Vst2Plugin {
     type Unit = Vst2Unit;
     const FORMAT: &'static str = "VST2";
@@ -758,20 +801,23 @@ impl OwnedPlugin for Vst2Plugin {
 
     /// Re-activate the plugin at the engine's current terms and install its unit, rows rebuilt. On
     /// failure the unit comes back to the caller and the plugin is left suspended.
-    fn reinstall(&mut self, mut unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
-        self.suspend();
-        let activated = self.configure(slot).and_then(|terms| Ok((self.resume()?, terms)));
-        match activated {
-            Ok((info, (rate, block))) => {
-                unit.rearm(&info, block);
-                slot.install(unit, rate).map_err(|(unit, e)| {
-                    // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
-                    self.suspend();
-                    (own(unit), e)
-                })
-            }
-            Err(e) => Err((unit, e)),
-        }
+    fn reinstall(&mut self, unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
+        let (unit, rate) = self.reactivate_with(unit, || slot_terms(slot))?;
+        slot.install(unit, rate).map_err(|(unit, e)| {
+            // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
+            self.suspend();
+            (own(unit), e)
+        })
+    }
+
+    /// Suspend, configure at `terms`, resume, and rebuild the unit's rows for what the plugin now
+    /// declares. On failure the unit comes back and the plugin is left suspended.
+    fn reactivate(
+        &mut self,
+        unit: Box<Vst2Unit>,
+        terms: Terms,
+    ) -> Result<Box<Vst2Unit>, (Box<Vst2Unit>, String)> {
+        self.reactivate_with(unit, || terms).map(|(unit, _)| unit)
     }
 
     /// What the plugin's own editor moved, with the value the plugin reported: told to the caller,

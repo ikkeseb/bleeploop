@@ -30,7 +30,8 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   or a failed add; an add of a reserved id is refused at once, never at seating.
 - **The id names the instance and nothing else.** Two instances of one plugin, in one chain or in both,
   are two ids. It holds across a move, a bypass, a restart, an engine rebuild, an app restart and a save;
-  it ends with a removal.
+  it ends with a removal. Until the rig record restores a chain at launch (§6, E3), the native chain host
+  removes every unit at shutdown, so each tone retires to its slot and plugin's file and the id ends there.
 - **The rig record** is `lf.rig` in the WebView's storage, beside recall and its crash marker
   (`src/ui/state/rig-recall.ts`): per slot the units in order as `UnitRecord`s (§2). The upgrade writes it
   before the first load (§6); while a recall runs (`src/app/boot.ts`) nothing writes it, so neither a
@@ -78,7 +79,10 @@ interface ChainHost {
 }
 ```
 
-The window events (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) carry `unit`.
+A chain unit's window events are `chain:editor-closed`, `chain:param-changed` and `chain:params-changed`,
+each carrying `unit` (`engine_io/chain_cmds.rs`); `plugin:*` stays the legacy slots'. `reload` writes the
+parked tone to the unit's file before it loads (`ToneStore::redeem`), so the outgoing instance's saves are
+dropped from then on; it answers `reloaded` only when its own candidate took the seat.
 A new `chain` module in `engine_io` (the chain host) keeps the run's model: per slot the ordered ids,
 kinds, plugin identities, each param and bypass **as applied**: it records a built-in's params as the unit
 clamped them at build, and the engine answers each `SetUnitParam` with `Event::UnitParam { frame, unit,
@@ -88,10 +92,15 @@ engine carrying its params and bypass; `engine_io/settings.rs` keeps no per-unit
 **Seating is acknowledged.** A port push only queues. The engine answers every port message with
 `Event::Seat { slot, unit, op, outcome }` (install, remove, withdraw, move; waiting, applied, or refused
 with its reason), owed until the ring takes it, as a lane's `Mix`; `add` and `remove` settle on it.
-`LOAD_TIMEOUT` (`host/engine_slot.rs`) bounds the plugin's setup and stops at the handover;
-`REMOVE_TIMEOUT` counts only while no `waiting` answer came.
+**A `waiting` answer is the first of two:** the held message gets a second `Seat` (applied or refused)
+when it resolves, and the slot keeps room owed for it. `add` settles on the first (`seated` or
+`waiting`; the second reaches the UI through `chains`); `remove`, `move` and `reload` wait for the
+second. The slot's call order (one structural call at a time, `engine_io/chain_cmds.rs`) is released at
+`waiting`, so a held op never holds the slot's other calls across a take. `LOAD_TIMEOUT`
+(`host/engine_slot.rs`) bounds the plugin's setup and stops at the handover; `REMOVE_TIMEOUT` counts only
+while no `waiting` answer came.
 
-**A rebuild keeps every bypass.** The eviction hands back each seat as `(id, unit, bypassed)`, the
+**A rebuild keeps every bypass.** The eviction hands back each seat as `(id, token, unit, bypassed, left)`, the
 final applied values (the unit holds its params), and the reseat restores exactly those; an owed
 `Seat`/`Chain`/`UnitParam` answer only updates the model, never replays. The unit commands the old engine
 never took, in its table or ring (peeked as `unapplied_transport` peeks, `engine.rs`), are pushed after
@@ -182,7 +191,16 @@ today's `FADE_SECONDS`): lifecycle (undelayed input ↔ what the seat sounds), i
 - **Reset** is a unit's audio state (lines, followers, tails, a carrier's phase), never its params: on
   entering an engine (a fresh build, a re-activation after an eviction), never while seated. No gesture
   resets a unit in this build, so the trait has no `reset`.
-- **Changes:** `SlotPort` (`slots.rs`) carries `Install { id, at, bypassed, replaces, unit, line }`,
+- **Answers keep order within one engine; a rebuild crosses engines.** A slot answers its port messages
+  in message order, so an op settles from its slot's `Seat`s alone (`engine_io/unit_host.rs`). Every
+  install carries a token the engine hands back with the unit and why it left (`Left`: removed,
+  replaced, withdrawn, evicted, unsent, refused), so the host tells two instances of one id apart (a
+  same-id reload evicted mid-crossfade). A rebuild settles what the old engine never answered from that
+  engine's own state (its chains, its owed param answers, its unapplied unit commands), never from its
+  event ring: a seated unit comes back evicted with its bypass, an install it never applied comes back
+  unsent (its op settles as rebuilt), and each owner re-activates at the new engine's terms and submits
+  again.
+- **Changes:** `SlotPort` (`slots.rs`) carries `Install { id, token, at, bypassed, replaces, unit }`,
   `Remove { id }`, `Withdraw { id }`, `Move { id, to }`, each answered by `Seat`; the rack holds
   `[Seat; MAX_UNITS]` and an order per slot; `src-tauri/AGENTS.md`'s unload order loses its live-off step.
 
@@ -295,7 +313,7 @@ pub trait UnitProcessor: Send {
     /// every sample finite. Never allocates, locks or waits.
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
     /// A built-in's parameter, on its frame. A plugin's ride its owner's ring: ignored here.
-    fn set_param(&mut self, _cx: &UnitCx, _param: UnitParam, _value: f64) {}
+    fn set_param(&mut self, _cx: &UnitCx, _param: UnitParam, _value: f64) -> Option<f64> { None } // Some(applied) clamped, None not a param of this unit
     /// The bypass, on its frame. True: the unit bypasses itself (§3); false: the seat's crossfade does.
     fn set_bypass(&mut self, _cx: &UnitCx, _bypassed: bool) -> bool { false }
     /// Hand over and restart the meter fold (§2). False: it shows nothing.
