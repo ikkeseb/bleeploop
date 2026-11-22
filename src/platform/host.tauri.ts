@@ -417,6 +417,20 @@ const noChain = async (): Promise<never> => {
   throw new Error(NO_CHAIN);
 };
 
+// Tauri does not guarantee two async commands start in the order sent, so structural calls on one
+// slot run one after another (mirroring `chain-fake.ts`'s `onSlot`).
+const chainSlotTails: [Promise<unknown>, Promise<unknown>] = [Promise.resolve(), Promise.resolve()];
+const chainUnitSlots = new Map<UnitId, PluginSlot>();
+function onChainSlot<T>(slot: PluginSlot, op: () => Promise<T>): Promise<T> {
+  const run = chainSlotTails[slot].then(op);
+  chainSlotTails[slot] = run.catch(() => {});
+  return run;
+}
+function onChainUnit<T>(unit: UnitId, op: () => Promise<T>): Promise<T> {
+  const slot = chainUnitSlots.get(unit);
+  return slot === undefined ? op() : onChainSlot(slot, op);
+}
+
 /**
  * The chain per slot over Tauri IPC (`src-tauri/src/engine_io/chain_cmds.rs`, unit contract §2).
  * Enabled only in DEV when `localStorage['lf.chainNative'] === '1'` (read once per page); otherwise
@@ -427,29 +441,45 @@ const tauriChainHost: ChainHost = chainNative
   ? {
       available: true,
       async add(slot, unit, spec, at, toneToken) {
-        return invoke<'seated' | 'waiting'>('chain_add', {
-          slot,
-          unit,
-          spec,
-          at,
-          toneToken: toneToken ?? null,
-          frontendEpoch: requireEpoch(),
+        const frontendEpoch = requireEpoch();
+        chainUnitSlots.set(unit, slot);
+        return onChainSlot(slot, () => {
+          chainUnitSlots.set(unit, slot);
+          return invoke<'seated' | 'waiting'>('chain_add', {
+            slot,
+            unit,
+            spec,
+            at,
+            toneToken: toneToken ?? null,
+            frontendEpoch,
+          });
         });
       },
       async remove(unit) {
-        await invoke('chain_remove', { unit, frontendEpoch: requireEpoch() });
-      },
-      async reload(unit, plugin, since, toneToken) {
-        return invoke<'reloaded' | 'moved' | 'failed'>('chain_reload', {
-          unit,
-          plugin,
-          since,
-          toneToken,
-          frontendEpoch: requireEpoch(),
+        const frontendEpoch = requireEpoch();
+        const slot = chainUnitSlots.get(unit);
+        return onChainUnit(unit, async () => {
+          await invoke('chain_remove', { unit, frontendEpoch });
+          if (slot !== undefined && chainUnitSlots.get(unit) === slot) chainUnitSlots.delete(unit);
         });
       },
+      async reload(unit, plugin, since, toneToken) {
+        const frontendEpoch = requireEpoch();
+        return onChainUnit(unit, () =>
+          invoke<'reloaded' | 'moved' | 'failed'>('chain_reload', {
+            unit,
+            plugin,
+            since,
+            toneToken,
+            frontendEpoch,
+          }),
+        );
+      },
       async move(unit, to) {
-        await invoke('chain_move', { unit, to, frontendEpoch: requireEpoch() });
+        const frontendEpoch = requireEpoch();
+        return onChainUnit(unit, async () => {
+          await invoke('chain_move', { unit, to, frontendEpoch });
+        });
       },
       async openEditor(unit) {
         await invoke('chain_open_editor', { unit, frontendEpoch: requireEpoch() });

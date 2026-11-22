@@ -1,7 +1,7 @@
 //! OWNS: the chain commands (E2, `docs/unit-contract.md` §2): the `chain_*` Tauri commands the UI's
-//! `ChainHost` calls (`src/platform/host.ts`), the per-slot call order, the built-in unit owner loop,
-//! the run exclusion with legacy plugin slots, shutdown teardown, and (in round 2) plugin adds, reload,
-//! editor affinity, params, tone tokens, and `chain:editor-closed`. JSON arguments are camelCase; every
+//! `ChainHost` calls (`src/platform/host.ts`), the per-slot call order, the built-in and plugin unit
+//! owners, the run exclusion with legacy plugin slots, shutdown teardown, plugin adds, reload, editor
+//! affinity, params, tone tokens, and `chain:*` window events. JSON arguments are camelCase; every
 //! command that can wait runs on `spawn_blocking`.
 //!
 //! The epoch (`host_init`'s `frontendEpoch`) is checked at entry: a call from a replaced document is
@@ -9,7 +9,7 @@
 //! document reads them from the reset frame). `plugin:*`, `plugin_*` and `host_init` are untouched:
 //! chain units emit `chain:*` only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{
     AtomicBool,
     Ordering::{Acquire, Relaxed, Release},
@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use lf_engine::{InstallToken, SeatRefusal, UnitId, UnitKind, SLOT_COUNT};
 use serde::Serialize;
+use tauri::Emitter;
 
 use super::chain::{PlateState, PluginRef, UnitSpec};
 use super::mode::{engine, EngineApp};
@@ -29,14 +30,18 @@ use super::unit_host::{
     self, Activated, Back, BuiltinFactory, Op, OpState, Removal, Spec, SubmitError, Unit, UnitHost,
 };
 use super::EngineHost;
+use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
+use crate::host::tone::{ToneBinding, ToneKey, ToneStore, ToneTokens};
+use crate::host::unit_owner::{self, Answer, UnitOwner};
 use crate::host::{ParamDesc, PluginHostState};
 
 #[cfg(test)]
 #[path = "chain_cmds_tests.rs"]
 pub(crate) mod tests;
 
-/// What unbuilt round-2 commands answer until plugin adds, reload, editors, params and tones land.
-const NOT_BUILT: &str = "chain host not built yet";
+/// Literal returned by `unit_owner::spawn_unit_with` when plugin setup hangs past its bound and the
+/// owner thread is left running (the module may stay loaded, so affinity leaks the holder).
+const SETUP_TIMEOUT_ERR: &str = "plugin setup timed out";
 
 /// How often a built-in unit's owner thread polls its mailbox and pending install op.
 const BUILTIN_POLL: Duration = Duration::from_millis(20);
@@ -47,20 +52,152 @@ const BUILTIN_ADD_TIMEOUT: Duration = Duration::from_secs(15);
 /// Unheld wait bound for `chain_remove` and `chain_move` (mirrors `host::engine_slot::REMOVE_TIMEOUT`).
 const REMOVE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 2 });
 
+/// Unheld wait bound for a waiting `chain_reload` to settle after the slot is no longer held.
+const RELOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Combined wait budget for all in-flight chain unit removals during app shutdown.
 const SHUTDOWN_UNLOAD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The window event a unit's editor sends when the player closed it by its own close, or it went with
-/// its unit. (`chain:param-changed` and `chain:params-changed` wait for the activation thread's drawer:
-/// no subscriber in E2.)
-#[allow(dead_code)] // round 2: editors
+/// its unit.
 pub(crate) const EDITOR_CLOSED: &str = "chain:editor-closed";
 
-/// [`EDITOR_CLOSED`]'s payload.
-#[allow(dead_code)] // round 2: editors
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct EditorClosed {
-    pub unit: UnitId,
+/// The window event a unit's plugin editor sends when a parameter moves.
+pub(crate) const PARAM_CHANGED: &str = "chain:param-changed";
+
+/// The window event a unit's plugin sends when its parameter list/values changed wholesale.
+pub(crate) const PARAMS_CHANGED: &str = "chain:params-changed";
+
+/// Pure mapping from an owner's [`EngineSlotEvent`] to its `chain:*` window event name and payload.
+pub(crate) fn chain_event(unit: UnitId, event: EngineSlotEvent) -> (&'static str, serde_json::Value) {
+    match event {
+        EngineSlotEvent::EditorClosed => (EDITOR_CLOSED, serde_json::json!({ "unit": unit })),
+        EngineSlotEvent::ParamChanged { id, value } => {
+            (PARAM_CHANGED, serde_json::json!({ "unit": unit, "id": id, "value": value }))
+        }
+        EngineSlotEvent::ParamsChanged => (PARAMS_CHANGED, serde_json::json!({ "unit": unit })),
+    }
+}
+
+/// Opener seam for loading a plugin unit: `unit_owner::load_unit` in production, a fake in tests.
+pub(crate) type Open<'a> = &'a dyn Fn(
+    PluginFormat,
+    &PluginRef,
+    UnitHost,
+    EventSink,
+    Option<ToneBinding>,
+) -> Result<(UnitOwner, Answer), String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AffinityState {
+    Owned,
+    Orphaned,
+    Unordered,
+}
+
+struct AffinityEntry {
+    inst: u64,
+    unit: UnitId,
+    state: AffinityState,
+}
+
+/// Per-plugin-file editor affinity table (D29, unit contract §1), slot-blind.
+///
+/// The first load of a path no instance holds owns its editor; a second load while the owner's load
+/// is still in flight makes the entry `unordered`; the owner going while other instances still hold
+/// the module makes it `orphaned`; the last holder releasing deletes the entry so the next load owns
+/// it afresh; a `leak`ed holder (e.g. a setup timeout whose owner thread stayed running) never
+/// releases.
+#[derive(Default)]
+pub(crate) struct Affinity {
+    next_inst: u64,
+    entries: BTreeMap<String, AffinityEntry>,
+    holders: BTreeMap<String, BTreeSet<u64>>,
+    loading: BTreeSet<u64>,
+    leaked: BTreeSet<u64>,
+}
+
+impl Affinity {
+    pub(crate) fn claim(&mut self, path: &str) -> u64 {
+        self.next_inst += 1;
+        let inst = self.next_inst;
+        if let Some(entry) = self.entries.get_mut(path) {
+            if entry.state == AffinityState::Owned && self.loading.contains(&entry.inst) {
+                entry.state = AffinityState::Unordered;
+            }
+        } else {
+            self.entries.insert(
+                path.to_string(),
+                AffinityEntry { inst, unit: 0, state: AffinityState::Owned },
+            );
+        }
+        self.holders.entry(path.to_string()).or_default().insert(inst);
+        self.loading.insert(inst);
+        inst
+    }
+
+    pub(crate) fn landed(&mut self, inst: u64, path: &str, unit: UnitId) {
+        self.loading.remove(&inst);
+        if let Some(entry) = self.entries.get_mut(path) {
+            if entry.inst == inst {
+                entry.unit = unit;
+            }
+        }
+    }
+
+    pub(crate) fn release(&mut self, inst: u64, path: &str) {
+        if self.leaked.contains(&inst) {
+            return;
+        }
+        self.loading.remove(&inst);
+        let empty = match self.holders.get_mut(path) {
+            Some(holding) => {
+                holding.remove(&inst);
+                holding.is_empty()
+            }
+            None => true,
+        };
+        if empty {
+            self.holders.remove(path);
+            self.entries.remove(path);
+        } else if let Some(entry) = self.entries.get_mut(path) {
+            if entry.inst == inst && entry.state == AffinityState::Owned {
+                entry.state = AffinityState::Orphaned;
+            }
+        }
+    }
+
+    pub(crate) fn leak(&mut self, inst: u64, path: &str) {
+        self.leaked.insert(inst);
+        self.holders.entry(path.to_string()).or_default().insert(inst);
+        if self.entries.get(path).is_some_and(|e| e.inst != inst) {
+            self.loading.remove(&inst);
+        }
+    }
+
+    pub(crate) fn check(&self, path: &str, inst: u64) -> Result<(), String> {
+        let Some(entry) = self.entries.get(path) else {
+            return Ok(());
+        };
+        match entry.state {
+            AffinityState::Orphaned => Err(format!(
+                "the editor is bound to unit {}'s previous load",
+                entry.unit
+            )),
+            AffinityState::Unordered => Err(
+                "the editor belongs to an unknown unit (two loaded it at once)".to_string(),
+            ),
+            AffinityState::Owned if entry.inst != inst => {
+                Err(format!("the editor belongs to unit {}", entry.unit))
+            }
+            AffinityState::Owned => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_held(&self, path: &str) -> bool {
+        self.holders.get(path).is_some_and(|h| !h.is_empty())
+    }
 }
 
 /// `chain_add`'s answer: the engine took the install, or holds it until a take ends.
@@ -73,7 +210,6 @@ pub enum Added {
 
 /// `chain_reload`'s answer: a fresh instance seated, the unit moved on since `since` (nothing done),
 /// or the load failed (the old instance stays).
-#[allow(dead_code)] // round 2: reload
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Reloaded {
@@ -86,7 +222,6 @@ pub enum Reloaded {
 /// and the bytes became the slot's file), the plugin's name, and the units the tone may go to: its own
 /// unit if seated with that identity, in either slot; then the import slot's other seated units of that
 /// identity, in chain order.
-#[allow(dead_code)] // round 2: tones
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ChainToneImport {
     pub token: Option<u32>,
@@ -96,35 +231,64 @@ pub struct ChainToneImport {
 
 /// One registered chain unit: its slot, row install token, and owner thread handle.
 struct Entry {
-    #[allow(dead_code)] // round 2: reload, editors, tone import
+    #[allow(dead_code)] // kept beside the owner for symmetry and diagnostics
     slot: usize,
     token: InstallToken,
     owner: Owner,
 }
 
-/// A chain unit's owner; round 2 adds the plugin owner variant here.
+/// A plugin unit's registered owner and its editor-affinity identity.
+struct PluginOwner {
+    plugin: PluginRef,
+    inst: u64,
+    owner: UnitOwner,
+}
+
+/// A chain unit's owner (built-in or native plugin).
 enum Owner {
     Builtin(BuiltinOwner),
+    Plugin(PluginOwner),
 }
 
 impl Owner {
     fn is_finished(&self) -> bool {
         match self {
             Owner::Builtin(b) => b.is_finished(),
+            Owner::Plugin(p) => p.owner.is_finished(),
         }
     }
 
     fn request_stop(&self) {
         match self {
             Owner::Builtin(b) => b.request_stop(),
+            Owner::Plugin(_) => {}
         }
     }
 
     fn join(&self) {
         match self {
             Owner::Builtin(b) => b.join(),
+            Owner::Plugin(_) => {}
         }
     }
+
+    fn affinity_handle(&self) -> Option<(u64, String)> {
+        match self {
+            Owner::Builtin(_) => None,
+            Owner::Plugin(p) => Some((p.inst, p.plugin.path.clone())),
+        }
+    }
+}
+
+/// A reload candidate held aside while waiting for a take to end (or after an `Unanswered`/timed-out
+/// wait), to be swapped into `registry` on promotion or retired to `gone` on failure.
+struct PendingReload {
+    unit: UnitId,
+    slot: usize,
+    old_token: InstallToken,
+    plugin: PluginRef,
+    inst: u64,
+    owner: UnitOwner,
 }
 
 struct BuiltinOwner {
@@ -168,13 +332,17 @@ const _: fn() = || {
     assert_send_sync::<Chains>();
 };
 
-/// The chain host's per-app state: built-in factory, live unit registry, departing owners, per-slot
-/// call serialization, and shutdown latch.
+/// The chain host's per-app state: built-in factory, live unit registry, departing owners, waiting
+/// reload candidates, per-slot call serialization, editor affinity, parked tone tokens, and shutdown
+/// latch.
 pub(crate) struct Chains {
     factory: Option<Arc<dyn BuiltinFactory>>,
     registry: Mutex<BTreeMap<UnitId, Arc<Entry>>>,
     gone: Mutex<Vec<Arc<Entry>>>,
+    pending_reloads: Mutex<Vec<PendingReload>>,
     order: [Mutex<()>; SLOT_COUNT],
+    affinity: Mutex<Affinity>,
+    tokens: Mutex<ToneTokens>,
     closing: AtomicBool,
 }
 
@@ -194,14 +362,31 @@ impl Chains {
             factory,
             registry: Mutex::new(BTreeMap::new()),
             gone: Mutex::new(Vec::new()),
+            pending_reloads: Mutex::new(Vec::new()),
             order: std::array::from_fn(|_| Mutex::new(())),
+            affinity: Mutex::new(Affinity::default()),
+            tokens: Mutex::new(ToneTokens::default()),
             closing: AtomicBool::new(false),
         }
     }
 
-    /// Move finished registry entries (e.g. a replaced source or `Dismissed` unit) into `gone`, and
-    /// drop finished `gone` entries whose last `Arc` lives here (instant join).
-    fn sweep(&self) {
+    /// Resolve any reload candidates held aside, move finished registry entries into `gone`, drop
+    /// finished `gone` entries whose last `Arc` lives here (instant join), and release their editor
+    /// affinity instances once their owner threads have ended.
+    fn sweep(&self, host: Option<&EngineHost>) {
+        if let Some(host) = host {
+            let checks: Vec<(UnitId, InstallToken, u64)> = {
+                let pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+                pending.iter().map(|c| (c.unit, c.old_token, c.inst)).collect()
+            };
+            for (unit, old_token, inst) in checks {
+                match reload_outcome(host, unit, old_token) {
+                    ReloadOutcome::Standing => {}
+                    ReloadOutcome::Reloaded(new_token) => self.promote_pending_reload(inst, new_token),
+                    ReloadOutcome::Failed => self.retire_pending_reload(inst),
+                }
+            }
+        }
         let mut moved = Vec::new();
         {
             let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -228,7 +413,72 @@ impl Chains {
                 }
             }
         }
+        let release_after: Vec<(u64, String)> = drop_now
+            .iter()
+            .filter_map(|entry| entry.owner.affinity_handle())
+            .collect();
         drop(drop_now);
+        if !release_after.is_empty() {
+            let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+            for (inst, path) in release_after {
+                aff.release(inst, &path);
+            }
+        }
+    }
+
+    fn take_pending_reload(&self, inst: u64) -> Option<PendingReload> {
+        let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+        let pos = pending.iter().position(|c| c.inst == inst)?;
+        Some(pending.swap_remove(pos))
+    }
+
+    fn promote_pending_reload(&self, inst: u64, new_token: InstallToken) {
+        let Some(cand) = self.take_pending_reload(inst) else {
+            return;
+        };
+        let entry = Arc::new(Entry {
+            slot: cand.slot,
+            token: new_token,
+            owner: Owner::Plugin(PluginOwner {
+                plugin: cand.plugin,
+                inst: cand.inst,
+                owner: cand.owner,
+            }),
+        });
+        let replaced = {
+            let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            if self.closing.load(Acquire) {
+                drop(reg);
+                self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+                return;
+            }
+            if reg.get(&cand.unit).is_some_and(|e| e.token != cand.old_token) {
+                // Another load already replaced `old_token`: retire this candidate rather than clobbering it.
+                drop(reg);
+                self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+                return;
+            }
+            reg.insert(cand.unit, entry)
+        };
+        if let Some(old_entry) = replaced {
+            self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(old_entry);
+        }
+    }
+
+    fn retire_pending_reload(&self, inst: u64) {
+        let Some(cand) = self.take_pending_reload(inst) else {
+            return;
+        };
+        let entry = Arc::new(Entry {
+            slot: cand.slot,
+            token: 0,
+            owner: Owner::Plugin(PluginOwner {
+                plugin: cand.plugin,
+                inst: cand.inst,
+                owner: cand.owner,
+            }),
+        });
+        self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
     }
 
     /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`).
@@ -260,27 +510,189 @@ impl Chains {
         drop(removed);
     }
 
-    /// Add a unit to `slot` at plate index `at`. Round 1 implements built-in units through the injected
-    /// factory; plugin adds answer `NOT_BUILT` until round 2.
+    /// Add a unit (built-in or plugin) to `slot` at plate index `at`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &self,
         host: &EngineHost,
         doc: (&PluginHostState, u32),
         slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        tones: Option<&ToneStore>,
         slot: usize,
         unit: UnitId,
         spec: UnitSpec,
         at: usize,
+        tone_token: Option<u32>,
+        sink: EventSink,
+        open: Open<'_>,
     ) -> Result<Added, String> {
         current_document(doc.0, doc.1)?;
-        self.sweep();
+        self.sweep(Some(host));
         let (spec, bypassed) = spec.into_spec()?;
-        let (kind, params) = match spec {
-            Spec::Plugin(_) => return Err(NOT_BUILT.into()),
-            Spec::Legacy => return Err("legacy unit spec is not valid for chain_add".to_string()),
-            Spec::Builtin { kind, params } => (kind, params),
+        match spec {
+            Spec::Legacy => Err("legacy unit spec is not valid for chain_add".to_string()),
+            Spec::Builtin { kind, params } => {
+                self.add_builtin(host, slots, slot, unit, kind, params, at, bypassed)
+            }
+            Spec::Plugin(plugin) => {
+                self.add_plugin(host, slots, tones, slot, unit, plugin, at, bypassed, tone_token, sink, open)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_plugin(
+        &self,
+        host: &EngineHost,
+        slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        tones: Option<&ToneStore>,
+        slot: usize,
+        unit: UnitId,
+        plugin: PluginRef,
+        at: usize,
+        bypassed: bool,
+        tone_token: Option<u32>,
+        sink: EventSink,
+        open: Open<'_>,
+    ) -> Result<Added, String> {
+        let format = check_plugin_format(&plugin)?;
+        if slot >= SLOT_COUNT {
+            return Err(format!("no slot {slot}"));
+        }
+
+        let _order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+        if self.closing.load(Acquire) {
+            return Err("the host is closing".to_string());
+        }
+
+        // Lock order: order[slot] -> slots -> host.core.state.
+        let (unit_host, token) = {
+            let slots_guard = slots.lock().map_err(|_| "engine slots poisoned".to_string())?;
+            for (s, entry) in slots_guard.iter().enumerate() {
+                if !matches!(entry, EngineSlot::Empty) {
+                    return Err(format!(
+                        "a plugin is loaded in slot {s} through the plugin slot: restart the app to use chains"
+                    ));
+                }
+            }
+            let unit_host = match host.unit(slot, unit, Spec::Plugin(plugin.clone()), at, bypassed) {
+                Ok(u) => u,
+                Err(why) => {
+                    if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
+                        return Err(format!(
+                            "unit {unit} is still leaving its chain (a take holds its removal); add it again when the take ends"
+                        ));
+                    }
+                    return Err(why);
+                }
+            };
+            let token = {
+                let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .table
+                    .active_row_for_id(unit)
+                    .map(|r| r.token)
+                    .ok_or_else(|| format!("unit {unit} row missing after reservation"))?
+            };
+            (unit_host, token)
         };
+
+        let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
+        let tone = match tones {
+            Some(store) => {
+                let key = ToneKey::Unit { unit, slot, identity: plugin.clone() };
+                let imported = match tone_token {
+                    Some(tok) => {
+                        let parked = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).take(tok, &plugin);
+                        match parked {
+                            Some(t) => match store.redeem(&key, t) {
+                                Ok(imp) => Some(imp),
+                                Err(why) => {
+                                    log::warn!(
+                                        "[chain_cmds] slot {slot} unit {unit}: tone token {tok} redeem failed: {why}; loading without it"
+                                    );
+                                    None
+                                }
+                            },
+                            None => {
+                                log::warn!(
+                                    "[chain_cmds] slot {slot} unit {unit}: tone token {tok} unknown or bound to another plugin; loading without it"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                Some(ToneBinding { store: store.clone(), key, imported })
+            }
+            None => {
+                if let Some(tok) = tone_token {
+                    log::warn!(
+                        "[chain_cmds] slot {slot} unit {unit}: no tone store; ignoring tone token {tok}"
+                    );
+                }
+                None
+            }
+        };
+
+        match open(format, &plugin, unit_host, sink, tone) {
+            Ok((owner, answer)) => {
+                self.affinity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .landed(inst, &plugin.path, unit);
+                let path_for_close = plugin.path.clone();
+                let entry = Arc::new(Entry {
+                    slot,
+                    token,
+                    owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
+                });
+                {
+                    let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                    if self.closing.load(Acquire) {
+                        drop(reg);
+                        drop(entry);
+                        self.affinity
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .release(inst, &path_for_close);
+                        return Err("the host is closing".to_string());
+                    }
+                    reg.insert(unit, entry);
+                }
+                match answer {
+                    Answer::Seated { .. } => Ok(Added::Seated),
+                    Answer::Waiting { .. } => Ok(Added::Waiting),
+                    Answer::Unanswered => Err(format!(
+                        "the audio engine did not answer within 30 s: unit {unit} stays loading and seats if the engine answers"
+                    )),
+                }
+            }
+            Err(e) => {
+                let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+                if e == SETUP_TIMEOUT_ERR {
+                    aff.leak(inst, &plugin.path);
+                } else {
+                    aff.release(inst, &plugin.path);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_builtin(
+        &self,
+        host: &EngineHost,
+        slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        slot: usize,
+        unit: UnitId,
+        kind: UnitKind,
+        params: unit_host::Params,
+        at: usize,
+        bypassed: bool,
+    ) -> Result<Added, String> {
         let Some(factory) = self.factory.as_ref().cloned() else {
             return Err(builtin_unavailable_reason(kind));
         };
@@ -426,7 +838,7 @@ impl Chains {
         unit: UnitId,
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
-        self.sweep();
+        self.sweep(Some(host));
         let slot = find_unit_slot(host, unit)?;
         let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
         let token = {
@@ -465,7 +877,7 @@ impl Chains {
         to: usize,
     ) -> Result<(), String> {
         current_document(doc.0, doc.1)?;
-        self.sweep();
+        self.sweep(Some(host));
         let slot = find_unit_slot(host, unit)?;
         let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
         let op = host.move_unit(unit, to)?;
@@ -484,7 +896,7 @@ impl Chains {
     pub(super) fn unload_all(&self, host: &EngineHost) {
         self.closing.store(true, Release);
         host.set_closing();
-        self.sweep();
+        self.sweep(Some(host));
         let ids: Vec<UnitId> = {
             let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             reg.keys().copied().collect()
@@ -508,8 +920,8 @@ impl Chains {
         }
     }
 
-    /// After `host.shutdown()`: signal stop to every remaining owner in `registry` and `gone` and join
-    /// their threads.
+    /// After `host.shutdown()`: signal stop to every remaining owner in `registry`, `gone` and
+    /// `pending_reloads` and join their threads.
     pub(super) fn join_all(&self) {
         let mut entries = Vec::new();
         {
@@ -521,12 +933,426 @@ impl Chains {
             let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
             entries.append(&mut *gone);
         }
+        {
+            let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+            for cand in pending.drain(..) {
+                entries.push(Arc::new(Entry {
+                    slot: cand.slot,
+                    token: 0,
+                    owner: Owner::Plugin(PluginOwner {
+                        plugin: cand.plugin,
+                        inst: cand.inst,
+                        owner: cand.owner,
+                    }),
+                }));
+            }
+        }
         for entry in &entries {
             entry.owner.request_stop();
         }
         for entry in &entries {
             entry.owner.join();
         }
+        let release_after: Vec<(u64, String)> = entries
+            .iter()
+            .filter_map(|e| e.owner.affinity_handle())
+            .collect();
+        drop(entries);
+        if !release_after.is_empty() {
+            let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+            for (inst, path) in release_after {
+                aff.release(inst, &path);
+            }
+        }
+    }
+
+    /// Reload `unit` with a fresh instance of `plugin` applying `tone_token`, if `unit` is still that
+    /// seated plugin and was not re-added since `since`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reload(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        tones: Option<&ToneStore>,
+        unit: UnitId,
+        plugin: PluginRef,
+        since: u64,
+        tone_token: u32,
+        sink: EventSink,
+        open: Open<'_>,
+    ) -> Result<Reloaded, String> {
+        current_document(doc.0, doc.1)?;
+        self.sweep(Some(host));
+        let format = check_plugin_format(&plugin)?;
+
+        let slot = {
+            let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            match state.model.find_plate(unit) {
+                Some((s, _)) => s,
+                None => return Ok(Reloaded::Moved),
+            }
+        };
+
+        let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
+        if self.closing.load(Acquire) {
+            return Err("the host is closing".to_string());
+        }
+
+        let old = {
+            let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some((plate_slot, plate)) = state.model.find_plate(unit) else {
+                return Ok(Reloaded::Moved);
+            };
+            if plate_slot != slot
+                || plate.legacy
+                || plate.kind != UnitKind::Plugin
+                || plate.plugin.as_ref() != Some(&plugin)
+                || plate.state != PlateState::Seated
+            {
+                return Ok(Reloaded::Moved);
+            }
+            match plate.told_seq {
+                Some(told) if told <= since => {}
+                _ => return Ok(Reloaded::Moved),
+            }
+            match state.table.active_row_for_id(unit) {
+                Some(row) => row.token,
+                None => {
+                    log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: active row missing");
+                    return Ok(Reloaded::Failed);
+                }
+            }
+        };
+
+        let unit_host = match host.reload_unit(unit, plugin.clone()) {
+            Ok(u) => u,
+            Err(why) => {
+                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+                return Ok(Reloaded::Failed);
+            }
+        };
+
+        let Some(store) = tones else {
+            let why = "no app-local data folder to keep tones in".to_string();
+            log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+            unit_host.failed(why);
+            unit_host.release();
+            return Ok(Reloaded::Failed);
+        };
+        let Some(tone) = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).take(tone_token, &plugin) else {
+            let why = format!("tone token {tone_token} is not parked for {}", plugin.path);
+            log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+            unit_host.failed(why);
+            unit_host.release();
+            return Ok(Reloaded::Failed);
+        };
+        let key = ToneKey::Unit { unit, slot, identity: plugin.clone() };
+        let imported = match store.redeem(&key, tone) {
+            Ok(imp) => imp,
+            Err(why) => {
+                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: redeem tone: {why}");
+                unit_host.failed(why);
+                unit_host.release();
+                return Ok(Reloaded::Failed);
+            }
+        };
+        let binding = ToneBinding { store: store.clone(), key, imported: Some(imported) };
+
+        let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
+        match open(format, &plugin, unit_host, sink, Some(binding)) {
+            Err(e) => {
+                {
+                    let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+                    if e == SETUP_TIMEOUT_ERR {
+                        aff.leak(inst, &plugin.path);
+                    } else {
+                        aff.release(inst, &plugin.path);
+                    }
+                }
+                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {e}");
+                Ok(Reloaded::Failed)
+            }
+            Ok((owner, Answer::Seated { .. })) => {
+                self.affinity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .landed(inst, &plugin.path, unit);
+                let new_token = {
+                    let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.table.active_row_for_id(unit).map(|r| r.token).unwrap_or(0)
+                };
+                let path_for_close = plugin.path.clone();
+                let entry = Arc::new(Entry {
+                    slot,
+                    token: new_token,
+                    owner: Owner::Plugin(PluginOwner { plugin, inst, owner }),
+                });
+                let replaced = {
+                    let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                    if self.closing.load(Acquire) {
+                        drop(reg);
+                        drop(entry);
+                        self.affinity
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .release(inst, &path_for_close);
+                        return Err("the host is closing".to_string());
+                    }
+                    reg.insert(unit, entry)
+                };
+                if let Some(old_entry) = replaced {
+                    self.gone.lock().unwrap_or_else(|e| e.into_inner()).push(old_entry);
+                }
+                Ok(Reloaded::Reloaded)
+            }
+            Ok((owner, Answer::Waiting { .. })) => {
+                self.affinity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .landed(inst, &plugin.path, unit);
+                self.pending_reloads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                drop(order);
+
+                let mut unheld = Duration::ZERO;
+                let mut last = Instant::now();
+                loop {
+                    match reload_outcome(host, unit, old) {
+                        ReloadOutcome::Reloaded(new_token) => {
+                            self.promote_pending_reload(inst, new_token);
+                            return Ok(Reloaded::Reloaded);
+                        }
+                        ReloadOutcome::Failed => {
+                            self.retire_pending_reload(inst);
+                            log::warn!(
+                                "[chain_cmds] slot {slot} unit {unit} reload failed while waiting to seat"
+                            );
+                            return Ok(Reloaded::Failed);
+                        }
+                        ReloadOutcome::Standing => {}
+                    }
+                    if self.closing.load(Acquire) || host.core.closing.load(Acquire) {
+                        self.retire_pending_reload(inst);
+                        log::warn!(
+                            "[chain_cmds] slot {slot} unit {unit} reload interrupted by shutdown"
+                        );
+                        return Ok(Reloaded::Failed);
+                    }
+                    let now = Instant::now();
+                    let dt = now.saturating_duration_since(last);
+                    last = now;
+                    let slot_held = {
+                        let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                        state.model.slot_held(slot)
+                    };
+                    if !slot_held {
+                        unheld += dt;
+                        if unheld >= RELOAD_WAIT_TIMEOUT {
+                            return Err(format!(
+                                "unit {unit} reload did not settle within {} s",
+                                RELOAD_WAIT_TIMEOUT.as_secs()
+                            ));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            Ok((owner, Answer::Unanswered)) => {
+                self.affinity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .landed(inst, &plugin.path, unit);
+                self.pending_reloads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                Err(format!(
+                    "the audio engine did not answer within 30 s: unit {unit} reload stays loading and seats if the engine answers"
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn open_editor(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        unit: UnitId,
+    ) -> Result<(), String> {
+        current_document(doc.0, doc.1)?;
+        self.sweep(Some(host));
+        let entry = {
+            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get(&unit).cloned()
+        }
+        .ok_or_else(|| format!("unit {unit} not found"))?;
+        match &entry.owner {
+            Owner::Builtin(_) => Err(format!("unit {unit} has no plugin editor")),
+            Owner::Plugin(p) => {
+                {
+                    let aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+                    aff.check(&p.plugin.path, p.inst)?;
+                }
+                p.owner.open_editor()
+            }
+        }
+    }
+
+    pub(crate) fn close_editor(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        unit: UnitId,
+    ) -> Result<(), String> {
+        current_document(doc.0, doc.1)?;
+        self.sweep(Some(host));
+        let entry = {
+            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get(&unit).cloned()
+        };
+        let Some(entry) = entry else {
+            return Ok(());
+        };
+        match &entry.owner {
+            Owner::Builtin(_) => Ok(()),
+            Owner::Plugin(p) => {
+                if p.owner.is_finished() {
+                    Ok(())
+                } else {
+                    p.owner.close_editor()
+                }
+            }
+        }
+    }
+
+    pub(crate) fn list_params(&self, host: &EngineHost, unit: UnitId) -> Result<Vec<ParamDesc>, String> {
+        self.sweep(Some(host));
+        let entry = {
+            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get(&unit).cloned()
+        }
+        .ok_or_else(|| format!("unit {unit} not found"))?;
+        match &entry.owner {
+            Owner::Builtin(_) => Err(format!("unit {unit} is not a plugin unit")),
+            Owner::Plugin(p) => p.owner.list_params(),
+        }
+    }
+
+    pub(crate) fn set_param(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        unit: UnitId,
+        param_id: u32,
+        value: f64,
+    ) -> Result<(), String> {
+        current_document(doc.0, doc.1)?;
+        self.sweep(Some(host));
+        let entry = {
+            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get(&unit).cloned()
+        };
+        let Some(entry) = entry else {
+            return Ok(());
+        };
+        if is_unit_leaving(host, unit) {
+            return Ok(());
+        }
+        match &entry.owner {
+            Owner::Builtin(_) => Err(format!("unit {unit} is not a plugin unit")),
+            Owner::Plugin(p) => {
+                if p.owner.is_finished() {
+                    Ok(())
+                } else {
+                    p.owner.set_param(param_id, value)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn tone_take(&self, host: &EngineHost, unit: UnitId) -> Result<Vec<u8>, String> {
+        self.sweep(Some(host));
+        let entry = {
+            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get(&unit).cloned()
+        }
+        .ok_or_else(|| format!("unit {unit} not found"))?;
+        match &entry.owner {
+            Owner::Builtin(_) => Err(format!("unit {unit} is not a plugin unit")),
+            Owner::Plugin(p) => p.owner.take_tone(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tone_import(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        tones: Option<&ToneStore>,
+        slot: usize,
+        bytes: &[u8],
+        plugin: &PluginRef,
+        hinted_unit: Option<UnitId>,
+    ) -> Result<ChainToneImport, String> {
+        current_document(doc.0, doc.1)?;
+        if slot >= SLOT_COUNT {
+            return Err(format!("no slot {slot}"));
+        }
+        let store = tones.ok_or_else(|| "no app-local data folder to keep tones in".to_string())?;
+        let tone = ToneStore::check(bytes, plugin)?;
+
+        let rev = {
+            let mut state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.model.snapshot()
+        };
+        let is_match = |u: &super::chain::UnitState| {
+            u.kind == UnitKind::Plugin
+                && u.state == PlateState::Seated
+                && u.plugin.as_ref() == Some(plugin)
+        };
+        let mut matches = Vec::new();
+        if let Some(hint) = hinted_unit {
+            let found = rev
+                .chains
+                .iter()
+                .flat_map(|c| c.units.iter())
+                .find(|u| u.id == hint && is_match(u));
+            if found.is_some() {
+                matches.push(hint);
+            }
+        }
+        for u in &rev.chains[slot].units {
+            if is_match(u) && !matches.contains(&u.id) {
+                matches.push(u.id);
+            }
+        }
+
+        let name = tone.name.clone();
+        if matches.is_empty() {
+            store.import(slot, bytes, plugin)?;
+            Ok(ChainToneImport { token: None, name, matches })
+        } else {
+            let token = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).park(tone);
+            Ok(ChainToneImport { token: Some(token), name, matches })
+        }
+    }
+
+    pub(crate) fn tone_forget(&self, doc: (&PluginHostState, u32), token: u32) -> Result<(), String> {
+        current_document(doc.0, doc.1)?;
+        self.tokens.lock().unwrap_or_else(|e| e.into_inner()).forget(token);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn affinity_held(&self, path: &str) -> bool {
+        self.affinity.lock().unwrap_or_else(|e| e.into_inner()).is_held(path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_parked_tone(&self, token: u32, identity: &PluginRef) -> Option<crate::host::tone::Tone> {
+        self.tokens.lock().unwrap_or_else(|e| e.into_inner()).take(token, identity)
     }
 
     #[cfg(test)]
@@ -535,6 +1361,44 @@ impl Chains {
         let g = self.gone.lock().unwrap_or_else(|e| e.into_inner()).len();
         r + g
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadOutcome {
+    Standing,
+    Reloaded(InstallToken),
+    Failed,
+}
+
+fn reload_outcome(host: &EngineHost, unit: UnitId, old: InstallToken) -> ReloadOutcome {
+    unit_host::service_if_idle(&host.core);
+    unit_host::drain_if_stale(&host.core);
+    let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.table.has_reload_row(unit) {
+        ReloadOutcome::Standing
+    } else if let Some(row) = state.table.active_row_for_id(unit) {
+        if row.token != old {
+            ReloadOutcome::Reloaded(row.token)
+        } else {
+            ReloadOutcome::Failed
+        }
+    } else {
+        ReloadOutcome::Failed
+    }
+}
+
+fn check_plugin_format(plugin: &PluginRef) -> Result<PluginFormat, String> {
+    let format = PluginFormat::of_path(std::path::Path::new(&plugin.path))
+        .ok_or_else(|| format!("{}: not a .clap, .vst3 or .dll plugin", plugin.path))?;
+    if format.as_str() != plugin.format {
+        return Err(format!(
+            "{}: plugin format {:?} does not match path extension ({})",
+            plugin.path,
+            plugin.format,
+            format.as_str()
+        ));
+    }
+    Ok(format)
 }
 
 /// Whether any chain unit (or non-legacy plate) exists in this run; called under the legacy slots lock
@@ -814,6 +1678,13 @@ async fn blocking<T: Send + 'static>(
     .map_err(|e| format!("{op} task: {e}"))?
 }
 
+fn window_sink(window: tauri::WebviewWindow, unit: UnitId) -> EventSink {
+    Arc::new(move |event| {
+        let (name, payload) = chain_event(unit, event);
+        let _ = window.emit(name, payload);
+    })
+}
+
 /// Reserve `unit` across both slots, build it, hand it over at plate index `at` (a source goes to the
 /// head, replacing a seated one); settles on the engine's answer. Rejects at once for a reserved id or a
 /// full chain, and on a failed load, or if the first answer does not arrive in time.
@@ -825,12 +1696,29 @@ pub async fn chain_add(
     at: usize,
     tone_token: Option<u32>,
     frontend_epoch: u32,
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<Added, String> {
     blocking(app, "chain_add", move |app, state| {
-        let _ = tone_token;
         let host = app.host()?;
-        app.chains.add(&host, (state, frontend_epoch), &app.slots, usize::from(slot), unit, spec, at)
+        let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
+        let sink = window_sink(window, unit);
+        let open = |format: PluginFormat, plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            unit_owner::load_unit(format, plugin.path.clone(), plugin.id.clone(), unit_host, parent, sink, tone)
+        };
+        app.chains.add(
+            &host,
+            (state, frontend_epoch),
+            &app.slots,
+            app.tones.as_ref(),
+            usize::from(slot),
+            unit,
+            spec,
+            at,
+            tone_token,
+            sink,
+            &open,
+        )
     })
     .await
 }
@@ -855,11 +1743,27 @@ pub async fn chain_reload(
     since: u64,
     tone_token: u32,
     frontend_epoch: u32,
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<Reloaded, String> {
-    blocking(app, "chain_reload", move |_, _| {
-        let _ = (unit, plugin, since, tone_token, frontend_epoch);
-        Err(NOT_BUILT.into())
+    blocking(app, "chain_reload", move |app, state| {
+        let host = app.host()?;
+        let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
+        let sink = window_sink(window, unit);
+        let open = |format: PluginFormat, plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            unit_owner::load_unit(format, plugin.path.clone(), plugin.id.clone(), unit_host, parent, sink, tone)
+        };
+        app.chains.reload(
+            &host,
+            (state, frontend_epoch),
+            app.tones.as_ref(),
+            unit,
+            plugin,
+            since,
+            tone_token,
+            sink,
+            &open,
+        )
     })
     .await
 }
@@ -877,9 +1781,9 @@ pub async fn chain_move(unit: UnitId, to: usize, frontend_epoch: u32, app: tauri
 /// Open `unit`'s editor on its owner thread (one editor per plugin file at a time: the affinity table).
 #[tauri::command]
 pub async fn chain_open_editor(unit: UnitId, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
-    blocking(app, "chain_open_editor", move |_, _| {
-        let _ = (unit, frontend_epoch);
-        Err(NOT_BUILT.into())
+    blocking(app, "chain_open_editor", move |app, state| {
+        let host = app.host()?;
+        app.chains.open_editor(&host, (state, frontend_epoch), unit)
     })
     .await
 }
@@ -887,9 +1791,9 @@ pub async fn chain_open_editor(unit: UnitId, frontend_epoch: u32, app: tauri::Ap
 /// Close `unit`'s editor. Idempotent.
 #[tauri::command]
 pub async fn chain_close_editor(unit: UnitId, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
-    blocking(app, "chain_close_editor", move |_, _| {
-        let _ = (unit, frontend_epoch);
-        Err(NOT_BUILT.into())
+    blocking(app, "chain_close_editor", move |app, state| {
+        let host = app.host()?;
+        app.chains.close_editor(&host, (state, frontend_epoch), unit)
     })
     .await
 }
@@ -897,9 +1801,9 @@ pub async fn chain_close_editor(unit: UnitId, frontend_epoch: u32, app: tauri::A
 /// `unit`'s plugin parameters (stable ids, ranges, live values), from its owner thread.
 #[tauri::command]
 pub async fn chain_list_params(unit: UnitId, app: tauri::AppHandle) -> Result<Vec<ParamDesc>, String> {
-    blocking(app, "chain_list_params", move |_, _| {
-        let _ = unit;
-        Err(NOT_BUILT.into())
+    blocking(app, "chain_list_params", move |app, _| {
+        let host = app.host()?;
+        app.chains.list_params(&host, unit)
     })
     .await
 }
@@ -913,9 +1817,9 @@ pub async fn chain_set_param(
     frontend_epoch: u32,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    blocking(app, "chain_set_param", move |_, _| {
-        let _ = (unit, param_id, value, frontend_epoch);
-        Err(NOT_BUILT.into())
+    blocking(app, "chain_set_param", move |app, state| {
+        let host = app.host()?;
+        app.chains.set_param(&host, (state, frontend_epoch), unit, param_id, value)
     })
     .await
 }
@@ -924,9 +1828,9 @@ pub async fn chain_set_param(
 /// (empty: the plugin keeps no state).
 #[tauri::command]
 pub async fn chain_tone_take(unit: UnitId, app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
-    let bytes: Vec<u8> = blocking(app, "chain_tone_take", move |_, _| {
-        let _ = unit;
-        Err(NOT_BUILT.into())
+    let bytes: Vec<u8> = blocking(app, "chain_tone_take", move |app, _| {
+        let host = app.host()?;
+        app.chains.tone_take(&host, unit)
     })
     .await?;
     Ok(tauri::ipc::Response::new(bytes))
@@ -953,16 +1857,19 @@ pub async fn chain_tone_import(request: tauri::ipc::Request<'_>, app: tauri::App
         return Err("chain_tone_import takes the tone file's bytes as the raw request body".to_string());
     };
     let bytes = bytes.clone();
-    blocking(app, "chain_tone_import", move |_, _| {
-        let _ = (slot, plugin, unit, epoch, bytes);
-        Err(NOT_BUILT.into())
+    blocking(app, "chain_tone_import", move |app, state| {
+        let host = app.host()?;
+        app.chains
+            .tone_import(&host, (state, epoch), app.tones.as_ref(), usize::from(slot), &bytes, &plugin, unit)
     })
     .await
 }
 
 /// The reload a tone import answered `token` for did not happen: drop the tone parked for it.
 #[tauri::command]
-pub async fn chain_tone_forget(token: u32, frontend_epoch: u32) -> Result<(), String> {
-    let _ = (token, frontend_epoch);
-    Err(NOT_BUILT.into())
+pub async fn chain_tone_forget(token: u32, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
+    blocking(app, "chain_tone_forget", move |app, state| {
+        app.chains.tone_forget((state, frontend_epoch), token)
+    })
+    .await
 }
