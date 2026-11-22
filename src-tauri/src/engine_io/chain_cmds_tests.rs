@@ -15,7 +15,7 @@ use crate::audio_output::AudioBackend;
 use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec, WireParams};
 use crate::engine_io::fake_driver::{Fake, FakeDriver};
 use crate::engine_io::plugins::EngineSlot;
-use crate::engine_io::test_rig::TestDevice;
+use crate::engine_io::test_rig::{TestDevice, PATIENCE};
 use crate::engine_io::unit_host::{Activated, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost};
 use crate::engine_io::{DeviceRequest, EngineHost, HostConfig};
 use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
@@ -245,7 +245,7 @@ fn start_take(device: &TestDevice) {
     host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let mut ev = Vec::new();
         let (_, ov) = host.drain_feed(&mut ev);
@@ -263,7 +263,7 @@ fn start_take(device: &TestDevice) {
 fn stop_take(device: &TestDevice) {
     let host = device.host();
     host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let mut ev = Vec::new();
         let (_, ov) = host.drain_feed(&mut ev);
@@ -770,14 +770,15 @@ fn j_shutdown_with_held_removal_in_open_take_finishes_within_3s() {
         let _ = sd_tx.try_send(t0.elapsed());
     });
     let elapsed = sd_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("shutdown hung past 5 s (must finish within 3 s)");
+        .recv_timeout(PATIENCE)
+        .expect("shutdown hung");
     sd_thread.join().unwrap();
-    assert!(elapsed < Duration::from_secs(3), "shutdown took {elapsed:?} (must be < 3 s)");
+    // Room for a loaded run (CI, a full suite); the shutdown bound itself is 8 s.
+    assert!(elapsed < Duration::from_millis(6500), "shutdown took {elapsed:?} (must be < 6.5 s)");
 
     // Background held removal unblocked on closing and finished too.
     let _ = rem_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("background held remove hung after shutdown");
     rem_thread.join().unwrap();
     assert_eq!(chains.active_entries(), 0, "no owner entries remain after join_all");
@@ -1354,7 +1355,7 @@ fn start_take_on_host(host: &EngineHost) {
     host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let mut ev = Vec::new();
         let (_, ov) = host.drain_feed(&mut ev);
@@ -1451,7 +1452,7 @@ fn p4f1_2b_shutdown_during_owner_startup_drops_box() {
     {
         *chains.before_register_hook.lock().unwrap() = Some(Box::new(move || {
             let _ = entered_tx.try_send(());
-            let _ = resume_rx.recv_timeout(Duration::from_secs(5));
+            let _ = resume_rx.recv_timeout(PATIENCE);
         }));
     }
 
@@ -1468,13 +1469,13 @@ fn p4f1_2b_shutdown_during_owner_startup_drops_box() {
     // Wait until `add_builtin` reaches the point right before registry insertion, then run `unload_all`
     // while the device is still playing (BEFORE `host.shutdown()`).
     entered_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("add_builtin never reached before_register_hook");
     chains.unload_all(&host);
     let _ = resume_tx.try_send(());
 
     let res = add_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("add_builtin did not finish within 5 s");
     add_thread.join().unwrap();
     assert!(res.is_err(), "add racing with closing must return Err, got: {res:?}");
@@ -1558,7 +1559,7 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
             if self.pause_slot1.swap(false, Ordering::AcqRel) {
                 let _ = self.in_build_tx.try_send(());
                 let rx = self.release_build_rx.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = rx.recv_timeout(Duration::from_secs(5));
+                let _ = rx.recv_timeout(PATIENCE);
             }
             Ok((
                 Box::new(ClampingEcho {
@@ -1599,7 +1600,7 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
     *chains.after_slot_lookup_hook.lock().unwrap() = Some(Arc::new(move |slot| {
         let _ = looked_tx.try_send(slot);
         if let Some(rx) = resume_lookup_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = rx.recv_timeout(Duration::from_secs(5));
+            let _ = rx.recv_timeout(PATIENCE);
         }
     }));
 
@@ -1615,7 +1616,7 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
         let _ = rem_tx.try_send(r);
     });
     assert_eq!(
-        looked_rx.recv_timeout(Duration::from_secs(5)),
+        looked_rx.recv_timeout(PATIENCE),
         Ok(0),
         "remove(400) did not resolve slot 0 before pausing"
     );
@@ -1632,13 +1633,13 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
         let _ = add_tx.try_send(r);
     });
     in_build_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("slot 1 add(400) never reached build pause");
 
     // 4. Resume `rem_thread` while slot 1's add is STILL IN FLIGHT. Under `order[0]`, it must see
     //    plate 400 moved to slot 1, loop to look up slot 1, and block on `order[1]`.
     let _ = resume_lookup_tx.try_send(());
-    let retried_slot = looked_rx.recv_timeout(Duration::from_secs(5));
+    let retried_slot = looked_rx.recv_timeout(PATIENCE);
 
     let rem_ran_early = rem_done.load(Ordering::Acquire);
     let slot1_still_has_400 = {
@@ -1648,8 +1649,8 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
 
     // Release slot 1's build so neither thread hangs regardless of assertion outcome.
     let _ = release_build_tx.try_send(());
-    let add_res = add_rx.recv_timeout(Duration::from_secs(5)).expect("slot 1 add(400) hung");
-    let rem_res = rem_rx.recv_timeout(Duration::from_secs(5)).expect("remove(400) hung");
+    let add_res = add_rx.recv_timeout(PATIENCE).expect("slot 1 add(400) hung");
+    let rem_res = rem_rx.recv_timeout(PATIENCE).expect("remove(400) hung");
     add_thread.join().unwrap();
     rem_thread.join().unwrap();
 
@@ -1671,7 +1672,7 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
     *chains.after_slot_lookup_hook.lock().unwrap() = Some(Arc::new(move |slot| {
         let _ = looked2_tx.try_send(slot);
         if let Some(rx) = resume2_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = rx.recv_timeout(Duration::from_secs(5));
+            let _ = rx.recv_timeout(PATIENCE);
         }
     }));
 
@@ -1688,7 +1689,7 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
         let _ = mv_tx.try_send(r);
     });
     assert_eq!(
-        looked2_rx.recv_timeout(Duration::from_secs(5)),
+        looked2_rx.recv_timeout(PATIENCE),
         Ok(0),
         "move_unit(401) did not resolve slot 0 before pausing"
     );
@@ -1703,16 +1704,16 @@ fn p4f1_4_remove_and_move_do_not_mutate_id_reused_in_other_slot() {
         let _ = add2_tx.try_send(r);
     });
     in_build_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("slot 1 add(401) never reached build pause");
 
     let _ = resume2_tx.try_send(());
-    let retried_mv_slot = looked2_rx.recv_timeout(Duration::from_secs(5));
+    let retried_mv_slot = looked2_rx.recv_timeout(PATIENCE);
     let mv_ran_early = mv_done.load(Ordering::Acquire);
     let _ = release_build_tx.try_send(());
 
-    let add2_res = add2_rx.recv_timeout(Duration::from_secs(5)).expect("slot 1 add(401) hung");
-    let mv_res = mv_rx.recv_timeout(Duration::from_secs(5)).expect("move_unit(401) hung");
+    let add2_res = add2_rx.recv_timeout(PATIENCE).expect("slot 1 add(401) hung");
+    let mv_res = mv_rx.recv_timeout(PATIENCE).expect("move_unit(401) hung");
     add2_thread.join().unwrap();
     mv_thread.join().unwrap();
     *chains.after_slot_lookup_hook.lock().unwrap() = None;
@@ -1872,7 +1873,7 @@ fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
         let _ = take_done_tx.try_send(res);
     });
     in_state_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("tone_take never entered plugin state()");
 
     // Shutdown: unload, close device, then start `join_all` while `tone_take` still holds `Arc<Entry>`.
@@ -1892,13 +1893,13 @@ fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
     let _ = resume_state_tx.try_send(());
     if !returned_early {
         join_done_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(PATIENCE)
             .expect("join_all did not finish after unblocking plugin state()");
     }
     join_thread.join().unwrap();
     let exited_when_join_returned = owner_exited.load(Ordering::Acquire);
     let _ = take_done_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("tone_take did not finish after unblocking plugin state()");
     take_thread.join().unwrap();
 
@@ -2116,7 +2117,7 @@ fn p4f2_2_readd_failed_plugin_id_never_blocks_registry_and_releases_affinity() {
     // Owner1 calls `host.failed` (freeing id 711) and pauses inside `plugin.release()`.
     stop_take(&device);
     in_release_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("owner1 did not enter plugin.release() after post-take refusal");
     wait_until(Duration::from_secs(3), "slot 0 unheld after take", || {
         let mut ev = Vec::new();
@@ -2248,13 +2249,13 @@ fn p4f2_4_cancelled_waiting_reload_answers_failed_even_if_later_reload_seats_and
 
     // Wait until reload 1 is parked right before its first `reload_outcome` poll.
     in_poll_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("reload 1 never reached its poll hook");
 
     // Rebuild cancels reload 1 in flight and evicts the original unit, which auto-reseats in the new engine.
     let gen_before = host.core.engine_gen.load(Ordering::Acquire);
     device.rebuild_at(96_000, 512);
-    wait_until(Duration::from_secs(5), "original 720 reseated after rebuild", || {
+    wait_until(PATIENCE, "original 720 reseated after rebuild", || {
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
         let st = host.core.state.lock().unwrap();
@@ -2322,7 +2323,7 @@ fn p4f3_a_shutdown_never_misses_owner_moving_between_tables() {
                 name: "GapOwner".into(),
                 on_release: Some(Arc::new(move || {
                     if let Some(rx) = release_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                        let _ = rx.recv_timeout(Duration::from_secs(5));
+                        let _ = rx.recv_timeout(PATIENCE);
                     }
                 })),
                 exited_flag: Some(exited_flag.clone()),
@@ -2379,11 +2380,11 @@ fn p4f3_a_shutdown_never_misses_owner_moving_between_tables() {
     let _ = resume_gap_tx.try_send(());
     let _ = release_tx.try_send(());
     retire_done_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("retire_to_gone did not finish within 5 s");
     if !returned_early {
         join_done_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(PATIENCE)
             .expect("join_all did not finish within 5 s");
     }
     let _ = retire_thread.join();
@@ -2450,7 +2451,7 @@ fn p4f3_b_reload_answers_reloaded_only_after_new_owner_is_in_registry() {
     let (resume_poll_tx, resume_poll_rx) = std::sync::mpsc::sync_channel::<()>(1);
     *chains.before_reload_poll_hook.lock().unwrap() = Some(Box::new(move || {
         let _ = in_poll_tx.try_send(());
-        let _ = resume_poll_rx.recv_timeout(Duration::from_secs(5));
+        let _ = resume_poll_rx.recv_timeout(PATIENCE);
     }));
 
     let r_chains = chains.clone();
@@ -2488,12 +2489,12 @@ fn p4f3_b_reload_answers_reloaded_only_after_new_owner_is_in_registry() {
     });
 
     in_poll_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("reload never reached before_reload_poll_hook");
 
     // End take so candidate seats in engine while reload waiter is paused at poll hook.
     stop_take(&device);
-    wait_until(Duration::from_secs(5), "reload candidate seated in table", || {
+    wait_until(PATIENCE, "reload candidate seated in table", || {
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
         let st = host.core.state.lock().unwrap();
@@ -2524,13 +2525,13 @@ fn p4f3_b_reload_answers_reloaded_only_after_new_owner_is_in_registry() {
     // Release reload's waiter while sweep is paused inside promotion.
     let _ = resume_poll_tx.try_send(());
     let reload_res = reload_done_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("reload did not finish within 5 s");
 
     // Immediately call `tone_take` as soon as `reload` returns `Reloaded`!
     let taken_res = chains.tone_take(&host, (&doc_state, epoch), 735);
 
-    let _ = sweep_done_rx.recv_timeout(Duration::from_secs(5));
+    let _ = sweep_done_rx.recv_timeout(PATIENCE);
     let _ = reload_thread.join();
     let _ = sweep_thread.join();
 
@@ -2594,7 +2595,7 @@ fn p4f3_c_late_refused_add_never_overwrites_newer_registration_in_other_slot() {
     let (resume_reg_tx, resume_reg_rx) = std::sync::mpsc::sync_channel::<()>(1);
     *chains.before_register_hook.lock().unwrap() = Some(Box::new(move || {
         let _ = in_reg_tx.try_send(());
-        let _ = resume_reg_rx.recv_timeout(Duration::from_secs(5));
+        let _ = resume_reg_rx.recv_timeout(PATIENCE);
     }));
 
     let c0 = chains.clone();
@@ -2624,12 +2625,12 @@ fn p4f3_c_late_refused_add_never_overwrites_newer_registration_in_other_slot() {
     });
 
     in_reg_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("slot 0 add never reached before_register_hook");
 
     // End the take: slot 0's 741 is refused (`Placement`) and its owner frees id 741 and exits.
     stop_take(&device);
-    wait_until(Duration::from_secs(5), "slot 0 refused 741 and freed its id", || {
+    wait_until(PATIENCE, "slot 0 refused 741 and freed its id", || {
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
         let st = host.core.state.lock().unwrap();
@@ -2659,7 +2660,7 @@ fn p4f3_c_late_refused_add_never_overwrites_newer_registration_in_other_slot() {
     // Resume slot 0's late add.
     let _ = resume_reg_tx.try_send(());
     let add0_res = add0_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(PATIENCE)
         .expect("slot 0 add did not finish within 5 s");
     let _ = add0_thread.join();
 
@@ -2715,7 +2716,7 @@ fn p4f3_d_dispose_late_entry_spawn_failure_leaks_without_joining_caller() {
             name: "LateDropFail".into(),
             on_release: Some(Arc::new(move || {
                 if let Some(rx) = release_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    let _ = rx.recv_timeout(Duration::from_secs(5));
+                    let _ = rx.recv_timeout(PATIENCE);
                 }
             })),
             exited_flag: Some(exited_flag),

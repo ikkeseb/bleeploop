@@ -1348,7 +1348,7 @@ mod tests {
         // Rebuild: A is evicted and enters reactivate, pausing before its retry submit.
         device.rebuild_at(96_000, 512);
         in_reactivate_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(crate::engine_io::test_rig::PATIENCE)
             .expect("owner A did not enter reactivate after rebuild");
 
         // While A is paused in reactivate, seat newer source B in slot 0.
@@ -1370,7 +1370,7 @@ mod tests {
         let _ = resume_reactivate_tx.try_send(());
 
         // Wait for owner A to exit on its own (no stop requested).
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::engine_io::test_rig::PATIENCE;
         while !a_exited.load(Ordering::Acquire) {
             assert!(Instant::now() < deadline, "owner A did not exit after being replaced");
             std::thread::sleep(Duration::from_millis(5));

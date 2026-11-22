@@ -13,7 +13,7 @@ use lf_engine::{
 
 use super::chain::{PlateState, PluginRef, UNOWNED_KEEP};
 use super::fake_driver::{Fake, FakeDriver};
-use super::test_rig::TestDevice;
+use super::test_rig::{TestDevice, PATIENCE};
 use super::unit_host::{Activated, Back, BuiltinFactory, Op, OpState, Params, Removal, Spec, SubmitError, Terms, Unit, GATE_DEADLINE};
 use super::{DeviceRequest, EngineHost, HostConfig};
 use crate::audio_output::AudioBackend;
@@ -159,7 +159,7 @@ fn start_take(device: &TestDevice) {
     host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let mut ev = Vec::new();
         let (_, ov) = host.drain_feed(&mut ev);
@@ -177,7 +177,7 @@ fn start_take(device: &TestDevice) {
 fn stop_take(device: &TestDevice) {
     let host = device.host();
     host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let mut ev = Vec::new();
         let (_, ov) = host.drain_feed(&mut ev);
@@ -994,7 +994,7 @@ fn shutdown_with_take_open_and_feed_stopped_ends_well_inside_its_bound() {
     host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let mut ev = Vec::new();
         let (_, ov) = host.drain_feed(&mut ev);
@@ -1271,7 +1271,7 @@ fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_before_the_watchdog
     host.send(TimedCommand { frame: None, command: Command::SetFixedLength(true) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::SetFixedBars(1.0) }).unwrap();
     host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let playing = {
             let ends = host.core.ends.lock().unwrap();
@@ -1284,7 +1284,7 @@ fn shutdown_mode_with_take_open_and_held_legacy_removal_ends_before_the_watchdog
         std::thread::sleep(Duration::from_millis(5));
     }
     host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let overdubbing = {
             let ends = host.core.ends.lock().unwrap();

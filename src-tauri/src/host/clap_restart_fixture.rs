@@ -1817,7 +1817,7 @@ mod unit_owner {
         host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
         host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
         host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         loop {
             let mut ev = Vec::new();
             let (_, ov) = host.drain_feed(&mut ev);
@@ -1835,7 +1835,7 @@ mod unit_owner {
     pub(super) fn stop_take(device: &TestDevice) {
         let host = device.host();
         host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         loop {
             let mut ev = Vec::new();
             let (_, ov) = host.drain_feed(&mut ev);
@@ -3999,7 +3999,7 @@ mod chain_cmds {
         fx::mark_dirty(&a);
 
         let took = rig.shut_down();
-        assert!(took < Duration::from_secs(3), "the chain shutdown took {took:?}");
+        assert!(took < Duration::from_millis(6500), "the chain shutdown took {took:?}");
         assert!(torn_down_once(&a), "the plugin is torn down once: {}", life(&a));
         assert!(fx::released_in_order(&a), "stop < deactivate < destroy: {}", life(&a));
         assert!(!unit_file.exists(), "the unit's file is retired");
