@@ -103,6 +103,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app_update_check` / `app_update_download` / `app_update_install` (`update.rs`; the release channel
   is `plugins.updater` in `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
+  The `chain_*` commands (`engine_io/chain_cmds.rs`) are registered under `debug_assertions` only, in
+  lockstep with the frontend's DEV flag `lf.chainNative`; they reach release together with chains.
   `export_save_part` (`export_save.rs`) takes a session export's bytes, a file name, an offset and a
   total, and no path: it writes only `<name>.<total>.part` and a free final name in the Downloads folder,
   replaces no finished file, refuses a name with `/`, `\`, `:`, `..` or a control character or one not

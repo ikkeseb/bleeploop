@@ -975,7 +975,10 @@ await probe(async ({ open }) => {
           const descriptor = descriptors.find((d) => d.path === args.path && d.id === args.id) ?? descriptors[0];
           return { slot: args.slot, descriptor };
         }
-        if (cmd === 'chain_add') return args.at === 0 ? 'seated' : 'waiting';
+        if (cmd === 'chain_add') {
+          if (window.__chainAddHook) return window.__chainAddHook(args);
+          return args.at === 0 ? 'seated' : 'waiting';
+        }
         if (cmd === 'chain_reload') return 'reloaded';
         if (cmd === 'chain_list_params') return [{ id: 3, name: 'Gain', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
         if (cmd === 'chain_tone_take') return args.unit === 11 ? new Uint8Array([1, 2, 3]).buffer : new ArrayBuffer(0);
@@ -1119,10 +1122,10 @@ await probe(async ({ open }) => {
       { cmd: 'chain_move', args: { unit: 12, to: 0, frontendEpoch: 7 }, isRawBytes: false, headers: null },
       { cmd: 'chain_open_editor', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
       { cmd: 'chain_close_editor', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
-      { cmd: 'chain_list_params', args: { unit: 11 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_list_params', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
       { cmd: 'chain_set_param', args: { unit: 11, paramId: 3, value: 0.75, frontendEpoch: 7 }, isRawBytes: false, headers: null },
-      { cmd: 'chain_tone_take', args: { unit: 11 }, isRawBytes: false, headers: null },
-      { cmd: 'chain_tone_take', args: { unit: 12 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_tone_take', args: { unit: 11, frontendEpoch: 7 }, isRawBytes: false, headers: null },
+      { cmd: 'chain_tone_take', args: { unit: 12, frontendEpoch: 7 }, isRawBytes: false, headers: null },
       {
         cmd: 'chain_tone_import',
         args: [9, 8, 7],
@@ -1156,6 +1159,41 @@ await probe(async ({ open }) => {
     ipcOn.invokes.some((i) => i.cmd === 'plugin:event|unlisten' && i.args.event === 'chain:editor-closed'),
     'onEditorClosed unsubscribe unlistens chain:editor-closed',
   );
+
+  // Rejected cross-slot duplicate add must not overwrite an existing unit's slot queue mapping.
+  const crossSlotCheck = await chainPage.evaluate(async ([amp]) => {
+    const chain = window.__lf.platform.chain;
+    await chain.add(0, 21, { kind: 'plugin', plugin: amp }, 0);
+    let releaseSlowAdd;
+    const slowAddGate = new Promise((r) => {
+      releaseSlowAdd = r;
+    });
+    window.__chainAddHook = async (args) => {
+      if (args.slot === 1 && args.unit === 21) throw new Error('unit 21 is reserved');
+      if (args.slot === 0 && args.unit === 22) {
+        await slowAddGate;
+        return 'seated';
+      }
+      return 'seated';
+    };
+    const dupErr = await chain.add(1, 21, { kind: 'plugin', plugin: amp }, 0).then(
+      () => null,
+      (e) => String(e?.message ?? e),
+    );
+    window.__tauriInvokes.length = 0;
+    const slowAdd = chain.add(0, 22, { kind: 'plugin', plugin: amp }, 1);
+    const queuedMove = chain.move(21, 0);
+    await new Promise((r) => setTimeout(r, 25));
+    const moveStartedEarly = window.__tauriInvokes.some((i) => i.cmd === 'chain_move' && i.args.unit === 21);
+    releaseSlowAdd();
+    await Promise.all([slowAdd, queuedMove]);
+    const moveFinished = window.__tauriInvokes.some((i) => i.cmd === 'chain_move' && i.args.unit === 21);
+    window.__chainAddHook = null;
+    return { dupErr, moveStartedEarly, moveFinished };
+  }, [AMP]);
+  assert.ok(crossSlotCheck.dupErr?.includes('reserved'), `rejected duplicate add must reject, got: ${crossSlotCheck.dupErr}`);
+  assert.equal(crossSlotCheck.moveStartedEarly, false, 'rejected cross-slot add must leave unit 21 mapped to slot 0 queue');
+  assert.equal(crossSlotCheck.moveFinished, true, 'unit 21 move runs once slot 0 finishes');
 
   assert.equal(ipcOn.unitOk, true, 'unit commands (non-Toggle.Units) succeed under Tauri when lf.chainNative=1');
   assert.deepEqual([ipcOn.kindOnly, ipcOn.kindMixed], [false, false], 'Toggle.Units is dropped before the batch under Tauri');

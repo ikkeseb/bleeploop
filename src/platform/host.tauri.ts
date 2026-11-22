@@ -442,10 +442,8 @@ const tauriChainHost: ChainHost = chainNative
       available: true,
       async add(slot, unit, spec, at, toneToken) {
         const frontendEpoch = requireEpoch();
-        chainUnitSlots.set(unit, slot);
-        return onChainSlot(slot, () => {
-          chainUnitSlots.set(unit, slot);
-          return invoke<'seated' | 'waiting'>('chain_add', {
+        return onChainSlot(slot, async () => {
+          const res = await invoke<'seated' | 'waiting'>('chain_add', {
             slot,
             unit,
             spec,
@@ -453,6 +451,8 @@ const tauriChainHost: ChainHost = chainNative
             toneToken: toneToken ?? null,
             frontendEpoch,
           });
+          chainUnitSlots.set(unit, slot);
+          return res;
         });
       },
       async remove(unit) {
@@ -490,14 +490,14 @@ const tauriChainHost: ChainHost = chainNative
       onEditorClosed(cb) {
         return subscribe<{ unit: UnitId }>('chain:editor-closed', ({ unit }) => cb(unit));
       },
-      listParams(unit) {
-        return invoke<PluginParamDesc[]>('chain_list_params', { unit });
+      async listParams(unit) {
+        return invoke<PluginParamDesc[]>('chain_list_params', { unit, frontendEpoch: requireEpoch() });
       },
       async setParameter(unit, paramId, value) {
         await invoke('chain_set_param', { unit, paramId, value, frontendEpoch: requireEpoch() });
       },
       async takeTone(unit) {
-        const bytes = await invoke<ArrayBuffer>('chain_tone_take', { unit });
+        const bytes = await invoke<ArrayBuffer>('chain_tone_take', { unit, frontendEpoch: requireEpoch() });
         return bytes.byteLength > 0 ? new Uint8Array(bytes) : null;
       },
       async importTone(slot, bytes, plugin, unit) {

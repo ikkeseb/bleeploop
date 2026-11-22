@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex, OnceLock};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
@@ -882,38 +882,98 @@ fn make_tone_bytes(identity: &ToneIdentity, name: &str, state: &[u8]) -> Vec<u8>
     })
 }
 
-struct WarnCapture;
-static WARN_LOGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-static WARN_LOGGER_INSTALLED: AtomicBool = AtomicBool::new(false);
+pub(crate) mod test_log {
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::{Mutex, Once};
+    use std::thread::ThreadId;
 
-impl log::Log for WarnCapture {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::Level::Warn
+    struct SharedTestLogger {
+        watchers: Mutex<Vec<(u64, ThreadId, Sender<(log::Level, String)>)>>,
+        next_id: std::sync::atomic::AtomicU64,
     }
-    fn log(&self, record: &log::Record<'_>) {
-        if self.enabled(record.metadata()) {
-            WARN_LOGS
-                .get_or_init(|| Mutex::new(Vec::new()))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(format!("{}", record.args()));
+
+    impl log::Log for SharedTestLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            let me = std::thread::current().id();
+            let msg = format!("{}", record.args());
+            let level = record.level();
+            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, tid, tx) in watchers.iter() {
+                if *tid == me {
+                    let _ = tx.send((level, msg.clone()));
+                }
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: SharedTestLogger = SharedTestLogger {
+        watchers: Mutex::new(Vec::new()),
+        next_id: std::sync::atomic::AtomicU64::new(1),
+    };
+    static INSTALL: Once = Once::new();
+
+    pub(crate) fn ensure_installed() {
+        INSTALL.call_once(|| {
+            log::set_logger(&LOGGER).expect("shared test logger must install cleanly");
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+    }
+
+    pub(crate) struct ThreadLogGuard {
+        id: u64,
+        rx: Receiver<(log::Level, String)>,
+    }
+
+    impl ThreadLogGuard {
+        pub(crate) fn drain_all(&self) -> Vec<(log::Level, String)> {
+            let mut out = Vec::new();
+            while let Ok(item) = self.rx.try_recv() {
+                out.push(item);
+            }
+            out
+        }
+
+        pub(crate) fn warns(&self) -> Vec<String> {
+            self.drain_all()
+                .into_iter()
+                .filter_map(|(lvl, msg)| (lvl == log::Level::Warn).then_some(msg))
+                .collect()
         }
     }
-    fn flush(&self) {}
-}
 
-fn install_warn_capture() -> bool {
-    static LOGGER: WarnCapture = WarnCapture;
-    if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Warn);
-        WARN_LOGGER_INSTALLED.store(true, Ordering::Release);
+    impl Drop for ThreadLogGuard {
+        fn drop(&mut self) {
+            let mut watchers = LOGGER.watchers.lock().unwrap_or_else(|e| e.into_inner());
+            watchers.retain(|(id, _, _)| *id != self.id);
+        }
     }
-    WARN_LOGGER_INSTALLED.load(Ordering::Acquire)
+
+    pub(crate) fn watch_thread(tid: ThreadId) -> ThreadLogGuard {
+        ensure_installed();
+        let id = LOGGER.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        LOGGER
+            .watchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((id, tid, tx));
+        ThreadLogGuard { id, rx }
+    }
+
+    pub(crate) fn watch_current_thread() -> ThreadLogGuard {
+        watch_thread(std::thread::current().id())
+    }
 }
 
 /// R2 (a): The affinity table: two instances of one path, the second refused; `unordered` refuses both;
 /// `orphaned` refuses both; last release deletes the entry and the next claim owns afresh; a `leak`ed
-/// holder keeps it.
+/// holder keeps it even when release is attempted on it.
 #[test]
 fn r2_a_affinity_table_rules() {
     let mut aff = Affinity::default();
@@ -960,13 +1020,15 @@ fn r2_a_affinity_table_rules() {
     aff.release(u2, path);
     assert!(!aff.is_held(path));
 
-    // A leaked holder keeps the entry even after the other holder releases.
+    // A leaked holder keeps the entry even when release is tried on both holders (release of the
+    // leaked holder is refused/ignored; replacing `leak` with a no-op fails this assertion).
     let l1 = aff.claim(path);
     aff.landed(l1, path, 60);
     let l2 = aff.claim(path);
     aff.leak(l2, path);
     aff.release(l1, path);
-    assert!(aff.is_held(path));
+    aff.release(l2, path);
+    assert!(aff.is_held(path), "leaked holder must refuse release and keep the entry held");
     let l3 = aff.claim(path);
     aff.landed(l3, path, 61);
     let err = aff.check(path, l3).unwrap_err();
@@ -1091,10 +1153,11 @@ fn r2_e_tone_import_matches_order_take_and_forget() {
     let amp = PluginRef { format: "clap".into(), path: "C:\\plugins\\Amp.clap".into(), id: "amp.one".into() };
     let delay = PluginRef { format: "clap".into(), path: "C:\\plugins\\Delay.clap".into(), id: "delay.one".into() };
 
-    // Slot 0: amp (101), delay (102), amp (103). Slot 1: amp (201, hinted).
-    let u101 = seat_stand_in_plugin(host, 0, 101, &amp, 0);
+    // Slot 0 chain order: amp (105), delay (102), amp (101) — numeric order differs from chain order.
+    // Slot 1: amp (201, hinted).
+    let u105 = seat_stand_in_plugin(host, 0, 105, &amp, 0);
     let u102 = seat_stand_in_plugin(host, 0, 102, &delay, 1);
-    let u103 = seat_stand_in_plugin(host, 0, 103, &amp, 2);
+    let u101 = seat_stand_in_plugin(host, 0, 101, &amp, 2);
     let u201 = seat_stand_in_plugin(host, 1, 201, &amp, 0);
 
     let bytes = make_tone_bytes(&amp, "Amp One", b"amp-state-v2");
@@ -1103,28 +1166,31 @@ fn r2_e_tone_import_matches_order_take_and_forget() {
         .unwrap();
     let tok = imported.token.expect("matches -> parked token");
     assert_eq!(imported.name, "Amp One");
-    assert_eq!(imported.matches, vec![201, 101, 103]);
+    assert_eq!(imported.matches, vec![201, 105, 101]);
     // Nothing written to slot file when units matched.
     assert_eq!(store.load(0, &amp).unwrap(), None);
 
-    // Token does not take for another identity, and forget drops it.
+    // Wrong-identity lookup returns None AND must NOT consume the token: the matching identity still
+    // redeems `tok` once.
     assert!(chains.take_parked_tone(tok, &delay).is_none());
-    assert_eq!(chains.tone_forget((&doc_state, epoch), tok), Ok(()));
+    let taken = chains
+        .take_parked_tone(tok, &amp)
+        .expect("wrong-identity lookup must leave token redeemable for matching identity");
+    assert_eq!(taken.state, b"amp-state-v2");
     assert!(chains.take_parked_tone(tok, &amp).is_none());
 
-    // Re-import and take with the right identity succeeds once.
+    // Re-import and verify `forget` drops the parked token.
     let imported2 = chains
         .tone_import(host, (&doc_state, epoch), Some(&store), 0, &bytes, &amp, Some(201))
         .unwrap();
     let tok2 = imported2.token.expect("second parked token");
-    let taken = chains.take_parked_tone(tok2, &amp).expect("takes for matching identity");
-    assert_eq!(taken.state, b"amp-state-v2");
+    assert_eq!(chains.tone_forget((&doc_state, epoch), tok2), Ok(()));
     assert!(chains.take_parked_tone(tok2, &amp).is_none());
 
     host.shutdown();
-    u101.release();
+    u105.release();
     u102.release();
-    u103.release();
+    u101.release();
     u201.release();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1133,7 +1199,14 @@ fn r2_e_tone_import_matches_order_take_and_forget() {
 /// reload `failed` when `reload_unit` refuses after `rebuild_at` (not yet resubmitted), with reason logged.
 #[test]
 fn r2_f_reload_moved_and_failed_with_warn_log() {
-    let captured_logs = install_warn_capture();
+    let log_guard = test_log::watch_current_thread();
+    // Self-check: Error records are never accepted as Warn.
+    log::error!("r2f error control record");
+    assert!(
+        log_guard.warns().is_empty(),
+        "warn capture must not accept Error records as Warn"
+    );
+
     let device = start_device();
     let host = device.host();
     let doc_state = PluginHostState::default();
@@ -1182,20 +1255,16 @@ fn r2_f_reload_moved_and_failed_with_warn_log() {
     // After rebuild_at (not yet resubmitted), plate stays Seated in UI state while seated_in_engine=false,
     // so `host.reload_unit` refuses -> `Reloaded::Failed` with reason logged at warn.
     device.rebuild_at(96_000, 512);
-    if captured_logs {
-        WARN_LOGS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap().clear();
-    }
+    let _ = log_guard.drain_all();
     assert_eq!(
         chains.reload(host, (&doc_state, epoch), Some(&store), 200, amp.clone(), 5, 1, noop_sink(), &no_open),
         Ok(Reloaded::Failed)
     );
-    if captured_logs {
-        let logs = WARN_LOGS.get().unwrap().lock().unwrap();
-        assert!(
-            logs.iter().any(|line| line.contains("200") && line.contains("not seated")),
-            "expected reload failure reason logged at warn, got: {logs:?}"
-        );
-    }
+    let logs = log_guard.warns();
+    assert!(
+        logs.iter().any(|line| line.contains("200") && line.contains("not seated")),
+        "expected reload failure reason logged strictly at Warn, got: {logs:?}"
+    );
 
     host.shutdown();
     u200.release();
@@ -1227,6 +1296,12 @@ fn r2_g_stale_frontend_epoch_refused_for_reload_editor_param_and_forget() {
 
     let err_forget = chains.tone_forget((&doc_state, old_epoch), 1).unwrap_err();
     assert!(err_forget.contains("stale frontend epoch"), "{err_forget}");
+
+    let err_params = chains.list_params(host, (&doc_state, old_epoch), 1).unwrap_err();
+    assert!(err_params.contains("stale frontend epoch"), "{err_params}");
+
+    let err_take = chains.tone_take(host, (&doc_state, old_epoch), 1).unwrap_err();
+    assert!(err_take.contains("stale frontend epoch"), "{err_take}");
 }
 
 // ── P4 fix round 1 tests: ownership and order in chain commands ──
@@ -1292,9 +1367,9 @@ fn p4f1_1_chain_commands_refuse_legacy_plate() {
     );
     assert!(chains.open_editor(host, (&doc_state, epoch), 1).is_err(), "chain_open_editor must refuse legacy plate");
     assert!(chains.close_editor(host, (&doc_state, epoch), 1).is_err(), "chain_close_editor must refuse legacy plate");
-    assert!(chains.list_params(host, 1).is_err(), "chain_list_params must refuse legacy plate");
+    assert!(chains.list_params(host, (&doc_state, epoch), 1).is_err(), "chain_list_params must refuse legacy plate");
     assert!(chains.set_param(host, (&doc_state, epoch), 1, 0, 0.5).is_err(), "chain_set_param must refuse legacy plate");
-    assert!(chains.tone_take(host, 1).is_err(), "chain_tone_take must refuse legacy plate");
+    assert!(chains.tone_take(host, (&doc_state, epoch), 1).is_err(), "chain_tone_take must refuse legacy plate");
 
     // Legacy unit must remain untouched in the engine.
     assert_eq!(engine_chain_summary(&device, 0), vec![(1, false)]);
@@ -1645,4 +1720,483 @@ fn p4f1_5a_full_port_add_fails_promptly_and_never_enqueues_after_later_command()
 
     chains.unload_all(host);
     chains.join_all();
+}
+
+// ── P4 fix round 2 tests: shutdown, re-add, reload outcome, epochs ──
+
+/// P4 fix r2 item 1a: `join_all` stops and waits for every plugin owner thread to exit even while an
+/// in-flight command (`tone_take`) holds an `Arc<Entry>` clone, and no command thread ends up doing
+/// an unbounded join after shutdown.
+#[test]
+fn p4f2_1a_join_all_waits_for_plugin_owner_even_with_held_arc() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let host = start_fake_driver_host();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Arc::new(Chains::new());
+    let (store, dir) = temp_tone_store("p4f2-1a");
+
+    let in_state = Arc::new(Barrier::new(2));
+    let resume_state = Arc::new(Barrier::new(2));
+    let owner_exited = Arc::new(AtomicBool::new(false));
+    let paused_once = Arc::new(AtomicBool::new(false));
+
+    let in_s = in_state.clone();
+    let res_s = resume_state.clone();
+    let p_once = paused_once.clone();
+    let exited = owner_exited.clone();
+    let fake_open = move |_fmt: PluginFormat,
+                          _plugin: &PluginRef,
+                          unit_host: UnitHost,
+                          sink: EventSink,
+                          tone: Option<ToneBinding>| {
+        let in_s = in_s.clone();
+        let res_s = res_s.clone();
+        let p_once = p_once.clone();
+        spawn_fake_unit(
+            unit_host,
+            sink,
+            tone,
+            FakePluginConfig {
+                name: "SlowSave".into(),
+                on_state: Some(Arc::new(move || {
+                    if !p_once.swap(true, Ordering::AcqRel) {
+                        in_s.wait();
+                        res_s.wait();
+                    }
+                })),
+                exited_flag: Some(exited.clone()),
+                ..Default::default()
+            },
+        )
+    };
+
+    let pref = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\SlowSave.clap".into(),
+        id: "slow.save".into(),
+    };
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(pref), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 0, 701, spec, 0, None, noop_sink(), &fake_open),
+        Ok(Added::Seated)
+    );
+
+    // Start an in-flight `tone_take` that clones `Arc<Entry>` and blocks inside the plugin's `state()`.
+    let take_chains = chains.clone();
+    let take_host = host.clone();
+    let take_doc = doc_state.clone();
+    let take_thread = std::thread::spawn(move || take_chains.tone_take(&take_host, (&take_doc, epoch), 701));
+    in_state.wait();
+
+    // Shutdown: unload, close device, then start `join_all` while `tone_take` still holds `Arc<Entry>`.
+    chains.unload_all(&host);
+    host.shutdown();
+    let join_done = Arc::new(AtomicBool::new(false));
+    let jd = join_done.clone();
+    let jc = chains.clone();
+    let join_thread = std::thread::spawn(move || {
+        jc.join_all();
+        jd.store(true, Ordering::Release);
+    });
+
+    std::thread::sleep(Duration::from_millis(80));
+    let returned_early = join_done.load(Ordering::Acquire);
+    let still_alive_while_blocked = !owner_exited.load(Ordering::Acquire);
+
+    // Release the slow save so both threads finish regardless of assertion result.
+    resume_state.wait();
+    join_thread.join().unwrap();
+    let exited_when_join_returned = owner_exited.load(Ordering::Acquire);
+    let _ = take_thread.join().unwrap();
+
+    assert!(still_alive_while_blocked, "owner should still be blocked in SaveTone");
+    assert!(
+        !returned_early,
+        "join_all must NOT return while a plugin owner thread is still running (even with a held Arc<Entry>)"
+    );
+    assert!(exited_when_join_returned, "plugin owner thread must have exited before join_all returned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P4 fix r2 item 1b (Sol finding 1): a reload candidate that seats just before `closing` is set
+/// (before `unload_all` removes the unit) must be handed to `gone` instead of dropped early on the
+/// command thread, so shutdown tears it down cleanly without abandoning/leaking the plugin.
+#[test]
+fn p4f2_1b_seated_reload_racing_closing_does_not_leak_plugin() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let host = start_fake_driver_host();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Arc::new(Chains::new());
+    let (store, dir) = temp_tone_store("p4f2-1b");
+
+    let released = Arc::new(AtomicUsize::new(0));
+    let amp = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\ReloadClose.clap".into(),
+        id: "reload.close".into(),
+    };
+
+    let rel1 = released.clone();
+    let open1 = move |_fmt: PluginFormat,
+                      _plugin: &PluginRef,
+                      unit_host: UnitHost,
+                      sink: EventSink,
+                      tone: Option<ToneBinding>| {
+        spawn_fake_unit(
+            unit_host,
+            sink,
+            tone,
+            FakePluginConfig {
+                name: "ReloadClose".into(),
+                released_count: Some(rel1.clone()),
+                ..Default::default()
+            },
+        )
+    };
+
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp.clone()), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 0, 702, spec, 0, None, noop_sink(), &open1),
+        Ok(Added::Seated)
+    );
+    let rev = host.core.state.lock().unwrap().model.snapshot().rev;
+    host.chain_told(rev, 1);
+
+    let bytes = make_tone_bytes(&amp, "ReloadClose", b"tone-v2");
+    let tok = chains
+        .tone_import(&host, (&doc_state, epoch), Some(&store), 0, &bytes, &amp, Some(702))
+        .unwrap()
+        .token
+        .expect("parked tone token");
+
+    let seated_barrier = Arc::new(Barrier::new(2));
+    let resume_barrier = Arc::new(Barrier::new(2));
+    let sb = seated_barrier.clone();
+    let rb = resume_barrier.clone();
+    let rel2 = released.clone();
+    let reload_chains = chains.clone();
+    let reload_host = host.clone();
+    let reload_doc = doc_state.clone();
+    let reload_store = store.clone();
+    let reload_amp = amp.clone();
+
+    let reload_thread = std::thread::spawn(move || {
+        let open2 = move |_fmt: PluginFormat,
+                          _plugin: &PluginRef,
+                          unit_host: UnitHost,
+                          sink: EventSink,
+                          tone: Option<ToneBinding>| {
+            let res = spawn_fake_unit(
+                unit_host,
+                sink,
+                tone,
+                FakePluginConfig {
+                    name: "ReloadClose".into(),
+                    released_count: Some(rel2.clone()),
+                    ..Default::default()
+                },
+            );
+            // Candidate is now seated in the engine; pause right before `reload` locks `registry`.
+            sb.wait();
+            rb.wait();
+            res
+        };
+        reload_chains.reload(
+            &reload_host,
+            (&reload_doc, epoch),
+            Some(&reload_store),
+            702,
+            reload_amp,
+            1,
+            tok,
+            noop_sink(),
+            &open2,
+        )
+    });
+
+    // Candidate is seated in the engine; flip `closing` BEFORE `remove_unit` has run.
+    seated_barrier.wait();
+    host.set_closing();
+    chains.closing.store(true, Ordering::Release);
+    resume_barrier.wait();
+
+    let res = reload_thread.join().unwrap();
+    assert!(res.is_err(), "reload racing closing must return Err, got {res:?}");
+
+    // Complete shutdown: remove units while device plays, close device, join all owners.
+    chains.unload_all(&host);
+    host.shutdown();
+    chains.join_all();
+
+    assert_eq!(chains.active_entries(), 0, "no entries left after join_all");
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        2,
+        "both original and seated reload candidate must take ordered_release (neither abandoned/leaked)"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P4 fix r2 item 2: re-adding a failed plugin id whose first owner is still blocked in foreign
+/// teardown never drops or joins the displaced entry under the registry mutex, and releases the old
+/// affinity claim once the old owner exits (before shutdown).
+#[test]
+fn p4f2_2_readd_failed_plugin_id_never_blocks_registry_and_releases_affinity() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    // 20 ms per 256-frame block keeps the recording take open cleanly without hitting max_loop_seconds.
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = Arc::new(empty_slots());
+    let chains = Arc::new(Chains::new());
+
+    let src_ref = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\HeadSrc.clap".into(),
+        id: "head.src".into(),
+    };
+    let p1 = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\FailFirst.clap".into(),
+        id: "fail.first".into(),
+    };
+    let p2 = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\ReaddSecond.clap".into(),
+        id: "readd.second".into(),
+    };
+
+    // Open a take FIRST, then queue a source (710) whose role change (false -> true) holds slot 0's
+    // port head. Effect 711 queued at index 0 behind it answers `Waiting`, then is refused
+    // (`Placement`, ahead of source 710) once the take ends.
+    start_take(&device);
+
+    let open_src = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(uh, sink, tone, FakePluginConfig { name: "HeadSrc".into(), source: true, ..Default::default() })
+    };
+    let spec_src = UnitSpec { kind: UnitKind::Plugin, plugin: Some(src_ref), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, None, 0, 710, spec_src, 0, None, noop_sink(), &open_src),
+        Ok(Added::Waiting)
+    );
+
+    let (in_release_tx, in_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_release_tx, resume_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let resume_release_rx = Arc::new(Mutex::new(Some(resume_release_rx)));
+    let owner1_exited = Arc::new(AtomicBool::new(false));
+    let oe = owner1_exited.clone();
+    let open_p1 = move |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        let in_tx = in_release_tx.clone();
+        let res_rx = resume_release_rx.clone();
+        spawn_fake_unit(
+            uh,
+            sink,
+            tone,
+            FakePluginConfig {
+                name: "FailFirst".into(),
+                source: false,
+                latency: 0,
+                on_release: Some(Arc::new(move || {
+                    let _ = in_tx.try_send(());
+                    if let Some(rx) = res_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        let _ = rx.recv_timeout(Duration::from_secs(10));
+                    }
+                })),
+                exited_flag: Some(oe.clone()),
+                ..Default::default()
+            },
+        )
+    };
+    let spec_p1 = UnitSpec { kind: UnitKind::Plugin, plugin: Some(p1.clone()), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, None, 0, 711, spec_p1, 0, None, noop_sink(), &open_p1),
+        Ok(Added::Waiting)
+    );
+    assert!(chains.affinity_held(&p1.path));
+
+    // End the take: source 710 seats at index 0, then engine refuses effect 711 (`Placement`).
+    // Owner1 calls `host.failed` (freeing id 711) and pauses inside `plugin.release()`.
+    stop_take(&device);
+    in_release_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("owner1 did not enter plugin.release() after post-take refusal");
+    wait_until(Duration::from_secs(3), "slot 0 unheld after take", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        !host.core.state.lock().unwrap().model.slot_held(0)
+    });
+
+    // Re-add id 711 (at valid index 1 behind source 710) on a spawned thread with a strict bound:
+    // if re-add ever drops/joins displaced owner1 under `registry`, recv_timeout fails promptly.
+    let readd_chains = chains.clone();
+    let readd_host = host.clone();
+    let readd_doc = doc_state.clone();
+    let readd_slots = slots.clone();
+    let (readd_tx, readd_rx) = std::sync::mpsc::sync_channel(1);
+    let readd_thread = std::thread::spawn(move || {
+        let open_p2 = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            spawn_fake_unit(uh, sink, tone, FakePluginConfig { name: "ReaddSecond".into(), source: false, ..Default::default() })
+        };
+        let spec_p2 = UnitSpec { kind: UnitKind::Plugin, plugin: Some(p2), params: None, bypass: false };
+        let res = readd_chains.add(&readd_host, (&readd_doc, epoch), &readd_slots, None, 0, 711, spec_p2, 1, None, noop_sink(), &open_p2);
+        let _ = readd_tx.try_send(res);
+    });
+
+    let readd_res = readd_rx.recv_timeout(Duration::from_secs(3));
+    let reg_unlocked = chains.registry.try_lock().is_ok();
+    let held_while_running = chains.affinity_held(&p1.path);
+
+    // Always unblock owner1 before asserting so even a failure never hangs on drop.
+    let _ = resume_release_tx.try_send(());
+    let readd_res = readd_res.expect("re-add blocked waiting on displaced owner1 (must never drop/join under registry)");
+    readd_thread.join().unwrap();
+
+    assert_eq!(readd_res, Ok(Added::Seated));
+    assert!(reg_unlocked, "registry mutex must not be held");
+    assert!(held_while_running, "p1 affinity stays held while owner1 is still running");
+
+    // Once owner1 exits, sweep BEFORE shutdown and verify p1's affinity releases.
+    wait_until(Duration::from_secs(3), "owner1 exits", || owner1_exited.load(Ordering::Acquire));
+    assert_eq!(chains.close_editor(&host, (&doc_state, epoch), 711), Ok(()));
+    assert!(
+        !chains.affinity_held(&p1.path),
+        "displaced owner1's affinity must be released once its owner thread exits (not only at shutdown)"
+    );
+
+    chains.unload_all(&host);
+    chains.join_all();
+}
+
+/// P4 fix r2 item 4: a waiting reload cancelled by an engine rebuild answers `Failed` (and logs the
+/// cause at `Warn`) even if a later reload of the same unit seats before the first waiter polls.
+#[test]
+fn p4f2_4_cancelled_waiting_reload_answers_failed_even_if_later_reload_seats_and_logs_cause() {
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = Arc::new(PluginHostState::default());
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Arc::new(Chains::new());
+    let (store, dir) = temp_tone_store("p4f2-4");
+
+    let amp = PluginRef {
+        format: "clap".into(),
+        path: "C:\\plugins\\ReloadRace.clap".into(),
+        id: "reload.race".into(),
+    };
+    let open_lat0 = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(uh, sink, tone, FakePluginConfig { name: "ReloadRace".into(), latency: 0, ..Default::default() })
+    };
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp.clone()), params: None, bypass: false };
+    assert_eq!(
+        chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 0, 720, spec, 0, None, noop_sink(), &open_lat0),
+        Ok(Added::Seated)
+    );
+    let rev = host.core.state.lock().unwrap().model.snapshot().rev;
+    host.chain_told(rev, 5);
+
+    let bytes = make_tone_bytes(&amp, "ReloadRace", b"tone-race");
+    let tok1 = chains
+        .tone_import(&host, (&doc_state, epoch), Some(&store), 0, &bytes, &amp, Some(720))
+        .unwrap()
+        .token
+        .expect("tok1");
+    let tok2 = chains
+        .tone_import(&host, (&doc_state, epoch), Some(&store), 0, &bytes, &amp, Some(720))
+        .unwrap()
+        .token
+        .expect("tok2");
+
+    // Open a take so reload 1 (with changed latency 64) enters `Answer::Waiting` and polls.
+    start_take(&device);
+    let (in_poll_tx, in_poll_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (resume_poll_tx, resume_poll_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    {
+        *chains.before_reload_poll_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = in_poll_tx.try_send(());
+            let _ = resume_poll_rx.recv_timeout(Duration::from_secs(10));
+        }));
+    }
+
+    let r1_chains = chains.clone();
+    let r1_host = host.clone();
+    let r1_doc = doc_state.clone();
+    let r1_store = store.clone();
+    let r1_amp = amp.clone();
+    let r1_thread = std::thread::spawn(move || {
+        let log_guard = test_log::watch_current_thread();
+        let open_lat64 = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            spawn_fake_unit(uh, sink, tone, FakePluginConfig { name: "ReloadRace".into(), latency: 64, ..Default::default() })
+        };
+        let res = r1_chains.reload(
+            &r1_host,
+            (&r1_doc, epoch),
+            Some(&r1_store),
+            720,
+            r1_amp,
+            5,
+            tok1,
+            noop_sink(),
+            &open_lat64,
+        );
+        (res, log_guard.warns())
+    });
+
+    // Wait until reload 1 is parked right before its first `reload_outcome` poll.
+    in_poll_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("reload 1 never reached its poll hook");
+
+    // Rebuild cancels reload 1 in flight and evicts the original unit, which auto-reseats in the new engine.
+    let gen_before = host.core.engine_gen.load(Ordering::Acquire);
+    device.rebuild_at(96_000, 512);
+    wait_until(Duration::from_secs(5), "original 720 reseated after rebuild", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        let st = host.core.state.lock().unwrap();
+        let new_gen = host.core.engine_gen.load(Ordering::Acquire);
+        new_gen > gen_before
+            && st.model.find_plate(720).is_some_and(|(_, p)| p.seated_in_engine && !p.reloading)
+            && !st.table.has_reload_row(720)
+    });
+
+    // A later reload (reload 2) seats BEFORE reload 1 polls again.
+    assert_eq!(
+        chains.reload(&host, (&doc_state, epoch), Some(&store), 720, amp.clone(), 5, tok2, noop_sink(), &open_lat0),
+        Ok(Reloaded::Reloaded)
+    );
+    let r2_token = host.core.state.lock().unwrap().table.active_row_for_id(720).expect("r2 row").token;
+
+    // Now resume reload 1's poll: it MUST answer `Failed` (never `Reloaded`) and log the cause at Warn.
+    let _ = resume_poll_tx.try_send(());
+    let (r1_res, r1_warns) = r1_thread.join().unwrap();
+
+    assert_eq!(
+        r1_res,
+        Ok(Reloaded::Failed),
+        "cancelled reload 1 must report Failed even after reload 2 seated"
+    );
+    assert!(
+        r1_warns.iter().any(|w| w.contains("720") && w.contains("rebuild")),
+        "failed waiting reload must log its cause at Warn, got: {r1_warns:?}"
+    );
+    assert_eq!(
+        chains.registry.lock().unwrap().get(&720).expect("r2 registered").token,
+        r2_token,
+        "reload 2's owner must stay registered"
+    );
+
+    chains.unload_all(&host);
+    chains.join_all();
+    let _ = std::fs::remove_dir_all(&dir);
 }

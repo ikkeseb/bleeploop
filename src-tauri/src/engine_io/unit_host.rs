@@ -125,6 +125,8 @@ pub enum SubmitError {
     PortFull,
     /// A reload candidate took over, or this reload candidate was cancelled: send nothing and only receive.
     Superseded,
+    /// A newer source already heads the slot after a rebuild: retire the unit's tone and tear down.
+    Replaced,
     /// A removal is pending or settled for this row: keep the unit and wait for the removal's terminal.
     Removing,
     /// A reload candidate stands for this id: keep a pending restart and retry when the reload ends.
@@ -1407,7 +1409,7 @@ impl UnitHost {
                         row.superseded = true;
                     }
                     state.model.remove_plate(self.slot, self.id);
-                    return Err((unit, SubmitError::Superseded));
+                    return Err((unit, SubmitError::Replaced));
                 }
             }
             (0, head)

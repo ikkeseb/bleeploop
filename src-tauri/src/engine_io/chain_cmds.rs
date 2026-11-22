@@ -268,14 +268,18 @@ impl Owner {
     fn request_stop(&self) {
         match self {
             Owner::Builtin(b) => b.request_stop(),
-            Owner::Plugin(_) => {}
+            Owner::Plugin(p) => p.owner.request_stop(),
         }
     }
 
     fn join(&self) {
         match self {
             Owner::Builtin(b) => b.join(),
-            Owner::Plugin(_) => {}
+            Owner::Plugin(p) => {
+                if let Err(e) = p.owner.join() {
+                    log::error!("[chain_cmds] plugin unit {} stop: {e}", p.plugin.id);
+                }
+            }
         }
     }
 
@@ -293,6 +297,8 @@ struct PendingReload {
     unit: UnitId,
     slot: usize,
     old_token: InstallToken,
+    candidate_token: InstallToken,
+    start_gen: u64,
     plugin: PluginRef,
     inst: u64,
     owner: UnitOwner,
@@ -368,6 +374,8 @@ pub(crate) struct Chains {
     fail_next_spawn: AtomicBool,
     #[cfg(test)]
     before_register_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_reload_poll_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Chains {
@@ -396,6 +404,8 @@ impl Chains {
             fail_next_spawn: AtomicBool::new(false),
             #[cfg(test)]
             before_register_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_reload_poll_hook: Mutex::new(None),
         }
     }
 
@@ -404,15 +414,22 @@ impl Chains {
     /// affinity instances once their owner threads have ended.
     fn sweep(&self, host: Option<&EngineHost>) {
         if let Some(host) = host {
-            let checks: Vec<(UnitId, InstallToken, u64)> = {
+            let checks: Vec<(usize, UnitId, InstallToken, InstallToken, u64, u64)> = {
                 let pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
-                pending.iter().map(|c| (c.unit, c.old_token, c.inst)).collect()
+                pending
+                    .iter()
+                    .map(|c| (c.slot, c.unit, c.old_token, c.candidate_token, c.start_gen, c.inst))
+                    .collect()
             };
-            for (unit, old_token, inst) in checks {
-                match reload_outcome(host, unit, old_token) {
+            for (slot, unit, old_token, candidate_token, start_gen, inst) in checks {
+                match reload_outcome(host, unit, old_token, candidate_token, start_gen) {
                     ReloadOutcome::Standing => {}
-                    ReloadOutcome::Reloaded(new_token) => self.promote_pending_reload(inst, new_token),
-                    ReloadOutcome::Failed => self.retire_pending_reload(inst),
+                    ReloadOutcome::Reloaded => self.promote_pending_reload(inst, candidate_token),
+                    ReloadOutcome::Failed(why) => {
+                        if self.retire_pending_reload(inst) {
+                            log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+                        }
+                    }
                 }
             }
         }
@@ -540,9 +557,9 @@ impl Chains {
         }
     }
 
-    fn retire_pending_reload(&self, inst: u64) {
+    fn retire_pending_reload(&self, inst: u64) -> bool {
         let Some(cand) = self.take_pending_reload(inst) else {
-            return;
+            return false;
         };
         let entry = Arc::new(Entry {
             slot: cand.slot,
@@ -556,6 +573,7 @@ impl Chains {
         if let Some(late) = self.retire_for_closing(entry) {
             self.dispose_late_entry(late);
         }
+        true
     }
 
     /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`).
@@ -1120,7 +1138,7 @@ impl Chains {
         self.sweep(Some(host));
         let format = check_plugin_format(&plugin)?;
 
-        let (slot, order, old, unit_host) = loop {
+        let (slot, order, old, start_gen, unit_host) = loop {
             let slot = {
                 let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
                 match state.model.find_plate(unit) {
@@ -1165,6 +1183,7 @@ impl Chains {
                     }
                 }
             };
+            let start_gen = host.core.engine_gen.load(Acquire);
             let unit_host = match host.reload_unit(unit, plugin.clone()) {
                 Ok(u) => u,
                 Err(why) => {
@@ -1172,7 +1191,7 @@ impl Chains {
                     return Ok(Reloaded::Failed);
                 }
             };
-            break (slot, order, old, unit_host);
+            break (slot, order, old, start_gen, unit_host);
         };
         let new_token = unit_host.install_token();
 
@@ -1268,23 +1287,34 @@ impl Chains {
                         }
                         return Err("the host is closing".to_string());
                     }
-                    pending.push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                    pending.push(PendingReload {
+                        unit,
+                        slot,
+                        old_token: old,
+                        candidate_token: new_token,
+                        start_gen,
+                        plugin,
+                        inst,
+                        owner,
+                    });
                 }
                 drop(order);
 
                 let mut unheld = Duration::ZERO;
                 let mut last = Instant::now();
                 loop {
-                    match reload_outcome(host, unit, old) {
-                        ReloadOutcome::Reloaded(new_token) => {
+                    #[cfg(test)]
+                    if let Some(hook) = self.before_reload_poll_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        hook();
+                    }
+                    match reload_outcome(host, unit, old, new_token, start_gen) {
+                        ReloadOutcome::Reloaded => {
                             self.promote_pending_reload(inst, new_token);
                             return Ok(Reloaded::Reloaded);
                         }
-                        ReloadOutcome::Failed => {
+                        ReloadOutcome::Failed(why) => {
                             self.retire_pending_reload(inst);
-                            log::warn!(
-                                "[chain_cmds] slot {slot} unit {unit} reload failed while waiting to seat"
-                            );
+                            log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
                             return Ok(Reloaded::Failed);
                         }
                         ReloadOutcome::Standing => {}
@@ -1336,7 +1366,16 @@ impl Chains {
                         }
                         return Err("the host is closing".to_string());
                     }
-                    pending.push(PendingReload { unit, slot, old_token: old, plugin, inst, owner });
+                    pending.push(PendingReload {
+                        unit,
+                        slot,
+                        old_token: old,
+                        candidate_token: new_token,
+                        start_gen,
+                        plugin,
+                        inst,
+                        owner,
+                    });
                 }
                 Err(format!(
                     "the audio engine did not answer within 30 s: unit {unit} reload stays loading and seats if the engine answers"
@@ -1399,7 +1438,13 @@ impl Chains {
         }
     }
 
-    pub(crate) fn list_params(&self, host: &EngineHost, unit: UnitId) -> Result<Vec<ParamDesc>, String> {
+    pub(crate) fn list_params(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        unit: UnitId,
+    ) -> Result<Vec<ParamDesc>, String> {
+        current_document(doc.0, doc.1)?;
         reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
@@ -1446,7 +1491,13 @@ impl Chains {
         }
     }
 
-    pub(crate) fn tone_take(&self, host: &EngineHost, unit: UnitId) -> Result<Vec<u8>, String> {
+    pub(crate) fn tone_take(
+        &self,
+        host: &EngineHost,
+        doc: (&PluginHostState, u32),
+        unit: UnitId,
+    ) -> Result<Vec<u8>, String> {
+        current_document(doc.0, doc.1)?;
         reject_if_legacy(host, unit)?;
         self.sweep(Some(host));
         let entry = {
@@ -1538,27 +1589,80 @@ impl Chains {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ReloadOutcome {
     Standing,
-    Reloaded(InstallToken),
-    Failed,
+    Reloaded,
+    Failed(String),
 }
 
-fn reload_outcome(host: &EngineHost, unit: UnitId, old: InstallToken) -> ReloadOutcome {
+fn reload_outcome(
+    host: &EngineHost,
+    unit: UnitId,
+    old: InstallToken,
+    candidate: InstallToken,
+    start_gen: u64,
+) -> ReloadOutcome {
     unit_host::service_if_idle(&host.core);
     unit_host::drain_if_stale(&host.core);
     let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
-    if state.table.has_reload_row(unit) {
-        ReloadOutcome::Standing
-    } else if let Some(row) = state.table.active_row_for_id(unit) {
-        if row.token != old {
-            ReloadOutcome::Reloaded(row.token)
+    if state
+        .table
+        .row(candidate)
+        .is_some_and(|r| r.is_reload && !r.released && !r.superseded)
+    {
+        return ReloadOutcome::Standing;
+    }
+    if state.table.active_row_for_id(unit).is_some_and(|r| r.token == candidate) {
+        return ReloadOutcome::Reloaded;
+    }
+    let why = if let Some(row) = state.table.row(candidate) {
+        if let Some(why) = row.settled.values().find_map(|s| match s {
+            OpState::Refused(why) => Some(*why),
+            _ => None,
+        }) {
+            format!("engine refused reload: {}", refusal_reason(why))
+        } else if row.settled.values().any(|s| matches!(s, OpState::Rebuilt)) {
+            "cancelled by engine rebuild".to_string()
+        } else if host.core.closing.load(Acquire) {
+            "interrupted by shutdown".to_string()
+        } else if host.core.engine_gen.load(Acquire) != start_gen {
+            "cancelled by engine rebuild".to_string()
         } else {
-            ReloadOutcome::Failed
+            describe_missing_reload_cause(&state, unit, old, candidate)
         }
+    } else if host.core.closing.load(Acquire) {
+        "interrupted by shutdown".to_string()
+    } else if host.core.engine_gen.load(Acquire) != start_gen {
+        "cancelled by engine rebuild".to_string()
     } else {
-        ReloadOutcome::Failed
+        describe_missing_reload_cause(&state, unit, old, candidate)
+    };
+    ReloadOutcome::Failed(why)
+}
+
+fn describe_missing_reload_cause(
+    state: &unit_host::HostState,
+    unit: UnitId,
+    old: InstallToken,
+    candidate: InstallToken,
+) -> String {
+    match state.model.find_plate(unit) {
+        None => "unit was removed or replaced before reload seated".to_string(),
+        Some((_, plate)) if plate.state == PlateState::Leaving => {
+            "unit removal started before reload seated".to_string()
+        }
+        Some(_) => {
+            if state
+                .table
+                .active_row_for_id(unit)
+                .is_some_and(|r| r.token != candidate && r.token != old)
+            {
+                "another load superseded the unit before reload seated".to_string()
+            } else {
+                "reload candidate was refused or cancelled before seating".to_string()
+            }
+        }
     }
 }
 
@@ -1672,6 +1776,7 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::Stale => "engine terms changed before submit".to_string(),
         SubmitError::PortFull => "the slot's engine port is full".to_string(),
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
+        SubmitError::Replaced => "a newer source replaced this unit".to_string(),
         SubmitError::Removing => "the unit is being removed".to_string(),
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
@@ -1742,7 +1847,7 @@ fn serve_builtin(
             // caller releases the slot's order mutex and no background retry can enqueue out of order.
             drop(returned);
             let why = submit_error_reason(err);
-            if !matches!(err, SubmitError::Superseded | SubmitError::Removing) {
+            if !matches!(err, SubmitError::Superseded | SubmitError::Replaced | SubmitError::Removing) {
                 host.failed(why.clone());
             }
             host.release();
@@ -1849,10 +1954,10 @@ fn serve_builtin(
                         }
                         seat = BuiltinSeat::Closing { unit: returned };
                     }
-                    Err((returned, SubmitError::Superseded)) => {
+                    Err((returned, err @ (SubmitError::Superseded | SubmitError::Replaced))) => {
                         drop(returned);
                         host.release();
-                        send_first_answer(&mut ready, Err("the unit was superseded before seating".to_string()));
+                        send_first_answer(&mut ready, Err(submit_error_reason(err)));
                         return;
                     }
                 },
@@ -2046,10 +2151,14 @@ pub async fn chain_close_editor(unit: UnitId, frontend_epoch: u32, app: tauri::A
 
 /// `unit`'s plugin parameters (stable ids, ranges, live values), from its owner thread.
 #[tauri::command]
-pub async fn chain_list_params(unit: UnitId, app: tauri::AppHandle) -> Result<Vec<ParamDesc>, String> {
-    blocking(app, "chain_list_params", move |app, _| {
+pub async fn chain_list_params(
+    unit: UnitId,
+    frontend_epoch: u32,
+    app: tauri::AppHandle,
+) -> Result<Vec<ParamDesc>, String> {
+    blocking(app, "chain_list_params", move |app, state| {
         let host = app.host()?;
-        app.chains.list_params(&host, unit)
+        app.chains.list_params(&host, (state, frontend_epoch), unit)
     })
     .await
 }
@@ -2073,10 +2182,14 @@ pub async fn chain_set_param(
 /// Save `unit`'s tone now, through its owner, and answer the tone file's bytes as the raw response
 /// (empty: the plugin keeps no state).
 #[tauri::command]
-pub async fn chain_tone_take(unit: UnitId, app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
-    let bytes: Vec<u8> = blocking(app, "chain_tone_take", move |app, _| {
+pub async fn chain_tone_take(
+    unit: UnitId,
+    frontend_epoch: u32,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes: Vec<u8> = blocking(app, "chain_tone_take", move |app, state| {
         let host = app.host()?;
-        app.chains.tone_take(&host, unit)
+        app.chains.tone_take(&host, (state, frontend_epoch), unit)
     })
     .await?;
     Ok(tauri::ipc::Response::new(bytes))

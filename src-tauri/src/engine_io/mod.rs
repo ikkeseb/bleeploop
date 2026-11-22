@@ -147,6 +147,8 @@
 
 mod callback;
 pub(crate) mod chain;
+// Its commands are registered in DEV builds only (`lib.rs`); release keeps the host for shutdown.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub mod chain_cmds;
 mod cpal_driver;
 mod driver;

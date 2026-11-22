@@ -3415,11 +3415,11 @@ fn p4f1_5b_evicted_source_retrying_after_rebuild_never_replaces_newer_source() {
     // Evicted Source A now retries `submit()` after newer Source B has already queued.
     let retry = u_a.submit(evicted_a, t2);
     match retry {
-        Err((returned_a, SubmitError::Superseded)) => {
+        Err((returned_a, SubmitError::Replaced)) => {
             drop(returned_a);
         }
         Ok(op) => panic!("evicted source A must not enqueue to replace newer source B (got Ok({op:?}))"),
-        Err((_, other)) => panic!("expected SubmitError::Superseded for evicted source A, got {other:?}"),
+        Err((_, other)) => panic!("expected SubmitError::Replaced for evicted source A, got {other:?}"),
     }
 
     // Service the port: Source B seats cleanly and remains the sole source in slot 0.

@@ -166,6 +166,7 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::Stale => "engine terms changed before submit".to_string(),
         SubmitError::PortFull => "the slot's engine port is full".to_string(),
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
+        SubmitError::Replaced => "a newer source replaced this unit".to_string(),
         SubmitError::Removing => "the unit is being removed".to_string(),
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
@@ -221,7 +222,7 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
                 );
                 *pending_restart = None;
             }
-            Err(err @ (SubmitError::Superseded | SubmitError::Removing | SubmitError::Closing | SubmitError::NoEngine)) => {
+            Err(err @ (SubmitError::Superseded | SubmitError::Replaced | SubmitError::Removing | SubmitError::Closing | SubmitError::NoEngine)) => {
                 log::info!(
                     "[plugin_host] engine slot {slot} unit {id}: dropping restart ({why}); withdraw refused ({err:?})"
                 );
@@ -350,6 +351,7 @@ fn submit_owed<P: OwnedPlugin>(
             None
         }
         Err((returned, SubmitError::Superseded)) => Some(Exit::Returned { unit: own(returned), retire: false }),
+        Err((returned, SubmitError::Replaced)) => Some(Exit::Returned { unit: own(returned), retire: true }),
     }
 }
 
@@ -859,7 +861,7 @@ pub(super) fn spawn_unit_with(
         format,
         name,
         running: running.clone(),
-        owner: Some(owner),
+        owner: Mutex::new(Some(owner)),
         requests: request_tx,
         params_tx,
         param_ids,
@@ -918,7 +920,7 @@ pub(crate) struct UnitOwner {
     format: PluginFormat,
     name: String,
     running: Arc<AtomicBool>,
-    owner: Option<JoinHandle<Result<(), String>>>,
+    owner: Mutex<Option<JoinHandle<Result<(), String>>>>,
     requests: Sender<OwnerRequest>,
     params_tx: Arc<Mutex<Producer<ParamEvent>>>,
     param_ids: ParamIds,
@@ -995,16 +997,39 @@ impl UnitOwner {
 
     /// Whether the owner thread has exited (e.g. after `Back::Removed` tore it down).
     pub(crate) fn is_finished(&self) -> bool {
-        self.owner.as_ref().is_none_or(JoinHandle::is_finished)
+        let owner = self.owner.lock().unwrap_or_else(|e| e.into_inner());
+        owner.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// Signal the owner loop to exit and wake it without blocking.
+    pub(crate) fn request_stop(&self) {
+        self.running.store(false, Release);
+        let _ = self.requests.send(OwnerRequest::Wake);
+    }
+
+    /// Wait for the owner thread to exit, if it has not already been joined.
+    pub(crate) fn join(&self) -> Result<(), String> {
+        let Some(owner) = self.owner.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return Ok(());
+        };
+        let t = Instant::now();
+        let result = owner.join().unwrap_or_else(|_| Err("the unit owner thread panicked".to_string()));
+        log::info!(
+            "[plugin_host] engine slot {} unit {} owner joined in {} ms",
+            self.slot,
+            self.id,
+            t.elapsed().as_millis()
+        );
+        result
     }
 
     /// Ask the owner loop to exit, wake it, and join the thread.
-    pub(crate) fn stop(mut self) -> Result<(), String> {
+    pub(crate) fn stop(self) -> Result<(), String> {
         self.shutdown()
     }
 
-    fn shutdown(&mut self) -> Result<(), String> {
-        let Some(owner) = self.owner.take() else {
+    fn shutdown(&self) -> Result<(), String> {
+        let Some(owner) = self.owner.lock().unwrap_or_else(|e| e.into_inner()).take() else {
             return Ok(());
         };
         let t = Instant::now();
@@ -1041,5 +1066,306 @@ impl Drop for UnitOwner {
         if let Err(e) = self.shutdown() {
             log::error!("[plugin_host] engine slot {} unit {} stop: {e}", self.slot, self.id);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use lf_engine::grid::Frame;
+    use lf_engine::{SlotEvent, UnitCx, UnitInfo, UnitKind, UnitParam, UnitProcessor};
+
+    use super::{serve_unit, spawn_unit, Answer, EventSink, Loaded, OwnedPlugin, PluginFormat, Reported, Setup, Terms, ToneBinding, UnitHost, UnitOwner};
+    use crate::engine_io::SlotHost;
+    use crate::host::engine_slot::Editor;
+    use crate::host::ParamDesc;
+
+    #[derive(Clone)]
+    pub(crate) struct FakePluginConfig {
+        pub(crate) name: String,
+        pub(crate) source: bool,
+        pub(crate) latency: Frame,
+        pub(crate) state_bytes: Vec<u8>,
+        pub(crate) on_state: Option<Arc<dyn Fn() + Send + Sync>>,
+        pub(crate) on_reactivate: Option<Arc<dyn Fn() + Send + Sync>>,
+        pub(crate) on_release: Option<Arc<dyn Fn() + Send + Sync>>,
+        pub(crate) released_count: Option<Arc<AtomicUsize>>,
+        pub(crate) exited_flag: Option<Arc<AtomicBool>>,
+    }
+
+    impl Default for FakePluginConfig {
+        fn default() -> Self {
+            Self {
+                name: "FakePlugin".to_string(),
+                source: false,
+                latency: 0,
+                state_bytes: b"fake-tone".to_vec(),
+                on_state: None,
+                on_reactivate: None,
+                on_release: None,
+                released_count: None,
+                exited_flag: None,
+            }
+        }
+    }
+
+    pub(crate) struct FakePluginUnit {
+        source: bool,
+        latency: Frame,
+    }
+
+    impl UnitProcessor for FakePluginUnit {
+        fn info(&self) -> UnitInfo {
+            UnitInfo { kind: UnitKind::Plugin, source: self.source, latency: self.latency }
+        }
+
+        fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+            for (o, i) in out.into_iter().zip(input) {
+                o.copy_from_slice(i);
+            }
+        }
+
+        fn set_param(&mut self, _cx: &UnitCx, _param: UnitParam, _value: f64) -> Option<f64> {
+            None
+        }
+
+        fn stop(&mut self) {}
+
+        fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+            self
+        }
+    }
+
+    struct FakeOwnedPlugin {
+        cfg: FakePluginConfig,
+    }
+
+    impl OwnedPlugin for FakeOwnedPlugin {
+        type Unit = FakePluginUnit;
+        const FORMAT: &'static str = "CLAP";
+
+        fn take_restart(&mut self) -> Option<String> {
+            None
+        }
+
+        fn reinstall(&mut self, _unit: Box<Self::Unit>, _slot: &SlotHost) -> Result<(), (Box<Self::Unit>, String)> {
+            unreachable!("reinstall is legacy-only")
+        }
+
+        fn reactivate(
+            &mut self,
+            unit: Box<Self::Unit>,
+            _terms: Terms,
+        ) -> Result<Box<Self::Unit>, (Box<Self::Unit>, String)> {
+            if let Some(cb) = &self.cfg.on_reactivate {
+                cb();
+            }
+            Ok(unit)
+        }
+
+        fn turn(&mut self, _sink: &EventSink) -> Reported {
+            Reported::default()
+        }
+
+        fn idle(&mut self) -> bool {
+            false
+        }
+
+        fn params(&mut self) -> Result<Vec<ParamDesc>, String> {
+            Ok(Vec::new())
+        }
+
+        fn state(&mut self) -> Result<Option<Vec<u8>>, String> {
+            if let Some(cb) = &self.cfg.on_state {
+                cb();
+            }
+            Ok(Some(self.cfg.state_bytes.clone()))
+        }
+
+        fn editor(&self) -> Editor {
+            Editor::Closed
+        }
+
+        fn editor_open(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn editor_close(&mut self) {}
+
+        fn release(self, unit: Option<Box<Self::Unit>>) {
+            if let Some(cb) = &self.cfg.on_release {
+                cb();
+            }
+            drop(unit);
+            if let Some(cnt) = &self.cfg.released_count {
+                cnt.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    pub(crate) fn spawn_fake_unit(
+        unit_host: UnitHost,
+        sink: EventSink,
+        tone: Option<ToneBinding>,
+        cfg: FakePluginConfig,
+    ) -> Result<(UnitOwner, Answer), String> {
+        let exited = cfg.exited_flag.clone();
+        spawn_unit(PluginFormat::Clap, unit_host, 0, sink, tone, move |ctx| {
+            let res = serve_unit(ctx, move |setup: Setup<'_>| {
+                let rate = setup.slot.rate().unwrap_or(0);
+                let unit = Box::new(FakePluginUnit { source: cfg.source, latency: cfg.latency });
+                let name = cfg.name.clone();
+                Ok(Loaded { plugin: FakeOwnedPlugin { cfg }, unit, name, rate, tone: None })
+            });
+            if let Some(flag) = exited {
+                flag.store(true, Ordering::SeqCst);
+            }
+            res
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::test_support::{spawn_fake_unit, FakePluginConfig};
+    use super::Answer;
+    use crate::engine_io::chain::PluginRef;
+    use crate::engine_io::test_rig::TestDevice;
+    use crate::engine_io::unit_host::Spec;
+    use crate::host::tone::{ToneBinding, ToneKey, ToneStore};
+
+    /// P4 fix r2 item 6: an evicted source superseded by a newer source after a rebuild retires its
+    /// tone (D1: replaced source promotes its unit file to the slot file), while the newer source
+    /// stays seated.
+    #[test]
+    fn p4f2_6_evicted_source_replaced_after_rebuild_retires_tone_and_keeps_newer_source() {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+        let host = device.host().clone();
+
+        let dir = std::env::temp_dir().join(format!(
+            "bleeploop-p4f2-item6-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ToneStore::new(dir.clone());
+
+        let synth_a = PluginRef {
+            format: "clap".into(),
+            path: "C:\\plugins\\SynthA.clap".into(),
+            id: "synth.a".into(),
+        };
+        let synth_b = PluginRef {
+            format: "clap".into(),
+            path: "C:\\plugins\\SynthB.clap".into(),
+            id: "synth.b".into(),
+        };
+
+        let (in_reactivate_tx, in_reactivate_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (resume_reactivate_tx, resume_reactivate_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let resume_reactivate_rx = Arc::new(std::sync::Mutex::new(Some(resume_reactivate_rx)));
+        let a_exited = Arc::new(AtomicBool::new(false));
+        let paused_once = Arc::new(AtomicBool::new(false));
+
+        let uh_a = host.unit(0, 610, Spec::Plugin(synth_a.clone()), 0, false).unwrap();
+        let binding_a = ToneBinding {
+            store: store.clone(),
+            key: ToneKey::Unit { unit: 610, slot: 0, identity: synth_a.clone() },
+            imported: None,
+        };
+        let p_once = paused_once.clone();
+        let (owner_a, ans_a) = spawn_fake_unit(
+            uh_a,
+            Arc::new(|_| {}),
+            Some(binding_a),
+            FakePluginConfig {
+                name: "SynthA".into(),
+                source: true,
+                state_bytes: b"synth-a-dialed-in".to_vec(),
+                on_reactivate: Some(Arc::new(move || {
+                    if !p_once.swap(true, Ordering::AcqRel) {
+                        let _ = in_reactivate_tx.try_send(());
+                        if let Some(rx) = resume_reactivate_rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            let _ = rx.recv_timeout(Duration::from_secs(10));
+                        }
+                    }
+                })),
+                exited_flag: Some(a_exited.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(ans_a, Answer::Seated { .. }), "got {ans_a:?}");
+
+        // Save A's tone so its unit file exists on disk while the slot file does not.
+        let saved_bytes = owner_a.take_tone().unwrap();
+        assert!(!saved_bytes.is_empty());
+        assert!(dir.join("unit-610.tone").exists(), "unit-610.tone should exist before rebuild");
+        assert_eq!(store.load(0, &synth_a).unwrap(), None, "slot file should be empty before retire");
+
+        // Rebuild: A is evicted and enters reactivate, pausing before its retry submit.
+        device.rebuild_at(96_000, 512);
+        in_reactivate_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner A did not enter reactivate after rebuild");
+
+        // While A is paused in reactivate, seat newer source B in slot 0.
+        let uh_b = host.unit(0, 611, Spec::Plugin(synth_b.clone()), 0, false).unwrap();
+        let (owner_b, ans_b) = spawn_fake_unit(
+            uh_b,
+            Arc::new(|_| {}),
+            None,
+            FakePluginConfig {
+                name: "SynthB".into(),
+                source: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(ans_b, Answer::Seated { .. }), "got {ans_b:?}");
+
+        // Resume A so it submits against the new engine while newer source B heads slot 0.
+        let _ = resume_reactivate_tx.try_send(());
+
+        // Wait for owner A to exit on its own (no stop requested).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !a_exited.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "owner A did not exit after being replaced");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Newer source B stays seated in slot 0.
+        let chain_ids: Vec<u32> = {
+            let rt = host.core.rt.lock().unwrap();
+            rt.engine.as_ref().unwrap().chain(0).map(|s| s.unit).collect()
+        };
+        assert_eq!(chain_ids, vec![611], "newer source B must stay seated in slot 0");
+
+        // Old owner A's tone MUST be retired (unit file promoted to slot 0 file).
+        assert!(
+            !dir.join("unit-610.tone").exists(),
+            "replaced evicted source A must retire its unit-610.tone file"
+        );
+        let promoted = store
+            .load(0, &synth_a)
+            .unwrap()
+            .expect("replaced evicted source A's tone must be promoted to slot 0 file");
+        assert_eq!(promoted.state, b"synth-a-dialed-in");
+
+        let _ = host.remove_unit(611);
+        host.shutdown();
+        let _ = owner_a.stop();
+        let _ = owner_b.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

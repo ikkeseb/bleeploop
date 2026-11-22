@@ -1292,30 +1292,6 @@ mod restart_flag_tests {
     use super::*;
     use rtrb::RingBuffer;
     use std::sync::atomic::AtomicUsize;
-    use std::thread::ThreadId;
-
-    /// Counts log records emitted on one watched thread; every other thread's records pass by.
-    struct ThreadLogCounter {
-        watched: Mutex<Option<ThreadId>>,
-        count: AtomicUsize,
-    }
-    impl log::Log for ThreadLogCounter {
-        fn enabled(&self, _: &log::Metadata) -> bool {
-            true
-        }
-        fn log(&self, _: &log::Record) {
-            let me = std::thread::current().id();
-            if *self.watched.lock().unwrap() == Some(me) {
-                self.count.fetch_add(1, Relaxed);
-            }
-        }
-        fn flush(&self) {}
-    }
-    static COUNTER: ThreadLogCounter = ThreadLogCounter {
-        watched: Mutex::new(None),
-        count: AtomicUsize::new(0),
-    };
-
     /// Run `f` on a fresh thread and return how many log records it emitted there.
     fn logs_on_a_foreign_thread(f: impl FnOnce() + Send + 'static) -> usize {
         let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
@@ -1323,18 +1299,15 @@ mod restart_flag_tests {
             go_rx.recv().unwrap();
             f();
         });
-        *COUNTER.watched.lock().unwrap() = Some(t.thread().id());
-        let before = COUNTER.count.load(Relaxed);
+        let guard = crate::engine_io::chain_cmds::tests::test_log::watch_thread(t.thread().id());
         go_tx.send(()).unwrap();
         t.join().unwrap();
-        *COUNTER.watched.lock().unwrap() = None;
-        COUNTER.count.load(Relaxed) - before
+        guard.drain_all().len()
     }
 
     #[test]
     fn restart_component_from_a_foreign_thread_only_raises_flags() {
-        let _ = log::set_logger(&COUNTER);
-        log::set_max_level(log::LevelFilter::Trace);
+        crate::engine_io::chain_cmds::tests::test_log::ensure_installed();
         // The counter works: a thread that logs is seen.
         assert_eq!(
             logs_on_a_foreign_thread(|| log::info!("control record")),
