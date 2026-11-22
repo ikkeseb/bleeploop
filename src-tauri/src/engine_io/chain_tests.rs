@@ -2328,7 +2328,7 @@ fn d1_cr2_failed_reload_during_crossfade_does_not_revive_older_owner() {
 #[test]
 fn d1_cr3_pending_held_adopts_unclaimed_refused_box_and_retry_reuses_op() {
     // Part A: refused initial install -> remove_unit reaps Refused box -> adopts into held until
-    // Remove settles (Refused(Unknown)), then releases Refused back to the owner.
+    // Remove settles (Refused(Unknown) -> Applied), then removes the plate and delivers Removed.
     {
         let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
         let host = device.host().clone();
@@ -2350,15 +2350,15 @@ fn d1_cr3_pending_held_adopts_unclaimed_refused_box_and_retry_reuses_op() {
             "unclaimed Refused box must be adopted into held while Remove is pending"
         );
 
-        // Now service and drain: Install is Refused(Latency), Remove is Refused(Unknown) -> cancel_remove
-        // restores the Refused box to the mailbox.
+        // Now service and drain: Install is Refused(Latency), Remove gets Refused(Unknown) -> settles
+        // as Applied, removes the plate, and delivers the held box as Back::Removed.
         super::unit_host::service_if_idle(&host.core);
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
         assert_eq!(u.poll(op_in), OpState::Refused(SeatRefusal::Latency));
-        assert_eq!(u.poll(op_rem), OpState::Refused(SeatRefusal::Unknown));
-        assert!(matches!(u.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
-        u.failed("latency".into());
+        assert_eq!(u.poll(op_rem), OpState::Applied);
+        assert!(matches!(u.take_back(), Some(Back::Removed(_))));
+        assert!(host.core.chain_snapshot().chains[0].units.is_empty());
         u.release();
     }
 
@@ -3001,7 +3001,7 @@ fn d2_d1r1_failed_and_release_during_pending_remove_keeps_id_reserved() {
         "id must stay reserved until pending Remove settles"
     );
 
-    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Refused(SeatRefusal::Unknown));
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
     let fresh = host.unit(0, 10, Spec::Plugin(plugin_ref("fresh")), 0, false).expect("id free after Remove settles");
     fresh.release();
 }
@@ -3167,4 +3167,178 @@ fn d2_d1r5_cancelled_reload_activated_does_not_overwrite_next_candidate() {
     }
     a.release();
     b2.release();
+}
+
+/// 54. Round D4 finding 1: when a different-id source replacement C is queued ahead of A's
+///     submitted same-id reload B and A's `Left::Replaced` box is reaped before C's `Applied`
+///     event drains, A must receive `Back::Removed` (retire) and candidate B must end; conversely,
+///     if C ahead of B was refused and B replaced A, A must still receive `Back::Superseded`.
+#[test]
+fn d4_f1_different_id_replace_ahead_of_submitted_reload_delivers_removed() {
+    // Part A: C (valid) queued ahead of same-id reload B -> C replaces A, B is refused Unknown.
+    {
+        let mut device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+
+        let a = host.unit(0, 10, Spec::Plugin(plugin_ref("src_a")), 0, false).unwrap();
+        a.activated(Activated { name: "src_a".into(), source: true, latency: 0 });
+        let t = a.terms().unwrap();
+        let op_a = ok_op(a.submit(Box::new(LatentUnit { tag: 1, latency: 0, source: true, stops: stops.clone() }), t));
+        assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let b = host.reload_unit(10, plugin_ref("src_b")).unwrap();
+        b.activated(Activated { name: "src_b".into(), source: true, latency: 0 });
+
+        // Stop callbacks so C and B are both queued in push order before the engine services them,
+        // and leave the event ring undrained when the return ring is reaped.
+        device.stop();
+        let c = host.unit(0, 20, Spec::Plugin(plugin_ref("src_c")), 0, false).unwrap();
+        c.activated(Activated { name: "src_c".into(), source: true, latency: 0 });
+        let op_c = ok_op(c.submit(Box::new(LatentUnit { tag: 2, latency: 0, source: true, stops: stops.clone() }), t));
+        let op_b = ok_op(b.submit(Box::new(LatentUnit { tag: 3, latency: 0, source: true, stops }), t));
+
+        // Service idle: C replaces A (pushes A Left::Replaced), then B is refused Unknown (behind A).
+        super::unit_host::service_if_idle(&host.core);
+
+        // Reap return ring before C's Applied / B's Refused events drain: A is filed before B's refusal.
+        let back_a = a.take_back().expect("replaced source A must return");
+        assert!(
+            matches!(back_a, Back::Removed(_)),
+            "different-id C queued ahead of submitted reload B must deliver Removed (retire), not Superseded"
+        );
+        assert!(
+            !host.core.chain_snapshot().chains[0].units.iter().any(|u| u.id == 10 && u.reloading),
+            "doomed reload candidate B must be ended once A is replaced by C"
+        );
+        assert!(
+            matches!(b.take_back(), Some(Back::Refused { why: SeatRefusal::Unknown, .. })),
+            "reload candidate B still surfaces its own install refusal"
+        );
+
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        assert_eq!(a.poll(op_c), OpState::Applied);
+        assert_eq!(b.poll(op_b), OpState::Refused(SeatRefusal::Unknown));
+        assert!(a.take_back().is_none(), "no second terminal for A after C's Applied drains");
+        let units = &host.core.chain_snapshot().chains[0].units;
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].id, 20);
+        a.release();
+        b.release();
+        c.release();
+    }
+
+    // Part B: C (over-budget, refused) queued ahead of reload B -> B replaces A -> Superseded.
+    {
+        let mut device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(1), 8, |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+        let past = max_chain_latency(48_000) + 1;
+
+        let a = host.unit(0, 10, Spec::Plugin(plugin_ref("src_a")), 0, false).unwrap();
+        a.activated(Activated { name: "src_a".into(), source: true, latency: 0 });
+        let t = a.terms().unwrap();
+        let op_a = ok_op(a.submit(Box::new(LatentUnit { tag: 1, latency: 0, source: true, stops: stops.clone() }), t));
+        assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+        let b = host.reload_unit(10, plugin_ref("src_b")).unwrap();
+        b.activated(Activated { name: "src_b".into(), source: true, latency: 0 });
+
+        device.stop();
+        let c = host.unit(0, 20, Spec::Plugin(plugin_ref("src_c")), 0, false).unwrap();
+        c.activated(Activated { name: "src_c".into(), source: true, latency: past });
+        let op_c = ok_op(c.submit(Box::new(LatentUnit { tag: 2, latency: past, source: true, stops: stops.clone() }), t));
+        let op_b = ok_op(b.submit(Box::new(LatentUnit { tag: 3, latency: 0, source: true, stops }), t));
+
+        super::unit_host::service_if_idle(&host.core);
+
+        let back_a = a.take_back().expect("replaced source A must return");
+        assert!(
+            matches!(back_a, Back::Superseded(_)),
+            "when C ahead of B was refused and reload B replaced A, A must receive Superseded"
+        );
+        assert!(matches!(c.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
+
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        assert_eq!(c.poll(op_c), OpState::Refused(SeatRefusal::Latency));
+        assert_eq!(b.poll(op_b), OpState::Applied);
+        a.release();
+        c.failed("latency".into());
+        c.release();
+        b.release();
+    }
+}
+
+/// 55. Round D4 finding 2: after a rebuild, an over-budget reseat is refused, the owner takes the
+///     box and parks before the install refusal event drains, `remove_unit` queues a Remove, and a
+///     plugin restart retry receives `SubmitError::Removing`. When the engine refuses the Remove
+///     with `SeatRefusal::Unknown`, the removal must settle as done (`Applied`), remove the plate,
+///     and deliver `Back::Dismissed` so the owner retires and releases instead of stranding in
+///     `Seat::Removing`.
+#[test]
+fn d4_f2_refused_remove_after_rebuild_settles_and_delivers_terminal() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let a = host.unit(0, 10, Spec::Plugin(plugin_ref("fx")), 0, false).unwrap();
+    a.activated(Activated { name: "fx".into(), source: false, latency: 0 });
+    let t1 = a.terms().unwrap();
+    let op_a = ok_op(a.submit(LatentUnit::new(1, 0, stops.clone()), t1));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    // Rebuild to a new engine; take the evicted box.
+    device.rebuild_at(44_100, 256);
+    let Back::Evicted { unit: _evicted, .. } = a.take_back().expect("evicted box") else {
+        panic!("expected Back::Evicted");
+    };
+    let t2 = a.terms().unwrap();
+
+    // Stop callbacks so Event::Seat(Install, Refused(Latency)) does not drain before the owner
+    // takes the refused box, parks, and remove_unit runs.
+    device.stop();
+    let past = max_chain_latency(44_100) + 1;
+    let op_reseat = ok_op(a.submit(LatentUnit::new(2, past, stops), t2));
+    super::unit_host::service_if_idle(&host.core);
+
+    // Owner takes the refused box and parks before the install refusal event drains.
+    let Back::Refused { unit: parked_box, why: SeatRefusal::Latency } =
+        a.take_back().expect("refused reseat box")
+    else {
+        panic!("expected Back::Refused(Latency)");
+    };
+    a.parked("latency".into());
+
+    // remove_unit sees the install still pending in the model and queues a Remove.
+    let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else {
+        panic!("expected Removal::Sent");
+    };
+
+    // Plugin restart retries submit and receives SubmitError::Removing (owner enters Seat::Removing).
+    let (held_by_owner, err) = a.submit(parked_box, t2).expect_err("retry during pending Remove must return Removing");
+    assert_eq!(err, SubmitError::Removing);
+    drop(held_by_owner);
+
+    // Engine services Remove -> no seat exists -> Refused(Unknown); now drain events.
+    super::unit_host::service_if_idle(&host.core);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+
+    assert_eq!(a.poll(op_reseat), OpState::Refused(SeatRefusal::Latency));
+    assert_eq!(host.wait_op(op_rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(
+        matches!(a.take_back(), Some(Back::Dismissed)),
+        "refused Remove(Unknown) must deliver Back::Dismissed to wake Seat::Removing"
+    );
+    assert!(
+        host.core.chain_snapshot().chains[0].units.is_empty(),
+        "plate must be removed once Remove(Unknown) settles"
+    );
+    a.release();
+
+    // Id 10 must be reusable once the owner releases.
+    let fresh = host.unit(0, 10, Spec::Plugin(plugin_ref("fresh")), 0, false).expect("id 10 free");
+    fresh.release();
 }

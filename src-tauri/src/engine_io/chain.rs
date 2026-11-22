@@ -613,6 +613,25 @@ impl Model {
             .any(|p| p.unit == id && matches!(p.kind, PendingKind::Install { .. }))
     }
 
+    /// The first non-refused pending `Install` in `slot`'s engine order whose `replaces == Some(id)`:
+    /// returns `(install_token, is_reload)`. Used when `Left::Replaced` is reaped before `Event::Seat`
+    /// drains to tell whether a same-id reload candidate or a different-id install replaced `id`.
+    pub(crate) fn first_pending_replacer(
+        &self,
+        slot: usize,
+        id: UnitId,
+        table: &Table,
+    ) -> Option<(InstallToken, bool)> {
+        self.slots[slot].pending.iter().find_map(|p| match p.kind {
+            PendingKind::Install { token, is_reload, replaces: Some(old_id), .. }
+                if old_id == id && !table.is_install_refused(p.op.n()) =>
+            {
+                Some((token, is_reload))
+            }
+            _ => None,
+        })
+    }
+
     /// Whether `id` currently has a pending remove in `slot`'s queue; returns its op.
     pub(crate) fn pending_remove_op(&self, slot: usize, id: UnitId) -> Option<Op> {
         self.slots[slot]
@@ -796,10 +815,10 @@ impl Model {
             }
             SeatOutcome::Refused(why) => {
                 let head = self.slots[s].pending.pop_front().expect("checked head");
-                self.record_settled(table, head.op, OpState::Refused(why));
                 let mut rev_bump = false;
                 match head.kind {
                     PendingKind::Install { token, is_reload, .. } => {
+                        self.record_settled(table, head.op, OpState::Refused(why));
                         table.clear_install_receipt(token, head.op.n());
                         if is_reload {
                             if table.fail_reload(token) {
@@ -821,7 +840,23 @@ impl Model {
                             rev_bump |= !plate.legacy;
                         }
                     }
+                    PendingKind::Remove { owner_token } if why == lf_engine::SeatRefusal::Unknown => {
+                        // No seat with this id exists in the engine: nothing left to remove. Settle
+                        // as done (`Applied`) so the plate goes and the owner gets its terminal.
+                        self.record_settled(table, head.op, OpState::Applied);
+                        if let Some(pos) = self.slots[s].find(unit) {
+                            rev_bump |= !self.slots[s].plates[pos].legacy;
+                            self.slots[s].plates.remove(pos);
+                        }
+                        if head.op.install() != 0 {
+                            table.note_remove_settled(head.op.install(), head.op.n(), OpState::Applied);
+                        }
+                        if let Some(tok) = owner_token {
+                            table.finish_remove(tok);
+                        }
+                    }
                     PendingKind::Remove { owner_token } => {
+                        self.record_settled(table, head.op, OpState::Refused(why));
                         if head.op.install() != 0 {
                             table.note_remove_settled(head.op.install(), head.op.n(), OpState::Refused(why));
                         }
@@ -844,6 +879,7 @@ impl Model {
                         }
                     }
                     PendingKind::Withdraw | PendingKind::Move { .. } => {
+                        self.record_settled(table, head.op, OpState::Refused(why));
                         if let Some(pos) = self.slots[s].find(unit) {
                             let plate = &mut self.slots[s].plates[pos];
                             plate.held = false;

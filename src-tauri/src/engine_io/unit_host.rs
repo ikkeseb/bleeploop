@@ -341,18 +341,19 @@ impl Table {
         self.reload_predecessor.insert(candidate, predecessor);
     }
 
-    fn has_reload_replacing(&self, predecessor: InstallToken) -> bool {
-        self.reload_predecessor.iter().any(|(&cand, &pred)| {
-            pred == predecessor
-                && self.row(cand).is_some_and(|r| {
-                    r.is_reload
-                        && !r.released
-                        && !r.superseded
-                        && r.install_op.is_some_and(|op_n| {
-                            !matches!(self.received.get(&op_n), Some((Left::Refused(_), _)))
-                        })
-                })
-        })
+    pub(crate) fn is_install_refused(&self, op_n: u64) -> bool {
+        matches!(self.received.get(&op_n), Some((Left::Refused(_), _)))
+    }
+
+    fn is_reload_of(&self, candidate: InstallToken, predecessor: InstallToken) -> bool {
+        self.reload_predecessor.get(&candidate) == Some(&predecessor)
+            && self.row(candidate).is_some_and(|r| r.is_reload && !r.released && !r.superseded)
+    }
+
+    fn reload_candidate_for(&self, predecessor: InstallToken) -> Option<InstallToken> {
+        self.reload_predecessor
+            .iter()
+            .find_map(|(&cand, &pred)| (pred == predecessor).then_some(cand))
     }
 
     pub(crate) fn is_superseded(&self, token: InstallToken) -> bool {
@@ -660,6 +661,16 @@ impl Table {
 
     /// File a box returned by `SlotPort::returned_unit` (normal or during rebuild).
     pub(crate) fn file_returned_rebuild(&mut self, slot: usize, ret: Returned, pending_remove: bool) {
+        self.file_returned_inner(slot, ret, None, pending_remove);
+    }
+
+    fn file_returned_inner(
+        &mut self,
+        slot: usize,
+        ret: Returned,
+        model: Option<&mut Model>,
+        pending_remove: bool,
+    ) {
         let Some(pos) = self.rows.iter().position(|r| r.token == ret.token) else {
             log::warn!("[engine_io] slot {slot}: returned unit id={} token={} has no row; leaking it", ret.id, ret.token);
             std::mem::forget(ret.unit);
@@ -693,10 +704,24 @@ impl Table {
             }
         }
 
-        // `Left::Replaced` on a row that a submitted same-id reload candidate is replacing always
-        // delivers `Back::Superseded`, even if reaped before `Event::Seat(Install, Applied)` drains.
-        let replaced_by_reload = matches!(ret.left, Left::Replaced)
-            && (self.rows[pos].superseded || self.has_reload_replacing(ret.token));
+        // `Left::Replaced` means "superseded by the reload" only when this row's reload candidate is
+        // the first non-refused install replacing `ret.id` in the engine's order (or already promoted).
+        // When a different-id install replacing `ret.id` is queued ahead of the candidate, it removed
+        // this row: deliver `Back::Removed` and end the doomed reload candidate.
+        let replaced_by_reload = if matches!(ret.left, Left::Replaced) {
+            if self.rows[pos].superseded {
+                true
+            } else if let Some(m) = model.as_deref() {
+                match m.first_pending_replacer(slot, ret.id, self) {
+                    Some((cand_token, true)) => self.is_reload_of(cand_token, ret.token),
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let row = &mut self.rows[pos];
         if row.superseded || replaced_by_reload {
             row.superseded = true;
@@ -713,14 +738,24 @@ impl Table {
 
         // Terminal engine causes deliver `Back::Removed` immediately and mark `Leave::Done`.
         if matches!(ret.left, Left::Removed | Left::Replaced) {
+            let replaced = matches!(ret.left, Left::Replaced);
             if matches!(row.leave, Leave::Done) {
                 std::mem::forget(ret.unit);
-                return;
+            } else {
+                if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Done) {
+                    forget_back(old);
+                }
+                row.mailbox.push_back(Back::Removed(ret.unit));
             }
-            if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Done) {
-                forget_back(old);
+            if replaced {
+                if let Some(cand) = self.reload_candidate_for(ret.token) {
+                    if self.fail_reload(cand) {
+                        if let Some(m) = model {
+                            m.cancel_reloading(slot, ret.id);
+                        }
+                    }
+                }
             }
-            row.mailbox.push_back(Back::Removed(ret.unit));
             return;
         }
 
@@ -782,10 +817,18 @@ impl Table {
         }
     }
 
-    /// Drain every returned box on `port` into the table's mailboxes.
+    /// Drain every returned box on `port` into the table's mailboxes (legacy callers).
     pub(crate) fn reap_port(&mut self, slot: usize, port: &mut SlotPort) {
         while let Some(ret) = port.returned_unit() {
             self.file_returned(slot, ret);
+        }
+    }
+
+    /// Drain every returned box on `port` into the table's mailboxes, reading `model`'s pending
+    /// queue order to classify `Left::Replaced` against queued reload candidates.
+    pub(crate) fn reap_port_with_model(&mut self, slot: usize, port: &mut SlotPort, model: &mut Model) {
+        while let Some(ret) = port.returned_unit() {
+            self.file_returned_inner(slot, ret, Some(model), false);
         }
     }
 
@@ -974,6 +1017,10 @@ impl HostState {
 
     pub(crate) fn poll(&self, op: Op) -> OpState {
         self.model.poll(&self.table, op)
+    }
+
+    pub(crate) fn reap_port(&mut self, slot: usize, port: &mut SlotPort) {
+        self.table.reap_port_with_model(slot, port, &mut self.model);
     }
 }
 
@@ -1284,7 +1331,7 @@ impl UnitHost {
         let mut port_guard = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(self.slot, port);
+            state.reap_port(self.slot, port);
         }
         if self.core.closing.load(Acquire) {
             return Err((unit, SubmitError::Closing));
@@ -1398,7 +1445,7 @@ impl UnitHost {
         let mut port_guard = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(self.slot, port);
+            state.reap_port(self.slot, port);
         }
         if self.core.closing.load(Acquire) {
             return Err(SubmitError::Closing);
@@ -1469,7 +1516,7 @@ impl UnitHost {
         let mut port_guard = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(self.slot, port);
+            state.reap_port(self.slot, port);
         }
         state.table.row_mut(self.install).and_then(|r| r.mailbox.pop_front())
     }
@@ -1480,7 +1527,7 @@ impl UnitHost {
         let mut port_guard = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(self.slot, port);
+            state.reap_port(self.slot, port);
         }
         let row = state.table.row_mut(self.install)?;
         if let Some(back) = row.mailbox.pop_front() {
@@ -1537,7 +1584,7 @@ impl UnitHost {
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         state.table.abandon_row(self.install);
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(self.slot, port);
+            state.reap_port(self.slot, port);
         }
     }
 
@@ -1686,7 +1733,7 @@ impl EngineHost {
         let mut port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(slot, port);
+            state.reap_port(slot, port);
         }
         let Some((_, plate)) = state.model.find_plate(id) else {
             return Err(format!("unit {id} not found"));
@@ -1788,7 +1835,7 @@ impl EngineHost {
         let mut port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
-            state.table.reap_port(slot, port);
+            state.reap_port(slot, port);
         }
         let Some(port) = port_guard.as_mut() else {
             return Err("no audio device is open".to_string());
