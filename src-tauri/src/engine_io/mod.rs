@@ -19,7 +19,10 @@
 //! | `transition` | the owner's decisions as pure functions (the kernel), with their table tests |
 //! | `callback` | the callback bodies (ASIO and WASAPI, input and output) and a run's shared state |
 //! | `driver` | the seam the owner opens streams through; `cpal_driver` is the real one, `fake_driver` (tests) the hardware-free one |
-//! | `slot_host` | [`SlotHost`]: a plugin owner's install/remove/eviction handshake with the engine |
+//! | `slot_host` | [`SlotHost`]: a legacy plugin slot's install/remove/eviction handshake, an adapter over `unit_host`'s table |
+//! | `unit_host` | the chain units' handshake with the engine: the table of installs (one row per `UnitHost`, its install token and mailbox), each port message as an op settled from the slot's `Event::Seat`s, the gate that holds a reseating unit's commands, a rebuild's handoff of every row |
+//! | `chain` | the model of the slots' chains as the engine applied them, and its wire shapes: what the feed's `chains` carries |
+//! | `chain_cmds` | the chain host (`Chains`): the `chain_*` Tauri commands, the per-slot call order, the unit owners and their join at shutdown, the run's exclusion with legacy plugin slots, editor affinity, tone tokens, `chain:*` window events |
 //! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp, whether a device runs, the feed's anchor; DEV, the stamps' history a frame turns into time through |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |

@@ -167,3 +167,25 @@
   `run_job`): a callback that stalls more than two 10 s waits between taking a load and applying it would
   apply a load already answered as failed; only the engine's fault path recovers it. Read from source,
   never seen. Next check, only if a load ever plays after a failed answer: the log's session-job lines.
+- Chain units (`engine_io/chain_cmds.rs`, `unit_host.rs`; read from source, none reproduced). A
+  `SetUnitParam` racing a withdrawal (the gate holds a reseating unit's commands and replays them) is
+  unobserved: no host unit overrides `UnitProcessor::set_param` (`lf-engine` `api.rs`; a plugin's
+  parameters ride its owner's ring), so no plugin unit takes one. Next check, when a host unit does: a
+  test that sets one while its unit is withdrawn and reads the value it reseats with.
+  A unit command already in the engine for a future frame reaches whatever seat holds its id when that
+  frame comes; the UI mints random u32 ids (`mintUnitId`, `src/platform/index.ts`), but an id removed and
+  added again within that window would take a command meant for the old instance. A fix is an
+  engine-side fence (the command carrying its install, or a removal dropping its id's queued commands).
+  Next check: a test that queues a command for a later frame, removes the unit and re-adds one under
+  the same id before that frame.
+- `tauriChainHost`'s per-slot queue (`src/platform/host.tauri.ts` `onChainSlot`) waits for each call to
+  settle, so a remove or reload held across a take keeps the slot's later calls waiting until the take
+  ends, while the native order mutex was already released at `waiting` (`chain_cmds.rs`
+  `wait_ordered`). Conservative: calls wait, never reorder. A fix needs native to signal per call when
+  it is ordered (taken under the slot's order), so the queue can move on then. Next check: a probe that
+  queues an add behind a held remove during a take and times the add.
+- `chain_tests.rs`' `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`
+  is load-sensitive: its 2 s wall bounds (the install's return, the seat and the refusal after the take)
+  failed once in a 479-test `cargo test -p app` run and pass alone. Next check: rerun the full
+  `cargo test -p app` on a quiet PC; if it fails again, widen the bounds to `test_rig::PATIENCE` or
+  stamp them on the engine's frames, as the timing tests above were.

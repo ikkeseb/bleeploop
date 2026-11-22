@@ -197,6 +197,11 @@ anything else that needs the interface or a real plugin.
 - A plugin with latency (not a zero-latency amp-sim) loaded or unloaded during a take now waits for the
   take's end: does the take stay on the click, and does the wait read as clear rather than broken?
   (machine: `lf-engine` `tests/chain.rs`)
+- The amp-sim as players get it, the chain commands riding along unused (the app still plays through
+  the legacy slot path; the chain host answers only behind a DEV flag): load, unload and swap it, let it
+  restart (a FabFilter latency-mode change), switch the device and export a session: does each sound as
+  before? (machine: the `slot_host.rs`, `plugins.rs` and `engine_slot.rs` tests and the CLAP, VST3 and
+  VST2 fixtures; on the PC `native:swap`, `native:recall`, `native:engine-recovery`, `native:tone-recall`)
 - AUTO REC armed while you change a slot's plugin listens again from the change, a moment later: does
   AUTO still feel immediate, and is no take started by sound from before the change?
 - A slot's input on a pair (its input window's `In 1+2`, beside the single inputs): a stereo source on

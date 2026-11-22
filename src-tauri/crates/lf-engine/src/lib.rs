@@ -218,20 +218,12 @@
 //!   block with no jump keeps the device interval at all.
 //! - **`tests/perf.rs`'s ignored Stage 2 bar fails on a loaded PC** (11.4 % and 9.1 % against its 10 %).
 //!   Next check: rerun it on a quiet desktop before reading a failure as a regression.
-//! - **An eviction can lose a queued install** (`engine_io/owner.rs`, the eviction's return count; read
-//!   from source). With the event ring full and 32 replies owed, an install stays queued, the empty slot
-//!   returns zero units, which reads as done, and the rebuild drops the rings with that unit. Next step:
-//!   E2's ownership handshake settles it.
 //! - **A source inserted ahead of an effect while the input plays switches the route hard** (A8;
 //!   read from source, not rendered): the processed input leaves the direct monitor and enters the
 //!   limiter-delayed bus on the source's first frame (a gap), and the source's removal switches it back
 //!   at its fade's end, over the bus audio still in flight; the input sends lose it at once. Sources
 //!   arrive with E3. Next check: a test rendering the switch on a playing input and measuring the gap
 //!   and the overlap at the output.
-//! - **A refusal after `SlotHost::install`'s 2 s wait goes unseen** (`engine_io/slot_host.rs`; read from
-//!   source): the owner reads only `take_evicted()` then, and a rebuild can strip the reason
-//!   (`owner.rs`). Reachable only after a 2 s stall with a refusal (today: a plugin reporting over a
-//!   second of latency). Next step: E2's ownership handshake settles it.
 //!
 //! # Beside this crate
 //!

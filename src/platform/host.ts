@@ -372,12 +372,13 @@ export interface EngineHost {
  * call at a time per slot, never items of the `input_send` batch. Each change is answered on the feed's
  * `chains` (the UI draws the chain from that alone, invariant 3); a call settles on the engine's answer.
  * Bypass and built-in params ride the batch (`SetUnitBypass`, `ToggleUnit`, `Toggle.Units`, `SetUnitParam`).
- * A refusal rejects with the reason. The native engine does not have the chain yet: under Tauri and in a
- * production browser build every call rejects (`available` false); the DEV browser fake answers it.
+ * A refusal rejects with the reason. Under Tauri the native chain host answers only in a DEV build with the
+ * flag `lf.chainNative` on (`host.tauri.ts`); otherwise, and in a production browser build, every call
+ * rejects (`available` false); the DEV browser fake answers it.
  */
 export interface ChainHost {
   /** False until the native engine speaks the chain; true on the DEV browser fake when a probe asks for the chain (`__lfChainFake`, with the engine fake on).
-   * Natively it turns true only with the activation prerequisites in `src/ui/AGENTS.md` § Open threads. */
+   * Natively true only in a DEV build with `lf.chainNative`; for players, only with the activation prerequisites in `src/ui/AGENTS.md` § Open threads. */
   readonly available: boolean;
   /** Reserve `unit` across both slots, build it, hand it over at index `at` (a source goes to the head,
    * replacing a seated one); settles on the engine's answer: `seated`, or `waiting` while a take holds
