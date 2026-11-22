@@ -182,8 +182,24 @@
   settle, so a remove or reload held across a take keeps the slot's later calls waiting until the take
   ends, while the native order mutex was already released at `waiting` (`chain_cmds.rs`
   `wait_ordered`). Conservative: calls wait, never reorder. A fix needs native to signal per call when
-  it is ordered (taken under the slot's order), so the queue can move on then. Next check: a probe that
-  queues an add behind a held remove during a take and times the add.
+  it is ordered (taken under the slot's order), so the queue can move on then. The same queue lets a
+  remove of a unit whose add is still in flight skip it (the unit has no slot mapping until native
+  accepts the add), so it can run ahead of a later add queued on that slot. Next check: a probe that
+  queues an add behind a held remove during a take and times the add, then one that removes a loading
+  unit with a second add queued behind it.
+- Chain host edges to settle before chains reach players (a cross-family review of the chain
+  commands, read from source, none reproduced; the chain host runs only in DEV builds today):
+  a) an evicted source that answers `Replaced` (a newer source queued after a rebuild) retires its tone
+  before the engine has taken the newer one, which the engine can still refuse (latency), leaving the
+  slot with neither; b) a source parked after a failed reactivation is not replaced by a newer source
+  that seats while it is out (the projected head omits it), so it keeps its owner and tone until it
+  retries; c) at shutdown a removal the full port refused leaves the unit seated, and the device's close
+  hands it back as `Evicted`, so its tone is kept, not retired; d) a plugin owner retrying `PortFull`
+  after its add's command returned can lose its place to a later edit on that slot; e) a built-in add
+  answered `waiting` whose box a rebuild returns after the 10 s first-answer bound is dropped instead of
+  offered to the new engine; f) a reload the engine refused can log a generic cause when its row is
+  released before the waiter polls. Sources and built-in factories arrive with E3. Next check: one
+  `chain_tests.rs`/`chain_cmds_tests.rs` test per letter, red first, before chains reach players.
 - `chain_tests.rs`' `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`
   is load-sensitive: its 2 s wall bounds (the install's return, the seat and the refusal after the take)
   failed once in a 479-test `cargo test -p app` run and pass alone. Next check: rerun the full
