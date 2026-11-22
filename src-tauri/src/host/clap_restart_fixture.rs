@@ -1093,7 +1093,7 @@ mod engine {
     }
 
     /// The host's `clap.gui`, as the plugin `obs` watches reaches it.
-    fn host_gui(obs: &Observed) -> (*const clap_host, &'static clap_host_gui) {
+    pub(super) fn host_gui(obs: &Observed) -> (*const clap_host, &'static clap_host_gui) {
         let host = obs.host.load(Relaxed).cast_const();
         // SAFETY: the host outlives its plugin, and declares `clap.gui` (a `clap_host_gui`).
         let gui = unsafe { ((*host).get_extension.unwrap())(host, CLAP_EXT_GUI.as_ptr()) }.cast::<clap_host_gui>();
@@ -1789,11 +1789,11 @@ mod unit_owner {
         UnitKind, UnitProcessor, SLOT_COUNT,
     };
 
-    fn device(rate: u32) -> TestDevice {
+    pub(super) fn device(rate: u32) -> TestDevice {
         TestDevice::start(rate, 256, Duration::from_millis(5), |_| 0.1)
     }
 
-    fn identity() -> ToneIdentity {
+    pub(super) fn identity() -> ToneIdentity {
         ToneIdentity {
             format: "clap".to_string(),
             path: "bleeploop-restart-fixture.clap".to_string(),
@@ -1805,14 +1805,14 @@ mod unit_owner {
         device.host().core.rt.lock().unwrap().engine.as_ref().unwrap().slot(slot)
     }
 
-    fn request_restart(obs: &Observed) {
+    pub(super) fn request_restart(obs: &Observed) {
         let host = unsafe { *obs.host.load(Relaxed) };
         std::thread::spawn(move || unsafe { (host.request_restart.unwrap())(&host) })
             .join()
             .unwrap();
     }
 
-    fn start_take(device: &TestDevice) {
+    pub(super) fn start_take(device: &TestDevice) {
         let host = device.host();
         host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
         host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
@@ -1832,7 +1832,7 @@ mod unit_owner {
         }
     }
 
-    fn stop_take(device: &TestDevice) {
+    pub(super) fn stop_take(device: &TestDevice) {
         let host = device.host();
         host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1876,7 +1876,7 @@ mod unit_owner {
     }
 
     /// Feed stand-in: drains engine events every ~2 ms so `UnitHost::poll` and `chains` advance.
-    struct FeedStandIn {
+    pub(super) struct FeedStandIn {
         stop: Arc<AtomicBool>,
         chains: Arc<Mutex<Arc<[ChainState; SLOT_COUNT]>>>,
         events: Arc<Mutex<Vec<Event>>>,
@@ -1885,7 +1885,7 @@ mod unit_owner {
     }
 
     impl FeedStandIn {
-        fn start(host: EngineHost) -> Self {
+        pub(super) fn start(host: EngineHost) -> Self {
             Self::start_with_blocks(host, None)
         }
 
@@ -1952,11 +1952,11 @@ mod unit_owner {
             FeedStandIn { stop, chains, events, overview, join: Some(join) }
         }
 
-        fn plate(&self, slot: usize, id: UnitId) -> Option<UnitState> {
+        pub(super) fn plate(&self, slot: usize, id: UnitId) -> Option<UnitState> {
             self.chains.lock().unwrap()[slot].units.iter().find(|u| u.id == id).cloned()
         }
 
-        fn chain(&self, slot: usize) -> ChainState {
+        pub(super) fn chain(&self, slot: usize) -> ChainState {
             self.chains.lock().unwrap()[slot].clone()
         }
 
@@ -1978,7 +1978,7 @@ mod unit_owner {
         }
     }
 
-    fn unit_runner(
+    pub(super) fn unit_runner(
         obs: Vec<Arc<Observed>>,
         plugin_id: &'static str,
         ended: Option<Arc<AtomicBool>>,
@@ -2554,7 +2554,7 @@ mod unit_owner {
     }
 
     /// Mark the fixture's state changed through the host's `clap.state` from its main thread.
-    fn mark_dirty(obs: &Observed) {
+    pub(super) fn mark_dirty(obs: &Observed) {
         let before = obs.marked_dirty.load(Relaxed);
         obs.dirty_on_callback.store(true, Relaxed);
         let host = obs.host.load(Relaxed);
@@ -2563,7 +2563,7 @@ mod unit_owner {
         assert!(wait_for(|| obs.marked_dirty.load(Relaxed) > before), "the plugin marked its state dirty");
     }
 
-    fn released_in_order(obs: &Observed) -> bool {
+    pub(super) fn released_in_order(obs: &Observed) -> bool {
         let (stop, deactivate, destroy) =
             (obs.stop_seq.load(Relaxed), obs.deactivate_seq.load(Relaxed), obs.destroy_seq.load(Relaxed));
         0 < stop && stop < deactivate && deactivate < destroy
@@ -3376,5 +3376,637 @@ mod unit_owner {
         fresh.release();
         assert!(!obs.contract_violation.load(Relaxed), "no contract violation");
         assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "no RT call off the device thread");
+    }
+}
+
+/// E2 P4's tests that need a real plugin unit owner: `engine_io::chain_cmds::Chains` driven with an
+/// opener that spawns this fixture's owner (`unit_owner::spawn_unit`) in place of `load_unit`, the
+/// built-ins from the chain tests' clamping factory. Every call that can wait runs on its own thread
+/// under a bound (`Rig::call`), so a red test fails instead of hanging.
+mod chain_cmds {
+    use super::super::engine_slot::{self, EngineSlotEvent, EventSink, PluginFormat};
+    use super::super::unit_owner::{self, Answer, UnitOwner};
+    use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, ToneStore};
+    use super::unit_owner as fx;
+    use super::unit_owner::FeedStandIn;
+    use super::*;
+    use crate::engine_io::chain::{ChainState, PlateState, PluginRef, UnitSpec, WireParams};
+    use crate::engine_io::chain_cmds::tests::{empty_slots, join_all, unload_all, ClampingBuiltinFactory};
+    use crate::engine_io::chain_cmds::{chain_event, Added, ChainToneImport, Chains, Reloaded, EDITOR_CLOSED};
+    use crate::engine_io::test_rig::TestDevice;
+    use crate::engine_io::unit_host::UnitHost;
+    use crate::engine_io::EngineHost;
+    use crate::host::PluginHostState;
+    use lf_engine::{InputSendParam, UnitId, UnitKind, UnitParam};
+    use std::sync::mpsc::{channel, sync_channel, Receiver, TryRecvError};
+
+    /// The bound on one chain call's answer (a load's own bound is 15 s; a held reload waits for its
+    /// take, which these tests end well inside this).
+    const CALL: Duration = Duration::from_secs(45);
+
+    type Events = Arc<Mutex<Vec<(&'static str, serde_json::Value)>>>;
+
+    /// One document's chain host over a test device: its epoch, a tone store, and the `chain:*` window
+    /// events its units' sinks would emit, recorded.
+    #[derive(Clone)]
+    struct Rig {
+        chains: Arc<Chains>,
+        host: EngineHost,
+        doc: Arc<PluginHostState>,
+        epoch: u32,
+        store: ToneStore,
+        events: Events,
+    }
+
+    impl Rig {
+        fn new(device: &TestDevice, dir: &TempDir) -> Rig {
+            let doc = Arc::new(PluginHostState::default());
+            let epoch = doc.begin_frontend_session();
+            Rig {
+                chains: Arc::new(Chains::with_factory(Arc::new(ClampingBuiltinFactory::new()))),
+                host: device.host().clone(),
+                doc,
+                epoch,
+                store: dir.store().clone(),
+                events: Arc::default(),
+            }
+        }
+
+        fn doc(&self) -> (&PluginHostState, u32) {
+            (&self.doc, self.epoch)
+        }
+
+        /// What the app's window sink would emit for `unit` (`chain_cmds::window_sink`), recorded.
+        fn sink(&self, unit: UnitId) -> EventSink {
+            let events = self.events.clone();
+            Arc::new(move |e: EngineSlotEvent| events.lock().unwrap().push(chain_event(unit, e)))
+        }
+
+        /// `f` on its own thread; its answer arrives on the receiver (none if it panicked).
+        fn spawn<T: Send + 'static>(&self, f: impl FnOnce(&Rig) -> T + Send + 'static) -> Receiver<T> {
+            let (tx, rx) = sync_channel(1);
+            let rig = self.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(f(&rig));
+            });
+            rx
+        }
+
+        #[track_caller]
+        fn call<T: Send + 'static>(&self, what: &str, f: impl FnOnce(&Rig) -> T + Send + 'static) -> T {
+            answer(what, &self.spawn(f))
+        }
+
+        fn add_plugin_rx(
+            &self,
+            slot: usize,
+            unit: UnitId,
+            at: usize,
+            bypass: bool,
+            obs: &Arc<Observed>,
+        ) -> Receiver<Result<Added, String>> {
+            let obs = vec![obs.clone()];
+            self.spawn(move |r| {
+                let open = opener(obs);
+                // Every slot is empty: the legacy plugin slots take no part in these tests.
+                r.chains.add(&r.host, r.doc(), &empty_slots(), Some(&r.store), slot, unit, plugin_spec(bypass), at, None, r.sink(unit), &open)
+            })
+        }
+
+        #[track_caller]
+        fn add_plugin(&self, slot: usize, unit: UnitId, at: usize, bypass: bool, obs: &Arc<Observed>) -> Result<Added, String> {
+            answer("chain add (plugin)", &self.add_plugin_rx(slot, unit, at, bypass, obs))
+        }
+
+        #[track_caller]
+        fn add_echo(&self, slot: usize, unit: UnitId, at: usize, level: f64) -> Result<Added, String> {
+            self.call("chain add (echo)", move |r| {
+                let spec = UnitSpec {
+                    kind: UnitKind::Echo,
+                    plugin: None,
+                    params: Some(WireParams(vec![(UnitParam::Send(InputSendParam::EchoLevel), level)])),
+                    bypass: false,
+                };
+                r.chains.add(&r.host, r.doc(), &empty_slots(), Some(&r.store), slot, unit, spec, at, None, r.sink(unit), &no_open)
+            })
+        }
+
+        /// Reload `unit` with `token`; `obs` records the candidate a load makes (none is made when the
+        /// reload answers before its load).
+        fn reload_rx(&self, unit: UnitId, since: u64, token: u32, obs: &Arc<Observed>) -> Receiver<Result<Reloaded, String>> {
+            let obs = vec![obs.clone()];
+            self.spawn(move |r| {
+                let open = opener(obs);
+                r.chains.reload(&r.host, r.doc(), Some(&r.store), unit, fx::identity(), since, token, r.sink(unit), &open)
+            })
+        }
+
+        #[track_caller]
+        fn reload(&self, unit: UnitId, since: u64, token: u32, obs: &Arc<Observed>) -> Result<Reloaded, String> {
+            answer("chain reload", &self.reload_rx(unit, since, token, obs))
+        }
+
+        #[track_caller]
+        fn remove(&self, unit: UnitId) -> Result<(), String> {
+            self.call("chain remove", move |r| r.chains.remove(&r.host, r.doc(), unit))
+        }
+
+        /// Import a fixture tone holding `state`, from `slot`'s header, naming `unit`.
+        fn import(&self, slot: usize, state: &[u8], unit: Option<UnitId>) -> ChainToneImport {
+            let bytes = tone::encode(&fixture_tone(state));
+            self.chains
+                .tone_import(&self.host, self.doc(), Some(&self.store), slot, &bytes, &fx::identity(), unit)
+                .expect("tone import")
+        }
+
+        /// Mark every plate the model holds as told at `seq`, as the feed would (`FeedStandIn` does not).
+        fn tell(&self, seq: u64) {
+            let rev = self.host.core.state.lock().unwrap().model.snapshot().rev;
+            self.host.chain_told(rev, seq);
+        }
+
+        fn open_editor(&self, unit: UnitId) -> Result<(), String> {
+            self.chains.open_editor(&self.host, self.doc(), unit)
+        }
+
+        fn model_chain(&self, slot: usize) -> ChainState {
+            self.host.core.state.lock().unwrap().model.snapshot().chains[slot].clone()
+        }
+
+        /// The app's shutdown order for the chains (`mode.rs` `shutdown`); how long it took.
+        #[track_caller]
+        fn shut_down(&self) -> Duration {
+            self.call("chain shutdown", |r| {
+                let t = Instant::now();
+                unload_all(&r.chains, &r.host);
+                r.host.shutdown();
+                join_all(&r.chains);
+                t.elapsed()
+            })
+        }
+    }
+
+    #[track_caller]
+    fn answer<T>(what: &str, rx: &Receiver<T>) -> T {
+        rx.recv_timeout(CALL).unwrap_or_else(|e| panic!("{what}: no answer within {CALL:?} ({e})"))
+    }
+
+    /// The opener `Chains` gets in place of `load_unit`: this fixture's owner, recording into `obs`.
+    fn opener(
+        obs: Vec<Arc<Observed>>,
+    ) -> impl Fn(PluginFormat, &PluginRef, UnitHost, EventSink, Option<ToneBinding>) -> Result<(UnitOwner, Answer), String> {
+        move |format: PluginFormat, _plugin: &PluginRef, unit: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+            unit_owner::spawn_unit(format, unit, 0, sink, tone, fx::unit_runner(obs.clone(), "bleeploop.restart-fixture", None))
+        }
+    }
+
+    fn no_open(
+        _: PluginFormat,
+        _: &PluginRef,
+        _: UnitHost,
+        _: EventSink,
+        _: Option<ToneBinding>,
+    ) -> Result<(UnitOwner, Answer), String> {
+        Err("a built-in add never opens a plugin".to_string())
+    }
+
+    fn plugin_spec(bypass: bool) -> UnitSpec {
+        UnitSpec { kind: UnitKind::Plugin, plugin: Some(fx::identity()), params: None, bypass }
+    }
+
+    fn fixture_tone(state: &[u8]) -> tone::Tone {
+        tone::Tone { identity: fx::identity(), name: "Restart fixture".to_string(), state: state.to_vec() }
+    }
+
+    /// A fixture instance that is an effect (a stereo input) with three listed parameters.
+    fn effect() -> Arc<Observed> {
+        let obs = Arc::new(Observed::default());
+        obs.inputs.store(2, Relaxed);
+        obs.param_count.store(3, Relaxed);
+        obs
+    }
+
+    /// An effect offering a floating editor.
+    fn effect_with_editor() -> Arc<Observed> {
+        let obs = effect();
+        obs.gui_floating.store(true, Relaxed);
+        obs
+    }
+
+    /// Arm `obs`'s next `activate` to park: the first receiver hears it parked, the sender lets it go.
+    fn park_next_activate(obs: &Observed) -> (Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (there_tx, there_rx) = channel();
+        let (go_tx, go_rx) = channel();
+        *obs.park_in_activate.lock().unwrap() = Some((there_tx, go_rx));
+        (there_rx, go_tx)
+    }
+
+    fn engine_chain(device: &TestDevice, slot: usize) -> Vec<(UnitId, bool)> {
+        let rt = device.host().core.rt.lock().unwrap();
+        rt.engine.as_ref().expect("engine present").chain(slot).map(|s| (s.unit, s.bypassed)).collect()
+    }
+
+    fn ids_and_bypass(chain: &ChainState) -> Vec<(UnitId, bool)> {
+        chain.units.iter().map(|u| (u.id, u.bypass)).collect()
+    }
+
+    fn echo_level(chain: &ChainState, id: UnitId) -> Option<f64> {
+        let unit = chain.units.iter().find(|u| u.id == id)?;
+        unit.params.as_ref()?.0.iter().find_map(|&(p, v)| (p == UnitParam::Send(InputSendParam::EchoLevel)).then_some(v))
+    }
+
+    fn torn_down_once(obs: &Observed) -> bool {
+        obs.destroy_seq.load(Relaxed) > 0 && obs.stops.load(Relaxed) == 1 && obs.deactivations.load(Relaxed) == 1
+    }
+
+    /// The lifecycle counters, for a failed assertion's message.
+    fn life(obs: &Observed) -> String {
+        format!(
+            "activations {} deactivations {} starts {} stops {} seq stop {} deactivate {} destroy {}",
+            obs.activations.load(Relaxed),
+            obs.deactivations.load(Relaxed),
+            obs.starts.load(Relaxed),
+            obs.stops.load(Relaxed),
+            obs.stop_seq.load(Relaxed),
+            obs.deactivate_seq.load(Relaxed),
+            obs.destroy_seq.load(Relaxed),
+        )
+    }
+
+    fn clean(obs: &Observed) -> bool {
+        !obs.contract_violation.load(Relaxed) && obs.rt_calls_off_device.load(Relaxed) == 0
+    }
+
+    /// (a) A cold restore: a bypassed fixture plugin and two ECHOs at different levels, each add
+    /// `seated`; the engine's chain, the model's snapshot and the feed's chain agree on ids, order
+    /// and bypass; the plugin's plate is seated and bypassed, the ECHOs' read 0.3 and 1.0 (clamped).
+    #[test]
+    fn a_cold_restore_of_a_bypassed_plugin_and_two_echos_agrees_in_engine_model_and_feed() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-a");
+        let rig = Rig::new(&device, &dir);
+
+        let plugin = effect();
+        assert_eq!(rig.add_plugin(0, 31, 0, true, &plugin), Ok(Added::Seated));
+        assert_eq!(rig.add_echo(0, 32, 1, 0.3), Ok(Added::Seated));
+        assert_eq!(rig.add_echo(0, 33, 2, 2.0), Ok(Added::Seated));
+
+        let expected = vec![(31, true), (32, false), (33, false)];
+        assert_eq!(engine_chain(&device, 0), expected, "the engine's chain");
+        let model = rig.model_chain(0);
+        assert_eq!(ids_and_bypass(&model), expected, "the model's snapshot");
+        assert!(wait_for(|| ids_and_bypass(&feed.chain(0)) == expected), "the feed's chain");
+
+        let plate = feed.plate(0, 31).expect("the plugin's plate");
+        assert_eq!((plate.state, plate.bypass, plate.kind), (PlateState::Seated, true, UnitKind::Plugin));
+        assert_eq!(plate.name, "Restart fixture");
+        assert_eq!(echo_level(&model, 32), Some(0.3));
+        assert_eq!(echo_level(&model, 33), Some(1.0), "2.0 clamped by the factory");
+        let fed = feed.chain(0);
+        assert_eq!((echo_level(&fed, 32), echo_level(&fed, 33)), (Some(0.3), Some(1.0)));
+        assert!(rig.model_chain(1).units.is_empty() && feed.chain(1).units.is_empty(), "slot 1 untouched");
+
+        rig.shut_down();
+        assert!(clean(&plugin), "no contract violation");
+    }
+
+    /// (b) Reload: `moved` for a `since` older than the plate's told seq (nothing loaded); `reloaded`:
+    /// a fresh instance under the same id, place and bypass, holding the token's state, the old one
+    /// torn down once; `failed` when the candidate comes up as another role (a source for an effect):
+    /// the engine refuses its placement and the old instance stays seated, its owner serving.
+    #[test]
+    fn b_reload_answers_moved_reloaded_and_failed_for_another_role() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-b");
+        let rig = Rig::new(&device, &dir);
+        let unit: UnitId = 41;
+
+        let a = effect();
+        assert_eq!(rig.add_echo(0, 40, 0, 0.5), Ok(Added::Seated));
+        assert_eq!(rig.add_plugin(0, unit, 1, true, &a), Ok(Added::Seated));
+        rig.tell(5);
+        assert_eq!(rig.host.told(unit), Some(5));
+
+        let imported = rig.import(0, b"tone-b", Some(unit));
+        assert_eq!(imported.matches, vec![unit]);
+        let token = imported.token.expect("a matching unit parks the tone");
+
+        // `since` older than the told seq: moved, nothing loaded, the token still parked.
+        let unused = effect();
+        assert_eq!(rig.reload(unit, 4, token, &unused), Ok(Reloaded::Moved));
+        assert_eq!(unused.activations.load(Relaxed), 0, "a moved reload loads nothing");
+
+        let b = effect();
+        assert_eq!(rig.reload(unit, 5, token, &b), Ok(Reloaded::Reloaded));
+        assert_eq!(*b.saved.lock().unwrap(), b"tone-b", "the fresh instance holds the token's state");
+        assert_eq!(b.state_loads.load(Relaxed), 1);
+        assert!(!b.loaded_while_active.load(Relaxed), "the tone went in before activation");
+        assert!(wait_for(|| torn_down_once(&a)), "the old instance is torn down once");
+        assert!(fx::released_in_order(&a), "A: stop < deactivate < destroy");
+        assert_eq!(a.activations.load(Relaxed), 1);
+        let expected = vec![(40, false), (unit, true)];
+        assert!(
+            wait_for(|| ids_and_bypass(&feed.chain(0)) == expected
+                && feed.plate(0, unit).is_some_and(|p| p.state == PlateState::Seated && !p.reloading)),
+            "the same id, place and bypass, seated"
+        );
+        assert_eq!(engine_chain(&device, 0), expected);
+
+        // A candidate that comes up as a source: refused (`Placement`), the old one stays.
+        let imported = rig.import(0, b"tone-c", Some(unit));
+        let token = imported.token.expect("parked");
+        let c = Arc::new(Observed::default());
+        c.param_count.store(3, Relaxed);
+        let b_starts = b.starts.load(Relaxed);
+        assert_eq!(rig.reload(unit, 1_000, token, &c), Ok(Reloaded::Failed));
+        assert!(wait_for(|| c.destroy_seq.load(Relaxed) > 0), "the refused candidate is released");
+        assert!(
+            wait_for(|| feed.plate(0, unit).is_some_and(|p| p.state == PlateState::Seated && !p.reloading && !p.source)),
+            "the effect's plate stands, seated"
+        );
+        assert_eq!(engine_chain(&device, 0), expected);
+        assert_eq!(b.destroy_seq.load(Relaxed), 0, "B is not torn down");
+        assert_eq!(b.starts.load(Relaxed), b_starts, "B was never taken out");
+        let params = rig.chains.list_params(&rig.host, rig.doc(), unit).expect("B's owner serves");
+        assert_eq!(params.len(), 3);
+
+        rig.shut_down();
+        assert!(clean(&a) && clean(&b) && clean(&c), "no contract violation");
+    }
+
+    /// (c) Editor affinity with instances of one plugin file: the first load owns the editor, a
+    /// second instance in the same chain and a third in the other slot are refused naming it; with
+    /// the first removed while the others stay, both are refused as bound to its previous load.
+    #[test]
+    fn c_editor_affinity_refuses_the_second_instance_in_one_chain_and_across_slots_then_orphaned() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let _feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-c");
+        let rig = Rig::new(&device, &dir);
+
+        let (first, second, third) = (effect_with_editor(), effect_with_editor(), effect_with_editor());
+        assert_eq!(rig.add_plugin(0, 51, 0, false, &first), Ok(Added::Seated));
+        assert_eq!(rig.add_plugin(0, 52, 1, false, &second), Ok(Added::Seated));
+        assert_eq!(rig.add_plugin(1, 53, 0, false, &third), Ok(Added::Seated));
+
+        assert_eq!(rig.open_editor(52), Err("the editor belongs to unit 51".to_string()), "same chain");
+        assert_eq!(rig.open_editor(53), Err("the editor belongs to unit 51".to_string()), "across slots");
+        assert_eq!(rig.open_editor(51), Ok(()));
+        assert_eq!(*first.gui_calls.lock().unwrap(), ["create", "show"]);
+        assert_eq!(rig.chains.close_editor(&rig.host, rig.doc(), 51), Ok(()));
+
+        assert_eq!(rig.remove(51), Ok(()));
+        assert!(wait_for(|| first.destroy_seq.load(Relaxed) > 0), "the first instance is released");
+        let orphaned = "the editor is bound to unit 51's previous load".to_string();
+        // The chain host releases the first's hold once its owner is joined (a call's sweep).
+        assert!(wait_for(|| rig.open_editor(52) == Err(orphaned.clone())), "orphaned in the first's chain");
+        assert_eq!(rig.open_editor(53), Err(orphaned), "orphaned across slots");
+        assert!(second.gui_calls.lock().unwrap().is_empty() && third.gui_calls.lock().unwrap().is_empty());
+
+        rig.shut_down();
+        assert!(clean(&first) && clean(&second) && clean(&third), "no contract violation");
+    }
+
+    /// (c) Two loads of one plugin file at once: the first parked in its `activate` while a second add
+    /// starts in the other slot. Neither knows which came first: both are refused as `unordered`.
+    #[test]
+    fn c_two_loads_at_once_leave_both_editors_unordered() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let _feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-c2");
+        let rig = Rig::new(&device, &dir);
+
+        let (first, second) = (effect_with_editor(), effect_with_editor());
+        let (parked, go) = park_next_activate(&first);
+        let first_add = rig.add_plugin_rx(0, 61, 0, false, &first);
+        parked.recv_timeout(Duration::from_secs(10)).expect("the first load parks in activate");
+        assert_eq!(rig.add_plugin(1, 62, 0, false, &second), Ok(Added::Seated), "the second load lands first");
+        go.send(()).unwrap();
+        assert_eq!(answer("the first add", &first_add), Ok(Added::Seated));
+
+        let unordered = Err("the editor belongs to an unknown unit (two loaded it at once)".to_string());
+        assert_eq!(rig.open_editor(61), unordered);
+        assert_eq!(rig.open_editor(62), unordered);
+        assert!(first.gui_calls.lock().unwrap().is_empty() && second.gui_calls.lock().unwrap().is_empty());
+
+        rig.shut_down();
+        assert!(clean(&first) && clean(&second), "no contract violation");
+    }
+
+    /// (d) A tone imported with slot 0's header, naming the fixture unit in slot 1: it matches that
+    /// unit and parks a token, and the unit's reload with it answers `reloaded`. The unit's file holds
+    /// the imported tone; a save the old load makes after the redeem does not land there.
+    #[test]
+    fn d_a_token_is_redeemed_by_its_own_unit_in_the_other_slot() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-d");
+        let rig = Rig::new(&device, &dir);
+        let unit: UnitId = 71;
+        let unit_file = dir.0.join(ToneIdentity::unit_file_name(unit));
+        let unit_tone = || std::fs::read(&unit_file).ok().map(|b| tone::decode(&b).unwrap().state);
+
+        let a = effect();
+        assert_eq!(rig.add_plugin(1, unit, 0, false, &a), Ok(Added::Seated));
+        rig.tell(1);
+        let imported = rig.import(0, b"imported-d", Some(unit));
+        assert_eq!(imported.matches, vec![unit]);
+        let token = imported.token.expect("a token for its own unit");
+        assert_eq!(rig.store.load(0, &fx::identity()).unwrap(), None, "a matched import writes no slot file");
+
+        // The candidate parks in activate: the token is redeemed, the old load still serves the unit.
+        let b = effect();
+        let (parked, go) = park_next_activate(&b);
+        let reload = rig.reload_rx(unit, 1_000, token, &b);
+        parked.recv_timeout(Duration::from_secs(10)).expect("the candidate parks in activate");
+        assert_eq!(unit_tone().as_deref(), Some(&b"imported-d"[..]), "the redeem wrote the unit's file");
+        *a.saved.lock().unwrap() = b"a-late".to_vec();
+        let taken = rig.chains.tone_take(&rig.host, rig.doc(), unit).expect("the old load answers a take");
+        assert_eq!(tone::decode(&taken).unwrap().state, b"a-late");
+        assert_eq!(unit_tone().as_deref(), Some(&b"imported-d"[..]), "the old load's save missed the unit's file");
+        *a.saved.lock().unwrap() = b"a-later".to_vec();
+        fx::mark_dirty(&a);
+        go.send(()).unwrap();
+
+        assert_eq!(answer("the reload", &reload), Ok(Reloaded::Reloaded));
+        assert_eq!(*b.saved.lock().unwrap(), b"imported-d", "the candidate restored the imported tone");
+        assert!(wait_for(|| torn_down_once(&a)), "the old load is torn down once");
+        assert!(
+            wait_for(|| feed.plate(1, unit).is_some_and(|p| p.state == PlateState::Seated && !p.reloading)),
+            "the unit stays seated in slot 1"
+        );
+        assert_eq!(unit_tone().as_deref(), Some(&b"imported-d"[..]), "the old load's release save missed it too");
+
+        rig.shut_down();
+        assert!(clean(&a) && clean(&b), "no contract violation");
+    }
+
+    /// (e) Round D through the commands: a reload while the unit's own restart has it withdrawn
+    /// answers `failed`, and the restart completes.
+    #[test]
+    fn e_a_reload_while_the_units_restart_is_withdrawn_answers_failed() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-e1");
+        let rig = Rig::new(&device, &dir);
+        let unit: UnitId = 81;
+
+        let a = effect();
+        assert_eq!(rig.add_plugin(0, unit, 0, false, &a), Ok(Added::Seated));
+        rig.tell(1);
+        let token = rig.import(0, b"tone-e1", Some(unit)).token.expect("parked");
+
+        let (parked, go) = park_next_activate(&a);
+        fx::request_restart(&a);
+        parked.recv_timeout(Duration::from_secs(10)).expect("the restart parks in activate, withdrawn");
+        let unused = effect();
+        assert_eq!(rig.reload(unit, 1_000, token, &unused), Ok(Reloaded::Failed));
+        assert_eq!(unused.activations.load(Relaxed), 0, "no candidate was loaded");
+        go.send(()).unwrap();
+
+        assert!(
+            wait_for(|| a.activations.load(Relaxed) == 2
+                && a.starts.load(Relaxed) == 2
+                && feed.plate(0, unit).is_some_and(|p| p.state == PlateState::Seated && !p.reloading)),
+            "the restart reseats the unit"
+        );
+        assert_eq!(a.destroy_seq.load(Relaxed), 0, "the unit's instance stays");
+
+        rig.shut_down();
+        assert!(clean(&a), "no contract violation");
+    }
+
+    /// (e) Round D through the commands: during a held reload (a take open, the candidate's latency
+    /// different), the candidate's plugin asks a restart and so does the old one. The reload answers
+    /// `reloaded` once the take ends; the restart then reseats the new instance; the old one is never
+    /// restarted, only torn down once.
+    #[test]
+    fn e_a_restart_asked_during_a_held_reload_runs_after_it_on_the_new_instance() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-e2");
+        let rig = Rig::new(&device, &dir);
+        let unit: UnitId = 82;
+
+        let a = effect();
+        assert_eq!(rig.add_plugin(0, unit, 0, false, &a), Ok(Added::Seated));
+        rig.tell(1);
+        let token = rig.import(0, b"tone-e2", Some(unit)).token.expect("parked");
+
+        fx::start_take(&device);
+        let b = effect();
+        b.latency.store(64, Relaxed);
+        let reload = rig.reload_rx(unit, 1_000, token, &b);
+        assert!(
+            wait_for(|| b.activations.load(Relaxed) == 1
+                && feed.plate(0, unit).is_some_and(|p| p.reloading && p.held)),
+            "the candidate's install is held by the take"
+        );
+
+        b.latency.store(32, Relaxed);
+        fx::request_restart(&b);
+        a.latency.store(16, Relaxed);
+        fx::request_restart(&a);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(reload.try_recv(), Err(TryRecvError::Empty), "the reload waits for the take");
+        assert_eq!((a.deactivations.load(Relaxed), b.deactivations.load(Relaxed)), (0, 0), "nothing restarts while held");
+
+        fx::stop_take(&device);
+        assert_eq!(answer("the held reload", &reload), Ok(Reloaded::Reloaded));
+        assert!(
+            wait_for(|| b.activations.load(Relaxed) == 2
+                && b.deactivations.load(Relaxed) == 1
+                && feed.plate(0, unit).is_some_and(|p| {
+                    p.state == PlateState::Seated && !p.reloading && !p.held && p.latency == 32
+                })),
+            "the restart reseats the new instance at its new latency"
+        );
+        assert!(wait_for(|| torn_down_once(&a)), "the old instance is torn down once");
+        assert_eq!(a.activations.load(Relaxed), 1, "the old instance is never restarted");
+        assert_eq!(b.destroy_seq.load(Relaxed), 0, "the new instance stays");
+
+        rig.shut_down();
+        assert!(clean(&a) && clean(&b), "no contract violation");
+    }
+
+    /// (f) The rest of the plugin path: `list_params` lists the fixture's ids and an unlisted id's set
+    /// is refused; `tone_take` answers the tone's bytes; an editor closed by the plugin's own close
+    /// emits `chain:editor-closed` with the unit.
+    #[test]
+    fn f_params_tone_take_and_an_editor_the_plugin_closed_reach_the_chain_commands() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let _feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-f");
+        let rig = Rig::new(&device, &dir);
+        let unit: UnitId = 91;
+
+        let a = effect_with_editor();
+        assert_eq!(rig.add_plugin(0, unit, 0, false, &a), Ok(Added::Seated));
+
+        let params = rig.chains.list_params(&rig.host, rig.doc(), unit).expect("list_params");
+        assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101, 102]);
+        assert!(rig.chains.set_param(&rig.host, rig.doc(), unit, 7, 0.5).is_err(), "an unlisted id is refused");
+        assert_eq!(rig.chains.set_param(&rig.host, rig.doc(), unit, 101, 0.25), Ok(()));
+        assert!(wait_for(|| a.last_param.load(Relaxed) == 101), "a listed id reaches the plugin");
+
+        *a.saved.lock().unwrap() = b"f-state".to_vec();
+        let taken = rig.chains.tone_take(&rig.host, rig.doc(), unit).expect("tone_take");
+        let taken = tone::decode(&taken).expect("tone bytes");
+        assert_eq!((taken.identity, taken.state), (fx::identity(), b"f-state".to_vec()));
+
+        assert_eq!(rig.open_editor(unit), Ok(()));
+        let (host, gui) = super::engine::host_gui(&a);
+        // SAFETY: the host's own callback, called as a plugin calls it.
+        unsafe { (gui.closed.unwrap())(host, true) };
+        let closed = (EDITOR_CLOSED, serde_json::json!({ "unit": unit }));
+        assert!(wait_for(|| rig.events.lock().unwrap().contains(&closed)), "chain:editor-closed names the unit");
+        assert_eq!(a.gui_calls.lock().unwrap().last(), Some(&"destroy"));
+
+        rig.shut_down();
+        assert!(clean(&a), "no contract violation");
+    }
+
+    /// (g) Shutdown with a plugin unit: a seated fixture unit and an ECHO. `unload_all`, the host's
+    /// shutdown and `join_all` end within 3 s; the plugin is torn down in order, and its changed tone
+    /// is saved, then retired to the slot's file.
+    #[test]
+    #[ignore = "defect: join_all's request_stop beats the owner's 20 ms poll for its Back::Removed, so the plugin is abandoned in the engine (leaked) and its tone never retired"]
+    fn g_shutdown_with_a_plugin_unit_tears_it_down_in_order_and_retires_its_tone() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = fx::device(48_000);
+        let feed = FeedStandIn::start(device.host().clone());
+        let dir = TempDir::new("p4r3-g");
+        let rig = Rig::new(&device, &dir);
+        let unit: UnitId = 95;
+        let unit_file = dir.0.join(ToneIdentity::unit_file_name(unit));
+
+        let a = effect();
+        assert_eq!(rig.add_plugin(0, unit, 0, false, &a), Ok(Added::Seated));
+        assert_eq!(rig.add_echo(0, 96, 1, 0.4), Ok(Added::Seated));
+        assert!(wait_for(|| ids_and_bypass(&feed.chain(0)) == vec![(unit, false), (96, false)]), "both seated");
+        assert!(wait_for(|| a.processes.load(Relaxed) > 8), "the plugin processes");
+
+        *a.saved.lock().unwrap() = b"g-state".to_vec();
+        fx::mark_dirty(&a);
+
+        let took = rig.shut_down();
+        assert!(took < Duration::from_secs(3), "the chain shutdown took {took:?}");
+        assert!(torn_down_once(&a), "the plugin is torn down once: {}", life(&a));
+        assert!(fx::released_in_order(&a), "stop < deactivate < destroy: {}", life(&a));
+        assert!(!unit_file.exists(), "the unit's file is retired");
+        let slot_tone = rig.store.load(0, &fx::identity()).expect("load the slot's tone").expect("a slot tone");
+        assert_eq!(slot_tone.state, b"g-state", "the changed tone was saved, then retired to the slot file");
+        assert_eq!(rig.chains.active_entries(), 0, "no owner left registered");
+        assert!(clean(&a), "no contract violation");
     }
 }

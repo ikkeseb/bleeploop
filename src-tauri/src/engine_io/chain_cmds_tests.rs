@@ -222,8 +222,18 @@ fn echo_spec(level: f64, bypass: bool) -> UnitSpec {
     }
 }
 
-fn empty_slots() -> Mutex<[EngineSlot; SLOT_COUNT]> {
+/// `pub(crate)` with the two below for the CLAP fixture's chain tests (`host/clap_restart_fixture.rs`
+/// `mod chain_cmds`), which cannot name `EngineSlot` or reach `Chains`' `pub(super)` shutdown steps.
+pub(crate) fn empty_slots() -> Mutex<[EngineSlot; SLOT_COUNT]> {
     Mutex::new(std::array::from_fn(|_| EngineSlot::Empty))
+}
+
+pub(crate) fn unload_all(chains: &Chains, host: &EngineHost) {
+    chains.unload_all(host);
+}
+
+pub(crate) fn join_all(chains: &Chains) {
+    chains.join_all();
 }
 
 fn start_device() -> TestDevice {
