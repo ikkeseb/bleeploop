@@ -16,6 +16,7 @@ use lf_engine::SLOT_COUNT;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
+use super::chain_cmds::Chains;
 use super::feed::{FeedHold, FeedThread};
 use super::midi::MidiHost;
 use super::plugins::EngineSlot;
@@ -46,7 +47,7 @@ pub fn switch_asio(
     engine()?.host()?.switch_asio(switch)
 }
 
-/// Engine mode's state: the host, its feed, native MIDI, its plugin slots and the tone store.
+/// Engine mode's state: the host, its feed, native MIDI, its plugin slots, its chains and the tone store.
 pub struct EngineApp {
     /// `None` when the engine did not start this launch.
     engine: Option<(EngineHost, FeedThread)>,
@@ -55,6 +56,7 @@ pub struct EngineApp {
     /// call in flight and drops it before the host shuts down.
     midi: Mutex<Option<MidiHost>>,
     pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
+    pub(super) chains: Chains,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
     pub(super) tones: Option<ToneStore>,
     /// A session import's tone, parked for the reload of the slot that held its plugin (`plugins`).
@@ -108,6 +110,7 @@ impl EngineApp {
             engine,
             midi: Mutex::new(midi),
             slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
+            chains: Chains::new(),
             tones,
             reload_tones: Mutex::default(),
         }
@@ -134,10 +137,11 @@ impl EngineApp {
     /// removals fail fast instead of waiting on an open take), stop native MIDI (its ports close, what
     /// they and the UI held is released while the device still plays, a bindings write still due is
     /// made, and its rebuild hook leaves the host), stop the feed, save every slot's tone
-    /// (`save_tones_on_exit`, bounded on its own), unload the plugins while the device still plays (each
-    /// crossfades out), then close the device and drop the engine on its owner thread. Waits at most
-    /// `SHUTDOWN_WAIT`: a plugin that hangs in its save or its teardown, or a MIDI driver that hangs in
-    /// its close, is left to the process's exit rather than holding the app open.
+    /// (`save_tones_on_exit`, bounded on its own), unload the legacy plugins and chain units while the
+    /// device still plays (each crossfades out), close the device and drop the engine on its owner
+    /// thread, then stop and join any chain unit owners left. Waits at most `SHUTDOWN_WAIT`: a plugin
+    /// that hangs in its save or its teardown, or a MIDI driver that hangs in its close, is left to the
+    /// process's exit rather than holding the app open.
     pub fn shutdown() {
         let Ok(app) = engine() else { return };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -152,8 +156,12 @@ impl EngineApp {
                         drop(midi);
                     },
                     || app.save_tones_on_exit(),
-                    || app.unload_all(),
+                    || {
+                        app.unload_all();
+                        app.chains.unload_all(host);
+                    },
                 );
+                app.chains.join_all();
             }
             let _ = done_tx.send(());
         });
@@ -166,8 +174,8 @@ impl EngineApp {
 }
 
 /// Run the shutdown sequence on the host and feed: mark the host closing first (so held removals
-/// fail fast), then tear down native MIDI, stop the feed, save tones, unload plugins, and shut down
-/// the host.
+/// fail fast), then tear down native MIDI, stop the feed, save tones, unload plugins and chain units,
+/// and shut down the host (chain unit owners still alive are joined right after).
 pub(super) fn run_shutdown(
     host: &EngineHost,
     feed: &FeedThread,

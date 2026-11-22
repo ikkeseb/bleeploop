@@ -1444,11 +1444,25 @@ pub struct UnitSpec {
 }
 
 impl UnitSpec {
-    /// The host's [`Spec`] and the bypass it asks for; Err for a plugin without its `plugin`, or a
-    /// built-in with one.
-    #[allow(dead_code)]
+    /// The host's [`Spec`] and the bypass it asks for; Err for a plugin without its `plugin` (or with
+    /// built-in `params`), or a built-in with a `plugin`.
     pub fn into_spec(self) -> Result<(Spec, bool), String> {
-        todo!("E2 P4")
+        let Self { kind, plugin, params, bypass } = self;
+        match kind {
+            UnitKind::Plugin => {
+                if params.is_some() {
+                    return Err("plugin unit spec must not carry built-in params".to_string());
+                }
+                let plugin = plugin.ok_or_else(|| "plugin unit spec requires a plugin".to_string())?;
+                Ok((Spec::Plugin(plugin), bypass))
+            }
+            kind => {
+                if plugin.is_some() {
+                    return Err(format!("built-in unit spec ({kind:?}) must not carry a plugin"));
+                }
+                Ok((Spec::Builtin { kind, params: params.map_or_else(Vec::new, |p| p.0) }, bypass))
+            }
+        }
     }
 }
 

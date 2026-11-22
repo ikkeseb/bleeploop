@@ -156,6 +156,9 @@ impl LoadTarget<'_> {
             {
                 let mut slots = lock(self.slots)?;
                 current_document(state, frontend_epoch)?;
+                if super::chain_cmds::chain_units_exist(self.host) {
+                    return Err("chain units are in this run: restart the app to load a plugin into a slot".to_string());
+                }
                 match slots[usize::from(slot)] {
                     EngineSlot::Empty => {
                         slots[usize::from(slot)] = EngineSlot::Loading { epoch: frontend_epoch, cancelled: false };
