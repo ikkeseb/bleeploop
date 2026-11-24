@@ -36,7 +36,10 @@
 //!
 //! Blink renders 128 frames at a time. This port takes any block within one quantum and renders the
 //! same bits: the direct stage keeps Blink's per-output summation order, the FFT stages stream (Blink's
-//! FFTConvolver already does), and the pre-delays wrap on quantum boundaries. A cell of the
+//! FFTConvolver already does), and the pre-delays wrap on quantum boundaries. A stream that begins
+//! mid-quantum (a chain unit seated off the grid) first runs that quantum's earlier frames as silence,
+//! so every stage stays on the quantum grid and renders what a convolver started on the boundary and
+//! fed silence up to that frame renders. A cell of the
 //! accumulation buffer gets its contributions in the same order at any block size: stages with equal
 //! post-delays write in one call in stage order, and unequal ones are ≥ 2 944 frames apart.
 //!
@@ -524,6 +527,10 @@ pub struct Convolver {
     sizes: Vec<FftSize>,
     temp: [f32; QUANTUM],
     zeros: [f32; QUANTUM],
+    /// Where a mid-quantum start's lead-in of silence renders, then is dropped.
+    discard: [f32; QUANTUM],
+    /// No stage has run yet: the first frame the stages see may be off a quantum boundary.
+    fresh: bool,
     sample_rate: f64,
     /// The response's length in seconds: how long the node renders after its input goes silent.
     tail: f64,
@@ -549,6 +556,8 @@ impl Convolver {
             sizes,
             temp: [0.0; QUANTUM],
             zeros: [0.0; QUANTUM],
+            discard: [0.0; QUANTUM],
+            fresh: true,
             sample_rate: sample_rate as f64,
             tail: response[0].len() as f64 / sample_rate as f64,
             last_non_silent_time: 0.0,
@@ -579,6 +588,16 @@ impl Convolver {
             left.fill(0.0);
             right.fill(0.0);
             return true;
+        }
+        if std::mem::replace(&mut self.fresh, false) {
+            // The pre-delay rings wrap on quantum boundaries: a stream that begins mid-quantum runs the
+            // quantum's earlier frames as silence first, as if started on the boundary.
+            let lead = (frame - quantum_start) as usize;
+            if lead > 0 {
+                for channel in &mut self.channels {
+                    channel.process(&self.zeros[..lead], &mut self.discard[..lead], &mut self.sizes, &mut self.temp[..lead]);
+                }
+            }
         }
         let source = input.unwrap_or(&self.zeros[..left.len()]);
         let temp = &mut self.temp[..left.len()];

@@ -4925,3 +4925,166 @@ fn toggle_units_is_no_kept_setting_never_replayed_and_respects_owed_backpressure
         assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
     }
 }
+
+// ── Off-grid installs: a unit whose first rendered frame is off a 128-frame quantum boundary ────────
+
+/// A quantum boundary on the DSP clock (48 000 = 375 × 128).
+const GRID: Frame = 48_000;
+/// First-frame offsets into the quantum at `GRID`.
+const OFF_GRID: [Frame; 6] = [1, 2, 63, 64, 65, 127];
+/// Past several wraps of every reverb stage's pre-delay ring (at most 4096 frames) and of ECHO's line.
+const OFF_GRID_FRAMES: usize = 20_000;
+/// The reference's call size: one DSP quantum.
+const QUANTUM_FRAMES: usize = 128;
+
+/// A `set_bypass` call made before the frames from `apply` on render, its `UnitCx` at `at`.
+#[derive(Clone, Copy)]
+struct BypassCall {
+    apply: Frame,
+    at: Frame,
+    bypassed: bool,
+}
+
+/// Render `l`/`r` through `unit` from DSP frame `start` in `block`-frame calls (each split where a
+/// bypass call applies), every call under the local `assert_no_alloc`.
+fn render_direct(unit: &mut dyn UnitProcessor, start: Frame, l: &[f32], r: &[f32], block: usize, calls: &[BypassCall]) -> [Vec<f32>; 2] {
+    let len = l.len();
+    let (mut out_l, mut out_r) = (vec![0.0f32; len], vec![0.0f32; len]);
+    let (mut pos, mut next) = (0usize, 0usize);
+    while pos < len {
+        let f = start + pos as Frame;
+        while next < calls.len() && calls[next].apply <= f {
+            let c = calls[next];
+            let cx = UnitCx { frame: c.at, dsp_frame: c.at, bpm: 120.0, meter: Meter::FOUR_FOUR };
+            assert_no_alloc(|| unit.set_bypass(&cx, c.bypassed));
+            next += 1;
+        }
+        let mut n = block.min(len - pos);
+        if let Some(c) = calls.get(next) {
+            n = n.min((c.apply - f) as usize);
+        }
+        let cx = UnitCx { frame: f, dsp_frame: f, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        assert_no_alloc(|| {
+            unit.process(&cx, [&l[pos..pos + n], &r[pos..pos + n]], &[], [&mut out_l[pos..pos + n], &mut out_r[pos..pos + n]]);
+        });
+        pos += n;
+    }
+    [out_l, out_r]
+}
+
+/// A stereo input from the pin: the left side as pinned, the right side its scaled negative.
+fn off_grid_input() -> (Vec<f32>, Vec<f32>) {
+    let x = pin_input();
+    let l = x[..OFF_GRID_FRAMES].to_vec();
+    let r = l.iter().map(|&v| -0.7 * v).collect();
+    (l, r)
+}
+
+/// `silence` zeros, then `x`.
+fn after_silence(silence: usize, x: &[f32]) -> Vec<f32> {
+    let mut v = vec![0.0f32; silence];
+    v.extend_from_slice(x);
+    v
+}
+
+/// For each offset and scenario: the unit rendered from `GRID + offset` at every block size (no panic,
+/// finite, bit-identical across block sizes) against `reference`'s render from `GRID` of the same
+/// input after `offset` frames of silence, compared from `GRID + offset` on.
+fn assert_off_grid_matches(
+    what: &str,
+    make: &dyn Fn() -> Box<dyn UnitProcessor>,
+    scenarios: &[(&str, &dyn Fn(Frame) -> Vec<BypassCall>, &dyn Fn(Frame) -> Vec<BypassCall>)],
+) {
+    let (l, r) = off_grid_input();
+    for &offset in &OFF_GRID {
+        let o = offset as usize;
+        for &(name, unit_calls, reference_calls) in scenarios {
+            let mut reference = make();
+            let want = render_direct(reference.as_mut(), GRID, &after_silence(o, &l), &after_silence(o, &r), QUANTUM_FRAMES, &reference_calls(offset));
+            let want = [&want[0][o..], &want[1][o..]];
+            assert!(want[0].iter().zip(want[1]).zip(l.iter().zip(&r)).any(|((a, b), (x, y))| a != x || b != y), "{what} {name}: the reference renders no wet");
+            for block in BLOCKS {
+                let tag = format!("{what} {name} offset={offset} block={block}");
+                let mut unit = make();
+                let got = render_direct(unit.as_mut(), GRID + offset, &l, &r, block, &unit_calls(offset));
+                assert!(got[0].iter().chain(&got[1]).all(|v| v.is_finite()), "{tag}: a non-finite sample");
+                assert_bits_eq(&got[0], want[0], &format!("{tag} L vs the unit started on the grid after silence"));
+                assert_bits_eq(&got[1], want[1], &format!("{tag} R vs the unit started on the grid after silence"));
+            }
+        }
+    }
+}
+
+/// Seated on, or seated bypassed and switched on, at a first frame off the quantum grid: each matches
+/// the same unit seated on the boundary before it and fed silence up to that frame. Seated on, REVERB's
+/// convolver panicked here (a pre-delay ring's block straddled its wrap) before it ran the quantum's
+/// earlier frames as silence. Seated bypassed, the gate's ramp sounds from the next quantum boundary, so
+/// the convolver first runs on the grid; those scenarios guard that. A switch-on on the first frame is
+/// made, in the reference, before its first rendered frame too (its `UnitCx` at the same frame), so both
+/// quanta's gates see the same ramp.
+#[test]
+fn reverb_unit_installed_off_quantum_grid_matches_grid_start_after_silence() {
+    let make = || -> Box<dyn UnitProcessor> { Box::new(new_reverb_unit()) };
+    let on: &dyn Fn(Frame) -> Vec<BypassCall> = &|_| vec![];
+    let first_frame: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID + o, at: GRID + o, bypassed: true }, BypassCall { apply: GRID + o, at: GRID + o, bypassed: false }]
+    };
+    let first_frame_ref: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID, at: GRID, bypassed: true }, BypassCall { apply: GRID, at: GRID + o, bypassed: false }]
+    };
+    // Switched on later, mid-quantum, after bypassed frames have rendered.
+    let later: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID + o, at: GRID + o, bypassed: true }, BypassCall { apply: GRID + 1_000 + o, at: GRID + 1_000 + o, bypassed: false }]
+    };
+    let later_ref: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID, at: GRID, bypassed: true }, BypassCall { apply: GRID + 1_000 + o, at: GRID + 1_000 + o, bypassed: false }]
+    };
+    assert_off_grid_matches("REVERB", &make, &[("on", on, on), ("bypassed, on at first frame", first_frame, first_frame_ref), ("bypassed, on later", later, later_ref)]);
+}
+
+/// ECHO's line writes at `write_index + k` and wraps frame by frame, its write position moving a
+/// quantum at frame 127: a first frame off the grid leaves the earlier frames' zeros unwritten, which
+/// the reference writes as zeros into a zeroed line. Same scenarios and property as REVERB's.
+#[test]
+fn echo_unit_installed_off_quantum_grid_matches_grid_start_after_silence() {
+    let make = || -> Box<dyn UnitProcessor> { Box::new(EchoUnit::new(SR)) };
+    let on: &dyn Fn(Frame) -> Vec<BypassCall> = &|_| vec![];
+    let first_frame: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID + o, at: GRID + o, bypassed: true }, BypassCall { apply: GRID + o, at: GRID + o, bypassed: false }]
+    };
+    let first_frame_ref: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID, at: GRID, bypassed: true }, BypassCall { apply: GRID, at: GRID + o, bypassed: false }]
+    };
+    assert_off_grid_matches("ECHO", &make, &[("on", on, on), ("bypassed, on at first frame", first_frame, first_frame_ref)]);
+}
+
+/// RING MOD holds no line, only its carrier's phase, which advances on the frames it renders (its
+/// module doc): a reference fed silence from the grid has turned its carrier `offset` frames further, so
+/// the property pinned is the off-grid render alone, at every block size: no panic, finite, the wet
+/// non-zero, and the output and the carrier's phase bit for bit across block sizes.
+#[test]
+fn ring_unit_installed_off_quantum_grid_renders_the_same_at_every_block_size() {
+    let (l, r) = off_grid_input();
+    for &offset in &OFF_GRID {
+        let calls: [&[BypassCall]; 2] = [&[], &[BypassCall { apply: GRID + offset, at: GRID + offset, bypassed: true }, BypassCall { apply: GRID + offset, at: GRID + offset, bypassed: false }]];
+        for (name, calls) in ["on", "bypassed, on at first frame"].into_iter().zip(calls) {
+            let mut first: Option<([Vec<f32>; 2], [f64; 2])> = None;
+            for block in BLOCKS {
+                let tag = format!("RING {name} offset={offset} block={block}");
+                let mut unit = RingUnit::new(SR);
+                let got = render_direct(&mut unit, GRID + offset, &l, &r, block, calls);
+                assert!(got[0].iter().chain(&got[1]).all(|v| v.is_finite()), "{tag}: a non-finite sample");
+                assert!(got[0].iter().zip(&l).any(|(a, b)| a != b), "{tag}: no wet");
+                let phase = unit.phase();
+                match &first {
+                    None => first = Some((got, phase)),
+                    Some((want, want_phase)) => {
+                        assert_bits_eq(&got[0], &want[0], &format!("{tag} L vs block 1"));
+                        assert_bits_eq(&got[1], &want[1], &format!("{tag} R vs block 1"));
+                        assert_eq!(phase.map(f64::to_bits), want_phase.map(f64::to_bits), "{tag}: carrier phase");
+                    }
+                }
+            }
+        }
+    }
+}
