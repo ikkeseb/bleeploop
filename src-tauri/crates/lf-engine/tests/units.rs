@@ -23,6 +23,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use assert_no_alloc::assert_no_alloc;
 use common::refs::{sha256_f32, write_wav, Mulberry32};
 use common::{Delay, Opts, Rig};
 use lf_engine::dsp::fdlibm;
@@ -225,14 +226,17 @@ fn load_pin(id: &str) -> Vec<f32> {
     ch.into_iter().next().unwrap()
 }
 
-/// Today's `input_fx` sends still match the stored pins bit for bit (record tap and monitor).
+/// Today's `input_fx` sends still match the stored pins bit for bit (record tap and monitor) across
+/// all block sizes.
 #[test]
 fn sends_match_pinned_fixtures() {
     let input = pin_input();
     for spec in PIN_SPECS {
         let pin = load_pin(spec.id);
-        let got = render_send_pin(spec, &input, 128);
-        assert_bits_eq(&got, &pin, spec.id);
+        for block in BLOCKS {
+            let got = render_send_pin(spec, &input, block);
+            assert_bits_eq(&got, &pin, &format!("{} block {block}", spec.id));
+        }
     }
 }
 
@@ -569,24 +573,24 @@ fn level_zero_is_input_bit_for_bit() {
         }
     }
 
-    // Direct `UnitProcessor::process` at settled level 0 preserves even `-0.0`.
+    // Direct `UnitProcessor::process` at settled level 0 preserves even `-0.0` (under `assert_no_alloc`).
     let cx0 = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
     let mut echo = EchoUnit::new(SR);
     let mut ring = RingUnit::new(SR);
-    assert_eq!(echo.set_param(&cx0, UnitParam::Send(InputSendParam::EchoLevel), 0.0), Some(0.0));
-    assert_eq!(ring.set_param(&cx0, UnitParam::Send(InputSendParam::RingLevel), 0.0), Some(0.0));
+    assert_eq!(assert_no_alloc(|| echo.set_param(&cx0, UnitParam::Send(InputSendParam::EchoLevel), 0.0)), Some(0.0));
+    assert_eq!(assert_no_alloc(|| ring.set_param(&cx0, UnitParam::Send(InputSendParam::RingLevel), 0.0)), Some(0.0));
     let x_l = [-0.0f32; 128];
     let x_r = [-0.0f32; 128];
     let mut out_l = [0.0f32; 128];
     let mut out_r = [0.0f32; 128];
     for q in 0..20u64 {
         let cx = UnitCx { frame: (q * 128) as Frame, dsp_frame: (q * 128) as Frame, bpm: 120.0, meter: Meter::FOUR_FOUR };
-        echo.process(&cx, [&x_l, &x_r], &[], [&mut out_l, &mut out_r]);
+        assert_no_alloc(|| echo.process(&cx, [&x_l, &x_r], &[], [&mut out_l, &mut out_r]));
         if q >= 16 {
             assert_bits_eq(&out_l, &x_l, "direct echo level 0 preserves -0.0 L");
             assert_bits_eq(&out_r, &x_r, "direct echo level 0 preserves -0.0 R");
         }
-        ring.process(&cx, [&x_l, &x_r], &[], [&mut out_l, &mut out_r]);
+        assert_no_alloc(|| ring.process(&cx, [&x_l, &x_r], &[], [&mut out_l, &mut out_r]));
         if q >= 16 {
             assert_bits_eq(&out_l, &x_l, "direct ring level 0 preserves -0.0 L");
             assert_bits_eq(&out_r, &x_r, "direct ring level 0 preserves -0.0 R");
@@ -905,31 +909,33 @@ fn bypass_settled_is_input_echo_rings_out_and_unbypass_ramps_20ms() {
     }
 
     // 4. Latency unchanged by bypass: `[Lag(37), Echo/Ring]` keeps live_latency == 37 and records an
-    //    impulse on the exact same loop frame whether bypassed or active.
+    //    impulse on the exact same loop frame whether bypassed or active, at every block size.
     for send in [InputSend::Echo, InputSend::Ring] {
         for bypassed in [false, true] {
-            let mut rig = Rig::new();
-            assert!(rig.port(0).install_at(1, 1, 0, false, None, Box::new(Delay::new(37))).is_ok());
-            let unit: Box<dyn UnitProcessor> = match send {
-                InputSend::Echo => Box::new(EchoUnit::new(SR)),
-                InputSend::Ring => Box::new(RingUnit::new(SR)),
-                _ => unreachable!(),
-            };
-            assert!(rig.port(0).install_at(2, 2, 1, bypassed, None, unit).is_ok());
-            rig.set(Command::SetMetronome(false));
-            rig.set(Command::SetFixedLength(true));
-            rig.set(Command::SetFixedBars(1.0));
-            rig.press(Command::RecDub(0));
-            assert_eq!(rig.engine.live_latency(), 37, "{send:?} bypassed={bypassed}: latency unchanged");
-            let start = rig.start_frame();
-            let hit = start + 2000 - 37;
-            rig.set_input(move |f| if f == hit { 1.0 } else { 0.0 });
-            rig.advance_to(rig.end_frame() + 1);
-            assert_eq!(rig.state(0), LaneState::Playing);
-            let pcm = rig.pcm(0);
-            let first_nz = pcm.iter().position(|&x| x != 0.0);
-            assert_eq!(first_nz, Some(2000), "{send:?} bypassed={bypassed}: dry note lands on loop frame 2000");
-            drain_returns(&mut rig);
+            for block in BLOCKS {
+                let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                assert!(rig.port(0).install_at(1, 1, 0, false, None, Box::new(Delay::new(37))).is_ok());
+                let unit: Box<dyn UnitProcessor> = match send {
+                    InputSend::Echo => Box::new(EchoUnit::new(SR)),
+                    InputSend::Ring => Box::new(RingUnit::new(SR)),
+                    _ => unreachable!(),
+                };
+                assert!(rig.port(0).install_at(2, 2, 1, bypassed, None, unit).is_ok());
+                rig.set(Command::SetMetronome(false));
+                rig.set(Command::SetFixedLength(true));
+                rig.set(Command::SetFixedBars(1.0));
+                rig.press(Command::RecDub(0));
+                assert_eq!(rig.engine.live_latency(), 37, "{send:?} bypassed={bypassed} block={block}: latency unchanged");
+                let start = rig.start_frame();
+                let hit = start + 2000 - 37;
+                rig.set_input(move |f| if f == hit { 1.0 } else { 0.0 });
+                rig.advance_to(rig.end_frame() + 1);
+                assert_eq!(rig.state(0), LaneState::Playing);
+                let pcm = rig.pcm(0);
+                let first_nz = pcm.iter().position(|&x| x != 0.0);
+                assert_eq!(first_nz, Some(2000), "{send:?} bypassed={bypassed} block={block}: dry note lands on loop frame 2000");
+                drain_returns(&mut rig);
+            }
         }
     }
 }
@@ -1164,5 +1170,349 @@ fn one_echo_in_each_slot_tails_and_removal() {
         assert_bits_eq(&rig.record, &want_l, &format!("two slots block {block} record L"));
         assert_bits_eq(&rig.record_right, &want_r, &format!("two slots block {block} record R"));
         drain_returns(&mut rig);
+    }
+}
+
+// ── Review round fixes: same-frame tempo+time, first-frame un-bypass, per-frame -0.0, split guard, held BPM ──
+
+/// Same-frame `SetBpm(60)` and ECHO time change (1/8 -> 1/16) in both ring orders: `EchoUnit` matches
+/// today's `InputFx` send bit for bit across all 7 block sizes (both on a quantum boundary and
+/// mid-quantum, after > 0.5 s of audio fills the delay line).
+#[test]
+fn same_frame_bpm_and_echo_time_match_input_fx_in_both_orders() {
+    let sig = |f: Frame| -> f32 {
+        let k = (f - F0) as usize;
+        0.3 * fdlibm::sin(std::f64::consts::TAU * 131.0 * k as f64 / SR as f64) as f32
+            + if k == 2_000 || k == 14_000 { 0.5 } else { 0.0 }
+    };
+    let on_at = F0 + 137;
+    // Both a quantum boundary (25_600 = 200 * 128, > 0.5 s into the signal so 0.5 s vs 0.25 s reads
+    // distinct non-zero samples) and a mid-quantum frame (25_613) with a second tempo.
+    let cases = [
+        ("qbound_bpm60_16n", F0 + 25_600, 60.0, 3.0),
+        ("midq_bpm80_16n", F0 + 25_613, 80.0, 3.0),
+    ];
+    let total = SR as Frame;
+
+    for (case, change_at, new_bpm, new_time) in cases {
+        for bpm_first in [true, false] {
+            let tag = format!("{case}_{}", if bpm_first { "bpm_then_time" } else { "time_then_bpm" });
+            let mut srig = Rig::new();
+            srig.set_input(sig);
+            srig.send_at(on_at, Command::SetInputSend(InputSend::Echo, true));
+            srig.send_at(on_at, Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.5));
+            srig.send_at(on_at, Command::SetInputSendParam(InputSendParam::EchoLevel, 0.7));
+            if bpm_first {
+                srig.send_at(change_at, Command::SetBpm(new_bpm));
+                srig.send_at(change_at, Command::SetInputSendParam(InputSendParam::EchoTime, new_time));
+            } else {
+                srig.send_at(change_at, Command::SetInputSendParam(InputSendParam::EchoTime, new_time));
+                srig.send_at(change_at, Command::SetBpm(new_bpm));
+            }
+            srig.keep_output();
+            srig.advance(total);
+            let want = srig.monitor.clone();
+
+            for block in BLOCKS {
+                let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                rig.set_input(sig);
+                assert!(rig.port(0).install_at(1, 1, 0, true, None, Box::new(EchoUnit::new(SR))).is_ok());
+                rig.send_at(on_at, Command::SetUnitBypass(1, false));
+                rig.send_at(on_at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoFeedback), 0.5));
+                rig.send_at(on_at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoLevel), 0.7));
+                if bpm_first {
+                    rig.send_at(change_at, Command::SetBpm(new_bpm));
+                    rig.send_at(change_at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoTime), new_time));
+                } else {
+                    rig.send_at(change_at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoTime), new_time));
+                    rig.send_at(change_at, Command::SetBpm(new_bpm));
+                }
+                rig.keep_output();
+                rig.advance(total);
+                assert_bits_eq(&rig.monitor, &want, &format!("{tag} block {block} monitor L"));
+                assert_bits_eq(&rig.monitor_right, &want, &format!("{tag} block {block} monitor R"));
+                assert_bits_eq(&rig.record, &want, &format!("{tag} block {block} record L"));
+                assert_bits_eq(&rig.record_right, &want, &format!("{tag} block {block} record R"));
+                drain_returns(&mut rig);
+            }
+        }
+    }
+}
+
+/// Un-bypassing on (or before) the first rendered frame after a bypassed install fades in over 20 ms
+/// from the command's frame, never snapping open, for both ECHO and RING MOD across all block sizes.
+#[test]
+fn unbypass_on_first_frame_after_bypassed_install_fades_20ms() {
+    const RAMP_FRAMES: usize = 960; // 20 ms at 48 kHz
+    for send in [InputSend::Echo, InputSend::Ring] {
+        // Reference from `InputFx` switched on at `F0` (its first rendered frame).
+        let mut srig = Rig::new();
+        srig.set_level(0.5);
+        match send {
+            InputSend::Echo => {
+                srig.send_at(F0, Command::SetInputSendParam(InputSendParam::EchoTime, 3.0)); // 1/16 = 6000
+                srig.send_at(F0, Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.0));
+                srig.send_at(F0, Command::SetInputSendParam(InputSendParam::EchoLevel, 1.0));
+            }
+            InputSend::Ring => {
+                srig.send_at(F0, Command::SetInputSendParam(InputSendParam::RingFreq, 300.0));
+                srig.send_at(F0, Command::SetInputSendParam(InputSendParam::RingLevel, 1.0));
+            }
+            _ => unreachable!(),
+        }
+        srig.send_at(F0, Command::SetInputSend(send, true));
+        srig.keep_output();
+        srig.advance(10_000);
+        let want = srig.monitor.clone();
+
+        for idle_install in [false, true] {
+            for block in BLOCKS {
+                let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                rig.set_level(0.5);
+                let unit: Box<dyn UnitProcessor> = match send {
+                    InputSend::Echo => Box::new(EchoUnit::new(SR)),
+                    InputSend::Ring => Box::new(RingUnit::new(SR)),
+                    _ => unreachable!(),
+                };
+                assert!(rig.port(0).install_at(1, 1, 0, true, None, unit).is_ok());
+                if idle_install {
+                    // Seat bypassed before any frame renders.
+                    rig.engine.service_slots_idle();
+                }
+                match send {
+                    InputSend::Echo => {
+                        rig.send_at(F0, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoTime), 3.0));
+                        rig.send_at(F0, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoFeedback), 0.0));
+                        rig.send_at(F0, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoLevel), 1.0));
+                    }
+                    InputSend::Ring => {
+                        rig.send_at(F0, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::RingFreq), 300.0));
+                        rig.send_at(F0, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::RingLevel), 1.0));
+                    }
+                    _ => unreachable!(),
+                }
+                rig.send_at(F0, Command::SetUnitBypass(1, false));
+                rig.keep_output();
+                rig.advance(10_000);
+
+                let tag = format!("{send:?} idle={idle_install} block={block}");
+                let wet: Vec<f32> = rig.monitor.iter().map(|&y| y - 0.5).collect();
+                let shift = if send == InputSend::Echo { SIXTEENTH as usize } else { 0 };
+                if send == InputSend::Echo {
+                    assert!(wet[shift] < 1e-4, "{tag}: must start near 0, not snapped (got {})", wet[shift]);
+                    assert!(wet[shift + 10] > 0.0 && wet[shift + 10] < 0.05, "{tag}: early ramp {}", wet[shift + 10]);
+                    assert!(wet[shift + RAMP_FRAMES / 2] > 0.20 && wet[shift + RAMP_FRAMES / 2] < 0.30, "{tag}: mid ramp {}", wet[shift + RAMP_FRAMES / 2]);
+                    assert!(wet[shift + RAMP_FRAMES..shift + RAMP_FRAMES + 200].iter().all(|&w| w == 0.5), "{tag}: settled after 20 ms");
+                } else {
+                    let early_peak = wet[0..100].iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                    let mid_peak = wet[400..560].iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                    let late_peak = wet[RAMP_FRAMES..RAMP_FRAMES + 400].iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                    assert!(early_peak > 1e-3 && early_peak < 0.08, "{tag}: early ramp peak {early_peak}");
+                    assert!(mid_peak > 0.18 && mid_peak < 0.32, "{tag}: mid ramp peak {mid_peak}");
+                    assert!((late_peak - 0.5).abs() < 1e-3, "{tag}: settled peak {late_peak}");
+                }
+                assert_bits_eq(&rig.monitor, &want, &format!("{tag} monitor L vs InputFx"));
+                assert_bits_eq(&rig.monitor_right, &want, &format!("{tag} monitor R vs InputFx"));
+                drain_returns(&mut rig);
+            }
+        }
+    }
+}
+
+/// `-0.0` input through a level ramp reaching 0 mid-quantum (frame 960, inside quantum 7 `[896, 1024)`),
+/// checked from the ramp's start (and with a live ECHO delay line at frame 960..1024), under
+/// `assert_no_alloc`, across all block sizes.
+#[test]
+fn level_ramp_to_zero_preserves_signed_zero_per_frame_inside_quantum() {
+    let cx0 = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+    let total = 1536usize; // covers quanta 0..12, including frame 960 inside quantum 7 [896, 1024)
+    let neg_zero = vec![-0.0f32; 1024];
+
+    for block in BLOCKS {
+        let mut echo = EchoUnit::new(SR);
+        let mut ring = RingUnit::new(SR);
+        assert_eq!(assert_no_alloc(|| echo.set_param(&cx0, UnitParam::Send(InputSendParam::EchoLevel), 0.0)), Some(0.0));
+        assert_eq!(assert_no_alloc(|| ring.set_param(&cx0, UnitParam::Send(InputSendParam::RingLevel), 0.0)), Some(0.0));
+
+        let mut out_l = vec![0.0f32; block];
+        let mut out_r = vec![0.0f32; block];
+        let mut pos = 0usize;
+        while pos < total {
+            let n = block.min(total - pos);
+            let cx = UnitCx { frame: pos as Frame, dsp_frame: pos as Frame, bpm: 120.0, meter: Meter::FOUR_FOUR };
+            let x = &neg_zero[..n];
+            assert_no_alloc(|| echo.process(&cx, [x, x], &[], [&mut out_l[..n], &mut out_r[..n]]));
+            assert_bits_eq(&out_l[..n], x, &format!("echo ramp-to-0 block {block} frame {pos} L"));
+            assert_bits_eq(&out_r[..n], x, &format!("echo ramp-to-0 block {block} frame {pos} R"));
+
+            assert_no_alloc(|| ring.process(&cx, [x, x], &[], [&mut out_l[..n], &mut out_r[..n]]));
+            assert_bits_eq(&out_l[..n], x, &format!("ring ramp-to-0 block {block} frame {pos} L"));
+            assert_bits_eq(&out_r[..n], x, &format!("ring ramp-to-0 block {block} frame {pos} R"));
+            pos += n;
+        }
+    }
+
+    // Even when ECHO's delay line holds live non-zero audio while the level ramp hits 0 mid-quantum,
+    // every frame from the ramp's zero point through the quantum's end passes `-0.0` untouched.
+    let mut echo = EchoUnit::new(SR);
+    assert_eq!(assert_no_alloc(|| echo.set_param(&cx0, UnitParam::Send(InputSendParam::EchoTime), 3.0)), Some(3.0)); // 1/16 = 6000
+    let fill_in = [0.5f32; 128];
+    let neg_in = [-0.0f32; 128];
+    let mut out_l = [0.0f32; 128];
+    let mut out_r = [0.0f32; 128];
+    // 55 quanta = 7040 frames > 6000 so the delay line is outputting non-zero on every frame.
+    for q in 0..55u64 {
+        let f = (q * 128) as Frame;
+        let cx = UnitCx { frame: f, dsp_frame: f, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        assert_no_alloc(|| echo.process(&cx, [&fill_in, &fill_in], &[], [&mut out_l, &mut out_r]));
+    }
+    let ramp_start = 55 * 128;
+    let cx_ramp = UnitCx { frame: ramp_start, dsp_frame: ramp_start, bpm: 120.0, meter: Meter::FOUR_FOUR };
+    assert_eq!(assert_no_alloc(|| echo.set_param(&cx_ramp, UnitParam::Send(InputSendParam::EchoLevel), 0.0)), Some(0.0));
+    // Quantum 7 after ramp_start spans [ramp_start + 896, ramp_start + 1024); level hits 0 at +960 (index 64).
+    for q in 0..9u64 {
+        let f = ramp_start + (q * 128) as Frame;
+        let cx = UnitCx { frame: f, dsp_frame: f, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        assert_no_alloc(|| echo.process(&cx, [&neg_in, &neg_in], &[], [&mut out_l, &mut out_r]));
+        if q == 7 {
+            assert!(out_l[0] > 0.0, "first half of quantum 7 still has non-zero wet tail");
+            assert_bits_eq(&out_l[64..], &neg_in[64..], "echo live-line mid-quantum level-0 preserves -0.0 L");
+            assert_bits_eq(&out_r[64..], &neg_in[64..], "echo live-line mid-quantum level-0 preserves -0.0 R");
+        }
+    }
+}
+
+/// Plugin fake that logs `(cx.frame, out_len)` of every `process` call into a preallocated buffer.
+struct CallLogPlugin {
+    calls: Vec<(Frame, usize)>,
+}
+
+impl CallLogPlugin {
+    fn new(cap: usize) -> Self {
+        CallLogPlugin { calls: Vec::with_capacity(cap) }
+    }
+}
+
+impl UnitProcessor for CallLogPlugin {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 }
+    }
+
+    fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        if self.calls.len() < self.calls.capacity() {
+            self.calls.push((cx.frame, out[0].len()));
+        }
+        out[0].copy_from_slice(input[0]);
+        out[1].copy_from_slice(input[1]);
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// A plugins-only rack (or plugins + non-tempo built-ins like RING MOD) does not split `process` at
+/// mid-block `SetBpm` / `SetMeter` commands; seating an ECHO does split so ECHO tracks the exact frame.
+#[test]
+fn plugins_only_rack_does_not_split_process_at_midblock_tempo_commands() {
+    for with_ring in [false, true] {
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 128, ..Opts::default() });
+        assert!(rig.port(0).install_at(1, 1, 0, false, None, Box::new(CallLogPlugin::new(16))).is_ok());
+        if with_ring {
+            assert!(rig.port(1).install_at(2, 2, 0, false, None, Box::new(RingUnit::new(SR))).is_ok());
+        }
+        rig.send_at(F0 + 17, Command::SetBpm(95.0));
+        rig.send_at(F0 + 61, Command::SetMeter(Meter::new(3, 4).unwrap()));
+        rig.advance(128);
+        rig.engine.evict_slots();
+        let ret = rig.port(0).returned_unit().expect("plugin returned");
+        let log = ret.unit.into_any().downcast::<CallLogPlugin>().unwrap();
+        assert_eq!(log.calls, vec![(F0, 128)], "with_ring={with_ring}: mid-block tempo commands must not split plugin process");
+        while let Some(r) = rig.port(1).returned_unit() {
+            drop(r.unit);
+        }
+    }
+
+    // With an ECHO seated, mid-block `SetBpm` DOES split so ECHO receives the new tempo on its frame.
+    let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 128, ..Opts::default() });
+    assert!(rig.port(0).install_at(1, 1, 0, false, None, Box::new(CallLogPlugin::new(16))).is_ok());
+    assert!(rig.port(0).install_at(2, 2, 1, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+    rig.send_at(F0 + 17, Command::SetBpm(95.0));
+    rig.advance(128);
+    rig.engine.evict_slots();
+    let mut plugin_calls = None;
+    while let Some(r) = rig.port(0).returned_unit() {
+        if r.id == 1 {
+            plugin_calls = Some(r.unit.into_any().downcast::<CallLogPlugin>().unwrap().calls);
+        } else {
+            drop(r.unit);
+        }
+    }
+    assert_eq!(plugin_calls, Some(vec![(F0, 17), (F0 + 17, 111)]), "ECHO seated: splits at SetBpm frame");
+}
+
+/// A `SetBpm` held behind a waiting `ClearAll` (while a COPY block job is in flight) applies when the
+/// job finishes, not at its stamp: `EchoUnit` follows the tempo on the applied frame, matching
+/// `InputFx` bit for bit across all block sizes.
+#[test]
+fn held_bpm_behind_waiting_clear_all_updates_echo_on_applied_frame() {
+    let run = |use_unit: bool, block: usize| -> ([Vec<f32>; 2], [Vec<f32>; 2], u32) {
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+        rig.set(Command::SetMetronome(false));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(1.0));
+        if use_unit {
+            assert!(rig.port(0).install_at(1, 1, 0, true, None, Box::new(EchoUnit::new(SR))).is_ok());
+            rig.send_at(F0 + 137, Command::SetUnitBypass(1, false));
+            rig.send_at(F0 + 137, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoFeedback), 0.5));
+            rig.send_at(F0 + 137, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoLevel), 0.7));
+        } else {
+            rig.send_at(F0 + 137, Command::SetInputSend(InputSend::Echo, true));
+            rig.send_at(F0 + 137, Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.5));
+            rig.send_at(F0 + 137, Command::SetInputSendParam(InputSendParam::EchoLevel, 0.7));
+        }
+        // Continuous signal from F0 so the ECHO delay line holds distinct non-zero samples at both
+        // 0.25 s (120 BPM 1/8) and 0.50 s (60 BPM 1/8) when the held SetBpm applies mid-block.
+        rig.set_input(|f| {
+            let k = (f - F0).max(0) as usize;
+            0.25 * fdlibm::sin(std::f64::consts::TAU * 173.0 * k as f64 / SR as f64) as f32
+                + 0.1 * fdlibm::sin(std::f64::consts::TAU * 293.0 * k as f64 / SR as f64) as f32
+        });
+        // Record a 1-bar loop (96_000 frames at 120 BPM -> COPY job takes 94 frames).
+        rig.press(Command::RecDub(0));
+        rig.advance_to(rig.end_frame() + 1);
+        assert_eq!(rig.state(0), LaneState::Playing);
+
+        // Align to a known absolute frame so all block sizes send commands at identical frames.
+        // At block=1024, base + 10..base + 104 + 256 all lie inside one 1024-frame block, so the
+        // quantum boundary at base + 128 (after ClearAll+SetBpm apply at base + 104) falls inside it.
+        let base = F0 + 2 * SR as Frame;
+        rig.advance_to(base);
+        let t_copy = base + 10;
+        let t_clear = base + 20;
+        let t_bpm = base + 30;
+        rig.send_at(t_copy, Command::Copy(0));
+        rig.send_at(t_clear, Command::ClearAll);
+        rig.send_at(t_bpm, Command::SetBpm(60.0));
+        rig.keep_output();
+        rig.advance(2048);
+        let bpm = rig.engine.clock().bpm();
+        let mon = [rig.monitor.clone(), rig.monitor_right.clone()];
+        let rec = [rig.record.clone(), rig.record_right.clone()];
+        drain_returns(&mut rig);
+        (mon, rec, bpm)
+    };
+
+    let (want_mon, want_rec, want_bpm) = run(false, 128);
+    assert_eq!(want_bpm, 60, "held SetBpm applied once ClearAll finished");
+    for block in BLOCKS {
+        let (mon, rec, bpm) = run(true, block);
+        assert_eq!(bpm, 60, "block {block}: held SetBpm applied");
+        assert_bits_eq(&mon[0], &want_mon[0], &format!("held SetBpm block {block} monitor L"));
+        assert_bits_eq(&mon[1], &want_mon[1], &format!("held SetBpm block {block} monitor R"));
+        assert_bits_eq(&rec[0], &want_rec[0], &format!("held SetBpm block {block} record L"));
+        assert_bits_eq(&rec[1], &want_rec[1], &format!("held SetBpm block {block} record R"));
     }
 }

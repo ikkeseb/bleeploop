@@ -10,9 +10,10 @@
 //!   128-frame DSP quantum boundary.
 //! - [`RingUnit`] runs one carrier-modulated wet path per channel with the same 20 ms ramps.
 //! - Both bypass themselves (`set_bypass` returns `true`): the input gate closes over 20 ms from the
-//!   command's frame, the dry passes untouched, ECHO's tail rings out, and once settled (or at level 0)
-//!   the output is the input bit for bit. Before a unit renders its first frame (an install that
-//!   arrives bypassed), `set_bypass` settles the starting gate immediately with no 20 ms leak.
+//!   command's frame, the dry passes untouched, ECHO's tail rings out, and wherever the wet sample is
+//!   exact zero (settled bypass, or level 0 per frame) the output is the input bit for bit. Only the
+//!   install's own starting bypassed state settles immediately with no 20 ms leak; every later
+//!   un-bypass fades in over 20 ms from the command's frame.
 //!
 //! Everything is allocated in `new`; `process`, `set_param`, `set_bypass` and `stop` never allocate,
 //! lock or block (invariant 5).
@@ -23,19 +24,20 @@ use crate::api::{InputSendParam, SlotEvent, UnitCx, UnitInfo, UnitKind, UnitPara
 use crate::dsp::fx::Ctl;
 use crate::dsp::param::QUANTUM;
 use crate::grid::frames_per_bar;
-use crate::input_fx::{Echo, Ring, START_BEAT_PERIOD};
+use crate::input_fx::{Echo, Ring};
 
 /// Stereo ECHO insert unit (`UnitKind::Echo`): one [`Echo`] feedback delay line per channel.
 pub struct EchoUnit {
     sample_rate: u32,
-    /// Quarter-note period (as f64 bits) last applied to both channels.
+    /// Quarter-note period (as f64 bits) last applied to both channels; `None` before the first render
+    /// (matching `InputFx`).
     beat_period: Option<u64>,
     channels: [Echo; 2],
     /// The DSP quantum whose control values are computed.
     prepared: Option<u64>,
-    /// At least one frame has rendered: from here `set_bypass` ramps over 20 ms (before it, sets the
-    /// starting state settled).
-    rendered: bool,
+    /// True until the first `set_bypass` or rendered frame: only a cold install arriving bypassed
+    /// settles immediately (no 20 ms wet leak); every later un-bypass fades in over 20 ms.
+    starting: bool,
     wet: [f32; QUANTUM],
 }
 
@@ -47,10 +49,10 @@ impl EchoUnit {
         let start = Ctl::at(0, sr);
         EchoUnit {
             sample_rate,
-            beat_period: Some(START_BEAT_PERIOD.to_bits()),
+            beat_period: None,
             channels: [Echo::new_on(sr, start), Echo::new_on(sr, start)],
             prepared: None,
-            rendered: false,
+            starting: true,
             wet: [0.0; QUANTUM],
         }
     }
@@ -87,7 +89,7 @@ impl UnitProcessor for EchoUnit {
         if len == 0 {
             return;
         }
-        self.rendered = true;
+        self.starting = false;
         let [ol, or] = out;
         let q = QUANTUM as u64;
         let start = cx.dsp_frame.max(0) as u64;
@@ -108,7 +110,7 @@ impl UnitProcessor for EchoUnit {
             for (ch, (x, y)) in self.channels.iter_mut().zip([(&input[0][span.clone()], &mut ol[span.clone()]), (&input[1][span.clone()], &mut or[span])]) {
                 if ch.process(at, x, wet) && ch.has_level() {
                     for (o, (&dry, &w)) in y.iter_mut().zip(x.iter().zip(wet.iter())) {
-                        *o = dry + w;
+                        *o = if w == 0.0 { dry } else { dry + w };
                     }
                 } else {
                     y.copy_from_slice(x);
@@ -125,7 +127,9 @@ impl UnitProcessor for EchoUnit {
         if !value.is_finite() {
             return None;
         }
-        self.follow_tempo(cx);
+        // Do not call `follow_tempo` here: `process` follows tempo on this frame after all same-frame
+        // commands have applied, matching `InputFx` (where a same-frame tempo change cancels an
+        // `EchoTime` ramp and snaps to the new time in either command order).
         let ctl = self.ctl(cx);
         let applied = self.channels[0].set_param(p, value, ctl);
         self.channels[1].set_param(p, value, ctl);
@@ -134,9 +138,10 @@ impl UnitProcessor for EchoUnit {
 
     fn set_bypass(&mut self, cx: &UnitCx, bypassed: bool) -> bool {
         let on = !bypassed;
-        if !self.rendered {
+        let starting = std::mem::replace(&mut self.starting, false);
+        if starting && bypassed {
             for ch in &mut self.channels {
-                ch.snap_on(on);
+                ch.snap_on(false);
             }
             return true;
         }
@@ -163,9 +168,9 @@ pub struct RingUnit {
     channels: [Ring; 2],
     /// The DSP quantum whose control values are computed.
     prepared: Option<u64>,
-    /// At least one frame has rendered: from here `set_bypass` ramps over 20 ms (before it, sets the
-    /// starting state settled).
-    rendered: bool,
+    /// True until the first `set_bypass` or rendered frame: only a cold install arriving bypassed
+    /// settles immediately (no 20 ms wet leak); every later un-bypass fades in over 20 ms.
+    starting: bool,
     wet: [f32; QUANTUM],
 }
 
@@ -179,7 +184,7 @@ impl RingUnit {
             sample_rate,
             channels: [Ring::new_on(sr, start), Ring::new_on(sr, start)],
             prepared: None,
-            rendered: false,
+            starting: true,
             wet: [0.0; QUANTUM],
         }
     }
@@ -204,7 +209,7 @@ impl UnitProcessor for RingUnit {
         if len == 0 {
             return;
         }
-        self.rendered = true;
+        self.starting = false;
         let [ol, or] = out;
         let q = QUANTUM as u64;
         let start = cx.dsp_frame.max(0) as u64;
@@ -225,7 +230,7 @@ impl UnitProcessor for RingUnit {
             for (ch, (x, y)) in self.channels.iter_mut().zip([(&input[0][span.clone()], &mut ol[span.clone()]), (&input[1][span.clone()], &mut or[span])]) {
                 if ch.process(at, x, wet) && ch.has_level() {
                     for (o, (&dry, &w)) in y.iter_mut().zip(x.iter().zip(wet.iter())) {
-                        *o = dry + w;
+                        *o = if w == 0.0 { dry } else { dry + w };
                     }
                 } else {
                     y.copy_from_slice(x);
@@ -250,9 +255,10 @@ impl UnitProcessor for RingUnit {
 
     fn set_bypass(&mut self, cx: &UnitCx, bypassed: bool) -> bool {
         let on = !bypassed;
-        if !self.rendered {
+        let starting = std::mem::replace(&mut self.starting, false);
+        if starting && bypassed {
             for ch in &mut self.channels {
-                ch.snap_on(on);
+                ch.snap_on(false);
             }
             return true;
         }

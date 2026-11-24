@@ -844,7 +844,7 @@ impl Engine {
             // per block unless one splits it.
             let k_next = (next - start) as usize;
             if self.slots_done < k_next {
-                let until = first_slot_pending(&self.pending, f).map_or(end, |at| at.min(end));
+                let until = first_slot_pending(&self.pending, f, self.rack.reads_tempo()).map_or(end, |at| at.min(end));
                 let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
                 let ([wl, wr], [al, ar], [bl, br]) = (&mut self.wet, &mut self.aligned, &mut self.slot_bus);
                 self.rack.render(
@@ -1165,13 +1165,29 @@ fn first_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<F
     pending.iter().flatten().map(|p| p.frame).filter(|&at| at > f).min()
 }
 
-/// The next frame after `f` a command the plugin slots hear is stamped for: where their render stops.
-fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<Frame> {
+/// The next frame after `f` a command the plugin slots hear can apply on: where their render stops.
+/// `SetBpm` and `SetMeter` split the render only while a seated unit reads the tempo
+/// (`Rack::reads_tempo`). A tempo command waiting behind a held looper command applies no earlier
+/// than that barrier's wake frame, so its split tracks the barrier rather than its stamp.
+fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame, reads_tempo: bool) -> Option<Frame> {
     pending
         .iter()
         .flatten()
-        .filter(|p| p.command.reaches_slots() || matches!(p.command, Command::SetBpm(_) | Command::SetMeter(_)))
-        .map(|p| p.frame)
+        .filter_map(|p| {
+            if p.command.reaches_slots() {
+                Some(p.frame)
+            } else if reads_tempo && matches!(p.command, Command::SetBpm(_) | Command::SetMeter(_)) {
+                let held_until = pending
+                    .iter()
+                    .flatten()
+                    .filter(|q| q.held && q.frame > f && q.seq < p.seq)
+                    .map(|q| q.frame)
+                    .max();
+                Some(held_until.map_or(p.frame, |at| p.frame.max(at)))
+            } else {
+                None
+            }
+        })
         .filter(|&at| at > f)
         .min()
 }
