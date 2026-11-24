@@ -23,6 +23,7 @@ use lf_engine::{InstallToken, SeatRefusal, UnitId, UnitKind, SLOT_COUNT};
 use serde::Serialize;
 use tauri::Emitter;
 
+use super::builtins::Builtins;
 use super::chain::{PlateState, PluginRef, UnitSpec};
 use super::mode::{engine, EngineApp};
 use super::plugins::EngineSlot;
@@ -361,7 +362,7 @@ struct GoneState {
 /// reload candidates, per-slot call serialization, editor affinity, parked tone tokens, and shutdown
 /// latch.
 pub(crate) struct Chains {
-    factory: Option<Arc<dyn BuiltinFactory>>,
+    factory: Arc<dyn BuiltinFactory>,
     registry: Mutex<BTreeMap<UnitId, Arc<Entry>>>,
     gone: Mutex<GoneState>,
     pending_reloads: Mutex<Vec<PendingReload>>,
@@ -391,17 +392,13 @@ pub(crate) struct Chains {
 }
 
 impl Chains {
-    /// Production state: no built-in factory in E2 (built-in adds are refused at once).
+    /// Production state: built-ins from `lf_engine::units` ([`Builtins`]).
     pub(crate) fn new() -> Self {
-        Self::with_optional_factory(None)
+        Self::with_factory(Arc::new(Builtins))
     }
 
-    #[cfg(test)]
+    /// Built-ins from `factory` (the tests' fakes).
     pub(crate) fn with_factory(factory: Arc<dyn BuiltinFactory>) -> Self {
-        Self::with_optional_factory(Some(factory))
-    }
-
-    fn with_optional_factory(factory: Option<Arc<dyn BuiltinFactory>>) -> Self {
         Chains {
             factory,
             registry: Mutex::new(BTreeMap::new()),
@@ -852,9 +849,6 @@ impl Chains {
         at: usize,
         bypassed: bool,
     ) -> Result<Added, String> {
-        let Some(factory) = self.factory.as_ref().cloned() else {
-            return Err(builtin_unavailable_reason(kind));
-        };
         if slot >= SLOT_COUNT {
             return Err(format!("no slot {slot}"));
         }
@@ -896,7 +890,7 @@ impl Chains {
             return Err(why);
         };
 
-        let (boxed, clamped) = match factory.build(kind, &params, terms) {
+        let (boxed, clamped) = match self.factory.build(kind, &params, terms) {
             Ok(built) => built,
             Err(why) => {
                 unit_host.failed(why.clone());
@@ -922,18 +916,19 @@ impl Chains {
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
         let owner_stop = stop.clone();
         let owner_wake = wake.clone();
+        let rebuild = Rebuild { factory: self.factory.clone(), kind, host: host.clone() };
         #[cfg(test)]
         let spawned = if self.fail_next_spawn.swap(false, Acquire) {
             Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "injected spawn failure"))
         } else {
             std::thread::Builder::new()
                 .name(format!("lf-builtin-unit-{unit}"))
-                .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake))
+                .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild))
         };
         #[cfg(not(test))]
         let spawned = std::thread::Builder::new()
             .name(format!("lf-builtin-unit-{unit}"))
-            .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake));
+            .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild));
 
         let handle = match spawned {
             Ok(h) => h,
@@ -1888,15 +1883,6 @@ fn builtin_display_name(kind: UnitKind) -> &'static str {
     }
 }
 
-fn builtin_unavailable_reason(kind: UnitKind) -> String {
-    let name = builtin_display_name(kind);
-    let article = match kind {
-        UnitKind::Ott | UnitKind::Echo => "an",
-        _ => "a",
-    };
-    format!("built-in units arrive in a later build: this one cannot add {article} {name}")
-}
-
 fn refusal_reason(why: SeatRefusal) -> String {
     match why {
         SeatRefusal::Full => "the chain already seats the maximum number of units (Full)".to_string(),
@@ -1952,19 +1938,44 @@ fn send_first_answer(ready: &mut Option<SyncSender<Result<Added, String>>>, answ
     }
 }
 
+/// What a built-in owner builds its box again from when the engine runs at another rate: the factory
+/// that built it, its kind, and the host whose model holds its params as applied.
+struct Rebuild {
+    factory: Arc<dyn BuiltinFactory>,
+    kind: UnitKind,
+    host: EngineHost,
+}
+
+impl Rebuild {
+    /// A box at `terms`' rate with the params the model holds as applied (the engine's last answers;
+    /// a rebuild reads the old engine's unanswered ones into it first, `unit_host::rebuild_handoff`),
+    /// so a SYNTH keeps its pick and levels. The model's answer is unchanged: the same values again.
+    fn build(&self, id: UnitId, terms: unit_host::Terms) -> Result<Unit, String> {
+        let params = {
+            let state = self.host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.model.find_plate(id).and_then(|(_, p)| p.params.clone()).unwrap_or_default()
+        };
+        self.factory.build(self.kind, &params, terms).map(|(unit, _)| unit)
+    }
+}
+
 /// Built-in unit owner loop (`lf-builtin-unit-{id}`): receives its host and box after registration,
 /// performs the first submit, answers the caller once (`Seated` / `Waiting` / `Err`), resubmits the
-/// same box after evictions/withdrawals, parks on post-seat refusal, drops the box off the RT thread
-/// on terminal return, and drains/abandons cleanly on stop.
+/// same box after evictions/withdrawals at the rate it was built at, builds it again from its applied
+/// params for an engine at another rate (its DSP is built for one rate), parks on post-seat refusal
+/// or a failed rebuild, drops the box off the RT thread on terminal return, and drains/abandons
+/// cleanly on stop.
 fn serve_builtin(
     start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms)>,
     ready_tx: SyncSender<Result<Added, String>>,
     stop: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
+    rebuild: Rebuild,
 ) {
     let Ok((host, boxed, initial_terms)) = start_rx.recv() else {
         return;
     };
+    let mut built_rate = initial_terms.rate;
     let mut ready = Some(ready_tx);
     let mut ever_seated = false;
     let initial_deadline = Instant::now() + BUILTIN_INITIAL_SUBMIT_TIMEOUT;
@@ -2045,7 +2056,32 @@ fn serve_builtin(
                 send_first_answer(&mut ready, Err(why));
                 return;
             }
-            match host.terms() {
+            let terms = host.terms();
+            let unit = match terms {
+                Some(terms) if terms.rate != built_rate => match rebuild.build(host.id(), terms) {
+                    Ok(rebuilt) => {
+                        drop(unit);
+                        built_rate = terms.rate;
+                        rebuilt
+                    }
+                    Err(why) => {
+                        let why = format!("could not build the unit again at {} Hz: {why}", terms.rate);
+                        log::warn!("[chain_cmds] built-in unit {}: {why}", host.id());
+                        if !ever_seated {
+                            drop(unit);
+                            host.failed(why.clone());
+                            host.release();
+                            send_first_answer(&mut ready, Err(why));
+                            return;
+                        }
+                        host.parked(why);
+                        seat = BuiltinSeat::Parked { unit };
+                        continue;
+                    }
+                },
+                _ => unit,
+            };
+            match terms {
                 None => {
                     if !ever_seated {
                         drop(unit);

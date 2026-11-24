@@ -22,6 +22,7 @@
 //! | `slot_host` | [`SlotHost`]: a legacy plugin slot's install/remove/eviction handshake, an adapter over `unit_host`'s table |
 //! | `unit_host` | the chain units' handshake with the engine: the table of installs (one row per `UnitHost`, its install token and mailbox), each port message as an op settled from the slot's `Event::Seat`s, the gate that holds a reseating unit's commands and the kind toggles (`Toggle::Units`) behind or before them, in one send order, a rebuild's handoff of every row |
 //! | `chain` | the model of the slots' chains as the engine applied them, and its wire shapes: what the feed's `chains` carries |
+//! | `builtins` | the chain host's built-in factory: ECHO, REVERB, RING MOD, OTT and SYNTH from `lf_engine::units` at the engine's rate, their params applied and answered as the engine would (a SYNTH with no pick plays Lead) |
 //! | `chain_cmds` | the chain host (`Chains`): the `chain_*` Tauri commands, the per-slot call order, the unit owners and their join at shutdown, the run's exclusion with legacy plugin slots, editor affinity, tone tokens, `chain:*` window events |
 //! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp, whether a device runs, the feed's anchor; DEV, the stamps' history a frame turns into time through |
@@ -145,6 +146,7 @@
 //! routing with no port open (`midi_mode`), the wire fixtures (`wire.rs`: the engine's and MIDI's). Code only a device or a real plugin can run is compile-checked (`--features
 //! asio` too); on the rig, `pnpm native:engine` runs `probe.rs`'s bar.
 
+mod builtins;
 mod callback;
 pub(crate) mod chain;
 // Its commands are registered in DEV builds only (`lib.rs`); release keeps the host for shutdown.
