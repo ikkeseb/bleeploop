@@ -1,5 +1,5 @@
 {
-  "note": "Pinned renders of input_fx ECHO and RING MOD (slot 0 live and empty, master 1, 2 s at 48 kHz) before input_fx.rs is retired (docs/unit-contract.md §5 item 1). Float32 WAVs in encodeWav's 58-byte layout, matching tests/fixtures/tone/.",
+  "note": "Pinned renders of input_fx ECHO, RING MOD and REVERB (mono record/monitor and REVERB's unsummed stereo convolver L/R; slot 0 live and empty, master 1, 2 s at 48 kHz) before input_fx.rs is retired (docs/unit-contract.md §5 item 1). Float32 WAVs in encodeWav's 58-byte layout, matching tests/fixtures/tone/.",
   "rate": 48000,
   "frames": 96000,
   "onOffset": 200,
@@ -55,6 +55,48 @@
         ],
         [
           "ringLevel",
+          0.85
+        ]
+      ]
+    },
+    {
+      "id": "reverb-default-48000",
+      "send": "reverb",
+      "channels": 1,
+      "file": "reverb-default-48000.wav",
+      "sha256": "56c326f7660ab4c48ce5cf5fc6d2cf3a8bee54c01e05400791e040cc573fc25e",
+      "params": []
+    },
+    {
+      "id": "reverb-default-stereo-48000",
+      "send": "reverb",
+      "channels": 2,
+      "file": "reverb-default-stereo-48000.wav",
+      "sha256": "2fca5dab05926afa40e39c26b29839ea9debe5aaac31a39cd912ec83f88eab23",
+      "params": []
+    },
+    {
+      "id": "reverb-alt-48000",
+      "send": "reverb",
+      "channels": 1,
+      "file": "reverb-alt-48000.wav",
+      "sha256": "f7c9396aafc3b4da3f3eb4a5603992bf7aa95705dd775f2bd83ef0bffbb6f978",
+      "params": [
+        [
+          "reverbLevel",
+          0.85
+        ]
+      ]
+    },
+    {
+      "id": "reverb-alt-stereo-48000",
+      "send": "reverb",
+      "channels": 2,
+      "file": "reverb-alt-stereo-48000.wav",
+      "sha256": "083993efd8799b4b20f3238c9dd4c1c0fa2d91acd6106e044205d544cb6a2fdd",
+      "params": [
+        [
+          "reverbLevel",
           0.85
         ]
       ]

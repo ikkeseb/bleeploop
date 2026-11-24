@@ -276,8 +276,18 @@ pub type StereoOtt = Ott<2>;
 impl<const C: usize> Ott<C> {
     /// Off, every control at its default, every coefficient computed for `sample_rate` here.
     pub fn new(sample_rate: u32) -> Ott<C> {
+        Ott::build(sample_rate, false)
+    }
+
+    /// On and settled at every control's default (for [`crate::units::OttUnit`]).
+    pub(crate) fn new_on(sample_rate: u32) -> Ott<C> {
+        Ott::build(sample_rate, true)
+    }
+
+    fn build(sample_rate: u32, on: bool) -> Ott<C> {
         let sr = sample_rate as f64;
         let coef = |tau: f64| (-1.0 / (tau * sr)).exp();
+        let fade = ((FADE_SECONDS * sr).round() as u32).max(1);
         let mut ott = Ott {
             lp_lo: Coefs::new(Kind::Lowpass, LOW_SPLIT, sr),
             hp_lo: Coefs::new(Kind::Highpass, LOW_SPLIT, sr),
@@ -294,14 +304,21 @@ impl<const C: usize> Ott<C> {
             up: Glided::new(DEFAULT_UPWARD),
             down: Glided::new(DEFAULT_DOWNWARD),
             glide_coef: coef(GLIDE_TAU),
-            on: false,
-            pos: 0,
-            fade: ((FADE_SECONDS * sr).round() as u32).max(1),
+            on,
+            pos: if on { fade } else { 0 },
+            fade,
             bands: [[0.0; C]; 3],
             gains: [1.0; 3],
         };
         ott.retime();
         ott
+    }
+
+    /// Set the starting on/off state settled, before any frame has rendered (an install that arrives
+    /// bypassed).
+    pub(crate) fn snap_on(&mut self, on: bool) {
+        self.on = on;
+        self.pos = if on { self.fade } else { 0 };
     }
 
     /// The release coefficients at the TIME set.
@@ -363,6 +380,11 @@ impl<const C: usize> Ott<C> {
     /// The last frame's linear gain per band (the controls and the makeup applied).
     pub fn gains(&self) -> [f64; 3] {
         self.gains
+    }
+
+    /// The last frame's linked peak follower per band, linear amplitude.
+    pub fn env(&self) -> [f64; 3] {
+        self.env
     }
 
     /// One frame of every channel. Off and settled, it comes back as it went in, bit for bit.

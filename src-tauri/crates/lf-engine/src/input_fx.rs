@@ -253,7 +253,7 @@ impl Echo {
     }
 }
 
-struct Reverb {
+pub(crate) struct Reverb {
     on: bool,
     level: f64,
     gate: ToneParam,
@@ -261,8 +261,14 @@ struct Reverb {
     convolver: Convolver,
     gates: [f32; QUANTUM],
     levels: [f32; QUANTUM],
+    /// Whether `levels` holds any non-zero value in the quantum being rendered.
+    level_nonzero: bool,
     gated: [f32; QUANTUM],
     wet: [[f32; QUANTUM]; 2],
+    /// Position of the last frame written into `wet` and its quantum offset in `levels` (for the
+    /// unit-contract pin test before `input_fx.rs` is retired).
+    last_n: usize,
+    last_at: usize,
     /// The gate is shut for the whole quantum being rendered: the convolver gets no input.
     shut: bool,
     /// The gate has opened once; before, the convolver is never called.
@@ -273,45 +279,76 @@ struct Reverb {
 
 impl Reverb {
     fn new(sample_rate: f32, ir: [&[f32]; 2], ctl: Ctl) -> Self {
+        Reverb::build(sample_rate, ir, ctl, false)
+    }
+
+    pub(crate) fn new_on(sample_rate: f32, ir: [&[f32]; 2], ctl: Ctl) -> Self {
+        Reverb::build(sample_rate, ir, ctl, true)
+    }
+
+    fn build(sample_rate: f32, ir: [&[f32]; 2], ctl: Ctl, on: bool) -> Self {
         let level = InputSendParam::ReverbLevel.range().2;
         Reverb {
-            on: false,
+            on,
             level,
-            gate: gain(sample_rate, Units::Gain, 0.0, ctl.frame),
+            gate: gain(sample_rate, Units::Gain, if on { 1.0 } else { 0.0 }, ctl.frame),
             level_gain: gain(sample_rate, Units::Gain, level, ctl.frame),
             convolver: Convolver::new(ir, sample_rate, true),
             gates: [0.0; QUANTUM],
             levels: [0.0; QUANTUM],
+            level_nonzero: level != 0.0,
             gated: [0.0; QUANTUM],
             wet: [[0.0; QUANTUM]; 2],
-            shut: true,
+            last_n: 0,
+            last_at: 0,
+            shut: !on,
             used: false,
             silent: true,
         }
     }
 
-    fn set_on(&mut self, on: bool, ctl: Ctl) {
+    pub(crate) fn is_on(&self) -> bool {
+        self.on
+    }
+
+    pub(crate) fn has_level(&self) -> bool {
+        self.level_nonzero
+    }
+
+    /// Set the starting gate settled, before any frame has rendered (an install that arrives bypassed).
+    pub(crate) fn snap_on(&mut self, on: bool) {
+        self.on = on;
+        self.gate.reset(Some(if on { 1.0 } else { 0.0 }), 0);
+        self.shut = !on;
+        if !on {
+            self.used = false;
+            self.silent = true;
+        }
+    }
+
+    pub(crate) fn set_on(&mut self, on: bool, ctl: Ctl) {
         self.on = on;
         self.gate.ramp_to(if on { 1.0 } else { 0.0 }, RAMP, ctl.now, ctl.frame);
     }
 
-    fn set_level(&mut self, value: f64, ctl: Ctl) {
+    pub(crate) fn set_level(&mut self, value: f64, ctl: Ctl) -> f64 {
         self.level = value.clamp(0.0, 1.0);
         self.level_gain.ramp_to(self.level, RAMP, ctl.now, ctl.frame);
+        self.level
     }
 
-    fn begin_quantum(&mut self, q: u64) {
+    pub(crate) fn begin_quantum(&mut self, q: u64) {
         self.shut = !fill(&mut self.gate, q, &mut self.gates);
         self.used |= !self.shut;
         if self.used {
-            fill(&mut self.level_gain, q, &mut self.levels);
+            self.level_nonzero = fill(&mut self.level_gain, q, &mut self.levels);
         }
     }
 
-    /// Frames `frame..frame + input.len()` (DSP clock; `at` into the quantum begun) into `out`; false
-    /// (and zeros) while silent.
-    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+    fn convolve(&mut self, frame: u64, at: usize, input: &[f32]) -> bool {
         let n = input.len();
+        self.last_n = n;
+        self.last_at = at;
         self.silent = !self.used;
         if self.used {
             let source = if self.shut {
@@ -325,13 +362,37 @@ impl Reverb {
             let [l, r] = &mut self.wet;
             self.silent = self.convolver.process(frame, source, &mut l[..n], &mut r[..n]);
         }
-        if self.silent {
+        !self.silent
+    }
+
+    /// Frames `frame..frame + input.len()` (DSP clock; `at` into the quantum begun) into `out`; false
+    /// (and zeros) while silent.
+    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+        if !self.convolve(frame, at, input) {
             out.fill(0.0);
             return false;
         }
+        let n = input.len();
         let [l, r] = &self.wet;
         for (((o, &a), &b), &g) in out.iter_mut().zip(&l[..n]).zip(&r[..n]).zip(&self.levels[at..at + n]) {
             *o = crate::fold(a, b) * g;
+        }
+        true
+    }
+
+    /// Stereo wet output (convolver L and R scaled by level, before summing to mono); false (and
+    /// zeros) while silent.
+    pub(crate) fn process_stereo(&mut self, frame: u64, at: usize, input: &[f32], out_l: &mut [f32], out_r: &mut [f32]) -> bool {
+        if !self.convolve(frame, at, input) {
+            out_l.fill(0.0);
+            out_r.fill(0.0);
+            return false;
+        }
+        let n = input.len();
+        let [l, r] = &self.wet;
+        for ((((ol, or), &a), &b), &g) in out_l.iter_mut().zip(out_r.iter_mut()).zip(&l[..n]).zip(&r[..n]).zip(&self.levels[at..at + n]) {
+            *ol = a * g;
+            *or = b * g;
         }
         true
     }
@@ -532,6 +593,18 @@ impl InputFx {
         self.ring.phase
     }
 
+    /// The reverb convolver's last rendered frame scaled by its level (left and right before summing to
+    /// mono), or `[0.0, 0.0]` while silent: what the unit-contract pin test reads before `input_fx.rs`
+    /// is retired.
+    pub fn last_reverb_stereo(&self) -> [f32; 2] {
+        if self.reverb.silent || self.reverb.last_n == 0 {
+            return [0.0, 0.0];
+        }
+        let k = self.reverb.last_n - 1;
+        let g = self.reverb.levels[self.reverb.last_at + k];
+        [self.reverb.wet[0][k] * g, self.reverb.wet[1][k] * g]
+    }
+
     pub fn set_on(&mut self, send: InputSend, on: bool, frame: Frame) {
         let ctl = self.ctl(frame);
         match send {
@@ -553,7 +626,9 @@ impl InputFx {
             InputSend::Echo => {
                 self.echo.set_param(param, value, ctl);
             }
-            InputSend::Reverb => self.reverb.set_level(value, ctl),
+            InputSend::Reverb => {
+                self.reverb.set_level(value, ctl);
+            }
             InputSend::Ring => {
                 self.ring.set_param(param, value, ctl);
             }

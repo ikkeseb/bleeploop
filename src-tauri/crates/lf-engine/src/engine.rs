@@ -61,7 +61,7 @@ use crate::tuner::{TunerFrame, TunerTap};
 /// Commands the engine holds for a future frame (a stamped command's, a wait for a block job).
 const MAX_PENDING: usize = 64;
 /// The seed of Tone's noise tables (a `Math.random` stand-in): fixed, so a render repeats.
-const NOISE_SEED: u32 = 7;
+pub(crate) const NOISE_SEED: u32 = 7;
 /// Master volume smoothing (master.ts `RAMP_TC`).
 const MASTER_TAU_SECONDS: f64 = 0.012;
 /// The tuner's mute of the monitor: a glide quick enough to sound like a switch without a click, at
