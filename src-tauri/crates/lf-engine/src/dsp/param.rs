@@ -1238,6 +1238,12 @@ impl ToneParam {
         self.in_units(value)
     }
 
+    /// True when no event is scheduled after `time` and the value at `time` equals `value`.
+    pub(crate) fn is_settled_at(&self, time: f64, value: f64) -> bool {
+        let t = time.max(0.0);
+        self.events.get_after(t).is_none() && self.get_value_at_time(t) == value
+    }
+
     pub fn set_ramp_point(&mut self, time: f64, frame: u64) {
         let mut current = self.get_value_at_time(time);
         self.cancel_and_hold_at_time(time, frame);

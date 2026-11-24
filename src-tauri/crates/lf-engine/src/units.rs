@@ -19,8 +19,9 @@
 //!   their input gate over 20 ms from the command's frame (dry passes untouched, ECHO and REVERB
 //!   tails ring out, and wherever the wet sample is exact zero the output is the input bit for bit);
 //!   OTT crossfades linearly between dry and processed over 10 ms (settled off is exact input bit
-//!   for bit). Only an install's own starting bypassed state settles immediately with no leak; every
-//!   later un-bypass fades in from the command's frame.
+//!   for bit). Only an install's own starting bypassed state — or a bypass arriving before the
+//!   unit's first rendered frame (nothing has sounded, so nothing clicks or leaks) — settles
+//!   immediately; every later un-bypass fades in from the command's frame.
 //!
 //! Everything is allocated in `new` / `with_ir`; `process`, `set_param`, `set_bypass`, `take_meter`
 //! and `stop` never allocate, lock or block (invariant 5).
@@ -162,10 +163,10 @@ impl UnitProcessor for EchoUnit {
             }
             return true;
         }
-        if self.channels[0].is_on() == on {
+        let ctl = self.ctl(cx);
+        if self.channels[0].is_settled(on, ctl) {
             return true;
         }
-        let ctl = self.ctl(cx);
         for ch in &mut self.channels {
             ch.set_on(on, ctl);
         }
@@ -279,10 +280,10 @@ impl UnitProcessor for RingUnit {
             }
             return true;
         }
-        if self.channels[0].is_on() == on {
+        let ctl = self.ctl(cx);
+        if self.channels[0].is_settled(on, ctl) {
             return true;
         }
-        let ctl = self.ctl(cx);
         for ch in &mut self.channels {
             ch.set_on(on, ctl);
         }
@@ -411,10 +412,10 @@ impl UnitProcessor for ReverbUnit {
             self.reverb.snap_on(false);
             return true;
         }
-        if self.reverb.is_on() == on {
+        let ctl = self.ctl(cx);
+        if self.reverb.is_settled(on, ctl) {
             return true;
         }
-        let ctl = self.ctl(cx);
         self.reverb.set_on(on, ctl);
         true
     }

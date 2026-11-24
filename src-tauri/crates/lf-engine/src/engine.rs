@@ -428,6 +428,10 @@ impl Engine {
         &self.input_fx
     }
 
+    pub fn input_fx_mut(&mut self) -> &mut InputFx {
+        &mut self.input_fx
+    }
+
     /// Whether the tuner is on ([`crate::tuner`]).
     pub fn tuner(&self) -> bool {
         self.tuner.on()

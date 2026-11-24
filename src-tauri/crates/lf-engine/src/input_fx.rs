@@ -164,8 +164,8 @@ impl Echo {
         }
     }
 
-    pub(crate) fn is_on(&self) -> bool {
-        self.on
+    pub(crate) fn is_settled(&self, on: bool, ctl: Ctl) -> bool {
+        self.on == on && self.gate.is_settled_at(ctl.now, if on { 1.0 } else { 0.0 })
     }
 
     pub(crate) fn has_level(&self) -> bool {
@@ -265,10 +265,6 @@ pub(crate) struct Reverb {
     level_nonzero: bool,
     gated: [f32; QUANTUM],
     wet: [[f32; QUANTUM]; 2],
-    /// Position of the last frame written into `wet` and its quantum offset in `levels` (for the
-    /// unit-contract pin test before `input_fx.rs` is retired).
-    last_n: usize,
-    last_at: usize,
     /// The gate is shut for the whole quantum being rendered: the convolver gets no input.
     shut: bool,
     /// The gate has opened once; before, the convolver is never called.
@@ -299,16 +295,14 @@ impl Reverb {
             level_nonzero: level != 0.0,
             gated: [0.0; QUANTUM],
             wet: [[0.0; QUANTUM]; 2],
-            last_n: 0,
-            last_at: 0,
             shut: !on,
             used: false,
             silent: true,
         }
     }
 
-    pub(crate) fn is_on(&self) -> bool {
-        self.on
+    pub(crate) fn is_settled(&self, on: bool, ctl: Ctl) -> bool {
+        self.on == on && self.gate.is_settled_at(ctl.now, if on { 1.0 } else { 0.0 })
     }
 
     pub(crate) fn has_level(&self) -> bool {
@@ -347,8 +341,6 @@ impl Reverb {
 
     fn convolve(&mut self, frame: u64, at: usize, input: &[f32]) -> bool {
         let n = input.len();
-        self.last_n = n;
-        self.last_at = at;
         self.silent = !self.used;
         if self.used {
             let source = if self.shut {
@@ -388,13 +380,17 @@ impl Reverb {
             out_r.fill(0.0);
             return false;
         }
-        let n = input.len();
+        self.copy_wet_stereo(at, input.len(), out_l, out_r);
+        true
+    }
+
+    /// Copy the last convolved chunk's left and right wet outputs (scaled by level) into `out_l`/`out_r`.
+    fn copy_wet_stereo(&self, at: usize, n: usize, out_l: &mut [f32], out_r: &mut [f32]) {
         let [l, r] = &self.wet;
         for ((((ol, or), &a), &b), &g) in out_l.iter_mut().zip(out_r.iter_mut()).zip(&l[..n]).zip(&r[..n]).zip(&self.levels[at..at + n]) {
             *ol = a * g;
             *or = b * g;
         }
-        true
     }
 }
 
@@ -447,8 +443,8 @@ impl Ring {
         }
     }
 
-    pub(crate) fn is_on(&self) -> bool {
-        self.on
+    pub(crate) fn is_settled(&self, on: bool, ctl: Ctl) -> bool {
+        self.on == on && self.gate.is_settled_at(ctl.now, if on { 1.0 } else { 0.0 })
     }
 
     pub(crate) fn has_level(&self) -> bool {
@@ -526,6 +522,10 @@ pub struct InputFx {
     /// The quantum whose control values are computed.
     prepared: Option<u64>,
     mono: [f32; QUANTUM],
+    /// Optional stereo reverb tap (preallocated off the RT thread by [`Self::enable_reverb_stereo_tap`]
+    /// for the unit-contract pin test across block sizes; empty and untouched otherwise).
+    reverb_tap: [Vec<f32>; 2],
+    reverb_tap_len: usize,
 }
 
 impl InputFx {
@@ -543,6 +543,8 @@ impl InputFx {
             ring: Ring::new(sr, start),
             prepared: None,
             mono: [0.0; QUANTUM],
+            reverb_tap: [Vec::new(), Vec::new()],
+            reverb_tap_len: 0,
         }
     }
 
@@ -593,16 +595,22 @@ impl InputFx {
         self.ring.phase
     }
 
-    /// The reverb convolver's last rendered frame scaled by its level (left and right before summing to
-    /// mono), or `[0.0, 0.0]` while silent: what the unit-contract pin test reads before `input_fx.rs`
-    /// is retired.
-    pub fn last_reverb_stereo(&self) -> [f32; 2] {
-        if self.reverb.silent || self.reverb.last_n == 0 {
-            return [0.0, 0.0];
-        }
-        let k = self.reverb.last_n - 1;
-        let g = self.reverb.levels[self.reverb.last_at + k];
-        [self.reverb.wet[0][k] * g, self.reverb.wet[1][k] * g]
+    /// Preallocate a `max_block`-frame stereo reverb tap off the RT thread (for the unit-contract
+    /// pin test before `input_fx.rs` is retired).
+    pub fn enable_reverb_stereo_tap(&mut self, max_block: usize) {
+        self.reverb_tap = [vec![0.0; max_block], vec![0.0; max_block]];
+        self.reverb_tap_len = 0;
+    }
+
+    /// Reset the stereo reverb tap cursor before rendering the next block.
+    pub fn clear_reverb_stereo_tap(&mut self) {
+        self.reverb_tap_len = 0;
+    }
+
+    /// Unsummed left and right convolver outputs (scaled by level) recorded since the last
+    /// [`Self::clear_reverb_stereo_tap`].
+    pub fn reverb_stereo_tap(&self) -> [&[f32]; 2] {
+        [&self.reverb_tap[0][..self.reverb_tap_len], &self.reverb_tap[1][..self.reverb_tap_len]]
     }
 
     pub fn set_on(&mut self, send: InputSend, on: bool, frame: Frame) {
@@ -675,11 +683,25 @@ impl InputFx {
             let span = done..done + n;
             let echo = self.echo.process(at, &input[span.clone()], &mut out[span.clone()]);
             let mono = &mut self.mono[..n];
-            if self.reverb.process(f, at, &input[span.clone()], mono) {
+            let rev_sounded = self.reverb.process(f, at, &input[span.clone()], mono);
+            if rev_sounded {
                 for (o, &r) in out[span.clone()].iter_mut().zip(mono.iter()) {
                     *o += r;
                 }
                 sounded = true;
+            }
+            if !self.reverb_tap[0].is_empty() {
+                let end = self.reverb_tap_len + n;
+                if end <= self.reverb_tap[0].len() {
+                    let [tl, tr] = &mut self.reverb_tap;
+                    if rev_sounded {
+                        self.reverb.copy_wet_stereo(at, n, &mut tl[self.reverb_tap_len..end], &mut tr[self.reverb_tap_len..end]);
+                    } else {
+                        tl[self.reverb_tap_len..end].fill(0.0);
+                        tr[self.reverb_tap_len..end].fill(0.0);
+                    }
+                    self.reverb_tap_len = end;
+                }
             }
             if self.ring.process(at, &input[span.clone()], mono) {
                 for (o, &r) in out[span].iter_mut().zip(mono.iter()) {

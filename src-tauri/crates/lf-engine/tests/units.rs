@@ -37,8 +37,8 @@ use common::refs::{sha256_f32, write_wav, Mulberry32};
 use common::{Delay, Opts, Rig};
 use lf_engine::dsp::fdlibm;
 use lf_engine::dsp::ott::{
-    release_scale, Setting, StereoOtt, CEILING, DEFAULT_DEPTH, FADE_SECONDS as OTT_FADE_SECONDS,
-    HIGH_SPLIT, LOW_SPLIT, MAKEUP_DB,
+    release_scale, Setting, StereoOtt, CEILING, CEILING_KNEE, DEFAULT_DEPTH,
+    FADE_SECONDS as OTT_FADE_SECONDS, HIGH_SPLIT, LOW_SPLIT, MAKEUP_DB,
 };
 use lf_engine::grid::{Frame, Meter};
 use lf_engine::units::{default_reverb_ir, EchoUnit, OttUnit, ReverbUnit, RingUnit};
@@ -219,12 +219,13 @@ fn render_send_pin(spec: PinSpec, input: &Arc<Vec<f32>>, block: usize) -> Vec<f3
     rig.record
 }
 
-/// Render today's `input_fx` REVERB send frame by frame (block = 1) and capture the convolver's
+/// Render today's `input_fx` REVERB send at `block` frames per call and capture the convolver's
 /// left and right wet outputs BEFORE they are summed (`dry + conv_l * level`, `dry + conv_r * level`).
 /// Also checks that their mean equals today's summed record tap within 1e-6 on every frame.
-fn render_reverb_stereo_pin(spec: PinSpec, input: &Arc<Vec<f32>>) -> [Vec<f32>; 2] {
+fn render_reverb_stereo_pin(spec: PinSpec, input: &Arc<Vec<f32>>, block: usize) -> [Vec<f32>; 2] {
     assert_eq!(spec.send, InputSend::Reverb);
-    let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 1, ..Opts::default() });
+    let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+    rig.engine.input_fx_mut().enable_reverb_stereo_tap(block);
     let sig = input.clone();
     rig.set_input(move |f| sig.get((f - F0) as usize).copied().unwrap_or(0.0));
     let on = F0 + ON_OFFSET;
@@ -235,18 +236,23 @@ fn render_reverb_stereo_pin(spec: PinSpec, input: &Arc<Vec<f32>>) -> [Vec<f32>; 
     rig.keep_output();
     let mut left = Vec::with_capacity(PIN_FRAMES);
     let mut right = Vec::with_capacity(PIN_FRAMES);
-    for k in 0..PIN_FRAMES {
-        rig.advance(1);
-        let dry = input[k];
-        let [wl, wr] = rig.engine.input_fx().last_reverb_stereo();
-        let ol = if wl == 0.0 { dry } else { dry + wl };
-        let or = if wr == 0.0 { dry } else { dry + wr };
-        left.push(ol);
-        right.push(or);
+    let mut pos = 0usize;
+    while pos < PIN_FRAMES {
+        let n = block.min(PIN_FRAMES - pos);
+        rig.engine.input_fx_mut().clear_reverb_stereo_tap();
+        rig.advance(n as Frame);
+        let [wl, wr] = rig.engine.input_fx().reverb_stereo_tap();
+        assert_eq!(wl.len(), n, "{}: stereo tap length at block {block}", spec.id);
+        for k in 0..n {
+            let dry = input[pos + k];
+            left.push(if wl[k] == 0.0 { dry } else { dry + wl[k] });
+            right.push(if wr[k] == 0.0 { dry } else { dry + wr[k] });
+        }
+        pos += n;
     }
     let folded: Vec<f32> = left.iter().zip(&right).map(|(&l, &r)| lf_engine::fold(l, r)).collect();
     let err = max_abs_diff(&folded, &rig.record);
-    assert!(err < 1e-6, "{}: stereo pin mean vs mono send diff {err}", spec.id);
+    assert!(err < 1e-6, "{}: stereo pin block {block} mean vs mono send diff {err}", spec.id);
     [left, right]
 }
 
@@ -279,7 +285,7 @@ fn write_send_pins() {
         });
         if spec.send == InputSend::Reverb {
             let sid = stereo_pin_id(spec.id);
-            let [l, r] = render_reverb_stereo_pin(spec, &input);
+            let [l, r] = render_reverb_stereo_pin(spec, &input, 128);
             let sfile = format!("{sid}.wav");
             write_wav(&dir.join(&sfile), SR, &[l.clone(), r.clone()]);
             scenarios.push(PinScenario {
@@ -344,9 +350,11 @@ fn sends_match_pinned_fixtures() {
         if spec.send == InputSend::Reverb {
             let sid = stereo_pin_id(spec.id);
             let [want_l, want_r] = load_stereo_pin(&sid);
-            let [got_l, got_r] = render_reverb_stereo_pin(spec, &input);
-            assert_bits_eq(&got_l, &want_l, &format!("{sid} L"));
-            assert_bits_eq(&got_r, &want_r, &format!("{sid} R"));
+            for block in BLOCKS {
+                let [got_l, got_r] = render_reverb_stereo_pin(spec, &input, block);
+                assert_bits_eq(&got_l, &want_l, &format!("{sid} block {block} L"));
+                assert_bits_eq(&got_r, &want_r, &format!("{sid} block {block} R"));
+            }
         }
     }
 }
@@ -1064,6 +1072,7 @@ fn composition_with_reverb_and_ott_matches_staged_and_order_differs() {
         (Stage::ReverbA, Stage::Gain),
         (Stage::Gain, Stage::ReverbA),
         (Stage::ReverbA, Stage::ReverbB),
+        (Stage::ReverbB, Stage::ReverbA),
         (Stage::OttA, Stage::EchoA),
         (Stage::EchoA, Stage::OttA),
         (Stage::OttA, Stage::ReverbA),
@@ -1075,6 +1084,7 @@ fn composition_with_reverb_and_ott_matches_staged_and_order_differs() {
         (Stage::OttA, Stage::Gain),
         (Stage::Gain, Stage::OttA),
         (Stage::OttA, Stage::OttB),
+        (Stage::OttB, Stage::OttA),
     ];
 
     for (x, y) in pairs {
@@ -1099,6 +1109,7 @@ fn composition_with_reverb_and_ott_matches_staged_and_order_differs() {
         (Stage::OttA, Stage::RingA, 0.05f32),
         (Stage::OttA, Stage::Clip, 0.05f32),
         (Stage::OttA, Stage::Gain, 0.05f32),
+        (Stage::OttA, Stage::OttB, 0.02f32),
     ] {
         let (ab, _) = render_stages(&[a, b], input.clone(), 128);
         let (ba, _) = render_stages(&[b, a], input.clone(), 128);
@@ -1976,38 +1987,60 @@ fn reverb_bypass_settled_is_input_rings_out_and_unbypass_ramps_20ms() {
         drain_returns(&mut rig);
     }
 
-    // 2. Active -> bypass: REVERB rings out past bypass on both channels (with L != R), ignores a
-    //    new impulse once the 20 ms gate is shut, and settles to exact dry input bit for bit once
-    //    the 2.62 s IR tail has passed.
-    let hit = F0 + 1_000;
-    let bypass_at = F0 + 2_000;
-    let ignored_hit = F0 + 4_500; // > bypass_at + 960 + 128: gate is shut
-    let settled_at = F0 + 4 * SR as Frame; // > bypass_at + 20 ms + 2.62 s IR tail
+    // 2. Active -> bypass: drive continuous input straight through the 20 ms closing edge so a
+    //    shorter (e.g. 10 ms) closing ramp diverges from `InputFx` and fails; REVERB still rings
+    //    out past bypass on both channels (with L != R), ignores a new impulse once the 20 ms gate
+    //    is shut, and settles to exact dry input bit for bit once the 2.62 s IR tail has passed.
+    let settle_on = 2400 as Frame;
+    let start_at = F0 + settle_on;
+    let bypass_at = start_at + 2_000; // mid-quantum
+    let drive_end = bypass_at + 1_500; // > bypass_at + 960 + 128: drives across the whole closing ramp
+    let ignored_hit = start_at + 4_500; // > bypass_at + 960 + 128: gate is shut
+    let settled_at = start_at + 4 * SR as Frame; // > bypass_at + 20 ms + 2.62 s IR tail
     let total = 4 * SR as Frame + SR as Frame / 2;
+    let active_sig = move |f: Frame| -> Pair {
+        if f >= start_at && f < drive_end {
+            let k = (f - start_at) as f64;
+            let s = (0.4 * fdlibm::sin(std::f64::consts::TAU * 199.0 * k / SR as f64)) as f32;
+            [s, s]
+        } else if f == ignored_hit {
+            [0.75, -0.25]
+        } else if f >= settled_at && (f - start_at) % 19 == 0 {
+            [0.0, f32::from_bits(1)]
+        } else if f >= settled_at {
+            [0.2, -0.15]
+        } else {
+            [0.0, 0.0]
+        }
+    };
+    let mut srig = Rig::new();
+    srig.send_at(F0, Command::SetInputSendParam(InputSendParam::ReverbLevel, 1.0));
+    srig.send_at(F0, Command::SetInputSend(InputSend::Reverb, true));
+    srig.advance(settle_on);
+    srig.set_input(move |f| {
+        let [l, r] = active_sig(f);
+        lf_engine::fold(l, r)
+    });
+    srig.send_at(bypass_at, Command::SetInputSend(InputSend::Reverb, false));
+    srig.keep_output();
+    srig.advance(total);
+    let want_close_mono = srig.monitor.clone();
+
     let mut rev_ref: Option<[Vec<f32>; 2]> = None;
     for block in BLOCKS {
         let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
-        rig.set_stereo_inputs(
-            move |f| {
-                if f == hit {
-                    [1.0, 1.0]
-                } else if f == ignored_hit {
-                    [0.75, -0.25]
-                } else if f >= settled_at && (f - F0) % 19 == 0 {
-                    [0.0, f32::from_bits(1)]
-                } else if f >= settled_at {
-                    [0.2, -0.15]
-                } else {
-                    [0.0, 0.0]
-                }
-            },
-            |_| [0.0, 0.0],
-        );
         assert!(rig.port(0).install_at(1, 1, 0, false, None, Box::new(new_reverb_unit())).is_ok());
         rig.send_at(F0, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::ReverbLevel), 1.0));
+        rig.advance(settle_on);
+        rig.set_stereo_inputs(active_sig, |_| [0.0, 0.0]);
         rig.send_at(bypass_at, Command::SetUnitBypass(1, true));
         rig.keep_output();
         rig.advance(total);
+
+        // Closing edge + full tail match `InputFx`'s 20 ms closing ramp within 1e-6.
+        let folded: Vec<f32> = rig.monitor.iter().zip(&rig.monitor_right).map(|(&l, &r)| lf_engine::fold(l, r)).collect();
+        let close_err = max_abs_diff(&folded, &want_close_mono);
+        assert!(close_err < 1e-6, "block {block}: reverb closing ramp + tail vs InputFx diff {close_err}");
 
         // Tail rings out well after bypass_at (e.g. [0.25 s, 1.0 s)) on both L and R, distinctly.
         let ring_win = (SR as usize / 4)..(SR as usize);
@@ -2017,11 +2050,8 @@ fn reverb_bypass_settled_is_input_rings_out_and_unbypass_ramps_20ms() {
         assert!(energy_r > 1e-4, "block {block}: reverb R tail must ring out while bypassed (energy {energy_r})");
         assert!(max_abs_diff(&rig.monitor[ring_win.clone()], &rig.monitor_right[ring_win]) > 1e-3, "block {block}: bypassed tail stays stereo");
 
-        // ignored_hit passes dry on its own frame; its pre-delay / tail never re-triggers after settle.
-        let ki = (ignored_hit - F0) as usize;
-        // Dry is added to the ringing tail from `hit` at `ki`, so check settled window [4.0 s, 4.5 s):
-        // if `ignored_hit` (at 0.094 s) had entered the convolver it would still be audible or shift tail end,
-        // and we also verify a second impulse after settle stays pure dry below.
+        // ignored_hit passes dry on its own frame; its tail never re-triggers after settle.
+        let ki = (ignored_hit - start_at) as usize;
         assert!((rig.monitor[ki] - 0.75).abs() < 0.25, "block {block}: dry passes at ignored_hit");
         let s4 = 4 * SR as usize;
         let end_k = total as usize;
@@ -2203,7 +2233,7 @@ fn ott_unit_run(unit: &mut OttUnit, in_l: &[f32], in_r: &[f32], block: usize) ->
     (out_l, out_r)
 }
 
-fn settled_ott_unit(sr: u32, depth: f64, active: bool) -> OttUnit {
+fn settled_ott_unit_at_block(sr: u32, depth: f64, active: bool, block: usize) -> OttUnit {
     let mut unit = OttUnit::new(sr);
     let cx0 = ott_cx(0);
     if !active {
@@ -2211,11 +2241,22 @@ fn settled_ott_unit(sr: u32, depth: f64, active: bool) -> OttUnit {
     }
     assert_eq!(assert_no_alloc(|| unit.set_param(&cx0, UnitParam::Send(InputSendParam::OttDepth), depth)), Some(depth));
     let silence = vec![0.0f32; sr as usize];
-    let _ = ott_unit_run(&mut unit, &silence, &silence, 128);
+    let _ = ott_unit_run(&mut unit, &silence, &silence, block);
     unit
 }
 
-fn ott_unit_band_gains(x: &[f32], params: &[(InputSendParam, f64)]) -> Vec<[f64; 3]> {
+fn ott_unit_run_with_params(x: &[f32], params: &[(InputSendParam, f64)], block: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut unit = OttUnit::new(SR);
+    let cx0 = ott_cx(0);
+    assert!(assert_no_alloc(|| unit.set_bypass(&cx0, true)));
+    for &(p, v) in params {
+        assert!(assert_no_alloc(|| unit.set_param(&cx0, UnitParam::Send(p), v)).is_some());
+    }
+    assert!(assert_no_alloc(|| unit.set_bypass(&cx0, false)));
+    ott_unit_run(&mut unit, x, x, block)
+}
+
+fn ott_unit_band_gains(x: &[f32], params: &[(InputSendParam, f64)]) -> (Vec<[f64; 3]>, Vec<f32>, Vec<f32>) {
     let mut unit = OttUnit::new(SR);
     let cx0 = ott_cx(0);
     // Cold bypassed so glided params snap before switching active (matching `tests/ott.rs::band_gains`).
@@ -2226,19 +2267,25 @@ fn ott_unit_band_gains(x: &[f32], params: &[(InputSendParam, f64)]) -> Vec<[f64;
     assert!(assert_no_alloc(|| unit.set_bypass(&cx0, false)));
     let mut ol = [0.0f32; 1];
     let mut or = [0.0f32; 1];
-    x.iter()
+    let mut out_l = Vec::with_capacity(x.len());
+    let mut out_r = Vec::with_capacity(x.len());
+    let gains = x
+        .iter()
         .enumerate()
         .map(|(k, &v)| {
             let s = [v];
             let cx = ott_cx(k as Frame);
             assert_no_alloc(|| unit.process(&cx, [&s, &s], &[], [&mut ol, &mut or]));
+            out_l.push(ol[0]);
+            out_r.push(or[0]);
             unit.gains()
         })
-        .collect()
+        .collect();
+    (gains, out_l, out_r)
 }
 
 /// §5 item 5 (processor half): every DSP test from `tests/ott.rs` run directly on `OttUnit` under
-/// `assert_no_alloc`.
+/// `assert_no_alloc`, bit-identical across all 7 `BLOCKS` sizes.
 #[test]
 fn ott_unit_dsp_properties_from_ott_suite() {
     // 1. Unity bands null against AP88 · AP2500 (< -130 dB) and are flat (< 0.05 dB) at 44.1 & 48 kHz.
@@ -2247,83 +2294,138 @@ fn ott_unit_dsp_properties_from_ott_suite() {
         let mut noise = OttNoise(7);
         let mut x: Vec<f32> = (0..n).map(|_| (0.25 * noise.next()) as f32).collect();
         x[n / 3] = 0.9;
-        let mut unit = settled_ott_unit(sr, 0.0, true);
-        let (l, r) = ott_unit_run(&mut unit, &x, &x, 128);
-        assert!(l.iter().chain(&r).all(|v| v.is_finite()), "sr={sr}: non-finite");
-        let (mut ap_lo, mut ap_hi) = (OttSection::allpass(LOW_SPLIT, sr as f64), OttSection::allpass(HIGH_SPLIT, sr as f64));
-        let mut worst = 0.0f64;
-        for (k, &v) in x.iter().enumerate() {
-            let want = ap_hi.tick(ap_lo.tick(v as f64)) as f32;
-            worst = worst.max((l[k] - want).abs() as f64).max((r[k] - want).abs() as f64);
+        let mut base_null: Option<(Vec<f32>, Vec<f32>)> = None;
+        for block in BLOCKS {
+            let mut unit = settled_ott_unit_at_block(sr, 0.0, true, block);
+            let (l, r) = ott_unit_run(&mut unit, &x, &x, block);
+            assert!(l.iter().chain(&r).all(|v| v.is_finite()), "sr={sr} block={block}: non-finite");
+            if let Some((bl, br)) = &base_null {
+                assert_bits_eq(&l, bl, &format!("sr={sr} block={block} unity null L"));
+                assert_bits_eq(&r, br, &format!("sr={sr} block={block} unity null R"));
+            } else {
+                let (mut ap_lo, mut ap_hi) = (OttSection::allpass(LOW_SPLIT, sr as f64), OttSection::allpass(HIGH_SPLIT, sr as f64));
+                let mut worst = 0.0f64;
+                for (k, &v) in x.iter().enumerate() {
+                    let want = ap_hi.tick(ap_lo.tick(v as f64)) as f32;
+                    worst = worst.max((l[k] - want).abs() as f64).max((r[k] - want).abs() as f64);
+                }
+                let null_db = ott_db(worst / ott_peak(&x) as f64);
+                assert!(null_db < -130.0, "sr={sr}: OttUnit null depth {null_db:.1} dB");
+                base_null = Some((l, r));
+            }
         }
-        let null_db = ott_db(worst / ott_peak(&x) as f64);
-        assert!(null_db < -130.0, "sr={sr}: OttUnit null depth {null_db:.1} dB");
 
         let fft_n = 1 << 17;
-        let mut flat_u = settled_ott_unit(sr, 0.0, true);
         let mut imp = vec![0.0f32; fft_n];
         imp[0] = 0.5;
-        let (fl, _) = ott_unit_run(&mut flat_u, &imp, &imp, 128);
-        let mut spectrum: Vec<Complex<f64>> = fl.iter().map(|&v| Complex::new(v as f64 / 0.5, 0.0)).collect();
-        FftPlanner::new().plan_fft_forward(fft_n).process(&mut spectrum);
-        let bin = |f: f64| (f * fft_n as f64 / sr as f64).round() as usize;
-        let flat = (bin(20.0)..=bin(20000.0f64.min(0.45 * sr as f64)))
-            .map(|k| ott_db(spectrum[k].norm()).abs())
-            .fold(0.0, f64::max);
-        assert!(flat < 0.05, "sr={sr}: OttUnit flatness {flat:.4} dB");
+        let mut base_flat: Option<Vec<f32>> = None;
+        for block in BLOCKS {
+            let mut flat_u = settled_ott_unit_at_block(sr, 0.0, true, block);
+            let (fl, _) = ott_unit_run(&mut flat_u, &imp, &imp, block);
+            if let Some(bf) = &base_flat {
+                assert_bits_eq(&fl, bf, &format!("sr={sr} block={block} flatness impulse"));
+            } else {
+                let mut spectrum: Vec<Complex<f64>> = fl.iter().map(|&v| Complex::new(v as f64 / 0.5, 0.0)).collect();
+                FftPlanner::new().plan_fft_forward(fft_n).process(&mut spectrum);
+                let bin = |f: f64| (f * fft_n as f64 / sr as f64).round() as usize;
+                let flat = (bin(20.0)..=bin(20000.0f64.min(0.45 * sr as f64)))
+                    .map(|k| ott_db(spectrum[k].norm()).abs())
+                    .fold(0.0, f64::max);
+                assert!(flat < 0.05, "sr={sr}: OttUnit flatness {flat:.4} dB");
+                base_flat = Some(fl);
+            }
+        }
     }
 
     // 2. Switch inside a fade turns from the weight reached; fade lands on exact last frame (480)
-    //    and off fade's last frame preserves dry bits including `-0.0`.
+    //    and off fade's last frame preserves dry bits including `-0.0` across all 7 block sizes.
     {
         let fade = (OTT_FADE_SECONDS * SR as f64) as usize;
         let step = 1.0 / fade as f64;
-        let mut unit = settled_ott_unit(SR, DEFAULT_DEPTH, false);
         let sig = vec![0.1f32; 200];
-        let mut ol = vec![0.0f32; 200];
-        let mut or = vec![0.0f32; 200];
-        assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(0), false)));
-        assert_no_alloc(|| unit.process(&ott_cx(0), [&sig[..160], &sig[..160]], &[], [&mut ol[..160], &mut or[..160]]));
-        assert!((unit.weight() - 160.0 * step).abs() < 1e-12);
-        assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(160), true)));
-        assert_no_alloc(|| unit.process(&ott_cx(160), [&sig[160..], &sig[160..]], &[], [&mut ol[160..], &mut or[160..]]));
-        assert!((unit.weight() - 120.0 * step).abs() < 1e-12, "weight {}", unit.weight());
-
-        let mut u2 = settled_ott_unit(SR, DEFAULT_DEPTH, false);
         let sig_f = vec![0.2f32; fade];
-        let mut fl = vec![0.0f32; fade];
-        let mut fr = vec![0.0f32; fade];
-        assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(0), false)));
-        assert_no_alloc(|| u2.process(&ott_cx(0), [&sig_f[..fade - 1], &sig_f[..fade - 1]], &[], [&mut fl[..fade - 1], &mut fr[..fade - 1]]));
-        assert!(u2.weight() < 1.0);
-        assert_no_alloc(|| u2.process(&ott_cx((fade - 1) as Frame), [&sig_f[fade - 1..], &sig_f[fade - 1..]], &[], [&mut fl[fade - 1..], &mut fr[fade - 1..]]));
-        assert_eq!(u2.weight(), 1.0);
-        assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(fade as Frame), true)));
-        assert_no_alloc(|| u2.process(&ott_cx(fade as Frame), [&sig_f[..fade - 1], &sig_f[..fade - 1]], &[], [&mut fl[..fade - 1], &mut fr[..fade - 1]]));
-        assert!(u2.weight() > 0.0);
-        let dry_l = [-0.0f32];
-        let dry_r = [0.123f32];
-        let mut last_l = [0.0f32];
-        let mut last_r = [0.0f32];
-        assert_no_alloc(|| u2.process(&ott_cx((2 * fade - 1) as Frame), [&dry_l, &dry_r], &[], [&mut last_l, &mut last_r]));
-        assert_eq!(u2.weight(), 0.0);
-        assert_eq!(last_l[0].to_bits(), (-0.0f32).to_bits(), "off fade last frame preserves -0.0");
-        assert_eq!(last_r[0].to_bits(), 0.123f32.to_bits(), "off fade last frame is dry bit for bit");
+        let mut base_rev: Option<(Vec<f32>, Vec<f32>)> = None;
+        let mut base_fade: Option<(Vec<f32>, Vec<f32>)> = None;
+        for block in BLOCKS {
+            let mut unit = settled_ott_unit_at_block(SR, DEFAULT_DEPTH, false, block);
+            let mut ol = vec![0.0f32; 200];
+            let mut or = vec![0.0f32; 200];
+            assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(0), false)));
+            let mut pos = 0usize;
+            while pos < 160 {
+                let n = block.min(160 - pos);
+                assert_no_alloc(|| unit.process(&ott_cx(pos as Frame), [&sig[pos..pos + n], &sig[pos..pos + n]], &[], [&mut ol[pos..pos + n], &mut or[pos..pos + n]]));
+                pos += n;
+            }
+            assert!((unit.weight() - 160.0 * step).abs() < 1e-12, "block {block}");
+            assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(160), true)));
+            while pos < 200 {
+                let n = block.min(200 - pos);
+                assert_no_alloc(|| unit.process(&ott_cx(pos as Frame), [&sig[pos..pos + n], &sig[pos..pos + n]], &[], [&mut ol[pos..pos + n], &mut or[pos..pos + n]]));
+                pos += n;
+            }
+            assert!((unit.weight() - 120.0 * step).abs() < 1e-12, "block {block} weight {}", unit.weight());
+            let (bl, br) = base_rev.get_or_insert_with(|| (ol.clone(), or.clone()));
+            assert_bits_eq(&ol, bl, &format!("fade reversal block {block} L"));
+            assert_bits_eq(&or, br, &format!("fade reversal block {block} R"));
+
+            let mut u2 = settled_ott_unit_at_block(SR, DEFAULT_DEPTH, false, block);
+            let mut fl = vec![0.0f32; 2 * fade];
+            let mut fr = vec![0.0f32; 2 * fade];
+            assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(0), false)));
+            let mut p = 0usize;
+            while p < fade - 1 {
+                let n = block.min((fade - 1) - p);
+                assert_no_alloc(|| u2.process(&ott_cx(p as Frame), [&sig_f[p..p + n], &sig_f[p..p + n]], &[], [&mut fl[p..p + n], &mut fr[p..p + n]]));
+                p += n;
+            }
+            assert!(u2.weight() < 1.0, "block {block}");
+            assert_no_alloc(|| u2.process(&ott_cx((fade - 1) as Frame), [&sig_f[fade - 1..], &sig_f[fade - 1..]], &[], [&mut fl[fade - 1..fade], &mut fr[fade - 1..fade]]));
+            assert_eq!(u2.weight(), 1.0, "block {block}");
+            assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(fade as Frame), true)));
+            p = 0;
+            while p < fade - 1 {
+                let n = block.min((fade - 1) - p);
+                assert_no_alloc(|| u2.process(&ott_cx((fade + p) as Frame), [&sig_f[p..p + n], &sig_f[p..p + n]], &[], [&mut fl[fade + p..fade + p + n], &mut fr[fade + p..fade + p + n]]));
+                p += n;
+            }
+            assert!(u2.weight() > 0.0, "block {block}");
+            let dry_l = [-0.0f32];
+            let dry_r = [0.123f32];
+            assert_no_alloc(|| u2.process(&ott_cx((2 * fade - 1) as Frame), [&dry_l, &dry_r], &[], [&mut fl[2 * fade - 1..], &mut fr[2 * fade - 1..]]));
+            assert_eq!(u2.weight(), 0.0, "block {block}");
+            assert_eq!(fl[2 * fade - 1].to_bits(), (-0.0f32).to_bits(), "block {block}: off fade last frame preserves -0.0");
+            assert_eq!(fr[2 * fade - 1].to_bits(), 0.123f32.to_bits(), "block {block}: off fade last frame is dry bit for bit");
+            let (bfl, bfr) = base_fade.get_or_insert_with(|| (fl.clone(), fr.clone()));
+            assert_bits_eq(&fl, bfl, &format!("fade exact end block {block} L"));
+            assert_bits_eq(&fr, bfr, &format!("fade exact end block {block} R"));
+        }
     }
 
     // 3. Silence, full-scale square (<= CEILING), near-denormal stay finite; 20 s decay -> exact 0.0.
     {
-        let mut unit = settled_ott_unit(SR, 1.0, true);
         let square: Vec<f32> = (0..2 * SR as usize).map(|k| if (k / 240) % 2 == 0 { 1.0 } else { -1.0 }).collect();
         let tiny: Vec<f32> = (0..SR as usize).map(|k| if k % 2 == 0 { 1e-38 } else { -1e-40 }).collect();
         let silence = vec![0.0f32; 20 * SR as usize];
-        for (name, x) in [("silence", &silence[..SR as usize]), ("square", &square[..]), ("denormal", &tiny[..]), ("decay", &silence[..])] {
-            let (l, r) = ott_unit_run(&mut unit, x, x, 128);
-            assert!(l.iter().chain(&r).all(|v| v.is_finite()), "{name}: non-finite");
-            assert!(ott_peak(&l).max(ott_peak(&r)) as f64 <= CEILING, "{name}: peak {}", ott_peak(&l));
+        let mut base_sq: Option<Vec<f32>> = None;
+        let mut base_tiny: Option<Vec<f32>> = None;
+        for block in BLOCKS {
+            let mut unit = settled_ott_unit_at_block(SR, 1.0, true, block);
+            for (name, x) in [("silence", &silence[..SR as usize]), ("square", &square[..]), ("denormal", &tiny[..]), ("decay", &silence[..])] {
+                let (l, r) = ott_unit_run(&mut unit, x, x, block);
+                assert!(l.iter().chain(&r).all(|v| v.is_finite()), "block {block} {name}: non-finite");
+                assert!(ott_peak(&l).max(ott_peak(&r)) as f64 <= CEILING, "block {block} {name}: peak {}", ott_peak(&l));
+                if name == "square" {
+                    let bs = base_sq.get_or_insert_with(|| l.clone());
+                    assert_bits_eq(&l, bs, &format!("square block {block}"));
+                } else if name == "denormal" {
+                    let bt = base_tiny.get_or_insert_with(|| l.clone());
+                    assert_bits_eq(&l, bt, &format!("denormal block {block}"));
+                }
+            }
+            let (l, r) = ott_unit_run(&mut unit, &[0.0; 128], &[0.0; 128], block);
+            assert!(l.iter().chain(&r).all(|&v| v == 0.0), "block {block}: 20 s decay flushes to exact zero");
         }
-        let (l, r) = ott_unit_run(&mut unit, &[0.0; 128], &[0.0; 128], 128);
-        assert!(l.iter().chain(&r).all(|&v| v == 0.0), "20 s decay flushes to exact zero");
     }
 
     // 4. Quiet-to-loud onset (< 3 dB overshoot) and -66 dBFS hiss (< 6 dB lift) at DEPTH 1.
@@ -2332,47 +2434,78 @@ fn ott_unit_dsp_properties_from_ott_suite() {
         let loud = pluck::once(&[pluck::accent(0.0, 40, 2.0)], 24000.0, SR, SR as usize, 0.708);
         let onset = quiet.len();
         let x: Vec<f32> = quiet.iter().chain(loud.iter()).copied().collect();
-        let mut unit = settled_ott_unit(SR, 1.0, true);
-        let (l, _) = ott_unit_run(&mut unit, &x, &x, 128);
-        let w = onset..onset + SR as usize / 20;
-        let overshoot = ott_db(ott_peak(&l[w.clone()]) as f64) - ott_db(ott_peak(&x[w]) as f64);
-        assert!(overshoot < 3.0, "OttUnit onset overshoot {overshoot:+.1} dB");
+        let mut base_onset: Option<Vec<f32>> = None;
+        for block in BLOCKS {
+            let mut unit = settled_ott_unit_at_block(SR, 1.0, true, block);
+            let (l, _) = ott_unit_run(&mut unit, &x, &x, block);
+            let w = onset..onset + SR as usize / 20;
+            let overshoot = ott_db(ott_peak(&l[w.clone()]) as f64) - ott_db(ott_peak(&x[w]) as f64);
+            assert!(overshoot < 3.0, "block {block}: OttUnit onset overshoot {overshoot:+.1} dB");
+            let bo = base_onset.get_or_insert_with(|| l.clone());
+            assert_bits_eq(&l, bo, &format!("onset overshoot block {block}"));
+        }
 
         let mut noise = OttNoise(5);
         let a = 10f64.powf(-66.0 / 20.0) * 3f64.sqrt();
         let hiss: Vec<f32> = (0..4 * SR as usize).map(|_| (a * noise.next()) as f32).collect();
-        let mut hu = settled_ott_unit(SR, 1.0, true);
-        let (hl, _) = ott_unit_run(&mut hu, &hiss, &hiss, 128);
-        let lift = ott_db(ott_rms(&hl[2 * SR as usize..])) - ott_db(ott_rms(&hiss[2 * SR as usize..]));
-        assert!(lift < 6.0, "OttUnit hiss lift {lift:+.1} dB");
+        let mut base_hiss: Option<Vec<f32>> = None;
+        for block in BLOCKS {
+            let mut hu = settled_ott_unit_at_block(SR, 1.0, true, block);
+            let (hl, _) = ott_unit_run(&mut hu, &hiss, &hiss, block);
+            let lift = ott_db(ott_rms(&hl[2 * SR as usize..])) - ott_db(ott_rms(&hiss[2 * SR as usize..]));
+            assert!(lift < 6.0, "block {block}: OttUnit hiss lift {lift:+.1} dB");
+            let bh = base_hiss.get_or_insert_with(|| hl.clone());
+            assert_bits_eq(&hl, bh, &format!("hiss lift block {block}"));
+        }
     }
 
-    // 5. DEPTH 0 unity, UP 0 no lift, DOWN 0 no cut, TIME scales every band's release (0.5x & 4x).
+    // 5. DEPTH 0 unity, UP 0 no lift, DOWN 0 no cut, TIME scales every band's release (0.5x & 4x),
+    //    and each configuration is bit-identical across all 7 `BLOCKS` sizes.
     {
         let riff_b: Vec<f32> = pluck::periodic(&pluck::RIFF_B, 12000.0, SR, 8.0, 0.9).iter().copied().collect();
-        for (k, g) in ott_unit_band_gains(&riff_b, &[(InputSendParam::OttDepth, 0.0)]).iter().enumerate() {
+        let (d0_gains, d0_l, d0_r) = ott_unit_band_gains(&riff_b, &[(InputSendParam::OttDepth, 0.0)]);
+        for (k, g) in d0_gains.iter().enumerate() {
             assert_eq!(*g, [1.0; 3], "DEPTH 0 frame {k}");
+        }
+        for block in BLOCKS {
+            let (l, r) = ott_unit_run_with_params(&riff_b, &[(InputSendParam::OttDepth, 0.0)], block);
+            assert_bits_eq(&l, &d0_l, &format!("DEPTH 0 block {block} L"));
+            assert_bits_eq(&r, &d0_r, &format!("DEPTH 0 block {block} R"));
         }
 
         let quiet_sine = ott_sine(1000.0, -50.0, 2 * SR as usize, SR);
         let settled_from = SR as usize;
-        let flat = ott_unit_band_gains(&quiet_sine, &[(InputSendParam::OttDepth, 1.0), (InputSendParam::OttUpward, 0.0)]);
+        let up0_params = [(InputSendParam::OttDepth, 1.0), (InputSendParam::OttUpward, 0.0)];
+        let (flat, flat_l, _) = ott_unit_band_gains(&quiet_sine, &up0_params);
         for (k, g) in flat.iter().enumerate().skip(settled_from) {
             assert_eq!(*g, [ott_makeup(1.0); 3], "UP 0 frame {k}");
         }
-        let lifted = ott_unit_band_gains(&quiet_sine, &[(InputSendParam::OttDepth, 1.0)]);
+        let (lifted, lifted_l, _) = ott_unit_band_gains(&quiet_sine, &[(InputSendParam::OttDepth, 1.0)]);
         let mid_lift = lifted[settled_from..].iter().map(|g| g[1]).fold(f64::INFINITY, f64::min);
         assert!(ott_db(mid_lift / ott_makeup(1.0)) > 6.0, "UP 1 mid lift");
+        for block in BLOCKS {
+            let (l0, _) = ott_unit_run_with_params(&quiet_sine, &up0_params, block);
+            let (l1, _) = ott_unit_run_with_params(&quiet_sine, &[(InputSendParam::OttDepth, 1.0)], block);
+            assert_bits_eq(&l0, &flat_l, &format!("UP 0 block {block}"));
+            assert_bits_eq(&l1, &lifted_l, &format!("UP 1 block {block}"));
+        }
 
         let loud_sine = ott_sine(1000.0, -6.0, 2 * SR as usize, SR);
-        let flat_d = ott_unit_band_gains(&loud_sine, &[(InputSendParam::OttDepth, 1.0), (InputSendParam::OttDownward, 0.0)]);
+        let down0_params = [(InputSendParam::OttDepth, 1.0), (InputSendParam::OttDownward, 0.0)];
+        let (flat_d, flat_d_l, _) = ott_unit_band_gains(&loud_sine, &down0_params);
         for (k, g) in flat_d.iter().enumerate().skip(settled_from) {
             assert!(g.iter().all(|&v| v >= ott_makeup(1.0)), "DOWN 0 frame {k}");
             assert_eq!(g[1], ott_makeup(1.0), "DOWN 0 mid frame {k}");
         }
-        let cut = ott_unit_band_gains(&loud_sine, &[(InputSendParam::OttDepth, 1.0)]);
+        let (cut, cut_l, _) = ott_unit_band_gains(&loud_sine, &[(InputSendParam::OttDepth, 1.0)]);
         let mid_cut = cut[settled_from..].iter().map(|g| g[1]).fold(0.0, f64::max);
         assert!(ott_db(mid_cut / ott_makeup(1.0)) < -10.0, "DOWN 1 mid cut");
+        for block in BLOCKS {
+            let (l0, _) = ott_unit_run_with_params(&loud_sine, &down0_params, block);
+            let (l1, _) = ott_unit_run_with_params(&loud_sine, &[(InputSendParam::OttDepth, 1.0)], block);
+            assert_bits_eq(&l0, &flat_d_l, &format!("DOWN 0 block {block}"));
+            assert_bits_eq(&l1, &cut_l, &format!("DOWN 1 block {block}"));
+        }
 
         assert_eq!([release_scale(0.0), release_scale(0.5), release_scale(1.0)], [0.25, 1.0, 4.0]);
         for (name, freq, band) in [("low", 50.0, 0), ("mid", 1000.0, 1), ("high", 6000.0, 2)] {
@@ -2383,8 +2516,10 @@ fn ott_unit_dsp_properties_from_ott_suite() {
                     (amp * (2.0 * PI * freq * k as f64 / SR as f64).sin()) as f32
                 })
                 .collect();
+            let mut ref_outs = Vec::new();
             let times = [0.25, 0.5, 1.0].map(|t| {
-                let gains = ott_unit_band_gains(&x, &[(InputSendParam::OttDepth, 1.0), (InputSendParam::OttTime, t)]);
+                let (gains, out_l, _) = ott_unit_band_gains(&x, &[(InputSendParam::OttDepth, 1.0), (InputSendParam::OttTime, t)]);
+                ref_outs.push((t, out_l));
                 let back = (step..x.len()).find(|&k| gains[k][band] >= ott_makeup(1.0)).expect("recovered");
                 (back - step) as f64 / SR as f64
             });
@@ -2393,12 +2528,19 @@ fn ott_unit_dsp_properties_from_ott_suite() {
                 let ratio = times[i] / times[1];
                 assert!((ratio / want - 1.0).abs() < 0.02, "{name}: ratio {ratio:.3} vs {want}");
             }
+            for (t, want_l) in &ref_outs {
+                for block in BLOCKS {
+                    let (got_l, _) = ott_unit_run_with_params(&x, &[(InputSendParam::OttDepth, 1.0), (InputSendParam::OttTime, *t)], block);
+                    assert_bits_eq(&got_l, want_l, &format!("TIME {name} t={t} block {block}"));
+                }
+            }
         }
     }
 
     // 6. Glided controls set while bypassed and settled take effect immediately on un-bypass.
     {
         let signal = ott_sine(220.0, -12.0, 4_800, SR);
+        let silence = vec![0.0f32; SR as usize];
         let params = [
             (InputSendParam::OttDepth, 1.0),
             (InputSendParam::OttUpward, 0.3),
@@ -2406,27 +2548,32 @@ fn ott_unit_dsp_properties_from_ott_suite() {
             (InputSendParam::OttTime, 0.9),
         ];
         let cx0 = ott_cx(0);
-        let mut at_once = OttUnit::new(SR);
-        assert!(assert_no_alloc(|| at_once.set_bypass(&cx0, true)));
-        for (p, v) in params {
-            assert_eq!(assert_no_alloc(|| at_once.set_param(&cx0, UnitParam::Send(p), v)), Some(v));
-        }
-        assert!(assert_no_alloc(|| at_once.set_bypass(&cx0, false)));
-        let (a_l, a_r) = ott_unit_run(&mut at_once, &signal, &signal, 128);
+        let mut base_out: Option<(Vec<f32>, Vec<f32>)> = None;
+        for block in BLOCKS {
+            let mut at_once = OttUnit::new(SR);
+            assert!(assert_no_alloc(|| at_once.set_bypass(&cx0, true)));
+            for (p, v) in params {
+                assert_eq!(assert_no_alloc(|| at_once.set_param(&cx0, UnitParam::Send(p), v)), Some(v));
+            }
+            assert!(assert_no_alloc(|| at_once.set_bypass(&cx0, false)));
+            let (a_l, a_r) = ott_unit_run(&mut at_once, &signal, &signal, block);
 
-        let mut glided = OttUnit::new(SR);
-        for (p, v) in params {
-            assert_eq!(assert_no_alloc(|| glided.set_param(&cx0, UnitParam::Send(p), v)), Some(v));
+            let mut glided = OttUnit::new(SR);
+            for (p, v) in params {
+                assert_eq!(assert_no_alloc(|| glided.set_param(&cx0, UnitParam::Send(p), v)), Some(v));
+            }
+            let _ = ott_unit_run(&mut glided, &silence, &silence, block);
+            assert!(assert_no_alloc(|| glided.set_bypass(&cx0, true)));
+            let _ = ott_unit_run(&mut glided, &silence, &silence, block);
+            assert_eq!(glided.weight(), 0.0);
+            assert!(assert_no_alloc(|| glided.set_bypass(&cx0, false)));
+            let (b_l, b_r) = ott_unit_run(&mut glided, &signal, &signal, block);
+            assert_bits_eq(&a_l, &b_l, &format!("glided controls set while off block {block} L"));
+            assert_bits_eq(&a_r, &b_r, &format!("glided controls set while off block {block} R"));
+            let (bl, br) = base_out.get_or_insert_with(|| (a_l.clone(), a_r.clone()));
+            assert_bits_eq(&a_l, bl, &format!("glided controls block {block} vs 1 L"));
+            assert_bits_eq(&a_r, br, &format!("glided controls block {block} vs 1 R"));
         }
-        let silence = vec![0.0f32; SR as usize];
-        let _ = ott_unit_run(&mut glided, &silence, &silence, 128);
-        assert!(assert_no_alloc(|| glided.set_bypass(&cx0, true)));
-        let _ = ott_unit_run(&mut glided, &silence, &silence, 128);
-        assert_eq!(glided.weight(), 0.0);
-        assert!(assert_no_alloc(|| glided.set_bypass(&cx0, false)));
-        let (b_l, b_r) = ott_unit_run(&mut glided, &signal, &signal, 128);
-        assert_bits_eq(&a_l, &b_l, "glided controls set while off take effect at once L");
-        assert_bits_eq(&a_r, &b_r, "glided controls set while off take effect at once R");
     }
 
     // 7. Non-finite controls dropped, out-of-range clamped, wrong-kind rejected.
@@ -2511,10 +2658,11 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
     const PRESS: Frame = 24_000;
     let riff_buf = Arc::new(pluck::periodic(&pluck::RIFF_A, 12000.0, SR, 8.0, 0.3));
 
-    // 1. What is heard is what is recorded (`[Delay(57), OttUnit]`): take == monitor, latency == 57.
+    // 1. What is heard is what is recorded (`[Delay(57), OttUnit]`): take == monitor, latency == 57,
+    //    bit-identical across all 7 `BLOCKS` sizes.
     {
-        let run_take = |active: bool, depth: f64| {
-            let mut rig = Rig::with(Opts { align: PHYS + LIMITER, block: 128, ..Opts::default() });
+        let run_take = |active: bool, depth: f64, block: usize| {
+            let mut rig = Rig::with(Opts { align: PHYS + LIMITER, block, ..Opts::default() });
             assert!(rig.port(0).install_at(1, 1, 0, false, None, Box::new(Delay::new(PLUGIN))).is_ok());
             assert!(rig.port(0).install_at(2, 2, 1, true, None, Box::new(OttUnit::new(SR))).is_ok());
             let r = riff_buf.clone();
@@ -2531,7 +2679,7 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             rig.advance_to(t0 + PRESS + 1);
             let start = rig.start_frame();
             let downbeat = t0 + PRESS + 4 * 24_000;
-            assert_eq!(start, downbeat + PHYS + PLUGIN + LIMITER, "OttUnit adds no alignment latency");
+            assert_eq!(start, downbeat + PHYS + PLUGIN + LIMITER, "block {block}: OttUnit adds no alignment latency");
             rig.advance_to(rig.end_frame() + 1);
             let pcm = rig.pcm(0);
             let s = (start - t0) as usize;
@@ -2539,12 +2687,20 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             drain_returns(&mut rig);
             (pcm, heard)
         };
-        let (off_pcm, off_heard) = run_take(false, DEFAULT_DEPTH);
-        assert_eq!(off_pcm, off_heard, "bypassed take == heard");
-        for depth in [DEFAULT_DEPTH, 1.0] {
-            let (on_pcm, on_heard) = run_take(true, depth);
-            assert_eq!(on_pcm, on_heard, "DEPTH {depth}: take == heard");
-            assert_ne!(on_pcm, off_pcm, "DEPTH {depth}: take carries OTT");
+        let mut base_off: Option<Vec<f32>> = None;
+        let mut base_on: [Option<Vec<f32>>; 2] = [None, None];
+        for block in BLOCKS {
+            let (off_pcm, off_heard) = run_take(false, DEFAULT_DEPTH, block);
+            assert_eq!(off_pcm, off_heard, "block {block}: bypassed take == heard");
+            let bo = base_off.get_or_insert_with(|| off_pcm.clone());
+            assert_bits_eq(&off_pcm, bo, &format!("take bypassed block {block}"));
+            for (di, depth) in [DEFAULT_DEPTH, 1.0].into_iter().enumerate() {
+                let (on_pcm, on_heard) = run_take(true, depth, block);
+                assert_eq!(on_pcm, on_heard, "block {block} DEPTH {depth}: take == heard");
+                assert_ne!(on_pcm, off_pcm, "block {block} DEPTH {depth}: take carries OTT");
+                let b = base_on[di].get_or_insert_with(|| on_pcm.clone());
+                assert_bits_eq(&on_pcm, b, &format!("take DEPTH {depth} block {block}"));
+            }
         }
     }
 
@@ -2588,14 +2744,16 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
                     Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttDownward), v) => Setting::Downward(v),
                     _ => unreachable!(),
                 };
-                standalone.set(s);
-                unlinked_r.set(s);
+                assert_no_alloc(|| {
+                    standalone.set(s);
+                    unlinked_r.set(s);
+                });
             }
             let [l, r] = stereo_sig(F0 + k as Frame);
-            let [ol, or] = standalone.frame([l, r]);
+            let ([ol, or], mr) = assert_no_alloc(|| (standalone.frame([l, r]), unlinked_r.frame([r])[0]));
             want_l.push(ol);
             want_r.push(or);
-            mono_r.push(unlinked_r.frame([r])[0]);
+            mono_r.push(mr);
         }
         // Confirm the test signal actually distinguishes linked stereo detection from unlinked mono.
         assert!(max_abs_diff(&want_r, &mono_r) > 0.005, "linked detector must differ from independent mono on R");
@@ -2673,18 +2831,23 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             drain_returns(&mut rig);
         }
 
-        // Active -> bypass settles on exact last frame (`20_000 + fade - 1`).
-        let mut rig = Rig::new();
-        let r = riff_buf.clone();
-        rig.set_input(move |f| r[f as usize % r.len()]);
-        assert!(rig.port(0).install_at(1, 1, 0, true, None, Box::new(OttUnit::new(SR))).is_ok());
-        rig.send_at(F0 + 1_000, Command::SetUnitBypass(1, false));
-        rig.send_at(F0 + 20_000, Command::SetUnitBypass(1, true));
-        rig.keep_output();
-        rig.advance(30_000);
-        assert_eq!(rig.monitor.iter().zip(&dry).position(|(a, b)| a.to_bits() != b.to_bits()), Some(1_000));
-        assert_bits_eq(&rig.monitor[20_000 + fade - 1..], &dry[20_000 + fade - 1..], "active -> bypassed settles bit for bit");
-        drain_returns(&mut rig);
+        // Active -> bypass settles on exact last frame (`20_000 + fade - 1`) across all 7 block sizes.
+        let mut base_active_bypass: Option<Vec<f32>> = None;
+        for block in BLOCKS {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+            let r = riff_buf.clone();
+            rig.set_input(move |f| r[f as usize % r.len()]);
+            assert!(rig.port(0).install_at(1, 1, 0, true, None, Box::new(OttUnit::new(SR))).is_ok());
+            rig.send_at(F0 + 1_000, Command::SetUnitBypass(1, false));
+            rig.send_at(F0 + 20_000, Command::SetUnitBypass(1, true));
+            rig.keep_output();
+            rig.advance(30_000);
+            assert_eq!(rig.monitor.iter().zip(&dry).position(|(a, b)| a.to_bits() != b.to_bits()), Some(1_000), "block {block}");
+            assert_bits_eq(&rig.monitor[20_000 + fade - 1..], &dry[20_000 + fade - 1..], &format!("active -> bypassed block {block} settles bit for bit"));
+            let b = base_active_bypass.get_or_insert_with(|| rig.monitor.clone());
+            assert_bits_eq(&rig.monitor, b, &format!("active -> bypassed block {block} vs 1"));
+            drain_returns(&mut rig);
+        }
 
         // Un-bypass on frame 0 after a bypassed install fades over 10 ms (matching `InputSend::Ott`).
         let mut srig = Rig::new();
@@ -2717,8 +2880,8 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
     //    two orders differ from each other!).
     {
         let at = 30_077usize;
-        let run_ctrl = |extra: Option<Command>| {
-            let mut rig = Rig::new();
+        let run_ctrl = |block: usize, extra: Option<Command>| {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
             let r = riff_buf.clone();
             rig.set_input(move |f| r[f as usize % r.len()]);
             assert!(rig.port(0).install_at(1, 1, 0, true, None, Box::new(OttUnit::new(SR))).is_ok());
@@ -2732,19 +2895,24 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             drain_returns(&mut rig);
             mon
         };
-        let base = run_ctrl(None);
+        let base = run_ctrl(128, None);
         for (name, cmd) in [
             ("DEPTH", Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttDepth), 1.0)),
             ("TIME", Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttTime), 1.0)),
             ("UP", Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttUpward), 0.0)),
             ("DOWN", Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttDownward), 0.0)),
         ] {
-            let moved = run_ctrl(Some(cmd));
-            let first = moved.iter().zip(&base).position(|(a, b)| a.to_bits() != b.to_bits());
-            if name == "DEPTH" {
-                assert_eq!(first, Some(at), "DEPTH lands on its exact frame");
-            } else {
-                assert!(first.is_some_and(|k| (at..at + SR as usize).contains(&k)), "{name}: landed at {first:?}");
+            let mut ref_moved: Option<Vec<f32>> = None;
+            for block in BLOCKS {
+                let moved = run_ctrl(block, Some(cmd));
+                let first = moved.iter().zip(&base).position(|(a, b)| a.to_bits() != b.to_bits());
+                if name == "DEPTH" {
+                    assert_eq!(first, Some(at), "block {block}: DEPTH lands on its exact frame");
+                } else {
+                    assert!(first.is_some_and(|k| (at..at + SR as usize).contains(&k)), "block {block} {name}: landed at {first:?}");
+                }
+                let rm = ref_moved.get_or_insert_with(|| moved.clone());
+                assert_bits_eq(&moved, rm, &format!("ott control {name} block {block}"));
             }
         }
 
@@ -2788,43 +2956,52 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
         assert!(max_abs_diff(&order_outputs[0], &order_outputs[1]) > 1e-3, "same-frame param_first vs bypass_first must differ");
     }
 
-    // 6. Hard square onset through `OttUnit` leaves device & Share <= -0.3 dBFS and monitor <= CEILING.
+    // 6. Hard square onset through `OttUnit` leaves device & Share <= -0.3 dBFS and monitor <= CEILING
+    //    across all 7 `BLOCKS` sizes, bit-identical across block sizes.
     {
         for (amp, freq) in [(0.8f32, 100.0), (0.8, 200.0), (1.0, 200.0)] {
             for depth in [0.0, 0.5, 1.0] {
-                let mut rig = Rig::new();
-                rig.set(Command::SetMetronome(false));
-                let start = rig.frame + rig.seconds(1.0);
                 let half = (SR as f64 / (2.0 * freq)).round() as Frame;
-                assert!(rig.port(1).install_at(1, 1, 0, false, None, Box::new(SquareSource { start, half, amp })).is_ok());
-                assert!(rig.port(1).install_at(2, 2, 1, false, None, Box::new(OttUnit::new(SR))).is_ok());
-                rig.set(Command::SetUnitParam(2, UnitParam::Send(InputSendParam::OttDepth), depth));
-                rig.advance(rig.seconds(0.5));
-                rig.keep_output();
-                rig.advance(rig.seconds(2.5));
-                let dev = ott_peak(&rig.heard).max(ott_peak(&rig.heard_right)) as f64;
-                let share = ott_peak(&rig.share).max(ott_peak(&rig.share_right)) as f64;
-                assert!(ott_db(dev) <= -0.3, "square ±{amp} {freq} Hz DEPTH {depth}: device {:+.2} dBFS", ott_db(dev));
-                assert!(ott_db(share) <= -0.3, "square ±{amp} {freq} Hz DEPTH {depth}: share {:+.2} dBFS", ott_db(share));
-                drain_returns(&mut rig);
+                let mut base_heard: Option<Vec<f32>> = None;
+                let mut base_mon: Option<Vec<f32>> = None;
+                for block in BLOCKS {
+                    let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                    rig.set(Command::SetMetronome(false));
+                    let start = rig.frame + rig.seconds(1.0);
+                    assert!(rig.port(1).install_at(1, 1, 0, false, None, Box::new(SquareSource { start, half, amp })).is_ok());
+                    assert!(rig.port(1).install_at(2, 2, 1, false, None, Box::new(OttUnit::new(SR))).is_ok());
+                    rig.set(Command::SetUnitParam(2, UnitParam::Send(InputSendParam::OttDepth), depth));
+                    rig.advance(rig.seconds(0.5));
+                    rig.keep_output();
+                    rig.advance(rig.seconds(2.5));
+                    let dev = ott_peak(&rig.heard).max(ott_peak(&rig.heard_right)) as f64;
+                    let share = ott_peak(&rig.share).max(ott_peak(&rig.share_right)) as f64;
+                    assert!(ott_db(dev) <= -0.3, "block {block} square ±{amp} {freq} Hz DEPTH {depth}: device {:+.2} dBFS", ott_db(dev));
+                    assert!(ott_db(share) <= -0.3, "block {block} square ±{amp} {freq} Hz DEPTH {depth}: share {:+.2} dBFS", ott_db(share));
+                    let bh = base_heard.get_or_insert_with(|| rig.heard.clone());
+                    assert_bits_eq(&rig.heard, bh, &format!("square ±{amp} {freq} Hz DEPTH {depth} block {block} heard"));
+                    drain_returns(&mut rig);
 
-                let mut lrig = Rig::new();
-                lrig.set(Command::SetMetronome(false));
-                assert!(lrig.port(0).install_at(1, 1, 0, false, None, Box::new(OttUnit::new(SR))).is_ok());
-                lrig.set(Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttDepth), depth));
-                let lstart = lrig.frame + lrig.seconds(1.0);
-                lrig.set_input(move |f| if f < lstart { 0.0 } else if ((f - lstart) / half) % 2 == 0 { amp } else { -amp });
-                lrig.keep_output();
-                lrig.advance(lrig.seconds(3.0));
-                let mon = ott_peak(&lrig.monitor).max(ott_peak(&lrig.monitor_right)) as f64;
-                assert!(mon <= CEILING, "live square ±{amp} {freq} Hz DEPTH {depth}: monitor {:+.2} dBFS", ott_db(mon));
-                drain_returns(&mut lrig);
+                    let mut lrig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                    lrig.set(Command::SetMetronome(false));
+                    assert!(lrig.port(0).install_at(1, 1, 0, false, None, Box::new(OttUnit::new(SR))).is_ok());
+                    lrig.set(Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttDepth), depth));
+                    let lstart = lrig.frame + lrig.seconds(1.0);
+                    lrig.set_input(move |f| if f < lstart { 0.0 } else if ((f - lstart) / half) % 2 == 0 { amp } else { -amp });
+                    lrig.keep_output();
+                    lrig.advance(lrig.seconds(3.0));
+                    let mon = ott_peak(&lrig.monitor).max(ott_peak(&lrig.monitor_right)) as f64;
+                    assert!(mon <= CEILING, "block {block} live square ±{amp} {freq} Hz DEPTH {depth}: monitor {:+.2} dBFS", ott_db(mon));
+                    let bm = base_mon.get_or_insert_with(|| lrig.monitor.clone());
+                    assert_bits_eq(&lrig.monitor, bm, &format!("live square ±{amp} {freq} Hz DEPTH {depth} block {block} monitor"));
+                    drain_returns(&mut lrig);
+                }
             }
         }
     }
 
     // 7. Zero added latency samples (impulse & pluck arrive on exact same frame) and loops/click
-    //    never pass `OttUnit`.
+    //    never pass `OttUnit`, bit-identical across all 7 `BLOCKS` sizes.
     {
         const IMPULSE: usize = 20_000;
         const PLUCK: usize = 50_000;
@@ -2839,35 +3016,40 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
         let first_over = |x: &[f32], from: usize, len: usize| -> usize {
             x[from..from + len].iter().position(|v| v.abs() > 0.001).expect("arrived")
         };
-        let mut seen = Vec::new();
-        for active in [false, true] {
-            let mut rig = Rig::with(Opts { align: PHYS + LIMITER, block: 128, ..Opts::default() });
-            assert!(rig.port(0).install_at(1, 1, 0, !active, None, Box::new(OttUnit::new(SR))).is_ok());
-            let inp = input.clone();
-            rig.set_input(move |f| inp(f));
-            let t0 = rig.frame;
-            rig.keep_output();
-            rig.send_at(t0, Command::SetFixedLength(true));
-            rig.send_at(t0, Command::SetFixedBars(1.0));
-            rig.send_at(t0 + PRESS, Command::RecDub(0));
-            rig.advance_to(t0 + PRESS + 1);
-            assert_eq!(rig.start_frame(), start);
-            rig.advance_to(rig.end_frame() + 1);
-            let pcm = rig.pcm(0);
-            let s = (start - t0) as usize;
-            seen.push([
-                first_over(&rig.monitor, s + IMPULSE, 4_800),
-                first_over(&pcm, IMPULSE, 4_800),
-                first_over(&rig.monitor, s + PLUCK, 9_600),
-                first_over(&pcm, PLUCK, 9_600),
-            ]);
-            drain_returns(&mut rig);
+        let mut base_lat_pcm: [Option<Vec<f32>>; 2] = [None, None];
+        for block in BLOCKS {
+            let mut seen = Vec::new();
+            for (ai, active) in [false, true].into_iter().enumerate() {
+                let mut rig = Rig::with(Opts { align: PHYS + LIMITER, block, ..Opts::default() });
+                assert!(rig.port(0).install_at(1, 1, 0, !active, None, Box::new(OttUnit::new(SR))).is_ok());
+                let inp = input.clone();
+                rig.set_input(move |f| inp(f));
+                let t0 = rig.frame;
+                rig.keep_output();
+                rig.send_at(t0, Command::SetFixedLength(true));
+                rig.send_at(t0, Command::SetFixedBars(1.0));
+                rig.send_at(t0 + PRESS, Command::RecDub(0));
+                rig.advance_to(t0 + PRESS + 1);
+                assert_eq!(rig.start_frame(), start, "block {block}");
+                rig.advance_to(rig.end_frame() + 1);
+                let pcm = rig.pcm(0);
+                let s = (start - t0) as usize;
+                seen.push([
+                    first_over(&rig.monitor, s + IMPULSE, 4_800),
+                    first_over(&pcm, IMPULSE, 4_800),
+                    first_over(&rig.monitor, s + PLUCK, 9_600),
+                    first_over(&pcm, PLUCK, 9_600),
+                ]);
+                let bp = base_lat_pcm[ai].get_or_insert_with(|| pcm.clone());
+                assert_bits_eq(&pcm, bp, &format!("zero-latency active={active} block {block}"));
+                drain_returns(&mut rig);
+            }
+            assert_eq!(seen[0], seen[1], "block {block}: OttUnit adds no latency samples");
         }
-        assert_eq!(seen[0], seen[1], "OttUnit adds no latency samples");
 
-        // Loops and click never pass OttUnit.
-        let count_in = |active: bool| {
-            let mut rig = Rig::new();
+        // Loops and click never pass OttUnit across all 7 `BLOCKS` sizes.
+        let count_in = |active: bool, block: usize| {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
             assert!(rig.port(0).install_at(1, 1, 0, !active, None, Box::new(OttUnit::new(SR))).is_ok());
             rig.set(Command::SetUnitParam(1, UnitParam::Send(InputSendParam::OttDepth), 1.0));
             rig.keep_output();
@@ -2877,12 +3059,17 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             drain_returns(&mut rig);
             heard
         };
-        let (off_c, on_c) = (count_in(false), count_in(true));
-        assert!(ott_peak(&off_c) > 0.05);
-        assert_bits_eq(&on_c, &off_c, "click never passes OttUnit");
+        let mut base_click: Option<Vec<f32>> = None;
+        for block in BLOCKS {
+            let (off_c, on_c) = (count_in(false, block), count_in(true, block));
+            assert!(ott_peak(&off_c) > 0.05, "block {block}");
+            assert_bits_eq(&on_c, &off_c, &format!("click never passes OttUnit block {block}"));
+            let bc = base_click.get_or_insert_with(|| on_c.clone());
+            assert_bits_eq(&on_c, bc, &format!("click block {block} vs 1"));
+        }
 
-        let looping = |active: bool| {
-            let mut rig = Rig::new();
+        let looping = |active: bool, block: usize| {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
             let r = riff_buf.clone();
             rig.set_input(move |f| r[f as usize % r.len()]);
             rig.record_first_take(0, 1, 2400);
@@ -2897,10 +3084,16 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             drain_returns(&mut rig);
             out
         };
-        let (off_l, on_l) = (looping(false), looping(true));
-        assert!(ott_peak(&off_l.0) > 0.1);
-        assert_bits_eq(&on_l.0, &off_l.0, "loop L never passes OttUnit");
-        assert_bits_eq(&on_l.1, &off_l.1, "loop R never passes OttUnit");
+        let mut base_loop: Option<(Vec<f32>, Vec<f32>)> = None;
+        for block in BLOCKS {
+            let (off_l, on_l) = (looping(false, block), looping(true, block));
+            assert!(ott_peak(&off_l.0) > 0.1, "block {block}");
+            assert_bits_eq(&on_l.0, &off_l.0, &format!("loop L never passes OttUnit block {block}"));
+            assert_bits_eq(&on_l.1, &off_l.1, &format!("loop R never passes OttUnit block {block}"));
+            let bl = base_loop.get_or_insert_with(|| on_l.clone());
+            assert_bits_eq(&on_l.0, &bl.0, &format!("loop L block {block} vs 1"));
+            assert_bits_eq(&on_l.1, &bl.1, &format!("loop R block {block} vs 1"));
+        }
     }
 }
 
@@ -2974,9 +3167,11 @@ fn ott_unit_band_meter_matches_processor_sample_by_sample_and_folded() {
 
     // 3. Sample-by-sample equality (`block = 1`, `take_meter` every sample) against `StereoOtt`.
     let mut ref_ott = StereoOtt::new(SR);
-    ref_ott.set(Setting::Depth(1.0));
-    ref_ott.set(Setting::Time(0.0)); // fast release so gains/followers move noticeably inside windows
-    ref_ott.set(Setting::On(true));
+    assert_no_alloc(|| {
+        ref_ott.set(Setting::Depth(1.0));
+        ref_ott.set(Setting::Time(0.0)); // fast release so gains/followers move noticeably inside windows
+        ref_ott.set(Setting::On(true));
+    });
     // Settle the on-fade over 480 frames of silence on both processors so `OttUnit` and `StereoOtt` match.
     let mut unit = OttUnit::new(SR);
     assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(0), true)));
@@ -2989,7 +3184,7 @@ fn ott_unit_band_meter_matches_processor_sample_by_sample_and_folded() {
     let mut s_ol = [0.0f32; 1];
     let mut s_or = [0.0f32; 1];
     for k in 0..n {
-        let [rl, rr] = ref_ott.frame([sig_l[k], sig_r[k]]);
+        let [rl, rr] = assert_no_alloc(|| ref_ott.frame([sig_l[k], sig_r[k]]));
         let rg = ref_ott.gains();
         let re = ref_ott.env();
         per_sample_gains.push(rg);
@@ -3063,30 +3258,46 @@ fn ott_unit_band_meter_matches_processor_sample_by_sample_and_folded() {
         assert!(assert_no_alloc(|| u.set_bypass(&ott_cx(0), false)));
         let mut out_l = vec![0.0f32; block];
         let mut out_r = vec![0.0f32; block];
-        for (wi, &(start, end)) in windows.iter().enumerate() {
-            let mut pos = start;
-            while pos < end {
-                let len = block.min(end - pos);
+        let mut wi = 0usize;
+        let mut max_call = 0usize;
+        let mut block_start = 0usize;
+        while block_start < n {
+            let block_end = (block_start + block).min(n);
+            let mut pos = block_start;
+            while pos < block_end {
+                let win_end = windows[wi].1;
+                let end = block_end.min(win_end);
+                let len = end - pos;
+                max_call = max_call.max(len);
                 assert_no_alloc(|| {
                     u.process(
                         &ott_cx(pos as Frame),
-                        [&sig_l[pos..pos + len], &sig_r[pos..pos + len]],
+                        [&sig_l[pos..end], &sig_r[pos..end]],
                         &[],
                         [&mut out_l[..len], &mut out_r[..len]],
                     );
                 });
-                pos += len;
+                pos = end;
+                if pos == win_end {
+                    assert!(assert_no_alloc(|| u.take_meter(&mut bands)), "block {block} window {wi}");
+                    assert_meter_bits_eq(&bands, &want_windows[wi], &format!("block {block} window {wi}"));
+                    assert!(!assert_no_alloc(|| u.take_meter(&mut bands)), "block {block} window {wi} second take");
+                    wi += 1;
+                }
             }
-            assert!(assert_no_alloc(|| u.take_meter(&mut bands)), "block {block} window {wi}");
-            assert_meter_bits_eq(&bands, &want_windows[wi], &format!("block {block} window {wi}"));
-            assert!(!assert_no_alloc(|| u.take_meter(&mut bands)), "block {block} window {wi} second take");
+            block_start = block_end;
         }
+        assert_eq!(wi, windows.len(), "block {block}: all windows taken");
+        assert_eq!(max_call, block, "block {block}: full block size must reach OttUnit::process");
     }
 
-    // 4 ms (192-sample) cadence across all 7 block sizes matches sample-by-sample fold bit for bit.
+    // 4 ms (192-sample) cadence across all 7 block sizes: outer blocks of size `block` are split
+    // where each 192-sample take falls, so every block size (including 480 and 1024) reaches the
+    // unit with its own call-length sequence instead of collapsing to identical 192-frame calls.
     let stride = 192usize;
     let total_4ms = stride * 16; // 3072 samples
     let want_4ms: Vec<[BandMeter; 3]> = (0..16).map(|i| fold_ref(i * stride, (i + 1) * stride)).collect();
+    let mut call_patterns: Vec<(usize, Vec<usize>)> = Vec::new();
     for block in BLOCKS {
         let mut u = OttUnit::new(SR);
         assert!(assert_no_alloc(|| u.set_bypass(&ott_cx(0), true)));
@@ -3095,25 +3306,426 @@ fn ott_unit_band_meter_matches_processor_sample_by_sample_and_folded() {
         assert!(assert_no_alloc(|| u.set_bypass(&ott_cx(0), false)));
         let mut out_l = vec![0.0f32; block];
         let mut out_r = vec![0.0f32; block];
+        let mut calls = Vec::new();
         let mut wi = 0usize;
-        let mut pos = 0usize;
-        while pos < total_4ms {
-            let next_take = (wi + 1) * stride;
-            let len = block.min(next_take - pos);
-            assert_no_alloc(|| {
-                u.process(
-                    &ott_cx(pos as Frame),
-                    [&sig_l[pos..pos + len], &sig_r[pos..pos + len]],
-                    &[],
-                    [&mut out_l[..len], &mut out_r[..len]],
-                );
-            });
-            pos += len;
-            if pos == next_take {
-                assert!(assert_no_alloc(|| u.take_meter(&mut bands)), "4ms block {block} win {wi}");
-                assert_meter_bits_eq(&bands, &want_4ms[wi], &format!("4ms block {block} win {wi}"));
-                wi += 1;
+        let mut block_start = 0usize;
+        while block_start < total_4ms {
+            let block_end = (block_start + block).min(total_4ms);
+            let mut pos = block_start;
+            while pos < block_end {
+                let next_take = (wi + 1) * stride;
+                let end = block_end.min(next_take);
+                let len = end - pos;
+                calls.push(len);
+                assert_no_alloc(|| {
+                    u.process(
+                        &ott_cx(pos as Frame),
+                        [&sig_l[pos..end], &sig_r[pos..end]],
+                        &[],
+                        [&mut out_l[..len], &mut out_r[..len]],
+                    );
+                });
+                pos = end;
+                if pos == next_take {
+                    assert!(assert_no_alloc(|| u.take_meter(&mut bands)), "4ms block {block} win {wi}");
+                    assert_meter_bits_eq(&bands, &want_4ms[wi], &format!("4ms block {block} win {wi}"));
+                    wi += 1;
+                }
+            }
+            block_start = block_end;
+        }
+        assert_eq!(wi, want_4ms.len(), "4ms block {block}: all 16 takes ran");
+        call_patterns.push((block, calls));
+    }
+    for i in 0..call_patterns.len() {
+        for j in (i + 1)..call_patterns.len() {
+            assert_ne!(
+                call_patterns[i].1, call_patterns[j].1,
+                "4ms meter loop must not feed identical call patterns to blocks {} and {}",
+                call_patterns[i].0, call_patterns[j].0
+            );
+        }
+    }
+}
+
+/// Review fix item 1: repeating a bypass command mid-ramp restarts the ramp from the gain reached
+/// (matching legacy `InputFx::set_on` for ECHO, RING MOD and REVERB, and legacy `StereoOtt::set`
+/// for OTT), while repeating a settled bypass leaves the settled state unchanged, across all 7
+/// `BLOCKS` sizes.
+#[test]
+fn repeated_bypass_restarts_ramp_like_legacy_send_and_keeps_settled_state() {
+    const MID_RAMP: Frame = 480; // halfway into a 20 ms (960-frame) send ramp
+
+    for send in [InputSend::Echo, InputSend::Ring, InputSend::Reverb] {
+        let make_unit = || -> Box<dyn UnitProcessor> {
+            match send {
+                InputSend::Echo => Box::new(EchoUnit::new(SR)),
+                InputSend::Ring => Box::new(RingUnit::new(SR)),
+                InputSend::Reverb => Box::new(new_reverb_unit()),
+                _ => unreachable!(),
+            }
+        };
+        let setup_send = |rig: &mut Rig, at: Frame| match send {
+            InputSend::Echo => {
+                rig.send_at(at, Command::SetInputSendParam(InputSendParam::EchoTime, 3.0)); // 1/16 = 6000
+                rig.send_at(at, Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.0));
+                rig.send_at(at, Command::SetInputSendParam(InputSendParam::EchoLevel, 1.0));
+            }
+            InputSend::Ring => {
+                rig.send_at(at, Command::SetInputSendParam(InputSendParam::RingFreq, 300.0));
+                rig.send_at(at, Command::SetInputSendParam(InputSendParam::RingLevel, 1.0));
+            }
+            InputSend::Reverb => {
+                rig.send_at(at, Command::SetInputSendParam(InputSendParam::ReverbLevel, 1.0));
+            }
+            _ => unreachable!(),
+        };
+        let setup_unit = |rig: &mut Rig, at: Frame| match send {
+            InputSend::Echo => {
+                rig.send_at(at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoTime), 3.0));
+                rig.send_at(at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoFeedback), 0.0));
+                rig.send_at(at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::EchoLevel), 1.0));
+            }
+            InputSend::Ring => {
+                rig.send_at(at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::RingFreq), 300.0));
+                rig.send_at(at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::RingLevel), 1.0));
+            }
+            InputSend::Reverb => {
+                rig.send_at(at, Command::SetUnitParam(1, UnitParam::Send(InputSendParam::ReverbLevel), 1.0));
+            }
+            _ => unreachable!(),
+        };
+
+        // A. Repeated ON 480 frames into an opening ramp restarts a fresh 20 ms ramp.
+        let t0 = F0 + 200;
+        let total = 10_000 as Frame;
+        let run_send = |repeat: bool| {
+            let mut srig = Rig::new();
+            srig.set_level(0.5);
+            setup_send(&mut srig, t0);
+            srig.send_at(t0, Command::SetInputSend(send, true));
+            if repeat {
+                srig.send_at(t0 + MID_RAMP, Command::SetInputSend(send, true));
+            }
+            srig.keep_output();
+            srig.advance(total);
+            srig.monitor
+        };
+        let want_rep = run_send(true);
+        let want_once = run_send(false);
+        let floor = if send == InputSend::Reverb { 1e-3f32 } else { 0.02f32 };
+        assert!(
+            max_abs_diff(&want_rep, &want_once) > floor,
+            "{send:?} open repeat must differ from single ON (diff {})",
+            max_abs_diff(&want_rep, &want_once)
+        );
+
+        let mut base_open: Option<[Vec<f32>; 2]> = None;
+        for block in BLOCKS {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+            if send == InputSend::Reverb {
+                rig.set_stereo_inputs(|_| [0.5, 0.5], |_| [0.0, 0.0]);
+            } else {
+                rig.set_level(0.5);
+            }
+            assert!(rig.port(0).install_at(1, 1, 0, true, None, make_unit()).is_ok());
+            setup_unit(&mut rig, t0);
+            rig.send_at(t0, Command::SetUnitBypass(1, false));
+            rig.send_at(t0 + MID_RAMP, Command::SetUnitBypass(1, false));
+            rig.keep_output();
+            rig.advance(total);
+            if send == InputSend::Reverb {
+                let folded: Vec<f32> = rig.monitor.iter().zip(&rig.monitor_right).map(|(&l, &r)| lf_engine::fold(l, r)).collect();
+                assert!(max_abs_diff(&folded, &want_rep) < 1e-6, "reverb open repeat block {block} vs InputFx");
+                assert!(max_abs_diff(&folded, &want_once) > floor, "reverb open repeat block {block} vs single ON");
+            } else {
+                assert_bits_eq(&rig.monitor, &want_rep, &format!("{send:?} open repeat block {block} L"));
+                assert_bits_eq(&rig.monitor_right, &want_rep, &format!("{send:?} open repeat block {block} R"));
+            }
+            let cur = [rig.monitor.clone(), rig.monitor_right.clone()];
+            let b = base_open.get_or_insert_with(|| cur.clone());
+            assert_bits_eq(&cur[0], &b[0], &format!("{send:?} open repeat block {block} vs 1 L"));
+            assert_bits_eq(&cur[1], &b[1], &format!("{send:?} open repeat block {block} vs 1 R"));
+            drain_returns(&mut rig);
+        }
+
+        // B. Repeated OFF 480 frames into a closing ramp restarts a fresh 20 ms closing ramp.
+        let settle = 2_400 as Frame;
+        let t_off = F0 + settle + 200;
+        let run_close_send = |repeat: bool| {
+            let mut srig = Rig::new();
+            setup_send(&mut srig, F0);
+            srig.send_at(F0, Command::SetInputSend(send, true));
+            srig.advance(settle);
+            srig.set_level(0.5);
+            srig.send_at(t_off, Command::SetInputSend(send, false));
+            if repeat {
+                srig.send_at(t_off + MID_RAMP, Command::SetInputSend(send, false));
+            }
+            srig.keep_output();
+            srig.advance(total);
+            srig.monitor
+        };
+        let want_close_rep = run_close_send(true);
+        let want_close_once = run_close_send(false);
+        assert!(
+            max_abs_diff(&want_close_rep, &want_close_once) > floor,
+            "{send:?} close repeat must differ from single OFF (diff {})",
+            max_abs_diff(&want_close_rep, &want_close_once)
+        );
+        let mut base_close: Option<[Vec<f32>; 2]> = None;
+        for block in BLOCKS {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+            assert!(rig.port(0).install_at(1, 1, 0, false, None, make_unit()).is_ok());
+            setup_unit(&mut rig, F0);
+            rig.advance(settle);
+            if send == InputSend::Reverb {
+                rig.set_stereo_inputs(|_| [0.5, 0.5], |_| [0.0, 0.0]);
+            } else {
+                rig.set_level(0.5);
+            }
+            rig.send_at(t_off, Command::SetUnitBypass(1, true));
+            rig.send_at(t_off + MID_RAMP, Command::SetUnitBypass(1, true));
+            rig.keep_output();
+            rig.advance(total);
+            if send == InputSend::Reverb {
+                let folded: Vec<f32> = rig.monitor.iter().zip(&rig.monitor_right).map(|(&l, &r)| lf_engine::fold(l, r)).collect();
+                assert!(max_abs_diff(&folded, &want_close_rep) < 1e-6, "reverb close repeat block {block} vs InputFx");
+                assert!(max_abs_diff(&folded, &want_close_once) > floor, "reverb close repeat block {block} vs single OFF");
+            } else {
+                assert_bits_eq(&rig.monitor, &want_close_rep, &format!("{send:?} close repeat block {block} L"));
+                assert_bits_eq(&rig.monitor_right, &want_close_rep, &format!("{send:?} close repeat block {block} R"));
+            }
+            let cur = [rig.monitor.clone(), rig.monitor_right.clone()];
+            let b = base_close.get_or_insert_with(|| cur.clone());
+            assert_bits_eq(&cur[0], &b[0], &format!("{send:?} close repeat block {block} vs 1 L"));
+            assert_bits_eq(&cur[1], &b[1], &format!("{send:?} close repeat block {block} vs 1 R"));
+            drain_returns(&mut rig);
+        }
+
+        // C. Settled ON and settled OFF are bit-for-bit unchanged by a repeated bypass command.
+        for settled_bypassed in [false, true] {
+            let run_settled = |block: usize, repeat: bool| {
+                let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                assert!(rig.port(0).install_at(1, 1, 0, settled_bypassed, None, make_unit()).is_ok());
+                setup_unit(&mut rig, F0);
+                rig.advance(settle);
+                rig.set_stereo_inputs(|_| [0.5, 0.5], |_| [0.0, 0.0]);
+                if repeat {
+                    rig.send_at(F0 + settle + 200, Command::SetUnitBypass(1, settled_bypassed));
+                }
+                rig.keep_output();
+                rig.advance(4_000);
+                let out = [rig.monitor.clone(), rig.monitor_right.clone()];
+                drain_returns(&mut rig);
+                out
+            };
+            let want = run_settled(128, false);
+            for block in BLOCKS {
+                let got = run_settled(block, true);
+                assert_bits_eq(&got[0], &want[0], &format!("{send:?} settled bypassed={settled_bypassed} block {block} L"));
+                assert_bits_eq(&got[1], &want[1], &format!("{send:?} settled bypassed={settled_bypassed} block {block} R"));
             }
         }
+    }
+
+    // OTT: repeated bypass mid-fade and when settled matches legacy `InputSend::Ott` bit for bit.
+    {
+        let t0 = F0 + 200;
+        let mut srig = Rig::new();
+        srig.set_level(0.35);
+        srig.send_at(t0, Command::SetInputSend(InputSend::Ott, true));
+        srig.send_at(t0 + 240, Command::SetInputSend(InputSend::Ott, true));
+        srig.keep_output();
+        srig.advance(3_000);
+        let want_ott = srig.monitor.clone();
+        for block in BLOCKS {
+            let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+            rig.set_level(0.35);
+            assert!(rig.port(0).install_at(1, 1, 0, true, None, Box::new(OttUnit::new(SR))).is_ok());
+            rig.send_at(t0, Command::SetUnitBypass(1, false));
+            rig.send_at(t0 + 240, Command::SetUnitBypass(1, false));
+            rig.keep_output();
+            rig.advance(3_000);
+            assert_bits_eq(&rig.monitor, &want_ott, &format!("ott mid-fade repeat block {block}"));
+            drain_returns(&mut rig);
+        }
+
+        for settled_bypassed in [false, true] {
+            let run_ott_settled = |block: usize, repeat: bool| {
+                let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+                assert!(rig.port(0).install_at(1, 1, 0, settled_bypassed, None, Box::new(OttUnit::new(SR))).is_ok());
+                rig.set_level(0.35);
+                if repeat {
+                    rig.send_at(F0 + 200, Command::SetUnitBypass(1, settled_bypassed));
+                }
+                rig.keep_output();
+                rig.advance(2_000);
+                let mon = rig.monitor.clone();
+                drain_returns(&mut rig);
+                mon
+            };
+            let want = run_ott_settled(128, false);
+            for block in BLOCKS {
+                let got = run_ott_settled(block, true);
+                assert_bits_eq(&got, &want, &format!("ott settled bypassed={settled_bypassed} block {block}"));
+            }
+        }
+    }
+}
+
+/// Review fix item 4: `tests/ott.rs`'s static gain curve points (including the 6 dB downward soft
+/// knee and no-inversion monotonicity) and soft-knee ceiling shape checks run directly on `OttUnit`
+/// under `assert_no_alloc`, bit-identical across all 7 `BLOCKS` sizes. A hard clip at `CEILING` or
+/// `CEILING_KNEE`, or a hard knee in the gain curve, fails this test.
+#[test]
+fn ott_unit_static_gain_points_and_soft_knee_shape() {
+    // At DC, LP88² · AP2500 has exact unity gain in band 0 and 0 in bands 1 & 2, so the linked
+    // peak follower settles with zero ripple to |x|, letting us measure both the static gain curve
+    // (DEPTH = 1) and the wet soft ceiling (DEPTH = 0) directly through `OttUnit::process`.
+    const RAMP: usize = 4_800; // 100 ms raised-cosine ramp avoids LP88² step overshoot on peak follower
+    const SETTLE: usize = 24_000; // 500 ms hold settles any residual to < 1e-5 dB at TIME = 0
+
+    let settled_dc = |depth: f64, amp: f32, block: usize| -> (f32, f32, [f64; 3]) {
+        let mut unit = OttUnit::new(SR);
+        let cx0 = ott_cx(0);
+        assert!(assert_no_alloc(|| unit.set_bypass(&cx0, true)));
+        assert_eq!(assert_no_alloc(|| unit.set_param(&cx0, UnitParam::Send(InputSendParam::OttDepth), depth)), Some(depth));
+        assert_eq!(assert_no_alloc(|| unit.set_param(&cx0, UnitParam::Send(InputSendParam::OttTime), 0.0)), Some(0.0));
+        assert!(assert_no_alloc(|| unit.set_bypass(&cx0, false)));
+        let mut inp = Vec::with_capacity(RAMP + SETTLE);
+        for k in 0..RAMP {
+            let t = (k + 1) as f64 / RAMP as f64;
+            let w = 0.5 * (1.0 - (PI * t).cos());
+            inp.push((amp as f64 * w) as f32);
+        }
+        inp.resize(RAMP + SETTLE, amp);
+        let (ol, or) = ott_unit_run(&mut unit, &inp, &inp, block);
+        (*ol.last().unwrap(), *or.last().unwrap(), unit.gains())
+    };
+
+    // 1. Static gain curve points from `tests/ott.rs::the_gain_curve_holds_its_static_points`.
+    let points = [
+        (-90.0, 0.0),
+        (-60.0, 0.0),
+        (-57.0, 12.0 * 0.25),
+        (-54.0, 12.0 * 0.5),
+        (-51.0, 10.0 * 0.75),
+        (-48.0, 8.0),
+        (-45.0, 6.0),
+        (-36.0, 0.0),
+        (-30.0, 0.0),
+        (-27.0, 0.0),
+        (-24.0, -0.75 * 9.0 / 12.0), // center of the 6 dB downward soft knee (-0.5625 dB; hard knee = 0)
+        (-21.0, -2.25),
+        (-12.0, -9.0),
+        (0.0, -18.0),
+    ];
+    for &(level, want_db) in &points {
+        let amp = 10f64.powf(level / 20.0) as f32;
+        let mut base_y: Option<f32> = None;
+        for block in BLOCKS {
+            let (yl, yr, gains) = settled_dc(1.0, amp, block);
+            assert_eq!(yl.to_bits(), yr.to_bits(), "level {level} block {block}: L == R");
+            let by = *base_y.get_or_insert(yl);
+            assert_eq!(yl.to_bits(), by.to_bits(), "level {level} block {block} vs 1");
+            let gain_from_unit = ott_db(gains[0]) - MAKEUP_DB;
+            let gain_from_audio = ott_db((yl.abs() as f64) / (amp as f64)) - MAKEUP_DB;
+            assert!(
+                (gain_from_unit - want_db).abs() < 1e-4,
+                "level {level} dBFS block {block}: unit gain {gain_from_unit:.6} dB vs want {want_db:.6}"
+            );
+            assert!(
+                (gain_from_audio - want_db).abs() < 1e-3,
+                "level {level} dBFS block {block}: audio gain {gain_from_audio:.6} dB vs want {want_db:.6}"
+            );
+        }
+    }
+
+    // Monotonicity (no inversion): louder DC levels always leave `OttUnit` strictly louder.
+    for block in BLOCKS {
+        let mut unit = OttUnit::new(SR);
+        let cx0 = ott_cx(0);
+        assert!(assert_no_alloc(|| unit.set_bypass(&cx0, true)));
+        assert_eq!(assert_no_alloc(|| unit.set_param(&cx0, UnitParam::Send(InputSendParam::OttDepth), 1.0)), Some(1.0));
+        assert_eq!(assert_no_alloc(|| unit.set_param(&cx0, UnitParam::Send(InputSendParam::OttTime), 0.0)), Some(0.0));
+        assert!(assert_no_alloc(|| unit.set_bypass(&cx0, false)));
+        let mut last = 0.0f32;
+        for step in -90..=0 {
+            let amp = 10f64.powf(step as f64 / 20.0) as f32;
+            let inp = vec![amp; 4_800];
+            let (ol, _) = ott_unit_run(&mut unit, &inp, &inp, block);
+            let y = *ol.last().unwrap();
+            assert!(y > last, "block {block}: curve folded back at {step} dBFS ({y} <= {last})");
+            last = y;
+        }
+    }
+
+    // 2. Soft-knee ceiling shape on `OttUnit` at DEPTH = 0 (unity bands -> direct `ceiling(x)`):
+    //    identity below `CEILING_KNEE`, slope 1 at the knee, `tanh(1)` one room past, slope
+    //    `1/cosh²(0.5)` half a room past, odd, monotonic, and `<= CEILING` out to +40 dBFS.
+    let room = CEILING - CEILING_KNEE;
+    let h = 2e-3;
+    let eval_ceiling = |x: f64, block: usize| -> f64 {
+        let (yl, yr, _) = settled_dc(0.0, x as f32, block);
+        assert_eq!(yl.to_bits(), yr.to_bits(), "ceiling x={x} block {block}: L == R");
+        yl as f64
+    };
+    let mut base_shape: Option<Vec<u32>> = None;
+    for block in BLOCKS {
+        let mut shape_bits = Vec::new();
+        for x in [0.0, 1e-6, 0.25, CEILING_KNEE] {
+            let yp = eval_ceiling(x, block);
+            let yn = eval_ceiling(-x, block);
+            assert!((yp - x).abs() < 1e-6, "block {block} identity +{x}: got {yp}");
+            assert!((yn + x).abs() < 1e-6, "block {block} identity -{x}: got {yn}");
+            shape_bits.push((yp as f32).to_bits());
+            shape_bits.push((yn as f32).to_bits());
+        }
+        // Slope 1 entering the soft ceiling above `CEILING_KNEE`.
+        let y_knee = eval_ceiling(CEILING_KNEE, block);
+        let y_knee_h = eval_ceiling(CEILING_KNEE + h, block);
+        let knee_slope = (y_knee_h - y_knee) / h;
+        assert!((knee_slope - 1.0).abs() < 2e-3, "block {block}: slope into ceiling knee {knee_slope}");
+
+        // One room past the knee: `CEILING_KNEE + room * tanh(1)` (hard clip at CEILING is off by ~0.032).
+        let y_room = eval_ceiling(CEILING_KNEE + room, block);
+        let want_room = CEILING_KNEE + room * 1f64.tanh();
+        assert!((y_room - want_room).abs() < 1e-5, "block {block}: 1-room bend {y_room} vs {want_room}");
+        shape_bits.push((y_room as f32).to_bits());
+
+        // Half a room past the knee: slope is `1 / cosh²(0.5)` (hard clip has slope 1 or 0).
+        let mid = CEILING_KNEE + room / 2.0;
+        let y_lo = eval_ceiling(mid - h, block);
+        let y_hi = eval_ceiling(mid + h, block);
+        let mid_slope = (y_hi - y_lo) / (2.0 * h);
+        let want_slope = 1.0 / 0.5f64.cosh().powi(2);
+        assert!((mid_slope - want_slope).abs() < 2e-3, "block {block}: mid-knee slope {mid_slope} vs {want_slope}");
+        shape_bits.push((y_lo as f32).to_bits());
+        shape_bits.push((y_hi as f32).to_bits());
+
+        // Monotonic, odd, and <= CEILING out to +40 dBFS (x = 100.0).
+        let mut last = y_knee;
+        for &x in &[
+            CEILING_KNEE + 0.25 * room,
+            CEILING_KNEE + 0.5 * room,
+            CEILING_KNEE + room,
+            CEILING_KNEE + 2.0 * room,
+            1.5,
+            3.0,
+            10.0,
+            30.0,
+            100.0,
+        ] {
+            let yp = eval_ceiling(x, block);
+            let yn = eval_ceiling(-x, block);
+            assert!(yp >= last, "block {block}: ceiling folded back at {x} ({yp} < {last})");
+            assert!(yp <= CEILING, "block {block}: ceiling exceeded CEILING at {x}: {yp}");
+            assert_eq!((yn as f32).to_bits(), (-(yp as f32)).to_bits(), "block {block}: ceiling odd at {x}");
+            shape_bits.push((yp as f32).to_bits());
+            last = yp;
+        }
+        let bs = base_shape.get_or_insert_with(|| shape_bits.clone());
+        assert_eq!(&shape_bits, bs, "block {block}: soft-knee shape bits match block 1");
     }
 }
