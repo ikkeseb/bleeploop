@@ -16,8 +16,10 @@
  *   a scripted `failed` plate without `parked` is a failed add (no seat in the sum, no source, gone at once);
  * - the batch: `SetUnitBypass`, `ToggleUnit` and `Toggle.Units` (any on: all off, else all on, one
  *   `Toggled`; none of the kind: nothing) switch the model; `SetUnitParam` clamped as the engine clamps
- *   (ECHO's level 2 reads 1, its time rounds to an index, SYNTH's level stops at 1.5); a param of another
- *   kind and an unseated id dropped;
+ *   (ECHO's level 2 reads 1, its time rounds to an index, SYNTH's level stops at 1.5; a SYNTH added with
+ *   its pick out of range plays pick 0); a param of another kind and an unseated id dropped; a SYNTH pick
+ *   (`input.pickSynth`) lands in the model as the router's `SetUnitParam`, a pick on another kind dropped,
+ *   and an engine batch carrying the pick refused whole;
  * - D29 by unit across both slots (a move keeps the owner; orphaned; unordered); tones by §8 (a tone file
  *   read and identity-checked, its own unit first in either slot, an unmatched tone kept as the slot's file
  *   a new unit starts from, a token bound to its plugin); reload (the old seat counted while it loads, its plate
@@ -442,10 +444,27 @@ await probe(async ({ open }) => {
   assert.deepEqual(await call('add', 1, synthB, { kind: 'synth', params: { gainLead: 3, instrument: 9 } }, 2), { ok: 'seated' });
   assert.deepEqual(ids(await last(), 1), [synthB, echoB], 'SYNTH heads slot B');
   const synthParams = unit(await last(), synthB).params;
-  assert.deepEqual([synthParams.gainLead, synthParams.instrument, synthParams.gainBass], [1.5, 5, 1], 'built clamped, the rest at defaults');
+  assert.deepEqual([synthParams.gainLead, synthParams.instrument, synthParams.gainBass], [1.5, 0, 1], 'built clamped, a pick out of range refused (pick 0, as the native factory), the rest at defaults');
   m = await mark();
   await send({ SetUnitParam: [synthB, 'gainPad', -2] });
   await waitFrames(m, (f) => f.chains && f.chains[1].units[0].params.gainPad === 0, 'SYNTH level clamped');
+  // SYNTH's pick: only through the router's `pickSynth`, applied as its `SetUnitParam`; an engine batch
+  // carrying one is refused whole, as native MIDI refuses a router command.
+  const pickDropped = await page.evaluate(() => window.__lf.native.chain.dropped.length);
+  m = await mark();
+  assert.equal(await page.evaluate((id) => window.__platform.input.pickSynth(1, id, 5), synthB), true, 'the pick batch ran');
+  await waitFrames(m, (f) => f.chains && f.chains[1].units[0].params.instrument === 5, 'the pick in the model');
+  assert.deepEqual(await page.evaluate(() => window.__lf.native.inputSent.at(-1)), { pickSynth: { slot: 1, unit: synthB, instrument: 5 } });
+  assert.ok(!(await page.evaluate(() => window.__lf.native.sent.some((c) => c.SetUnitParam?.[1] === 'instrument'))), 'the router’s param is no command the UI sent');
+  const direct = await page.evaluate(
+    async (id) => window.__lf.platform.input.send(1, [{ engine: { SetUnitParam: [id, 'instrument', 2] } }]).then(() => 'ran', (e) => e.message),
+    synthB,
+  );
+  assert.match(direct, /goes through the note router/, 'an engine batch carrying the pick is refused');
+  await page.evaluate((id) => window.__platform.input.pickSynth(1, id, 3), echoB);
+  await page.waitForTimeout(50);
+  assert.equal(unit(await last(), synthB).params.instrument, 5, 'nothing else moved the pick');
+  assert.deepEqual((await page.evaluate(() => window.__lf.native.chain.dropped.slice())).slice(pickDropped).map((d) => d.SetUnitParam), [[echoB, 'instrument', 3]], 'a pick on an ECHO dropped');
   for (const id of [synthB, echoB]) assert.deepEqual(await call('remove', id), { ok: null });
 
   // ── D29 by unit, across both slots ────────────────────────────────────────────────────────────────

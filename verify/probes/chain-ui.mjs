@@ -27,6 +27,10 @@
  * - LIVE follows the applied head: a synth still loading does not take it away;
  * - the slot's level and the note target in chain mode: `SetSlotGain`, `{ Slot: n }`, never
  *   `SetInstrumentGain`; a plugin's editor window closed by its own close clears the plate's editor press;
+ * - a synth choice on a slot a seated SYNTH heads (the `+` menu's instrument, `selectSynth`) is one
+ *   `pickSynth` to the router, never an add: the model takes it, the plate reads it, the slot becomes the
+ *   MIDI slot (the pick, then its note target, in one batch), the drum layout follows a Drum pick; the same
+ *   pick again sends none; a pick that undoes one still on its way is sent;
  * - the row's popovers hang from their plate (the name's Parameters, the `+` menu);
  * - the OTT face: a press on the plate's name opens it under the row; DEPTH by the keyboard and by a drag
  *   sends `SetUnitParam` and shows the feed's value; its glass (read-outs, NOW ladders, history, level
@@ -877,6 +881,63 @@ await probe(async ({ open }) => {
         assert.ok(!(await sent()).some((c) => c.SetInstrumentGain), 'no SetInstrumentGain in chain mode');
         const last = (await sent()).filter((c) => c.SetSlotGain).slice(-2).map((c) => c.SetSlotGain[0]).sort();
         assert.deepEqual(last, [0, 1], 'a reset resends both slots’ levels');
+      });
+      await check('a synth choice on a slot a SYNTH heads is a pick on it: the + menu and the legacy picker; the drum layout follows the pick', async () => {
+        const inputSent = () => page.evaluate(() => JSON.parse(JSON.stringify(window.__lf.native.inputSent)));
+        const picks = async (from) => (await inputSent()).slice(from).filter((e) => e.pickSynth).map((e) => e.pickSynth);
+        const adds = async () => (await calls()).filter((x) => x[0] === 'add').length;
+        const pickOf = async () => (await chains())[1].units[0].params.instrument;
+        const keys = () => page.locator('section.zone--keyboard').getAttribute('aria-label');
+        await page.evaluate(() => window.__lf.setActiveSlot(0));
+        await show('b');
+        const [synth] = await ids(1);
+        assert.deepEqual([(await chains())[1].units[0].kind, await pickOf()], ['synth', 1], 'B: a Bass SYNTH heads');
+        assert.equal(await keys(), 'Keyboard');
+        const addsBefore = await adds();
+        let from = (await inputSent()).length;
+        // the + menu's Drum: a pick on the seated SYNTH, never an add; its slot becomes the MIDI slot
+        await add('b', 'Drum');
+        assert.deepEqual(await picks(from), [{ slot: 1, unit: synth, instrument: 5 }], 'one pick to the router');
+        assert.equal(await adds(), addsBefore, 'no add call');
+        assert.equal(await pickOf(), 5, 'the pick reaches the model');
+        assert.equal(await plate(synth).locator('.plate__name').textContent(), 'Drum', 'the plate reads the pick');
+        assert.equal(await page.evaluate(() => window.__lf.activeSlot()), 1, 'B is the MIDI slot');
+        const batch = await page.evaluate(() => JSON.parse(JSON.stringify(window.__lf.native.batches)).find((b) => b.items.some((i) => i.input?.pickSynth)));
+        const rest = batch.items.slice(batch.items.findIndex((i) => i.input?.pickSynth) + 1);
+        assert.ok(rest.some((i) => JSON.stringify(i.input?.selectTarget) === JSON.stringify({ slot: 1, target: { Slot: 1 } })), `the pick, then B as the note target, in one batch: ${JSON.stringify(batch.items)}`);
+        assert.equal(await keys(), 'Drums', 'the drum layout follows the Drum pick');
+        assert.equal(await page.locator('.kb--drum').count(), 1, 'the keyboard draws pads');
+        // the same pick again sends none
+        from = (await inputSent()).length;
+        await add('b', 'Drum');
+        await page.evaluate(() => window.__lf.selectSynth(1, 'drum'));
+        await settle();
+        assert.deepEqual(await picks(from), [], 'the same pick again: no pick sent');
+        assert.equal(await adds(), addsBefore, 'and no add');
+        // the legacy picker's call in chain mode: a pick too
+        from = (await inputSent()).length;
+        await page.evaluate(() => window.__lf.selectSynth(1, 'lead'));
+        await settle();
+        assert.deepEqual(await picks(from), [{ slot: 1, unit: synth, instrument: 0 }], 'selectSynth picks on the SYNTH');
+        assert.equal(await pickOf(), 0);
+        assert.equal(await keys(), 'Keyboard', 'the piano layout back with Lead');
+        // a pick that undoes one still on its way is sent (judged against the pick in flight, not the feed)
+        from = (await inputSent()).length;
+        await page.evaluate(() => (window.__lf.native.holdApply = true));
+        try {
+          await page.evaluate(() => window.__lf.selectSynth(1, 'bass'));
+          await settle();
+          await page.evaluate(() => window.__lf.selectSynth(1, 'lead'));
+          await settle();
+          assert.equal(await pickOf(), 0, 'nothing applied yet');
+        } finally {
+          await page.evaluate(() => (window.__lf.native.holdApply = false));
+        }
+        await settle();
+        assert.deepEqual((await picks(from)).map((p) => p.instrument), [1, 0], 'Bass, then Lead again, both sent');
+        assert.equal(await pickOf(), 0, 'Lead in the end');
+        await page.evaluate(() => window.__lf.setActiveSlot(0));
+        await show('a');
       });
     } else {
       // the scene for the other sizes: a chain of four in slot A, a synth in B

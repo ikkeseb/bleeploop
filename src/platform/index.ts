@@ -349,6 +349,14 @@ export const input = {
   allNotesOff(): void {
     void enqueue([encodeItem.input(encodeInput.allNotesOff())]);
   },
+  /** Pick `instrument` (its index in `SYNTHS` order) on `unit`, the SYNTH heading `slot`'s chain (unit
+   * contract §4): natively the router releases what sounds, makes `slot` the note target when it is not,
+   * then sends the unit its `instrument` param, one batch; the same pick again sends nothing. The only path
+   * for that param: a `sendEngine` batch carrying it is refused. Resolves as `sendEngine` does (the batch's
+   * submission, never the pick's outcome: the feed's `chains` brings that). */
+  pickSynth(slot: 0 | 1, unit: UnitId, instrument: number): Promise<boolean> {
+    return enqueue([encodeItem.input(encodeInput.pickSynth(slot, unit, instrument))]);
+  },
 };
 
 /** The web engine fake a probe scripts through `__lf.native`; null under Tauri and in a production build. */

@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js';
 import {
+  input,
   mintUnitId,
   platform,
   sendEngine,
@@ -10,7 +11,7 @@ import {
   type UnitSpec,
   type UnitState,
 } from '../../platform';
-import { availablePlugins } from './instrument';
+import { availablePlugins, setActiveSlot } from './instrument';
 import { withAt } from './instrument-slots';
 import { keepUnitMeters } from '../units/unit-meters';
 
@@ -43,6 +44,7 @@ export const slotChain = (slot: 0 | 1): ChainState => chains()[slot];
 /** The feed's `chains` (the engine store's frame path, inside its batch). */
 export function applyChains(next: [ChainState, ChainState]): void {
   setChains(next);
+  forgetShownPicks(next);
   const ids = new Set(next.flatMap((c) => c.units.map((u) => u.id)));
   keepUnitMeters(ids);
   // an editor's unit that left the chain, or no longer sounds (parked, withdrawn), has no window any more
@@ -187,6 +189,58 @@ export async function moveUnit(unit: UnitId, to: number): Promise<void> {
  * the batch drops one for any other. */
 export function toggleUnit(unit: UnitId): void {
   if (unitSeated(unit)) void sendEngine({ Action: { ToggleUnit: unit } });
+}
+
+// ── SYNTH's pick (unit contract §4): an instrument choice on a slot a SYNTH heads is a pick on it ───────
+
+/** The pick last sent to each SYNTH that the feed has not shown yet: judged against the feed alone, a pick
+ * that undoes one still on its way (Lead, Bass, Lead before the feed says Bass) would be skipped. */
+const picksSent = new Map<UnitId, number>();
+
+/** Forget each pick sent that the feed now shows, or whose unit is no SYNTH in the chain any more. */
+function forgetShownPicks(next: [ChainState, ChainState]): void {
+  if (picksSent.size === 0) return;
+  const units = new Map(next.flatMap((c) => c.units.map((u) => [u.id, u] as const)));
+  for (const [unit, pick] of picksSent) {
+    const u = units.get(unit);
+    if (u?.kind !== 'synth' || (u.params?.instrument ?? 0) === pick) picksSent.delete(unit);
+  }
+}
+
+/** The pick of the SYNTH that heads slot `slot`'s chain as applied, as the feed shows it (an index in
+ * `SYNTHS`; an add that asked none plays 0), or null when no SYNTH heads it. */
+export function headSynthPick(slot: 0 | 1): number | null {
+  const head = appliedHead(slot);
+  return head?.kind === 'synth' ? (head.params?.instrument ?? 0) : null;
+}
+
+/**
+ * Built-in instrument `instrument` (an index in `SYNTHS`) chosen for slot `slot`: with a SYNTH seated at
+ * the head of its chain, a pick on it through the note router (one bank: what sounds is released and a
+ * released note rings out, as a legacy synth switch does), sent only when neither the feed nor a pick
+ * still on its way already says it; the slot becomes the MIDI slot either way, as a legacy synth pick
+ * makes it (natively the pick has selected it already, so this changes nothing there). False when no
+ * SYNTH is seated there: nothing sent, the caller's own path runs.
+ */
+export function pickSynth(slot: 0 | 1, instrument: number): boolean {
+  const head = appliedHead(slot);
+  if (head?.kind !== 'synth' || head.state !== 'seated') return false;
+  const unit = head.id;
+  if ((picksSent.get(unit) ?? head.params?.instrument ?? 0) !== instrument) {
+    picksSent.set(unit, instrument);
+    void input.pickSynth(slot, unit, instrument).then((took) => {
+      // a pick that did not reach the router (lost, or dropped there) is not on its way
+      if (!took && picksSent.get(unit) === instrument) picksSent.delete(unit);
+    });
+  }
+  setActiveSlot(slot);
+  return true;
+}
+
+/** The `+` menu's built-in instrument: a pick on the SYNTH seated at the slot's head (`pickSynth`), else a
+ * SYNTH added with that pick (it lands at the head, replacing a source there). */
+export function chooseSynth(slot: 0 | 1, instrument: number): void {
+  if (!pickSynth(slot, instrument)) void addUnit(slot, { kind: 'synth', params: { instrument } });
 }
 
 /** A built-in unit's parameter, while it is seated; the feed's `chains` brings back the value it took. */

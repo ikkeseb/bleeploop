@@ -39,6 +39,7 @@ import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resu
 import { readStoredNumber, writeStoredNumber } from './persist';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
+import { appliedHead, headSynthPick, pickSynth } from './chain';
 
 /**
  * Two-slot instrument host. Each slot holds EITHER a built-in instrument (a selectable id the engine
@@ -217,8 +218,12 @@ function activateSlot(i: 0 | 1): void {
  * picking a source is picking what you play. If the slot was in plugin mode, the plugin is unloaded and
  * the slot reverts to this instrument; a failed unload keeps the plugin and leaves the active slot where
  * it was. An instrument takes no input: a slot that was live stops (every source change ends GO LIVE).
+ * With the chain drawn and a SYNTH seated at the slot's head, the choice is a pick on it instead
+ * (`chain.ts` `pickSynth`), and nothing here changes.
  */
 export function selectSynth(slotIndex: 0 | 1, id: string): void {
+  const pick = SYNTHS.findIndex((s) => s.id === id);
+  if (platform.chain.available && pick >= 0 && pickSynth(slotIndex, pick)) return;
   chosenSource[slotIndex] = true;
   settleUnset(slotIndex);
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
@@ -696,15 +701,29 @@ export function slotTakesInput(slot: 0 | 1): boolean {
  * the UI's one path.) */
 export { slotIds, slotOff, slotPendingCounts, slotPlugins, slotUnset, activeSlot };
 
+/** The GM drum kit's place in `SYNTHS`: a SYNTH unit's pick of it. */
+const DRUM_PICK = SYNTHS.findIndex((s) => s.id === 'drum');
+
 /**
  * Derived predicate: is the ACTIVE slot playing the built-in GM drum kit (synth id 'drum' AND not
- * overridden by a loaded plugin — a plugin always plays chromatically, never the pad grid)? The ONE
- * source for the "keyboard is a pad grid" decision, read by app.tsx (chrome noun + the digit-select
+ * overridden by a loaded plugin — a plugin always plays chromatically, never the pad grid)? With the
+ * chain drawn: the SYNTH heading the active slot's chain has the kit picked, as the feed shows it. The
+ * ONE source for the "keyboard is a pad grid" decision, read by app.tsx (chrome noun + the digit-select
  * yield) and Keyboard.tsx (pad-vs-piano layout) so the two can never disagree.
  */
 export function activeIsDrum(): boolean {
   const i = activeSlot();
+  if (platform.chain.available) return headSynthPick(i) === DRUM_PICK;
   return !slotPlugins()[i] && !slotOff()[i] && slotIds()[i] === 'drum';
+}
+
+/** What the active slot plays, as a key that changes exactly when it does (a slot switch, its source or
+ * its synth pick changing; with the chain drawn, its head unit or that SYNTH's pick): the keyboard drops
+ * its held keys on a change, as the router released their notes. */
+export function activeSourceKey(): string {
+  const i = activeSlot();
+  if (platform.chain.available) return `${i}:${appliedHead(i)?.id ?? ''}:${headSynthPick(i) ?? ''}`;
+  return `${i}:${slotPlugins()[i]?.id ?? slotIds()[i]}`;
 }
 
 /** Read-only reactive accessors: scanned plugins + scan-in-progress flag (the picker). */

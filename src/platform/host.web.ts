@@ -293,7 +293,8 @@ export interface EngineFake extends EngineHost {
    */
   emit(raw: unknown): void;
   /** Every input event the UI sent (`InputHost.send`'s input items: notes by owner, blurs, note targets,
-   * panics), in order, batches flattened. Recorded only while the fake engine is on, as `sent`. */
+   * panics, SYNTH picks), in order, batches flattened. Recorded only while the fake engine is on, as `sent`.
+   * Only a pick is applied (to the chain, as the router's `SetUnitParam`); the rest are recorded. */
   readonly inputSent: InputEvent[];
   /** Every `InputHost.send` call as it came (a refused one too): its epoch and its items, in order. */
   readonly batches: { epoch: number; items: InputItem[] }[];
@@ -782,7 +783,7 @@ const engineSubscribers = new Set<(frame: FeedFrame) => void>();
 let fakeStatus: DeviceStatus | null = null;
 const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngineFakeRate ?? 48000;
 
-// ── The fake's native MIDI and input: recorded, never run ───────────────────────────────────────────
+// ── The fake's native MIDI and input: recorded, never run but a SYNTH pick ─────────────────────────────
 
 const midiCalls: [string, ...unknown[]][] = [];
 const inputSent: InputEvent[] = [];
@@ -875,6 +876,10 @@ const webInput: InputHost = {
       throw new Error('The fake lost the batch (failSends)');
     }
     const commands = read.flatMap((item) => ('engine' in item ? [item.engine] : []));
+    // As native MIDI refuses a router command sent as an engine command, the whole batch with it
+    // (`midi/mod.rs` `ui_commands`): a SYNTH's pick goes only through `pickSynth` (unit contract §4).
+    const routerOnly = commands.find((c) => typeof c === 'object' && 'SetUnitParam' in c && c.SetUnitParam[1] === 'instrument');
+    if (routerOnly) throw new Error(`${JSON.stringify(routerOnly)} goes through the note router, not as an engine command`);
     if (webEngineFake.refuseMix && commands.some(isMixCommand)) {
       // It reached the host, which ran none of it.
       webEngineFake.sent.push(...commands);
@@ -882,7 +887,17 @@ const webInput: InputHost = {
     }
     for (const item of read) {
       if ('engine' in item) runCommand(item.engine);
-      else inputSent.push(item.input);
+      else {
+        inputSent.push(item.input);
+        // The router's pick reaches the engine as the unit's `instrument` param (its releases and its
+        // target are the router's, which the fake does not run); it is no command the UI sent (`sent`).
+        if (typeof item.input === 'object' && 'pickSynth' in item.input) {
+          const { unit, instrument } = item.input.pickSynth;
+          const command: EngineCommand = { SetUnitParam: [unit, 'instrument', instrument] };
+          if (applyHeld) heldCommands.push(command);
+          else applyCommand(command);
+        }
+      }
     }
     echoChanges();
     const answer = webEngineFake.dropped;

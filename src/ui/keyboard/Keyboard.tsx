@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { input } from '../../platform';
 import { heldNotes } from '../state/midi';
-import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '../state/instrument';
+import { activeIsDrum, activeSourceKey, ensureActive } from '../state/instrument';
 import { DRUM_KIT } from '../state/drum-kit';
 import type { KeyboardPlacement } from '../layout/layout-store';
 import { stageOpen } from '../stage/stage-store';
@@ -237,14 +237,13 @@ export function Keyboard(props: KeyboardProps = {}) {
   }
 
   // Flush local held state whenever the active instrument changes — a slot switch or the active
-  // slot's synth changing (e.g. pad <-> piano). The target switch already released the notes
+  // slot's synth changing (e.g. pad <-> piano; a chain's SYNTH pick). The router's target switch or
+  // pick already released the notes
   // natively (the router forgets their owners), so we only need to drop this
   // keyboard's stale bookkeeping: otherwise heldKeyNote keeps the old mapping, leaving the still-held
   // computer key dead (guarded by `heldKeyNote.has(e.code)`, the physical key) and the on-screen key visually stuck until
   // it's physically released. No input traffic here — the audio side is already clean.
-  const activeInstrumentKey = createMemo(
-    () => `${activeSlot()}:${slotPlugins()[activeSlot()]?.id ?? slotIds()[activeSlot()]}`,
-  );
+  const activeInstrumentKey = createMemo(activeSourceKey);
   let prevInstrumentKey = activeInstrumentKey();
   createEffect(() => {
     const key = activeInstrumentKey();

@@ -4,6 +4,7 @@ import {
   addUnit,
   appliedHead,
   chainRefusal,
+  chooseSynth,
   editorOpen,
   moveRefusal,
   moveUnit,
@@ -732,8 +733,9 @@ function PluginParamRows(props: { unit: number }) {
   );
 }
 
-/** The `+` bay at the chain's end: a menu of the built-in effects, the built-in instruments and the
- * scanned plugins; a refusal comes back as the slot's tag beside it. */
+/** The `+` bay at the chain's end: a menu of the built-in effects, the built-in instruments (a pick on the
+ * SYNTH that already heads the chain, `chooseSynth`) and the scanned plugins; a refusal comes back as
+ * the slot's tag beside it. */
 function AddBay(props: {
   slot: 0 | 1;
   returnFocus?: (el: HTMLElement | undefined) => void;
@@ -790,7 +792,7 @@ function AddBay(props: {
         {item('OTT', add({ kind: 'ott' }))}
         <div class="slot-menu__sep" role="separator" />
         <p class="unit-add-menu__head">Instruments</p>
-        <For each={SYNTHS}>{(s, i) => item(s.name, add({ kind: 'synth', params: { instrument: i() } }))}</For>
+        <For each={SYNTHS}>{(s, i) => item(s.name, () => chooseSynth(props.slot, i()))}</For>
         <Show when={pickerPlugins().length > 0}>
           <div class="slot-menu__sep" role="separator" />
           <p class="unit-add-menu__head">Plugins</p>

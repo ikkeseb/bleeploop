@@ -18,7 +18,8 @@
  *   plugin; an unmatched tone or a removed unit's kept as the slot-and-plugin file a new unit starts from);
  * - the batch (§2, §6): `SetUnitBypass`, `ToggleUnit`, `Toggle.Units` (answered by one `Toggled`) and
  *   `SetUnitParam` (clamped as the unit clamps it) switch the model, answered by `chains`; a command naming
- *   an id that is not seated, or a param of another kind, is dropped and counted (`dropped`);
+ *   an id that is not seated, a param of another kind or a SYNTH pick out of range is dropped and counted
+ *   (`dropped`); a SYNTH pick (`InputEvent.pickSynth`) reaches the model as the router's `SetUnitParam`;
  * - the meters (§2): one per seated unit on every frame it makes; the faces' on the fake's own 60 Hz timer
  *   while an OTT or an ECHO is seated and on: the OTT's bands from the accepted mockup's simulated guitar
  *   part through the same curve (`docs/redesign/ott.js`, SIM-BEGIN to SIM-END), following its four params;
@@ -82,7 +83,8 @@ export interface ChainFake {
   readonly host: ChainHost;
   /** Every `ChainHost` call, in the order made: its method's name and arguments. */
   readonly calls: [string, ...unknown[]][];
-  /** Every batch command the model dropped: a unit not seated, a param of another kind. */
+  /** Every batch command the model dropped: a unit not seated, a param of another kind, a SYNTH pick out of
+   * range (a refused `pickSynth` lands here as the router's `SetUnitParam`). */
   readonly dropped: EngineCommand[];
   readonly plugins: readonly CannedPlugin[];
   /** Probe seam: while set, an add's or a reload's activation waits for it (the plate stays `loading`). */
@@ -117,8 +119,8 @@ export interface ChainFake {
 type Slot = 0 | 1;
 type BuiltinKind = Exclude<UnitKindId, 'plugin'>;
 /** A param's range and default (`lf_engine::api` `InputSendParam::range`); `index`: rounded to an index
- * (`dsp::fx::clamp_index`). */
-type Range = { min: number; max: number; def: number; index?: boolean };
+ * (`dsp::fx::clamp_index`); `strict`: a value outside the range is refused, never clamped (`refused`). */
+type Range = { min: number; max: number; def: number; index?: boolean; strict?: boolean };
 
 /** SYNTH's level ceiling (`SLOT_GAIN_MAX`, `src/ui/state/instrument.ts`, which this layer may not import). */
 const SYNTH_GAIN_MAX = 1.5;
@@ -139,10 +141,11 @@ const PARAMS: Readonly<Record<BuiltinKind, Partial<Record<UnitParamId, Range>>>>
   },
   reverb: { reverbLevel: { min: 0, max: 1, def: 0.5 } },
   ring: { ringFreq: { min: 20, max: 1500, def: 440 }, ringLevel: { min: 0, max: 1, def: 0.5 } },
-  // unit contract §2: `instrument` is the index in the UI's `SYNTHS` order; out of range is clamped to it
-  // (the contract is silent; the reading closest to `clamp_index`).
+  // unit contract §2: `instrument` is the index in the UI's `SYNTHS` order; out of range is refused, as
+  // `SynthUnit::set_param` refuses it (checked before rounding: 5.25 is no pick); an add that asks none, or
+  // one refused, plays pick 0 (Lead), as the native factory builds it (`engine_io/builtins.rs`).
   synth: {
-    instrument: { min: 0, max: 5, def: 0, index: true },
+    instrument: { min: 0, max: 5, def: 0, index: true, strict: true },
     gainLead: synthGain,
     gainBass: synthGain,
     gainPad: synthGain,
@@ -155,6 +158,9 @@ const PARAMS: Readonly<Record<BuiltinKind, Partial<Record<UnitParamId, Range>>>>
 const NAMES: Readonly<Record<BuiltinKind, string>> = { ott: 'OTT', echo: 'ECHO', reverb: 'REVERB', ring: 'RING MOD', synth: 'SYNTH' };
 /** SYNTH sounds a note one render quantum late and reports it as its latency (unit contract §4). */
 const SYNTH_LATENCY = 128;
+
+/** A value a `strict` param refuses: outside its range before rounding, or not a number at all. */
+const refused = (r: Range, v: number): boolean => r.strict === true && !(v >= r.min && v <= r.max);
 
 const clampParam = (r: Range, v: number): number => {
   const x = Math.min(r.max, Math.max(r.min, v));
@@ -568,13 +574,14 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     } else if (entry?.inst === inst && entry.state === 'owned') entry.state = 'orphaned';
   }
 
-  /** A built-in's params as it applies them at build: every param of its kind, the asked ones clamped. */
+  /** A built-in's params as it applies them at build: every param of its kind, the asked ones clamped (a
+   * refused one, and any not asked, at its default). */
   function buildParams(kind: BuiltinKind, asked: Partial<Record<UnitParamId, number>> | undefined): Partial<Record<UnitParamId, number>> {
     const ranges = PARAMS[kind];
     const params: Partial<Record<UnitParamId, number>> = {};
     for (const [k, r] of Object.entries(ranges) as [UnitParamId, Range][]) {
       const v = asked?.[k];
-      params[k] = typeof v === 'number' && Number.isFinite(v) ? clampParam(r, v) : r.def;
+      params[k] = typeof v === 'number' && Number.isFinite(v) && !refused(r, v) ? clampParam(r, v) : r.def;
     }
     return params;
   }
@@ -1025,7 +1032,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
       const [unit, param, value] = c.SetUnitParam;
       const u = seated(unit);
       const range = u && u.state.kind !== 'plugin' ? PARAMS[u.state.kind][param] : undefined;
-      if (!u || !range || u.state.kind === 'plugin') fake.dropped.push(c);
+      if (!u || !range || u.state.kind === 'plugin' || refused(range, value)) fake.dropped.push(c);
       else {
         const params = u.state.params ?? (u.state.params = {});
         const v = clampParam(range, value);
