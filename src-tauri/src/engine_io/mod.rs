@@ -1189,9 +1189,11 @@ impl EngineHost {
                     // A held entry that may go now takes the ring before this command, under the gate's
                     // own rules (`unit_host::flush_gate_locked`, as the feed's flush): else sends that
                     // refill the ring after every block could keep it waiting forever. Entries that may
-                    // not go stay held and delay nothing ungated; a ring the flush fills refuses this one.
-                    if !state.gate.is_empty() {
-                        unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state);
+                    // not go stay held and delay nothing ungated; a ring the flush fills, or found full for an
+                    // entry that may go (the next free slot is that entry's), refuses this one.
+                    if !state.gate.is_empty() && unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state) {
+                        self.core.counters.commands_full.fetch_add(1, Relaxed);
+                        return Err("the engine's command ring is full".to_string());
                     }
                     let (unit, kind) = (command.command.unit(), command.command.kind_toggle());
                     if unit.is_some() || kind.is_some() {

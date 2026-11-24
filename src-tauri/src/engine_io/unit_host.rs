@@ -1049,7 +1049,9 @@ pub(crate) fn flush_gate(core: &Core, settings: &mut Settings, ends: &mut Ends) 
     flush_gate_locked(core, settings, ends, &mut state);
 }
 
-pub(crate) fn flush_gate_locked(core: &Core, settings: &mut Settings, ends: &mut Ends, state: &mut HostState) {
+/// Returns true when an entry that may go found the ring full: the next free slot is its, so a caller
+/// about to push something else refuses that instead (`push_all`).
+pub(crate) fn flush_gate_locked(core: &Core, settings: &mut Settings, ends: &mut Ends, state: &mut HostState) -> bool {
     let now = Instant::now();
     let expired = state.model.expire_reseats(now, state.gate_deadline);
     for id in expired {
@@ -1059,7 +1061,7 @@ pub(crate) fn flush_gate_locked(core: &Core, settings: &mut Settings, ends: &mut
         }
     }
     if state.gate.is_empty() {
-        return;
+        return false;
     }
     // In send order. Every entry before `i` is still held (a sent or dropped one leaves the gate), so a
     // kind toggle goes only from the front, and a unit command only past no held entry of its own id
@@ -1093,13 +1095,14 @@ pub(crate) fn flush_gate_locked(core: &Core, settings: &mut Settings, ends: &mut
         }
         if ends.commands.push(cmd).is_err() {
             core.counters.commands_full.fetch_add(1, Relaxed);
-            return;
+            return true;
         }
         gate.held.remove(i);
         ends.pushed += 1;
         settings.record(&cmd.command);
         settings.pushed(&cmd.command);
     }
+    false
 }
 
 /// First engine ever (no old engine to evict): advance the model's generation to `next`.
