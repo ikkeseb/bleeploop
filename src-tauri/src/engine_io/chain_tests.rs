@@ -3515,53 +3515,118 @@ fn a_kind_toggle_survives_a_rebuild_between_unit_commands_in_send_order() {
 }
 
 /// 57. With the gate empty, a kind toggle sent while a unit of its kind reseats waits for it, and a
-///     command for a seated unit sent after it waits behind it.
+///     command for a seated unit sent after it waits behind it, then follows it. ECHO 10 reseats, ECHO 30
+///     is back: the kind toggle (both on, so all go off) then 30's lamp (30 back on) ends 10 bypassed,
+///     30 not. Reversed, the lamp turns 30 off first and the toggle (10 still on) turns both off: 30 ends
+///     bypassed, so the last assertion fails.
 #[test]
 fn a_kind_toggle_waits_for_its_kinds_reseat_and_holds_later_unit_commands() {
     let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
     let host = device.host().clone();
     let factory = ClampFactory { applied: ParamRecorder::new() };
-    let stops = Arc::new(AtomicUsize::new(0));
     let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.5)];
-    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
-    let t1 = u.terms().unwrap();
-    let (unit1, clamped) = factory.build(UnitKind::Echo, &init, t1).unwrap();
-    u.committed(clamped);
-    assert_eq!(host.wait_op(ok_op(u.submit(unit1, t1)), Duration::from_secs(2)).unwrap(), OpState::Applied);
-    let p = host.unit(1, 20, Spec::Plugin(plugin_ref("p")), 0, false).unwrap();
-    let tp = p.terms().unwrap();
-    assert_eq!(host.wait_op(ok_op(p.submit(LatentUnit::new(1, 0, stops.clone()), tp)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let seat = |slot: usize, id: UnitId| {
+        let u = host.unit(slot, id, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+        let t = u.terms().unwrap();
+        let (unit, clamped) = factory.build(UnitKind::Echo, &init, t).unwrap();
+        u.committed(clamped);
+        assert_eq!(host.wait_op(ok_op(u.submit(unit, t)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+        u
+    };
+    let u = seat(0, 10);
+    let w = seat(1, 30);
 
     device.rebuild_at(44_100, 256);
-    let Back::Evicted { unit: old_echo, .. } = u.take_back().expect("evicted") else { panic!("evicted") };
-    drop(old_echo);
-    let Back::Evicted { unit: old_plugin, .. } = p.take_back().expect("evicted") else { panic!("evicted") };
-    let tp2 = p.terms().unwrap();
-    assert_eq!(host.wait_op(ok_op(p.submit(old_plugin, tp2)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    for h in [&u, &w] {
+        let Back::Evicted { unit: old, bypassed } = h.take_back().expect("evicted") else { panic!("evicted") };
+        assert!(!bypassed);
+        drop(old);
+    }
+    let reseat = |h: &super::unit_host::UnitHost, slot: usize| {
+        let t = h.terms().unwrap();
+        let params = host.core.chain_snapshot().chains[slot].units[0].params.as_ref().unwrap().0.clone();
+        let (unit, _) = factory.build(UnitKind::Echo, &params, t).unwrap();
+        assert_eq!(host.wait_op(ok_op(h.submit(unit, t)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    };
+    reseat(&w, 1);
     let mut ev = Vec::new();
     host.drain_feed(&mut ev);
     assert!(host.core.state.lock().unwrap().gate.is_empty());
 
     host.send(TimedCommand { frame: None, command: Command::Action(Action::Toggle(lf_engine::Toggle::Units(UnitKind::Echo))) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::Action(Action::ToggleUnit(20)) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::Action(Action::ToggleUnit(30)) }).unwrap();
     {
         let state = host.core.state.lock().unwrap();
         assert!(state.gate.holds_kind_toggle(), "its kind reseats: the toggle waits");
-        assert!(state.gate.has(20), "a seated unit's command waits behind the held kind toggle");
+        assert!(state.gate.has(30), "a seated unit's command waits behind the held kind toggle");
     }
     host.drain_feed(&mut ev);
     assert!(host.core.state.lock().unwrap().gate.holds_kind_toggle(), "still reseating: still held");
+    assert_eq!(engine_chain_ids(&device, 1), vec![(30, false)], "nothing reached the seated ECHO yet");
 
-    let t2 = u.terms().unwrap();
-    let params = host.core.chain_snapshot().chains[0].units[0].params.as_ref().unwrap().0.clone();
-    let (unit2, _) = factory.build(UnitKind::Echo, &params, t2).unwrap();
-    assert_eq!(host.wait_op(ok_op(u.submit(unit2, t2)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    ev.clear();
+    reseat(&u, 0);
     host.drain_feed(&mut ev);
     assert!(device.wait_blocks(10));
     host.drain_feed(&mut ev);
     assert!(host.core.state.lock().unwrap().gate.is_empty());
+    let answers: Vec<bool> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            lf_engine::Event::Toggled { toggle: lf_engine::Toggle::Units(UnitKind::Echo), on, .. } => Some(on),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, [false], "the kind toggle applied once: an ECHO was on, so all went off");
     assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "the toggle reached the reseated ECHO: on → bypassed");
-    assert_eq!(engine_chain_ids(&device, 1), vec![(20, true)], "and the lamp after it");
+    assert_eq!(engine_chain_ids(&device, 1), vec![(30, false)], "then 30's lamp, after the toggle: back on");
     u.release();
-    p.release();
+    w.release();
+}
+
+/// 58. A held entry that may go takes a freed ring slot before a new send: with the ring one slot short
+///     of full and an eligible command in the gate (its unit seated, nothing before it), an ordinary
+///     send flushes the gate first, so the held command takes the slot and the send is refused. Without
+///     the flush in `push_all`, the send would take the slot and leave the held command waiting, which
+///     sends that refill the ring after every block could do forever.
+#[test]
+fn a_new_send_lets_an_eligible_held_command_take_the_free_slot_first() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let factory = ClampFactory { applied: ParamRecorder::new() };
+    let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.5)];
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let (unit, clamped) = factory.build(UnitKind::Echo, &init, t).unwrap();
+    u.committed(clamped);
+    assert_eq!(host.wait_op(ok_op(u.submit(unit, t)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false)]);
+
+    device.stop();
+    {
+        let mut ends = host.core.ends.lock().unwrap();
+        let ends = ends.as_mut().unwrap();
+        while ends.commands.slots() > 1 {
+            ends.commands.push(TimedCommand { frame: None, command: Command::SetMasterVolume(1.0) }).unwrap();
+        }
+    }
+    host.core.state.lock().unwrap().gate.push(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) });
+
+    let full_before = host.core.counters.commands_full.load(Relaxed);
+    let sent = host.send(TimedCommand { frame: None, command: Command::SetClickVolume(0.25) });
+    assert!(sent.is_err(), "the held command took the one free slot, so the new send finds the ring full");
+    assert_eq!(host.core.counters.commands_full.load(Relaxed), full_before + 1);
+    assert!(host.core.state.lock().unwrap().gate.is_empty(), "the eligible held command went first");
+    assert_eq!(host.core.ends.lock().unwrap().as_ref().unwrap().commands.slots(), 0);
+
+    device.resume();
+    let deadline = Instant::now() + PATIENCE;
+    while engine_chain_ids(&device, 0) != vec![(10, true)] {
+        assert!(Instant::now() < deadline, "the held bypass never reached the engine");
+        assert!(device.wait_blocks(1));
+        host.drain_feed(&mut ev);
+    }
+    u.release();
 }

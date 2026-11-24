@@ -1185,9 +1185,16 @@ impl EngineHost {
         for command in commands {
             match ends.as_mut() {
                 Some(ends) => {
+                    let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                    // A held entry that may go now takes the ring before this command, under the gate's
+                    // own rules (`unit_host::flush_gate_locked`, as the feed's flush): else sends that
+                    // refill the ring after every block could keep it waiting forever. Entries that may
+                    // not go stay held and delay nothing ungated; a ring the flush fills refuses this one.
+                    if !state.gate.is_empty() {
+                        unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state);
+                    }
                     let (unit, kind) = (command.command.unit(), command.command.kind_toggle());
                     if unit.is_some() || kind.is_some() {
-                        let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
                         let deadline = state.gate_deadline;
                         let expired = state.model.expire_reseats(Instant::now(), deadline);
                         for exp in expired {

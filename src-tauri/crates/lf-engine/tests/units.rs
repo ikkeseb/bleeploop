@@ -5385,3 +5385,48 @@ fn ring_unit_installed_off_quantum_grid_renders_the_same_at_every_block_size() {
         }
     }
 }
+
+/// Frames streamed from `GRID` before the eviction: the stream stops one frame past the grid (129 and
+/// 1) and mid-quantum (192), so a later frame of a lower phase than 64 makes the convolver's lead-in
+/// of silence finish its quantum and run on into the next.
+const REALIGN_ENDS: [usize; 3] = [129, 1, 192];
+/// The reseated stream's first frames on its new engine's clock: on the grid, and five past it.
+const REALIGN_RESUMES: [Frame; 2] = [384, 389];
+/// Frames rendered after the reseat: past several wraps of every pre-delay ring (at most 4096 frames).
+const REALIGN_FRAMES: usize = 12_000;
+
+/// A REVERB unit streamed from the grid to an off-grid frame, then reseated (the same box) on a new
+/// engine whose clock stands at another phase of the quantum, matches a reference that streamed the
+/// same input from the grid, then silence up to the new frame's phase, then the same continuation: no
+/// panic, finite, bit for bit at every block size. Before the convolver re-aligned on any call off its
+/// stages' phase (only the first call was), the reseat's blocks straddled a pre-delay ring's wrap.
+#[test]
+fn reverb_unit_reseated_at_another_quantum_phase_matches_a_stream_fed_silence_to_that_phase() {
+    let (l, r) = off_grid_input();
+    let q = QUANTUM_FRAMES;
+    for end in REALIGN_ENDS {
+        for resume in REALIGN_RESUMES {
+            let lead = (resume as usize % q + q - end % q) % q;
+            let after = end..end + REALIGN_FRAMES;
+            let joined = |x: &[f32]| -> Vec<f32> {
+                let mut v = x[..end].to_vec();
+                v.extend(std::iter::repeat_n(0.0, lead));
+                v.extend_from_slice(&x[after.clone()]);
+                v
+            };
+            let mut reference = new_reverb_unit();
+            let want = render_direct(&mut reference, GRID, &joined(&l), &joined(&r), q, &[]);
+            let want = [&want[0][end + lead..], &want[1][end + lead..]];
+            assert!(want[0].iter().zip(&l[after.clone()]).any(|(a, b)| a != b), "end={end} resume={resume}: the reference renders no wet");
+            for block in BLOCKS {
+                let tag = format!("REVERB end={end} resume={resume} block={block}");
+                let mut unit = new_reverb_unit();
+                render_direct(&mut unit, GRID, &l[..end], &r[..end], block, &[]);
+                let got = render_direct(&mut unit, resume, &l[after.clone()], &r[after.clone()], block, &[]);
+                assert!(got[0].iter().chain(&got[1]).all(|v| v.is_finite()), "{tag}: a non-finite sample");
+                assert_bits_eq(&got[0], want[0], &format!("{tag} L vs the stream fed silence to the new phase"));
+                assert_bits_eq(&got[1], want[1], &format!("{tag} R vs the stream fed silence to the new phase"));
+            }
+        }
+    }
+}

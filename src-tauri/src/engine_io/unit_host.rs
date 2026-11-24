@@ -948,7 +948,8 @@ impl Table {
 /// kind toggle; a kind toggle goes unless the gate holds anything, or a plate of its kind is reseating
 /// (it switches every unit of the kind, so it waits until each is back: `docs/unit-contract.md` §2). So
 /// no command overtakes a kind toggle sent before it, and a kind toggle overtakes nothing. The gate
-/// survives a second rebuild and is flushed only by [`flush_gate`]. A row not submitted
+/// survives a second rebuild and is flushed only by [`flush_gate`] (the feed's tick, and every send
+/// while it holds anything, so a held entry that may go takes a freed ring slot before the send). A row not submitted
 /// [`GATE_DEADLINE`] after a swap reads `failed`, and its commands drop; a later submit still seats it
 /// (its terms fence it).
 pub(crate) struct Gate {
