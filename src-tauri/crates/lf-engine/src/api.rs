@@ -122,13 +122,13 @@ pub enum Command {
     /// Where the notes go: a built-in instrument, a plugin slot, or nowhere ([`NoteTarget::Off`]). Sent on
     /// a slot switch, not per note: it releases the held notes (of the instrument or slot it leaves) and
     /// hands a built-in instrument the wheels, even when the target stays (two slots may hold the same
-    /// synth, as two web synths).
+    /// synth, as two web synths). A SYNTH in a slot keeps the wheels it last got.
     SelectInstrument(NoteTarget),
     /// A note (0..127) on the selected target; velocity 0..1. Sustain and the owner of a held note stay
     /// with the sender, native MIDI's one note router (the app's `engine_io::midi::router`). The
     /// instrument commands never wait behind a looper command that waits for a block job. On a built-in
-    /// instrument a note on or off sounds `instruments::LEAD` frames after it is applied; a plugin slot
-    /// gets it at the frame it is applied.
+    /// instrument a note on or off sounds `instruments::LEAD` frames after it is applied; a slot's chain
+    /// gets it at the frame it is applied (a SYNTH there sounds it `instruments::LEAD` later).
     NoteOn(u8, f32),
     NoteOff(u8),
     /// The pitch wheel, in semitones: the built-in instruments, and the note-target slot's chain while
