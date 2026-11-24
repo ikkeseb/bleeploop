@@ -4176,33 +4176,64 @@ fn unit_meter_ring_late_reader_covers_every_sample_at_4ms_cadence() {
     }
 
     // Plugins-only rack check: a stray `Toggle::Units(Echo)` stamped mid-block causes ZERO extra
-    // splits of the plugin's `process` calls, and audio is bit-identical across all 7 block sizes.
+    // splits of the plugin's `process` calls (one per block, over a fixed 4096-frame span), and the
+    // whole render is bit-identical across all 7 block sizes.
+    const SPAN: Frame = 4_096;
     let mut base_plugin_audio: Option<(Vec<f32>, Vec<f32>)> = None;
     for block in BLOCKS {
         let what = format!("plugins-only block {block}");
         let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
-        let (u, _takes, calls) = MeterProbeUnit::new(UnitKind::Plugin, [0.8, 0.4], 4096);
+        let (u, _takes, calls) = MeterProbeUnit::new(UnitKind::Plugin, [0.8, 0.4], SPAN as usize);
         assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, u).is_ok());
         rig.set_stereo_inputs(|f| [0.25 * ((f % 17) as f32 / 17.0), -0.15 * ((f % 13) as f32 / 13.0)], |_| [0.0; 2]);
         let stray = F0 + 2 * block as Frame + (block as Frame / 2).max(1);
         rig.send_at(stray, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
         rig.keep_output();
-        let span = 4 * block as Frame;
-        rig.advance(span);
+        rig.advance(SPAN);
         let logged = calls.lock().unwrap().clone();
-        assert_eq!(logged.len(), 4, "{what}: stray Toggle::Units must not split plugin calls: {logged:?}");
+        let want_calls = ((SPAN + block as Frame - 1) / block as Frame) as usize;
+        assert_eq!(logged.len(), want_calls, "{what}: stray Toggle::Units must not split plugin calls: {logged:?}");
         for (k, &(f, len)) in logged.iter().enumerate() {
-            assert_eq!((f, len), (F0 + k as Frame * block as Frame, block), "{what}: call {k}");
+            let at = k as Frame * block as Frame;
+            assert_eq!((f, len as Frame), (F0 + at, (block as Frame).min(SPAN - at)), "{what}: call {k}");
         }
+        assert_eq!((rig.monitor.len(), rig.monitor_right.len()), (SPAN as usize, SPAN as usize), "{what}: the whole span was kept");
         if let Some((bl, br)) = &base_plugin_audio {
-            let n = bl.len().min(rig.monitor.len());
-            assert_bits_eq(&rig.monitor[..n], &bl[..n], &format!("{what} L"));
-            assert_bits_eq(&rig.monitor_right[..n], &br[..n], &format!("{what} R"));
+            assert_bits_eq(&rig.monitor, bl, &format!("{what} L"));
+            assert_bits_eq(&rig.monitor_right, br, &format!("{what} R"));
         } else {
             base_plugin_audio = Some((rig.monitor.clone(), rig.monitor_right.clone()));
         }
         assert_eq!(evict_all(&mut rig)[0].len(), 1);
     }
+}
+
+/// The monitor of [`unit_meter_ring_full_across_two_feed_frames_delays_and_covers_every_sample`]'s rig,
+/// rendered again at block 1 with the same installs and inputs (zero before `run_start`, the stall's
+/// input from `stall_start`), the ring never full: frames `run_start..end`, left and right.
+fn full_ring_reference_audio(
+    run_start: Frame,
+    stall_start: Frame,
+    end: Frame,
+    ott_input: impl Fn(Frame, Option<Frame>) -> Pair + Copy + 'static,
+    cnt_input: impl Fn(Frame, Option<Frame>) -> Pair + Copy + 'static,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 1, ..Opts::default() });
+    rig.set(Command::SetSlotLive(1, true));
+    let (cnt_unit, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+    assert!(rig.port(0).install_at(10, 1, MAX_UNITS, false, None, Box::new(OttUnit::new(SR))).is_ok());
+    assert!(rig.port(1).install_at(20, 2, MAX_UNITS, false, None, cnt_unit).is_ok());
+    rig.send_at(F0, Command::SetUnitParam(10, UnitParam::Send(InputSendParam::OttTime), 0.0));
+    rig.advance_to(run_start);
+    let _ = rig.read_unit_meters();
+    let from = move |f: Frame| (f >= stall_start).then_some(stall_start);
+    rig.set_stereo_inputs(move |f| ott_input(f, from(f)), move |f| cnt_input(f, from(f)));
+    rig.keep_output();
+    while rig.frame < end {
+        rig.advance((end - rig.frame).min(1_024));
+        let _ = rig.read_unit_meters();
+    }
+    (rig.monitor.clone(), rig.monitor_right.clone())
 }
 
 /// §9 E3c proof: when `EngineHandle::unit_meters` is full across two feed frames (~42 ms),
@@ -4214,7 +4245,6 @@ fn unit_meter_ring_late_reader_covers_every_sample_at_4ms_cadence() {
 fn unit_meter_ring_full_across_two_feed_frames_delays_and_covers_every_sample() {
     let cap = 8usize;
     let stall_frames: Frame = 2_048; // > 42 ms at 48 kHz (> two 60 Hz feed frames)
-    let mut base_audio: Option<(Vec<f32>, Vec<f32>)> = None;
 
     for block in BLOCKS {
         let what = format!("block {block}");
@@ -4382,9 +4412,13 @@ fn unit_meter_ring_full_across_two_feed_frames_delays_and_covers_every_sample() 
         assert_eq!(ott_m.out[0].to_bits(), want_peak_l.to_bits(), "{what}: stalled OTT out L");
         assert_eq!(ott_m.out[1].to_bits(), want_peak_r.to_bits(), "{what}: stalled OTT out R");
 
-        // Compare audio prefix (up to shortest run's length; different block sizes fill the ring
-        // slightly differently, so compare a deterministic prefix of the same length).
-        let _ = base_audio.get_or_insert_with(|| (rig.monitor.clone(), rig.monitor_right.clone()));
+        // The audio is the same at every block size and whatever the ring did: the monitor over the whole
+        // run (its units meter at different frames per block size, the ring full for two feed frames)
+        // equals a block-1 render of the same inputs and installs, bit for bit.
+        let (want_l, want_r) = full_ring_reference_audio(run_start, stall_start, rig.frame, ott_input, cnt_input);
+        assert_eq!(rig.monitor.len() as Frame, rig.frame - run_start, "{what}: the kept monitor spans the run");
+        assert_bits_eq(&rig.monitor, &want_l, &format!("{what} monitor L vs a block-1 render"));
+        assert_bits_eq(&rig.monitor_right, &want_r, &format!("{what} monitor R vs a block-1 render"));
         assert_eq!(evict_all(&mut rig)[0].len(), 1);
     }
 
@@ -4921,23 +4955,42 @@ fn toggle_units_is_no_kept_setting_never_replayed_and_respects_owed_backpressure
         assert_eq!(states0, want, "{what}: slot 0 exact alternating bypass order");
         assert_eq!(states1, want, "{what}: slot 1 exact alternating bypass order");
         assert!(c0.last().unwrap().0 > t, "{what}: backpressure held later Toggle::Units past frame {t}");
+        // One `Toggled` answer per applied command, none lost to the full ring; an owed answer is offered
+        // at the value the setting has then, so the last one is the final state (an even count of
+        // any-on toggles: all on again).
+        let answers: Vec<(Frame, bool)> = toggled_events_since(&rig, mark)
+            .into_iter()
+            .filter(|&(f, tg, _)| f >= t && tg == Toggle::Units(UnitKind::Echo))
+            .map(|(f, _, on)| (f, on))
+            .collect();
+        assert_eq!(answers.len(), 40, "{what}: one Toggled per command: {answers:?}");
+        assert!(answers.windows(2).all(|w| w[0].0 <= w[1].0), "{what}: answers in frame order: {answers:?}");
+        assert!(answers.last().unwrap().1, "{what}: the last answer is the final state, on");
+        assert!(rig.engine.toggles()[Toggle::Units(UnitKind::Echo).index()], "{what}: ECHO ends on");
         let ret = evict_all(&mut rig);
         assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
+        assert_eq!((ret[0][0].bypassed, ret[1][0].bypassed), (false, false), "{what}: both seats end on after 40 toggles");
     }
 }
 
 /// §6, the review's CLEAR case: a `Toggle::Units` with none of its kind seated does nothing at all,
 /// on a plugins-only rack: no `Toggled`, no `Chain`, no disarm of a pending CLEAR, and on the
 /// held-command path no `Press` queued behind the held command. Arm, toggle, confirm: the loop
-/// clears, as without the toggle, pressed directly and behind a held COPY.
+/// clears, as without the toggle, pressed directly and behind a held PLAY (waiting for a COPY's job).
+/// Every kind at the default block, one press a frame; then all seven `BLOCKS`, each with a kind in
+/// turn and the whole sequence sent for one block start (same-frame order).
 #[test]
 fn toggle_units_with_none_of_its_kind_seated_does_nothing_and_clear_still_confirms() {
-    let looping = || {
-        let mut rig = Rig::with(Opts { loop_seconds: 60.0, ..Opts::default() });
+    const KINDS: [UnitKind; 4] = [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Ott];
+    let looping = |block: usize| {
+        // The COPY's block job runs master / `JOB_RATE` frames: longer than the block that starts it, so
+        // the presses behind it are still held when the block ends.
+        let bars = if block <= 128 { 4 } else if block <= 480 { 8 } else { 16 };
+        let mut rig = Rig::with(Opts { loop_seconds: 40.0, block, ..Opts::default() });
         let (plugin, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
         assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, plugin).is_ok());
         rig.set_level(0.5);
-        rig.record_first_take(0, 16, 2400);
+        rig.record_first_take(0, bars, 2400);
         rig.set_level(0.0);
         rig.set(Command::SetMute(0, true));
         rig.advance(4800);
@@ -4945,36 +4998,64 @@ fn toggle_units_with_none_of_its_kind_seated_does_nothing_and_clear_still_confir
         assert_eq!(rig.state(0), LaneState::Playing);
         rig
     };
+    // One press a frame, or every command queued for the next block start and that block rendered.
+    let send = |rig: &mut Rig, cmds: &[Command], queued: bool| {
+        for &c in cmds {
+            if queued {
+                rig.queue(c);
+            } else {
+                rig.press(c);
+            }
+        }
+        if queued {
+            rig.advance(rig.block as Frame);
+        }
+    };
     let quiet = |rig: &Rig, mark: usize, what: &str| {
         assert!(toggled_events_since(rig, mark).is_empty(), "{what}: no Toggled");
         assert!(chain_events_since(rig, mark, 0).is_empty() && chain_events_since(rig, mark, 1).is_empty(), "{what}: no Chain");
     };
-    for kind in [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Ott] {
+    let case = |block: usize, kind: UnitKind, queued: bool| {
+        let clear = Command::Action(Action::Clear);
         // Pressed directly between the arm and the confirmation.
-        let what = format!("{kind:?} direct");
-        let mut rig = looping();
+        let what = format!("{kind:?} block {block} {} direct", if queued { "queued" } else { "pressed" });
+        let mut rig = looping(block);
         let mark = rig.events.len();
-        rig.press(Command::Action(Action::Clear));
-        rig.press(Command::Action(Action::Toggle(Toggle::Units(kind))));
-        rig.press(Command::Action(Action::Clear));
+        send(&mut rig, &[clear, Command::Action(Action::Toggle(Toggle::Units(kind))), clear], queued);
         assert_eq!(rig.state(0), LaneState::Empty, "{what}: CLEAR confirmed through the empty-kind toggle");
         quiet(&rig, mark, &what);
         assert_eq!(evict_all(&mut rig)[0].len(), 1);
 
-        // Behind a held COPY: the arm and the confirmation wait for the copy's job; the toggle passes
-        // the held command and must queue no `Press` between them.
-        let what = format!("{kind:?} held");
-        let mut rig = looping();
-        let mark = rig.events.len();
-        rig.press(Command::Copy(0));
-        rig.press(Command::Action(Action::Clear));
-        rig.press(Command::ActionOn(2, Action::Toggle(Toggle::Units(kind))));
-        rig.press(Command::Action(Action::Clear));
-        assert!(rig.engine.holding(), "{what}: the CLEAR presses wait for the copy");
-        rig.idle();
+        // Behind a held PLAY (it waits for the COPY's job, so the arm and the confirmation wait behind
+        // it): the toggle passes the held command and must queue no `Press` between the arm and the
+        // confirmation, which would disarm the arm. The held PLAY runs as it does without the toggle.
+        let what = format!("{kind:?} block {block} {} held", if queued { "queued" } else { "pressed" });
+        let held = |toggle: Option<UnitKind>| {
+            let mut rig = looping(block);
+            let mark = rig.events.len();
+            let mut cmds = vec![Command::Copy(0), Command::PlayStop(1), clear];
+            cmds.extend(toggle.map(|kind| Command::ActionOn(2, Action::Toggle(Toggle::Units(kind)))));
+            cmds.push(clear);
+            send(&mut rig, &cmds, queued);
+            assert!(rig.engine.holding(), "{what}: the presses wait for the copy");
+            assert_eq!(rig.state(0), LaneState::Playing, "{what}: the arm has not run yet");
+            rig.idle();
+            (rig, mark)
+        };
+        let (mut base, _) = held(None);
+        let (mut rig, mark) = held(Some(kind));
         assert_eq!(rig.state(0), LaneState::Empty, "{what}: the held CLEAR confirmed through the empty-kind toggle");
+        assert_eq!(rig.state(1), base.state(1), "{what}: the held PLAY ran as without the toggle");
         quiet(&rig, mark, &what);
         assert_eq!(evict_all(&mut rig)[0].len(), 1);
+        assert_eq!(evict_all(&mut base)[0].len(), 1);
+    };
+    let default_block = Opts::default().block;
+    for kind in KINDS {
+        case(default_block, kind, false);
+    }
+    for (k, block) in BLOCKS.into_iter().enumerate() {
+        case(block, KINDS[k % KINDS.len()], true);
     }
 }
 
@@ -5039,7 +5120,8 @@ fn unit_meter_ranges_chain_frame_to_frame_under_a_late_reader_at_44_1_and_48_khz
     const SCALE: f32 = 8_192.0;
     const RAMP: Frame = 6_000;
     for sr in [44_100u32, 48_000] {
-        let interval = unit_meter_frames(sr) as Frame;
+        // 4 ms, rounded up, from the rate alone (not from the engine's own function).
+        let interval = (sr as Frame * 4 + 999) / 1_000;
         assert_eq!(interval, if sr == 44_100 { 177 } else { 192 }, "4 ms rounded up at {sr} Hz");
         let drain_every = (sr as Frame * 48) / 1_000;
         for block in BLOCKS {
@@ -5092,49 +5174,53 @@ fn unit_meter_ranges_chain_frame_to_frame_under_a_late_reader_at_44_1_and_48_khz
             }
             assert_eq!(evict_all(&mut rig)[0].len(), 1);
         }
+        assert_eq!(unit_meter_frames(sr) as Frame, interval, "the engine's interval at {sr} Hz");
     }
 }
 
 /// §2's rebuild: `Engine::unapplied_unit_commands` carries a built-in effect kind's `Toggle::Units`
 /// (pressed or `ActionOn`, with or without a seat of its kind) among the per-unit commands, in send
 /// order, from the table and then the ring, and nothing else (`Toggle::Units(Plugin)`, a setting,
-/// another toggle); the peek takes nothing.
+/// another toggle); the peek takes nothing. All seven `BLOCKS`.
 #[test]
 fn unapplied_unit_commands_carry_kind_toggles_in_send_order() {
-    let mut rig = Rig::new();
-    assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
-    assert!(rig.port(1).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
-    rig.advance(1_024);
-    let later = rig.frame + 48_000;
     let units = |k| Command::Action(Action::Toggle(Toggle::Units(k)));
-    let sent = [
-        (true, Command::SetUnitBypass(1, true)),
-        (false, Command::SetMetronome(true)),
-        (true, units(UnitKind::Echo)),
-        (false, Command::Action(Action::Toggle(Toggle::Click))),
-        (true, Command::SetUnitParam(2, UnitParam::Send(InputSendParam::EchoLevel), 0.5)),
-    ];
-    for (_, c) in sent {
-        rig.send_at(later, c);
+    for block in BLOCKS {
+        let mut rig = Rig::with(Opts { block, ..Opts::default() });
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        rig.advance(1_024);
+        let later = rig.frame + 48_000;
+        let sent = [
+            (true, Command::SetUnitBypass(1, true)),
+            (false, Command::SetMetronome(true)),
+            (true, units(UnitKind::Echo)),
+            (false, Command::Action(Action::Toggle(Toggle::Click))),
+            (true, Command::SetUnitParam(2, UnitParam::Send(InputSendParam::EchoLevel), 0.5)),
+        ];
+        for (_, c) in sent {
+            rig.send_at(later, c);
+        }
+        // The table takes what the ring holds at a block start; the stamped commands wait there.
+        rig.advance(block as Frame);
+        let queued = [
+            (true, Command::Action(Action::ToggleUnit(2))),
+            (false, units(UnitKind::Plugin)),
+            (true, units(UnitKind::Ring)),
+            (false, Command::SetBpm(100.0)),
+            (true, Command::ActionOn(3, Action::Toggle(Toggle::Units(UnitKind::Echo)))),
+        ];
+        for (_, c) in queued {
+            rig.queue(c);
+        }
+        let want: Vec<Command> = sent.iter().chain(&queued).filter(|(unit, _)| *unit).map(|&(_, c)| c).collect();
+        assert_eq!(rig.engine.unapplied_unit_commands().collect::<Vec<_>>(), want, "block {block}");
+        assert_eq!(rig.engine.unapplied_unit_commands().count(), want.len(), "block {block}: the peek takes nothing");
+        rig.advance_to(later + block as Frame);
+        assert_eq!(rig.engine.unapplied_unit_commands().count(), 0, "block {block}: all applied");
+        let ret = evict_all(&mut rig);
+        assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
     }
-    rig.advance(128);
-    let queued = [
-        (true, Command::Action(Action::ToggleUnit(2))),
-        (false, units(UnitKind::Plugin)),
-        (true, units(UnitKind::Ring)),
-        (false, Command::SetBpm(100.0)),
-        (true, Command::ActionOn(3, Action::Toggle(Toggle::Units(UnitKind::Echo)))),
-    ];
-    for (_, c) in queued {
-        rig.queue(c);
-    }
-    let want: Vec<Command> = sent.iter().chain(&queued).filter(|(unit, _)| *unit).map(|&(_, c)| c).collect();
-    assert_eq!(rig.engine.unapplied_unit_commands().collect::<Vec<_>>(), want);
-    assert_eq!(rig.engine.unapplied_unit_commands().count(), want.len(), "the peek takes nothing");
-    rig.advance_to(later + 128);
-    assert_eq!(rig.engine.unapplied_unit_commands().count(), 0, "all applied");
-    let ret = evict_all(&mut rig);
-    assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
 }
 
 // ── Off-grid installs: a unit whose first rendered frame is off a 128-frame quantum boundary ────────

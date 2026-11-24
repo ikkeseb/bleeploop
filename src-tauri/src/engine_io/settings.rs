@@ -179,9 +179,12 @@ fn key(command: &Command) -> Option<Key> {
 }
 
 /// The toggled setting `command` sets (a setter: true) or switches (its toggle: false); `None` for a slot
-/// past `SLOT_COUNT`, which the engine ignores and answers nothing.
+/// past `SLOT_COUNT`, which the engine ignores and answers nothing, and for a `Toggle::Units`, which is no
+/// kept setting (no setter: a rebuild restores every seat's own bypass, `docs/unit-contract.md` §2), so
+/// nothing of it is in flight here.
 fn toggled_by(command: &Command) -> Option<(Toggle, bool)> {
     let (toggle, setter) = match *command {
+        Command::Action(Action::Toggle(Toggle::Units(_))) | Command::ActionOn(_, Action::Toggle(Toggle::Units(_))) => return None,
         Command::SetMetronome(_) => (Toggle::Click, true),
         Command::SetLoopEndStop(_) => (Toggle::EndStop, true),
         Command::SetFixedLength(_) => (Toggle::Fixed, true),
@@ -323,13 +326,15 @@ impl Settings {
     /// The engine of generation `gen` answered the oldest command of `toggle` in flight with `on` (its
     /// `Event::Toggled`, or an owed one read at a rebuild): kept as the setter that sets it, unless a
     /// setter pushed after that command is still unanswered (its value, kept as sent, is newer). False,
-    /// and nothing kept, for an engine this memory no longer follows.
+    /// and nothing kept, for an engine this memory no longer follows. A `Toggle::Units` answer keeps and
+    /// counts nothing: it has no setter and was never `pushed`.
     pub(crate) fn toggled(&mut self, gen: u64, toggle: Toggle, on: bool) -> bool {
         if gen != self.gen {
             return false;
         }
+        let Some(setter) = toggle.setter(on) else { return true };
         if self.answered(toggle) {
-            self.insert(toggle.setter(on));
+            self.insert(setter);
         }
         true
     }
@@ -577,10 +582,41 @@ mod tests {
         s.follow(2);
         assert!(!s.toggled(1, Toggle::Retake, true), "a replaced engine's late Toggled");
         assert!(!replay(&s).contains(&Command::SetRetake(true)));
-        for t in Toggle::ALL {
-            assert_eq!(key(&t.setter(true)), key(&t.setter(false)), "{t:?}: one key per setting");
-            assert!(key(&t.setter(true)).is_some());
+        for t in Toggle::ALL.into_iter().filter(|t| t.setter(true).is_some()) {
+            let (on, off) = (t.setter(true).unwrap(), t.setter(false).unwrap());
+            assert_eq!(key(&on), key(&off), "{t:?}: one key per setting");
+            assert!(key(&on).is_some());
         }
+    }
+
+    #[test]
+    fn a_units_toggle_is_never_recorded_counted_or_replayed() {
+        use lf_engine::UnitKind;
+        let mut s = Settings::default();
+        s.follow(1);
+        assert!(s.record(&Command::SetMetronome(true)));
+        let kinds = [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Ott];
+        for kind in kinds {
+            let t = Toggle::Units(kind);
+            assert!(t.exists() && t.setter(true).is_none(), "{t:?}: a toggle with no setter");
+            for c in [Command::Action(Action::Toggle(t)), Command::ActionOn(0, Action::Toggle(t))] {
+                assert!(!s.record(&c), "{c:?}: an action, kept nowhere");
+                assert_eq!(toggled_by(&c), None, "{c:?}: no setting it switches");
+                s.pushed(&c);
+            }
+            assert!(s.toggled(1, t, true), "the engine it follows answered: true, nothing kept");
+            assert!(s.toggled(1, t, false));
+            assert!(!s.toggled(0, t, true), "a replaced engine's late answer");
+        }
+        assert_eq!(s.in_flight, [0; Toggle::COUNT], "nothing in flight for a kind toggle");
+        assert_eq!(s.setter_at, [0; Toggle::COUNT]);
+        assert_eq!(replay(&s), [Command::SetMetronome(true)], "the replay holds the kept setter alone");
+        s.pushed(&Command::Action(Action::Toggle(Toggle::Click)));
+        assert!(s.toggled(1, Toggle::Units(UnitKind::Echo), false), "a kind toggle's answer");
+        assert_eq!(s.in_flight[Toggle::Click.index()], 1, "takes no other setting's answer");
+        s.follow(2);
+        assert!(s.toggled(2, Toggle::Units(UnitKind::Ott), true), "an owed answer read at a rebuild");
+        assert_eq!(replay(&s), [Command::SetMetronome(true)], "is never replayed into the new engine");
     }
 
     #[test]

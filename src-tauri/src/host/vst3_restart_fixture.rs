@@ -1353,7 +1353,7 @@ mod unit_owner {
                 let mut events = Vec::new();
                 while !stopping.load(Relaxed) {
                     events.clear();
-                    host.drain_feed_taps(&mut events, None, None);
+                    host.drain_feed_taps(&mut events, None, None, None);
                     std::thread::sleep(Duration::from_millis(2));
                 }
             });

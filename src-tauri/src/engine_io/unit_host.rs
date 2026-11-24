@@ -943,58 +943,67 @@ impl Table {
 }
 
 /// A unit command held back from the ring (`SetUnitBypass`, `SetUnitParam`, `ToggleUnit`:
-/// `Command::unit`). A unit command goes to the ring unless its id is reseating or the gate already
-/// holds one for it. The gate is per unit id, survives a second rebuild, and is flushed only by
-/// [`flush_gate`]. A row not submitted [`GATE_DEADLINE`] after a swap reads `failed`, and its commands
-/// drop; a later submit still seats it (its terms fence it).
+/// `Command::unit`), or a kind toggle (`Toggle::Units`: `Command::kind_toggle`), in one send order. A
+/// unit command goes to the ring unless its id is reseating, or the gate already holds one for it or a
+/// kind toggle; a kind toggle goes unless the gate holds anything, or a plate of its kind is reseating
+/// (it switches every unit of the kind, so it waits until each is back: `docs/unit-contract.md` §2). So
+/// no command overtakes a kind toggle sent before it, and a kind toggle overtakes nothing. The gate
+/// survives a second rebuild and is flushed only by [`flush_gate`]. A row not submitted
+/// [`GATE_DEADLINE`] after a swap reads `failed`, and its commands drop; a later submit still seats it
+/// (its terms fence it).
 pub(crate) struct Gate {
-    queues: BTreeMap<UnitId, VecDeque<TimedCommand>>,
+    /// Every held command, oldest first.
+    held: VecDeque<TimedCommand>,
+}
+
+/// What the gate holds: a unit command or a kind toggle.
+fn gated(command: &Command) -> bool {
+    command.unit().is_some() || command.kind_toggle().is_some()
 }
 
 impl Gate {
     pub(crate) fn new() -> Gate {
-        Gate { queues: BTreeMap::new() }
+        Gate { held: VecDeque::new() }
     }
 
     pub(crate) fn has(&self, id: UnitId) -> bool {
-        self.queues.get(&id).is_some_and(|q| !q.is_empty())
+        self.held.iter().any(|c| c.command.unit() == Some(id))
+    }
+
+    /// Whether a kind toggle waits here: every unit command sent after it waits behind it.
+    pub(crate) fn holds_kind_toggle(&self) -> bool {
+        self.held.iter().any(|c| c.command.kind_toggle().is_some())
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.queues.is_empty()
+        self.held.is_empty()
     }
 
-    pub(crate) fn push(&mut self, id: UnitId, command: TimedCommand) {
-        self.queues.entry(id).or_default().push_back(command);
+    /// Hold `command` (a unit command or a kind toggle) behind everything held.
+    pub(crate) fn push(&mut self, command: TimedCommand) {
+        debug_assert!(gated(&command.command), "the gate holds unit commands and kind toggles only");
+        self.held.push_back(command);
     }
 
     pub(crate) fn drop_id(&mut self, id: UnitId) -> u64 {
-        self.queues.remove(&id).map_or(0, |q| q.len() as u64)
+        let before = self.held.len();
+        self.held.retain(|c| c.command.unit() != Some(id));
+        (before - self.held.len()) as u64
     }
 
-    /// Rebuild the gate: the old engine's unapplied unit commands, the old gate, and the MIDI
-    /// queue's unsent unit commands, in that order per unit id.
+    /// Rebuild the gate: the old engine's unapplied unit commands and kind toggles (its table, then its
+    /// ring), the old gate, and the input path's unsent ones, in that order, which is their send order:
+    /// a command reached the old ring only when nothing it must follow was held.
     pub(crate) fn on_rebuild(
         &mut self,
         old_unapplied: impl IntoIterator<Item = Command>,
         midi_unsent: impl IntoIterator<Item = Command>,
     ) {
-        let old_gate = std::mem::take(&mut self.queues);
-        for cmd in old_unapplied {
-            if let Some(id) = cmd.unit() {
-                self.queues.entry(id).or_default().push_back(TimedCommand { frame: None, command: cmd });
-            }
-        }
-        for (id, cmds) in old_gate {
-            if !cmds.is_empty() {
-                self.queues.entry(id).or_default().extend(cmds);
-            }
-        }
-        for cmd in midi_unsent {
-            if let Some(id) = cmd.unit() {
-                self.queues.entry(id).or_default().push_back(TimedCommand { frame: None, command: cmd });
-            }
-        }
+        let old_gate = std::mem::take(&mut self.held);
+        let fresh = |command: Command| TimedCommand { frame: None, command };
+        self.held.extend(old_unapplied.into_iter().filter(gated).map(fresh));
+        self.held.extend(old_gate);
+        self.held.extend(midi_unsent.into_iter().filter(gated).map(fresh));
     }
 }
 
@@ -1051,38 +1060,44 @@ pub(crate) fn flush_gate_locked(core: &Core, settings: &mut Settings, ends: &mut
     if state.gate.is_empty() {
         return;
     }
-    let ids: Vec<UnitId> = state.gate.queues.keys().copied().collect();
-    let mut ring_full = false;
-    for id in ids {
-        match state.model.unit_gate_status(id) {
-            GateStatus::Seated => {
-                if ring_full {
+    // In send order. Every entry before `i` is still held (a sent or dropped one leaves the gate), so a
+    // kind toggle goes only from the front, and a unit command only past no held entry of its own id
+    // and no held kind toggle.
+    let HostState { gate, model, .. } = state;
+    let mut held_ids: Vec<UnitId> = Vec::new();
+    let mut toggle_held = false;
+    let mut i = 0;
+    while let Some(&cmd) = gate.held.get(i) {
+        let send = match (cmd.command.unit(), cmd.command.kind_toggle()) {
+            (Some(id), _) => match model.unit_gate_status(id) {
+                GateStatus::Seated => !toggle_held && !held_ids.contains(&id),
+                GateStatus::Reseating => false,
+                GateStatus::Gone => {
+                    // None of the id's entries is before `i`: the first one met drops them all.
+                    let n = gate.drop_id(id);
+                    core.gate_dropped.fetch_add(n, Relaxed);
                     continue;
                 }
-                let Some(q) = state.gate.queues.get_mut(&id) else { continue };
-                while let Some(cmd) = q.pop_front() {
-                    if ends.commands.push(cmd).is_err() {
-                        q.push_front(cmd);
-                        core.counters.commands_full.fetch_add(1, Relaxed);
-                        ring_full = true;
-                        break;
-                    }
-                    ends.pushed += 1;
-                    settings.record(&cmd.command);
-                    settings.pushed(&cmd.command);
-                }
-                if q.is_empty() {
-                    state.gate.queues.remove(&id);
-                }
+            },
+            (None, Some(kind)) => i == 0 && !model.kind_reseating(kind),
+            (None, None) => unreachable!("the gate holds unit commands and kind toggles only"),
+        };
+        if !send {
+            match cmd.command.unit() {
+                Some(id) => held_ids.push(id),
+                None => toggle_held = true,
             }
-            GateStatus::Reseating => {}
-            GateStatus::Gone => {
-                let n = state.gate.drop_id(id);
-                if n > 0 {
-                    core.gate_dropped.fetch_add(n, Relaxed);
-                }
-            }
+            i += 1;
+            continue;
         }
+        if ends.commands.push(cmd).is_err() {
+            core.counters.commands_full.fetch_add(1, Relaxed);
+            return;
+        }
+        gate.held.remove(i);
+        ends.pushed += 1;
+        settings.record(&cmd.command);
+        settings.pushed(&cmd.command);
     }
 }
 

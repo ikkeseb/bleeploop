@@ -41,7 +41,10 @@ use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
 use lf_engine::grid::{self, Frame};
-use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle, UnitId, UnitParam, SLOT_COUNT};
+use lf_engine::{
+    Action, BandMeter, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle, UnitId,
+    UnitKind, UnitMeter, UnitParam, SLOT_COUNT,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::chain::ChainState;
@@ -182,7 +185,8 @@ enum ActionDef {
 }
 
 /// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, `{"Send":"echo"}` (a send
-/// as its key), or `{"Live":0}` (a slot's GO LIVE).
+/// as its key), `{"Live":0}` (a slot's GO LIVE), or `{"Units":"echo"}` (every unit of a built-in effect
+/// kind, as its key: `effect_kind`).
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Toggle")]
 enum ToggleDef {
@@ -193,6 +197,7 @@ enum ToggleDef {
     AutoRec,
     Send(#[serde(with = "input_send")] InputSend),
     Live(u8),
+    Units(#[serde(with = "effect_kind")] UnitKind),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -432,6 +437,24 @@ mod input_send {
     }
 }
 
+/// A built-in effect kind (`Toggle::Units`) as its key: `ott`, `echo`, `reverb`, `ring` (`engine-wire.ts`
+/// `UnitEffectKindId`). `plugin` and `synth` name no toggle: refused both ways.
+mod effect_kind {
+    use super::*;
+
+    const KEYS: [(UnitKind, &str); 4] = [(UnitKind::Ott, "ott"), (UnitKind::Echo, "echo"), (UnitKind::Reverb, "reverb"), (UnitKind::Ring, "ring")];
+
+    pub fn serialize<S: Serializer>(v: &UnitKind, s: S) -> Result<S::Ok, S::Error> {
+        let key = KEYS.iter().find(|(k, _)| k == v).map(|(_, key)| *key);
+        s.serialize_str(key.ok_or_else(|| serde::ser::Error::custom(format!("{v:?} is no built-in effect kind")))?)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<UnitKind, D::Error> {
+        let key = String::deserialize(d)?;
+        KEYS.iter().find(|(_, k)| *k == key).map(|(kind, _)| *kind).ok_or_else(|| serde::de::Error::custom(format!("unknown built-in effect kind \"{key}\"")))
+    }
+}
+
 /// An `InputSendParam` as its key (`InputSendParam::key`).
 mod input_send_param {
     use super::*;
@@ -524,6 +547,53 @@ pub struct TunerUpdate {
     pub level: f32,
 }
 
+/// One unit's meter since the last frame (`docs/unit-contract.md` §2, `engine-wire.ts` `UnitMeter`): its
+/// output peak per channel (linear) and, for an OTT, its bands (low, mid, high); `bands` absent for any
+/// other unit. The feed folds every entry the engine published since the last frame into one (`feed.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireUnitMeter {
+    pub unit: UnitId,
+    pub out: [f32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bands: Option<[WireBandMeter; 3]>,
+}
+
+/// An OTT band's meter (`engine-wire.ts` `BandMeter`): `gain` in dB at the last sample, `gainMin` and
+/// `gainMax` its range, `level` the linked follower in dBFS at the last sample, `levelPeak` its largest.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireBandMeter {
+    pub gain: f32,
+    pub gain_min: f32,
+    pub gain_max: f32,
+    pub level: f32,
+    pub level_peak: f32,
+}
+
+/// A number JSON can carry: serde_json writes a NaN or an infinity as `null`, which the TS decoder
+/// refuses with the whole frame. A NaN reads 0, an infinity the largest finite value of its sign.
+fn json_f32(v: f32) -> f32 {
+    if v.is_nan() {
+        0.0
+    } else {
+        v.clamp(f32::MIN, f32::MAX)
+    }
+}
+
+impl From<UnitMeter> for WireUnitMeter {
+    fn from(m: UnitMeter) -> Self {
+        let band = |b: BandMeter| WireBandMeter {
+            gain: json_f32(b.gain),
+            gain_min: json_f32(b.gain_min),
+            gain_max: json_f32(b.gain_max),
+            level: json_f32(b.level),
+            level_peak: json_f32(b.level_peak),
+        };
+        WireUnitMeter { unit: m.unit, out: m.out.map(json_f32), bands: m.bands.map(|b| b.map(band)) }
+    }
+}
+
 /// One `engine_feed` message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedFrame {
@@ -550,9 +620,13 @@ pub struct FeedFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<[bool; SLOT_COUNT]>,
     /// Each plugin slot's chain as the host's model holds it (`chain.rs`): on a reset frame, and on a
-    /// frame where its revision moved; absent otherwise. `unitMeters` stays absent until E3.
+    /// frame where its revision moved; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chains: Option<[ChainState; SLOT_COUNT]>,
+    /// Each unit's meter since the last frame sent, in unit id order, for every unit the engine
+    /// published one for (`feed.rs`); absent when none did.
+    #[serde(default, rename = "unitMeters", skip_serializing_if = "Option::is_none")]
+    pub unit_meters: Option<Vec<WireUnitMeter>>,
     pub peaks: Vec<PeakUpdate>,
     /// Absent unless the stage view asked for the scope and this frame carries columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -971,16 +1045,66 @@ mod tests {
         assert!(units.iter().any(|u| u.held) && units.iter().any(|u| !u.held), "held present and absent");
         assert!(units.iter().any(|u| u.reloading) && units.iter().any(|u| !u.reloading), "reloading present and absent");
         assert!(units.iter().any(|u| u.error.is_some()) && units.iter().any(|u| u.error.is_none()), "error present and absent");
+        let meters: Vec<_> = frames.iter().filter_map(|f| f.unit_meters.as_ref()).flatten().collect();
+        assert!(meters.iter().any(|m| m.bands.is_some()) && meters.iter().any(|m| m.bands.is_none()), "an OTT's meter with bands and one without");
+        assert!(frames.iter().any(|f| f.unit_meters.is_none()), "and a frame without meters (the field is absent then)");
     }
 
     #[test]
-    fn unit_commands_refuse_unknown_keys_unit_zero_and_toggle_units() {
+    fn unit_commands_refuse_unknown_keys_and_unit_zero_and_toggle_units_by_effect_kind() {
         let parse = |json: &str| serde_json::from_str::<WireCommand>(json).map(|c| c.0);
         assert!(parse(r#"{"SetUnitParam":[7,"nope",1]}"#).is_err(), "unknown unit param key");
         assert!(parse(r#"{"SetUnitBypass":[0,true]}"#).is_err(), "unit id 0");
         assert!(parse(r#"{"Action":{"ToggleUnit":0}}"#).is_err(), "toggle unit id 0");
-        assert!(parse(r#"{"Action":{"Toggle":{"Units":"echo"}}}"#).is_err(), "Toggle.Units not in Rust until E3");
         assert_eq!(parse(r#"{"SetUnitParam":[7,"gainDrum",0.3]}"#).unwrap(), Command::SetUnitParam(7, UnitParam::Gain(Instrument::Drums), 0.3));
+        for (key, kind) in [("ott", UnitKind::Ott), ("echo", UnitKind::Echo), ("reverb", UnitKind::Reverb), ("ring", UnitKind::Ring)] {
+            let pressed = format!(r#"{{"Action":{{"Toggle":{{"Units":"{key}"}}}}}}"#);
+            let command = Command::Action(Action::Toggle(Toggle::Units(kind)));
+            assert_eq!(parse(&pressed).unwrap(), command, "{pressed}");
+            assert_eq!(serde_json::to_string(&WireCommand(command)).unwrap(), pressed, "writes back as read");
+            let on = format!(r#"{{"ActionOn":[3,{{"Toggle":{{"Units":"{key}"}}}}]}}"#);
+            assert_eq!(parse(&on).unwrap(), Command::ActionOn(3, Action::Toggle(Toggle::Units(kind))), "{on}");
+            let toggled = serde_json::to_string(&WireEvent(Event::Toggled { frame: 9, toggle: Toggle::Units(kind), on: true })).unwrap();
+            assert_eq!(toggled, format!(r#"{{"Toggled":{{"frame":9,"toggle":{{"Units":"{key}"}},"on":true}}}}"#));
+        }
+        for key in ["plugin", "synth", "Echo", "nope"] {
+            let json = format!(r#"{{"Action":{{"Toggle":{{"Units":"{key}"}}}}}}"#);
+            assert!(parse(&json).is_err(), "{json}: no built-in effect kind");
+        }
+        for kind in [UnitKind::Plugin, UnitKind::Synth] {
+            let command = WireCommand(Command::Action(Action::Toggle(Toggle::Units(kind))));
+            assert!(serde_json::to_string(&command).is_err(), "{kind:?}: never written");
+        }
+    }
+
+    #[test]
+    fn a_unit_meter_writes_camel_case_bands_only_for_an_ott_and_the_field_is_absent_when_none() {
+        let band = |k: f32| BandMeter { gain: -k, gain_min: -2.0 * k, gain_max: 0.5, level: -24.0 - k, level_peak: -12.0 - k };
+        let ott = WireUnitMeter::from(UnitMeter { unit: 4, out: [0.5, 0.25], bands: Some([band(1.0), band(2.0), band(3.0)]) });
+        let plugin = WireUnitMeter::from(UnitMeter { unit: 9, out: [f32::NAN, f32::INFINITY], bands: None });
+        let frame = FeedFrame {
+            seq: 3, reset: false, catch_up: false, events: Vec::new(), device: Vec::new(), status: None, anchor: None, meter: None,
+            live: None, chains: None, unit_meters: Some(vec![ott, plugin]), peaks: Vec::new(), scope: None, tuner: None, settings: None,
+        };
+        // As the IPC sends it: text.
+        let json: Value = serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+        let want = serde_json::json!([
+            { "unit": 4, "out": [0.5, 0.25], "bands": [
+                { "gain": -1.0, "gainMin": -2.0, "gainMax": 0.5, "level": -25.0, "levelPeak": -13.0 },
+                { "gain": -2.0, "gainMin": -4.0, "gainMax": 0.5, "level": -26.0, "levelPeak": -14.0 },
+                { "gain": -3.0, "gainMin": -6.0, "gainMax": 0.5, "level": -27.0, "levelPeak": -15.0 },
+            ] },
+            { "unit": 9, "out": [0.0, "largest"] },
+        ]);
+        let mut got = json["unitMeters"].clone();
+        assert_eq!(got[1]["out"][1].as_f64().map(|v| v as f32), Some(f32::MAX), "an infinity writes as the largest f32, never null: {json}");
+        got[1]["out"][1] = Value::from("largest");
+        assert!(same(&got, &want), "a NaN writes as 0: {json}");
+        assert!(json.get("unit_meters").is_none(), "camelCase only: {json}");
+        let back: FeedFrame = serde_json::from_value(json).unwrap();
+        assert_eq!(back.unit_meters, frame.unit_meters, "reads back as written");
+        let none = serde_json::to_value(FeedFrame { unit_meters: None, ..frame }).unwrap();
+        assert!(none.get("unitMeters").is_none(), "no meters: the field is absent: {none}");
     }
 
     #[test]
@@ -991,7 +1115,7 @@ mod tests {
         assert!(same(&unpitched, &serde_json::json!({ "hz": null, "level": -71.2 })), "{unpitched}");
         let frame = FeedFrame {
             seq: 0, reset: false, catch_up: false, events: Vec::new(), device: Vec::new(), status: None, anchor: None, meter: None,
-            live: None, chains: None, peaks: Vec::new(), scope: None, tuner: None, settings: None,
+            live: None, chains: None, unit_meters: None, peaks: Vec::new(), scope: None, tuner: None, settings: None,
         };
         let json = serde_json::to_value(&frame).unwrap();
         assert!(json.get("tuner").is_none(), "no reading: the field is absent: {json}");

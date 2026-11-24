@@ -25,6 +25,14 @@
 //! tuner's current activation is read. The drain that meets another engine is discarded whole, its
 //! ring emptied past what the storage held.
 //!
+//! The unit meter ring (`lf_engine::EngineHandle::unit_meters`: each seated unit's meter, folded by the
+//! engine at most every 4 ms) is drained every tick in the same acquisition, here and never on the audio
+//! thread, and folded per unit until a frame goes out (`fold_unit_meter`): held, withheld and quiet
+//! ticks keep folding, so a peak is never lost between frames. A frame carries the fold as `unitMeters`,
+//! one per unit with an entry, in unit id order, and leaves the field out when none had one. A fold unlike
+//! the last one sent is itself a reason to send; the same again (a silent unit) is not. A new engine
+//! drops what the old one's units folded.
+//!
 //! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
 //! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
 //! keeps a mirror of the lanes, the transport, the selection, the current count-in and whether the tuner
@@ -77,10 +85,10 @@ use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::pitch::{Ear, Reading};
 use lf_engine::scope::{ScopeBin, SCOPE_SOURCES};
 use lf_engine::tuner::{tuner_capacity, TunerFrame};
-use lf_engine::{Event, LaneInfo, LaneState, Overview, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{BandMeter, Event, LaneInfo, LaneState, Overview, UnitMeter, SLOT_COUNT, TRACK_COUNT};
 
 use super::chain::{ChainRev, ChainState};
-use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, TunerUpdate, WireCommand, WireEvent};
+use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, TunerUpdate, WireCommand, WireEvent, WireUnitMeter};
 use super::{DeviceEvent, DeviceStatus, EngineHost, FeedDrain};
 
 /// The device events an unsent feed keeps for its next frame; older ones go first.
@@ -200,6 +208,12 @@ pub(crate) struct Feed {
     /// skipped.
     tuner_breaks: u64,
     tuner_fence: Frame,
+    /// This tick's unit meters, as drained (storage reused between ticks).
+    unit_drained: Vec<UnitMeter>,
+    /// Every unit meter drained since the last frame sent, folded per unit in unit id order
+    /// (`fold_unit_meter`), and the fold the last frame carried.
+    unit_fold: Vec<UnitMeter>,
+    unit_sent: Vec<UnitMeter>,
 }
 
 impl Feed {
@@ -241,6 +255,9 @@ impl Feed {
             tuner_epoch: None,
             tuner_breaks: 0,
             tuner_fence: Frame::MIN,
+            unit_drained: Vec::with_capacity(lf_engine::UNIT_METER_CAPACITY),
+            unit_fold: Vec::new(),
+            unit_sent: Vec::new(),
         }
     }
 
@@ -251,11 +268,16 @@ impl Feed {
         self.drained.clear();
         self.columns.clear();
         self.tuner_frames.clear();
-        // The events and the taps in one acquisition, so this tick's columns, tuner frames and
-        // chain snapshot are the engine whose events it took: a second drain could straddle a
-        // rebuild and mix the two.
-        let FeedDrain { gen, overview, scope_bin, rate, chains, stash_lost } =
-            self.host.drain_feed_taps(&mut self.drained, Some(&mut self.columns), Some(&mut self.tuner_frames));
+        self.unit_drained.clear();
+        // The events and the taps in one acquisition, so this tick's columns, tuner frames, unit
+        // meters and chain snapshot are the engine whose events it took: a second drain could
+        // straddle a rebuild and mix the two.
+        let FeedDrain { gen, overview, scope_bin, rate, chains, stash_lost } = self.host.drain_feed_taps(
+            &mut self.drained,
+            Some(&mut self.columns),
+            Some(&mut self.tuner_frames),
+            Some(&mut self.unit_drained),
+        );
         self.stash_lost |= stash_lost;
         self.scope_bin = scope_bin;
         if self.gen != Some(gen) {
@@ -272,6 +294,13 @@ impl Feed {
                 self.tuner_frames.reserve_exact(need.saturating_sub(self.tuner_frames.len()));
             }
             self.tuner_epoch = None;
+            // The old engine's meters go with it: its units are reseated in the new one, which
+            // meters them afresh.
+            self.unit_fold.clear();
+            self.unit_sent.clear();
+        }
+        for meter in self.unit_drained.drain(..) {
+            fold_unit_meter(&mut self.unit_fold, meter);
         }
         (self.update_mirror(gen), chains)
     }
@@ -407,10 +436,16 @@ impl Feed {
         // The tick that ends a held stretch, or a reset, reads no old input: it discards and starts over.
         let tuner = self.tuner(!reset && !catch_up);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
+        // Unit meters unlike the last sent are a reason to send; the same again (a silent unit's
+        // zeros, a steady peak) is not, and keeps folding until a frame goes out.
+        let units_metered = !self.unit_fold.is_empty() && self.unit_fold != self.unit_sent;
         // A batch of columns, a tuner reading or a chain update is itself a reason to send: a tick that built one never drops it.
-        if !(reset || catch_up || due || metered || live.is_some() || chains.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some() || tuner.is_some()) {
+        if !(reset || catch_up || due || metered || units_metered || live.is_some() || chains.is_some() || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some() || tuner.is_some()) {
             return None;
         }
+        let unit_meters = (!self.unit_fold.is_empty()).then(|| self.unit_fold.iter().map(|&m| WireUnitMeter::from(m)).collect());
+        std::mem::swap(&mut self.unit_sent, &mut self.unit_fold);
+        self.unit_fold.clear();
         let events = if reset {
             self.state_events()
         } else if catch_up {
@@ -428,7 +463,7 @@ impl Feed {
         self.sent = Some(Instant::now());
         let seq = self.seq;
         self.seq += 1;
-        let frame = FeedFrame { seq, reset, catch_up, events, device, status, anchor, meter, live, chains, peaks, scope, tuner, settings };
+        let frame = FeedFrame { seq, reset, catch_up, events, device, status, anchor, meter, live, chains, unit_meters, peaks, scope, tuner, settings };
         if frame.chains.is_some() {
             self.chains_sent = Some((chain_rev.rev, chain_rev.chains));
             self.host.chain_told(chain_rev.rev, seq);
@@ -846,6 +881,29 @@ impl FeedThread {
     }
 }
 
+/// Fold one unit meter the engine published into `fold`, which holds one per unit in unit id order:
+/// `out` the larger per channel; each band's `gain` and `level` the newer entry's, `gainMin` the
+/// smaller, `gainMax` and `levelPeak` the larger (`docs/unit-contract.md` §2). Bands on one side only
+/// (no unit changes kind under its id) are kept as they are.
+fn fold_unit_meter(fold: &mut Vec<UnitMeter>, meter: UnitMeter) {
+    let at = match fold.binary_search_by_key(&meter.unit, |m| m.unit) {
+        Ok(at) => at,
+        Err(at) => return fold.insert(at, meter),
+    };
+    let held = &mut fold[at];
+    held.out = [held.out[0].max(meter.out[0]), held.out[1].max(meter.out[1])];
+    held.bands = match (held.bands, meter.bands) {
+        (Some(old), Some(new)) => Some(std::array::from_fn(|b| BandMeter {
+            gain: new[b].gain,
+            gain_min: old[b].gain_min.min(new[b].gain_min),
+            gain_max: old[b].gain_max.max(new[b].gain_max),
+            level: new[b].level,
+            level_peak: old[b].level_peak.max(new[b].level_peak),
+        })),
+        (old, new) => new.or(old),
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,7 +972,7 @@ mod tests {
         let (engine, handle) = lf_engine::Engine::new(config);
         *core.ends.lock().unwrap() = Some(super::super::Ends {
             commands: handle.commands, pushed: 0, events: handle.events, overview: handle.overview,
-            session: Some(handle.session), scope: handle.scope, scope_bin: 32, tuner: handle.tuner, rate: 8_000,
+            session: Some(handle.session), scope: handle.scope, scope_bin: 32, tuner: handle.tuner, rate: 8_000, unit_meters: handle.unit_meters,
         });
         (engine, Feed::new(EngineHost { core }))
     }
@@ -2215,7 +2273,7 @@ mod tests {
         assert!(rig.feed.host.core.rt.lock().unwrap().engine.as_ref().unwrap().diag().tuner_dropped > 0, "and refused frames");
         let mut taken = Vec::new();
         let mut frames = std::mem::take(&mut rig.feed.tuner_frames);
-        rig.feed.host.drain_feed_taps(&mut taken, None, Some(&mut frames));
+        rig.feed.host.drain_feed_taps(&mut taken, None, Some(&mut frames), None);
         assert_eq!((frames.len(), frames.capacity(), rig.waiting()), (ring, capacity, 0), "one drain took the whole ring");
         frames.clear();
         rig.feed.tuner_frames = frames;
@@ -2512,5 +2570,102 @@ mod tests {
         turn(&mut feed, &mut sub, &Hold::default());
         assert!(sent.lock().unwrap()[1..].iter().all(|f| f.chains.is_none()), "legacy install moves no chains");
         let _ = slot.remove(PATIENCE);
+    }
+
+    fn band(gain: f32, level: f32) -> BandMeter {
+        BandMeter { gain, gain_min: gain, gain_max: gain, level, level_peak: level }
+    }
+
+    fn ott_meter(unit: lf_engine::UnitId, out: [f32; 2], gains: [f32; 3], level: f32) -> UnitMeter {
+        UnitMeter { unit, out, bands: Some(gains.map(|g| band(g, level))) }
+    }
+
+    #[test]
+    fn unit_meters_fold_per_unit_across_ticks_until_a_frame_is_sent() {
+        let device = engine();
+        let mut feed = Feed::new(device.host().clone());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap()[0].unit_meters, None, "no unit metered: the field is absent");
+
+        // Two ticks' entries, the second's behind a held tick (it keeps folding, sends nothing).
+        fold_unit_meter(&mut feed.unit_fold, ott_meter(9, [0.5, 0.1], [-3.0, 0.0, 2.0], -20.0));
+        fold_unit_meter(&mut feed.unit_fold, UnitMeter { unit: 4, out: [0.2, 0.7], bands: None });
+        feed.tick_held();
+        fold_unit_meter(&mut feed.unit_fold, ott_meter(9, [0.25, 0.4], [-6.0, 1.0, 1.0], -30.0));
+        fold_unit_meter(&mut feed.unit_fold, UnitMeter { unit: 4, out: [0.3, 0.1], bands: None });
+        turn(&mut feed, &mut sub, &Hold::default());
+        let frame = sent.lock().unwrap().last().unwrap().clone();
+        assert!(frame.catch_up, "the frame that ends the held tick");
+        let meters = frame.unit_meters.clone().expect("the fold rides the frame");
+        assert_eq!(meters.iter().map(|m| m.unit).collect::<Vec<_>>(), [4, 9], "in unit id order");
+        assert_eq!(meters[0], WireUnitMeter { unit: 4, out: [0.3, 0.7], bands: None }, "out: the larger per channel");
+        assert_eq!(meters[1].out, [0.5, 0.4]);
+        let bands = meters[1].bands.expect("an OTT's bands");
+        let want = [(-6.0, -6.0, -3.0), (1.0, 0.0, 1.0), (1.0, 1.0, 2.0)];
+        for (b, (gain, min, max)) in bands.iter().zip(want) {
+            assert_eq!((b.gain, b.gain_min, b.gain_max), (gain, min, max), "gain the newer entry's, its range across both");
+            assert_eq!((b.level, b.level_peak), (-30.0, -20.0), "level the newer entry's, its peak the larger");
+        }
+        // As the IPC sends it: text.
+        let json: serde_json::Value = serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+        assert_eq!(json["unitMeters"][0], serde_json::json!({ "unit": 4, "out": [0.3, 0.7] }), "no bands: absent: {json}");
+        assert!(json["unitMeters"][1]["bands"][0].get("levelPeak").is_some(), "camelCase band fields: {json}");
+
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 2, "the fold went with its frame: nothing left to send");
+
+        // The same as the last sent is no reason to send; it keeps folding into the next frame.
+        for meter in feed.unit_sent.clone() {
+            fold_unit_meter(&mut feed.unit_fold, meter);
+        }
+        turn(&mut feed, &mut sub, &Hold::default());
+        assert_eq!(sent.lock().unwrap().len(), 2, "unchanged meters send no frame");
+        fold_unit_meter(&mut feed.unit_fold, UnitMeter { unit: 4, out: [0.9, 0.0], bands: None });
+        turn(&mut feed, &mut sub, &Hold::default());
+        let frames = sent.lock().unwrap().clone();
+        assert_eq!(frames.len(), 3, "a louder peak sends");
+        let meters = frames[2].unit_meters.as_ref().unwrap();
+        assert_eq!(meters[0].out, [0.9, 0.7], "the unsent tick's entry folded in");
+        assert_eq!(meters[1].unit, 9, "a unit with no entry since then still rides its unsent fold");
+
+        // Another engine: the old one's fold goes.
+        fold_unit_meter(&mut feed.unit_fold, UnitMeter { unit: 4, out: [1.0, 1.0], bands: None });
+        device.rebuild_at(44_100, 256);
+        turn(&mut feed, &mut sub, &Hold::default());
+        let last = sent.lock().unwrap().last().unwrap().clone();
+        assert!(last.reset && last.unit_meters.is_none(), "a new engine's reset carries none of the old engine's meters");
+    }
+
+    #[test]
+    fn a_seated_units_meters_reach_the_feed_off_the_engines_ring() {
+        use super::super::unit_host::{Activated, OpState, Spec};
+
+        let device = engine();
+        let host = device.host().clone();
+        let mut feed = Feed::new(host.clone());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &Hold::default());
+        let u = host.unit(0, 10, Spec::Plugin(test_plugin_ref("m")), 0, false).unwrap();
+        u.activated(Activated { name: "m".into(), source: false, latency: 0 });
+        let t = u.terms().unwrap();
+        let op = u.submit(Box::new(PassUnit(0)), t).unwrap_or_else(|(_, e)| panic!("submit failed: {e:?}"));
+        assert_eq!(host.wait_op(op, PATIENCE).unwrap(), OpState::Applied);
+        assert!(device.wait_blocks(4), "the engine meters the seat");
+        let deadline = Instant::now() + PATIENCE;
+        let meters = loop {
+            turn(&mut feed, &mut sub, &Hold::default());
+            let newest = sent.lock().unwrap().last().map(|f| f.seq);
+            sub.as_mut().unwrap().ack(newest, Instant::now());
+            if let Some(m) = sent.lock().unwrap().iter().find_map(|f| f.unit_meters.clone()) {
+                break m;
+            }
+            assert!(Instant::now() < deadline, "no frame carried the seated unit's meter");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(meters.len(), 1, "the one seated unit: {meters:?}");
+        assert_eq!((meters[0].unit, meters[0].bands), (10, None), "a plugin unit's meter: no bands");
+        assert!(meters[0].out.iter().all(|v| (0.0..=1.0).contains(v)), "{meters:?}");
+        u.release();
     }
 }
