@@ -913,9 +913,10 @@ pub enum SlotEventKind {
     Modulation { depth: f64 },
     /// Every note the unit holds released at once, as a pick releases them (`Bank::select`: at the
     /// sounding pitch, so a mono bass never falls back to an older key on its way out). Only a SYNTH
-    /// holding a key gets it, in place of the NoteOff per held key a plugin gets: when it leaves (a
-    /// removal, a withdrawal, a replacement), when the note target leaves its slot (or is selected
-    /// again) and on [`Command::AllNotesOff`] (`slots.rs` `unit_events`, `Slot::release_all`); a plugin
+    /// gets it, held keys or not (as today's bank releases: a released bass's tail re-releases on it), in
+    /// place of the NoteOff per held key a plugin gets: when it leaves (a removal, a withdrawal, a
+    /// replacement), when the note target leaves its slot (or is selected again: once) and on
+    /// [`Command::AllNotesOff`] (`slots.rs` `unit_events`, `Slot::release_all`); a plugin
     /// host never sees it and ignores it.
     AllNotesOff,
 }

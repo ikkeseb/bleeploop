@@ -16,10 +16,12 @@
 //! - The wheels never reach a chain without a SYNTH, nor split its render; a withdrawing SYNTH and a
 //!   SYNTH slot the note target has left take none and split nothing.
 //! - A departing SYNTH (replaced, removed) leaves the tail a pick's release of the same notes leaves, bit
-//!   for bit (a mono bass never falls back to an older key on its way out); a withdrawn and reseated one
-//!   is silent until its next note.
+//!   for bit (a mono bass never falls back to an older key on its way out), also after its last NoteOff
+//!   (a pick releases a bass's tail again); a withdrawn and reseated one is silent until its next note.
 //! - The note target leaving a SYNTH slot and `AllNotesOff` release as today's bank does (one release of
-//!   the bank's own, in ring order with a note on the frame), where a plugin keeps a NoteOff per key.
+//!   the bank's own, in ring order with a note on the frame, held keys or not: also after the last
+//!   NoteOff, the tail still sounding; once when the target is selected again), where a plugin keeps a
+//!   NoteOff per key.
 //! - A SYNTH's levels glide as `SetInstrumentGain`'s, its take records what today's bank's does, and a
 //!   pick hands over the wheels it holds (against the same wheels sent after the pick).
 //!
@@ -951,11 +953,16 @@ enum Depart {
 }
 
 /// Slot 0's SYNTH on `i` holds 67, then 60 over it (a mono bass sounds 60), neither ever released by a
-/// NoteOff; at `CHANGE` it departs `how`. Answers the SYNTH.
-fn departure(block: usize, i: Instrument, how: Depart) -> Box<Spy<SynthUnit>> {
+/// NoteOff (or, `released`, both released `RELEASED` frames before, their tail still sounding); at
+/// `CHANGE` it departs `how`. Answers the SYNTH.
+fn departure(block: usize, i: Instrument, how: Depart, released: bool) -> Box<Spy<SynthUnit>> {
     let mut rig = rig(block);
     let old = rig.install_id(0, Box::new(Spy::new(picked(i))));
-    play(&mut rig, &[(0, Command::SelectInstrument(NoteTarget::Slot(0))), (1_000, Command::NoteOn(67, 0.9)), (3_000, Command::NoteOn(60, 0.8))], CHANGE);
+    let mut s = vec![(0, Command::SelectInstrument(NoteTarget::Slot(0))), (1_000, Command::NoteOn(67, 0.9)), (3_000, Command::NoteOn(60, 0.8))];
+    if released {
+        s.extend([(CHANGE - S0 - RELEASED - 200, Command::NoteOff(67)), (CHANGE - S0 - RELEASED, Command::NoteOff(60))]);
+    }
+    play(&mut rig, &s, CHANGE);
     let new = 900;
     match how {
         Depart::Pick => rig.send_at(CHANGE, Command::SetUnitParam(old, UnitParam::Instrument, ui_index(i))),
@@ -981,13 +988,15 @@ fn a_departing_synth_releases_as_a_pick_does() {
     // Its fade: every frame the departing unit is still called for.
     let end = CHANGE + 480;
     let r = 0..(end - S0) as usize;
-    for i in [Instrument::Bass, Instrument::Lead] {
-        let pick = departure(128, i, Depart::Pick);
+    // `released`: the last NoteOff came before the departure, the tail still sounding (a pick releases
+    // a bass's tail again, held keys or not).
+    for (i, released) in [(Instrument::Bass, false), (Instrument::Lead, false), (Instrument::Bass, true), (Instrument::Lead, true)] {
+        let pick = departure(128, i, Depart::Pick, released);
         assert!(pick.energy(CHANGE + LEAD, end) > 1e-4, "{i:?}: the released tail sounds");
         for block in BLOCKS {
             for how in [Depart::Replace, Depart::Remove] {
-                let what = format!("{i:?}, {how:?}, block {block}");
-                let gone = departure(block, i, how);
+                let what = format!("{i:?}, {how:?}, released {released}, block {block}");
+                let gone = departure(block, i, how, released);
                 // The tail of the notes it held, bit for bit a pick's release of them: a mono bass
                 // released at the pitch it sounds, never falling back to 67 on its way out.
                 for c in 0..2 {
@@ -1008,15 +1017,24 @@ enum Leave {
     OtherSlot,
     /// `Command::AllNotesOff`, the target staying.
     AllNotesOff,
+    /// `SelectInstrument` to the same slot (today's bank: the same instrument), the target staying: one
+    /// release, as a pick of the same instrument.
+    Again,
 }
 
 const LEAVE: Frame = 30_037;
+/// How long before the leave (or the departure) a `released` script's last NoteOff comes: its tail
+/// still sounds there.
+const RELEASED: Frame = 700;
 
 /// Slot 0's SYNTH (or today's bank, `builtin`) on `i`, a bend held, 67 then 60 over it held from
 /// `HOLD` and never released by a NoteOff; at `LEAVE` the note target leaves it `how` (today's bank:
 /// `SelectInstrument(Off)` for both selects), a NoteOn 64 on that frame sent before (`note_first`) or
-/// after it; then note 48 at `LEAVE + 9_000`. `fx`: a plugin effect after the SYNTH.
-fn leave_render(block: usize, builtin: bool, i: Instrument, how: Leave, note_first: bool, fx: bool) -> (Taps, Option<Box<Spy<SynthUnit>>>, Option<Box<Spy<Pass>>>) {
+/// after it; then note 48 at `LEAVE + 9_000`. `released`: 67 and then 60 get their NoteOffs ahead of
+/// the leave, the last `RELEASED` frames before it (the tail still sounding, no key held). `fx`: a
+/// plugin effect after the SYNTH.
+#[allow(clippy::too_many_arguments)]
+fn leave_render(block: usize, builtin: bool, i: Instrument, how: Leave, note_first: bool, released: bool, fx: bool) -> (Taps, Option<Box<Spy<SynthUnit>>>, Option<Box<Spy<Pass>>>) {
     let mut rig = rig(block);
     rig.input_latency = 256;
     let id = if builtin { 0 } else { rig.install_id(0, Box::new(Spy::new(synth()))) };
@@ -1027,8 +1045,13 @@ fn leave_render(block: usize, builtin: bool, i: Instrument, how: Leave, note_fir
         vec![(0, Command::SetUnitParam(id, UnitParam::Instrument, ui_index(i))), (0, Command::SelectInstrument(NoteTarget::Slot(0)))]
     };
     s.extend([(500, Command::PitchBend(0.5)), (HOLD, Command::NoteOn(67, 0.9)), (HOLD + 3_000, Command::NoteOn(60, 0.8))]);
+    if released {
+        s.extend([(LEAVE - RELEASED - 200, Command::NoteOff(67)), (LEAVE - RELEASED, Command::NoteOff(60))]);
+    }
     let leave = match (how, builtin) {
         (Leave::AllNotesOff, _) => Command::AllNotesOff,
+        (Leave::Again, true) => Command::SelectInstrument(NoteTarget::Builtin(i)),
+        (Leave::Again, false) => Command::SelectInstrument(NoteTarget::Slot(0)),
         (_, true) | (Leave::Off, false) => Command::SelectInstrument(NoteTarget::Off),
         (Leave::OtherSlot, false) => Command::SelectInstrument(NoteTarget::Slot(1)),
     };
@@ -1058,6 +1081,7 @@ fn leave_plugins(block: usize, how: Leave, note_first: bool) -> [Vec<(Frame, Slo
         Leave::Off => Command::SelectInstrument(NoteTarget::Off),
         Leave::OtherSlot => Command::SelectInstrument(NoteTarget::Slot(1)),
         Leave::AllNotesOff => Command::AllNotesOff,
+        Leave::Again => Command::SelectInstrument(NoteTarget::Slot(0)),
     };
     let note = (LEAVE, Command::NoteOn(64, 0.7));
     let mut s = vec![(0, Command::SelectInstrument(NoteTarget::Slot(0))), (HOLD, Command::NoteOn(67, 0.9)), (HOLD + 3_000, Command::NoteOn(60, 0.8))];
@@ -1073,13 +1097,15 @@ fn leave_plugins(block: usize, how: Leave, note_first: bool) -> [Vec<(Frame, Slo
 fn the_target_leaving_a_synth_releases_as_todays_bank_does() {
     let at = S0 + LEAVE;
     let on = |key: u8, velocity: f32| SlotEventKind::NoteOn { key, velocity };
-    for i in [Instrument::Bass, Instrument::Lead] {
-        for how in [Leave::Off, Leave::OtherSlot, Leave::AllNotesOff] {
+    // `released`: the last NoteOff came before the leave, the tail still sounding: today's bank
+    // releases again all the same (a bass's tail re-releases on it).
+    for (i, released) in [(Instrument::Bass, false), (Instrument::Lead, false), (Instrument::Bass, true), (Instrument::Lead, true)] {
+        for how in [Leave::Off, Leave::OtherSlot, Leave::AllNotesOff, Leave::Again] {
             for note_first in [true, false] {
-                let what = format!("{i:?}, {how:?}, NoteOn 64 sent {} it", if note_first { "before" } else { "after" });
-                let reference = leave_render(128, true, i, how, note_first, false).0;
+                let what = format!("{i:?}, {how:?}, released {released}, NoteOn 64 sent {} it", if note_first { "before" } else { "after" });
+                let reference = leave_render(128, true, i, how, note_first, released, false).0;
                 for block in BLOCKS {
-                    let (taps, spy, _) = leave_render(block, false, i, how, note_first, false);
+                    let (taps, spy, _) = leave_render(block, false, i, how, note_first, released, false);
                     // Today's bank, bit for bit: the release on the frame, at the sounding pitch.
                     taps.assert_eq(&reference, &format!("{what}, block {block}: against today's bank"));
                     // One release of the bank's own, in ring order with the note on its frame, and no
@@ -1088,11 +1114,11 @@ fn the_target_leaving_a_synth_releases_as_todays_bank_does() {
                     let there: Vec<SlotEventKind> = spy.events.iter().filter(|&&(f, _)| f == at).map(|&(_, k)| k).collect();
                     let want = match (note_first, how) {
                         (true, _) => vec![on(64, 0.7), SlotEventKind::AllNotesOff],
-                        (false, Leave::AllNotesOff) => vec![SlotEventKind::AllNotesOff, on(64, 0.7)],
+                        (false, Leave::AllNotesOff | Leave::Again) => vec![SlotEventKind::AllNotesOff, on(64, 0.7)],
                         (false, _) => vec![SlotEventKind::AllNotesOff],
                     };
                     assert_eq!(there, want, "{what}, block {block}: the SYNTH's events on the frame");
-                    assert!(spy.keys().iter().all(|&(f, on, _)| on || f >= PICK_END), "{what}, block {block}: a NoteOff reached the SYNTH");
+                    assert!(spy.keys().iter().all(|&(f, on, _)| on || f >= PICK_END || (released && f < at)), "{what}, block {block}: a NoteOff reached the SYNTH");
                 }
             }
         }
@@ -1100,11 +1126,11 @@ fn the_target_leaving_a_synth_releases_as_todays_bank_does() {
     // A plugin keeps a NoteOff per held key, ascending: alone in a slot (whose queue is what it was) and
     // as an effect after a SYNTH, which takes the one release in their place.
     for block in [1, 480] {
-        for how in [Leave::Off, Leave::OtherSlot, Leave::AllNotesOff] {
+        for how in [Leave::Off, Leave::OtherSlot, Leave::AllNotesOff, Leave::Again] {
             for note_first in [true, false] {
                 let what = format!("{how:?}, NoteOn 64 sent {}, block {block}", if note_first { "before" } else { "after" });
                 let mut released: Vec<(Frame, SlotEventKind)> = [60, 64, 67].into_iter().filter(|&k| k != 64 || note_first).map(|key| (at, SlotEventKind::NoteOff { key })).collect();
-                if !note_first && how == Leave::AllNotesOff {
+                if !note_first && matches!(how, Leave::AllNotesOff | Leave::Again) {
                     released.push((at, on(64, 0.7)));
                 }
                 for (u, events) in leave_plugins(block, how, note_first).iter().enumerate() {
@@ -1116,7 +1142,7 @@ fn the_target_leaving_a_synth_releases_as_todays_bank_does() {
                     assert_eq!(there, want, "{what}: plugins-only slot, unit {u}");
                     assert!(events.iter().all(|&(_, k)| k != SlotEventKind::AllNotesOff), "{what}: AllNotesOff reached a plugin");
                 }
-                let (_, synth, fx) = leave_render(block, false, Instrument::Bass, how, note_first, true);
+                let (_, synth, fx) = leave_render(block, false, Instrument::Bass, how, note_first, false, true);
                 let fx = fx.unwrap();
                 let there: Vec<_> = fx.events.iter().copied().filter(|&(f, _)| f == at).collect();
                 let mut want = released.clone();

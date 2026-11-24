@@ -155,7 +155,7 @@
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
 //!   runs: [`Engine::service_slots_idle`]); a leaving unit gets the releases of the notes it holds (a
-//!   SYNTH one `AllNotesOff`, a plugin a NoteOff per key), crossfades to bypass, stops the unit once and
+//!   SYNTH one `AllNotesOff`, held keys or not, a plugin a NoteOff per key), crossfades to bypass, stops the unit once and
 //!   hands it back (a unit resets only on entering an engine, never while seated; a withdrawn SYNTH stops
 //!   silent, its voices silenced by its `stop`, so a reseat resumes silent until its next note), and an eviction hands back every unit, a waiting install included (the host evicts again while units come back). A message leaves its
 //!   port only once its answer and its unit's return have their places, so none is dropped or leaked

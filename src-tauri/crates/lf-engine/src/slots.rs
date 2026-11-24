@@ -361,6 +361,11 @@ struct Seat {
     /// only for a key it holds, and a leaving unit gets the releases of what it holds, once.
     held: [u64; 2],
     old_held: [u64; 2],
+    /// Whether the unit, and the outgoing one, still owe their departure's release: set as a unit is
+    /// seated, cleared once it leaves. A leaving SYNTH takes its [`SlotEventKind::AllNotesOff`] by this,
+    /// held keys or not (a pick always releases: a bass's tail re-releases on it).
+    owes: bool,
+    old_owes: bool,
     /// How many of the slot's queued events the unit has had already: a SYNTH gets those sent ahead of
     /// a param on its frame before the param applies ([`Rack::set_unit_param`]), and its next render
     /// call skips them. 0 whenever the queue is empty.
@@ -560,15 +565,16 @@ fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
 
 /// The events one unit gets over a call into `ev`: a playing unit every NoteOn and wheel of the slot's
 /// `events` (it holds a NoteOn's key from there) and a NoteOff only for a key it holds, the slot's
-/// [`SlotEventKind::AllNotesOff`] only if it is a SYNTH holding a key ([`Slot::release_all`]); a leaving one
-/// (removed, withdrawn, replaced) none of them, only the releases of what it holds, at the call's first
-/// frame, once: a NoteOff per key, ascending, or for a SYNTH (`synth`) one
-/// [`SlotEventKind::AllNotesOff`], which its bank releases as a pick does (at the sounding pitch: a mono
-/// bass released key by key would fall back to an older key and retune its tail). So a source change
+/// [`SlotEventKind::AllNotesOff`] only if it is a SYNTH, held keys or not ([`Slot::release_all`]); a leaving
+/// one (removed, withdrawn, replaced) none of them, only the releases of what it holds, at the call's first
+/// frame, once (`owes`): a NoteOff per key, ascending, or for a SYNTH (`synth`) one
+/// [`SlotEventKind::AllNotesOff`], held keys or not, which its bank releases as a pick does (at the
+/// sounding pitch: a mono bass released key by key would fall back to an older key and retune its tail;
+/// a released bass's tail re-releases on it, as on a pick). So a source change
 /// releases the old source's notes on the frame it applies (a sustained one too: the router withholds
 /// its NoteOff), the new source starts holding none, and a NoteOff for a key the new one never got is
 /// dropped (`docs/unit-contract.md` §4).
-fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent], playing: bool, synth: bool) {
+fn unit_events(ev: &mut Vec<SlotEvent>, (held, owes): (&mut [u64; 2], &mut bool), events: &[SlotEvent], playing: bool, synth: bool) {
     ev.clear();
     let bit = |key: u8| ((key / 64) as usize, 1u64 << (key % 64));
     if playing {
@@ -585,10 +591,11 @@ fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent
                     }
                     held[w] &= !b;
                 }
-                // The slot's release of every note: a SYNTH holding a key takes it (the NoteOffs queued
-                // behind it then find no key held); a plugin takes those NoteOffs instead.
+                // The slot's release of every note: a SYNTH takes it, held keys or not, as today's bank
+                // does (the NoteOffs queued behind it then find no key held); a plugin takes those
+                // NoteOffs instead.
                 SlotEventKind::AllNotesOff => {
-                    if !synth || *held == [0; 2] {
+                    if !synth {
                         continue;
                     }
                     *held = [0; 2];
@@ -598,10 +605,10 @@ fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent
             ev.push(*e);
         }
     } else if synth {
-        if *held != [0; 2] {
+        if *owes {
             ev.push(SlotEvent { offset: 0, kind: SlotEventKind::AllNotesOff });
         }
-        *held = [0; 2];
+        (*held, *owes) = ([0; 2], false);
     } else {
         for key in 0..128u8 {
             let (w, b) = bit(key);
@@ -609,7 +616,7 @@ fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent
                 ev.push(SlotEvent { offset: 0, kind: SlotEventKind::NoteOff { key } });
             }
         }
-        *held = [0; 2];
+        (*held, *owes) = ([0; 2], false);
     }
 }
 
@@ -661,7 +668,7 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
                     // Those it had ahead of a param on this call's first frame (`Rack::set_unit_param`).
                     let skip = seat.sent.min(events.len());
                     seat.sent -= skip;
-                    unit_events(&mut seat.ev, &mut seat.held, &events[skip..], playing, seat.info.kind == UnitKind::Synth);
+                    unit_events(&mut seat.ev, (&mut seat.held, &mut seat.owes), &events[skip..], playing, seat.info.kind == UnitKind::Synth);
                     let unit_len = match (seat.removing, seat.withdrawing) {
                         (false, false) => b - a,
                         (removing, withdrawing) => left(if removing { seat.fade } else { u32::MAX }.min(if withdrawing { seat.wet } else { u32::MAX }), !seat.ev.is_empty()),
@@ -676,7 +683,7 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
         }
         if let Some((_, _, old, _)) = seat.outgoing.as_mut() {
             let [ol, or] = &mut seat.old;
-            unit_events(&mut seat.ev, &mut seat.old_held, events, false, seat.old_kind == UnitKind::Synth);
+            unit_events(&mut seat.ev, (&mut seat.old_held, &mut seat.old_owes), events, false, seat.old_kind == UnitKind::Synth);
             let old_len = left(n - seat.swap, !seat.ev.is_empty());
             process_for(old.as_mut(), cx, [&x[0][..old_len], &x[1][..old_len]], &seat.ev, [&mut ol[a..b], &mut or[a..b]], errors);
         }
@@ -863,11 +870,14 @@ impl Slot {
 
     /// Every note the slot holds released on `offset` (the note target leaving it, `Command::AllNotesOff`):
     /// a NoteOff per key, ascending, which a plugin seat takes as before, and ahead of them, only while
-    /// the slot seats a SYNTH, one [`SlotEventKind::AllNotesOff`] that a playing SYNTH takes in their
-    /// place (`unit_events`): its bank releases as a pick does, as `Instruments::select(None)` and
-    /// `Instruments::all_notes_off` release today's bank. A plugins-only slot queues what it did before.
+    /// the slot seats a SYNTH, one [`SlotEventKind::AllNotesOff`], held keys or not, that a playing SYNTH
+    /// takes in their place (`unit_events`): its bank releases as a pick does, as `Instruments::select`
+    /// and `Instruments::all_notes_off` release today's bank, unconditionally (a released bass's tail
+    /// re-releases on it). A plugins-only slot queues what it did before. The queue's bound holds: the
+    /// releases of 128 keys at most, and at most two events (a marker and a note) for each other command
+    /// a block takes (`engine.rs` `MAX_PENDING`, 64): 128 + 2 × 64 = [`MAX_SLOT_EVENTS`].
     fn release_all(&mut self, offset: u32, dropped: &mut u64) {
-        if self.notes != [0; 2] && self.seats[..self.len].iter().any(|s| s.unit.is_some() && s.info.kind == UnitKind::Synth) {
+        if self.seats[..self.len].iter().any(|s| s.unit.is_some() && s.info.kind == UnitKind::Synth) {
             self.queue(SlotEventKind::AllNotesOff, offset, dropped);
         }
         for key in 0..128u8 {
@@ -1005,14 +1015,14 @@ impl Slot {
             let [l, r] = &mut seat.out;
             if seat.removing || seat.withdrawing {
                 if let Some(unit) = seat.unit.as_mut() {
-                    unit_events(&mut seat.ev, &mut seat.held, &[], false, seat.info.kind == UnitKind::Synth);
+                    unit_events(&mut seat.ev, (&mut seat.held, &mut seat.owes), &[], false, seat.info.kind == UnitKind::Synth);
                     if !seat.ev.is_empty() {
                         unit.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
                     }
                 }
             }
             if let Some((_, _, old, _)) = seat.outgoing.as_mut() {
-                unit_events(&mut seat.ev, &mut seat.old_held, &[], false, seat.old_kind == UnitKind::Synth);
+                unit_events(&mut seat.ev, (&mut seat.old_held, &mut seat.old_owes), &[], false, seat.old_kind == UnitKind::Synth);
                 if !seat.ev.is_empty() {
                     old.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
                 }
@@ -1169,6 +1179,8 @@ impl Rack {
                         old_wet: 0,
                         held: [0; 2],
                         old_held: [0; 2],
+                        owes: false,
+                        old_owes: false,
                         sent: 0,
                         ev: Vec::with_capacity(MAX_SLOT_EVENTS + 128),
                         out: [vec![0.0; block], vec![0.0; block]],
@@ -1466,9 +1478,9 @@ impl Rack {
                             seat.outgoing = Some((seat.id, seat.token, old, seat.bypassed));
                             seat.swap = if fade { 0 } else { n };
                             (seat.old_kind, seat.old_latency, seat.old_wet) = (seat.info.kind, seat.info.latency as usize, seat.wet);
-                            seat.old_held = seat.held;
+                            (seat.old_held, seat.old_owes) = (seat.held, seat.owes);
                         }
-                        (seat.held, seat.sent) = ([0; 2], 0);
+                        (seat.held, seat.owes, seat.sent) = ([0; 2], true, 0);
                         // The line holds this seat's input while it was an effect, at any latency: a
                         // role change starts it empty.
                         let seat = &mut s.seats[k];
@@ -1500,7 +1512,7 @@ impl Rack {
                         (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
                         (seat.removing, seat.evicting, seat.engaged, seat.fade) = (false, false, true, if engaged { n } else { 0 });
                         (seat.withdrawing, seat.outgoing, seat.swap) = (false, None, n);
-                        (seat.line_at, seat.filled, seat.held, seat.sent) = (0, 0, [0; 2], 0);
+                        (seat.line_at, seat.filled, seat.held, seat.owes, seat.sent) = (0, 0, [0; 2], true, 0);
                         seat.params_owed = [None; UnitParam::COUNT];
                         seat.meter_out = [0.0; 2];
                         seat.meter_frames = 0;
@@ -1688,7 +1700,7 @@ impl Rack {
             return;
         };
         if seat.info.kind == UnitKind::Synth && seat.sent < events.len() {
-            unit_events(&mut seat.ev, &mut seat.held, &events[seat.sent..], true, true);
+            unit_events(&mut seat.ev, (&mut seat.held, &mut seat.owes), &events[seat.sent..], true, true);
             for e in seat.ev.iter_mut() {
                 e.offset = 0;
             }
@@ -1978,14 +1990,14 @@ impl Rack {
         (now - self.cursor).max(0) as u32
     }
 
-    /// The note target moves (`Command::SelectInstrument`): the slot it leaves releases its notes, and
-    /// so does the one it lands on when it stays.
+    /// The note target moves (`Command::SelectInstrument`): the slot it leaves releases its notes, once,
+    /// also when it stays, as `Instruments::select` releases the instrument it leaves or picks again. A
+    /// slot it lands on from elsewhere holds no note and its SYNTH is not released again (today's bank
+    /// releases nothing on a pick from no instrument).
     pub(crate) fn select(&mut self, target: Option<usize>, now: Frame) {
         let offset = self.offset(now);
-        for i in [self.target, target].into_iter().flatten() {
-            if let Some(s) = self.slots.get_mut(i) {
-                s.release_all(offset, &mut self.events_dropped);
-            }
+        if let Some(s) = self.target.map(|i| &mut self.slots[i]) {
+            s.release_all(offset, &mut self.events_dropped);
         }
         self.target = target.filter(|&i| i < SLOT_COUNT);
     }
