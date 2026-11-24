@@ -380,6 +380,20 @@ impl Rig {
         out
     }
 
+    /// Take the unit meters the engine has pushed, oldest first (`EngineHandle::unit_meters`).
+    pub fn read_unit_meters(&mut self) -> Vec<lf_engine::UnitMeter> {
+        let mut out = Vec::new();
+        while let Ok(meter) = self.handle.unit_meters.pop() {
+            out.push(meter);
+        }
+        out
+    }
+
+    /// Unread entries currently sitting in `EngineHandle::unit_meters`.
+    pub fn unit_meters_pending(&self) -> usize {
+        self.handle.unit_meters.slots()
+    }
+
     /// Columns the ring holds, taken and thrown away (a reader that keeps up).
     pub fn drop_scope(&mut self) -> usize {
         self.read_scope().len()

@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitParam, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitMeter, UnitParam, SLOT_COUNT, TRACK_COUNT, UNIT_METER_CAPACITY};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -55,7 +55,7 @@ use crate::looper::{Applied, Cx, Looper};
 use crate::overview::Overview;
 use crate::scope::{Scope, ScopeBin, SCOPE_MASTER, SCOPE_MONITOR, SCOPE_SOURCES};
 use crate::session::{SessionEnd, SessionPort};
-use crate::slots::{Rack, SlotPort, UnitClock};
+use crate::slots::{BypassTarget, Rack, SlotPort, UnitClock};
 use crate::tuner::{TunerFrame, TunerTap};
 
 /// Commands the engine holds for a future frame (a stamped command's, a wait for a block job).
@@ -82,6 +82,9 @@ pub struct EngineConfig {
     pub max_input_frames: Frame,
     pub command_capacity: usize,
     pub event_capacity: usize,
+    /// Entries the unit meter ring holds ([`EngineHandle::unit_meters`]); defaults to
+    /// [`crate::UNIT_METER_CAPACITY`].
+    pub unit_meter_capacity: usize,
     /// Mix [`Taps::looper`] every block (the lanes before their FX plus the click): what the looper's
     /// tests read. Nothing the device plays or the Share mix carries depends on it, so the host leaves
     /// it off (the default) and no frame of it is computed; empty while off.
@@ -95,7 +98,7 @@ impl EngineConfig {
         // A second of input side: what the record lines held before E1 (one second for the input side
         // and a plugin's latency together). An ASIO driver at its largest block with its safety offset
         // and converters, and the WASAPI join's pipe, stay well inside it.
-        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, max_input_frames: sample_rate as Frame, command_capacity: 1024, event_capacity: 4096, looper_tap: false }
+        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, max_input_frames: sample_rate as Frame, command_capacity: 1024, event_capacity: 4096, unit_meter_capacity: UNIT_METER_CAPACITY, looper_tap: false }
     }
 }
 
@@ -113,6 +116,10 @@ pub struct EngineHandle {
     /// The tuner's tap: both slots' raw input, one frame each, while the tuner is on ([`crate::tuner`]);
     /// its own ring, as the scope's.
     pub tuner: Consumer<TunerFrame>,
+    /// Each seated unit's folded meter (output peak per channel, and the OTT's per-band meter),
+    /// pushed at most every 4 ms when the ring has room (`docs/unit-contract.md` §2): its own ring
+    /// (invariant 2). A full ring delays a range and never drops samples.
+    pub unit_meters: Consumer<UnitMeter>,
 }
 
 /// The event ring's producer. A full ring refuses the event and counts it: the audio never waits.
@@ -335,7 +342,7 @@ impl Engine {
         let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(config.sample_rate as f32, vec![l, r]));
         let (white, pink) = (table(white), table(pink));
         let ir = effects::reverb_ir(config.sample_rate, &white);
-        let (rack, slots) = Rack::new(config.sample_rate, config.max_block, config.max_input_frames);
+        let (rack, slots, unit_meters) = Rack::new(config.sample_rate, config.max_block, config.max_input_frames, config.unit_meter_capacity);
         let looper = Looper::new(config.sample_rate, capacity);
         let overview = looper.overview().clone();
         let (session_port, session) = crate::session::channel();
@@ -401,7 +408,7 @@ impl Engine {
             xruns: 0,
             input_clamped: 0,
         };
-        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port, scope: scope_rx, tuner: tuner_rx })
+        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port, scope: scope_rx, tuner: tuner_rx, unit_meters })
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -568,12 +575,14 @@ impl Engine {
         self.replayed.then(|| (self.next_frame, std::array::from_fn(|i| CompactMix::from(&self.looper.mix(i, &self.fx)))))
     }
 
-    /// The `Toggled` events the engine still owes, one per answer the full ring refused, each at the
-    /// setting's current value. The host reads it from an engine it replaced, after draining its event
-    /// ring (`owner.rs` `swap_engine`), so a toggle accepted just before a rebuild survives it however
-    /// full the ring was. Not for the audio thread.
+    /// The `Toggled` events the engine still owes for kept settings, one per answer the full ring
+    /// refused, each at the setting's current value. The host reads it from an engine it replaced,
+    /// after draining its event ring (`owner.rs` `swap_engine`), so a toggle accepted just before a
+    /// rebuild survives it however full the ring was. Excludes [`Toggle::Units`], which is no kept
+    /// setting (no setter, its `Toggled` is never replayed; a rebuild restores every seat's own
+    /// bypass instead). Not for the audio thread.
     pub fn unsent_toggles(&self) -> impl Iterator<Item = (Toggle, bool)> + '_ {
-        Toggle::ALL.into_iter().flat_map(|t| {
+        Toggle::ALL.into_iter().filter(|t| t.setter(true).is_some()).flat_map(|t| {
             let on = toggle_value(&self.clock, &self.looper, &self.input_fx, &self.rack, t);
             std::iter::repeat_n((t, on), self.toggles_owed[t.index()] as usize)
         })
@@ -864,7 +873,7 @@ impl Engine {
             // per block unless one splits it.
             let k_next = (next - start) as usize;
             if self.slots_done < k_next {
-                let until = first_slot_pending(&self.pending, f, self.rack.reads_tempo()).map_or(end, |at| at.min(end));
+                let until = first_slot_pending(&self.pending, f, &self.rack).map_or(end, |at| at.min(end));
                 let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
                 let ([wl, wr], [al, ar], [bl, br]) = (&mut self.wet, &mut self.aligned, &mut self.slot_bus);
                 self.rack.render(
@@ -1069,7 +1078,7 @@ impl Engine {
     /// Each slot with a bypass command waiting for a place among what it owes keeps the next place for
     /// it, ahead of its port's messages (`Rack::reserve_bypasses`).
     fn reserve_bypasses(&mut self) {
-        self.rack.reserve_bypasses(self.pending.iter().flatten().filter(|p| p.owed).filter_map(|p| bypass_unit(p.command)));
+        self.rack.reserve_bypasses(self.pending.iter().flatten().filter(|p| p.owed).filter_map(|p| bypass_target(p.command)));
     }
 
     /// A capture's alignment is fixed: a take's window has its start.
@@ -1100,10 +1109,22 @@ impl Engine {
     }
 }
 
-/// The unit a bypass command names ([`Command::SetUnitBypass`], [`Action::ToggleUnit`]): a param
-/// command folds its answer and never waits for owed room.
-fn bypass_unit(command: Command) -> Option<UnitId> {
-    command.unit().filter(|_| !matches!(command, Command::SetUnitParam(..)))
+/// The unit or built-in effect kind a bypass command targets ([`Command::SetUnitBypass`],
+/// [`Action::ToggleUnit`], [`Toggle::Units`]): a param command folds its answer and never waits for
+/// owed room.
+fn bypass_target(command: Command) -> Option<BypassTarget> {
+    match command {
+        Command::SetUnitBypass(unit, _)
+        | Command::Action(Action::ToggleUnit(unit))
+        | Command::ActionOn(_, Action::ToggleUnit(unit)) => Some(BypassTarget::Unit(unit)),
+        Command::Action(Action::Toggle(Toggle::Units(kind)))
+        | Command::ActionOn(_, Action::Toggle(Toggle::Units(kind)))
+            if kind.is_builtin_effect() =>
+        {
+            Some(BypassTarget::Kind(kind))
+        }
+        _ => None,
+    }
 }
 
 /// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
@@ -1114,21 +1135,23 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
     let f = cx.now;
     while let Some(k) = due(pending, f) {
         let p = pending[k].take().unwrap();
-        if let Some(unit) = bypass_unit(p.command) {
-            if !at.rack.bypass_room(unit) {
+        if let Some(target) = bypass_target(p.command) {
+            if !at.rack.bypass_room(target) {
                 at.rack.offer(cx.feed);
             }
-            if !at.rack.bypass_room(unit) {
+            if !at.rack.bypass_room(target) {
                 insert(pending, dropped, Pending { frame: block_end.max(f + 1), owed: true, ..p });
                 continue;
             }
         }
-        if let Command::Action(Action::Toggle(t @ Toggle::Send(_))) | Command::ActionOn(_, Action::Toggle(t @ Toggle::Send(_))) = p.command {
-            if pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
-                // An input send's toggle passed a looper command held for a block job (`due`): the send
-                // switches now, as its setter did, and the press disarms a pending CLEAR in its own turn,
-                // after the held command (a held CLEAR confirmation still confirms), as the `Press` the UI
-                // sent before the setter did.
+        if let Command::Action(Action::Toggle(t @ (Toggle::Send(_) | Toggle::Units(_))))
+        | Command::ActionOn(_, Action::Toggle(t @ (Toggle::Send(_) | Toggle::Units(_)))) = p.command
+        {
+            if t.exists() && pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
+                // An input send's or effect-kind toggle passed a looper command held for a block job
+                // (`due`): the effect switches now, and the press disarms a pending CLEAR in its own
+                // turn, after the held command (a held CLEAR confirmation still confirms), as the
+                // `Press` the UI sent before the setter did.
                 toggle(looper, cx, at, t);
                 insert(pending, dropped, Pending { command: Command::Press, ..p });
                 looper.events(cx);
@@ -1166,7 +1189,7 @@ fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
         .enumerate()
         .filter_map(|(k, p)| {
             p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots() || p.command.is_input_send()))
-                .filter(|p| bypass_unit(p.command).is_none() || owed.is_none_or(|b| p.seq < b))
+                .filter(|p| bypass_target(p.command).is_none() || owed.is_none_or(|b| p.seq < b))
                 .map(|p| (p.seq, k))
         })
         .min()
@@ -1187,14 +1210,21 @@ fn first_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<F
 
 /// The next frame after `f` a command the plugin slots hear can apply on: where their render stops.
 /// `SetBpm` and `SetMeter` split the render only while a seated unit reads the tempo
-/// (`Rack::reads_tempo`). A tempo command waiting behind a held looper command applies no earlier
-/// than that barrier's wake frame, so its split tracks the barrier rather than its stamp.
-fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame, reads_tempo: bool) -> Option<Frame> {
+/// (`Rack::reads_tempo`), and `Toggle::Units(kind)` only while a seat of `kind` exists
+/// (`Rack::has_unit_kind`), so a plugins-only rack sees no extra splits. A tempo command waiting
+/// behind a held looper command applies no earlier than that barrier's wake frame, so its split
+/// tracks the barrier rather than its stamp.
+fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame, rack: &Rack) -> Option<Frame> {
+    let reads_tempo = rack.reads_tempo();
     pending
         .iter()
         .flatten()
         .filter_map(|p| {
-            if p.command.reaches_slots() {
+            if let Command::Action(Action::Toggle(Toggle::Units(kind)))
+            | Command::ActionOn(_, Action::Toggle(Toggle::Units(kind))) = p.command
+            {
+                (kind.is_builtin_effect() && rack.has_unit_kind(kind)).then_some(p.frame)
+            } else if p.command.reaches_slots() {
                 Some(p.frame)
             } else if reads_tempo && matches!(p.command, Command::SetBpm(_) | Command::SetMeter(_)) {
                 let held_until = pending
@@ -1228,6 +1258,7 @@ fn toggle_value(clock: &Clock, looper: &Looper, input_fx: &InputFx, rack: &Rack,
         Toggle::Send(InputSend::Ott) => rack.ott_on(),
         Toggle::Send(send) => input_fx.is_on(send),
         Toggle::Live(slot) => rack.live(usize::from(slot)),
+        Toggle::Units(kind) => rack.any_unit_on(kind),
     }
 }
 
@@ -1272,6 +1303,12 @@ fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
         }
         return;
     }
+    if let Toggle::Units(kind) = t {
+        if let Some(on) = at.rack.toggle_units(kind, now) {
+            toggled(cx.feed, now, at.toggles_owed, t, on);
+        }
+        return;
+    }
     let on = !toggle_value(cx.clock, looper, at.input_fx, at.rack, t);
     match t {
         Toggle::Click => cx.clock.set_metronome(on),
@@ -1281,6 +1318,7 @@ fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
         Toggle::AutoRec => looper.set_auto_record(on),
         Toggle::Send(send) => set_send(at, send, on, now),
         Toggle::Live(slot) => set_slot_live(looper, at.rack, usize::from(slot), on, now),
+        Toggle::Units(_) => unreachable!(),
     }
     toggled(cx.feed, now, at.toggles_owed, t, on);
 }
@@ -1383,7 +1421,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         // pending pedal CLEAR before it is judged, as `Looper::action` does for the others. GO LIVE's
         // does not: its press sends `Press` first, so one press disarms once and a cap click never.
         Command::Action(Action::Toggle(t)) | Command::ActionOn(_, Action::Toggle(t)) => {
-            if !matches!(t, Toggle::Live(_)) {
+            if !matches!(t, Toggle::Live(_)) && t.exists() {
                 looper.disarm_clear();
             }
             toggle(looper, cx, at, t);

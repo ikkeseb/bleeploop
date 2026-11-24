@@ -35,7 +35,7 @@
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
-//! | [`slots`] | the two slots' chains of units: install at an index, replace, remove, move and withdraw through their ports (each answered by an [`Event::Seat`], and a second when a held message resolves; each applied chain an [`Event::Chain`]), the edits held for a take, each unit's bypass, their crossfades, notes, live and gain, each slot's own input pair, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`slots`] | the two slots' chains of units: install at an index, replace, remove, move and withdraw through their ports (each answered by an [`Event::Seat`], and a second when a held message resolves; each applied chain an [`Event::Chain`]), the edits held for a take, each unit's bypass (and [`Toggle::Units`]' any-on rule across both slots), per-seat folded meters on [`EngineHandle::unit_meters`] (at most every 4 ms when the ring has room), their crossfades, notes, live and gain, each slot's own input pair, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the unit seam ([`UnitProcessor`], stereo both ways) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter, the input OTT | Tone.js on Blink's Web Audio (the OTT: the engine's own) |
 //!
@@ -141,12 +141,14 @@
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted
 //!   press's, for that pedal's release) and a pedal MUTE's state are the engine's, and so is the value
-//!   a toggle ([`Action::Toggle`]: CLICK, END STOP, FIXED, RETAKE, AUTO REC, an input send, a slot's GO
-//!   LIVE) switches, so a pedal and a click never undo each other. CLEAR is one arm for every hand (the lane's CLR, the key
+//!   a toggle ([`Action::Toggle`]: CLICK, END STOP, FIXED, RETAKE, AUTO REC, an input send, a built-in
+//!   effect kind via [`Toggle::Units`], a slot's GO
+//!   LIVE) switches, so a pedal and a click never undo each other (`Toggle::Units` is no kept setting:
+//!   no setter, its `Toggled` never replayed on rebuild). CLEAR is one arm for every hand (the lane's CLR, the key
 //!   and a pedal all press [`Action::Clear`]), on the feed as each lane's [`LaneInfo::clear_armed`] until
 //!   its window ends on its frame or the device stops. Every looper press but CLEAR's confirming one
 //!   disarms a pending CLEAR, a toggle too, refused or not (TAP and GO LIVE say they are one with
-//!   [`Command::Press`], so GO LIVE's own toggle disarms nothing); a setting alone does not. An input send's toggle passes a command held for a
+//!   [`Command::Press`], so GO LIVE's own toggle disarms nothing); a setting alone does not. An input send's or effect-kind toggle passes a command held for a
 //!   block job, as its setter does; its disarm keeps its place behind it.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
