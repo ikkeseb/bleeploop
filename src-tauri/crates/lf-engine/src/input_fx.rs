@@ -164,8 +164,8 @@ impl Echo {
         }
     }
 
-    pub(crate) fn is_on(&self) -> bool {
-        self.on
+    pub(crate) fn is_settled(&self, on: bool, ctl: Ctl) -> bool {
+        self.on == on && self.gate.is_settled_at(ctl.now, if on { 1.0 } else { 0.0 })
     }
 
     pub(crate) fn has_level(&self) -> bool {
@@ -253,7 +253,7 @@ impl Echo {
     }
 }
 
-struct Reverb {
+pub(crate) struct Reverb {
     on: bool,
     level: f64,
     gate: ToneParam,
@@ -261,6 +261,8 @@ struct Reverb {
     convolver: Convolver,
     gates: [f32; QUANTUM],
     levels: [f32; QUANTUM],
+    /// Whether `levels` holds any non-zero value in the quantum being rendered.
+    level_nonzero: bool,
     gated: [f32; QUANTUM],
     wet: [[f32; QUANTUM]; 2],
     /// The gate is shut for the whole quantum being rendered: the convolver gets no input.
@@ -273,44 +275,71 @@ struct Reverb {
 
 impl Reverb {
     fn new(sample_rate: f32, ir: [&[f32]; 2], ctl: Ctl) -> Self {
+        Reverb::build(sample_rate, ir, ctl, false)
+    }
+
+    pub(crate) fn new_on(sample_rate: f32, ir: [&[f32]; 2], ctl: Ctl) -> Self {
+        Reverb::build(sample_rate, ir, ctl, true)
+    }
+
+    fn build(sample_rate: f32, ir: [&[f32]; 2], ctl: Ctl, on: bool) -> Self {
         let level = InputSendParam::ReverbLevel.range().2;
         Reverb {
-            on: false,
+            on,
             level,
-            gate: gain(sample_rate, Units::Gain, 0.0, ctl.frame),
+            gate: gain(sample_rate, Units::Gain, if on { 1.0 } else { 0.0 }, ctl.frame),
             level_gain: gain(sample_rate, Units::Gain, level, ctl.frame),
             convolver: Convolver::new(ir, sample_rate, true),
             gates: [0.0; QUANTUM],
             levels: [0.0; QUANTUM],
+            level_nonzero: level != 0.0,
             gated: [0.0; QUANTUM],
             wet: [[0.0; QUANTUM]; 2],
-            shut: true,
+            shut: !on,
             used: false,
             silent: true,
         }
     }
 
-    fn set_on(&mut self, on: bool, ctl: Ctl) {
+    pub(crate) fn is_settled(&self, on: bool, ctl: Ctl) -> bool {
+        self.on == on && self.gate.is_settled_at(ctl.now, if on { 1.0 } else { 0.0 })
+    }
+
+    pub(crate) fn has_level(&self) -> bool {
+        self.level_nonzero
+    }
+
+    /// Set the starting gate settled, before any frame has rendered (an install that arrives bypassed).
+    pub(crate) fn snap_on(&mut self, on: bool) {
+        self.on = on;
+        self.gate.reset(Some(if on { 1.0 } else { 0.0 }), 0);
+        self.shut = !on;
+        if !on {
+            self.used = false;
+            self.silent = true;
+        }
+    }
+
+    pub(crate) fn set_on(&mut self, on: bool, ctl: Ctl) {
         self.on = on;
         self.gate.ramp_to(if on { 1.0 } else { 0.0 }, RAMP, ctl.now, ctl.frame);
     }
 
-    fn set_level(&mut self, value: f64, ctl: Ctl) {
+    pub(crate) fn set_level(&mut self, value: f64, ctl: Ctl) -> f64 {
         self.level = value.clamp(0.0, 1.0);
         self.level_gain.ramp_to(self.level, RAMP, ctl.now, ctl.frame);
+        self.level
     }
 
-    fn begin_quantum(&mut self, q: u64) {
+    pub(crate) fn begin_quantum(&mut self, q: u64) {
         self.shut = !fill(&mut self.gate, q, &mut self.gates);
         self.used |= !self.shut;
         if self.used {
-            fill(&mut self.level_gain, q, &mut self.levels);
+            self.level_nonzero = fill(&mut self.level_gain, q, &mut self.levels);
         }
     }
 
-    /// Frames `frame..frame + input.len()` (DSP clock; `at` into the quantum begun) into `out`; false
-    /// (and zeros) while silent.
-    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+    fn convolve(&mut self, frame: u64, at: usize, input: &[f32]) -> bool {
         let n = input.len();
         self.silent = !self.used;
         if self.used {
@@ -325,15 +354,43 @@ impl Reverb {
             let [l, r] = &mut self.wet;
             self.silent = self.convolver.process(frame, source, &mut l[..n], &mut r[..n]);
         }
-        if self.silent {
+        !self.silent
+    }
+
+    /// Frames `frame..frame + input.len()` (DSP clock; `at` into the quantum begun) into `out`; false
+    /// (and zeros) while silent.
+    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+        if !self.convolve(frame, at, input) {
             out.fill(0.0);
             return false;
         }
+        let n = input.len();
         let [l, r] = &self.wet;
         for (((o, &a), &b), &g) in out.iter_mut().zip(&l[..n]).zip(&r[..n]).zip(&self.levels[at..at + n]) {
             *o = crate::fold(a, b) * g;
         }
         true
+    }
+
+    /// Stereo wet output (convolver L and R scaled by level, before summing to mono); false (and
+    /// zeros) while silent.
+    pub(crate) fn process_stereo(&mut self, frame: u64, at: usize, input: &[f32], out_l: &mut [f32], out_r: &mut [f32]) -> bool {
+        if !self.convolve(frame, at, input) {
+            out_l.fill(0.0);
+            out_r.fill(0.0);
+            return false;
+        }
+        self.copy_wet_stereo(at, input.len(), out_l, out_r);
+        true
+    }
+
+    /// Copy the last convolved chunk's left and right wet outputs (scaled by level) into `out_l`/`out_r`.
+    fn copy_wet_stereo(&self, at: usize, n: usize, out_l: &mut [f32], out_r: &mut [f32]) {
+        let [l, r] = &self.wet;
+        for ((((ol, or), &a), &b), &g) in out_l.iter_mut().zip(out_r.iter_mut()).zip(&l[..n]).zip(&r[..n]).zip(&self.levels[at..at + n]) {
+            *ol = a * g;
+            *or = b * g;
+        }
     }
 }
 
@@ -386,8 +443,8 @@ impl Ring {
         }
     }
 
-    pub(crate) fn is_on(&self) -> bool {
-        self.on
+    pub(crate) fn is_settled(&self, on: bool, ctl: Ctl) -> bool {
+        self.on == on && self.gate.is_settled_at(ctl.now, if on { 1.0 } else { 0.0 })
     }
 
     pub(crate) fn has_level(&self) -> bool {
@@ -465,6 +522,12 @@ pub struct InputFx {
     /// The quantum whose control values are computed.
     prepared: Option<u64>,
     mono: [f32; QUANTUM],
+    /// Optional stereo reverb tap (preallocated off the RT thread by [`Self::enable_reverb_stereo_tap`]
+    /// for the unit-contract pin test across block sizes; disabled and untouched otherwise).
+    reverb_tap: [Vec<f32>; 2],
+    reverb_tap_len: usize,
+    reverb_tap_enabled: bool,
+    reverb_tap_overflow: bool,
 }
 
 impl InputFx {
@@ -482,6 +545,10 @@ impl InputFx {
             ring: Ring::new(sr, start),
             prepared: None,
             mono: [0.0; QUANTUM],
+            reverb_tap: [Vec::new(), Vec::new()],
+            reverb_tap_len: 0,
+            reverb_tap_enabled: false,
+            reverb_tap_overflow: false,
         }
     }
 
@@ -532,6 +599,33 @@ impl InputFx {
         self.ring.phase
     }
 
+    /// Preallocate a `max_block`-frame stereo reverb tap off the RT thread (for the unit-contract
+    /// pin test before `input_fx.rs` is retired).
+    pub(crate) fn enable_reverb_stereo_tap(&mut self, max_block: usize) {
+        self.reverb_tap = [vec![0.0; max_block], vec![0.0; max_block]];
+        self.reverb_tap_len = 0;
+        self.reverb_tap_enabled = true;
+        self.reverb_tap_overflow = false;
+    }
+
+    /// Reset the stereo reverb tap cursor before rendering the next block.
+    pub(crate) fn clear_reverb_stereo_tap(&mut self) {
+        self.reverb_tap_len = 0;
+        self.reverb_tap_overflow = false;
+    }
+
+    /// Unsummed left and right convolver outputs (scaled by level) recorded since the last
+    /// [`Self::clear_reverb_stereo_tap`]. Panics off the RT path if any render exceeded the tap's
+    /// capacity (never returns a gapped or truncated trace silently).
+    pub(crate) fn reverb_stereo_tap(&self) -> [&[f32]; 2] {
+        assert!(
+            !self.reverb_tap_overflow,
+            "reverb stereo tap overflowed capacity {} (rendered more frames than configured before clearing)",
+            self.reverb_tap[0].len()
+        );
+        [&self.reverb_tap[0][..self.reverb_tap_len], &self.reverb_tap[1][..self.reverb_tap_len]]
+    }
+
     pub fn set_on(&mut self, send: InputSend, on: bool, frame: Frame) {
         let ctl = self.ctl(frame);
         match send {
@@ -553,7 +647,9 @@ impl InputFx {
             InputSend::Echo => {
                 self.echo.set_param(param, value, ctl);
             }
-            InputSend::Reverb => self.reverb.set_level(value, ctl),
+            InputSend::Reverb => {
+                self.reverb.set_level(value, ctl);
+            }
             InputSend::Ring => {
                 self.ring.set_param(param, value, ctl);
             }
@@ -600,11 +696,26 @@ impl InputFx {
             let span = done..done + n;
             let echo = self.echo.process(at, &input[span.clone()], &mut out[span.clone()]);
             let mono = &mut self.mono[..n];
-            if self.reverb.process(f, at, &input[span.clone()], mono) {
+            let rev_sounded = self.reverb.process(f, at, &input[span.clone()], mono);
+            if rev_sounded {
                 for (o, &r) in out[span.clone()].iter_mut().zip(mono.iter()) {
                     *o += r;
                 }
                 sounded = true;
+            }
+            if self.reverb_tap_enabled && !self.reverb_tap_overflow {
+                if let Some(end) = self.reverb_tap_len.checked_add(n).filter(|&end| end <= self.reverb_tap[0].len()) {
+                    let [tl, tr] = &mut self.reverb_tap;
+                    if rev_sounded {
+                        self.reverb.copy_wet_stereo(at, n, &mut tl[self.reverb_tap_len..end], &mut tr[self.reverb_tap_len..end]);
+                    } else {
+                        tl[self.reverb_tap_len..end].fill(0.0);
+                        tr[self.reverb_tap_len..end].fill(0.0);
+                    }
+                    self.reverb_tap_len = end;
+                } else {
+                    self.reverb_tap_overflow = true;
+                }
             }
             if self.ring.process(at, &input[span.clone()], mono) {
                 for (o, &r) in out[span].iter_mut().zip(mono.iter()) {

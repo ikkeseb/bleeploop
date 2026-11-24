@@ -907,6 +907,25 @@ pub struct UnitCx {
     pub meter: Meter,
 }
 
+/// Floor for [`BandMeter::level`] and [`BandMeter::level_peak`] in dBFS (`docs/unit-contract.md` §2).
+pub const BAND_LEVEL_FLOOR_DB: f32 = -120.0;
+
+/// One band's folded meter from [`UnitProcessor::take_meter`] (`docs/unit-contract.md` §2):
+/// the OTT's low, mid and high bands over the samples processed since the last take.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BandMeter {
+    /// Applied band gain in dB at the last sample processed.
+    pub gain: f32,
+    /// Smallest applied band gain in dB over the window.
+    pub gain_min: f32,
+    /// Largest applied band gain in dB over the window.
+    pub gain_max: f32,
+    /// Linked peak follower in dBFS (floored at [`BAND_LEVEL_FLOOR_DB`]) at the last sample.
+    pub level: f32,
+    /// Largest linked peak follower in dBFS (floored at [`BAND_LEVEL_FLOOR_DB`]) over the window.
+    pub level_peak: f32,
+}
+
 /// The unit seam: one unit of a slot's chain, run inside the engine callback. Its host builds and
 /// activates it off the audio thread and installs it through the slot's [`crate::SlotPort`] under its
 /// [`UnitId`]; the engine crossfades it in, and on removal crossfades it out, calls
@@ -941,6 +960,12 @@ pub trait UnitProcessor: Send {
     /// input delayed by the unit's latency over 10 ms and back, the unit still called. Either way the
     /// chain's latency stays. Never allocates, locks or waits.
     fn set_bypass(&mut self, _cx: &UnitCx, _bypassed: bool) -> bool {
+        false
+    }
+    /// Hand over and restart the meter fold (`docs/unit-contract.md` §2). False: it shows nothing
+    /// (either this unit carries no band meter, or no samples were rendered since the last take).
+    /// Never allocates, locks or waits.
+    fn take_meter(&mut self, _bands: &mut [BandMeter; 3]) -> bool {
         false
     }
     /// Called once, after the last `process` and before the unit leaves the engine (CLAP
