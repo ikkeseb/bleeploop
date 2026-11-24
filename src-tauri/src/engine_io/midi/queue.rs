@@ -15,9 +15,11 @@
 //!   slot; the engine (retained, or rebuilt) gets it all, in order, once a device runs.
 //! - **Capacity is reserved, not hoped for.** An admitted attack (`NoteOn`) reserves the slot its
 //!   `NoteOff` will take, a HOLD press the slot of its release, and one slot each is kept for the next
-//!   target change and for a panic (`AllNotesOff`). So releases, a target switch and a panic always go
-//!   in, and the router, which forgets a note when it releases it, never forgets one the queue then
-//!   refuses. When the unreserved room is gone, a batch that needs some is refused (counted): fresh
+//!   target change, for the next synth pick (`SetUnitParam(_, Instrument, _)`, the router's alone) and
+//!   for a panic (`AllNotesOff`). So releases, a target switch, a pick and a panic always go in, and the
+//!   router, which forgets a note when it releases it, never forgets one the queue then refuses. The one
+//!   pick that can need more is a second SYNTH's pick queued since the last fresh entry: it takes free
+//!   room, and with none left the host refuses it before the router runs ([`Queue::takes_pick`]). When the unreserved room is gone, a batch that needs some is refused (counted): fresh
 //!   attacks, HOLD presses, actions, and a release nothing reserved a slot for.
 //! - **A batch goes in whole or not at all** (one input's commands: a re-strike's `NoteOff` and
 //!   `NoteOn`, a switch's releases and the switch); a refused batch leaves nothing queued, and the
@@ -26,6 +28,9 @@
 //!   last one still queued only while nothing fresh (an attack, an action, a HOLD press) was admitted
 //!   after it, so no note is moved onto a target it was not played on; otherwise it goes in at the
 //!   tail. The first fresh entry after the last queued change takes the slot the next change will need.
+//!   A synth pick does the same per unit: it replaces the last queued pick of its unit while nothing
+//!   fresh follows that one, so no note sounds on an instrument it was not played on, and the first
+//!   fresh entry after the last queued pick keeps the slot for the next.
 //! - **A panic goes in at the tail, and one still queued leaves its place:** silencing later ends
 //!   everything the earlier one would have (a target switch on the way releases what it leaves).
 //! - **Wheel updates coalesce:** a new value replaces the queued value of the same wheel when only wheel
@@ -34,26 +39,27 @@
 //!   at the tail as soon as there is room, so the wheel still ends where the player left it.
 //! - **Fresh one-shots need a running device** (the no-device rule): while no device runs, or while
 //!   paused for a rebuild, attacks, actions and HOLD presses are refused (the router records no owner);
-//!   releases, the target and the wheels still go in (every release passes, controller state is kept).
+//!   releases, the target, a synth pick and the wheels still go in (every release passes, controller
+//!   state is kept).
 //! - **A rebuild empties the queue** (a rebuild needs no WebView: `pause`, `rebuild`, then `resume` once
 //!   the settings replay has run): the old engine's attacks, non-unit actions, HOLD presses and their
 //!   releases are discarded (the new engine has no voice or capture for them to end; an old release
-//!   would end the new engine's note). Queued unit commands (`Command::unit().is_some()`) and kind
-//!   toggles (`Command::kind_toggle().is_some()`) stay in queue order for the host's unit-command gate, and the latest target and wheels, queued or
+//!   would end the new engine's note). Queued unit commands (`Command::unit().is_some()`, a synth pick
+//!   among them) and kind toggles (`Command::kind_toggle().is_some()`) stay in queue order for the host's unit-command gate, and the latest target and wheels, queued or
 //!   waiting, come back as a [`Fold`] for the settings memory, so they reach the new engine through
 //!   its replay alone. Batches are built and admitted under the lock the rebuild takes, so none spans
 //!   two engines.
 
 use std::collections::VecDeque;
 
-use lf_engine::{Action, Command, NoteTarget, TimedCommand};
+use lf_engine::{Action, Command, NoteTarget, TimedCommand, UnitId, UnitParam};
 
 /// The FIFO's bound. It fills only while the engine takes nothing (no device runs, or its ring of 1024
 /// commands, `EngineConfig::new`, refuses), so it is sized for what it must honour then: a reserved
 /// release for every note (128) and for each HOLD control the engine tells apart (16,
-/// `lf_engine::HOLD_CONTROLS`), the next target change and a panic (2), leaving 110 entries of backlog
-/// for fresh attacks, actions and wheel updates; past that, input that cannot reach the engine is stale
-/// and refused. Preallocated.
+/// `lf_engine::HOLD_CONTROLS`), the next target change, the next synth pick and a panic (3), leaving 109
+/// entries of backlog for fresh attacks, actions and wheel updates; past that, input that cannot reach
+/// the engine is stale and refused. Preallocated.
 pub const CAPACITY: usize = 256;
 
 /// What a command is to the queue.
@@ -69,6 +75,9 @@ pub enum Class {
     Wheel,
     /// `SelectInstrument`: takes the slot kept for it, or replaces the last one queued.
     Target,
+    /// `SetUnitParam(_, Instrument, _)`, a synth pick (the router's alone): takes the slot kept for it,
+    /// or replaces the last one of its unit queued.
+    Pick,
     /// Every other command: a looper press, `Press`, a toggle.
     Action,
     /// HOLD's press (`Action::Hold`): reserves the slot of its release.
@@ -85,6 +94,7 @@ impl Class {
             Command::AllNotesOff => Class::Panic,
             Command::PitchBend(_) | Command::Modulation(_) => Class::Wheel,
             Command::SelectInstrument(_) => Class::Target,
+            Command::SetUnitParam(_, UnitParam::Instrument, _) => Class::Pick,
             Command::Action(Action::Hold(_)) | Command::ActionOn(_, Action::Hold(_)) => Class::HoldPress,
             Command::Action(Action::Release(_)) | Command::ActionOn(_, Action::Release(_)) => Class::HoldRelease,
             _ => Class::Action,
@@ -162,6 +172,8 @@ pub struct QueueCounters {
     pub coalesced: u64,
     /// Target changes that replaced one still queued.
     pub targets_replaced: u64,
+    /// Synth picks that replaced one of their unit still queued.
+    pub picks_replaced: u64,
     /// Panics that moved one still queued to the tail.
     pub panics_moved: u64,
     /// Queued commands of a replaced engine that never reached it (a rebuild's one-shots and releases).
@@ -211,18 +223,21 @@ impl Reserved {
     }
 }
 
-/// What admission spends, walked in batch order: the reservations made or used, and whether a target
-/// change would need a new entry (none is queued, or something fresh follows the last one).
+/// What admission spends, walked in batch order: the reservations made or used, whether a target
+/// change or a synth pick would need a new entry (none is queued, or something fresh follows the last
+/// one), and whether the batch put something fresh in before this entry.
 #[derive(Clone, Copy)]
 struct Ledger {
     notes: Reserved,
     holds: Reserved,
     target_open: bool,
+    pick_open: bool,
+    fresh: bool,
 }
 
 impl Ledger {
-    /// The free room `out` takes.
-    fn cost(&mut self, out: &Out) -> usize {
+    /// The free room `out` takes, in `queue`.
+    fn cost(&mut self, out: &Out, queue: &Queue) -> usize {
         let own = match (out.class, out.command) {
             (Class::Attack, Command::NoteOn(n, _)) => self.notes.reserve(n),
             (Class::Release, Command::NoteOff(n)) => self.notes.release(n),
@@ -233,15 +248,23 @@ impl Ledger {
                 self.target_open = false;
                 0
             }
+            // A pick replaces its unit's, takes the slot kept for picks, or (a second unit's) free room.
+            (Class::Pick, Command::SetUnitParam(unit, ..)) if !self.fresh && queue.replaceable_pick(unit).is_some() => 0,
+            (Class::Pick, _) if self.pick_open => {
+                self.pick_open = false;
+                0
+            }
             (Class::Panic | Class::Wheel, _) => 0,
             _ => 1,
         };
-        if out.class.fresh() && !self.target_open {
-            // The first fresh entry after the last target change keeps a slot for the next change.
-            self.target_open = true;
-            return own + 1;
+        if !out.class.fresh() {
+            return own;
         }
-        own
+        // The first fresh entry after the last target change (pick) keeps a slot for the next one.
+        self.fresh = true;
+        let reopened = usize::from(!self.target_open) + usize::from(!self.pick_open);
+        (self.target_open, self.pick_open) = (true, true);
+        own + reopened
     }
 }
 
@@ -316,8 +339,18 @@ impl Queue {
 
     /// A target change would need a new entry: none is queued, or something fresh follows the last.
     fn target_open(&self) -> bool {
+        self.open(Class::Target)
+    }
+
+    /// A synth pick may take the slot kept for picks: none is queued, or something fresh follows the last.
+    fn pick_open(&self) -> bool {
+        self.open(Class::Pick)
+    }
+
+    /// No entry of `class` is queued after the last fresh entry.
+    fn open(&self, class: Class) -> bool {
         for e in self.entries.iter().rev() {
-            if e.class == Class::Target {
+            if e.class == class {
                 return false;
             }
             if e.class.fresh() {
@@ -327,13 +360,39 @@ impl Queue {
         true
     }
 
+    /// The last queued pick of `unit`, when nothing fresh follows it: a new pick of `unit` replaces it.
+    fn replaceable_pick(&self, unit: UnitId) -> Option<usize> {
+        for (k, e) in self.entries.iter().enumerate().rev() {
+            if e.class.fresh() {
+                return None;
+            }
+            if e.class == Class::Pick && e.command.unit() == Some(unit) {
+                return Some(k);
+            }
+        }
+        None
+    }
+
+    /// Whether a pick of `unit` would go in now: it replaces its unit's, takes the slot kept for picks,
+    /// or finds free room a waiting wheel value does not take first (`admit` places those before its
+    /// batch). The router's pick batch costs nothing else (its releases and its switch hold reserved
+    /// slots), so the host asks this before the router runs, and the batch is then taken.
+    pub fn takes_pick(&self, unit: UnitId) -> bool {
+        self.replaceable_pick(unit).is_some() || self.pick_open() || self.free() > self.waiting.iter().flatten().count()
+    }
+
     fn panic_queued(&self) -> bool {
         self.entries.iter().any(|e| e.class == Class::Panic)
     }
 
-    /// Slots promised to releases not yet admitted, to the next target change and to a panic.
+    /// Slots promised to releases not yet admitted, to the next target change, to the next synth pick and
+    /// to a panic.
     fn reserved(&self) -> usize {
-        self.notes.count() + self.holds.count() + usize::from(self.target_open()) + usize::from(!self.panic_queued())
+        self.notes.count()
+            + self.holds.count()
+            + usize::from(self.target_open())
+            + usize::from(self.pick_open())
+            + usize::from(!self.panic_queued())
     }
 
     /// Room no reservation holds.
@@ -342,7 +401,7 @@ impl Queue {
     }
 
     fn ledger(&self) -> Ledger {
-        Ledger { notes: self.notes, holds: self.holds, target_open: self.target_open() }
+        Ledger { notes: self.notes, holds: self.holds, target_open: self.target_open(), pick_open: self.pick_open(), fresh: false }
     }
 
     /// One input's commands: queued whole, or refused whole.
@@ -357,7 +416,7 @@ impl Queue {
         // What waited is older than this batch: it goes in first.
         self.place_waiting();
         let mut ledger = self.ledger();
-        let mut owed: usize = batch.iter().map(|o| ledger.cost(o)).sum();
+        let mut owed: usize = batch.iter().map(|o| ledger.cost(o, self)).sum();
         if owed > self.free() {
             self.count_refused(batch);
             return Err(Refused::Full);
@@ -368,7 +427,7 @@ impl Queue {
                 continue;
             }
             let mut ledger = self.ledger();
-            owed -= ledger.cost(out);
+            owed -= ledger.cost(out, self);
             (self.notes, self.holds) = (ledger.notes, ledger.holds);
             self.push(out);
         }
@@ -377,9 +436,17 @@ impl Queue {
     }
 
     /// Queue `out` (its room already counted): a target change replaces the last one queued while
-    /// nothing fresh follows it; a panic moves one still queued to the tail.
+    /// nothing fresh follows it, a synth pick the last one of its unit likewise; a panic moves one still
+    /// queued to the tail.
     fn push(&mut self, out: &Out) {
         match out.class {
+            Class::Pick => {
+                if let Some(k) = out.command.unit().and_then(|unit| self.replaceable_pick(unit)) {
+                    self.entries[k].command = out.command;
+                    self.counters.picks_replaced += 1;
+                    return;
+                }
+            }
             Class::Target if !self.target_open() => {
                 if let Some(k) = self.entries.iter().rposition(|e| e.class == Class::Target) {
                     self.entries[k].command = out.command;
@@ -571,6 +638,8 @@ mod tests {
             (Command::PitchBend(1.0), Class::Wheel),
             (Command::Modulation(0.5), Class::Wheel),
             (Command::SelectInstrument(LEAD), Class::Target),
+            (Command::SetUnitParam(7, UnitParam::Instrument, 2.0), Class::Pick),
+            (Command::SetUnitParam(7, UnitParam::Gain(Instrument::Pad), 0.5), Class::Action),
             (Command::Action(Action::Hold(3)), Class::HoldPress),
             (Command::ActionOn(1, Action::Hold(3)), Class::HoldPress),
             (Command::Action(Action::Release(3)), Class::HoldRelease),
@@ -626,7 +695,7 @@ mod tests {
         admit(&mut q, &[Command::Action(Action::Hold(0))]).unwrap();
         assert_eq!(take(&mut q, 8).len(), 2, "both reached the engine; their reservations stay");
         let filled = fill(&mut q);
-        assert_eq!(filled, CAPACITY - 4, "the two releases, the next target change and a panic keep their slots");
+        assert_eq!(filled, CAPACITY - 5, "the two releases, the next target change, the next pick and a panic keep their slots");
         // One slot free: an action fits; an attack or a HOLD press does not, needing its release's too.
         take(&mut q, 1);
         assert_eq!(admit(&mut q, &[Command::NoteOn(61, 0.5)]), Err(Refused::Full));
@@ -636,6 +705,7 @@ mod tests {
         assert_eq!(admit(&mut q, &[Command::NoteOff(60)]), Ok(()));
         assert_eq!(admit(&mut q, &[Command::SelectInstrument(LEAD)]), Ok(()));
         assert_eq!(admit(&mut q, &[Command::AllNotesOff]), Ok(()));
+        assert_eq!(admit(&mut q, &[Command::SetUnitParam(7, UnitParam::Instrument, 1.0)]), Ok(()));
         assert_eq!(q.len(), CAPACITY);
         // A release nothing reserved finds no room.
         assert_eq!(admit(&mut q, &[Command::NoteOff(70)]), Err(Refused::Full));
@@ -663,10 +733,10 @@ mod tests {
         // replaces it.
         admit(&mut q, &[Command::SelectInstrument(PAD)]).unwrap();
         let filled = fill(&mut q);
-        assert_eq!(filled, CAPACITY - 1 - 2, "the first action after the queued switch kept a slot for the next");
+        assert_eq!(filled, CAPACITY - 1 - 3, "the first action after the queued switch kept a slot for the next");
         assert_eq!(admit(&mut q, &[Command::SelectInstrument(LEAD)]), Ok(()));
         assert_eq!(admit(&mut q, &[Command::SelectInstrument(PAD)]), Ok(()));
-        assert_eq!(q.len(), CAPACITY - 1, "only the panic's slot is left");
+        assert_eq!(q.len(), CAPACITY - 2, "only the panic's and the next pick's slots are left");
         let all = take(&mut q, CAPACITY);
         assert_eq!((all.first(), all.last()), (Some(&Command::SelectInstrument(PAD)), Some(&Command::SelectInstrument(PAD))));
         assert_eq!(all.iter().filter(|c| matches!(c, Command::SelectInstrument(_))).count(), 2);
@@ -781,8 +851,8 @@ mod tests {
         assert_eq!(admit(&mut q, &[Command::NoteOn(62, 0.5)]), Ok(()));
         assert_eq!(take(&mut q, 8), [Command::NoteOn(62, 0.5)]);
         // The old engine's reservations went with it: the room is whole again but for 62's release, the
-        // next target change and a panic.
-        assert_eq!(fill(&mut q), CAPACITY - 3);
+        // next target change, the next pick and a panic.
+        assert_eq!(fill(&mut q), CAPACITY - 4);
     }
 
     // A wheel value waiting for room when the engine is rebuilt is the newest: it is the one folded.
@@ -819,6 +889,84 @@ mod tests {
         assert_eq!(fold, Fold { target: None, pitch_bend: Some(0.5), modulation: None });
         assert_eq!(units, [bypass, kind, toggle, param], "a kind toggle kept in its place");
         assert_eq!(q.counters().discarded, 2, "only NoteOn and Hold are discarded");
+        assert!(q.is_empty());
+    }
+
+    fn pick(unit: UnitId, instrument: u8) -> Command {
+        Command::SetUnitParam(unit, UnitParam::Instrument, f64::from(instrument))
+    }
+
+    // A synth pick takes the slot kept for it, with no device too (it starts nothing): with the room gone
+    // it still goes in, behind a switch and a panic, and the router may forget the notes its batch
+    // releases. A pick of the same unit replaces it while nothing fresh follows; a second unit's pick
+    // needs free room, which the host asks for first (`takes_pick`).
+    #[test]
+    fn a_pick_takes_its_reserved_slot_with_no_device_and_the_same_units_next_replaces_it() {
+        let mut q = Queue::default();
+        admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
+        admit(&mut q, &[Command::NoteOn(62, 0.5)]).unwrap();
+        fill(&mut q);
+        assert_eq!(q.free(), 0);
+        let gap = |q: &mut Queue, c: &[Command]| q.admit(&outs(c), false);
+        assert!(q.takes_pick(7));
+        let batch = [Command::NoteOff(60), Command::NoteOff(62), Command::SelectInstrument(PAD), pick(7, 2)];
+        assert_eq!(gap(&mut q, &batch), Ok(()), "a pick's batch goes in whole, the room gone and no device");
+        assert_eq!(gap(&mut q, &[Command::AllNotesOff]), Ok(()));
+        assert_eq!(q.len(), CAPACITY, "every reserved slot taken");
+        assert!(q.takes_pick(7), "the same unit's pick replaces it");
+        assert_eq!(gap(&mut q, &[pick(7, 4)]), Ok(()));
+        assert_eq!(q.counters().picks_replaced, 1);
+        assert!(!q.takes_pick(9), "a second SYNTH's pick needs room there is not");
+        assert_eq!(gap(&mut q, &[pick(9, 1)]), Err(Refused::Full), "what the host's ask spares the router");
+        let all = take(&mut q, CAPACITY);
+        assert_eq!(&all[all.len() - 5..], [Command::NoteOff(60), Command::NoteOff(62), Command::SelectInstrument(PAD), pick(7, 4), Command::AllNotesOff]);
+        assert_eq!(all.iter().filter(|c| Class::of(c) == Class::Pick).count(), 1);
+        // Emptied, a second unit's pick finds room again.
+        assert!(q.takes_pick(9));
+    }
+
+    // Picks stay chronological: one queued before a note is never replaced by one after it (the note
+    // sounds on the instrument it was played on); the first fresh entry after a pick keeps a slot for
+    // the next. Two SYNTHs' picks since the last fresh entry are two entries, each kept; a third of the
+    // first unit replaces its own, in its place.
+    #[test]
+    fn a_pick_never_replaces_one_across_a_note_and_two_units_picks_both_stay() {
+        let mut q = Queue::default();
+        admit(&mut q, &[pick(7, 1)]).unwrap();
+        admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
+        admit(&mut q, &[Command::NoteOff(60), pick(7, 2)]).unwrap();
+        admit(&mut q, &[Command::SelectInstrument(NoteTarget::Slot(1)), pick(9, 5)]).unwrap();
+        admit(&mut q, &[Command::SelectInstrument(NoteTarget::Slot(0)), pick(7, 3)]).unwrap();
+        assert_eq!(q.counters().picks_replaced, 1);
+        assert_eq!(q.counters().targets_replaced, 1);
+        assert_eq!(
+            take(&mut q, 16),
+            [pick(7, 1), Command::NoteOn(60, 0.5), Command::NoteOff(60), pick(7, 3), Command::SelectInstrument(NoteTarget::Slot(0)), pick(9, 5)],
+            "60 sounds on pick 1; each unit ends on its last pick"
+        );
+        // With the room gone right after a fresh entry, the next pick still has its slot.
+        admit(&mut q, &[Command::NoteOn(61, 0.5)]).unwrap();
+        fill(&mut q);
+        assert!(q.takes_pick(11));
+        assert_eq!(admit(&mut q, &[pick(11, 0)]), Ok(()));
+    }
+
+    // A rebuild keeps a queued pick in queue order with the other unit commands for the host's gate (its
+    // unit reseats in the new engine), never folded with the target nor discarded.
+    #[test]
+    fn a_rebuild_keeps_a_queued_pick_for_the_unit_gate() {
+        let mut q = Queue::new();
+        let bypass = Command::SetUnitBypass(7, true);
+        admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
+        admit(&mut q, &[Command::NoteOff(60), Command::SelectInstrument(NoteTarget::Slot(1)), pick(9, 2)]).unwrap();
+        admit(&mut q, &[bypass]).unwrap();
+        q.pause();
+        assert_eq!(admit(&mut q, &[pick(7, 4)]), Ok(()), "a pick goes in during a rebuild too");
+        let (fold, units) = q.rebuild();
+        assert_eq!(fold.target, Some(NoteTarget::Slot(1)));
+        assert_eq!(units, [pick(9, 2), bypass, pick(7, 4)]);
+        assert_eq!(q.counters().discarded, 2, "NoteOn and NoteOff");
+        q.resume();
         assert!(q.is_empty());
     }
 }
@@ -1234,8 +1382,8 @@ mod pipeline {
         assert_eq!(rig.engine.log, [Command::SelectInstrument(LEAD), Command::PitchBend(0.5), Command::NoteOn(62, 100.0 / 127.0), Command::NoteOn(64, 100.0 / 127.0)]);
         assert_eq!(rig.engine.holds, [] as [u8; 0], "no HOLD crossed into the new engine");
         // The HOLD held across has no reservation left: the whole room but for the new notes' releases,
-        // the next target change and a panic is free.
-        assert_eq!(rig.queue.reserved(), 4);
+        // the next target change, the next pick and a panic is free.
+        assert_eq!(rig.queue.reserved(), 5);
     }
 
     // A retained-engine device gap with a HOLD press and its release (the no-device rule): the release

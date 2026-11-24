@@ -30,8 +30,8 @@ fn midi<R>(f: impl FnOnce(&MidiHost) -> R) -> Result<R, String> {
 
 /// `input_send`'s batch, in order, for the page of `epoch`: a run of engine commands through
 /// [`MidiHost::ui_commands`] (input commands join the one ordered queue, settings go straight to the
-/// engine), each input event through the router's own call. A note, a wheel, the note target or a panic
-/// sent as an engine command refuses the whole batch before any of it runs. An input event of a
+/// engine), each input event through the router's own call. A note, a wheel, the note target, a panic or
+/// a synth pick sent as an engine command refuses the whole batch before any of it runs. An input event of a
 /// replaced page is refused there (`stale`); its engine commands run, as they always did. The answer is
 /// the first reason anything was dropped.
 fn input_to(midi: &MidiHost, epoch: u64, items: Vec<InputItem>) -> Result<Option<Dropped>, String> {
@@ -57,6 +57,7 @@ fn input_to(midi: &MidiHost, epoch: u64, items: Vec<InputItem>) -> Result<Option
             InputEvent::Blur => midi.ui_blur(epoch),
             InputEvent::SelectTarget { slot, target } => midi.select_target(epoch, slot, target),
             InputEvent::AllNotesOff => midi.all_notes_off(epoch),
+            InputEvent::PickSynth { slot, unit, instrument } => midi.pick_synth(epoch, slot, unit, instrument),
         };
         dropped = dropped.or(ran).or(input);
     }
@@ -139,7 +140,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use lf_engine::{Command, Instrument, NoteTarget, TimedCommand};
+    use lf_engine::{Command, Instrument, NoteTarget, TimedCommand, UnitParam};
     use serde_json::json;
 
     use super::super::midi::EngineSide;
@@ -197,6 +198,9 @@ mod tests {
             { "input": { "blur": null } },
             { "input": { "note": { "owner": "key:KeyS", "note": 64, "velocity": 127, "on": true } } },
             { "input": "allNotesOff" },
+            { "input": { "note": { "owner": "key:KeyS", "note": 65, "velocity": 127, "on": true } } },
+            { "input": { "pickSynth": { "slot": 1, "unit": 7, "instrument": 2 } } },
+            { "engine": "Press" },
         ]));
         assert_eq!(input_to(&midi, epoch, batch), Ok(None));
         assert_eq!(
@@ -213,6 +217,11 @@ mod tests {
                 Command::NoteOn(64, 1.0),
                 Command::NoteOff(64),
                 Command::AllNotesOff,
+                Command::NoteOn(65, 1.0),
+                Command::NoteOff(65),
+                Command::SelectInstrument(NoteTarget::Slot(1)),
+                Command::SetUnitParam(7, UnitParam::Instrument, 2.0),
+                Command::Press,
             ]
         );
         let newer = midi.subscribe(2.0, Box::new(|_| {}));
@@ -220,6 +229,7 @@ mod tests {
             { "input": { "note": { "owner": "key:KeyA", "note": 62, "velocity": 127, "on": true } } },
             { "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } },
             { "input": "allNotesOff" },
+            { "input": { "pickSynth": { "slot": 0, "unit": 7, "instrument": 3 } } },
             { "engine": { "SetBpm": 100 } },
         ]));
         assert_eq!(input_to(&midi, epoch, late), Ok(Some(Dropped::Stale)), "the replaced page hears its input was refused");
@@ -227,12 +237,14 @@ mod tests {
         assert!(newer > epoch);
     }
 
-    // A note, a wheel, the note target or a panic sent as an engine command refuses the batch before any
-    // of it runs, so the outbox may send it again without running anything twice.
+    // A note, a wheel, the note target, a panic or a synth pick (unit contract §2: `instrument` is "sent
+    // only by the note router") sent as an engine command refuses the batch before any of it runs, so the
+    // outbox may send it again without running anything twice. Another SYNTH param stays the UI's.
     #[test]
     fn a_batch_with_a_router_command_runs_nothing() {
         let (midi, engine, epoch) = rig();
-        for refused in [json!({ "NoteOn": [60, 0.5] }), json!({ "SelectInstrument": { "Slot": 0 } }), json!("AllNotesOff"), json!({ "PitchBend": 1.0 })] {
+        let pick = json!({ "SetUnitParam": [7, "instrument", 2] });
+        for refused in [json!({ "NoteOn": [60, 0.5] }), json!({ "SelectInstrument": { "Slot": 0 } }), json!("AllNotesOff"), json!({ "PitchBend": 1.0 }), pick] {
             let batch = items(json!([
                 { "engine": "Press" },
                 { "input": { "note": { "owner": "pointer:1", "note": 60, "velocity": 100, "on": true } } },
@@ -241,6 +253,9 @@ mod tests {
             assert!(input_to(&midi, epoch, batch).is_err());
             assert_eq!(take(&engine), [], "nothing of a refused batch reached the engine");
         }
+        let gain = items(json!([{ "engine": { "SetUnitParam": [7, "gainBass", 0.5] } }]));
+        assert_eq!(input_to(&midi, epoch, gain), Ok(None));
+        assert_eq!(take(&engine), [Command::SetUnitParam(7, UnitParam::Gain(Instrument::Bass), 0.5)]);
     }
 
     // A fresh press or note-on with no device is dropped and the batch says so; a release in it passes.

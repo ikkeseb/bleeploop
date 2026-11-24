@@ -32,7 +32,8 @@
 //! Native MIDI's wire (`midi_mode.rs`'s commands) is camelCase throughout: `input_send`'s items are
 //! `{"engine":<a command as above>}` and `{"input":<an InputEvent>}`, an [`InputEvent`] being
 //! `{"note":{…}}`, `"blur"` or `{"blur":null}`, `{"selectTarget":{"slot":0,"target":…}}` with the target
-//! as `SelectInstrument` carries it, or `"allNotesOff"`; its answer is `null` or a `midi::Dropped`
+//! as `SelectInstrument` carries it, `{"pickSynth":{"slot":0,"unit":7,"instrument":2}}` (the UI's `SYNTHS`
+//! index), or `"allNotesOff"`; its answer is `null` or a `midi::Dropped`
 //! (`"noDevice"`, `"rebuilding"`, `"full"`, `"stale"`); `midi_subscribe` takes the page's age (`origin`,
 //! its `performance.timeOrigin`) and answers its input epoch, a number; `midi::MidiEvent` and `midi::ImportReport` keep the serde they derive where they are defined.
 //! `verify/fixtures/midi-wire.json` holds both sides to that JSON as `engine-wire.json` does to this.
@@ -103,6 +104,41 @@ pub enum InputEvent {
     },
     /// Panic: every note that sounds is released, then `AllNotesOff`.
     AllNotesOff,
+    /// Pick `instrument` (the UI's `SYNTHS` index, 0..=5) on `unit`, the SYNTH heading `slot`'s chain: the
+    /// router releases what sounds, selects the slot when it is not the note target, then sends
+    /// `SetUnitParam(unit, Instrument, n)`, one batch (`docs/unit-contract.md` §4). A slot past
+    /// `SLOT_COUNT`, unit id 0 and an instrument outside 0..=5 are refused here, as `midi-wire.ts` refuses them.
+    PickSynth {
+        #[serde(deserialize_with = "pick_slot")]
+        slot: u8,
+        #[serde(deserialize_with = "pick_unit")]
+        unit: UnitId,
+        #[serde(deserialize_with = "pick_instrument")]
+        instrument: u8,
+    },
+}
+
+fn pick_slot<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let slot = u8::deserialize(d)?;
+    if usize::from(slot) >= SLOT_COUNT {
+        return Err(serde::de::Error::custom(format!("no plugin slot {slot}")));
+    }
+    Ok(slot)
+}
+
+fn pick_unit<'de, D: Deserializer<'de>>(d: D) -> Result<UnitId, D::Error> {
+    match UnitId::deserialize(d)? {
+        0 => Err(serde::de::Error::custom("unit id 0 is reserved")),
+        unit => Ok(unit),
+    }
+}
+
+fn pick_instrument<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let instrument = u8::deserialize(d)?;
+    if usize::from(instrument) >= lf_engine::units::SYNTH_IDS.len() {
+        return Err(serde::de::Error::custom(format!("no SYNTH instrument {instrument}")));
+    }
+    Ok(instrument)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1264,13 +1300,14 @@ mod tests {
 
     /// Every variant, by position: a new one fails to compile here until it has a number (bump the
     /// count) and an example in the fixture.
-    const INPUT_EVENTS: usize = 4;
+    const INPUT_EVENTS: usize = 5;
     fn input_event_index(e: &InputEvent) -> usize {
         match e {
             InputEvent::Note { .. } => 0,
             InputEvent::Blur => 1,
             InputEvent::SelectTarget { .. } => 2,
             InputEvent::AllNotesOff => 3,
+            InputEvent::PickSynth { .. } => 4,
         }
     }
 
@@ -1463,6 +1500,31 @@ mod tests {
         assert!(refused(serde_json::json!({"Note":{"owner":"key:KeyA","note":60,"velocity":1,"on":true}})), "variants are camelCase");
         assert!(refused(serde_json::json!({"selectTarget":{"slot":0,"target":{"Builtin":"Lead"}}})), "an instrument is its id");
         assert!(refused(serde_json::json!({"note":{"owner":"key:KeyA","note":300,"velocity":1,"on":true}})), "a note is a byte");
+    }
+
+    // A synth pick reads by its field names; a slot past SLOT_COUNT, unit id 0, an instrument outside the
+    // UI's six SYNTHS or not a whole number, and a missing field are refused, as midi-wire.ts refuses them.
+    #[test]
+    fn a_synth_pick_reads_and_its_out_of_range_fields_are_refused() {
+        let read = |json: Value| serde_json::from_value::<InputEvent>(json);
+        assert_eq!(
+            read(serde_json::json!({"pickSynth":{"slot":1,"unit":7,"instrument":5}})).unwrap(),
+            InputEvent::PickSynth { slot: 1, unit: 7, instrument: 5 }
+        );
+        assert_eq!(read(serde_json::json!({"pickSynth":{"slot":0,"unit":4294967295u32,"instrument":0}})).unwrap(), InputEvent::PickSynth { slot: 0, unit: u32::MAX, instrument: 0 });
+        for (json, why) in [
+            (serde_json::json!({"pickSynth":{"slot":2,"unit":7,"instrument":0}}), "a slot past SLOT_COUNT"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":0,"instrument":0}}), "unit id 0"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":7,"instrument":6}}), "an instrument past drum"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":7,"instrument":-1}}), "a negative instrument"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":7,"instrument":1.5}}), "a fractional instrument"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":7,"instrument":"bass"}}), "an instrument by name"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":7}}), "no instrument"),
+            (serde_json::json!({"pickSynth":{"slot":0,"unit":-7,"instrument":1}}), "a negative unit"),
+            (serde_json::json!({"PickSynth":{"slot":0,"unit":7,"instrument":1}}), "a PascalCase variant"),
+        ] {
+            assert!(read(json.clone()).is_err(), "{why}: {json}");
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //! | `bindings` | [`Binding`], the 28 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
 //! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
-//! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts` (removed), `instrument.ts` `routeEngine` |
+//! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the synth pick, the held-note set | `src/ui/state/input-router.ts` (removed), `instrument.ts` `routeEngine` |
 //! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, what a rebuild empties and folds | (new: nothing is stamped, the no-device rule, a rebuild needs no WebView) |
 //! | `store` | `midi-bindings.json` and the one-time import of the web's list | (new: bindings live native, the import never guesses) |
 //! | `ports` | midir connections, port identities, which port a stored binding answers to, the port thread | `midi.ts` `attachInputs` (removed) |
@@ -37,16 +37,18 @@
 //!   stamped**): the router's batches, what a binding fires, and the UI's looper presses, `Press`,
 //!   `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting and GO LIVE's toggle go straight
 //!   to `EngineHost::send` (**Every toggle has one owner, the engine**); a note, a wheel, the note
-//!   target or a panic from the UI goes through the router's own calls, never past it (a UI batch that
-//!   holds one is refused whole, before any of it runs).
+//!   target, a synth pick (`SetUnitParam(_, Instrument, _)`, `docs/unit-contract.md` §2: "sent only by
+//!   the note router") or a panic from the UI goes through the router's own calls, never past it (a UI
+//!   batch that holds one is refused whole, before any of it runs).
 //! - **No device here** (the rule: **The no-device rule**, `EngineSide::running`): the router records
-//!   no owner for a refused attack, learn no HOLD for a refused press. Releases, pedals, wheels and the
-//!   target wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and every `RETRY` after a
+//!   no owner for a refused attack, learn no HOLD for a refused press. Releases, pedals, wheels, the
+//!   target and a synth pick wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and every `RETRY` after a
 //!   drain the engine's full ring refused. A refusal of the UI's input is answered ([`Dropped`]: the
 //!   player hears why a press did nothing); a pedal's is counted only.
 //! - **The rebuild handshake** (the rule: **A rebuild needs no WebView**; [`super::RebuildHook`],
 //!   registered at start): the queue pauses, folds its target and wheels into the settings memory
-//!   before the replay, keeps queued unit commands in order for the host's unit-command gate, and
+//!   before the replay, keeps queued unit commands (a synth pick among them) in order for the host's
+//!   unit-command gate, and
 //!   drops the old engine's other one-shots and their releases; the router forgets what the old
 //!   engine sounded, learn its HOLD presses; the queue resumes after the replay. The handshake itself
 //!   sends nothing and calls no UI sink (its caller holds every slot port): the port thread, woken,
@@ -75,7 +77,7 @@
 //!   [`MidiHost::subscribe`]): the new epoch, the older pages' released holds, the cancelled learn (an
 //!   unloaded page ran no cleanup of its own) and the replaced event sink happen under the one lock; an
 //!   older page's subscribe gets an epoch that is never current. The epoch checks the UI's input
-//!   events (a note, a blur, a slot pick, a panic) and learn calls; a refused input event is answered
+//!   events (a note, a blur, a slot pick, a synth pick, a panic) and learn calls; a refused input event is answered
 //!   ([`Dropped::Stale`]), and the UI's engine commands carry no epoch. MIDI holds stay through a
 //!   resubscribe and a blur.
 
@@ -303,7 +305,7 @@ impl Dropped {
 }
 
 /// A command the UI sends only through the router's own calls (a note, a wheel, the note target, a
-/// panic): refused as an engine command, the whole batch with it.
+/// panic, a synth pick): refused as an engine command, the whole batch with it.
 pub fn router_command(command: &Command) -> bool {
     actions::ui_route(command) == UiRoute::Router
 }
@@ -1154,6 +1156,25 @@ impl MidiHost {
         self.core.ui(epoch, |st, out| st.router.select_target(slot, target, out))
     }
 
+    /// Document `epoch` picks `instrument` (the UI's `SYNTHS` index) on `unit`, the SYNTH heading `slot`'s
+    /// chain (`router::Router::pick`): the slot becomes the note target when it is not, what sounds is
+    /// released, then `SetUnitParam(unit, Instrument, n)`, one batch; the slot's last sent pick again
+    /// sends nothing. The queue always takes it but for a second SYNTH's pick with the room gone, refused
+    /// here before the router moves (answered `full`), so the router never forgets a note it then fails
+    /// to release.
+    pub fn pick_synth(&self, epoch: u64, slot: u8, unit: lf_engine::UnitId, instrument: u8) -> Option<Dropped> {
+        let mut room = true;
+        let dropped = self.core.ui(epoch, |st, out| {
+            room = st.queue.takes_pick(unit);
+            if room {
+                st.router.pick(slot, unit, instrument, out);
+            } else {
+                st.refused.count(Refused::Full);
+            }
+        });
+        if room { dropped } else { Some(Dropped::Full) }
+    }
+
     /// Document `epoch`'s panic: every note that sounds is released and forgotten, then
     /// `Command::AllNotesOff`.
     pub fn all_notes_off(&self, epoch: u64) -> Option<Dropped> {
@@ -1171,9 +1192,9 @@ impl MidiHost {
     /// with it off, so there is nothing to tell the player. A setting goes straight to the engine, and may
     /// overtake input still queued behind a full ring. GO LIVE's toggle goes straight there too, so no
     /// live operation overtakes another (`actions::UiRoute::Live`); dropped while no device runs or the
-    /// ring is full. A note, a wheel, the note target or a panic is
+    /// ring is full. A note, a wheel, the note target, a synth pick or a panic is
     /// refused, the whole batch with it before any of it runs: those go through [`MidiHost::ui_note`],
-    /// [`MidiHost::select_target`] and [`MidiHost::all_notes_off`]. Answers why a command was dropped,
+    /// [`MidiHost::select_target`], [`MidiHost::pick_synth`] and [`MidiHost::all_notes_off`]. Answers why a command was dropped,
     /// the first one's reason; the rest of the batch ran.
     pub fn ui_commands(&self, commands: Vec<Command>) -> Result<Option<Dropped>, String> {
         if let Some(command) = commands.iter().find(|c| router_command(c)) {

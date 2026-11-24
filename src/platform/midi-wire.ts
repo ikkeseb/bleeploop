@@ -12,7 +12,7 @@
  * read, so a drift fails at the first event; unknown extra fields are ignored. Pure: a Node guard
  * imports this file directly.
  */
-import { decodeCommand, decodeNoteTarget, type EngineCommand, type NoteTarget } from './engine-wire.ts'; // explicit .ts: Node guards import this file
+import { decodeCommand, decodeNoteTarget, ENGINE_SLOTS, type EngineCommand, type NoteTarget, type UnitId } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 import { array, bool, fail, int, nullable, obj, oneOf, str, tagged } from './wire-read.ts';
 
 /** The named actions a binding runs, as `src/app/actions.ts` names them (Rust `ActionId`), in the learn
@@ -144,12 +144,16 @@ export type MidiEvent =
 
 /** One UI input event for the native router (`input_send`, Rust `InputEvent`), in its wire shape. `owner`
  * is the physical source (`pointer:<id>`, `key:<code>`); velocity 0..127, 0 a release. `selectTarget` moves
- * the notes to `target`, picked on `slot` (null: no slot); `allNotesOff` is the panic. */
+ * the notes to `target`, picked on `slot` (null: no slot); `allNotesOff` is the panic. `pickSynth` picks
+ * `instrument` (the index in `SYNTHS` order, 0..5) on `unit`, the SYNTH heading `slot`'s chain: the router
+ * releases what sounds, selects the slot when it is not the note target, then sends the unit its
+ * `instrument` param, one batch (unit contract §4; only the router sends that param). */
 export type InputEvent =
   | { note: { owner: string; note: number; velocity: number; on: boolean } }
   | 'blur'
   | { selectTarget: { slot: number | null; target: NoteTarget } }
-  | 'allNotesOff';
+  | 'allNotesOff'
+  | { pickSynth: { slot: number; unit: UnitId; instrument: number } };
 
 /** One item of the UI's outbox (`input_send`, Rust `wire.rs` `InputItem`), in the order it was queued: an
  * engine command, or a note source's input event for the router. */
@@ -175,6 +179,9 @@ export interface ImportReport {
   /** The store already held a binding on that control. */
   skipped: number[];
 }
+
+/** SYNTH's picks: the UI's `SYNTHS` (`src/ui/state/instruments.ts`; Rust `lf_engine::units::SYNTH_IDS`). */
+const SYNTH_PICKS = 6;
 
 // ── Decoders ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -289,6 +296,7 @@ export const encodeInput = {
   blur: (): InputEvent => 'blur',
   selectTarget: (slot: number | null, target: NoteTarget): InputEvent => ({ selectTarget: { slot, target } }),
   allNotesOff: (): InputEvent => 'allNotesOff',
+  pickSynth: (slot: number, unit: UnitId, instrument: number): InputEvent => ({ pickSynth: { slot, unit, instrument } }),
 };
 
 /** The outbox's items as the UI queues them (`index.ts`). */
@@ -332,6 +340,13 @@ export function decodeInputEvent(raw: unknown): InputEvent {
       const o = obj(payload, 'InputEvent.selectTarget');
       nullable(o.slot, (s) => u8(s, 'InputEvent.selectTarget.slot'));
       decodeNoteTarget(o.target, 'InputEvent.selectTarget.target');
+      break;
+    }
+    case 'pickSynth': {
+      const o = obj(payload, 'InputEvent.pickSynth');
+      u8(o.slot, 'InputEvent.pickSynth.slot', ENGINE_SLOTS - 1);
+      int(o.unit, 'InputEvent.pickSynth.unit', 1, 0xffff_ffff);
+      u8(o.instrument, 'InputEvent.pickSynth.instrument', SYNTH_PICKS - 1);
       break;
     }
     case 'blur':

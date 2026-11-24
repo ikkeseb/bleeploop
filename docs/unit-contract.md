@@ -222,9 +222,9 @@ rings out. Two synth slots are two banks.
   a router release is not ordered with it. The engine does it: on the frame a source's install,
   replacement, withdrawal or removal applies, the old source's sounding notes (sustained ones too: their
   `NoteOff` is withheld) are released, the new one starts with none, and a `NoteOff` reaching a seat that
-  never got its note is dropped. The router's key (`router.rs` `select_target`, today `(slot, target)`)
-  becomes `(slot, synth pick)`: a pick is a batch command, so its release and `SetUnitParam [unit,
-  'instrument', n]` go in one ordered batch. SYNTH hands the picked instrument its wheels
+  never got its note is dropped. The router keeps its key (`router.rs` `select_target`, `(slot, target)`)
+  and the last pick it sent per slot: a pick (`InputEvent::PickSynth`) is a batch command, so its release
+  and `SetUnitParam [unit, 'instrument', n]` go in one ordered batch, and the same pick again sends nothing. SYNTH hands the picked instrument its wheels
   (`Instruments::select`).
 - **The wheels become slot events** (`SlotEventKind`): SYNTH applies them, a plugin ignores them (D12).
 - **A note sounds one quantum late** (`instruments::LEAD`): SYNTH reports it as its latency, so one formula
