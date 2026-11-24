@@ -23,7 +23,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assert_no_alloc::assert_no_alloc;
 use common::refs::{sha256_f32, write_wav, Mulberry32};
 use common::{Delay, Opts, Rig};
 use lf_engine::dsp::fdlibm;
@@ -37,6 +36,15 @@ use serde::{Deserialize, Serialize};
 
 const BLOCKS: [usize; 7] = [1, 32, 64, 127, 128, 480, 1024];
 const SR: u32 = 48_000;
+
+/// A direct unit call under `assert_no_alloc` that fails on an allocation: with `warn_debug` the crate
+/// only counts violations, so the count must not move (as `Rig` checks its renders).
+fn assert_no_alloc<T, F: FnOnce() -> T>(f: F) -> T {
+    let before = common::violation_count();
+    let out = ::assert_no_alloc::assert_no_alloc(f);
+    assert_eq!(common::violation_count(), before, "a direct unit call allocated");
+    out
+}
 const F0: Frame = 48_000;
 const PIN_FRAMES: usize = 2 * SR as usize;
 /// Frame offset from `F0` where the pin scenarios switch the send/unit on (and apply alt params):
