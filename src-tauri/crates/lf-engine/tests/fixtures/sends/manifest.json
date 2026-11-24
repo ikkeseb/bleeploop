@@ -1,0 +1,63 @@
+{
+  "note": "Pinned renders of input_fx ECHO and RING MOD (slot 0 live and empty, master 1, 2 s at 48 kHz) before input_fx.rs is retired (docs/unit-contract.md §5 item 1). Float32 WAVs in encodeWav's 58-byte layout, matching tests/fixtures/tone/.",
+  "rate": 48000,
+  "frames": 96000,
+  "onOffset": 200,
+  "inputSha256": "58c04d845f1049b364025af1bf8fe63a997b878b93bfe94c53ffc361fd2a888c",
+  "scenarios": [
+    {
+      "id": "echo-default-48000",
+      "send": "echo",
+      "channels": 1,
+      "file": "echo-default-48000.wav",
+      "sha256": "d2895e797fbc1c41fb38edc16f19ff3b49431fee374e98f0a9851c21c893050f",
+      "params": []
+    },
+    {
+      "id": "echo-alt-48000",
+      "send": "echo",
+      "channels": 1,
+      "file": "echo-alt-48000.wav",
+      "sha256": "70914014fdb59173f4f142de74261b6915f5bd2c611b9c54267d60fcc0d82084",
+      "params": [
+        [
+          "echoTime",
+          2.0
+        ],
+        [
+          "echoFeedback",
+          0.72
+        ],
+        [
+          "echoLevel",
+          0.85
+        ]
+      ]
+    },
+    {
+      "id": "ring-default-48000",
+      "send": "ring",
+      "channels": 1,
+      "file": "ring-default-48000.wav",
+      "sha256": "9a906c7506a3b6c5b6e8ba9a51d462eae397e71b49623d788d49f11743205119",
+      "params": []
+    },
+    {
+      "id": "ring-alt-48000",
+      "send": "ring",
+      "channels": 1,
+      "file": "ring-alt-48000.wav",
+      "sha256": "47953e16fa3cd03fe2975ea59368ae838bfa479b3ce8b71a61e049147465125f",
+      "params": [
+        [
+          "ringFreq",
+          173.5
+        ],
+        [
+          "ringLevel",
+          0.85
+        ]
+      ]
+    }
+  ]
+}

@@ -352,8 +352,9 @@ struct Seat {
     /// (0 old ↔ n new) and handed back once it ends.
     outgoing: Option<(UnitId, InstallToken, Unit, bool)>,
     swap: u32,
-    /// The replaced unit's latency and where its bypass crossfade stood when it was replaced: what it
-    /// sounds while it crossfades out.
+    /// The replaced unit's kind, latency and where its bypass crossfade stood when it was replaced:
+    /// what it sounds while it crossfades out.
+    old_kind: UnitKind,
     old_latency: usize,
     old_wet: u32,
     /// The keys the unit holds (bit per key), and those the outgoing unit held: a NoteOff reaches a unit
@@ -1003,7 +1004,9 @@ fn reorder(seats: &mut [Seat], id: UnitId, to: usize) {
     seats[q..].rotate_right(1);
 }
 
-/// The engine's clock the units read ([`UnitCx`]): set once per block.
+/// The engine's clock the units read ([`UnitCx`]): `skipped` is set once per block
+/// ([`Rack::begin_block`]); `bpm` and `meter` follow [`Rack::set_clock`] as `SetBpm` and `SetMeter`
+/// apply (splitting a block's slot render only while [`Rack::reads_tempo`] holds).
 #[derive(Clone, Copy)]
 pub(crate) struct UnitClock {
     /// Device frames the DSP clock is behind.
@@ -1072,6 +1075,7 @@ impl Rack {
                         withdrawing: false,
                         outgoing: None,
                         swap: 0,
+                        old_kind: UnitKind::Plugin,
                         old_latency: 0,
                         old_wet: 0,
                         held: [0; 2],
@@ -1366,7 +1370,7 @@ impl Rack {
                         if let Some(old) = seat.unit.take() {
                             seat.outgoing = Some((seat.id, seat.token, old, seat.bypassed));
                             seat.swap = if fade { 0 } else { n };
-                            (seat.old_latency, seat.old_wet) = (seat.info.latency as usize, seat.wet);
+                            (seat.old_kind, seat.old_latency, seat.old_wet) = (seat.info.kind, seat.info.latency as usize, seat.wet);
                             seat.old_held = seat.held;
                         }
                         seat.held = [0; 2];
@@ -1608,6 +1612,23 @@ impl Rack {
         for s in self.slots.iter_mut() {
             s.reorder_due(now, &mut self.protocol_errors);
         }
+    }
+
+    pub(crate) fn set_clock(&mut self, bpm: f64, meter: Meter) {
+        self.clock.bpm = bpm;
+        self.clock.meter = meter;
+    }
+
+    /// Whether any seated unit (leaving or outgoing included) reads the engine's tempo (`UnitCx::bpm`
+    /// / `UnitCx::meter`): a built-in ECHO today. Only then do `SetBpm` and `SetMeter` split the
+    /// slots' render range mid-block.
+    pub(crate) fn reads_tempo(&self) -> bool {
+        self.slots.iter().any(|s| {
+            s.seats[..s.len].iter().any(|seat| {
+                (seat.unit.is_some() && seat.info.kind == UnitKind::Echo)
+                    || (seat.outgoing.is_some() && seat.old_kind == UnitKind::Echo)
+            })
+        })
     }
 
     /// At a block start: service the ports (unless `serve` is off: a capture's end may be due on this

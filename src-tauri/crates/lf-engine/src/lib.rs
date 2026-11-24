@@ -30,6 +30,7 @@
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`scope`] | the live scope taps, while the UI asks for them ([`Command::SetScope`]): per lane after its FX, per monitor and per master, a min/max envelope in 4 ms columns on its own ring | — (engine only) |
 //! | [`tuner`] | the tuner's on flag and its tap: both slots' raw input, frame by frame, on its own ring for a pitch detector off the audio thread, with an epoch that changes wherever the input breaks | — (engine only) |
+//! | [`units`] | built-in chain units implementing [`UnitProcessor`]: ECHO and RING MOD per-channel inserts over [`input_fx`]'s DSP (REVERB, OTT and SYNTH follow in later E3 slices) | — (engine only) |
 //! | [`pitch`] | the tuner's ear, run off the audio thread by the host's feed: a pitch detector per slot input (MPM through an FFT autocorrelation, refined to a tenth of a cent) and which input is shown | — (engine only) |
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
@@ -253,6 +254,7 @@ pub mod scope;
 pub mod session;
 pub mod slots;
 pub mod tuner;
+pub mod units;
 
 pub use api::*;
 pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
