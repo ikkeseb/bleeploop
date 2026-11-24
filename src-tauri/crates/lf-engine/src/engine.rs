@@ -827,6 +827,7 @@ impl Engine {
             self.rack.offer(cx.feed);
             self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), self.clock.meter(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), self.clock.meter(), f);
+            self.rack.set_clock(self.clock.bpm() as f64, self.clock.meter());
 
             let quantum_end = f - (f - self.skipped).rem_euclid(QUANTUM as Frame) + QUANTUM as Frame;
             let mut next = end.min(quantum_end);
@@ -1166,7 +1167,13 @@ fn first_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<F
 
 /// The next frame after `f` a command the plugin slots hear is stamped for: where their render stops.
 fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<Frame> {
-    pending.iter().flatten().filter(|p| p.command.reaches_slots()).map(|p| p.frame).filter(|&at| at > f).min()
+    pending
+        .iter()
+        .flatten()
+        .filter(|p| p.command.reaches_slots() || matches!(p.command, Command::SetBpm(_) | Command::SetMeter(_)))
+        .map(|p| p.frame)
+        .filter(|&at| at > f)
+        .min()
 }
 
 fn lane(i: u8) -> Option<usize> {
@@ -1397,10 +1404,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetBpm(bpm) => {
             cx.clock.set_bpm(bpm, now);
+            at.rack.set_clock(cx.clock.bpm() as f64, cx.clock.meter());
             Applied::Done
         }
         Command::SetMeter(meter) => {
             cx.clock.set_meter(meter);
+            at.rack.set_clock(cx.clock.bpm() as f64, cx.clock.meter());
             Applied::Done
         }
         Command::SetMetronome(on) => {

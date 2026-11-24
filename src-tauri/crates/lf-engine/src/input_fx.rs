@@ -81,7 +81,7 @@ const MAX_DELAY: f64 = 2.0;
 /// The echo writes a sample below this (−120 dBFS) into its line as 0 (see the module doc).
 const FLUSH: f32 = 1e-6;
 /// The tempo the echo's time starts from, until the clock hands it one.
-const START_BEAT_PERIOD: f64 = 0.5;
+pub(crate) const START_BEAT_PERIOD: f64 = 0.5;
 
 /// A param starting at `value`: a gain, or the ring's frequency.
 fn gain(sample_rate: f32, units: Units, value: f64, frame: u64) -> ToneParam {
@@ -103,7 +103,7 @@ fn fill(param: &mut ToneParam, q: u64, values: &mut [f32; QUANTUM]) -> bool {
     }
 }
 
-struct Echo {
+pub(crate) struct Echo {
     on: bool,
     /// Index into [`DIVISIONS`].
     time: usize,
@@ -119,6 +119,8 @@ struct Echo {
     feedbacks: [f32; QUANTUM],
     /// The heard level, compensated for the feedback (module doc).
     levels: [f32; QUANTUM],
+    /// Whether `levels` holds any non-zero value in the quantum being rendered.
+    level_nonzero: bool,
     /// Zeros written into the line in a row, up to `span`, the line's buffer length.
     quiet: usize,
     span: usize,
@@ -128,32 +130,56 @@ struct Echo {
 
 impl Echo {
     fn new(sample_rate: f32, ctl: Ctl) -> Self {
+        Echo::build(sample_rate, ctl, false)
+    }
+
+    pub(crate) fn new_on(sample_rate: f32, ctl: Ctl) -> Self {
+        Echo::build(sample_rate, ctl, true)
+    }
+
+    fn build(sample_rate: f32, ctl: Ctl, on: bool) -> Self {
         let time = InputSendParam::EchoTime.range().2 as usize;
         let feedback = InputSendParam::EchoFeedback.range().2;
         let level = InputSendParam::EchoLevel.range().2;
         let delay = DelayNode::new(sample_rate, START_BEAT_PERIOD * division_beats(time), MAX_DELAY, ctl.frame);
         let span = delay.delay.buffer_frames();
         Echo {
-            on: false,
+            on,
             time,
             feedback,
             level,
             beat_period: START_BEAT_PERIOD,
             sample_rate,
-            gate: gain(sample_rate, Units::Gain, 0.0, ctl.frame),
+            gate: gain(sample_rate, Units::Gain, if on { 1.0 } else { 0.0 }, ctl.frame),
             feedback_gain: gain(sample_rate, Units::NormalRange, feedback, ctl.frame),
             level_gain: gain(sample_rate, Units::Gain, level, ctl.frame),
             delay,
             gates: [0.0; QUANTUM],
             feedbacks: [0.0; QUANTUM],
             levels: [0.0; QUANTUM],
+            level_nonzero: level != 0.0,
             quiet: span,
             span,
-            idle: true,
+            idle: !on,
         }
     }
 
-    fn set_on(&mut self, on: bool, ctl: Ctl) {
+    pub(crate) fn is_on(&self) -> bool {
+        self.on
+    }
+
+    pub(crate) fn has_level(&self) -> bool {
+        self.level_nonzero
+    }
+
+    /// Set the starting gate settled, before any frame has rendered (an install that arrives bypassed).
+    pub(crate) fn snap_on(&mut self, on: bool) {
+        self.on = on;
+        self.gate.reset(Some(if on { 1.0 } else { 0.0 }), 0);
+        self.idle = !on && self.quiet >= self.span;
+    }
+
+    pub(crate) fn set_on(&mut self, on: bool, ctl: Ctl) {
         self.on = on;
         self.gate.ramp_to(if on { 1.0 } else { 0.0 }, RAMP, ctl.now, ctl.frame);
     }
@@ -162,37 +188,40 @@ impl Echo {
         self.beat_period * division_beats(self.time)
     }
 
-    fn set_param(&mut self, param: InputSendParam, value: f64, ctl: Ctl) {
+    pub(crate) fn set_param(&mut self, param: InputSendParam, value: f64, ctl: Ctl) -> f64 {
         match param {
             InputSendParam::EchoTime => {
                 self.time = clamp_index(value, DIVISIONS.len());
                 self.delay.delay_time.ramp_to(self.delay_seconds(), RAMP, ctl.now, ctl.frame);
+                self.time as f64
             }
             InputSendParam::EchoFeedback => {
                 self.feedback = value.clamp(0.0, MAX_FEEDBACK);
                 self.feedback_gain.ramp_to(self.feedback, RAMP, ctl.now, ctl.frame);
+                self.feedback
             }
             _ => {
                 self.level = value.clamp(0.0, 1.0);
                 self.level_gain.ramp_to(self.level, RAMP, ctl.now, ctl.frame);
+                self.level
             }
         }
     }
 
     /// A new beat replaces the delay time at once, from the context time (`DelayFx::set_timing`).
-    fn set_beat_period(&mut self, beat_period: f64, ctl: Ctl) {
+    pub(crate) fn set_beat_period(&mut self, beat_period: f64, ctl: Ctl) {
         self.beat_period = beat_period;
         let now = ctl.context_time(self.sample_rate);
         self.delay.delay_time.cancel_scheduled_values(now, ctl.frame);
         self.delay.delay_time.set_value_at_time(self.delay_seconds(), now, ctl.frame);
     }
 
-    fn begin_quantum(&mut self, q: u64) {
+    pub(crate) fn begin_quantum(&mut self, q: u64) {
         let open = fill(&mut self.gate, q, &mut self.gates);
         self.idle = !open && self.quiet >= self.span;
         if !self.idle {
             fill(&mut self.feedback_gain, q, &mut self.feedbacks);
-            fill(&mut self.level_gain, q, &mut self.levels);
+            self.level_nonzero = fill(&mut self.level_gain, q, &mut self.levels);
             // The feedback's energy compensation (module doc), per frame so a feedback ramp stays smooth.
             for (level, &fb) in self.levels.iter_mut().zip(&self.feedbacks) {
                 *level *= (1.0 - fb * fb).sqrt();
@@ -202,7 +231,7 @@ impl Echo {
     }
 
     /// Frames `at..at + input.len()` of the quantum begun into `out`; false (and zeros) while idle.
-    fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+    pub(crate) fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) -> bool {
         if self.idle {
             out.fill(0.0);
             return false;
@@ -308,7 +337,7 @@ impl Reverb {
     }
 }
 
-struct Ring {
+pub(crate) struct Ring {
     on: bool,
     freq: f64,
     level: f64,
@@ -320,6 +349,8 @@ struct Ring {
     gates: [f32; QUANTUM],
     freqs: [f32; QUANTUM],
     levels: [f32; QUANTUM],
+    /// Whether `levels` holds any non-zero value in the quantum being rendered.
+    level_nonzero: bool,
     /// The carrier's phase at the next frame the ring renders, in [0, 2π).
     phase: f64,
     /// The gate is shut for the whole quantum being rendered: it renders nothing.
@@ -328,30 +359,58 @@ struct Ring {
 
 impl Ring {
     fn new(sample_rate: f32, ctl: Ctl) -> Self {
+        Ring::build(sample_rate, ctl, false)
+    }
+
+    pub(crate) fn new_on(sample_rate: f32, ctl: Ctl) -> Self {
+        Ring::build(sample_rate, ctl, true)
+    }
+
+    fn build(sample_rate: f32, ctl: Ctl, on: bool) -> Self {
         let freq = InputSendParam::RingFreq.range().2;
         let level = InputSendParam::RingLevel.range().2;
         Ring {
-            on: false,
+            on,
             freq,
             level,
             sample_rate: sample_rate as f64,
-            gate: gain(sample_rate, Units::Gain, 0.0, ctl.frame),
+            gate: gain(sample_rate, Units::Gain, if on { 1.0 } else { 0.0 }, ctl.frame),
             freq_hz: gain(sample_rate, Units::Frequency, freq, ctl.frame),
             level_gain: gain(sample_rate, Units::Gain, level, ctl.frame),
             gates: [0.0; QUANTUM],
             freqs: [0.0; QUANTUM],
             levels: [0.0; QUANTUM],
+            level_nonzero: level != 0.0,
             phase: 0.0,
-            idle: true,
+            idle: !on,
         }
     }
 
-    fn set_on(&mut self, on: bool, ctl: Ctl) {
+    pub(crate) fn is_on(&self) -> bool {
+        self.on
+    }
+
+    pub(crate) fn has_level(&self) -> bool {
+        self.level_nonzero
+    }
+
+    pub(crate) fn phase(&self) -> f64 {
+        self.phase
+    }
+
+    /// Set the starting gate settled, before any frame has rendered (an install that arrives bypassed).
+    pub(crate) fn snap_on(&mut self, on: bool) {
+        self.on = on;
+        self.gate.reset(Some(if on { 1.0 } else { 0.0 }), 0);
+        self.idle = !on;
+    }
+
+    pub(crate) fn set_on(&mut self, on: bool, ctl: Ctl) {
         self.on = on;
         self.gate.ramp_to(if on { 1.0 } else { 0.0 }, RAMP, ctl.now, ctl.frame);
     }
 
-    fn set_param(&mut self, param: InputSendParam, value: f64, ctl: Ctl) {
+    pub(crate) fn set_param(&mut self, param: InputSendParam, value: f64, ctl: Ctl) -> f64 {
         let (min, max, _) = param.range();
         let value = value.clamp(min, max);
         if param == InputSendParam::RingFreq {
@@ -361,19 +420,20 @@ impl Ring {
             self.level = value;
             self.level_gain.ramp_to(value, RAMP, ctl.now, ctl.frame);
         }
+        value
     }
 
-    fn begin_quantum(&mut self, q: u64) {
+    pub(crate) fn begin_quantum(&mut self, q: u64) {
         self.idle = !fill(&mut self.gate, q, &mut self.gates);
         if !self.idle {
             fill(&mut self.freq_hz, q, &mut self.freqs);
-            fill(&mut self.level_gain, q, &mut self.levels);
+            self.level_nonzero = fill(&mut self.level_gain, q, &mut self.levels);
         }
     }
 
     /// Frames `at..at + input.len()` of the quantum begun into `out`; false (and zeros, the phase held)
     /// while idle.
-    fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+    pub(crate) fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) -> bool {
         if self.idle {
             out.fill(0.0);
             return false;
@@ -490,9 +550,13 @@ impl InputFx {
         }
         let ctl = self.ctl(frame);
         match param.send() {
-            InputSend::Echo => self.echo.set_param(param, value, ctl),
+            InputSend::Echo => {
+                self.echo.set_param(param, value, ctl);
+            }
             InputSend::Reverb => self.reverb.set_level(value, ctl),
-            InputSend::Ring => self.ring.set_param(param, value, ctl),
+            InputSend::Ring => {
+                self.ring.set_param(param, value, ctl);
+            }
             InputSend::Ott => {}
         }
     }

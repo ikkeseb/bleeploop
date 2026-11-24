@@ -1610,6 +1610,11 @@ impl Rack {
         }
     }
 
+    pub(crate) fn set_clock(&mut self, bpm: f64, meter: Meter) {
+        self.clock.bpm = bpm;
+        self.clock.meter = meter;
+    }
+
     /// At a block start: service the ports (unless `serve` is off: a capture's end may be due on this
     /// frame, and [`Rack::release_hold`] serves them once it is resolved) and start the render cursor.
     /// `hold`: a capture holds the alignment.
