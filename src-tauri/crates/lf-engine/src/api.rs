@@ -209,6 +209,16 @@ impl Command {
         }
     }
 
+    /// The built-in effect kind a [`Toggle::Units`] press names ([`Action::Toggle`] pressed or on a named
+    /// lane): what switches every seated unit of that kind. `None` for any other command, and for a
+    /// kind that is no built-in effect (`Plugin`, `Synth`), which names no toggle.
+    pub fn kind_toggle(&self) -> Option<UnitKind> {
+        match *self {
+            Command::Action(Action::Toggle(Toggle::Units(kind))) | Command::ActionOn(_, Action::Toggle(Toggle::Units(kind))) if kind.is_builtin_effect() => Some(kind),
+            _ => None,
+        }
+    }
+
     /// A command a plugin slot hears: the note target, the notes, the slot's live flag and gain, the
     /// input OTT's switch and controls (each slot runs an instance on its output), and per-unit or
     /// built-in-effect-kind bypass/param commands. Like the instrument commands it never waits behind
@@ -230,12 +240,8 @@ impl Command {
                 | Command::SetUnitParam(..)
                 | Command::Action(Action::ToggleUnit(_))
                 | Command::ActionOn(_, Action::ToggleUnit(_))
-        ) || matches!(
-            self,
-            Command::Action(Action::Toggle(Toggle::Units(k)))
-                | Command::ActionOn(_, Action::Toggle(Toggle::Units(k)))
-                if k.is_builtin_effect()
-        ) || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
+        ) || self.kind_toggle().is_some()
+            || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
     }
 
     /// A command for the input sends or the input OTT, a toggle included. It never waits behind the
@@ -954,9 +960,10 @@ pub const UNIT_METER_MS: f64 = 4.0;
 pub const UNIT_METER_CAPACITY: usize = 512;
 
 /// Minimum frames between consecutive meter publishes for one seat at `sample_rate`:
-/// [`UNIT_METER_MS`] rounded, at least one frame.
+/// [`UNIT_METER_MS`] rounded up (a floor: 177 frames at 44.1 kHz, never 176's 3.99 ms), at least one
+/// frame.
 pub fn unit_meter_frames(sample_rate: u32) -> usize {
-    ((sample_rate as f64 * UNIT_METER_MS / 1000.0).round() as usize).max(1)
+    ((sample_rate as f64 * UNIT_METER_MS / 1000.0).ceil() as usize).max(1)
 }
 
 /// Floor for [`BandMeter::level`] and [`BandMeter::level_peak`] in dBFS (`docs/unit-contract.md` §2).

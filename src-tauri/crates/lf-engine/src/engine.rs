@@ -625,12 +625,13 @@ impl Engine {
     }
 
     /// The unit commands sent and not applied yet ([`Command::SetUnitBypass`], [`Command::SetUnitParam`],
-    /// [`Action::ToggleUnit`] pressed or on a named lane), in the order they were sent: still in the table
-    /// (a bypass waiting for a place among what its slot owes, or one stamped ahead) or in the command
-    /// ring, peeked at without taking anything. A rebuild replays them on the new engine once the units
-    /// are reseated (`docs/unit-contract.md` §2). Not for the audio thread.
+    /// [`Action::ToggleUnit`] and a built-in effect kind's [`Toggle::Units`], pressed or on a named
+    /// lane), in the order they were sent: still in the table (a bypass waiting for a place among what
+    /// its slot owes, or one stamped ahead) or in the command ring, peeked at without taking anything. A
+    /// rebuild replays them on the new engine once the units are reseated, in this order
+    /// (`docs/unit-contract.md` §2). Not for the audio thread.
     pub fn unapplied_unit_commands(&mut self) -> impl Iterator<Item = Command> {
-        self.unapplied().filter(|c| c.unit().is_some())
+        self.unapplied().filter(|c| c.unit().is_some() || c.kind_toggle().is_some())
     }
 
     /// Every command sent and not applied yet, in send order: the table holds what the ring gave first,
@@ -1117,14 +1118,16 @@ fn bypass_target(command: Command) -> Option<BypassTarget> {
         Command::SetUnitBypass(unit, _)
         | Command::Action(Action::ToggleUnit(unit))
         | Command::ActionOn(_, Action::ToggleUnit(unit)) => Some(BypassTarget::Unit(unit)),
-        Command::Action(Action::Toggle(Toggle::Units(kind)))
-        | Command::ActionOn(_, Action::Toggle(Toggle::Units(kind)))
-            if kind.is_builtin_effect() =>
-        {
-            Some(BypassTarget::Kind(kind))
-        }
-        _ => None,
+        _ => command.kind_toggle().map(BypassTarget::Kind),
     }
+}
+
+/// Whether toggle `t` acts when it applies: it names a setting ([`Toggle::exists`]), and a
+/// [`Toggle::Units`] finds a unit of its kind seated in either slot. One that does not act does
+/// nothing at all (`docs/unit-contract.md` §6): no switch, no answer, no disarm of a pending CLEAR,
+/// no `Press` queued behind a held command.
+fn toggle_acts(rack: &Rack, t: Toggle) -> bool {
+    t.exists() && !matches!(t, Toggle::Units(kind) if !rack.has_unit_kind(kind))
 }
 
 /// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
@@ -1147,7 +1150,7 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
         if let Command::Action(Action::Toggle(t @ (Toggle::Send(_) | Toggle::Units(_))))
         | Command::ActionOn(_, Action::Toggle(t @ (Toggle::Send(_) | Toggle::Units(_)))) = p.command
         {
-            if t.exists() && pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
+            if toggle_acts(at.rack, t) && pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
                 // An input send's or effect-kind toggle passed a looper command held for a block job
                 // (`due`): the effect switches now, and the press disarms a pending CLEAR in its own
                 // turn, after the held command (a held CLEAR confirmation still confirms), as the
@@ -1220,10 +1223,8 @@ fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame, rack: 
         .iter()
         .flatten()
         .filter_map(|p| {
-            if let Command::Action(Action::Toggle(Toggle::Units(kind)))
-            | Command::ActionOn(_, Action::Toggle(Toggle::Units(kind))) = p.command
-            {
-                (kind.is_builtin_effect() && rack.has_unit_kind(kind)).then_some(p.frame)
+            if let Some(kind) = p.command.kind_toggle() {
+                rack.has_unit_kind(kind).then_some(p.frame)
             } else if p.command.reaches_slots() {
                 Some(p.frame)
             } else if reads_tempo && matches!(p.command, Command::SetBpm(_) | Command::SetMeter(_)) {
@@ -1290,11 +1291,11 @@ fn ott_control(param: InputSendParam, value: f64) -> Option<Setting> {
 
 /// [`Action::Toggle`]: switch `t` from the value it has now, gated as the UI gates it
 /// (`Looper::toggle_gate`), and say so: `Event::Toggled` with the value it left, or `Event::Refused` on the
-/// selected lane with nothing switched. The caller disarms a pending CLEAR (not for GO LIVE). A toggle that names no
-/// setting ([`Toggle::exists`]) does nothing and is answered by nothing.
+/// selected lane with nothing switched. The caller disarms a pending CLEAR (not for GO LIVE). A toggle that does not
+/// act ([`toggle_acts`]: it names no setting, or no unit of its kind is seated) does nothing and is answered by nothing.
 fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
     let now = cx.now;
-    if !t.exists() {
+    if !toggle_acts(at.rack, t) {
         return;
     }
     if let Err(reason) = looper.toggle_gate(t, cx.clock.locked()) {
@@ -1421,7 +1422,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         // pending pedal CLEAR before it is judged, as `Looper::action` does for the others. GO LIVE's
         // does not: its press sends `Press` first, so one press disarms once and a cap click never.
         Command::Action(Action::Toggle(t)) | Command::ActionOn(_, Action::Toggle(t)) => {
-            if !matches!(t, Toggle::Live(_)) && t.exists() {
+            if !matches!(t, Toggle::Live(_)) && toggle_acts(at.rack, t) {
                 looper.disarm_clear();
             }
             toggle(looper, cx, at, t);

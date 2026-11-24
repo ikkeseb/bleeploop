@@ -4043,7 +4043,7 @@ fn fold_out_peaks(meters: &[UnitMeter], unit: UnitId) -> Option<[f32; 2]> {
 #[test]
 fn unit_meter_ring_late_reader_covers_every_sample_at_4ms_cadence() {
     assert_eq!(unit_meter_frames(48_000), 192);
-    assert_eq!(unit_meter_frames(44_100), 176);
+    assert_eq!(unit_meter_frames(44_100), 177);
     assert_eq!(unit_meter_frames(1), 1);
 
     let bin = unit_meter_frames(SR) as Frame; // 192 frames = 4 ms
@@ -4924,6 +4924,217 @@ fn toggle_units_is_no_kept_setting_never_replayed_and_respects_owed_backpressure
         let ret = evict_all(&mut rig);
         assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
     }
+}
+
+/// §6, the review's CLEAR case: a `Toggle::Units` with none of its kind seated does nothing at all,
+/// on a plugins-only rack: no `Toggled`, no `Chain`, no disarm of a pending CLEAR, and on the
+/// held-command path no `Press` queued behind the held command. Arm, toggle, confirm: the loop
+/// clears, as without the toggle, pressed directly and behind a held COPY.
+#[test]
+fn toggle_units_with_none_of_its_kind_seated_does_nothing_and_clear_still_confirms() {
+    let looping = || {
+        let mut rig = Rig::with(Opts { loop_seconds: 60.0, ..Opts::default() });
+        let (plugin, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, plugin).is_ok());
+        rig.set_level(0.5);
+        rig.record_first_take(0, 16, 2400);
+        rig.set_level(0.0);
+        rig.set(Command::SetMute(0, true));
+        rig.advance(4800);
+        rig.press(Command::SelectTrack(0));
+        assert_eq!(rig.state(0), LaneState::Playing);
+        rig
+    };
+    let quiet = |rig: &Rig, mark: usize, what: &str| {
+        assert!(toggled_events_since(rig, mark).is_empty(), "{what}: no Toggled");
+        assert!(chain_events_since(rig, mark, 0).is_empty() && chain_events_since(rig, mark, 1).is_empty(), "{what}: no Chain");
+    };
+    for kind in [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Ott] {
+        // Pressed directly between the arm and the confirmation.
+        let what = format!("{kind:?} direct");
+        let mut rig = looping();
+        let mark = rig.events.len();
+        rig.press(Command::Action(Action::Clear));
+        rig.press(Command::Action(Action::Toggle(Toggle::Units(kind))));
+        rig.press(Command::Action(Action::Clear));
+        assert_eq!(rig.state(0), LaneState::Empty, "{what}: CLEAR confirmed through the empty-kind toggle");
+        quiet(&rig, mark, &what);
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+
+        // Behind a held COPY: the arm and the confirmation wait for the copy's job; the toggle passes
+        // the held command and must queue no `Press` between them.
+        let what = format!("{kind:?} held");
+        let mut rig = looping();
+        let mark = rig.events.len();
+        rig.press(Command::Copy(0));
+        rig.press(Command::Action(Action::Clear));
+        rig.press(Command::ActionOn(2, Action::Toggle(Toggle::Units(kind))));
+        rig.press(Command::Action(Action::Clear));
+        assert!(rig.engine.holding(), "{what}: the CLEAR presses wait for the copy");
+        rig.idle();
+        assert_eq!(rig.state(0), LaneState::Empty, "{what}: the held CLEAR confirmed through the empty-kind toggle");
+        quiet(&rig, mark, &what);
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+    }
+}
+
+/// §2 transport, the review's replacement case: a seat's range since its last publish stays with the
+/// seat under its id. The ring full, a unique peak rendered, then the unit replaced under the same id
+/// (a reload) or withdrawn and reseated under it: once the reader drains, the next meter for the id
+/// carries the peak. A removal takes its range with the id. All seven `BLOCKS`.
+#[test]
+fn unit_meter_range_survives_a_same_id_replacement_and_a_withdrawal() {
+    let cap = 2usize;
+    let interval = unit_meter_frames(SR) as Frame;
+    for block in BLOCKS {
+        for withdraw in [false, true] {
+            let what = format!("block {block} {}", if withdraw { "withdraw and reseat" } else { "same-id replacement" });
+            let mut rig = Rig::with_config(Opts { sr: SR, start: F0, block, ..Opts::default() }, |cfg| cfg.unit_meter_capacity = cap);
+            let (a, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+            assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, a).is_ok());
+            rig.set_stereo_inputs(|_| [0.01, 0.01], |_| [0.0; 2]);
+            rig.advance(1_024);
+            let _ = rig.read_unit_meters();
+            while rig.unit_meters_pending() < cap {
+                rig.advance(block as Frame);
+            }
+            // A peak nothing before or after it reaches, rendered while the ring is full.
+            let spike = rig.frame + 5;
+            rig.set_stereo_inputs(move |f| if f == spike { [-0.77, 0.66] } else { [0.01, 0.01] }, |_| [0.0; 2]);
+            rig.advance_to(spike + 1);
+            assert_eq!(rig.unit_meters_pending(), cap, "{what}: the ring stayed full over the peak");
+            if withdraw {
+                assert!(rig.port(0).withdraw(1));
+                rig.advance(1_024);
+                let back = rig.port(0).returned_unit().expect("withdrawn unit back");
+                assert_eq!((back.id, back.left), (1, lf_engine::Left::Withdrawn), "{what}");
+                drop(back.unit);
+            }
+            let (b, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+            assert!(rig.port(0).install_at(1, 2, MAX_UNITS, false, Some(1), b).is_ok());
+            rig.advance(1_024);
+            if !withdraw {
+                let back = rig.port(0).returned_unit().expect("replaced unit back");
+                assert_eq!((back.id, back.left), (1, lf_engine::Left::Replaced), "{what}");
+                drop(back.unit);
+            }
+            assert_eq!(rig.unit_meters_pending(), cap, "{what}: still full");
+            let old = rig.read_unit_meters();
+            assert!(old.iter().all(|m| m.out[0] < 0.5), "{what}: the peak came after the ring filled: {old:?}");
+            rig.advance(interval.max(block as Frame));
+            let next = rig.read_unit_meters();
+            assert_eq!(next.first().map(|m| (m.unit, m.out)), Some((1, [0.77, 0.66])), "{what}: the peak reached the ring under the id: {next:?}");
+            assert_eq!(evict_all(&mut rig)[0].len(), 1);
+        }
+    }
+}
+
+/// §2 transport and the review's late-reader and cadence cases: every range a seat publishes starts
+/// on the frame after the last one's end, so a dropped range shows whatever its peaks were (the left
+/// input rises with the frame and names each range's last frame, the right falls and names its
+/// first), and none is shorter than 4 ms, rounded up (177 frames at 44.1 kHz, 192 at 48 kHz; exactly
+/// that at block 1). A reader draining about every 48 ms, all seven `BLOCKS`.
+#[test]
+fn unit_meter_ranges_chain_frame_to_frame_under_a_late_reader_at_44_1_and_48_khz() {
+    const SCALE: f32 = 8_192.0;
+    const RAMP: Frame = 6_000;
+    for sr in [44_100u32, 48_000] {
+        let interval = unit_meter_frames(sr) as Frame;
+        assert_eq!(interval, if sr == 44_100 { 177 } else { 192 }, "4 ms rounded up at {sr} Hz");
+        let drain_every = (sr as Frame * 48) / 1_000;
+        for block in BLOCKS {
+            let what = format!("{sr} Hz block {block}");
+            let mut rig = Rig::with(Opts { sr, start: F0, block, ..Opts::default() });
+            let (probe, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+            assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, probe).is_ok());
+            rig.advance(4_096);
+            let _ = rig.read_unit_meters();
+            let start = rig.frame;
+            rig.set_stereo_inputs(
+                move |f| {
+                    let k = f - start;
+                    if (0..RAMP).contains(&k) { [(k + 1) as f32 / SCALE, (RAMP - k) as f32 / SCALE] } else { [0.0; 2] }
+                },
+                |_| [0.0; 2],
+            );
+            let mut got: Vec<UnitMeter> = Vec::new();
+            let mut since: Frame = 0;
+            let end = start + RAMP + 2 * interval + block as Frame;
+            while rig.frame < end {
+                let step = (block as Frame).min(end - rig.frame);
+                rig.advance(step);
+                since += step;
+                if since >= drain_every {
+                    got.extend(rig.read_unit_meters());
+                    since = 0;
+                }
+            }
+            got.extend(rig.read_unit_meters());
+            assert!(got.iter().all(|m| m.unit == 1 && m.bands.is_none()), "{what}");
+            // (first, last) frame of each range, relative to the ramp's start; past the ramp, silence.
+            let ranges: Vec<(Frame, Frame)> = got
+                .iter()
+                .filter(|m| m.out != [0.0; 2])
+                .map(|m| (RAMP - (m.out[1] * SCALE) as Frame, (m.out[0] * SCALE) as Frame - 1))
+                .collect();
+            assert_eq!(ranges.first().map(|r| r.0), Some(0), "{what}: the first range holds the ramp's first frame");
+            assert_eq!(ranges.last().map(|r| r.1), Some(RAMP - 1), "{what}: the last range holds its last frame");
+            for (k, pair) in ranges.windows(2).enumerate() {
+                assert_eq!(pair[1].0, pair[0].1 + 1, "{what}: range {} starts where range {k} ended: {:?}", k + 1, pair);
+            }
+            // The first range began before the ramp and the last may end in the silence after it.
+            for &(first, last) in &ranges[1..ranges.len() - 1] {
+                let len = last - first + 1;
+                assert!(len >= interval, "{what}: a range of {len} frames, under 4 ms ({interval})");
+                if block == 1 {
+                    assert_eq!(len, interval, "{what}: at block 1 every range is exactly the interval");
+                }
+            }
+            assert_eq!(evict_all(&mut rig)[0].len(), 1);
+        }
+    }
+}
+
+/// §2's rebuild: `Engine::unapplied_unit_commands` carries a built-in effect kind's `Toggle::Units`
+/// (pressed or `ActionOn`, with or without a seat of its kind) among the per-unit commands, in send
+/// order, from the table and then the ring, and nothing else (`Toggle::Units(Plugin)`, a setting,
+/// another toggle); the peek takes nothing.
+#[test]
+fn unapplied_unit_commands_carry_kind_toggles_in_send_order() {
+    let mut rig = Rig::new();
+    assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+    assert!(rig.port(1).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+    rig.advance(1_024);
+    let later = rig.frame + 48_000;
+    let units = |k| Command::Action(Action::Toggle(Toggle::Units(k)));
+    let sent = [
+        (true, Command::SetUnitBypass(1, true)),
+        (false, Command::SetMetronome(true)),
+        (true, units(UnitKind::Echo)),
+        (false, Command::Action(Action::Toggle(Toggle::Click))),
+        (true, Command::SetUnitParam(2, UnitParam::Send(InputSendParam::EchoLevel), 0.5)),
+    ];
+    for (_, c) in sent {
+        rig.send_at(later, c);
+    }
+    rig.advance(128);
+    let queued = [
+        (true, Command::Action(Action::ToggleUnit(2))),
+        (false, units(UnitKind::Plugin)),
+        (true, units(UnitKind::Ring)),
+        (false, Command::SetBpm(100.0)),
+        (true, Command::ActionOn(3, Action::Toggle(Toggle::Units(UnitKind::Echo)))),
+    ];
+    for (_, c) in queued {
+        rig.queue(c);
+    }
+    let want: Vec<Command> = sent.iter().chain(&queued).filter(|(unit, _)| *unit).map(|&(_, c)| c).collect();
+    assert_eq!(rig.engine.unapplied_unit_commands().collect::<Vec<_>>(), want);
+    assert_eq!(rig.engine.unapplied_unit_commands().count(), want.len(), "the peek takes nothing");
+    rig.advance_to(later + 128);
+    assert_eq!(rig.engine.unapplied_unit_commands().count(), 0, "all applied");
+    let ret = evict_all(&mut rig);
+    assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
 }
 
 // ── Off-grid installs: a unit whose first rendered frame is off a 128-frame quantum boundary ────────

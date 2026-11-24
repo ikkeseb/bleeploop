@@ -375,10 +375,10 @@ struct Seat {
     /// Owed [`Event::UnitParam`] answers for this seat (one per [`UnitParam`]): the latest applied value
     /// and its frame when the event ring has not taken it yet.
     params_owed: [Option<(Frame, f64)>; UnitParam::COUNT],
-    /// Folded output peak per channel (`[left, right]`) since the last [`UnitMeter`] publish.
+    /// Folded output peak per channel (`[left, right]`) since the last [`UnitMeter`] publish under this
+    /// seat's id: kept across a same-id replacement and a withdrawal, reset by a removal or another id.
     meter_out: [f32; 2],
-    /// Rendered frames folded into `meter_out` (and the unit's own `take_meter` fold) since the last
-    /// [`UnitMeter`] publish for this seat.
+    /// Rendered frames folded into `meter_out` since the last [`UnitMeter`] publish for this seat.
     meter_frames: usize,
 }
 
@@ -649,7 +649,9 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
             process_for(old.as_mut(), cx, [&x[0][..old_len], &x[1][..old_len]], &seat.ev, [&mut ol[a..b], &mut or[a..b]], errors);
         }
         let swapping = seat.outgoing.is_some();
-        let meter_active = !seat.removing && !seat.withdrawing && seat.unit.is_some();
+        // What the seat outputs while it holds its unit, a withdrawal's fade included (the seat stays under
+        // its id); a removal's fade is not (the id leaves with it).
+        let meter_active = !seat.removing && seat.unit.is_some();
         let latency = seat.info.latency as usize;
         let old_latency = if swapping { seat.old_latency } else { latency };
         let cap = seat.line.len();
@@ -907,8 +909,8 @@ impl Slot {
         }
         let seat = &mut self.seats[k];
         seat.withdrawing = false;
-        seat.meter_out = [0.0; 2];
-        seat.meter_frames = 0;
+        // The seat stays under its id: what it output since its last publish waits for a same-id reseat
+        // (a seat without its unit publishes nothing) and goes out with that unit's first range.
         if let Some(unit) = seat.unit.take() {
             let (id, token, bypassed) = (seat.id, seat.token, seat.bypassed);
             self.give_back(Back { id, token, unit, bypassed, left: Left::Withdrawn }, errors);
@@ -1424,11 +1426,15 @@ impl Rack {
                         }
                         let same_id = seat.id == id;
                         (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
+                        // A same-id replacement (a reload, a reseat after a withdrawal) keeps what the seat
+                        // output since its last meter publish: that range reaches the ring under the id
+                        // with the new unit's first; only the old unit's own `take_meter` fold leaves with
+                        // it. Another id starts its range here.
                         if !same_id {
                             seat.params_owed = [None; UnitParam::COUNT];
+                            seat.meter_out = [0.0; 2];
+                            seat.meter_frames = 0;
                         }
-                        seat.meter_out = [0.0; 2];
-                        seat.meter_frames = 0;
                         k
                     }
                     None => {
