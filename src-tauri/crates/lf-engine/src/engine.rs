@@ -428,8 +428,24 @@ impl Engine {
         &self.input_fx
     }
 
-    pub fn input_fx_mut(&mut self) -> &mut InputFx {
-        &mut self.input_fx
+    /// Test hook: preallocate a `max_block`-frame stereo reverb tap off the RT thread (for the
+    /// unit-contract pin test before `input_fx.rs` is retired).
+    #[doc(hidden)]
+    pub fn enable_reverb_stereo_tap(&mut self, max_block: usize) {
+        self.input_fx.enable_reverb_stereo_tap(max_block);
+    }
+
+    /// Test hook: reset the stereo reverb tap cursor before rendering the next block.
+    #[doc(hidden)]
+    pub fn clear_reverb_stereo_tap(&mut self) {
+        self.input_fx.clear_reverb_stereo_tap();
+    }
+
+    /// Test hook: read the unsummed stereo reverb tap recorded since the last
+    /// [`Self::clear_reverb_stereo_tap`]; panics off the RT path if the tap overflowed.
+    #[doc(hidden)]
+    pub fn reverb_stereo_tap(&self) -> [&[f32]; 2] {
+        self.input_fx.reverb_stereo_tap()
     }
 
     /// Whether the tuner is on ([`crate::tuner`]).

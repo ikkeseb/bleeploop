@@ -523,9 +523,11 @@ pub struct InputFx {
     prepared: Option<u64>,
     mono: [f32; QUANTUM],
     /// Optional stereo reverb tap (preallocated off the RT thread by [`Self::enable_reverb_stereo_tap`]
-    /// for the unit-contract pin test across block sizes; empty and untouched otherwise).
+    /// for the unit-contract pin test across block sizes; disabled and untouched otherwise).
     reverb_tap: [Vec<f32>; 2],
     reverb_tap_len: usize,
+    reverb_tap_enabled: bool,
+    reverb_tap_overflow: bool,
 }
 
 impl InputFx {
@@ -545,6 +547,8 @@ impl InputFx {
             mono: [0.0; QUANTUM],
             reverb_tap: [Vec::new(), Vec::new()],
             reverb_tap_len: 0,
+            reverb_tap_enabled: false,
+            reverb_tap_overflow: false,
         }
     }
 
@@ -597,19 +601,28 @@ impl InputFx {
 
     /// Preallocate a `max_block`-frame stereo reverb tap off the RT thread (for the unit-contract
     /// pin test before `input_fx.rs` is retired).
-    pub fn enable_reverb_stereo_tap(&mut self, max_block: usize) {
+    pub(crate) fn enable_reverb_stereo_tap(&mut self, max_block: usize) {
         self.reverb_tap = [vec![0.0; max_block], vec![0.0; max_block]];
         self.reverb_tap_len = 0;
+        self.reverb_tap_enabled = true;
+        self.reverb_tap_overflow = false;
     }
 
     /// Reset the stereo reverb tap cursor before rendering the next block.
-    pub fn clear_reverb_stereo_tap(&mut self) {
+    pub(crate) fn clear_reverb_stereo_tap(&mut self) {
         self.reverb_tap_len = 0;
+        self.reverb_tap_overflow = false;
     }
 
     /// Unsummed left and right convolver outputs (scaled by level) recorded since the last
-    /// [`Self::clear_reverb_stereo_tap`].
-    pub fn reverb_stereo_tap(&self) -> [&[f32]; 2] {
+    /// [`Self::clear_reverb_stereo_tap`]. Panics off the RT path if any render exceeded the tap's
+    /// capacity (never returns a gapped or truncated trace silently).
+    pub(crate) fn reverb_stereo_tap(&self) -> [&[f32]; 2] {
+        assert!(
+            !self.reverb_tap_overflow,
+            "reverb stereo tap overflowed capacity {} (rendered more frames than configured before clearing)",
+            self.reverb_tap[0].len()
+        );
         [&self.reverb_tap[0][..self.reverb_tap_len], &self.reverb_tap[1][..self.reverb_tap_len]]
     }
 
@@ -690,9 +703,8 @@ impl InputFx {
                 }
                 sounded = true;
             }
-            if !self.reverb_tap[0].is_empty() {
-                let end = self.reverb_tap_len + n;
-                if end <= self.reverb_tap[0].len() {
+            if self.reverb_tap_enabled && !self.reverb_tap_overflow {
+                if let Some(end) = self.reverb_tap_len.checked_add(n).filter(|&end| end <= self.reverb_tap[0].len()) {
                     let [tl, tr] = &mut self.reverb_tap;
                     if rev_sounded {
                         self.reverb.copy_wet_stereo(at, n, &mut tl[self.reverb_tap_len..end], &mut tr[self.reverb_tap_len..end]);
@@ -701,6 +713,8 @@ impl InputFx {
                         tr[self.reverb_tap_len..end].fill(0.0);
                     }
                     self.reverb_tap_len = end;
+                } else {
+                    self.reverb_tap_overflow = true;
                 }
             }
             if self.ring.process(at, &input[span.clone()], mono) {

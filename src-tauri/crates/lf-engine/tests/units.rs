@@ -225,7 +225,7 @@ fn render_send_pin(spec: PinSpec, input: &Arc<Vec<f32>>, block: usize) -> Vec<f3
 fn render_reverb_stereo_pin(spec: PinSpec, input: &Arc<Vec<f32>>, block: usize) -> [Vec<f32>; 2] {
     assert_eq!(spec.send, InputSend::Reverb);
     let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
-    rig.engine.input_fx_mut().enable_reverb_stereo_tap(block);
+    rig.engine.enable_reverb_stereo_tap(block);
     let sig = input.clone();
     rig.set_input(move |f| sig.get((f - F0) as usize).copied().unwrap_or(0.0));
     let on = F0 + ON_OFFSET;
@@ -239,9 +239,9 @@ fn render_reverb_stereo_pin(spec: PinSpec, input: &Arc<Vec<f32>>, block: usize) 
     let mut pos = 0usize;
     while pos < PIN_FRAMES {
         let n = block.min(PIN_FRAMES - pos);
-        rig.engine.input_fx_mut().clear_reverb_stereo_tap();
+        rig.engine.clear_reverb_stereo_tap();
         rig.advance(n as Frame);
-        let [wl, wr] = rig.engine.input_fx().reverb_stereo_tap();
+        let [wl, wr] = rig.engine.reverb_stereo_tap();
         assert_eq!(wl.len(), n, "{}: stereo tap length at block {block}", spec.id);
         for k in 0..n {
             let dry = input[pos + k];
@@ -2337,68 +2337,191 @@ fn ott_unit_dsp_properties_from_ott_suite() {
         }
     }
 
-    // 2. Switch inside a fade turns from the weight reached; fade lands on exact last frame (480)
-    //    and off fade's last frame preserves dry bits including `-0.0` across all 7 block sizes.
+    // 2. Switch inside a fade turns from the weight reached; full-block ON/OFF fades reach `block`
+    //    frames (so 480 and 1024 get distinct call patterns and a 1024-frame call carries an entire
+    //    fade), fade lands on exact last frame (480), and off fade's last frame preserves dry bits
+    //    including `-0.0` across all 7 block sizes.
     {
         let fade = (OTT_FADE_SECONDS * SR as f64) as usize;
         let step = 1.0 / fade as f64;
-        let sig = vec![0.1f32; 200];
-        let sig_f = vec![0.2f32; fade];
+
+        // 2a. Fade reversal on outer `block`-sized calls over 2048 frames (t_on = 0, reverse at 160,
+        //     inspect at 200, then run through the rest of the off-fade and settled tail so 480 and
+        //     1024 get distinct call sequences and `max_call == block`).
+        let rev_total = 2048usize;
+        let sig_rev = vec![0.1f32; rev_total];
         let mut base_rev: Option<(Vec<f32>, Vec<f32>)> = None;
-        let mut base_fade: Option<(Vec<f32>, Vec<f32>)> = None;
+        let mut rev_patterns: Vec<(usize, Vec<usize>)> = Vec::new();
         for block in BLOCKS {
             let mut unit = settled_ott_unit_at_block(SR, DEFAULT_DEPTH, false, block);
-            let mut ol = vec![0.0f32; 200];
-            let mut or = vec![0.0f32; 200];
+            let mut ol = vec![0.0f32; rev_total];
+            let mut or = vec![0.0f32; rev_total];
+            let mut calls = Vec::new();
+            let mut max_call = 0usize;
             assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(0), false)));
-            let mut pos = 0usize;
-            while pos < 160 {
-                let n = block.min(160 - pos);
-                assert_no_alloc(|| unit.process(&ott_cx(pos as Frame), [&sig[pos..pos + n], &sig[pos..pos + n]], &[], [&mut ol[pos..pos + n], &mut or[pos..pos + n]]));
-                pos += n;
+            let mut block_start = 0usize;
+            while block_start < rev_total {
+                let block_end = (block_start + block).min(rev_total);
+                let mut pos = block_start;
+                while pos < block_end {
+                    let stop = if pos < 160 {
+                        160
+                    } else if pos < 200 {
+                        200
+                    } else {
+                        rev_total
+                    };
+                    let end = block_end.min(stop);
+                    let len = end - pos;
+                    calls.push(len);
+                    max_call = max_call.max(len);
+                    assert_no_alloc(|| {
+                        unit.process(
+                            &ott_cx(pos as Frame),
+                            [&sig_rev[pos..end], &sig_rev[pos..end]],
+                            &[],
+                            [&mut ol[pos..end], &mut or[pos..end]],
+                        );
+                    });
+                    pos = end;
+                    if pos == 160 {
+                        assert!((unit.weight() - 160.0 * step).abs() < 1e-12, "block {block}");
+                        assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(160), true)));
+                    } else if pos == 200 {
+                        assert!((unit.weight() - 120.0 * step).abs() < 1e-12, "block {block} weight {}", unit.weight());
+                    }
+                }
+                block_start = block_end;
             }
-            assert!((unit.weight() - 160.0 * step).abs() < 1e-12, "block {block}");
-            assert!(assert_no_alloc(|| unit.set_bypass(&ott_cx(160), true)));
-            while pos < 200 {
-                let n = block.min(200 - pos);
-                assert_no_alloc(|| unit.process(&ott_cx(pos as Frame), [&sig[pos..pos + n], &sig[pos..pos + n]], &[], [&mut ol[pos..pos + n], &mut or[pos..pos + n]]));
-                pos += n;
-            }
-            assert!((unit.weight() - 120.0 * step).abs() < 1e-12, "block {block} weight {}", unit.weight());
+            assert_eq!(unit.weight(), 0.0, "block {block}: reversed off-fade settled");
+            assert_eq!(max_call, block, "fade reversal block {block}: full block size must reach OttUnit::process");
             let (bl, br) = base_rev.get_or_insert_with(|| (ol.clone(), or.clone()));
             assert_bits_eq(&ol, bl, &format!("fade reversal block {block} L"));
             assert_bits_eq(&or, br, &format!("fade reversal block {block} R"));
+            rev_patterns.push((block, calls));
+        }
+        for i in 0..rev_patterns.len() {
+            for j in (i + 1)..rev_patterns.len() {
+                assert_ne!(
+                    rev_patterns[i].1, rev_patterns[j].1,
+                    "fade reversal must not feed identical call patterns to blocks {} and {}",
+                    rev_patterns[i].0, rev_patterns[j].0
+                );
+            }
+        }
 
+        // 2b. Full-block uninterrupted ON/OFF fades (`[0, 1024)` ON fade, `[1024, 2048)` OFF fade
+        //     with `-0.0` / `0.123` on the exact last fade frame `1024 + fade - 1`) followed by
+        //     exact-frame weight edge checks (`[2048, 2048 + 2*fade)`), all split from outer
+        //     `block`-sized calls so every block size reaches `block` frames *during* a fade and
+        //     all 7 block sizes produce distinct call patterns.
+        let edge_start = 2048usize;
+        let fade_total = edge_start + 2 * fade;
+        let mut in_l = vec![0.2f32; fade_total];
+        let mut in_r = vec![0.2f32; fade_total];
+        let off_last_full = 1024 + fade - 1;
+        let off_last_edge = edge_start + 2 * fade - 1;
+        in_l[off_last_full] = -0.0;
+        in_r[off_last_full] = 0.123;
+        in_l[off_last_edge] = -0.0;
+        in_r[off_last_edge] = 0.123;
+
+        let events = [
+            1024usize,
+            edge_start,
+            edge_start + fade - 1,
+            edge_start + fade,
+            edge_start + 2 * fade - 1,
+            fade_total,
+        ];
+        // Intervals where a fade is active: [0, fade), [1024, 1024 + fade), [edge_start, fade_total).
+        let overlaps_fade = |a: usize, b: usize| -> bool {
+            (a < fade && b > 0)
+                || (a < 1024 + fade && b > 1024)
+                || (a < fade_total && b > edge_start)
+        };
+
+        let mut base_fade: Option<(Vec<f32>, Vec<f32>)> = None;
+        let mut fade_patterns: Vec<(usize, Vec<usize>)> = Vec::new();
+        for block in BLOCKS {
             let mut u2 = settled_ott_unit_at_block(SR, DEFAULT_DEPTH, false, block);
-            let mut fl = vec![0.0f32; 2 * fade];
-            let mut fr = vec![0.0f32; 2 * fade];
+            let mut fl = vec![0.0f32; fade_total];
+            let mut fr = vec![0.0f32; fade_total];
+            let mut calls = Vec::new();
+            let mut max_fade_call = 0usize;
             assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(0), false)));
-            let mut p = 0usize;
-            while p < fade - 1 {
-                let n = block.min((fade - 1) - p);
-                assert_no_alloc(|| u2.process(&ott_cx(p as Frame), [&sig_f[p..p + n], &sig_f[p..p + n]], &[], [&mut fl[p..p + n], &mut fr[p..p + n]]));
-                p += n;
+            let mut ei = 0usize;
+            let mut block_start = 0usize;
+            while block_start < fade_total {
+                let block_end = (block_start + block).min(fade_total);
+                let mut pos = block_start;
+                while pos < block_end {
+                    let next_ev = events[ei];
+                    let end = block_end.min(next_ev);
+                    let len = end - pos;
+                    calls.push(len);
+                    if overlaps_fade(pos, end) {
+                        max_fade_call = max_fade_call.max(len);
+                    }
+                    assert_no_alloc(|| {
+                        u2.process(
+                            &ott_cx(pos as Frame),
+                            [&in_l[pos..end], &in_r[pos..end]],
+                            &[],
+                            [&mut fl[pos..end], &mut fr[pos..end]],
+                        );
+                    });
+                    pos = end;
+                    if pos == next_ev {
+                        match pos {
+                            1024 => {
+                                assert_eq!(u2.weight(), 1.0, "block {block}: full-block ON fade settled");
+                                assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(pos as Frame), true)));
+                            }
+                            x if x == edge_start => {
+                                assert_eq!(u2.weight(), 0.0, "block {block}: full-block OFF fade settled");
+                                assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(pos as Frame), false)));
+                            }
+                            x if x == edge_start + fade - 1 => {
+                                assert!(u2.weight() < 1.0, "block {block}: ON fade not settled at fade-1");
+                            }
+                            x if x == edge_start + fade => {
+                                assert_eq!(u2.weight(), 1.0, "block {block}: ON fade lands on exact frame fade");
+                                assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(pos as Frame), true)));
+                            }
+                            x if x == edge_start + 2 * fade - 1 => {
+                                assert!(u2.weight() > 0.0, "block {block}: OFF fade not settled at fade-1");
+                            }
+                            x if x == fade_total => {
+                                assert_eq!(u2.weight(), 0.0, "block {block}: OFF fade lands on exact frame fade");
+                            }
+                            _ => unreachable!(),
+                        }
+                        ei += 1;
+                    }
+                }
+                block_start = block_end;
             }
-            assert!(u2.weight() < 1.0, "block {block}");
-            assert_no_alloc(|| u2.process(&ott_cx((fade - 1) as Frame), [&sig_f[fade - 1..], &sig_f[fade - 1..]], &[], [&mut fl[fade - 1..fade], &mut fr[fade - 1..fade]]));
-            assert_eq!(u2.weight(), 1.0, "block {block}");
-            assert!(assert_no_alloc(|| u2.set_bypass(&ott_cx(fade as Frame), true)));
-            p = 0;
-            while p < fade - 1 {
-                let n = block.min((fade - 1) - p);
-                assert_no_alloc(|| u2.process(&ott_cx((fade + p) as Frame), [&sig_f[p..p + n], &sig_f[p..p + n]], &[], [&mut fl[fade + p..fade + p + n], &mut fr[fade + p..fade + p + n]]));
-                p += n;
-            }
-            assert!(u2.weight() > 0.0, "block {block}");
-            let dry_l = [-0.0f32];
-            let dry_r = [0.123f32];
-            assert_no_alloc(|| u2.process(&ott_cx((2 * fade - 1) as Frame), [&dry_l, &dry_r], &[], [&mut fl[2 * fade - 1..], &mut fr[2 * fade - 1..]]));
-            assert_eq!(u2.weight(), 0.0, "block {block}");
-            assert_eq!(fl[2 * fade - 1].to_bits(), (-0.0f32).to_bits(), "block {block}: off fade last frame preserves -0.0");
-            assert_eq!(fr[2 * fade - 1].to_bits(), 0.123f32.to_bits(), "block {block}: off fade last frame is dry bit for bit");
+            assert_eq!(ei, events.len(), "block {block}: all fade events ran");
+            assert_eq!(max_fade_call, block, "fade edge block {block}: longest fade call must reach block size");
+            assert_ne!(fl[off_last_full - 1].to_bits(), in_l[off_last_full - 1].to_bits(), "block {block}: full-block off fade still active one frame before end");
+            assert_eq!(fl[off_last_full].to_bits(), (-0.0f32).to_bits(), "block {block}: full-block off fade last frame preserves -0.0");
+            assert_eq!(fr[off_last_full].to_bits(), 0.123f32.to_bits(), "block {block}: full-block off fade last frame is dry bit for bit");
+            assert_eq!(fl[off_last_edge].to_bits(), (-0.0f32).to_bits(), "block {block}: off fade last frame preserves -0.0");
+            assert_eq!(fr[off_last_edge].to_bits(), 0.123f32.to_bits(), "block {block}: off fade last frame is dry bit for bit");
             let (bfl, bfr) = base_fade.get_or_insert_with(|| (fl.clone(), fr.clone()));
             assert_bits_eq(&fl, bfl, &format!("fade exact end block {block} L"));
             assert_bits_eq(&fr, bfr, &format!("fade exact end block {block} R"));
+            fade_patterns.push((block, calls));
+        }
+        for i in 0..fade_patterns.len() {
+            for j in (i + 1)..fade_patterns.len() {
+                assert_ne!(
+                    fade_patterns[i].1, fade_patterns[j].1,
+                    "fade edge must not feed identical call patterns to blocks {} and {}",
+                    fade_patterns[i].0, fade_patterns[j].0
+                );
+            }
         }
     }
 
@@ -2775,9 +2898,11 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
         }
     }
 
-    // 3. Stamped `ToggleUnit` inside a block switches `OttUnit` on its exact frame across block sizes.
+    // 3. Stamped `SetUnitBypass` and `ToggleUnit` inside a block switch `OttUnit` on their exact
+    //    frame across all 7 `BLOCKS` sizes (`at = 1_019` lands 5 frames before the end of the first
+    //    1024-frame call, so a late-landing setter at 1024 fails both `first_diff` and bit equality).
     {
-        let at: Frame = 1_001;
+        let at: Frame = 1_019;
         let frames = 24_000;
         let run_toggle = |block: usize, cmd: Option<Command>| {
             let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
@@ -2793,11 +2918,17 @@ fn ott_unit_in_engine_matches_ott_suite_across_block_sizes() {
             drain_returns(&mut rig);
             mon
         };
-        let off = run_toggle(128, None);
-        let setter = run_toggle(128, Some(Command::SetUnitBypass(1, false)));
-        let first_diff = setter.iter().zip(&off).position(|(a, b)| a.to_bits() != b.to_bits());
-        assert_eq!(first_diff, Some(at as usize), "SetUnitBypass switches on its exact frame");
+        let mut base_off: Option<Vec<f32>> = None;
+        let mut base_setter: Option<Vec<f32>> = None;
         for block in BLOCKS {
+            let off = run_toggle(block, None);
+            let bo = base_off.get_or_insert_with(|| off.clone());
+            assert_bits_eq(&off, bo, &format!("off block {block} vs 1"));
+            let setter = run_toggle(block, Some(Command::SetUnitBypass(1, false)));
+            let first_diff = setter.iter().zip(&off).position(|(a, b)| a.to_bits() != b.to_bits());
+            assert_eq!(first_diff, Some(at as usize), "block {block}: SetUnitBypass switches on its exact frame");
+            let bs = base_setter.get_or_insert_with(|| setter.clone());
+            assert_bits_eq(&setter, bs, &format!("SetUnitBypass block {block} vs 1"));
             let toggled = run_toggle(block, Some(Command::Action(Action::ToggleUnit(1))));
             assert_bits_eq(&toggled, &setter, &format!("ToggleUnit block {block} matches SetUnitBypass"));
         }
@@ -3728,4 +3859,65 @@ fn ott_unit_static_gain_points_and_soft_knee_shape() {
         let bs = base_shape.get_or_insert_with(|| shape_bits.clone());
         assert_eq!(&shape_bits, bs, "block {block}: soft-knee shape bits match block 1");
     }
+}
+
+/// Review fix round 2 items 4 & 5: the narrow `Engine` stereo reverb tap hooks must never return
+/// a gapped or truncated trace silently when a render exceeds `max_block` (including a chunked
+/// overflow `60 + 60 + 30` into a `100`-frame tap where the third chunk would otherwise fit after
+/// a skipped middle chunk), must keep the RT path free of allocations/panics and leave audio bits
+/// unchanged, and must recover cleanly on `clear_reverb_stereo_tap`.
+#[test]
+fn reverb_stereo_tap_overflow_fails_loudly_off_rt_path() {
+    let input = pin_input();
+
+    // Baseline without the stereo tap enabled.
+    let mut base_rig = Rig::with(Opts { sr: SR, start: F0, block: 128, ..Opts::default() });
+    let sig = input.clone();
+    base_rig.set_input(move |f| sig.get((f - F0) as usize).copied().unwrap_or(0.0));
+    base_rig.send_at(F0, Command::SetInputSend(InputSend::Reverb, true));
+    base_rig.keep_output();
+    base_rig.advance(60 + 60 + 30 + 128 + 64);
+    let want_record = base_rig.record.clone();
+
+    // Same render with a 100-frame stereo tap enabled via the narrow `Engine` hooks.
+    let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 128, ..Opts::default() });
+    rig.engine.enable_reverb_stereo_tap(100);
+    let sig = input.clone();
+    rig.set_input(move |f| sig.get((f - F0) as usize).copied().unwrap_or(0.0));
+    rig.send_at(F0, Command::SetInputSend(InputSend::Reverb, true));
+    rig.keep_output();
+
+    // 1. Multi-chunk gapped-trace case: 60 + 60 (overflows 100) + 30 (would fit after gap without latch).
+    rig.block = 60;
+    rig.advance(60);
+    rig.advance(60);
+    rig.block = 30;
+    rig.advance(30);
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.engine.reverb_stereo_tap()));
+    assert!(err.is_err(), "multi-chunk overflow (60+60+30 into 100) must panic off the RT path");
+
+    // 2. Single oversized block (128 > 100) after clear also fails loudly off the RT path.
+    rig.engine.clear_reverb_stereo_tap();
+    rig.block = 128;
+    rig.advance(128);
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.engine.reverb_stereo_tap()));
+    assert!(err.is_err(), "single-block overflow (128 into 100) must panic off the RT path");
+
+    // 3. Clearing resets the latch; a subsequent within-capacity render (64 <= 100) reads cleanly.
+    rig.engine.clear_reverb_stereo_tap();
+    rig.block = 64;
+    rig.advance(64);
+    let [wl, wr] = rig.engine.reverb_stereo_tap();
+    assert_eq!(wl.len(), 64);
+    assert_eq!(wr.len(), 64);
+
+    // 4. Audio output bits are untouched by the tap and its overflow state.
+    assert_bits_eq(&rig.record, &want_record, "reverb stereo tap overflow leaves audio bits unchanged");
+
+    // 5. Zero-capacity enabled tap fails loudly on any rendered frame.
+    rig.engine.enable_reverb_stereo_tap(0);
+    rig.block = 1;
+    rig.advance(1);
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.engine.reverb_stereo_tap()));
+    assert!(err.is_err(), "zero-capacity enabled tap must panic on read after rendering 1 frame");
 }
