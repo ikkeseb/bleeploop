@@ -5,7 +5,9 @@
 //! with the sender, native MIDI's one note router (`engine_io::midi::router` in the app crate). The SYNTH
 //! chain unit ([`crate::units::SynthUnit`], `docs/unit-contract.md` §4) holds a bank of its own: two
 //! synth slots are two banks, and [`Instruments`] keeps serving `NoteTarget::Builtin` until a later
-//! slice retires it.
+//! slice retires it. Whenever its slot releases every note (its departure, the note target leaving, an
+//! all-notes-off) a SYNTH's bank releases as a pick does, as [`Instruments::select`] and
+//! [`Instruments::all_notes_off`] release today's, and its `stop` silences the bank (`Bank::silence`).
 //!
 //! All six are built in `Bank::new` and render every block, so a switch never allocates and a
 //! released note rings out after one, as each slot's synth does in the web app when the player
@@ -207,6 +209,19 @@ impl Bank {
         if depth.is_finite() {
             self.wheels(self.bend, depth.clamp(0.0, 1.0), f);
         }
+    }
+
+    /// Every instrument silent from DSP frame `f` on, holding no note (what a SYNTH's `stop` does, so a
+    /// withdrawn and reseated SYNTH resumes silent instead of splicing its released tails in after the
+    /// gap): each voice's amplitude envelope back to 0 with nothing scheduled, the lines that would
+    /// replay a tail cleared. The pick, the levels and the wheels stay. No allocation. `f` is where
+    /// the last render ended.
+    pub(crate) fn silence(&mut self, f: u64) {
+        for synth in self.poly.iter_mut() {
+            synth.silence(f);
+        }
+        self.bass.silence(f);
+        self.drums.silence(f);
     }
 
     /// Keep the wheels and apply them to the selected instrument (the drum kit has none).

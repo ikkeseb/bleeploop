@@ -7,16 +7,24 @@
 //! - Two SYNTH slots are two banks: notes and wheels to one never reach or sound in the other.
 //! - A pick mid-note releases the held note on the pick's frame (it rings out, then falls silent where
 //!   an unpicked note sustains), hands the new instrument the wheels, allocates nothing, and does all of
-//!   it for the instrument already picked too, as `Instruments::select` does; a pick and a NoteOn on one
-//!   frame give one result in both ring orders (the pick first).
+//!   it for the instrument already picked too, as `Instruments::select` does; a pick, a NoteOn and a bend
+//!   on one frame apply in ring order, each order against today's bank sent in the same order.
 //! - A source change (SYNTH → SYNTH, SYNTH → a fake source, a withdrawal and its reseat, a removal)
 //!   under a held note and a note whose NoteOff never comes: each released on the applied frame, the
 //!   new source silent until its own NoteOn, a stray NoteOff dropped, in both orders of a replacement
 //!   and a NoteOff sent for the same block.
-//! - The wheels never reach a chain without a SYNTH, nor split its render.
+//! - The wheels never reach a chain without a SYNTH, nor split its render; a withdrawing SYNTH and a
+//!   SYNTH slot the note target has left take none and split nothing.
+//! - A departing SYNTH (replaced, removed) leaves the tail a pick's release of the same notes leaves, bit
+//!   for bit (a mono bass never falls back to an older key on its way out); a withdrawn and reseated one
+//!   is silent until its next note.
+//! - The note target leaving a SYNTH slot and `AllNotesOff` release as today's bank does (one release of
+//!   the bank's own, in ring order with a note on the frame), where a plugin keeps a NoteOff per key.
+//! - A SYNTH's levels glide as `SetInstrumentGain`'s, its take records what today's bank's does, and a
+//!   pick hands over the wheels it holds (against the same wheels sent after the pick).
 //!
-//! Every render runs through `tests/common::Rig` (each `process` under `assert_no_alloc`) or the local
-//! `assert_no_alloc` wrapper, bit-identical across block sizes 1, 32, 64, 127, 128, 480 and 1024.
+//! Every render runs through the local `assert_no_alloc` wrapper (the rig's own bookkeeping given room
+//! for it), bit-identical across block sizes 1, 32, 64, 127, 128, 480 and 1024 where it says so.
 
 mod common;
 
@@ -37,12 +45,13 @@ const SR: u32 = 48_000;
 /// The rig's first frame (`Opts::default`).
 const S0: Frame = 48_000;
 
-/// A direct unit call under `assert_no_alloc` that fails on an allocation: with `warn_debug` the crate
-/// only counts violations, so the count must not move (as `Rig` checks its renders).
+/// A render or a direct unit call under `assert_no_alloc` that fails on an allocation: with
+/// `warn_debug` the crate only counts violations, so the count must not move. Every render here goes
+/// through it (`advance`), the rig's own bookkeeping inside it too, so `rig` gives that room first.
 fn assert_no_alloc<T, F: FnOnce() -> T>(f: F) -> T {
     let before = common::violation_count();
     let out = ::assert_no_alloc::assert_no_alloc(f);
-    assert_eq!(common::violation_count(), before, "a direct unit call allocated");
+    assert_eq!(common::violation_count(), before, "a render or a direct unit call allocated");
     out
 }
 
@@ -110,10 +119,39 @@ impl Taps {
     }
 }
 
+/// Frames of kept output a rig has room for: more than any render here keeps.
+const ROOM: usize = 8 * SR as usize;
+
+/// A rig keeping its output, with room for all of it and for its events, so its bookkeeping never
+/// allocates under the wrapper.
 fn rig(block: usize) -> Rig {
     let mut rig = Rig::with(Opts { block, ..Opts::default() });
     rig.keep_output();
+    if let Some((_, out)) = rig.output.as_mut() {
+        out.reserve(ROOM);
+    }
+    for v in [
+        &mut rig.output_right,
+        &mut rig.heard,
+        &mut rig.heard_right,
+        &mut rig.bus,
+        &mut rig.bus_right,
+        &mut rig.monitor,
+        &mut rig.monitor_right,
+        &mut rig.record,
+        &mut rig.record_right,
+        &mut rig.share,
+        &mut rig.share_right,
+    ] {
+        v.reserve(ROOM);
+    }
+    rig.events.reserve(1 << 16);
     rig
+}
+
+/// Render `frames` under the local wrapper.
+fn advance(rig: &mut Rig, frames: Frame) {
+    assert_no_alloc(|| rig.advance(frames));
 }
 
 /// Render to `until`, each command stamped on its frame (`S0 +` its offset) and sent ahead of it, so it
@@ -126,7 +164,7 @@ fn play(rig: &mut Rig, script: &[(Frame, Command)], until: Frame) {
             next += 1;
         }
         let step = (rig.block as Frame).min(until - rig.frame);
-        rig.advance(step);
+        advance(rig, step);
     }
     assert_eq!(next, script.len(), "the script runs past the render");
 }
@@ -365,7 +403,7 @@ fn take_back(rig: &mut Rig, slot: usize, ids: &[UnitId]) -> Vec<(UnitId, Box<dyn
         if ids.iter().all(|id| back.iter().any(|(b, ..)| b == id)) {
             break;
         }
-        rig.advance(1);
+        advance(rig, 1);
     }
     back
 }
@@ -426,8 +464,10 @@ fn two_synth_slots_are_two_banks() {
     for block in BLOCKS {
         let (both, bus) = two_banks(block, [true, true]);
         let (a, b) = (both[0].as_ref().unwrap(), both[1].as_ref().unwrap());
-        // Slot 0's SYNTH hears the first phrase and the select's release, never slot 1's notes or wheels.
-        assert_eq!(a.keys(), vec![(S0 + 1_000, true, 60), (S0 + 1_000, true, 64), (S0 + 20_000, false, 60), (S0 + 20_000, false, 64)], "block {block}: slot 0's notes");
+        // Slot 0's SYNTH hears the first phrase and the select's release (its bank's own, as a pick's),
+        // never slot 1's notes or wheels.
+        assert_eq!(a.keys(), vec![(S0 + 1_000, true, 60), (S0 + 1_000, true, 64)], "block {block}: slot 0's notes");
+        assert!(a.events.contains(&(S0 + 20_000, SlotEventKind::AllNotesOff)), "block {block}: slot 0's release");
         assert_eq!(a.wheels(), 2, "block {block}: slot 0's wheels");
         assert_eq!(b.keys(), vec![(S0 + 21_000, true, 67), (S0 + 30_000, false, 67)], "block {block}: slot 1's notes");
         assert_eq!(b.wheels(), 1, "block {block}: slot 1's wheels");
@@ -462,8 +502,8 @@ const HOLD: Frame = 2_000;
 const PICK: Frame = 30_037;
 
 /// Slot 0's SYNTH (or today's bank, `builtin`) on lead, the wheels set, note 60 held from `HOLD`; at
-/// `PICK` (if any) a pick of `to`; then note 48 at `PICK + 9_000`. `same_frame`: a NoteOn 52 on the
-/// pick's frame, sent before the pick (`true`) or after it (`false`).
+/// `PICK` (if any) a pick of `to`; then note 48 at `PICK + 9_000`. `same_frame`: a NoteOn 52 and a bend
+/// on the pick's frame, sent before the pick (`true`) or after it (`false`).
 fn pick_script(builtin: bool, to: Option<Instrument>, same_frame: Option<bool>, id: UnitId) -> Vec<(Frame, Command)> {
     let pick = |i: Instrument| if builtin { Command::SelectInstrument(NoteTarget::Builtin(i)) } else { Command::SetUnitParam(id, UnitParam::Instrument, ui_index(i)) };
     let mut s = vec![(0, pick(Instrument::Lead))];
@@ -473,8 +513,8 @@ fn pick_script(builtin: bool, to: Option<Instrument>, same_frame: Option<bool>, 
     s.extend([(500, Command::PitchBend(1.0)), (700, Command::Modulation(0.6)), (HOLD, Command::NoteOn(60, 0.9))]);
     if let Some(to) = to {
         match same_frame {
-            Some(true) => s.extend([(PICK, Command::NoteOn(52, 0.8)), (PICK, pick(to))]),
-            Some(false) => s.extend([(PICK, pick(to)), (PICK, Command::NoteOn(52, 0.8))]),
+            Some(true) => s.extend([(PICK, Command::NoteOn(52, 0.8)), (PICK, Command::PitchBend(-0.5)), (PICK, pick(to))]),
+            Some(false) => s.extend([(PICK, pick(to)), (PICK, Command::NoteOn(52, 0.8)), (PICK, Command::PitchBend(-0.5))]),
             None => s.push((PICK, pick(to))),
         }
     }
@@ -523,20 +563,16 @@ fn a_pick_mid_note_releases_on_its_frame_and_hands_over_the_wheels() {
             assert_eq!(keys, vec![(S0 + HOLD, true, 60), (S0 + PICK + 9_000, true, 48)], "{what}: the unit's notes");
         }
     }
-    // A pick and a NoteOn on one frame: the pick first, in both ring orders (today's bank, sent pick
-    // then note, is the reference).
-    let reference = {
-        let mut rig = rig(128);
-        rig.input_latency = 256;
-        let mut s = pick_script(true, Some(Instrument::Bass), Some(false), 0);
-        s.sort_by_key(|&(f, _)| f);
-        play(&mut rig, &s, PICK_END);
-        Taps::of(&rig)
-    };
+    // A pick, a NoteOn and a bend on one frame apply in ring order, as `Instruments::select` among
+    // `note_on`s does: sent before the pick, the note reaches the lead and the pick releases it (the
+    // bend bends the lead's tail, then is handed over); sent after it, the bass plays them. Today's bank,
+    // sent in the same order, is each order's reference, and the two orders sound different.
+    let references = [true, false].map(|note_first| pick_render(128, true, Some(Instrument::Bass), Some(note_first)).0);
+    assert!(references[0].bus[0] != references[1].bus[0], "the two orders sound the same: the test cannot tell them apart");
     for block in BLOCKS {
-        for note_first in [true, false] {
+        for (note_first, reference) in [true, false].into_iter().zip(&references) {
             let (taps, spy) = pick_render(block, false, Some(Instrument::Bass), Some(note_first));
-            taps.assert_eq(&reference, &format!("block {block}, NoteOn sent {} the pick", if note_first { "before" } else { "after" }));
+            taps.assert_eq(reference, &format!("block {block}, NoteOn and bend sent {} the pick", if note_first { "before" } else { "after" }));
             assert!(spy.unwrap().keys().contains(&(S0 + PICK, true, 52)));
         }
     }
@@ -550,7 +586,27 @@ fn a_pick_allocates_nothing_and_refuses_what_is_out_of_range() {
     let on = [SlotEvent { offset: 3, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } }, SlotEvent { offset: 5, kind: SlotEventKind::PitchBend { semitones: 0.5 } }];
     let [l, r] = &mut out;
     assert_no_alloc(|| u.process(&cx_at(0), [&zeros, &zeros], &on, [&mut l[..], &mut r[..]]));
-    for (value, expect) in [(1.0, Some(1.0)), (1.4, Some(1.0)), (4.6, Some(5.0)), (5.0, Some(5.0)), (5.6, None), (-0.6, None), (6.0, None), (f64::NAN, None), (f64::INFINITY, None), (0.0, Some(0.0)), (0.0, Some(0.0))] {
+    // The range is checked before rounding: only 0..=5 is a pick, rounded to the nearest; the fringe
+    // just outside it (which rounds into range) is refused.
+    let values = [
+        (1.0, Some(1.0)),
+        (1.4, Some(1.0)),
+        (4.6, Some(5.0)),
+        (5.0, Some(5.0)),
+        (-0.25, None),
+        (-0.0001, None),
+        (5.0001, None),
+        (5.25, None),
+        (5.6, None),
+        (-0.6, None),
+        (6.0, None),
+        (f64::NAN, None),
+        (f64::INFINITY, None),
+        (f64::NEG_INFINITY, None),
+        (0.0, Some(0.0)),
+        (0.0, Some(0.0)),
+    ];
+    for (value, expect) in values {
         let before = u.instrument();
         let got = assert_no_alloc(|| u.set_param(&cx_at(1024), UnitParam::Instrument, value));
         assert_eq!(got, expect, "instrument {value}");
@@ -591,13 +647,14 @@ enum Change {
 const CHANGE: Frame = S0 + 24_000;
 const AFTER: Frame = CHANGE + 6_000;
 
-/// Slot 0's SYNTH (lead) holds 60 (released after the change: a stray NoteOff there) and 64 (never
+/// Slot 0's SYNTH (on `i`) holds 60 (released after the change: a stray NoteOff there) and 64 (never
 /// released: sustained); the change applies at `CHANGE`; the new source's own note 67 comes at `AFTER`.
 /// `note_off_first`: a NoteOff 60 for the change's own block, sent before the change's message (`Some
-/// (true)`) or after it (`Some(false)`); `None`: it comes 1 000 frames later.
-fn source_change(block: usize, change: Change, note_off_first: Option<bool>) -> (Rig, UnitId, UnitId, Vec<(UnitId, Box<dyn UnitProcessor>, Left)>) {
+/// (true)`) or after it (`Some(false)`); `None`: it comes 1 000 frames later (while a withdrawn SYNTH
+/// is out, before its reseat).
+fn source_change(block: usize, i: Instrument, change: Change, note_off_first: Option<bool>) -> (Rig, UnitId, UnitId, Vec<(UnitId, Box<dyn UnitProcessor>, Left)>) {
     let mut rig = rig(block);
-    let old = rig.install_id(0, Box::new(Spy::new(picked(Instrument::Lead))));
+    let old = rig.install_id(0, Box::new(Spy::new(picked(i))));
     let script = [(0, Command::SelectInstrument(NoteTarget::Slot(0))), (1_000, Command::NoteOn(60, 0.9)), (1_500, Command::NoteOn(64, 0.6))];
     play(&mut rig, &script, CHANGE);
     if note_off_first == Some(true) {
@@ -625,9 +682,12 @@ fn source_change(block: usize, change: Change, note_off_first: Option<bool>) -> 
     }
     later.push((AFTER - S0, Command::NoteOn(67, 0.8)));
     let mut back = Vec::new();
-    // The withdrawn unit comes back first; it is reseated under its id before the next note.
+    // The withdrawn unit comes back first (the stray NoteOff reaching its slot meanwhile); it is reseated
+    // under its id before the next note.
     if change == Change::Withdraw {
-        play(&mut rig, &[], CHANGE + 2_000);
+        let out: Vec<(Frame, Command)> = later.iter().copied().filter(|&(f, _)| S0 + f < CHANGE + 2_000).collect();
+        later.retain(|&(f, _)| S0 + f >= CHANGE + 2_000);
+        play(&mut rig, &out, CHANGE + 2_000);
         while let Some(r) = rig.port(0).returned_unit() {
             back.push((r.id, r.unit, r.left));
         }
@@ -636,8 +696,6 @@ fn source_change(block: usize, change: Change, note_off_first: Option<bool>) -> 
         assert!(rig.port(0).install_at(old, 8, 0, false, None, unit).is_ok());
         play(&mut rig, &[], CHANGE + 4_000);
     }
-    let start = rig.frame;
-    let later: Vec<(Frame, Command)> = later.into_iter().filter(|&(f, _)| S0 + f >= start).collect();
     play(&mut rig, &later, AFTER + 6_000);
     while let Some(r) = rig.port(0).returned_unit() {
         back.push((r.id, r.unit, r.left));
@@ -659,78 +717,87 @@ fn unit_back(back: &mut Vec<(UnitId, Box<dyn UnitProcessor>, Left)>, id: UnitId)
 
 #[test]
 fn a_source_change_releases_on_its_frame() {
-    for change in [Change::ToSynth, Change::ToFake, Change::Withdraw, Change::Remove] {
-        let mut first: Option<Vec<f32>> = None;
-        for block in BLOCKS {
-            for note_off_first in [None, Some(true), Some(false)] {
-                if note_off_first.is_some() && matches!(change, Change::Withdraw | Change::Remove) && block != 128 {
-                    continue;
-                }
-                let what = format!("{change:?}, block {block}, NoteOff 60 {note_off_first:?}");
-                let (rig, old, new, mut back) = source_change(block, change, note_off_first);
-                let op = match change {
-                    Change::ToSynth | Change::ToFake => SeatOp::Install,
-                    Change::Withdraw => SeatOp::Withdraw,
-                    Change::Remove => SeatOp::Remove,
-                };
-                let at = applied(&rig, if op == SeatOp::Install { new } else { old }, op);
-                assert_eq!(at, CHANGE, "{what}: the change applies on the frame it was sent for");
-                let (old_unit, left) = unit_back(&mut back, old);
-                let old_spy = spy_of::<SynthUnit>(old_unit);
-                // The old source gets its notes, then on the applied frame the releases of both, the
-                // sustained one included, and nothing after (a reseat after a withdrawal is new).
-                let released = vec![(S0 + 1_000, true, 60), (S0 + 1_500, true, 64), (CHANGE, false, 60), (CHANGE, false, 64)];
-                match change {
-                    Change::Withdraw => {
-                        assert_eq!(left, Left::Removed, "{what}");
-                        // The same unit, reseated: it holds nothing, so the stray NoteOff never reaches it;
-                        // its own note does.
-                        let mut want = released.clone();
-                        want.push((AFTER, true, 67));
-                        let keys: Vec<_> = old_spy.keys().into_iter().filter(|&(f, ..)| f <= AFTER + 5_000).collect();
-                        assert_eq!(keys, want, "{what}: the withdrawn and reseated SYNTH's notes");
+    for i in [Instrument::Lead, Instrument::Bass] {
+        for change in [Change::ToSynth, Change::ToFake, Change::Withdraw, Change::Remove] {
+            let mut first: Option<Vec<f32>> = None;
+            for block in BLOCKS {
+                for note_off_first in [None, Some(true), Some(false)] {
+                    if note_off_first.is_some() && matches!(change, Change::Withdraw | Change::Remove) && block != 128 {
+                        continue;
                     }
-                    _ => {
-                        assert_eq!(left, if change == Change::Remove { Left::Removed } else { Left::Replaced }, "{what}");
-                        assert_eq!(old_spy.keys(), released, "{what}: the old source's notes");
-                    }
-                }
-                // Once per time it leaves: a withdrawn and reseated unit leaves again when the rig takes it back.
-                assert_eq!(old_spy.stops, if change == Change::Withdraw { 2 } else { 1 }, "{what}: stopped once per leaving");
-                // The released lead rings out from the frame its release sounds.
-                assert!(old_spy.energy(CHANGE, CHANGE + LEAD) > 1e-3, "{what}: the old source sounds up to its release");
-                match change {
-                    Change::ToSynth => {
-                        let (unit, _) = unit_back(&mut back, new);
-                        let spy = spy_of::<SynthUnit>(unit);
-                        // (Its own note's release comes with the rig taking it back at the end.)
-                        assert_eq!(spy.keys()[..1], [(AFTER, true, 67)], "{what}: the new SYNTH gets its own note alone");
-                        assert!(spy.keys()[1..].iter().all(|&(f, on, k)| f > AFTER + 5_000 && !on && k == 67), "{what}: the new SYNTH's later notes");
-                        assert!(spy.silent(CHANGE, AFTER + LEAD), "{what}: the new SYNTH is silent until its note");
-                        assert!(spy.energy(AFTER + LEAD, AFTER + 4_000) > 1e-3, "{what}: the new SYNTH plays its note");
-                    }
-                    Change::ToFake => {
-                        let (unit, _) = unit_back(&mut back, new);
-                        let spy = spy_of::<FakeSource>(unit);
-                        assert_eq!(spy.keys()[..1], [(AFTER, true, 67)], "{what}: the fake source gets its own note alone");
-                        assert!(spy.keys()[1..].iter().all(|&(f, on, k)| f > AFTER + 5_000 && !on && k == 67), "{what}: the fake source's later notes");
-                        assert!(spy.silent(CHANGE, AFTER), "{what}: the fake source is silent until its note");
-                        assert!(!spy.silent(AFTER, AFTER + 1), "{what}: the fake source plays its note");
-                    }
-                    // A reseated SYNTH is the same bank: the tail of what its withdrawal released plays on
-                    // from where it stopped (no reset while in one engine, contract §3), so no silence here.
-                    Change::Withdraw => {}
-                    Change::Remove => {}
-                }
-                assert!(back.is_empty(), "{what}: no other unit came back");
-                if note_off_first.is_none() {
-                    let bus: Vec<f32> = rig.bus.iter().chain(&rig.bus_right).copied().collect();
-                    match &first {
-                        None => first = Some(bus),
-                        Some(f) => assert_bits(&bus, f, &format!("{what}: the bus across block sizes")),
-                    }
+                    let what = format!("{i:?}, {change:?}, block {block}, NoteOff 60 {note_off_first:?}");
+                    source_change_case(block, i, change, note_off_first, &what, &mut first);
                 }
             }
+        }
+    }
+}
+
+fn source_change_case(block: usize, i: Instrument, change: Change, note_off_first: Option<bool>, what: &str, first: &mut Option<Vec<f32>>) {
+    let (rig, old, new, mut back) = source_change(block, i, change, note_off_first);
+    let op = match change {
+        Change::ToSynth | Change::ToFake => SeatOp::Install,
+        Change::Withdraw => SeatOp::Withdraw,
+        Change::Remove => SeatOp::Remove,
+    };
+    let at = applied(&rig, if op == SeatOp::Install { new } else { old }, op);
+    assert_eq!(at, CHANGE, "{what}: the change applies on the frame it was sent for");
+    let (old_unit, left) = unit_back(&mut back, old);
+    let old_spy = spy_of::<SynthUnit>(old_unit);
+    // The old SYNTH gets its notes, then on the applied frame one release of both, the sustained one
+    // included, as its bank's own (not a NoteOff per key), and nothing after; the stray NoteOff 60 never
+    // reaches it, before or after a reseat (a reseat after a withdrawal holds nothing).
+    let mut want = vec![(S0 + 1_000, SlotEventKind::NoteOn { key: 60, velocity: 0.9 }), (S0 + 1_500, SlotEventKind::NoteOn { key: 64, velocity: 0.6 }), (CHANGE, SlotEventKind::AllNotesOff)];
+    match change {
+        Change::Withdraw => {
+            assert_eq!(left, Left::Removed, "{what}");
+            // The same unit, reseated: its own note, then (the rig taking it back) its release.
+            want.push((AFTER, SlotEventKind::NoteOn { key: 67, velocity: 0.8 }));
+            assert_eq!(old_spy.events[..want.len()], want[..], "{what}: the withdrawn and reseated SYNTH's events");
+            assert!(old_spy.events[want.len()..].iter().all(|&(f, k)| f > AFTER + 5_000 && k == SlotEventKind::AllNotesOff), "{what}: the reseated SYNTH's later events");
+            // `stop` silenced it: from its reseat it is silent until its own note sounds, never the tail
+            // its withdrawal released spliced in after the gap.
+            assert!(old_spy.silent(CHANGE + 2_000, AFTER + LEAD), "{what}: the reseated SYNTH is silent until its note");
+            assert!(old_spy.energy(AFTER + LEAD, AFTER + 4_000) > 1e-3, "{what}: the reseated SYNTH plays its note");
+        }
+        _ => {
+            assert_eq!(left, if change == Change::Remove { Left::Removed } else { Left::Replaced }, "{what}");
+            assert_eq!(old_spy.events, want, "{what}: the old source's events");
+        }
+    }
+    // Once per time it leaves: a withdrawn and reseated unit leaves again when the rig takes it back.
+    assert_eq!(old_spy.stops, if change == Change::Withdraw { 2 } else { 1 }, "{what}: stopped once per leaving");
+    // The old source sounds up to its release, and its released tail through the fade after it (its
+    // shape against a pick's release: `a_departing_synth_releases_as_a_pick_does`).
+    assert!(old_spy.energy(CHANGE, CHANGE + LEAD) > 1e-3, "{what}: the old source sounds up to its release");
+    assert!(old_spy.energy(CHANGE + LEAD, CHANGE + 480) > 1e-4, "{what}: the old source's released tail sounds");
+    match change {
+        Change::ToSynth => {
+            let (unit, _) = unit_back(&mut back, new);
+            let spy = spy_of::<SynthUnit>(unit);
+            // (Its own note's release comes with the rig taking it back at the end.)
+            assert_eq!(spy.events[..1], [(AFTER, SlotEventKind::NoteOn { key: 67, velocity: 0.8 })], "{what}: the new SYNTH gets its own note alone");
+            assert!(spy.events[1..].iter().all(|&(f, k)| f > AFTER + 5_000 && k == SlotEventKind::AllNotesOff), "{what}: the new SYNTH's later events");
+            assert!(spy.silent(CHANGE, AFTER + LEAD), "{what}: the new SYNTH is silent until its note");
+            assert!(spy.energy(AFTER + LEAD, AFTER + 4_000) > 1e-3, "{what}: the new SYNTH plays its note");
+        }
+        Change::ToFake => {
+            let (unit, _) = unit_back(&mut back, new);
+            let spy = spy_of::<FakeSource>(unit);
+            assert_eq!(spy.keys()[..1], [(AFTER, true, 67)], "{what}: the fake source gets its own note alone");
+            assert!(spy.keys()[1..].iter().all(|&(f, on, k)| f > AFTER + 5_000 && !on && k == 67), "{what}: the fake source's later notes");
+            assert!(spy.events.iter().all(|&(_, k)| k != SlotEventKind::AllNotesOff), "{what}: a plugin never gets AllNotesOff");
+            assert!(spy.silent(CHANGE, AFTER), "{what}: the fake source is silent until its note");
+            assert!(!spy.silent(AFTER, AFTER + 1), "{what}: the fake source plays its note");
+        }
+        Change::Withdraw | Change::Remove => {}
+    }
+    assert!(back.is_empty(), "{what}: no other unit came back");
+    if note_off_first.is_none() {
+        let bus: Vec<f32> = rig.bus.iter().chain(&rig.bus_right).copied().collect();
+        match first {
+            None => *first = Some(bus),
+            Some(f) => assert_bits(&bus, f, &format!("{what}: the bus across block sizes")),
         }
     }
 }
@@ -778,4 +845,415 @@ fn the_wheels_never_reach_or_split_a_chain_without_a_synth() {
     let f = spy_of::<Pass>(unit_back(&mut back, fx).0);
     assert_eq!(s.events[..3], want[..], "the SYNTH's events");
     assert_eq!(f.events[..3], want[..], "the effect after it");
+}
+
+// ── A withdrawing SYNTH and a note-target switch: the wheels ────────────────────────────────────────
+
+/// Slot 0 holds a lead SYNTH and a plugin effect after it, the note target, note 60 held; the SYNTH is
+/// withdrawn at `CHANGE`; `wheels`: bends and mod wheel moves inside its fade and after it. Answers the
+/// effect's calls and events and the SYNTH's events.
+fn withdraw_wheels(block: usize, wheels: bool) -> (Vec<(Frame, usize)>, Vec<(Frame, SlotEventKind)>, Vec<(Frame, SlotEventKind)>) {
+    let mut rig = rig(block);
+    let synth_id = rig.install_id(0, Box::new(Spy::new(picked(Instrument::Lead))));
+    let fx = rig.install_id(0, Box::new(Spy::new(Pass)));
+    play(&mut rig, &[(0, Command::SelectInstrument(NoteTarget::Slot(0))), (1_000, Command::NoteOn(60, 0.9))], CHANGE);
+    assert!(rig.port(0).withdraw(synth_id));
+    let c = CHANGE - S0;
+    let mut script = vec![(c + 2_000, Command::NoteOff(60))];
+    if wheels {
+        for j in 0..12 {
+            script.push((c + 7 + j * 37, Command::PitchBend(j as f64 / 4.0)));
+            script.push((c + 600 + j * 211, Command::Modulation(j as f64 / 11.0)));
+        }
+    }
+    script.sort_by_key(|&(f, _)| f);
+    play(&mut rig, &script, CHANGE + 4_000);
+    assert_eq!(applied(&rig, synth_id, SeatOp::Withdraw), CHANGE);
+    let mut back = take_back(&mut rig, 0, &[fx, synth_id]);
+    let f = spy_of::<Pass>(unit_back(&mut back, fx).0);
+    let s = spy_of::<SynthUnit>(unit_back(&mut back, synth_id).0);
+    (f.calls.clone(), f.events.clone(), s.events.clone())
+}
+
+/// Slot 0 holds a lead SYNTH, slot 1 a plugin source and a plugin effect after it. The note target
+/// starts on slot 0, moves to slot 1 at `AWAY` and back at `BACK`, a note played on each; `wheels`:
+/// a bend on each switch's frame (sent after both switches, `wheel_last`, or before both) and wheels
+/// while slot 1 is the target. Answers slot 1's two units' calls and events, then the SYNTH's wheels.
+#[allow(clippy::type_complexity)]
+fn switch_wheels(block: usize, wheels: bool, wheel_last: bool) -> ([Vec<(Frame, usize)>; 2], [Vec<(Frame, SlotEventKind)>; 2], Vec<(Frame, SlotEventKind)>) {
+    const AWAY: Frame = 10_000;
+    const BACK: Frame = 20_000;
+    let mut rig = rig(block);
+    let synth_id = rig.install_id(0, Box::new(Spy::new(picked(Instrument::Lead))));
+    let src = rig.install_id(1, Box::new(Spy::new(FakeSource { held: [0; 2] })));
+    let fx = rig.install_id(1, Box::new(Spy::new(Pass)));
+    let mut script = vec![(0, Command::SelectInstrument(NoteTarget::Slot(0))), (1_000, Command::NoteOn(60, 0.9))];
+    let switch = |at: Frame, to: u8, bend: f64| {
+        let (select, wheel) = ((at, Command::SelectInstrument(NoteTarget::Slot(to))), (at, Command::PitchBend(bend)));
+        match (wheels, wheel_last) {
+            (false, _) => vec![select],
+            (true, true) => vec![select, wheel],
+            (true, false) => vec![wheel, select],
+        }
+    };
+    script.extend(switch(AWAY, 1, 0.5));
+    script.extend([(12_000, Command::NoteOn(64, 0.8)), (15_000, Command::NoteOff(64))]);
+    if wheels {
+        for j in 0..10 {
+            script.push((AWAY + 101 + j * 853, Command::PitchBend(j as f64 / 5.0)));
+            script.push((AWAY + 503 + j * 911, Command::Modulation(j as f64 / 9.0)));
+        }
+    }
+    script.sort_by_key(|&(f, _)| f);
+    script.extend(switch(BACK, 0, -0.5));
+    script.push((BACK + 1_000, Command::NoteOn(67, 0.7)));
+    play(&mut rig, &script, S0 + 30_000);
+    let mut back = take_back(&mut rig, 1, &[fx, src]);
+    let f = spy_of::<Pass>(unit_back(&mut back, fx).0);
+    let s = spy_of::<FakeSource>(unit_back(&mut back, src).0);
+    let mut back = take_back(&mut rig, 0, &[synth_id]);
+    let synth = spy_of::<SynthUnit>(unit_back(&mut back, synth_id).0);
+    let synth_wheels = synth.events.iter().copied().filter(|(_, k)| matches!(k, SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. })).collect();
+    ([s.calls.clone(), f.calls.clone()], [s.events.clone(), f.events.clone()], synth_wheels)
+}
+
+#[test]
+fn a_synth_on_its_way_out_or_off_target_takes_no_wheels() {
+    for block in BLOCKS {
+        // A withdrawing SYNTH no longer takes the wheels nor splits its chain for them: the effect after
+        // it renders as without them, and the SYNTH gets only its notes' release.
+        let (calls, events, synth) = withdraw_wheels(block, true);
+        let (still_calls, still_events, _) = withdraw_wheels(block, false);
+        assert_eq!((&calls, &events), (&still_calls, &still_events), "block {block}: wheels during a withdrawal reached or split the effect");
+        assert_eq!(synth, vec![(S0 + 1_000, SlotEventKind::NoteOn { key: 60, velocity: 0.9 }), (CHANGE, SlotEventKind::AllNotesOff)], "block {block}: the withdrawing SYNTH's events");
+        // A note target on a plugin slot: wheels there reach and split nothing, whether a switch's frame
+        // carries one before or after the switch; the SYNTH takes the one sent while it is the target.
+        let (calls, events, _) = switch_wheels(block, false, true);
+        for wheel_last in [true, false] {
+            let (c, e, synth) = switch_wheels(block, true, wheel_last);
+            assert_eq!((&c, &e), (&calls, &events), "block {block}, the switch's bend sent {}: wheels changed the plugin slot's calls or events", if wheel_last { "after" } else { "before" });
+            let want = if wheel_last { (S0 + 20_000, SlotEventKind::PitchBend { semitones: -0.5 }) } else { (S0 + 10_000, SlotEventKind::PitchBend { semitones: 0.5 }) };
+            assert_eq!(synth, vec![want], "block {block}: the SYNTH's wheels");
+        }
+        assert!(events[0].iter().any(|&(f, k)| f == S0 + 12_000 && k == SlotEventKind::NoteOn { key: 64, velocity: 0.8 }), "block {block}: the plugin slot plays its note");
+    }
+}
+
+// ── A departing SYNTH releases as a pick does ───────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Depart {
+    /// The reference: the SYNTH stays and picks its own instrument again (a pick releases every note).
+    Pick,
+    /// Replaced by another SYNTH.
+    Replace,
+    Remove,
+}
+
+/// Slot 0's SYNTH on `i` holds 67, then 60 over it (a mono bass sounds 60), neither ever released by a
+/// NoteOff; at `CHANGE` it departs `how`. Answers the SYNTH.
+fn departure(block: usize, i: Instrument, how: Depart) -> Box<Spy<SynthUnit>> {
+    let mut rig = rig(block);
+    let old = rig.install_id(0, Box::new(Spy::new(picked(i))));
+    play(&mut rig, &[(0, Command::SelectInstrument(NoteTarget::Slot(0))), (1_000, Command::NoteOn(67, 0.9)), (3_000, Command::NoteOn(60, 0.8))], CHANGE);
+    let new = 900;
+    match how {
+        Depart::Pick => rig.send_at(CHANGE, Command::SetUnitParam(old, UnitParam::Instrument, ui_index(i))),
+        Depart::Replace => assert!(rig.port(0).install_at(new, 7, 0, false, Some(old), Box::new(picked(Instrument::Pad))).is_ok()),
+        Depart::Remove => rig.remove_id(0, old),
+    }
+    play(&mut rig, &[], CHANGE + 2_000);
+    let mut back = Vec::new();
+    while let Some(r) = rig.port(0).returned_unit() {
+        back.push((r.id, r.unit, r.left));
+    }
+    let ids: &[UnitId] = match how {
+        Depart::Pick => &[old],
+        Depart::Replace => &[new],
+        Depart::Remove => &[],
+    };
+    back.extend(take_back(&mut rig, 0, ids));
+    spy_of::<SynthUnit>(unit_back(&mut back, old).0)
+}
+
+#[test]
+fn a_departing_synth_releases_as_a_pick_does() {
+    // Its fade: every frame the departing unit is still called for.
+    let end = CHANGE + 480;
+    let r = 0..(end - S0) as usize;
+    for i in [Instrument::Bass, Instrument::Lead] {
+        let pick = departure(128, i, Depart::Pick);
+        assert!(pick.energy(CHANGE + LEAD, end) > 1e-4, "{i:?}: the released tail sounds");
+        for block in BLOCKS {
+            for how in [Depart::Replace, Depart::Remove] {
+                let what = format!("{i:?}, {how:?}, block {block}");
+                let gone = departure(block, i, how);
+                // The tail of the notes it held, bit for bit a pick's release of them: a mono bass
+                // released at the pitch it sounds, never falling back to 67 on its way out.
+                for c in 0..2 {
+                    assert_bits(&gone.out[c][r.clone()], &pick.out[c][r.clone()], &format!("{what}: the departing tail against a pick's release, side {c}"));
+                }
+            }
+        }
+    }
+}
+
+// ── The note target leaving a SYNTH, and AllNotesOff ────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Leave {
+    /// `SelectInstrument(Off)`.
+    Off,
+    /// `SelectInstrument` to the other (empty) slot.
+    OtherSlot,
+    /// `Command::AllNotesOff`, the target staying.
+    AllNotesOff,
+}
+
+const LEAVE: Frame = 30_037;
+
+/// Slot 0's SYNTH (or today's bank, `builtin`) on `i`, a bend held, 67 then 60 over it held from
+/// `HOLD` and never released by a NoteOff; at `LEAVE` the note target leaves it `how` (today's bank:
+/// `SelectInstrument(Off)` for both selects), a NoteOn 64 on that frame sent before (`note_first`) or
+/// after it; then note 48 at `LEAVE + 9_000`. `fx`: a plugin effect after the SYNTH.
+fn leave_render(block: usize, builtin: bool, i: Instrument, how: Leave, note_first: bool, fx: bool) -> (Taps, Option<Box<Spy<SynthUnit>>>, Option<Box<Spy<Pass>>>) {
+    let mut rig = rig(block);
+    rig.input_latency = 256;
+    let id = if builtin { 0 } else { rig.install_id(0, Box::new(Spy::new(synth()))) };
+    let fx_id = (fx && !builtin).then(|| rig.install_id(0, Box::new(Spy::new(Pass))));
+    let mut s = if builtin {
+        vec![(0, Command::SelectInstrument(NoteTarget::Builtin(i)))]
+    } else {
+        vec![(0, Command::SetUnitParam(id, UnitParam::Instrument, ui_index(i))), (0, Command::SelectInstrument(NoteTarget::Slot(0)))]
+    };
+    s.extend([(500, Command::PitchBend(0.5)), (HOLD, Command::NoteOn(67, 0.9)), (HOLD + 3_000, Command::NoteOn(60, 0.8))]);
+    let leave = match (how, builtin) {
+        (Leave::AllNotesOff, _) => Command::AllNotesOff,
+        (_, true) | (Leave::Off, false) => Command::SelectInstrument(NoteTarget::Off),
+        (Leave::OtherSlot, false) => Command::SelectInstrument(NoteTarget::Slot(1)),
+    };
+    let note = (LEAVE, Command::NoteOn(64, 0.7));
+    s.extend(if note_first { [note, (LEAVE, leave)] } else { [(LEAVE, leave), note] });
+    s.push((LEAVE + 9_000, Command::NoteOn(48, 0.7)));
+    play(&mut rig, &s, PICK_END);
+    let taps = Taps::of(&rig);
+    if builtin {
+        return (taps, None, None);
+    }
+    let ids: Vec<UnitId> = fx_id.into_iter().chain([id]).collect();
+    let mut back = take_back(&mut rig, 0, &ids);
+    let spy = spy_of::<SynthUnit>(unit_back(&mut back, id).0);
+    let fx = fx_id.map(|f| spy_of::<Pass>(unit_back(&mut back, f).0));
+    (taps, Some(spy), fx)
+}
+
+/// Slot 0 holds a plugin source and a plugin effect after it, the note target, 67 then 60 held; at
+/// `LEAVE` the target leaves `how`, a NoteOn 64 sent on that frame before it (or after). Answers both
+/// units' events.
+fn leave_plugins(block: usize, how: Leave, note_first: bool) -> [Vec<(Frame, SlotEventKind)>; 2] {
+    let mut rig = rig(block);
+    let src = rig.install_id(0, Box::new(Spy::new(FakeSource { held: [0; 2] })));
+    let fx = rig.install_id(0, Box::new(Spy::new(Pass)));
+    let leave = match how {
+        Leave::Off => Command::SelectInstrument(NoteTarget::Off),
+        Leave::OtherSlot => Command::SelectInstrument(NoteTarget::Slot(1)),
+        Leave::AllNotesOff => Command::AllNotesOff,
+    };
+    let note = (LEAVE, Command::NoteOn(64, 0.7));
+    let mut s = vec![(0, Command::SelectInstrument(NoteTarget::Slot(0))), (HOLD, Command::NoteOn(67, 0.9)), (HOLD + 3_000, Command::NoteOn(60, 0.8))];
+    s.extend(if note_first { [note, (LEAVE, leave)] } else { [(LEAVE, leave), note] });
+    play(&mut rig, &s, S0 + LEAVE + 2_000);
+    let mut back = take_back(&mut rig, 0, &[fx, src]);
+    let s = spy_of::<FakeSource>(unit_back(&mut back, src).0);
+    let f = spy_of::<Pass>(unit_back(&mut back, fx).0);
+    [s.events.clone(), f.events.clone()]
+}
+
+#[test]
+fn the_target_leaving_a_synth_releases_as_todays_bank_does() {
+    let at = S0 + LEAVE;
+    let on = |key: u8, velocity: f32| SlotEventKind::NoteOn { key, velocity };
+    for i in [Instrument::Bass, Instrument::Lead] {
+        for how in [Leave::Off, Leave::OtherSlot, Leave::AllNotesOff] {
+            for note_first in [true, false] {
+                let what = format!("{i:?}, {how:?}, NoteOn 64 sent {} it", if note_first { "before" } else { "after" });
+                let reference = leave_render(128, true, i, how, note_first, false).0;
+                for block in BLOCKS {
+                    let (taps, spy, _) = leave_render(block, false, i, how, note_first, false);
+                    // Today's bank, bit for bit: the release on the frame, at the sounding pitch.
+                    taps.assert_eq(&reference, &format!("{what}, block {block}: against today's bank"));
+                    // One release of the bank's own, in ring order with the note on its frame, and no
+                    // NoteOff per key.
+                    let spy = spy.unwrap();
+                    let there: Vec<SlotEventKind> = spy.events.iter().filter(|&&(f, _)| f == at).map(|&(_, k)| k).collect();
+                    let want = match (note_first, how) {
+                        (true, _) => vec![on(64, 0.7), SlotEventKind::AllNotesOff],
+                        (false, Leave::AllNotesOff) => vec![SlotEventKind::AllNotesOff, on(64, 0.7)],
+                        (false, _) => vec![SlotEventKind::AllNotesOff],
+                    };
+                    assert_eq!(there, want, "{what}, block {block}: the SYNTH's events on the frame");
+                    assert!(spy.keys().iter().all(|&(f, on, _)| on || f >= PICK_END), "{what}, block {block}: a NoteOff reached the SYNTH");
+                }
+            }
+        }
+    }
+    // A plugin keeps a NoteOff per held key, ascending: alone in a slot (whose queue is what it was) and
+    // as an effect after a SYNTH, which takes the one release in their place.
+    for block in [1, 480] {
+        for how in [Leave::Off, Leave::OtherSlot, Leave::AllNotesOff] {
+            for note_first in [true, false] {
+                let what = format!("{how:?}, NoteOn 64 sent {}, block {block}", if note_first { "before" } else { "after" });
+                let mut released: Vec<(Frame, SlotEventKind)> = [60, 64, 67].into_iter().filter(|&k| k != 64 || note_first).map(|key| (at, SlotEventKind::NoteOff { key })).collect();
+                if !note_first && how == Leave::AllNotesOff {
+                    released.push((at, on(64, 0.7)));
+                }
+                for (u, events) in leave_plugins(block, how, note_first).iter().enumerate() {
+                    let there: Vec<_> = events.iter().copied().filter(|&(f, _)| f == at).collect();
+                    let mut want = released.clone();
+                    if note_first {
+                        want.insert(0, (at, on(64, 0.7)));
+                    }
+                    assert_eq!(there, want, "{what}: plugins-only slot, unit {u}");
+                    assert!(events.iter().all(|&(_, k)| k != SlotEventKind::AllNotesOff), "{what}: AllNotesOff reached a plugin");
+                }
+                let (_, synth, fx) = leave_render(block, false, Instrument::Bass, how, note_first, true);
+                let fx = fx.unwrap();
+                let there: Vec<_> = fx.events.iter().copied().filter(|&(f, _)| f == at).collect();
+                let mut want = released.clone();
+                if note_first {
+                    want.insert(0, (at, on(64, 0.7)));
+                }
+                assert_eq!(there, want, "{what}: the effect after a SYNTH");
+                assert!(fx.events.iter().all(|&(_, k)| k != SlotEventKind::AllNotesOff), "{what}: AllNotesOff reached the effect after a SYNTH");
+                assert!(synth.unwrap().events.iter().any(|&(f, k)| f == at && k == SlotEventKind::AllNotesOff), "{what}: the SYNTH before the effect");
+            }
+        }
+    }
+}
+
+// ── A level change, and a take ──────────────────────────────────────────────────────────────────────
+
+/// A lead chord whose level moves twice mid-note, a level set for the pad before it is picked, then
+/// the pad played: through today's bank (`SetInstrumentGain`) or slot 0's SYNTH (`UnitParam::Gain`).
+/// Every level is exact in f32, as the wire's f32 and the param's f64 then agree.
+fn gain_render(block: usize, builtin: bool) -> Taps {
+    let mut rig = rig(block);
+    rig.input_latency = 256;
+    let id = if builtin { 0 } else { rig.install_id(0, Box::new(synth())) };
+    let pick = |i: Instrument| if builtin { Command::SelectInstrument(NoteTarget::Builtin(i)) } else { Command::SetUnitParam(id, UnitParam::Instrument, ui_index(i)) };
+    let gain = |i: Instrument, g: f64| if builtin { Command::SetInstrumentGain(i, g as f32) } else { Command::SetUnitParam(id, UnitParam::Gain(i), g) };
+    let mut s = vec![(0, pick(Instrument::Lead))];
+    if !builtin {
+        s.push((0, Command::SelectInstrument(NoteTarget::Slot(0))));
+    }
+    s.extend([
+        (1_000, Command::NoteOn(60, 0.8)),
+        (1_500, Command::NoteOn(64, 0.7)),
+        (5_011, gain(Instrument::Lead, 0.375)),
+        (9_100, gain(Instrument::Lead, 1.25)),
+        (12_000, gain(Instrument::Pad, 0.5)),
+        (14_000, Command::NoteOff(60)),
+        (14_000, Command::NoteOff(64)),
+        (16_000, pick(Instrument::Pad)),
+        (16_500, Command::NoteOn(67, 0.9)),
+        (20_333, gain(Instrument::Pad, 0.0)),
+        (26_000, Command::NoteOff(67)),
+    ]);
+    play(&mut rig, &s, S0 + 30_000);
+    Taps::of(&rig)
+}
+
+#[test]
+fn a_synth_level_glides_as_todays_bank_does() {
+    let reference = gain_render(128, true);
+    let still = {
+        let r = (S0 + 10_000 - S0) as usize..(S0 + 13_000 - S0) as usize;
+        energy(&reference.bus[0][r])
+    };
+    assert!(still > 1.0, "the lead sounds at its raised level ({still})");
+    for block in BLOCKS {
+        gain_render(block, false).assert_eq(&reference, &format!("block {block}: SYNTH's levels against SetInstrumentGain"));
+    }
+}
+
+/// The phrase on `i` recorded as a first take (its count-in first), through today's bank or slot 0's
+/// SYNTH: the committed loop.
+fn take_render(i: Instrument, builtin: bool, block: usize, input_latency: Frame) -> Vec<lf_engine::Pair> {
+    const AT: Frame = 100_000;
+    let mut rig = rig(block);
+    rig.input_latency = input_latency;
+    let id = if builtin { 0 } else { rig.install_id(0, Box::new(synth())) };
+    let mut s = if builtin {
+        vec![(0, Command::SelectInstrument(NoteTarget::Builtin(i)))]
+    } else {
+        vec![(0, Command::SetUnitParam(id, UnitParam::Instrument, ui_index(i))), (0, Command::SelectInstrument(NoteTarget::Slot(0)))]
+    };
+    s.push((0, Command::RecDub(0)));
+    s.extend(phrase(i).into_iter().map(|(f, c)| (AT + f, c)));
+    s.push((AT + 2 * 96_000, Command::RecDub(0)));
+    play(&mut rig, &s, S0 + AT + 2 * 96_000 + 24_000);
+    assert!(rig.master() > 0, "{i:?}: the take committed");
+    rig.pcm2(0)
+}
+
+#[test]
+fn a_take_records_what_todays_bank_records() {
+    for i in Instrument::ALL {
+        for input_latency in [256, 64] {
+            let reference = take_render(i, true, 128, input_latency);
+            let side = |c: usize| reference.iter().map(|p| p[c]).collect::<Vec<f32>>();
+            assert!(energy(&side(0)) > 1.0 && energy(&side(1)) > 1.0, "{i:?}: the take holds the phrase");
+            for block in [128, 127] {
+                let got = take_render(i, false, block, input_latency);
+                for c in 0..2 {
+                    let mine: Vec<f32> = got.iter().map(|p| p[c]).collect();
+                    assert_bits(&mine, &side(c), &format!("{i:?}, input side {input_latency}, block {block}: the SYNTH's take against today's bank's, side {c}"));
+                }
+            }
+        }
+    }
+}
+
+// ── The wheels a pick hands over, against an independent expectation ───────────────────────────────
+
+/// Today's bank or slot 0's SYNTH on lead, a bend and a mod wheel set (`wheels`), then a pick of `to` at
+/// `PICK` and a note on it. `resend`: the same bend and mod wheel sent again on the pick's frame, after
+/// it, so the picked instrument gets them without the pick's own handover.
+fn wheel_pick(block: usize, builtin: bool, to: Instrument, wheels: bool, resend: bool) -> Taps {
+    let mut rig = rig(block);
+    rig.input_latency = 256;
+    let id = if builtin { 0 } else { rig.install_id(0, Box::new(synth())) };
+    let pick = |i: Instrument| if builtin { Command::SelectInstrument(NoteTarget::Builtin(i)) } else { Command::SetUnitParam(id, UnitParam::Instrument, ui_index(i)) };
+    let mut s = vec![(0, pick(Instrument::Lead))];
+    if !builtin {
+        s.push((0, Command::SelectInstrument(NoteTarget::Slot(0))));
+    }
+    if wheels {
+        s.extend([(500, Command::PitchBend(1.0)), (700, Command::Modulation(0.6))]);
+    }
+    s.push((PICK, pick(to)));
+    if resend {
+        s.extend([(PICK, Command::PitchBend(1.0)), (PICK, Command::Modulation(0.6))]);
+    }
+    s.extend([(PICK + 1_000, Command::NoteOn(48, 0.8)), (PICK + 20_000, Command::NoteOff(48))]);
+    play(&mut rig, &s, S0 + PICK + 30_000);
+    Taps::of(&rig)
+}
+
+/// The handover is `Bank::select`'s, which today's bank and the SYNTH share, so a reference through
+/// either moves with it: here a pick under held wheels must sound as the same pick with the same wheels
+/// sent after it, and unlike the pick with the wheels at rest.
+#[test]
+fn a_pick_hands_over_the_wheels_it_holds() {
+    for builtin in [true, false] {
+        for to in [Instrument::Bass, Instrument::Pad] {
+            let what = format!("{} picks {to:?}", if builtin { "today's bank" } else { "SYNTH" });
+            let resent = wheel_pick(128, builtin, to, true, true);
+            let at_rest = wheel_pick(128, builtin, to, false, false);
+            assert!(resent.bus[0] != at_rest.bus[0], "{what}: the wheels are not heard on the picked instrument");
+            for block in [1, 128, 480] {
+                wheel_pick(block, builtin, to, true, false).assert_eq(&resent, &format!("{what}, block {block}: the pick hands over the wheels it holds"));
+            }
+        }
+    }
 }

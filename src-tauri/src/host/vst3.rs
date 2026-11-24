@@ -765,8 +765,8 @@ impl IParameterChangesTrait for RtParamChanges {
 }
 
 /// The engine's note at `offset` frames into the slice as a VST3 `Event` on bus 0, channel 0 (no
-/// note id); `None` for a wheel, which a plugin ignores (owner decision D12). Params ride
-/// `IParameterChanges` (P10.3), not the event list.
+/// note id); `None` for a wheel, which a plugin ignores (owner decision D12), and for `AllNotesOff`,
+/// which no plugin is sent. Params ride `IParameterChanges` (P10.3), not the event list.
 fn note_to_vst3(kind: SlotEventKind, offset: i32) -> Option<Event> {
     // SAFETY: a zeroed Event is a valid POD base we then fill.
     let mut e: Event = unsafe { std::mem::zeroed() };
@@ -800,7 +800,8 @@ fn note_to_vst3(kind: SlotEventKind, offset: i32) -> Option<Event> {
                 },
             };
         }
-        SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => return None,
+        // The rack sends AllNotesOff to a SYNTH alone (a leaving plugin gets a NoteOff per held key).
+        SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } | SlotEventKind::AllNotesOff => return None,
     }
     Some(e)
 }

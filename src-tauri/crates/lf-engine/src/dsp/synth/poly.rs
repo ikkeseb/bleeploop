@@ -185,6 +185,11 @@ impl ModulationBus {
         }
     }
 
+    /// The vibrato's delay line forgets what it holds (the wheel's depth and crossfade stay).
+    pub(crate) fn silence(&mut self) {
+        self.vibrato.silence();
+    }
+
     pub(crate) fn process(&mut self, q: u64, input: Option<&[f32; Q]>, out: &mut [f32; Q]) {
         let dry_silent = self.dry.process(q, input.map(std::slice::from_ref), &mut self.dry_out);
         let vibrato = self.vibrato.process(q, input);
@@ -312,6 +317,17 @@ impl PolySynth {
             entry.note = None;
             entry.voice.trigger_release((immediate + 0.005).max(entry.attack_time), frame);
         }
+    }
+
+    /// Every voice silent from the next quantum after `frame` and none holding a note; the rest of the
+    /// quantum rendered last is silent too. The bend, the mod wheel and the volume stay. No allocation.
+    pub fn silence(&mut self, frame: u64) {
+        for entry in self.voices.iter_mut() {
+            entry.note = None;
+            entry.voice.silence(frame);
+        }
+        self.modulation.silence();
+        self.out.fill(0.0);
     }
 
     /// `setPitchBend(semitones)` at Tone time `now`: every voice's detune.

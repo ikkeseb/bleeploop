@@ -21,7 +21,13 @@
 //!   [`instruments::LEAD`] as its latency, since a note sounds that long after its frame, so its slot's
 //!   source record line lags it exactly as [`crate::instruments::Instruments`]' does. It starts with no
 //!   instrument picked: silent until [`UnitParam::Instrument`] picks one (the host sends the pick with the
-//!   unit's params). The seat does its bypass (a bypassed source is silent and still gets its notes).
+//!   unit's params; an index outside 0..=5 is refused before rounding). A pick or a level applies in ring
+//!   order with the notes and wheels on its frame: the rack hands it those sent ahead first, in a call of
+//!   no frames. Its notes are released as a pick releases them (at the sounding pitch) when it gets
+//!   [`SlotEventKind::AllNotesOff`]: on its departure, the note target leaving its slot and
+//!   `Command::AllNotesOff`. Its `stop` silences every voice (the pick, the levels and the wheels stay), so
+//!   a withdrawn and reseated SYNTH resumes silent. The seat does its bypass (a bypassed source is silent
+//!   and still gets its notes).
 //! - The four effects bypass themselves (`set_bypass` returns `true`): ECHO, REVERB and RING MOD close
 //!   their input gate over 20 ms from the command's frame (dry passes untouched, ECHO and REVERB
 //!   tails ring out, and wherever the wet sample is exact zero the output is the input bit for bit);
@@ -605,6 +611,8 @@ pub const SYNTH_GAIN_MAX: f64 = 1.5;
 /// up to each; a note sounds [`instruments::LEAD`] after its frame.
 pub struct SynthUnit {
     bank: Bank,
+    /// The DSP frame after the last one rendered: where [`UnitProcessor::stop`] silences the bank.
+    next: u64,
 }
 
 impl SynthUnit {
@@ -617,7 +625,7 @@ impl SynthUnit {
 
     /// [`SynthUnit::new`] over noise tables already made ([`tone_noise`]): build off the audio thread.
     pub fn with_noise(sample_rate: u32, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
-        SynthUnit { bank: Bank::new(sample_rate, white, pink) }
+        SynthUnit { bank: Bank::new(sample_rate, white, pink), next: 0 }
     }
 
     /// The instrument that takes the notes, if one is picked.
@@ -648,11 +656,13 @@ impl UnitProcessor for SynthUnit {
                 SlotEventKind::NoteOff { key } => self.bank.note_off(key, f),
                 SlotEventKind::PitchBend { semitones } => self.bank.set_pitch_bend(semitones, f),
                 SlotEventKind::Modulation { depth } => self.bank.set_modulation(depth, f),
+                SlotEventKind::AllNotesOff => self.bank.all_notes_off(f),
             }
         }
         if done < len {
             self.bank.render(start + done as u64, &mut ol[done..], &mut or[done..]);
         }
+        self.next = start + len as u64;
     }
 
     fn set_param(&mut self, cx: &UnitCx, param: UnitParam, value: f64) -> Option<f64> {
@@ -661,10 +671,11 @@ impl UnitProcessor for SynthUnit {
         }
         match param {
             UnitParam::Instrument => {
-                let k = (value + 0.5).floor();
-                if !(0.0..SYNTH_IDS.len() as f64).contains(&k) {
+                // The range is checked before rounding: -0.25 or 5.25 is no pick.
+                if !(0.0..=(SYNTH_IDS.len() - 1) as f64).contains(&value) {
                     return None;
                 }
+                let k = (value + 0.5).floor();
                 let instrument = Instrument::from_id(SYNTH_IDS[k as usize])?;
                 self.bank.select(Some(instrument), cx.dsp_frame.max(0) as u64);
                 Some(k)
@@ -678,7 +689,12 @@ impl UnitProcessor for SynthUnit {
         }
     }
 
-    fn stop(&mut self) {}
+    /// The unit leaves the engine (`docs/unit-contract.md` §3: a withdrawn source is silent, its notes
+    /// released): every voice silenced where the last call ended, so a withdrawn and reseated SYNTH
+    /// resumes silent until its next note. The pick, the levels and the wheels stay; nothing allocates.
+    fn stop(&mut self) {
+        self.bank.silence(self.next);
+    }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
         self

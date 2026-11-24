@@ -122,7 +122,9 @@ pub enum Command {
     /// Where the notes go: a built-in instrument, a plugin slot, or nowhere ([`NoteTarget::Off`]). Sent on
     /// a slot switch, not per note: it releases the held notes (of the instrument or slot it leaves) and
     /// hands a built-in instrument the wheels, even when the target stays (two slots may hold the same
-    /// synth, as two web synths). A SYNTH in a slot keeps the wheels it last got.
+    /// synth, as two web synths). A SYNTH in a slot keeps the wheels it last got, and the slot it leaves
+    /// releases its notes as a pick does ([`SlotEventKind::AllNotesOff`]), where a plugin gets a NoteOff
+    /// per held key.
     SelectInstrument(NoteTarget),
     /// A note (0..127) on the selected target; velocity 0..1. Sustain and the owner of a held note stay
     /// with the sender, native MIDI's one note router (the app's `engine_io::midi::router`). The
@@ -137,6 +139,9 @@ pub enum Command {
     PitchBend(f64),
     /// The mod wheel, 0..1: as [`Command::PitchBend`], a [`SlotEventKind::Modulation`].
     Modulation(f64),
+    /// Every held note released on the command's frame: the selected built-in instrument's, and the
+    /// note-target slot's, a SYNTH there in one [`SlotEventKind::AllNotesOff`] (as today's bank
+    /// releases), a plugin there a NoteOff per held key.
     AllNotesOff,
     /// GO LIVE: the slot's own input (its capture channel, picked on the device side) feeds the slot (an
     /// empty slot, or one holding an effect, passes it on as the wet signal; an instrument plugin takes
@@ -906,6 +911,13 @@ pub enum SlotEventKind {
     /// The mod wheel ([`Command::Modulation`]), as sent (SYNTH clamps it to 0..1); a plugin ignores it
     /// (D12). Only a chain that seats a SYNTH gets it.
     Modulation { depth: f64 },
+    /// Every note the unit holds released at once, as a pick releases them (`Bank::select`: at the
+    /// sounding pitch, so a mono bass never falls back to an older key on its way out). Only a SYNTH
+    /// holding a key gets it, in place of the NoteOff per held key a plugin gets: when it leaves (a
+    /// removal, a withdrawal, a replacement), when the note target leaves its slot (or is selected
+    /// again) and on [`Command::AllNotesOff`] (`slots.rs` `unit_events`, `Slot::release_all`); a plugin
+    /// host never sees it and ignores it.
+    AllNotesOff,
 }
 
 /// A chain's role, from its head (`docs/unit-contract.md` §The picture): today's rule per unit, lifted
@@ -1025,7 +1037,10 @@ pub trait UnitProcessor: Send {
     /// every offset `< out[0].len()`. `out` is overwritten, every sample finite (the rack silences and
     /// counts a call that is not). Never allocates, locks or waits. Called on the audio thread, except
     /// one silent frame carrying a removal's released notes while no device runs (on the thread that
-    /// holds the engine, just before [`UnitProcessor::stop`]).
+    /// holds the engine, just before [`UnitProcessor::stop`]). A SYNTH alone also gets calls of no
+    /// frames, every event at offset 0: the slot's events sent ahead of a [`Command::SetUnitParam`] on
+    /// its frame, handed to it before the param so the two apply in ring order
+    /// (`Rack::set_unit_param`).
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
     /// A built-in unit's parameter, on its frame (`cx.frame`, before the frames from it are rendered):
     /// `Some(applied)` when the unit took it (clamped to its own range), `None` when `param` is not a

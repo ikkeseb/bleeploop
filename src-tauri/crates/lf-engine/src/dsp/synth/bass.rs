@@ -188,6 +188,19 @@ impl Bass {
         self.mono.trigger_release((immediate + 0.005).max(self.attack_time), frame);
     }
 
+    /// Silent from the next quantum after `frame`, holding no note: the amplitude and filter envelopes
+    /// back to 0 with nothing scheduled, the filter's memory and the vibrato's line cleared, the rest of
+    /// the quantum rendered last silent. The bend, the mod wheel and the volume stay. No allocation.
+    pub fn silence(&mut self, frame: u64) {
+        self.held.clear();
+        self.sounding = None;
+        self.mono.envelope.reset(frame);
+        self.mono.filter_envelope.envelope.reset(frame);
+        self.mono.filter.clear_memory();
+        self.modulation.silence();
+        self.out.fill(0.0);
+    }
+
     /// `setPitchBend(semitones)` at Tone time `now`: the oscillator's detune.
     pub fn set_pitch_bend(&mut self, semitones: f64, now: f64, frame: u64) {
         self.mono.detune.param.set_value(semitones * 100.0, now, frame);

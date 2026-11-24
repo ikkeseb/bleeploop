@@ -361,6 +361,10 @@ struct Seat {
     /// only for a key it holds, and a leaving unit gets the releases of what it holds, once.
     held: [u64; 2],
     old_held: [u64; 2],
+    /// How many of the slot's queued events the unit has had already: a SYNTH gets those sent ahead of
+    /// a param on its frame before the param applies ([`Rack::set_unit_param`]), and its next render
+    /// call skips them. 0 whenever the queue is empty.
+    sent: usize,
     /// One unit's events over a call (allocated with the rack: a whole queue, or every key's release).
     ev: Vec<SlotEvent>,
     /// The unit's output over a render call, then the seat's (the crossfades applied in place).
@@ -555,12 +559,16 @@ fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
 }
 
 /// The events one unit gets over a call into `ev`: a playing unit every NoteOn and wheel of the slot's
-/// `events` (it holds a NoteOn's key from there) and a NoteOff only for a key it holds; a leaving one
+/// `events` (it holds a NoteOn's key from there) and a NoteOff only for a key it holds, the slot's
+/// [`SlotEventKind::AllNotesOff`] only if it is a SYNTH holding a key ([`Slot::release_all`]); a leaving one
 /// (removed, withdrawn, replaced) none of them, only the releases of what it holds, at the call's first
-/// frame, once. So a source change releases the old source's notes on the frame it applies (a sustained
-/// one too: the router withholds its NoteOff), the new source starts holding none, and a NoteOff for a
-/// key the new one never got is dropped (`docs/unit-contract.md` §4).
-fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent], playing: bool) {
+/// frame, once: a NoteOff per key, ascending, or for a SYNTH (`synth`) one
+/// [`SlotEventKind::AllNotesOff`], which its bank releases as a pick does (at the sounding pitch: a mono
+/// bass released key by key would fall back to an older key and retune its tail). So a source change
+/// releases the old source's notes on the frame it applies (a sustained one too: the router withholds
+/// its NoteOff), the new source starts holding none, and a NoteOff for a key the new one never got is
+/// dropped (`docs/unit-contract.md` §4).
+fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent], playing: bool, synth: bool) {
     ev.clear();
     let bit = |key: u8| ((key / 64) as usize, 1u64 << (key % 64));
     if playing {
@@ -577,10 +585,23 @@ fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent
                     }
                     held[w] &= !b;
                 }
+                // The slot's release of every note: a SYNTH holding a key takes it (the NoteOffs queued
+                // behind it then find no key held); a plugin takes those NoteOffs instead.
+                SlotEventKind::AllNotesOff => {
+                    if !synth || *held == [0; 2] {
+                        continue;
+                    }
+                    *held = [0; 2];
+                }
                 SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => {}
             }
             ev.push(*e);
         }
+    } else if synth {
+        if *held != [0; 2] {
+            ev.push(SlotEvent { offset: 0, kind: SlotEventKind::AllNotesOff });
+        }
+        *held = [0; 2];
     } else {
         for key in 0..128u8 {
             let (w, b) = bit(key);
@@ -637,7 +658,10 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
             let [ol, or] = &mut seat.out;
             match seat.unit.as_mut() {
                 Some(unit) => {
-                    unit_events(&mut seat.ev, &mut seat.held, events, playing);
+                    // Those it had ahead of a param on this call's first frame (`Rack::set_unit_param`).
+                    let skip = seat.sent.min(events.len());
+                    seat.sent -= skip;
+                    unit_events(&mut seat.ev, &mut seat.held, &events[skip..], playing, seat.info.kind == UnitKind::Synth);
                     let unit_len = match (seat.removing, seat.withdrawing) {
                         (false, false) => b - a,
                         (removing, withdrawing) => left(if removing { seat.fade } else { u32::MAX }.min(if withdrawing { seat.wet } else { u32::MAX }), !seat.ev.is_empty()),
@@ -652,7 +676,7 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
         }
         if let Some((_, _, old, _)) = seat.outgoing.as_mut() {
             let [ol, or] = &mut seat.old;
-            unit_events(&mut seat.ev, &mut seat.old_held, events, false);
+            unit_events(&mut seat.ev, &mut seat.old_held, events, false, seat.old_kind == UnitKind::Synth);
             let old_len = left(n - seat.swap, !seat.ev.is_empty());
             process_for(old.as_mut(), cx, [&x[0][..old_len], &x[1][..old_len]], &seat.ev, [&mut ol[a..b], &mut or[a..b]], errors);
         }
@@ -787,10 +811,14 @@ impl Slot {
         self.chain().any(|k| self.seats[k].unit.is_some())
     }
 
-    /// A seat takes the wheels: one holds a SYNTH and is not leaving. Only such a chain is handed them
-    /// (and only then do they split the slots' render), so a chain without one renders as before.
+    /// A seat takes the wheels: one holds a SYNTH that plays (not removed, withdrawing or withdrawn).
+    /// Only such a chain is handed them (and only then do they split the slots' render), so a chain
+    /// without one, or whose SYNTH is on its way out, renders as before.
     fn takes_wheels(&self) -> bool {
-        self.chain().any(|k| self.seats[k].unit.is_some() && self.seats[k].info.kind == UnitKind::Synth)
+        self.chain().any(|k| {
+            let seat = &self.seats[k];
+            seat.unit.is_some() && !seat.withdrawing && seat.info.kind == UnitKind::Synth
+        })
     }
 
     /// Units the slot holds: every seat's, and an install taken from its ring.
@@ -833,7 +861,15 @@ impl Slot {
         }
     }
 
+    /// Every note the slot holds released on `offset` (the note target leaving it, `Command::AllNotesOff`):
+    /// a NoteOff per key, ascending, which a plugin seat takes as before, and ahead of them, only while
+    /// the slot seats a SYNTH, one [`SlotEventKind::AllNotesOff`] that a playing SYNTH takes in their
+    /// place (`unit_events`): its bank releases as a pick does, as `Instruments::select(None)` and
+    /// `Instruments::all_notes_off` release today's bank. A plugins-only slot queues what it did before.
     fn release_all(&mut self, offset: u32, dropped: &mut u64) {
+        if self.notes != [0; 2] && self.seats[..self.len].iter().any(|s| s.unit.is_some() && s.info.kind == UnitKind::Synth) {
+            self.queue(SlotEventKind::AllNotesOff, offset, dropped);
+        }
         for key in 0..128u8 {
             if self.notes[(key / 64) as usize] & (1 << (key % 64)) != 0 {
                 self.queue(SlotEventKind::NoteOff { key }, offset, dropped);
@@ -969,14 +1005,14 @@ impl Slot {
             let [l, r] = &mut seat.out;
             if seat.removing || seat.withdrawing {
                 if let Some(unit) = seat.unit.as_mut() {
-                    unit_events(&mut seat.ev, &mut seat.held, &[], false);
+                    unit_events(&mut seat.ev, &mut seat.held, &[], false, seat.info.kind == UnitKind::Synth);
                     if !seat.ev.is_empty() {
                         unit.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
                     }
                 }
             }
             if let Some((_, _, old, _)) = seat.outgoing.as_mut() {
-                unit_events(&mut seat.ev, &mut seat.old_held, &[], false);
+                unit_events(&mut seat.ev, &mut seat.old_held, &[], false, seat.old_kind == UnitKind::Synth);
                 if !seat.ev.is_empty() {
                     old.process(cx, [&zeros[..1], &zeros[..1]], &seat.ev, [&mut l[..1], &mut r[..1]]);
                 }
@@ -1133,6 +1169,7 @@ impl Rack {
                         old_wet: 0,
                         held: [0; 2],
                         old_held: [0; 2],
+                        sent: 0,
                         ev: Vec::with_capacity(MAX_SLOT_EVENTS + 128),
                         out: [vec![0.0; block], vec![0.0; block]],
                         old: [vec![0.0; block], vec![0.0; block]],
@@ -1431,7 +1468,7 @@ impl Rack {
                             (seat.old_kind, seat.old_latency, seat.old_wet) = (seat.info.kind, seat.info.latency as usize, seat.wet);
                             seat.old_held = seat.held;
                         }
-                        seat.held = [0; 2];
+                        (seat.held, seat.sent) = ([0; 2], 0);
                         // The line holds this seat's input while it was an effect, at any latency: a
                         // role change starts it empty.
                         let seat = &mut s.seats[k];
@@ -1463,7 +1500,7 @@ impl Rack {
                         (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
                         (seat.removing, seat.evicting, seat.engaged, seat.fade) = (false, false, true, if engaged { n } else { 0 });
                         (seat.withdrawing, seat.outgoing, seat.swap) = (false, None, n);
-                        (seat.line_at, seat.filled, seat.held) = (0, 0, [0; 2]);
+                        (seat.line_at, seat.filled, seat.held, seat.sent) = (0, 0, [0; 2], 0);
                         seat.params_owed = [None; UnitParam::COUNT];
                         seat.meter_out = [0.0; 2];
                         seat.meter_frames = 0;
@@ -1627,6 +1664,12 @@ impl Rack {
     /// it (a later value for the same param overwrites it). An unseated id (or a withdrawing/withdrawn
     /// seat) is dropped and counted on `unit_commands_dropped`; a param the unit answers `None` to is
     /// dropped and counted on `unit_params_dropped`.
+    ///
+    /// A SYNTH first gets the slot's events queued and not yet handed to it (those sent ahead of this
+    /// command on its frame: the slots render up to every slot command), in a call of no frames, so
+    /// its pick lands among the notes and wheels in ring order as `Instruments::select` does among
+    /// `note_on`s: a NoteOn then a pick on one frame reaches the old instrument and the pick releases
+    /// it; a pick then a NoteOn plays the new one. Any other unit's call is untouched.
     pub(crate) fn set_unit_param(&mut self, id: UnitId, param: UnitParam, value: f64, now: Frame) {
         let cx = self.unit_cx(now);
         let found = (0..SLOT_COUNT).find_map(|i| self.slots[i].find(id).map(|k| (i, k)));
@@ -1634,7 +1677,8 @@ impl Rack {
             self.unit_commands_dropped += 1;
             return;
         };
-        let seat = &mut self.slots[i].seats[k];
+        let Slot { seats, events, .. } = &mut self.slots[i];
+        let seat = &mut seats[k];
         if seat.withdrawing {
             self.unit_commands_dropped += 1;
             return;
@@ -1643,6 +1687,14 @@ impl Rack {
             self.unit_commands_dropped += 1;
             return;
         };
+        if seat.info.kind == UnitKind::Synth && seat.sent < events.len() {
+            unit_events(&mut seat.ev, &mut seat.held, &events[seat.sent..], true, true);
+            for e in seat.ev.iter_mut() {
+                e.offset = 0;
+            }
+            seat.sent = events.len();
+            unit.process(&cx, [&[], &[]], &seat.ev, [&mut [], &mut []]);
+        }
         match unit.set_param(&cx, param, value) {
             Some(applied) => seat.params_owed[param.index()] = Some((now, applied)),
             None => self.unit_params_dropped += 1,
@@ -2128,6 +2180,9 @@ impl Rack {
                 run_chain(&mut s.seats[..len], gated, zeros, &mut s.dry, &mut s.tail, &s.events[first..], &self_cx(&self.clock, frame + split as Frame), (split, m), fade_frames, &mut to_bus, &mut self.protocol_errors);
             }
             s.events.clear();
+            for seat in s.seats.iter_mut() {
+                seat.sent = 0;
+            }
             let dipping = s.dip.is_some();
             let len = s.line.len();
             let (d, dw) = ((delay - s.line_latency).clamp(0, (len - 1) as Frame) as usize, s.dw);

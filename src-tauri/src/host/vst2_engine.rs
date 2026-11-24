@@ -211,8 +211,8 @@ impl Vst2Unit {
 
     /// Fill the event list for the slice `[at, at + len)` and return how many events it holds: first
     /// a note-off at offset 0 for every key in `release` (once: the set is emptied), then the
-    /// slice's notes, note-on and note-off on channel 0, each at its offset inside the slice. The
-    /// list has room for what the engine queues between two renders (`MAX_SLOT_EVENTS`) beside the
+    /// slice's notes, note-on and note-off on channel 0, each at its offset inside the slice (a wheel,
+    /// which a plugin ignores, takes no place). The list has room for what the engine queues between two renders (`MAX_SLOT_EVENTS`) beside the
     /// releases, so a note past that is a broken caller: it is DROPPED and latched, never carried
     /// into a later slice, where it would sound late at an offset that is no longer its own.
     fn collect_notes(&mut self, events: &[SlotEvent], next: &mut usize, at: usize, len: usize) -> usize {
@@ -236,6 +236,11 @@ impl Vst2Unit {
         let released = count;
         while let Some(e) = events.get(*next).filter(|e| (e.offset as usize) < at + len) {
             *next += 1;
+            // A plugin ignores the wheels (owner decision D12), and the rack sends AllNotesOff to a SYNTH
+            // alone: skipped before the capacity check, so neither takes a place or faults a full call.
+            if matches!(e.kind, SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } | SlotEventKind::AllNotesOff) {
+                continue;
+            }
             if count - released == MAX_SLOT_EVENTS {
                 self.faults.fetch_or(FAULT_EVENTS, Relaxed);
                 continue;
@@ -252,8 +257,7 @@ impl Vst2Unit {
                     self.held[usize::from(key / 64)] &= !(1 << (key % 64));
                     [0x80, key, 0, 0]
                 }
-                // A plugin ignores the wheels (owner decision D12).
-                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => continue,
+                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } | SlotEventKind::AllNotesOff => continue,
             };
             self.midi[count] = event((e.offset as usize).saturating_sub(at), midi_data);
             count += 1;

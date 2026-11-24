@@ -1125,6 +1125,37 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
     drop(unit);
 }
 
+/// The unit on its own: the wheels (which a plugin ignores, D12) and `AllNotesOff` (which the rack
+/// sends a SYNTH alone) take no place in the event list, so after a full list's worth of notes in one
+/// slice they fault nothing and every note still reaches the plugin.
+#[test]
+fn a_wheel_after_a_full_event_list_takes_no_place_and_faults_nothing() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let slot = device.host().slot(0);
+    let probe = Probe::new();
+    probe.set_level(0.5);
+    let mut plugin = plugin_here(&slot, instrument(probe));
+    let (unit, _params, faults) = unit_here(&mut plugin, &slot, 64);
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
+        let mut events = [SlotEvent { offset: 3, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } }; MAX_SLOT_EVENTS + 4];
+        events[0].kind = SlotEventKind::PitchBend { semitones: -1.0 };
+        events[MAX_SLOT_EVENTS + 1].kind = SlotEventKind::PitchBend { semitones: 1.0 };
+        events[MAX_SLOT_EVENTS + 2].kind = SlotEventKind::Modulation { depth: 0.5 };
+        events[MAX_SLOT_EVENTS + 3].kind = SlotEventKind::AllNotesOff;
+        unit.process_mono(0, &input, &events, &mut out);
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!((probe.note_ons.load(Relaxed), probe.event_calls.load(Relaxed)), (MAX_SLOT_EVENTS, 1), "every note, in one event list");
+    assert_eq!(probe.bad_events.load(Relaxed), 0);
+    assert_eq!(faults.load(Relaxed), 0, "a wheel past a full list is no fault");
+    drop(unit);
+}
+
 /// A plugin that settles its layout inside `effMainsChanged(1)`: what the owner installs is the
 /// layout read AFTER the resume (two inputs and a 2-output effect became a 4-output instrument with
 /// latency), and the report that came with it is consumed: no cycle follows.
