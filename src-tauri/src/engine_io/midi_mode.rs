@@ -30,8 +30,9 @@ fn midi<R>(f: impl FnOnce(&MidiHost) -> R) -> Result<R, String> {
 
 /// `input_send`'s batch, in order, for the page of `epoch`: a run of engine commands through
 /// [`MidiHost::ui_commands`] (input commands join the one ordered queue, settings go straight to the
-/// engine), each input event through the router's own call. A note, a wheel, the note target, a panic or
-/// a synth pick sent as an engine command refuses the whole batch before any of it runs. An input event of a
+/// engine), each input event through the router's own call (a synth pick: DEV only, as the `chain_*`
+/// commands). A note, a wheel, the note target, a panic or a synth pick sent as an engine command refuses
+/// the whole batch before any of it runs. An input event of a
 /// replaced page is refused there (`stale`); its engine commands run, as they always did. The answer is
 /// the first reason anything was dropped.
 fn input_to(midi: &MidiHost, epoch: u64, items: Vec<InputItem>) -> Result<Option<Dropped>, String> {
@@ -57,6 +58,7 @@ fn input_to(midi: &MidiHost, epoch: u64, items: Vec<InputItem>) -> Result<Option
             InputEvent::Blur => midi.ui_blur(epoch),
             InputEvent::SelectTarget { slot, target } => midi.select_target(epoch, slot, target),
             InputEvent::AllNotesOff => midi.all_notes_off(epoch),
+            #[cfg(debug_assertions)]
             InputEvent::PickSynth { slot, unit, instrument } => midi.pick_synth(epoch, slot, unit, instrument),
         };
         dropped = dropped.or(ran).or(input);
@@ -184,11 +186,14 @@ mod tests {
     }
 
     // The outbox's one path: engine commands and input events run in the order they were queued, across
-    // the two kinds; a replaced document's input events are dropped, its engine commands run.
+    // the two kinds; a replaced document's input events are dropped, its engine commands run. DEV: a synth
+    // pick among them (a release build has none).
     #[test]
     fn input_send_runs_engine_commands_and_input_events_in_order() {
         let (midi, engine, epoch) = rig();
-        let batch = items(json!([
+        let dev = cfg!(debug_assertions);
+        let pick = |slot: u8, instrument: u8| json!({ "input": { "pickSynth": { "slot": slot, "unit": 7, "instrument": instrument } } });
+        let mut sent = json!([
             { "input": { "note": { "owner": "pointer:1", "note": 60, "velocity": 127, "on": true } } },
             { "engine": { "SetBpm": 90 } },
             { "input": { "selectTarget": { "slot": null, "target": { "Builtin": "pad" } } } },
@@ -199,40 +204,46 @@ mod tests {
             { "input": { "note": { "owner": "key:KeyS", "note": 64, "velocity": 127, "on": true } } },
             { "input": "allNotesOff" },
             { "input": { "note": { "owner": "key:KeyS", "note": 65, "velocity": 127, "on": true } } },
-            { "input": { "pickSynth": { "slot": 1, "unit": 7, "instrument": 2 } } },
             { "engine": "Press" },
-        ]));
-        assert_eq!(input_to(&midi, epoch, batch), Ok(None));
-        assert_eq!(
-            take(&engine),
-            [
-                Command::NoteOn(60, 1.0),
-                Command::SetBpm(90.0),
-                Command::NoteOff(60),
-                Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)),
-                Command::Press,
-                Command::RecDub(0),
-                Command::NoteOn(62, 1.0),
-                Command::NoteOff(62),
-                Command::NoteOn(64, 1.0),
-                Command::NoteOff(64),
-                Command::AllNotesOff,
-                Command::NoteOn(65, 1.0),
-                Command::NoteOff(65),
-                Command::SelectInstrument(NoteTarget::Slot(1)),
-                Command::SetUnitParam(7, UnitParam::Instrument, 2.0),
-                Command::Press,
-            ]
-        );
+        ])
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+        if dev {
+            sent.insert(sent.len() - 1, pick(1, 2));
+        }
+        assert_eq!(input_to(&midi, epoch, items(json!(sent))), Ok(None));
+        let mut expected = vec![
+            Command::NoteOn(60, 1.0),
+            Command::SetBpm(90.0),
+            Command::NoteOff(60),
+            Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)),
+            Command::Press,
+            Command::RecDub(0),
+            Command::NoteOn(62, 1.0),
+            Command::NoteOff(62),
+            Command::NoteOn(64, 1.0),
+            Command::NoteOff(64),
+            Command::AllNotesOff,
+            Command::NoteOn(65, 1.0),
+            Command::Press,
+        ];
+        if dev {
+            let at = expected.len() - 1;
+            expected.splice(at..at, [Command::NoteOff(65), Command::SelectInstrument(NoteTarget::Slot(1)), Command::SetUnitParam(7, UnitParam::Instrument, 2.0)]);
+        }
+        assert_eq!(take(&engine), expected);
         let newer = midi.subscribe(2.0, Box::new(|_| {}));
-        let late = items(json!([
-            { "input": { "note": { "owner": "key:KeyA", "note": 62, "velocity": 127, "on": true } } },
-            { "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } },
-            { "input": "allNotesOff" },
-            { "input": { "pickSynth": { "slot": 0, "unit": 7, "instrument": 3 } } },
-            { "engine": { "SetBpm": 100 } },
-        ]));
-        assert_eq!(input_to(&midi, epoch, late), Ok(Some(Dropped::Stale)), "the replaced page hears its input was refused");
+        let mut late = vec![
+            json!({ "input": { "note": { "owner": "key:KeyA", "note": 62, "velocity": 127, "on": true } } }),
+            json!({ "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } }),
+            json!({ "input": "allNotesOff" }),
+            json!({ "engine": { "SetBpm": 100 } }),
+        ];
+        if dev {
+            late.insert(3, pick(0, 3));
+        }
+        assert_eq!(input_to(&midi, epoch, items(json!(late))), Ok(Some(Dropped::Stale)), "the replaced page hears its input was refused");
         assert_eq!(take(&engine), [Command::SetBpm(100.0)], "a replaced page's input events are dropped, its engine commands run");
         assert!(newer > epoch);
     }

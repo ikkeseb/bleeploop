@@ -25,18 +25,22 @@
 //!   swap while it unloads). The same slot and target again changes nothing (`routeEngine`'s
 //!   `${slot}:${target}` key), so a click on the active slot cuts no chord; another slot holding the
 //!   same synth is a switch.
-//! - **A synth pick is a switch onto the slot's SYNTH** ([`Router::pick`], `docs/unit-contract.md` §4):
+//! - **DEV only (chain mode, `cfg(debug_assertions)`, as the `chain_*` commands): a synth pick is a
+//!   switch onto the slot's SYNTH** ([`Router::pick`], `docs/unit-contract.md` §4):
 //!   it selects the slot as a target switch does (key `(slot, Slot(slot))`, so on the note target already
 //!   it selects nothing), then, unless the slot's last sent pick is this unit and instrument, releases what
 //!   sounds and sends `SetUnitParam(unit, Instrument, n)`: one batch, releases first, pedals and wheels
 //!   kept (the engine hands the picked instrument the wheels). The router keeps the last pick it sent
 //!   per slot, never one read from the feed, so a stale feed value sends no old pick back; the same pick
-//!   again sends nothing. Only the router sends that parameter (`super::router_command`).
+//!   again sends nothing ([`Router::pick_sends`], asked before the queue's room). A slot's seated SYNTH
+//!   changing (a chain add on the slot, the unit's removal) forgets what it kept
+//!   ([`Router::forget_picks`]), so the next pick is always sent. Only the router sends that parameter
+//!   (`super::router_command`).
 //! - **A refused attack records no owner.** The queue decides after the router; when it refuses the
 //!   batch a `note_on` made, [`Router::attack_refused`] undoes what that call recorded, and nothing for
 //!   any other batch. Every other batch the router makes (releases, wheels, the target, a panic, a pick)
-//!   is one the queue always takes (its reservations; a pick past them is refused by the host before the
-//!   router runs, `Queue::takes_pick`), so the router may forget a note as it releases it.
+//!   is one the queue always takes (its reservations; DEV: a pick past them is refused by the host
+//!   before the router runs, `Queue::takes_pick`), so the router may forget a note as it releases it.
 //! - **A rebuilt engine sounds nothing** ([`Router::engine_rebuilt`]): the owners and pedals stay, so a
 //!   later release is harmless (nothing is sent for a note the new engine never sounded) and a fresh
 //!   press attacks again; the target and wheels the router last sent reach the new engine through the
@@ -53,7 +57,9 @@
 use std::sync::atomic::{fence, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::Arc;
 
-use lf_engine::{Command, NoteTarget, UnitId, UnitParam, SLOT_COUNT};
+use lf_engine::{Command, NoteTarget};
+#[cfg(debug_assertions)]
+use lf_engine::{UnitId, SLOT_COUNT};
 
 use super::parse::Message;
 use super::queue::Out;
@@ -97,7 +103,8 @@ pub struct Router {
     mod_depth: f64,
     /// The slot and target last selected (`routeEngine`'s key).
     target: Option<(Option<u8>, NoteTarget)>,
-    /// Per slot, the SYNTH unit and instrument (the UI's `SYNTHS` index) of the last pick sent there.
+    /// DEV: per slot, the SYNTH unit and instrument (the UI's `SYNTHS` index) of the last pick sent there.
+    #[cfg(debug_assertions)]
     picks: [Option<(UnitId, u8)>; SLOT_COUNT],
     /// Notes this engine was told to sound and not yet to release, bit n for note n.
     sounding: u128,
@@ -376,12 +383,13 @@ impl Router {
         self.target = Some((slot, target));
     }
 
-    /// `instrument` (the UI's `SYNTHS` index) picked on `unit`, the SYNTH heading `slot`'s chain: the slot
+    /// DEV: `instrument` (the UI's `SYNTHS` index) picked on `unit`, the SYNTH heading `slot`'s chain: the slot
     /// becomes the note target as [`Router::select_target`] makes it (`(slot, Slot(slot))`: nothing when
     /// it is the target already), then, unless it is the slot's last sent pick, every note held or
     /// sustained is released and `SetUnitParam(unit, Instrument, n)` follows, in this one batch. The held
     /// notes are forgotten; the pedals and the wheels stay. A slot past `SLOT_COUNT` or an instrument past
     /// the six (the wire refuses both) does nothing.
+    #[cfg(debug_assertions)]
     pub fn pick(&mut self, slot: u8, unit: UnitId, instrument: u8, out: &mut Vec<Out>) {
         self.undo = None;
         if usize::from(instrument) >= lf_engine::units::SYNTH_IDS.len() {
@@ -393,8 +401,29 @@ impl Router {
             return;
         }
         self.release_all(out);
-        out.push(Out::new(Command::SetUnitParam(unit, UnitParam::Instrument, f64::from(instrument))));
+        out.push(Out::pick(slot, unit, instrument));
         self.picks[usize::from(slot)] = Some((unit, instrument));
+    }
+
+    /// DEV: whether [`Router::pick`] of these would send a pick (a queue entry): not when it is the slot's
+    /// last sent pick, nor for a slot or an instrument out of range (it then sends nothing at all). Its
+    /// switch, if any, is a target change the queue always takes.
+    #[cfg(debug_assertions)]
+    pub fn pick_sends(&self, slot: u8, unit: UnitId, instrument: u8) -> bool {
+        usize::from(instrument) < lf_engine::units::SYNTH_IDS.len()
+            && self.picks.get(usize::from(slot)).is_some_and(|last| *last != Some((unit, instrument)))
+    }
+
+    /// DEV: a slot's seated SYNTH may have changed: forget the last pick kept for `slot` (a chain add
+    /// there; `None`: none) and every one kept for `unit` (its removal, or its id reused), so the next pick
+    /// of either is sent.
+    #[cfg(debug_assertions)]
+    pub fn forget_picks(&mut self, slot: Option<u8>, unit: UnitId) {
+        for (s, last) in self.picks.iter_mut().enumerate() {
+            if slot.is_some_and(|slot| usize::from(slot) == s) || last.is_some_and(|(u, _)| u == unit) {
+                *last = None;
+            }
+        }
     }
 
     /// `allNotesOff`: a `NoteOff` for every note that sounds, held ones first, and forget them.
@@ -869,13 +898,15 @@ mod tests {
         assert_eq!(sent(&mut r, |r, out| r.select_target(Some(1), NoteTarget::Slot(1), out)), [Command::SelectInstrument(NoteTarget::Slot(1))]);
     }
 
+    #[cfg(debug_assertions)]
     fn pick(unit: UnitId, instrument: u8) -> Command {
-        Command::SetUnitParam(unit, UnitParam::Instrument, f64::from(instrument))
+        Command::SetUnitParam(unit, lf_engine::UnitParam::Instrument, f64::from(instrument))
     }
 
     // Unit contract §4: a pick on the note target's SYNTH releases what sounds, held then sustained, and
     // sends the pick, one batch; the pedal and the wheels stay. The same pick again sends nothing, so the
     // chord played after it rings on.
+    #[cfg(debug_assertions)]
     #[test]
     fn a_pick_releases_the_held_and_sustained_notes_then_picks_in_one_batch_and_the_same_pick_sends_nothing() {
         let mut r = Router::default();
@@ -904,6 +935,7 @@ mod tests {
     // A pick on a slot that is not the note target selects it as a target switch does (key (slot,
     // Slot(slot))): the releases, the switch, the pick, one batch; routeEngine's select of that slot then
     // changes nothing. Each slot keeps its own last pick: picking a slot's last pick again only selects it.
+    #[cfg(debug_assertions)]
     #[test]
     fn a_pick_on_another_slot_also_selects_it_and_each_slot_keeps_its_last_pick() {
         let mut r = Router::default();
@@ -923,6 +955,28 @@ mod tests {
         // A rebuild keeps the picks sent: they reach the new engine with their units (or the unit gate).
         r.engine_rebuilt();
         assert_eq!(sent(&mut r, |r, out| r.pick(1, 8, 4, out)), []);
+    }
+
+    // DEV, review fix: the dedupe the host asks before the queue's room (`pick_sends`) answers what `pick`
+    // sends; a slot's SYNTH changing forgets the slot's pick and the unit's, so unit 7 removed and added
+    // again under its id with another instrument is picked anew.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_pick_is_sent_unless_it_is_the_slots_last_and_a_changed_synth_forgets_it() {
+        let mut r = Router::default();
+        assert!(r.pick_sends(0, 7, 1));
+        assert!(!r.pick_sends(0, 7, 6) && !r.pick_sends(2, 7, 1), "out of range: nothing is sent");
+        sent(&mut r, |r, out| r.pick(0, 7, 1, out));
+        sent(&mut r, |r, out| r.pick(1, 8, 4, out));
+        assert!(!r.pick_sends(0, 7, 1) && !r.pick_sends(1, 8, 4));
+        assert!(r.pick_sends(0, 7, 2) && r.pick_sends(0, 9, 1));
+        r.forget_picks(None, 7);
+        assert!(r.pick_sends(0, 7, 1), "unit 7 removed");
+        assert!(!r.pick_sends(1, 8, 4), "the other slot keeps its pick");
+        assert_eq!(sent(&mut r, |r, out| r.pick(0, 7, 1, out)), [Command::SelectInstrument(NoteTarget::Slot(0)), pick(7, 1)]);
+        r.forget_picks(Some(1), 12);
+        assert!(r.pick_sends(1, 8, 4), "an add on slot 1");
+        assert!(!r.pick_sends(0, 7, 1));
     }
 
     // A rebuild needs no WebView: a rebuilt engine sounds nothing; owners stay (a release is harmless),

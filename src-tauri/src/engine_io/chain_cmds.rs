@@ -2254,7 +2254,7 @@ pub async fn chain_add(
         let open = |format: PluginFormat, plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
             unit_owner::load_unit(format, plugin.path.clone(), plugin.id.clone(), unit_host, parent, sink, tone)
         };
-        app.chains.add(
+        let added = app.chains.add(
             &host,
             (state, frontend_epoch),
             &app.slots,
@@ -2266,9 +2266,24 @@ pub async fn chain_add(
             tone_token,
             sink,
             &open,
-        )
+        );
+        // The slot's seated SYNTH may have changed (a source replaces the head; the id may be one a
+        // removed SYNTH had): native MIDI's router forgets the picks it kept, whatever the outcome, so the
+        // next pick is sent (an extra one only re-sends what the SYNTH already plays).
+        forget_picks(app, Some(slot), unit);
+        added
     })
     .await
+}
+
+/// A slot's seated SYNTH may have changed: native MIDI's router forgets the picks it kept for `slot` and
+/// for `unit` (`MidiHost::forget_picks`). Nothing when native MIDI does not run, nor in a release build
+/// (no pick there; the `chain_*` commands are DEV-only too).
+fn forget_picks(app: &EngineApp, slot: Option<u8>, unit: UnitId) {
+    #[cfg(debug_assertions)]
+    let _ = app.with_midi(|midi| midi.forget_picks(slot, unit));
+    #[cfg(not(debug_assertions))]
+    let _ = (app, slot, unit);
 }
 
 /// Remove `unit`; settles on the removal's `Applied` (a failed add's plate goes at once).
@@ -2276,7 +2291,9 @@ pub async fn chain_add(
 pub async fn chain_remove(unit: UnitId, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     blocking(app, "chain_remove", move |app, state| {
         let host = app.host()?;
-        app.chains.remove(&host, (state, frontend_epoch), unit)
+        let removed = app.chains.remove(&host, (state, frontend_epoch), unit);
+        forget_picks(app, None, unit);
+        removed
     })
     .await
 }

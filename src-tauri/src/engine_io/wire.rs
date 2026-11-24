@@ -33,7 +33,7 @@
 //! `{"engine":<a command as above>}` and `{"input":<an InputEvent>}`, an [`InputEvent`] being
 //! `{"note":{…}}`, `"blur"` or `{"blur":null}`, `{"selectTarget":{"slot":0,"target":…}}` with the target
 //! as `SelectInstrument` carries it, `{"pickSynth":{"slot":0,"unit":7,"instrument":2}}` (the UI's `SYNTHS`
-//! index), or `"allNotesOff"`; its answer is `null` or a `midi::Dropped`
+//! index; DEV builds only, as the `chain_*` commands: a release build refuses it), or `"allNotesOff"`; its answer is `null` or a `midi::Dropped`
 //! (`"noDevice"`, `"rebuilding"`, `"full"`, `"stale"`); `midi_subscribe` takes the page's age (`origin`,
 //! its `performance.timeOrigin`) and answers its input epoch, a number; `midi::MidiEvent` and `midi::ImportReport` keep the serde they derive where they are defined.
 //! `verify/fixtures/midi-wire.json` holds both sides to that JSON as `engine-wire.json` does to this.
@@ -108,6 +108,8 @@ pub enum InputEvent {
     /// router releases what sounds, selects the slot when it is not the note target, then sends
     /// `SetUnitParam(unit, Instrument, n)`, one batch (`docs/unit-contract.md` §4). A slot past
     /// `SLOT_COUNT`, unit id 0 and an instrument outside 0..=5 are refused here, as `midi-wire.ts` refuses them.
+    /// DEV only (chain mode, in lockstep with the `chain_*` commands): a release build reads no such event.
+    #[cfg(debug_assertions)]
     PickSynth {
         #[serde(deserialize_with = "pick_slot")]
         slot: u8,
@@ -118,6 +120,7 @@ pub enum InputEvent {
     },
 }
 
+#[cfg(debug_assertions)]
 fn pick_slot<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     let slot = u8::deserialize(d)?;
     if usize::from(slot) >= SLOT_COUNT {
@@ -126,6 +129,7 @@ fn pick_slot<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     Ok(slot)
 }
 
+#[cfg(debug_assertions)]
 fn pick_unit<'de, D: Deserializer<'de>>(d: D) -> Result<UnitId, D::Error> {
     match UnitId::deserialize(d)? {
         0 => Err(serde::de::Error::custom("unit id 0 is reserved")),
@@ -133,6 +137,7 @@ fn pick_unit<'de, D: Deserializer<'de>>(d: D) -> Result<UnitId, D::Error> {
     }
 }
 
+#[cfg(debug_assertions)]
 fn pick_instrument<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     let instrument = u8::deserialize(d)?;
     if usize::from(instrument) >= lf_engine::units::SYNTH_IDS.len() {
@@ -1300,13 +1305,14 @@ mod tests {
 
     /// Every variant, by position: a new one fails to compile here until it has a number (bump the
     /// count) and an example in the fixture.
-    const INPUT_EVENTS: usize = 5;
+    const INPUT_EVENTS: usize = if cfg!(debug_assertions) { 5 } else { 4 };
     fn input_event_index(e: &InputEvent) -> usize {
         match e {
             InputEvent::Note { .. } => 0,
             InputEvent::Blur => 1,
             InputEvent::SelectTarget { .. } => 2,
             InputEvent::AllNotesOff => 3,
+            #[cfg(debug_assertions)]
             InputEvent::PickSynth { .. } => 4,
         }
     }
@@ -1465,11 +1471,23 @@ mod tests {
         ]
     }
 
+    /// A fixture entry a release build has no variant for (the DEV synth pick, as an event or an item):
+    /// it must refuse it, and the round trip skips it there.
+    fn release_refuses(entry: &Value) -> bool {
+        let dev_only = entry.get("pickSynth").or_else(|| entry.get("input").and_then(|i| i.get("pickSynth"))).is_some();
+        if dev_only && !cfg!(debug_assertions) {
+            assert!(serde_json::from_value::<InputItem>(entry.clone()).is_err() && serde_json::from_value::<InputEvent>(entry.clone()).is_err(), "a release build reads no synth pick: {entry}");
+            return true;
+        }
+        false
+    }
+
     #[test]
     fn every_input_event_round_trips_through_the_midi_fixture() {
         let entries = midi_fixture("inputEvents");
         let events: Vec<InputEvent> = entries
             .iter()
+            .filter(|entry| !release_refuses(entry))
             .map(|entry| {
                 let parsed: InputEvent = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.inputEvents: {entry}: {e}"));
                 let back: Value = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
@@ -1504,6 +1522,7 @@ mod tests {
 
     // A synth pick reads by its field names; a slot past SLOT_COUNT, unit id 0, an instrument outside the
     // UI's six SYNTHS or not a whole number, and a missing field are refused, as midi-wire.ts refuses them.
+    #[cfg(debug_assertions)]
     #[test]
     fn a_synth_pick_reads_and_its_out_of_range_fields_are_refused() {
         let read = |json: Value| serde_json::from_value::<InputEvent>(json);
@@ -1531,6 +1550,7 @@ mod tests {
     fn every_input_item_answer_and_epoch_round_trips_through_the_midi_fixture() {
         let items: Vec<InputItem> = midi_fixture("inputItems")
             .iter()
+            .filter(|entry| !release_refuses(entry))
             .map(|entry| {
                 let parsed: InputItem = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.inputItems: {entry}: {e}"));
                 let back: Value = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();

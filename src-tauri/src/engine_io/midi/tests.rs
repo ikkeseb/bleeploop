@@ -350,13 +350,24 @@ fn pick(unit: lf_engine::UnitId, instrument: u8) -> Command {
     Command::SetUnitParam(unit, lf_engine::UnitParam::Instrument, f64::from(instrument))
 }
 
-// Unit contract §4 through the host: a synth pick on the note target's SYNTH releases a held and a
-// CC64-sustained note, then picks, in one batch; the same pick again sends nothing (the chord after it
-// rings on); a pick on the other slot also selects it; a replaced page's pick is refused. A UI batch
-// carrying the pick as an engine command is refused whole (§2: "sent only by the note router"), and
-// another SYNTH param stays the UI's.
+// Unit contract §2 ("sent only by the note router"), in every build: a UI batch carrying a synth pick as an
+// engine command is refused whole, and another SYNTH param stays the UI's.
 #[test]
-fn a_synth_pick_releases_then_picks_in_one_batch_and_only_the_router_sends_it() {
+fn a_ui_batch_carrying_a_synth_pick_is_refused_whole() {
+    let r = Rig::new();
+    assert!(r.host.ui_commands(vec![Command::Press, pick(7, 1)]).is_err());
+    assert_eq!(r.take(), [], "nothing of a batch carrying a pick runs");
+    let gain = Command::SetUnitParam(7, lf_engine::UnitParam::Gain(Instrument::Bass), 0.5);
+    assert_eq!(r.host.ui_commands(vec![gain]), Ok(None));
+    assert_eq!(r.take(), [gain]);
+}
+
+// DEV, unit contract §4 through the host: a synth pick on the note target's SYNTH releases a held and a
+// CC64-sustained note, then picks, in one batch; the same pick again sends nothing (the chord after it
+// rings on); a pick on the other slot also selects it; a replaced page's pick is refused.
+#[cfg(debug_assertions)]
+#[test]
+fn a_synth_pick_releases_then_picks_in_one_batch() {
     let r = Rig::new();
     let (slot0, slot1) = (NoteTarget::Slot(0), NoteTarget::Slot(1));
     r.host.select_target(r.epoch(), Some(0), slot0);
@@ -375,16 +386,11 @@ fn a_synth_pick_releases_then_picks_in_one_batch_and_only_the_router_sends_it() 
     r.subscribe();
     assert_eq!(r.host.pick_synth(old, 0, 7, 3), Some(Dropped::Stale));
     assert_eq!(r.take(), []);
-
-    assert!(r.host.ui_commands(vec![Command::Press, pick(7, 1)]).is_err());
-    assert_eq!(r.take(), [], "nothing of a batch carrying a pick runs");
-    let gain = Command::SetUnitParam(7, lf_engine::UnitParam::Gain(Instrument::Bass), 0.5);
-    assert_eq!(r.host.ui_commands(vec![gain]), Ok(None));
-    assert_eq!(r.take(), [gain]);
 }
 
 // The no-device rule: a pick starts nothing, so it waits in the queue for a device as a target does
 // (answered as taken), and reaches the engine once one runs.
+#[cfg(debug_assertions)]
 #[test]
 fn with_no_device_a_synth_pick_waits_for_it() {
     let mut r = Rig::new();
@@ -398,49 +404,36 @@ fn with_no_device_a_synth_pick_waits_for_it() {
     assert_eq!(r.take(), [pick(7, 4)]);
 }
 
-// The replay: a pick still queued when the engine is rebuilt comes back from the handshake after the
-// folded target, for the host's unit gate (its SYNTH reseats in the new engine), and is never sent to
-// the old ring after; the router keeps it as sent, so the same pick again sends nothing.
+// DEV, review fix: each slot's pick has its own place, so with the room gone both slots' SYNTHs are
+// picked; a pick of the tail's unit replaces it. Only a pick whose slot's place is taken and whose unit's
+// pick is not the tail is refused, before the router moves (answered `full`); a pick equal to the slot's
+// last sends no pick (the router's dedupe is asked first), so it is never refused for room, its switch
+// alone going in. Once there is room, the refused pick goes through: the router never recorded it.
+#[cfg(debug_assertions)]
 #[test]
-fn a_queued_synth_pick_goes_to_the_unit_gate_across_a_rebuild() {
-    let mut r = Rig::new();
-    r.host.select_target(r.epoch(), Some(0), NoteTarget::Slot(0));
-    r.take();
-    r.engine.full.store(true, Relaxed);
-    r.host.pick_synth(r.epoch(), 1, 9, 3);
-    let hook = r.engine.hook.lock().unwrap().clone().expect("registered at start");
-    hook.pause();
-    assert_eq!(hook.rebuild(1), [Command::SelectInstrument(NoteTarget::Slot(1)), pick(9, 3)]);
-    hook.resume();
-    r.engine.full.store(false, Relaxed);
-    r.wait(RETRY);
-    assert_eq!(r.take(), [], "nothing a second time");
-    assert_eq!(r.host.pick_synth(r.epoch(), 1, 9, 3), None);
-    assert_eq!(r.take(), []);
-    assert_eq!(r.host.diag().queue.discarded, 0, "a pick is kept, not discarded");
-}
-
-// A pick always finds its reserved slot; only a second SYNTH's pick since the last fresh entry, with
-// the room gone, is refused, before the router moves: answered `full`, and its slot's switch and pick
-// are sent whole once there is room again.
-#[test]
-fn with_the_room_gone_a_pick_still_goes_in_and_a_second_synths_is_refused_before_the_router() {
+fn with_the_room_gone_each_slots_pick_goes_in_and_a_repeated_pick_is_never_full() {
     let mut r = Rig::new();
     r.host.select_target(r.epoch(), Some(0), NoteTarget::Slot(0));
     r.take();
     r.engine.full.store(true, Relaxed);
     while r.host.ui_commands(vec![Command::Press]) == Ok(None) {}
-    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 1), None, "the reserved slot");
-    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 2), None, "the same unit's replaces it");
-    assert_eq!(r.host.pick_synth(r.epoch(), 1, 9, 1), Some(Dropped::Full));
-    assert!(r.host.diag().refused.full >= 2, "the press that found no room, and the pick");
+    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 1), None, "slot 0's place");
+    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 2), None, "its unit's pick at the tail: replaced");
+    assert_eq!(r.host.pick_synth(r.epoch(), 1, 9, 1), None, "slot 1's place");
+    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 3), Some(Dropped::Full), "slot 0's place is taken, its pick not the tail");
+    let full = r.host.diag().refused.full;
+    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 2), None, "slot 0's last pick: its switch alone");
+    assert_eq!(r.host.pick_synth(r.epoch(), 1, 9, 1), None, "slot 1's last pick: its switch alone");
+    assert_eq!(r.host.diag().refused.full, full, "a repeated pick is never refused for room");
     r.engine.full.store(false, Relaxed);
     r.wait(RETRY);
     let sent = r.take();
-    assert_eq!(sent.last(), Some(&pick(7, 2)));
-    assert_eq!(sent.iter().filter(|c| matches!(c, Command::SetUnitParam(..))).count(), 1);
-    assert_eq!(r.host.pick_synth(r.epoch(), 1, 9, 1), None);
-    assert_eq!(r.take(), [Command::SelectInstrument(NoteTarget::Slot(1)), pick(9, 1)], "the router never recorded the refused pick");
+    let picks: Vec<&Command> = sent.iter().filter(|c| matches!(c, Command::SetUnitParam(..))).collect();
+    assert_eq!(picks, [&pick(7, 2), &pick(9, 1)], "each SYNTH's last pick, once");
+    assert_eq!(sent.last(), Some(&pick(9, 1)));
+    assert_eq!(sent.iter().rev().find(|c| matches!(c, Command::SelectInstrument(_))), Some(&Command::SelectInstrument(NoteTarget::Slot(1))));
+    assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 3), None);
+    assert_eq!(r.take(), [Command::SelectInstrument(NoteTarget::Slot(0)), pick(7, 3)], "the router never recorded the refused pick");
 }
 
 // One ordered path into the engine: the UI's input commands join the one queue, so a pedal and a
@@ -1375,4 +1368,118 @@ fn queued_unit_commands_survive_a_rebuild_through_ui_commands_with_a_full_ring()
 
     u10.release();
     u20.release();
+}
+
+/// DEV: a SYNTH source as the engine sees one, logging lock-free, in the order it gets them, the keys of
+/// its `NoteOn`s (`0x100 | key`) and the picks it applies (`0x200 | n`). Preallocated (invariant 5).
+#[cfg(debug_assertions)]
+struct PickLog {
+    entries: [std::sync::atomic::AtomicU32; 16],
+    len: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(debug_assertions)]
+impl PickLog {
+    fn push(&self, entry: u32) {
+        let k = self.len.load(Relaxed);
+        if k < self.entries.len() {
+            self.entries[k].store(entry, Relaxed);
+            self.len.store(k + 1, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn read(&self) -> Vec<u32> {
+        let n = self.len.load(std::sync::atomic::Ordering::Acquire);
+        self.entries[..n].iter().map(|e| e.load(Relaxed)).collect()
+    }
+}
+
+#[cfg(debug_assertions)]
+struct LoggingSynth(Arc<PickLog>);
+
+#[cfg(debug_assertions)]
+impl lf_engine::UnitProcessor for LoggingSynth {
+    fn info(&self) -> lf_engine::UnitInfo {
+        lf_engine::UnitInfo { kind: lf_engine::UnitKind::Synth, source: true, latency: 0 }
+    }
+
+    fn process(&mut self, _cx: &lf_engine::UnitCx, _input: [&[f32]; 2], events: &[lf_engine::SlotEvent], out: [&mut [f32]; 2]) {
+        for e in events {
+            if let lf_engine::SlotEventKind::NoteOn { key, .. } = e.kind {
+                self.0.push(0x100 | u32::from(key));
+            }
+        }
+        for o in out {
+            o.fill(0.0);
+        }
+    }
+
+    fn set_param(&mut self, _cx: &lf_engine::UnitCx, param: lf_engine::UnitParam, value: f64) -> Option<f64> {
+        (param == lf_engine::UnitParam::Instrument).then(|| {
+            self.0.push(0x200 | value as u32);
+            value
+        })
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+// DEV, review fix: the replay through the real gate. A pick (its switch with it) waits behind a full ring
+// when the engine is rebuilt; the handshake hands the pick to the host's gate (the switch to the settings
+// replay), nothing is sent a second time once the ring takes again, and the gate holds the pick until its
+// SYNTH reseats. Once the gate has let it go, a note played after it reaches the SYNTH after the pick:
+// each once, in that order. The router keeps the pick as sent: the same pick again sends nothing.
+// (A note played while the reseated SYNTH's seat answer is still unread can overtake the held pick:
+// `src-tauri/OPEN-THREADS.md`; this test waits for the gate to empty first.)
+#[cfg(debug_assertions)]
+#[test]
+fn a_queued_synth_pick_reaches_its_reseated_synth_through_the_gate_before_a_later_note() {
+    use super::super::test_rig::TestDevice;
+    use super::super::unit_host::{Activated, Back, OpState, Spec};
+
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let log = Arc::new(PickLog { entries: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)), len: Default::default() });
+    let synth = host.unit(1, 9, Spec::Builtin { kind: lf_engine::UnitKind::Synth, params: vec![] }, 0, false).unwrap();
+    synth.activated(Activated { name: "SYNTH".into(), source: true, latency: 0 });
+    let op = synth.submit(Box::new(LoggingSynth(log.clone())), synth.terms().unwrap()).unwrap_or_else(|(_, e)| panic!("submit: {e:?}"));
+    assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(device.wait_blocks(1), "a device runs");
+
+    let engine = Arc::new(Recorded { host: host.clone(), sent: Mutex::default(), full: AtomicBool::new(true) });
+    let midi = MidiHost { core: hosted(engine.clone(), store::empty(), None, None, None), wake: None, port_thread: None };
+    let epoch = midi.subscribe(1.0, Box::new(|_| {}));
+    assert_eq!(midi.pick_synth(epoch, 1, 9, 3), None, "queued behind the full ring");
+    assert!(engine.sent.lock().unwrap().is_empty());
+
+    device.rebuild_at(44_100, 256);
+    assert!(host.core.state.lock().unwrap().gate.has(9), "the pick waits at the gate for its SYNTH");
+    engine.full.store(false, Relaxed);
+    midi.core.tick(Instant::now());
+    assert!(engine.sent.lock().unwrap().is_empty(), "the rebuild emptied the queue: nothing a second time");
+    assert!(host.settings().contains(&Command::SelectInstrument(NoteTarget::Slot(1))), "the switch rides the replay");
+
+    let Back::Evicted { unit, .. } = synth.take_back().expect("evicted by the rebuild") else { panic!("expected Evicted") };
+    let op = synth.submit(unit, synth.terms().unwrap()).unwrap_or_else(|(_, e)| panic!("reseat: {e:?}"));
+    assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !host.core.state.lock().unwrap().gate.is_empty() {
+        assert!(Instant::now() < deadline, "the gate let the pick go once its SYNTH was seated");
+        host.drain_feed_taps(&mut Vec::new(), None, None, None);
+        std::thread::sleep(MS);
+    }
+    assert_eq!(midi.ui_note(epoch, "key:KeyA".into(), 60, 100, true), None);
+    assert!(device.wait_blocks(16));
+    assert_eq!(log.read(), [0x200 | 3, 0x100 | 60], "the pick, then the note, each once");
+    assert_eq!(*engine.sent.lock().unwrap(), [on(60, 100)], "the pick went through the gate, not the queue again");
+    assert_eq!(midi.pick_synth(epoch, 1, 9, 3), None);
+    assert!(device.wait_blocks(8));
+    assert_eq!(log.read().len(), 2, "the same pick again sends nothing");
+    assert_eq!(host.core.gate_dropped.load(Relaxed), 0);
+
+    synth.release();
 }

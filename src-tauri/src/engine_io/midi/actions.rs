@@ -142,7 +142,10 @@ pub(crate) enum UiRoute {
     /// A note, a wheel, the note target, a panic or a synth pick (`SetUnitParam(_, Instrument, _)`,
     /// `docs/unit-contract.md` §2: "sent only by the note router"): the router's alone (one ordered path
     /// into the engine). Refused here: sent past the router it would break note ownership (a pick
-    /// releases what sounds in its own batch).
+    /// releases what sounds in its own batch). The pick's refusal stays in release builds, where the
+    /// router sends none: a release page sends no unit command at all (`host.tauri.ts` throws while
+    /// `lf.chainNative` is off, and it is never on outside DEV), so it refuses no batch a release page
+    /// sends.
     Router,
     /// A setting: straight to `EngineHost::send`, which keeps it (a rebuild would discard it queued).
     Direct,

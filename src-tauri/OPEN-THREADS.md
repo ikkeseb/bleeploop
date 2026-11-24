@@ -214,3 +214,11 @@
   failed once in a 479-test `cargo test -p app` run and pass alone. Next check: rerun the full
   `cargo test -p app` on a quiet PC; if it fails again, widen the bounds to `test_rig::PATIENCE` or
   stamp them on the engine's frames, as the timing tests above were.
+- A note can overtake a synth pick held at the unit gate (DEV chain mode, read from source, never run): across
+  a device rebuild a queued `PickSynth` waits at the gate for its SYNTH's reseat; once the SYNTH is back in the
+  engine but its `Seat` answer is still unread (the model says reseating), a fresh `NoteOn` through
+  `EngineHost::send` is not gated and reaches the ring before the pick (`engine_io/mod.rs` `send`,
+  `unit_host.rs` `flush_gate_locked`), so it plays the previous instrument. Next check: `midi/tests.rs`'
+  `a_queued_synth_pick_reaches_its_reseated_synth_through_the_gate_before_a_later_note` without its wait for
+  the gate to empty (send the note right after `wait_op`), and read the log's order. A fix gates a note behind a
+  pick held for its slot's unit.
