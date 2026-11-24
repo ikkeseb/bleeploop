@@ -131,9 +131,11 @@ pub enum Command {
     /// gets it at the frame it is applied.
     NoteOn(u8, f32),
     NoteOff(u8),
-    /// The pitch wheel, in semitones (built-in instruments only; a plugin slot gets no wheels yet, D12).
+    /// The pitch wheel, in semitones: the built-in instruments, and the note-target slot's chain while
+    /// it seats a SYNTH, on the command's frame as a [`SlotEventKind::PitchBend`] (a plugin there
+    /// ignores it, D12; a chain with no SYNTH gets nothing, so a plugins-only rack renders as before).
     PitchBend(f64),
-    /// The mod wheel, 0..1 (built-in instruments only).
+    /// The mod wheel, 0..1: as [`Command::PitchBend`], a [`SlotEventKind::Modulation`].
     Modulation(f64),
     AllNotesOff,
     /// GO LIVE: the slot's own input (its capture channel, picked on the device side) feeds the slot (an
@@ -487,7 +489,11 @@ impl Instrument {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnitParam {
     Send(InputSendParam),
+    /// SYNTH's pick: the index in the UI's `SYNTHS` order (`src/ui/state/instruments.ts`; 0 lead,
+    /// 1 bass, 2 pad, 3 piano, 4 organ, 5 drum: [`crate::units::SYNTH_IDS`], never [`Instrument`]'s
+    /// order), rounded to the nearest; one outside 0..=5 is refused.
     Instrument,
+    /// One SYNTH instrument's level, 0..[`crate::units::SYNTH_GAIN_MAX`], default 1.
     Gain(Instrument),
 }
 
@@ -882,7 +888,7 @@ pub struct ProcessContext {
     pub input_frames: Frame,
 }
 
-/// A note for a plugin slot, `offset` frames into the `process` call that carries it.
+/// A note or a wheel for a slot's chain, `offset` frames into the `process` call that carries it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlotEvent {
     pub offset: u32,
@@ -894,6 +900,12 @@ pub enum SlotEventKind {
     /// Velocity 0..1.
     NoteOn { key: u8, velocity: f32 },
     NoteOff { key: u8 },
+    /// The pitch wheel ([`Command::PitchBend`]), in semitones as sent: SYNTH applies it to its picked
+    /// instrument, a plugin ignores it (owner decision D12). Only a chain that seats a SYNTH gets it.
+    PitchBend { semitones: f64 },
+    /// The mod wheel ([`Command::Modulation`]), as sent (SYNTH clamps it to 0..1); a plugin ignores it
+    /// (D12). Only a chain that seats a SYNTH gets it.
+    Modulation { depth: f64 },
 }
 
 /// A chain's role, from its head (`docs/unit-contract.md` §The picture): today's rule per unit, lifted

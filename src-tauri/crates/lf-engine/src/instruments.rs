@@ -1,9 +1,13 @@
-//! OWNS: the six built-in instruments, which one plays (or none), each one's level, the performance
-//! wheels, and the instruments' record path. Ported from `synths/index.ts` and the synth side of
-//! `input-router.ts`; sustain and per-source note ownership stay with the sender, native MIDI's one
-//! note router (`engine_io::midi::router` in the app crate).
+//! OWNS: the six built-in instruments as one bank (`Bank`: which one plays, or none, each one's
+//! level, the performance wheels), and today's [`Instruments`] around it: the bank the
+//! `NoteTarget::Builtin` path plays, the input OTT on its sum and its record path. Ported from
+//! `synths/index.ts` and the synth side of `input-router.ts`; sustain and per-source note ownership stay
+//! with the sender, native MIDI's one note router (`engine_io::midi::router` in the app crate). The SYNTH
+//! chain unit ([`crate::units::SynthUnit`], `docs/unit-contract.md` §4) holds a bank of its own: two
+//! synth slots are two banks, and [`Instruments`] keeps serving `NoteTarget::Builtin` until a later
+//! slice retires it.
 //!
-//! All six are built in [`Instruments::new`] and render every block, so a switch never allocates and a
+//! All six are built in `Bank::new` and render every block, so a switch never allocates and a
 //! released note rings out after one, as each slot's synth does in the web app when the player
 //! switches slots. (Picking another synth for the same slot disposed the web synth and cut its tail;
 //! here it rings out.) Notes go to the selected one, and nowhere while none is; a switch releases the
@@ -11,8 +15,9 @@
 //! A note outside 0..127 does nothing, as the web router drops it. Each instrument has its own level,
 //! smoothed as a plugin slot's gain, on what is heard and what is recorded, selected or not.
 //!
-//! They run on the DSP clock of `effects` (the device frame less the frames the device skipped);
-//! methods take device frames and [`Instruments::set_offset`] keeps the difference.
+//! They run on the DSP clock of `effects` (the device frame less the frames the device skipped): the
+//! bank's methods take DSP frames; [`Instruments`]' take device frames and [`Instruments::set_offset`]
+//! keeps the difference (a unit gets its DSP frame as [`crate::UnitCx::dsp_frame`]).
 //!
 //! The instruments are heard on the master bus and recorded, as on the web's `looperInputBus`. A note
 //! sounds when it is played, and the player played it when the click reached their ears: the output
@@ -22,7 +27,8 @@
 //! the heard click lands on the grid like a guitar note (up to its entry at the next block start).
 //!
 //! A note on or off is scheduled [`LEAD`] frames after the frame it is applied on and sounds exactly
-//! there; the record path takes the lead off its delay. The web router scheduled 5 ms ahead
+//! there; the record path takes the lead off its delay (a SYNTH unit reports it as its latency, and its slot's
+//! source record line takes it off the same way: `slots`). The web router scheduled 5 ms ahead
 //! (`SCHEDULE_AHEAD`), and the ported synths rely on a look-ahead: a note at the current context time
 //! would start on the next quantum boundary, and two starts of one voice inside a quantum would collide
 //! (`dsp::synth::poly`). One quantum is the shortest lead that holds. When the input side plus the
@@ -94,7 +100,11 @@ impl Level {
     }
 }
 
-pub struct Instruments {
+/// The six instruments, the picked one (or none), each one's level and the wheels: today's bank, which
+/// [`Instruments`] and the SYNTH unit ([`crate::units::SynthUnit`]) both hold. Its methods take frames on
+/// the DSP clock (the device frame less the frames the device skipped); a note on or off is scheduled
+/// [`LEAD`] after its frame, a pick, a release of every note and a wheel apply on it.
+pub(crate) struct Bank {
     sample_rate: f32,
     poly: Vec<PolySynth>,
     /// Boxed, as the chains are: its render buffers are large.
@@ -104,25 +114,18 @@ pub struct Instruments {
     /// Each instrument's level, by `Instrument as usize`.
     levels: [Level; 6],
     gain_coef: f64,
-    /// Device frames the DSP clock is behind.
-    offset: Frame,
     bend: f64,
     modulation: f64,
-    mono: Vec<f32>,
-    /// The record path's delay line: the instruments' stereo sum, `delay` frames late.
-    line: Vec<Pair>,
-    write: usize,
-    /// The input OTT on the sum, after the levels.
-    ott: StereoOtt,
+    /// One instrument's mono render over one quantum at most ([`Bank::render`] splits there).
+    mono: [f32; QUANTUM],
 }
 
-impl Instruments {
-    /// Allocates: build it off the audio thread. `max_block` bounds a render, `max_input` the device's
-    /// input side (the record line holds it plus [`max_chain_latency`] plus a block); `white` and `pink`
-    /// are Tone's noise tables (`dsp::noise`).
-    pub fn new(sample_rate: u32, max_block: usize, max_input: Frame, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
+impl Bank {
+    /// Allocates: build it off the audio thread. `white` and `pink` are Tone's noise tables
+    /// (`dsp::noise`).
+    pub(crate) fn new(sample_rate: u32, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
         let sr = sample_rate as f32;
-        Instruments {
+        Bank {
             sample_rate: sr,
             poly: [PolyKind::Lead, PolyKind::Pad, PolyKind::Piano, PolyKind::Organ].into_iter().map(|kind| PolySynth::new(kind, sr, 0.0, 0)).collect(),
             bass: Box::new(Bass::new(sr, 0.0, 0)),
@@ -130,58 +133,40 @@ impl Instruments {
             selected: None,
             levels: [Level { target: 1.0, gain: 1.0 }; 6],
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
-            offset: 0,
             bend: 0.0,
             modulation: 0.0,
-            mono: vec![0.0; max_block],
-            line: vec![[0.0; 2]; (max_input.max(0) + max_chain_latency(sample_rate)) as usize + max_block],
-            write: 0,
-            ott: StereoOtt::new(sample_rate),
+            mono: [0.0; QUANTUM],
         }
     }
 
-    pub fn selected(&self) -> Option<Instrument> {
+    pub(crate) fn selected(&self) -> Option<Instrument> {
         self.selected
     }
 
-    /// `instrument`'s level (linear, 0..): it glides there from the frame it is set.
-    pub fn set_gain(&mut self, instrument: Instrument, gain: f32) {
-        self.levels[instrument as usize].target = if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 };
+    /// `instrument`'s level (linear, 0.., already checked): it glides there from the next frame rendered.
+    pub(crate) fn set_gain(&mut self, instrument: Instrument, gain: f64) {
+        self.levels[instrument as usize].target = gain;
     }
 
-    /// The input OTT's setting, from the next frame rendered.
-    pub fn set_ott(&mut self, setting: Setting) {
-        self.ott.set(setting);
+    /// DSP frame `f`'s time in seconds.
+    fn time(&self, f: u64) -> f64 {
+        f as f64 / self.sample_rate as f64
     }
 
-    pub fn set_offset(&mut self, offset: Frame) {
-        self.offset = offset;
-    }
-
-    /// A device frame on the DSP clock, and its time in seconds.
-    fn at(&self, frame: Frame) -> (f64, u64) {
-        let f = (frame - self.offset) as u64;
-        (f as f64 / self.sample_rate as f64, f)
-    }
-
-    /// A note's time, [`LEAD`] after `frame`, and the frame being rendered.
-    fn ahead(&self, frame: Frame) -> (f64, u64) {
-        let (_, f) = self.at(frame);
-        ((f + LEAD as u64) as f64 / self.sample_rate as f64, f)
-    }
-
-    pub fn select(&mut self, instrument: Option<Instrument>, frame: Frame) {
-        self.all_notes_off(frame);
+    /// The pick: the held notes released on `f`, then `instrument` takes the notes and the wheels, also
+    /// when it is the one picked already.
+    pub(crate) fn select(&mut self, instrument: Option<Instrument>, f: u64) {
+        self.all_notes_off(f);
         self.selected = instrument;
         let (bend, modulation) = (self.bend, self.modulation);
-        self.wheels(bend, modulation, frame);
+        self.wheels(bend, modulation, f);
     }
 
-    pub fn note_on(&mut self, note: u8, velocity: f32, frame: Frame) {
+    pub(crate) fn note_on(&mut self, note: u8, velocity: f32, f: u64) {
         if note > 127 {
             return;
         }
-        let (t, f) = self.ahead(frame);
+        let t = self.time(f + LEAD as u64);
         let v = if velocity.is_finite() { velocity.clamp(0.0, 1.0) as f64 } else { 0.0 };
         match self.selected {
             Some(Instrument::Bass) => self.bass.note_on(note, v, t, f),
@@ -191,11 +176,11 @@ impl Instruments {
         }
     }
 
-    pub fn note_off(&mut self, note: u8, frame: Frame) {
+    pub(crate) fn note_off(&mut self, note: u8, f: u64) {
         if note > 127 {
             return;
         }
-        let (t, f) = self.ahead(frame);
+        let t = self.time(f + LEAD as u64);
         match self.selected {
             Some(Instrument::Bass) => self.bass.note_off(note, t, f),
             Some(Instrument::Drums) => self.drums.note_off(note, t, f),
@@ -204,8 +189,7 @@ impl Instruments {
         }
     }
 
-    pub fn all_notes_off(&mut self, frame: Frame) {
-        let f = self.at(frame).1;
+    pub(crate) fn all_notes_off(&mut self, f: u64) {
         match self.selected {
             Some(Instrument::Bass) => self.bass.all_notes_off(f),
             Some(Instrument::Drums) | None => {}
@@ -213,23 +197,23 @@ impl Instruments {
         }
     }
 
-    pub fn set_pitch_bend(&mut self, semitones: f64, frame: Frame) {
+    pub(crate) fn set_pitch_bend(&mut self, semitones: f64, f: u64) {
         if semitones.is_finite() {
-            self.wheels(semitones, self.modulation, frame);
+            self.wheels(semitones, self.modulation, f);
         }
     }
 
-    pub fn set_modulation(&mut self, depth: f64, frame: Frame) {
+    pub(crate) fn set_modulation(&mut self, depth: f64, f: u64) {
         if depth.is_finite() {
-            self.wheels(self.bend, depth.clamp(0.0, 1.0), frame);
+            self.wheels(self.bend, depth.clamp(0.0, 1.0), f);
         }
     }
 
     /// Keep the wheels and apply them to the selected instrument (the drum kit has none).
-    fn wheels(&mut self, bend: f64, modulation: f64, frame: Frame) {
+    fn wheels(&mut self, bend: f64, modulation: f64, f: u64) {
         self.bend = bend;
         self.modulation = modulation;
-        let (t, f) = self.at(frame);
+        let t = self.time(f);
         match self.selected {
             Some(Instrument::Bass) => {
                 self.bass.set_pitch_bend(bend, t, f);
@@ -244,12 +228,22 @@ impl Instruments {
         }
     }
 
-    /// Render frames `frame..frame + left.len()` of all six, each at its level, then the input OTT, into
-    /// `left`/`right` (overwritten), and the record path's frames into `record` (added): the stereo sum
-    /// `delay` less [`LEAD`] frames late.
-    pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [Pair]) {
+    /// Render DSP frames `f..f + left.len()` of all six, each at its level, into `left`/`right`
+    /// (overwritten), a quantum at most per pass (the drum kit's stereo, then lead, pad, piano, organ and
+    /// bass on both sides, in that order, frame by frame).
+    pub(crate) fn render(&mut self, f: u64, left: &mut [f32], right: &mut [f32]) {
+        let (n, q) = (left.len(), QUANTUM as u64);
+        let mut done = 0;
+        while done < n {
+            let at = f + done as u64;
+            let k = ((q - at % q) as usize).min(n - done);
+            self.render_quantum(at, &mut left[done..done + k], &mut right[done..done + k]);
+            done += k;
+        }
+    }
+
+    fn render_quantum(&mut self, f: u64, left: &mut [f32], right: &mut [f32]) {
         let n = left.len();
-        let f = self.at(frame).1;
         let coef = self.gain_coef;
         self.drums.render(f, left, right);
         self.levels[Instrument::Drums as usize].apply_stereo(coef, left, right);
@@ -269,6 +263,86 @@ impl Instruments {
             *l += x;
             *r += x;
         }
+    }
+}
+
+pub struct Instruments {
+    bank: Bank,
+    /// Device frames the DSP clock is behind.
+    offset: Frame,
+    /// The record path's delay line: the instruments' stereo sum, `delay` frames late.
+    line: Vec<Pair>,
+    write: usize,
+    /// The input OTT on the sum, after the levels.
+    ott: StereoOtt,
+}
+
+impl Instruments {
+    /// Allocates: build it off the audio thread. `max_block` bounds a render, `max_input` the device's
+    /// input side (the record line holds it plus [`max_chain_latency`] plus a block); `white` and `pink`
+    /// are Tone's noise tables (`dsp::noise`).
+    pub fn new(sample_rate: u32, max_block: usize, max_input: Frame, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
+        Instruments {
+            bank: Bank::new(sample_rate, white, pink),
+            offset: 0,
+            line: vec![[0.0; 2]; (max_input.max(0) + max_chain_latency(sample_rate)) as usize + max_block],
+            write: 0,
+            ott: StereoOtt::new(sample_rate),
+        }
+    }
+
+    pub fn selected(&self) -> Option<Instrument> {
+        self.bank.selected()
+    }
+
+    /// `instrument`'s level (linear, 0..): it glides there from the frame it is set.
+    pub fn set_gain(&mut self, instrument: Instrument, gain: f32) {
+        self.bank.set_gain(instrument, if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 });
+    }
+
+    /// The input OTT's setting, from the next frame rendered.
+    pub fn set_ott(&mut self, setting: Setting) {
+        self.ott.set(setting);
+    }
+
+    pub fn set_offset(&mut self, offset: Frame) {
+        self.offset = offset;
+    }
+
+    /// A device frame on the DSP clock.
+    fn at(&self, frame: Frame) -> u64 {
+        (frame - self.offset) as u64
+    }
+
+    pub fn select(&mut self, instrument: Option<Instrument>, frame: Frame) {
+        self.bank.select(instrument, self.at(frame));
+    }
+
+    pub fn note_on(&mut self, note: u8, velocity: f32, frame: Frame) {
+        self.bank.note_on(note, velocity, self.at(frame));
+    }
+
+    pub fn note_off(&mut self, note: u8, frame: Frame) {
+        self.bank.note_off(note, self.at(frame));
+    }
+
+    pub fn all_notes_off(&mut self, frame: Frame) {
+        self.bank.all_notes_off(self.at(frame));
+    }
+
+    pub fn set_pitch_bend(&mut self, semitones: f64, frame: Frame) {
+        self.bank.set_pitch_bend(semitones, self.at(frame));
+    }
+
+    pub fn set_modulation(&mut self, depth: f64, frame: Frame) {
+        self.bank.set_modulation(depth, self.at(frame));
+    }
+
+    /// Render frames `frame..frame + left.len()` of all six, each at its level, then the input OTT, into
+    /// `left`/`right` (overwritten), and the record path's frames into `record` (added): the stereo sum
+    /// `delay` less [`LEAD`] frames late.
+    pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [Pair]) {
+        self.bank.render(self.at(frame), left, right);
         self.ott.process(left, right);
         let len = self.line.len();
         let delay = (delay - LEAD).clamp(0, (len - 1) as Frame) as usize;

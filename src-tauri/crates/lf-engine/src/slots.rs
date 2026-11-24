@@ -554,22 +554,30 @@ fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
     }
 }
 
-/// The events one unit gets over a call into `ev`: a playing unit every NoteOn of the slot's `events`
-/// (it holds the key from there) and a NoteOff only for a key it holds; a leaving one (removed,
-/// withdrawn, replaced) none of them, only the releases of what it holds, at the call's first frame,
-/// once.
+/// The events one unit gets over a call into `ev`: a playing unit every NoteOn and wheel of the slot's
+/// `events` (it holds a NoteOn's key from there) and a NoteOff only for a key it holds; a leaving one
+/// (removed, withdrawn, replaced) none of them, only the releases of what it holds, at the call's first
+/// frame, once. So a source change releases the old source's notes on the frame it applies (a sustained
+/// one too: the router withholds its NoteOff), the new source starts holding none, and a NoteOff for a
+/// key the new one never got is dropped (`docs/unit-contract.md` §4).
 fn unit_events(ev: &mut Vec<SlotEvent>, held: &mut [u64; 2], events: &[SlotEvent], playing: bool) {
     ev.clear();
     let bit = |key: u8| ((key / 64) as usize, 1u64 << (key % 64));
     if playing {
         for e in events {
-            let (w, b) = match e.kind {
-                SlotEventKind::NoteOn { key, .. } | SlotEventKind::NoteOff { key } => bit(key),
-            };
             match e.kind {
-                SlotEventKind::NoteOn { .. } => held[w] |= b,
-                SlotEventKind::NoteOff { .. } if held[w] & b != 0 => held[w] &= !b,
-                SlotEventKind::NoteOff { .. } => continue,
+                SlotEventKind::NoteOn { key, .. } => {
+                    let (w, b) = bit(key);
+                    held[w] |= b;
+                }
+                SlotEventKind::NoteOff { key } => {
+                    let (w, b) = bit(key);
+                    if held[w] & b == 0 {
+                        continue;
+                    }
+                    held[w] &= !b;
+                }
+                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => {}
             }
             ev.push(*e);
         }
@@ -777,6 +785,12 @@ impl Slot {
     /// A seat takes notes: one holds a unit and is not leaving.
     fn plays(&self) -> bool {
         self.chain().any(|k| self.seats[k].unit.is_some())
+    }
+
+    /// A seat takes the wheels: one holds a SYNTH and is not leaving. Only such a chain is handed them
+    /// (and only then do they split the slots' render), so a chain without one renders as before.
+    fn takes_wheels(&self) -> bool {
+        self.chain().any(|k| self.seats[k].unit.is_some() && self.seats[k].info.kind == UnitKind::Synth)
     }
 
     /// Units the slot holds: every seat's, and an install taken from its ring.
@@ -1949,6 +1963,22 @@ impl Rack {
         let offset = self.offset(now);
         if let Some(s) = self.target.map(|i| &mut self.slots[i]) {
             s.release_all(offset, &mut self.events_dropped);
+        }
+    }
+
+    /// Whether the note target's chain takes the wheels now (it seats a SYNTH): only then is a wheel
+    /// command a slot command that splits the slots' render (`engine.rs` `first_slot_pending`).
+    pub(crate) fn takes_wheels(&self) -> bool {
+        self.target.is_some_and(|i| self.slots[i].takes_wheels())
+    }
+
+    /// A wheel ([`SlotEventKind::PitchBend`] or [`SlotEventKind::Modulation`]) for the note target's
+    /// chain on `now`, as a note goes, while it seats a SYNTH; nowhere otherwise.
+    pub(crate) fn wheel(&mut self, kind: SlotEventKind, now: Frame) {
+        let offset = self.offset(now);
+        let Some(s) = self.target.map(|i| &mut self.slots[i]) else { return };
+        if s.takes_wheels() {
+            s.queue(kind, offset, &mut self.events_dropped);
         }
     }
 

@@ -252,6 +252,8 @@ impl Vst2Unit {
                     self.held[usize::from(key / 64)] &= !(1 << (key % 64));
                     [0x80, key, 0, 0]
                 }
+                // A plugin ignores the wheels (owner decision D12).
+                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => continue,
             };
             self.midi[count] = event((e.offset as usize).saturating_sub(at), midi_data);
             count += 1;

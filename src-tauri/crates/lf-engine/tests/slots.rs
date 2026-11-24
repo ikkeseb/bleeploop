@@ -82,6 +82,8 @@ impl Probe {
             .map(|(_, _, k)| match k {
                 SlotEventKind::NoteOn { key, .. } => (true, key),
                 SlotEventKind::NoteOff { key } => (false, key),
+                // A wheel reaches only a chain that seats a SYNTH, which no test here builds.
+                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => panic!("a wheel reached a chain without a SYNTH"),
             })
             .collect()
     }
