@@ -1243,6 +1243,12 @@ impl Model {
         expired
     }
 
+    /// Whether a plate of `kind` is reseating ([`GateStatus::Reseating`]): a `Toggle::Units(kind)` waits
+    /// in the gate until none is, so it switches every unit of its kind once each is back.
+    pub(crate) fn kind_reseating(&self, kind: UnitKind) -> bool {
+        self.slots.iter().flat_map(|s| &s.plates).any(|p| p.kind == kind && !p.legacy && self.unit_gate_status(p.id) == GateStatus::Reseating)
+    }
+
     pub(crate) fn unit_gate_status(&self, id: UnitId) -> GateStatus {
         let Some((slot, plate)) = self.find_plate(id) else {
             return GateStatus::Gone;

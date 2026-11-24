@@ -209,10 +209,21 @@ impl Command {
         }
     }
 
-    /// A command a plugin slot hears: the note target, the notes, the slot's live flag and gain, and the
-    /// input OTT's switch and controls (each slot runs an instance on its output). Like the instrument
-    /// commands it never waits behind the looper, and the engine renders the slots up to its frame
-    /// before applying it.
+    /// The built-in effect kind a [`Toggle::Units`] press names ([`Action::Toggle`] pressed or on a named
+    /// lane): what switches every seated unit of that kind. `None` for any other command, and for a
+    /// kind that is no built-in effect (`Plugin`, `Synth`), which names no toggle.
+    pub fn kind_toggle(&self) -> Option<UnitKind> {
+        match *self {
+            Command::Action(Action::Toggle(Toggle::Units(kind))) | Command::ActionOn(_, Action::Toggle(Toggle::Units(kind))) if kind.is_builtin_effect() => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// A command a plugin slot hears: the note target, the notes, the slot's live flag and gain, the
+    /// input OTT's switch and controls (each slot runs an instance on its output), and per-unit or
+    /// built-in-effect-kind bypass/param commands. Like the instrument commands it never waits behind
+    /// the looper, and the engine renders the slots up to its frame before applying it (a
+    /// [`Toggle::Units`] command splits a block's slot render only while a seat of that kind exists).
     pub fn reaches_slots(&self) -> bool {
         matches!(
             self,
@@ -229,7 +240,8 @@ impl Command {
                 | Command::SetUnitParam(..)
                 | Command::Action(Action::ToggleUnit(_))
                 | Command::ActionOn(_, Action::ToggleUnit(_))
-        ) || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
+        ) || self.kind_toggle().is_some()
+            || matches!(self, Command::SetInputSendParam(p, _) if p.send() == InputSend::Ott)
     }
 
     /// A command for the input sends or the input OTT, a toggle included. It never waits behind the
@@ -275,10 +287,11 @@ impl InputSend {
     }
 }
 
-/// A setting a hands-free press switches ([`Action::Toggle`]): the click, END STOP, FIXED, RETAKE, AUTO REC,
-/// each input send and the input OTT, and each plugin slot's GO LIVE. The engine owns each one's value; a press says "switch
-/// it" and the engine reads the value it switches when the press applies, so two producers (a pedal, a
-/// click on screen) never undo each other by sending what each last saw.
+/// A setting (or built-in effect kind) a hands-free press switches ([`Action::Toggle`]): the click,
+/// END STOP, FIXED, RETAKE, AUTO REC, each input send and the input OTT, each plugin slot's GO LIVE,
+/// and every seated unit of a built-in effect kind ([`Toggle::Units`]). The engine owns each one's
+/// value; a press says "switch it" and the engine reads the value it switches when the press applies,
+/// so two producers (a pedal, a click on screen) never undo each other by sending what each last saw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Toggle {
     Click,
@@ -291,10 +304,19 @@ pub enum Toggle {
     /// ([`Command::reaches_slots`]) and disarms no pending CLEAR: GO LIVE's press sends [`Command::Press`]
     /// for that. A slot past [`SLOT_COUNT`] is no setting: the engine ignores it and answers nothing.
     Live(u8),
+    /// Every seated unit of a built-in effect kind (`Echo`, `Reverb`, `Ring`, `Ott`) across both
+    /// slots (`docs/unit-contract.md` §2, §6): if any is on (not bypassed), all go bypassed; else all
+    /// come on; answered by one [`Event::Toggled`] and each changed [`Event::Chain`]; with none of
+    /// that kind seated, does nothing. Not a kept setting: no setter ([`Toggle::setter`] returns
+    /// `None`), its `Toggled` is never replayed on rebuild. A non-effect kind (`Plugin`, `Synth`)
+    /// does not [`Toggle::exists`] and is ignored.
+    Units(UnitKind),
 }
 
 impl Toggle {
-    pub const COUNT: usize = 11;
+    /// Kept toggles plus the four built-in effect kinds (`Units` takes `Send`'s four places once
+    /// `input_fx` retires, returning `COUNT` to 11: `docs/unit-contract.md` §2).
+    pub const COUNT: usize = 15;
     pub const ALL: [Toggle; Toggle::COUNT] = [
         Toggle::Click,
         Toggle::EndStop,
@@ -307,11 +329,20 @@ impl Toggle {
         Toggle::Send(InputSend::Ott),
         Toggle::Live(0),
         Toggle::Live(1),
+        Toggle::Units(UnitKind::Echo),
+        Toggle::Units(UnitKind::Reverb),
+        Toggle::Units(UnitKind::Ring),
+        Toggle::Units(UnitKind::Ott),
     ];
 
-    /// Whether it names a setting: every toggle but a slot's past [`SLOT_COUNT`].
+    /// Whether it names a valid toggle: every kept toggle within range, and [`Toggle::Units`] for a
+    /// built-in effect kind (`Echo`, `Reverb`, `Ring`, `Ott`).
     pub fn exists(self) -> bool {
-        !matches!(self, Toggle::Live(s) if usize::from(s) >= SLOT_COUNT)
+        match self {
+            Toggle::Live(s) => usize::from(s) < SLOT_COUNT,
+            Toggle::Units(k) => k.is_builtin_effect(),
+            _ => true,
+        }
     }
 
     /// Its position in [`Toggle::ALL`]; only for a toggle that [`exists`](Toggle::exists).
@@ -324,13 +355,19 @@ impl Toggle {
             Toggle::AutoRec => 4,
             Toggle::Send(send) => 5 + send as usize,
             Toggle::Live(slot) => 9 + usize::from(slot),
+            Toggle::Units(UnitKind::Echo) => 11,
+            Toggle::Units(UnitKind::Reverb) => 12,
+            Toggle::Units(UnitKind::Ring) => 13,
+            Toggle::Units(UnitKind::Ott) => 14,
+            Toggle::Units(_) => unreachable!("Toggle::index called on a non-effect UnitKind"),
         }
     }
 
-    /// The setter that sets it to `on` outright: what initialization and a settings replay send, and
-    /// what the host's settings memory keeps for it.
-    pub fn setter(self, on: bool) -> Command {
-        match self {
+    /// The setter that sets a kept toggle to `on` outright: what initialization and a settings replay
+    /// send, and what the host's settings memory keeps for it. `None` for [`Toggle::Units`], which is
+    /// no kept setting (a rebuild restores every seat's own bypass instead).
+    pub fn setter(self, on: bool) -> Option<Command> {
+        Some(match self {
             Toggle::Click => Command::SetMetronome(on),
             Toggle::EndStop => Command::SetLoopEndStop(on),
             Toggle::Fixed => Command::SetFixedLength(on),
@@ -338,7 +375,8 @@ impl Toggle {
             Toggle::AutoRec => Command::SetAutoRecord(on),
             Toggle::Send(send) => Command::SetInputSend(send, on),
             Toggle::Live(slot) => Command::SetSlotLive(slot, on),
-        }
+            Toggle::Units(_) => return None,
+        })
     }
 }
 
@@ -882,6 +920,13 @@ pub enum UnitKind {
     Synth,
 }
 
+impl UnitKind {
+    /// Whether this kind is one of the four built-in effects ([`Toggle::Units`]).
+    pub const fn is_builtin_effect(self) -> bool {
+        matches!(self, UnitKind::Ott | UnitKind::Echo | UnitKind::Reverb | UnitKind::Ring)
+    }
+}
+
 /// A unit as it is installed, read once ([`UnitProcessor::info`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnitInfo {
@@ -907,6 +952,20 @@ pub struct UnitCx {
     pub meter: Meter,
 }
 
+/// Minimum interval between unit meter publishes per seated unit (`docs/unit-contract.md` §2): 4 ms.
+pub const UNIT_METER_MS: f64 = 4.0;
+
+/// Default entries the unit meter ring holds ([`crate::EngineConfig::unit_meter_capacity`]): 32
+/// flushes of a full 2 × 8 rack (~128 ms at 4 ms cadence, ~2 s with a single unit).
+pub const UNIT_METER_CAPACITY: usize = 512;
+
+/// Minimum frames between consecutive meter publishes for one seat at `sample_rate`:
+/// [`UNIT_METER_MS`] rounded up (a floor: 177 frames at 44.1 kHz, never 176's 3.99 ms), at least one
+/// frame.
+pub fn unit_meter_frames(sample_rate: u32) -> usize {
+    ((sample_rate as f64 * UNIT_METER_MS / 1000.0).ceil() as usize).max(1)
+}
+
 /// Floor for [`BandMeter::level`] and [`BandMeter::level_peak`] in dBFS (`docs/unit-contract.md` §2).
 pub const BAND_LEVEL_FLOOR_DB: f32 = -120.0;
 
@@ -924,6 +983,16 @@ pub struct BandMeter {
     pub level: f32,
     /// Largest linked peak follower in dBFS (floored at [`BAND_LEVEL_FLOOR_DB`]) over the window.
     pub level_peak: f32,
+}
+
+/// One seated unit's folded meter on [`crate::EngineHandle::unit_meters`]
+/// (`docs/unit-contract.md` §2): output peak per channel since the previous publish, and the unit's
+/// per-band meter when [`UnitProcessor::take_meter`] reports one (the OTT).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitMeter {
+    pub unit: UnitId,
+    pub out: [f32; 2],
+    pub bands: Option<[BandMeter; 3]>,
 }
 
 /// The unit seam: one unit of a slot's chain, run inside the engine callback. Its host builds and

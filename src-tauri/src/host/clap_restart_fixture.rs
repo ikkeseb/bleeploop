@@ -1896,7 +1896,7 @@ mod unit_owner {
         fn start_with_blocks(host: EngineHost, blocks: Option<Arc<AtomicU64>>) -> Self {
             let stop = Arc::new(AtomicBool::new(false));
             let mut first_ev = Vec::new();
-            let first = host.drain_feed_taps(&mut first_ev, None, None);
+            let first = host.drain_feed_taps(&mut first_ev, None, None, None);
             let chains = Arc::new(Mutex::new(first.chains.chains));
             let events = Arc::new(Mutex::new(first_ev));
             let overview = Arc::new(Mutex::new(first.overview));
@@ -1935,7 +1935,7 @@ mod unit_owner {
                             }
                         }
                         ev.clear();
-                        let drain = host.drain_feed_taps(&mut ev, None, None);
+                        let drain = host.drain_feed_taps(&mut ev, None, None, None);
                         *chains_t.lock().unwrap() = drain.chains.chains;
                         if drain.overview.is_some() {
                             *overview_t.lock().unwrap() = drain.overview;

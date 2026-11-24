@@ -364,7 +364,7 @@ fn unrelated_bypass_during_latency_changing_reseat_keeps_op_held_and_bound_intac
         host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(20, true) }).unwrap();
         assert!(device.wait_blocks(10));
         let mut ev = Vec::new();
-        let drain = host.drain_feed_taps(&mut ev, None, None);
+        let drain = host.drain_feed_taps(&mut ev, None, None, None);
         assert!(drain.chains.chains[0].held, "slot stays held after unrelated bypass");
         assert!(drain.chains.chains[0].units.iter().find(|u| u.id == 20).unwrap().bypass, "B is bypassed");
         assert_eq!(ua.poll(op_reseat), OpState::Held, "reseat op stays Held");
@@ -727,13 +727,13 @@ fn late_submit_after_gate_deadline_at_same_rate_is_refused_stale() {
     // Just before the gate deadline: plate has not failed yet and the command stays gated.
     host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE - Duration::from_millis(1));
     let mut ev = Vec::new();
-    let before = host.drain_feed_taps(&mut ev, None, None);
+    let before = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(before.chains.chains[0].units[0].state, PlateState::Seated);
     assert_eq!(host.core.gate_dropped.load(SeqCst), 0);
 
     // Advance across the gate deadline deterministically, then flush gate -> plate fails and gated command drops.
     host.core.state.lock().unwrap().model.advance_clock(Duration::from_millis(1));
-    let drain = host.drain_feed_taps(&mut ev, None, None);
+    let drain = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(drain.chains.chains[0].units[0].state, PlateState::Failed);
     assert_eq!(host.core.gate_dropped.load(SeqCst), 1, "gated command dropped after deadline");
 
@@ -1509,7 +1509,7 @@ fn a_drain_mid_swap_never_pairs_the_new_chains_with_the_old_generation() {
         fn rebuild(&self, _generation: u64) -> Vec<Command> {
             let host = EngineHost { core: self.0.upgrade().expect("the host lives") };
             let mut ev = Vec::new();
-            let drain = host.drain_feed_taps(&mut ev, None, None);
+            let drain = host.drain_feed_taps(&mut ev, None, None, None);
             self.1.lock().unwrap().push((drain.gen, drain.chains.chains[0].latency));
             Vec::new()
         }
@@ -1523,7 +1523,7 @@ fn a_drain_mid_swap_never_pairs_the_new_chains_with_the_old_generation() {
     let op = ok_op(u.submit(LatentUnit::new(1, 64, Arc::new(AtomicUsize::new(0))), t));
     assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
     let mut ev = Vec::new();
-    let before = host.drain_feed_taps(&mut ev, None, None);
+    let before = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(before.chains.chains[0].latency, 64);
 
     let hook = Arc::new(DrainsMidSwap(Arc::downgrade(&host.core), Mutex::new(Vec::new())));
@@ -1536,7 +1536,7 @@ fn a_drain_mid_swap_never_pairs_the_new_chains_with_the_old_generation() {
         vec![(before.gen, 64)],
         "mid-swap: the old generation with the old engine's chains"
     );
-    let after = host.drain_feed_taps(&mut ev, None, None);
+    let after = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!((after.gen, after.chains.chains[0].latency), (before.gen + 1, 0), "after the publish: the new pair");
     u.release();
 }
@@ -1639,7 +1639,7 @@ fn timely_submit_held_across_gate_deadline_keeps_gated_commands() {
     // flush the gate via a feed drain and send another unit command after the deadline.
     host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(5));
     let mut ev = Vec::new();
-    let mid = host.drain_feed_taps(&mut ev, None, None);
+    let mid = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(host.core.gate_dropped.load(SeqCst), 0, "timely submit must not drop gated commands");
     assert_eq!(mid.chains.chains[0].units[0].state, PlateState::Waiting, "plate stays Waiting, not Failed");
     host.send(TimedCommand { frame: None, command: Command::SetUnitParam(10, level, 0.9) }).unwrap();
@@ -2558,7 +2558,7 @@ fn d2_astra6a_withdrawn_seat_expires_after_deadline_and_push_all_drops_gone() {
 
     host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(1));
     let mut ev = Vec::new();
-    let drain = host.drain_feed_taps(&mut ev, None, None);
+    let drain = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(host.core.gate_dropped.load(SeqCst), 1, "withdrawn gate expired and dropped");
     assert_eq!(drain.chains.chains[0].units[0].state, PlateState::Failed, "expired withdrawn plate reads Failed");
     assert!(!host.core.state.lock().unwrap().gate.has(10));
@@ -2619,7 +2619,7 @@ fn d2_cr_timely_resubmit_during_take_not_expired_by_delayed_withdraw_applied() {
 
     // Now drain: Withdraw Applied arrives AFTER submit, followed by Install Waiting.
     let mut ev = Vec::new();
-    let drain = host.drain_feed_taps(&mut ev, None, None);
+    let drain = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(host.core.state.lock().unwrap().poll(op_in), OpState::Held);
     assert_eq!(drain.chains.chains[0].units[0].state, PlateState::Waiting);
 
@@ -2628,7 +2628,7 @@ fn d2_cr_timely_resubmit_during_take_not_expired_by_delayed_withdraw_applied() {
 
     host.core.state.lock().unwrap().model.advance_clock(GATE_DEADLINE + Duration::from_secs(1));
     ev.clear();
-    let after = host.drain_feed_taps(&mut ev, None, None);
+    let after = host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(host.core.gate_dropped.load(SeqCst), 0, "timely held resubmit must not expire");
     assert_eq!(after.chains.chains[0].units[0].state, PlateState::Waiting);
     assert!(host.core.state.lock().unwrap().gate.has(10));
@@ -2636,10 +2636,10 @@ fn d2_cr_timely_resubmit_during_take_not_expired_by_delayed_withdraw_applied() {
     stop_take(&device);
     assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
     ev.clear();
-    host.drain_feed_taps(&mut ev, None, None);
+    host.drain_feed_taps(&mut ev, None, None, None);
     assert!(device.wait_blocks(5));
     ev.clear();
-    host.drain_feed_taps(&mut ev, None, None);
+    host.drain_feed_taps(&mut ev, None, None, None);
     assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "held resubmit receives its gated bypass");
     u.release();
 }
@@ -3452,4 +3452,181 @@ fn p4f1_5b_evicted_source_retrying_after_rebuild_never_replaces_newer_source() {
     assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
     drop(u_b.take_back());
     u_b.release();
+}
+
+/// 56. A kind toggle (`Toggle::Units`) survives a rebuild in send order (`docs/unit-contract.md` §2): a
+///     per-unit command and the toggle the stopped engine never took, then a per-unit command sent while
+///     the unit reseats, apply after the reseat in that order. A: bypass on; K: none of the kind on, so
+///     all come on (`Toggled` on = true); B: the lamp flips it back to bypassed. Any other order ends
+///     unbypassed or answers K with false.
+#[test]
+fn a_kind_toggle_survives_a_rebuild_between_unit_commands_in_send_order() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let factory = ClampFactory { applied: ParamRecorder::new() };
+    let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.5)];
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+    let t1 = u.terms().unwrap();
+    let (unit1, clamped) = factory.build(UnitKind::Echo, &init, t1).unwrap();
+    u.committed(clamped);
+    assert_eq!(host.wait_op(ok_op(u.submit(unit1, t1)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false)]);
+
+    let kind = Command::Action(Action::Toggle(lf_engine::Toggle::Units(UnitKind::Echo)));
+    device.stop();
+    host.send(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) }).unwrap();
+    host.send(TimedCommand { frame: None, command: kind }).unwrap();
+    device.rebuild_at(44_100, 256);
+    let Back::Evicted { unit: old_box, bypassed } = u.take_back().expect("evicted") else { panic!("evicted") };
+    drop(old_box);
+    assert!(!bypassed, "the stopped engine applied neither");
+    host.send(TimedCommand { frame: None, command: Command::Action(Action::ToggleUnit(10)) }).unwrap();
+    {
+        let state = host.core.state.lock().unwrap();
+        assert!(state.gate.holds_kind_toggle(), "the old engine's unapplied kind toggle is in the gate");
+        assert!(state.gate.has(10));
+    }
+    device.resume();
+    ev.clear();
+    host.drain_feed(&mut ev);
+    assert!(host.core.state.lock().unwrap().gate.holds_kind_toggle(), "a flush before the reseat keeps the kind toggle");
+
+    let t2 = u.terms().unwrap();
+    let params = host.core.chain_snapshot().chains[0].units[0].params.as_ref().unwrap().0.clone();
+    let (unit2, _) = factory.build(UnitKind::Echo, &params, t2).unwrap();
+    assert_eq!(host.wait_op(ok_op(u.submit(unit2, t2)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    host.drain_feed(&mut ev);
+    assert!(device.wait_blocks(10));
+    host.drain_feed(&mut ev);
+    assert!(host.core.state.lock().unwrap().gate.is_empty(), "all three sent");
+    let answers: Vec<bool> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            lf_engine::Event::Toggled { toggle: lf_engine::Toggle::Units(UnitKind::Echo), on, .. } => Some(on),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, [true], "the kind toggle applied once, after the bypass-on: all came on");
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "then the lamp: bypassed");
+    assert!(host.core.chain_snapshot().chains[0].units[0].bypass);
+    u.release();
+}
+
+/// 57. With the gate empty, a kind toggle sent while a unit of its kind reseats waits for it, and a
+///     command for a seated unit sent after it waits behind it, then follows it. ECHO 10 reseats, ECHO 30
+///     is back: the kind toggle (both on, so all go off) then 30's lamp (30 back on) ends 10 bypassed,
+///     30 not. Reversed, the lamp turns 30 off first and the toggle (10 still on) turns both off: 30 ends
+///     bypassed, so the last assertion fails.
+#[test]
+fn a_kind_toggle_waits_for_its_kinds_reseat_and_holds_later_unit_commands() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let factory = ClampFactory { applied: ParamRecorder::new() };
+    let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.5)];
+    let seat = |slot: usize, id: UnitId| {
+        let u = host.unit(slot, id, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+        let t = u.terms().unwrap();
+        let (unit, clamped) = factory.build(UnitKind::Echo, &init, t).unwrap();
+        u.committed(clamped);
+        assert_eq!(host.wait_op(ok_op(u.submit(unit, t)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+        u
+    };
+    let u = seat(0, 10);
+    let w = seat(1, 30);
+
+    device.rebuild_at(44_100, 256);
+    for h in [&u, &w] {
+        let Back::Evicted { unit: old, bypassed } = h.take_back().expect("evicted") else { panic!("evicted") };
+        assert!(!bypassed);
+        drop(old);
+    }
+    let reseat = |h: &super::unit_host::UnitHost, slot: usize| {
+        let t = h.terms().unwrap();
+        let params = host.core.chain_snapshot().chains[slot].units[0].params.as_ref().unwrap().0.clone();
+        let (unit, _) = factory.build(UnitKind::Echo, &params, t).unwrap();
+        assert_eq!(host.wait_op(ok_op(h.submit(unit, t)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    };
+    reseat(&w, 1);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert!(host.core.state.lock().unwrap().gate.is_empty());
+
+    host.send(TimedCommand { frame: None, command: Command::Action(Action::Toggle(lf_engine::Toggle::Units(UnitKind::Echo))) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::Action(Action::ToggleUnit(30)) }).unwrap();
+    {
+        let state = host.core.state.lock().unwrap();
+        assert!(state.gate.holds_kind_toggle(), "its kind reseats: the toggle waits");
+        assert!(state.gate.has(30), "a seated unit's command waits behind the held kind toggle");
+    }
+    host.drain_feed(&mut ev);
+    assert!(host.core.state.lock().unwrap().gate.holds_kind_toggle(), "still reseating: still held");
+    assert_eq!(engine_chain_ids(&device, 1), vec![(30, false)], "nothing reached the seated ECHO yet");
+
+    ev.clear();
+    reseat(&u, 0);
+    host.drain_feed(&mut ev);
+    assert!(device.wait_blocks(10));
+    host.drain_feed(&mut ev);
+    assert!(host.core.state.lock().unwrap().gate.is_empty());
+    let answers: Vec<bool> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            lf_engine::Event::Toggled { toggle: lf_engine::Toggle::Units(UnitKind::Echo), on, .. } => Some(on),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, [false], "the kind toggle applied once: an ECHO was on, so all went off");
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, true)], "the toggle reached the reseated ECHO: on → bypassed");
+    assert_eq!(engine_chain_ids(&device, 1), vec![(30, false)], "then 30's lamp, after the toggle: back on");
+    u.release();
+    w.release();
+}
+
+/// 58. A held entry that may go takes a freed ring slot before a new send: with the ring one slot short
+///     of full and an eligible command in the gate (its unit seated, nothing before it), an ordinary
+///     send flushes the gate first, so the held command takes the slot and the send is refused. Without
+///     the flush in `push_all`, the send would take the slot and leave the held command waiting, which
+///     sends that refill the ring after every block could do forever.
+#[test]
+fn a_new_send_lets_an_eligible_held_command_take_the_free_slot_first() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+    let host = device.host().clone();
+    let factory = ClampFactory { applied: ParamRecorder::new() };
+    let init = vec![(UnitParam::Send(InputSendParam::EchoLevel), 0.5)];
+    let u = host.unit(0, 10, Spec::Builtin { kind: UnitKind::Echo, params: init.clone() }, 0, false).unwrap();
+    let t = u.terms().unwrap();
+    let (unit, clamped) = factory.build(UnitKind::Echo, &init, t).unwrap();
+    u.committed(clamped);
+    assert_eq!(host.wait_op(ok_op(u.submit(unit, t)), Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(engine_chain_ids(&device, 0), vec![(10, false)]);
+
+    device.stop();
+    {
+        let mut ends = host.core.ends.lock().unwrap();
+        let ends = ends.as_mut().unwrap();
+        while ends.commands.slots() > 1 {
+            ends.commands.push(TimedCommand { frame: None, command: Command::SetMasterVolume(1.0) }).unwrap();
+        }
+    }
+    host.core.state.lock().unwrap().gate.push(TimedCommand { frame: None, command: Command::SetUnitBypass(10, true) });
+
+    let full_before = host.core.counters.commands_full.load(Relaxed);
+    let sent = host.send(TimedCommand { frame: None, command: Command::SetClickVolume(0.25) });
+    assert!(sent.is_err(), "the held command took the one free slot, so the new send finds the ring full");
+    assert_eq!(host.core.counters.commands_full.load(Relaxed), full_before + 1);
+    assert!(host.core.state.lock().unwrap().gate.is_empty(), "the eligible held command went first");
+    assert_eq!(host.core.ends.lock().unwrap().as_ref().unwrap().commands.slots(), 0);
+
+    device.resume();
+    let deadline = Instant::now() + PATIENCE;
+    while engine_chain_ids(&device, 0) != vec![(10, true)] {
+        assert!(Instant::now() < deadline, "the held bypass never reached the engine");
+        assert!(device.wait_blocks(1));
+        host.drain_feed(&mut ev);
+    }
+    u.release();
 }

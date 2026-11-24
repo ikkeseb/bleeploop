@@ -67,7 +67,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     if let Some(hook) = &hook {
         hook.pause();
     }
-    let EngineHandle { commands, events, slots, overview, session, scope, tuner } = handle;
+    let EngineHandle { commands, events, slots, overview, session, scope, tuner, unit_meters } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
     core.max_block.store(config.max_block as u32, Relaxed);
@@ -120,7 +120,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             if let Some(ends) = ends.as_mut() {
                 super::drain(&mut settings, &mut state, &mut ends.events, gen, &core.chain_protocol_errors, |_| {});
             }
-            state.gate.on_rebuild(unapplied_units, unsent_input.iter().copied().filter(|c| c.unit().is_some()));
+            state.gate.on_rebuild(unapplied_units, unsent_input.iter().copied());
         }
         if let Some((frame, mixes)) = applied {
             for (lane, mix) in mixes.iter().enumerate() {
@@ -145,7 +145,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             settings.record(command);
         }
         let scope_bin = lf_engine::scope::scope_bin_frames(config.sample_rate) as u32;
-        let ends = ends.insert(Ends { commands, pushed: 0, events, overview, session: Some(session), scope, scope_bin, tuner, rate: config.sample_rate });
+        let ends = ends.insert(Ends { commands, pushed: 0, events, overview, session: Some(session), scope, scope_bin, tuner, rate: config.sample_rate, unit_meters });
         let replay: Vec<_> = settings.replay().collect();
         let made = core.engine_gen.fetch_add(1, Release) + 1;
         debug_assert_eq!(made, generation, "another thread raised the engine generation mid-swap");

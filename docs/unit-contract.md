@@ -129,7 +129,7 @@ index in the UI's `SYNTHS` order (0 lead, 1 bass, 2 pad, 3 piano, 4 organ, 5 dru
 ```ts
 interface FeedFrame {
   chains?: [ChainState, ChainState]; // as applied: on a reset frame and on change; absent = unchanged
-  unitMeters: UnitMeter[];           // one per seated unit, every frame
+  unitMeters?: UnitMeter[];          // one per unit with a range since the last frame; absent = none
 }
 interface ChainState { units: UnitState[]; latency: Frame; held: boolean }
 type UnitState = UnitRecord & { // an interface cannot extend the union

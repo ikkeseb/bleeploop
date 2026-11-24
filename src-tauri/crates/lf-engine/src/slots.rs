@@ -99,7 +99,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use crate::api::{max_chain_latency, ChainSeat, Event, InstallToken, Pair, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitParam, UnitProcessor, MAX_UNITS, SLOT_COUNT};
+use crate::api::{max_chain_latency, unit_meter_frames, BandMeter, ChainSeat, Event, InstallToken, Pair, SeatOp, SeatOutcome, SeatRefusal, SlotEvent, SlotEventKind, SlotKind, UnitCx, UnitId, UnitInfo, UnitKind, UnitMeter, UnitParam, UnitProcessor, MAX_UNITS, SLOT_COUNT};
 use crate::dsp::ott::{Setting, StereoOtt};
 use crate::engine::Feed;
 use crate::grid::{Frame, Meter};
@@ -375,6 +375,11 @@ struct Seat {
     /// Owed [`Event::UnitParam`] answers for this seat (one per [`UnitParam`]): the latest applied value
     /// and its frame when the event ring has not taken it yet.
     params_owed: [Option<(Frame, f64)>; UnitParam::COUNT],
+    /// Folded output peak per channel (`[left, right]`) since the last [`UnitMeter`] publish under this
+    /// seat's id: kept across a same-id replacement and a withdrawal, reset by a removal or another id.
+    meter_out: [f32; 2],
+    /// Rendered frames folded into `meter_out` since the last [`UnitMeter`] publish for this seat.
+    meter_frames: usize,
 }
 
 impl Seat {
@@ -644,6 +649,9 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
             process_for(old.as_mut(), cx, [&x[0][..old_len], &x[1][..old_len]], &seat.ev, [&mut ol[a..b], &mut or[a..b]], errors);
         }
         let swapping = seat.outgoing.is_some();
+        // What the seat outputs while it holds its unit, a withdrawal's fade included (the seat stays under
+        // its id); a removal's fade is not (the id leaves with it).
+        let meter_active = !seat.removing && seat.unit.is_some();
         let latency = seat.info.latency as usize;
         let old_latency = if swapping { seat.old_latency } else { latency };
         let cap = seat.line.len();
@@ -689,11 +697,18 @@ fn run_chain(seats: &mut [Seat], gated: [&[f32]; 2], zeros: &[f32], dry: &mut [V
                 seat.out[0][j] = crossfade(input[0], inner[0], seat.fade, n);
                 seat.out[1][j] = crossfade(input[1], inner[1], seat.fade, n);
             }
+            if meter_active {
+                seat.meter_out[0] = seat.meter_out[0].max(seat.out[0][j].abs());
+                seat.meter_out[1] = seat.meter_out[1].max(seat.out[1][j].abs());
+            }
             step(&mut seat.fade, seat.engaged, n);
             step(&mut seat.wet, seat.wet_on, n);
             if swapping && seat.swap < n {
                 seat.swap += 1;
             }
+        }
+        if meter_active {
+            seat.meter_frames = seat.meter_frames.saturating_add(b - a);
         }
     }
     let [tl, tr] = tail;
@@ -876,6 +891,8 @@ impl Slot {
         seat.engaged = false;
         seat.fade = 0;
         seat.params_owed = [None; UnitParam::COUNT];
+        seat.meter_out = [0.0; 2];
+        seat.meter_frames = 0;
         self.seats[k..self.len].rotate_left(1);
         self.len -= 1;
         if self.len == 0 {
@@ -892,6 +909,8 @@ impl Slot {
         }
         let seat = &mut self.seats[k];
         seat.withdrawing = false;
+        // The seat stays under its id: what it output since its last publish waits for a same-id reseat
+        // (a seat without its unit publishes nothing) and goes out with that unit's first range.
         if let Some(unit) = seat.unit.take() {
             let (id, token, bypassed) = (seat.id, seat.token, seat.bypassed);
             self.give_back(Back { id, token, unit, bypassed, left: Left::Withdrawn }, errors);
@@ -1015,6 +1034,13 @@ pub(crate) struct UnitClock {
     pub(crate) meter: Meter,
 }
 
+/// What a bypass command targets for owed-room checks and reservations (`engine.rs`).
+#[derive(Clone, Copy)]
+pub(crate) enum BypassTarget {
+    Unit(UnitId),
+    Kind(UnitKind),
+}
+
 /// The two slots, as the engine holds them.
 pub(crate) struct Rack {
     slots: [Slot; SLOT_COUNT],
@@ -1037,6 +1063,14 @@ pub(crate) struct Rack {
     clock: UnitClock,
     /// The slot [`Rack::offer`] offers first.
     offer_first: usize,
+    /// Per-seat folded meters pushed at most every [`crate::UNIT_METER_MS`] when the ring has room
+    /// (`EngineHandle::unit_meters`, invariant 2).
+    meter_tx: Producer<UnitMeter>,
+    /// Minimum rendered frames between consecutive publishes for one seat ([`unit_meter_frames`]).
+    meter_interval: usize,
+    /// Round-robin start index into `SLOT_COUNT * MAX_UNITS` seats for [`Rack::flush_meters`], so a
+    /// ring with partial room never starves a later seat.
+    meter_cursor: usize,
     pub(crate) events_dropped: u64,
     pub(crate) protocol_errors: u64,
     /// Unit commands naming an id no seat holds.
@@ -1048,11 +1082,16 @@ pub(crate) struct Rack {
 impl Rack {
     /// Allocates: build it off the audio thread. Every record line holds `max_input` (the device's
     /// input side at most: `EngineConfig::max_input_frames`) plus [`max_chain_latency`] plus a block;
-    /// every seat's bypass line [`max_chain_latency`] and one.
-    pub(crate) fn new(sample_rate: u32, max_block: usize, max_input: Frame) -> (Rack, [SlotPort; SLOT_COUNT]) {
+    /// every seat's bypass line [`max_chain_latency`] and one. The unit meter ring is allocated and
+    /// every slot touched here so pushes in the callback never fault an untouched page.
+    pub(crate) fn new(sample_rate: u32, max_block: usize, max_input: Frame, unit_meter_capacity: usize) -> (Rack, [SlotPort; SLOT_COUNT], Consumer<UnitMeter>) {
         let max_latency = max_chain_latency(sample_rate);
         let line = (max_input.max(0) + max_latency) as usize + max_block;
         let block = max_block.max(1);
+        let (mut meter_tx, mut meter_rx) = RingBuffer::new(unit_meter_capacity);
+        let empty_meter = UnitMeter { unit: 0, out: [0.0; 2], bands: None };
+        while meter_tx.push(empty_meter).is_ok() {}
+        while meter_rx.pop().is_ok() {}
         let mut ports = Vec::with_capacity(SLOT_COUNT);
         let slots = std::array::from_fn(|_| {
             let (port, end) = slot_channel();
@@ -1087,6 +1126,8 @@ impl Rack {
                         line_at: 0,
                         filled: 0,
                         params_owed: [None; UnitParam::COUNT],
+                        meter_out: [0.0; 2],
+                        meter_frames: 0,
                     })
                     .collect(),
                 len: 0,
@@ -1133,12 +1174,15 @@ impl Rack {
             cursor: 0,
             clock: UnitClock { skipped: 0, bpm: 120.0, meter: Meter::FOUR_FOUR },
             offer_first: 0,
+            meter_tx,
+            meter_interval: unit_meter_frames(sample_rate),
+            meter_cursor: 0,
             events_dropped: 0,
             protocol_errors: 0,
             unit_commands_dropped: 0,
             unit_params_dropped: 0,
         };
-        (rack, ports)
+        (rack, ports, meter_rx)
     }
 
     fn unit_cx(&self, frame: Frame) -> UnitCx {
@@ -1382,8 +1426,14 @@ impl Rack {
                         }
                         let same_id = seat.id == id;
                         (seat.id, seat.token, seat.info, seat.unit) = (id, token, info, Some(unit));
+                        // A same-id replacement (a reload, a reseat after a withdrawal) keeps what the seat
+                        // output since its last meter publish: that range reaches the ring under the id
+                        // with the new unit's first; only the old unit's own `take_meter` fold leaves with
+                        // it. Another id starts its range here.
                         if !same_id {
                             seat.params_owed = [None; UnitParam::COUNT];
+                            seat.meter_out = [0.0; 2];
+                            seat.meter_frames = 0;
                         }
                         k
                     }
@@ -1401,6 +1451,8 @@ impl Rack {
                         (seat.withdrawing, seat.outgoing, seat.swap) = (false, None, n);
                         (seat.line_at, seat.filled, seat.held) = (0, 0, [0; 2]);
                         seat.params_owed = [None; UnitParam::COUNT];
+                        seat.meter_out = [0.0; 2];
+                        seat.meter_frames = 0;
                         s.len += 1;
                         s.seats[p..=k].rotate_right(1);
                         p
@@ -1466,6 +1518,20 @@ impl Rack {
         Some(true)
     }
 
+    /// Apply bypass `b` to `seat` on frame `cx.frame`, calling `set_bypass` on its unit when live.
+    fn apply_seat_bypass(seat: &mut Seat, b: bool, cx: &UnitCx, n: u32, rendered: bool) {
+        seat.bypassed = b;
+        if !seat.withdrawing {
+            if let Some(unit) = seat.unit.as_mut() {
+                let handled = unit.set_bypass(cx, b);
+                seat.wet_on = !b || handled;
+                if !rendered {
+                    seat.wet = if seat.wet_on { n } else { 0 };
+                }
+            }
+        }
+    }
+
     /// The bypass of unit `id` at `now`: `Some` outright, `None` switched from the engine's value. On a
     /// seat that holds its unit, through [`UnitProcessor::set_bypass`]; a withdrawn seat keeps the value
     /// (a same-id reseat keeps it). Answered by [`Event::Chain`]; an id no seat holds is dropped and
@@ -1480,17 +1546,66 @@ impl Rack {
         let s = &mut self.slots[i];
         let seat = &mut s.seats[k];
         let b = bypassed.unwrap_or(!seat.bypassed);
-        seat.bypassed = b;
-        if !seat.withdrawing {
-            if let Some(unit) = seat.unit.as_mut() {
-                let handled = unit.set_bypass(&cx, b);
-                seat.wet_on = !b || handled;
-                if !rendered {
-                    seat.wet = if seat.wet_on { n } else { 0 };
+        Self::apply_seat_bypass(seat, b, &cx, n, rendered);
+        s.owe_chain(now, &mut self.protocol_errors);
+    }
+
+    /// Whether any seated unit (non-removing) of `kind` exists in either slot.
+    pub(crate) fn has_unit_kind(&self, kind: UnitKind) -> bool {
+        self.slots.iter().any(|s| s.chain().any(|k| s.seats[k].info.kind == kind))
+    }
+
+    /// Whether any seated unit (non-removing) of `kind` in either slot is currently on (not bypassed).
+    pub(crate) fn any_unit_on(&self, kind: UnitKind) -> bool {
+        self.slots.iter().any(|s| {
+            s.chain().any(|k| {
+                let seat = &s.seats[k];
+                seat.info.kind == kind && !seat.bypassed
+            })
+        })
+    }
+
+    /// [`crate::Toggle::Units`]' any-on rule (`docs/unit-contract.md` §6): across both slots, every
+    /// seated unit of built-in effect `kind` switches — if any is on, all go bypassed (`Some(false)`),
+    /// else all come on (`Some(true)`), owing one [`Event::Chain`] per slot whose chain changed.
+    /// Returns `None` when `kind` is not a built-in effect or no unit of `kind` is seated (does nothing).
+    pub(crate) fn toggle_units(&mut self, kind: UnitKind, now: Frame) -> Option<bool> {
+        if !kind.is_builtin_effect() {
+            return None;
+        }
+        let mut any_seated = false;
+        let mut any_on = false;
+        for s in &self.slots {
+            for k in s.chain() {
+                let seat = &s.seats[k];
+                if seat.info.kind == kind {
+                    any_seated = true;
+                    if !seat.bypassed {
+                        any_on = true;
+                    }
                 }
             }
         }
-        s.owe_chain(now, &mut self.protocol_errors);
+        if !any_seated {
+            return None;
+        }
+        let target_bypassed = any_on;
+        let (n, rendered, cx) = (self.fade_frames, self.rendered, self.unit_cx(now));
+        for s in &mut self.slots {
+            let mut changed = false;
+            for k in 0..s.len {
+                let seat = &mut s.seats[k];
+                if seat.removing || seat.info.kind != kind || seat.bypassed == target_bypassed {
+                    continue;
+                }
+                Self::apply_seat_bypass(seat, target_bypassed, &cx, n, rendered);
+                changed = true;
+            }
+            if changed {
+                s.owe_chain(now, &mut self.protocol_errors);
+            }
+        }
+        Some(!target_bypassed)
     }
 
     /// Apply `param` = `value` to unit `id` at `now` through [`UnitProcessor::set_param`]. Answered by
@@ -1535,24 +1650,53 @@ impl Rack {
         })
     }
 
-    /// Whether a bypass command on unit `id` can apply now: its chain has a place among what its slot
-    /// owes (an id no seat holds needs none: it is dropped). One that cannot waits, with every bypass
-    /// command sent after it (the engine's table), so none is folded or lost.
-    pub(crate) fn bypass_room(&self, id: UnitId) -> bool {
-        self.slots.iter().find(|s| s.find(id).is_some()).is_none_or(|s| s.owed.len() + s.kept() < OWED_CAPACITY)
+    /// Whether a bypass command (`SetUnitBypass`, `ToggleUnit`, `Toggle::Units`) can apply now: every
+    /// slot whose chain would change has a place among what it owes (an unseated id or kind needs none).
+    /// One that cannot waits, with every bypass command sent after it (the engine's table), so none is
+    /// folded or lost.
+    pub(crate) fn bypass_room(&self, target: BypassTarget) -> bool {
+        match target {
+            BypassTarget::Unit(id) => {
+                self.slots.iter().find(|s| s.find(id).is_some()).is_none_or(|s| s.owed.len() + s.kept() < OWED_CAPACITY)
+            }
+            BypassTarget::Kind(kind) => {
+                if !kind.is_builtin_effect() {
+                    return true;
+                }
+                let target_bypassed = self.any_unit_on(kind);
+                self.slots.iter().all(|s| {
+                    let would_change = s.chain().any(|k| {
+                        let seat = &s.seats[k];
+                        seat.info.kind == kind && seat.bypassed != target_bypassed
+                    });
+                    !would_change || s.owed.len() + s.kept() < OWED_CAPACITY
+                })
+            }
+        }
     }
 
     /// The bypass commands that wait for a place among what their slot owes (the engine's table, oldest
     /// first among them): each such slot keeps the next place freed for the oldest, ahead of its port's
     /// next message, so a port edit every block never takes the places a waiting bypass needs. Set
     /// before the ports are served.
-    pub(crate) fn reserve_bypasses(&mut self, waiting: impl Iterator<Item = UnitId>) {
+    pub(crate) fn reserve_bypasses(&mut self, waiting: impl Iterator<Item = BypassTarget>) {
         for s in self.slots.iter_mut() {
             s.reserved = false;
         }
-        for id in waiting {
-            if let Some(s) = self.slots.iter_mut().find(|s| s.find(id).is_some()) {
-                s.reserved = true;
+        for target in waiting {
+            match target {
+                BypassTarget::Unit(id) => {
+                    if let Some(s) = self.slots.iter_mut().find(|s| s.find(id).is_some()) {
+                        s.reserved = true;
+                    }
+                }
+                BypassTarget::Kind(kind) => {
+                    for s in self.slots.iter_mut() {
+                        if s.chain().any(|k| s.seats[k].info.kind == kind) {
+                            s.reserved = true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1998,7 +2142,50 @@ impl Rack {
             r[0] += l;
             r[1] += rr;
         }
+        self.flush_meters();
         self.cursor += m as Frame;
+    }
+
+    /// Move each seated unit's folded meter onto `meter_tx` once at least `meter_interval` frames
+    /// (~4 ms) have accumulated, calling `take_meter` only while the ring has room so a full ring
+    /// delays a range and never drops or loses samples (`docs/unit-contract.md` §2). Never allocates,
+    /// locks or blocks (invariant 5).
+    fn flush_meters(&mut self) {
+        let total = SLOT_COUNT * MAX_UNITS;
+        let start = self.meter_cursor;
+        let mut next_cursor = start;
+        for offset in 0..total {
+            if self.meter_tx.slots() == 0 {
+                break;
+            }
+            let idx = (start + offset) % total;
+            let slot_idx = idx / MAX_UNITS;
+            let seat_idx = idx % MAX_UNITS;
+            let s = &mut self.slots[slot_idx];
+            if seat_idx >= s.len {
+                continue;
+            }
+            let seat = &mut s.seats[seat_idx];
+            if seat.removing || seat.withdrawing || seat.meter_frames < self.meter_interval {
+                continue;
+            }
+            let Some(unit) = seat.unit.as_mut() else {
+                continue;
+            };
+            let mut bands = [BandMeter::default(); 3];
+            let has_bands = unit.take_meter(&mut bands);
+            let meter = UnitMeter {
+                unit: seat.id,
+                out: seat.meter_out,
+                bands: has_bands.then_some(bands),
+            };
+            if self.meter_tx.push(meter).is_ok() {
+                seat.meter_out = [0.0; 2];
+                seat.meter_frames = 0;
+                next_cursor = (idx + 1) % total;
+            }
+        }
+        self.meter_cursor = next_cursor;
     }
 }
 
@@ -2036,7 +2223,7 @@ mod tests {
     /// dropped and counted rather than allocating.
     #[test]
     fn notes_past_the_event_queue_are_dropped_and_counted() {
-        let (mut rack, mut ports) = Rack::new(48000, 64, 0);
+        let (mut rack, mut ports, _meters) = Rack::new(48000, 64, 0, crate::api::UNIT_METER_CAPACITY);
         assert!(ports[0].install(1, Box::new(Sink)).is_ok());
         rack.service_idle(0, false);
         rack.select(Some(0), 0);

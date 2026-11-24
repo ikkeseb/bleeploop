@@ -36,7 +36,12 @@
 //!
 //! Blink renders 128 frames at a time. This port takes any block within one quantum and renders the
 //! same bits: the direct stage keeps Blink's per-output summation order, the FFT stages stream (Blink's
-//! FFTConvolver already does), and the pre-delays wrap on quantum boundaries. A cell of the
+//! FFTConvolver already does), and the pre-delays wrap on quantum boundaries. The convolver counts
+//! the frames its stages have streamed; a call whose frame is off that count's phase in the quantum
+//! (a chain unit seated off the grid, or reseated on an engine at another phase) first streams the
+//! frames up to its phase as silence, output dropped, so every stage stays on the quantum grid and
+//! renders what the same convolver renders when fed that silence and then the call's frames. A
+//! continuous stream never takes it, and an inactive quantum skips whole quanta. A cell of the
 //! accumulation buffer gets its contributions in the same order at any block size: stages with equal
 //! post-delays write in one call in stage order, and unequal ones are ≥ 2 944 frames apart.
 //!
@@ -524,6 +529,10 @@ pub struct Convolver {
     sizes: Vec<FftSize>,
     temp: [f32; QUANTUM],
     zeros: [f32; QUANTUM],
+    /// Where a re-alignment's lead-in of silence renders, then is dropped.
+    discard: [f32; QUANTUM],
+    /// Frames the stages have streamed: its phase in the quantum is where their pre-delay rings stand.
+    streamed: u64,
     sample_rate: f64,
     /// The response's length in seconds: how long the node renders after its input goes silent.
     tail: f64,
@@ -549,6 +558,8 @@ impl Convolver {
             sizes,
             temp: [0.0; QUANTUM],
             zeros: [0.0; QUANTUM],
+            discard: [0.0; QUANTUM],
+            streamed: 0,
             sample_rate: sample_rate as f64,
             tail: response[0].len() as f64 / sample_rate as f64,
             last_non_silent_time: 0.0,
@@ -580,10 +591,24 @@ impl Convolver {
             right.fill(0.0);
             return true;
         }
+        // The pre-delay rings wrap on quantum boundaries: a call off the stages' phase (a first call
+        // mid-quantum, a box reseated at another phase) streams silence up to its frame's phase first.
+        let mut phase = (self.streamed % q) as usize;
+        let target = (frame % q) as usize;
+        while phase != target {
+            // Up to the target, or to the boundary when the target lies in the next quantum.
+            let lead = if target > phase { target - phase } else { QUANTUM - phase };
+            for channel in &mut self.channels {
+                channel.process(&self.zeros[..lead], &mut self.discard[..lead], &mut self.sizes, &mut self.temp[..lead]);
+            }
+            self.streamed += lead as u64;
+            phase = (phase + lead) % QUANTUM;
+        }
         let source = input.unwrap_or(&self.zeros[..left.len()]);
         let temp = &mut self.temp[..left.len()];
         self.channels[0].process(source, left, &mut self.sizes, temp);
         self.channels[1].process(source, right, &mut self.sizes, temp);
+        self.streamed += left.len() as u64;
         false
     }
 }

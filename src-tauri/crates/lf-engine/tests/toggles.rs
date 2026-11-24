@@ -57,7 +57,7 @@ fn looping() -> Rig {
 
 #[test]
 fn alternating_producers_each_switch_a_setting_once() {
-    for t in Toggle::ALL {
+    for t in Toggle::ALL.into_iter().filter(|t| t.setter(true).is_some()) {
         let mut rig = Rig::new();
         rig.advance(256);
         let mark = rig.events.len();

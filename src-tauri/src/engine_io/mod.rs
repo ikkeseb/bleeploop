@@ -20,7 +20,7 @@
 //! | `callback` | the callback bodies (ASIO and WASAPI, input and output) and a run's shared state |
 //! | `driver` | the seam the owner opens streams through; `cpal_driver` is the real one, `fake_driver` (tests) the hardware-free one |
 //! | `slot_host` | [`SlotHost`]: a legacy plugin slot's install/remove/eviction handshake, an adapter over `unit_host`'s table |
-//! | `unit_host` | the chain units' handshake with the engine: the table of installs (one row per `UnitHost`, its install token and mailbox), each port message as an op settled from the slot's `Event::Seat`s, the gate that holds a reseating unit's commands, a rebuild's handoff of every row |
+//! | `unit_host` | the chain units' handshake with the engine: the table of installs (one row per `UnitHost`, its install token and mailbox), each port message as an op settled from the slot's `Event::Seat`s, the gate that holds a reseating unit's commands and the kind toggles (`Toggle::Units`) behind or before them, in one send order, a rebuild's handoff of every row |
 //! | `chain` | the model of the slots' chains as the engine applied them, and its wire shapes: what the feed's `chains` carries |
 //! | `chain_cmds` | the chain host (`Chains`): the `chain_*` Tauri commands, the per-slot call order, the unit owners and their join at shutdown, the run's exclusion with legacy plugin slots, editor affinity, tone tokens, `chain:*` window events |
 //! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
@@ -192,7 +192,7 @@ use std::time::{Duration, Instant};
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
 use lf_engine::tuner::TunerFrame;
-use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, TimedCommand, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, TimedCommand, UnitMeter, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -630,6 +630,10 @@ pub(crate) struct Ends {
     /// is built for.
     pub(crate) tuner: Consumer<TunerFrame>,
     pub(crate) rate: u32,
+    /// The unit meter ring (`EngineHandle::unit_meters`): each seated unit's meter, folded by the engine
+    /// at most every 4 ms; drained by the feed every tick with the scope, off the audio thread, and
+    /// folded per unit until a frame carries it (`feed.rs`).
+    pub(crate) unit_meters: Consumer<UnitMeter>,
 }
 
 /// What one feed drain read under `settings` and `ends`, besides the events and taps it moved out.
@@ -764,7 +768,7 @@ pub trait RebuildHook: Send + Sync {
     /// The engine of generation `generation` replaced the old one. Returns what the input path meant to
     /// send and never did that survives the swap: the latest note target and wheels for the settings
     /// memory (recorded before the replay, so the new engine gets them through the replay alone) and
-    /// any queued unit commands in queue order for the host's unit-command gate.
+    /// any queued unit commands and kind toggles in queue order for the host's unit-command gate.
     fn rebuild(&self, generation: u64) -> Vec<Command>;
     /// The replay is queued: input flows again.
     fn resume(&self);
@@ -1181,8 +1185,18 @@ impl EngineHost {
         for command in commands {
             match ends.as_mut() {
                 Some(ends) => {
-                    if let Some(id) = command.command.unit() {
-                        let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+                    // A held entry that may go now takes the ring before this command, under the gate's
+                    // own rules (`unit_host::flush_gate_locked`, as the feed's flush): else sends that
+                    // refill the ring after every block could keep it waiting forever. Entries that may
+                    // not go stay held and delay nothing ungated; a ring the flush fills, or found full for an
+                    // entry that may go (the next free slot is that entry's), refuses this one.
+                    if !state.gate.is_empty() && unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state) {
+                        self.core.counters.commands_full.fetch_add(1, Relaxed);
+                        return Err("the engine's command ring is full".to_string());
+                    }
+                    let (unit, kind) = (command.command.unit(), command.command.kind_toggle());
+                    if unit.is_some() || kind.is_some() {
                         let deadline = state.gate_deadline;
                         let expired = state.model.expire_reseats(Instant::now(), deadline);
                         for exp in expired {
@@ -1191,25 +1205,27 @@ impl EngineHost {
                                 self.core.gate_dropped.fetch_add(n, Relaxed);
                             }
                         }
-                        match state.model.unit_gate_status(id) {
-                            chain::GateStatus::Reseating => {
-                                state.gate.push(id, command);
-                                mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
-                                continue;
-                            }
-                            chain::GateStatus::Gone => {
-                                let n = state.gate.drop_id(id);
-                                self.core.gate_dropped.fetch_add(n + 1, Relaxed);
-                                mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
-                                continue;
-                            }
-                            chain::GateStatus::Seated => {
-                                if state.gate.has(id) {
-                                    state.gate.push(id, command);
+                        // The gate keeps one send order (`unit_host::Gate`): a unit command waits behind
+                        // its id's held ones and any held kind toggle; a kind toggle behind anything held
+                        // and every plate of its kind reseating.
+                        let hold = match (unit, kind) {
+                            (Some(id), _) => match state.model.unit_gate_status(id) {
+                                chain::GateStatus::Reseating => true,
+                                chain::GateStatus::Gone => {
+                                    let n = state.gate.drop_id(id);
+                                    self.core.gate_dropped.fetch_add(n + 1, Relaxed);
                                     mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
                                     continue;
                                 }
-                            }
+                                chain::GateStatus::Seated => state.gate.has(id) || state.gate.holds_kind_toggle(),
+                            },
+                            (None, Some(kind)) => !state.gate.is_empty() || state.model.kind_reseating(kind),
+                            (None, None) => false,
+                        };
+                        if hold {
+                            state.gate.push(command);
+                            mark = Some((self.core.engine_gen.load(Acquire), ends.overview.clone(), ends.pushed));
+                            continue;
                         }
                     }
                     // Kept once the ring took it: a setting the engine never got must not reach a rebuild
@@ -1312,7 +1328,7 @@ impl EngineHost {
     /// came from and its overview (`None` while no engine exists), read under the same lock.
     #[cfg(any(debug_assertions, test))]
     pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
-        let FeedDrain { gen, overview, .. } = self.drain_feed_taps(out, None, None);
+        let FeedDrain { gen, overview, .. } = self.drain_feed_taps(out, None, None, None);
         (gen, overview)
     }
 
@@ -1340,13 +1356,21 @@ impl EngineHost {
     /// oldest first; with `tuner`, the tuner's frames, oldest first, up to the storage's capacity (it
     /// never grows here: the feed sizes it for the engine's ring, `lf_engine::tuner::tuner_capacity`, so
     /// one drain empties a full ring; storage still sized for a smaller ring takes what fits, and the
-    /// rest is discarded). One acquisition of `settings` and `ends` for all three: `ends` is
+    /// rest is discarded); with `unit_meters`, every unit meter the engine published, oldest first (a
+    /// caller without it leaves them in the ring, which a full ring delays and never loses). One
+    /// acquisition of `settings` and `ends` for all of them: `ends` is
     /// the lock the player's own `input_send` batch takes, so the feed takes it once a tick, and a second
     /// acquisition could straddle a rebuild and mix one engine's events with another's taps. The feed
     /// drains the taps every tick, whatever it sends: a ring left to fill would make the next batch a
     /// replay of seconds of old sound. Nothing is analysed here: the feed reads the tuner's frames after
     /// both locks are released.
-    pub(crate) fn drain_feed_taps(&self, out: &mut Vec<Event>, columns: Option<&mut Vec<ScopeBin>>, tuner: Option<&mut Vec<TunerFrame>>) -> FeedDrain {
+    pub(crate) fn drain_feed_taps(
+        &self,
+        out: &mut Vec<Event>,
+        columns: Option<&mut Vec<ScopeBin>>,
+        tuner: Option<&mut Vec<TunerFrame>>,
+        unit_meters: Option<&mut Vec<UnitMeter>>,
+    ) -> FeedDrain {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
         let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else {
             let gen = self.core.engine_gen.load(Acquire);
@@ -1390,6 +1414,11 @@ impl EngineHost {
             // that reset is left for a later tick; nothing is allocated here.
             if tuner.capacity() < ends.tuner.buffer().capacity() {
                 while ends.tuner.pop().is_ok() {}
+            }
+        }
+        if let Some(unit_meters) = unit_meters {
+            while let Ok(meter) = ends.unit_meters.pop() {
+                unit_meters.push(meter);
             }
         }
         FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate, chains, stash_lost }

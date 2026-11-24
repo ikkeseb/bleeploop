@@ -17,8 +17,12 @@
 //!   rings its tail through the second as item 2 composes it, and removing one leaves the other's line
 //!   untouched.
 //! - §5 item 5: `tests/ott.rs`'s cases run on `OttUnit`, and `OttUnit::take_meter`'s `BandMeter`
-//!   matches `StereoOtt`'s own gains and linked followers sample by sample and over folded windows
-//!   (direct `take_meter`; the engine's 4 ms meter ring arrives in a later E3 slice).
+//!   matches `StereoOtt`'s own gains and linked followers sample by sample and over folded windows.
+//! - §2, §6 & §9 E3c: the unit meter ring (`EngineHandle::unit_meters`, at most every 4 ms, late
+//!   draining, full across two feed frames without dropping samples or calling `take_meter`, OTT
+//!   `bands` matching `take_meter` bit for bit, plugins-only rack unsplit) and `Toggle::Units(kind)`'
+//!   any-on rule across both slots (mixed states, same-frame ordering in both ring orders, no kept
+//!   setting / no setter / never replayed via `unsent_toggles`, owed backpressure).
 //!
 //! Every render runs through `tests/common::Rig` or the local `assert_no_alloc` wrapper, bit-identical
 //! across block sizes 1, 32, 64, 127, 128, 480 and 1024 (`docs/unit-contract.md` §9).
@@ -31,6 +35,7 @@ mod pluck;
 use std::f64::consts::{FRAC_1_SQRT_2, LN_10, PI};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 
 use common::refs::{sha256_f32, write_wav, Mulberry32};
@@ -43,8 +48,9 @@ use lf_engine::dsp::ott::{
 use lf_engine::grid::{Frame, Meter};
 use lf_engine::units::{default_reverb_ir, EchoUnit, OttUnit, ReverbUnit, RingUnit};
 use lf_engine::{
-    Action, BandMeter, Command, Event, InputSend, InputSendParam, LaneState, Pair, SlotEvent,
-    UnitCx, UnitId, UnitInfo, UnitKind, UnitParam, UnitProcessor, BAND_LEVEL_FLOOR_DB,
+    unit_meter_frames, Action, BandMeter, ChainSeat, Command, Event, InputSend, InputSendParam,
+    LaneState, Pair, SlotEvent, Toggle, UnitCx, UnitId, UnitInfo, UnitKind, UnitMeter, UnitParam,
+    UnitProcessor, BAND_LEVEL_FLOOR_DB, MAX_UNITS, UNIT_METER_CAPACITY,
 };
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
@@ -3920,4 +3926,1507 @@ fn reverb_stereo_tap_overflow_fails_loudly_off_rt_path() {
     rig.advance(1);
     let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.engine.reverb_stereo_tap()));
     assert!(err.is_err(), "zero-capacity enabled tap must panic on read after rendering 1 frame");
+}
+
+// ── E3c: Unit meter ring (`EngineHandle::unit_meters`) and `Toggle::Units` any-on rule ──────────────
+
+/// Stereo gain fake that logs every `process` call `(frame, len)` into a preallocated buffer and
+/// counts `take_meter` calls without allocating on the audio thread.
+struct MeterProbeUnit {
+    kind: UnitKind,
+    gain: [f32; 2],
+    takes: Arc<AtomicUsize>,
+    calls: Arc<std::sync::Mutex<Vec<(Frame, usize)>>>,
+}
+
+impl MeterProbeUnit {
+    fn new(kind: UnitKind, gain: [f32; 2], max_calls: usize) -> (Box<Self>, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<(Frame, usize)>>>) {
+        let takes = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::with_capacity(max_calls)));
+        let unit = Box::new(MeterProbeUnit { kind, gain, takes: takes.clone(), calls: calls.clone() });
+        (unit, takes, calls)
+    }
+}
+
+impl UnitProcessor for MeterProbeUnit {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: self.kind, source: false, latency: 0 }
+    }
+
+    fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        if let Ok(mut log) = self.calls.try_lock() {
+            if log.len() < log.capacity() {
+                log.push((cx.frame, out[0].len()));
+            }
+        }
+        let [ol, or] = out;
+        for (o, &x) in ol.iter_mut().zip(input[0].iter()) {
+            *o = x * self.gain[0];
+        }
+        for (o, &x) in or.iter_mut().zip(input[1].iter()) {
+            *o = x * self.gain[1];
+        }
+    }
+
+    fn take_meter(&mut self, _bands: &mut [BandMeter; 3]) -> bool {
+        self.takes.fetch_add(1, AtomicOrdering::Relaxed);
+        false
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// Evict every seated unit from both slots and drop them off the audio thread.
+fn evict_all(rig: &mut Rig) -> [Vec<lf_engine::Returned>; 2] {
+    rig.engine.evict_slots();
+    std::array::from_fn(|s| {
+        let mut out = Vec::new();
+        while let Some(ret) = rig.port(s).returned_unit() {
+            out.push(ret);
+        }
+        out
+    })
+}
+
+fn chain_events_since(rig: &Rig, mark: usize, slot: u8) -> Vec<(Frame, Vec<ChainSeat>)> {
+    rig.events[mark..]
+        .iter()
+        .filter_map(|e| match *e {
+            Event::Chain { frame, slot: s, len, seats } if s == slot => {
+                Some((frame, seats[..len as usize].to_vec()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn toggled_events_since(rig: &Rig, mark: usize) -> Vec<(Frame, Toggle, bool)> {
+    rig.events[mark..]
+        .iter()
+        .filter_map(|e| match *e {
+            Event::Toggled { frame, toggle, on } => Some((frame, toggle, on)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_bands_bits_eq(got: &[BandMeter; 3], want: &[BandMeter; 3], what: &str) {
+    for b in 0..3 {
+        assert_eq!(got[b].gain.to_bits(), want[b].gain.to_bits(), "{what} band {b} gain: {} vs {}", got[b].gain, want[b].gain);
+        assert_eq!(got[b].gain_min.to_bits(), want[b].gain_min.to_bits(), "{what} band {b} gain_min: {} vs {}", got[b].gain_min, want[b].gain_min);
+        assert_eq!(got[b].gain_max.to_bits(), want[b].gain_max.to_bits(), "{what} band {b} gain_max: {} vs {}", got[b].gain_max, want[b].gain_max);
+        assert_eq!(got[b].level.to_bits(), want[b].level.to_bits(), "{what} band {b} level: {} vs {}", got[b].level, want[b].level);
+        assert_eq!(got[b].level_peak.to_bits(), want[b].level_peak.to_bits(), "{what} band {b} level_peak: {} vs {}", got[b].level_peak, want[b].level_peak);
+    }
+}
+
+/// Fold a unit's `out` peaks over all `UnitMeter` entries for `unit`.
+fn fold_out_peaks(meters: &[UnitMeter], unit: UnitId) -> Option<[f32; 2]> {
+    let mut peak: Option<[f32; 2]> = None;
+    for m in meters.iter().filter(|m| m.unit == unit) {
+        peak = Some(match peak {
+            None => m.out,
+            Some([l, r]) => [l.max(m.out[0]), r.max(m.out[1])],
+        });
+    }
+    peak
+}
+
+/// §2 & §9 E3c: a reader that drains late (~48 ms per drain) loses nothing; every seated unit
+/// publishes at most every 4 ms (`unit_meter_frames`), `out` covers every sample's peak per channel
+/// (distinct L/R 1-sample spikes), only OTT reports `bands`, audio is bit-identical across all seven
+/// block sizes, and a plugins-only rack sees no extra splits (even with a stray `Toggle::Units`).
+#[test]
+fn unit_meter_ring_late_reader_covers_every_sample_at_4ms_cadence() {
+    assert_eq!(unit_meter_frames(48_000), 192);
+    assert_eq!(unit_meter_frames(44_100), 177);
+    assert_eq!(unit_meter_frames(1), 1);
+
+    let bin = unit_meter_frames(SR) as Frame; // 192 frames = 4 ms
+    // Total frames chosen as a multiple of 192 and 480 so block=1,32,64,480 flush cleanly;
+    // we also advance one tail flush window so even 127/128/1024 flush the spike region.
+    let active_frames: Frame = 4_800; // 100 ms
+    let tail_frames: Frame = 1_024;
+    let total_frames = active_frames + tail_frames;
+    let drain_every: Frame = 2_304; // 48 ms (~3 feed frames, late reader)
+
+    let mut base_audio: Option<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> = None;
+
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+        // Queue live BEFORE installing so every unit seats at F0 (dsp_frame = 0).
+        rig.queue(Command::SetSlotLive(1, true));
+        // Slot 0: EchoUnit(10) -> OttUnit(20). Slot 1: Plugin MeterProbeUnit(30, gain [1.0, 0.5]).
+        let (probe_unit, _takes, _calls) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 0.5], 0);
+        assert!(rig.port(0).install_at(10, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(0).install_at(20, 2, MAX_UNITS, false, None, Box::new(OttUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(30, 3, MAX_UNITS, false, None, probe_unit).is_ok());
+
+        // Settle lifecycle fades and drain initial meters.
+        rig.advance(1_024);
+        let _ = rig.read_unit_meters();
+
+        let start = rig.frame;
+        // Distinct stereo input per slot, including 1-sample spikes on each channel mid-window.
+        rig.set_stereo_inputs(
+            move |f| {
+                let k = f - start;
+                if k == 913 {
+                    [-0.45, 0.05]
+                } else if k == 2_517 {
+                    [0.05, 0.52]
+                } else if k < active_frames {
+                    let s = fdlibm::sin(std::f64::consts::TAU * 220.0 * k as f64 / SR as f64) as f32;
+                    [0.12 * s, 0.08 * s]
+                } else {
+                    [0.0, 0.0]
+                }
+            },
+            move |f| {
+                let k = f - start;
+                if k == 1_101 {
+                    [-0.93, 0.10]
+                } else if k == 3_333 {
+                    [0.10, 0.88]
+                } else if k < active_frames {
+                    [0.05, -0.04]
+                } else {
+                    [0.0, 0.0]
+                }
+            },
+        );
+        rig.keep_output();
+
+        let mut drained: Vec<UnitMeter> = Vec::new();
+        let mut since_drain: Frame = 0;
+        let mut last_pub_frame: [Option<Frame>; 3] = [None; 3];
+        let mut min_gap = [Frame::MAX; 3];
+        let mut done: Frame = 0;
+        while done < total_frames {
+            let step = (block as Frame).min(total_frames - done);
+            rig.advance(step);
+            done += step;
+            since_drain += step;
+            // At block=1, verify exact >= 4 ms spacing on every single publish; at all blocks,
+            // drain late (~48 ms) so multiple publishes queue up in the ring before the reader takes them.
+            if block == 1 || since_drain >= drain_every || done == total_frames {
+                let batch = rig.read_unit_meters();
+                if block == 1 {
+                    for m in &batch {
+                        let idx = match m.unit { 10 => 0, 20 => 1, 30 => 2, other => panic!("unexpected unit {other}") };
+                        if let Some(prev) = last_pub_frame[idx] {
+                            min_gap[idx] = min_gap[idx].min(rig.frame - prev);
+                        }
+                        last_pub_frame[idx] = Some(rig.frame);
+                    }
+                }
+                drained.extend(batch);
+                since_drain = 0;
+            }
+        }
+
+        // Audio bit-identity across all 7 block sizes.
+        let audio = (rig.monitor.clone(), rig.monitor_right.clone(), rig.record.clone(), rig.record_right.clone());
+        if let Some((ml, mr, rl, rr)) = &base_audio {
+            assert_bits_eq(&audio.0, ml, &format!("{what} monitor L vs block 1"));
+            assert_bits_eq(&audio.1, mr, &format!("{what} monitor R vs block 1"));
+            assert_bits_eq(&audio.2, rl, &format!("{what} record L vs block 1"));
+            assert_bits_eq(&audio.3, rr, &format!("{what} record R vs block 1"));
+        } else {
+            base_audio = Some(audio);
+        }
+
+        // Cadence: at most one publish per 4 ms per seat.
+        let max_publishes = (total_frames / bin) as usize + 1;
+        for id in [10u32, 20, 30] {
+            let count = drained.iter().filter(|m| m.unit == id).count();
+            assert!(count >= 1, "{what}: unit {id} published nothing");
+            assert!(count <= max_publishes, "{what}: unit {id} published {count} times > max {max_publishes}");
+        }
+        if block == 1 {
+            for (i, id) in [10u32, 20, 30].into_iter().enumerate() {
+                assert_eq!(min_gap[i], bin, "block 1 unit {id}: min publish gap {} != {bin}", min_gap[i]);
+            }
+        }
+
+        // Only OTT reports bands; ECHO and plugin report None.
+        assert!(drained.iter().filter(|m| m.unit == 10).all(|m| m.bands.is_none()), "{what}: ECHO bands must be None");
+        assert!(drained.iter().filter(|m| m.unit == 20).all(|m| m.bands.is_some()), "{what}: OTT bands must be Some");
+        assert!(drained.iter().filter(|m| m.unit == 30).all(|m| m.bands.is_none()), "{what}: plugin bands must be None");
+
+        // Slot 1 plugin (gain [1.0, 0.5]) must see exact 1-sample spike peaks: L=0.93, R=0.44.
+        let p30 = fold_out_peaks(&drained, 30).expect("unit 30 meters");
+        assert_eq!(p30[0].to_bits(), 0.93f32.to_bits(), "{what}: plugin L spike peak {}", p30[0]);
+        assert_eq!(p30[1].to_bits(), 0.44f32.to_bits(), "{what}: plugin R spike peak {}", p30[1]);
+
+        // Slot 0 ECHO and OTT must both show distinct non-zero stereo peaks.
+        let p10 = fold_out_peaks(&drained, 10).expect("unit 10 meters");
+        let p20 = fold_out_peaks(&drained, 20).expect("unit 20 meters");
+        assert!(p10[0] >= 0.44 && p10[1] >= 0.51, "{what}: ECHO peaks too low: {p10:?}");
+        assert!(p20[0] > 0.2 && p20[1] > 0.2, "{what}: OTT peaks too low: {p20:?}");
+
+        let returned = evict_all(&mut rig);
+        assert_eq!(returned[0].len(), 2);
+        assert_eq!(returned[1].len(), 1);
+    }
+
+    // Plugins-only rack check: a stray `Toggle::Units(Echo)` stamped mid-block causes ZERO extra
+    // splits of the plugin's `process` calls (one per block, over a fixed 4096-frame span), and the
+    // whole render is bit-identical across all 7 block sizes.
+    const SPAN: Frame = 4_096;
+    let mut base_plugin_audio: Option<(Vec<f32>, Vec<f32>)> = None;
+    for block in BLOCKS {
+        let what = format!("plugins-only block {block}");
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+        let (u, _takes, calls) = MeterProbeUnit::new(UnitKind::Plugin, [0.8, 0.4], SPAN as usize);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, u).is_ok());
+        rig.set_stereo_inputs(|f| [0.25 * ((f % 17) as f32 / 17.0), -0.15 * ((f % 13) as f32 / 13.0)], |_| [0.0; 2]);
+        let stray = F0 + 2 * block as Frame + (block as Frame / 2).max(1);
+        rig.send_at(stray, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.keep_output();
+        rig.advance(SPAN);
+        let logged = calls.lock().unwrap().clone();
+        let want_calls = ((SPAN + block as Frame - 1) / block as Frame) as usize;
+        assert_eq!(logged.len(), want_calls, "{what}: stray Toggle::Units must not split plugin calls: {logged:?}");
+        for (k, &(f, len)) in logged.iter().enumerate() {
+            let at = k as Frame * block as Frame;
+            assert_eq!((f, len as Frame), (F0 + at, (block as Frame).min(SPAN - at)), "{what}: call {k}");
+        }
+        assert_eq!((rig.monitor.len(), rig.monitor_right.len()), (SPAN as usize, SPAN as usize), "{what}: the whole span was kept");
+        if let Some((bl, br)) = &base_plugin_audio {
+            assert_bits_eq(&rig.monitor, bl, &format!("{what} L"));
+            assert_bits_eq(&rig.monitor_right, br, &format!("{what} R"));
+        } else {
+            base_plugin_audio = Some((rig.monitor.clone(), rig.monitor_right.clone()));
+        }
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+    }
+}
+
+/// The monitor of [`unit_meter_ring_full_across_two_feed_frames_delays_and_covers_every_sample`]'s rig,
+/// rendered again at block 1 with the same installs and inputs (zero before `run_start`, the stall's
+/// input from `stall_start`), the ring never full: frames `run_start..end`, left and right.
+fn full_ring_reference_audio(
+    run_start: Frame,
+    stall_start: Frame,
+    end: Frame,
+    ott_input: impl Fn(Frame, Option<Frame>) -> Pair + Copy + 'static,
+    cnt_input: impl Fn(Frame, Option<Frame>) -> Pair + Copy + 'static,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 1, ..Opts::default() });
+    rig.set(Command::SetSlotLive(1, true));
+    let (cnt_unit, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+    assert!(rig.port(0).install_at(10, 1, MAX_UNITS, false, None, Box::new(OttUnit::new(SR))).is_ok());
+    assert!(rig.port(1).install_at(20, 2, MAX_UNITS, false, None, cnt_unit).is_ok());
+    rig.send_at(F0, Command::SetUnitParam(10, UnitParam::Send(InputSendParam::OttTime), 0.0));
+    rig.advance_to(run_start);
+    let _ = rig.read_unit_meters();
+    let from = move |f: Frame| (f >= stall_start).then_some(stall_start);
+    rig.set_stereo_inputs(move |f| ott_input(f, from(f)), move |f| cnt_input(f, from(f)));
+    rig.keep_output();
+    while rig.frame < end {
+        rig.advance((end - rig.frame).min(1_024));
+        let _ = rig.read_unit_meters();
+    }
+    (rig.monitor.clone(), rig.monitor_right.clone())
+}
+
+/// §9 E3c proof: when `EngineHandle::unit_meters` is full across two feed frames (~42 ms),
+/// `take_meter` is NOT called while full, no samples are lost, and the next `UnitMeter` emitted
+/// after draining covers every single sample from the pre-stall flush through the post-drain flush
+/// (catching 1-sample L/R spikes AND OTT's mid-stall `gain_min`/`level_peak` dip that recovers
+/// before draining), bit-identical against standalone `OttUnit::take_meter` at all 7 `BLOCKS`.
+#[test]
+fn unit_meter_ring_full_across_two_feed_frames_delays_and_covers_every_sample() {
+    let cap = 8usize;
+    let stall_frames: Frame = 2_048; // > 42 ms at 48 kHz (> two 60 Hz feed frames)
+
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let mut rig = Rig::with_config(Opts { sr: SR, start: F0, block, ..Opts::default() }, |cfg| {
+            cfg.unit_meter_capacity = cap;
+        });
+        rig.set(Command::SetSlotLive(1, true));
+        let (cnt_unit, cnt_takes, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+        assert!(rig.port(0).install_at(10, 1, MAX_UNITS, false, None, Box::new(OttUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(20, 2, MAX_UNITS, false, None, cnt_unit).is_ok());
+
+        // Phase 1: fill the ring to capacity while recording the exact frame of each publish.
+        // Set `OttTime = 0.0` (fast release) so the mid-stall burst clearly dips `gain_min` and
+        // peaks `level_peak` and then recovers before draining.
+        rig.send_at(F0, Command::SetUnitParam(10, UnitParam::Send(InputSendParam::OttTime), 0.0));
+        // Advance silence until >= 1024 frames AND OTT just flushed (so `seat.meter_frames == 0`),
+        // then start filling the ring cleanly.
+        let mut settle_frames: Frame = 0;
+        loop {
+            rig.advance(block as Frame);
+            settle_frames += block as Frame;
+            let got = rig.read_unit_meters();
+            if settle_frames >= 1_024 && got.iter().any(|m| m.unit == 10) {
+                break;
+            }
+        }
+        let run_start = rig.frame;
+
+        let ott_input = move |f: Frame, stall_start: Option<Frame>| -> Pair {
+            let k = f - run_start;
+            let base = (0.04 * fdlibm::sin(std::f64::consts::TAU * 310.0 * k as f64 / SR as f64)) as f32;
+            match stall_start {
+                Some(s) if (s + 100..s + 400).contains(&f) => {
+                    // Loud multi-band burst early in the stall (pushes OTT gain_min down and
+                    // level_peak up), followed by quiet audio so gain/level recover before drain.
+                    let t = (f - s) as f64 / SR as f64;
+                    let low = 0.55 * fdlibm::sin(std::f64::consts::TAU * 90.0 * t);
+                    let mid = 0.45 * fdlibm::sin(std::f64::consts::TAU * 1_100.0 * t);
+                    let hi = 0.35 * fdlibm::sin(std::f64::consts::TAU * 6_500.0 * t);
+                    [(low + mid + hi) as f32, (low - 0.7 * mid + hi) as f32]
+                }
+                _ => [base, base * 0.5],
+            }
+        };
+        let cnt_input = move |f: Frame, stall_start: Option<Frame>| -> Pair {
+            match stall_start {
+                Some(s) if f == s + 317 => [-0.91, 0.02],
+                Some(s) if f == s + 1_211 => [0.02, 0.73],
+                _ => [0.02, -0.01],
+            }
+        };
+
+        rig.set_stereo_inputs(move |f| ott_input(f, None), move |f| cnt_input(f, None));
+        rig.keep_output();
+
+        // Advance block by block until the ring is 100% full (`pending == cap`), tracking every
+        // push frame by watching `unit_meters_pending()` grow.
+        let mut prev_pending = 0usize;
+        let mut push_frames: Vec<Frame> = Vec::new();
+        while rig.unit_meters_pending() < cap {
+            rig.advance(block as Frame);
+            let now_pending = rig.unit_meters_pending();
+            for _ in prev_pending..now_pending {
+                push_frames.push(rig.frame);
+            }
+            prev_pending = now_pending;
+            assert!(rig.frame - run_start < 48_000, "{what}: ring never filled");
+        }
+        assert_eq!(rig.unit_meters_pending(), cap, "{what}: ring full");
+        assert_eq!(push_frames.len(), cap);
+
+        // Phase 2: stall across TWO full feed frames (> 42 ms) with the ring 100% full.
+        let stall_start = rig.frame;
+        let takes_before_stall = cnt_takes.load(AtomicOrdering::Relaxed);
+        rig.set_stereo_inputs(
+            move |f| ott_input(f, Some(stall_start)),
+            move |f| cnt_input(f, Some(stall_start)),
+        );
+
+        let mut stall_done: Frame = 0;
+        while stall_done < stall_frames {
+            let step = (block as Frame).min(stall_frames - stall_done);
+            rig.advance(step);
+            stall_done += step;
+            assert_eq!(rig.unit_meters_pending(), cap, "{what}: ring stayed full during stall");
+            assert_eq!(
+                cnt_takes.load(AtomicOrdering::Relaxed),
+                takes_before_stall,
+                "{what}: take_meter must NOT be called while ring is full"
+            );
+        }
+
+        // Phase 3: drain the full ring (discovering which pre-fill entry belonged to OTT, so we
+        // know the exact frame of OTT's last pre-stall take).
+        let old_entries = rig.read_unit_meters();
+        assert_eq!(old_entries.len(), cap, "{what}: drained all {cap} pre-stall entries");
+        let last_ott_idx = old_entries.iter().rposition(|m| m.unit == 10).expect("OTT pushed before full");
+        let last_ott_flush = push_frames[last_ott_idx];
+
+        // Now advance one block so both delayed seats immediately flush onto the freed ring.
+        // Because `meter_frames >= meter_interval` throughout the stall, ONE block is enough!
+        rig.advance(block as Frame);
+        let flush_end = rig.frame;
+        let delayed = rig.read_unit_meters();
+
+        let ott_m = delayed.iter().find(|m| m.unit == 10).expect("delayed OTT meter after drain");
+        let cnt_m = delayed.iter().find(|m| m.unit == 20).expect("delayed probe meter after drain");
+
+        // Verify probe unit caught BOTH 1-sample spikes injected during the 2-feed-frame stall!
+        assert_eq!(cnt_m.out[0].to_bits(), 0.91f32.to_bits(), "{what}: stalled L spike lost: {:?}", cnt_m.out);
+        assert_eq!(cnt_m.out[1].to_bits(), 0.73f32.to_bits(), "{what}: stalled R spike lost: {:?}", cnt_m.out);
+        assert!(cnt_m.bands.is_none(), "{what}: probe has no bands");
+        assert_eq!(cnt_takes.load(AtomicOrdering::Relaxed), takes_before_stall + 1, "{what}: take_meter called once after drain");
+
+        // Rebuild exact standalone OTT fold over `[last_ott_flush, flush_end)` from fresh state
+        // to compare EVERY field of `bands` and `out` bit-for-bit!
+        let mut exact_ott = OttUnit::new(SR);
+        {
+            let cx0 = UnitCx { frame: F0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+            assert_eq!(assert_no_alloc(|| exact_ott.set_param(&cx0, UnitParam::Send(InputSendParam::OttTime), 0.0)), Some(0.0));
+        }
+        let pre_len = (last_ott_flush - F0) as usize;
+        {
+            let mut il = vec![0.0f32; pre_len];
+            let mut ir = vec![0.0f32; pre_len];
+            for k in 0..pre_len {
+                let f = F0 + k as Frame;
+                if f >= run_start {
+                    [il[k], ir[k]] = ott_input(f, None);
+                }
+            }
+            let mut ol = vec![0.0f32; pre_len];
+            let mut or = vec![0.0f32; pre_len];
+            let cx = UnitCx { frame: F0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+            assert_no_alloc(|| exact_ott.process(&cx, [&il, &ir], &[], [&mut ol, &mut or]));
+            let mut discard = [BandMeter::default(); 3];
+            assert_no_alloc(|| exact_ott.take_meter(&mut discard));
+        }
+        let span_len = (flush_end - last_ott_flush) as usize;
+        let mut il = vec![0.0f32; span_len];
+        let mut ir = vec![0.0f32; span_len];
+        for k in 0..span_len {
+            let f = last_ott_flush + k as Frame;
+            let ss = (f >= stall_start).then_some(stall_start);
+            [il[k], ir[k]] = ott_input(f, ss);
+        }
+        let mut ol = vec![0.0f32; span_len];
+        let mut or = vec![0.0f32; span_len];
+        let cx = UnitCx { frame: last_ott_flush, dsp_frame: last_ott_flush - F0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        assert_no_alloc(|| exact_ott.process(&cx, [&il, &ir], &[], [&mut ol, &mut or]));
+        let mut want_bands = [BandMeter::default(); 3];
+        assert!(assert_no_alloc(|| exact_ott.take_meter(&mut want_bands)));
+        let want_peak_l = ol.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        let want_peak_r = or.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+
+        // Confirm the burst genuinely moved gain_min below final gain and level_peak above final level
+        // (so a dropped/truncated stall window would definitely fail!).
+        assert!(
+            want_bands[1].gain_min < want_bands[1].gain - 1.0 && want_bands[1].level_peak > want_bands[1].level + 3.0,
+            "{what}: stall burst did not create a distinct dip/peak to verify: {:?}",
+            want_bands[1]
+        );
+        let got_bands = ott_m.bands.expect("OTT meter has bands");
+        assert_bands_bits_eq(&got_bands, &want_bands, &format!("{what} stalled OTT bands"));
+        assert_eq!(ott_m.out[0].to_bits(), want_peak_l.to_bits(), "{what}: stalled OTT out L");
+        assert_eq!(ott_m.out[1].to_bits(), want_peak_r.to_bits(), "{what}: stalled OTT out R");
+
+        // The audio is the same at every block size and whatever the ring did: the monitor over the whole
+        // run (its units meter at different frames per block size, the ring full for two feed frames)
+        // equals a block-1 render of the same inputs and installs, bit for bit.
+        let (want_l, want_r) = full_ring_reference_audio(run_start, stall_start, rig.frame, ott_input, cnt_input);
+        assert_eq!(rig.monitor.len() as Frame, rig.frame - run_start, "{what}: the kept monitor spans the run");
+        assert_bits_eq(&rig.monitor, &want_l, &format!("{what} monitor L vs a block-1 render"));
+        assert_bits_eq(&rig.monitor_right, &want_r, &format!("{what} monitor R vs a block-1 render"));
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+    }
+
+    // Also verify default `UNIT_METER_CAPACITY` ring fills and delays cleanly without losing a spike.
+    let mut rig = Rig::with(Opts { sr: SR, start: F0, block: 192, ..Opts::default() });
+    let (cnt_unit, cnt_takes, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+    assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, cnt_unit).is_ok());
+    rig.advance(192 * 4);
+    let _ = rig.read_unit_meters();
+    rig.advance(192 * UNIT_METER_CAPACITY as Frame);
+    assert_eq!(rig.unit_meters_pending(), UNIT_METER_CAPACITY);
+    let takes_full = cnt_takes.load(AtomicOrdering::Relaxed);
+    let spike_at = rig.frame + 700;
+    rig.set_stereo_inputs(move |f| if f == spike_at { [-0.87, 0.61] } else { [0.01, 0.01] }, |_| [0.0; 2]);
+    rig.advance(192 * 12); // > 2 feed frames while full
+    assert_eq!(rig.unit_meters_pending(), UNIT_METER_CAPACITY);
+    assert_eq!(cnt_takes.load(AtomicOrdering::Relaxed), takes_full);
+    assert_eq!(rig.read_unit_meters().len(), UNIT_METER_CAPACITY);
+    rig.advance(192);
+    let next = rig.read_unit_meters();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].out, [0.87, 0.61]);
+    assert_eq!(evict_all(&mut rig)[0].len(), 1);
+}
+
+/// §2 & §9 E3c: `OttUnit`'s `bands` and `out` through `EngineHandle::unit_meters` equal a
+/// lockstep standalone `OttUnit::take_meter` bit for bit on every single publish across all 7
+/// block sizes (`BLOCKS`), including mid-run parameter changes and stereo multi-band swells.
+#[test]
+fn unit_meter_ring_ott_bands_equal_take_meter_across_all_blocks() {
+    let bin = unit_meter_frames(SR) as Frame;
+    let total_frames: Frame = 4_800; // 100 ms
+    let mut base_audio: Option<(Vec<f32>, Vec<f32>)> = None;
+
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+        assert!(rig.port(0).install_at(77, 1, MAX_UNITS, false, None, Box::new(OttUnit::new(SR))).is_ok());
+
+        // Settle silence until >= 1024 frames AND the seat just flushed (so `meter_frames == 0`
+        // at `start` for every block size, syncing `last_flush` and `ref_ott` cleanly).
+        let mut settle: Frame = 0;
+        loop {
+            rig.advance(block as Frame);
+            settle += block as Frame;
+            if !rig.read_unit_meters().is_empty() && settle >= 1_024 {
+                break;
+            }
+        }
+        let start = rig.frame;
+        let param_at = start + 2_100;
+
+        let signal = move |f: Frame| -> Pair {
+            let k = (f - start) as f64;
+            let t = k / SR as f64;
+            let env = 0.08 + 0.45 * (0.5 - 0.5 * fdlibm::cos(std::f64::consts::TAU * 12.0 * t));
+            let l = env * (0.5 * fdlibm::sin(std::f64::consts::TAU * 85.0 * t)
+                + 0.35 * fdlibm::sin(std::f64::consts::TAU * 950.0 * t)
+                + 0.25 * fdlibm::sin(std::f64::consts::TAU * 5_400.0 * t));
+            let r = env * (0.4 * fdlibm::sin(std::f64::consts::TAU * 110.0 * t)
+                - 0.3 * fdlibm::sin(std::f64::consts::TAU * 1_400.0 * t)
+                + 0.3 * fdlibm::sin(std::f64::consts::TAU * 7_200.0 * t));
+            [l as f32, r as f32]
+        };
+
+        rig.set_stereo_inputs(signal, |_| [0.0; 2]);
+        rig.send_at(param_at, Command::SetUnitParam(77, UnitParam::Send(InputSendParam::OttDepth), 0.9));
+        rig.keep_output();
+
+        // Standalone reference OTT fed the exact same frames (with exact same param change).
+        let mut ref_ott = OttUnit::new(SR);
+        {
+            let zeros = vec![0.0f32; settle as usize];
+            let mut ol = vec![0.0f32; settle as usize];
+            let mut or = vec![0.0f32; settle as usize];
+            let cx = UnitCx { frame: F0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+            assert_no_alloc(|| ref_ott.process(&cx, [&zeros, &zeros], &[], [&mut ol, &mut or]));
+            let mut discard = [BandMeter::default(); 3];
+            assert_no_alloc(|| ref_ott.take_meter(&mut discard));
+        }
+
+        let mut ref_peak = [0.0f32; 2];
+        let mut last_flush = start;
+        let mut publishes = 0usize;
+        let mut done: Frame = 0;
+
+        while done < total_frames {
+            let step = (block as Frame).min(total_frames - done);
+            let f0 = rig.frame;
+            let f1 = f0 + step;
+            rig.advance(step);
+            done += step;
+
+            // Step standalone OTT over [f0, f1), splitting at `param_at` if inside this block.
+            let mut cur = f0;
+            while cur < f1 {
+                if cur == param_at {
+                    let cx = UnitCx { frame: cur, dsp_frame: cur - F0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+                    assert_eq!(assert_no_alloc(|| ref_ott.set_param(&cx, UnitParam::Send(InputSendParam::OttDepth), 0.9)), Some(0.9));
+                }
+                let seg_end = if cur < param_at && param_at < f1 { param_at } else { f1 };
+                let n = (seg_end - cur) as usize;
+                let il: Vec<f32> = (0..n).map(|k| signal(cur + k as Frame)[0]).collect();
+                let ir: Vec<f32> = (0..n).map(|k| signal(cur + k as Frame)[1]).collect();
+                let mut ol = vec![0.0f32; n];
+                let mut or = vec![0.0f32; n];
+                let cx = UnitCx { frame: cur, dsp_frame: cur - F0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+                assert_no_alloc(|| ref_ott.process(&cx, [&il, &ir], &[], [&mut ol, &mut or]));
+                for (&yl, &yr) in ol.iter().zip(&or) {
+                    ref_peak[0] = ref_peak[0].max(yl.abs());
+                    ref_peak[1] = ref_peak[1].max(yr.abs());
+                }
+                cur = seg_end;
+            }
+
+            let batch = rig.read_unit_meters();
+            if !batch.is_empty() {
+                // Note: if `param_at` fell strictly inside a large block (e.g. block=1024), the
+                // engine may split `Rack::render` at `param_at` and flush twice in one block.
+                // Folding all items in `batch` matches the standalone OTT across [last_flush, f1)!
+                if batch.len() == 1 {
+                    let m = batch[0];
+                    assert_eq!(m.unit, 77);
+                    assert!(f1 - last_flush >= bin, "{what}: published after {} < {bin}", f1 - last_flush);
+                    let mut want_bands = [BandMeter::default(); 3];
+                    assert!(assert_no_alloc(|| ref_ott.take_meter(&mut want_bands)));
+                    assert_bands_bits_eq(&m.bands.expect("OTT bands"), &want_bands, &format!("{what} at {f1}"));
+                    assert_eq!(m.out[0].to_bits(), ref_peak[0].to_bits(), "{what} at {f1} out L");
+                    assert_eq!(m.out[1].to_bits(), ref_peak[1].to_bits(), "{what} at {f1} out R");
+                } else {
+                    // Two flushes inside one command-split block: fold their ranges and compare.
+                    let mut folded_out = [0.0f32; 2];
+                    let mut folded_bands = batch[0].bands.expect("OTT bands");
+                    for m in &batch {
+                        assert_eq!(m.unit, 77);
+                        folded_out[0] = folded_out[0].max(m.out[0]);
+                        folded_out[1] = folded_out[1].max(m.out[1]);
+                        let bs = m.bands.expect("OTT bands");
+                        for b in 0..3 {
+                            folded_bands[b].gain = bs[b].gain;
+                            folded_bands[b].gain_min = folded_bands[b].gain_min.min(bs[b].gain_min);
+                            folded_bands[b].gain_max = folded_bands[b].gain_max.max(bs[b].gain_max);
+                            folded_bands[b].level = bs[b].level;
+                            folded_bands[b].level_peak = folded_bands[b].level_peak.max(bs[b].level_peak);
+                        }
+                    }
+                    let mut want_bands = [BandMeter::default(); 3];
+                    assert!(assert_no_alloc(|| ref_ott.take_meter(&mut want_bands)));
+                    assert_bands_bits_eq(&folded_bands, &want_bands, &format!("{what} split-folded at {f1}"));
+                    assert_eq!(folded_out[0].to_bits(), ref_peak[0].to_bits(), "{what} split-folded out L");
+                    assert_eq!(folded_out[1].to_bits(), ref_peak[1].to_bits(), "{what} split-folded out R");
+                }
+                ref_peak = [0.0; 2];
+                last_flush = f1;
+                publishes += batch.len();
+            }
+        }
+        assert!(publishes >= 4, "{what}: expected multiple publishes, got {publishes}");
+
+        if let Some((bl, br)) = &base_audio {
+            assert_bits_eq(&rig.monitor, bl, &format!("{what} monitor L vs block 1"));
+            assert_bits_eq(&rig.monitor_right, br, &format!("{what} monitor R vs block 1"));
+        } else {
+            base_audio = Some((rig.monitor.clone(), rig.monitor_right.clone()));
+        }
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+    }
+}
+
+/// §2 & §6: `Toggle::Units(kind)` switches every seated unit of a built-in effect kind across both
+/// slots by the any-on rule (if any is on -> all bypassed; else -> all on), emits one `Event::Toggled`
+/// and one `Event::Chain` per CHANGED slot only, leaves other kinds untouched, does nothing when none
+/// of the kind is seated or for non-effect kinds (`Plugin`, `Synth`), disarms CLEAR, and passes a
+/// held looper command without breaking a held CLEAR confirmation. Bit-identical at all 7 `BLOCKS`.
+#[test]
+fn toggle_units_any_on_rule_across_both_slots_and_all_builtin_kinds() {
+    let mut base_audio: Option<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> = None;
+
+    for block in BLOCKS {
+        let what = format!("block {block}");
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+        // Queue live BEFORE installing so every unit seats at F0 (dsp_frame = 0).
+        rig.queue(Command::SetSlotLive(1, true));
+
+        // Slot 0: [Plugin(1, on), Echo(2, on), Echo(3, bypassed), Ott(4, on)]
+        // Slot 1: [Echo(5, bypassed), Reverb(6, on), Ring(7, bypassed)]
+        let (plugin, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [0.9, 0.9], 0);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, plugin).is_ok());
+        assert!(rig.port(0).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(0).install_at(3, 3, MAX_UNITS, true, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(0).install_at(4, 4, MAX_UNITS, false, None, Box::new(OttUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(5, 5, MAX_UNITS, true, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(6, 6, MAX_UNITS, false, None, Box::new(new_reverb_unit())).is_ok());
+        assert!(rig.port(1).install_at(7, 7, MAX_UNITS, true, None, Box::new(RingUnit::new(SR))).is_ok());
+
+        rig.set_stereo_inputs(
+            |f| [0.15 * fdlibm::sin(std::f64::consts::TAU * 220.0 * (f - F0) as f64 / SR as f64) as f32; 2],
+            |f| [0.12 * fdlibm::sin(std::f64::consts::TAU * 330.0 * (f - F0) as f64 / SR as f64) as f32; 2],
+        );
+        rig.keep_output();
+        rig.advance(1_024);
+
+        // Initial toggle values: Echo=true (id 2 on), Reverb=true (id 6 on), Ring=false (id 7 off), Ott=true (id 4 on).
+        assert!(rig.engine.toggles()[Toggle::Units(UnitKind::Echo).index()]);
+        assert!(rig.engine.toggles()[Toggle::Units(UnitKind::Reverb).index()]);
+        assert!(!rig.engine.toggles()[Toggle::Units(UnitKind::Ring).index()]);
+        assert!(rig.engine.toggles()[Toggle::Units(UnitKind::Ott).index()]);
+
+        // 1. Mixed Echo (id 2 on; id 3 & 5 bypassed) -> all 3 bypassed! Only slot 0 changed!
+        let mark = rig.events.len();
+        let t1 = rig.frame + 37;
+        rig.send_at(t1, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.advance(1_024);
+        assert_eq!(toggled_events_since(&rig, mark), vec![(t1, Toggle::Units(UnitKind::Echo), false)], "{what}: step 1 toggled");
+        let c0 = chain_events_since(&rig, mark, 0);
+        let c1 = chain_events_since(&rig, mark, 1);
+        assert_eq!(c0.len(), 1, "{what}: slot 0 changed once");
+        assert_eq!(c0[0].0, t1);
+        assert_eq!(c0[0].1.iter().map(|s| (s.unit, s.bypassed)).collect::<Vec<_>>(), vec![(1, false), (2, true), (3, true), (4, false)], "{what}: step 1 slot 0");
+        assert!(c1.is_empty(), "{what}: slot 1 had no changed Echo so must emit no Chain: {c1:?}");
+
+        // 2. All Echo bypassed -> all 3 come ON! Both slots change (slot 0 emits ONE Chain for both ECHOs)!
+        let mark = rig.events.len();
+        let t2 = rig.frame + 53;
+        rig.send_at(t2, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.advance(1_024);
+        assert_eq!(toggled_events_since(&rig, mark), vec![(t2, Toggle::Units(UnitKind::Echo), true)], "{what}: step 2 toggled");
+        let c0 = chain_events_since(&rig, mark, 0);
+        let c1 = chain_events_since(&rig, mark, 1);
+        assert_eq!(c0.len(), 1, "{what}: slot 0 emits ONE Chain for both ECHOs");
+        assert_eq!(c0[0].0, t2);
+        assert_eq!(c0[0].1.iter().map(|s| (s.unit, s.bypassed)).collect::<Vec<_>>(), vec![(1, false), (2, false), (3, false), (4, false)]);
+        assert_eq!(c1.len(), 1, "{what}: slot 1 emits ONE Chain");
+        assert_eq!(c1[0].0, t2);
+        assert_eq!(c1[0].1.iter().map(|s| (s.unit, s.bypassed)).collect::<Vec<_>>(), vec![(5, false), (6, false), (7, true)]);
+
+        // 3. ActionOn ignores lane; all 3 Echo on -> all 3 bypassed!
+        let mark = rig.events.len();
+        let t3 = rig.frame + 19;
+        rig.send_at(t3, Command::ActionOn(3, Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.advance(1_024);
+        assert_eq!(toggled_events_since(&rig, mark), vec![(t3, Toggle::Units(UnitKind::Echo), false)], "{what}: step 3 toggled");
+        assert_eq!(chain_events_since(&rig, mark, 0).len(), 1);
+        assert_eq!(chain_events_since(&rig, mark, 1).len(), 1);
+
+        // 4. Reverb (on -> off), Ring (off -> on), Ott (on -> off), each touching only its kind.
+        let mark = rig.events.len();
+        let t4 = rig.frame + 11;
+        rig.send_at(t4, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Reverb))));
+        rig.send_at(t4 + 5, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Ring))));
+        rig.send_at(t4 + 9, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Ott))));
+        rig.advance(1_024);
+        assert_eq!(
+            toggled_events_since(&rig, mark),
+            vec![
+                (t4, Toggle::Units(UnitKind::Reverb), false),
+                (t4 + 5, Toggle::Units(UnitKind::Ring), true),
+                (t4 + 9, Toggle::Units(UnitKind::Ott), false),
+            ],
+            "{what}: Reverb, Ring, Ott toggles"
+        );
+        let s0_final: Vec<(UnitId, bool)> = rig.engine.chain(0).map(|s| (s.unit, s.bypassed)).collect();
+        let s1_final: Vec<(UnitId, bool)> = rig.engine.chain(1).map(|s| (s.unit, s.bypassed)).collect();
+        assert_eq!(s0_final, vec![(1, false), (2, true), (3, true), (4, true)], "{what}: slot 0 final");
+        assert_eq!(s1_final, vec![(5, true), (6, true), (7, false)], "{what}: slot 1 final");
+
+        // 5. Non-effect kinds (`Plugin`, `Synth`) do not exist and do nothing even with Plugin(1) seated.
+        assert!(!Toggle::Units(UnitKind::Plugin).exists());
+        assert!(!Toggle::Units(UnitKind::Synth).exists());
+        let mark = rig.events.len();
+        rig.press(Command::Action(Action::Toggle(Toggle::Units(UnitKind::Plugin))));
+        rig.press(Command::Action(Action::Toggle(Toggle::Units(UnitKind::Synth))));
+        rig.advance(256);
+        assert!(toggled_events_since(&rig, mark).is_empty(), "{what}: non-effect kinds emit no Toggled");
+        assert!(chain_events_since(&rig, mark, 0).is_empty(), "{what}: Plugin(1) untouched");
+        assert!(chain_events_since(&rig, mark, 1).is_empty());
+
+        let audio = (rig.monitor.clone(), rig.monitor_right.clone(), rig.record.clone(), rig.record_right.clone());
+        if let Some((ml, mr, rl, rr)) = &base_audio {
+            assert_bits_eq(&audio.0, ml, &format!("{what} monitor L vs block 1"));
+            assert_bits_eq(&audio.1, mr, &format!("{what} monitor R vs block 1"));
+            assert_bits_eq(&audio.2, rl, &format!("{what} record L vs block 1"));
+            assert_bits_eq(&audio.3, rr, &format!("{what} record R vs block 1"));
+        } else {
+            base_audio = Some(audio);
+        }
+
+        let ret = evict_all(&mut rig);
+        assert_eq!((ret[0].len(), ret[1].len()), (4, 3));
+    }
+
+    // 6. With NO unit of that kind seated, `Toggle::Units(kind)` does nothing (no Toggled, no Chain).
+    {
+        let mut rig = Rig::new();
+        rig.advance(256);
+        let mark = rig.events.len();
+        for k in [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Ott] {
+            rig.press(Command::Action(Action::Toggle(Toggle::Units(k))));
+        }
+        rig.advance(256);
+        assert!(toggled_events_since(&rig, mark).is_empty(), "none seated: no Toggled");
+        assert!(chain_events_since(&rig, mark, 0).is_empty(), "none seated: no Chain 0");
+        assert!(chain_events_since(&rig, mark, 1).is_empty(), "none seated: no Chain 1");
+    }
+
+    // 7. Held-looper pass-through + CLEAR disarm (matches Toggle::Send): passing a held CLEAR
+    // confirmation switches ECHO immediately AND lets the held CLEAR still confirm; between two
+    // CLEAR presses, Toggle::Units disarms CLEAR (and an invalid Toggle::Units(Plugin) does not).
+    {
+        let mut rig = Rig::with(Opts { loop_seconds: 60.0, ..Opts::default() });
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        rig.set_level(0.5);
+        rig.record_first_take(0, 16, 2400);
+        rig.set_level(0.0);
+        rig.set(Command::SetMute(0, true));
+        rig.advance(4800);
+        rig.press(Command::SelectTrack(0));
+        rig.press(Command::Copy(0));
+        rig.press(Command::Action(Action::Clear));
+        rig.press(Command::Action(Action::Clear));
+        assert!(rig.engine.holding() && rig.state(0) == LaneState::Playing, "CLEAR confirmation held for copy");
+        rig.press(Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        assert!(!rig.engine.toggles()[Toggle::Units(UnitKind::Echo).index()], "ECHO bypassed immediately while copy runs");
+        rig.idle();
+        assert_eq!(rig.state(0), LaneState::Empty, "held CLEAR confirmation still confirmed");
+        // Between two CLEAR presses on lane 1 (playing), Toggle::Units(Echo) disarms CLEAR.
+        rig.press(Command::SelectTrack(1));
+        rig.press(Command::Action(Action::Clear));
+        rig.press(Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.press(Command::Action(Action::Clear));
+        assert_eq!(rig.state(1), LaneState::Playing, "Toggle::Units disarmed pending CLEAR");
+        // Non-existent Toggle::Units(Plugin) does NOT disarm pending CLEAR.
+        rig.press(Command::Action(Action::Toggle(Toggle::Units(UnitKind::Plugin))));
+        rig.press(Command::Action(Action::Clear));
+        assert_eq!(rig.state(1), LaneState::Empty, "invalid Toggle::Units(Plugin) did not disarm CLEAR");
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+    }
+}
+
+/// Review rule: commands stamped on the SAME frame apply in ring send order; covers BOTH ring
+/// orders of `Toggle::Units(Echo)` with `SetUnitBypass` and with `ToggleUnit`, bit-identical at
+/// all seven `BLOCKS` sizes.
+#[test]
+fn toggle_units_same_frame_order_with_per_unit_bypass_both_ring_orders() {
+    let run = |block: usize, cmds: [Command; 2]| -> (Vec<bool>, Vec<(Toggle, bool)>, Vec<f32>, Vec<f32>) {
+        let mut rig = Rig::with(Opts { sr: SR, start: F0, block, ..Opts::default() });
+        // Queue live BEFORE installing so every unit seats at F0 (dsp_frame = 0).
+        rig.queue(Command::SetSlotLive(1, true));
+        // Slot 0: Echo(1, on). Slot 1: Echo(2, bypassed).
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(2, 2, MAX_UNITS, true, None, Box::new(EchoUnit::new(SR))).is_ok());
+        rig.set_stereo_inputs(
+            |f| [0.2 * fdlibm::sin(std::f64::consts::TAU * 220.0 * (f - F0) as f64 / SR as f64) as f32; 2],
+            |f| [0.2 * fdlibm::sin(std::f64::consts::TAU * 330.0 * (f - F0) as f64 / SR as f64) as f32; 2],
+        );
+        rig.advance(1_024);
+        let mark = rig.events.len();
+        let t = rig.frame + 73;
+        rig.send_at(t, cmds[0]);
+        rig.send_at(t, cmds[1]);
+        rig.keep_output();
+        rig.advance(2_400);
+        let bypassed = vec![
+            rig.engine.chain(0).next().unwrap().bypassed,
+            rig.engine.chain(1).next().unwrap().bypassed,
+        ];
+        let toggled: Vec<(Toggle, bool)> = toggled_events_since(&rig, mark).into_iter().map(|(_, tg, on)| (tg, on)).collect();
+        let (ml, mr) = (rig.monitor.clone(), rig.monitor_right.clone());
+        let ret = evict_all(&mut rig);
+        assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
+        (bypassed, toggled, ml, mr)
+    };
+
+    let cases: [(&str, [Command; 2], [bool; 2], bool); 4] = [
+        // Order A: SetUnitBypass(1, true) first -> both bypassed -> Toggle::Units(Echo) turns BOTH on!
+        (
+            "SetUnitBypass then Toggle::Units",
+            [Command::SetUnitBypass(1, true), Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo)))],
+            [false, false],
+            true,
+        ),
+        // Order B: Toggle::Units(Echo) first -> sees 1 on -> both bypassed -> SetUnitBypass(1, true) keeps both bypassed!
+        (
+            "Toggle::Units then SetUnitBypass",
+            [Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))), Command::SetUnitBypass(1, true)],
+            [true, true],
+            false,
+        ),
+        // Order C: ToggleUnit(1) first -> 1 flips off -> both off -> Toggle::Units(Echo) turns BOTH on!
+        (
+            "ToggleUnit then Toggle::Units",
+            [Command::Action(Action::ToggleUnit(1)), Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo)))],
+            [false, false],
+            true,
+        ),
+        // Order D: Toggle::Units(Echo) first -> sees 1 on -> both bypassed -> ToggleUnit(1) flips 1 back ON (2 stays bypassed)!
+        (
+            "Toggle::Units then ToggleUnit",
+            [Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))), Command::Action(Action::ToggleUnit(1))],
+            [false, true],
+            false,
+        ),
+    ];
+
+    for (name, cmds, want_bypassed, want_toggled_on) in cases {
+        let mut base: Option<(Vec<f32>, Vec<f32>)> = None;
+        for block in BLOCKS {
+            let (bypassed, toggled, ml, mr) = run(block, cmds);
+            assert_eq!(bypassed, want_bypassed, "{name} block {block}: final bypass states");
+            assert_eq!(toggled, vec![(Toggle::Units(UnitKind::Echo), want_toggled_on)], "{name} block {block}: Toggled event");
+            if let Some((bl, br)) = &base {
+                assert_bits_eq(&ml, bl, &format!("{name} block {block} monitor L vs block 1"));
+                assert_bits_eq(&mr, br, &format!("{name} block {block} monitor R vs block 1"));
+            } else {
+                base = Some((ml, mr));
+            }
+        }
+    }
+}
+
+/// §2 & §6: `Toggle::Units` is no kept setting (no setter, its `Toggled` is never in
+/// `Engine::unsent_toggles` so a rebuild never replays it — eviction keeps both an unanswered
+/// kind toggle and any per-unit override after it), while a running engine's `offer_toggles` still
+/// delivers its owed `Event::Toggled` once the ring drains, and `slot.owed` backpressure holds
+/// `Toggle::Units` in order without losing any `Chain` or `Toggled`.
+#[test]
+fn toggle_units_is_no_kept_setting_never_replayed_and_respects_owed_backpressure() {
+    // 1. No setter for any `Toggle::Units`, and every kept toggle in `Toggle::ALL` has a setter.
+    for k in [UnitKind::Plugin, UnitKind::Ott, UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Synth] {
+        assert_eq!(Toggle::Units(k).setter(true), None, "{k:?} must have no setter(true)");
+        assert_eq!(Toggle::Units(k).setter(false), None, "{k:?} must have no setter(false)");
+    }
+    for t in Toggle::ALL {
+        if matches!(t, Toggle::Units(_)) {
+            assert!(t.setter(true).is_none());
+        } else {
+            assert!(t.setter(true).is_some() && t.setter(false).is_some(), "{t:?} must have a setter");
+        }
+    }
+
+    // 2. Full event ring: Toggle::Units(Echo) (unanswered) + per-unit SetUnitBypass(1, false)
+    //    after it + kept Toggle::Click. `unsent_toggles()` must NOT include Toggle::Units(Echo)
+    //    (only Click), while eviction preserves Echo 1 = on and Echo 2 = bypassed!
+    {
+        let mut rig = Rig::with_event_capacity(Opts::default(), 4);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        rig.advance(256);
+        rig.hold_events = true;
+        // Fill the 4-slot event ring first (SetVolume publishes 5 Mixes at the end of this block).
+        for lane in 0..5u8 {
+            rig.send_at(rig.frame, Command::SetVolume(lane, 0.5));
+        }
+        rig.advance(128);
+        // Now the event ring is full: send Toggle::Units(Echo), per-unit override, and Click.
+        rig.send_at(rig.frame, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.send_at(rig.frame, Command::SetUnitBypass(1, false));
+        rig.send_at(rig.frame, Command::Action(Action::Toggle(Toggle::Click)));
+        rig.advance(128);
+
+        // `unsent_toggles` has ONLY Click — never `Toggle::Units(Echo)`.
+        let unsent: Vec<_> = rig.engine.unsent_toggles().collect();
+        assert_eq!(unsent, vec![(Toggle::Click, true)], "Toggle::Units must never be in unsent_toggles: {unsent:?}");
+
+        // Eviction returns each seat with its exact final applied bypass: 1=on (false), 2=bypassed (true).
+        let ret = evict_all(&mut rig);
+        assert_eq!((ret[0][0].id, ret[0][0].bypassed), (1, false), "per-unit override after kind toggle kept");
+        assert_eq!((ret[1][0].id, ret[1][0].bypassed), (2, true), "kind toggle effect on slot 1 kept");
+    }
+
+    // 3. Without rebuild: once the full event ring drains, `offer_toggles` delivers the running
+    //    engine's owed `Event::Toggled` for `Toggle::Units(Echo)`.
+    {
+        let mut rig = Rig::with_event_capacity(Opts::default(), 4);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        rig.advance(256);
+        let mark = rig.events.len();
+        rig.hold_events = true;
+        for lane in 0..5u8 {
+            rig.send_at(rig.frame, Command::SetVolume(lane, 0.4));
+        }
+        rig.advance(128);
+        rig.send_at(rig.frame, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        rig.advance(128);
+        assert!(!rig.engine.toggles()[Toggle::Units(UnitKind::Echo).index()], "applied while ring full");
+        assert!(rig.engine.unsent_toggles().next().is_none(), "not in unsent_toggles for rebuild");
+        rig.hold_events = false;
+        for _ in 0..16 {
+            rig.read_events();
+            rig.advance(128);
+        }
+        rig.read_events();
+        let delivered: Vec<_> = toggled_events_since(&rig, mark)
+            .into_iter()
+            .filter(|(_, t, _)| *t == Toggle::Units(UnitKind::Echo))
+            .collect();
+        assert_eq!(delivered.len(), 1, "owed Toggled delivered once ring drained: {delivered:?}");
+        assert!(!delivered[0].2);
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+    }
+
+    // 4. Stalled event ring filling `slot.owed` (`OWED_CAPACITY = 33`): flooding 40 `Toggle::Units`
+    //    across both slots holds back application once `slot.owed` is full and loses ZERO chains or
+    //    toggles once drained (at all 7 `BLOCKS` sizes).
+    for block in BLOCKS {
+        let what = format!("owed backpressure block {block}");
+        let mut rig = Rig::with_event_capacity(Opts { sr: SR, start: F0, block, ..Opts::default() }, 4);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        // Let the initial installs' Seat/Chain events drain out of the 4-slot ring before stalling.
+        for _ in 0..8 {
+            rig.advance(block as Frame);
+        }
+        let mark = rig.events.len();
+        rig.hold_events = true;
+        let t = rig.frame + 7;
+        for _ in 0..40 {
+            rig.send_at(t, Command::Action(Action::Toggle(Toggle::Units(UnitKind::Echo))));
+        }
+        rig.advance(1_100);
+        // Drain and let all 40 finish.
+        rig.hold_events = false;
+        rig.read_events();
+        for _ in 0..96 {
+            rig.advance(block as Frame);
+        }
+        let c0: Vec<_> = chain_events_since(&rig, mark, 0).into_iter().filter(|(f, _)| *f >= t).collect();
+        let c1: Vec<_> = chain_events_since(&rig, mark, 1).into_iter().filter(|(f, _)| *f >= t).collect();
+        assert_eq!(c0.len(), 40, "{what}: all 40 slot 0 chains delivered");
+        assert_eq!(c1.len(), 40, "{what}: all 40 slot 1 chains delivered");
+        let states0: Vec<bool> = c0.iter().map(|(_, s)| s[0].bypassed).collect();
+        let states1: Vec<bool> = c1.iter().map(|(_, s)| s[0].bypassed).collect();
+        let want: Vec<bool> = (0..40).map(|k| k % 2 == 0).collect();
+        assert_eq!(states0, want, "{what}: slot 0 exact alternating bypass order");
+        assert_eq!(states1, want, "{what}: slot 1 exact alternating bypass order");
+        assert!(c0.last().unwrap().0 > t, "{what}: backpressure held later Toggle::Units past frame {t}");
+        // One `Toggled` answer per applied command, none lost to the full ring; an owed answer is offered
+        // at the value the setting has then, so the last one is the final state (an even count of
+        // any-on toggles: all on again).
+        let answers: Vec<(Frame, bool)> = toggled_events_since(&rig, mark)
+            .into_iter()
+            .filter(|&(f, tg, _)| f >= t && tg == Toggle::Units(UnitKind::Echo))
+            .map(|(f, _, on)| (f, on))
+            .collect();
+        assert_eq!(answers.len(), 40, "{what}: one Toggled per command: {answers:?}");
+        assert!(answers.windows(2).all(|w| w[0].0 <= w[1].0), "{what}: answers in frame order: {answers:?}");
+        assert!(answers.last().unwrap().1, "{what}: the last answer is the final state, on");
+        assert!(rig.engine.toggles()[Toggle::Units(UnitKind::Echo).index()], "{what}: ECHO ends on");
+        let ret = evict_all(&mut rig);
+        assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
+        assert_eq!((ret[0][0].bypassed, ret[1][0].bypassed), (false, false), "{what}: both seats end on after 40 toggles");
+    }
+}
+
+/// §6, the review's CLEAR case: a `Toggle::Units` with none of its kind seated does nothing at all,
+/// on a plugins-only rack: no `Toggled`, no `Chain`, no disarm of a pending CLEAR, and on the
+/// held-command path no `Press` queued behind the held command. Arm, toggle, confirm: the loop
+/// clears, as without the toggle, pressed directly and behind a held PLAY (waiting for a COPY's job).
+/// Every kind at the default block, one press a frame; then all seven `BLOCKS`, each with a kind in
+/// turn and the whole sequence sent for one block start (same-frame order).
+#[test]
+fn toggle_units_with_none_of_its_kind_seated_does_nothing_and_clear_still_confirms() {
+    const KINDS: [UnitKind; 4] = [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring, UnitKind::Ott];
+    let looping = |block: usize| {
+        // The COPY's block job runs master / `JOB_RATE` frames: longer than the block that starts it, so
+        // the presses behind it are still held when the block ends.
+        let bars = if block <= 128 { 4 } else if block <= 480 { 8 } else { 16 };
+        let mut rig = Rig::with(Opts { loop_seconds: 40.0, block, ..Opts::default() });
+        let (plugin, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, plugin).is_ok());
+        rig.set_level(0.5);
+        rig.record_first_take(0, bars, 2400);
+        rig.set_level(0.0);
+        rig.set(Command::SetMute(0, true));
+        rig.advance(4800);
+        rig.press(Command::SelectTrack(0));
+        assert_eq!(rig.state(0), LaneState::Playing);
+        rig
+    };
+    // One press a frame, or every command queued for the next block start and that block rendered.
+    let send = |rig: &mut Rig, cmds: &[Command], queued: bool| {
+        for &c in cmds {
+            if queued {
+                rig.queue(c);
+            } else {
+                rig.press(c);
+            }
+        }
+        if queued {
+            rig.advance(rig.block as Frame);
+        }
+    };
+    let quiet = |rig: &Rig, mark: usize, what: &str| {
+        assert!(toggled_events_since(rig, mark).is_empty(), "{what}: no Toggled");
+        assert!(chain_events_since(rig, mark, 0).is_empty() && chain_events_since(rig, mark, 1).is_empty(), "{what}: no Chain");
+    };
+    let case = |block: usize, kind: UnitKind, queued: bool| {
+        let clear = Command::Action(Action::Clear);
+        // Pressed directly between the arm and the confirmation.
+        let what = format!("{kind:?} block {block} {} direct", if queued { "queued" } else { "pressed" });
+        let mut rig = looping(block);
+        let mark = rig.events.len();
+        send(&mut rig, &[clear, Command::Action(Action::Toggle(Toggle::Units(kind))), clear], queued);
+        assert_eq!(rig.state(0), LaneState::Empty, "{what}: CLEAR confirmed through the empty-kind toggle");
+        quiet(&rig, mark, &what);
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+
+        // Behind a held PLAY (it waits for the COPY's job, so the arm and the confirmation wait behind
+        // it): the toggle passes the held command and must queue no `Press` between the arm and the
+        // confirmation, which would disarm the arm. The held PLAY runs as it does without the toggle.
+        let what = format!("{kind:?} block {block} {} held", if queued { "queued" } else { "pressed" });
+        let held = |toggle: Option<UnitKind>| {
+            let mut rig = looping(block);
+            let mark = rig.events.len();
+            let mut cmds = vec![Command::Copy(0), Command::PlayStop(1), clear];
+            cmds.extend(toggle.map(|kind| Command::ActionOn(2, Action::Toggle(Toggle::Units(kind)))));
+            cmds.push(clear);
+            send(&mut rig, &cmds, queued);
+            assert!(rig.engine.holding(), "{what}: the presses wait for the copy");
+            assert_eq!(rig.state(0), LaneState::Playing, "{what}: the arm has not run yet");
+            rig.idle();
+            (rig, mark)
+        };
+        let (mut base, _) = held(None);
+        let (mut rig, mark) = held(Some(kind));
+        assert_eq!(rig.state(0), LaneState::Empty, "{what}: the held CLEAR confirmed through the empty-kind toggle");
+        assert_eq!(rig.state(1), base.state(1), "{what}: the held PLAY ran as without the toggle");
+        quiet(&rig, mark, &what);
+        assert_eq!(evict_all(&mut rig)[0].len(), 1);
+        assert_eq!(evict_all(&mut base)[0].len(), 1);
+    };
+    let default_block = Opts::default().block;
+    for kind in KINDS {
+        case(default_block, kind, false);
+    }
+    for (k, block) in BLOCKS.into_iter().enumerate() {
+        case(block, KINDS[k % KINDS.len()], true);
+    }
+}
+
+/// §2 transport, the review's replacement case: a seat's range since its last publish stays with the
+/// seat under its id. The ring full, a unique peak rendered, then the unit replaced under the same id
+/// (a reload) or withdrawn and reseated under it: once the reader drains, the next meter for the id
+/// carries the peak. A removal takes its range with the id. All seven `BLOCKS`.
+#[test]
+fn unit_meter_range_survives_a_same_id_replacement_and_a_withdrawal() {
+    let cap = 2usize;
+    let interval = unit_meter_frames(SR) as Frame;
+    for block in BLOCKS {
+        for withdraw in [false, true] {
+            let what = format!("block {block} {}", if withdraw { "withdraw and reseat" } else { "same-id replacement" });
+            let mut rig = Rig::with_config(Opts { sr: SR, start: F0, block, ..Opts::default() }, |cfg| cfg.unit_meter_capacity = cap);
+            let (a, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+            assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, a).is_ok());
+            rig.set_stereo_inputs(|_| [0.01, 0.01], |_| [0.0; 2]);
+            rig.advance(1_024);
+            let _ = rig.read_unit_meters();
+            while rig.unit_meters_pending() < cap {
+                rig.advance(block as Frame);
+            }
+            // A peak nothing before or after it reaches, rendered while the ring is full.
+            let spike = rig.frame + 5;
+            rig.set_stereo_inputs(move |f| if f == spike { [-0.77, 0.66] } else { [0.01, 0.01] }, |_| [0.0; 2]);
+            rig.advance_to(spike + 1);
+            assert_eq!(rig.unit_meters_pending(), cap, "{what}: the ring stayed full over the peak");
+            if withdraw {
+                assert!(rig.port(0).withdraw(1));
+                rig.advance(1_024);
+                let back = rig.port(0).returned_unit().expect("withdrawn unit back");
+                assert_eq!((back.id, back.left), (1, lf_engine::Left::Withdrawn), "{what}");
+                drop(back.unit);
+            }
+            let (b, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+            assert!(rig.port(0).install_at(1, 2, MAX_UNITS, false, Some(1), b).is_ok());
+            rig.advance(1_024);
+            if !withdraw {
+                let back = rig.port(0).returned_unit().expect("replaced unit back");
+                assert_eq!((back.id, back.left), (1, lf_engine::Left::Replaced), "{what}");
+                drop(back.unit);
+            }
+            assert_eq!(rig.unit_meters_pending(), cap, "{what}: still full");
+            let old = rig.read_unit_meters();
+            assert!(old.iter().all(|m| m.out[0] < 0.5), "{what}: the peak came after the ring filled: {old:?}");
+            rig.advance(interval.max(block as Frame));
+            let next = rig.read_unit_meters();
+            assert_eq!(next.first().map(|m| (m.unit, m.out)), Some((1, [0.77, 0.66])), "{what}: the peak reached the ring under the id: {next:?}");
+            assert_eq!(evict_all(&mut rig)[0].len(), 1);
+        }
+    }
+}
+
+/// §2 transport and the review's late-reader and cadence cases: every range a seat publishes starts
+/// on the frame after the last one's end, so a dropped range shows whatever its peaks were (the left
+/// input rises with the frame and names each range's last frame, the right falls and names its
+/// first), and none is shorter than 4 ms, rounded up (177 frames at 44.1 kHz, 192 at 48 kHz; exactly
+/// that at block 1). A reader draining about every 48 ms, all seven `BLOCKS`.
+#[test]
+fn unit_meter_ranges_chain_frame_to_frame_under_a_late_reader_at_44_1_and_48_khz() {
+    const SCALE: f32 = 8_192.0;
+    const RAMP: Frame = 6_000;
+    for sr in [44_100u32, 48_000] {
+        // 4 ms, rounded up, from the rate alone (not from the engine's own function).
+        let interval = (sr as Frame * 4 + 999) / 1_000;
+        assert_eq!(interval, if sr == 44_100 { 177 } else { 192 }, "4 ms rounded up at {sr} Hz");
+        let drain_every = (sr as Frame * 48) / 1_000;
+        for block in BLOCKS {
+            let what = format!("{sr} Hz block {block}");
+            let mut rig = Rig::with(Opts { sr, start: F0, block, ..Opts::default() });
+            let (probe, _, _) = MeterProbeUnit::new(UnitKind::Plugin, [1.0, 1.0], 0);
+            assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, probe).is_ok());
+            rig.advance(4_096);
+            let _ = rig.read_unit_meters();
+            let start = rig.frame;
+            rig.set_stereo_inputs(
+                move |f| {
+                    let k = f - start;
+                    if (0..RAMP).contains(&k) { [(k + 1) as f32 / SCALE, (RAMP - k) as f32 / SCALE] } else { [0.0; 2] }
+                },
+                |_| [0.0; 2],
+            );
+            let mut got: Vec<UnitMeter> = Vec::new();
+            let mut since: Frame = 0;
+            let end = start + RAMP + 2 * interval + block as Frame;
+            while rig.frame < end {
+                let step = (block as Frame).min(end - rig.frame);
+                rig.advance(step);
+                since += step;
+                if since >= drain_every {
+                    got.extend(rig.read_unit_meters());
+                    since = 0;
+                }
+            }
+            got.extend(rig.read_unit_meters());
+            assert!(got.iter().all(|m| m.unit == 1 && m.bands.is_none()), "{what}");
+            // (first, last) frame of each range, relative to the ramp's start; past the ramp, silence.
+            let ranges: Vec<(Frame, Frame)> = got
+                .iter()
+                .filter(|m| m.out != [0.0; 2])
+                .map(|m| (RAMP - (m.out[1] * SCALE) as Frame, (m.out[0] * SCALE) as Frame - 1))
+                .collect();
+            assert_eq!(ranges.first().map(|r| r.0), Some(0), "{what}: the first range holds the ramp's first frame");
+            assert_eq!(ranges.last().map(|r| r.1), Some(RAMP - 1), "{what}: the last range holds its last frame");
+            for (k, pair) in ranges.windows(2).enumerate() {
+                assert_eq!(pair[1].0, pair[0].1 + 1, "{what}: range {} starts where range {k} ended: {:?}", k + 1, pair);
+            }
+            // The first range began before the ramp and the last may end in the silence after it.
+            for &(first, last) in &ranges[1..ranges.len() - 1] {
+                let len = last - first + 1;
+                assert!(len >= interval, "{what}: a range of {len} frames, under 4 ms ({interval})");
+                if block == 1 {
+                    assert_eq!(len, interval, "{what}: at block 1 every range is exactly the interval");
+                }
+            }
+            assert_eq!(evict_all(&mut rig)[0].len(), 1);
+        }
+        assert_eq!(unit_meter_frames(sr) as Frame, interval, "the engine's interval at {sr} Hz");
+    }
+}
+
+/// §2's rebuild: `Engine::unapplied_unit_commands` carries a built-in effect kind's `Toggle::Units`
+/// (pressed or `ActionOn`, with or without a seat of its kind) among the per-unit commands, in send
+/// order, from the table and then the ring, and nothing else (`Toggle::Units(Plugin)`, a setting,
+/// another toggle); the peek takes nothing. All seven `BLOCKS`.
+#[test]
+fn unapplied_unit_commands_carry_kind_toggles_in_send_order() {
+    let units = |k| Command::Action(Action::Toggle(Toggle::Units(k)));
+    for block in BLOCKS {
+        let mut rig = Rig::with(Opts { block, ..Opts::default() });
+        assert!(rig.port(0).install_at(1, 1, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        assert!(rig.port(1).install_at(2, 2, MAX_UNITS, false, None, Box::new(EchoUnit::new(SR))).is_ok());
+        rig.advance(1_024);
+        let later = rig.frame + 48_000;
+        let sent = [
+            (true, Command::SetUnitBypass(1, true)),
+            (false, Command::SetMetronome(true)),
+            (true, units(UnitKind::Echo)),
+            (false, Command::Action(Action::Toggle(Toggle::Click))),
+            (true, Command::SetUnitParam(2, UnitParam::Send(InputSendParam::EchoLevel), 0.5)),
+        ];
+        for (_, c) in sent {
+            rig.send_at(later, c);
+        }
+        // The table takes what the ring holds at a block start; the stamped commands wait there.
+        rig.advance(block as Frame);
+        let queued = [
+            (true, Command::Action(Action::ToggleUnit(2))),
+            (false, units(UnitKind::Plugin)),
+            (true, units(UnitKind::Ring)),
+            (false, Command::SetBpm(100.0)),
+            (true, Command::ActionOn(3, Action::Toggle(Toggle::Units(UnitKind::Echo)))),
+        ];
+        for (_, c) in queued {
+            rig.queue(c);
+        }
+        let want: Vec<Command> = sent.iter().chain(&queued).filter(|(unit, _)| *unit).map(|&(_, c)| c).collect();
+        assert_eq!(rig.engine.unapplied_unit_commands().collect::<Vec<_>>(), want, "block {block}");
+        assert_eq!(rig.engine.unapplied_unit_commands().count(), want.len(), "block {block}: the peek takes nothing");
+        rig.advance_to(later + block as Frame);
+        assert_eq!(rig.engine.unapplied_unit_commands().count(), 0, "block {block}: all applied");
+        let ret = evict_all(&mut rig);
+        assert_eq!((ret[0].len(), ret[1].len()), (1, 1));
+    }
+}
+
+// ── Off-grid installs: a unit whose first rendered frame is off a 128-frame quantum boundary ────────
+
+/// A quantum boundary on the DSP clock (48 000 = 375 × 128).
+const GRID: Frame = 48_000;
+/// First-frame offsets into the quantum at `GRID`.
+const OFF_GRID: [Frame; 6] = [1, 2, 63, 64, 65, 127];
+/// Past several wraps of every reverb stage's pre-delay ring (at most 4096 frames) and of ECHO's line.
+const OFF_GRID_FRAMES: usize = 20_000;
+/// The reference's call size: one DSP quantum.
+const QUANTUM_FRAMES: usize = 128;
+
+/// A `set_bypass` call made before the frames from `apply` on render, its `UnitCx` at `at`.
+#[derive(Clone, Copy)]
+struct BypassCall {
+    apply: Frame,
+    at: Frame,
+    bypassed: bool,
+}
+
+/// Render `l`/`r` through `unit` from DSP frame `start` in `block`-frame calls (each split where a
+/// bypass call applies), every call under the local `assert_no_alloc`.
+fn render_direct(unit: &mut dyn UnitProcessor, start: Frame, l: &[f32], r: &[f32], block: usize, calls: &[BypassCall]) -> [Vec<f32>; 2] {
+    let len = l.len();
+    let (mut out_l, mut out_r) = (vec![0.0f32; len], vec![0.0f32; len]);
+    let (mut pos, mut next) = (0usize, 0usize);
+    while pos < len {
+        let f = start + pos as Frame;
+        while next < calls.len() && calls[next].apply <= f {
+            let c = calls[next];
+            let cx = UnitCx { frame: c.at, dsp_frame: c.at, bpm: 120.0, meter: Meter::FOUR_FOUR };
+            assert_no_alloc(|| unit.set_bypass(&cx, c.bypassed));
+            next += 1;
+        }
+        let mut n = block.min(len - pos);
+        if let Some(c) = calls.get(next) {
+            n = n.min((c.apply - f) as usize);
+        }
+        let cx = UnitCx { frame: f, dsp_frame: f, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        assert_no_alloc(|| {
+            unit.process(&cx, [&l[pos..pos + n], &r[pos..pos + n]], &[], [&mut out_l[pos..pos + n], &mut out_r[pos..pos + n]]);
+        });
+        pos += n;
+    }
+    [out_l, out_r]
+}
+
+/// A stereo input from the pin: the left side as pinned, the right side its scaled negative.
+fn off_grid_input() -> (Vec<f32>, Vec<f32>) {
+    let x = pin_input();
+    let l = x[..OFF_GRID_FRAMES].to_vec();
+    let r = l.iter().map(|&v| -0.7 * v).collect();
+    (l, r)
+}
+
+/// `silence` zeros, then `x`.
+fn after_silence(silence: usize, x: &[f32]) -> Vec<f32> {
+    let mut v = vec![0.0f32; silence];
+    v.extend_from_slice(x);
+    v
+}
+
+/// For each offset and scenario: the unit rendered from `GRID + offset` at every block size (no panic,
+/// finite, bit-identical across block sizes) against `reference`'s render from `GRID` of the same
+/// input after `offset` frames of silence, compared from `GRID + offset` on.
+fn assert_off_grid_matches(
+    what: &str,
+    make: &dyn Fn() -> Box<dyn UnitProcessor>,
+    scenarios: &[(&str, &dyn Fn(Frame) -> Vec<BypassCall>, &dyn Fn(Frame) -> Vec<BypassCall>)],
+) {
+    let (l, r) = off_grid_input();
+    for &offset in &OFF_GRID {
+        let o = offset as usize;
+        for &(name, unit_calls, reference_calls) in scenarios {
+            let mut reference = make();
+            let want = render_direct(reference.as_mut(), GRID, &after_silence(o, &l), &after_silence(o, &r), QUANTUM_FRAMES, &reference_calls(offset));
+            let want = [&want[0][o..], &want[1][o..]];
+            assert!(want[0].iter().zip(want[1]).zip(l.iter().zip(&r)).any(|((a, b), (x, y))| a != x || b != y), "{what} {name}: the reference renders no wet");
+            for block in BLOCKS {
+                let tag = format!("{what} {name} offset={offset} block={block}");
+                let mut unit = make();
+                let got = render_direct(unit.as_mut(), GRID + offset, &l, &r, block, &unit_calls(offset));
+                assert!(got[0].iter().chain(&got[1]).all(|v| v.is_finite()), "{tag}: a non-finite sample");
+                assert_bits_eq(&got[0], want[0], &format!("{tag} L vs the unit started on the grid after silence"));
+                assert_bits_eq(&got[1], want[1], &format!("{tag} R vs the unit started on the grid after silence"));
+            }
+        }
+    }
+}
+
+/// Seated on, or seated bypassed and switched on, at a first frame off the quantum grid: each matches
+/// the same unit seated on the boundary before it and fed silence up to that frame. Seated on, REVERB's
+/// convolver panicked here (a pre-delay ring's block straddled its wrap) before it ran the quantum's
+/// earlier frames as silence. Seated bypassed, the gate's ramp sounds from the next quantum boundary, so
+/// the convolver first runs on the grid; those scenarios guard that. A switch-on on the first frame is
+/// made, in the reference, before its first rendered frame too (its `UnitCx` at the same frame), so both
+/// quanta's gates see the same ramp.
+#[test]
+fn reverb_unit_installed_off_quantum_grid_matches_grid_start_after_silence() {
+    let make = || -> Box<dyn UnitProcessor> { Box::new(new_reverb_unit()) };
+    let on: &dyn Fn(Frame) -> Vec<BypassCall> = &|_| vec![];
+    let first_frame: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID + o, at: GRID + o, bypassed: true }, BypassCall { apply: GRID + o, at: GRID + o, bypassed: false }]
+    };
+    let first_frame_ref: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID, at: GRID, bypassed: true }, BypassCall { apply: GRID, at: GRID + o, bypassed: false }]
+    };
+    // Switched on later, mid-quantum, after bypassed frames have rendered.
+    let later: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID + o, at: GRID + o, bypassed: true }, BypassCall { apply: GRID + 1_000 + o, at: GRID + 1_000 + o, bypassed: false }]
+    };
+    let later_ref: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID, at: GRID, bypassed: true }, BypassCall { apply: GRID + 1_000 + o, at: GRID + 1_000 + o, bypassed: false }]
+    };
+    assert_off_grid_matches("REVERB", &make, &[("on", on, on), ("bypassed, on at first frame", first_frame, first_frame_ref), ("bypassed, on later", later, later_ref)]);
+}
+
+/// ECHO's line writes at `write_index + k` and wraps frame by frame, its write position moving a
+/// quantum at frame 127: a first frame off the grid leaves the earlier frames' zeros unwritten, which
+/// the reference writes as zeros into a zeroed line. Same scenarios and property as REVERB's.
+#[test]
+fn echo_unit_installed_off_quantum_grid_matches_grid_start_after_silence() {
+    let make = || -> Box<dyn UnitProcessor> { Box::new(EchoUnit::new(SR)) };
+    let on: &dyn Fn(Frame) -> Vec<BypassCall> = &|_| vec![];
+    let first_frame: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID + o, at: GRID + o, bypassed: true }, BypassCall { apply: GRID + o, at: GRID + o, bypassed: false }]
+    };
+    let first_frame_ref: &dyn Fn(Frame) -> Vec<BypassCall> = &|o| {
+        vec![BypassCall { apply: GRID, at: GRID, bypassed: true }, BypassCall { apply: GRID, at: GRID + o, bypassed: false }]
+    };
+    assert_off_grid_matches("ECHO", &make, &[("on", on, on), ("bypassed, on at first frame", first_frame, first_frame_ref)]);
+}
+
+/// RING MOD holds no line, only its carrier's phase, which advances on the frames it renders (its
+/// module doc): a reference fed silence from the grid has turned its carrier `offset` frames further, so
+/// the property pinned is the off-grid render alone, at every block size: no panic, finite, the wet
+/// non-zero, and the output and the carrier's phase bit for bit across block sizes.
+#[test]
+fn ring_unit_installed_off_quantum_grid_renders_the_same_at_every_block_size() {
+    let (l, r) = off_grid_input();
+    for &offset in &OFF_GRID {
+        let calls: [&[BypassCall]; 2] = [&[], &[BypassCall { apply: GRID + offset, at: GRID + offset, bypassed: true }, BypassCall { apply: GRID + offset, at: GRID + offset, bypassed: false }]];
+        for (name, calls) in ["on", "bypassed, on at first frame"].into_iter().zip(calls) {
+            let mut first: Option<([Vec<f32>; 2], [f64; 2])> = None;
+            for block in BLOCKS {
+                let tag = format!("RING {name} offset={offset} block={block}");
+                let mut unit = RingUnit::new(SR);
+                let got = render_direct(&mut unit, GRID + offset, &l, &r, block, calls);
+                assert!(got[0].iter().chain(&got[1]).all(|v| v.is_finite()), "{tag}: a non-finite sample");
+                assert!(got[0].iter().zip(&l).any(|(a, b)| a != b), "{tag}: no wet");
+                let phase = unit.phase();
+                match &first {
+                    None => first = Some((got, phase)),
+                    Some((want, want_phase)) => {
+                        assert_bits_eq(&got[0], &want[0], &format!("{tag} L vs block 1"));
+                        assert_bits_eq(&got[1], &want[1], &format!("{tag} R vs block 1"));
+                        assert_eq!(phase.map(f64::to_bits), want_phase.map(f64::to_bits), "{tag}: carrier phase");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Frames streamed from `GRID` before the eviction: the stream stops one frame past the grid (129 and
+/// 1) and mid-quantum (192), so a later frame of a lower phase than 64 makes the convolver's lead-in
+/// of silence finish its quantum and run on into the next.
+const REALIGN_ENDS: [usize; 3] = [129, 1, 192];
+/// The reseated stream's first frames on its new engine's clock: on the grid, and five past it.
+const REALIGN_RESUMES: [Frame; 2] = [384, 389];
+/// Frames rendered after the reseat: past several wraps of every pre-delay ring (at most 4096 frames).
+const REALIGN_FRAMES: usize = 12_000;
+
+/// A REVERB unit streamed from the grid to an off-grid frame, then reseated (the same box) on a new
+/// engine whose clock stands at another phase of the quantum, matches a reference that streamed the
+/// same input from the grid, then silence up to the new frame's phase, then the same continuation: no
+/// panic, finite, bit for bit at every block size. Before the convolver re-aligned on any call off its
+/// stages' phase (only the first call was), the reseat's blocks straddled a pre-delay ring's wrap.
+#[test]
+fn reverb_unit_reseated_at_another_quantum_phase_matches_a_stream_fed_silence_to_that_phase() {
+    let (l, r) = off_grid_input();
+    let q = QUANTUM_FRAMES;
+    for end in REALIGN_ENDS {
+        for resume in REALIGN_RESUMES {
+            let lead = (resume as usize % q + q - end % q) % q;
+            let after = end..end + REALIGN_FRAMES;
+            let joined = |x: &[f32]| -> Vec<f32> {
+                let mut v = x[..end].to_vec();
+                v.extend(std::iter::repeat_n(0.0, lead));
+                v.extend_from_slice(&x[after.clone()]);
+                v
+            };
+            let mut reference = new_reverb_unit();
+            let want = render_direct(&mut reference, GRID, &joined(&l), &joined(&r), q, &[]);
+            let want = [&want[0][end + lead..], &want[1][end + lead..]];
+            assert!(want[0].iter().zip(&l[after.clone()]).any(|(a, b)| a != b), "end={end} resume={resume}: the reference renders no wet");
+            for block in BLOCKS {
+                let tag = format!("REVERB end={end} resume={resume} block={block}");
+                let mut unit = new_reverb_unit();
+                render_direct(&mut unit, GRID, &l[..end], &r[..end], block, &[]);
+                let got = render_direct(&mut unit, resume, &l[after.clone()], &r[after.clone()], block, &[]);
+                assert!(got[0].iter().chain(&got[1]).all(|v| v.is_finite()), "{tag}: a non-finite sample");
+                assert_bits_eq(&got[0], want[0], &format!("{tag} L vs the stream fed silence to the new phase"));
+                assert_bits_eq(&got[1], want[1], &format!("{tag} R vs the stream fed silence to the new phase"));
+            }
+        }
+    }
 }

@@ -65,7 +65,10 @@ const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'CopyWide',
   'Halve', 'Hold', 'Release', 'FadeAll', 'Tuner', 'Toggle', 'ToggleUnit',
 ];
-const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Send:ott', 'Live:0', 'Live:1'];
+const TOGGLES = [
+  'Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring', 'Send:ott', 'Live:0', 'Live:1',
+  'Units:ott', 'Units:echo', 'Units:reverb', 'Units:ring',
+];
 const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
   'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing',
@@ -93,17 +96,26 @@ check('the fixture toggles every toggled setting', () => {
   const toggles = fixture.commands
     .map((c) => c.Action ?? c.ActionOn?.[1])
     .filter((a) => a?.Toggle !== undefined)
-    .map((a) => (typeof a.Toggle === 'string' ? a.Toggle : a.Toggle.Send !== undefined ? `Send:${a.Toggle.Send}` : `Live:${a.Toggle.Live}`));
+    .map((a) => (typeof a.Toggle === 'string' ? a.Toggle : Object.entries(a.Toggle).map(([k, v]) => `${k}:${v}`)[0]));
   assert.deepEqual([...new Set(toggles)].sort(), [...TOGGLES].sort());
 });
-check('isUnitCommand is true for the fixture\'s four unit commands only', () => {
+check('isUnitCommand is true for the fixture\'s unit commands and kind toggles only', () => {
   const unit = fixture.commands.filter((c) => isUnitCommand(c));
   assert.deepEqual(unit, [
+    { Action: { Toggle: { Units: 'ott' } } },
+    { Action: { Toggle: { Units: 'echo' } } },
+    { ActionOn: [3, { Toggle: { Units: 'reverb' } }] },
+    { Action: { Toggle: { Units: 'ring' } } },
     { SetUnitBypass: [7, true] },
     { SetUnitParam: [7, 'echoLevel', 0.5] },
     { Action: { ToggleUnit: 7 } },
     { ActionOn: [2, { ToggleUnit: 9 }] },
   ]);
+});
+check('a Toggle.Units naming no built-in effect kind is refused', () => {
+  for (const kind of ['plugin', 'synth', 'Echo']) {
+    assert.throws(() => decodeCommand({ Action: { Toggle: { Units: kind } } }), undefined, kind);
+  }
 });
 
 // ── Events: every field the Rust side writes is read ────────────────────────────────────────────────
@@ -200,6 +212,7 @@ for (const f of fixture.feed) {
     if ('settings' in f) assert.deepEqual(decoded.settings, f.settings);
     if ('live' in f) assert.deepEqual(decoded.live, f.live);
     if ('chains' in f) assert.deepEqual(decoded.chains, f.chains);
+    if ('unitMeters' in f) assert.deepEqual(decoded.unitMeters, f.unitMeters);
     assert.deepEqual(decoded.anchor, f.anchor);
     assert.deepEqual(decoded.meter, f.meter);
     assert.deepEqual(decoded.peaks, f.peaks);
@@ -215,6 +228,13 @@ check('every reset frame carries chains, and non-reset frames both carry and omi
   for (const flag of ['parked', 'held', 'reloading', 'error']) {
     assert.ok(units.some((u) => flag in u) && units.some((u) => !(flag in u)), `${flag} present and absent`);
   }
+});
+check('the fixture has a frame carrying unit meters (an OTT\'s with bands, one without) and frames carrying none', () => {
+  const meters = fixture.feed.flatMap((f) => f.unitMeters ?? []);
+  assert.ok(meters.some((m) => m.bands !== undefined) && meters.some((m) => m.bands === undefined), 'bands present and absent');
+  assert.ok(fixture.feed.some((f) => f.unitMeters === undefined), 'and a frame with the field absent');
+  const f = { ...structuredClone(fixture.feed[1]), unitMeters: [{ unit: 3, out: [0.5, 0.5], bands: [] }] };
+  assert.throws(() => decodeFeedFrame(f), undefined, 'an OTT meter carries three bands');
 });
 check('the fixture has a frame carrying scope columns and frames carrying none', () => {
   const carried = fixture.feed.filter((f) => f.scope !== undefined);

@@ -1235,7 +1235,7 @@ fn queued_unit_commands_survive_a_rebuild_through_ui_commands_with_a_full_ring()
     assert_eq!(host.wait_op(op20, Duration::from_secs(2)).unwrap(), OpState::Applied);
 
     let mut ev = Vec::new();
-    host.drain_feed_taps(&mut ev, None, None);
+    host.drain_feed_taps(&mut ev, None, None, None);
     // Wait for at least one block to publish the device clock so `EngineSide::running` is true.
     assert!(device.wait_blocks(1));
 
@@ -1266,10 +1266,10 @@ fn queued_unit_commands_survive_a_rebuild_through_ui_commands_with_a_full_ring()
 
     // A feed drain flushes the gate; render so engine 2 applies both commands, then drain the Chain updates.
     ev.clear();
-    host.drain_feed_taps(&mut ev, None, None);
+    host.drain_feed_taps(&mut ev, None, None, None);
     assert!(device.wait_blocks(10));
     ev.clear();
-    host.drain_feed_taps(&mut ev, None, None);
+    host.drain_feed_taps(&mut ev, None, None, None);
 
     let snap = host.core.chain_snapshot();
     let units: Vec<(lf_engine::UnitId, bool)> = snap.chains[0].units.iter().map(|u| (u.id, u.bypass)).collect();

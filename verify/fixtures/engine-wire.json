@@ -43,6 +43,10 @@
     { "Action": { "Toggle": { "Send": "ott" } } },
     { "Action": { "Toggle": { "Live": 0 } } },
     { "ActionOn": [0, { "Toggle": { "Live": 1 } }] },
+    { "Action": { "Toggle": { "Units": "ott" } } },
+    { "Action": { "Toggle": { "Units": "echo" } } },
+    { "ActionOn": [3, { "Toggle": { "Units": "reverb" } }] },
+    { "Action": { "Toggle": { "Units": "ring" } } },
     "Press",
     { "SelectTrack": 3 },
     { "SetBpm": 96.5 },
@@ -181,6 +185,7 @@
     { "Toggled": { "frame": 99240, "toggle": "Fixed", "on": true } },
     { "Toggled": { "frame": 99241, "toggle": { "Send": "ring" }, "on": false } },
     { "Toggled": { "frame": 99242, "toggle": { "Live": 1 }, "on": true } },
+    { "Toggled": { "frame": 99243, "toggle": { "Units": "echo" }, "on": false } },
     { "Tuner": { "frame": 99243, "on": true } },
     { "TakeRejected": { "frame": 99300, "lane": 1, "overdub": true } },
     { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
@@ -494,7 +499,19 @@
       "anchor": { "frame": 1235456, "atMs": 1790000000143.5, "rate": 44100, "grid": 96666 },
       "meter": { "peak": [[0.5, 0.25], [1, 1]], "clip": [false, true] },
       "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }],
-      "tuner": { "hz": 82.407, "level": -18.5 }
+      "tuner": { "hz": 82.407, "level": -18.5 },
+      "unitMeters": [
+        {
+          "unit": 3,
+          "out": [0.5, 0.375],
+          "bands": [
+            { "gain": -3.5, "gainMin": -6.25, "gainMax": 0.75, "level": -18.5, "levelPeak": -12.125 },
+            { "gain": 1.5, "gainMin": 0, "gainMax": 2.25, "level": -24, "levelPeak": -20.5 },
+            { "gain": 0, "gainMin": -1, "gainMax": 0, "level": -120, "levelPeak": -96.5 }
+          ]
+        },
+        { "unit": 7, "out": [0.25, 0] }
+      ]
     },
     {
       "seq": 2,

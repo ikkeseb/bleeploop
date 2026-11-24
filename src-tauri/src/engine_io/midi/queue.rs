@@ -38,8 +38,8 @@
 //! - **A rebuild empties the queue** (a rebuild needs no WebView: `pause`, `rebuild`, then `resume` once
 //!   the settings replay has run): the old engine's attacks, non-unit actions, HOLD presses and their
 //!   releases are discarded (the new engine has no voice or capture for them to end; an old release
-//!   would end the new engine's note). Queued unit commands (`Command::unit().is_some()`) stay in
-//!   queue order for the host's unit-command gate, and the latest target and wheels, queued or
+//!   would end the new engine's note). Queued unit commands (`Command::unit().is_some()`) and kind
+//!   toggles (`Command::kind_toggle().is_some()`) stay in queue order for the host's unit-command gate, and the latest target and wheels, queued or
 //!   waiting, come back as a [`Fold`] for the settings memory, so they reach the new engine through
 //!   its replay alone. Batches are built and admitted under the lock the rebuild takes, so none spans
 //!   two engines.
@@ -493,8 +493,8 @@ impl Queue {
 
     /// The engine was replaced: empty the queue, discarding the old engine's non-unit one-shots and
     /// their releases, and hand back the latest target and wheels (queued or waiting, as a [`Fold`] for
-    /// the settings memory) beside every queued unit command in queue order (for the host's
-    /// unit-command gate).
+    /// the settings memory) beside every queued unit command and kind toggle in queue order (for the
+    /// host's unit-command gate).
     pub fn rebuild(&mut self) -> (Fold, Vec<Command>) {
         let mut fold = Fold::default();
         let mut units = Vec::new();
@@ -504,7 +504,7 @@ impl Queue {
                 Command::SelectInstrument(target) => fold.target = Some(target),
                 Command::PitchBend(v) => fold.pitch_bend = Some(v),
                 Command::Modulation(v) => fold.modulation = Some(v),
-                c if c.unit().is_some() => units.push(c),
+                c if c.unit().is_some() || c.kind_toggle().is_some() => units.push(c),
                 _ => discarded += 1,
             }
         }
@@ -806,16 +806,18 @@ mod tests {
         let bypass = Command::SetUnitBypass(7, true);
         let toggle = Command::ActionOn(1, Action::ToggleUnit(9));
         let param = Command::SetUnitParam(7, UnitParam::Send(InputSendParam::EchoLevel), 0.5);
+        let kind = Command::Action(Action::Toggle(lf_engine::Toggle::Units(lf_engine::UnitKind::Echo)));
         admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
         admit(&mut q, &[bypass]).unwrap();
         admit(&mut q, &[Command::Action(Action::Hold(0))]).unwrap();
+        admit(&mut q, &[kind]).unwrap();
         admit(&mut q, &[toggle]).unwrap();
         admit(&mut q, &[param]).unwrap();
         admit(&mut q, &[Command::PitchBend(0.5)]).unwrap();
         q.pause();
         let (fold, units) = q.rebuild();
         assert_eq!(fold, Fold { target: None, pitch_bend: Some(0.5), modulation: None });
-        assert_eq!(units, [bypass, toggle, param]);
+        assert_eq!(units, [bypass, kind, toggle, param], "a kind toggle kept in its place");
         assert_eq!(q.counters().discarded, 2, "only NoteOn and Hold are discarded");
         assert!(q.is_empty());
     }
