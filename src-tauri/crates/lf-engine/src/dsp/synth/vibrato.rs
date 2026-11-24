@@ -162,6 +162,13 @@ impl Vibrato {
         &mut self.lfo.amplitude
     }
 
+    /// Between two quanta: everything written to the delay so far reads as 0, and the quantum last
+    /// rendered too (the LFO and the depth run on). No allocation.
+    pub fn silence(&mut self) {
+        self.delay.clear(0);
+        self.out.fill(0.0);
+    }
+
     /// Render the quantum at `q` from `input` (`None` when silent).
     pub fn process(&mut self, q: u64, input: Option<&[f32; Q]>) -> &[f32; Q] {
         let delay_time = self.lfo.process(q);

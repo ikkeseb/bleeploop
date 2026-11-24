@@ -88,6 +88,13 @@ impl Synth {
         self.oscillator.stop(time + self.envelope.envelope.adsr.release, frame);
     }
 
+    /// Silent from the next quantum rendered after `frame`: the amplitude envelope back to 0 with
+    /// nothing scheduled (a next attack starts from 0, as on a fresh voice). The frequency, the detune
+    /// (the pitch wheel) and the volume keep their values. No allocation.
+    pub fn silence(&mut self, frame: u64) {
+        self.envelope.reset(frame);
+    }
+
     /// Render the quantum at `q`, with the signals connected to frequency and detune, if any. `None`
     /// when the output is silent.
     pub fn process(&mut self, q: u64, frequency: Option<&[f32; Q]>, detune: Option<&[f32; Q]>) -> Option<&[f32; Q]> {
@@ -196,6 +203,12 @@ impl ModulationSynth {
         self.modulator.trigger_envelope_release(time, frame);
     }
 
+    /// [`Synth::silence`] on the carrier and the modulator.
+    pub fn silence(&mut self, frame: u64) {
+        self.carrier.silence(frame);
+        self.modulator.silence(frame);
+    }
+
     /// Render the quantum at `q`; `None` when silent.
     pub fn process(&mut self, q: u64) -> Option<&[f32; Q]> {
         let f = self.frequency.process(q, None);
@@ -255,6 +268,13 @@ impl Voice {
         match self {
             Voice::Synth(s) => s.trigger_release(time, frame),
             Voice::Modulation(s) => s.trigger_release(time, frame),
+        }
+    }
+
+    pub fn silence(&mut self, frame: u64) {
+        match self {
+            Voice::Synth(s) => s.silence(frame),
+            Voice::Modulation(s) => s.silence(frame),
         }
     }
 

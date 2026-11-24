@@ -26,16 +26,16 @@
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume, the Share mix (the master without the click) | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR, COPY and WIDE COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor (the input OTT is switched beside them but sits in `slots` and `instruments`) | — (engine only) |
-//! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, the input OTT on their sum, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
+//! | [`instruments`] | the bank of six built-in instruments (`Bank`: the picked one or none, each one's level, the wheels), which [`units::SynthUnit`] also holds; [`instruments::Instruments`], today's [`NoteTarget::Builtin`] path: a bank, the input OTT on its sum, its record line | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`scope`] | the live scope taps, while the UI asks for them ([`Command::SetScope`]): per lane after its FX, per monitor and per master, a min/max envelope in 4 ms columns on its own ring | — (engine only) |
 //! | [`tuner`] | the tuner's on flag and its tap: both slots' raw input, frame by frame, on its own ring for a pitch detector off the audio thread, with an epoch that changes wherever the input breaks | — (engine only) |
-//! | [`units`] | built-in chain units implementing [`UnitProcessor`]: ECHO, REVERB, RING MOD and OTT over [`input_fx`]'s and [`dsp::ott`]'s DSP (SYNTH follows in a later E3 slice) | — (engine only) |
+//! | [`units`] | built-in chain units implementing [`UnitProcessor`]: ECHO, REVERB, RING MOD and OTT over [`input_fx`]'s and [`dsp::ott`]'s DSP, and SYNTH ([`units::SynthUnit`], a source over [`instruments`]' shared `Bank`: a SYNTH per slot is a bank of its own) | — (engine only) |
 //! | [`pitch`] | the tuner's ear, run off the audio thread by the host's feed: a pitch detector per slot input (MPM through an FFT autocorrelation, refined to a tenth of a cent) and which input is shown | — (engine only) |
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
-//! | [`slots`] | the two slots' chains of units: install at an index, replace, remove, move and withdraw through their ports (each answered by an [`Event::Seat`], and a second when a held message resolves; each applied chain an [`Event::Chain`]), the edits held for a take, each unit's bypass (and [`Toggle::Units`]' any-on rule across both slots), per-seat folded meters on [`EngineHandle::unit_meters`] (at most every 4 ms, rounded up, when the ring has room; a seat's range since its last publish survives a same-id replacement and a withdrawal and goes out under the id with the next unit's first, a removal or eviction drops it with the id), their crossfades, notes, live and gain, each slot's own input pair, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`slots`] | the two slots' chains of units: install at an index, replace, remove, move and withdraw through their ports (each answered by an [`Event::Seat`], and a second when a held message resolves; each applied chain an [`Event::Chain`]), the edits held for a take, each unit's bypass (and [`Toggle::Units`]' any-on rule across both slots), the wheels as slot events ([`SlotEventKind::PitchBend`], [`SlotEventKind::Modulation`]) to the note target's chain only while it seats a SYNTH (a plugins-only rack renders as before; a plugin host ignores them, D12), a source change that releases the old source's held notes on its applied frame (a NoteOff for a key the new source never got is dropped), a SYNTH's notes released as its bank's pick releases them (one [`SlotEventKind::AllNotesOff`]: on its departure, the note target leaving its slot and [`Command::AllNotesOff`]) where a plugin gets a NoteOff per held key, a SYNTH's param applied in ring order with the notes and wheels on its frame, per-seat folded meters on [`EngineHandle::unit_meters`] (at most every 4 ms, rounded up, when the ring has room; a seat's range since its last publish survives a same-id replacement and a withdrawal and goes out under the id with the next unit's first, a removal or eviction drops it with the id), their crossfades, notes, live and gain, each slot's own input pair, the input OTT on each output, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the unit seam ([`UnitProcessor`], stereo both ways) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter, the input OTT | Tone.js on Blink's Web Audio (the OTT: the engine's own) |
 //!
@@ -92,7 +92,7 @@
 //!   scheduled looper event, a beat, an AUTO trigger or a render quantum's end falls, so the same
 //!   commands render bit-identical output at any block size (the golden jam, the gesture property tests,
 //!   `tests/sound.rs` and `tests/slots.rs` assert it). A note sounds one quantum after its frame ([`instruments::LEAD`]);
-//!   a wheel or an FX change (a lane's or an input send's) sounds from the next 128-frame quantum
+//!   a wheel (to a built-in instrument or a SYNTH alike) or an FX change (a lane's or an input send's) sounds from the next 128-frame quantum
 //!   boundary, as a live Web Audio call with no look-ahead does. Every control-rate step (the 128-frame
 //!   k-rate quanta, the compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the frame
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
@@ -154,12 +154,14 @@
 //!   block job, as its setter does; its disarm keeps its place behind it.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
-//!   runs: [`Engine::service_slots_idle`]); a leaving unit gets the releases of the notes it holds,
-//!   crossfades to bypass, stops the unit once and hands it back, and an eviction hands back every unit,
-//!   a waiting install included (the host evicts again while units come back). A message leaves its
+//!   runs: [`Engine::service_slots_idle`]); a leaving unit gets the releases of the notes it holds (a
+//!   SYNTH one `AllNotesOff`, held keys or not, a plugin a NoteOff per key), crossfades to bypass, stops the unit once and
+//!   hands it back (a unit resets only on entering an engine, never while seated; a withdrawn SYNTH stops
+//!   silent, its voices silenced by its `stop`, so a reseat resumes silent until its next note), and an eviction hands back every unit, a waiting install included (the host evicts again while units come back). A message leaves its
 //!   port only once its answer and its unit's return have their places, so none is dropped or leaked
 //!   on the audio thread; a refused install comes back with why. The slots render ahead to the next slot command, so a plugin sees one
-//!   call per block unless a stamped note, target, live flag, gain or input OTT command splits it there.
+//!   call per block unless a stamped note, target, live flag, gain or input OTT command, or a wheel while the target
+//!   seats a SYNTH, splits it there.
 //! - **The tuner mutes the monitor and nothing else** ([`tuner`]): the wet signal and the input sends glide
 //!   to silence over about 2 ms from its frame and back when it closes; loops, the click and the record
 //!   tap play on. It and a take never coexist: pressed on while one exists it is refused, and a take that

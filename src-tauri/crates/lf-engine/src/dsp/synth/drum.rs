@@ -428,6 +428,20 @@ impl DrumKit {
     /// `noteOff`: one-shot voices ignore it.
     pub fn note_off(&mut self, _note: u8, _time: f64, _frame: u64) {}
 
+    /// Every pad silent from the next quantum after `frame` (its envelope back to 0 with nothing
+    /// scheduled), the rest of the quantum rendered last silent too. No allocation.
+    pub fn silence(&mut self, frame: u64) {
+        for pad in self.pads.iter_mut() {
+            match &mut pad.voice {
+                Voice::Membrane(m) => m.synth.silence(frame),
+                Voice::Noise(n) => n.envelope.reset(frame),
+                Voice::Metal(m) => m.envelope.reset(frame),
+            }
+        }
+        self.left.fill(0.0);
+        self.right.fill(0.0);
+    }
+
     fn process(&mut self, q: u64) {
         self.left.fill(0.0);
         self.right.fill(0.0);

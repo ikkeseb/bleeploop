@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotKind, TimedCommand, Toggle, UnitId, UnitMeter, UnitParam, SLOT_COUNT, TRACK_COUNT, UNIT_METER_CAPACITY};
+use crate::api::{Action, ChainSeat, Command, CompactMix, Event, InputSend, InputSendParam, NoteTarget, Pair, ProcessContext, Refusal, SlotEventKind, SlotKind, TimedCommand, Toggle, UnitId, UnitMeter, UnitParam, SLOT_COUNT, TRACK_COUNT, UNIT_METER_CAPACITY};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -1225,6 +1225,9 @@ fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame, rack: 
         .filter_map(|p| {
             if let Some(kind) = p.command.kind_toggle() {
                 rack.has_unit_kind(kind).then_some(p.frame)
+            } else if matches!(p.command, Command::PitchBend(_) | Command::Modulation(_)) {
+                // A wheel reaches the slots only while the note target seats a SYNTH (`Rack::wheel`).
+                rack.takes_wheels().then_some(p.frame)
             } else if p.command.reaches_slots() {
                 Some(p.frame)
             } else if reads_tempo && matches!(p.command, Command::SetBpm(_) | Command::SetMeter(_)) {
@@ -1598,10 +1601,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::PitchBend(semitones) => {
             at.instruments.set_pitch_bend(semitones, now);
+            at.rack.wheel(SlotEventKind::PitchBend { semitones }, now);
             Applied::Done
         }
         Command::Modulation(depth) => {
             at.instruments.set_modulation(depth, now);
+            at.rack.wheel(SlotEventKind::Modulation { depth }, now);
             Applied::Done
         }
         Command::AllNotesOff => {

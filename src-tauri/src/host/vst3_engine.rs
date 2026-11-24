@@ -149,7 +149,9 @@ impl UnitProcessor for Vst3Unit {
                 drain_params(&mut self.params, &self.changes, MAX_EVENTS_PER_BLOCK);
             }
             while let Some(e) = events.get(next).filter(|e| (e.offset as usize) < at + len) {
-                self.events.push(note_to_vst3(e.kind, (e.offset as usize - at) as i32));
+                if let Some(note) = note_to_vst3(e.kind, (e.offset as usize - at) as i32) {
+                    self.events.push(note);
+                }
                 next += 1;
             }
             // The bus the activation granted: stereo as asked, or one channel the pair's mean.

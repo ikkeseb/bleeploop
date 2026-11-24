@@ -15,7 +15,20 @@
 //! - [`OttUnit`] wraps [`StereoOtt`] (`Ott<2>`, detectors linked across channels) and folds its
 //!   per-band applied gain (dB) and linked follower (dBFS, floor −120) per sample for
 //!   [`UnitProcessor::take_meter`].
-//! - All four bypass themselves (`set_bypass` returns `true`): ECHO, REVERB and RING MOD close
+//! - [`SynthUnit`] is SYNTH (`docs/unit-contract.md` §4), a source: today's bank of six instruments
+//!   (`instruments`' `Bank`, the DSP moved, not rewritten), all six rendering every frame, the picked one
+//!   taking the notes and the wheels ([`SlotEventKind`]), each at its level. It reports
+//!   [`instruments::LEAD`] as its latency, since a note sounds that long after its frame, so its slot's
+//!   source record line lags it exactly as [`crate::instruments::Instruments`]' does. It starts with no
+//!   instrument picked: silent until [`UnitParam::Instrument`] picks one (the host sends the pick with the
+//!   unit's params; an index outside 0..=5 is refused before rounding). A pick or a level applies in ring
+//!   order with the notes and wheels on its frame: the rack hands it those sent ahead first, in a call of
+//!   no frames. Its notes are released as a pick releases them (at the sounding pitch) when it gets
+//!   [`SlotEventKind::AllNotesOff`]: on its departure, the note target leaving its slot and
+//!   `Command::AllNotesOff`. Its `stop` silences every voice (the pick, the levels and the wheels stay), so
+//!   a withdrawn and reseated SYNTH resumes silent. The seat does its bypass (a bypassed source is silent
+//!   and still gets its notes).
+//! - The four effects bypass themselves (`set_bypass` returns `true`): ECHO, REVERB and RING MOD close
 //!   their input gate over 20 ms from the command's frame (dry passes untouched, ECHO and REVERB
 //!   tails ring out, and wherever the wet sample is exact zero the output is the input bit for bit);
 //!   OTT crossfades linearly between dry and processed over 10 ms (settled off is exact input bit
@@ -23,15 +36,15 @@
 //!   unit's first rendered frame (nothing has sounded, so nothing clicks or leaks) — settles
 //!   immediately; every later un-bypass fades in from the command's frame.
 //!
-//! Everything is allocated in `new` / `with_ir`; `process`, `set_param`, `set_bypass`, `take_meter`
+//! Everything is allocated in `new` / `with_ir` / `with_noise`; `process`, `set_param`, `set_bypass`, `take_meter`
 //! and `stop` never allocate, lock or block (invariant 5).
 
 use std::any::Any;
 use std::sync::Arc;
 
 use crate::api::{
-    BandMeter, InputSendParam, SlotEvent, UnitCx, UnitInfo, UnitKind, UnitParam, UnitProcessor,
-    BAND_LEVEL_FLOOR_DB,
+    BandMeter, InputSendParam, Instrument, SlotEvent, SlotEventKind, UnitCx, UnitInfo, UnitKind, UnitParam,
+    UnitProcessor, BAND_LEVEL_FLOOR_DB,
 };
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::fx::Ctl;
@@ -43,6 +56,7 @@ use crate::effects;
 use crate::engine::NOISE_SEED;
 use crate::grid::frames_per_bar;
 use crate::input_fx::{Echo, Reverb, Ring};
+use crate::instruments::{self, Bank};
 
 /// Stereo ECHO insert unit (`UnitKind::Echo`): one [`Echo`] feedback delay line per channel.
 pub struct EchoUnit {
@@ -300,10 +314,15 @@ impl UnitProcessor for RingUnit {
 /// Generates the engine's standard stereo reverb impulse response at `sample_rate` (identical to
 /// [`crate::Engine::new`]). Allocates: call off the audio thread.
 pub fn default_reverb_ir(sample_rate: u32) -> [Vec<f32>; 2] {
-    let NoiseTables { white, .. } = NoiseTables::generate(&mut Mulberry32::new(NOISE_SEED));
-    let [l, r] = white;
-    let white = Arc::new(AudioBuffer::new(sample_rate as f32, vec![l, r]));
+    let [white, _] = tone_noise(sample_rate);
     effects::reverb_ir(sample_rate, &white)
+}
+
+/// Tone's white and pink noise tables at `sample_rate`, as [`crate::Engine::new`] generates them (the
+/// drum kit's and the reverb IR's). Allocates: call off the audio thread.
+pub fn tone_noise(sample_rate: u32) -> [Arc<AudioBuffer>; 2] {
+    let NoiseTables { white, pink } = NoiseTables::generate(&mut Mulberry32::new(NOISE_SEED));
+    [white, pink].map(|[l, r]| Arc::new(AudioBuffer::new(sample_rate as f32, vec![l, r])))
 }
 
 /// Stereo REVERB insert unit (`UnitKind::Reverb`): feeds the pair's mean ([`crate::fold`]) to its
@@ -573,6 +592,109 @@ impl UnitProcessor for OttUnit {
     }
 
     fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+/// SYNTH's instruments in the UI's `SYNTHS` order (`src/ui/state/instruments.ts`): what
+/// [`UnitParam::Instrument`]'s index names, mapped through [`Instrument::from_id`] (never the enum's own
+/// order, where 1 is Pad).
+pub const SYNTH_IDS: [&str; 6] = ["lead", "bass", "pad", "piano", "organ", "drum"];
+
+/// SYNTH's level ceiling: the UI's `SLOT_GAIN_MAX` (`src/ui/state/instrument.ts`).
+pub const SYNTH_GAIN_MAX: f64 = 1.5;
+
+/// SYNTH (`UnitKind::Synth`, `docs/unit-contract.md` §4): today's bank of six built-in instruments as one
+/// source unit. Notes and wheels arrive as its slot's events and apply on their frames, the bank rendered
+/// up to each; a note sounds [`instruments::LEAD`] after its frame.
+pub struct SynthUnit {
+    bank: Bank,
+    /// The DSP frame after the last one rendered: where [`UnitProcessor::stop`] silences the bank.
+    next: u64,
+}
+
+impl SynthUnit {
+    /// Allocates the six instruments and Tone's noise tables: build off the audio thread. No instrument
+    /// is picked, every level is 1 and the wheels are at rest.
+    pub fn new(sample_rate: u32) -> Self {
+        let [white, pink] = tone_noise(sample_rate);
+        SynthUnit::with_noise(sample_rate, &white, &pink)
+    }
+
+    /// [`SynthUnit::new`] over noise tables already made ([`tone_noise`]): build off the audio thread.
+    pub fn with_noise(sample_rate: u32, white: &Arc<AudioBuffer>, pink: &Arc<AudioBuffer>) -> Self {
+        SynthUnit { bank: Bank::new(sample_rate, white, pink), next: 0 }
+    }
+
+    /// The instrument that takes the notes, if one is picked.
+    pub fn instrument(&self) -> Option<Instrument> {
+        self.bank.selected()
+    }
+}
+
+impl UnitProcessor for SynthUnit {
+    fn info(&self) -> UnitInfo {
+        UnitInfo { kind: UnitKind::Synth, source: true, latency: instruments::LEAD }
+    }
+
+    fn process(&mut self, cx: &UnitCx, _input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]) {
+        let [ol, or] = out;
+        let len = ol.len();
+        let start = cx.dsp_frame.max(0) as u64;
+        let mut done = 0;
+        for e in events {
+            let at = (e.offset as usize).min(len);
+            if at > done {
+                self.bank.render(start + done as u64, &mut ol[done..at], &mut or[done..at]);
+                done = at;
+            }
+            let f = start + at as u64;
+            match e.kind {
+                SlotEventKind::NoteOn { key, velocity } => self.bank.note_on(key, velocity, f),
+                SlotEventKind::NoteOff { key } => self.bank.note_off(key, f),
+                SlotEventKind::PitchBend { semitones } => self.bank.set_pitch_bend(semitones, f),
+                SlotEventKind::Modulation { depth } => self.bank.set_modulation(depth, f),
+                SlotEventKind::AllNotesOff => self.bank.all_notes_off(f),
+            }
+        }
+        if done < len {
+            self.bank.render(start + done as u64, &mut ol[done..], &mut or[done..]);
+        }
+        self.next = start + len as u64;
+    }
+
+    fn set_param(&mut self, cx: &UnitCx, param: UnitParam, value: f64) -> Option<f64> {
+        if !value.is_finite() {
+            return None;
+        }
+        match param {
+            UnitParam::Instrument => {
+                // The range is checked before rounding: -0.25 or 5.25 is no pick.
+                if !(0.0..=(SYNTH_IDS.len() - 1) as f64).contains(&value) {
+                    return None;
+                }
+                let k = (value + 0.5).floor();
+                let instrument = Instrument::from_id(SYNTH_IDS[k as usize])?;
+                self.bank.select(Some(instrument), cx.dsp_frame.max(0) as u64);
+                Some(k)
+            }
+            UnitParam::Gain(instrument) => {
+                let gain = value.clamp(0.0, SYNTH_GAIN_MAX);
+                self.bank.set_gain(instrument, gain);
+                Some(gain)
+            }
+            UnitParam::Send(_) => None,
+        }
+    }
+
+    /// The unit leaves the engine (`docs/unit-contract.md` §3: a withdrawn source is silent, its notes
+    /// released): every voice silenced where the last call ended, so a withdrawn and reseated SYNTH
+    /// resumes silent until its next note. The pick, the levels and the wheels stay; nothing allocates.
+    fn stop(&mut self) {
+        self.bank.silence(self.next);
+    }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
         self

@@ -227,6 +227,9 @@ impl UnitProcessor for ClapUnit {
                     SlotEventKind::NoteOff { key } => {
                         buf.push(&NoteOffEvent::new(time, Pckn::new(0u16, 0u16, key as u16, Match::All), 0.0))
                     }
+                    // A plugin ignores the wheels (owner decision D12); the rack sends AllNotesOff to a
+                    // SYNTH alone (a leaving plugin gets a NoteOff per held key).
+                    SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } | SlotEventKind::AllNotesOff => {}
                 }
                 next += 1;
             }
