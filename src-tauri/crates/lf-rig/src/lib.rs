@@ -9,7 +9,7 @@
 //! neither. The page's part is one handover: `rig_open`, and on `absent` one `rig_import` of what
 //! its upgrade of the legacy keys made ([`answer`]).
 //!
-//! **This checkpoint (CP1) is the seam:** the types only, fixed before the parallel writers build on
+//! **The seam came first (CP1):** the types only, fixed before the parallel writers build on
 //! them. The rules land in the modules the plan names: the tolerant parse, the store and the
 //! projection (CP2a); the restore machine, the marker and placement (CP2c).
 //!
@@ -22,23 +22,32 @@
 //! | [`plan`] | What the restore holds per record unit ([`Plan`], [`Disposition`]): filled by the restore, read by the projection |
 //! | [`project`](mod@project) | The record as a projection of the model ([`project()`]), a change's kind ([`Change`]), the import ([`import()`]) |
 //! | [`store`] | The record's file over a [`Disk`]: the lock, the commit criterion, the writer's pace ([`Store`]) |
+//! | [`restore`] | The restore, a sans-IO state machine ([`Restore`]: events in, actions out; D1, D5, D10) |
+//! | [`marker`] | The crash marker: its file, and when a plugin load leaves it ([`Loads`], D6) |
+//! | [`place`] | Placement: a slot's role, `pending`'s move, an add's anchor, a match (D9) |
 //!
 //! The decisions cited as `D<n>` are the build plan's (`native-rig-plan.md`, a working document
 //! while the move is open); each lands in `docs/unit-contract.md` with the checkpoint that builds it.
 
 pub mod add;
 pub mod answer;
+pub mod marker;
+pub mod place;
 pub mod plan;
 pub mod project;
 pub mod record;
+pub mod restore;
 pub mod store;
 pub mod view;
 
 pub use add::{AddFail, AddOk, AddState, Place, Retry};
 pub use answer::{Notice, NoticeId, RigAnswer, RigImport, RigStatus, IMPORT_STALE};
+pub use marker::{Loads, MarkerRead, SETTLE};
+pub use place::{HeadRole, Match, Role};
 pub use plan::{Disposition, Plan};
 pub use project::{change, import, project, volumes, Change, ImportError, Volumes};
 pub use record::{Params, PluginRecord, RigRecord, SlotRecord, UnitBody, UnitRecord, Unreadable, Version1, SLOT_GAIN_MAX};
+pub use restore::{Action, Event, Restore};
 pub use store::{Commit, Disk, Files, Opened, Refusal, Store, DEV_FILES, RELEASE_FILES, SAVE_QUIET, TICK};
 pub use view::{PlateState, PlateView, PluginRefView, RigView};
 

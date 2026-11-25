@@ -26,12 +26,13 @@ pub enum Place {
     End,
 }
 
-/// An add the host took: the unit is in the engine or waiting to go in.
+/// An add the host took: the unit is in the engine or waiting to go in (or, [`AddState::Matched`], was
+/// there already).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AddOk {
     pub state: AddState,
-    /// The install token of the plate the add created ([`crate::PlateView::added_by`]): the restore
-    /// follows the unit's outcome by it in the views that follow.
+    /// The install token of the plate the add created ([`crate::PlateView::added_by`]), or of the plate
+    /// it matched: the restore follows the unit's outcome by it in the views that follow.
     pub token: InstallToken,
 }
 
@@ -42,6 +43,12 @@ pub enum AddState {
     Seated,
     /// A held install (a take holds the alignment): not applied yet, so not terminal for the marker.
     Waiting,
+    /// The model already held the unit (D9): under the slot's order lock the host found a live plate of
+    /// that slot with that id, kind and plugin identity, not a failed add and not `Leaving`, and added
+    /// nothing. `token` is that plate's [`crate::PlateView::added_by`]. The restore's own match runs on
+    /// its latest view first; this answer covers a plate that appeared between that view and the add.
+    /// No plugin code ran for the attempt, so its load leaves the crash marker at the next write.
+    Matched,
 }
 
 /// An add that failed, by who refused it (D5). `why` is the host's reason as the wire's `chain_add`
