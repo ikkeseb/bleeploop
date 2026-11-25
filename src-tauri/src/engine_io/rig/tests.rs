@@ -2,11 +2,13 @@
 //! transient plate state, the close (D7), the import (D12, D13), and the tone files' two outcomes through
 //! the real teardown. Each test drives a [`TestDevice`]'s engine host (or a [`Chains`] over it), ticks the
 //! writer by hand and reads the record file back. Until CP3a wires the restore, the plan is the record as
-//! found, its units held at their place (`held_plan`).
+//! found, its units held at their place or matched to an applied plate (`held_plan`). No feed thread runs
+//! here: a close with a record to write waits its bound for a feed pass (`FEED_PASS_WAIT`) unless a test
+//! drains as the feed would.
 
 use std::any::Any;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +19,7 @@ use lf_rig::{
     IMPORT_STALE, RELEASE_FILES,
 };
 
-use super::{files, writer, Rig};
+use super::{files, lock, writer, Inner, Rig};
 use crate::engine_io::chain::{PluginRef, UnitSpec};
 use crate::engine_io::chain_cmds::tests::{empty_slots, ClampingBuiltinFactory};
 use crate::engine_io::chain_cmds::{Added, Chains};
@@ -846,4 +848,191 @@ fn import_refuses_an_id_the_chain_holds() {
     assert!(rig.import(host, (&doc, epoch), &import_text(&import)).is_err());
     assert!(!folder.path(files()).exists(), "nothing stored");
     assert_eq!(rig.open(host).status, RigStatus::Absent);
+}
+
+// ── the plan's judgement at the adoption's view and at close's full view (D3, D7) ───────────────────
+
+/// A DEV import's adopted unit is matched to its plate, so the player's removal of it before the
+/// writer's next tick ends it: the record does not write it back.
+#[test]
+fn an_adopted_unit_the_player_removes_before_a_tick_is_not_written_back() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("adopt-removed");
+    let rig = folder.rig();
+    let doc = PluginHostState::default();
+    let epoch = doc.begin_frontend_session();
+    let uh = seat(host, 150, &plugin("adopt-removed"), 0, 0);
+    rig.import(host, (&doc, epoch), &import_text(&record(vec![echo_unit(250)], Vec::new()))).expect("stored");
+    assert_eq!(folder.ids(0), vec![150], "adopted");
+
+    remove(host, 150);
+    tick(&rig, host);
+    assert_eq!(folder.ids(0), Vec::<UnitId>::new(), "the player's removal stands");
+    assert!(matches!(take_back(&uh), Back::Removed(_)));
+    uh.release();
+}
+
+/// A record unit the player added again under its id and then removed while a take holds the removal
+/// (its plate `Leaving`), with no tick between: close judges the plan at its full view first (the
+/// player's applied plate wins the id), then drops the leaving plate, so the unit is not written back.
+#[test]
+fn a_record_unit_readded_then_leaving_at_close_is_not_written_back() {
+    let device = slow_device();
+    let host = device.host();
+    let folder = Folder::new("leaving-close");
+    let amp = plugin("leaving-close");
+    let rig = folder.opened(host, &record(vec![plugin_unit(160, &amp)], Vec::new()));
+    // Latency 64: its removal is an edit a take holds.
+    let uh = seat(host, 160, &amp, 0, 64);
+    start_take(&device);
+    let op = remove_held(host, 160);
+    rig.close(host);
+    assert_eq!(folder.ids(0), Vec::<UnitId>::new(), "the player's removal stands");
+
+    stop_take(&device);
+    assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
+    assert!(matches!(take_back(&uh), Back::Removed(_)));
+    uh.release();
+}
+
+// ── the close's order (D7) ───────────────────────────────────────────────────────────────────────────
+
+/// Close decides under `disk` whether it writes: a record an import or a first open committed and has
+/// not yet published to `inner` (that window, set here by hand) still takes close's last write.
+#[test]
+fn close_writes_a_record_committed_but_not_yet_published() {
+    let device = fast_device();
+    let host = device.host();
+    let doc = PluginHostState::default();
+    let epoch = doc.begin_frontend_session();
+    let imported = Folder::new("unpublished-import");
+    let found = Folder::new("unpublished-open");
+    let a = imported.rig();
+    a.import(host, (&doc, epoch), &import_text(&record(vec![echo_unit(170)], Vec::new()))).expect("stored");
+    let b = found.opened(host, &record(vec![echo_unit(171)], Vec::new()));
+    for rig in [&a, &b] {
+        *lock(&rig.inner) = Inner::default();
+    }
+    let _unit = seat(host, 172, &plugin("unpublished"), 0, 0);
+    a.close(host);
+    b.close(host);
+    assert_eq!(imported.ids(0), vec![170, 172], "the import's record, then the unit applied after it");
+    assert_eq!(found.ids(0), vec![171, 172], "the opened record, then the unit applied after it");
+}
+
+/// Close waits for one completed feed pass before it takes its copy: an install the engine applied,
+/// its `Seat` still in the event ring, reaches the model first, so the record holds the unit.
+#[test]
+fn close_waits_for_a_feed_pass_to_take_an_applied_install() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("feed-pass");
+    let rig = folder.opened(host, &empty());
+    let uh = reserve(host, 180, &plugin("feed-pass"), 0, 0);
+    let terms = uh.terms().expect("engine terms");
+    let op = uh.submit(Box::new(StandIn(0)), terms).map_err(|(_, e)| e).expect("submit");
+    // The engine applies it within a few blocks; nothing drains its `Seat` into the model.
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!plate(host, 180).applied, "the model has not heard the seat yet");
+
+    let done = AtomicBool::new(false);
+    let (rig_ref, done_ref) = (&rig, &done);
+    std::thread::scope(|s| {
+        // The feed, whose first pass comes well after close began.
+        let feed_host = host.clone();
+        s.spawn(move || {
+            wait_until("close begins", || rig_ref.closing.load(Acquire));
+            std::thread::sleep(Duration::from_millis(100));
+            while !done_ref.load(Acquire) {
+                settle(&feed_host);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        rig.close(host);
+        done.store(true, Release);
+    });
+    assert_eq!(folder.ids(0), vec![180], "the applied install is in the record");
+    assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
+    uh.release();
+}
+
+/// A second close (the updater's shutdown, then the exit's) returns only after the first has written
+/// and released the lock file, and writes nothing of its own.
+#[test]
+fn a_second_close_returns_after_the_first_has_written() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("second-close");
+    let rig = folder.opened(host, &empty());
+    let _unit = seat(host, 190, &plugin("second-close"), 0, 0);
+    let returned = AtomicBool::new(false);
+    let (early, after) = std::thread::scope(|s| {
+        // The first close stops at `inner`, past `closing`, while the test holds it.
+        let inner = lock(&rig.inner);
+        let first = s.spawn(|| rig.close(host));
+        wait_until("the first close begins", || rig.closing.load(Acquire));
+        let second = s.spawn(|| {
+            rig.close(host);
+            returned.store(true, Release);
+            // What the second close leaves when it returns.
+            let status = folder.rig().open(host).status;
+            (folder.ids(0), status)
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let early = returned.load(Acquire);
+        drop(inner);
+        first.join().unwrap();
+        (early, second.join().unwrap())
+    });
+    assert!(!early, "the second close waits for the first");
+    assert_eq!(after, (vec![190], RigStatus::Present), "the first had written and released the lock file");
+}
+
+/// Once close has begun nothing opens or reads the file: an open that comes before close's last step
+/// answers `unavailable` and takes no lock file.
+#[test]
+fn an_open_after_close_began_opens_no_file() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("open-closing");
+    folder.write(files(), &empty());
+    let rig = folder.rig();
+    let (status, opened, lock_file) = std::thread::scope(|s| {
+        // Close stops at `inner` (if it gets there) while the test holds it, past `closing`.
+        let inner = lock(&rig.inner);
+        let close = s.spawn(|| rig.close(host));
+        wait_until("close begins", || rig.closing.load(Acquire));
+        let status = rig.opened().status;
+        let opened = lock(&rig.disk).store.is_some();
+        let lock_file = folder.0.join(files().lock).exists();
+        drop(inner);
+        close.join().unwrap();
+        (status, opened, lock_file)
+    });
+    assert_eq!((status, opened, lock_file), (RigStatus::Unavailable, false, false));
+}
+
+/// The import checks its page's epoch again right before its commit: a `host_init` after the call's
+/// own check (here while the import waits for the chains' copy) makes it `stale`, and nothing is stored.
+#[test]
+fn an_import_whose_page_was_replaced_before_its_commit_is_stale() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("stale-late");
+    let rig = folder.rig();
+    let doc = PluginHostState::default();
+    let epoch = doc.begin_frontend_session();
+    let text = import_text(&record(vec![echo_unit(200)], Vec::new()));
+    let answer = std::thread::scope(|s| {
+        let state = host.core.state.lock().unwrap();
+        let import = s.spawn(|| rig.import(host, (&doc, epoch), &text));
+        // Past its first check once the store is open; it then waits for `state` (the view).
+        wait_until("the import opened the store", || lock(&rig.disk).store.is_some());
+        doc.begin_frontend_session();
+        drop(state);
+        import.join().unwrap()
+    });
+    assert_eq!(answer, Err(IMPORT_STALE.to_string()));
+    assert!(!folder.path(files()).exists(), "nothing stored");
 }
