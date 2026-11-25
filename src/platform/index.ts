@@ -5,7 +5,7 @@
  */
 import { isTauri } from '@tauri-apps/api/core';
 import type { MidiSubscription, Platform } from './host';
-import { isKindToggle, isUnitCommand, type EngineCommand, type NoteTarget, type UnitId } from './engine-wire';
+import { isUnitCommand, type EngineCommand, type NoteTarget, type UnitId } from './engine-wire';
 import { encodeInput, encodeItem, type Dropped, type InputItem, type MidiEvent } from './midi-wire';
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
@@ -325,13 +325,11 @@ export function sendEngineReported(...commands: EngineCommand[]): Promise<boolea
 
 /**
  * Queue engine commands, dropping unit commands (`isUnitCommand`) while the platform's chain host is not
- * available, and dropping `Toggle.Units` (`isKindToggle`) under Tauri until the built-in units land on
- * the native engine (unit contract §2). A dropped command resolves its call false, without a log line or a
- * toast: the chain UI asks `platform.chain.available` first.
+ * available (unit contract §2). A dropped command resolves its call false, without a log line or a toast:
+ * the chain UI asks `platform.chain.available` first.
  */
 function enqueueEngine(commands: EngineCommand[], ownToast: boolean): Promise<boolean> {
-  const drop = !platform.chain.available ? isUnitCommand : underTauri ? isKindToggle : null;
-  const kept = drop ? commands.filter((c) => !drop(c)) : commands;
+  const kept = platform.chain.available ? commands : commands.filter((c) => !isUnitCommand(c));
   const sent = enqueue(kept.map(encodeItem.engine), ownToast);
   return kept.length === commands.length ? sent : sent.then(() => false);
 }

@@ -15,7 +15,7 @@
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` (removed) |
 //! | `bindings` | [`Binding`], the 28 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
-//! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
+//! | `actions` | what a binding runs, as engine commands and UI events (an IN FX pedal by the page's mode: the units of its kind in DEV chain mode, else the legacy send); which of the UI's commands join the queue | `src/app/actions.ts` |
 //! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the synth pick, the held-note set | `src/ui/state/input-router.ts` (removed), `instrument.ts` `routeEngine` |
 //! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, what a rebuild empties and folds | (new: nothing is stamped, the no-device rule, a rebuild needs no WebView) |
 //! | `store` | `midi-bindings.json` and the one-time import of the web's list | (new: bindings live native, the import never guesses) |
@@ -76,7 +76,8 @@
 //!   presses; the UI hears [`MidiEvent::Gone`] (the toast).
 //! - **The subscription's locked step** (the rule: **A page is its subscription**;
 //!   [`MidiHost::subscribe`]): the new epoch, the older pages' released holds, the cancelled learn (an
-//!   unloaded page ran no cleanup of its own) and the replaced event sink happen under the one lock; an
+//!   unloaded page ran no cleanup of its own), the page's mode (DEV chain mode through
+//!   `MidiHost::subscribe_chain`, else legacy) and the replaced event sink happen under the one lock; an
 //!   older page's subscribe gets an epoch that is never current. The epoch checks the UI's input
 //!   events (a note, a blur, a slot pick, a DEV synth pick, a panic) and learn calls; a refused input event is answered
 //!   ([`Dropped::Stale`]), and the UI's engine commands carry no epoch. MIDI holds stay through a
@@ -460,6 +461,10 @@ struct State {
     /// handed out (0: none yet).
     origin: Option<f64>,
     epochs: u64,
+    /// The current page runs chain mode (DEV: it subscribed through `MidiHost::subscribe_chain`; never
+    /// in a release build): an IN FX pedal switches the units of its kind (`actions`). Set by every
+    /// subscribe that makes a new page current, in the same locked step as its epoch.
+    chain_mode: bool,
 }
 
 type Sink = Arc<dyn Fn(MidiEvent) + Send + Sync>;
@@ -526,6 +531,7 @@ impl Core {
                 problem,
                 origin: None,
                 epochs: 0,
+                chain_mode: false,
             }),
             engine,
             dir,
@@ -557,8 +563,9 @@ impl Core {
     /// released and their later input refused (`Router::ui_epoch`), a pending learn is cancelled, and
     /// `sink` replaces the listener. It hears first what it needs to draw, queued with the sink in that
     /// step, so no thread handing events over can come between them; the held set goes out after them,
-    /// whatever its count. The epoch, and whether `sink` is the listener now.
-    fn subscribe(&self, origin: f64, sink: Sink) -> (u64, bool) {
+    /// whatever its count. `chains`: the page runs chain mode (DEV), set in the same step as its epoch.
+    /// The epoch, and whether `sink` is the listener now.
+    fn subscribe(&self, origin: f64, sink: Sink, chains: bool) -> (u64, bool) {
         let answer = {
             let mut guard = self.lock();
             let st = &mut *guard;
@@ -568,6 +575,7 @@ impl Core {
             let newest = origin.is_finite() && st.origin.is_none_or(|o| origin >= o);
             if newest {
                 st.origin = Some(origin);
+                st.chain_mode = chains;
                 let mut out = Vec::new();
                 st.router.ui_epoch(epoch, &mut out);
                 let _ = self.admit(st, &mut out);
@@ -665,7 +673,7 @@ impl Core {
 
     /// What a binding fired: its batch, then its UI events. A refused HOLD press holds nothing.
     fn fire(&self, st: &mut State, fire: Fire) {
-        let run = actions::run(fire);
+        let run = actions::run(fire, st.chain_mode);
         let mut out = run.out;
         if self.admit(st, &mut out).is_err() {
             if let Fire::HoldPress { control, .. } = fire {
@@ -1132,7 +1140,16 @@ impl MidiHost {
     /// new listener needs: the ports, the bindings, the learn's state, the store's last problem and the
     /// held notes. An older page's subscribe changes nothing, and its epoch is never current.
     pub fn subscribe(&self, origin: f64, sink: Box<dyn Fn(MidiEvent) + Send + Sync>) -> u64 {
-        self.core.subscribe(origin, Arc::from(sink)).0
+        self.core.subscribe(origin, Arc::from(sink), false).0
+    }
+
+    /// DEV (as the `chain_*` commands): [`MidiHost::subscribe`] for a page that runs chain mode, which
+    /// holds for its epoch from the same locked step on: an IN FX pedal runs `Toggle::Units` of its kind
+    /// instead of the legacy send (`actions`). A plain subscribe of a newer page ends it; an older page's
+    /// late one, refused, changes nothing. A release build has no call: its pedals run the send.
+    #[cfg(debug_assertions)]
+    pub fn subscribe_chain(&self, origin: f64, sink: Box<dyn Fn(MidiEvent) + Send + Sync>) -> u64 {
+        self.core.subscribe(origin, Arc::from(sink), true).0
     }
 
     /// A pointer or key of document `epoch` (`owner`: `pointer:<id>` or `key:<code>`) pressed or let go

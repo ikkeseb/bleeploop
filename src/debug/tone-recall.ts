@@ -38,7 +38,7 @@ import { parseZip } from '../session/unzip';
 import { availablePlugins, clearPlugin, nativeHostReady, selectPlugin, slotPendingCounts, slotPlugins } from '../ui/state/instrument';
 import { goLive, inputArmed } from '../ui/state/native-io';
 import { pluginDescriptorKey } from '../ui/state/plugin-descriptor';
-import { rigRecallDone } from '../ui/state/rig-recall';
+import { rigRecallFinished } from '../ui/state/rig-recall';
 import { restoreSessionTones } from '../ui/state/slot-tones';
 import { toasts } from '../notify';
 import { confirmNativeClose, platform, type PluginDescriptor, type PluginInfo } from '../platform';
@@ -214,7 +214,7 @@ async function save(): Promise<string> {
 
 /** The recall's loads, each answering a restored tone, with both slots holding the saved plugins. */
 async function recalled(what: string): Promise<void> {
-  await until('the recall', () => rigRecallDone(), 180);
+  await until('the recall', () => rigRecallFinished(), 180);
   const restored = loads.filter((l) => l.tone === 'restored').map((l) => l.slot).sort();
   check(restored.join() === '0,1', `${what}: the loads answered ${JSON.stringify(loads)}, not a restored tone in both slots`);
   check(slotPlugins().every(Boolean), `${what}: the slots hold ${JSON.stringify(slotPlugins().map((d) => d?.name ?? null))}`);
@@ -313,7 +313,7 @@ export async function runToneRecall(): Promise<void> {
     await until('the plugin scan', () => nativeHostReady() && availablePlugins().length > 0, 600);
     const raw = import.meta.env.VITE_LF_PROBE_EXPECT as string | undefined;
     if (phase === 'save') {
-      await until('the recall', () => rigRecallDone(), 180);
+      await until('the recall', () => rigRecallFinished(), 180);
       log(`saved: ${await save()}`);
     } else if (phase === 'check' || phase === 'after') {
       check(raw !== undefined, 'no VITE_LF_PROBE_EXPECT handed over from the phase before');

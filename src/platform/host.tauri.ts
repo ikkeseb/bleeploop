@@ -23,7 +23,7 @@ import type {
   ToneImport,
   UpdateProgress,
 } from './host';
-import { decodeDeviceStatus, decodeFeedFrame, isKindToggle, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
+import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: verify/guards/boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
@@ -301,8 +301,12 @@ const tauriMidi: MidiHost = {
       }
     };
     // The page's age: a newer page's subscribe wins over an older page's late one, whatever the order
-    // the two calls reach native code in.
-    const epoch = invoke<unknown>('midi_subscribe', { channel, origin: performance.timeOrigin }).then(decodeEpoch);
+    // the two calls reach native code in. Under the DEV flag `lf.chainNative` the page subscribes through
+    // `midi_subscribe_chain` (DEV builds only, beside the `chain_*` commands), which turns native MIDI's
+    // chain mode on for this epoch in the same step, so a learned IN FX pedal switches its built-in units
+    // (`Toggle.Units`) from the first event on; a plain subscribe (always so in a release build) turns it off.
+    const command = chainNative ? 'midi_subscribe_chain' : 'midi_subscribe';
+    const epoch = invoke<unknown>(command, { channel, origin: performance.timeOrigin }).then(decodeEpoch);
     epoch.catch((err: unknown) => {
       console.error('[host.tauri] MIDI subscribe failed', err);
       notifyError('Could not reach MIDI. Restart BleepLoop to get it back.', err);
@@ -341,12 +345,9 @@ const tauriMidi: MidiHost = {
 /** The outbox's batches over Tauri IPC (`input_send`, synchronous on the main thread natively). */
 const tauriInput: InputHost = {
   async send(epoch, items) {
-    // Unit contract §2: with `lf.chainNative` off, no unit command reaches `input_send`; with it on,
-    // `SetUnitBypass`, `SetUnitParam` and `ToggleUnit` go through while `Toggle.Units` stays off the
-    // native batch until the built-in units land (`src/platform/index.ts` `enqueueEngine`).
-    if (items.some((item) => 'engine' in item && (chainNative ? isKindToggle(item.engine) : isUnitCommand(item.engine)))) {
-      throw new Error(chainNative ? NO_KIND_TOGGLE : NO_CHAIN);
-    }
+    // Unit contract §2: with `lf.chainNative` off (always so in a release build), no unit command reaches
+    // `input_send` (`src/platform/index.ts` `enqueueEngine` drops them first); with it on, all go through.
+    if (!chainNative && items.some((item) => 'engine' in item && isUnitCommand(item.engine))) throw new Error(NO_CHAIN);
     return decodeDropped(await invoke<unknown>('input_send', { epoch, items }));
   },
 };
@@ -412,7 +413,6 @@ function readChainNative(): boolean {
 const chainNative = readChainNative();
 
 const NO_CHAIN = 'The native chain host is off (enable lf.chainNative in DEV).';
-const NO_KIND_TOGGLE = 'Toggle.Units is not on the native engine yet.';
 const noChain = async (): Promise<never> => {
   throw new Error(NO_CHAIN);
 };

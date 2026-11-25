@@ -115,6 +115,7 @@ impl SlotHost {
                     settled: BTreeMap::new(),
                     last_remove_settled: None,
                     legacy_owner: self.token,
+                    keep_tone: false,
                 });
                 return Ok(());
             }
@@ -147,6 +148,7 @@ impl SlotHost {
                 settled: BTreeMap::new(),
                 last_remove_settled: None,
                 legacy_owner: self.token,
+                keep_tone: false,
             });
             state.model.push_pending(
                 self.slot,

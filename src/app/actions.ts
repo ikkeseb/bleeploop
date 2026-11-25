@@ -1,6 +1,6 @@
 import { activeSlot, slotOff, slotPlugins } from '../ui/state/instrument';
 import { liveInPlay } from '../ui/state/native-io';
-import { sendEngine, type EngineAction } from '../platform';
+import { platform, sendEngine, type EngineAction, type UnitEffectKindId } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
 import { nextStageView, toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
@@ -18,9 +18,10 @@ import { dismissLaneCue, refuseOnLane, tapGate } from '../ui/looper/gates';
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
  * follow the take. Every lane action and the engine's global ones (`ENGINE_GLOBAL`: NEXT/PREV TRACK,
- * ▶/■ ALL, FADE, the toggles CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input effects, and the tuner) go to the
- * engine as its `Action`: on the lane the engine has selected when the press lands (never the UI's copy
- * of the selection, which a feed frame may not have refreshed yet), or `ActionOn` a named track. The
+ * ▶/■ ALL, FADE, the toggles CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input effects (in chain
+ * mode their built-in units, `Toggle.Units`), and the tuner) go to the engine as its `Action`: on the
+ * lane the engine has selected when the press lands (never the UI's copy of the selection, which a feed
+ * frame may not have refreshed yet), or `ActionOn` a named track. The
  * engine gates them, confirms CLEAR per lane (one arm for the lane's CLR, the key and a pedal alike, on
  * the feed as the lane's `clearArmed`), resolves HOLD's lane, switches a toggle from the value it
  * has then (so a pedal and a click never undo each other) and names a refusal on the feed
@@ -156,6 +157,22 @@ const ENGINE_GLOBAL: Readonly<Record<EngineGlobalId, EngineAction>> = {
   tunerToggle: 'Tuner',
 };
 
+/** The input effects' rows in chain mode (unit contract §6): every built-in unit of the kind in both
+ * chains (`Toggle.Units`), as native MIDI runs their pedals there; the legacy sends are silent then. */
+const IN_FX_UNITS: Partial<Readonly<Record<EngineGlobalId, UnitEffectKindId>>> = {
+  inFxEcho: 'echo',
+  inFxReverb: 'reverb',
+  inFxRing: 'ring',
+  inFxOtt: 'ott',
+};
+
+/** The engine's action for global row `id`: an input effect's `Toggle.Units` while the chain is drawn
+ * (`platform.chain.available`, fixed for a page), else the table's. */
+function engineGlobal(id: EngineGlobalId): EngineAction {
+  const kind = platform.chain.available ? IN_FX_UNITS[id] : undefined;
+  return kind ? { Toggle: { Units: kind } } : ENGINE_GLOBAL[id];
+}
+
 /** The stage view's own controls. Not looper presses: the engine never hears them, and a pending CLEAR
  * and a lane cue outlive them. */
 const STAGE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>(['stageView', 'stageNextView']);
@@ -185,7 +202,7 @@ export function runAction(id: ActionId, target: Target = null): void {
     GLOBAL[id]();
     return;
   }
-  sendEngine({ Action: ENGINE_GLOBAL[id] });
+  sendEngine({ Action: engineGlobal(id) });
 }
 
 /** A learned MIDI binding fired a looper press natively (native MIDI sent its `Press` or action): the

@@ -61,8 +61,14 @@ function tone(plugin, name, state) {
   return out;
 }
 
+/** A returning player's profile whose rig record (`src/ui/state/rig-record.ts`) holds two empty slots: the
+ * chain starts empty, as the checks below build it, not as the upgrade of a profile with no record (Lead in A,
+ * Bass in B, `docs/unit-contract.md` §6) would. */
+const EMPTY_RIG = { 'lf.rig': JSON.stringify({ version: 1, slots: [{ volume: 1, units: [] }, { volume: 1, units: [] }] }) };
+
 await probe(async ({ open }) => {
   const { page, consumeConsoleErrors } = await open({
+    storage: EMPTY_RIG,
     init: (p) =>
       p.addInitScript(() => {
         window.__lfEngineFake = true;
@@ -967,12 +973,13 @@ await probe(async ({ open }) => {
         const isRawBytes = args instanceof Uint8Array;
         invokes.push({
           cmd,
-          args: cmd === 'engine_feed' || cmd === 'midi_subscribe' ? null : isRawBytes ? [...args] : args,
+          args: cmd === 'engine_feed' || cmd === 'midi_subscribe' || cmd === 'midi_subscribe_chain' ? null : isRawBytes ? [...args] : args,
           isRawBytes,
           headers: options?.headers ?? null,
         });
         if (cmd === 'host_init') return 7;
-        if (cmd === 'midi_subscribe') return 1;
+        // `host.tauri.ts` subscribes through `midi_subscribe_chain` under `lf.chainNative`, else `midi_subscribe`
+        if (cmd === 'midi_subscribe' || cmd === 'midi_subscribe_chain') return 1;
         if (cmd === 'plugin:event|listen') {
           const id = nextEvent++;
           const list = listeners.get(args.event) ?? [];
@@ -1030,7 +1037,8 @@ await probe(async ({ open }) => {
 
   // 1) Flag on: page reload with two chain plugins — host_init runs, no plugin_unload, no plugin_load,
   // and the UI draws the reset frame's chains; then spy every ChainHost call, chain_tone_import's raw
-  // body and headers, unit commands on input_send, and Toggle.Units dropped before the batch.
+  // body and headers, unit commands and Toggle.Units on input_send (the chain host is on), and MIDI
+  // subscribed through midi_subscribe_chain.
   const twoPluginChains = [
     {
       units: [
@@ -1072,6 +1080,8 @@ await probe(async ({ open }) => {
   assert.equal(reloadCheck.invokes.filter((i) => i.cmd === 'plugin_load').length, 0, 'reload skips recallRig (no plugin_load)');
   assert.deepEqual(reloadCheck.chainIds, [0x101, 0x102], 'reset frame chains decoded into chain state');
   assert.deepEqual(reloadCheck.plateNames, ['Fake Amp', 'Fake Lookahead'], 'UI draws the reset frame chains');
+  const subscribes = (invokes) => [...new Set(invokes.map((i) => i.cmd).filter((c) => c.startsWith('midi_subscribe')))];
+  assert.deepEqual(subscribes(reloadCheck.invokes), ['midi_subscribe_chain'], 'under lf.chainNative the page subscribes MIDI through midi_subscribe_chain only');
 
   const ipcOn = await chainPage.evaluate(async ([amp]) => {
     localStorage.removeItem('lf.chainNative');
@@ -1234,10 +1244,12 @@ await probe(async ({ open }) => {
   assert.equal(crossSlotCheck.moveStartedEarly, false, 'rejected cross-slot add must leave unit 21 mapped to slot 0 queue');
   assert.equal(crossSlotCheck.moveFinished, true, 'unit 21 move runs once slot 0 finishes');
 
-  assert.equal(ipcOn.unitOk, true, 'unit commands (non-Toggle.Units) succeed under Tauri when lf.chainNative=1');
-  assert.deepEqual([ipcOn.kindOnly, ipcOn.kindMixed], [false, false], 'Toggle.Units is dropped before the batch under Tauri');
+  // Toggle.Units passes wherever the chain host is on; without lf.chainNative it is dropped with every other
+  // unit command (the `?under-tauri` spy above: unitOnly false, zero unit commands invoked).
+  assert.equal(ipcOn.unitOk, true, 'unit commands succeed under Tauri when lf.chainNative=1');
+  assert.deepEqual([ipcOn.kindOnly, ipcOn.kindMixed], [true, true], 'Toggle.Units reaches the batch under Tauri when lf.chainNative=1');
   assert.equal(ipcOn.directUnit, 'sent', 'tauriInput.send lets unit commands through when lf.chainNative=1');
-  assert.notEqual(ipcOn.directKind, 'sent', 'tauriInput.send refuses Toggle.Units before IPC');
+  assert.equal(ipcOn.directKind, 'sent', 'tauriInput.send lets Toggle.Units through when lf.chainNative=1');
   const sentBatchesOn = ipcOn.invokes.filter((i) => i.cmd === 'input_send').map((i) => i.args.items);
   assert.deepEqual(
     sentBatchesOn,
@@ -1248,10 +1260,12 @@ await probe(async ({ open }) => {
         { engine: { Action: { ToggleUnit: 5 } } },
         { engine: { ActionOn: [2, { ToggleUnit: 5 }] } },
       ],
-      [{ engine: { SetUnitBypass: [5, false] } }],
+      [{ engine: { Action: { Toggle: { Units: 'echo' } } } }, { engine: { ActionOn: [1, { Toggle: { Units: 'ott' } }] } }],
+      [{ engine: { Action: { Toggle: { Units: 'echo' } } } }, { engine: { SetUnitBypass: [5, false] } }],
       [{ engine: { SetUnitBypass: [6, true] } }],
+      [{ engine: { Action: { Toggle: { Units: 'echo' } } } }],
     ],
-    'unit commands reach input_send and zero Toggle.Units are invoked',
+    'unit commands and Toggle.Units reach input_send, each batch whole',
   );
 
   // 2) Flag off: boot recalls the saved amp-sim via plugin_load as today.
@@ -1276,4 +1290,5 @@ await probe(async ({ open }) => {
     [{ slot: 0, path: AMP.path, id: AMP.id, frontendEpoch: 7, toneToken: null }],
     'flag off boot recalls the saved amp-sim via plugin_load',
   );
+  assert.deepEqual(subscribes(legacyBoot.invokes), ['midi_subscribe'], 'without lf.chainNative the page subscribes MIDI through midi_subscribe only');
 });

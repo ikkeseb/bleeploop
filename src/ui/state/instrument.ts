@@ -20,6 +20,7 @@ import {
 import { notifyError } from '../../notify';
 import {
   activeSlot,
+  DEFAULT_IDS,
   guitarFirstInstall,
   nativeHostReady,
   serializeSlot,
@@ -35,9 +36,11 @@ import {
   slotUnset,
   withAt,
 } from './instrument-slots';
+import { engineDevice } from './engine-store';
 import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
-import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
+import { forgetSlotPlugin, keepRigVolume, recallInFlight, rememberSlotPlugin, rigVolumes, savedRig, type SavedRig } from './rig-recall';
+import { defaultPluginLevel, legacySlotVolume, SLOT_GAIN_MAX, storedSlotSource, type LegacySnapshot } from './rig-record';
 import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 import { appliedHead, headSynthPick, pickSynth } from './chain';
 
@@ -70,13 +73,8 @@ const sourceOps: [number, number] = [0, 0];
 /** Which instance `slot` holds: read before a session import asks the host, for its reload. */
 export const slotSourceGeneration = (slot: 0 | 1): number => sourceOps[slot];
 
-/** A slot's volume range (the lane faders' and the plugin output's): unity at 1. */
-export const SLOT_GAIN_MAX = 1.5;
-
-/** A plugin's output level before the player sets one, by its scan kind: an amp-sim/FX is already
- * gain-staged, so its wet wants ~unity; a synth's default patches clip, so it starts conservative. */
-const FX_DEFAULT_GAIN = 0.9;
-const SYNTH_DEFAULT_GAIN = 0.1;
+/** A slot's volume range (the lane faders' and the plugin output's): unity at 1 (`rig-record.ts`). */
+export { SLOT_GAIN_MAX };
 
 // Kept for the next launch: each slot's source without its plugin (an instrument id, or 'off'; a plugin
 // over it comes back through the rig recall), each slot's input level, each instrument's level and each
@@ -84,12 +82,13 @@ const SYNTH_DEFAULT_GAIN = 0.1;
 const sourceKey = (slot: 0 | 1) => `lf.slotSource.${slot}`;
 const inputGainKey = (slot: 0 | 1) => `lf.slotInputGain.${slot}`;
 const synthGainKey = (id: string) => `lf.synthGain.${id}`;
-const pluginGainKey = (slot: 0 | 1, desc: PluginDescriptor) => `lf.pluginGain.${slot}.${pluginDescriptorKey(desc)}`;
+const pluginGainKey = (slot: 0 | 1, desc: Pick<PluginDescriptor, 'format' | 'path' | 'id'>) =>
+  `lf.pluginGain.${slot}.${pluginDescriptorKey(desc)}`;
 
-/** The level `desc` last had in `slot`, else its kind's default (an unclassified plugin at the quieter
- * synth level). */
+/** The level `desc` last had in `slot`, else its kind's default (`defaultPluginLevel`: an unclassified
+ * plugin at the quieter synth level). */
 const savedPluginLevel = (slot: 0 | 1, desc: PluginDescriptor): number =>
-  readStoredNumber(pluginGainKey(slot, desc), desc.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN, 0, SLOT_GAIN_MAX);
+  readStoredNumber(pluginGainKey(slot, desc), defaultPluginLevel(desc.isEffect), 0, SLOT_GAIN_MAX);
 
 function writeSource(slot: 0 | 1, source: string): void {
   try {
@@ -103,19 +102,20 @@ function writeSource(slot: 0 | 1, source: string): void {
 // (`guitarFirstInstall`), Off and unset: the guitar's slot, passing the input dry once GO LIVE is on,
 // as a stored Off does. A plugin's first load into an unset slot stores its Off, so the slot stays set.
 const guitarFirst = guitarFirstInstall();
-for (const slot of [0, 1] as const) {
-  let saved: string | null = null;
+function savedSource(slot: 0 | 1): string | null {
   try {
-    saved = localStorage.getItem(sourceKey(slot));
+    return localStorage.getItem(sourceKey(slot));
   } catch {
-    /* unreadable: the default synth */
+    return null; // unreadable: the default synth
   }
-  if (saved === 'off') setSlotOff((prev) => withAt(prev, slot, true));
-  else if (saved !== null && SYNTHS.some((s) => s.id === saved)) setSlotIds((prev) => withAt(prev, slot, saved));
-  else if (saved === null && guitarFirst) {
+}
+for (const slot of [0, 1] as const) {
+  const source = storedSlotSource(savedSource(slot), guitarFirst);
+  if (source === 'off') setSlotOff((prev) => withAt(prev, slot, true));
+  else if (source === 'unset') {
     setSlotOff((prev) => withAt(prev, slot, true));
     setSlotUnset((prev) => withAt(prev, slot, true));
-  }
+  } else if (source !== null) setSlotIds((prev) => withAt(prev, slot, source));
 }
 
 /** Slot `slot` holds a source now (a pick, or a plugin that loaded): it is no longer unset. */
@@ -153,8 +153,99 @@ function routeEngine(i: 0 | 1): void {
 }
 
 // With the chain drawn: each slot's level after its chain (unit contract: the slot volume sits after the
-// chain), unity at first. Not kept across a launch yet: the rig record's (`src/ui/AGENTS.md` § Open threads).
-const [chainGains, setChainGains] = createSignal<[number, number]>([1, 1]);
+// chain), kept in the rig record (`rig-recall.ts`): read here at load (a WebView reload, a launch), set by
+// the record's restore (`adoptRigVolume`) and the slot level. With no record yet the fader shows the level
+// the upgrade derives from the old keys (`legacySlotVolume`; the restore then applies the upgrade's own), so
+// the player can set it while the upgrade waits for its scan (review r2 finding 5). No level is sent before
+// the record is known (`chainLevelKnown`: an engine keeps its own meanwhile; a migrated Off slot never passes
+// its input at unity first): a level set meanwhile lands in the record's first write, and the restore sends
+// it. An unreadable record shows none. Only chain mode reads `lf.rig`: the release never does.
+const rigAtLoad = platform.chain.available ? rigVolumes() : null;
+const chainLevelKnown: [boolean, boolean] = Array.isArray(rigAtLoad) ? [true, true] : [false, false];
+const [chainGains, setChainGains] = createSignal<[number | null, number | null]>(
+  rigAtLoad === 'absent' ? upgradeLevels() : (rigAtLoad ?? [null, null]),
+);
+/** Each slot's level as the upgrade derives it from the old keys (the plugin's scan kind not known yet). */
+function upgradeLevels(): [number, number] {
+  const { slots } = legacyRigSnapshot([], savedRig());
+  return [legacySlotVolume(slots[0], guitarFirst, recallInFlight()), legacySlotVolume(slots[1], guitarFirst, recallInFlight())];
+}
+/** Per slot, who waits for its next level the engine takes (`adoptRigVolume`). */
+const levelTaken: [((took: boolean) => void)[], ((took: boolean) => void)[]] = [[], []];
+/** Per slot, the latest level send: an older one's resend stops. */
+const levelSends: [number, number] = [0, 0];
+
+/** How long a refused send goes again before it is logged, once (`resendUntilTaken`). */
+const RESEND_LOG_MS = 10_000;
+
+/**
+ * Send with `send` until the engine takes it: a refused batch (a briefly full command ring, a lost batch)
+ * goes again a short backoff apart (20 ms doubling to 500 ms), while `wanted()` holds (a newer send of the
+ * same thing, a new engine or no device running ends it), with no cap while it holds (review r3 finding 2:
+ * an IPC that recovers on the same device lets a waiting restore go on); one log line once refused for
+ * RESEND_LOG_MS. True once taken. Chain mode's rig restore waits on such sends (review r2 finding 3): the
+ * slot levels here, the legacy sends' send-off in `engine-store.ts`.
+ */
+export async function resendUntilTaken(what: string, send: () => Promise<boolean>, wanted: () => boolean): Promise<boolean> {
+  const logAt = Date.now() + RESEND_LOG_MS;
+  let logged = false;
+  for (let wait = 20; ; wait = Math.min(wait * 2, 500)) {
+    if (await send()) return true;
+    if (!wanted()) return false;
+    if (!logged && Date.now() >= logAt) {
+      logged = true;
+      console.error(`[instrument] ${what} was refused for ${RESEND_LOG_MS / 1000} s; still sending it until the engine takes it`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    if (!wanted()) return false;
+  }
+}
+
+/** Send slot `slot`'s chain-mode level (again while refused, until a newer level of the slot goes, while a
+ * device runs); once the engine took it, its waiters go on with true; with no device running they settle
+ * false (the restore adds nothing this launch). */
+function sendChainLevel(slot: 0 | 1, v: number): void {
+  const n = ++levelSends[slot];
+  const running = () => engineDevice() !== null;
+  void resendUntilTaken(`slot ${slot + 1}'s level`, () => sendEngine({ SetSlotGain: [slot, v] }), () => levelSends[slot] === n && running()).then((took) => {
+    if (took || !running()) levelTaken[slot].splice(0).forEach((go) => go(took));
+  });
+}
+
+/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. Settles true
+ * once the engine took a level of the slot (this one, resent while refused, or a later one): the restore's
+ * adds wait for it, so no unit seats at another level; false when no device runs before it was taken. */
+export function adoptRigVolume(slot: 0 | 1, volume: number): Promise<boolean> {
+  const v = Math.max(0, Math.min(SLOT_GAIN_MAX, volume));
+  setChainGains((prev) => withAt(prev, slot, v));
+  chainLevelKnown[slot] = true;
+  const taken = new Promise<boolean>((go) => levelTaken[slot].push(go));
+  sendChainLevel(slot, v);
+  return taken;
+}
+
+/**
+ * The legacy slot keys through the resolvers that read them today, for the rig record's upgrade (unit
+ * contract §6): per slot the legacy recall's plugin (`legacy`) with what this launch's `scan` says of it and
+ * its stored level, the stored source, the input level; the guitar-first install and each instrument's level.
+ */
+export function legacyRigSnapshot(
+  scan: readonly PluginDescriptor[],
+  legacy: SavedRig,
+): Pick<LegacySnapshot, 'slots' | 'guitarFirst' | 'synthGains'> {
+  const slot = (n: 0 | 1): LegacySnapshot['slots'][0] => {
+    const saved = legacy[n];
+    const found = saved && scan.find((d) => samePluginDescriptor(d, saved));
+    const stored = saved ? readStoredNumber(pluginGainKey(n, saved), Number.NaN, 0, SLOT_GAIN_MAX) : Number.NaN;
+    return {
+      plugin: saved && { ref: { ...saved }, isEffect: found ? found.isEffect : null, stored: Number.isNaN(stored) ? null : stored },
+      savedSource: savedSource(n),
+      defaultSynth: DEFAULT_IDS[n],
+      inputGain: inputGains()[n],
+    };
+  };
+  return { slots: [slot(0), slot(1)], guitarFirst, synthGains: synthGains() };
+}
 
 // Per-slot plugin gain; null = no plugin.
 const [engineGains, setEngineGains] = createSignal<[number | null, number | null]>([null, null]);
@@ -179,7 +270,10 @@ export function engineResync(first: boolean): void {
   applyActiveRouting();
   if (platform.chain.available) {
     // the chain's slot level after its chain; SYNTH's levels are its unit's params (unit contract §2, §4)
-    for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, chainGains()[slot]] });
+    for (const slot of [0, 1] as const) {
+      const v = chainGains()[slot];
+      if (v !== null && chainLevelKnown[slot]) sendChainLevel(slot, v);
+    }
     if (first) disarmEngineLive();
     return;
   }
@@ -662,12 +756,14 @@ export function slotLevel(slot: 0 | 1): number | null {
 }
 
 /** Set slot `slot`'s level (`slotLevel`), heard and recorded; an Off slot's and a synth's are kept
- * for the next launch. */
+ * for the next launch, and in chain mode the slot's volume in the rig record (`keepRigVolume`). */
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
   if (platform.chain.available) {
     setChainGains((prev) => withAt(prev, slot, v));
-    sendEngine({ SetSlotGain: [slot, v] });
+    keepRigVolume(slot, v);
+    // before the record is known it waits in the record's first write; the restore sends it
+    if (chainLevelKnown[slot]) sendChainLevel(slot, v);
     return;
   }
   const plugin = slotPlugins()[slot];

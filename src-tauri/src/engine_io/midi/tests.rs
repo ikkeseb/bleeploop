@@ -169,6 +169,16 @@ impl Rig {
         epoch
     }
 
+    /// [`Rig::subscribe`] for a page that runs chain mode (DEV).
+    #[cfg(debug_assertions)]
+    fn subscribe_chain(&self) -> u64 {
+        self.origin.set(self.origin.get() + 1.0);
+        let events = self.events.clone();
+        let epoch = self.host.subscribe_chain(self.origin.get(), Box::new(move |e| events.lock().unwrap().push(e)));
+        self.epoch.set(epoch);
+        epoch
+    }
+
     fn epoch(&self) -> u64 {
         self.epoch.get()
     }
@@ -1151,7 +1161,7 @@ fn a_new_listener_gets_its_first_events_even_mid_flush() {
             old.lock().unwrap().push(e);
             if !replaced.swap(true, Relaxed) {
                 let (new, core) = (new.clone(), core.upgrade().unwrap());
-                assert!(core.subscribe(f64::MAX, Arc::new(move |e| new.lock().unwrap().push(e))).1);
+                assert!(core.subscribe(f64::MAX, Arc::new(move |e| new.lock().unwrap().push(e)), false).1);
             }
         }));
     }
@@ -1548,4 +1558,147 @@ fn a_queued_synth_pick_reaches_its_reseated_synth_through_the_gate_before_a_late
     assert_eq!(host.core.gate_dropped.load(Relaxed), 0);
 
     synth.release();
+}
+
+/// What v0.8.9's store wrote (`git show v0.8.9:src-tauri/src/engine_io/midi/store.rs`, `Store::write`:
+/// version 1, `to_vec_pretty`) for the three IN FX pedals it had (no OTT action yet), learned on "Pedal".
+const V089_BINDINGS: &str = r##"{
+  "version": 1,
+  "revision": 3,
+  "bindings": [
+    {
+      "origin": "native",
+      "ordinal": false,
+      "blocked": null,
+      "binding": {
+        "portId": "winmm:0:\\\\?\\usb#pedal:Pedal",
+        "portName": "Pedal",
+        "channel": 0,
+        "kind": "cc",
+        "number": 20,
+        "action": "inFxEcho",
+        "target": null,
+        "pressHigh": true,
+        "momentary": true,
+        "hold": false
+      }
+    },
+    {
+      "origin": "native",
+      "ordinal": false,
+      "blocked": null,
+      "binding": {
+        "portId": "winmm:0:\\\\?\\usb#pedal:Pedal",
+        "portName": "Pedal",
+        "channel": 0,
+        "kind": "cc",
+        "number": 21,
+        "action": "inFxReverb",
+        "target": null,
+        "pressHigh": true,
+        "momentary": true,
+        "hold": false
+      }
+    },
+    {
+      "origin": "native",
+      "ordinal": false,
+      "blocked": null,
+      "binding": {
+        "portId": "winmm:0:\\\\?\\usb#pedal:Pedal",
+        "portName": "Pedal",
+        "channel": 0,
+        "kind": "cc",
+        "number": 22,
+        "action": "inFxRing",
+        "target": null,
+        "pressHigh": true,
+        "momentary": true,
+        "hold": false
+      }
+    }
+  ],
+  "rejected": [],
+  "legacy": {
+    "imported": false
+  }
+}"##;
+
+// Unit contract § 6: a v0.8.9 profile's IN FX pedals keep working. Its bindings file loads as it was
+// written, every pedal live on its port; in legacy mode each pedal is its send's toggle, as v0.8.9 ran it;
+// (DEV) for a page that subscribed in chain mode, each is `Toggle::Units` of its kind alone. The mode is set
+// with the subscription, in one step: a newer page's plain subscribe ends it, an older page's late
+// subscribe (refused) of either kind leaves the current page's mode as it is. OTT (no v0.8.9 action) is
+// learned today on the same port.
+#[test]
+fn a_v089_profiles_in_fx_pedals_switch_the_send_or_in_chain_mode_the_units_of_their_kind() {
+    use lf_engine::{InputSend, UnitKind};
+    let dir = Scratch::new("v089");
+    std::fs::write(dir.0.join(FILE_NAME), V089_BINDINGS).unwrap();
+    let (store, problem) = dir.load();
+    assert_eq!(problem, None, "v0.8.9's file loads as it is");
+    let r = Rig::with((store, problem), Some(dir.0.clone()), vec![port("Pedal", Some(A))]);
+    assert_eq!(r.states(), vec![("Pedal".to_string(), false, BindingState::Live); 3]);
+    r.learn(ActionId::InFxOtt, None, A, &[[0xb0, 23, 127], [0xb0, 23, 0]]);
+    r.take();
+    let pedals = [(20, InputSend::Echo, UnitKind::Echo), (21, InputSend::Reverb, UnitKind::Reverb), (22, InputSend::Ring, UnitKind::Ring), (23, InputSend::Ott, UnitKind::Ott)];
+    let press = |cc: u8| {
+        r.send(A, &[[0xb0, cc, 127], [0xb0, cc, 0]]);
+        r.take()
+    };
+    let sends = || {
+        for (cc, send, _) in pedals {
+            assert_eq!(press(cc), [Command::Action(Action::Toggle(Toggle::Send(send)))], "CC {cc} in legacy mode");
+        }
+    };
+    sends();
+    #[cfg(debug_assertions)]
+    {
+        let units = || {
+            for (cc, _, kind) in pedals {
+                assert_eq!(press(cc), [Command::Action(Action::Toggle(Toggle::Units(kind)))], "CC {cc} in chain mode");
+            }
+        };
+        let chain_page = r.subscribe_chain();
+        units();
+        // An older page's late subscribes, plain or in chain mode: never current, the mode stays.
+        let late = r.host.subscribe(1.0, Box::new(|_| {}));
+        assert!(late > chain_page && !r.host.learn(late, ActionId::Undo, None), "the late page is not current");
+        units();
+        r.subscribe();
+        sends();
+        r.host.subscribe_chain(2.0, Box::new(|_| {}));
+        sends();
+        r.subscribe_chain();
+        units();
+        r.subscribe();
+        sends();
+
+        // The mode holds from the subscription's locked step: a pedal pressed from inside the new page's
+        // first event (its sink runs outside the MIDI lock, so a midir callback may get in there) already
+        // runs the new page's mode, each subscribe switching it.
+        let subscribe_pressing = |chains: bool, cc: u8| -> Vec<Command> {
+            r.take();
+            let (core, at) = (r.host.core.clone(), r.t);
+            let fired = AtomicBool::new(false);
+            let events = r.events.clone();
+            let sink = Box::new(move |e: MidiEvent| {
+                if !fired.swap(true, Relaxed) {
+                    core.message(A, at, &[0xb0, cc, 127]);
+                    core.message(A, at, &[0xb0, cc, 0]);
+                }
+                events.lock().unwrap().push(e);
+            });
+            r.origin.set(r.origin.get() + 1.0);
+            let epoch = if chains { r.host.subscribe_chain(r.origin.get(), sink) } else { r.host.subscribe(r.origin.get(), sink) };
+            r.epoch.set(epoch);
+            r.take()
+        };
+        for (cc, send, kind) in pedals {
+            let units = [Command::Action(Action::Toggle(Toggle::Units(kind)))];
+            assert_eq!(subscribe_pressing(true, cc), units, "CC {cc} pressed inside a chain subscribe's first event");
+            let send = [Command::Action(Action::Toggle(Toggle::Send(send)))];
+            assert_eq!(subscribe_pressing(false, cc), send, "CC {cc} pressed inside a plain subscribe's first event");
+        }
+    }
 }

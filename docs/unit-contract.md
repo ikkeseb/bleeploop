@@ -30,14 +30,43 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   or a failed add; an add of a reserved id is refused at once, never at seating.
 - **The id names the instance and nothing else.** Two instances of one plugin, in one chain or in both,
   are two ids. It holds across a move, a bypass, a restart, an engine rebuild, an app restart and a save;
-  it ends with a removal. Until the rig record restores a chain at launch (§6, E3), the native chain host
-  removes every unit at shutdown, so each tone retires to its slot and plugin's file and the id ends there.
-- **The rig record** is `lf.rig` in the WebView's storage, beside recall and its crash marker
-  (`src/ui/state/rig-recall.ts`): per slot the units in order as `UnitRecord`s (§2). The upgrade writes it
-  before the first load (§6); while a recall runs (`src/app/boot.ts`) nothing writes it, so neither a
-  half-restored chain nor `resyncNativeSlots` reaches it; then each `chains` report writes it, except a
-  plugin unit the scan did not find, which keeps its entry (today's rule). A leftover marker forgets the
-  record's plugin units only.
+  it ends with a removal. The native chain host still removes every unit at shutdown, but keeps each
+  plugin unit's tone file (`unit-<id>.tone`), so the rig record's restore at the next launch brings the unit
+  back under its id with its own tone; only a removal the player made retires a tone.
+- **The rig record** is `lf.rig` in the WebView's storage (`src/ui/state/rig-recall.ts`; its shape and
+  rules, `rig-record.ts`): `{ version: 1, slots: [slot, slot] }`, per slot its `volume` (after the chain), its
+  `units` in order as `UnitRecord`s (§2; a plugin unit's display name as `plugin.name`, as §8's rig) and,
+  while §6's second step is owed, `pending`. The upgrade writes it whole before the first add (§6). One
+  writer holds every later write, each a read-modify-write of the whole record, so a volume change never
+  overwrites newer units; it writes only once the launch's restore has the record (read, or upgraded and
+  stored): a slot level set before then waits and the record takes it, and a record that cannot be read
+  (bad text, a version this build does not know) is left as it is, nothing restored or written that
+  launch. The restore starts from the first reset frame's `chains` (none in time: nothing restored or
+  written). While a recall runs (`src/app/boot.ts`) nothing writes `units` or `pending` (the
+  `volume` may change), so neither a half-restored chain nor `resyncNativeSlots` reaches them; then each
+  `chains` report writes `units`: every reported unit but one `leaving`, in order, a failed add's plate
+  included, and every record unit no report of the page has named yet, at its record place (a plugin the
+  scan did not find, an add on its way), so only a confirmed removal drops one. A failed plate is no proof
+  of a plugin fault: the feed names no cause (a lost device or an owner thread that would not start fails a
+  plate as the plugin's own load does), so the plate keeps its id and place and each launch adds it again
+  until the player removes it. A durable step (the upgrade, a placement) adds nothing until its write reads
+  back equal; a failed one logs and waits for the next launch. Its crash marker is `lf.rigInFlight`, the
+  chain's own (legacy recall's `lf.rigRecallInFlight` stays legacy mode's), naming the plugin unit ids whose
+  adds the restore issued: stored (naming none) before the restore's first add of any kind, and again just
+  before each plugin add, naming it too; storage refusing it, no further add and no placement that launch. A
+  plugin never issued (missing from the scan, or after an add with no plate, whose later units wait for the
+  next launch) is neither named nor waited for, and an add rejected with no plate leaves the marker again, so
+  a crash in the other slot's load forgets only the units whose adds reached the host. Removed only by a
+  settle that completed, which starts once each issued plugin add's outcome is in the feed (seated or
+  failed), or at once when none reached the host (none issued, or each rejected with no plate: an IPC
+  failure is no crash). Left over, the last launch died
+  restoring only in a new native process (the page's first native MIDI subscribe answers epoch 1, `midi.ts`
+  `firstPageOfLaunch`) with none of the record's plugin units in the first reported chains: the record
+  forgets the units the marker names only, through the record's one writer (a level set meanwhile stays),
+  and the slots' `pending` then place. An empty report alone is no proof of a crash: in a WebView reload (a
+  later epoch), or with some plugin units reported, a reload cut a restore short: it goes on, the marker
+  kept until a settle completes. Unknown which (no epoch in time): the plugin units are kept and not added
+  that launch.
 - **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`
   `file_name`; today `slot<n>-<hash>.tone`). A removal renames it to that slot-and-plugin file, and a new
   unit with no tone of its own starts from it.
@@ -273,32 +302,58 @@ below reads an old key through the resolver that reads it today, so a missing ke
 - **A learned pedal keeps working, no relearn, no file change.** The bindings and action ids stay
   (`engine_io/midi/bindings.rs`); `InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt` run `Toggle::Units(kind)`
   (`midi/actions.rs`): every unit of that kind in both chains; if any is on, all go bypassed, else all come
-  on; answered by one `Toggled` and each changed `Chain`; with none of the kind it does nothing.
-  `ToggleUnit` serves a pedal bound to one unit; learning one is not in this build.
+  on; answered by one `Toggled` and each changed `Chain`; with none of the kind it does nothing and answers
+  no event (`api.rs`). In chain mode native MIDI knows it from the page's subscription
+  (`midi_subscribe_chain`), and the UI's own press of an input effect (`src/app/actions.ts`) sends the same
+  `Toggle.Units`; legacy mode keeps the sends. `ToggleUnit` serves a pedal bound to one unit; learning one
+  is not in this build.
 - **The old sends become units in two durable steps,** as a plugin chain's role is known only at
   activation (§The picture: VST2's scan and activation disagree). The upgrade's `lf.rig` write holds
-  `pending`: per slot, the send units to place, ids minted, values read. Once the recall settled and that
-  slot's head activated, one `lf.rig` write adds them to its chain and clears its `pending`; a restart
-  between places them again under the same ids, none lost or doubled; a missing plugin's slot keeps its
-  `pending`. The placement, after each input-fed chain's plugin: the OTT (dev only), RING MOD → ECHO →
-  REVERB, with their saved values; a send that was on goes on into every input-fed chain (it sounded on
-  both slots' sum), one that was off goes bypassed, so its pedal reaches either input. One off, at its
-  defaults and bound to no pedal is not migrated (boot stores every send's key, `legacy-storage.mjs`
-  header). A source-headed slot gets the OTT alone, if it was on. `lf.inputSend.*` stays as it is.
-- **Rig recall:** `lf.rigRecall` becomes `lf.rig`, written whole before the first load (§1): each slot's
-  plugin a plugin unit with a fresh id, else its source as `instrument.ts` resolves `lf.slotSource.<n>`
-  (unset: Lead in A, Bass in B, Off on a guitar-first install) as a SYNTH unit or an empty chain. The old
-  keys stay one release.
+  `pending`: per slot, the send units to place, ids minted, values read (a param with no key reads its
+  resolver's default). Once the recall settled and that slot's head (the record's first unit) has a known
+  role, one `lf.rig` write adds them to its chain and clears its `pending`; a restart between places them
+  again under the same ids, none lost or doubled. No head, a built-in effect or a SYNTH head is known at
+  once; a plugin head once a fresh `chains` report shows it applied (seated or parked, its `source`). A
+  plugin head missing from the scan, still loading or waiting, or whose add failed with no plate (the host,
+  the IPC), keeps the slot's `pending`; so does one whose add left a `failed` plate: the plate names no cause
+  (§1), so it is kept, its slot's `pending` with it, and retried each launch until the player removes it (a
+  crash at load is still the marker's, §1). Not now: a native cause on the plate (`UnitState.failedBy`) would
+  let a plugin's own load failure be forgotten again as legacy recall forgets one, and the slot place as
+  input-fed (`src/ui/AGENTS.md` § Open threads). The placement, appended at each input-fed chain's
+  end (a reload or the player may have added units since): the OTT, RING MOD → ECHO → REVERB, with their
+  saved values; a send that was on goes on into every input-fed chain (it sounded on both slots' sum), one
+  that was off goes bypassed, so its pedal reaches either input. One off, at its defaults and bound to no
+  pedal is not migrated (boot stores every send's key, `legacy-storage.mjs` header); "bound" reads native
+  MIDI's first `bindings` report, and none within `NATIVE_WAIT_MS` counts every send as bound. The OTT
+  follows the same rule through its resolvers: v0.8.9 stored no OTT key, so it migrates only when bound; a
+  dev profile's on, changed or bound OTT migrates even without its switch key. The upgrade puts only the
+  OTT in a SYNTH-headed slot's `pending`, every migrating send in the others'; a source-headed slot (a
+  SYNTH, or a plugin that activates as one) gets the OTT alone, if it was on. `lf.inputSend.*` stays as it
+  is: in chain mode the legacy sends go off on every reset frame and nothing writes their keys.
+- **Rig recall:** `lf.rigRecall` becomes `lf.rig`, written whole before the first load (§1), after a scan of
+  the legacy recall's plugin paths: each slot's plugin a plugin unit with a fresh id (dropped when the
+  legacy crash marker is stored, as v0.8.9 would have), else its source as `instrument.ts` resolves
+  `lf.slotSource.<n>` (unset: Lead in A, Bass in B, Off on a guitar-first install) as a SYNTH unit or an
+  empty chain. A DEV chain already reported on the first reset frame with no record yet is adopted as the
+  record's units instead (its ids, its order, each slot at the gain the reset frame's settings replay,
+  unity where they hold none); the sends still go to `pending`. The old keys stay
+  one release.
 - **Tones:** a migrated plugin unit's first load starts from its slot and plugin's v0.8.9 file (§1).
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
-  effect, 0.1 otherwise, `instrument.ts`); an empty input-fed slot `lf.slotInputGain.<n>`; a SYNTH slot
-  unity, its instrument levels from `lf.synthGain.<id>` (the input trim never scaled a synth). GO LIVE is
-  never restored.
+  effect, 0.1 otherwise or when the scan did not find it, `instrument.ts`); an empty input-fed slot
+  `lf.slotInputGain.<n>`; a SYNTH slot unity, its instrument levels from `lf.synthGain.<id>` (the input trim
+  never scaled a synth). In chain mode no slot level is sent before the record is known: with no record yet
+  the slot's fader shows the level these rules give from the old keys (the scan kind not yet known), and a
+  level set on it waits for the record's first write. The restore then applies each slot's volume
+  (`SetSlotGain`) and adds nothing until the engine took it and the reset's send-off of the legacy sends;
+  either refused (a briefly full command ring) goes again a short backoff apart until taken, with no reset
+  frame needed. GO LIVE is never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
   `inputChannel` seeding both, as today) each become a mono pick, `null` auto; stereo is the player's (§7).
 - **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.
-- **Proved by** `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1 and 48
-  kHz) and `rig-recall.mjs` on a stored v0.8.9 profile; at the boundaries those fakes skip, `src-tauri`
+- **Proved by** `verify/guards/rig-upgrade.mjs` (the upgrade case by case, the placement, the record's
+  units from a report), `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1
+  and 48 kHz) and `rig-recall.mjs` on a stored v0.8.9 profile; at the boundaries those fakes skip, `src-tauri`
   tests that load a v0.8.9 `slot<n>-<hash>.tone` into a new unit (`host/tone.rs`) and dispatch a v0.8.9
   bindings file's `InFx*` into `Toggle::Units` (`actions.rs`). A real profile is rehearsed at the release.
 

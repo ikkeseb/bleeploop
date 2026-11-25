@@ -1,11 +1,29 @@
 import { initAudioDeviceSettings, refreshAndPruneDevices } from '../ui/state/audio-devices';
-import { availablePlugins, restorePlugin, resyncNativeSlots, scanForPlugins } from '../ui/state/instrument';
-import { recallRig, savedRigPaths } from '../ui/state/rig-recall';
+import {
+  adoptRigVolume,
+  availablePlugins,
+  legacyRigSnapshot,
+  restorePlugin,
+  resyncNativeSlots,
+  scanForPlugins,
+} from '../ui/state/instrument';
+import { recallChains, recallRig, savedRigPaths } from '../ui/state/rig-recall';
+import { boundKinds } from '../ui/state/rig-record';
+import { bindingsKnown, firstPageOfLaunch } from '../ui/state/midi';
 import { setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
-import { platform } from '../platform';
+import { mintUnitId, platform } from '../platform';
 import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
-import { onEngineEvent, openEngineDevice, restoreEngineShare, startEngineStore, whenDevice } from '../ui/state/engine-store';
+import {
+  legacySendsOff,
+  onEngineEvent,
+  openEngineDevice,
+  reportedSlotGains,
+  restoreEngineShare,
+  startEngineStore,
+  storedInputSends,
+  whenDevice,
+} from '../ui/state/engine-store';
 import { session } from '../ui/state/audio';
 import { autosave } from '../session/autosave';
 
@@ -17,7 +35,11 @@ import { autosave } from '../session/autosave';
  * the device's rate: it resyncs the slots a WebView reload stranded, reloads each slot's plugin from the
  * last run (`rig-recall.ts`) from a scan of those plugins' own paths, and meanwhile scans every
  * installed CLAP/VST3/VST2 plugin for the slot picker, whose new or updated bundles may each take a scan
- * child up to 20 s that the saved amp-sim no longer waits for. So a
+ * child up to 20 s that the saved amp-sim no longer waits for. In chain mode (`platform.chain.available`)
+ * the recall is the rig record's (`recallChains`), with or without a plugin host: the upgrade of a v0.8.9
+ * profile on its first run, then the restore of each chain unit the reset frame's `chains` lack, from the
+ * same scan of their paths (the native host keeps its chains across a WebView reload, so a reload adds
+ * nothing; native MIDI's epoch tells a reload from a new launch, `firstPageOfLaunch`). So a
  * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
  * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
  * and stays silent. Returns the dispose fn.
@@ -46,16 +68,46 @@ export function bootEngine(): () => void {
       if (disposed) return;
       restoreEngineShare();
       stopAutosave = autosave.start(session);
+      if (platform.chain.available) {
+        // The rig record's recall instead of legacy `recallRig`, on every chain-mode launch: a SYNTH or an
+        // empty rig needs no plugin host. With one, the full scan fills the `+` picker meanwhile and the
+        // restore scans its plugins' own paths; without one, a plugin unit is kept in the record, not added.
+        const host = platform.pluginHost.available;
+        if (host) {
+          await platform.pluginHost.init();
+          await resyncNativeSlots();
+          setNativeHostReady(true);
+        }
+        const full = host ? scanForPlugins() : Promise.resolve();
+        const restored = recallChains({
+          scan: (paths) =>
+            !host || paths.length === 0
+              ? Promise.resolve([])
+              : platform.pluginHost.scanPluginPaths(paths).catch((e: unknown) => {
+                  // The restore waits for the full scan instead.
+                  console.error('[app] rig plugin scan failed', e);
+                  return full.then(() => availablePlugins());
+                }),
+          snapshot: async (scan, legacy) => ({
+            ...legacyRigSnapshot(scan, legacy),
+            sends: storedInputSends(),
+            bound: boundKinds(await bindingsKnown()),
+            reportedVolumes: reportedSlotGains(),
+          }),
+          setVolume: adoptRigVolume,
+          sendsOff: legacySendsOff,
+          firstPage: firstPageOfLaunch,
+          add: (slot, unit, spec, at) => platform.chain.add(slot, unit, spec, at),
+          mint: mintUnitId,
+        });
+        await full;
+        await restored;
+        return;
+      }
       if (!platform.pluginHost.available) return;
       await platform.pluginHost.init();
       await resyncNativeSlots();
       setNativeHostReady(true);
-      if (platform.chain.available) {
-        // In chain mode the native host owns the chain across reloads and reports it on the reset
-        // frame's `chains`, so legacy `recallRig` is skipped while the full scan still fills the `+` picker.
-        await scanForPlugins();
-        return;
-      }
       const paths = savedRigPaths();
       const rig = paths.length === 0 ? [] : await platform.pluginHost.scanPluginPaths(paths).catch((e: unknown) => {
         // The recall waits for the full scan instead.

@@ -36,7 +36,7 @@ import { availablePlugins, clearPlugin, selectPlugin, slotPendingCounts, slotPlu
 import { inputArmed } from '../ui/state/native-io';
 import { readAudioDeviceSettings, writeAudioDeviceSettings } from '../ui/state/audio-settings';
 import { pluginDescriptorKey } from '../ui/state/plugin-descriptor';
-import { recallInFlight, rigRecallDone } from '../ui/state/rig-recall';
+import { recallInFlight, rigRecallFinished } from '../ui/state/rig-recall';
 import { toasts } from '../notify';
 import { confirmSeam } from '../ui/confirm/confirm-store';
 import { confirmNativeClose, onNativeCloseRequested, platform, type PluginDescriptor } from '../platform';
@@ -83,8 +83,8 @@ function spy(): void {
 }
 
 async function recallFinished(): Promise<boolean> {
-  for (let i = 0; i < 1800 && !rigRecallDone(); i++) await sleep(100);
-  return rigRecallDone();
+  for (let i = 0; i < 1800 && !rigRecallFinished(); i++) await sleep(100);
+  return rigRecallFinished();
 }
 
 /** The loaded plugin keys as the frontend and the native host each see them. */
@@ -155,7 +155,7 @@ async function restoreProblems(expect: Expect): Promise<string[]> {
  */
 async function settleWindow(): Promise<boolean> {
   for (let i = 0; i < 9000; i++) {
-    if (rigRecallDone()) return false;
+    if (rigRecallFinished()) return false;
     if (recallInFlight() && slotPlugins().every(Boolean) && slotPendingCounts().every((n) => n === 0)) return true;
     await sleep(20);
   }
@@ -215,7 +215,7 @@ async function crash(): Promise<void> {
   // This launch's marker, with slot 0's load under way: a marker left over from the check phase is
   // stored from the start too, but then the recall skips and never loads.
   while (!(recallInFlight() && slotPendingCounts()[0] > 0)) {
-    if (rigRecallDone()) {
+    if (rigRecallFinished()) {
       const shown = toasts().map((t) => t.message);
       return log(`FAIL the recall finished without loading under a marker of its own; toasts ${JSON.stringify(shown)}`);
     }
@@ -254,7 +254,7 @@ export async function runRecallRestart(): Promise<void> {
 }
 
 async function runPhase(phase: string | undefined): Promise<void> {
-  const early = !rigRecallDone();
+  const early = !rigRecallFinished();
   if (phase === 'check') {
     const raw = import.meta.env.VITE_LF_PROBE_EXPECT as string | undefined;
     if (!raw) return log('FAIL no VITE_LF_PROBE_EXPECT handed over from the save phase');
