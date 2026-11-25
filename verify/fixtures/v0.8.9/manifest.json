@@ -1,0 +1,109 @@
+{
+ "note": "Written by verify/probes/legacy-sessions.mjs --write against a v0.8.9 checkout's dev server. The recovery archives v0.8.9 stores in IndexedDB (bleeploop/recovery, record `latest`); `record` is that record's other fields, `bytes` its ArrayBuffer.",
+ "capture": {
+  "commit": "457447d65af918645228e2ae99b50663927167ae",
+  "dirty": false,
+  "chromium": "153.0.8010.12"
+ },
+ "how": "session.loadSession (one lane, 1 bar), the fake's snapshot scripted to the same PCM, the lane shown playing, then autosave.flush(): its recovery worker, prepareStemArchive float32, makeZip.",
+ "session": {
+  "bars": 1,
+  "pcm": "0.5 sine at `freq` Hz, with 1.5, -1.5 and 1e-7 at frame 1024",
+  "mix": {
+   "volume": 0.7,
+   "muted": false,
+   "dubFeedback": 0.6,
+   "pan": -0.25,
+   "filter": {
+    "cutoff": 900,
+    "q": 3
+   }
+  }
+ },
+ "files": [
+  {
+   "file": "recovery-v1-48000.zip",
+   "formatVersion": 1,
+   "rate": 48000,
+   "bpm": 300,
+   "meter": {
+    "num": 4,
+    "den": 4,
+    "beats": 4
+   },
+   "lane": 0,
+   "freq": 220,
+   "record": {
+    "key": "latest",
+    "savedAt": 1795598895024,
+    "rate": 48000
+   },
+   "frames": 38400,
+   "bytes": 155048,
+   "sha256": "e4d06e4fae59e9c91bf60239665b7b3ded440aaa75df8e504a77f807bf47237f"
+  },
+  {
+   "file": "recovery-v1-44100.zip",
+   "formatVersion": 1,
+   "rate": 44100,
+   "bpm": 300,
+   "meter": {
+    "num": 4,
+    "den": 4,
+    "beats": 4
+   },
+   "lane": 1,
+   "freq": 330,
+   "record": {
+    "key": "latest",
+    "savedAt": 1795598895280,
+    "rate": 44100
+   },
+   "frames": 35280,
+   "bytes": 142568,
+   "sha256": "0ac02e53f7760a2dc42bac7bbdaabe2b3e66e432efca5c81432fe42197365b5e"
+  },
+  {
+   "file": "recovery-v2-48000.zip",
+   "formatVersion": 2,
+   "rate": 48000,
+   "bpm": 300,
+   "meter": {
+    "num": 6,
+    "den": 8,
+    "beats": 2
+   },
+   "lane": 2,
+   "freq": 440,
+   "record": {
+    "key": "latest",
+    "savedAt": 1795598895530,
+    "rate": 48000
+   },
+   "frames": 19200,
+   "bytes": 78309,
+   "sha256": "fbbd5b188636de7c41fbd4b2d294a7301b3c005c1f80cdf7d5dd64749dd4889c"
+  },
+  {
+   "file": "recovery-v2-44100.zip",
+   "formatVersion": 2,
+   "rate": 44100,
+   "bpm": 300,
+   "meter": {
+    "num": 6,
+    "den": 8,
+    "beats": 2
+   },
+   "lane": 4,
+   "freq": 550,
+   "record": {
+    "key": "latest",
+    "savedAt": 1795598895779,
+    "rate": 44100
+   },
+   "frames": 17640,
+   "bytes": 72069,
+   "sha256": "fdf35af4c855e58ad6f56f03a3c55431cf59bbfaa0f2d7cf8f031bcf8701baba"
+  }
+ ]
+}
