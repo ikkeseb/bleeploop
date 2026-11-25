@@ -870,10 +870,6 @@ const webMidi: MidiHost = {
       return scripted ?? { already: false, unreadable: null, imported: [], blocked: [], rejected: [], skipped: [] };
     });
   },
-  setChainMode(epoch, on) {
-    // Recorded, and taken for the current page's epoch only, as natively.
-    return midiCall(['setChainMode', epoch, on], () => epoch === fakeEpoch);
-  },
 };
 
 const webInput: InputHost = {

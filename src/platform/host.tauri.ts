@@ -301,8 +301,12 @@ const tauriMidi: MidiHost = {
       }
     };
     // The page's age: a newer page's subscribe wins over an older page's late one, whatever the order
-    // the two calls reach native code in.
-    const epoch = invoke<unknown>('midi_subscribe', { channel, origin: performance.timeOrigin }).then(decodeEpoch);
+    // the two calls reach native code in. Under the DEV flag `lf.chainNative` the page subscribes through
+    // `midi_subscribe_chain` (DEV builds only, beside the `chain_*` commands), which turns native MIDI's
+    // chain mode on for this epoch in the same step, so a learned IN FX pedal switches its built-in units
+    // (`Toggle.Units`) from the first event on; a plain subscribe (always so in a release build) turns it off.
+    const command = chainNative ? 'midi_subscribe_chain' : 'midi_subscribe';
+    const epoch = invoke<unknown>(command, { channel, origin: performance.timeOrigin }).then(decodeEpoch);
     epoch.catch((err: unknown) => {
       console.error('[host.tauri] MIDI subscribe failed', err);
       notifyError('Could not reach MIDI. Restart BleepLoop to get it back.', err);
@@ -335,11 +339,6 @@ const tauriMidi: MidiHost = {
   async importLegacy(epoch, json) {
     const report = await invoke<unknown>('midi_import_legacy', { epoch, json });
     return report === null ? null : decodeImportReport(report);
-  },
-  // `midi_chain_mode` is registered in DEV builds only, beside the `chain_*` commands: without the DEV flag
-  // (always so in a release build) no IPC is made.
-  setChainMode(epoch, on) {
-    return chainNative ? invoke<boolean>('midi_chain_mode', { epoch, on }) : Promise.resolve(false);
   },
 };
 
