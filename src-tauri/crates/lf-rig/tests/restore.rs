@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use lf_rig::restore::{SEED_BACKOFF_MAX, SEED_LOG_AFTER};
 use lf_rig::{
-    project, Action, AddFail, AddOk, AddState, Disposition, Event, InstallToken, MarkerRead, Place, PlateState, PlateView, PluginRecord,
+    project, Action, AddFail, AddOk, AddState, Disposition, Event, Fate, InstallToken, MarkerRead, Place, PlateState, PlateView, PluginRecord,
     PluginRefView, Restore, Retry, RigRecord, RigView, SlotRecord, UnitBody, UnitId, UnitKind, UnitRecord, Version1,
 };
 
@@ -1125,9 +1125,23 @@ fn a_won_id_leaves_the_marker_while_the_restore_load_runs() {
     assert_eq!(rig.disk, None, "{:#?}", rig.trace);
 }
 
+/// Each id a projection writes: its slot, whether it is `pending`, and the unit as written.
+fn cells(r: &RigRecord) -> BTreeMap<UnitId, Vec<(usize, bool, UnitRecord)>> {
+    let mut cells: BTreeMap<UnitId, Vec<_>> = BTreeMap::new();
+    for (s, slot) in r.slots.iter().enumerate() {
+        let all = slot.units.iter().map(|u| (false, u)).chain(slot.pending.iter().map(|u| (true, u)));
+        for (pending, unit) in all {
+            cells.entry(unit.id).or_default().push((s, pending, unit.clone()));
+        }
+    }
+    cells
+}
+
 /// Feed a view of the fake's model, and check the restore and the projection judge every id alike:
-/// what the plan keeps after the view is what the projection writes at it, and the projection writes
-/// the same ids with the plan before the view as after it (one rule, either side of the view).
+/// what the plan keeps after the view is what the projection writes at it (the plan's own unit in its
+/// own slot for a unit at its place, the plate's slot for one its plate stands for), and the
+/// projection writes the same units, in the same slots, with the plan before the view as after it (one
+/// rule, either side of the view).
 fn view_agrees(rig: &mut Rig, rec: &RigRecord) {
     let before = rig.m.plan().clone();
     let event = rig.view_event();
@@ -1136,8 +1150,26 @@ fn view_agrees(rig: &mut Rig, rec: &RigRecord) {
     rig.feed(event);
     let after = rig.m.plan();
     let (old, new) = (project(rec, &before, &view, [None, None]), project(rec, after, &view, [None, None]));
-    assert_eq!(rows(&old), rows(&new), "the plan before the view and after it");
+    assert_eq!(cells(&old), cells(&new), "the plan before the view and after it");
     assert!(rows(&new).values().all(|&n| n == 1), "each id once: {:?}", rows(&new));
+    let written = cells(&new);
+    for id in after.ids() {
+        let cell = written.get(&id).map(|c| c[0].clone());
+        match after.fate(id, &view) {
+            Some(Fate::AtPlace) => {
+                let s = (0..2).find(|s| after.units[*s].iter().chain(&after.pending[*s]).any(|u| u.id == id)).expect("the plan holds it");
+                let pending = after.pending[s].iter().any(|u| u.id == id);
+                let unit = after.units[s].iter().chain(&after.pending[s]).find(|u| u.id == id).cloned().expect("the plan holds it");
+                assert_eq!(cell, Some((s, pending, unit)), "{id} at its place: the plan's unit in the plan's slot");
+            }
+            Some(Fate::Plate(t)) => {
+                let s = (0..2).find(|s| view.slots[*s].iter().any(|p| p.added_by == t)).expect("its plate is in the view");
+                assert_eq!(cell.map(|(slot, pending, _)| (slot, pending)), Some((s, false)), "{id} from its plate, in the plate's slot");
+            }
+            Some(Fate::Ended) => panic!("{id} ended but the restore kept it"),
+            Some(Fate::Dropped) | None => {}
+        }
+    }
     for s in 0..2 {
         let pending: Vec<UnitId> = new.slots[s].pending.iter().map(|u| u.id).collect();
         assert_eq!(pending, after.pending[s].iter().map(|u| u.id).collect::<Vec<_>>(), "slot {s}'s pending");
@@ -1157,7 +1189,7 @@ fn view_agrees(rig: &mut Rig, rec: &RigRecord) {
 fn projection_and_restore_agree_on_every_id() {
     let rec = record(
         slot(vec![plug(1), fx(2, UnitKind::Echo), fx(3, UnitKind::Ring)], vec![fx(5, UnitKind::Reverb)]),
-        slot(vec![fx(4, UnitKind::Echo)], vec![fx(6, UnitKind::Ott)]),
+        slot(vec![fx(4, UnitKind::Echo), fx(7, UnitKind::Ring)], vec![fx(6, UnitKind::Ott)]),
     );
     let mut rig = Rig::new().answer(1, &[Ans::UnresolvedUnseen { exited: false }]).answer(3, &[Ans::Hang]);
     rig.open(rec.clone(), MarkerRead::None);
@@ -1177,6 +1209,154 @@ fn projection_and_restore_agree_on_every_id() {
     rig.view.slots[0].retain(|p| p.id != 2);
     rig.view.slots[1].retain(|p| p.id != 5);
     view_agrees(&mut rig, &rec);
+    // While 3's add blocks, he applies an exact match for queued 7, then removes it.
+    rig.view.slots[1].push(plate(&fx(7, UnitKind::Ring), 903, PlateState::Seated, true, false));
+    view_agrees(&mut rig, &rec);
+    assert_eq!(rig.disposition(7), Some(&Disposition::Matched { token: 903 }));
+    rig.view.slots[1].retain(|p| p.id != 7);
+    view_agrees(&mut rig, &rec);
     let new = rig.projected(&rec);
     assert_eq!(rows(&new).keys().copied().collect::<Vec<_>>(), [1, 3, 4, 6]);
+    // 3's add answers: nothing comes back under 7.
+    rig.set_plate(3, PlateState::Seated, true, false);
+    rig.feed(Event::AddAnswered(Ok(AddOk { state: AddState::Seated, token: rig.token(3) })));
+    assert!(!rig.adds().contains(&7), "{:?}", rig.adds());
+    assert_eq!(rows(&rig.projected(&rec)).keys().copied().collect::<Vec<_>>(), [1, 3, 4, 6]);
+}
+
+// ── review round 3 ───────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_unit_removed_before_any_view_showed_its_seated_or_waiting_add_stays_removed() {
+    // 1's plate seats and the player removes it before any view shows it; then its add answers.
+    let rec = record(slot(vec![fx(1, UnitKind::Echo), fx(2, UnitKind::Ring)], vec![]), slot(vec![], vec![]));
+    let mut rig = Rig::new().answer(1, &[Ans::Hang]);
+    rig.open(rec.clone(), MarkerRead::None);
+    let token = rig.token(1);
+    rig.view.slots[0].retain(|p| p.id != 1);
+    rig.feed(Event::AddAnswered(Ok(AddOk { state: AddState::Seated, token })));
+    assert_eq!(rig.adds(), [1, 2]);
+    assert_eq!(rig.disposition(1), None, "the answer saw its plate: the next view's lack of it is a removal");
+    assert_eq!(rows(&rig.projected(&rec)), BTreeMap::from([(2, 1)]));
+
+    // The same for a held install (`Waiting`) of a plugin.
+    let rec = record(slot(vec![plug(1), fx(2, UnitKind::Ring)], vec![]), slot(vec![], vec![]));
+    let mut rig = Rig::new().answer(1, &[Ans::Hang]);
+    rig.open(rec.clone(), MarkerRead::None);
+    let token = rig.token(1);
+    rig.view.slots[0].retain(|p| p.id != 1);
+    rig.feed(Event::AddAnswered(Ok(AddOk { state: AddState::Waiting, token })));
+    assert_eq!(rig.adds(), [1, 2]);
+    assert_eq!(rig.disposition(1), None);
+    assert_eq!(rows(&rig.projected(&rec)), BTreeMap::from([(2, 1)]));
+}
+
+#[test]
+fn a_match_removed_while_another_add_blocks_is_not_added() {
+    let rec = record(slot(vec![plug(1)], vec![]), slot(vec![fx(2, UnitKind::Echo)], vec![]));
+    let mut rig = Rig::new().answer(1, &[Ans::Hang]);
+    rig.open(rec.clone(), MarkerRead::None);
+    assert_eq!(rig.adds(), [1]);
+    // While 1's add blocks, the player applies an exact match for queued 2: matched at that view.
+    rig.player_plate(1, &fx(2, UnitKind::Echo), 900, true);
+    assert_eq!(rig.disposition(2), Some(&Disposition::Matched { token: 900 }));
+    // He removes it, and 1's add answers: nothing comes back under 2.
+    rig.remove_plate(2);
+    assert_eq!(rig.disposition(2), None);
+    rig.set_plate(1, PlateState::Seated, true, false);
+    rig.feed(Event::AddAnswered(Ok(AddOk { state: AddState::Seated, token: rig.token(1) })));
+    assert_eq!(rig.adds(), [1]);
+    assert_eq!(rows(&rig.projected(&rec)), BTreeMap::from([(1, 1)]));
+}
+
+#[test]
+fn a_failed_placement_commit_keeps_out_an_id_that_ended_meanwhile() {
+    // Writes: 1 the first marker, 2 slot A's placement (out while the player's unit wins 5 and leaves).
+    let rec = record(slot(vec![fx(1, UnitKind::Echo)], vec![fx(5, UnitKind::Ring), fx(6, UnitKind::Reverb)]), slot(vec![], vec![]));
+    let mut rig = Rig::new();
+    rig.hold_writes_from = 2;
+    rig.open(rec.clone(), MarkerRead::None);
+    assert_eq!(rig.trace.last(), Some(&Action::Commit));
+    assert_eq!(rig.m.plan().units[0].iter().map(|u| u.id).collect::<Vec<_>>(), [1, 5, 6]);
+    rig.player_plate(1, &fx(5, UnitKind::Echo), 900, true);
+    assert!(!rig.m.plan().ids().contains(&5));
+    rig.remove_plate(5);
+    rig.hold_writes_from = usize::MAX;
+    rig.feed(Event::CommitFailed);
+    // The rollback keeps `pending` as the record holds it, less 5.
+    assert_eq!(rig.m.plan().pending[0], [fx(6, UnitKind::Reverb)]);
+    assert_eq!(rows(&rig.projected(&rec)), BTreeMap::from([(1, 1), (6, 1)]));
+    assert_eq!(rig.adds(), [1]);
+}
+
+#[test]
+fn a_matched_load_leaves_a_marker_another_load_still_holds() {
+    // Writes: 1 the first marker, 2 plugin 1's load, 3 plugin 2's load (out while the player's exact
+    // match for 2 applies). 1 stays unresolved.
+    let rec = record(slot(vec![plug(1)], vec![]), slot(vec![plug(2)], vec![]));
+    let mut rig = Rig::new().answer(1, &[Ans::Unresolved { exited: false }]);
+    rig.hold_writes_from = 3;
+    rig.open(rec.clone(), MarkerRead::None);
+    assert_eq!(rig.trace.last(), Some(&Action::CommitMarker(vec![1, 2])));
+    rig.player_plate(1, &plug(2), 900, true);
+    rig.hold_writes_from = usize::MAX;
+    rig.disk = Some(vec![1, 2]);
+    rig.feed(Event::Committed);
+    assert_eq!(rig.disk, Some(vec![1]), "{:#?}", rig.trace);
+    assert_eq!(rig.adds(), [1]);
+
+    // The host finds 2 under its slot lock (a plate after the machine's last view): the same.
+    let mut rig = Rig::new().answer(1, &[Ans::Unresolved { exited: false }]).answer(2, &[Ans::Matched]);
+    rig.open(rec, MarkerRead::None);
+    assert!(rig.trace.contains(&Action::CommitMarker(vec![1, 2])));
+    assert_eq!(rig.adds(), [1, 2]);
+    assert_eq!(rig.disk, Some(vec![1]), "{:#?}", rig.trace);
+}
+
+#[test]
+fn a_failed_leftover_removal_retries_and_is_never_done_with_it_on_disk() {
+    // Write 1, the leftover marker's removal, fails; 2 removes it.
+    let rec = record(slot(vec![], vec![]), slot(vec![], vec![]));
+    let mut rig = Rig::new();
+    rig.fail_writes = vec![1];
+    rig.open(rec.clone(), MarkerRead::Names(vec![9]));
+    assert_eq!(rig.trace.last(), Some(&Action::Backoff { after: Duration::from_millis(20) }));
+    assert_eq!(rig.disk, Some(vec![9]));
+    assert!(!rig.done(), "never done with the marker on disk");
+    assert_eq!(rig.feed(Event::BackoffElapsed), [Action::RemoveMarker, Action::Done]);
+    assert_eq!(rig.disk, None);
+
+    // Close before the retry removes it too.
+    let mut rig = Rig::new();
+    rig.fail_writes = vec![1];
+    rig.open(rec, MarkerRead::Names(vec![9]));
+    assert_eq!(rig.feed(Event::Closing), [Action::RemoveMarker, Action::Done]);
+    assert_eq!(rig.disk, None);
+}
+
+#[test]
+fn a_forget_whose_id_a_plate_holds_waits_for_it_to_leave() {
+    // Writes: 1 the first marker, 2 plugin 1's load, 3 the forget's record (out when the player's
+    // effect takes the id).
+    let rec = record(slot(vec![plug(1)], vec![]), slot(vec![], vec![]));
+    let start = || {
+        let mut rig = Rig::new().answer(1, &[Ans::Plugin]);
+        rig.hold_writes_from = 3;
+        rig.open(rec.clone(), MarkerRead::None);
+        assert_eq!(rig.trace.last(), Some(&Action::Commit));
+        rig.view.slots[0].retain(|p| p.id != 1);
+        rig.player_plate(0, &fx(1, UnitKind::Echo), 900, true);
+        rig.hold_writes_from = usize::MAX;
+        rig.feed(Event::Committed);
+        assert!(!rig.trace.contains(&Action::Forget { id: 1 }), "the id is his effect's now");
+        assert!(rig.done());
+        rig
+    };
+    // He removes his effect: the forgotten plugin's tone files go at that view.
+    let mut rig = start();
+    assert_eq!(rig.remove_plate(1), [Action::Forget { id: 1 }]);
+    // He keeps it until close: the files stay, told in the log.
+    let mut rig = start();
+    assert!(matches!(rig.feed(Event::Closing)[..], [Action::Log(_)]));
+    assert!(!rig.trace.contains(&Action::Forget { id: 1 }));
 }

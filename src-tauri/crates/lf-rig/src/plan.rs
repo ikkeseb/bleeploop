@@ -25,8 +25,9 @@ pub struct Plan {
     /// One disposition per id in `units` (and only those). An id leaves the map, and its unit the
     /// record, only when [`Plan::fate`] says [`Fate::Ended`].
     pub dispositions: BTreeMap<UnitId, Disposition>,
-    /// Every install token a view the restore was fed has shown: a token seen and then gone from the
-    /// view is a confirmed removal ([`Plan::fate`]). The restore adds each view's tokens as it takes it.
+    /// Every install token a view the restore was fed has shown, or an add's answer named
+    /// ([`crate::AddOk`]: its plate was in the model then): a token seen and then gone from the view is
+    /// a confirmed removal ([`Plan::fate`]). The restore adds each view's tokens as it takes it.
     pub seen: BTreeSet<InstallToken>,
 }
 
@@ -84,12 +85,16 @@ impl Plan {
     /// (`Issued`, `Held`, `Restored`, `Matched`) also ends by a confirmed removal: a view showed its plate
     /// and this one does not, and (for a held one) no plate holds its id. A token no view has shown ends
     /// nothing: the plan keeps the unit at its place. A `Queued` unit's id held by an applied plate that
-    /// is the unit itself (D9's match) does not end it: the restore matches it. An `Issued` unit whose
-    /// add has not answered yet never ends: a plate under its id may be the add's own.
+    /// is the unit itself (D9's match) does not end it: the restore matches it at that view, so the
+    /// player's removal of that plate ends it as any `Matched` unit's. An `Issued` unit whose add has
+    /// not answered yet never ends: a plate under its id may be the add's own. What stays open there: a
+    /// built-in whose add is out when the app closes is written at its place, even when the player
+    /// applied and removed its plate before the add answered.
     ///
     /// The restore ([`crate::Restore`]) drops an `Ended` id from the plan; the projection
     /// ([`crate::project()`]) writes the plan's unit for `AtPlace` alone. **The glue calls both with the
-    /// same fresh view** (`Model::rig_view`), the restore first, so the two never differ on an id.
+    /// same fresh view** (`Model::rig_view`), the restore first, so the two never differ on an id, and
+    /// feeds no view taken before an add's answer after that answer: its plate would read as removed.
     pub fn fate(&self, id: UnitId, view: &RigView) -> Option<Fate> {
         let plates = || view.slots.iter().flatten().filter(move |p| p.id == id);
         let present = |t: InstallToken| view.slots.iter().flatten().any(|p| p.added_by == t);

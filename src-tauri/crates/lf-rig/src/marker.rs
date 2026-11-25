@@ -6,8 +6,8 @@
 //! - **One entry per issued plugin load, held until terminal.** A load is terminal when its plate
 //!   applied and then lived [`SETTLE`] on, or when it failed with its owner gone (its exit latch set).
 //!   `Waiting`, an unresolved add and a setup timeout whose owner may still be in plugin code are not.
-//!   A terminal load leaves the marker by a durable rewrite; a host refusal (no plugin code ran) leaves
-//!   it at the next write, which comes before the next load ([`Loads`]).
+//!   A terminal load leaves the marker by a durable rewrite, and so does a load withdrawn (a host
+//!   refusal, a match: no plugin code ran), unless the next load's write already drops it ([`Loads`]).
 //! - **The file** is `{ "version": 1, "units": [id, …] }`, written with the record's durability (synced,
 //!   renamed). One naming nothing reads as none ([`read`]): the restore writes it before its first add
 //!   of any kind, so a crash in a built-in's add forgets nothing.
@@ -161,9 +161,8 @@ impl Loads {
         self.loads.get(&id).and_then(|l| l.token)
     }
 
-    /// `id`'s load leaves the set. It never ran plugin code (a host refusal, a match found after its
-    /// write, a write that failed): it leaves the marker at the next write, which no rewrite of its own
-    /// is owed for. Or no record unit can use it any more (the module doc): the caller owes a rewrite.
+    /// `id`'s load leaves the set: it never ran plugin code (a host refusal, a match, a write that
+    /// failed), or no record unit can use it any more (the module doc). The caller owes a rewrite.
     pub fn withdraw(&mut self, id: UnitId) {
         self.loads.remove(&id);
     }
