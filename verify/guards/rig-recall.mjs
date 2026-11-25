@@ -97,7 +97,7 @@ for (const probe of ['editor-smoke', 'restart-survey', 'swap-stress']) {
     const { m, loads } = await launch(probe, seed);
     assert.deepEqual(loads, [], 'nothing restored');
     assert.deepEqual(m.savedRigPaths(), [], 'and no path to scan');
-    assert.equal(m.rigRecallDone(), true);
+    assert.equal(m.rigRecallFinished(), true);
     assert.equal(m.recallInFlight(), false);
     m.rememberSlotPlugin(0, SYN);
     m.forgetSlotPlugin(1);

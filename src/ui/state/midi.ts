@@ -41,6 +41,17 @@ export { bindings };
  * made against a list that changed since (its index may name another binding now). */
 let revision = 0;
 
+let firstBindings!: (list: readonly ListedBinding[]) => void;
+const bindingsReported = new Promise<readonly ListedBinding[]>((resolve) => (firstBindings = resolve));
+/**
+ * The stored bindings as native MIDI's first `bindings` report brought them (the rig record's upgrade asks
+ * which `InFx*` pedals are bound, unit contract §6), waiting at most NATIVE_WAIT_MS from the call; null when
+ * none came by then (the upgrade then counts every send as bound, seat decision c).
+ */
+export function bindingsKnown(): Promise<readonly ListedBinding[] | null> {
+  return Promise.race([bindingsReported, new Promise<null>((resolve) => setTimeout(() => resolve(null), NATIVE_WAIT_MS))]);
+}
+
 const [learning, setLearning] = createSignal<LearnPick | null>(null);
 /** What the next CC or note-on will be learned onto, or null. Set at once by `learn` and `cancelLearn`
  * (so Esc ends LISTENING without a round trip), then by native MIDI's `learning` events. */
@@ -114,6 +125,7 @@ function onEvent(ev: MidiEvent): void {
     case 'bindings':
       revision = ev.revision;
       setBindings(ev.bindings);
+      firstBindings(ev.bindings);
       break;
     case 'learning':
       setLearning(ev.learning);

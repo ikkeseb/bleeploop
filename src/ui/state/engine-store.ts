@@ -55,6 +55,7 @@ import { settingsAction } from '../../settings-opener';
 import { confirm } from '../confirm/confirm-store';
 import { applyChains, chainShown } from './chain';
 import { applyUnitMeters, dropUnitMeters } from '../units/unit-meters';
+import type { StoredSend } from './rig-record';
 
 /**
  * OWNS: the UI's view of the native engine (invariants 3 and 6): the feed reducer, the device that
@@ -258,7 +259,12 @@ const inputSendValues = Object.fromEntries(
   INPUT_SEND_PARAMS.map((d) => [d.key, createSignal(readStoredNumber(inputSendKey(d.key), d.default, d.min, d.max))]),
 ) as Record<InputSendParamId, ReturnType<typeof createSignal<number>>>;
 
+/** A send as the engine applied it: its switch and its saved key. Not in chain mode (unit contract §6,
+ * `lf.inputSend.*` stays as it is): there the legacy sends are silent, sent off on every reset frame, and
+ * what they were became units (`rig-record.ts`), so the engine's off (and the `Toggled` it answers) writes
+ * nothing. */
 function adoptInputSend(id: InputSendId, on: boolean): void {
+  if (chainShown()) return;
   inputSendOn[id][1](on);
   writeStoredNumber(inputSendKey(id), on ? 1 : 0);
 }
@@ -272,25 +278,49 @@ function inputSendValue(key: InputSendParamId, value: number): number | null {
 }
 
 function adoptInputSendParam(key: InputSendParamId, value: number): void {
+  if (chainShown()) return; // as `adoptInputSend`
   const applied = inputSendValue(key, value);
   if (applied === null) return;
   inputSendValues[key][1](applied);
   writeStoredNumber(inputSendKey(key), applied);
 }
 
-/** The input sends, for the command bar's IN FX control. */
+/**
+ * The stored sends as their resolvers read them at load, for the rig record's upgrade (unit contract §6):
+ * per send its switch (`lf.inputSend.<id>`, off when absent), its params (each key, its default when absent
+ * or out of range) and their defaults. Reads storage, never a signal.
+ */
+export function storedInputSends(): Record<InputSendId, StoredSend> {
+  const sends = {} as Record<InputSendId, StoredSend>;
+  for (const id of INPUT_SENDS) {
+    const defs = INPUT_SEND_PARAMS.filter((d) => d.send === id);
+    sends[id] = {
+      on: readStoredNumber(inputSendKey(id), 0, 0, 1) === 1,
+      params: Object.fromEntries(defs.map((d) => [d.key, readStoredNumber(inputSendKey(d.key), d.default, d.min, d.max)])),
+      defaults: Object.fromEntries(defs.map((d) => [d.key, d.default])),
+    };
+  }
+  return sends;
+}
+
+/** The input sends, for the command bar's IN FX control. In chain mode (which draws no IN FX row) the
+ * legacy sends stay silent: a press or a script sets nothing (`adoptInputSend`). */
 export const engineInputSends = {
   params: INPUT_SEND_PARAMS,
   on: (id: InputSendId): boolean => inputSendOn[id][0](),
   /** The key's switch, as a press: the engine's toggle (`toggleSetting`), the OTT's as the sends'. */
-  toggle: (id: InputSendId): void => toggleSetting({ Send: id }),
+  toggle: (id: InputSendId): void => {
+    if (!chainShown()) toggleSetting({ Send: id });
+  },
   /** On or off outright: initialization and scripts, not a control. */
   setOn: (id: InputSendId, on: boolean): void => {
+    if (chainShown()) return;
     adoptInputSend(id, on);
     sendEngine({ SetInputSend: [id, on] });
   },
   value: (key: InputSendParamId): number => inputSendValues[key][0](),
   setValue: (key: InputSendParamId, value: number): void => {
+    if (chainShown()) return;
     adoptInputSendParam(key, value);
     sendEngine({ SetInputSendParam: [key, inputSendValues[key][0]()] });
   },
@@ -1189,12 +1219,18 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   const kept = storedMeter();
   meterAsked = !meterKnown && kept !== FOUR_FOUR;
   if (meterAsked) lacking.push({ SetMeter: [kept.num, kept.den] });
-  // The input sends the engine lacks: values first, so a send that comes on comes on with them.
-  for (const d of INPUT_SEND_PARAMS) {
-    if (!sendsKnown.has(d.key)) lacking.push({ SetInputSendParam: [d.key, inputSendValues[d.key][0]()] });
-  }
-  for (const id of INPUT_SENDS) {
-    if (!sendsKnown.has(id)) lacking.push({ SetInputSend: [id, inputSendOn[id][0]()] });
+  // The input sends the engine lacks: values first, so a send that comes on comes on with them. In chain
+  // mode every legacy send goes off instead, whatever the engine kept (unit contract §6: their values are
+  // units now, `rig-record.ts`), and nothing of theirs is adopted or stored (`adoptInputSend`).
+  if (chainShown()) {
+    for (const id of INPUT_SENDS) lacking.push({ SetInputSend: [id, false] });
+  } else {
+    for (const d of INPUT_SEND_PARAMS) {
+      if (!sendsKnown.has(d.key)) lacking.push({ SetInputSendParam: [d.key, inputSendValues[d.key][0]()] });
+    }
+    for (const id of INPUT_SENDS) {
+      if (!sendsKnown.has(id)) lacking.push({ SetInputSend: [id, inputSendOn[id][0]()] });
+    }
   }
   sendEngine(...lacking);
   engineResync(plain.resets === 1);

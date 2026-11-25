@@ -20,6 +20,7 @@ import {
 import { notifyError } from '../../notify';
 import {
   activeSlot,
+  DEFAULT_IDS,
   guitarFirstInstall,
   nativeHostReady,
   serializeSlot,
@@ -37,7 +38,8 @@ import {
 } from './instrument-slots';
 import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
-import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
+import { forgetSlotPlugin, keepRigVolume, rememberSlotPlugin, rigVolumes, type SavedRig } from './rig-recall';
+import { defaultPluginLevel, SLOT_GAIN_MAX, storedSlotSource, type LegacySnapshot } from './rig-record';
 import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 import { appliedHead, headSynthPick, pickSynth } from './chain';
 
@@ -70,13 +72,8 @@ const sourceOps: [number, number] = [0, 0];
 /** Which instance `slot` holds: read before a session import asks the host, for its reload. */
 export const slotSourceGeneration = (slot: 0 | 1): number => sourceOps[slot];
 
-/** A slot's volume range (the lane faders' and the plugin output's): unity at 1. */
-export const SLOT_GAIN_MAX = 1.5;
-
-/** A plugin's output level before the player sets one, by its scan kind: an amp-sim/FX is already
- * gain-staged, so its wet wants ~unity; a synth's default patches clip, so it starts conservative. */
-const FX_DEFAULT_GAIN = 0.9;
-const SYNTH_DEFAULT_GAIN = 0.1;
+/** A slot's volume range (the lane faders' and the plugin output's): unity at 1 (`rig-record.ts`). */
+export { SLOT_GAIN_MAX };
 
 // Kept for the next launch: each slot's source without its plugin (an instrument id, or 'off'; a plugin
 // over it comes back through the rig recall), each slot's input level, each instrument's level and each
@@ -84,12 +81,13 @@ const SYNTH_DEFAULT_GAIN = 0.1;
 const sourceKey = (slot: 0 | 1) => `lf.slotSource.${slot}`;
 const inputGainKey = (slot: 0 | 1) => `lf.slotInputGain.${slot}`;
 const synthGainKey = (id: string) => `lf.synthGain.${id}`;
-const pluginGainKey = (slot: 0 | 1, desc: PluginDescriptor) => `lf.pluginGain.${slot}.${pluginDescriptorKey(desc)}`;
+const pluginGainKey = (slot: 0 | 1, desc: Pick<PluginDescriptor, 'format' | 'path' | 'id'>) =>
+  `lf.pluginGain.${slot}.${pluginDescriptorKey(desc)}`;
 
-/** The level `desc` last had in `slot`, else its kind's default (an unclassified plugin at the quieter
- * synth level). */
+/** The level `desc` last had in `slot`, else its kind's default (`defaultPluginLevel`: an unclassified
+ * plugin at the quieter synth level). */
 const savedPluginLevel = (slot: 0 | 1, desc: PluginDescriptor): number =>
-  readStoredNumber(pluginGainKey(slot, desc), desc.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN, 0, SLOT_GAIN_MAX);
+  readStoredNumber(pluginGainKey(slot, desc), defaultPluginLevel(desc.isEffect), 0, SLOT_GAIN_MAX);
 
 function writeSource(slot: 0 | 1, source: string): void {
   try {
@@ -103,19 +101,20 @@ function writeSource(slot: 0 | 1, source: string): void {
 // (`guitarFirstInstall`), Off and unset: the guitar's slot, passing the input dry once GO LIVE is on,
 // as a stored Off does. A plugin's first load into an unset slot stores its Off, so the slot stays set.
 const guitarFirst = guitarFirstInstall();
-for (const slot of [0, 1] as const) {
-  let saved: string | null = null;
+function savedSource(slot: 0 | 1): string | null {
   try {
-    saved = localStorage.getItem(sourceKey(slot));
+    return localStorage.getItem(sourceKey(slot));
   } catch {
-    /* unreadable: the default synth */
+    return null; // unreadable: the default synth
   }
-  if (saved === 'off') setSlotOff((prev) => withAt(prev, slot, true));
-  else if (saved !== null && SYNTHS.some((s) => s.id === saved)) setSlotIds((prev) => withAt(prev, slot, saved));
-  else if (saved === null && guitarFirst) {
+}
+for (const slot of [0, 1] as const) {
+  const source = storedSlotSource(savedSource(slot), guitarFirst);
+  if (source === 'off') setSlotOff((prev) => withAt(prev, slot, true));
+  else if (source === 'unset') {
     setSlotOff((prev) => withAt(prev, slot, true));
     setSlotUnset((prev) => withAt(prev, slot, true));
-  }
+  } else if (source !== null) setSlotIds((prev) => withAt(prev, slot, source));
 }
 
 /** Slot `slot` holds a source now (a pick, or a plugin that loaded): it is no longer unset. */
@@ -153,8 +152,39 @@ function routeEngine(i: 0 | 1): void {
 }
 
 // With the chain drawn: each slot's level after its chain (unit contract: the slot volume sits after the
-// chain), unity at first. Not kept across a launch yet: the rig record's (`src/ui/AGENTS.md` § Open threads).
-const [chainGains, setChainGains] = createSignal<[number, number]>([1, 1]);
+// chain), kept in the rig record (`rig-recall.ts`): read here at load (a WebView reload, a launch), set by
+// the record's restore (`adoptRigVolume`) and the slot level, unity with no record yet.
+const [chainGains, setChainGains] = createSignal<[number, number]>(rigVolumes() ?? [1, 1]);
+
+/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. */
+export function adoptRigVolume(slot: 0 | 1, volume: number): void {
+  const v = Math.max(0, Math.min(SLOT_GAIN_MAX, volume));
+  setChainGains((prev) => withAt(prev, slot, v));
+  sendEngine({ SetSlotGain: [slot, v] });
+}
+
+/**
+ * The legacy slot keys through the resolvers that read them today, for the rig record's upgrade (unit
+ * contract §6): per slot the legacy recall's plugin (`legacy`) with what this launch's `scan` says of it and
+ * its stored level, the stored source, the input level; the guitar-first install and each instrument's level.
+ */
+export function legacyRigSnapshot(
+  scan: readonly PluginDescriptor[],
+  legacy: SavedRig,
+): Pick<LegacySnapshot, 'slots' | 'guitarFirst' | 'synthGains'> {
+  const slot = (n: 0 | 1): LegacySnapshot['slots'][0] => {
+    const saved = legacy[n];
+    const found = saved && scan.find((d) => samePluginDescriptor(d, saved));
+    const stored = saved ? readStoredNumber(pluginGainKey(n, saved), Number.NaN, 0, SLOT_GAIN_MAX) : Number.NaN;
+    return {
+      plugin: saved && { ref: { ...saved }, isEffect: found ? found.isEffect : null, stored: Number.isNaN(stored) ? null : stored },
+      savedSource: savedSource(n),
+      defaultSynth: DEFAULT_IDS[n],
+      inputGain: inputGains()[n],
+    };
+  };
+  return { slots: [slot(0), slot(1)], guitarFirst, synthGains: synthGains() };
+}
 
 // Per-slot plugin gain; null = no plugin.
 const [engineGains, setEngineGains] = createSignal<[number | null, number | null]>([null, null]);
@@ -662,12 +692,13 @@ export function slotLevel(slot: 0 | 1): number | null {
 }
 
 /** Set slot `slot`'s level (`slotLevel`), heard and recorded; an Off slot's and a synth's are kept
- * for the next launch. */
+ * for the next launch, and in chain mode the slot's volume in the rig record (`keepRigVolume`). */
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
   if (platform.chain.available) {
     setChainGains((prev) => withAt(prev, slot, v));
     sendEngine({ SetSlotGain: [slot, v] });
+    keepRigVolume(slot, v);
     return;
   }
   const plugin = slotPlugins()[slot];

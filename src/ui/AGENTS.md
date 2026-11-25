@@ -102,7 +102,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   began. A refusal the contract makes certain (a ninth unit, a source moved, an effect ahead of a source) is the
   slot's tag with nothing sent (`addRefusal`, `moveRefusal`), judged against the chain as the edits already
   sent leave it (a reloading source is still the source); the host resolves the rest. A gesture reaches only a
-  seated unit, and a popover or a face of a unit that stops being seated closes.
+  seated unit, and a popover or a face of a unit that stops being seated closes. The IN FX pedals
+  (`InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt`) and their keys switch every built-in unit of the kind in
+  both chains (`Toggle.Units`); the legacy sends stay off, their row undrawn.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.
@@ -121,16 +123,17 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 
 - **Chain mode's activation.** The gate is `platform.chain.available` (`state/chain.ts` `chainShown`): with
   the DEV flag `lf.chainNative` off (always in release) `tauriChainHost` rejects every chain call before any
-  IPC, so chain mode is the DEV fake's and that flag's alone. It turns on for players only with these, none built:
-  contract §6's durable migration in rig recall (`lf.rig` with its `pending` step; chain mode today simply
-  does not draw the old IN FX sends, and their values do not become units); the named pedal actions
-  (`InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt`) running `Toggle.Units` in chain mode instead of the
-  legacy sends; the slot's level kept across a launch (chain mode holds it in memory, unity at boot,
-  `state/instrument.ts` `chainGains`). Chain mode
+  IPC, so chain mode is the DEV fake's and that flag's alone. Built for it: contract §6's durable migration
+  (`lf.rig`, `state/rig-recall.ts` `recallChains`, rules in `state/rig-record.ts`: the upgrade, the restore,
+  the `pending` placement, the slot's level kept), the named pedal actions on `Toggle.Units` (native MIDI
+  through `midi_subscribe_chain`, the UI's own press in `src/app/actions.ts`) and the legacy sends kept
+  silent with their keys untouched (`state/engine-store.ts`). Not built: the activation itself (the flag
+  and the legacy arms go) and `input_fx.rs`' retirement (contract §9, E3). Chain mode
   already routes notes to the slot (`{ Slot: n }`) and sends the slot's level as `SetSlotGain`, never the
   legacy `Builtin` target or `SetInstrumentGain`; a synth choice on a slot a seated SYNTH heads is a pick on
-  it through the note router (§4, `state/chain.ts` `pickSynth`). Next check: with the engine step, `rig-recall` on a stored
-  v0.8.9 profile in chain mode.
+  it through the note router (§4, `state/chain.ts` `pickSynth`). Next check: a native restore on the PC
+  (`tauri dev` with `lf.chainNative`, a v0.8.9 profile: the upgrade, a restart bringing each unit back
+  under its id with its tone, a learned IN FX pedal on `Toggle.Units`).
 
 - **Chain mode's edges on the fake, left at the branch's third review** (each read from source by a
   reviewer, none reproduced; the next engine step rewrites held edits and moves, so they are judged there):
