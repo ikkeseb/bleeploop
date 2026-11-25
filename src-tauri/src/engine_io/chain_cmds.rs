@@ -50,8 +50,9 @@ const BUILTIN_POLL: Duration = Duration::from_millis(20);
 /// How long a built-in add waits for its owner thread's first answer (`Seated`, `Waiting`, or `Err`).
 const BUILTIN_ADD_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Bound for an initial built-in submit retrying `Stale`/`Reloading` before failing cleanly; strictly
-/// below `BUILTIN_ADD_TIMEOUT` so the owner always exits and answers before the caller releases order.
+/// Bound for an initial built-in submit retrying `Stale`/`Reloading`/`Behind` before failing cleanly,
+/// while its caller still waits for the first answer; strictly below `BUILTIN_ADD_TIMEOUT` so the owner
+/// always exits and answers before the caller releases order.
 const BUILTIN_INITIAL_SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bound for stopping/joining a late entry that finished opening after `join_all` already completed.
@@ -1725,7 +1726,11 @@ fn reload_outcome(
     if state.table.active_row_for_id(unit).is_some_and(|r| r.token == candidate) {
         return ReloadOutcome::Reloaded;
     }
-    let why = if let Some(row) = state.table.row(candidate) {
+    // The refusal is read from the table's own record first: the candidate's owner may have released
+    // its row (and with it `settled`) before this poll.
+    let why = if let Some(why) = state.table.reload_refusal(candidate) {
+        format!("engine refused reload: {}", refusal_reason(why))
+    } else if let Some(row) = state.table.row(candidate) {
         if let Some(why) = row.settled.values().find_map(|s| match s {
             OpState::Refused(why) => Some(*why),
             _ => None,
@@ -1902,6 +1907,7 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::PortFull => "the slot's engine port is full".to_string(),
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
         SubmitError::Replaced => "a newer source replaced this unit".to_string(),
+        SubmitError::Behind => "a newer source is queued ahead of this unit".to_string(),
         SubmitError::Removing => "the unit is being removed".to_string(),
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
@@ -1985,7 +1991,7 @@ fn serve_builtin(
 
     let mut seat = match host.submit(boxed, initial_terms) {
         Ok(op) => BuiltinSeat::Installing { op },
-        Err((returned, SubmitError::Stale | SubmitError::Reloading)) => BuiltinSeat::Owed { unit: returned },
+        Err((returned, SubmitError::Stale | SubmitError::Reloading | SubmitError::Behind)) => BuiltinSeat::Owed { unit: returned },
         Err((returned, SubmitError::Closing)) => {
             drop(returned);
             host.release();
@@ -2051,7 +2057,11 @@ fn serve_builtin(
 
         if matches!(seat, BuiltinSeat::Owed { .. }) {
             let unit = seat.take_unit().expect("checked Owed");
-            if !ever_seated && Instant::now() >= initial_deadline {
+            // Only an add still owed its first answer fails fast: one answered `Waiting` was accepted
+            // (its caller moved on), so a box a rebuild returns is offered to the new engine like a
+            // seated one's, whenever that comes.
+            let answering = ready.is_some();
+            if !ever_seated && answering && Instant::now() >= initial_deadline {
                 drop(unit);
                 let why = "built-in unit could not submit before timeout".to_string();
                 host.failed(why.clone());
@@ -2086,7 +2096,7 @@ fn serve_builtin(
             };
             match terms {
                 None => {
-                    if !ever_seated {
+                    if !ever_seated && answering {
                         drop(unit);
                         let why = "no audio device is open".to_string();
                         host.failed(why.clone());
@@ -2100,7 +2110,7 @@ fn serve_builtin(
                     Ok(op) => {
                         seat = BuiltinSeat::Installing { op };
                     }
-                    Err((returned, SubmitError::PortFull | SubmitError::NoEngine)) if !ever_seated => {
+                    Err((returned, SubmitError::PortFull | SubmitError::NoEngine)) if !ever_seated && answering => {
                         drop(returned);
                         let why = "the slot's engine port is full".to_string();
                         host.failed(why.clone());
@@ -2108,7 +2118,7 @@ fn serve_builtin(
                         send_first_answer(&mut ready, Err(why));
                         return;
                     }
-                    Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading)) => {
+                    Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind)) => {
                         seat = BuiltinSeat::Owed { unit: returned };
                     }
                     Err((returned, SubmitError::Removing)) => {

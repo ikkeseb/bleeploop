@@ -729,7 +729,7 @@ impl Model {
                 self.record_settled(table, head.op, OpState::Applied);
                 let mut rev_bump = false;
                 match head.kind {
-                    PendingKind::Install { token, is_reload, replaces, .. } => {
+                    PendingKind::Install { token, is_reload, replaces, source, .. } => {
                         table.mark_seated(token, gen);
                         if is_reload {
                             table.promote_reload(token);
@@ -770,6 +770,9 @@ impl Model {
                             plate.error = None;
                             plate.reseating_since = None;
                             rev_bump |= !plate.legacy;
+                        }
+                        if source && !is_reload {
+                            rev_bump |= self.end_older_sources_out_of_engine(s, unit, table);
                         }
                     }
                     PendingKind::Remove { owner_token } => {
@@ -892,6 +895,39 @@ impl Model {
                 }
             }
         }
+    }
+
+    /// Source `unit` just seated at the head of `slot`: end every older source of that slot whose seat
+    /// is out of this engine (evicted and not back yet, or parked after a failed re-activation), as a
+    /// replacement would. The engine holds no seat of theirs for the install to name in `replaces`, so
+    /// without this each kept its owner and tone until its retry found the newer head. Its plate goes and
+    /// its owner gets `Back::Dismissed` (`Table::finish_replaced`: the tone retires). A source with an op
+    /// still queued is left to that op; a failed add (its id freed) is the player's to remove.
+    fn end_older_sources_out_of_engine(&mut self, slot: usize, unit: UnitId, table: &mut Table) -> bool {
+        let sm = &self.slots[slot];
+        let Some(rev) = sm.find(unit).map(|i| sm.plates[i].added_rev) else { return false };
+        let older: Vec<UnitId> = sm
+            .plates
+            .iter()
+            .filter(|p| {
+                p.source
+                    && p.id != unit
+                    && !p.legacy
+                    && !p.seated_in_engine
+                    && p.state != PlateState::Leaving
+                    && p.added_rev < rev
+                    && table.has_active_row(p.id)
+                    && !sm.pending.iter().any(|q| q.unit == p.id)
+            })
+            .map(|p| p.id)
+            .collect();
+        for &old_id in &older {
+            if let Some(pos) = self.slots[slot].find(old_id) {
+                self.slots[slot].plates.remove(pos);
+            }
+            table.finish_replaced(old_id);
+        }
+        !older.is_empty()
     }
 
     /// Project an `Event::Chain` (or a snapshot read off `Engine::chain`) into the model.

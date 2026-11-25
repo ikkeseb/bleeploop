@@ -103,7 +103,7 @@ pub(super) fn ready_channel() -> (SyncSender<Result<Answer, String>>, Receiver<R
 /// Where the owner's unit box stands relative to the engine.
 enum Seat<U> {
     /// Held by the owner and owed a seat (initial load, `Withdrawn`, `Evicted`, `Stale`/`PortFull`/
-    /// `NoEngine`, or a parked unit woken by a restart). `activated_at` is `Some(terms)` only when
+    /// `Behind`/`NoEngine`, or a parked unit woken by a restart). `activated_at` is `Some(terms)` only when
     /// the unit is already activated at those exact terms and has not returned from the engine or
     /// been asked to restart since.
     Owed { unit: Box<U>, activated_at: Option<Terms> },
@@ -117,7 +117,7 @@ enum Seat<U> {
     Withdrawing { op: Op },
     /// Out of the engine and parked (refused reseat or failed reactivate): the seat stays,
     /// `host.parked(why)` was reported. Retries on the next plugin-asked restart; ends on
-    /// `Back::Dismissed`.
+    /// `Back::Dismissed` (the player's removal, or a newer source seating in its slot).
     Parked { unit: Box<U> },
     /// Out of the engine while the host is closing (`SubmitError::Closing`): kept in hand with no
     /// retry until shutdown releases it.
@@ -171,6 +171,7 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::PortFull => "the slot's engine port is full".to_string(),
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
         SubmitError::Replaced => "a newer source replaced this unit".to_string(),
+        SubmitError::Behind => "a newer source is queued ahead of this unit".to_string(),
         SubmitError::Removing => "the unit is being removed".to_string(),
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
@@ -217,7 +218,7 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
                 *seat = Seat::Withdrawing { op };
                 *pending_restart = None;
             }
-            Err(SubmitError::PortFull | SubmitError::Reloading) => {
+            Err(SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind) => {
                 // Keep pending_restart set and retry `withdraw()` on the next turn.
             }
             Err(SubmitError::Stale) => {
@@ -320,7 +321,16 @@ fn submit_owed<P: OwnedPlugin>(
             *seat = Seat::Installing { op };
             None
         }
-        Err((returned, SubmitError::PortFull | SubmitError::Reloading)) => {
+        Err((returned, SubmitError::PortFull)) if !ever_seated && answering_caller => {
+            // A first submit into a full port fails while the add's caller still holds the slot's
+            // order (as a built-in's does): retried past the add's bound, it would enter the port
+            // after a later edit on that slot.
+            return Some(Exit::FailedBeforeSeat {
+                unit: Some(own(returned)),
+                why: submit_error_reason(SubmitError::PortFull),
+            });
+        }
+        Err((returned, SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind)) => {
             *seat = Seat::Owed { unit: own(returned), activated_at };
             None
         }

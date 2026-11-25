@@ -125,8 +125,13 @@ pub enum SubmitError {
     PortFull,
     /// A reload candidate took over, or this reload candidate was cancelled: send nothing and only receive.
     Superseded,
-    /// A newer source already heads the slot after a rebuild: retire the unit's tone and tear down.
+    /// A newer source already seats at the slot's head after a rebuild: retire the unit's tone and tear
+    /// down.
     Replaced,
+    /// A newer source's install is queued at the head after a rebuild and the engine has not taken it
+    /// yet (it can still refuse it): keep the unit and retry. Should that install apply, the unit is
+    /// dismissed (`Back::Dismissed`); refused, the retry seats it.
+    Behind,
     /// A removal is pending or settled for this row: keep the unit and wait for the removal's terminal.
     Removing,
     /// A reload candidate stands for this id: keep a pending restart and retry when the reload ends.
@@ -270,7 +275,14 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
+    /// Why the engine refused a reload candidate, by its token, the latest [`RELOAD_REFUSALS_KEPT`]:
+    /// its row's `settled` goes at `release`, often before the reload's waiter polls
+    /// (`chain_cmds::reload_outcome`), which reads the cause here.
+    reload_refusals: VecDeque<(InstallToken, SeatRefusal)>,
 }
+
+/// How many reload refusals [`Table`] keeps for a waiter that polls after the candidate's release.
+const RELOAD_REFUSALS_KEPT: usize = 32;
 
 impl Table {
     pub(crate) fn new() -> Table {
@@ -281,7 +293,24 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
+            reload_refusals: VecDeque::new(),
         }
+    }
+
+    /// Keep why the engine refused reload candidate `token` past its row's release.
+    fn note_reload_refusal(&mut self, token: InstallToken, why: SeatRefusal) {
+        if self.reload_refusals.iter().any(|&(t, _)| t == token) {
+            return;
+        }
+        if self.reload_refusals.len() == RELOAD_REFUSALS_KEPT {
+            self.reload_refusals.pop_front();
+        }
+        self.reload_refusals.push_back((token, why));
+    }
+
+    /// Why the engine refused reload candidate `token`, if it did (kept past the row's release).
+    pub(crate) fn reload_refusal(&self, token: InstallToken) -> Option<SeatRefusal> {
+        self.reload_refusals.iter().find_map(|&(t, why)| (t == token).then_some(why))
     }
 
     pub(crate) fn mint_token(&mut self) -> InstallToken {
@@ -479,13 +508,15 @@ impl Table {
     }
 
     pub(crate) fn record_settled(&mut self, op: Op, state: OpState) -> bool {
-        if let Some(row) = self.row_mut(op.install()) {
-            if !row.released {
-                row.settled.insert(op.n(), state);
-                return true;
-            }
+        let Some(row) = self.row_mut(op.install()) else { return false };
+        if row.released {
+            return false;
         }
-        false
+        row.settled.insert(op.n(), state);
+        if let (true, OpState::Refused(why)) = (row.is_reload, state) {
+            self.note_reload_refusal(op.install(), why);
+        }
+        true
     }
 
     pub(crate) fn note_remove_settled(&mut self, token: InstallToken, op_n: u64, state: OpState) {
@@ -718,6 +749,7 @@ impl Table {
         if self.rows[pos].is_reload {
             if let Left::Refused(why) = ret.left {
                 self.rows[pos].mailbox.push_back(Back::Refused { unit: ret.unit, why });
+                self.note_reload_refusal(ret.token, why);
                 return;
             }
         }
@@ -1438,12 +1470,17 @@ impl UnitHost {
             let head = state.model.head_source_id(self.slot, Some(self.id));
             if let Some(head_id) = head {
                 // An evicted/older source retrying after a rebuild must never replace a newer
-                // source that has already queued or seated in the new engine.
-                let head_is_newer = state
+                // source that has already queued or seated in the new engine. Seated, it ended this
+                // one; only queued, the engine can still refuse it, so this one waits for its answer.
+                let newer_head = state
                     .model
                     .find_plate(head_id)
-                    .is_some_and(|(_, hp)| hp.added_rev > my_added_rev);
-                if head_is_newer {
+                    .filter(|(_, hp)| hp.added_rev > my_added_rev)
+                    .map(|(_, hp)| hp.seated_in_engine);
+                if newer_head == Some(false) {
+                    return Err((unit, SubmitError::Behind));
+                }
+                if newer_head == Some(true) {
                     if let Some(row) = state.table.row_mut(self.install) {
                         row.superseded = true;
                     }

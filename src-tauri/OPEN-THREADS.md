@@ -187,18 +187,6 @@
   accepts the add), so it can run ahead of a later add queued on that slot. Next check: a probe that
   queues an add behind a held remove during a take and times the add, then one that removes a loading
   unit with a second add queued behind it.
-- Chain host edges to settle before chains reach players (a cross-family review of the chain
-  commands, read from source, none reproduced; the chain host runs only in DEV builds today):
-  a) an evicted source that answers `Replaced` (a newer source queued after a rebuild) retires its tone
-  before the engine has taken the newer one, which the engine can still refuse (latency), leaving the
-  slot with neither; b) a source parked after a failed reactivation is not replaced by a newer source
-  that seats while it is out (the projected head omits it), so it keeps its owner and tone until it
-  retries; c) a plugin owner retrying `PortFull`
-  after its add's command returned can lose its place to a later edit on that slot; d) a built-in add
-  answered `waiting` whose box a rebuild returns after the 10 s first-answer bound is dropped instead of
-  offered to the new engine; e) a reload the engine refused can log a generic cause when its row is
-  released before the waiter polls. Sources and built-in factories arrive with E3. Next check: one
-  `chain_tests.rs`/`chain_cmds_tests.rs` test per letter, red first, before chains reach players.
 - A clean chain unit's tone is not pinned (DEV chain mode, read from source, never run; a plan review's
   finding, left for later in E3f): a plugin unit that never saved its own `unit-<id>.tone` (nothing was
   changed) reads its plugin's slot file at every load (`ToneStore::load_for_restore_key`'s fallback). When
