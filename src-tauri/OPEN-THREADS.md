@@ -10,6 +10,15 @@
   and stamp the loop's stop on the engine's frame. Next check, only if one fails again: loop it under a
   parallel `cargo build` and read the failing line against these bounds.
 
+- A DEV session shares the release profile's tones and scan cache. `tauri dev` and the release share the
+  app's data folder: the rig record is split by build kind (a DEV build keeps its own record and lock), but
+  DEV chain units read and write the same `tones/` folder (`unit-<id>.tone`, `unit-<id>.pin`, a retire into
+  the slot's file), and a DEV scan writes the same scan cache. A never-changed unit no longer writes the
+  slot's file (its pin is its own), so what is left is a DEV unit the player changed retiring into a slot
+  file the release reads, and a DEV scan's cache entries. Not new with the native record (DEV chain units did it before).
+  Next check, before chains reach players: a DEV run on a copy of a release profile, diffing `tones/` and
+  the scan cache after a session; if the release's tones moved, a DEV tone folder of its own with the
+  release's as a read-only fallback.
 - Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a

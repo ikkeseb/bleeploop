@@ -31,8 +31,9 @@ const TONES_DIR: &str = "tones";
 /// Set once, at setup.
 static APP: OnceLock<EngineApp> = OnceLock::new();
 
-/// How long the exit waits for the engine's shutdown (the plugins' unloads, then the device's close).
-const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
+/// How long the exit waits for the engine's shutdown (the plugins' unloads, then the device's close);
+/// a second shutdown's rig close waits as long for the first's (`rig::Rig::close`).
+pub(super) const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
 
 /// This launch's engine; an error when it did not start (the log says why).
 pub fn engine() -> Result<&'static EngineApp, String> {

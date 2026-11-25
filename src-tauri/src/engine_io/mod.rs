@@ -189,7 +189,7 @@ mod transition;
 pub(crate) mod unit_host;
 pub mod wire;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -704,6 +704,11 @@ pub(crate) struct Core {
     pub(crate) closing: AtomicBool,
     /// Count of `Event::Seat` protocol mismatches (`Model::on_seat`).
     pub(crate) chain_protocol_errors: AtomicU64,
+    /// The feed's completed drains (`EngineHost::drain_feed_taps`), each bumped under `settings` at
+    /// its end: a count read under `settings` (`EngineHost::feed_passes`) moves only by a drain that
+    /// began after the read, which took every event the engine had published by then. The rig's close
+    /// waits for one (`rig::Rig::close`); nothing on the audio thread reads or writes it.
+    pub(crate) feed_passes: AtomicU64,
     /// Count of gated unit commands dropped because their unit left or missed `GATE_DEADLINE`.
     pub(crate) gate_dropped: AtomicU64,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
@@ -871,6 +876,7 @@ impl Core {
             stash: Mutex::new(chain::Stash::new()),
             closing: AtomicBool::new(false),
             chain_protocol_errors: AtomicU64::new(0),
+            feed_passes: AtomicU64::new(0),
             gate_dropped: AtomicU64::new(0),
             fault: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -1325,6 +1331,13 @@ impl EngineHost {
         lock_at(&self.core.settings, LockSite::Settings).map(|s| s.replay().collect()).unwrap_or_default()
     }
 
+    /// The feed's completed drains (`Core::feed_passes`), read under `settings`, so no drain is midway:
+    /// the count moves next by a drain that takes every event the engine published before this call.
+    pub(crate) fn feed_passes(&self) -> u64 {
+        let _settings = lock_at(&self.core.settings, LockSite::Settings);
+        self.core.feed_passes.load(Acquire)
+    }
+
     /// Each lane's mix as the engine last reported it (`Event::Mix`), for the lanes it has reported.
     pub(crate) fn mixes(&self) -> Vec<Event> {
         lock_at(&self.core.settings, LockSite::Settings).map(|s| s.mixes().collect()).unwrap_or_default()
@@ -1395,6 +1408,8 @@ impl EngineHost {
             }
         }
         let Some(ends) = ends.as_mut() else {
+            // No engine: nothing is left to drain, and the pass is complete.
+            self.core.feed_passes.fetch_add(1, Release);
             return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot_for(gen), stash_lost };
         };
         let chains = {
@@ -1427,6 +1442,8 @@ impl EngineHost {
                 unit_meters.push(meter);
             }
         }
+        // Still under `settings`: the pass is complete (`Core::feed_passes`).
+        self.core.feed_passes.fetch_add(1, Release);
         FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate, chains, stash_lost }
     }
 
