@@ -3,7 +3,7 @@
  * This is what `pnpm dev` runs against.
  */
 import type { AppUpdate, AppUpdates, EngineHost, ExportFiles, InputHost, LogFolder, MidiHost, Platform, PluginHost, RigAnswer, RigHost, RigNotice, RigStatus, UpdateProgress } from './host';
-import { decodeRigAnswer } from './host';
+import { decodeRigAnswer } from './host.ts'; // explicit .ts: Node guards import this file
 import {
   ENGINE_LANES,
   FOUR_FOUR,
