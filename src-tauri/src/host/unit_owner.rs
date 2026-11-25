@@ -142,6 +142,13 @@ pub(crate) fn hand_exit(exit: &ExitLatch) -> HandedExit {
 /// Clears a latch [`hand_exit`] handed and no owner took.
 pub(crate) struct HandedExit(());
 
+impl HandedExit {
+    /// Whether an owner took the handed latch: one that did not leaves no owner to set it.
+    pub(crate) fn taken(&self) -> bool {
+        HANDED_EXIT.with(|h| h.borrow().is_none())
+    }
+}
+
 impl Drop for HandedExit {
     fn drop(&mut self) {
         HANDED_EXIT.with(|h| h.borrow_mut().take());
@@ -180,7 +187,9 @@ pub(crate) struct LoadFail {
 }
 
 /// An opener that answers a plain reason (the tests' fakes, the CLAP fixture's) names no owner: a setup
-/// timeout reads [`FailClass::Unresolved`], anything else [`FailClass::Plugin`], the latch set.
+/// timeout reads [`FailClass::Unresolved`], anything else [`FailClass::Plugin`], the latch set. That latch
+/// is no owner's: `Chains` keeps the one it handed at the mint over it while that one is unset (an owner
+/// that took it may still run).
 impl From<String> for LoadFail {
     fn from(why: String) -> Self {
         let class = if why == SETUP_TIMEOUT { FailClass::Unresolved } else { FailClass::Plugin };
@@ -722,9 +731,10 @@ fn abandon_in_engine<P: OwnedPlugin>(
     Err(msg)
 }
 
-/// This owner thread's latch never sets ([`ExitLatch::abandon`]); a thread with none (a fixture's) has
-/// nothing to abandon.
-fn abandon_own_exit() {
+/// This owner thread's latch never sets ([`ExitLatch::abandon`]): plugin code of its load may still run
+/// (a unit the engine holds, a VST2 instance leaked unclosed). A thread with none (a fixture's, a slot
+/// owner's) has nothing to abandon.
+pub(super) fn abandon_own_exit() {
     OWN_EXIT.with(|e| {
         if let Some(exit) = e.borrow().as_ref() {
             exit.abandon();
@@ -787,13 +797,18 @@ fn refused_before_code(format: PluginFormat, path: &str, id: &str) -> Option<Str
     }
 }
 
-/// An owner whose load [`refused_before_code`]: it ends as one with no engine does, answering `Host`.
-fn refuse_before_code(ctx: UnitCtx, why: String) -> Result<(), String> {
+/// An owner refused before any plugin code ran (no device, or [`refused_before_code`]): it ends as one
+/// whose load failed does, answering `class` (`Host`).
+fn refuse_unloaded(ctx: UnitCtx, class: FailClass, why: String) -> Result<(), String> {
     let UnitCtx { unit: host, ready, mut tone, .. } = ctx;
     let add = !host.is_reload();
-    fail_unloaded(host, &mut tone, add, &mut Some(ready), FailClass::Host(Retry::Launch), why);
+    fail_unloaded(host, &mut tone, add, &mut Some(ready), class, why);
     Ok(())
 }
+
+/// The refusal of an owner that finds no engine: before its load, and before its file is looked at (the
+/// player's first refusal stays the device's).
+const NO_DEVICE: &str = "no audio device is open";
 
 /// The chain-unit owner loop every format shares: `load` builds the plugin and its unit from
 /// `Setup`, this publishes params and plate metadata, claims, submits through [`UnitHost`], answers
@@ -825,8 +840,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let add = !host.is_reload();
 
     let Some(terms) = host.terms() else {
-        let why = "no audio device is open".to_string();
-        fail_unloaded(host, &mut tone, add, &mut ready, FailClass::Host(Retry::Device), why);
+        fail_unloaded(host, &mut tone, add, &mut ready, FailClass::Host(Retry::Device), NO_DEVICE.to_string());
         return Ok(());
     };
 
@@ -1111,8 +1125,9 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 
 /// Load plugin `id` from `path` into a chain unit owned through `unit`: the owner and its install's
 /// first answer, or the failure by D5's class with the owner's exit latch ([`LoadFail`]). The owner
-/// refuses a load before the plugin's code runs when its binary or its id cannot be loaded
-/// ([`refused_before_code`]); its latch is the one [`hand_exit`] handed on this thread, if any.
+/// refuses a load before the plugin's code runs when no device is open, then when its binary or its id
+/// cannot be loaded ([`refused_before_code`]); its latch is the one [`hand_exit`] handed on this thread,
+/// if any.
 #[allow(dead_code)] // P4 calls this
 pub(crate) fn load_unit(
     format: PluginFormat,
@@ -1125,10 +1140,18 @@ pub(crate) fn load_unit(
 ) -> Result<(UnitOwner, Answer), LoadFail> {
     let (checked_path, checked_id) = (path.clone(), id.clone());
     let spawn = move |run: Box<dyn FnOnce(UnitCtx) -> Result<(), String> + Send>| {
-        // Checked on the owner thread, right before the load: the plugin's file as it stands then.
-        let run = move |ctx: UnitCtx| match refused_before_code(format, &checked_path, &checked_id) {
-            Some(why) => refuse_before_code(ctx, why),
-            None => run(ctx),
+        // Checked on the owner thread, right before the load: the device first (as `serve_unit` checks it),
+        // then the plugin's file as it stands then.
+        let run = move |ctx: UnitCtx| {
+            let refusal = if ctx.unit.terms().is_none() {
+                Some((FailClass::Host(Retry::Device), NO_DEVICE.to_string()))
+            } else {
+                refused_before_code(format, &checked_path, &checked_id).map(|why| (FailClass::Host(Retry::Launch), why))
+            };
+            match refusal {
+                Some((class, why)) => refuse_unloaded(ctx, class, why),
+                None => run(ctx),
+            }
         };
         spawn_owner(format, unit, editor_parent, sink, tone, run, spawn_thread)
     };
@@ -1814,5 +1837,34 @@ mod tests {
         let _ = owner_a.stop();
         let _ = owner_b.stop();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D5, D6: a VST2 instance this host refuses after its constructor ran (`OpenError::Refused`) stays
+    /// leaked, unclosed, with its module, and its code may still run (a thread its constructor started):
+    /// the load answers `Plugin` with its owner's latch abandoned, unset once the owner was joined.
+    #[test]
+    fn d5_a_vst2_instance_refused_after_its_constructor_leaves_the_latch_unset() {
+        use super::super::vst2_engine::{self, Opened};
+        use crate::host::vst2::fixture::{self, Shape};
+
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+        let host = device.host().clone();
+        let plugin = PluginRef { format: "vst2".into(), path: "C:\\plugins\\Refused.dll".into(), id: "4c664678".into() };
+        let unit_host = host.unit(0, 620, Spec::Plugin(plugin), 0, false).unwrap();
+        let run = |ctx: super::UnitCtx| {
+            // Refused by `validate` after the entry (the plugin's constructor) ran.
+            fixture::arm(Shape { magic: 0x1234_5678, ..Shape::default() });
+            vst2_engine::run_unit_with(ctx, "4c664678", || {
+                Ok(Opened { module: None, entry: fixture::entry, file_stem: "Refused".to_string() })
+            })
+        };
+        match super::spawn_owner(super::PluginFormat::Vst2, unit_host, 0, Arc::new(|_| {}), None, run, super::spawn_thread) {
+            Err(fail) => {
+                assert_eq!(fail.class, super::FailClass::Plugin, "got: {}", fail.why);
+                assert!(!fail.exit.is_set(), "the leaked instance's code may still run: {}", fail.why);
+            }
+            Ok(_) => panic!("expected the refused instance to fail the load"),
+        }
+        host.shutdown();
     }
 }

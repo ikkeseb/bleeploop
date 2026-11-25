@@ -295,10 +295,12 @@ impl Owner {
         }
     }
 
-    fn affinity_handle(&self) -> Option<(u64, String)> {
+    /// The plugin file's affinity instance, with the owner's exit latch that decides its end
+    /// ([`Chains::settle_affinity`]).
+    fn affinity_handle(&self) -> Option<(u64, String, ExitLatch)> {
         match self {
             Owner::Builtin(_) => None,
-            Owner::Plugin(p) => Some((p.inst, p.plugin.path.clone())),
+            Owner::Plugin(p) => Some((p.inst, p.plugin.path.clone(), p.owner.exit_latch().clone())),
         }
     }
 }
@@ -384,8 +386,8 @@ pub(crate) struct Chains {
     id_guard: Mutex<()>,
     affinity: Mutex<Affinity>,
     tokens: Mutex<ToneTokens>,
-    /// The exit latches of the load attempts not known to have ended, by the install token their add
-    /// minted, registered at the mint (`exited`); `sweep` drops each once set. A leaf lock.
+    /// The exit latch of every load attempt an add minted, by its install token, registered at the
+    /// mint (`exited`) and kept once set (one entry per add). A leaf lock.
     exits: Mutex<BTreeMap<InstallToken, ExitLatch>>,
     closing: AtomicBool,
     #[cfg(test)]
@@ -394,6 +396,13 @@ pub(crate) struct Chains {
     fail_next_late_drop_spawn: AtomicBool,
     #[cfg(test)]
     before_register_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test-only: run on the adding thread with the attempt's token right after its mint, before its
+    /// latch is registered.
+    #[cfg(test)]
+    after_mint_hook: Mutex<Option<Box<dyn FnOnce(InstallToken) + Send>>>,
+    /// Test-only: run at every turn of the next built-in owner's loop.
+    #[cfg(test)]
+    builtin_turn_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test-only: run on the next built-in owner's thread after its serving ended, before the thread does.
     #[cfg(test)]
     builtin_end_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -433,6 +442,10 @@ impl Chains {
             #[cfg(test)]
             before_register_hook: Mutex::new(None),
             #[cfg(test)]
+            after_mint_hook: Mutex::new(None),
+            #[cfg(test)]
+            builtin_turn_hook: Mutex::new(None),
+            #[cfg(test)]
             builtin_end_hook: Mutex::new(None),
             #[cfg(test)]
             before_reload_poll_hook: Mutex::new(None),
@@ -446,8 +459,8 @@ impl Chains {
     }
 
     /// Resolve any reload candidates held aside, move finished registry entries into `gone`, drop
-    /// finished `gone` entries whose last `Arc` lives here (instant join), and release their editor
-    /// affinity instances once their owner threads have ended.
+    /// finished `gone` entries whose last `Arc` lives here (instant join), and settle their editor
+    /// affinity instances once their owner threads have ended ([`Self::settle_affinity`]).
     fn sweep(&self, host: Option<&EngineHost>) {
         if let Some(host) = host {
             let checks: Vec<(usize, UnitId, InstallToken, InstallToken, u64, u64)> = {
@@ -496,18 +509,29 @@ impl Chains {
                 }
             }
         }
-        let release_after: Vec<(u64, String)> = drop_now
+        let settle_after: Vec<(u64, String, ExitLatch)> = drop_now
             .iter()
             .filter_map(|entry| entry.owner.affinity_handle())
             .collect();
         drop(drop_now);
-        if !release_after.is_empty() {
-            let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-            for (inst, path) in release_after {
+        self.settle_affinity(settle_after);
+    }
+
+    /// End the affinity instances of owners that were joined: released where the owner's latch set, leaked
+    /// where it left its unit in the engine ([`ExitLatch::abandon`]): its plugin stays loaded and may still
+    /// process, so the next instance of that file must not take its editor.
+    fn settle_affinity(&self, joined: Vec<(u64, String, ExitLatch)>) {
+        if joined.is_empty() {
+            return;
+        }
+        let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+        for (inst, path, exit) in joined {
+            if exit.is_set() {
                 aff.release(inst, &path);
+            } else {
+                aff.leak(inst, &path);
             }
         }
-        self.exits.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, exit| !exit.is_set());
     }
 
     /// Hand `entry` to `gone` while holding `gone` (and any source table lock in
@@ -572,12 +596,11 @@ impl Chains {
                 false
             }
         };
-        if let Some((inst, path)) = aff_handle {
-            let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((inst, path, exit)) = aff_handle {
             if finished {
-                aff.release(inst, &path);
+                self.settle_affinity(vec![(inst, path, exit)]);
             } else {
-                aff.leak(inst, &path);
+                self.affinity.lock().unwrap_or_else(|e| e.into_inner()).leak(inst, &path);
             }
         }
     }
@@ -754,25 +777,30 @@ impl Chains {
     }
 
     /// Whether the load attempt that minted `token` has ended (D5, D6): its exit latch
-    /// ([`ExitLatch`]), from any thread. Registered unset at the mint, before any unit code runs, so a
-    /// setup still in progress reads false; it stays false while the owner runs and for good when it
-    /// left its unit in the engine. Two tokens read true without a latch: one whose latch set and was
-    /// swept, and one this host never minted for an add (a reload's candidate included).
+    /// ([`ExitLatch`]), from any thread. Registered unset right after the mint, before any unit code
+    /// runs; it stays false while the owner runs and for good when it left its unit in the engine, and
+    /// reads true once set, for the rest of the process. A token with no latch here reads false: one
+    /// read between its plate's insert and the registration (a `rig_view` may find it there), and one
+    /// this host never minted for an add (a reload's candidate included; the rig reads only an add's,
+    /// its plate's `added_by`).
     #[allow(dead_code)] // the rig's restore driver reads it (CP3a part 2); the tests now
     pub(crate) fn exited(&self, token: InstallToken) -> bool {
         let exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
-        !exits.get(&token).is_some_and(|latch| !latch.is_set())
+        exits.get(&token).is_some_and(ExitLatch::is_set)
     }
 
-    /// Track `token`'s attempt by `exit` until it is set (`sweep` drops it then): registered at the
-    /// mint, and again with the latch the opener answered (the same one in production, `hand_exit`; a
-    /// test opener's own otherwise).
-    fn track_exit(&self, token: InstallToken, exit: &ExitLatch) {
+    /// Track `token`'s attempt by `exit` and answer the latch that stands for it now: registered at the
+    /// mint, and again with the latch the opener answered (the same one in production, `hand_exit`). A
+    /// registered latch still unset is never replaced by a set one: that is a string opener's
+    /// (`LoadFail::from`), which names no owner, while the owner that took the minted one may still run.
+    fn track_exit(&self, token: InstallToken, exit: &ExitLatch) -> ExitLatch {
         let mut exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
-        if exit.is_set() {
-            exits.remove(&token);
-        } else {
-            exits.insert(token, exit.clone());
+        match exits.get(&token) {
+            Some(held) if !held.is_set() && exit.is_set() => held.clone(),
+            _ => {
+                exits.insert(token, exit.clone());
+                exit.clone()
+            }
         }
     }
 
@@ -804,6 +832,10 @@ impl Chains {
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
         let unit_host = self.mint(host, slots, slot, unit, Spec::Plugin(plugin.clone()), at, bypassed)?;
         let token = unit_host.install_token();
+        #[cfg(test)]
+        if let Some(hook) = self.after_mint_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            hook(token);
+        }
         // The attempt's latch, known from the mint on and handed to the owner the opener spawns.
         let minted = ExitLatch::new();
         self.track_exit(token, &minted);
@@ -854,13 +886,17 @@ impl Chains {
         };
 
         let opened = {
-            let _handed = unit_owner::hand_exit(&minted);
-            open(format, &plugin, unit_host, sink, tone).map_err(Into::into)
+            let handed = unit_owner::hand_exit(&minted);
+            let opened = open(format, &plugin, unit_host, sink, tone).map_err(Into::into);
+            if !handed.taken() {
+                // No owner took it, so none runs with it (an opener that spawned none).
+                minted.end();
+            }
+            opened
         };
         match opened {
             Ok((owner, answer)) => {
-                let exit = owner.exit_latch().clone();
-                self.track_exit(token, &exit);
+                let exit = self.track_exit(token, owner.exit_latch());
                 self.affinity
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -914,7 +950,7 @@ impl Chains {
                 }
             }
             Err(LoadFail { why, class, exit }) => {
-                self.track_exit(token, &exit);
+                let exit = self.track_exit(token, &exit);
                 {
                     let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
                     // The owner may still be in plugin code, or left its unit in the engine: its module
@@ -991,6 +1027,10 @@ impl Chains {
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
         let unit_host = self.mint(host, slots, slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed)?;
         let token = unit_host.install_token();
+        #[cfg(test)]
+        if let Some(hook) = self.after_mint_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            hook(token);
+        }
         // The attempt's latch, known from the mint on: the owner thread holds its guard first and drops it
         // last; a refusal before the owner's spawn sets it (no owner ran), as does a thread that never
         // starts (its closure drops the guard).
@@ -1039,8 +1079,12 @@ impl Chains {
         let owner_exit = exit.clone();
         #[cfg(test)]
         let end_hook = self.builtin_end_hook.lock().unwrap_or_else(|e| e.into_inner()).take();
+        #[cfg(test)]
+        let turn_hook = self.builtin_turn_hook.lock().unwrap_or_else(|e| e.into_inner()).take();
         let main = move || {
             let _exit = exit_guard;
+            #[cfg(test)]
+            BUILTIN_TURN.with(|t| *t.borrow_mut() = turn_hook);
             serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild, owner_exit);
             #[cfg(test)]
             if let Some(hook) = end_hook {
@@ -1338,17 +1382,12 @@ impl Chains {
         for entry in &entries {
             entry.owner.join();
         }
-        let release_after: Vec<(u64, String)> = entries
+        let settle_after: Vec<(u64, String, ExitLatch)> = entries
             .iter()
             .filter_map(|e| e.owner.affinity_handle())
             .collect();
         drop(entries);
-        if !release_after.is_empty() {
-            let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-            for (inst, path) in release_after {
-                aff.release(inst, &path);
-            }
-        }
+        self.settle_affinity(settle_after);
     }
 
     /// Reload `unit` with a fresh instance of `plugin` applying `tone_token`, if `unit` is still that
@@ -2136,6 +2175,35 @@ impl BuiltinSeat {
     }
 }
 
+/// A built-in owner's seat, watched for an unwind (D5, D6): a panic while the engine may hold its box
+/// (installing, seated, or out of the seat for a submit) abandons the attempt's latch and the unit's row,
+/// so `exited` never reads set and a late box leaks, as `serve_unit`'s caught panic does
+/// (`abandon_in_engine`); a box in hand drops with the unwind. Either way the reservation ends.
+struct WatchedSeat {
+    seat: BuiltinSeat,
+    exit: ExitLatch,
+    host: UnitHost,
+}
+
+impl Drop for WatchedSeat {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        if matches!(self.seat, BuiltinSeat::Installing { .. } | BuiltinSeat::Seated | BuiltinSeat::InTransit) {
+            self.exit.abandon();
+            self.host.abandon();
+        }
+        self.host.clone().release();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: on a built-in owner's thread, run at every turn of its loop (`Chains::builtin_turn_hook`).
+    static BUILTIN_TURN: std::cell::RefCell<Option<Arc<dyn Fn() + Send + Sync>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// A built-in owner's first answer: the install's, or its failure with its class (D5).
 type BuiltinFirst = Result<Added, (FailClass, String)>;
 
@@ -2171,7 +2239,7 @@ impl Rebuild {
 /// same box after evictions/withdrawals at the rate it was built at, builds it again from its applied
 /// params for an engine at another rate (its DSP is built for one rate), parks on post-seat refusal
 /// or a failed rebuild, drops the box off the RT thread on terminal return, and drains/abandons
-/// cleanly on stop.
+/// cleanly on stop; a panic is settled by its seat ([`WatchedSeat`]).
 fn serve_builtin(
     start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms, Instant)>,
     ready_tx: SyncSender<BuiltinFirst>,
@@ -2191,7 +2259,9 @@ fn serve_builtin(
 
     // Bounded like every push while the first answer is owed: delayed on the way (the port's lock),
     // it sends nothing once its caller may have stopped waiting.
-    let mut seat = match host.submit_before(boxed, initial_terms, initial_deadline) {
+    // Watched from before the first submit: from there the engine may hold the box.
+    let mut seat = WatchedSeat { seat: BuiltinSeat::InTransit, exit, host: host.clone() };
+    seat.seat = match host.submit_before(boxed, initial_terms, initial_deadline) {
         Ok(op) => BuiltinSeat::Installing { op },
         Err((returned, SubmitError::Stale | SubmitError::Reloading | SubmitError::Behind)) => BuiltinSeat::Owed { unit: returned },
         Err((returned, SubmitError::Closing)) => {
@@ -2216,17 +2286,21 @@ fn serve_builtin(
     };
 
     while !stop.load(Acquire) {
+        #[cfg(test)]
+        if let Some(hook) = BUILTIN_TURN.with(|t| t.borrow().clone()) {
+            hook();
+        }
         while let Some(back) = host.take_back() {
             match back {
                 Back::Removed(unit) | Back::Superseded(unit) => {
-                    drop(seat.take_unit());
+                    drop(seat.seat.take_unit());
                     drop(unit);
                     host.release();
                     send_first_answer(&mut ready, Err((FailClass::Seat, "unit left before seating".to_string())));
                     return;
                 }
                 Back::Dismissed => {
-                    drop(seat.take_unit());
+                    drop(seat.seat.take_unit());
                     host.release();
                     send_first_answer(&mut ready, Err((FailClass::Seat, "unit dismissed before seating".to_string())));
                     return;
@@ -2234,7 +2308,7 @@ fn serve_builtin(
                 Back::Refused { unit, why } => {
                     let msg = refusal_reason(why);
                     if !ever_seated {
-                        drop(seat.take_unit());
+                        drop(seat.seat.take_unit());
                         drop(unit);
                         host.failed(msg.clone());
                         host.release();
@@ -2242,24 +2316,24 @@ fn serve_builtin(
                         return;
                     }
                     host.parked(msg);
-                    seat = BuiltinSeat::Parked { unit };
+                    seat.seat = BuiltinSeat::Parked { unit };
                 }
                 Back::Withdrawn { unit, .. } => {
                     ever_seated = true;
-                    seat = BuiltinSeat::Owed { unit };
+                    seat.seat = BuiltinSeat::Owed { unit };
                 }
                 Back::Evicted { unit, .. } => {
-                    if matches!(seat, BuiltinSeat::Installing { op } if host.poll(op) == OpState::Applied) {
+                    if matches!(seat.seat, BuiltinSeat::Installing { op } if host.poll(op) == OpState::Applied) {
                         ever_seated = true;
                         send_first_answer(&mut ready, Ok(Added::Seated));
                     }
-                    seat = BuiltinSeat::Owed { unit };
+                    seat.seat = BuiltinSeat::Owed { unit };
                 }
             }
         }
 
-        if matches!(seat, BuiltinSeat::Owed { .. }) {
-            let unit = seat.take_unit().expect("checked Owed");
+        if matches!(seat.seat, BuiltinSeat::Owed { .. }) {
+            let unit = seat.seat.take_unit().expect("checked Owed");
             // Only an add still owed its first answer fails fast: one answered `Waiting` was accepted
             // (its caller moved on), so a box a rebuild returns is offered to the new engine like a
             // seated one's, whenever that comes; a full port there keeps its place (`UnitHost::submit`).
@@ -2291,7 +2365,7 @@ fn serve_builtin(
                             return;
                         }
                         host.parked(why);
-                        seat = BuiltinSeat::Parked { unit };
+                        seat.seat = BuiltinSeat::Parked { unit };
                         continue;
                     }
                 },
@@ -2307,7 +2381,7 @@ fn serve_builtin(
                         send_first_answer(&mut ready, Err((FailClass::Host(Retry::Device), why)));
                         return;
                     }
-                    seat = BuiltinSeat::Owed { unit };
+                    seat.seat = BuiltinSeat::Owed { unit };
                 }
                 // While the first answer is owed the bound is judged where the push happens, under the
                 // port's lock: an owner delayed on its way here (the lock, the box built again above)
@@ -2318,7 +2392,7 @@ fn serve_builtin(
                     host.submit(unit, terms)
                 } {
                     Ok(op) => {
-                        seat = BuiltinSeat::Installing { op };
+                        seat.seat = BuiltinSeat::Installing { op };
                     }
                     Err((returned, err @ SubmitError::Late)) => {
                         drop(returned);
@@ -2338,7 +2412,7 @@ fn serve_builtin(
                             return;
                         }
                         host.parked(msg);
-                        seat = BuiltinSeat::Parked { unit: returned };
+                        seat.seat = BuiltinSeat::Parked { unit: returned };
                     }
                     Err((returned, err @ (SubmitError::PortFull | SubmitError::NoEngine))) if !ever_seated && answering => {
                         drop(returned);
@@ -2350,7 +2424,7 @@ fn serve_builtin(
                         return;
                     }
                     Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind)) => {
-                        seat = BuiltinSeat::Owed { unit: returned };
+                        seat.seat = BuiltinSeat::Owed { unit: returned };
                     }
                     Err((returned, SubmitError::Removing)) => {
                         if !ever_seated {
@@ -2359,7 +2433,7 @@ fn serve_builtin(
                             send_first_answer(&mut ready, Err((FailClass::Seat, submit_error_reason(SubmitError::Removing))));
                             return;
                         }
-                        seat = BuiltinSeat::Removing { unit: returned };
+                        seat.seat = BuiltinSeat::Removing { unit: returned };
                     }
                     Err((returned, SubmitError::Closing)) => {
                         if !ever_seated {
@@ -2368,7 +2442,7 @@ fn serve_builtin(
                             send_first_answer(&mut ready, Err((FailClass::Host(Retry::Launch), "the host is closing".to_string())));
                             return;
                         }
-                        seat = BuiltinSeat::Closing { unit: returned };
+                        seat.seat = BuiltinSeat::Closing { unit: returned };
                     }
                     Err((returned, err @ (SubmitError::Superseded | SubmitError::Replaced))) => {
                         drop(returned);
@@ -2380,10 +2454,10 @@ fn serve_builtin(
             }
         }
 
-        if let BuiltinSeat::Installing { op } = seat {
+        if let BuiltinSeat::Installing { op } = seat.seat {
             match host.poll(op) {
                 OpState::Applied => {
-                    seat = BuiltinSeat::Seated;
+                    seat.seat = BuiltinSeat::Seated;
                     ever_seated = true;
                     send_first_answer(&mut ready, Ok(Added::Seated));
                 }
@@ -2407,11 +2481,11 @@ fn serve_builtin(
     // Stop requested: drain anything returned (or held in Leave::Pending), waiting up to
     // `BUILTIN_STOP_RETURN_TIMEOUT` while an engine still runs so a removed unit finishing its
     // fade-out is collected rather than abandoned, then release the reservation.
-    let pending_op = match seat {
+    let pending_op = match seat.seat {
         BuiltinSeat::Installing { op } => Some(op),
         _ => None,
     };
-    let mut have_box = seat.take_unit().is_some();
+    let mut have_box = seat.seat.take_unit().is_some();
     let mut dismissed = false;
     let drain_shutdown = |have_box: &mut bool, dismissed: &mut bool| {
         while let Some(back) = host.take_back_for_shutdown() {
@@ -2450,7 +2524,7 @@ fn serve_builtin(
     }
     if !have_box && !dismissed {
         // The box stays in the engine: this attempt's latch never sets (D5, D6).
-        exit.abandon();
+        seat.exit.abandon();
         host.abandon();
     }
     host.release();

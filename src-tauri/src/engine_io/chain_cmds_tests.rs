@@ -5469,7 +5469,7 @@ fn d5_an_owner_that_leaves_its_unit_in_the_engine_never_sets_its_latch() {
 
 /// D5, D6: the attempt's latch is registered at the mint, before any unit code runs, so a reader that
 /// finds the token on its plate (`added_by`) while the plugin's setup still runs reads it unset. A token
-/// this host never minted reads ended, as does one whose owner ended.
+/// this host has no latch for reads unended; one whose owner ended reads ended.
 #[test]
 fn d5_the_latch_is_known_from_the_mint_while_the_setup_runs() {
     use lf_rig::{AddOk, AddState};
@@ -5500,7 +5500,7 @@ fn d5_the_latch_is_known_from_the_mint_while_the_setup_runs() {
     });
     assert_eq!(added, Ok(AddOk { state: AddState::Seated, token }));
     assert!(!chains.exited(token), "its owner serves");
-    assert!(chains.exited(token + 1_000), "a token never minted reads ended");
+    assert!(!chains.exited(token + 1_000), "a token with no latch here reads unended");
 
     chains.unload_all(host);
     chains.join_all();
@@ -5653,6 +5653,195 @@ fn d5_a_failed_builtin_answers_within_its_bound_while_its_owner_ends() {
 
     gate_tx.send(()).unwrap();
     wait_until(PATIENCE, "the latch sets once the owner's thread ends", || chains.exited(token));
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// D5, D6: a token with no latch here reads unended (a plate's read before its latch's registration, a
+/// token never minted for an add), and an ended attempt reads ended for good, a sweep after it included.
+#[test]
+fn d5_a_token_with_no_latch_reads_unended_and_an_ended_one_stays_ended() {
+    use lf_rig::AddFail;
+    let device = start_device();
+    let host = device.host();
+    let slots = empty_slots();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().failing_kind(UnitKind::Echo, "echo build failed")));
+
+    let token = match typed_add(&chains, host, &slots, 0, 460, echo_spec(0.5, false), 0, &no_open) {
+        Err(AddFail::Plugin { token, exited: true, .. }) => token,
+        other => panic!("expected a plugin failure, got {other:?}"),
+    };
+    assert!(chains.exited(token), "its owner never ran");
+    chains.sweep(Some(host));
+    assert!(chains.exited(token), "a sweep keeps an ended attempt ended");
+    assert!(!chains.exited(token + 1_000), "a token with no latch here reads unended");
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// D5, D6: the plate is in the host's view from the mint on, before the add registers its latch; a reader
+/// that finds its token there (a `rig_view`) in between reads it unended, a plugin's and a built-in's.
+#[test]
+fn d5_a_token_read_between_its_plates_insert_and_its_latch_reads_unended() {
+    let device = start_device();
+    let host = device.host();
+    let slots = empty_slots();
+    let chains = Arc::new(Chains::with_factory(Arc::new(ClampingBuiltinFactory::new())));
+
+    let open = typed_open(unit_owner::test_support::FakePluginConfig::default());
+    for (unit, spec) in [(470, plugin_spec(&fake_ref("Window"))), (471, echo_spec(0.5, false))] {
+        let read = Arc::new(Mutex::new(None));
+        let (reader, seen, view) = (chains.clone(), read.clone(), host.clone());
+        *chains.after_mint_hook.lock().unwrap() = Some(Box::new(move |token| {
+            *seen.lock().unwrap() = Some((added_by(&view, unit) == token, reader.exited(token)));
+        }));
+        let added = typed_add(&chains, host, &slots, 0, unit, spec, 0, &open).expect("the unit seats");
+        assert_eq!(*read.lock().unwrap(), Some((true, false)), "unit {unit}: the plate holds the token, read unended");
+        assert!(!chains.exited(added.token), "unit {unit}: its owner serves");
+    }
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// D5, D6: a built-in owner that panics while the engine holds its seated box abandons its latch, as a
+/// plugin owner's caught panic does: the engine may still run the box, so the attempt never reads ended.
+#[test]
+fn d5_a_builtin_that_panics_with_its_box_in_the_engine_never_sets_its_latch() {
+    use lf_rig::{AddOk, AddState};
+    let device = start_device();
+    let host = device.host();
+    let slots = empty_slots();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new()));
+
+    let panic_now = Arc::new(AtomicBool::new(false));
+    let armed = panic_now.clone();
+    *chains.builtin_turn_hook.lock().unwrap() = Some(Arc::new(move || {
+        if armed.swap(false, Ordering::SeqCst) {
+            panic!("a built-in owner's turn panics with its box seated");
+        }
+    }));
+    let AddOk { state, token } = typed_add(&chains, host, &slots, 0, 480, echo_spec(0.5, false), 0, &no_open).expect("the echo seats");
+    assert_eq!(state, AddState::Seated);
+
+    panic_now.store(true, Ordering::SeqCst);
+    let finished = || chains.registry.lock().unwrap().get(&480).is_none_or(|e| e.owner.is_finished());
+    wait_until(PATIENCE, "the owner's thread ends after its panic", finished);
+    assert!(engine_chain_summary(&device, 0).iter().any(|&(id, _)| id == 480), "the box is still in the engine");
+    assert!(!chains.exited(token), "an owner that left its box in the engine never reads ended");
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// D5 `Host`: no device and a binary gone since the scan: the device's refusal comes first, as it did
+/// before the file check, through the real `load_unit`.
+#[test]
+fn d5_no_device_is_refused_before_a_missing_binary() {
+    use lf_rig::{AddFail, Retry};
+    let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 2.0 }, FakeDriver(Fake::new())).unwrap();
+    let slots = empty_slots();
+    let chains = Chains::new();
+
+    let real_open = |format: PluginFormat, plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        unit_owner::load_unit(format, plugin.path.clone(), plugin.id.clone(), unit_host, 0, sink, tone)
+    };
+    let gone = PluginRef {
+        format: "clap".into(),
+        path: "C:\\__bleeploop_nonexistent_plugin_dir__\\Missing.clap".into(),
+        id: "missing.amp".into(),
+    };
+    match typed_add(&chains, &host, &slots, 0, 490, plugin_spec(&gone), 0, &real_open) {
+        Err(AddFail::Host { retry: Retry::Device, token: Some(token), why }) => {
+            assert!(why.contains("no audio device"), "got: {why}");
+            assert_eq!(token, added_by(&host, 490));
+            assert!(chains.exited(token), "its owner ended");
+        }
+        other => panic!("expected the device's refusal, got {other:?}"),
+    }
+
+    chains.unload_all(&host);
+    chains.join_all();
+}
+
+/// D5, D6: an owner that left its unit in the engine keeps its plugin file's editor affinity when a sweep
+/// drops its finished entry, as the add's own failure does: the plugin stays loaded and may still process.
+#[test]
+fn d5_a_swept_owner_that_left_its_unit_in_the_engine_keeps_its_editor_affinity() {
+    let device = start_device();
+    let host = device.host();
+    let slots = empty_slots();
+    let chains = Chains::new();
+
+    let panic_now = Arc::new(AtomicBool::new(false));
+    let armed = panic_now.clone();
+    let open = typed_open(unit_owner::test_support::FakePluginConfig {
+        on_turn: Some(Arc::new(move || {
+            if armed.swap(false, Ordering::SeqCst) {
+                panic!("an owner turn panics with its unit seated");
+            }
+        })),
+        ..Default::default()
+    });
+    let amp = fake_ref("SweptAbandon");
+    let token = typed_add(&chains, host, &slots, 0, 500, plugin_spec(&amp), 0, &open).expect("the plugin seats").token;
+
+    panic_now.store(true, Ordering::SeqCst);
+    let finished = || chains.registry.lock().unwrap().get(&500).is_none_or(|e| e.owner.is_finished());
+    wait_until(PATIENCE, "the owner's thread ends after its panic", finished);
+    assert!(!chains.exited(token), "its owner left its unit in the engine");
+    chains.sweep(Some(host));
+    assert!(chains.registry.lock().unwrap().get(&500).is_none(), "the sweep took the finished entry");
+    assert!(chains.affinity_held(&amp.path), "the abandoned instance keeps its plugin file's affinity");
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// D5, D6: a string-answering opener (`LoadFail::from`'s latch is no owner's) whose setup outlasts its wait
+/// keeps the latch its owner took at the mint: the attempt reads unended while that owner is in its setup.
+#[test]
+fn d5_a_string_openers_setup_timeout_keeps_its_owners_latch() {
+    use lf_rig::AddFail;
+    let device = start_device();
+    let host = device.host();
+    let slots = empty_slots();
+    let chains = Chains::new();
+    unit_owner::set_load_wait(Duration::from_millis(300));
+
+    let gate = Arc::new(AtomicBool::new(false));
+    let held = gate.clone();
+    let left = Arc::new(AtomicBool::new(false));
+    let out_of_setup = left.clone();
+    let cfg = unit_owner::test_support::FakePluginConfig {
+        on_load: Some(Arc::new(move || {
+            let deadline = Instant::now() + PATIENCE;
+            while !held.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            out_of_setup.store(true, Ordering::SeqCst);
+        })),
+        ..Default::default()
+    };
+    let open = move |_: PluginFormat, _: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        unit_owner::test_support::spawn_fake_unit(uh, sink, tone, cfg.clone())
+    };
+    let amp = fake_ref("StringSlow");
+    let (token, exited) = match typed_add(&chains, host, &slots, 0, 510, plugin_spec(&amp), 0, &open) {
+        Err(AddFail::Unresolved { token, exited, why }) => {
+            assert_eq!(why, unit_owner::SETUP_TIMEOUT);
+            (token, exited)
+        }
+        other => panic!("expected an unresolved setup, got {other:?}"),
+    };
+    let in_setup = !left.load(Ordering::SeqCst) && !chains.exited(token);
+    gate.store(true, Ordering::SeqCst);
+    assert!(!exited, "the answer reads the owner's latch, unset in its setup");
+    assert!(in_setup, "the attempt reads unended while its owner is in its setup");
+    assert!(chains.affinity_held(&amp.path), "a setup timeout leaks its plugin file's affinity");
+    wait_until(PATIENCE, "the owner's latch sets once it ends", || chains.exited(token));
 
     chains.unload_all(host);
     chains.join_all();

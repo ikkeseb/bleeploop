@@ -549,7 +549,8 @@ pub(crate) enum OpenError {
     /// The entry made no instance: the module can be unloaded.
     NoInstance(String),
     /// The entry made an instance this host will not run. Nothing of it was called, so it was never
-    /// closed either: its module must stay loaded (`Vst2Module::leak`), with its context.
+    /// closed either: its module must stay loaded (`Vst2Module::leak`), with its context, and its code
+    /// may still run (a thread its constructor started).
     Refused(String),
 }
 
