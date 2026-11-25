@@ -150,9 +150,19 @@ impl Loads {
         }
     }
 
-    /// The attempt `token` applied: true when this starts its settle.
+    /// The attempt `token` applied: true when this starts its settle. A failure seen before (a plate
+    /// that read failed, then applied) no longer counts: only the settle ends the load now, so a latch
+    /// that comes later does not cut it short.
     pub fn applied(&mut self, token: InstallToken) -> bool {
-        self.by_token(token).is_some_and(|load| !std::mem::replace(&mut load.applied, true))
+        self.by_token(token).is_some_and(|load| {
+            load.failed = false;
+            !std::mem::replace(&mut load.applied, true)
+        })
+    }
+
+    /// The attempt tokens answers named, of the loads still followed.
+    pub fn tokens(&self) -> Vec<InstallToken> {
+        self.loads.values().filter_map(|l| l.token).collect()
     }
 
     /// The settle of `token` ran out: true when its load became terminal (a rewrite is owed).

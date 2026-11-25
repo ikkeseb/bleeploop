@@ -1,8 +1,8 @@
 //! The restore machine (D1, D5, D6, D9, D10) driven by events, judged by the actions it answers. A
 //! small driver plays the app's glue: it answers each blocking action as a fake host would (a device
 //! runs, the engine takes the seed, the scan finds the record's plugins, every write commits, every
-//! add seats), and each test scripts what differs: an add's answer, a refused seed, a failed write,
-//! a view.
+//! add seats), and each test scripts what differs: an add's answer, a refused seed, a failed or
+//! unanswered write, a take held back, a view.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -75,6 +75,11 @@ enum Ans {
     Plugin,
     SourceTaken,
     Unresolved { exited: bool },
+    /// Unresolved, and its plate came and went before the next view: no view shows it.
+    UnresolvedUnseen,
+    /// The host found the unit already in the slot under its lock (a plate that appeared after the
+    /// machine's last view) and added nothing.
+    Matched,
     /// No answer yet (a plugin in setup, a built-in that hangs).
     Hang,
 }
@@ -94,6 +99,8 @@ struct Rig {
     answers: BTreeMap<UnitId, VecDeque<Ans>>,
     /// Which durable writes fail, by their 1-based count.
     fail_writes: Vec<usize>,
+    /// Writes from this 1-based count on get no answer (still out when the test goes on).
+    hold_writes_from: usize,
     writes: usize,
     /// The crash marker on disk, as this fake keeps it.
     disk: Option<Vec<UnitId>>,
@@ -116,6 +123,7 @@ impl Rig {
             plugins: Vec::new(),
             answers: BTreeMap::new(),
             fail_writes: Vec::new(),
+            hold_writes_from: usize::MAX,
             writes: 0,
             disk: None,
             view: RigView::default(),
@@ -173,6 +181,9 @@ impl Rig {
             }
             Action::Commit | Action::CommitMarker(_) | Action::RemoveMarker => {
                 self.writes += 1;
+                if self.writes >= self.hold_writes_from {
+                    return Vec::new();
+                }
                 if self.fail_writes.contains(&self.writes) {
                     return vec![Event::CommitFailed];
                 }
@@ -232,6 +243,11 @@ impl Rig {
             Ans::Unresolved { exited } => {
                 put(self, PlateState::Loading, false, false);
                 Err(AddFail::Unresolved { why: "setup timed out".into(), token, exited })
+            }
+            Ans::UnresolvedUnseen => Err(AddFail::Unresolved { why: "setup timed out".into(), token, exited: false }),
+            Ans::Matched => {
+                put(self, PlateState::Seated, true, false);
+                Ok(AddOk { state: AddState::Matched, token })
             }
             Ans::Hang => {
                 put(self, PlateState::Loading, false, false);
@@ -328,7 +344,13 @@ fn c1_marker_and_record_durable_before_any_add_levels_taken_before_adds() {
     assert_eq!(rig.trace.last(), Some(&Action::WaitDevice));
 
     rig.device = true;
+    rig.takes = false;
     rig.feed(Event::DeviceRuns);
+    // The engine has not taken the seed yet: no add, whatever else is ready.
+    assert!(rig.adds().is_empty(), "{:#?}", rig.trace);
+    assert_eq!(rig.trace.last(), Some(&Action::WaitTaken));
+    rig.takes = true;
+    rig.feed(Event::Taken { gen: 1 });
     let taken = rig.pos(|a| *a == Action::WaitTaken).expect("the barrier");
     let first_marker = rig.pos(is_marker(&[])).expect("the marker naming nothing");
     let placement = rig.pos(|a| *a == Action::Commit).expect("slot B's placement");
@@ -462,6 +484,14 @@ fn c8_ott_on_placement_order() {
     }
     assert!(rig.m.plan().pending.iter().all(Vec::is_empty));
     assert!(rig.disposition(2).is_none() && rig.disposition(3).is_none());
+
+    // A SYNTH head with its OTT on: the OTT alone goes in, at the chain's end.
+    let mut rig = Rig::new();
+    rig.open(record(slot(vec![fx(1, UnitKind::Synth)], vec![fx(2, UnitKind::Ott), fx(3, UnitKind::Ring)]), slot(vec![], vec![])), MarkerRead::None);
+    assert_eq!(rig.adds(), [1, 2]);
+    assert_eq!(rig.add_of(2), (0, Place::End));
+    assert_eq!(rig.m.plan().units[0].iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2]);
+    assert!(rig.disposition(3).is_none() && rig.m.plan().pending[0].is_empty());
 }
 
 #[test]
@@ -529,7 +559,8 @@ fn c13_matched_units_skipped() {
     rig.open(record(slot(vec![p1, fx(2, UnitKind::Echo)], vec![]), slot(vec![ring], vec![])), MarkerRead::None);
     assert_eq!(rig.disposition(1), Some(&Disposition::Matched { token: 500 }));
     assert!(!rig.trace.iter().any(|a| matches!(a, Action::Scan(_))), "a matched plugin is not scanned");
-    assert!(rig.held(3), "its id is held in the other slot");
+    assert_eq!(rig.disposition(3), None, "an applied plate in the other slot holds its id: the player's unit wins it");
+    assert!(rig.m.plan().units[1].is_empty());
     assert_eq!(rig.adds(), [2]);
     assert_eq!(rig.add_of(2).1, Place::After(vec![1]));
 }
@@ -538,7 +569,13 @@ fn c13_matched_units_skipped() {
 fn c18_c27_refused_or_partial_seed_retries_no_add_meanwhile_one_log_at_10s() {
     let mut rig = Rig::new();
     rig.refusals = 40;
+    rig.takes = false;
     rig.open(record(slot(vec![fx(1, UnitKind::Echo)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    // Seeded at last, but not yet taken by the engine: still no add.
+    assert!(rig.adds().is_empty(), "{:#?}", rig.trace);
+    assert_eq!(rig.trace.last(), Some(&Action::WaitTaken));
+    rig.takes = true;
+    rig.feed(Event::Taken { gen: 1 });
     let seeds: Vec<(usize, Duration)> =
         rig.trace.iter().enumerate().filter_map(|(i, a)| if let Action::Seed { after, .. } = a { Some((i, *after)) } else { None }).collect();
     assert_eq!(seeds.len(), 41);
@@ -568,6 +605,9 @@ fn c22_unresolved_plugin_and_builtin_timeout_hold_marker_and_place() {
     let mut rig = Rig::new().answer(1, &[Ans::Unresolved { exited: false }]).answer(3, &[Ans::Unresolved { exited: false }]);
     rig.open(record(slot(vec![plug(1), fx(2, UnitKind::Echo)], vec![]), slot(vec![fx(3, UnitKind::Ring)], vec![])), MarkerRead::None);
     assert_eq!(rig.adds(), [1, 2, 3], "the units after it go on");
+    assert_eq!(rig.add_of(1), (0, Place::After(vec![])));
+    assert_eq!(rig.add_of(2), (0, Place::After(vec![1])), "after the unresolved unit, which keeps its place");
+    assert_eq!(rig.add_of(3), (1, Place::After(vec![])));
     assert_eq!(rig.disposition(1), Some(&Disposition::Issued { token: Some(rig.token(1)) }));
     assert_eq!(rig.disposition(3), Some(&Disposition::Issued { token: Some(rig.token(3)) }));
     assert_eq!(rig.disk, Some(vec![1]), "the marker keeps naming it");
@@ -667,6 +707,23 @@ fn waiting_head_reevaluated_on_apply_and_on_removal() {
 
 #[test]
 fn full_chain_keeps_unused_ids_queued() {
+    // The chain is full: every placed unit is refused its seat in turn, and each is held under its
+    // id, once, for the next launch.
+    let mut rig = Rig::new().answer(2, &[Ans::Seat]).answer(3, &[Ans::Seat]).answer(4, &[Ans::Seat]);
+    rig.open(
+        record(slot(vec![fx(1, UnitKind::Echo)], vec![fx(2, UnitKind::Ott), fx(3, UnitKind::Ring), fx(4, UnitKind::Reverb)]), slot(vec![], vec![])),
+        MarkerRead::None,
+    );
+    assert_eq!(rig.adds(), [1, 2, 3, 4]);
+    let plan = rig.m.plan();
+    assert_eq!(plan.units[0].iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2, 3, 4], "each id once");
+    assert!(plan.pending[0].is_empty());
+    for id in [2, 3, 4] {
+        assert_eq!(plan.dispositions[&id], Disposition::Held { why: "port full".into(), token: Some(rig.token(id)) });
+    }
+    assert!(rig.done());
+
+    // A failure midway (an add that never answers, then close): the rest stay queued.
     let mut rig = Rig::new().answer(2, &[Ans::Seat]).answer(3, &[Ans::Hang]);
     rig.open(
         record(slot(vec![fx(1, UnitKind::Echo)], vec![fx(2, UnitKind::Ott), fx(3, UnitKind::Ring), fx(4, UnitKind::Reverb)]), slot(vec![], vec![])),
@@ -768,4 +825,148 @@ fn yielded_source_and_player_removal_of_a_held_plate() {
     assert!(rig.held(2));
     rig.remove_plate(2);
     assert!(rig.disposition(2).is_none() && rig.m.plan().units[1].is_empty(), "the player removed its failed plate");
+}
+
+// ── review round 1 ───────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn id_reuse_a_plate_not_applied_keeps_the_hold_an_applied_one_wins_the_id() {
+    // A held unit's failed plate goes, and a plate of another token loads under its id: the hold stays.
+    let mut rig = Rig::new().answer(2, &[Ans::Seat]);
+    rig.open(record(slot(vec![fx(1, UnitKind::Echo), plug(2)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    let t2 = rig.token(2);
+    assert!(rig.held(2));
+    rig.view.slots[0].retain(|p| p.id != 2);
+    rig.view.slots[0].push(plate(&plug(2), 900, PlateState::Loading, false, false));
+    let event = rig.view_event();
+    rig.feed(event);
+    assert_eq!(rig.disposition(2), Some(&Disposition::Held { why: "port full".into(), token: Some(t2) }), "a loading plate ends nothing");
+    assert_eq!(rig.m.plan().units[0].iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2]);
+    // It applies: the player's unit wins the id, and the restore adds nothing under it.
+    rig.set_plate(2, PlateState::Seated, true, false);
+    assert_eq!(rig.disposition(2), None);
+    assert_eq!(rig.m.plan().units[0].iter().map(|u| u.id).collect::<Vec<_>>(), [1]);
+    assert_eq!(rig.adds(), [1, 2]);
+
+    // A unit still queued (no device yet): an applied plate of another unit under its id wins it.
+    let mut rig = Rig::new();
+    rig.device = false;
+    rig.open(record(slot(vec![fx(1, UnitKind::Echo), fx(2, UnitKind::Ring)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    rig.view.slots[1].push(plate(&fx(1, UnitKind::Reverb), 900, PlateState::Seated, true, false));
+    let event = rig.view_event();
+    rig.feed(event);
+    assert_eq!(rig.disposition(1), None, "the player's unit holds the id");
+    rig.device = true;
+    rig.feed(Event::DeviceRuns);
+    assert_eq!(rig.adds(), [2], "nothing added under the id");
+    assert_eq!(rig.add_of(2).1, Place::After(vec![]));
+}
+
+#[test]
+fn marker_rewrite_does_not_wait_for_a_blocked_add() {
+    let mut rig = Rig::new().answer(2, &[Ans::Hang]);
+    rig.open(record(slot(vec![plug(1), fx(2, UnitKind::Echo)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    assert_eq!(rig.adds(), [1, 2], "add 2 is out and does not answer");
+    assert_eq!(rig.disk, Some(vec![1]));
+    assert_eq!(rig.feed(Event::SettleElapsed { token: rig.token(1) }), [Action::CommitMarker(vec![])]);
+    assert_eq!(rig.disk, Some(vec![]));
+}
+
+#[test]
+fn failed_marker_rewrite_retries_with_backoff() {
+    // Writes: 1 the first marker, 2 plugin 1's load, 3 and 4 its rewrite (both fail), 5 the rewrite again.
+    let mut rig = Rig::new().answer(2, &[Ans::Hang]);
+    rig.fail_writes = vec![3, 4];
+    rig.open(record(slot(vec![plug(1), fx(2, UnitKind::Echo)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    let after = rig.feed(Event::SettleElapsed { token: rig.token(1) });
+    assert_eq!(after[0], Action::CommitMarker(vec![]));
+    assert!(matches!(after[1], Action::Log(_)));
+    assert_eq!(after[2..], [Action::Backoff { after: Duration::from_millis(20) }]);
+    assert_eq!(rig.feed(Event::BackoffElapsed), [Action::CommitMarker(vec![]), Action::Backoff { after: Duration::from_millis(40) }], "one log per run");
+    assert_eq!(rig.disk, Some(vec![1]));
+    assert_eq!(rig.feed(Event::BackoffElapsed), [Action::CommitMarker(vec![])]);
+    assert_eq!(rig.disk, Some(vec![]));
+}
+
+#[test]
+fn latch_after_a_plate_unseen_by_any_view_is_terminal() {
+    let mut rig = Rig::new().answer(1, &[Ans::UnresolvedUnseen]);
+    rig.open(record(slot(vec![plug(1)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    let token = rig.token(1);
+    assert_eq!(rig.disk, Some(vec![1]));
+    assert_eq!(rig.feed(Event::LatchSet { token }), [Action::RemoveMarker, Action::Done]);
+    assert_eq!(rig.disposition(1), Some(&Disposition::Held { why: "its add failed with no answer to trust".into(), token: Some(token) }));
+}
+
+#[test]
+fn failed_then_applied_then_latch_keeps_the_settle() {
+    let mut rig = Rig::new().answer(1, &[Ans::Unresolved { exited: false }]);
+    rig.open(record(slot(vec![plug(1)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    let token = rig.token(1);
+    rig.set_plate(1, PlateState::Failed, false, false);
+    assert!(rig.set_plate(1, PlateState::Seated, true, false).contains(&Action::Settle { token }));
+    assert!(rig.feed(Event::LatchSet { token }).is_empty(), "applied: only its settle ends it");
+    assert_eq!(rig.disk, Some(vec![1]));
+    assert_eq!(rig.feed(Event::SettleElapsed { token }), [Action::RemoveMarker, Action::Done]);
+}
+
+#[test]
+fn forget_is_durable_before_its_tone_and_marker() {
+    let rec = record(slot(vec![plug(1), fx(2, UnitKind::Echo)], vec![]), slot(vec![], vec![]));
+    let mut rig = Rig::new().answer(1, &[Ans::Plugin]);
+    rig.open(rec.clone(), MarkerRead::None);
+    let commit = rig.pos(|a| *a == Action::Commit).expect("the record without the unit");
+    let forget = rig.pos(|a| *a == Action::Forget { id: 1 }).expect("its tone files go");
+    let removed = rig.pos(|a| *a == Action::RemoveMarker).expect("the marker goes");
+    assert!(commit < forget && forget < removed, "{:#?}", rig.trace);
+    assert!(rig.done());
+
+    // The record write fails: its tone stays and the marker keeps naming it, until a retry commits.
+    // Writes: 1 the first marker, 2 plugin 1's load, 3 the forget's record (fails), 4 the retry.
+    let mut rig = Rig::new().answer(1, &[Ans::Plugin]);
+    rig.fail_writes = vec![3];
+    rig.open(rec, MarkerRead::None);
+    assert!(rig.trace.contains(&Action::Commit));
+    assert!(!rig.trace.contains(&Action::Forget { id: 1 }));
+    assert_eq!(rig.disk, Some(vec![1]), "a crash now forgets it at the next launch");
+    assert_eq!(rig.trace.last(), Some(&Action::Backoff { after: Duration::from_millis(20) }));
+    assert!(!rig.done());
+    let after = rig.feed(Event::BackoffElapsed);
+    assert_eq!(after[..2], [Action::Commit, Action::Forget { id: 1 }]);
+    assert_eq!(rig.disk, None);
+    assert!(rig.done());
+}
+
+#[test]
+fn close_between_a_marker_write_and_its_ack() {
+    // Writes: 1 the first marker, 2 plugin 1's load, 3 plugin 2's load: out when close comes.
+    let mut rig = Rig::new().answer(1, &[Ans::Unresolved { exited: false }]);
+    rig.hold_writes_from = 3;
+    rig.open(record(slot(vec![plug(1)], vec![]), slot(vec![plug(2)], vec![])), MarkerRead::None);
+    assert_eq!(rig.trace.last(), Some(&Action::CommitMarker(vec![1, 2])));
+    assert_eq!(rig.adds(), [1]);
+    // 2's add never started: close keeps 1 alone, written after the write out.
+    assert_eq!(rig.feed(Event::Closing), [Action::CommitMarker(vec![1]), Action::Done]);
+}
+
+#[test]
+fn close_reads_an_applied_plate_before_its_add_answers() {
+    let mut rig = Rig::new().answer(1, &[Ans::Hang]);
+    rig.open(record(slot(vec![plug(1)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    assert_eq!(rig.disk, Some(vec![1]));
+    rig.set_plate(1, PlateState::Seated, true, false);
+    // SEAT-C: applied, so terminal at a clean close, though its answer never came.
+    assert_eq!(rig.feed(Event::Closing), [Action::RemoveMarker, Action::Done]);
+}
+
+#[test]
+fn host_matched_answer_is_matched_and_leaves_the_marker() {
+    let mut rig = Rig::new().answer(1, &[Ans::Matched]);
+    rig.open(record(slot(vec![plug(1), fx(2, UnitKind::Echo)], vec![]), slot(vec![], vec![])), MarkerRead::None);
+    let token = rig.token(1);
+    assert_eq!(rig.disposition(1), Some(&Disposition::Matched { token }));
+    assert!(!rig.trace.contains(&Action::Settle { token }), "no plugin code ran for the attempt");
+    assert_eq!(rig.adds(), [1, 2]);
+    assert_eq!(rig.disk, None);
+    assert!(rig.done());
 }

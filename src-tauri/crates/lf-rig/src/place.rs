@@ -6,8 +6,8 @@
 //!   kind at once (SYNTH plays notes, the rest are input-fed), a plugin from its **applied** plate's
 //!   `source` (a plugin's activation says what it is; the scan does not). A head still to add, loading
 //!   or `Waiting` waits and is read again at the next view; one `Forgotten`, yielded or removed lets the
-//!   next unit decide; one `Held` keeps `pending` for the next launch. A slot with no record unit reads
-//!   the first plate the player put in, and an empty chain is input-fed.
+//!   next unit decide; one `Held` (a built-in too) keeps `pending` for the next launch. A slot with no
+//!   record unit reads the first plate the player put in, and an empty chain is input-fed.
 //! - **What the role takes** from `pending`: an input-fed chain all of it, in its order (the OTT, RING
 //!   MOD, ECHO, REVERB, as the upgrade wrote it); a source-headed chain the OTT alone, and only when it
 //!   is on. One commit moves it to the units' end and clears `pending`, before any of its adds.
@@ -54,15 +54,14 @@ pub fn head_role(units: &[UnitRecord], dispositions: &BTreeMap<UnitId, Dispositi
         // No record unit: the player's first plate decides, and an empty chain is input-fed.
         return plates.iter().find(|p| !p.failed_add).map_or(HeadRole::Known(Role::Input), plate_role);
     };
-    match &head.body {
-        UnitBody::Builtin { kind, .. } => HeadRole::Known(builtin_role(*kind)),
-        UnitBody::Plugin(_) => match dispositions.get(&head.id) {
-            Some(Disposition::Held { .. }) => HeadRole::Keep,
-            Some(Disposition::Restored { token } | Disposition::Matched { token }) => {
-                plates.iter().find(|p| p.added_by == *token).map_or(HeadRole::Wait, plate_role)
-            }
-            _ => HeadRole::Wait,
-        },
+    match (dispositions.get(&head.id), &head.body) {
+        // A held head keeps `pending` for the next launch, a built-in as much as a plugin.
+        (Some(Disposition::Held { .. }), _) => HeadRole::Keep,
+        (_, UnitBody::Builtin { kind, .. }) => HeadRole::Known(builtin_role(*kind)),
+        (Some(Disposition::Restored { token } | Disposition::Matched { token }), UnitBody::Plugin(_)) => {
+            plates.iter().find(|p| p.added_by == *token).map_or(HeadRole::Wait, plate_role)
+        }
+        (_, UnitBody::Plugin(_)) => HeadRole::Wait,
     }
 }
 

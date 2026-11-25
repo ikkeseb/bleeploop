@@ -79,3 +79,9 @@ fn match_by_slot_id_kind_and_identity() {
     assert_eq!(find_match(0, &p, &at(0, plate(&p, 9, PlateState::Failed, false, false))), Match::Free, "a failed add is replaced");
     assert_eq!(find_match(0, &p, &RigView::default()), Match::Free);
 }
+
+#[test]
+fn a_held_builtin_head_keeps_pending() {
+    let d = BTreeMap::from([(1, Disposition::Held { why: String::new(), token: None })]);
+    assert_eq!(head_role(&[fx(1, UnitKind::Synth), fx(2, UnitKind::Echo)], &d, &[]), HeadRole::Keep);
+}

@@ -13,21 +13,34 @@
 //! any kind, and naming each plugin before its load. Adds go one at a time, slot A then slot B, in
 //! record order, each after the record units before it ([`crate::place`]).
 //!
-//! **Blocking actions** are answered by one event each, and the machine issues the next only after
-//! that answer: `Seed` (`Seeded`/`Refused`), `WaitTaken` (`Taken`), `WaitDevice` (`DeviceRuns`), `Scan`
-//! (`Scanned`), `Commit`, `CommitMarker` and `RemoveMarker` (`Committed`/`CommitFailed`), `Add`
-//! (`AddAnswered`). The others (`Forget`, `Settle`, `Log`, `Done`) are run as they come. `ViewChanged`,
-//! `LatchSet`, `GenMoved`, `DeviceRuns` and `SettleElapsed` may come at any time.
+//! **Blocking actions** are answered by one event each: `Seed` (`Seeded`/`Refused`), `WaitTaken`
+//! (`Taken`), `WaitDevice` (`DeviceRuns`), `Scan` (`Scanned`), `Add` (`AddAnswered`), and the writes,
+//! `Commit`, `CommitMarker` and `RemoveMarker` (`Committed`/`CommitFailed`). The restore's steps run
+//! one at a time, and **at most one write is out at a time**, so `Committed` always answers the write
+//! that is out. Beside the steps runs one more lane, for the writes nothing else may wait on: a load
+//! that turned terminal leaves the marker by a rewrite at once, also while an add or a device wait is
+//! out (the glue runs that write while the add blocks), and a plugin's forget commits the record
+//! before its effects. A failed write on that lane is tried again after a wait ([`Action::Backoff`],
+//! D1's 20 ms doubling to 500 ms). The others (`Forget`, `Settle`, `Backoff`, `Log`, `Done`) are run as
+//! they come. `ViewChanged`, `LatchSet`, `GenMoved`, `DeviceRuns`, `SettleElapsed` and
+//! `BackoffElapsed` may come at any time.
 //!
 //! **Dispositions** (D3, D5): each record unit's in the [`Plan`], which the projection reads for every
 //! write. A plugin's own failure forgets it (`Forget`: its tone files go too); a host or seat refusal
 //! holds it at its place (a refusal for no engine is tried again under its id once a device runs); a
 //! source the player put in yields it; an add with no answer to trust stays issued until its plate
-//! applies or fails with its owner gone. A plate that was seen and left the model is a confirmed
-//! removal: the unit leaves the plan.
+//! applies or fails with its owner gone. A plugin's forget is durable before its effects: the record
+//! without the unit commits first, then its tone files go and its load leaves the marker.
+//!
+//! **Each id once** (the rule the projection shares, D3): a disposition binds to its own token. A
+//! unit the restore holds (`Queued`, `Issued`, `Held`) leaves the plan only when the plate carrying its
+//! token was seen and left the model and no plate (either slot) holds its id, or when an applied plate
+//! with another token holds its id (the player's unit won it; nothing is added under it). A plate
+//! under the id that has not applied ends nothing. A `Restored` or `Matched` unit leaves with its plate.
 //!
 //! **Closing** stops every action: the machine answers only the marker's close (SEAT-C) and `Done`, and
-//! nothing after.
+//! nothing after. Close reads the marker as written or in flight: with a marker write out, it writes
+//! its own unless both the old and the new content already say what close keeps.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -40,7 +53,7 @@ use crate::marker::{Loads, MarkerRead};
 use crate::place::{self, HeadRole, Match};
 use crate::plan::{Disposition, Plan};
 use crate::record::{RigRecord, UnitBody, UnitRecord};
-use crate::view::{PlateState, PluginRefView, RigView};
+use crate::view::{PlateState, PlateView, PluginRefView, RigView};
 
 /// The first wait before a refused seed is sent again (D1).
 pub const SEED_BACKOFF_FIRST: Duration = Duration::from_millis(20);
@@ -65,7 +78,7 @@ pub enum Event {
     GenMoved { gen: u64 },
     /// The scan of [`Action::Scan`]'s paths: the plugins it found.
     Scanned(Vec<PluginRefView>),
-    /// The last `Commit`, `CommitMarker` or `RemoveMarker` is durable.
+    /// The write out (`Commit`, `CommitMarker` or `RemoveMarker`; one at a time) is durable.
     Committed,
     /// It failed.
     CommitFailed,
@@ -83,6 +96,8 @@ pub enum Event {
     Closing,
     /// The page showed the notice `id` (`rig_seen`).
     Seen(NoticeId),
+    /// The wait of the last [`Action::Backoff`] passed.
+    BackoffElapsed,
 }
 
 /// What the machine asks the driver to do.
@@ -110,6 +125,8 @@ pub enum Action {
     Forget { id: UnitId },
     /// Feed `SettleElapsed { token }` after [`crate::marker::SETTLE`].
     Settle { token: InstallToken },
+    /// A write beside the steps failed: feed `BackoffElapsed` after `after`, and it is tried again.
+    Backoff { after: Duration },
     /// One log line.
     Log(String),
     /// The restore has nothing left to do or wait for. Comes once.
@@ -131,13 +148,35 @@ enum Await {
     FirstMarker(Vec<UnitId>),
     /// The marker naming a plugin before its load.
     LoadMarker { id: UnitId, ids: Vec<UnitId> },
-    /// A rewrite after a load went terminal.
-    Rewrite(Vec<UnitId>),
     /// This launch's marker, removed at the end.
     Remove,
     /// The leftover marker, removed once handled.
     RemoveLeftover,
     Add { slot: usize, id: UnitId },
+}
+
+impl Await {
+    /// Whether this step is a write (one write is out at a time).
+    fn writes(&self) -> bool {
+        matches!(
+            self,
+            Await::ForgetCommit(_)
+                | Await::PlaceCommit { .. }
+                | Await::FirstMarker(_)
+                | Await::LoadMarker { .. }
+                | Await::Remove
+                | Await::RemoveLeftover
+        )
+    }
+}
+
+/// A write beside the steps (the module doc).
+#[derive(Clone, Debug, PartialEq)]
+enum Side {
+    /// The record without these forgotten plugin units (D5), with each one's attempt token.
+    Forget(Vec<(UnitId, InstallToken)>),
+    /// The marker naming these ids, after a load went terminal.
+    Rewrite(Vec<UnitId>),
 }
 
 /// The restore machine. One per process (the app's `Rig`).
@@ -166,7 +205,19 @@ pub struct Restore {
     /// What this launch's marker on disk names; `None` when this launch wrote none (or removed it).
     marker: Option<Vec<UnitId>>,
     first_written: bool,
+    /// A load went terminal: the marker is rewritten without it.
     rewrite_owed: bool,
+    /// The write out beside the steps.
+    side: Option<Side>,
+    /// Plugin units forgotten whose record write is still owed, with their attempt token.
+    forgets: Vec<(UnitId, InstallToken)>,
+    /// A failed write beside the steps waits for `BackoffElapsed`.
+    backoff_armed: bool,
+    backoff_next: Duration,
+    backoff_logged: bool,
+    /// The tokens under the in-flight add's id when it was issued: a plate under the id with another
+    /// token is the add's own, read by close before the add answers.
+    add_over: BTreeSet<InstallToken>,
     /// Why nothing more is issued this launch.
     stopped: bool,
     /// Units held for no engine, tried again once a device runs (D5's `Device`).
@@ -285,13 +336,18 @@ impl Restore {
             Event::ViewChanged(view) => self.view_changed(view, &mut out),
             Event::LatchSet { token } => {
                 self.exited.insert(token);
-                self.rewrite_owed |= self.loads.exited(token);
+                // A plate gone from the view (also one that came and went between two views) did not
+                // apply: with its owner ended, its load failed.
+                self.rewrite_owed |=
+                    if self.plate(token).is_none() { self.loads.failed(token, true) } else { self.loads.exited(token) };
                 self.resolve_issued(&mut out);
             }
             Event::SettleElapsed { token } => self.rewrite_owed |= self.loads.settled(token),
+            Event::BackoffElapsed => self.backoff_armed = false,
             Event::Seen(_) => {}
         }
         self.drive(&mut out);
+        self.side_write(&mut out);
         out
     }
 
@@ -312,7 +368,8 @@ impl Restore {
 
     /// Issue the next blocking action, if nothing is awaited.
     fn drive(&mut self, out: &mut Vec<Action>) {
-        if self.closing || self.done || !self.seeded || self.waiting.is_some() {
+        // A write beside the steps is out: the next step may be a write too, so it waits for the answer.
+        if self.closing || self.done || !self.seeded || self.waiting.is_some() || self.side.is_some() {
             return;
         }
         match self.leftover.take() {
@@ -328,19 +385,11 @@ impl Restore {
                 return;
             }
         }
-        // This launch's marker, when it names more than it must.
-        if let Some(on_disk) = &self.marker {
-            let named = self.loads.named();
-            if named.is_empty() && !self.more_to_issue() {
-                self.waiting = Some(Await::Remove);
-                out.push(Action::RemoveMarker);
-                return;
-            }
-            if std::mem::take(&mut self.rewrite_owed) && named != *on_disk {
-                self.waiting = Some(Await::Rewrite(named.clone()));
-                out.push(Action::CommitMarker(named));
-                return;
-            }
+        // This launch's marker, once nothing is left to name or issue.
+        if self.marker.is_some() && self.loads.is_empty() && self.forgets.is_empty() && !self.more_to_issue() {
+            self.waiting = Some(Await::Remove);
+            out.push(Action::RemoveMarker);
+            return;
         }
         if !self.stopped {
             for slot in 0..2 {
@@ -389,6 +438,7 @@ impl Restore {
                 }
                 let place =
                     if self.placed.contains(&unit.id) { Place::End } else { place::anchor(&self.plan.units[slot], &self.plan.dispositions, index) };
+                self.add_over = self.view.slots.iter().flatten().filter(|p| p.id == unit.id).map(|p| p.added_by).collect();
                 self.plan.dispositions.insert(unit.id, Disposition::Issued { token: None });
                 self.waiting = Some(Await::Add { slot, id: unit.id });
                 out.push(Action::Add { slot, id: unit.id, spec: unit, place });
@@ -404,6 +454,66 @@ impl Restore {
             self.done = true;
             out.push(Action::Done);
         }
+    }
+
+    /// The lane beside the steps (the module doc): a forget's record write, then a marker rewrite a
+    /// terminal load owes, each once no other write is out and no failed one waits its backoff.
+    fn side_write(&mut self, out: &mut Vec<Action>) {
+        if self.closing || self.side.is_some() || self.backoff_armed || self.waiting.as_ref().is_some_and(Await::writes) {
+            return;
+        }
+        if !self.forgets.is_empty() {
+            self.side = Some(Side::Forget(std::mem::take(&mut self.forgets)));
+            out.push(Action::Commit);
+            return;
+        }
+        let Some(on_disk) = &self.marker else { return };
+        if std::mem::take(&mut self.rewrite_owed) {
+            let named = self.loads.named();
+            if named != *on_disk {
+                self.side = Some(Side::Rewrite(named.clone()));
+                out.push(Action::CommitMarker(named));
+            }
+        }
+    }
+
+    fn side_answered(&mut self, side: Side, ok: bool, out: &mut Vec<Action>) {
+        if ok {
+            self.backoff_next = Duration::ZERO;
+            self.backoff_logged = false;
+        }
+        match side {
+            Side::Forget(forgets) if ok => {
+                // Durable: only now its tone files go and its load may leave the marker.
+                for (id, token) in forgets {
+                    out.push(Action::Forget { id });
+                    self.loads.answered(id, token);
+                    let exited = self.exited.contains(&token);
+                    self.rewrite_owed |= self.loads.failed(token, exited);
+                }
+            }
+            Side::Forget(mut forgets) => {
+                forgets.append(&mut self.forgets);
+                self.forgets = forgets;
+                self.back_off("could not write the rig record without a plugin that failed to load; trying again", out);
+            }
+            Side::Rewrite(ids) if ok => self.marker = Some(ids),
+            Side::Rewrite(_) => {
+                self.rewrite_owed = true;
+                self.back_off("could not rewrite the crash marker; trying again (a crash meanwhile forgets a unit that loaded)", out);
+            }
+        }
+    }
+
+    /// A failed write beside the steps: tried again after D1's backoff, one log line per failure run.
+    fn back_off(&mut self, line: &str, out: &mut Vec<Action>) {
+        if !self.backoff_logged {
+            self.backoff_logged = true;
+            out.push(log(line));
+        }
+        self.backoff_next = (self.backoff_next * 2).clamp(SEED_BACKOFF_FIRST, SEED_BACKOFF_MAX);
+        self.backoff_armed = true;
+        out.push(Action::Backoff { after: self.backoff_next });
     }
 
     fn first_marker(&mut self, out: &mut Vec<Action>) {
@@ -446,6 +556,8 @@ impl Restore {
 
     fn finished(&self) -> bool {
         self.waiting.is_none()
+            && self.side.is_none()
+            && self.forgets.is_empty()
             && !self.more_to_issue()
             && self.loads.is_empty()
             && self.marker.is_none()
@@ -561,6 +673,9 @@ impl Restore {
     // ── the answers ───────────────────────────────────────────────────────────────────────────────
 
     fn committed(&mut self, ok: bool, out: &mut Vec<Action>) {
+        if let Some(side) = self.side.take() {
+            return self.side_answered(side, ok, out);
+        }
         let Some(waiting) = self.waiting.take() else { return };
         match waiting {
             Await::ForgetCommit(ids) if ok => {
@@ -603,10 +718,9 @@ impl Restore {
                 self.stop("the crash marker could not be written");
                 out.push(log("could not write the crash marker; the rest is not restored this launch"));
             }
-            Await::Rewrite(ids) if ok => self.marker = Some(ids),
-            Await::Rewrite(_) => out.push(log("could not rewrite the crash marker; a crash before the next write forgets a unit that loaded")),
             Await::Remove => {
                 self.marker = None;
+                self.rewrite_owed = false;
                 if !ok {
                     out.push(log("could not remove the crash marker; the next launch forgets the units it names"));
                 }
@@ -622,6 +736,11 @@ impl Restore {
         let name = self.unit(id).map(label).unwrap_or_default();
         let at = format!("slot {}: {name}", slot + 1);
         match answer {
+            Ok(AddOk { state: AddState::Matched, token }) => {
+                // The host found the unit under its slot lock: no plugin code ran for this attempt.
+                self.loads.withdraw(id);
+                self.plan.dispositions.insert(id, Disposition::Matched { token });
+            }
             Ok(AddOk { state, token }) => {
                 self.loads.answered(id, token);
                 if state == AddState::Seated {
@@ -651,9 +770,13 @@ impl Restore {
                 out.push(log(&format!("{at} not seated ({why}); held at its place")));
             }
             Err(AddFail::Plugin { why, token, exited }) => {
+                // Durable before its effects: the record without it commits first (`side_write`); its
+                // tone files and its marker entry go after. Until then the marker keeps naming it.
                 self.plan.dispositions.insert(id, Disposition::Forgotten);
-                self.failed_load(id, token, exited);
-                out.push(Action::Forget { id });
+                if exited {
+                    self.exited.insert(token);
+                }
+                self.forgets.push((id, token));
                 out.push(log(&format!("{at} failed to load ({why}); forgotten")));
             }
             Err(AddFail::Unresolved { why, token, exited }) => {
@@ -665,6 +788,7 @@ impl Restore {
                 out.push(log(&format!("{at}: no answer to trust ({why}); its place is kept while it may still seat")));
             }
         }
+        self.follow_loads(out);
         self.resolve_issued(out);
     }
 
@@ -686,18 +810,10 @@ impl Restore {
             return; // an older copy than the one held
         }
         self.view = view;
+        self.follow_loads(out);
         let present: BTreeSet<InstallToken> = self.view.slots.iter().flatten().map(|p| p.added_by).collect();
-        // A plate seen before and gone now is a confirmed removal (D3): its unit leaves the plan.
-        let gone: Vec<(UnitId, InstallToken)> = self
-            .plan
-            .dispositions
-            .iter()
-            .filter_map(|(id, d)| token_of(d).map(|t| (*id, t)))
-            .filter(|(_, t)| self.seen.contains(t) && !present.contains(t))
-            .collect();
-        for (id, token) in gone {
-            let exited = self.exited.contains(&token);
-            self.rewrite_owed |= self.loads.failed(token, exited);
+        let ended: Vec<UnitId> = self.plan.dispositions.iter().filter(|(id, d)| self.ended(**id, d, &present)).map(|(id, _)| *id).collect();
+        for id in ended {
             self.plan.dispositions.remove(&id);
             self.device_retry.remove(&id);
             for units in &mut self.plan.units {
@@ -708,8 +824,67 @@ impl Restore {
         self.resolve_issued(out);
     }
 
-    /// An issued unit whose plate applied is restored; one whose plate failed with its owner gone is
-    /// held (D5).
+    /// The marker's loads by their own tokens, whatever the plan holds for their units: a plate that
+    /// applied starts its settle; one that failed, or was seen and left before it applied, failed.
+    fn follow_loads(&mut self, out: &mut Vec<Action>) {
+        for token in self.loads.tokens() {
+            let exited = self.exited.contains(&token);
+            match self.plate(token) {
+                Some(p) if p.applied => {
+                    if self.loads.applied(token) {
+                        out.push(Action::Settle { token });
+                    }
+                }
+                Some(p) if p.state == PlateState::Failed => self.rewrite_owed |= self.loads.failed(token, exited),
+                Some(_) => {}
+                // Not in the view: failed if an earlier view showed it (a view older than its add shows
+                // nothing yet).
+                None if self.seen.contains(&token) => self.rewrite_owed |= self.loads.failed(token, exited),
+                None => {}
+            }
+        }
+    }
+
+    /// Whether `id`'s unit leaves the plan at this view (the module doc's "each id once").
+    fn ended(&self, id: UnitId, d: &Disposition, present: &BTreeSet<InstallToken>) -> bool {
+        let gone = |t: &InstallToken| self.seen.contains(t) && !present.contains(t);
+        let mut holders = self.view.slots.iter().flatten().filter(|p| p.id == id);
+        match d {
+            Disposition::Restored { token } | Disposition::Matched { token } => gone(token),
+            // Its add is out: a plate under its id may be the add's own.
+            Disposition::Issued { token: None } => false,
+            Disposition::Queued => holders.any(|p| p.applied && !self.matches(id, p)),
+            Disposition::Held { token: None, .. } => holders.any(|p| p.applied),
+            Disposition::Issued { token: Some(t) } | Disposition::Held { token: Some(t), .. } => {
+                let mut any = false;
+                for p in holders {
+                    if p.applied && p.added_by != *t {
+                        return true;
+                    }
+                    any = true;
+                }
+                gone(t) && !any
+            }
+            Disposition::Forgotten | Disposition::Yielded => false,
+        }
+    }
+
+    /// Whether `plate` is the record unit `id` itself (D9's match): the restore matches it, not yields.
+    fn matches(&self, id: UnitId, plate: &PlateView) -> bool {
+        (0..2).any(|slot| {
+            self.plan.units[slot]
+                .iter()
+                .find(|u| u.id == id)
+                .is_some_and(|u| place::find_match(slot, u, &self.view) == Match::Matched(plate.added_by))
+        })
+    }
+
+    fn plate(&self, token: InstallToken) -> Option<&PlateView> {
+        self.view.slots.iter().flatten().find(|p| p.added_by == token)
+    }
+
+    /// An issued unit whose plate applied is restored; one whose plate failed, or is gone, with its
+    /// owner ended is held (D5).
     fn resolve_issued(&mut self, out: &mut Vec<Action>) {
         let issued: Vec<(UnitId, InstallToken)> = self
             .plan
@@ -721,16 +896,15 @@ impl Restore {
             })
             .collect();
         for (id, token) in issued {
-            let Some(plate) = self.view.slots.iter().flatten().find(|p| p.added_by == token) else { continue };
-            if plate.applied {
-                let plugin = self.is_plugin(id);
-                self.restored(id, token, plugin, out);
-            } else if plate.state == PlateState::Failed {
-                let exited = self.exited.contains(&token);
-                self.rewrite_owed |= self.loads.failed(token, exited);
-                if exited {
-                    self.hold(id, "its add failed with no answer to trust", Some(token));
+            let exited = self.exited.contains(&token);
+            match self.plate(token) {
+                Some(p) if p.applied => {
+                    let plugin = self.is_plugin(id);
+                    self.restored(id, token, plugin, out);
                 }
+                Some(p) if p.state != PlateState::Failed => {}
+                _ if exited => self.hold(id, "its add failed with no answer to trust", Some(token)),
+                _ => {}
             }
         }
     }
@@ -741,28 +915,38 @@ impl Restore {
         if !self.opened || self.done {
             return;
         }
-        if let Some(on_disk) = &self.marker {
-            let mut keep = self.loads.at_close();
-            // A load whose marker write is out was never issued: the driver starts no add after close.
-            if let Some(Await::LoadMarker { id, .. }) = &self.waiting {
-                keep.retain(|k| k != id);
+        // What the disk may hold: the last write acknowledged, and the marker write out, if any (the
+        // glue lands close's own write after it).
+        let in_flight = match (&self.waiting, &self.side) {
+            (Some(Await::FirstMarker(ids) | Await::LoadMarker { ids, .. }), _) | (_, Some(Side::Rewrite(ids))) => Some(Some(ids.clone())),
+            (Some(Await::Remove), _) => Some(None),
+            _ => None,
+        };
+        let disk: Vec<Option<Vec<UnitId>>> = std::iter::once(self.marker.clone()).chain(in_flight).collect();
+        if disk.iter().all(Option::is_none) {
+            out.push(Action::Done);
+            return;
+        }
+        let mut keep = self.loads.at_close();
+        match &self.waiting {
+            // Its marker write is out: its add never started (no add follows a close).
+            Some(Await::LoadMarker { id, .. }) => keep.retain(|k| k != id),
+            // Its add is out: its own plate (a token the id did not have at the issue) applied, so it
+            // is terminal under SEAT-C, its answer not needed.
+            Some(Await::Add { slot, id }) => {
+                let applied = self.view.slots[*slot].iter().any(|p| p.id == *id && p.applied && !self.add_over.contains(&p.added_by));
+                if applied {
+                    keep.retain(|k| k != id);
+                }
             }
-            if keep.is_empty() {
-                out.push(Action::RemoveMarker);
-            } else if keep != *on_disk {
-                out.push(Action::CommitMarker(keep));
-            }
+            _ => {}
+        }
+        if keep.is_empty() {
+            out.push(Action::RemoveMarker);
+        } else if disk.iter().any(|d| d.as_ref() != Some(&keep)) {
+            out.push(Action::CommitMarker(keep));
         }
         out.push(Action::Done);
-    }
-}
-
-/// The token a disposition follows its plate by.
-fn token_of(d: &Disposition) -> Option<InstallToken> {
-    match d {
-        Disposition::Issued { token } | Disposition::Held { token, .. } => *token,
-        Disposition::Restored { token } | Disposition::Matched { token } => Some(*token),
-        Disposition::Queued | Disposition::Forgotten | Disposition::Yielded => None,
     }
 }
 

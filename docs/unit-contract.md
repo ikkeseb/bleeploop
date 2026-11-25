@@ -38,8 +38,10 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   glue in the device side, being built; the page keeps the one-time upgrade and hands it over).
   Its crash marker, `rig-inflight.json`, names each plugin unit whose load the native restore issued and
   that is not yet known to have seated (and settled) or failed with its owner gone; written before the
-  restore's first add and before each plugin load. A process's first open that finds it forgets those
-  units and tells the page until it confirms (the rules: `crates/lf-rig`, `marker.rs`, `restore.rs`).
+  restore's first add and before each plugin load, and rewritten as soon as a load ends. A plugin whose
+  own load failed leaves it only after the record without that unit is written. A process's first open
+  that finds it forgets those units and tells the page until it confirms (the rules: `crates/lf-rig`,
+  `marker.rs`, `restore.rs`).
   Until that lands, this bullet describes today's record, which is `lf.rig` in the WebView's storage (`src/ui/state/rig-recall.ts`; its shape and
   rules, `rig-record.ts`): `{ version: 1, slots: [slot, slot] }`, per slot its `volume` (after the chain), its
   `units` in order as `UnitRecord`s (§2; a plugin unit's display name as `plugin.name`, as §8's rig) and,
@@ -325,8 +327,9 @@ below reads an old key through the resolver that reads it today, so a missing ke
   the IPC), keeps the slot's `pending`; so does one whose add left a `failed` plate: the plate names no cause
   (§1), so it is kept, its slot's `pending` with it, and retried each launch until the player removes it (a
   crash at load is still the marker's, §1). In the native restore (`crates/lf-rig`, `place.rs`): a plugin
-  head missing from the scan, still loading or waiting, or refused by the host keeps the slot's `pending`;
-  one whose own load failed is forgotten, and the next unit decides. Not now: a native cause on the plate (`UnitState.failedBy`) would
+  head missing from the scan, still loading or waiting, or refused by the host keeps the slot's `pending`,
+  and so does a built-in head held at its place; one whose own load failed is forgotten, and the next unit
+  decides. Not now: a native cause on the plate (`UnitState.failedBy`) would
   let a plugin's own load failure be forgotten again as legacy recall forgets one, and the slot place as
   input-fed (`src/ui/AGENTS.md` § Open threads). The placement, appended at each input-fed chain's
   end (a reload or the player may have added units since): the OTT, RING MOD → ECHO → REVERB, with their
