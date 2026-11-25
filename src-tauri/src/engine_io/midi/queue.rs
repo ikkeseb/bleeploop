@@ -1330,15 +1330,18 @@ mod pipeline {
         while rig.input(|r, o| r.note_on(&b, n, 100, o)).is_ok() {
             n += 1;
         }
-        assert_eq!(n, 126, "the room went to the attacks and their reserved releases");
-        assert!(!rig.held().contains(&126), "the refused attack records no owner");
+        // An attack takes two places (itself and its reserved release); a DEV build keeps one place per
+        // slot for a synth pick, so one attack fewer fits there.
+        let fits: u8 = if cfg!(debug_assertions) { 126 - lf_engine::SLOT_COUNT as u8 / 2 } else { 126 };
+        assert_eq!(n, fits, "the room went to the attacks and their reserved releases");
+        assert!(!rig.held().contains(&fits), "the refused attack records no owner");
         while rig.action(Command::Action(Action::Undo)).is_ok() {}
         assert_eq!(rig.action(Command::Action(Action::Undo)), Err(Refused::Full));
         assert_eq!(rig.queue.len() + rig.queue.reserved(), CAPACITY);
 
         assert_eq!(rig.input(|r, o| r.sustain(&a, false, o)).unwrap().len(), 40);
         let released = rig.input(|r, o| r.release_conn(2, o)).unwrap();
-        assert_eq!(released.len(), 87, "b's 86 notes and the wheel handed back to a");
+        assert_eq!(released.len(), usize::from(fits) - 40 + 1, "b's notes and the wheel handed back to a");
         assert_eq!(released.last(), Some(&Command::PitchBend(1.0)));
         assert_eq!(rig.input(|r, o| r.select_target(Some(0), PAD, o)).unwrap(), [Command::SelectInstrument(PAD)]);
 
@@ -1354,7 +1357,7 @@ mod pipeline {
         rig.engine.log[..switch].iter().for_each(|c| before.apply(*c));
         assert_eq!(before.notes(), [], "nothing sounds before the switch");
         let offs = rig.engine.log[..switch].iter().filter(|c| matches!(c, Command::NoteOff(_))).count();
-        assert_eq!(offs, 126);
+        assert_eq!(offs, usize::from(fits));
     }
 
     // Review fix: with the room gone, a panic (every note released, then AllNotesOff) still goes in, so
