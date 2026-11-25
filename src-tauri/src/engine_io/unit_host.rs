@@ -1685,6 +1685,30 @@ impl UnitHost {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: called on this thread by every `EngineHost::remove` with the removed id the moment the
+    /// call releases the host's locks, its message sent ([`AfterRemoveUnlocked`]): no line of the call runs
+    /// after it. A test holds the caller there while the engine applies the removal.
+    pub(crate) static AFTER_REMOVE_UNLOCKED: std::cell::RefCell<Option<Box<dyn FnMut(UnitId)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: declared first in `EngineHost::remove`, so it drops last, after the port and state guards.
+#[cfg(test)]
+struct AfterRemoveUnlocked(UnitId);
+
+#[cfg(test)]
+impl Drop for AfterRemoveUnlocked {
+    fn drop(&mut self) {
+        AFTER_REMOVE_UNLOCKED.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(self.0);
+            }
+        });
+    }
+}
+
 /// Builds a built-in unit at the engine's terms and answers its params as it clamped them: in the app
 /// `super::builtins::Builtins` over `lf_engine::units`; a clamping fake in the tests.
 pub trait BuiltinFactory: Send + Sync {
@@ -1823,6 +1847,8 @@ impl EngineHost {
     }
 
     fn remove(&self, id: UnitId, keep_tone: bool) -> Result<Removal, String> {
+        #[cfg(test)]
+        let _after_unlock = AfterRemoveUnlocked(id);
         let slot = {
             let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
             state
