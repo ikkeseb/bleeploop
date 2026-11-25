@@ -18,9 +18,19 @@
  *   screen shows, slot A's input on In 1 (the device opened with it, slot B Auto), so the probe tells the
  *   two apart.
  *
- * Not booted: the plugin host (the browser build has none), so the device prune, the ASIO probe and rig
- * recall, which run only with it, leave `lf.audioDevices` and `lf.rigRecall` alone here; `audio-settings-
- * startup` and `rig-recall` cover those. `lf.rigRecallInFlight` is not in the fixture: it is stored from a
+ * - full older install in chain mode (DEV, `window.__lfChainFake` beside the engine fake; contract §6), with
+ *   RING MOD off at its defaults and bound to no pedal (the first `bindings` report, scripted: the fake's
+ *   subscribe sends none, names only a REC/DUB pedal): after the boot settles (`rigRecallDone`), and again
+ *   after a relaunch, no v0.8.9 key is changed or removed, `lf.rig` is written (slot A the remembered
+ *   amp-sim, missing from this build's empty scan, at its saved level, with the old sends waiting in its
+ *   `pending`: ECHO on, REVERB bypassed, no RING MOD; slot B the stored Pad as a SYNTH unit at unity, its
+ *   instrument levels from `lf.synthGain.*`, nothing pending, as no OTT was ever stored), its ids the same
+ *   after the relaunch, the legacy sends go to the engine off and nothing else of them, and the app never
+ *   writes an `lf.inputSend.*` key (a `localStorage` spy counts every write a module under `src/` makes).
+ *
+ * Not booted: the plugin host (the browser build has none), so the device prune, the ASIO probe and legacy
+ * rig recall, which run only with it, leave `lf.audioDevices` and `lf.rigRecall` alone here; `audio-settings-
+ * startup` and `rig-recall` cover those (and `rig-recall` the chain-mode restore and placement). `lf.rigRecallInFlight` is not in the fixture: it is stored from a
  * recall's first load until the loads have settled, so an install holds it at boot only after a launch
  * that died or was stopped while restoring, which the next boot answers by forgetting the record (the
  * `rig-recall` probe's crash phase). Cannot see WebView2's storage or the native engine.
@@ -84,6 +94,16 @@ const OLDER_INSTALL = {
 
 const MINIMAL_INSTALL = { 'lf.masterVolume': '0.8' };
 
+/** The full older install with RING MOD off at its defaults (`engine-store.ts` `INPUT_SEND_PARAMS`): bound
+ * to no pedal, it is the send §6 does not migrate. */
+const CHAIN_INSTALL = { ...OLDER_INSTALL, 'lf.inputSend.ringFreq': '440', 'lf.inputSend.ringLevel': '0.5' };
+/** Native MIDI's first `bindings` report for it: one REC/DUB pedal, no IN FX pedal. */
+const BINDINGS = { bindings: { revision: 1, bindings: [{
+  binding: { portId: 'winmm:0:FS-6 Pedal', portName: 'FS-6 Pedal', channel: 0, kind: 'cc', number: 64, action: 'recDub', target: null, pressHigh: true, momentary: true, hold: false },
+  origin: 'native', ordinal: false, blocked: null, displayName: 'FS-6 Pedal', state: 'live',
+}] } };
+
+
 /** What every boot over an engine that remembers nothing stores when the install kept none of it, the
  * branch's rule aside (`src/ui/state/engine-store.ts`): the meter the reset frame's `Transport` shows
  * (`applyEvent`, no kept meter to ask for), and each input send's state as the engine's `Toggled` answers
@@ -108,6 +128,19 @@ await probe(async ({ browser, open }) => {
     seq = 0;
     await freshEngine(page);
     await page.evaluate(() => window.__lf.autosave.ready());
+    await page.waitForTimeout(500);
+  };
+  /** `boot` in chain mode: native MIDI's first `bindings` report once the page subscribed, then the fresh
+   * engine's reset frame (its `chains` the fake's own, empty), and the rig recall settled. */
+  const chainBoot = async (page) => {
+    await page.waitForFunction(() => '__lf' in window && window.__lf.native.opened.length === 1 && window.__lf.native.midiCalls.some(([c]) => c === 'subscribe'), undefined, { timeout: 30_000 });
+    await page.evaluate((b) => window.__lf.native.midiEmit(b), BINDINGS);
+    seq = 0;
+    await freshEngine(page);
+    await page.evaluate(async () => {
+      await window.__lf.autosave.ready();
+      await (await import('/src/ui/state/rig-recall.ts')).rigRecallDone();
+    });
     await page.waitForTimeout(500);
   };
   const storage = (page) => page.evaluate(() => Object.fromEntries(Object.keys(localStorage).sort().map((k) => [k, localStorage.getItem(k)])));
@@ -211,6 +244,65 @@ await probe(async ({ browser, open }) => {
     assert.deepEqual(l.inputA, { value: '0', text: 'In 1' }, `${when}: slot A's input pick`);
     assert.deepEqual(l.asked, [0, null], `${when}: the channels the device opened with (slot A on In 1, slot B Auto)`);
     console.log(`${when}: ${JSON.stringify(stored)}, ${JSON.stringify(l.slots)}, keyboard ${l.placement}`);
+    await context.close();
+  }
+
+  // d) The full older install in DEV chain mode (contract §6): every v0.8.9 key kept, `lf.rig` written, the
+  // legacy sends silent and their keys never written, across a relaunch.
+  {
+    const context = await browser.newContext();
+    const app = await open({
+      context,
+      viewport: { width: 1280, height: 820 },
+      storage: CHAIN_INSTALL,
+      init: (p) => p.addInitScript(() => {
+        Object.assign(window, { __lfEngineFake: true, __lfChainFake: true, __lsWrites: [] });
+        // Every write or removal a module of the app makes (its stack names `/src/`), not the harness's seed.
+        for (const method of ['setItem', 'removeItem']) {
+          const real = Storage.prototype[method];
+          Storage.prototype[method] = function (key, ...rest) {
+            if (this === window.localStorage && /\/src\//.test(new Error().stack ?? '')) window.__lsWrites.push(`${method} ${key}`);
+            return real.call(this, key, ...rest);
+          };
+        }
+      }),
+    });
+    const { page } = app;
+    const pad = await page.evaluate(async () => (await import('/src/ui/state/instruments.ts')).SYNTHS.findIndex((s) => s.id === 'pad'));
+    let ids = null;
+    for (const when of ['chain mode, booted', 'chain mode, relaunched']) {
+      if (when.endsWith('relaunched')) await page.reload();
+      await chainBoot(page);
+      const stored = await storage(page);
+      // Ordinary boot writes may add keys (the meter, a layout); §6's rule is the old keys and `lf.rig`.
+      for (const [k, v] of Object.entries(CHAIN_INSTALL)) assert.equal(stored[k], v, `${when}: ${k} was changed or removed`);
+      assert.ok(stored['lf.rig'], `${when}: lf.rig was not written`);
+      assert.deepEqual(Object.keys(stored).filter((k) => k.startsWith('lf.inputSend.') && !(k in CHAIN_INSTALL)), [], `${when}: an lf.inputSend key was added`);
+      const writes = await page.evaluate(() => window.__lsWrites);
+      assert.deepEqual(writes.filter((w) => / lf\.(inputSend\.|rigRecall)/.test(w)), [], `${when}: the app wrote a legacy send or recall key`);
+      const rig = JSON.parse(stored['lf.rig']);
+      const [a, b] = rig.slots;
+      const sends = (list = []) => list.filter((u) => u.kind !== 'plugin' && u.kind !== 'synth').map(({ id: _, ...u }) => u);
+      console.log(`${when}: lf.rig ${stored['lf.rig']}; writes ${JSON.stringify(writes)}`);
+      assert.equal(rig.version, 1, `${when}: lf.rig's version`);
+      assert.deepEqual(a.units.map(({ id: _, ...u }) => u), [{ kind: 'plugin', plugin: AMP_SIM, bypass: false }], `${when}: slot A's units`);
+      assert.equal(a.volume, 0.75, `${when}: slot A's volume, its saved plugin level`);
+      assert.deepEqual(sends(a.pending), [
+        { kind: 'echo', params: { echoTime: 2, echoFeedback: 0.55, echoLevel: 0.35 }, bypass: false },
+        { kind: 'reverb', params: { reverbLevel: 0.6 }, bypass: true },
+      ], `${when}: slot A's pending: ECHO on, REVERB bypassed, RING MOD (off, at its defaults, unbound) not migrated`);
+      assert.deepEqual(b.units.map(({ id: _, ...u }) => u), [{ kind: 'synth', bypass: false, params: {
+        instrument: pad, gainLead: 0.5, gainBass: 0.7, gainPad: 0.6, gainPiano: 0.9, gainOrgan: 0.4, gainDrum: 1.1 } }], `${when}: slot B's units`);
+      assert.deepEqual([b.volume, b.pending ?? []], [1, []], `${when}: slot B at unity, nothing pending`);
+      const now = [...a.units, ...a.pending, ...b.units].map((u) => u.id);
+      assert.equal(new Set(now).size, now.length, `${when}: each unit has its own id`);
+      if (ids) assert.deepEqual(now, ids, `${when}: the relaunch kept the record's ids (no second upgrade)`);
+      ids = now;
+      const legacySends = await page.evaluate(() => window.__lf.native.sent.filter((c) => 'SetInputSend' in c || 'SetInputSendParam' in c));
+      assert.deepEqual(legacySends.filter((c) => !('SetInputSend' in c && c.SetInputSend[1] === false)), [], `${when}: a legacy send went on or took a value`);
+      assert.deepEqual([...new Set(legacySends.map((c) => c.SetInputSend[0]))].sort(), ['echo', 'ott', 'reverb', 'ring'], `${when}: the four legacy sends are sent off`);
+      app.consumeConsoleErrors(/^\[rig-recall\] slot 1: Amp Sim \(VST3\) .* is not in this launch's plugin scan/);
+    }
     await context.close();
   }
 });
