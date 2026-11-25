@@ -125,9 +125,10 @@ jobs:
     needs: docs_guard
     if: needs.docs_guard.outputs.docs_only != 'true' && needs.docs_guard.outputs.native != 'false'
     runs-on: ubuntu-latest
-    # 30, not 20: the suite's test time runs 11 to 16+ min on the runner (98dfc0a8, 19677bda),
-    # plus 2 to 4 min of build; 20 cancelled a green run mid-way.
-    timeout-minutes: 30
+    # 45: the suite grew with E3 (b7fd645 took 27 min green; 237dc2b, with lf-engine unchanged, was
+    # cancelled at 30 twice in tests/units.rs, two binaries from the end). 20 and 30 each cancelled a
+    # green run mid-way.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
