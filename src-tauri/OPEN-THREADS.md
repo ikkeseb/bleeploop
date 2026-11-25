@@ -41,6 +41,17 @@
   copies); a disk failure inside `redeem` loses it (pre-existing). Next check: a `chain_cmds_tests.rs` case
   per end on `Chains::add` with a gated fake (`unload_all` from `before_register_hook`; a failing spawn as in
   `p4f1_2a`). The native rig move, whose restore reads the outcome by token, is where the fix lands.
+- The exit latch (`Chains::exited`, D5, D6) sets when the owner thread's last Rust drop ran, before Windows
+  ends the thread: `DLL_THREAD_DETACH` can still run a plugin's `DllMain` for it, so a crash there comes after
+  `exited` read true and the restore may have dropped that load from the crash marker. Setting it only after a
+  join would leave loads unended past close, and the next launch would forget sound plugins. Next check, only
+  if a crash report's stack shows a plugin's `DllMain` at thread detach: whether that load left the marker.
+- A join can wait on the loader lock (a sweep's drop, a plugin add's join on its owner's failure or a
+  disconnected answer, pre-existing): a plugin hung in `DllMain` holds it for every thread start and end in
+  the process, so the app stalls whatever the add does. Next check, only on a hang report: the hung process's
+  stacks for `LdrpLoaderLock`.
+- A plugin binary removed between its add's file check (`refused_before_code`) and its load answers `Plugin`,
+  not `Host`, so the next launch forgets that unit (a microsecond window). Next check: none planned.
 - An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
   that command's drop of the handle still tears the plugin down (read from source, never run; no
   command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on
