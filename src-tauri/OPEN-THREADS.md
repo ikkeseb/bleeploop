@@ -204,8 +204,8 @@
   changed) reads its plugin's slot file at every load (`ToneStore::load_for_restore_key`'s fallback). When
   another instance of that plugin in that slot retires its tone into that file (the player removes it), the
   clean unit's next load, at the next launch's restore under its id, starts from the other instance's tone,
-  not the one it played. The shutdown no longer retires (`EngineHost::remove_unit_at_shutdown`), so only a
-  player's removal does this. Next check: a `chain_cmds_tests.rs` test with two units of one plugin in slot
+  not the one it played. The shutdown's own removal no longer retires (`EngineHost::remove_unit_at_shutdown`),
+  so only a player's removal or a source replacement does this. Next check: a `chain_cmds_tests.rs` test with two units of one plugin in slot
   0, the first never saving, the second saving a new tone and removed by the player, then `unload_all` and
   the first re-added under its id: read the tone its load restores. A fix writes the inherited tone to
   `unit-<id>.tone` at a unit's first load.

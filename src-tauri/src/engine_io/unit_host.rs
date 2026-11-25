@@ -241,6 +241,13 @@ pub(crate) struct Row {
     pub(crate) last_remove_settled: Option<(u64, OpState)>,
     /// Legacy `SlotHost` owner id (0 for chain rows).
     pub(crate) legacy_owner: u64,
+    /// The host's shutdown removed this row ([`EngineHost::remove_unit_at_shutdown`]) and its removal is
+    /// the one that ends it: its owner keeps `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]), so
+    /// the next launch's restore under the id finds the unit's own tone (`docs/unit-contract.md` § 1).
+    /// Set under the state lock where that removal is accepted, only on a row no other removal or
+    /// replacement has taken; cleared where another cause ends the row first (a source replacement, a
+    /// refused removal). Every other end retires the tone into the slot's file.
+    pub(crate) keep_tone: bool,
 }
 
 /// The table: one row per install (two under one id while a reload's candidate stands beside the
@@ -263,11 +270,6 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
-    /// The ids the host's shutdown removed ([`EngineHost::remove_unit_at_shutdown`]): their owners keep
-    /// `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]) instead of retiring it into the slot's file,
-    /// so the rig record's restore at the next launch finds each unit's own tone
-    /// (`docs/unit-contract.md` § 1).
-    kept_tones: BTreeSet<UnitId>,
 }
 
 impl Table {
@@ -279,7 +281,6 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
-            kept_tones: BTreeSet::new(),
         }
     }
 
@@ -432,16 +433,21 @@ impl Table {
     /// Promote reload candidate `token` to the active row and permanently mark its specific
     /// predecessor row superseded (clearing any pending removal state on that predecessor).
     pub(crate) fn promote_reload(&mut self, token: InstallToken) {
-        if let Some(row) = self.row_mut(token) {
-            row.is_reload = false;
-        }
+        let mut keep_tone = false;
         if let Some(pred_tok) = self.reload_predecessor.remove(&token) {
             if let Some(pred) = self.row_mut(pred_tok) {
                 pred.superseded = true;
+                // A shutdown's removal pending on the predecessor moves to the candidate
+                // (`transfer_remove_to_promoted`), and its keep with it.
+                keep_tone = std::mem::take(&mut pred.keep_tone);
                 if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut pred.leave, Leave::Staying) {
                     forget_back(old);
                 }
             }
+        }
+        if let Some(row) = self.row_mut(token) {
+            row.is_reload = false;
+            row.keep_tone |= keep_tone;
         }
     }
 
@@ -600,6 +606,8 @@ impl Table {
             if matches!(row.leave, Leave::Done) {
                 continue;
             }
+            // The replacement ends this row, not a shutdown's removal queued behind it: it retires.
+            row.keep_tone = false;
             let held = match std::mem::replace(&mut row.leave, Leave::Settled) {
                 Leave::Pending { held } => held,
                 Leave::Staying | Leave::Settled | Leave::Done => None,
@@ -641,6 +649,8 @@ impl Table {
                 return;
             }
         };
+        // A refused removal ended nothing: a shutdown's keep goes with it.
+        row.keep_tone = false;
         if let Some(back) = held {
             if row.abandoned || row.released {
                 forget_back(back);
@@ -750,6 +760,10 @@ impl Table {
             if matches!(row.leave, Leave::Done) {
                 std::mem::forget(ret.unit);
             } else {
+                if replaced {
+                    // A source replacement ahead of a shutdown's removal ends the row: it retires.
+                    row.keep_tone = false;
+                }
                 if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut row.leave, Leave::Done) {
                     forget_back(old);
                 }
@@ -1568,11 +1582,12 @@ impl UnitHost {
         state.table.row_mut(self.install).and_then(|r| r.mailbox.pop_front())
     }
 
-    /// Whether the host's shutdown removed this unit ([`EngineHost::remove_unit_at_shutdown`]): its owner
-    /// keeps `unit-<id>.tone` instead of retiring it into the slot's file.
+    /// Whether the host's shutdown's removal is what ended this install ([`Row::keep_tone`]): its owner
+    /// keeps `unit-<id>.tone` instead of retiring it into the slot's file. Read after the terminal
+    /// `Back`, which is posted under the same lock as the disposition.
     pub fn keeps_tone(&self) -> bool {
         let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.table.kept_tones.contains(&self.id)
+        state.table.row(self.install).is_some_and(|r| r.keep_tone)
     }
 
     /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or
@@ -1728,6 +1743,7 @@ impl EngineHost {
             settled: BTreeMap::new(),
             last_remove_settled: None,
             legacy_owner: 0,
+            keep_tone: false,
         });
         Ok(UnitHost::new(self.core.clone(), slot, id, token))
     }
@@ -1779,6 +1795,7 @@ impl EngineHost {
             settled: BTreeMap::new(),
             last_remove_settled: None,
             legacy_owner: 0,
+            keep_tone: false,
         });
         Ok(UnitHost::new(self.core.clone(), slot, id, token))
     }
@@ -1789,9 +1806,12 @@ impl EngineHost {
         self.remove(id, false)
     }
 
-    /// [`EngineHost::remove_unit`] for the host's shutdown (`Chains::unload_all`): the owner keeps
-    /// `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]), so the next launch's restore of the unit
-    /// under its id finds its own tone. A removal already under way (the player's) keeps its retire.
+    /// [`EngineHost::remove_unit`] for the host's shutdown (`Chains::unload_all`): when this removal is
+    /// the one that ends the unit, its owner keeps `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]),
+    /// so the next launch's restore of the unit under its id finds its own tone. A unit already leaving
+    /// (the player's removal, a source replacement returned or queued ahead of this removal) retires as
+    /// before, and so does one whose removal the port refuses: a unit the device's close then evicts
+    /// keeps its file anyway (`Row::keep_tone`).
     pub fn remove_unit_at_shutdown(&self, id: UnitId) -> Result<Removal, String> {
         self.remove(id, true)
     }
@@ -1821,10 +1841,13 @@ impl EngineHost {
         let failed_no_seat = plate.state == PlateState::Failed && !parked && !seated_in_engine;
         let has_pending_install = state.model.has_pending_install(slot, id);
         let owner_token = state.table.active_row_for_id(id).map(|r| r.token);
-        // Before anything below can post the owner its terminal `Back`, under the same lock.
-        if keep_tone {
-            state.table.kept_tones.insert(id);
-        }
+        // The shutdown's keep binds to its own removal, set below where it is accepted and under the same
+        // lock as the terminal `Back`, and only on a row no other cause has begun to take: a row already
+        // leaving (a player's removal, a replacement whose box came back) keeps its retire.
+        let keep_tone = keep_tone
+            && owner_token
+                .and_then(|tok| state.table.row(tok))
+                .is_some_and(|r| matches!(r.leave, Leave::Staying));
 
         if failed_no_seat {
             state.model.remove_plate(slot, id);
@@ -1832,6 +1855,7 @@ impl EngineHost {
                 if !state.table.row(tok).is_some_and(|r| r.id_freed || matches!(r.leave, Leave::Done)) {
                     if let Some(row) = state.table.row_mut(tok) {
                         row.leave = Leave::Done;
+                        row.keep_tone = keep_tone;
                     }
                     state.table.post_back(tok, Back::Dismissed);
                 }
@@ -1846,6 +1870,7 @@ impl EngineHost {
             if let Some(tok) = owner_token {
                 if let Some(row) = state.table.row_mut(tok) {
                     if !matches!(row.leave, Leave::Done) {
+                        row.keep_tone = keep_tone;
                         let held = match std::mem::replace(&mut row.leave, Leave::Done) {
                             Leave::Pending { held } => held,
                             Leave::Staying | Leave::Settled | Leave::Done => None,
@@ -1885,6 +1910,11 @@ impl EngineHost {
         let gen = self.core.engine_gen.load(Acquire);
         if let Some(tok) = owner_token {
             state.table.begin_remove(tok, gen);
+            if keep_tone {
+                if let Some(row) = state.table.row_mut(tok) {
+                    row.keep_tone = true;
+                }
+            }
         }
         state.model.mark_leaving(slot, id);
         let op = state.model.mint_op(owner_token.unwrap_or(0), gen, slot);

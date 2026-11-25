@@ -1673,5 +1673,32 @@ fn a_v089_profiles_in_fx_pedals_switch_the_send_or_in_chain_mode_the_units_of_th
         units();
         r.subscribe();
         sends();
+
+        // The mode holds from the subscription's locked step: a pedal pressed from inside the new page's
+        // first event (its sink runs outside the MIDI lock, so a midir callback may get in there) already
+        // runs the new page's mode, each subscribe switching it.
+        let subscribe_pressing = |chains: bool, cc: u8| -> Vec<Command> {
+            r.take();
+            let (core, at) = (r.host.core.clone(), r.t);
+            let fired = AtomicBool::new(false);
+            let events = r.events.clone();
+            let sink = Box::new(move |e: MidiEvent| {
+                if !fired.swap(true, Relaxed) {
+                    core.message(A, at, &[0xb0, cc, 127]);
+                    core.message(A, at, &[0xb0, cc, 0]);
+                }
+                events.lock().unwrap().push(e);
+            });
+            r.origin.set(r.origin.get() + 1.0);
+            let epoch = if chains { r.host.subscribe_chain(r.origin.get(), sink) } else { r.host.subscribe(r.origin.get(), sink) };
+            r.epoch.set(epoch);
+            r.take()
+        };
+        for (cc, send, kind) in pedals {
+            let units = [Command::Action(Action::Toggle(Toggle::Units(kind)))];
+            assert_eq!(subscribe_pressing(true, cc), units, "CC {cc} pressed inside a chain subscribe's first event");
+            let send = [Command::Action(Action::Toggle(Toggle::Send(send)))];
+            assert_eq!(subscribe_pressing(false, cc), send, "CC {cc} pressed inside a plain subscribe's first event");
+        }
     }
 }

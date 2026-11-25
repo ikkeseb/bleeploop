@@ -1129,8 +1129,9 @@ impl Chains {
     /// (so no add can slip past the snapshot), sweep finished entries, send a removal for every
     /// registered or in-flight non-legacy chain unit, and wait for all of them under one 2 s deadline
     /// (held ops return at once with the host closing). Each removal is the shutdown's
-    /// (`EngineHost::remove_unit_at_shutdown`): a plugin unit keeps `unit-<id>.tone` for the next
-    /// launch's restore under its id, and the slot's file stays as it was.
+    /// (`EngineHost::remove_unit_at_shutdown`): a plugin unit it ends keeps `unit-<id>.tone` for the next
+    /// launch's restore under its id, and the slot's file stays as it was; one already leaving (the
+    /// player's removal, a source replacement) or whose removal is refused keeps its own end.
     pub(super) fn unload_all(&self, host: &EngineHost) {
         host.set_closing();
         let mut ids = BTreeSet::new();
