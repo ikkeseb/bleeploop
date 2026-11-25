@@ -118,9 +118,11 @@ impl TestDevice {
                         *s = input(frame + k as Frame);
                     }
                     let rate = core.rate.load(Relaxed);
+                    let mut rendered = false;
                     match core.rt.try_lock() {
                         Ok(mut rt) => {
                             if let Some(engine) = rt.engine.as_mut() {
+                                rendered = true;
                                 let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
                                 engine.process(&ctx, &x, &mut l, &mut r);
                                 let mut until = rush.lock().unwrap_or_else(|e| e.into_inner());
@@ -146,12 +148,14 @@ impl TestDevice {
                     }
                     frame_at.store(frame + block as Frame, Relaxed);
                     blocks.fetch_add(1, Relaxed);
-                    if rush.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-                        // Let a thread waiting on the engine lock in between blocks.
-                        std::thread::yield_now();
-                    } else {
+                    if rush.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
                         std::thread::sleep(period);
+                    } else if !rendered {
+                        // The engine lock's holder (a swap, a host call) needs the CPU to let it go.
+                        std::thread::yield_now();
                     }
+                    // Rushing, a rendered block goes straight on to the next: a yield between blocks
+                    // gave the CPU away on a loaded runner, 494 blocks in 30 s (4f24c28, run 45714981558).
                 }
             })
             .expect("spawn the test device");
@@ -162,9 +166,9 @@ impl TestDevice {
         &self.host
     }
 
-    /// Render back to back (a yield between blocks, no period) until `done` holds of the engine after
-    /// a block, then at the period again, from that block on. A miss of the engine lock renders
-    /// nothing and keeps rushing. What a test does after `done` holds runs at the device's own pace.
+    /// Render back to back (no period and no yield, so one time slice renders a count-in's few hundred
+    /// blocks) until `done` holds of the engine after a block, then at the period again, from that block
+    /// on. A miss of the engine lock renders nothing, yields and keeps rushing. What a test does after `done` holds runs at the device's own pace.
     pub(crate) fn rush_until(&self, done: fn(&Engine) -> bool) {
         *self.rush.lock().unwrap_or_else(|e| e.into_inner()) = Some(done);
     }
