@@ -335,18 +335,14 @@ below reads an old key through the resolver that reads it today, so a missing ke
   is: in chain mode the legacy sends go off on every reset frame and nothing writes their keys.
 - **Rig recall:** `lf.rigRecall` becomes the native record (§1) by one handover: a chain-mode page calls
   `rig.open()` first, and no device opens before it settled (answered, refused, or 2 s without an answer; a
-  later answer still brings its levels and notice); only on `absent` it runs the upgrade and, if the device still runs, calls `rig.import(record)` (5 s at
-  most), which native stores only while it has none (`src/ui/state/rig-recall.ts` `openRig`, `importRig`).
-  An answer of another shape than D13's counts as a refusal. The first chain-mode page of this build deletes `lf.rig` and `lf.rigInFlight` (a DEV record
-  never restored natively). Until every chain-mode page hands over (the browser fake does only with
-  `__lfRigFake`), the WebView's record is `lf.rig`, written whole before the first load (§1). The upgrade
-  runs after a scan of the legacy recall's plugin paths: each slot's plugin a plugin unit with a fresh id (dropped when the
-  legacy crash marker is stored, as v0.8.9 would have), else its source as `instrument.ts` resolves
-  `lf.slotSource.<n>` (unset: Lead in A, Bass in B, Off on a guitar-first install) as a SYNTH unit or an
-  empty chain. A DEV chain already reported on the first reset frame with no record yet is adopted as the
-  record's units instead (its ids, its order, each slot at the gain the reset frame's settings replay,
-  unity where they hold none); the sends still go to `pending`. The old keys stay
-  one release.
+  later answer still brings its levels and notice); only on `absent` it runs the upgrade and, if the device
+  still runs, calls `rig.import(record)` (5 s at most), which native stores only while it has none
+  (`src/ui/state/rig-recall.ts` `openRig`, `importRig`). An answer of another shape than D13's counts as a
+  refusal. The first chain-mode page of this build deletes `lf.rig` and `lf.rigInFlight` (a DEV record never
+  restored natively). The upgrade runs after a scan of the legacy recall's plugin paths: each slot's plugin a
+  plugin unit with a fresh id (dropped when the legacy crash marker is stored, as v0.8.9 would have), else its
+  source as `instrument.ts` resolves `lf.slotSource.<n>` (unset: Lead in A, Bass in B, Off on a guitar-first
+  install) as a SYNTH unit or an empty chain. The old keys stay one release.
 - **Tones:** a migrated plugin unit's first load starts from its slot and plugin's v0.8.9 file (§1).
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
   effect, 0.1 otherwise or when the scan did not find it, `instrument.ts`); an empty input-fed slot
@@ -360,11 +356,13 @@ below reads an old key through the resolver that reads it today, so a missing ke
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
   `inputChannel` seeding both, as today) each become a mono pick, `null` auto; stereo is the player's (§7).
 - **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.
-- **Proved by** `verify/guards/rig-upgrade.mjs` (the upgrade case by case, the placement, the record's
-  units from a report), `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1
-  and 48 kHz) and `rig-recall.mjs` on a stored v0.8.9 profile; at the boundaries those fakes skip, `src-tauri`
-  tests that load a v0.8.9 `slot<n>-<hash>.tone` into a new unit (`host/tone.rs`) and dispatch a v0.8.9
-  bindings file's `InFx*` into `Toggle::Units` (`actions.rs`). A real profile is rehearsed at the release.
+- **Proved by** `verify/guards/rig-upgrade.mjs` (the upgrade case by case, the import's text, the fixture
+  native shares), `verify/probes/legacy-storage.mjs`, `legacy-sessions.mjs` (v1/v2 recovery at 44.1 and
+  48 kHz) and `rig-recall.mjs` (the handover) on a stored v0.8.9 profile; the record's rules (its parse, the
+  projection, the restore, the marker, the placement of `pending`) by `crates/lf-rig`'s tests, its file, lock
+  and glue by `engine_io/rig/`'s tests; at the boundaries those fakes skip, `src-tauri` tests that load a
+  v0.8.9 `slot<n>-<hash>.tone` into a new unit (`host/tone.rs`) and dispatch a v0.8.9 bindings file's `InFx*`
+  into `Toggle::Units` (`actions.rs`). A real profile is rehearsed at the release.
 
 ## 7. The stereo unit interface
 

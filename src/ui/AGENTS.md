@@ -124,10 +124,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 - **Chain mode's activation.** The gate is `platform.chain.available` (`state/chain.ts` `chainShown`): with
   the DEV flag `lf.chainNative` off (always in release) `tauriChainHost` rejects every chain call before any
   IPC, so chain mode is the DEV fake's and that flag's alone. Built for it: contract §6's durable migration
-  (`lf.rig`, `state/rig-recall.ts` `recallChains`, rules in `state/rig-record.ts`: the upgrade, the restore,
-  the `pending` placement, the slot's level kept), the named pedal actions on `Toggle.Units` (native MIDI
-  through `midi_subscribe_chain`, the UI's own press in `src/app/actions.ts`) and the legacy sends kept
-  silent with their keys untouched (`state/engine-store.ts`). Not built: the activation itself (the flag
+  (the record, its restore and its crash marker native, `engine_io/rig/` with its rules in
+  `src-tauri/crates/lf-rig`; the page's one-time handover of the legacy keys' upgrade, `state/rig-recall.ts`
+  `openRig` and `importRig`, the upgrade in `state/rig-record.ts`), the named pedal actions on
+  `Toggle.Units` (native MIDI through `midi_subscribe_chain`, the UI's own press in `src/app/actions.ts`) and
+  the legacy sends kept silent with their keys untouched (`state/engine-store.ts`). Not built: the activation itself (the flag
   and the legacy arms go), step 1b (`Builtin`, `SetInstrumentGain` and `Instruments` leave the engine) and
   `input_fx.rs`' retirement (contract §9, E3). Chain mode
   already routes notes to the slot (`{ Slot: n }`) and sends the slot's level as `SetSlotGain`, never the
@@ -135,21 +136,6 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   it through the note router (§4, `state/chain.ts` `pickSynth`). Next check: a native restore on the PC
   (`tauri dev` with `lf.chainNative`, a v0.8.9 profile: the upgrade, a restart bringing each unit back
   under its id with its tone, a learned IN FX pedal on `Toggle.Units`).
-
-- **A failed plate's cause is not on the wire.** A plugin unit whose add ends in a `failed` plate stays in the
-  rig record with its slot's `pending` and is added again at each launch until the player removes it
-  (`state/rig-record.ts` `unitsFromReport`; contract §1, §6): `UnitState` carries only free text (`error`),
-  and a lost device or an owner thread that would not start fails a plate as the plugin's own load does. A
-  plugin that crashes the host at load is still caught by the crash marker. Next check: a native `failedBy`
-  on `UnitState` (`'plugin' | 'host'`, set where the unit owner's load fails), so a plugin's own load failure
-  is forgotten again, as legacy recall forgets one (contract §6).
-- **The rig restore's late plate and its design** (E3f's last review rounds, DEV only). A plugin add rejected
-  over IPC whose plate shows after `rig-recall.ts`' plate wait (500 ms) loads while the crash marker no longer
-  names it, so a crash inside that load is not caught at the next launch. The restore's gates (the in-flight and
-  issued sets, the marker, the plate wait, the reload check, the resends) exist because the page infers what the
-  native host knows; a design read proposes moving the record, its writer, the restore and the marker native,
-  the page keeping only the one-time upgrade from the legacy keys (an owner's call before activation). Next
-  check: a probe case with the plate held past the wait and the load crashing.
 
 - **Chain mode's edges on the fake, left at the branch's third review** (each read from source by a
   reviewer, none reproduced; the next engine step rewrites held edits and moves, so they are judged there):
