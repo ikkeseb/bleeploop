@@ -69,7 +69,10 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   that launch.
 - **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`
   `file_name`; today `slot<n>-<hash>.tone`). A removal renames it to that slot-and-plugin file, and a new
-  unit with no tone of its own starts from it.
+  unit with no tone of its own starts from it and pins what it started from as `unit-<id>.pin` (empty:
+  the plugin's defaults), so another instance retiring into the slot's file later never changes the tone
+  this unit restores. A save replaces the pin with the unit's own file; a unit that never saved retires by
+  deleting its pin, the slot's file untouched, and so does an add that fails before it seats.
 - **D29 follows the unit.** The editor affinity is per plugin FILE (`instrument.ts` `editorAffinity`);
   each plugin unit has its own owner thread, so a file's editor belongs to the unit loaded first, in either
   slot; a second instance in the SAME chain is refused its editor (its parameters work). `unordered` and

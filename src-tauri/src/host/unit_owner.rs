@@ -360,12 +360,15 @@ fn submit_owed<P: OwnedPlugin>(
 }
 
 /// End before the unit ever applied a seat: fail the plate, release the plugin and its unit (if
-/// held), release the reservation, and then answer `Err(why)` so a caller that sees `Err` finds the
-/// plugin already gone.
+/// held), delete the tone pin its load wrote (`ToneKeeper::unpin`: the failed plate's removal has no
+/// owner left to retire it), release the reservation, and then answer `Err(why)` so a caller that sees
+/// `Err` finds the plugin already gone.
+#[allow(clippy::too_many_arguments)]
 fn fail_before_seat<P: OwnedPlugin>(
     host: UnitHost,
     mut plugin: P,
     unit: Option<Box<P::Unit>>,
+    tone: &mut ToneKeeper,
     why: String,
     ready: &mut Option<SyncSender<Result<Answer, String>>>,
     faults: &AtomicU32,
@@ -377,6 +380,7 @@ fn fail_before_seat<P: OwnedPlugin>(
         plugin.editor_close();
     }
     plugin.release(unit);
+    tone.unpin();
     report_faults(faults, slot, reported);
     host.release();
     if let Some(tx) = ready.take() {
@@ -527,6 +531,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         Ok(loaded) => loaded,
         Err(e) => {
             host.failed(e.clone());
+            tone.unpin();
             host.release();
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err(e));
@@ -545,6 +550,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             host,
             plugin,
             Some(unit),
+            &mut tone,
             "plugin load cancelled".to_string(),
             &mut ready,
             &faults,
@@ -704,7 +710,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 
     match served {
         Ok(Exit::FailedBeforeSeat { unit, why }) => {
-            fail_before_seat(host, plugin, unit, why, &mut ready, &faults, &mut reported)
+            fail_before_seat(host, plugin, unit, &mut tone, why, &mut ready, &faults, &mut reported)
         }
         Ok(Exit::Returned { unit, retire }) => {
             let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, retire, &faults, &mut reported);
