@@ -244,9 +244,11 @@ pub(crate) struct Row {
     /// The host's shutdown removed this row ([`EngineHost::remove_unit_at_shutdown`]) and its removal is
     /// the one that ends it: its owner keeps `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]), so
     /// the next launch's restore under the id finds the unit's own tone (`docs/unit-contract.md` § 1).
-    /// Set under the state lock where that removal is accepted, only on a row no other removal or
-    /// replacement has taken; cleared where another cause ends the row first (a source replacement, a
-    /// refused removal). Every other end retires the tone into the slot's file.
+    /// Set under the state lock where that removal is accepted, before any terminal `Back` it causes, on
+    /// every row it may end that no other removal or replacement has taken: the seated row and a live
+    /// same-id reload candidate queued ahead of it (whose install, applied, the removal then ends). Cleared
+    /// where another cause ends the row first (a source replacement, a refused removal), and never set
+    /// later: a promotion carries nothing over. Every other end retires the tone into the slot's file.
     pub(crate) keep_tone: bool,
 }
 
@@ -335,9 +337,15 @@ impl Table {
     }
 
     pub(crate) fn has_reload_row(&self, id: UnitId) -> bool {
+        self.live_reload_row_for_id(id).is_some()
+    }
+
+    /// The live same-id reload candidate for `id` (not released, not superseded), if one stands.
+    pub(crate) fn live_reload_row_for_id(&self, id: UnitId) -> Option<InstallToken> {
         self.rows
             .iter()
-            .any(|r| r.id == id && r.is_reload && !r.released && !r.superseded)
+            .find(|r| r.id == id && r.is_reload && !r.released && !r.superseded)
+            .map(|r| r.token)
     }
 
     pub(crate) fn has_other_reload_row(&self, id: UnitId, exclude_token: InstallToken) -> bool {
@@ -431,15 +439,14 @@ impl Table {
     }
 
     /// Promote reload candidate `token` to the active row and permanently mark its specific
-    /// predecessor row superseded (clearing any pending removal state on that predecessor).
+    /// predecessor row superseded (clearing any pending removal state on that predecessor). A shutdown's
+    /// removal pending on the predecessor moves to the candidate (`transfer_remove_to_promoted`); its keep
+    /// does not: the candidate got its own where that removal was accepted ([`Row::keep_tone`]), and a
+    /// copy here could revive one a replacement cleared after the candidate's terminal `Back`.
     pub(crate) fn promote_reload(&mut self, token: InstallToken) {
-        let mut keep_tone = false;
         if let Some(pred_tok) = self.reload_predecessor.remove(&token) {
             if let Some(pred) = self.row_mut(pred_tok) {
                 pred.superseded = true;
-                // A shutdown's removal pending on the predecessor moves to the candidate
-                // (`transfer_remove_to_promoted`), and its keep with it.
-                keep_tone = std::mem::take(&mut pred.keep_tone);
                 if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut pred.leave, Leave::Staying) {
                     forget_back(old);
                 }
@@ -447,7 +454,6 @@ impl Table {
         }
         if let Some(row) = self.row_mut(token) {
             row.is_reload = false;
-            row.keep_tone |= keep_tone;
         }
     }
 
@@ -1843,11 +1849,15 @@ impl EngineHost {
         let owner_token = state.table.active_row_for_id(id).map(|r| r.token);
         // The shutdown's keep binds to its own removal, set below where it is accepted and under the same
         // lock as the terminal `Back`, and only on a row no other cause has begun to take: a row already
-        // leaving (a player's removal, a replacement whose box came back) keeps its retire.
-        let keep_tone = keep_tone
-            && owner_token
-                .and_then(|tok| state.table.row(tok))
-                .is_some_and(|r| matches!(r.leave, Leave::Staying));
+        // leaving (a player's removal, a replacement whose box came back) keeps its retire. A same-id reload
+        // candidate queued ahead of this removal is a row it may end (the candidate's install applies
+        // first): it binds there too, before the candidate's box can come back ahead of its promotion.
+        let staying = |tok: InstallToken| state.table.row(tok).is_some_and(|r| matches!(r.leave, Leave::Staying));
+        let candidate_keep = keep_tone
+            .then(|| state.table.live_reload_row_for_id(id))
+            .flatten()
+            .filter(|&tok| staying(tok));
+        let keep_tone = keep_tone && owner_token.is_some_and(staying);
 
         if failed_no_seat {
             state.model.remove_plate(slot, id);
@@ -1915,6 +1925,9 @@ impl EngineHost {
                     row.keep_tone = true;
                 }
             }
+        }
+        if let Some(row) = candidate_keep.and_then(|tok| state.table.row_mut(tok)) {
+            row.keep_tone = true;
         }
         state.model.mark_leaving(slot, id);
         let op = state.model.mint_op(owner_token.unwrap_or(0), gen, slot);

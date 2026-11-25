@@ -497,25 +497,35 @@ impl ToneStore {
 #[allow(dead_code)]
 impl ToneStore {
     /// A load's read by key ([`ToneStore::load_for_restore`] by slot stays): for a unit, its own file,
-    /// else the slot's file, read only; and the import count it belongs to.
+    /// else the slot's file; and the import count it belongs to. A unit with no file of its own yet
+    /// pins the slot's tone it starts from as its own file (the slot's file is left as it is), so
+    /// another instance of that plugin retiring into the slot's file later never changes the tone this
+    /// unit restores under its id. A failed pin is logged and the load goes on from the slot's tone.
     pub(crate) fn load_for_restore_key(&self, key: &ToneKey) -> (Result<Option<Tone>, String>, u64) {
         match key {
             ToneKey::Slot { slot, identity } => self.load_for_restore(*slot, identity),
             ToneKey::Unit { unit, slot, identity } => {
                 let unit_file = ToneIdentity::unit_file_name(*unit);
                 let unit_entry = self.entry_for(&unit_file);
-                let (own, revision) = {
-                    let _write = unit_entry.write();
-                    (self.read_file(&unit_file, identity), unit_entry.revision.load(Acquire))
-                };
-                match own {
-                    Ok(None) => {
-                        let slot_entry = self.entry(*slot, identity);
-                        let _slot_write = slot_entry.write();
-                        (self.load(*slot, identity), revision)
-                    }
-                    other => (other, revision),
+                // Held across the pin, so no redeem lands between the read and the write; the slot's lock
+                // is taken under it, the order `retire` keeps.
+                let _write = unit_entry.write();
+                let revision = unit_entry.revision.load(Acquire);
+                match self.read_file(&unit_file, identity) {
+                    Ok(None) => {}
+                    other => return (other, revision),
                 }
+                let inherited = {
+                    let slot_entry = self.entry(*slot, identity);
+                    let _slot_write = slot_entry.write();
+                    self.load(*slot, identity)
+                };
+                if let Ok(Some(tone)) = &inherited {
+                    if let Err(e) = self.write_file(&unit_file, &encode(tone)) {
+                        log::warn!("tone pin of unit {unit} failed: {e}");
+                    }
+                }
+                (inherited, revision)
             }
         }
     }
@@ -1287,21 +1297,24 @@ mod tests {
         assert_eq!(dir.store().revision(0, &identity()), 1, "promotion is counted on the slot");
         assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, b"dialed in");
 
-        // The next unit of the same plugin in the slot starts from the slot's file, read only.
+        // The next unit of the same plugin in the slot starts from the slot's file and pins it as its own.
         let mut next = ToneKeeper::new(Some(dir.unit_binding(2, 0, identity())), Arc::new(AtomicBool::new(false)));
         assert_eq!(next.stored().unwrap().as_deref(), Some(&b"dialed in"[..]));
-        assert!(!dir.0.join("unit-2.tone").exists(), "fallback read writes nothing");
+        let pinned = decode(&std::fs::read(dir.0.join("unit-2.tone")).unwrap()).unwrap();
+        assert_eq!(pinned.state, b"dialed in", "the first load pins the inherited tone");
+        assert_eq!(dir.store().revision(0, &identity()), 1, "the pin leaves the slot's file alone");
 
-        // Retiring a unit that never saved its own file leaves the slot's file as it was.
+        // Retiring a unit that never changed its tone moves its pinned copy back: the slot holds the same tone.
         next.retire();
+        assert!(!dir.0.join("unit-2.tone").exists());
         assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, b"dialed in");
-        assert_eq!(dir.store().revision(0, &identity()), 1);
+        assert_eq!(dir.store().revision(0, &identity()), 2);
     }
 
     // Unit contract § 6: a v0.8.9 tone carries over. The bytes are v0.8.9's `encode` of one tone (run from
     // `git show v0.8.9:src-tauri/src/host/tone.rs`, its `encode`, `put_bytes` and `fnv1a64` alone), stored
     // as v0.8.9 named it (`slot0-<hash>.tone`); today's `encode` writes the same bytes. A chain unit of that
-    // plugin in that slot with a fresh id starts from it, read only: no unit file, the slot file untouched.
+    // plugin in that slot with a fresh id starts from it and pins it as its own file, the slot file untouched.
     #[test]
     fn a_v089_slot_tone_is_where_a_fresh_unit_of_its_plugin_starts() {
         const V089: [u8; 64] = [
@@ -1324,7 +1337,7 @@ mod tests {
         assert_eq!((read.unwrap(), revision), (Some(v089), 0));
         let mut unit = ToneKeeper::new(Some(dir.unit_binding(4242, 0, clap.clone())), Arc::new(AtomicBool::new(false)));
         assert_eq!(unit.stored().unwrap().as_deref(), Some(&b"v0.8.9 tone"[..]));
-        assert!(!dir.0.join("unit-4242.tone").exists(), "the fallback read writes no unit file");
+        assert_eq!(std::fs::read(dir.0.join("unit-4242.tone")).unwrap(), V089, "the first load pins the slot's tone as the unit's");
         assert_eq!(std::fs::read(&slot_file).unwrap(), V089, "the slot file is untouched");
         assert_eq!(dir.store().revision(0, &clap), 0);
         // The other slot has no tone of it.
