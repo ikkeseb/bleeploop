@@ -1,8 +1,9 @@
 //! The rig record's glue on the real chain model (CP2b): its files and lock, the writer's tick over each
 //! transient plate state, the close (D7), the import (D12, D13), and the tone files' two outcomes through
 //! the real teardown. Each test drives a [`TestDevice`]'s engine host (or a [`Chains`] over it), ticks the
-//! writer by hand and reads the record file back. Until CP3a wires the restore, the plan is the record as
-//! found, its units held at their place or matched to an applied plate (`held_plan`). No feed thread runs
+//! writer by hand and reads the record file back. These rigs run no restore driver (no `RestoreHost`:
+//! `restore_tests.rs` drives one), so the plan is the restore's as fed the record and every view: each
+//! unit held at its place or matched to an applied plate, never added. No feed thread runs
 //! here: a close with a record to write waits its bound for its feed passes (`FEED_PASS_WAIT`) unless a
 //! test drains as the feed would.
 
@@ -35,10 +36,10 @@ use crate::host::PluginHostState;
 
 /// A fresh data folder under the system temp dir, removed on drop (declare it before the `Rig` over
 /// it, so the rig and its lock file go first).
-struct Folder(PathBuf);
+pub(super) struct Folder(pub(super) PathBuf);
 
 impl Folder {
-    fn new(tag: &str) -> Folder {
+    pub(super) fn new(tag: &str) -> Folder {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!("bleeploop-rig-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -51,15 +52,15 @@ impl Folder {
         Rig::new(Some(self.0.clone()), files())
     }
 
-    fn path(&self, files: Files) -> PathBuf {
+    pub(super) fn path(&self, files: Files) -> PathBuf {
         self.0.join(files.record)
     }
 
-    fn write(&self, files: Files, record: &RigRecord) {
+    pub(super) fn write(&self, files: Files, record: &RigRecord) {
         std::fs::write(self.path(files), serde_json::to_vec(record).expect("a record serializes")).expect("write the record");
     }
 
-    fn bytes(&self, files: Files) -> Vec<u8> {
+    pub(super) fn bytes(&self, files: Files) -> Vec<u8> {
         std::fs::read(self.path(files)).expect("the record file")
     }
 
@@ -68,7 +69,7 @@ impl Folder {
     }
 
     /// The record's unit ids in `slot`, in order.
-    fn ids(&self, slot: usize) -> Vec<UnitId> {
+    pub(super) fn ids(&self, slot: usize) -> Vec<UnitId> {
         self.read().slots[slot].units.iter().map(|u| u.id).collect()
     }
 
@@ -87,7 +88,7 @@ impl Drop for Folder {
     }
 }
 
-fn record(a: Vec<UnitRecord>, b: Vec<UnitRecord>) -> RigRecord {
+pub(super) fn record(a: Vec<UnitRecord>, b: Vec<UnitRecord>) -> RigRecord {
     let slot = |units| SlotRecord { volume: 1.0, units, pending: Vec::new() };
     RigRecord { version: Version1, slots: [slot(a), slot(b)] }
 }
@@ -105,7 +106,7 @@ fn plugin_unit(id: UnitId, plugin: &PluginRef) -> UnitRecord {
     UnitRecord { id, body: UnitBody::Plugin(PluginRecord { plugin, name: None }), bypass: Some(false) }
 }
 
-fn echo_unit(id: UnitId) -> UnitRecord {
+pub(super) fn echo_unit(id: UnitId) -> UnitRecord {
     UnitRecord { id, body: UnitBody::Builtin { kind: UnitKind::Echo, params: None }, bypass: None }
 }
 
@@ -147,7 +148,7 @@ fn stop_take(device: &TestDevice) {
     });
 }
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+pub(super) fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + PATIENCE;
     while !cond() {
         assert!(Instant::now() < deadline, "timed out waiting for: {what}");
@@ -325,8 +326,14 @@ fn dev_and_release_file_names() {
     let written = RigRecord::read(&folder.bytes(DEV_FILES)).unwrap();
     assert_eq!(written.slots[0].units.iter().map(|u| u.id).collect::<Vec<_>>(), vec![3]);
     dev.close(host);
+    assert_eq!(folder.bytes(RELEASE_FILES), release_before, "the DEV rig's tick and close never touched the release's record");
+    // Both rigs read the one model here, so the release's own close writes the unit into its own file,
+    // and leaves the DEV record as the DEV close wrote it.
+    let dev_closed = folder.bytes(DEV_FILES);
     release.close(host);
-    assert_eq!(folder.bytes(RELEASE_FILES), release_before, "the DEV rig never touched the release's record");
+    let ids = |r: RigRecord| r.slots[0].units.iter().map(|u| u.id).collect::<Vec<_>>();
+    assert_eq!(ids(RigRecord::read(&folder.bytes(RELEASE_FILES)).unwrap()), vec![3], "the release's close writes its own record");
+    assert_eq!(folder.bytes(DEV_FILES), dev_closed, "the release rig never touched the DEV record");
 }
 
 // ── one per transient plate state (D4: a unit enters once applied, and stays until it is gone) ──────
@@ -868,6 +875,29 @@ fn an_adopted_unit_the_player_removes_before_a_tick_is_not_written_back() {
 
     remove(host, 150);
     tick(&rig, host);
+    assert_eq!(folder.ids(0), Vec::<UnitId>::new(), "the player's removal stands");
+    assert!(matches!(take_back(&uh), Back::Removed(_)));
+    uh.release();
+}
+
+/// A close that sees the record before the import's own `keep` has run (that window, set here by hand)
+/// still makes the plan at the adoption's view first: the adopted unit is matched to its plate there, so
+/// the player's removal of it before close ends it, and close does not write it back.
+#[test]
+fn close_before_the_imports_keep_ends_an_adopted_unit_the_player_removed() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("adopt-close");
+    let rig = folder.rig();
+    let doc = PluginHostState::default();
+    let epoch = doc.begin_frontend_session();
+    let uh = seat(host, 155, &plugin("adopt-close"), 0, 0);
+    rig.import(host, (&doc, epoch), &import_text(&record(vec![echo_unit(255)], Vec::new()))).expect("stored");
+    assert_eq!(folder.ids(0), vec![155], "adopted");
+    *lock(&rig.inner) = Inner::default();
+
+    remove(host, 155);
+    rig.close(host);
     assert_eq!(folder.ids(0), Vec::<UnitId>::new(), "the player's removal stands");
     assert!(matches!(take_back(&uh), Back::Removed(_)));
     uh.release();

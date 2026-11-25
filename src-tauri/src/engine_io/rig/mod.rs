@@ -2,12 +2,13 @@
 //! lock (D8), the page's handover (`rig_open`, `rig_import`, `rig_seen`; D13), the writer's 100 ms tick
 //! and the close at shutdown (D7). The rules are the pure crate `crates/lf-rig` (its crate doc); this is
 //! the Windows glue that does the I/O and drives them. `disk` is the data folder ([`lf_rig::Disk`]),
-//! `writer` the tick and the close.
+//! `writer` the tick and the close, `restore` the restore's driver and the host it drives
+//! ([`RestoreHost`]).
 //!
 //! **Who writes.** Only this `Rig` writes the record, and only the restore's `CommitMarker` the crash
 //! marker; the page writes neither. The record changes in three places: the page's import (once, while
-//! no record exists), the writer's tick on the rig thread (CP3a's restore commits there too, one at a
-//! time with the ticks), and the close, after which nothing is written.
+//! no record exists), the rig thread (the writer's tick and the restore's commits, one at a time), and
+//! the close, after which nothing is written.
 //!
 //! **Every durable write is [`lf_rig::project()`]'s output over a fresh view.** Each tick and the close
 //! take the settings' slot gains (D2), then [`Model::rig_view`](super::chain::Model::rig_view) under
@@ -31,33 +32,46 @@
 //! open opens or reads the file. A second close (the updater's shutdown, then the exit's) returns only
 //! once the first has written and released the lock file, and does nothing.
 //!
-//! **Restore then project, same view (CP3a).** Once the restore runs, each tick feeds
-//! `Restore::handle(ViewChanged)` and `project` the same fresh `rig_view`, the restore first, so the two
-//! never judge an id apart ([`lf_rig::Plan::fate`]); a view taken before an add's answer is never fed
-//! after it (its plate would read as removed). Until CP3a wires the restore, the plan is the record as
-//! found or imported, made at a view ([`held_plan`]): a record unit with an applied plate under its id
-//! is `Matched` to that plate (the player's removal of it ends it), every other unit `Held` at its
-//! place, so the writer keeps every record unit the model lacks instead of writing them away, and adds
-//! what the player applies. Each projection first drops the ids the plan's rule ends at that view
-//! ([`end_ids`]); close judges them at its full view before it drops the `Leaving` plates.
+//! **The plan is the restore's (D3, D10).** The first call that sees a record (an open, the import's
+//! commit, or a close that comes first) feeds [`lf_rig::Restore`] `Opened { record, marker }` (the
+//! marker as the store's open read it), then the views it has: the import's adoption view first (kept
+//! under `disk` with its commit, so a close that sees the record before the import's own `keep` still
+//! matches each adopted unit to its plate, and the player's removal of it ends it), then its own. From
+//! then on [`lf_rig::Restore::plan`] is the plan every projection writes by, and a later open (a
+//! reload) starts nothing (D1). **Restore then project, same view:** each tick feeds the restore the
+//! driver's inputs, then `ViewChanged` with a fresh `rig_view`, then projects that view with the plan,
+//! all under one `inner`, so the two never judge an id apart ([`lf_rig::Plan::fate`]); a view is taken
+//! after the inputs, so no view older than an add's answer is fed after it (its plate would read as
+//! removed).
 //!
-//! **What CP3a's plan must cover** (`held_plan` leaves both open): the plan is made by the first call
-//! that sees a record, so a close (or an open) that makes it before the import's own `keep` judges an
-//! adopted unit the player has removed meanwhile as `Held` and writes it back; and a record id held
-//! with no plate, which the player's unit takes, applies and leaves between two views, comes back from
-//! the plan, since no view showed that plate.
+//! **The driver** (`restore.rs`) runs only with a [`RestoreHost`] ([`Rig::with_restore`]); the app's
+//! `Rig::new` has none today (the real host is CP3b's: `mode.rs`, where `EngineApp` makes its `Rig`, is
+//! where it plugs in). Without one the restore is fed the record and every view but never seeded, so
+//! its plan holds every record unit the model lacks at its place (`Queued`), matches a unit the model
+//! holds to its plate, and lets an id go to the player's applied unit: the writer keeps the record and
+//! adds what the player applies, and no marker is written.
 //!
-//! **Locks.** `inner` (the plan, the stored record's copy the projection reads, the notice) and `disk`
-//! (the store, so one write at a time, and `closed`, the done flag a second close waits on). Neither is
-//! held across a `settings` or `state` take, a scan, an add or a wait (a second close's wait on
-//! `closed_cv` releases `disk`), nor are the two held together; `disk` is held across one
-//! `write_atomic` at most. A record write is never made under `state` or `settings`.
+//! **What the plan cannot see:** a record id the restore holds with no plate, which the player's unit
+//! takes, applies and leaves between two views, comes back from the plan: no view showed that plate
+//! (the player's ids are random `u32`s, so this needs a collision or a page reusing a record id).
+//! Closing it needs the model to report a plate that applied and left between two views.
+//!
+//! **Locks.** `inner` (the restore with its plan and notice, the stored record's copy the projection
+//! reads, the restore's actions not yet run) and `disk` (the store, so one write at a time, and
+//! `closed`, the done flag a second close waits on). Neither is held across a `settings` or `state`
+//! take, a scan, an add or a wait (a second close's wait on `closed_cv` releases `disk`), nor are the
+//! two held together; `disk` is held across one `write_atomic` at most (`remove` and a write for the
+//! marker's removal). A record write is never made under `state` or `settings`. The driver's own state
+//! (`driver`) is the rig thread's: taken before `inner` or `disk`, never by an open, an import or close.
 //!
 //! **Release.** The `rig_*` commands are DEV-only (`lib.rs`), in lockstep with `lf.chainNative`, so a
 //! release build opens no rig and runs no writer before activation; its shutdown still calls
 //! [`Rig::close`], which then has nothing to write.
 
 mod disk;
+mod restore;
+#[cfg(test)]
+mod restore_tests;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -66,14 +80,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed}};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use lf_engine::UnitId;
-use lf_rig::{Commit, Disposition, Fate, Files, ImportError, Notice, NoticeId, Opened, Plan, Refusal, RigAnswer, RigRecord, RigStatus, RigView, Store, Volumes, IMPORT_STALE};
+use lf_rig::marker::{self, MarkerRead};
+use lf_rig::{Action, Commit, Event, Files, ImportError, NoticeId, Opened, Refusal, Restore, RigAnswer, RigRecord, RigStatus, RigView, Store, Volumes, IMPORT_STALE};
 
 use super::mode::{engine, EngineApp};
 use super::EngineHost;
 use crate::host::PluginHostState;
 pub(crate) use disk::files;
 use disk::FileDisk;
+#[allow(unused_imports)] // the real host (CP3b) implements them
+pub(crate) use restore::{Forgot, RestoreHost, SeedTaken};
+use restore::Driver;
+pub(crate) use writer::RigModel;
 
 /// The process's rig record (the module doc).
 pub(crate) struct Rig {
@@ -84,6 +102,10 @@ pub(crate) struct Rig {
     closing: AtomicBool,
     /// The writer thread was started (once per process).
     writer: AtomicBool,
+    /// What the restore drives (the engine, the chain host); `None`: no restore runs this process.
+    host: Option<Arc<dyn RestoreHost>>,
+    /// The driver's own state, the rig thread's (`restore.rs`).
+    driver: Mutex<Driver>,
     inner: Mutex<Inner>,
     disk: Mutex<DiskState>,
     /// Signalled under `disk` when the first close sets `closed` (a second close waits on it).
@@ -97,11 +119,12 @@ struct Inner {
     /// the store's write count it was copied at, so a slower copy never replaces a newer one.
     stored: Option<RigRecord>,
     stored_at: u64,
-    /// The plan was made from the first record this process found or imported.
-    planned: bool,
-    plan: Plan,
-    /// What every open answers until `rig_seen` (D13); the restore's (CP3a).
-    notice: Option<Notice>,
+    /// The restore was fed the first record this process found or imported (`Opened`).
+    opened: bool,
+    /// The restore (D10): its plan is the projection's, its notice what every open answers (D13).
+    restore: Restore,
+    /// The restore's actions the driver has not run yet, in order.
+    actions: Vec<Action>,
 }
 
 /// The store, under `disk`.
@@ -113,6 +136,11 @@ struct DiskState {
     closed: bool,
     /// Bumped at the open and at each commit: orders the copies `inner` keeps.
     at: u64,
+    /// The crash marker as the store's open found it (D6), for the restore's `Opened`.
+    marker: Option<MarkerRead>,
+    /// The view the import adopted the chains at (D12), kept with its commit: the restore's plan is
+    /// matched at it first, whoever makes the plan.
+    adopted: Option<RigView>,
 }
 
 /// What a step under `disk` found, for `inner` and the answer.
@@ -120,6 +148,8 @@ struct Seen {
     status: RigStatus,
     stored: Option<RigRecord>,
     at: u64,
+    marker: MarkerRead,
+    adopted: Option<RigView>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -127,12 +157,25 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Rig {
+    /// The app's rig: no restore runs (its host is CP3b's; it plugs in here, by [`Rig::with_restore`]).
     pub(crate) fn new(dir: Option<PathBuf>, files: Files) -> Rig {
+        Rig::build(dir, files, None)
+    }
+
+    /// A rig whose restore drives `host` (D10).
+    #[allow(dead_code)] // the app's real host is CP3b's; the tests drive a fake one
+    pub(crate) fn with_restore(dir: Option<PathBuf>, files: Files, host: Arc<dyn RestoreHost>) -> Rig {
+        Rig::build(dir, files, Some(host))
+    }
+
+    fn build(dir: Option<PathBuf>, files: Files, host: Option<Arc<dyn RestoreHost>>) -> Rig {
         Rig {
             dir,
             files,
             closing: AtomicBool::new(false),
             writer: AtomicBool::new(false),
+            host,
+            driver: Mutex::default(),
             inner: Mutex::default(),
             disk: Mutex::default(),
             closed_cv: Condvar::new(),
@@ -141,12 +184,14 @@ impl Rig {
 
     /// `rig_open` (D13): what the record is for this process, each slot's volume the fader shows (the
     /// settings' slot gain, else the record's: D2) and the notice. The first call opens the store: the
-    /// lock, then the read (D8). The restore starts here from CP3a; a later call answers the same facts.
-    pub(crate) fn open(&self, host: &EngineHost) -> RigAnswer {
-        let held = writer::slot_gains(host);
+    /// lock, then the read (D8). The first that finds a record starts the restore and sends its seed
+    /// before it answers (D1); a later call answers the same facts and starts nothing.
+    pub(crate) fn open(&self, model: &(impl RigModel + ?Sized)) -> RigAnswer {
+        let held = model.gains();
         let seen = self.opened();
-        let view = writer::view(host);
-        self.keep(&seen, Some(&view));
+        let view = model.view();
+        let started = self.keep(&seen, Some(&view));
+        self.start(started);
         self.answer(&seen, held)
     }
 
@@ -156,20 +201,21 @@ impl Rig {
     /// refuses it. Its commit is its durability: a failed write is an `Err`, and the next launch answers
     /// `absent`. A replaced page's import is `Err("stale")`, checked at the call and again under `disk`
     /// right before the commit (a `host_init` meanwhile stores nothing).
-    pub(crate) fn import(&self, host: &EngineHost, doc: (&PluginHostState, u32), text: &str) -> Result<RigAnswer, String> {
+    pub(crate) fn import(&self, model: &(impl RigModel + ?Sized), doc: (&PluginHostState, u32), text: &str) -> Result<RigAnswer, String> {
         let stale = || doc.0.frontend_epoch.load(Relaxed) != doc.1;
         if stale() {
             return Err(IMPORT_STALE.to_string());
         }
         let seen = self.opened();
         if seen.status != RigStatus::Absent {
-            let held = writer::slot_gains(host);
-            self.keep(&seen, Some(&writer::view(host)));
+            let held = model.gains();
+            let started = self.keep(&seen, Some(&model.view()));
+            self.start(started);
             return Ok(self.answer(&seen, held));
         }
         self.keep(&seen, None);
-        let held = writer::slot_gains(host);
-        let view = writer::view(host);
+        let held = model.gains();
+        let view = model.view();
         let record = lf_rig::import(text, &view, held).map_err(|e| match e {
             ImportError::Unreadable(u) => format!("the import is not a rig record: {}", u.why),
             ImportError::IdHeld(id) => format!("the import's unit {id} is in the chain already"),
@@ -188,11 +234,14 @@ impl Rig {
             };
             if commit == Commit::Committed {
                 disk.at += 1;
+                disk.adopted = Some(view.clone());
             }
             (commit, Self::found(&disk))
         };
-        // The plan is made at the adoption's view: an adopted unit is matched to its plate.
-        self.keep(&seen, Some(&view));
+        // `present` after its commit is an open with that record: the plan is made at the adoption's
+        // view (an adopted unit matched to its plate), and the restore starts.
+        let started = self.keep(&seen, Some(&view));
+        self.start(started);
         match commit {
             Commit::Committed | Commit::Refused(Refusal::Present | Refusal::Unreadable | Refusal::Unavailable) => Ok(self.answer(&seen, held)),
             Commit::Failed { why, .. } => {
@@ -205,10 +254,8 @@ impl Rig {
 
     /// `rig_seen` (D13): the page showed notice `id`; every later open answers none.
     pub(crate) fn seen(&self, id: NoticeId) {
-        let mut inner = lock(&self.inner);
-        if inner.notice.as_ref().is_some_and(|n| n.id == id) {
-            inner.notice = None;
-        }
+        let actions = lock(&self.inner).restore.handle(Event::Seen(id));
+        debug_assert!(actions.is_empty(), "`Seen` answers no action");
     }
 
     /// The store, opened by the first call (the lock, then the read), as it stands. Once `closing` is
@@ -217,11 +264,22 @@ impl Rig {
     fn opened(&self) -> Seen {
         let mut disk = lock(&self.disk);
         if disk.store.is_none() && !disk.closed && !self.closing.load(Acquire) {
-            let (store, opened) = Store::open(FileDisk::new(self.dir.clone()), self.files);
+            let (mut store, opened) = Store::open(FileDisk::new(self.dir.clone()), self.files);
             match &opened {
                 Opened::Unavailable { why } => log::warn!("[rig] the rig record is unavailable this launch: {why}"),
                 Opened::Unreadable(u) => log::warn!("[rig] the rig record is unreadable; it is kept and nothing is written this launch: {}", u.why),
                 Opened::Present(_) | Opened::Absent => {}
+            }
+            // The marker as this launch found it (D6), before the restore writes one. One that cannot
+            // be read counts as unreadable: no plugin is restored this launch.
+            if matches!(opened, Opened::Present(_) | Opened::Absent) {
+                disk.marker = Some(match store.read_marker() {
+                    Ok(bytes) => marker::read(bytes.as_deref()),
+                    Err(e) => {
+                        log::warn!("[rig] the crash marker could not be read ({e})");
+                        MarkerRead::Unreadable
+                    }
+                });
             }
             disk.store = Some(store);
             disk.at += 1;
@@ -230,27 +288,37 @@ impl Rig {
     }
 
     fn found(disk: &DiskState) -> Seen {
-        match &disk.store {
-            Some(store) => Seen { status: store.status(), stored: store.stored().cloned(), at: disk.at },
-            None => Seen { status: RigStatus::Unavailable, stored: None, at: disk.at },
-        }
+        let (status, stored) = match &disk.store {
+            Some(store) => (store.status(), store.stored().cloned()),
+            None => (RigStatus::Unavailable, None),
+        };
+        let marker = disk.marker.clone().unwrap_or(MarkerRead::None);
+        Seen { status, stored, at: disk.at, marker, adopted: disk.adopted.clone() }
     }
 
-    /// Keep the store's copy in `inner` unless a newer one is there; the first record the process
-    /// finds or imports makes the plan, at `view` (taken after the store's copy, each lock released).
-    /// Every call that can first see a record passes its view; a tick's (after a commit) need not.
-    fn keep(&self, seen: &Seen, view: Option<&RigView>) {
+    /// Keep the store's copy in `inner` unless a newer one is there. The first record the process finds
+    /// or imports starts the restore (`Opened`), then is judged at the adoption's view (an import's) and
+    /// at `view` (taken after the store's copy, each lock released), in that order; the restore's
+    /// actions so far are answered for the caller to start ([`Rig::start`]; close drops them). Every
+    /// call that can first see a record passes its view; a tick's (after a commit) need not.
+    fn keep(&self, seen: &Seen, view: Option<&RigView>) -> Vec<Action> {
         let mut inner = lock(&self.inner);
+        let inner = &mut *inner;
         if seen.at >= inner.stored_at {
             inner.stored = seen.stored.clone();
             inner.stored_at = seen.at;
         }
-        if !inner.planned {
+        let mut started = Vec::new();
+        if !inner.opened {
             if let (Some(record), Some(view)) = (&seen.stored, view) {
-                inner.plan = held_plan(record, view);
-                inner.planned = true;
+                inner.opened = true;
+                started.extend(inner.restore.handle(Event::Opened { record: record.clone(), marker: seen.marker.clone() }));
+                for view in seen.adopted.iter().chain([view]) {
+                    started.extend(inner.restore.handle(Event::ViewChanged(view.clone())));
+                }
             }
         }
+        started
     }
 
     fn answer(&self, seen: &Seen, held: Volumes) -> RigAnswer {
@@ -258,57 +326,22 @@ impl Rig {
             (RigStatus::Present, Some(record)) => Some(lf_rig::volumes(record, held)),
             _ => None,
         };
-        RigAnswer { status: seen.status, volumes, notice: lock(&self.inner).notice.clone() }
+        RigAnswer { status: seen.status, volumes, notice: lock(&self.inner).restore.notice().cloned() }
     }
 
     /// Start the writer's tick on the rig thread, once per process (the first `rig_open` or
-    /// `rig_import`).
+    /// `rig_import`). With a restore host the tick reads the model through it.
     pub(crate) fn start_writer(self: &Arc<Self>, host: EngineHost) {
         if self.writer.swap(true, AcqRel) {
             return;
         }
         let rig = self.clone();
-        let spawned = std::thread::Builder::new().name("lf-rig".into()).spawn(move || writer::run(&rig, &host));
+        let spawned = std::thread::Builder::new().name("lf-rig".into()).spawn(move || match rig.host.clone() {
+            Some(restore) => writer::run(&rig, &*restore),
+            None => writer::run(&rig, &host),
+        });
         if let Err(e) = spawned {
             log::error!("[rig] no thread for the rig record's writer ({e}); changes are stored at close only");
-        }
-    }
-}
-
-/// The plan until CP3a's restore makes it: the record's units and `pending` at their places. A unit
-/// with an applied plate under its id at `view` (a DEV import's adopted unit, a unit the model held when
-/// the record was found) is `Matched` to that plate, its token seen, so [`Plan::fate`] ends it at the
-/// player's removal like any matched unit, also one made before the next view; every other unit is
-/// `Held` (not restored this launch), so the projection keeps every record unit the model lacks. A plate
-/// that has not applied matches nothing: its failed add must not end the record's unit.
-pub(crate) fn held_plan(record: &RigRecord, view: &RigView) -> Plan {
-    let mut plan = Plan::default();
-    for (s, slot) in record.slots.iter().enumerate() {
-        for unit in &slot.units {
-            let applied = view.slots.iter().flatten().find(|p| p.id == unit.id && p.applied);
-            let disposition = match applied {
-                Some(plate) => {
-                    plan.seen.insert(plate.added_by);
-                    Disposition::Matched { token: plate.added_by }
-                }
-                None => Disposition::Held { why: "the restore is not wired yet".into(), token: None },
-            };
-            plan.dispositions.insert(unit.id, disposition);
-        }
-        plan.units[s] = slot.units.clone();
-        plan.pending[s] = slot.pending.clone();
-    }
-    plan
-}
-
-/// Drop from the plan every id whose fate at `view` is `Ended` (the player's applied unit won it), as
-/// the restore does at each view, so a unit the player removed later does not come back from the plan.
-fn end_ids(plan: &mut Plan, view: &RigView) {
-    let ended: Vec<UnitId> = plan.ids().into_iter().filter(|&id| plan.fate(id, view) == Some(Fate::Ended)).collect();
-    for id in ended {
-        plan.dispositions.remove(&id);
-        for units in plan.units.iter_mut().chain(plan.pending.iter_mut()) {
-            units.retain(|u| u.id != id);
         }
     }
 }

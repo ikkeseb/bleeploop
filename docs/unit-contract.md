@@ -37,26 +37,28 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
 - **The rig record is the native host's** (decided 2026-11-25: the record, its writer, the restore and the
   crash marker; their rules in `src-tauri/crates/lf-rig`, the glue in `src-tauri/src/engine_io/rig/`). The
   page keeps only the one-time upgrade of the WebView's old record and hands it over (§6). The record, its
-  writer and the shutdown's close are wired into the app, DEV only with chain mode; the restore and the crash
-  marker are built in the crate and not yet wired. `rig.json` in the app-local data folder (`rig.dev.json`
+  writer and the shutdown's close are wired into the app, DEV only with chain mode. The restore and the crash
+  marker are wired behind a host interface (`RestoreHost`, `engine_io/rig/restore.rs`) the app does not
+  provide yet: no restore adds a unit and no marker is written. `rig.json` in the app-local data folder (`rig.dev.json`
   in a DEV build), the same JSON as `lf.rig`. One process owns
   the file pair (a lock file); another answers `unavailable`. Only a missing file is no record; one that
   cannot be read or that a newer build wrote is reported, never written over, and nothing is restored or
   written that launch (the crash marker included). A write commits when it is synced and renamed; a failed
   one is retried at the writer's next tick. The record is a projection of the chain model: each unit the engine applied (until its
-  removal is confirmed) and each record unit the restore still holds (until the restore is wired, each
+  removal is confirmed) and each record unit the restore still holds (while no restore runs, each
   record unit the chain lacks), at its place, each id once (a unit the player added under a held unit's id wins it once applied); `volume` is
   the slot gain the settings memory keeps, else the record's. A fresh add enters once applied. The shutdown
   first closes the rig: it takes the chain and the levels as they stand, keeps what the restore had not
   finished at its place, leaves out a unit whose removal is under way (before that removal is confirmed),
   and writes nothing after. A failed last write at close is logged, not retried: the file keeps the last
   record stored.
-  Its crash marker (the restore's flow, not wired yet), `rig-inflight.json`, names each plugin unit whose load the native restore issued and
+  Its crash marker (written once a restore runs), `rig-inflight.json`, names each plugin unit whose load the native restore issued and
   that is not yet known to have seated (and settled) or failed with its owner gone; written before the
   restore's first add and before each plugin load, and rewritten as soon as a load ends. A plugin whose
   own load failed leaves it only after the record without that unit is written. A process's first open
   that finds it forgets those units and tells the page until it confirms (the rules: `crates/lf-rig`,
-  `marker.rs`, `restore.rs`).
+  `marker.rs`, `restore.rs`). At close the marker keeps each plugin load whose add was issued and has not
+  applied; one that applied goes, also inside its settle (the process lived through it).
 - **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`), beside
   one per slot and plugin, `slot<n>-<hash>.tone`. A load reads the unit's own file, else its pin
   `unit-<id>.pin`, else the slot's file, which it then pins (empty: the plugin's defaults), so another
@@ -304,21 +306,16 @@ below reads an old key through the resolver that reads it today, so a missing ke
   `Toggle.Units`; legacy mode keeps the sends. `ToggleUnit` serves a pedal bound to one unit; learning one
   is not in this build.
 - **The old sends become units in two durable steps,** as a plugin chain's role is known only at
-  activation (§The picture: VST2's scan and activation disagree). The upgrade's `lf.rig` write holds
-  `pending`: per slot, the send units to place, ids minted, values read (a param with no key reads its
-  resolver's default). Once the recall settled and that slot's head (the record's first unit) has a known
-  role, one `lf.rig` write adds them to its chain and clears its `pending`; a restart between places them
-  again under the same ids, none lost or doubled. No head, a built-in effect or a SYNTH head is known at
-  once; a plugin head once a fresh `chains` report shows it applied (seated or parked, its `source`). A
-  plugin head missing from the scan, still loading or waiting, or whose add failed with no plate (the host,
-  the IPC), keeps the slot's `pending`; so does one whose add left a `failed` plate: the plate names no cause
-  (§1), so it is kept, its slot's `pending` with it, and retried each launch until the player removes it (a
-  crash at load is still the marker's, §1). In the native restore (`crates/lf-rig`, `place.rs`): a plugin
-  head missing from the scan, still loading or waiting, or refused by the host keeps the slot's `pending`,
-  and so does a built-in head held at its place; one whose own load failed is forgotten, and the next unit
-  decides. Not now: a native cause on the plate (`UnitState.failedBy`) would
-  let a plugin's own load failure be forgotten again as legacy recall forgets one, and the slot place as
-  input-fed (`src/ui/AGENTS.md` § Open threads). The placement, appended at each input-fed chain's
+  activation (§The picture: VST2's scan and activation disagree). The upgrade's record, imported once as
+  the native record (§1), holds `pending`: per slot, the send units to place, ids minted, values read (a
+  param with no key reads its resolver's default). The native restore (`crates/lf-rig`, `place.rs`) places a
+  slot's `pending` once that slot's head (the first record unit it still holds) has a known role: one record
+  commit moves them to the chain and clears its `pending`, and their adds come after that commit; a restart
+  between places them again under the same ids, none lost or doubled. No head, a built-in effect or a SYNTH
+  head is known at once; a plugin head once its plate applied (its `source` from the activation, never the
+  scan). A plugin head missing from the scan, still loading or waiting, or refused by the host keeps the
+  slot's `pending` for a later launch, and so does a built-in head held at its place; a plugin head whose own
+  load failed is forgotten, and the next unit decides. The placement, appended at each input-fed chain's
   end (a reload or the player may have added units since): the OTT, RING MOD → ECHO → REVERB, with their
   saved values; a send that was on goes on into every input-fed chain (it sounded on both slots' sum), one
   that was off goes bypassed, so its pedal reaches either input. One off, at its defaults and bound to no
