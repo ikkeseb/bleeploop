@@ -1780,6 +1780,7 @@ mod unit_owner {
     use super::super::super::state::ToneRestore;
     use super::*;
     use crate::engine_io::chain::{ChainState, PlateState, UnitState};
+    pub(super) use crate::engine_io::test_rig::{start_take, stop_take};
     use crate::engine_io::test_rig::TestDevice;
     use crate::engine_io::unit_host::{Activated, Back, OpState, Removal, Spec};
     use crate::engine_io::EngineHost;
@@ -1810,43 +1811,6 @@ mod unit_owner {
         std::thread::spawn(move || unsafe { (host.request_restart.unwrap())(&host) })
             .join()
             .unwrap();
-    }
-
-    pub(super) fn start_take(device: &TestDevice) {
-        let host = device.host();
-        host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
-        host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
-        host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            let mut ev = Vec::new();
-            let (_, ov) = host.drain_feed(&mut ev);
-            if let Some(ov) = ov {
-                let l = ov.lane(0);
-                if l.state == LaneState::Recording && l.frames > 0 {
-                    break;
-                }
-            }
-            assert!(Instant::now() < deadline, "recording take never started");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    pub(super) fn stop_take(device: &TestDevice) {
-        let host = device.host();
-        host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            let mut ev = Vec::new();
-            let (_, ov) = host.drain_feed(&mut ev);
-            if let Some(ov) = ov {
-                if ov.lane(0).state != LaneState::Recording {
-                    break;
-                }
-            }
-            assert!(Instant::now() < deadline, "recording take never stopped");
-            std::thread::sleep(Duration::from_millis(2));
-        }
     }
 
     /// Tiny pass-through unit with a fixed latency, submitted straight through `UnitHost` in tests.

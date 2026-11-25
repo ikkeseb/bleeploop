@@ -4,6 +4,11 @@
 //! publishes the frame clock, and keeps the left channel it rendered. [`TestDevice::rebuild_at`] swaps in
 //! an engine at another rate through the device owner's own `swap_engine`, evicting the units;
 //! [`TestDevice::stop`] and [`TestDevice::resume`] are a close and a reopen at the same rate.
+//!
+//! The device renders at its period in wall time, and a loaded runner stretches every period: a wait
+//! through engine frames that a test only waits out (a take's count-in) is rendered back to back
+//! instead ([`TestDevice::rush_until`]), so its wall time no longer scales with the block count. A take
+//! is started and stopped here ([`start_take`], [`stop_take`]) for every test that holds one.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, Mutex};
@@ -11,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Engine, EngineConfig, ProcessContext};
+use lf_engine::{Command, Engine, EngineConfig, LaneState, ProcessContext, TimedCommand};
 
 use super::{Core, EngineHost, Ends};
 
@@ -34,9 +39,12 @@ pub(crate) struct TestDevice {
     block: usize,
     period: Duration,
     input: Input,
+    /// While set, the render thread renders back to back until this holds of the engine after a block.
+    rush: Rush,
 }
 
 type Input = Arc<dyn Fn(Frame) -> f32 + Send + Sync>;
+type Rush = Arc<Mutex<Option<fn(&Engine) -> bool>>>;
 
 impl TestDevice {
     /// Build an engine at `rate` (2-second lanes, to keep tests light) and render `block`-frame blocks
@@ -77,6 +85,7 @@ impl TestDevice {
             block,
             period,
             input: Arc::new(input),
+            rush: Arc::new(Mutex::new(None)),
         };
         device.resume();
         device
@@ -96,6 +105,7 @@ impl TestDevice {
         self.stop.store(false, Release);
         let core = self.host.core.clone();
         let (stop, blocks, output, frame_at, input) = (self.stop.clone(), self.blocks.clone(), self.output.clone(), self.frame.clone(), self.input.clone());
+        let rush = self.rush.clone();
         let (block, period) = (self.block, self.period);
         let join = std::thread::Builder::new()
             .name("lf-test-device".into())
@@ -113,6 +123,10 @@ impl TestDevice {
                             if let Some(engine) = rt.engine.as_mut() {
                                 let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
                                 engine.process(&ctx, &x, &mut l, &mut r);
+                                let mut until = rush.lock().unwrap_or_else(|e| e.into_inner());
+                                if until.is_some_and(|done| done(engine)) {
+                                    *until = None;
+                                }
                             }
                         }
                         Err(_) => {
@@ -132,7 +146,12 @@ impl TestDevice {
                     }
                     frame_at.store(frame + block as Frame, Relaxed);
                     blocks.fetch_add(1, Relaxed);
-                    std::thread::sleep(period);
+                    if rush.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                        // Let a thread waiting on the engine lock in between blocks.
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(period);
+                    }
                 }
             })
             .expect("spawn the test device");
@@ -141,6 +160,43 @@ impl TestDevice {
 
     pub(crate) fn host(&self) -> &EngineHost {
         &self.host
+    }
+
+    /// Render back to back (a yield between blocks, no period) until `done` holds of the engine after
+    /// a block, then at the period again, from that block on. A miss of the engine lock renders
+    /// nothing and keeps rushing. What a test does after `done` holds runs at the device's own pace.
+    pub(crate) fn rush_until(&self, done: fn(&Engine) -> bool) {
+        *self.rush.lock().unwrap_or_else(|e| e.into_inner()) = Some(done);
+    }
+
+    /// The device and its engine as a timed-out wait reports them: the blocks rendered, the device
+    /// frame, the engine lock's misses, whether it still rushes, the engine generation, the commands
+    /// pushed against those the engine took, and lane 0 in the overview the feed reads.
+    pub(crate) fn describe(&self) -> String {
+        let core = &self.host.core;
+        let rushing = self.rush.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let mut text = format!(
+            "{} blocks to frame {}, {} engine lock misses, {}rushing, engine gen {}",
+            self.blocks.load(Relaxed),
+            self.frame.load(Relaxed),
+            core.counters.lock_misses.load(Relaxed),
+            if rushing { "" } else { "not " },
+            core.engine_gen.load(Acquire),
+        );
+        match core.ends.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(ends) => {
+                let lane = ends.overview.lane(0);
+                text += &format!(
+                    ", {} commands pushed, {} taken, lane 0 {:?} at {} frames",
+                    ends.pushed,
+                    ends.overview.commands_taken(),
+                    lane.state,
+                    lane.frames
+                );
+            }
+            None => text += ", no overview (no engine)",
+        }
+        text
     }
 
     /// A device at another rate: a new engine (2-second lanes, `max_block`) replaces the old one, whose
@@ -188,5 +244,44 @@ impl TestDevice {
 impl Drop for TestDevice {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Lane 0 records a take: past its count-in, it has captured frames.
+pub(crate) fn take_records(engine: &Engine) -> bool {
+    let lane = engine.looper().overview().lane(0);
+    lane.state == LaneState::Recording && lane.frames > 0
+}
+
+/// Start a free take on lane 0 (240 BPM: a one-bar count-in of 48,000 frames at 48 kHz) and wait
+/// until it records. The count-in renders back to back ([`TestDevice::rush_until`]): at a 64-frame,
+/// 5 ms device it is 750 blocks, which a loaded runner stretched past [`PATIENCE`]. The take itself
+/// runs at the device's pace, so it lasts as long in wall time as the test expects.
+pub(crate) fn start_take(device: &TestDevice) {
+    let host = device.host();
+    for command in [Command::SetBpm(240.0), Command::SetFixedLength(false), Command::RecDub(0)] {
+        host.send(TimedCommand { frame: None, command }).unwrap();
+    }
+    device.rush_until(take_records);
+    wait_lane0(device, "the take records", |state, frames| state == LaneState::Recording && frames > 0);
+}
+
+/// Stop lane 0's take and wait until it no longer records.
+pub(crate) fn stop_take(device: &TestDevice) {
+    device.host().send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
+    wait_lane0(device, "the take stops", |state, _| state != LaneState::Recording);
+}
+
+/// Drain the feed until lane 0 in its overview satisfies `cond` ([`PATIENCE`] at most), else panic with
+/// what the device and the engine show ([`TestDevice::describe`]).
+fn wait_lane0(device: &TestDevice, what: &str, cond: impl Fn(LaneState, Frame) -> bool) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let (_, overview) = device.host().drain_feed(&mut Vec::new());
+        if overview.is_some_and(|ov| cond(ov.lane(0).state, ov.lane(0).frames)) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for: {what}; {}", device.describe());
+        std::thread::sleep(Duration::from_millis(2));
     }
 }

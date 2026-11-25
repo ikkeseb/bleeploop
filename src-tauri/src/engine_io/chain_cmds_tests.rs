@@ -18,7 +18,7 @@ use crate::engine_io::builtins::Builtins;
 use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec, UnitState, WireParams};
 use crate::engine_io::fake_driver::{Fake, FakeDriver};
 use crate::engine_io::plugins::EngineSlot;
-use crate::engine_io::test_rig::{TestDevice, PATIENCE};
+use crate::engine_io::test_rig::{start_take, stop_take, TestDevice, PATIENCE};
 use crate::engine_io::unit_host::{Activated, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost};
 use crate::engine_io::{DeviceRequest, EngineHost, HostConfig};
 use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
@@ -241,43 +241,6 @@ pub(crate) fn join_all(chains: &Chains) {
 
 fn start_device() -> TestDevice {
     TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0)
-}
-
-fn start_take(device: &TestDevice) {
-    let host = device.host();
-    host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let mut ev = Vec::new();
-        let (_, ov) = host.drain_feed(&mut ev);
-        if let Some(ov) = ov {
-            let l = ov.lane(0);
-            if l.state == LaneState::Recording && l.frames > 0 {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "recording take never started");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn stop_take(device: &TestDevice) {
-    let host = device.host();
-    host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let mut ev = Vec::new();
-        let (_, ov) = host.drain_feed(&mut ev);
-        if let Some(ov) = ov {
-            if ov.lane(0).state != LaneState::Recording {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "recording take never stopped");
-        std::thread::sleep(Duration::from_millis(2));
-    }
 }
 
 fn engine_chain_summary(device: &TestDevice, slot: usize) -> Vec<(UnitId, bool)> {

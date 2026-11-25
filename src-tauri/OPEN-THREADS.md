@@ -274,20 +274,12 @@
   accepts the add), so it can run ahead of a later add queued on that slot. Next check: a probe that
   queues an add behind a held remove during a take and times the add, then one that removes a loading
   unit with a second add queued behind it.
-- Two `chain_tests.rs` tests are `#[ignore]`d (quarantined): `held_remove_outlives_remove_timeout` and
-  `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`. On CI's Windows
-  runner (`rust-test`) their `start_take` never sees lane 0 recording, even with `test_rig::PATIENCE`
-  (30 s); every local run passes them, alone and in the full suite. Both run a real-time `TestDevice` at
-  64 frames every 5 ms (other chain tests: 1-2 ms), where dev's own take tests drive frames by hand
-  (`tests.rs` `Harness`). Next check: run them on CI with `--ignored` and a log of the device's block
-  count and lane 0's state while `start_take` waits; whether the take is not sent, not started, or not
-  seen in `drain_feed`'s overview settles which fix (faster device period, `SetSlotLive`, or reading
-  lane events instead of the overview). Un-ignore both before chains reach players.
 - `chain_tests.rs`' `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`
-  is load-sensitive: its 2 s wall bounds (the install's return, the seat and the refusal after the take)
-  failed once in a 479-test `cargo test -p app` run and pass alone. Next check: rerun the full
-  `cargo test -p app` on a quiet PC; if it fails again, widen the bounds to `test_rig::PATIENCE` or
-  stamp them on the engine's frames, as the timing tests above were.
+  is load-sensitive: its two wall bounds that are its claim (each held install returns within the
+  slot host's `SETTLE`, 2 s) failed once in a 479-test `cargo test -p app` run and pass alone; its waits
+  for something that must happen are `test_rig::PATIENCE`. Next check: if it fails on CI's loaded
+  runner, see which bound; a claim free of wall time needs the install's own outcome (returned on
+  `Held`, not on the `SETTLE` timeout), which `SlotHost::install` does not report.
 - A note can overtake a synth pick held at the unit gate (DEV chain mode, read from source, never run): across
   a device rebuild a queued `PickSynth` waits at the gate for its SYNTH's reseat; once the SYNTH is back in the
   engine but its `Seat` answer is still unread (the model says reseating), a fresh `NoteOn` through

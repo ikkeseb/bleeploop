@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
-use lf_engine::{max_chain_latency, Command, InputSend, LaneState, ProcessContext, SeatRefusal, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{max_chain_latency, Command, InputSend, ProcessContext, SeatRefusal, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, SLOT_COUNT, TRACK_COUNT};
 use lf_rig::{AddFail, AddOk, AddState, Place, PluginRecord, PluginRefView, Retry, RigRecord, RigStatus, UnitBody, UnitRecord, SAVE_QUIET};
 
 use super::host::{AppHost, Loader};
@@ -22,7 +22,7 @@ use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec};
 use crate::engine_io::chain_cmds::tests::{empty_slots, ClampingBuiltinFactory};
 use crate::engine_io::chain_cmds::Chains;
 use crate::engine_io::plugins::EngineSlot;
-use crate::engine_io::test_rig::{TestDevice, PATIENCE};
+use crate::engine_io::test_rig::{start_take, TestDevice, PATIENCE};
 use crate::engine_io::unit_host::{Activated, Back, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost, BEFORE_RESERVE_STATE};
 use crate::engine_io::EngineHost;
 use crate::host::engine_slot::{EventSink, PluginFormat};
@@ -298,13 +298,7 @@ fn leaving_or_failed_plate_is_no_match() {
     assert_ne!(again, failed, "a new attempt replaces the failed plate");
 
     seated(b.app.add(1, 10, &builtin(10, UnitKind::Synth), &Place::End));
-    send(host, Command::SetBpm(240.0));
-    send(host, Command::SetFixedLength(false));
-    send(host, Command::RecDub(0));
-    wait_until("the take records", || {
-        let (_, ov) = host.drain_feed(&mut Vec::new());
-        ov.is_some_and(|ov| ov.lane(0).state == LaneState::Recording && ov.lane(0).frames > 0)
-    });
+    start_take(&b.device);
     let Removal::Sent(op) = host.remove_unit(10).expect("remove") else { panic!("expected a sent removal") };
     wait_until("the take holds the removal", || {
         settle(host);

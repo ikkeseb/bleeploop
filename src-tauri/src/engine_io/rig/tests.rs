@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, LaneState, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor};
+use lf_engine::{Command, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor};
 use lf_rig::{
     Files, PluginRecord, PluginRefView, RigRecord, RigStatus, RigView, SlotRecord, UnitBody, UnitRecord, Version1, DEV_FILES,
     IMPORT_STALE, RELEASE_FILES,
@@ -24,7 +24,7 @@ use super::{files, lock, writer, Inner, Rig};
 use crate::engine_io::chain::{PluginRef, UnitSpec};
 use crate::engine_io::chain_cmds::tests::{empty_slots, ClampingBuiltinFactory};
 use crate::engine_io::chain_cmds::{Added, Chains};
-use crate::engine_io::test_rig::{TestDevice, PATIENCE};
+use crate::engine_io::test_rig::{start_take, stop_take, TestDevice, PATIENCE};
 use crate::engine_io::unit_host::{Activated, Back, OpState, Removal, Spec, UnitHost};
 use crate::engine_io::EngineHost;
 use crate::host::engine_slot::{EventSink, PluginFormat};
@@ -123,29 +123,10 @@ fn fast_device() -> TestDevice {
     TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0)
 }
 
-/// 64-frame blocks every 5 ms: the 2-second take lasts about 7.5 s, long past what a test holds it.
+/// 64-frame blocks every 5 ms: the 2-second take lasts at least 7.5 s, long past what a test holds it
+/// (its count-in is rushed: `test_rig::start_take`).
 fn slow_device() -> TestDevice {
     TestDevice::start(48_000, 64, Duration::from_millis(5), |_| 0.0)
-}
-
-fn start_take(device: &TestDevice) {
-    let host = device.host();
-    host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    wait_until("the take records", || {
-        let (_, ov) = host.drain_feed(&mut Vec::new());
-        ov.is_some_and(|ov| ov.lane(0).state == LaneState::Recording && ov.lane(0).frames > 0)
-    });
-}
-
-fn stop_take(device: &TestDevice) {
-    let host = device.host();
-    host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-    wait_until("the take stops", || {
-        let (_, ov) = host.drain_feed(&mut Vec::new());
-        ov.is_some_and(|ov| ov.lane(0).state != LaneState::Recording)
-    });
 }
 
 pub(super) fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -1019,25 +1000,60 @@ fn close_waits_for_a_feed_pass_to_take_an_applied_install() {
     });
     assert!(!plate(host, 180).applied, "the model has not heard the seat yet");
 
-    let done = AtomicBool::new(false);
-    let (rig_ref, done_ref) = (&rig, &done);
+    let (entered, done) = (AtomicBool::new(false), AtomicBool::new(false));
+    let model = FeedWaitSeen { host, entered: &entered };
     std::thread::scope(|s| {
-        // The feed, whose first pass comes well after close began.
+        // The feed, whose first pass comes well after close began its feed wait: a close that did not
+        // wait would have taken its view by then. Then passes back to back: close's bound
+        // (`FEED_PASS_WAIT`, 250 ms) leaves the rest for them, with no timer wake-up between them.
         let feed_host = host.clone();
+        let (entered, done) = (&entered, &done);
         s.spawn(move || {
-            wait_until("close begins", || rig_ref.closing.load(Acquire));
-            std::thread::sleep(Duration::from_millis(100));
-            while !done_ref.load(Acquire) {
+            spin_until(|| entered.load(Acquire));
+            let began = Instant::now();
+            spin_until(|| began.elapsed() >= Duration::from_millis(20));
+            while !done.load(Acquire) {
                 settle(&feed_host);
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::yield_now();
             }
         });
-        rig.close(host);
+        rig.close(&model);
         done.store(true, Release);
     });
     assert_eq!(folder.ids(0), vec![180], "the applied install is in the record");
     assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
     uh.release();
+}
+
+/// The app's host as close reads it, which marks when close's feed wait begins.
+struct FeedWaitSeen<'a> {
+    host: &'a EngineHost,
+    entered: &'a AtomicBool,
+}
+
+impl writer::RigModel for FeedWaitSeen<'_> {
+    fn gains(&self) -> lf_rig::Volumes {
+        writer::RigModel::gains(self.host)
+    }
+
+    fn view(&self) -> RigView {
+        writer::RigModel::view(self.host)
+    }
+
+    fn wait_feed(&self) {
+        self.entered.store(true, Release);
+        writer::RigModel::wait_feed(self.host);
+    }
+}
+
+/// Busy-wait (yielding) until `cond`, [`PATIENCE`] at most: no timer wake-up, which a loaded runner can
+/// delay past a short bound.
+fn spin_until(mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + PATIENCE;
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out spinning");
+        std::thread::yield_now();
+    }
 }
 
 /// A second close (the updater's shutdown, then the exit's) returns only after the first has written

@@ -13,7 +13,7 @@ use lf_engine::{
 
 use super::chain::{PlateState, PluginRef, UNOWNED_KEEP};
 use super::fake_driver::{Fake, FakeDriver};
-use super::test_rig::{TestDevice, PATIENCE};
+use super::test_rig::{start_take, stop_take, TestDevice, PATIENCE};
 use super::unit_host::{Activated, Back, BuiltinFactory, Op, OpState, Params, Removal, Spec, SubmitError, Terms, Unit, GATE_DEADLINE};
 use super::{DeviceRequest, EngineHost, HostConfig};
 use crate::audio_output::AudioBackend;
@@ -151,43 +151,6 @@ impl BuiltinFactory for ClampFactory {
         }
         let clamped = vec![(UnitParam::Send(InputSendParam::EchoLevel), level)];
         Ok((ClampEcho::new(level, 0, self.applied.clone()), clamped))
-    }
-}
-
-fn start_take(device: &TestDevice) {
-    let host = device.host();
-    host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::SetFixedLength(false) }).unwrap();
-    host.send(TimedCommand { frame: None, command: Command::RecDub(0) }).unwrap();
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let mut ev = Vec::new();
-        let (_, ov) = host.drain_feed(&mut ev);
-        if let Some(ov) = ov {
-            let l = ov.lane(0);
-            if l.state == LaneState::Recording && l.frames > 0 {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "recording take never started");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn stop_take(device: &TestDevice) {
-    let host = device.host();
-    host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let mut ev = Vec::new();
-        let (_, ov) = host.drain_feed(&mut ev);
-        if let Some(ov) = ov {
-            if ov.lane(0).state != LaneState::Recording {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "recording take never stopped");
-        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -792,7 +755,6 @@ fn reseats_finishing_in_reverse_land_in_model_order_with_bypass() {
 
 /// 12. A held remove outlives `REMOVE_TIMEOUT` (2 s): `wait_op` does not count time while held.
 #[test]
-#[ignore = "quarantined: on CI's Windows runner the take never starts (start_take, 30 s); passes locally; src-tauri/OPEN-THREADS.md"]
 fn held_remove_outlives_remove_timeout() {
     // 64-frame blocks every 5 ms (~12,800 frames/s) so the 2-second max loop (96,000 frames) stays
     // open for > 7 real seconds while we wait past the 2 s REMOVE_TIMEOUT.
@@ -804,7 +766,7 @@ fn held_remove_outlives_remove_timeout() {
     u.activated(Activated { name: "lat".into(), source: false, latency: 64 });
     let t = u.terms().unwrap();
     let op_in = ok_op(u.submit(LatentUnit::new(1, 64, stops.clone()), t));
-    assert_eq!(host.wait_op(op_in, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(host.wait_op(op_in, PATIENCE).unwrap(), OpState::Applied);
 
     start_take(&device);
     let Removal::Sent(op_rem) = host.remove_unit(10).unwrap() else { panic!("expected Sent") };
@@ -817,7 +779,7 @@ fn held_remove_outlives_remove_timeout() {
         waiter.join().unwrap()
     });
     assert_eq!(result.unwrap(), OpState::Applied);
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + PATIENCE;
     let back = loop {
         if let Some(b) = u.take_back() {
             break b;
@@ -1032,7 +994,6 @@ fn shutdown_with_take_open_and_feed_stopped_ends_well_inside_its_bound() {
 ///     (not after the take), seats when the take ends, and a refusal at the take's end reaches
 ///     `take_evicted` with its reason.
 #[test]
-#[ignore = "quarantined: on CI's Windows runner the take never starts (start_take, 30 s); passes locally; src-tauri/OPEN-THREADS.md"]
 fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal() {
     // Part A: latent legacy unit installed during an open take returns within SETTLE while the
     // take is still recording, and seats once the take ends.
@@ -1083,7 +1044,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
 
         // End the take: the unit seats in slot 0.
         stop_take(&device);
-        let seat_deadline = Instant::now() + Duration::from_secs(2);
+        let seat_deadline = Instant::now() + PATIENCE;
         let id = host.core.legacy_unit_id(0);
         assert_ne!(id, 0);
         while engine_chain_ids(&device, 0) != vec![(id, false)] {
@@ -1092,7 +1053,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
             assert!(Instant::now() < seat_deadline, "held legacy unit never seated after take ended");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let back = slot.remove(Duration::from_secs(2)).expect("remove").expect("unit");
+        let back = slot.remove(PATIENCE).expect("remove").expect("unit");
         assert_eq!(back.into_any().downcast::<LatentUnit>().unwrap().tag, 11);
         assert_eq!(stops.load(SeqCst), 1);
     }
@@ -1137,7 +1098,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
             );
             op
         };
-        assert_eq!(host.wait_op(blocker_op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        assert_eq!(host.wait_op(blocker_op, PATIENCE).unwrap(), OpState::Applied);
 
         start_take(&device);
 
@@ -1160,7 +1121,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
             );
             op
         };
-        let held_deadline = Instant::now() + Duration::from_secs(2);
+        let held_deadline = Instant::now() + PATIENCE;
         while {
             let mut ev = Vec::new();
             host.drain_feed(&mut ev);
@@ -1206,7 +1167,7 @@ fn legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_re
 
         // End the take: blocker leaves and the over-budget legacy install is refused with Latency.
         stop_take(&device);
-        let ref_deadline = Instant::now() + Duration::from_secs(2);
+        let ref_deadline = Instant::now() + PATIENCE;
         loop {
             let mut ev = Vec::new();
             host.drain_feed(&mut ev);
