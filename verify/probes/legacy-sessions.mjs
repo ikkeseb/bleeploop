@@ -303,7 +303,7 @@ await probe(async ({ browser, open }) => {
     console.log(c.file, 'restored:', JSON.stringify(loaded.header));
     const mix = loaded.header.tracks[0]?.mix;
     assert.deepEqual(
-      { ...loaded.header, tracks: loaded.header.tracks.map(({ mix: _, ...rest }) => rest) },
+      { ...loaded.header, tracks: loaded.header.tracks.map((t) => { const rest = { ...t }; delete rest.mix; return rest; }) },
       { bpm: c.bpm, ...(c.formatVersion === 2 ? { meter: c.meter } : {}), bars: 1, masterLengthFrames: frames,
         tracks: [{ index: c.lane, frames, channels: 1, reversed: false, state: 'Playing' }] },
       `${c.file}: the restore's header (grid, meter, one channel)`,
