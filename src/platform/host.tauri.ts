@@ -20,11 +20,11 @@ import type {
   PluginInfo,
   PluginParamDesc,
   PluginSlot,
-  RigAnswer,
   RigHost,
   ToneImport,
   UpdateProgress,
 } from './host';
+import { decodeRigAnswer } from './host';
 import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
@@ -531,26 +531,6 @@ const tauriChainHost: ChainHost = chainNative
       forgetTone: noChain,
     };
 
-const RIG_STATUSES: readonly string[] = ['present', 'absent', 'unreadable', 'unavailable'];
-
-/** `rig_open`'s and `rig_import`'s answer as the page reads it (`src-tauri/crates/lf-rig/src/answer.rs`):
- * a reply of another shape rejects, as a refused call does. */
-function decodeRigAnswer(raw: unknown): RigAnswer {
-  const bad = (): never => {
-    throw new Error(`rig answer of an unknown shape: ${JSON.stringify(raw)}`);
-  };
-  if (typeof raw !== 'object' || raw === null) return bad();
-  const { status, volumes, notice } = raw as Record<string, unknown>;
-  if (typeof status !== 'string' || !RIG_STATUSES.includes(status)) return bad();
-  if (volumes !== null && !(Array.isArray(volumes) && volumes.length === 2 && volumes.every((v) => typeof v === 'number' && Number.isFinite(v)))) return bad();
-  if (notice !== null) {
-    if (typeof notice !== 'object') return bad();
-    const { id, forgotten, pluginsHeld } = notice as Record<string, unknown>;
-    if (!Number.isSafeInteger(id) || !Array.isArray(forgotten) || !forgotten.every((n) => typeof n === 'string') || typeof pluginsHeld !== 'boolean') return bad();
-  }
-  return raw as RigAnswer;
-}
-
 const NO_RIG = 'The native rig record is off (enable lf.chainNative in DEV).';
 
 /**
@@ -563,10 +543,10 @@ const tauriRig: RigHost = chainNative
   ? {
       available: true,
       async open() {
-        return decodeRigAnswer(await invoke<unknown>('rig_open'));
+        return decodeRigAnswer(await invoke<unknown>('rig_open'), 'open');
       },
       async import(text) {
-        return decodeRigAnswer(await invoke<unknown>('rig_import', { text, frontendEpoch: requireEpoch() }));
+        return decodeRigAnswer(await invoke<unknown>('rig_import', { text, frontendEpoch: requireEpoch() }), 'import');
       },
       async seen(id) {
         await invoke('rig_seen', { id });

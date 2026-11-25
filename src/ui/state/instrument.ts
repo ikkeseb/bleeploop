@@ -162,27 +162,53 @@ function routeEngine(i: 0 | 1): void {
 // it. An unreadable record shows none. Only chain mode reads `lf.rig`: the release never does.
 //
 // With the native rig record (`rigNative`: `platform.rig.available`, the WebView's record above unread) the
-// fader shows the latest reset frame's slot gain (the engine's settings memory, where a gesture lands), else
-// what `rig.open` answered, else the upgrade's level until the import answers (`showRigLevels`); a gesture is
-// a plain `SetSlotGain`, and native keeps it in the record (D2: the player's level wins over the record's).
+// fader shows the player's latest gesture, else the latest reset frame's slot gain (the engine's settings
+// memory), else what `rig.open` answered, else the upgrade's level until the import answers (`showRigLevels`).
+// A gesture is a plain `SetSlotGain`, and native keeps it in the record (D2: the player's level wins over the
+// record's); a reset frame or an answer that arrives after it names an older level. A refused gesture puts the
+// fader back on the last level the engine took (else the answer's, else the upgrade's).
 const rigNative = platform.chain.available && platform.rig.available;
 const rigAtLoad = platform.chain.available && !rigNative ? rigVolumes() : null;
 const chainLevelKnown: [boolean, boolean] = Array.isArray(rigAtLoad) ? [true, true] : [false, false];
 const [chainGains, setChainGains] = createSignal<[number | null, number | null]>(
   rigNative || rigAtLoad === 'absent' ? upgradeLevels() : (rigAtLoad ?? [null, null]),
 );
-/** `rigNative`: per slot, what the fader's level came from: 1 the upgrade, 2 a rig answer, 3 the engine (a
- * reset frame's slot gain) or the player's gesture. A level from a lower rank never replaces a higher one. */
-const levelFrom: [number, number] = [1, 1];
-function showLevel(slot: 0 | 1, v: number, rank: number): void {
+/** `rigNative`: where a fader's level comes from, lowest rank first. */
+const FROM = { upgrade: 1, answer: 2, engine: 3, gesture: 4 } as const;
+type LevelFrom = (typeof FROM)[keyof typeof FROM];
+/** Per slot, the rank the fader shows: a level from a lower rank never replaces a higher one's. */
+const levelFrom: [LevelFrom, LevelFrom] = [FROM.upgrade, FROM.upgrade];
+/** Per slot, the level each rank last named (by rank; `engine` also a gesture the engine took): what a
+ * refused gesture goes back to. */
+const levelNamed: [(number | undefined)[], (number | undefined)[]] = [[], []];
+chainGains().forEach((v, slot) => void (levelNamed[slot][FROM.upgrade] = v ?? undefined));
+/** Per slot, the latest gesture's count: only its own refusal moves the fader back. */
+const gestures: [number, number] = [0, 0];
+function showLevel(slot: 0 | 1, v: number, rank: LevelFrom): void {
+  const level = Math.max(0, Math.min(SLOT_GAIN_MAX, v));
+  levelNamed[slot][rank] = level;
   if (rank < levelFrom[slot]) return;
   levelFrom[slot] = rank;
-  setChainGains((prev) => withAt(prev, slot, Math.max(0, Math.min(SLOT_GAIN_MAX, v))));
+  setChainGains((prev) => withAt(prev, slot, level));
 }
 /** The rig handover's levels on the faders (`rig-recall.ts` `openRig`, `importRig`): an answer's (null: it
  * holds none, so the engine's unity), or the upgrade's until the import answers. */
 export function showRigLevels(volumes: [number, number] | null, from: 'answer' | 'upgrade'): void {
-  for (const slot of [0, 1] as const) showLevel(slot, volumes?.[slot] ?? 1, from === 'upgrade' ? 1 : 2);
+  for (const slot of [0, 1] as const) showLevel(slot, volumes?.[slot] ?? 1, from === 'upgrade' ? FROM.upgrade : FROM.answer);
+}
+/** `rigNative`: the player's level on slot `slot`, a plain `SetSlotGain`. Taken, it is the engine's level; refused
+ * (and still the latest gesture), the fader goes back to the highest rank below a gesture that named one. */
+function gestureLevel(slot: 0 | 1, v: number): void {
+  const n = ++gestures[slot];
+  showLevel(slot, v, FROM.gesture);
+  void sendEngine({ SetSlotGain: [slot, v] }).then((took) => {
+    if (took) levelNamed[slot][FROM.engine] = v;
+    if (took || n !== gestures[slot]) return;
+    levelNamed[slot][FROM.gesture] = undefined;
+    const back = ([FROM.engine, FROM.answer, FROM.upgrade] as const).find((r) => levelNamed[slot][r] !== undefined) ?? FROM.upgrade;
+    levelFrom[slot] = back;
+    setChainGains((prev) => withAt(prev, slot, levelNamed[slot][back] ?? 1));
+  });
 }
 /** Each slot's level as the upgrade derives it from the old keys (the plugin's scan kind not known yet). */
 function upgradeLevels(): [number, number] {
@@ -292,7 +318,7 @@ export function engineResync(first: boolean): void {
     const kept = reportedSlotGains();
     for (const slot of [0, 1] as const) {
       const v = kept[slot];
-      if (v !== null) showLevel(slot, v, 3);
+      if (v !== null) showLevel(slot, v, FROM.engine);
     }
     if (first) disarmEngineLive();
     return;
@@ -790,8 +816,7 @@ export function slotLevel(slot: 0 | 1): number | null {
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
   if (rigNative) {
-    showLevel(slot, v, 3);
-    sendEngine({ SetSlotGain: [slot, v] });
+    gestureLevel(slot, v);
     return;
   }
   if (platform.chain.available) {

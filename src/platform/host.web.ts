@@ -3,6 +3,7 @@
  * This is what `pnpm dev` runs against.
  */
 import type { AppUpdate, AppUpdates, EngineHost, ExportFiles, InputHost, LogFolder, MidiHost, Platform, PluginHost, RigAnswer, RigHost, RigNotice, RigStatus, UpdateProgress } from './host';
+import { decodeRigAnswer } from './host';
 import {
   ENGINE_LANES,
   FOUR_FOUR,
@@ -346,8 +347,10 @@ type RigCall = 'open' | 'import' | 'seen';
  * `present` and the volumes are the imported record's (no gesture in the settings memory); while a record
  * exists it answers `present` and stores nothing, as native. Every call is recorded in `calls` as it comes.
  * Its seams: `refuse` (a call of that name rejects with the reason, `'stale'` the replaced page's import),
- * `hold` (a call of that name waits until `release(name)`). Seeded from `window.__lfRigFake` (an init script's
- * `{ status?, volumes?, notice?, refuse?, hold? }`, `hold` a list of names) at its first use; a page reload
+ * `hold` (a call of that name waits until `release(name)`), `reply` (an `open` or `import` answers this raw
+ * reply instead, its state unchanged: a native answer of any shape). Every answer goes through the page's
+ * strict reading (`decodeRigAnswer`), as Tauri's does. Seeded from `window.__lfRigFake` (an init script's
+ * `{ status?, volumes?, notice?, refuse?, hold?, reply? }`, `hold` a list of names) at its first use; a page reload
  * starts it again, so a probe hands the state on through that script. Nothing else changes with it: no
  * restore, no adds (those are the native host's, CP2-CP3's Rust tests).
  */
@@ -367,6 +370,7 @@ interface RigScript {
   notice?: RigNotice | null;
   refuse?: Partial<Record<RigCall, string>>;
   hold?: RigCall[];
+  reply?: { open?: unknown; import?: unknown };
 }
 
 const rigScript = (): RigScript | null => {
@@ -410,16 +414,17 @@ function rigFake(): RigFake {
     },
     async open() {
       await call('open', []);
-      return answer();
+      return decodeRigAnswer(script.reply && 'open' in script.reply ? script.reply.open : answer(), 'open');
     },
     async import(text) {
       await call('import', [text]);
+      if (script.reply && 'import' in script.reply) return decodeRigAnswer(script.reply.import, 'import');
       if (fake.status === 'absent') {
         const record = JSON.parse(text) as { slots: { volume: number }[] };
         fake.status = 'present';
         fake.volumes = [record.slots[0].volume, record.slots[1].volume];
       }
-      return answer();
+      return decodeRigAnswer(answer(), 'import');
     },
     async seen(id) {
       await call('seen', [id]);

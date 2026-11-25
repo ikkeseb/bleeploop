@@ -9,6 +9,7 @@ import {
   encodeSessionBytes,
   platform,
   sendEngine,
+  sendEngineAlone,
   type DeviceEvent,
   type DeviceRequest,
   type DeviceStatus,
@@ -1240,7 +1241,8 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   const sent = sendEngine(...lacking);
   // D11: refused (or refused partly), the send-off alone goes again a short backoff apart until taken, this
   // engine's reset frame the latest and its device running, with no cap and one log line at 10 s
-  // (`resendUntilTaken`); a later reset frame's own send-off takes over. It covers a DEV process whose earlier
+  // (`resendUntilTaken`); a later reset frame's own send-off takes over. Each resend is a batch of its own
+  // (`sendEngineAlone`), so "taken" means those four, never a batch they shared with other commands. It covers a DEV process whose earlier
   // page ran legacy, whichever record the page has (the native rig's restore sends its own, D1). The WebView's
   // rig record's adds wait for it (`legacySendsOff`): with no device running that gate settles refused (the
   // restore adds nothing this launch). The other lacking settings go again at the next reset frame, as ever.
@@ -1248,7 +1250,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     const reset = plain.resets;
     const off = INPUT_SENDS.map((id): EngineCommand => ({ SetInputSend: [id, false] }));
     void sent
-      .then((took) => took || resendUntilTaken("the legacy sends' send-off", () => sendEngine(...off), () => plain.resets === reset && device() !== null))
+      .then((took) => took || resendUntilTaken("the legacy sends' send-off", () => sendEngineAlone(...off), () => plain.resets === reset && device() !== null))
       .then((took) => (took || device() === null) && sendsOffTaken(took));
   }
   engineResync(plain.resets === 1);
@@ -1728,6 +1730,20 @@ function deviceLabel(s: DeviceStatus): string {
 }
 
 let openTail: Promise<unknown> = Promise.resolve();
+
+/**
+ * Hold every device open, switch and pick on the open queue (`serialize`: boot's `openEngineDevice`, Audio
+ * Settings' reopen, an ASIO driver switch) until `until` settles, either way. Chain mode's boot holds them
+ * on the native rig's open (`rig-recall.ts` `openRig`: its answer, its rejection or its timeout): on `present`
+ * native seeds the slot levels and the send-off before it answers, so the first device replays them (SEAT-B).
+ */
+export function holdDeviceOpens(until: Promise<unknown>): void {
+  const settled = until.then(
+    () => undefined,
+    () => undefined,
+  );
+  openTail = openTail.then(() => settled);
+}
 
 /** The saved picks that name a device. */
 type DevicePicks = Pick<

@@ -28,7 +28,7 @@
  *   (`openRig`, `importRig`) and runs none of the chain half above, which goes once every chain-mode page
  *   hands over.
  */
-import { NATIVE_WAIT_MS, platform, within, type ChainState, type PluginDescriptor, type RigAnswer, type UnitId, type UnitSpec } from '../../platform';
+import { NATIVE_WAIT_MS, platform, TimedOut, within, type ChainState, type PluginDescriptor, type RigAnswer, type UnitId, type UnitSpec } from '../../platform';
 import { notifyError } from '../../notify';
 import { samePluginDescriptor } from './plugin-descriptor';
 import { isPluginFormat } from './plugin-format';
@@ -731,7 +731,14 @@ export interface RigImportDeps extends RigHandoverDeps {
   snapshot(scan: readonly PluginDescriptor[], legacy: SavedRig): Promise<Omit<LegacySnapshot, 'legacyMarker' | 'reported' | 'reportedVolumes'>>;
   /** A new unit id (`mintUnitId`). */
   mint(): UnitId;
+  /** Whether the device runs and the plugin host is initialised (`host_init`, whose epoch the import
+   * carries): asked right before the import, after the scan and the bindings wait. */
+  ready(): boolean;
 }
+
+/** How long the import may take before the handover ends without its answer (D13: a commit that failed or
+ * never came leaves no record, and the next launch answers `absent` and imports again). */
+const IMPORT_WAIT_MS = 5000;
 
 /** Whether this page showed a rig notice: one toast per page (a reload's page shows it again until `seen`). */
 let noticeShown = false;
@@ -795,9 +802,10 @@ export async function openRig(d: RigHandoverDeps): Promise<RigAnswer | null> {
  * The handover's second half, once the device runs and the plugin host is up: only when `opened` (`openRig`'s
  * answer) is `absent`, the upgrade of the old keys (§6) from this launch's scan of the legacy recall's plugins,
  * with no reported chains (D12: native adopts what its model holds), and one `rig.import`, which native stores
- * only while it has none. The fader shows the upgrade's levels until the import answers, then the answer's. A
- * refused import (a replaced page: `'stale'`; a failed write: nothing restored, the next launch imports
- * again) is one log line. Settles `rigRecallDone` in every case.
+ * only while it has none, sent only while the device still runs (`ready`, asked right before it). The fader
+ * shows the upgrade's levels until the import answers, then the answer's. No device at the import, a refused
+ * import (a replaced page: `'stale'`; a failed write or an invalid answer: nothing restored, the next launch
+ * imports again) or one with no answer in IMPORT_WAIT_MS is one log line. Settles `rigRecallDone` in every case.
  */
 export async function importRig(opened: RigAnswer | null, d: RigImportDeps): Promise<void> {
   try {
@@ -807,10 +815,30 @@ export async function importRig(opened: RigAnswer | null, d: RigImportDeps): Pro
     const base = await d.snapshot(scan, legacy);
     const record = upgradeRig({ ...base, legacyMarker: storedMarker(KEYS.marker) !== null, reported: null }, freshMint(d.mint, new Set()));
     d.levels([record.slots[0].volume, record.slots[1].volume], 'upgrade');
+    if (!d.ready()) {
+      // the device stopped (or the host never came up) during the scan or the bindings wait: native would
+      // restore into no device, so nothing is imported; native keeps no record, the next launch imports
+      console.error('[rig-recall] no audio device runs at the import; nothing imported, the next launch imports it again');
+      d.levels(null, 'answer');
+      return;
+    }
+    const call = platform.rig.import(serializeRig(record));
     let answer: RigAnswer;
     try {
-      answer = await platform.rig.import(serializeRig(record));
+      answer = await within(call, IMPORT_WAIT_MS, 'rig_import');
     } catch (e) {
+      if (e instanceof TimedOut) {
+        // the faders keep the upgrade's levels, which a late commit seeds; a late answer still shows its own
+        console.error(`[rig-recall] the rig record's import got no answer in ${IMPORT_WAIT_MS / 1000} s; the handover ends here`, e);
+        void call.then(
+          (late) => {
+            d.levels(late.volumes, 'answer');
+            tellNotice(late);
+          },
+          () => {},
+        );
+        return;
+      }
       const stale = e === 'stale' || (e instanceof Error && e.message === 'stale');
       if (stale) console.error('[rig-recall] the native rig record refused this page\'s import: a newer page replaced it');
       else console.error('[rig-recall] could not import the rig record; nothing restored, the next launch imports it again', e);

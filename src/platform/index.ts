@@ -72,7 +72,8 @@ export const debugAbortHost: (setAt: number) => Promise<void> = underTauri
  * comes after it. Its fate is then unknown: it may still run. */
 export const NATIVE_WAIT_MS = 2000;
 
-class TimedOut extends Error {}
+/** `within`'s rejection: no answer in time (the call may still run and answer later). */
+export class TimedOut extends Error {}
 
 /** `promise`, or a `TimedOut` rejection once `ms` passed with no answer. */
 export function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -332,14 +333,21 @@ export function sendEngineReported(...commands: EngineCommand[]): Promise<boolea
   return enqueueEngine(commands, true);
 }
 
+/** `sendEngine` in a batch of its own (`enqueue`'s `alone`): it resolves with these commands' own submission,
+ * so a resend that must know whether exactly they were taken (D11's send-off, `engine-store.ts`) never
+ * shares an answer with what other callers queued beside it. */
+export function sendEngineAlone(...commands: EngineCommand[]): Promise<boolean> {
+  return enqueueEngine(commands, false, true);
+}
+
 /**
  * Queue engine commands, dropping unit commands (`isUnitCommand`) while the platform's chain host is not
  * available (unit contract §2). A dropped command resolves its call false, without a log line or a toast:
  * the chain UI asks `platform.chain.available` first.
  */
-function enqueueEngine(commands: EngineCommand[], ownToast: boolean): Promise<boolean> {
+function enqueueEngine(commands: EngineCommand[], ownToast: boolean, alone = false): Promise<boolean> {
   const kept = platform.chain.available ? commands : commands.filter((c) => !isUnitCommand(c));
-  const sent = enqueue(kept.map(encodeItem.engine), ownToast);
+  const sent = enqueue(kept.map(encodeItem.engine), ownToast, alone);
   return kept.length === commands.length ? sent : sent.then(() => false);
 }
 

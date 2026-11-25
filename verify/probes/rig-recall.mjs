@@ -62,14 +62,21 @@
  * the reset frame replays.
  *
  * The native record's handover (H cases, the same context with the rig fake on, `__lfRigFake`, scripted per
- * launch as that launch's process holds the record): on `absent` one import, equal to the WebView's upgrade of
- * the same profile, and no add or slot level from the page; `present`, `unreadable` and `unavailable` import
- * nothing, the last two with one log line; a reload opens again and imports nothing; the fader shows the reset
- * frame's slot gain over open's volumes, and the upgrade's level until the import answers, a gesture one plain
- * `SetSlotGain` that the import's answer does not override; a notice is one toast and one log line per page,
- * then `seen`, shown again by a reload before `seen` answered; a refused or stale import and a refused open
- * are one log line each, the device opening anyway; `lf.rig` and `lf.rigInFlight` are deleted before the open,
- * which comes before the device opens; a refused reset send-off goes again alone until taken.
+ * launch as that launch's process holds the record; its replies go through the page's strict reading of D13's
+ * answer, a scripted raw reply included): on `absent` one import, equal to the WebView's upgrade of the same
+ * profile, after the device opened and `host_init`, and no add or slot level from the page; `present`,
+ * `unreadable` and `unavailable` import nothing, the last two with one log line; a reload opens again and
+ * imports nothing; the fader shows the reset frame's slot gain over open's volumes, and the upgrade's level
+ * (the plugin's kind unknown before the scan, known after it) until the import answers; a gesture is one plain
+ * `SetSlotGain` that outranks a later older reset frame and the import's answer, and a refused one puts the
+ * fader back on the last level the engine took; a notice is one toast and one log line per page, the toast
+ * before `seen`, shown again by a reload before `seen` answered; a refused or stale import, a refused,
+ * unanswered (2 s) or invalid open, and an import answered other than `present` are one log line each, the
+ * device opening anyway; `lf.rig` and `lf.rigInFlight` are deleted before the open, and no device opens before
+ * the open settled, one Audio Settings asks for included; a refused or partly refused reset send-off goes again
+ * in batches of its own until taken, while other commands queue, one log line at 10 s; a device that stops
+ * during the scan gets no import, and an import with no answer in 5 s ends the handover (a late answer still
+ * shows its levels).
  *
  * The native load, the scan, the OS close and a real crash are out of reach here: `pnpm native:recall`
  * covers them on the PC.
@@ -140,8 +147,9 @@ function installFakeHost() {
  * replacing the whole localStorage (a fresh profile); `failRig` makes every store of `lf.rig` throw, and
  * `garbleRig` every read of it answer other text than was stored (a failed read-back); `failMarker` every
  * store of `lf.rigInFlight` throw; `refuse` (engine command names) refuses every batch carrying one of them,
- * as a full command ring would, until `window.__refuse` is cleared (the chain context's route of
- * `host.web.ts` gates `InputHost.send`).
+ * as a full command ring would, until `window.__refuse` is cleared, and `refusePartly` takes the rest of such
+ * a batch and answers that it dropped some, until `window.__refusePartly` is cleared; `sendDelay` makes every
+ * batch take that many ms (the chain context's route of `host.web.ts` gates `InputHost.send`).
  * `install(chain)`, called once `__lf` is up and before the reset frame (the restore waits for its chains,
  * so nothing is minted or added before): `mint` counts from `mintFrom`; `hold` holds every activation
  * (`release()`); `failures` scripts failed plates by id; the add wrapper logs each add with `lf.rig` as
@@ -175,6 +183,8 @@ function installChainProbe() {
     };
   }
   window.__refuse = cfg.refuse ?? null;
+  window.__refusePartly = cfg.refusePartly ?? null;
+  window.__sendDelay = cfg.sendDelay ?? 0;
   // The native record's handover on (`host.web.ts` `RigFake`), scripted as this launch's process holds it.
   if (cfg.rig) window.__lfRigFake = cfg.rig;
   if (cfg.garbleRig) {
@@ -550,18 +560,35 @@ await probe(async ({ browser, open }) => {
         if (!source.includes(epoch)) throw new Error('Cannot locate the fake\'s MIDI epoch counter');
         const body = source.replace(epoch, 'let fakeEpoch = Number(JSON.parse(sessionStorage.getItem(\'chainProbe\') ?? \'{}\').epochBase ?? 0);')
           + '\nObject.assign(webPluginHost, window.__recallHost ?? {});\n'
-          // `refuse`: a batch carrying a refused command is rejected whole before the fake takes any of it.
-          + '\n{ const take = webInput.send; webInput.send = (epoch, items) => {'
-          + ' const refused = window.__refuse;'
-          + ' if (refused && items.map(decodeInputItem).some((it) => \'engine\' in it && typeof it.engine === \'object\' && refused.includes(Object.keys(it.engine)[0])))'
+          // `refuse`: a batch carrying a refused command is rejected whole before the fake takes any of it;
+          // `refusePartly`: the fake takes the rest of such a batch and answers that it dropped some (`full`);
+          // `sendDelay`: every batch takes that many ms (a busy native call, so later sends queue behind it).
+          + '\n{ const take = webInput.send; webInput.send = async (epoch, items) => {'
+          + ' if (window.__sendDelay) await new Promise((resolve) => setTimeout(resolve, window.__sendDelay));'
+          + ' const named = (list) => (it) => \'engine\' in it && typeof it.engine === \'object\' && list.includes(Object.keys(it.engine)[0]);'
+          + ' const refused = window.__refuse; const partly = window.__refusePartly;'
+          + ' if (refused && items.map(decodeInputItem).some(named(refused)))'
           + ' { (window.__refusedBatches ??= []).push(items.map(decodeInputItem));'
-          + ' return Promise.reject(new Error(\'injected: the command ring is full\')); }'
+          + ' throw new Error(\'injected: the command ring is full\'); }'
+          + ' if (partly && items.map(decodeInputItem).some(named(partly)))'
+          + ' { (window.__refusedBatches ??= []).push(items.map(decodeInputItem));'
+          + ' await take(epoch, items.filter((item) => !named(partly)(decodeInputItem(item)))); return \'full\'; }'
           + ' return take(epoch, items); }; }\n'
-          // The native record's open (`__lfRigFake`): what the page had kept of the WebView's record, and how many
-          // devices it had opened, when it called.
+          // `host_init` (the plugin host's `init`), counted.
+          + '\n{ const init = webPluginHost.init; webPluginHost.init = async () => { await init.call(webPluginHost); window.__hostInits = (window.__hostInits ?? 0) + 1; }; }\n'
+          // The native record's calls (`__lfRigFake`): what the page had kept of the WebView's record and how many
+          // devices it had opened when it called open, and how many when the open settled; the devices and the
+          // host inits at the import; the toasts at `seen`.
           + '\n{ const rig = webEngineFake.rig; const open = rig.open; rig.open = () => {'
           + ' window.__rigOpenSaw = { rig: localStorage.getItem(\'lf.rig\'), inFlight: localStorage.getItem(\'lf.rigInFlight\'), devices: webEngineFake.opened.length };'
-          + ' return open(); }; }\n';
+          + ' const answer = open(); const settled = () => void (window.__rigOpenSettled = webEngineFake.opened.length);'
+          + ' answer.then(settled, settled); return answer; };'
+          + ' const imp = rig.import; rig.import = (text) => {'
+          + ' window.__rigImportSaw = { devices: webEngineFake.opened.length, hostInits: window.__hostInits ?? 0 };'
+          + ' return imp(text); };'
+          + ' const seen = rig.seen; rig.seen = (id) => {'
+          + ' window.__rigSeenSaw = window.__lf?.notify.toasts().length ?? null;'
+          + ' return seen(id); }; }\n';
         await route.fulfill({ response, body });
       }),
     ]),
@@ -617,18 +644,20 @@ await probe(async ({ browser, open }) => {
    * storage first), wait for the engine and the MIDI subscription, install the seams, then the first
    * `bindings` report (unless `bindings` is false: the probe emits it later) and the reset frame (`chains`: a
    * WebView reload's; `settings`: what it replays); `holdPaths` holds the restore's scan of its plugins' paths
-   * until `window.__recallProbe.releasePaths()`.
+   * until `window.__recallProbe.releasePaths()`. `whileBoot` runs right after the reload, before the wait for
+   * `devices` device opens (the boot's one by default).
    */
-  async function chainLaunch({ scan = CANNED, seed = null, chains = null, settings = [], bindings = true, holdPaths = false, ...cfg } = {}) {
+  async function chainLaunch({ scan = CANNED, seed = null, chains = null, settings = [], bindings = true, holdPaths = false, whileBoot = null, devices = 1, ...cfg } = {}) {
     await cp.evaluate(([r, c, sd]) => {
       sessionStorage.setItem('recallProbe', JSON.stringify(r));
       sessionStorage.setItem('chainProbe', JSON.stringify(c));
       if (sd) sessionStorage.setItem('chainSeed', JSON.stringify(sd));
     }, [{ scan, holdPaths }, cfg, seed]);
     await cp.reload();
+    await whileBoot?.();
     await cp.waitForFunction(
-      () => '__lf' in window && window.__lf.native.opened.length === 1 && window.__lf.native.midiCalls.some(([c]) => c === 'subscribe'),
-      undefined,
+      (n) => '__lf' in window && window.__lf.native.opened.length === n && window.__lf.native.midiCalls.some(([c]) => c === 'subscribe'),
+      devices,
       { timeout: 30_000 },
     );
     await cp.evaluate(async () => {
@@ -1117,6 +1146,9 @@ await probe(async ({ browser, open }) => {
       return {
         calls: rig.calls.map(([name, ...args]) => (name === 'import' ? [name, JSON.parse(args[0])] : [name, ...args])),
         saw: window.__rigOpenSaw ?? null,
+        openSettled: window.__rigOpenSettled ?? null,
+        importSaw: window.__rigImportSaw ?? null,
+        seenSaw: window.__rigSeenSaw ?? null,
         state: { status: rig.status, volumes: rig.volumes, notice: rig.notice },
         gains: window.__lf.native.sent.filter((c) => 'SetSlotGain' in c).map((c) => c.SetSlotGain),
         adds: window.__chainProbe.adds.length,
@@ -1142,12 +1174,24 @@ await probe(async ({ browser, open }) => {
   const NOTICE = { id: 7, forgotten: ['Fake Amp (VST3)'], pluginsHeld: false };
   const FORGOT = 'Could not restore the plugins. Add a plugin again to load it. x1';
   let r;
+  /** A slot's fader. */
+  const fader = (letter) => cp.getByRole('slider', { name: `Volume for slot ${letter}`, exact: true });
+  /** Wait until the faders show `values`. */
+  const fadersAt = (values) => cp.waitForFunction((want) => ['A', 'B'].every((letter, i) => document.querySelector(`input[aria-label="Volume for slot ${letter}"]`)?.value === want[i]), values, { timeout: 5000 });
+  /** The four send-offs of the legacy sends as a refused batch reads, and a batch's engine commands so. */
+  const alone = ['echo', 'reverb', 'ring', 'ott'].map((id) => JSON.stringify({ SetInputSend: [id, false] })).join(' ');
+  const offs = (items) => items.map((it) => JSON.stringify(it.engine)).join(' ');
+  /** Take the refused batches' log lines (`refused`), or native MIDI's dropped-input line. */
+  const consumeRefused = (refused = true) => {
+    assert.ok(chainApp.consumeConsoleErrors(refused ? /^\[platform\] input batch failed/ : /^\[platform\] native MIDI dropped input: full/).length > 0, 'the refused batches are logged');
+  };
 
   // H1. Absent: one import, equal to the WebView's upgrade of the same v0.8.9 profile (no reported chains),
-  // after the device; no add, no slot level sent; the faders show the import's answer.
+  // after the device opened and `host_init`; no add, no slot level sent; the faders show the import's answer.
   await chainLaunch({ seed: V089, rig: {} });
   r = await rigSettle();
   assert.deepEqual(r.calls, [['open'], ['import', upgradedV089]], 'open, then one import of the upgrade');
+  assert.deepEqual(r.importSaw, { devices: 1, hostInits: 1 }, 'the import comes after the device opened and host_init');
   assert.deepEqual({ adds: r.adds, gains: r.gains, toasts: r.toasts, faders: r.faders }, { adds: 0, gains: [], toasts: [], faders: ['0.8', '1'] });
   const imported = r;
 
@@ -1171,34 +1215,65 @@ await probe(async ({ browser, open }) => {
     assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains, adds: r.adds }, { calls: [['open']], faders, gains: [], adds: 0 }, status);
   }
 
-  // H4. A notice: one toast and one log line on the page, then `seen(id)`; its answer held, a reload shows it
-  // again (every open answers it until `seen`); confirmed, the next page shows nothing. An unreadable marker's
-  // notice tells its own.
+  // H4. A notice: one toast and one log line on the page, the toast before `seen(id)`; its answer held, a reload
+  // shows it again (every open answers it until `seen`); confirmed, the next page shows nothing. An unreadable
+  // marker's notice tells its own.
   await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [1, 1], notice: NOTICE, hold: ['seen'] } });
   r = await rigSettle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Fake Amp \(VST3\); its plugins are forgotten/] });
-  assert.deepEqual({ calls: r.calls, toasts: r.toasts }, { calls: [['open'], ['seen', 7]], toasts: [FORGOT] }, 'one toast, then seen');
+  assert.deepEqual({ calls: r.calls, toasts: r.toasts, seenSaw: r.seenSaw }, { calls: [['open'], ['seen', 7]], toasts: [FORGOT], seenSaw: 1 }, 'one toast, then seen');
   await chainLaunch({ epochBase: 1, rig: held(r) });
   r = await rigSettle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Fake Amp/] });
-  assert.deepEqual({ calls: r.calls, toasts: r.toasts, notice: r.state.notice }, { calls: [['open'], ['seen', 7]], toasts: [FORGOT], notice: null },
-    'a reload before seen shows it again; confirmed now');
+  assert.deepEqual({ calls: r.calls, toasts: r.toasts, notice: r.state.notice, seenSaw: r.seenSaw }, { calls: [['open'], ['seen', 7]], toasts: [FORGOT], notice: null, seenSaw: 1 },
+    'a reload before seen shows it again, then seen; confirmed now');
   await chainLaunch({ epochBase: 2, rig: held(r) });
   r = await rigSettle();
   assert.deepEqual({ calls: r.calls, toasts: r.toasts }, { calls: [['open']], toasts: [] }, 'seen: no notice on the next page');
   await chainLaunch({ seed: V089, rig: { notice: { id: 8, forgotten: [], pluginsHeld: true }, hold: ['seen'] } });
   r = await rigSettle({ recall: [/^\[rig-recall\] the last restore's crash marker could not be read/] });
-  assert.deepEqual({ calls: r.calls.map(([name, x]) => (name === 'import' ? name : [name, x].filter((v) => v !== undefined).join(' '))), toasts: r.toasts },
-    { calls: ['open', 'seen 8', 'import'], toasts: ['Could not restore the plugins this time. Restart BleepLoop to bring them back. x1'] },
+  assert.deepEqual({ calls: r.calls.map(([name, x]) => (name === 'import' ? name : [name, x].filter((v) => v !== undefined).join(' '))), toasts: r.toasts, seenSaw: r.seenSaw },
+    { calls: ['open', 'seen 8', 'import'], toasts: ['Could not restore the plugins this time. Restart BleepLoop to bring them back. x1'], seenSaw: 1 },
     'told once, though the import answers it again while seen is on its way');
 
-  // H5. Before the import answers, the faders show the upgrade's level; a gesture sends `SetSlotGain` once
-  // and holds against the import's answer (the player's level wins).
-  await chainLaunch({ seed: V089, rig: { hold: ['import'] } });
+  // H5. The fader's sources. The amp-sim with no stored level: before the scan the upgrade's level for a plugin
+  // of unknown kind (0.1), after it the scanned effect's (0.9), until the import answers (its own levels,
+  // 0.75 and 0.4). A gesture on slot B sends one plain `SetSlotGain` and outranks every earlier source: a reset
+  // frame after it replaying an older level (0.3), and the import's answer, leave it shown.
+  const { [`lf.pluginGain.0.${keyOf(AMP)}`]: _gain, ...V089_NO_LEVEL } = V089;
+  await chainLaunch({
+    seed: V089_NO_LEVEL,
+    holdPaths: true,
+    rig: { hold: ['import'], reply: { import: { status: 'present', volumes: [0.75, 0.4], notice: null } } },
+  });
+  await cp.waitForFunction(() => window.__recallProbe.calls.paths.length === 1);
+  assert.deepEqual(await faderValues(), ['0.1', '1'], 'before the scan: the upgrade\'s level, the plugin\'s kind unknown');
+  await cp.evaluate(() => window.__recallProbe.releasePaths());
   await cp.waitForFunction(() => window.__lf.native.rig.calls.some(([name]) => name === 'import'));
-  assert.deepEqual(await faderValues(), ['0.8', '1'], 'the upgrade\'s levels before the import answers');
-  await cp.getByRole('slider', { name: 'Volume for slot B', exact: true }).fill('0.5');
+  assert.deepEqual(await faderValues(), ['0.9', '1'], 'after the scan, before the import answers: the upgrade\'s own');
+  await fader('B').fill('0.5');
+  await cp.evaluate((f) => window.__lf.native.emit(f), resetFrame(null, [{ SetSlotGain: [1, 0.3] }]));
+  await cp.waitForTimeout(200);
+  assert.deepEqual(await faderValues(), ['0.9', '0.5'], 'a reset frame after the gesture names an older level: the gesture stays');
   await cp.evaluate(() => window.__lf.native.rig.release('import'));
   r = await rigSettle();
-  assert.deepEqual({ gains: r.gains, faders: r.faders }, { gains: [[1, 0.5]], faders: ['0.8', '0.5'] }, 'one plain SetSlotGain; the gesture kept');
+  assert.deepEqual({ gains: r.gains, faders: r.faders }, { gains: [[1, 0.5]], faders: ['0.75', '0.5'] }, 'one plain SetSlotGain; the gesture kept over the import\'s answer');
+
+  // H5, refused. A gesture the engine refuses (a full command ring) puts the fader back on the last level the
+  // engine took: open's answer while none was taken, then a gesture it took.
+  await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [0.7, 0.6] } });
+  r = await rigSettle();
+  assert.deepEqual(r.faders, ['0.7', '0.6'], 'open\'s levels');
+  await cp.evaluate(() => void (window.__refuse = ['SetSlotGain']));
+  await fader('B').fill('0.2');
+  await fadersAt(['0.7', '0.6']);
+  await cp.evaluate(() => void (window.__refuse = null));
+  await fader('B').fill('0.3');
+  await cp.waitForFunction(() => window.__lf.native.sent.some((c) => c.SetSlotGain?.[1] === 0.3));
+  await cp.evaluate(() => void (window.__refuse = ['SetSlotGain']));
+  await fader('B').fill('0.25');
+  await fadersAt(['0.7', '0.3']);
+  await cp.evaluate(() => void (window.__refuse = null));
+  consumeRefused();
+  assert.deepEqual(await cp.evaluate(() => window.__lf.native.sent.filter((c) => 'SetSlotGain' in c).map((c) => c.SetSlotGain)), [[1, 0.3]], 'only the taken gesture reached the engine');
 
   // H6. The import refused (a failed write) or stale (a replaced page): one log line, nothing else.
   for (const [why, line] of [
@@ -1211,40 +1286,108 @@ await probe(async ({ browser, open }) => {
       { calls: ['open', 'import'], toasts: [], gains: [], adds: 0, status: 'absent' }, why);
   }
 
-  // H7. The open refused: one log line, and the device still opens (`chainLaunch` waits for it); no import.
-  await chainLaunch({ seed: V089, rig: { refuse: { open: 'rig_open: not registered' } } });
-  r = await rigSettle({ recall: [/^\[rig-recall\] could not open the native rig record/] });
-  assert.deepEqual({ calls: r.calls, adds: r.adds, gains: r.gains }, { calls: [['open']], adds: 0, gains: [] });
+  // H7. The open refused, unanswered for 2 s, or answered in a shape D13 does not allow (`decodeRigAnswer`,
+  // which the fake's replies go through as Tauri's do): one log line, the device still opens (`chainLaunch`
+  // waits for it), no import, the faders at unity. An import answered other than `present`: one log line too.
+  for (const [what, rig] of [
+    ['refused', { refuse: { open: 'rig_open: not registered' } }],
+    ['unanswered', { hold: ['open'] }],
+    ['absent with volumes', { reply: { open: { status: 'absent', volumes: [0.5, 0.5], notice: null } } }],
+    ['present without volumes', { reply: { open: { status: 'present', volumes: null, notice: null } } }],
+  ]) {
+    await chainLaunch({ seed: V089, rig });
+    r = await rigSettle({ recall: [/^\[rig-recall\] could not open the native rig record/] });
+    assert.deepEqual({ calls: r.calls, adds: r.adds, gains: r.gains, faders: r.faders }, { calls: [['open']], adds: 0, gains: [], faders: ['1', '1'] }, what);
+  }
+  for (const reply of [{ status: 'absent', volumes: null, notice: null }, { status: 'unreadable', volumes: null, notice: null }]) {
+    await chainLaunch({ seed: V089, rig: { reply: { import: reply } } });
+    r = await rigSettle({ recall: [/^\[rig-recall\] could not import the rig record; nothing restored/] });
+    assert.deepEqual({ calls: r.calls.map(([name]) => name), faders: r.faders }, { calls: ['open', 'import'], faders: ['1', '1'] }, `an import answered ${reply.status}`);
+  }
 
-  // H8. The DEV cutover: `lf.rig` and `lf.rigInFlight` deleted before the open, which comes before the device
-  // opens; the legacy keys untouched.
-  await chainLaunch({ seed: { ...V089, 'lf.rig': TWO_PLUGINS, 'lf.rigInFlight': '[1001]' }, rig: { status: 'present', volumes: [1, 1] } });
+  // H8. The DEV cutover: `lf.rig` and `lf.rigInFlight` deleted before the open; no device opens before the open
+  // settled, the one Audio Settings asks for meanwhile included (both open after it); the legacy keys untouched.
+  await chainLaunch({
+    seed: { ...V089, 'lf.rig': TWO_PLUGINS, 'lf.rigInFlight': '[1001]' },
+    rig: { status: 'present', volumes: [1, 1], hold: ['open'] },
+    devices: 2,
+    whileBoot: async () => {
+      await cp.waitForFunction(() => '__lf' in window && window.__lf.native.rig.calls.some(([name]) => name === 'open'));
+      await cp.evaluate(() => window.__lf.ui.openSettings());
+      const buffer = cp.getByRole('combobox', { name: 'Buffer size in frames' });
+      await buffer.selectOption((await buffer.inputValue()) === '256' ? '512' : '256');
+      await cp.waitForTimeout(300);
+      assert.equal(await cp.evaluate(() => window.__lf.native.opened.length), 0, 'no device opens while the open waits, Audio Settings\' neither');
+      await cp.evaluate(() => window.__lf.native.rig.release('open'));
+    },
+  });
   r = await rigSettle();
   assert.deepEqual(r.saw, { rig: null, inFlight: null, devices: 0 }, 'the old keys gone and no device opened at the open');
+  assert.equal(r.openSettled, 0, 'no device opened before the open settled');
   assert.deepEqual(r.keys, { rig: null, inFlight: null, rigRecall: V089['lf.rigRecall'] }, 'nothing writes them back; the legacy keys kept');
 
-  // H9. The engine refuses every batch carrying the reset's send-off of the legacy sends (a full command ring):
-  // the four `SetInputSend false` go again alone until taken, then stop.
-  await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [1, 1] }, refuse: ['SetInputSend'] });
-  await cp.waitForTimeout(1000);
+  // H9. The engine refuses every batch carrying the reset's send-off of the legacy sends (a full command ring),
+  // past the 10 s log point, while other commands keep coming (each batch busy for a while, so they queue): the
+  // four `SetInputSend false` go again in batches of their own until taken, one log line at 10 s, then stop.
+  await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [1, 1] }, refuse: ['SetInputSend'], sendDelay: 15 });
+  await cp.waitForFunction(() => (window.__refusedBatches ?? []).length > 0);
+  await cp.evaluate(async () => {
+    const { sendEngine } = await import('/src/platform/index.ts');
+    window.__busy = setInterval(() => void sendEngine({ SetMasterVolume: 0.8 }), 3);
+  });
+  await cp.waitForTimeout(10_500);
+  await cp.evaluate(() => clearInterval(window.__busy));
   {
     const refusedBatches = await cp.evaluate(() => window.__refusedBatches ?? []);
-    const offs = (items) => items.map((it) => JSON.stringify(it.engine)).join(' ');
-    const alone = ['echo', 'reverb', 'ring', 'ott'].map((id) => JSON.stringify({ SetInputSend: [id, false] })).join(' ');
-    console.log(JSON.stringify({ refused: refusedBatches.map(offs) }));
     // the reset's batch (the outbox sends a refused batch once more itself), then the resends
     const [reset, ...rest] = refusedBatches.map(offs);
     const resends = rest.filter((b) => b !== reset);
+    console.log(JSON.stringify({ resends: resends.length, merged: resends.filter((b) => b !== alone).slice(0, 3) }));
     assert.ok(reset.includes(alone) && reset !== alone, 'the reset\'s batch carries the send-off among the settings');
-    assert.ok(resends.length >= 2 && resends.every((b) => b === alone), `the four send-offs sent again alone while refused: ${resends.length}`);
+    assert.ok(resends.length >= 4 && resends.every((b) => b === alone), `the four send-offs sent again alone while refused: ${resends.length}`);
+    const lines = chainApp.consumeConsoleErrors(/^\[instrument\] the legacy sends' send-off was refused/);
+    assert.equal(lines.length, 1, `one log line at 10 s: ${JSON.stringify(lines)}`);
   }
   await cp.evaluate(() => void (window.__refuse = null));
   await cp.waitForFunction(() => window.__lf.native.sent.filter((c) => c.SetInputSend?.[1] === false).length === 4, undefined, { timeout: 5000 });
   await cp.waitForTimeout(1000);
   assert.equal(await cp.evaluate(() => window.__lf.native.sent.filter((c) => 'SetInputSend' in c).length), 4, 'taken once, then no more');
-  assert.ok(chainApp.consumeConsoleErrors(/^\[platform\] input batch failed/).length > 0, 'the refused batches are logged');
+  consumeRefused();
   r = await rigSettle();
   assert.deepEqual(r.calls, [['open']]);
+
+  // H9, partly. The engine takes the reset's batch but drops the send-off (refused partly): the four go again
+  // alone until taken.
+  await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [1, 1] }, refusePartly: ['SetInputSend'] });
+  await cp.waitForTimeout(1000);
+  {
+    const [reset, ...resends] = (await cp.evaluate(() => window.__refusedBatches ?? [])).map(offs);
+    assert.ok(reset.includes(alone) && reset !== alone, 'the reset\'s batch, taken partly');
+    assert.ok(resends.length >= 2 && resends.every((b) => b === alone), `the four sent again alone while refused partly: ${resends.length}`);
+    assert.equal(await cp.evaluate(() => window.__lf.native.sent.filter((c) => 'SetInputSend' in c).length), 0, 'none of the four taken yet');
+  }
+  await cp.evaluate(() => void (window.__refusePartly = null));
+  await cp.waitForFunction(() => window.__lf.native.sent.filter((c) => c.SetInputSend?.[1] === false).length === 4, undefined, { timeout: 5000 });
+  await cp.waitForTimeout(500);
+  assert.equal(await cp.evaluate(() => window.__lf.native.sent.filter((c) => 'SetInputSend' in c).length), 4, 'taken once, then no more');
+  consumeRefused(false);
+  await rigSettle();
+
+  // H10. The device stops during the import's scan: nothing is imported (one log line), the faders at unity.
+  await chainLaunch({ seed: V089, rig: {}, holdPaths: true });
+  await cp.waitForFunction(() => window.__recallProbe.calls.paths.length === 1);
+  await cp.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [], status: null }));
+  await cp.evaluate(() => window.__recallProbe.releasePaths());
+  r = await rigSettle({ recall: [/^\[rig-recall\] no audio device runs at the import; nothing imported/] });
+  assert.deepEqual({ calls: r.calls, faders: r.faders, status: r.state.status }, { calls: [['open']], faders: ['1', '1'], status: 'absent' }, 'no import with no device');
+
+  // H11. The import never answers: one log line after 5 s and the handover ends (the boot done), the faders on
+  // the upgrade's levels; a late answer still shows its own.
+  await chainLaunch({ seed: V089, rig: { hold: ['import'], reply: { import: { status: 'present', volumes: [0.7, 0.9], notice: null } } } });
+  r = await rigSettle({ recall: [/^\[rig-recall\] the rig record's import got no answer in 5 s; the handover ends here/] });
+  assert.deepEqual({ calls: r.calls.map(([name]) => name), faders: r.faders }, { calls: ['open', 'import'], faders: ['0.8', '1'] }, 'the handover ends without the answer');
+  await cp.evaluate(() => window.__lf.native.rig.release('import'));
+  await fadersAt(['0.7', '0.9']);
 
   await chainContext.close();
 });

@@ -11,11 +11,13 @@ import {
 import { importRig, openRig, recallChains, recallRig, savedRigPaths, type SavedRig } from '../ui/state/rig-recall';
 import { boundKinds } from '../ui/state/rig-record';
 import { bindingsKnown, firstPageOfLaunch } from '../ui/state/midi';
-import { setNativeHostReady } from '../ui/state/instrument-slots';
+import { nativeHostReady, setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
 import { mintUnitId, platform, type PluginDescriptor } from '../platform';
 import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
 import {
+  engineDevice,
+  holdDeviceOpens,
   legacySendsOff,
   onEngineEvent,
   openEngineDevice,
@@ -42,9 +44,10 @@ import { autosave } from '../session/autosave';
  * same scan of their paths (the native host keeps its chains across a WebView reload, so a reload adds
  * nothing; native MIDI's epoch tells a reload from a new launch, `firstPageOfLaunch`). With the native rig
  * record (`platform.rig.available`, every native chain-mode page) none of that runs: the page opens the
- * record before the device (`openRig`; a failure never stops the audio boot), and only when native has none,
- * once the device and the plugin host run, scans the legacy recall's plugins, upgrades the old keys and
- * imports the result once (`importRig`); the restore is native's. So a
+ * record first, and no device opens before that open settled (`openRig`, `holdDeviceOpens`; a failure never
+ * stops the audio boot), and only when native has none, once the device and the plugin host run, scans the
+ * legacy recall's plugins, upgrades the old keys and imports the result once while the device still runs
+ * (`importRig`); the restore is native's. So a
  * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
  * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
  * and stays silent. Returns the dispose fn.
@@ -62,14 +65,18 @@ export function bootEngine(): () => void {
   let stopAutosave: (() => void) | null = null;
   let disposed = false;
   if (platform.pluginHost.available) setNativeHostReady(false);
+  // The native rig's open goes first, and no device opens before it settled: boot's, nor one Audio Settings
+  // asks for meanwhile (`holdDeviceOpens`; SEAT-B). It never rejects (a refusal or a timeout is null).
+  const rigNative = platform.chain.available && platform.rig.available;
+  const opening = rigNative ? openRig({ levels: showRigLevels }) : Promise.resolve(null);
+  if (rigNative) holdDeviceOpens(opening);
   void (async () => {
     try {
       if (platform.pluginHost.available) {
         await initAudioDeviceSettings();
         await refreshAndPruneDevices();
       }
-      const rigNative = platform.chain.available && platform.rig.available;
-      const opened = rigNative ? await openRig({ levels: showRigLevels }) : null;
+      const opened = await opening;
       await openEngineDevice();
       await whenDevice();
       if (disposed) return;
@@ -100,8 +107,9 @@ export function bootEngine(): () => void {
           sends: storedInputSends(),
           bound: boundKinds(await bindingsKnown()),
         });
+        const ready = () => engineDevice() !== null && (!host || nativeHostReady());
         const restored = rigNative
-          ? importRig(opened, { levels: showRigLevels, scan, snapshot: legacy, mint: mintUnitId })
+          ? importRig(opened, { levels: showRigLevels, scan, snapshot: legacy, mint: mintUnitId, ready })
           : recallChains({
               scan,
               snapshot: async (found, saved) => ({ ...(await legacy(found, saved)), reportedVolumes: reportedSlotGains() }),
