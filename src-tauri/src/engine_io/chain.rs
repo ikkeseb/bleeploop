@@ -75,6 +75,14 @@ pub(crate) struct Plate {
     /// Reload candidate's pending plugin ref and activation info until its install applies.
     pub(crate) reload_plugin: Option<PluginRef>,
     pub(crate) reload_activated: Option<Activated>,
+    /// The install token `EngineHost::unit` minted for the add that created this plate. A plate is
+    /// created per add, so a reused id has a new token: the rig record never carries a fact of one
+    /// unit over to the next under the same id (`lf_rig::PlateView::added_by`).
+    pub(crate) added_by: InstallToken,
+    /// Set at the plate's first applied install, in both places an install applies (`on_seat`'s
+    /// `Applied`, a rebuild's settle), and never cleared: a reload, a rebuild, a withdrawal or a park
+    /// keeps it. The rig record holds a unit only once it applied (`lf_rig::project`, D4).
+    pub(crate) applied: bool,
 }
 
 impl Plate {
@@ -490,9 +498,9 @@ impl Model {
             .is_some_and(|p| p.source)
     }
 
-    /// Add a new plate at plate index `at`. If an un-removed failed-add plate already carries `id`,
-    /// it is cleared first (its id was freed by `failed()`).
-    pub(crate) fn add_plate(&mut self, slot: usize, id: UnitId, spec: &Spec, at: usize, bypassed: bool) {
+    /// Add a new plate at plate index `at`, made by the add whose row `token` names. If an un-removed
+    /// failed-add plate already carries `id`, it is cleared first (its id was freed by `failed()`).
+    pub(crate) fn add_plate(&mut self, slot: usize, id: UnitId, spec: &Spec, at: usize, bypassed: bool, token: InstallToken) {
         // Clear any leftover failed-add plate with the same freed id.
         for s in &mut self.slots {
             s.plates.retain(|p| !(p.id == id && p.is_failed_add()));
@@ -533,8 +541,37 @@ impl Model {
                 seated_source: None,
                 reload_plugin: None,
                 reload_activated: None,
+                added_by: token,
+                applied: false,
             },
         );
+    }
+
+    /// The chains as the rig record reads them (`lf_rig::RigView`, D3): both slots' plates in chain
+    /// order, legacy rows left out, copied with the revision the feed's `chains` carry. The caller takes
+    /// it under `state` and releases the lock before it projects anything (`engine_io/rig`).
+    pub(crate) fn rig_view(&self) -> lf_rig::RigView {
+        let plate = |p: &Plate| lf_rig::PlateView {
+            id: p.id,
+            added_by: p.added_by,
+            kind: p.kind,
+            plugin: p.plugin.as_ref().map(|r| lf_rig::PluginRefView { format: r.format.clone(), path: r.path.clone(), id: r.id.clone() }),
+            name: p.name.clone(),
+            params: if p.kind == UnitKind::Plugin { None } else { p.params.clone() },
+            bypass: p.bypass,
+            source: p.source,
+            state: match p.state {
+                PlateState::Loading => lf_rig::PlateState::Loading,
+                PlateState::Waiting => lf_rig::PlateState::Waiting,
+                PlateState::Seated => lf_rig::PlateState::Seated,
+                PlateState::Leaving => lf_rig::PlateState::Leaving,
+                PlateState::Failed => lf_rig::PlateState::Failed,
+            },
+            applied: p.applied,
+            failed_add: p.is_failed_add(),
+        };
+        let slot = |s: usize| self.slots.get(s).map(|m| m.plates.iter().filter(|p| !p.legacy).map(plate).collect()).unwrap_or_default();
+        lf_rig::RigView { rev: self.rev, slots: [slot(0), slot(1)] }
     }
 
     pub(crate) fn remove_plate(&mut self, slot: usize, id: UnitId) -> bool {
@@ -815,6 +852,7 @@ impl Model {
                                 plate.state = PlateState::Seated;
                             }
                             plate.seated_in_engine = true;
+                            plate.applied = true;
                             plate.seated_source = Some(plate.source);
                             plate.withdrawn = false;
                             plate.parked = false;
@@ -1180,6 +1218,7 @@ impl Model {
                                     }
                                     plate.bypass = bypassed;
                                     plate.seated_in_engine = true;
+                                    plate.applied = true;
                                     plate.seated_source = Some(plate.source);
                                     plate.withdrawn = false;
                                     plate.parked = false;

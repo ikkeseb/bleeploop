@@ -20,6 +20,7 @@ use super::chain_cmds::Chains;
 use super::feed::{FeedHold, FeedThread};
 use super::midi::MidiHost;
 use super::plugins::EngineSlot;
+use super::rig::{self, Rig};
 use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::FeedFrame;
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
@@ -61,6 +62,8 @@ pub struct EngineApp {
     pub(super) tones: Option<ToneStore>,
     /// A session import's tone, parked for the reload of the slot that held its plugin (`plugins`).
     pub(super) reload_tones: Mutex<ToneHandoff<SLOT_COUNT>>,
+    /// Chain mode's rig record (`engine_io/rig`): opened by the page's `rig_open`, closed first at shutdown.
+    pub(super) rig: Arc<Rig>,
 }
 
 impl EngineApp {
@@ -81,6 +84,7 @@ impl EngineApp {
             }
         };
         let tones = data_dir.as_ref().map(|dir| ToneStore::new(dir.join(TONES_DIR)));
+        let rig = Arc::new(Rig::new(data_dir.clone(), rig::files()));
         let started = EngineHost::new(HostConfig::default()).map_err(|e| format!("the device owner thread did not start ({e})")).and_then(|host| {
             match FeedThread::spawn(host.clone()) {
                 Ok(feed) => Ok((host, feed)),
@@ -113,6 +117,7 @@ impl EngineApp {
             chains: Chains::new(),
             tones,
             reload_tones: Mutex::default(),
+            rig,
         }
     }
 
@@ -147,6 +152,8 @@ impl EngineApp {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
+                // The rig record first takes the chains as they stand and writes nothing after (D7).
+                app.rig.close(host);
                 run_shutdown(
                     host,
                     feed,

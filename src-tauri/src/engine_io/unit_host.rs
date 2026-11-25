@@ -1998,7 +1998,7 @@ impl EngineHost {
             self.core.gate_dropped.fetch_add(dropped, Relaxed);
         }
         let token = state.table.mint_token();
-        state.model.add_plate(slot, id, &spec, at, bypassed);
+        state.model.add_plate(slot, id, &spec, at, bypassed, token);
         state.table.insert(Row {
             token,
             id,

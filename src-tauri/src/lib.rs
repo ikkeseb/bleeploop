@@ -411,6 +411,14 @@ pub fn run() {
             engine_io::chain_cmds::chain_tone_import,
             #[cfg(all(windows, debug_assertions))]
             engine_io::chain_cmds::chain_tone_forget,
+            // Chain mode's rig record (`engine_io/rig`): the page's handover, DEV only in lockstep with the
+            // `chain_*` commands until chains reach players.
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::rig::rig_open,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::rig::rig_import,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::rig::rig_seen,
             // Native MIDI (`engine_io/midi_mode.rs`): the UI's one ordered input path (its engine
             // commands and note input, synchronous), its subscription, and the learn UI's calls.
             #[cfg(windows)]

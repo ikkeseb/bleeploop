@@ -30,6 +30,7 @@
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms, the scope's columns), on its own thread |
 //! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands, shutdown on exit |
 //! | `midi_mode` | native MIDI's Tauri commands: the UI's one ordered input path (`input_send`: its engine commands, through native MIDI's routing, and its note input), the document's subscription and input epoch (`midi_subscribe`), the learn UI's `midi_*` calls |
+//! | `rig` | chain mode's rig record on disk (`Rig`, one per process): its files and lock, the page's handover (`rig_*`), the writer's tick and the close at shutdown; its rules are `crates/lf-rig` |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
@@ -167,6 +168,9 @@ pub mod mode;
 mod owner;
 pub(crate) mod pipes;
 mod plugins;
+// Its commands are registered in DEV builds only (`lib.rs`); release keeps the close for shutdown.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub mod rig;
 #[cfg(debug_assertions)]
 pub(crate) mod probe;
 mod session;
