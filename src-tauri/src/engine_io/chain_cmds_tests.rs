@@ -5210,10 +5210,10 @@ fn d5_a_setup_timeout_is_unresolved_and_its_latch_sets_when_the_owner_ends() {
         }
         other => panic!("expected an unresolved setup, got {other:?}"),
     };
-    assert!(
-        entered.load(Ordering::SeqCst) && !left.load(Ordering::SeqCst),
-        "the owner is in its setup at the answer"
-    );
+    assert!(!left.load(Ordering::SeqCst), "the owner has not left its setup at the answer");
+    // A starved runner can answer the 300 ms wait before the owner reaches the setup at all (CI
+    // 45718706541): the answer is the same, so the test waits for the setup rather than assume it.
+    wait_until(PATIENCE, "the owner enters its setup", || entered.load(Ordering::SeqCst));
     assert_eq!(token, added_by(host, 360));
     assert!(!chains.exited(token), "the owner is still in its setup");
     assert!(chains.affinity_held(&amp.path), "a setup timeout leaks its plugin file's affinity");
