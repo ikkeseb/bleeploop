@@ -125,8 +125,21 @@ pub enum SubmitError {
     PortFull,
     /// A reload candidate took over, or this reload candidate was cancelled: send nothing and only receive.
     Superseded,
-    /// A newer source already heads the slot after a rebuild: retire the unit's tone and tear down.
+    /// A newer source already seats at the slot's head after a rebuild: retire the unit's tone and tear
+    /// down.
     Replaced,
+    /// A newer source's install is queued after a rebuild and the engine has not answered it yet (it can
+    /// still refuse it), whatever is queued behind that install: keep the unit and retry. Should that
+    /// install apply, the unit is dismissed (`Back::Dismissed`); refused, the retry seats it.
+    Behind,
+    /// The host answers what the engine would have, had a rebuild not emptied it: an effect that sat
+    /// behind another seat, or behind a newer source now seated, and came back a source is refused its
+    /// place (`SeatRefusal::Placement`, `docs/unit-contract.md` §3). The owner parks, as on
+    /// [`Back::Refused`].
+    Refused(SeatRefusal),
+    /// [`UnitHost::submit_before`]'s deadline passed before the install could enter the port: nothing
+    /// was sent.
+    Late,
     /// A removal is pending or settled for this row: keep the unit and wait for the removal's terminal.
     Removing,
     /// A reload candidate stands for this id: keep a pending restart and retry when the reload ends.
@@ -244,9 +257,11 @@ pub(crate) struct Row {
     /// The host's shutdown removed this row ([`EngineHost::remove_unit_at_shutdown`]) and its removal is
     /// the one that ends it: its owner keeps `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]), so
     /// the next launch's restore under the id finds the unit's own tone (`docs/unit-contract.md` § 1).
-    /// Set under the state lock where that removal is accepted, only on a row no other removal or
-    /// replacement has taken; cleared where another cause ends the row first (a source replacement, a
-    /// refused removal). Every other end retires the tone into the slot's file.
+    /// Set under the state lock where that removal is accepted, before any terminal `Back` it causes, on
+    /// every row it may end that no other removal or replacement has taken: the seated row and a live
+    /// same-id reload candidate queued ahead of it (whose install, applied, the removal then ends). Cleared
+    /// where another cause ends the row first (a source replacement, a refused removal), and never set
+    /// later: a promotion carries nothing over. Every other end retires the tone into the slot's file.
     pub(crate) keep_tone: bool,
 }
 
@@ -270,7 +285,36 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
+    /// The unreleased rows an install of which has applied in some engine (its `Event::Seat` drained
+    /// `Applied`, or its box came back with a seated verdict: removed, replaced, withdrawn, evicted),
+    /// read by [`UnitHost::ever_applied`]. A row's token leaves at its release.
+    applied: BTreeSet<InstallToken>,
+    /// Why the engine refused a reload candidate, by its token: its row's `settled` goes at `release`,
+    /// often before the reload's waiter polls (`chain_cmds::reload_outcome`), which reads the cause
+    /// here. Noted only while the candidate is live (a refusal that comes after another cause ended it,
+    /// such as a different-id source replacing its unit first, has no reader), and kept, never evicted
+    /// by count, until the reload has no reader left ([`Table::forget_reload_refusal`]: the waiting call
+    /// as it returns, the sweep that retires a candidate no call waits for, or a call that returns
+    /// before leaving it to either). A cause noted after its call returned at shutdown can stay.
+    reload_refusals: BTreeMap<InstallToken, SeatRefusal>,
+    /// The installs whose submit found the slot's port full, oldest first, each with when its owner
+    /// last retried ([`UnitHost::submit`]): no later push on that slot (another install, a removal, a
+    /// move, a withdrawal) takes the last places they need ([`Table::port_claimed_ahead`]). A claim
+    /// stands only while its owner keeps retrying: one its owner has not renewed within
+    /// [`PORT_CLAIM_LEASE`] lapses (an owner held in a plugin call, re-activating after a restart, or
+    /// gone in a panic before its `release`). It also ends when its install enters the port, its submit
+    /// ends another way, its row ends or leaves, its owner parks or fails, or a rebuild replaces the
+    /// ports; none holds back the shutdown's removals.
+    port_claims: VecDeque<(InstallToken, Instant)>,
 }
+
+/// How long a claim on a full port ([`Table::port_claimed_ahead`]) stands without its owner's retry:
+/// owners retry every 20 ms (`OWNER_POLL`, `BUILTIN_POLL`), so ten polls.
+pub(crate) const PORT_CLAIM_LEASE: Duration = Duration::from_millis(200);
+
+/// The places of one slot's port: lf-engine's `MSG_CAPACITY` (`slots.rs`), which it does not export.
+/// Pinned by `chain_tests.rs` `port_places_matches_the_engines_slot_port`.
+pub(crate) const PORT_PLACES: usize = 2 * MAX_UNITS;
 
 impl Table {
     pub(crate) fn new() -> Table {
@@ -281,7 +325,75 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
+            applied: BTreeSet::new(),
+            reload_refusals: BTreeMap::new(),
+            port_claims: VecDeque::new(),
         }
+    }
+
+    /// Note that an install of row `token` applied in some engine ([`Table::applied`]).
+    fn note_applied(&mut self, token: InstallToken) {
+        if self.row(token).is_some_and(|r| !r.released) {
+            self.applied.insert(token);
+        }
+    }
+
+    /// Keep why the engine refused reload candidate `token` past its row's release (its first cause).
+    fn note_reload_refusal(&mut self, token: InstallToken, why: SeatRefusal) {
+        self.reload_refusals.entry(token).or_insert(why);
+    }
+
+    /// Why the engine refused reload candidate `token`, if it did (kept past the row's release).
+    pub(crate) fn reload_refusal(&self, token: InstallToken) -> Option<SeatRefusal> {
+        self.reload_refusals.get(&token).copied()
+    }
+
+    /// The reload of candidate `token` has no reader left: drop its refusal's cause.
+    pub(crate) fn forget_reload_refusal(&mut self, token: InstallToken) {
+        self.reload_refusals.remove(&token);
+    }
+
+    /// Whether a push on `slot` by `token` (`None`: a push with no claim of its own) must leave the
+    /// port's free places to the installs that claimed them earlier: true while the places the model
+    /// can count as free (`PORT_PLACES` less `queued`, the slot's messages not yet answered back,
+    /// never more than the port has free) are no more than the live claims ahead of it. A claimant
+    /// with none ahead pushes. Drops claims that lapsed or whose row ended first.
+    pub(crate) fn port_claimed_ahead(&mut self, slot: usize, token: Option<InstallToken>, queued: usize) -> bool {
+        let now = Instant::now();
+        let rows = &self.rows;
+        let live = |t: InstallToken| {
+            rows.iter()
+                .find(|r| r.token == t)
+                .filter(|r| !r.released && !r.abandoned && !r.superseded && !r.leave.is_leaving())
+        };
+        self.port_claims
+            .retain(|&(t, renewed)| live(t).is_some() && now.saturating_duration_since(renewed) < PORT_CLAIM_LEASE);
+        let ahead = self
+            .port_claims
+            .iter()
+            .take_while(|&&(t, _)| Some(t) != token)
+            .filter(|&&(t, _)| live(t).is_some_and(|r| r.slot == slot))
+            .count();
+        ahead > 0 && PORT_PLACES.saturating_sub(queued) <= ahead
+    }
+
+    /// `token`'s submit found its slot's port full (or its places claimed ahead of it): it keeps its
+    /// place in line, and the retry renews its lease.
+    pub(crate) fn claim_port(&mut self, token: InstallToken) {
+        let now = Instant::now();
+        match self.port_claims.iter_mut().find(|(t, _)| *t == token) {
+            Some((_, renewed)) => *renewed = now,
+            None => self.port_claims.push_back((token, now)),
+        }
+    }
+
+    pub(crate) fn release_port_claim(&mut self, token: InstallToken) {
+        self.port_claims.retain(|&(t, _)| t != token);
+    }
+
+    /// A rebuild replaced the ports: every claim was on a port that is gone.
+    pub(crate) fn clear_port_claims(&mut self) {
+        self.port_claims.clear();
     }
 
     pub(crate) fn mint_token(&mut self) -> InstallToken {
@@ -335,9 +447,15 @@ impl Table {
     }
 
     pub(crate) fn has_reload_row(&self, id: UnitId) -> bool {
+        self.live_reload_row_for_id(id).is_some()
+    }
+
+    /// The live same-id reload candidate for `id` (not released, not superseded), if one stands.
+    pub(crate) fn live_reload_row_for_id(&self, id: UnitId) -> Option<InstallToken> {
         self.rows
             .iter()
-            .any(|r| r.id == id && r.is_reload && !r.released && !r.superseded)
+            .find(|r| r.id == id && r.is_reload && !r.released && !r.superseded)
+            .map(|r| r.token)
     }
 
     pub(crate) fn has_other_reload_row(&self, id: UnitId, exclude_token: InstallToken) -> bool {
@@ -423,6 +541,7 @@ impl Table {
     }
 
     pub(crate) fn mark_seated(&mut self, token: InstallToken, gen: u64) {
+        self.note_applied(token);
         if let Some(row) = self.row_mut(token) {
             if row.in_engine == (RowEngineState::Queued { generation: gen }) {
                 row.in_engine = RowEngineState::Seated { generation: gen };
@@ -431,15 +550,14 @@ impl Table {
     }
 
     /// Promote reload candidate `token` to the active row and permanently mark its specific
-    /// predecessor row superseded (clearing any pending removal state on that predecessor).
+    /// predecessor row superseded (clearing any pending removal state on that predecessor). A shutdown's
+    /// removal pending on the predecessor moves to the candidate (`transfer_remove_to_promoted`); its keep
+    /// does not: the candidate got its own where that removal was accepted ([`Row::keep_tone`]), and a
+    /// copy here could revive one a replacement cleared after the candidate's terminal `Back`.
     pub(crate) fn promote_reload(&mut self, token: InstallToken) {
-        let mut keep_tone = false;
         if let Some(pred_tok) = self.reload_predecessor.remove(&token) {
             if let Some(pred) = self.row_mut(pred_tok) {
                 pred.superseded = true;
-                // A shutdown's removal pending on the predecessor moves to the candidate
-                // (`transfer_remove_to_promoted`), and its keep with it.
-                keep_tone = std::mem::take(&mut pred.keep_tone);
                 if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut pred.leave, Leave::Staying) {
                     forget_back(old);
                 }
@@ -447,8 +565,8 @@ impl Table {
         }
         if let Some(row) = self.row_mut(token) {
             row.is_reload = false;
-            row.keep_tone |= keep_tone;
         }
+        self.note_applied(token);
     }
 
     /// End a live reload candidate without touching any predecessor row. Returns `true` if `token`
@@ -479,13 +597,15 @@ impl Table {
     }
 
     pub(crate) fn record_settled(&mut self, op: Op, state: OpState) -> bool {
-        if let Some(row) = self.row_mut(op.install()) {
-            if !row.released {
-                row.settled.insert(op.n(), state);
-                return true;
-            }
+        let Some(row) = self.row_mut(op.install()) else { return false };
+        if row.released {
+            return false;
         }
-        false
+        row.settled.insert(op.n(), state);
+        if let (true, false, OpState::Refused(why)) = (row.is_reload, row.superseded, state) {
+            self.note_reload_refusal(op.install(), why);
+        }
+        true
     }
 
     pub(crate) fn note_remove_settled(&mut self, token: InstallToken, op_n: u64, state: OpState) {
@@ -712,11 +832,19 @@ impl Table {
             }
             return;
         }
+        if matches!(ret.left, Left::Removed | Left::Replaced | Left::Withdrawn | Left::Evicted) {
+            self.applied.insert(ret.token);
+        }
 
         // A reload candidate's install refusal always surfaces as `Back::Refused`, never `Superseded`
         // or `Removed`, even if `Event::Seat(Refused)` drained first or a removal was queued behind it.
         if self.rows[pos].is_reload {
             if let Left::Refused(why) = ret.left {
+                // Kept for the reload's reader only while the candidate is live: one another cause ended
+                // first (its unit replaced or removed ahead of it) was read as that, or will be.
+                if !self.rows[pos].superseded {
+                    self.note_reload_refusal(ret.token, why);
+                }
                 self.rows[pos].mailbox.push_back(Back::Refused { unit: ret.unit, why });
                 return;
             }
@@ -870,6 +998,7 @@ impl Table {
     /// concurrent `wait_op` caller can still read it.
     pub(crate) fn release_row(&mut self, token: InstallToken) -> Option<(u64, OpState)> {
         self.reload_predecessor.remove(&token);
+        self.applied.remove(&token);
         let pos = self.rows.iter().position(|r| r.token == token)?;
         let row = &mut self.rows[pos];
         row.released = true;
@@ -1372,9 +1501,41 @@ impl UnitHost {
     /// seated one; a reload candidate: its own id) and the bypass are the model's (a same-id reseat
     /// sends the model's latest bypass, never a stale one). Index and push happen in one port-locked
     /// section. Stale terms, a full port, a superseded row, closing, or no engine: the box comes back.
+    ///
+    /// A full port keeps this install's place ([`SubmitError::PortFull`], `Table::port_claims`): while
+    /// its owner retries, another push on the slot is refused as a full port when it would take a place
+    /// the claim needs (never the shutdown's removals), so a later edit never leaves it without room,
+    /// whether or not the add's command still waits.
     pub fn submit(&self, unit: Unit, terms: Terms) -> Result<Op, (Unit, SubmitError)> {
+        self.submit_inner(unit, terms, None)
+    }
+
+    /// [`UnitHost::submit`], sending nothing once `deadline` has passed ([`SubmitError::Late`]): the
+    /// deadline is read under the port's lock, where the push happens, so an owner delayed on its way
+    /// here (a lock, a box built again) never sends after its caller stopped waiting.
+    pub fn submit_before(&self, unit: Unit, terms: Terms, deadline: Instant) -> Result<Op, (Unit, SubmitError)> {
+        self.submit_inner(unit, terms, Some(deadline))
+    }
+
+    fn submit_inner(&self, unit: Unit, terms: Terms, deadline: Option<Instant>) -> Result<Op, (Unit, SubmitError)> {
         let mut port_guard = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        let res = self.submit_locked(&mut port_guard, &mut state, unit, terms, deadline);
+        match &res {
+            Err((_, SubmitError::PortFull)) => state.table.claim_port(self.install),
+            _ => state.table.release_port_claim(self.install),
+        }
+        res
+    }
+
+    fn submit_locked(
+        &self,
+        port_guard: &mut Option<SlotPort>,
+        state: &mut HostState,
+        unit: Unit,
+        terms: Terms,
+        deadline: Option<Instant>,
+    ) -> Result<Op, (Unit, SubmitError)> {
         if let Some(port) = port_guard.as_mut() {
             state.reap_port(self.slot, port);
         }
@@ -1428,34 +1589,58 @@ impl UnitHost {
         };
         let seated_in_engine = plate.seated_in_engine;
         let withdrawn = plate.withdrawn;
-        let my_added_rev = plate.added_rev;
+        let was_effect = plate.seated_source == Some(false);
 
         let (at, replaces) = if is_reload {
             (0, Some(self.id))
         } else if seated_in_engine && withdrawn {
+            // A withdrawn seat reseats where it stands, but an install queued ahead that takes that
+            // seat (a newer source's `replaces`) ends this unit if the engine applies it: wait for its
+            // answer (`Behind`), as an evicted source does, or the reseat would follow it into a slot
+            // that no longer holds the seat (whatever is queued behind it, a removal of the newer one
+            // included) and sit there with no plate.
+            if state.model.seat_taken_by_queued_install(self.slot, self.id) {
+                return Err((unit, SubmitError::Behind));
+            }
             (0, None)
         } else if is_source {
-            let head = state.model.head_source_id(self.slot, Some(self.id));
-            if let Some(head_id) = head {
-                // An evicted/older source retrying after a rebuild must never replace a newer
-                // source that has already queued or seated in the new engine.
-                let head_is_newer = state
-                    .model
-                    .find_plate(head_id)
-                    .is_some_and(|(_, hp)| hp.added_rev > my_added_rev);
-                if head_is_newer {
+            // An effect that came back a source with no seat in this engine (a rebuild took it): the
+            // engine would refuse its withdrawn seat that role behind another seat, and the empty
+            // engine cannot, so the host does, by the plates' order. At the head it may change role.
+            if was_effect && state.model.live_plate_ahead(self.slot, self.id, &state.table) {
+                return Err((unit, SubmitError::Refused(SeatRefusal::Placement)));
+            }
+            // An older source retrying after a rebuild never replaces a newer one. Seated, the newer
+            // one ended this one. Its install only queued (whatever is queued behind it, its own
+            // removal included), the engine can still refuse it, so this one waits for that answer:
+            // judged on the queue itself, never on the projected head, which a queued removal empties.
+            // An effect back as a source was never the slot's source: a newer one seated refuses it
+            // its place, as the engine would behind that head, and ends nothing of it.
+            match state.model.newer_source(self.slot, self.id) {
+                Some(false) => return Err((unit, SubmitError::Behind)),
+                Some(true) if was_effect => return Err((unit, SubmitError::Refused(SeatRefusal::Placement))),
+                Some(true) => {
                     if let Some(row) = state.table.row_mut(self.install) {
                         row.superseded = true;
                     }
                     state.model.remove_plate(self.slot, self.id);
                     return Err((unit, SubmitError::Replaced));
                 }
+                None => {}
             }
-            (0, head)
+            (0, state.model.head_source_id(self.slot, Some(self.id)))
         } else {
             (state.model.engine_index_for_insert(self.slot, self.id), None)
         };
 
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err((unit, SubmitError::Late));
+        }
+        // The port's last free places belong to the installs that found it full first.
+        let queued = state.model.queued(self.slot);
+        if state.table.port_claimed_ahead(self.slot, Some(self.install), queued) {
+            return Err((unit, SubmitError::PortFull));
+        }
         if let Err(unit) = port.install_at(self.id, self.install, at, bypassed, replaces, unit) {
             return Err((unit, SubmitError::PortFull));
         }
@@ -1535,7 +1720,8 @@ impl UnitHost {
         if row.is_reload || row.in_engine.generation() != Some(gen) {
             return Err(SubmitError::Stale);
         }
-        if !port.withdraw(self.id) {
+        let queued = state.model.queued(self.slot);
+        if state.table.port_claimed_ahead(self.slot, Some(self.install), queued) || !port.withdraw(self.id) {
             return Err(SubmitError::PortFull);
         }
         if let Some(row) = state.table.row_mut(self.install) {
@@ -1590,6 +1776,19 @@ impl UnitHost {
         state.table.row(self.install).is_some_and(|r| r.keep_tone)
     }
 
+    /// Whether this install is a reload's candidate ([`EngineHost::reload_unit`]), not an add. Read it
+    /// before the install can apply: a promotion makes the candidate the id's active row.
+    pub fn is_reload(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.row(self.install).is_some_and(|r| r.is_reload)
+    }
+
+    /// Whether an install of this row has applied in some engine ([`Table::applied`]), told or not.
+    pub fn ever_applied(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.applied.contains(&self.install)
+    }
+
     /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or
     /// [`Leave::Settled`]): a stopping owner waits for that box, never for a seated unit's.
     pub fn removal_in_flight(&self) -> bool {
@@ -1632,6 +1831,8 @@ impl UnitHost {
         if row.superseded || row.released || row.abandoned || row.is_reload || row.leave.is_leaving() {
             return;
         }
+        // A parked owner stops retrying: it holds no place on the port.
+        state.table.release_port_claim(self.install);
         state.model.mark_parked(self.slot, self.id, why);
     }
 
@@ -1642,19 +1843,24 @@ impl UnitHost {
         if row.superseded || row.released || row.abandoned {
             return;
         }
-        if row.is_reload {
+        let (is_reload, leaving) = (row.is_reload, row.leave.is_leaving());
+        state.table.release_port_claim(self.install);
+        if is_reload {
             if state.table.fail_reload(self.install) {
                 state.model.cancel_reloading(self.slot, self.id);
             }
             return;
         }
-        if row.leave.is_leaving() || state.model.has_pending_remove(self.id) {
+        if leaving || state.model.has_pending_remove(self.id) {
             return;
         }
         if let Some(row) = state.table.row_mut(self.install) {
             row.id_freed = true;
         }
         state.model.mark_failed(self.slot, self.id, why);
+        drop(state);
+        #[cfg(test)]
+        id_freed(self.id);
     }
 
     /// The owner gives up on its unit: its box, if it ever comes, leaks.
@@ -1676,6 +1882,73 @@ impl UnitHost {
         if let Some((op_n, op_state)) = state.table.release_row(self.install) {
             state.model.record_unowned_settled(op_n, op_state);
         }
+        drop(state);
+        #[cfg(test)]
+        id_freed(self.id);
+    }
+}
+
+/// Test-only: one-shot hooks by unit id, each called on the owner's thread the first time
+/// [`UnitHost::failed`] or [`UnitHost::release`] has let go of the state lock under that id, the
+/// points where an owner frees its id. A test holds the owner there while another add takes the id.
+#[cfg(test)]
+pub(crate) static ON_ID_FREED: std::sync::Mutex<Vec<(UnitId, Arc<dyn Fn() + Send + Sync>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn id_freed(id: UnitId) {
+    let hook = {
+        let mut hooks = ON_ID_FREED.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.iter().position(|(i, _)| *i == id).map(|pos| hooks.remove(pos).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: called on this thread by `EngineHost::remove` with the removed id the moment the call
+    /// lets go of its slot's port lock ([`RemovePortGuard`]), the last host lock it holds: every line of
+    /// the call that runs unguarded runs after it. A test holds the caller there while the engine
+    /// applies the removal.
+    pub(crate) static AFTER_REMOVE_UNLOCKED: std::cell::RefCell<Option<Box<dyn FnMut(UnitId)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: `EngineHost::remove`'s slot port guard. The state lock is taken under it, so it is
+/// released before or with it (a scope's end drops the later guard first); dropping this one, however
+/// the call drops it, releases the port lock and then calls [`AFTER_REMOVE_UNLOCKED`].
+#[cfg(test)]
+struct RemovePortGuard<'a> {
+    guard: Option<MutexGuard<'a, Option<SlotPort>>>,
+    id: UnitId,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for RemovePortGuard<'_> {
+    type Target = Option<SlotPort>;
+    fn deref(&self) -> &Option<SlotPort> {
+        self.guard.as_ref().expect("held until drop")
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for RemovePortGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<SlotPort> {
+        self.guard.as_mut().expect("held until drop")
+    }
+}
+
+#[cfg(test)]
+impl Drop for RemovePortGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        AFTER_REMOVE_UNLOCKED.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(self.id);
+            }
+        });
     }
 }
 
@@ -1825,7 +2098,10 @@ impl EngineHost {
                 .map(|(s, _)| s)
                 .ok_or_else(|| format!("unit {id} not found"))?
         };
-        let mut port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
+        let port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        let port_guard = RemovePortGuard { guard: Some(port_guard), id };
+        let mut port_guard = port_guard;
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
             state.reap_port(slot, port);
@@ -1843,11 +2119,15 @@ impl EngineHost {
         let owner_token = state.table.active_row_for_id(id).map(|r| r.token);
         // The shutdown's keep binds to its own removal, set below where it is accepted and under the same
         // lock as the terminal `Back`, and only on a row no other cause has begun to take: a row already
-        // leaving (a player's removal, a replacement whose box came back) keeps its retire.
-        let keep_tone = keep_tone
-            && owner_token
-                .and_then(|tok| state.table.row(tok))
-                .is_some_and(|r| matches!(r.leave, Leave::Staying));
+        // leaving (a player's removal, a replacement whose box came back) keeps its retire. A same-id reload
+        // candidate queued ahead of this removal is a row it may end (the candidate's install applies
+        // first): it binds there too, before the candidate's box can come back ahead of its promotion.
+        let staying = |tok: InstallToken| state.table.row(tok).is_some_and(|r| matches!(r.leave, Leave::Staying));
+        let candidate_keep = keep_tone
+            .then(|| state.table.live_reload_row_for_id(id))
+            .flatten()
+            .filter(|&tok| staying(tok));
+        let keep_tone = keep_tone && owner_token.is_some_and(staying);
 
         if failed_no_seat {
             state.model.remove_plate(slot, id);
@@ -1904,7 +2184,12 @@ impl EngineHost {
         }
 
         let port = port_guard.as_mut().expect("checked above");
-        if !port.remove(id) {
+        // The last free places of this port go to the installs waiting for room (`Table::port_claims`);
+        // the unit's own claim never holds its removal back, and none holds the shutdown's, sent once
+        // with no retry (every claimant's next submit answers `Closing` and ends its claim).
+        let queued = state.model.queued(slot);
+        let claimed = !self.core.closing.load(Acquire) && state.table.port_claimed_ahead(slot, owner_token, queued);
+        if claimed || !port.remove(id) {
             return Err(format!("slot {slot}'s port is full"));
         }
         let gen = self.core.engine_gen.load(Acquire);
@@ -1915,6 +2200,9 @@ impl EngineHost {
                     row.keep_tone = true;
                 }
             }
+        }
+        if let Some(row) = candidate_keep.and_then(|tok| state.table.row_mut(tok)) {
+            row.keep_tone = true;
         }
         state.model.mark_leaving(slot, id);
         let op = state.model.mint_op(owner_token.unwrap_or(0), gen, slot);
@@ -1950,7 +2238,8 @@ impl EngineHost {
             return Err("no audio device is open".to_string());
         };
         let (to_plate, to_engine) = state.model.translate_move(slot, id, to)?;
-        if !port.move_to(id, to_engine) {
+        let queued = state.model.queued(slot);
+        if state.table.port_claimed_ahead(slot, None, queued) || !port.move_to(id, to_engine) {
             return Err(format!("slot {slot}'s port is full"));
         }
         let gen = self.core.engine_gen.load(Acquire);

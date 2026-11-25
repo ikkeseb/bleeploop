@@ -14,6 +14,17 @@
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
+- Chain tones: an add's files and its import token do not follow every outcome (read from source, never
+  run). Files left behind an add that answered `Err`: a unit that applied a seat before it left keeps its
+  tone's end as any seated unit (the shutdown's keep, also after `Chains::add_plugin`'s `outcome_err`), and
+  an owner thread that fails to spawn (`spawn_unit_with`) drops its `ToneKeeper` unrun, so a redeemed import
+  stays in `unit-<id>.tone`; each is a file under an id no rig record may name. The token: a 15 s setup
+  timeout parks it again before the owner's cleanup, so a second id can redeem it while the first file
+  exists; a 30 s `Unanswered` add that later ends in an undo deletes the file without parking it (the
+  import is lost); an applied add that answers `Err` keeps or retires its file and parks it too (two
+  copies); a disk failure inside `redeem` loses it (pre-existing). Next check: a `chain_cmds_tests.rs` case
+  per end on `Chains::add` with a gated fake (`unload_all` from `before_register_hook`; a failing spawn as in
+  `p4f1_2a`). The native rig move, whose restore reads the outcome by token, is where the fix lands.
 - An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
   that command's drop of the handle still tears the plugin down (read from source, never run; no
   command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on
@@ -178,6 +189,34 @@
   engine-side fence (the command carrying its install, or a removal dropping its id's queued commands).
   Next check: a test that queues a command for a later frame, removes the unit and re-adds one under
   the same id before that frame.
+- A plugin add's first push has no bound of its own (DEV chain mode, read from source, never run; found
+  settling the chain host edges): its call answers `Unanswered` after `LOAD_TIMEOUT` twice and releases
+  the slot's order, while an owner held up before that push (a rebuild between its load and its claim
+  makes it re-activate the plugin first, `host/unit_owner.rs` `submit_owed`) still pushes afterwards, so a
+  later edit on the slot can enter the port first. A built-in's first push is bounded under the port lock
+  (`UnitHost::submit_before`, counted from where its caller's wait starts); a plugin's could take the
+  same bound. Next check: a
+  `chain_cmds_tests.rs` test whose fake plugin's re-activation (gated, as the edge tests do) outlasts the
+  add's two waits, then a move on that slot: read which entered the port first.
+- A source whose role flips across a re-activation can still leave a slot with no playable source (DEV
+  chain mode, read from source by the edges review's third round, never run; the edges rounds stopped
+  there). (a) A plain `Withdraw(A)` whose box reaches the owner before the model reads the withdrawal: with
+  `Install(B, replaces A)` and `Remove(B)` already queued and A back as an effect, A skips both `Behind`
+  checks (`unit_host.rs` ~:1572) and can seat after B with no plate to remove it from. (b) A withdrawn
+  source back as an effect, refused on latency and parked: `head_source_id` (`chain.rs` ~:170) reads the
+  reported role, so a new source B is sent without `replaces: A` and the engine refuses it `Placement`;
+  after a rebuild, an A whose effect reseat is still queued when B seats is skipped by the role filter
+  (`chain.rs` ~:967) and keeps its owner and tone. (c) An effect E added before source A, which took the
+  head: after a rebuild A seats first with a `Remove` queued; `live_plate_ahead` skips A but
+  `newer_source` (`chain.rs` ~:441) still counts it, so E parks `Placement` and the slot loses both
+  sources when A goes. Also: a late `Seat` answer can make a move or remove answer `PortFull` with room in
+  the port. Tests that would not catch a wrong fix: the claim tests never try free places equal to the
+  claims (`<` for `<=` passes); the `Waiting` claim test can pass with the claim given only to
+  `ever_seated` owners (force `Unsent`; a CI stall past the 200 ms lease makes it falsely red); the
+  owner's queued-removal test can remove A before E's reseat; the first-push deadline tests hold only the
+  port lock; the no-waiter refusal test injects `Unanswered` instead of timing a `Waiting` caller out.
+  Next check: one `chain_tests.rs` test per edge (a)-(c) on `TestDevice` with the role flip scripted,
+  each reading the engine's chain and the plates after the last removal; then the test gaps above.
 - `tauriChainHost`'s per-slot queue (`src/platform/host.tauri.ts` `onChainSlot`) waits for each call to
   settle, so a remove or reload held across a take keeps the slot's later calls waiting until the take
   ends, while the native order mutex was already released at `waiting` (`chain_cmds.rs`
@@ -187,39 +226,6 @@
   accepts the add), so it can run ahead of a later add queued on that slot. Next check: a probe that
   queues an add behind a held remove during a take and times the add, then one that removes a loading
   unit with a second add queued behind it.
-- Chain host edges to settle before chains reach players (a cross-family review of the chain
-  commands, read from source, none reproduced; the chain host runs only in DEV builds today):
-  a) an evicted source that answers `Replaced` (a newer source queued after a rebuild) retires its tone
-  before the engine has taken the newer one, which the engine can still refuse (latency), leaving the
-  slot with neither; b) a source parked after a failed reactivation is not replaced by a newer source
-  that seats while it is out (the projected head omits it), so it keeps its owner and tone until it
-  retries; c) a plugin owner retrying `PortFull`
-  after its add's command returned can lose its place to a later edit on that slot; d) a built-in add
-  answered `waiting` whose box a rebuild returns after the 10 s first-answer bound is dropped instead of
-  offered to the new engine; e) a reload the engine refused can log a generic cause when its row is
-  released before the waiter polls. Sources and built-in factories arrive with E3. Next check: one
-  `chain_tests.rs`/`chain_cmds_tests.rs` test per letter, red first, before chains reach players.
-- A clean chain unit's tone is not pinned (DEV chain mode, read from source, never run; a plan review's
-  finding, left for later in E3f): a plugin unit that never saved its own `unit-<id>.tone` (nothing was
-  changed) reads its plugin's slot file at every load (`ToneStore::load_for_restore_key`'s fallback). When
-  another instance of that plugin in that slot retires its tone into that file (the player removes it), the
-  clean unit's next load, at the next launch's restore under its id, starts from the other instance's tone,
-  not the one it played. The shutdown's own removal no longer retires (`EngineHost::remove_unit_at_shutdown`),
-  so only a player's removal or a source replacement does this. Next check: a `chain_cmds_tests.rs` test with two units of one plugin in slot
-  0, the first never saving, the second saving a new tone and removed by the player, then `unload_all` and
-  the first re-added under its id: read the tone its load restores. A fix writes the inherited tone to
-  `unit-<id>.tone` at a unit's first load.
-- The shutdown's keep of a unit's tone misses a reload in flight (DEV chain mode, read from source by a
-  review, not run; declined at E3f's second review round as rare and no worse than before E3f): with a same-id
-  reload queued ahead of the shutdown's removal and its `Event::Seat` undrained, the candidate's owner can end
-  on `Left::Removed` before `Table::promote_reload` carries the predecessor's `Row::keep_tone` to it, so its tone
-  retires into the slot's file (the restore then reads it from there: the pre-E3f behaviour, wrong only with two
-  instances of one plugin in a slot); and a different-id source replacing that candidate ahead of the shutdown's
-  removal can have its cleared keep revived by the later promotion, so the replaced unit keeps an orphan
-  `unit-<id>.tone` instead of retiring it. Next check: a `chain_cmds_tests.rs` test per case (a reload queued,
-  then `unload_all` with the Seat undrained; a reload then a replacing source then `unload_all`), asserting both
-  files. A fix binds the disposition before the candidate's terminal return is posted and lets promotion copy
-  the keep only onto a row still `Staying`.
 - Two `chain_tests.rs` tests are `#[ignore]`d (quarantined): `held_remove_outlives_remove_timeout` and
   `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`. On CI's Windows
   runner (`rust-test`) their `start_take` never sees lane 0 recording, even with `test_rig::PATIENCE`

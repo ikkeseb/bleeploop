@@ -11,10 +11,11 @@ rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# The native audio engine is a pure crate beside the app (briefing: crates/lf-engine/src/lib.rs).
+# The native audio engine is a pure crate beside the app (briefing: crates/lf-engine/src/lib.rs); so are
+# chain mode's rig record rules (briefing: crates/lf-rig/src/lib.rs).
 # Profiles below apply to every member. scripts/engine-deny.mjs keeps the host crates out of its tree.
 [workspace]
-members = [".", "crates/lf-engine"]
+members = [".", "crates/lf-engine", "crates/lf-rig"]
 
 [lib]
 name = "app_lib"
@@ -117,6 +118,8 @@ rubato           = "3.0.0"                  # the engine pipes' fractional resam
 walkdir          = "2"                      # the plugin scan's folder walk: CLAP, VST3 and VST2 (no clack-finder)
 # The native engine (briefing: crates/lf-engine/src/lib.rs): pure, driven by `engine_io`.
 lf-engine        = { path = "crates/lf-engine" }
+# Chain mode's rig record rules (briefing: crates/lf-rig/src/lib.rs): pure, driven by `engine_io`.
+lf-rig           = { path = "crates/lf-rig" }
 # Native MIDI input for the engine (engine_io::midi; WinMM on Windows). 0.11 accepts windows
 # >=0.59,<=0.62; the lock holds it on 0.61 with the rest of the graph (see windows-core above).
 midir            = "0.11"

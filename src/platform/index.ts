@@ -72,7 +72,8 @@ export const debugAbortHost: (setAt: number) => Promise<void> = underTauri
  * comes after it. Its fate is then unknown: it may still run. */
 export const NATIVE_WAIT_MS = 2000;
 
-class TimedOut extends Error {}
+/** `within`'s rejection: no answer in time (the call may still run and answer later). */
+export class TimedOut extends Error {}
 
 /** `promise`, or a `TimedOut` rejection once `ms` passed with no answer. */
 export function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -232,7 +233,7 @@ async function drain(): Promise<void> {
       const batch = waiting.shift()!;
       waitingItems -= batch.items.length;
       overflowTold = false;
-      batch.settle(await submit(batch.items, batch.toastLost));
+      batch.settle(await submit(batch.items, batch.toastLost, batch.alone));
     }
   } finally {
     sending = false;
@@ -274,10 +275,12 @@ const DROPPED_TOAST: Record<Exclude<Dropped, 'stale'>, readonly [string, string]
  * natively (a note must not stick); a blur that is lost too rides at the head of the next batch. What
  * native MIDI dropped of a batch that ran (a press with no device running) is logged and toasted once
  * (`toldDropped`); input of a page native MIDI no longer counts as current is logged once per epoch. True
- * when the batch ran and nothing of it was dropped.
+ * when the batch ran and nothing of it was dropped. `alone` (`enqueue`'s): an owed blur goes first in a call
+ * of its own, never inside the batch, whose answer stays its items' alone.
  */
-async function submit(items: InputItem[], toastLost: boolean): Promise<boolean> {
-  const batch = pendingBlur ? [BLUR, ...items] : items;
+async function submit(items: InputItem[], toastLost: boolean, alone: boolean): Promise<boolean> {
+  if (pendingBlur && alone && !('lost' in (await sendOnce([BLUR])))) pendingBlur = false;
+  const batch = pendingBlur && !alone ? [BLUR, ...items] : items;
   let sent = await sendOnce(batch);
   if ('lost' in sent && !sent.timedOut) sent = await sendOnce(batch);
   if ('lost' in sent) {
@@ -291,7 +294,7 @@ async function submit(items: InputItem[], toastLost: boolean): Promise<boolean> 
     }
     return false;
   }
-  pendingBlur = false;
+  if (!alone) pendingBlur = false;
   const { epoch, dropped } = sent;
   if (dropped === 'stale') {
     if (toldStale !== epoch) {
@@ -332,14 +335,21 @@ export function sendEngineReported(...commands: EngineCommand[]): Promise<boolea
   return enqueueEngine(commands, true);
 }
 
+/** `sendEngine` in a batch of its own (`enqueue`'s `alone`): it resolves with these commands' own submission,
+ * so a resend that must know whether exactly they were taken (D11's send-off, `engine-store.ts`) never
+ * shares an answer with what other callers queued beside it. */
+export function sendEngineAlone(...commands: EngineCommand[]): Promise<boolean> {
+  return enqueueEngine(commands, false, true);
+}
+
 /**
  * Queue engine commands, dropping unit commands (`isUnitCommand`) while the platform's chain host is not
  * available (unit contract §2). A dropped command resolves its call false, without a log line or a toast:
  * the chain UI asks `platform.chain.available` first.
  */
-function enqueueEngine(commands: EngineCommand[], ownToast: boolean): Promise<boolean> {
+function enqueueEngine(commands: EngineCommand[], ownToast: boolean, alone = false): Promise<boolean> {
   const kept = platform.chain.available ? commands : commands.filter((c) => !isUnitCommand(c));
-  const sent = enqueue(kept.map(encodeItem.engine), ownToast);
+  const sent = enqueue(kept.map(encodeItem.engine), ownToast, alone);
   return kept.length === commands.length ? sent : sent.then(() => false);
 }
 

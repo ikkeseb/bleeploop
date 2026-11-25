@@ -11,6 +11,9 @@
  *   - EngineHost   — the native audio engine (`docs/ARCHITECTURE.md`).
  *   - ChainHost    — a slot's chain of units (`docs/unit-contract.md` §2): add, remove, move, reload, by unit.
  *                    Only the browser fake speaks it yet; the Tauri and production hosts refuse every call.
+ *   - RigHost      — chain mode's rig record, which the native host owns: the page's one handover. Only
+ *                    the DEV browser fake (`__lfRigFake`) and, natively, a DEV build with `lf.chainNative`
+ *                    speak it; the native side's commands land with the record's writer.
  *   - MidiHost     — native MIDI (`src-tauri/src/engine_io/midi`): its ports, MIDI learn and the stored
  *                    bindings, and what it tells the UI. The app never opens Web MIDI (the WebView's
  *                    permission is denied, and `verify/guards/web-midi.mjs` keeps the Web MIDI API out
@@ -406,6 +409,77 @@ export interface ChainHost {
   forgetTone(token: number): Promise<void>;
 }
 
+/**
+ * What the native rig record is for this process (`src-tauri/crates/lf-rig/src/answer.rs` `RigStatus`):
+ * `present` (read, or stored by this import), `absent` (no record file: run the upgrade and import it),
+ * `unreadable` (kept, never written over; nothing restored), `unavailable` (no data folder, or another
+ * process owns the record).
+ */
+export type RigStatus = 'present' | 'absent' | 'unreadable' | 'unavailable';
+
+/** What the restore forgot or held back; every `open` answers it until `seen(id)`. */
+export interface RigNotice {
+  id: number;
+  /** The display names of the plugin units the crash marker named, now forgotten. */
+  forgotten: string[];
+  /** The crash marker could not be read: no plugin was restored this launch (built-ins were). */
+  pluginsHeld: boolean;
+}
+
+/** `rig_open`'s and `rig_import`'s answer (`answer.rs` `RigAnswer`). */
+export interface RigAnswer {
+  status: RigStatus;
+  /** Each slot's volume for the fader, A then B (the player's level, else the record's); only with `present`. */
+  volumes: [number, number] | null;
+  notice: RigNotice | null;
+}
+
+const RIG_STATUSES: readonly string[] = ['present', 'absent', 'unreadable', 'unavailable'];
+
+/**
+ * `rig_open`'s (`call` 'open') or `rig_import`'s ('import') reply as the page reads it, strict per D13:
+ * `volumes` is a pair of finite numbers exactly when `status` is `present`, else null; an import answers
+ * `present` only (it stored the record, or one existed). Any other shape throws, so the caller treats it as
+ * a refused call (one log line): an `absent` with volumes must not start an import, an import's `absent` must
+ * not read as stored. Both hosts that speak `RigHost` answer through it (the web fake's scripted replies too).
+ */
+export function decodeRigAnswer(raw: unknown, call: 'open' | 'import'): RigAnswer {
+  const bad = (): never => {
+    throw new Error(`rig_${call} answered an invalid reply: ${JSON.stringify(raw)}`);
+  };
+  if (typeof raw !== 'object' || raw === null) return bad();
+  const { status, volumes, notice } = raw as Record<string, unknown>;
+  if (typeof status !== 'string' || !RIG_STATUSES.includes(status)) return bad();
+  if (call === 'import' && status !== 'present') return bad();
+  const pair = Array.isArray(volumes) && volumes.length === 2 && volumes.every((v) => typeof v === 'number' && Number.isFinite(v));
+  if (status === 'present' ? !pair : volumes !== null) return bad();
+  if (notice !== null) {
+    if (typeof notice !== 'object') return bad();
+    const { id, forgotten, pluginsHeld } = notice as Record<string, unknown>;
+    if (!Number.isSafeInteger(id) || !Array.isArray(forgotten) || !forgotten.every((n) => typeof n === 'string') || typeof pluginsHeld !== 'boolean') return bad();
+  }
+  return raw as RigAnswer;
+}
+
+/**
+ * Chain mode's rig record, owned by the native host (`src-tauri/crates/lf-rig`): the page never writes it,
+ * and hands over the legacy keys' upgrade once. Natively only in a DEV build with `lf.chainNative`
+ * (the `rig_*` commands are DEV-only until chains reach players); otherwise every call rejects
+ * (`available` false). A chain-mode page's boot is the one caller (`src/ui/state/rig-recall.ts` `openRig`).
+ */
+export interface RigHost {
+  readonly available: boolean;
+  /** `rig_open`: called before the device opens; the process's first call starts the restore, a later
+   * one (a reload) answers the same and starts nothing. */
+  open(): Promise<RigAnswer>;
+  /** `rig_import` with this document's epoch: `text` is `serializeRig(upgradeRig(…))`, stored only while no
+   * record exists (else it answers `present`). Rejects with `'stale'` for a replaced page, with the
+   * reason the record could not be written (then nothing is restored), or for a reply other than `present`. */
+  import(text: string): Promise<RigAnswer>;
+  /** `rig_seen`: the page showed notice `id`; native clears it. */
+  seen(id: number): Promise<void>;
+}
+
 /** A session export's one .zip, handed over for keeping. */
 export interface ExportFiles {
   /**
@@ -478,6 +552,7 @@ export interface Platform {
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
   readonly chain: ChainHost;
+  readonly rig: RigHost;
   readonly exports: ExportFiles;
   readonly logs: LogFolder;
   readonly updates: AppUpdates;

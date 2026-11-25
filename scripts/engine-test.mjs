@@ -1,5 +1,5 @@
-// scripts/engine-test.mjs — the engine's tests on demand: `cargo test -p lf-engine
-// --no-default-features` from src-tauri/ (the pure engine crate, no device, no SDK). Not in
+// scripts/engine-test.mjs — the engine's tests on demand: `cargo test -p lf-engine -p lf-rig
+// --no-default-features` from src-tauri/ (the pure engine crate and the rig record's rules, no device, no SDK). Not in
 // `pnpm check`: minutes on Windows even warm and side by side (scripts/cargo-test.mjs), so the pre-push
 // hook leaves them to CI's engine job, which runs them on a push to main or dev, or a pull request into main, that
 // touches native code (scripts/ci-changes.mjs). Where cargo is absent (the Mac has no Rust toolchain) it warns and skips; a cargo that is there but
@@ -14,7 +14,7 @@ import { cargoTest } from './cargo-test.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const cwd = join(root, 'src-tauri');
-const args = ['test', '-p', 'lf-engine', '--no-default-features'];
+const args = ['test', '-p', 'lf-engine', '-p', 'lf-rig', '--no-default-features'];
 
 /**
  * What `cargo --version`'s outcome means for the run: `skip` only when no cargo executable exists

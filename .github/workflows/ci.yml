@@ -119,8 +119,9 @@ jobs:
       # `cargo test` is NOT here: it builds the workspace's test binaries (the cache holds dependencies
       # only) and runs them, minutes against ~2 for this check — rust-test.yml, on src-tauri/ changes.
 
-  # lf-engine, the pure engine crate (briefing: its src/lib.rs): its tests build nothing of the app, so
-  # they run on Linux, on the same `native` diffs as `rust`. rust-test.yml runs them again on Windows.
+  # lf-engine, the pure engine crate (briefing: its src/lib.rs), and lf-rig, the rig record's rules
+  # (briefing: its src/lib.rs): their tests build nothing of the app, so they run on Linux, on the same
+  # `native` diffs as `rust`. rust-test.yml runs them again on Windows.
   engine:
     needs: docs_guard
     if: needs.docs_guard.outputs.docs_only != 'true' && needs.docs_guard.outputs.native != 'false'
@@ -141,5 +142,5 @@ jobs:
       - run: node scripts/engine-deny.mjs
       # Plain cargo: side by side (scripts/cargo-test.mjs) the binaries took as long here, 7.5 min
       # against 5.4 to 7.4, since the long ones already fill the runner's four cores with their threads.
-      - run: cargo test -p lf-engine
+      - run: cargo test -p lf-engine -p lf-rig
         working-directory: src-tauri

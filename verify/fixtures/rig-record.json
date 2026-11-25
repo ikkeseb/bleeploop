@@ -1,0 +1,242 @@
+{
+  "input": {
+    "slots": [
+      {
+        "plugin": {
+          "ref": {
+            "format": "vst3",
+            "path": "C:\\Program Files\\Common Files\\VST3\\Amp.vst3",
+            "id": "ABCDEF0123456789ABCDEF0123456789",
+            "name": "Amp Sim"
+          },
+          "isEffect": true,
+          "stored": 0.7
+        },
+        "savedSource": null,
+        "defaultSynth": "lead",
+        "inputGain": 1
+      },
+      {
+        "plugin": null,
+        "savedSource": "pad",
+        "defaultSynth": "bass",
+        "inputGain": 0.8
+      }
+    ],
+    "guitarFirst": false,
+    "synthGains": {
+      "lead": 0.8,
+      "bass": 1.2,
+      "pad": 1,
+      "piano": 0.9999999999999999,
+      "organ": 1,
+      "drum": 1.1
+    },
+    "sends": {
+      "ott": {
+        "on": true,
+        "params": {
+          "ottDepth": 0.7,
+          "ottTime": 0.5,
+          "ottUpward": 1,
+          "ottDownward": 1
+        },
+        "defaults": {
+          "ottDepth": 0.5,
+          "ottTime": 0.5,
+          "ottUpward": 1,
+          "ottDownward": 1
+        }
+      },
+      "ring": {
+        "on": false,
+        "params": {
+          "ringFreq": 220,
+          "ringLevel": 0.5
+        },
+        "defaults": {
+          "ringFreq": 440,
+          "ringLevel": 0.5
+        }
+      },
+      "echo": {
+        "on": true,
+        "params": {
+          "echoTime": 1,
+          "echoFeedback": 0.4,
+          "echoLevel": 0.5
+        },
+        "defaults": {
+          "echoTime": 1,
+          "echoFeedback": 0.4,
+          "echoLevel": 0.5
+        }
+      },
+      "reverb": {
+        "on": false,
+        "params": {
+          "reverbLevel": 0.5
+        },
+        "defaults": {
+          "reverbLevel": 0.5
+        }
+      }
+    },
+    "bound": {
+      "ott": false,
+      "ring": false,
+      "echo": false,
+      "reverb": true
+    },
+    "legacyMarker": false,
+    "reported": null
+  },
+  "record": {
+    "version": 1,
+    "slots": [
+      {
+        "volume": 0.7,
+        "units": [
+          {
+            "id": 1,
+            "kind": "plugin",
+            "plugin": {
+              "format": "vst3",
+              "path": "C:\\Program Files\\Common Files\\VST3\\Amp.vst3",
+              "id": "ABCDEF0123456789ABCDEF0123456789",
+              "name": "Amp Sim"
+            },
+            "bypass": false
+          }
+        ],
+        "pending": [
+          {
+            "id": 2,
+            "kind": "ott",
+            "params": {
+              "ottDepth": 0.7,
+              "ottTime": 0.5,
+              "ottUpward": 1,
+              "ottDownward": 1
+            },
+            "bypass": false
+          },
+          {
+            "id": 3,
+            "kind": "ring",
+            "params": {
+              "ringFreq": 220,
+              "ringLevel": 0.5
+            },
+            "bypass": true
+          },
+          {
+            "id": 4,
+            "kind": "echo",
+            "params": {
+              "echoTime": 1,
+              "echoFeedback": 0.4,
+              "echoLevel": 0.5
+            },
+            "bypass": false
+          },
+          {
+            "id": 5,
+            "kind": "reverb",
+            "params": {
+              "reverbLevel": 0.5
+            },
+            "bypass": true
+          }
+        ]
+      },
+      {
+        "volume": 1,
+        "units": [
+          {
+            "id": 6,
+            "kind": "synth",
+            "params": {
+              "instrument": 2,
+              "gainLead": 0.8,
+              "gainBass": 1.2,
+              "gainPad": 1,
+              "gainPiano": 0.9999999999999999,
+              "gainOrgan": 1,
+              "gainDrum": 1.1
+            },
+            "bypass": false
+          }
+        ],
+        "pending": [
+          {
+            "id": 7,
+            "kind": "ott",
+            "params": {
+              "ottDepth": 0.7,
+              "ottTime": 0.5,
+              "ottUpward": 1,
+              "ottDownward": 1
+            },
+            "bypass": false
+          }
+        ]
+      }
+    ]
+  },
+  "written": [
+    {
+      "version": 1,
+      "slots": [
+        {
+          "volume": 1,
+          "units": [
+            {
+              "id": 1,
+              "kind": "plugin",
+              "plugin": {
+                "format": "clap",
+                "path": "C:\\Program Files\\Common Files\\CLAP\\Amp.clap",
+                "id": "com.example.amp"
+              }
+            },
+            {
+              "id": 2,
+              "kind": "ott",
+              "params": {}
+            },
+            {
+              "id": 3,
+              "kind": "ring",
+              "bypass": true
+            },
+            {
+              "id": 4,
+              "kind": "echo",
+              "params": {},
+              "bypass": false
+            }
+          ]
+        },
+        {
+          "volume": 0.5,
+          "units": [
+            {
+              "id": 5,
+              "kind": "synth",
+              "params": {
+                "instrument": 1
+              }
+            }
+          ],
+          "pending": [
+            {
+              "id": 6,
+              "kind": "reverb"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

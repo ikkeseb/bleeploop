@@ -3,7 +3,7 @@
  * Tauri, so this runs only when someone opens the built `dist` in a plain browser; it must boot, and every
  * capability says it is absent. The scriptable rig (`host.web.ts`) is DEV-only (`index.ts`).
  */
-import type { ChainHost, LogFolder, MidiHost, Platform, PluginHost } from './host';
+import type { ChainHost, LogFolder, MidiHost, Platform, PluginHost, RigHost } from './host';
 
 const ABSENT = 'Not available in the browser build.';
 const absent = async (): Promise<never> => {
@@ -76,6 +76,9 @@ const chain: ChainHost = {
   forgetTone: absent,
 };
 
+// The rig record (`RigHost`): no native host, so no record.
+const rig: RigHost = { available: false, open: absent, import: absent, seen: absent };
+
 export const inertPlatform: Platform = {
   kind: 'web',
   pluginHost,
@@ -91,6 +94,7 @@ export const inertPlatform: Platform = {
     subscribe: () => () => {},
   },
   chain,
+  rig,
   exports: { save: absent },
   logs,
   updates: { available: false, check: async () => null, download: absent, install: absent, onProgress() {} },
