@@ -3608,7 +3608,8 @@ fn edge_a_a_plugin_owner_keeps_an_evicted_source_while_a_newer_one_is_queued_and
     assert_eq!(added, Ok(Added::Seated));
     let entry = chains.registry.lock().unwrap().get(&650).cloned().expect("A's owner is registered");
     let super::Owner::Plugin(a) = &entry.owner else { panic!("A is a plugin") };
-    assert_eq!(a.owner.take_tone().expect("A's tone saved"), b"edge-a-dialed-in".to_vec());
+    let saved = crate::host::tone::decode(&a.owner.take_tone().expect("A's tone saved")).expect("A's tone decodes");
+    assert_eq!(saved.state, b"edge-a-dialed-in".to_vec());
     assert!(dir.join("unit-650.tone").exists(), "A's own tone file is written");
     assert_eq!(store.load(0, &src).unwrap(), None, "the slot's tone file is empty");
 

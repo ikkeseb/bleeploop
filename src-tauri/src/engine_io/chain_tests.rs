@@ -3998,7 +3998,16 @@ fn edge_a_a_withdrawn_source_waits_for_a_newer_source_queued_ahead_of_its_reseat
     assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
     let op_w = u_a.withdraw().expect("withdraw A");
     assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
-    let Some(Back::Withdrawn { unit: withdrawn_a, .. }) = u_a.take_back() else { panic!("expected A withdrawn") };
+    // The withdrawn box comes back through the port after the op applies: wait for it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let back_a = loop {
+        if let Some(b) = u_a.take_back() {
+            break b;
+        }
+        assert!(Instant::now() < deadline, "A's withdrawn box never arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let Back::Withdrawn { unit: withdrawn_a, .. } = back_a else { panic!("expected A withdrawn") };
 
     device.stop();
     let u_b = host
