@@ -32,7 +32,7 @@ use super::unit_host::{
 };
 use super::EngineHost;
 use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
-use crate::host::tone::{ToneBinding, ToneKey, ToneStore, ToneTokens};
+use crate::host::tone::{Tone, ToneBinding, ToneKey, ToneStore, ToneTokens};
 use crate::host::unit_owner::{self, Answer, UnitOwner};
 use crate::host::{ParamDesc, PluginHostState};
 
@@ -737,6 +737,9 @@ impl Chains {
         let token = unit_host.install_token();
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
+        // The token's tone this add redeemed into `unit-<id>.tone`: an owner whose add ends without ever applying
+        // a seat deletes that file (`ToneKeeper::undo_add`), so the tone goes back under its token for a later load.
+        let mut redeemed: Option<(u32, Tone)> = None;
         let tone = match tones {
             Some(store) => {
                 let key = ToneKey::Unit { unit, slot, identity: plugin.clone() };
@@ -745,7 +748,10 @@ impl Chains {
                         let parked = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).take(tok, &plugin);
                         match parked {
                             Some(t) => match store.redeem(&key, t) {
-                                Ok(imp) => Some(imp),
+                                Ok(imp) => {
+                                    redeemed = Some((tok, imp.tone.clone()));
+                                    Some(imp)
+                                }
                                 Err(why) => {
                                     log::warn!(
                                         "[chain_cmds] slot {slot} unit {unit}: tone token {tok} redeem failed: {why}; loading without it"
@@ -826,11 +832,16 @@ impl Chains {
                 }
             }
             Err(e) => {
-                let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-                if e == SETUP_TIMEOUT_ERR {
-                    aff.leak(inst, &plugin.path);
-                } else {
-                    aff.release(inst, &plugin.path);
+                {
+                    let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
+                    if e == SETUP_TIMEOUT_ERR {
+                        aff.leak(inst, &plugin.path);
+                    } else {
+                        aff.release(inst, &plugin.path);
+                    }
+                }
+                if let Some((tok, tone)) = redeemed {
+                    self.tokens.lock().unwrap_or_else(|e| e.into_inner()).repark(tok, tone);
                 }
                 Err(e)
             }

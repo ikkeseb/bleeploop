@@ -14,6 +14,17 @@
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
+- Chain tones: an add's files and its import token do not follow every outcome (read from source, never
+  run). Files left behind an add that answered `Err`: a unit that applied a seat before it left keeps its
+  tone's end as any seated unit (the shutdown's keep, also after `Chains::add_plugin`'s `outcome_err`), and
+  an owner thread that fails to spawn (`spawn_unit_with`) drops its `ToneKeeper` unrun, so a redeemed import
+  stays in `unit-<id>.tone`; each is a file under an id no rig record may name. The token: a 15 s setup
+  timeout parks it again before the owner's cleanup, so a second id can redeem it while the first file
+  exists; a 30 s `Unanswered` add that later ends in an undo deletes the file without parking it (the
+  import is lost); an applied add that answers `Err` keeps or retires its file and parks it too (two
+  copies); a disk failure inside `redeem` loses it (pre-existing). Next check: a `chain_cmds_tests.rs` case
+  per end on `Chains::add` with a gated fake (`unload_all` from `before_register_hook`; a failing spawn as in
+  `p4f1_2a`). The native rig move, whose restore reads the outcome by token, is where the fix lands.
 - An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
   that command's drop of the handle still tears the plugin down (read from source, never run; no
   command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on
@@ -199,27 +210,6 @@
   offered to the new engine; e) a reload the engine refused can log a generic cause when its row is
   released before the waiter polls. Sources and built-in factories arrive with E3. Next check: one
   `chain_tests.rs`/`chain_cmds_tests.rs` test per letter, red first, before chains reach players.
-- A clean chain unit's tone is not pinned (DEV chain mode, read from source, never run; a plan review's
-  finding, left for later in E3f): a plugin unit that never saved its own `unit-<id>.tone` (nothing was
-  changed) reads its plugin's slot file at every load (`ToneStore::load_for_restore_key`'s fallback). When
-  another instance of that plugin in that slot retires its tone into that file (the player removes it), the
-  clean unit's next load, at the next launch's restore under its id, starts from the other instance's tone,
-  not the one it played. The shutdown's own removal no longer retires (`EngineHost::remove_unit_at_shutdown`),
-  so only a player's removal or a source replacement does this. Next check: a `chain_cmds_tests.rs` test with two units of one plugin in slot
-  0, the first never saving, the second saving a new tone and removed by the player, then `unload_all` and
-  the first re-added under its id: read the tone its load restores. A fix writes the inherited tone to
-  `unit-<id>.tone` at a unit's first load.
-- The shutdown's keep of a unit's tone misses a reload in flight (DEV chain mode, read from source by a
-  review, not run; declined at E3f's second review round as rare and no worse than before E3f): with a same-id
-  reload queued ahead of the shutdown's removal and its `Event::Seat` undrained, the candidate's owner can end
-  on `Left::Removed` before `Table::promote_reload` carries the predecessor's `Row::keep_tone` to it, so its tone
-  retires into the slot's file (the restore then reads it from there: the pre-E3f behaviour, wrong only with two
-  instances of one plugin in a slot); and a different-id source replacing that candidate ahead of the shutdown's
-  removal can have its cleared keep revived by the later promotion, so the replaced unit keeps an orphan
-  `unit-<id>.tone` instead of retiring it. Next check: a `chain_cmds_tests.rs` test per case (a reload queued,
-  then `unload_all` with the Seat undrained; a reload then a replacing source then `unload_all`), asserting both
-  files. A fix binds the disposition before the candidate's terminal return is posted and lets promotion copy
-  the keep only onto a row still `Staying`.
 - Two `chain_tests.rs` tests are `#[ignore]`d (quarantined): `held_remove_outlives_remove_timeout` and
   `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`. On CI's Windows
   runner (`rust-test`) their `start_take` never sees lane 0 recording, even with `test_rig::PATIENCE`

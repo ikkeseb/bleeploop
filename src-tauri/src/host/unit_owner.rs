@@ -359,23 +359,30 @@ fn submit_owed<P: OwnedPlugin>(
     }
 }
 
-/// End before the unit ever applied a seat: fail the plate, release the plugin and its unit (if
-/// held), release the reservation, and then answer `Err(why)` so a caller that sees `Err` finds the
-/// plugin already gone.
+/// End before the unit ever applied a seat: delete the files its add wrote (`undo_add`: the failed
+/// plate's removal has no owner left to retire them) while the id is still reserved, fail the plate
+/// (which frees the id), release the plugin and its unit (if held), release the reservation, and then
+/// answer `Err(why)` so a caller that sees `Err` finds the plugin already gone. The id is free before
+/// `plugin.release()`, which may block in foreign code: a same-id add never waits on this owner's
+/// teardown (the plugin's path affinity stays held until the owner thread ends).
+#[allow(clippy::too_many_arguments)]
 fn fail_before_seat<P: OwnedPlugin>(
     host: UnitHost,
     mut plugin: P,
     unit: Option<Box<P::Unit>>,
+    tone: &mut ToneKeeper,
+    add: bool,
     why: String,
     ready: &mut Option<SyncSender<Result<Answer, String>>>,
     faults: &AtomicU32,
     reported: &mut u32,
 ) -> Result<(), String> {
     let slot = host.slot();
-    host.failed(why.clone());
     if plugin.editor() != Editor::Closed {
         plugin.editor_close();
     }
+    undo_add(add, tone);
+    host.failed(why.clone());
     plugin.release(unit);
     report_faults(faults, slot, reported);
     host.release();
@@ -385,10 +392,48 @@ fn fail_before_seat<P: OwnedPlugin>(
     Ok(())
 }
 
+/// A unit that never stood: delete the files its add wrote (`ToneKeeper::undo_add`) while its id is
+/// still reserved, so a same-id add in the other slot (possible once `UnitHost::failed` or `release`
+/// frees the id) never reads them as its own nor loses its own to this cleanup. `add`: the owner was
+/// spawned for an add, not a reload (read at its start); a reload candidate's redeemed tone is the
+/// seated unit's, and stays.
+fn undo_add(add: bool, tone: &mut ToneKeeper) {
+    if add {
+        tone.undo_add();
+    }
+}
+
+/// How an owner whose unit is out of the engine ends its tone ([`ordered_release`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToneEnd {
+    /// The files stay as they are (a superseded instance; after a panic).
+    Stay,
+    /// The unit left for good: its tone retires into the slot's file, unless the host's shutdown's
+    /// removal ended it (`UnitHost::keeps_tone`).
+    Retire,
+    /// An add whose unit never applied a seat in any engine: nothing is saved and the files the add
+    /// wrote go ([`undo_add`]), whatever the shutdown's removal decided.
+    Undo,
+}
+
+/// The tone end for a unit out of the engine: [`ToneEnd::Undo`] for an add (`add`: not a reload, read
+/// at the owner's start) whose unit never applied a seat in any engine ([`UnitHost::ever_applied`]),
+/// else retire or not as the terminal `Back` said. A unit that applied keeps its tone's end even when
+/// it left before its owner's first answer: it played, and a reload's promotion makes it the id's unit.
+fn tone_end(host: &UnitHost, add: bool, retire: bool) -> ToneEnd {
+    if add && !host.ever_applied() {
+        ToneEnd::Undo
+    } else if retire {
+        ToneEnd::Retire
+    } else {
+        ToneEnd::Stay
+    }
+}
+
 /// Ordered release once the unit is out of the engine (or none is held after `Dismissed`): close any
-/// editor → fold a last `turn` into the tone → `quiesce` → save if dirty or editor was open →
-/// optionally `retire` (never when the host's shutdown's removal ended the unit: `UnitHost::keeps_tone`) →
-/// `release(unit)` → `host.release()`. Skips `turn`, save and `retire` after a panic.
+/// editor → fold a last `turn` into the tone → `quiesce` → save if dirty or editor was open → end the
+/// tone as `end` says ([`ToneEnd`]) → `release(unit)` → `host.release()`. Skips `turn`, save and the
+/// tone's end after a panic, and `turn` and save for [`ToneEnd::Undo`].
 #[allow(clippy::too_many_arguments)]
 fn ordered_release<P: OwnedPlugin>(
     host: UnitHost,
@@ -397,7 +442,7 @@ fn ordered_release<P: OwnedPlugin>(
     tone: &mut ToneKeeper,
     name: &str,
     allow_save: bool,
-    retire: bool,
+    end: ToneEnd,
     faults: &AtomicU32,
     reported: &mut u32,
 ) -> Result<(), String> {
@@ -408,13 +453,14 @@ fn ordered_release<P: OwnedPlugin>(
     if editor_open {
         plugin.editor_close();
     }
-    if allow_save {
+    let save = allow_save && end != ToneEnd::Undo;
+    if save {
         let Reported { relist, changed } = plugin.turn(&(Arc::new(|_| {}) as EventSink));
         if relist || changed {
             tone.note_change(Instant::now());
         }
     }
-    let keep = allow_save && (editor_open || tone.dirty());
+    let keep = save && (editor_open || tone.dirty());
     plugin.quiesce();
     if keep {
         let _ = keep_tone(tone, slot, "unload", name, || plugin.state());
@@ -422,8 +468,10 @@ fn ordered_release<P: OwnedPlugin>(
     // When the host's shutdown's removal is what ended the unit, its own file stays for the next launch's
     // restore under the same id (`EngineHost::remove_unit_at_shutdown`, decided with the terminal `Back`);
     // any other end (the player's removal, a source replacement) retires it into the slot's file.
-    if allow_save && retire && !host.keeps_tone() {
-        tone.retire();
+    match end {
+        ToneEnd::Retire if allow_save && !host.keeps_tone() => tone.retire(),
+        ToneEnd::Undo if allow_save => tone.undo_add(),
+        ToneEnd::Retire | ToneEnd::Undo | ToneEnd::Stay => {}
     }
     plugin.release(unit);
     report_faults(faults, slot, reported);
@@ -502,9 +550,12 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let faults = Arc::new(AtomicU32::new(0));
     let mut reported = 0u32;
     let mut ready = Some(ready);
+    // Read once, before the install can apply: a reload's promotion clears the row's flag.
+    let add = !host.is_reload();
 
     let Some(terms) = host.terms() else {
         let why = "no audio device is open".to_string();
+        undo_add(add, &mut tone);
         host.failed(why.clone());
         host.release();
         if let Some(tx) = ready.take() {
@@ -526,6 +577,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let Loaded { mut plugin, unit, name, tone: restored, .. } = match load(setup) {
         Ok(loaded) => loaded,
         Err(e) => {
+            undo_add(add, &mut tone);
             host.failed(e.clone());
             host.release();
             if let Some(tx) = ready.take() {
@@ -545,6 +597,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             host,
             plugin,
             Some(unit),
+            &mut tone,
+            add,
             "plugin load cancelled".to_string(),
             &mut ready,
             &faults,
@@ -704,10 +758,11 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 
     match served {
         Ok(Exit::FailedBeforeSeat { unit, why }) => {
-            fail_before_seat(host, plugin, unit, why, &mut ready, &faults, &mut reported)
+            fail_before_seat(host, plugin, unit, &mut tone, add, why, &mut ready, &faults, &mut reported)
         }
         Ok(Exit::Returned { unit, retire }) => {
-            let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, retire, &faults, &mut reported);
+            let end = tone_end(&host, add, retire);
+            let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err("unit left before seating".to_string()));
             }
@@ -715,7 +770,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         }
         Ok(Exit::Dismissed) => {
             let unit = seat.take_unit();
-            let res = ordered_release(host, plugin, unit, &mut tone, &name, true, true, &faults, &mut reported);
+            let end = tone_end(&host, add, true);
+            let res = ordered_release(host, plugin, unit, &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err("unit dismissed before seating".to_string()));
             }
@@ -781,17 +837,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             // ahead of `Dismissed` in the mailbox, or a box held in `Leave::Pending` during a
             // pending removal) takes the ordered release.
             if in_hand.is_some() || dismissed {
-                ordered_release(
-                    host,
-                    plugin,
-                    in_hand,
-                    &mut tone,
-                    &name,
-                    !panicked,
-                    !panicked && retire,
-                    &faults,
-                    &mut reported,
-                )
+                let end = tone_end(&host, add, retire);
+                ordered_release(host, plugin, in_hand, &mut tone, &name, !panicked, end, &faults, &mut reported)
             } else {
                 abandon_in_engine(host, plugin, &mut tone, &name, !panicked, &faults, &mut reported)
             }
@@ -1108,7 +1155,7 @@ impl Drop for UnitOwner {
 pub(crate) mod test_support {
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use lf_engine::grid::Frame;
     use lf_engine::{SlotEvent, UnitCx, UnitInfo, UnitKind, UnitParam, UnitProcessor};
@@ -1127,8 +1174,15 @@ pub(crate) mod test_support {
         pub(crate) on_state: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) on_reactivate: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) on_release: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Called at every owner turn (`OwnedPlugin::turn`): a test may hold the owner's loop there.
+        pub(crate) on_turn: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Called inside the load, after its tone read (`restores`), before the owner claims and submits.
+        pub(crate) on_load: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) released_count: Option<Arc<AtomicUsize>>,
         pub(crate) exited_flag: Option<Arc<AtomicBool>>,
+        /// When set, the load reads its tone as a real plugin's load does (`ToneKeeper::stored`) and
+        /// records the state it would restore (`None`: nothing stored or unreadable).
+        pub(crate) restores: Option<Arc<Mutex<Vec<Option<Vec<u8>>>>>>,
     }
 
     impl Default for FakePluginConfig {
@@ -1141,8 +1195,11 @@ pub(crate) mod test_support {
                 on_state: None,
                 on_reactivate: None,
                 on_release: None,
+                on_turn: None,
+                on_load: None,
                 released_count: None,
                 exited_flag: None,
+                restores: None,
             }
         }
     }
@@ -1202,6 +1259,9 @@ pub(crate) mod test_support {
         }
 
         fn turn(&mut self, _sink: &EventSink) -> Reported {
+            if let Some(cb) = &self.cfg.on_turn {
+                cb();
+            }
             Reported::default()
         }
 
@@ -1250,6 +1310,13 @@ pub(crate) mod test_support {
         let exited = cfg.exited_flag.clone();
         spawn_unit(PluginFormat::Clap, unit_host, 0, sink, tone, move |ctx| {
             let res = serve_unit(ctx, move |setup: Setup<'_>| {
+                if let Some(restores) = &cfg.restores {
+                    let stored = setup.tone.stored().ok().flatten();
+                    restores.lock().unwrap_or_else(|e| e.into_inner()).push(stored);
+                }
+                if let Some(cb) = &cfg.on_load {
+                    cb();
+                }
                 let rate = setup.slot.rate().unwrap_or(0);
                 let unit = Box::new(FakePluginUnit { source: cfg.source, latency: cfg.latency });
                 let name = cfg.name.clone();

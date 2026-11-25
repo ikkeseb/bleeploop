@@ -244,9 +244,11 @@ pub(crate) struct Row {
     /// The host's shutdown removed this row ([`EngineHost::remove_unit_at_shutdown`]) and its removal is
     /// the one that ends it: its owner keeps `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]), so
     /// the next launch's restore under the id finds the unit's own tone (`docs/unit-contract.md` § 1).
-    /// Set under the state lock where that removal is accepted, only on a row no other removal or
-    /// replacement has taken; cleared where another cause ends the row first (a source replacement, a
-    /// refused removal). Every other end retires the tone into the slot's file.
+    /// Set under the state lock where that removal is accepted, before any terminal `Back` it causes, on
+    /// every row it may end that no other removal or replacement has taken: the seated row and a live
+    /// same-id reload candidate queued ahead of it (whose install, applied, the removal then ends). Cleared
+    /// where another cause ends the row first (a source replacement, a refused removal), and never set
+    /// later: a promotion carries nothing over. Every other end retires the tone into the slot's file.
     pub(crate) keep_tone: bool,
 }
 
@@ -270,6 +272,10 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
+    /// The unreleased rows an install of which has applied in some engine (its `Event::Seat` drained
+    /// `Applied`, or its box came back with a seated verdict: removed, replaced, withdrawn, evicted),
+    /// read by [`UnitHost::ever_applied`]. A row's token leaves at its release.
+    applied: BTreeSet<InstallToken>,
 }
 
 impl Table {
@@ -281,6 +287,14 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
+            applied: BTreeSet::new(),
+        }
+    }
+
+    /// Note that an install of row `token` applied in some engine ([`Table::applied`]).
+    fn note_applied(&mut self, token: InstallToken) {
+        if self.row(token).is_some_and(|r| !r.released) {
+            self.applied.insert(token);
         }
     }
 
@@ -335,9 +349,15 @@ impl Table {
     }
 
     pub(crate) fn has_reload_row(&self, id: UnitId) -> bool {
+        self.live_reload_row_for_id(id).is_some()
+    }
+
+    /// The live same-id reload candidate for `id` (not released, not superseded), if one stands.
+    pub(crate) fn live_reload_row_for_id(&self, id: UnitId) -> Option<InstallToken> {
         self.rows
             .iter()
-            .any(|r| r.id == id && r.is_reload && !r.released && !r.superseded)
+            .find(|r| r.id == id && r.is_reload && !r.released && !r.superseded)
+            .map(|r| r.token)
     }
 
     pub(crate) fn has_other_reload_row(&self, id: UnitId, exclude_token: InstallToken) -> bool {
@@ -423,6 +443,7 @@ impl Table {
     }
 
     pub(crate) fn mark_seated(&mut self, token: InstallToken, gen: u64) {
+        self.note_applied(token);
         if let Some(row) = self.row_mut(token) {
             if row.in_engine == (RowEngineState::Queued { generation: gen }) {
                 row.in_engine = RowEngineState::Seated { generation: gen };
@@ -431,15 +452,14 @@ impl Table {
     }
 
     /// Promote reload candidate `token` to the active row and permanently mark its specific
-    /// predecessor row superseded (clearing any pending removal state on that predecessor).
+    /// predecessor row superseded (clearing any pending removal state on that predecessor). A shutdown's
+    /// removal pending on the predecessor moves to the candidate (`transfer_remove_to_promoted`); its keep
+    /// does not: the candidate got its own where that removal was accepted ([`Row::keep_tone`]), and a
+    /// copy here could revive one a replacement cleared after the candidate's terminal `Back`.
     pub(crate) fn promote_reload(&mut self, token: InstallToken) {
-        let mut keep_tone = false;
         if let Some(pred_tok) = self.reload_predecessor.remove(&token) {
             if let Some(pred) = self.row_mut(pred_tok) {
                 pred.superseded = true;
-                // A shutdown's removal pending on the predecessor moves to the candidate
-                // (`transfer_remove_to_promoted`), and its keep with it.
-                keep_tone = std::mem::take(&mut pred.keep_tone);
                 if let Leave::Pending { held: Some(old) } = std::mem::replace(&mut pred.leave, Leave::Staying) {
                     forget_back(old);
                 }
@@ -447,8 +467,8 @@ impl Table {
         }
         if let Some(row) = self.row_mut(token) {
             row.is_reload = false;
-            row.keep_tone |= keep_tone;
         }
+        self.note_applied(token);
     }
 
     /// End a live reload candidate without touching any predecessor row. Returns `true` if `token`
@@ -712,6 +732,9 @@ impl Table {
             }
             return;
         }
+        if matches!(ret.left, Left::Removed | Left::Replaced | Left::Withdrawn | Left::Evicted) {
+            self.applied.insert(ret.token);
+        }
 
         // A reload candidate's install refusal always surfaces as `Back::Refused`, never `Superseded`
         // or `Removed`, even if `Event::Seat(Refused)` drained first or a removal was queued behind it.
@@ -870,6 +893,7 @@ impl Table {
     /// concurrent `wait_op` caller can still read it.
     pub(crate) fn release_row(&mut self, token: InstallToken) -> Option<(u64, OpState)> {
         self.reload_predecessor.remove(&token);
+        self.applied.remove(&token);
         let pos = self.rows.iter().position(|r| r.token == token)?;
         let row = &mut self.rows[pos];
         row.released = true;
@@ -1590,6 +1614,19 @@ impl UnitHost {
         state.table.row(self.install).is_some_and(|r| r.keep_tone)
     }
 
+    /// Whether this install is a reload's candidate ([`EngineHost::reload_unit`]), not an add. Read it
+    /// before the install can apply: a promotion makes the candidate the id's active row.
+    pub fn is_reload(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.row(self.install).is_some_and(|r| r.is_reload)
+    }
+
+    /// Whether an install of this row has applied in some engine ([`Table::applied`]), told or not.
+    pub fn ever_applied(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.applied.contains(&self.install)
+    }
+
     /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or
     /// [`Leave::Settled`]): a stopping owner waits for that box, never for a seated unit's.
     pub fn removal_in_flight(&self) -> bool {
@@ -1655,6 +1692,9 @@ impl UnitHost {
             row.id_freed = true;
         }
         state.model.mark_failed(self.slot, self.id, why);
+        drop(state);
+        #[cfg(test)]
+        id_freed(self.id);
     }
 
     /// The owner gives up on its unit: its box, if it ever comes, leaks.
@@ -1676,6 +1716,73 @@ impl UnitHost {
         if let Some((op_n, op_state)) = state.table.release_row(self.install) {
             state.model.record_unowned_settled(op_n, op_state);
         }
+        drop(state);
+        #[cfg(test)]
+        id_freed(self.id);
+    }
+}
+
+/// Test-only: one-shot hooks by unit id, each called on the owner's thread the first time
+/// [`UnitHost::failed`] or [`UnitHost::release`] has let go of the state lock under that id, the
+/// points where an owner frees its id. A test holds the owner there while another add takes the id.
+#[cfg(test)]
+pub(crate) static ON_ID_FREED: std::sync::Mutex<Vec<(UnitId, Arc<dyn Fn() + Send + Sync>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn id_freed(id: UnitId) {
+    let hook = {
+        let mut hooks = ON_ID_FREED.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.iter().position(|(i, _)| *i == id).map(|pos| hooks.remove(pos).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: called on this thread by `EngineHost::remove` with the removed id the moment the call
+    /// lets go of its slot's port lock ([`RemovePortGuard`]), the last host lock it holds: every line of
+    /// the call that runs unguarded runs after it. A test holds the caller there while the engine
+    /// applies the removal.
+    pub(crate) static AFTER_REMOVE_UNLOCKED: std::cell::RefCell<Option<Box<dyn FnMut(UnitId)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: `EngineHost::remove`'s slot port guard. The state lock is taken under it, so it is
+/// released before or with it (a scope's end drops the later guard first); dropping this one, however
+/// the call drops it, releases the port lock and then calls [`AFTER_REMOVE_UNLOCKED`].
+#[cfg(test)]
+struct RemovePortGuard<'a> {
+    guard: Option<MutexGuard<'a, Option<SlotPort>>>,
+    id: UnitId,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for RemovePortGuard<'_> {
+    type Target = Option<SlotPort>;
+    fn deref(&self) -> &Option<SlotPort> {
+        self.guard.as_ref().expect("held until drop")
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for RemovePortGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<SlotPort> {
+        self.guard.as_mut().expect("held until drop")
+    }
+}
+
+#[cfg(test)]
+impl Drop for RemovePortGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        AFTER_REMOVE_UNLOCKED.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(self.id);
+            }
+        });
     }
 }
 
@@ -1825,7 +1932,10 @@ impl EngineHost {
                 .map(|(s, _)| s)
                 .ok_or_else(|| format!("unit {id} not found"))?
         };
-        let mut port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
+        let port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        let port_guard = RemovePortGuard { guard: Some(port_guard), id };
+        let mut port_guard = port_guard;
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
             state.reap_port(slot, port);
@@ -1843,11 +1953,15 @@ impl EngineHost {
         let owner_token = state.table.active_row_for_id(id).map(|r| r.token);
         // The shutdown's keep binds to its own removal, set below where it is accepted and under the same
         // lock as the terminal `Back`, and only on a row no other cause has begun to take: a row already
-        // leaving (a player's removal, a replacement whose box came back) keeps its retire.
-        let keep_tone = keep_tone
-            && owner_token
-                .and_then(|tok| state.table.row(tok))
-                .is_some_and(|r| matches!(r.leave, Leave::Staying));
+        // leaving (a player's removal, a replacement whose box came back) keeps its retire. A same-id reload
+        // candidate queued ahead of this removal is a row it may end (the candidate's install applies
+        // first): it binds there too, before the candidate's box can come back ahead of its promotion.
+        let staying = |tok: InstallToken| state.table.row(tok).is_some_and(|r| matches!(r.leave, Leave::Staying));
+        let candidate_keep = keep_tone
+            .then(|| state.table.live_reload_row_for_id(id))
+            .flatten()
+            .filter(|&tok| staying(tok));
+        let keep_tone = keep_tone && owner_token.is_some_and(staying);
 
         if failed_no_seat {
             state.model.remove_plate(slot, id);
@@ -1915,6 +2029,9 @@ impl EngineHost {
                     row.keep_tone = true;
                 }
             }
+        }
+        if let Some(row) = candidate_keep.and_then(|tok| state.table.row_mut(tok)) {
+            row.keep_tone = true;
         }
         state.model.mark_leaving(slot, id);
         let op = state.model.mint_op(owner_token.unwrap_or(0), gen, slot);
