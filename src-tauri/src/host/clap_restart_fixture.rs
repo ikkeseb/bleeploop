@@ -3978,9 +3978,10 @@ mod chain_cmds {
 
     /// (g) Shutdown with a plugin unit: a seated fixture unit and an ECHO. `unload_all`, the host's
     /// shutdown and `join_all` end within 3 s; the plugin is torn down in order, and its changed tone
-    /// is saved, then retired to the slot's file.
+    /// is saved into the unit's own file, which the shutdown keeps for the next launch's restore under
+    /// the same id (contract § 1; E3f): the slot's file is not written.
     #[test]
-    fn g_shutdown_with_a_plugin_unit_tears_it_down_in_order_and_retires_its_tone() {
+    fn g_shutdown_with_a_plugin_unit_tears_it_down_in_order_and_keeps_its_tone() {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = fx::device(48_000);
         let feed = FeedStandIn::start(device.host().clone());
@@ -4002,9 +4003,9 @@ mod chain_cmds {
         assert!(took < Duration::from_millis(6500), "the chain shutdown took {took:?}");
         assert!(torn_down_once(&a), "the plugin is torn down once: {}", life(&a));
         assert!(fx::released_in_order(&a), "stop < deactivate < destroy: {}", life(&a));
-        assert!(!unit_file.exists(), "the unit's file is retired");
-        let slot_tone = rig.store.load(0, &fx::identity()).expect("load the slot's tone").expect("a slot tone");
-        assert_eq!(slot_tone.state, b"g-state", "the changed tone was saved, then retired to the slot file");
+        let kept = tone::decode(&std::fs::read(&unit_file).expect("the unit's file is kept")).expect("tone bytes");
+        assert_eq!(kept.state, b"g-state", "the changed tone was saved into the unit's own file");
+        assert!(rig.store.load(0, &fx::identity()).expect("load the slot's tone").is_none(), "the slot's file is not written");
         assert_eq!(rig.chains.active_entries(), 0, "no owner left registered");
         assert!(clean(&a), "no contract violation");
     }
