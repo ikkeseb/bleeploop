@@ -39,6 +39,9 @@
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
+/** A unit record without its minted id. */
+const withoutId = (u) => Object.fromEntries(Object.entries(u).filter(([k]) => k !== 'id'));
+
 const RATE = 48000;
 const AMP_SIM = { format: 'vst3', path: 'C:\\Program Files\\Common Files\\VST3\\Amp Sim.vst3', id: 'com.example.ampsim', name: 'Amp Sim' };
 const DELAY = { format: 'clap', path: 'C:\\Program Files\\Common Files\\CLAP\\Delay.clap', id: 'com.example.delay', name: 'Delay' };
@@ -282,16 +285,16 @@ await probe(async ({ browser, open }) => {
       assert.deepEqual(writes.filter((w) => / lf\.(inputSend\.|rigRecall)/.test(w)), [], `${when}: the app wrote a legacy send or recall key`);
       const rig = JSON.parse(stored['lf.rig']);
       const [a, b] = rig.slots;
-      const sends = (list = []) => list.filter((u) => u.kind !== 'plugin' && u.kind !== 'synth').map(({ id: _, ...u }) => u);
+      const sends = (list = []) => list.filter((u) => u.kind !== 'plugin' && u.kind !== 'synth').map(withoutId);
       console.log(`${when}: lf.rig ${stored['lf.rig']}; writes ${JSON.stringify(writes)}`);
-      assert.equal(rig.version, 1, `${when}: lf.rig's version`);
-      assert.deepEqual(a.units.map(({ id: _, ...u }) => u), [{ kind: 'plugin', plugin: AMP_SIM, bypass: false }], `${when}: slot A's units`);
+            assert.equal(rig.version, 1, `${when}: lf.rig's version`);
+      assert.deepEqual(a.units.map(withoutId), [{ kind: 'plugin', plugin: AMP_SIM, bypass: false }], `${when}: slot A's units`);
       assert.equal(a.volume, 0.75, `${when}: slot A's volume, its saved plugin level`);
       assert.deepEqual(sends(a.pending), [
         { kind: 'echo', params: { echoTime: 2, echoFeedback: 0.55, echoLevel: 0.35 }, bypass: false },
         { kind: 'reverb', params: { reverbLevel: 0.6 }, bypass: true },
       ], `${when}: slot A's pending: ECHO on, REVERB bypassed, RING MOD (off, at its defaults, unbound) not migrated`);
-      assert.deepEqual(b.units.map(({ id: _, ...u }) => u), [{ kind: 'synth', bypass: false, params: {
+      assert.deepEqual(b.units.map(withoutId), [{ kind: 'synth', bypass: false, params: {
         instrument: pad, gainLead: 0.5, gainBass: 0.7, gainPad: 0.6, gainPiano: 0.9, gainOrgan: 0.4, gainDrum: 1.1 } }], `${when}: slot B's units`);
       assert.deepEqual([b.volume, b.pending ?? []], [1, []], `${when}: slot B at unity, nothing pending`);
       const now = [...a.units, ...a.pending, ...b.units].map((u) => u.id);
