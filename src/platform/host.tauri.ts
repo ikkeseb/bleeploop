@@ -23,7 +23,7 @@ import type {
   ToneImport,
   UpdateProgress,
 } from './host';
-import { decodeDeviceStatus, decodeFeedFrame, isKindToggle, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
+import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: verify/guards/boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
@@ -336,17 +336,19 @@ const tauriMidi: MidiHost = {
     const report = await invoke<unknown>('midi_import_legacy', { epoch, json });
     return report === null ? null : decodeImportReport(report);
   },
+  // `midi_chain_mode` is registered in DEV builds only, beside the `chain_*` commands: without the DEV flag
+  // (always so in a release build) no IPC is made.
+  setChainMode(epoch, on) {
+    return chainNative ? invoke<boolean>('midi_chain_mode', { epoch, on }) : Promise.resolve(false);
+  },
 };
 
 /** The outbox's batches over Tauri IPC (`input_send`, synchronous on the main thread natively). */
 const tauriInput: InputHost = {
   async send(epoch, items) {
-    // Unit contract §2: with `lf.chainNative` off, no unit command reaches `input_send`; with it on,
-    // `SetUnitBypass`, `SetUnitParam` and `ToggleUnit` go through while `Toggle.Units` stays off the
-    // native batch until the built-in units land (`src/platform/index.ts` `enqueueEngine`).
-    if (items.some((item) => 'engine' in item && (chainNative ? isKindToggle(item.engine) : isUnitCommand(item.engine)))) {
-      throw new Error(chainNative ? NO_KIND_TOGGLE : NO_CHAIN);
-    }
+    // Unit contract §2: with `lf.chainNative` off (always so in a release build), no unit command reaches
+    // `input_send` (`src/platform/index.ts` `enqueueEngine` drops them first); with it on, all go through.
+    if (!chainNative && items.some((item) => 'engine' in item && isUnitCommand(item.engine))) throw new Error(NO_CHAIN);
     return decodeDropped(await invoke<unknown>('input_send', { epoch, items }));
   },
 };
@@ -412,7 +414,6 @@ function readChainNative(): boolean {
 const chainNative = readChainNative();
 
 const NO_CHAIN = 'The native chain host is off (enable lf.chainNative in DEV).';
-const NO_KIND_TOGGLE = 'Toggle.Units is not on the native engine yet.';
 const noChain = async (): Promise<never> => {
   throw new Error(NO_CHAIN);
 };

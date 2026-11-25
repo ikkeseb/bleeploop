@@ -101,9 +101,8 @@ export type InputSendParamId =
 export type AudioBackend = 'Wasapi' | 'Asio';
 
 // ── The chain per slot (`docs/unit-contract.md` §2): the wire's unit shapes ─────────────────────────
-// The native host takes these when the DEV flag `lf.chainNative` is on (`host.tauri.ts`); `Toggle.Units`
-// stays off the native batch until the built-in units land. The browser fake (`chain-fake.ts`) answers
-// all of them as the contract says the engine will.
+// The native host takes these when the DEV flag `lf.chainNative` is on (`host.tauri.ts`). The browser
+// fake (`chain-fake.ts`) answers all of them as the contract says the engine will.
 
 /** A unit's id: an opaque non-zero u32, minted by whoever asks for the unit (`mintUnitId`). */
 export type UnitId = number;
@@ -359,8 +358,7 @@ export type EngineCommand =
   /** A built-in unit's parameter, clamped as the unit clamps it; one of another kind is dropped. */
   | { SetUnitParam: [UnitId, UnitParamId, number] };
 
-/** Whether `c` is a `Toggle.Units` action (pressed or `ActionOn`): stays off the native batch until the
- * built-in units land (`src/platform/index.ts` `enqueueEngine`, `src/platform/host.tauri.ts`). */
+/** Whether `c` is a `Toggle.Units` action (pressed or `ActionOn`): one of `isUnitCommand`'s. */
 export function isKindToggle(c: EngineCommand): boolean {
   if (typeof c !== 'object') return false;
   const action = 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
@@ -370,10 +368,9 @@ export function isKindToggle(c: EngineCommand): boolean {
 /**
  * A batch command only a chain host takes (unit contract §2): `SetUnitBypass`, `SetUnitParam`, and the
  * actions `ToggleUnit` and `Toggle.Units` (pressed or `ActionOn`). The native host takes these when the
- * DEV flag `lf.chainNative` is on (`host.tauri.ts`), except `Toggle.Units` which stays off the native
- * batch until the built-in units land. Wherever `ChainHost.available` is false, the outbox drops them
- * before queuing (`src/platform/index.ts`) and `host.tauri.ts`'s `input_send` refuses a batch that carries
- * one.
+ * DEV flag `lf.chainNative` is on (`host.tauri.ts`). Wherever `ChainHost.available` is false, the outbox
+ * drops them before queuing (`src/platform/index.ts`) and `host.tauri.ts`'s `input_send` refuses a batch
+ * that carries one.
  */
 export function isUnitCommand(c: EngineCommand): boolean {
   if (typeof c !== 'object') return false;

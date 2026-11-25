@@ -57,6 +57,8 @@ const midi: MidiHost = {
   assign: absent,
   // Nothing to import and nothing to report: the boot asks every launch, and a rejection would toast.
   importLegacy: async () => null,
+  // No native MIDI, so no chain mode to tell.
+  setChainMode: async () => false,
 };
 
 // The chain per slot (`docs/unit-contract.md` §2): no engine, so nothing to chain.

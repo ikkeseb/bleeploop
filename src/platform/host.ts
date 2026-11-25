@@ -313,6 +313,11 @@ export interface MidiHost {
   /** Import the web's bindings once (`lf.midiLearn` verbatim, `"[]"` when absent); later calls change
    * nothing and answer `already`. */
   importLegacy(epoch: number, json: string): Promise<ImportReport | null>;
+  /** DEV chain mode on (true) or off for this page (`midi_chain_mode`, DEV builds only): a bound IN FX pedal
+   * then switches its built-in units (`Toggle.Units`) instead of the legacy send. Natively the mode is the
+   * page's, reset to off by every subscribe. Resolves false where nothing took it: a stale epoch, a build
+   * without the command (release, or `lf.chainNative` off), no native MIDI. */
+  setChainMode(epoch: number, on: boolean): Promise<boolean>;
 }
 
 /** A subscription to native MIDI's events: the document's input epoch, and the stop. */
