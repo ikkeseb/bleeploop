@@ -623,7 +623,8 @@ fn builtin_timeout_holds_place() {
     l.turns(t0 + 2 * SETTLE, 10);
     assert_eq!(folder.ids(0), vec![1, 2], "held at its place");
     assert!(matches!(l.disposition(1), Some(Disposition::Issued { token: Some(_) })));
-    assert_eq!(on_disk(&folder), Some(Vec::new()), "the marker names nothing");
+    // The marker names plugins only: with nothing left to issue it goes, the built-in still unresolved.
+    l.until(t0 + 2 * SETTLE, "the marker goes: it never names a built-in", || on_disk(&folder).is_none());
 }
 
 /// C6: a plugin the scan does not find is held at its place, its tone file kept; the next launch whose
