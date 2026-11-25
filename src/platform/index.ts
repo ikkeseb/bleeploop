@@ -74,23 +74,28 @@ export function within<T>(promise: Promise<T>, ms: number, what: string): Promis
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
-/** The most items that wait for the next batch while one is on its way. Past it, a fresh note-on or an
+/** The most items that wait for the next batches while one is on its way. Past it, a fresh note-on or an
  * engine command is dropped (one release-log line per overflow); a release, a blur, a panic and the note
  * target always wait. */
 const WAITING_MAX = 256;
 
-/** What waits for the next send, and the promise its callers hold. */
+/** What waits for a send, and the promise its callers hold. */
 interface Batch {
   items: InputItem[];
   /** Whether a lost send toasts: false while every caller in it tells the player itself
    * (`sendEngineReported`). The release log names every lost batch. */
   toastLost: boolean;
+  /** Its items travel alone: nothing queued after them joins it (`enqueue`'s `alone`). */
+  alone: boolean;
   settle: (took: boolean) => void;
   submitted: Promise<boolean>;
 }
 
-/** The items queued since the last send left. */
-let waiting: Batch | null = null;
+/** What was queued since the last send left, in order: one batch, but for a caller's items that go alone
+ * (a batch of their own, and a new one for what follows them). */
+const waiting: Batch[] = [];
+/** The items in `waiting`, every batch's. */
+let waitingItems = 0;
 /** A send is in flight, or about to start: the next one waits for it. */
 let sending = false;
 /** The waiting batch overflowed and the release log said so; cleared when it leaves. */
@@ -169,29 +174,34 @@ const droppable = (item: InputItem): boolean => noteOf(item)?.on === true || 'en
 
 /**
  * Queue `items` behind everything queued before. The outbox sends one `input_send` batch at a time,
- * carrying every item queued since the last one left, in order, and starts the next only once that one
+ * carrying every item queued since the last one left (but `alone`), in order, and starts the next only once that one
  * settled (or `NATIVE_WAIT_MS` passed): Tauri's IPC does not keep two calls in the order they were made, so
  * a slot pick and the note after it, or a looper press and a note, reach native code in the order they
  * happened only this way. Nothing is sent while the platform has no engine (the browser build without the
- * DEV fake). False when an item was dropped (the waiting batch was full). `ownToast`: the caller tells the
- * player itself when the batch is lost, so the outbox toasts only for the batch's other callers.
+ * DEV fake). False when an item was dropped (`WAITING_MAX` items were waiting). `ownToast`: the caller tells the
+ * player itself when the batch is lost, so the outbox toasts only for the batch's other callers. `alone`:
+ * `items` leave in a batch of their own, in their place in the order, so what native MIDI answers is
+ * theirs alone (it answers a batch with one reason for all it dropped: a SYNTH pick's caller must know
+ * whether the pick went in, whatever else a batch beside it lost).
  */
-function enqueue(items: InputItem[], ownToast = false): Promise<boolean> {
+function enqueue(items: InputItem[], ownToast = false, alone = false): Promise<boolean> {
   if (!platform.engine.available) return Promise.resolve(false);
   if (items.length === 0) return Promise.resolve(true);
-  if (!waiting) {
+  let batch = waiting.at(-1);
+  if (!batch || batch.alone || alone) {
     let settle!: (took: boolean) => void;
     const submitted = new Promise<boolean>((resolve) => (settle = resolve));
-    waiting = { items: [], toastLost: false, settle, submitted };
+    batch = { items: [], toastLost: false, alone, settle, submitted };
+    waiting.push(batch);
     if (!sending) {
       sending = true;
       queueMicrotask(() => void drain());
     }
   }
-  if (!ownToast) waiting.toastLost = true;
+  if (!ownToast) batch.toastLost = true;
   let kept = true;
   for (const item of items) {
-    if (waiting.items.length >= WAITING_MAX && droppable(item)) {
+    if (waitingItems >= WAITING_MAX && droppable(item)) {
       kept = false;
       if (!overflowTold) {
         overflowTold = true;
@@ -199,18 +209,19 @@ function enqueue(items: InputItem[], ownToast = false): Promise<boolean> {
       }
       continue;
     }
-    waiting.items.push(item);
+    batch.items.push(item);
+    waitingItems++;
   }
-  return kept ? waiting.submitted : Promise.resolve(false);
+  return kept ? batch.submitted : Promise.resolve(false);
 }
 
 /** Send what waits, one batch at a time, until nothing does. */
 async function drain(): Promise<void> {
   try {
-    while (waiting) {
+    while (waiting.length > 0) {
       await pageEpoch();
-      const batch = waiting;
-      waiting = null;
+      const batch = waiting.shift()!;
+      waitingItems -= batch.items.length;
       overflowTold = false;
       batch.settle(await submit(batch.items, batch.toastLost));
     }
@@ -352,10 +363,12 @@ export const input = {
   /** Pick `instrument` (its index in `SYNTHS` order) on `unit`, the SYNTH heading `slot`'s chain (unit
    * contract §4): natively the router releases what sounds, makes `slot` the note target when it is not,
    * then sends the unit its `instrument` param, one batch; the same pick again sends nothing. The only path
-   * for that param: a `sendEngine` batch carrying it is refused. Resolves as `sendEngine` does (the batch's
-   * submission, never the pick's outcome: the feed's `chains` brings that). */
+   * for that param: a `sendEngine` batch carrying it is refused. The pick leaves in a batch of its own
+   * (`enqueue`'s `alone`), so it resolves with the pick's own submission: true once the router took it
+   * (its releases were then queued ahead of it), false when it was lost or refused (no room, a replaced
+   * page). Never its outcome: the feed's `chains` brings that. */
   pickSynth(slot: 0 | 1, unit: UnitId, instrument: number): Promise<boolean> {
-    return enqueue([encodeItem.input(encodeInput.pickSynth(slot, unit, instrument))]);
+    return enqueue([encodeItem.input(encodeInput.pickSynth(slot, unit, instrument))], false, true);
   },
 };
 

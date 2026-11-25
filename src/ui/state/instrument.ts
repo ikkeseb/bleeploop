@@ -718,11 +718,13 @@ export function activeIsDrum(): boolean {
 }
 
 /** What the active slot plays, as a key that changes exactly when it does (a slot switch, its source or
- * its synth pick changing; with the chain drawn, its head unit or that SYNTH's pick): the keyboard drops
- * its held keys on a change, as the router released their notes. */
+ * its synth pick changing; with the chain drawn, its head unit): the keyboard drops its held keys on a
+ * change, as the router released their notes. Not a chain SYNTH's pick: the feed shows it after the router
+ * applied it, and a key pressed in between still sounds (the keyboard drops what the pick released when
+ * the router takes it, `chain.ts` `onPickTaken`). */
 export function activeSourceKey(): string {
   const i = activeSlot();
-  if (platform.chain.available) return `${i}:${appliedHead(i)?.id ?? ''}:${headSynthPick(i) ?? ''}`;
+  if (platform.chain.available) return `${i}:${appliedHead(i)?.id ?? ''}`;
   return `${i}:${slotPlugins()[i]?.id ?? slotIds()[i]}`;
 }
 

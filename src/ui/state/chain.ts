@@ -193,18 +193,52 @@ export function toggleUnit(unit: UnitId): void {
 
 // ── SYNTH's pick (unit contract §4): an instrument choice on a slot a SYNTH heads is a pick on it ───────
 
-/** The pick last sent to each SYNTH that the feed has not shown yet: judged against the feed alone, a pick
- * that undoes one still on its way (Lead, Bass, Lead before the feed says Bass) would be skipped. */
-const picksSent = new Map<UnitId, number>();
+/**
+ * The picks sent to each SYNTH that the feed has not shown yet, in the order sent, and `shown`, the pick
+ * the feed last showed while they were on their way. The router applies them in that order, so the last
+ * one sent is where the unit ends: a choice is skipped only when it equals that, or, with none on its way,
+ * the feed's pick (judged against the feed alone, Lead, Bass, Lead sent before the feed says Bass would
+ * skip the second Lead). A pick the router did not take is struck out (`pickSynth`).
+ */
+const picksSent = new Map<UnitId, { shown: number; sent: { instrument: number }[] }>();
 
-/** Forget each pick sent that the feed now shows, or whose unit is no SYNTH in the chain any more. */
+/**
+ * The feed's pick of each SYNTH with picks on their way acknowledges the picks it shows applied: the
+ * earliest place in the order sent that reads it (the pick shown before them counts as the first), with
+ * every pick before it. Never later: a frame may show one pick of several alike (Bass, Pad, Bass with the
+ * first Bass applied) and must not strike out one still on its way. A frame that skipped picks (two applied
+ * between frames, or two the queue coalesced) may leave applied ones listed: they end where the unit is,
+ * so no choice is judged wrong by them. A unit that is no SYNTH in the chain any more takes its picks along.
+ */
 function forgetShownPicks(next: [ChainState, ChainState]): void {
   if (picksSent.size === 0) return;
   const units = new Map(next.flatMap((c) => c.units.map((u) => [u.id, u] as const)));
-  for (const [unit, pick] of picksSent) {
+  for (const [unit, track] of picksSent) {
     const u = units.get(unit);
-    if (u?.kind !== 'synth' || (u.params?.instrument ?? 0) === pick) picksSent.delete(unit);
+    if (u?.kind !== 'synth') {
+      picksSent.delete(unit);
+      continue;
+    }
+    const shown = u.params?.instrument ?? 0;
+    if (shown === track.shown) continue;
+    const at = track.sent.findIndex((p) => p.instrument === shown);
+    if (at < 0) continue;
+    track.sent.splice(0, at + 1);
+    track.shown = shown;
+    if (track.sent.length === 0) picksSent.delete(unit);
   }
+}
+
+/** Picks sent so far, as a running count: a keyboard hold stamps it at its press (`picksSentSoFar`). */
+let pickSerial = 0;
+/** The count of picks sent so far; a pick's number is the count once it was sent. */
+export const picksSentSoFar = (): number => pickSerial;
+const pickTakers = new Set<(serial: number) => void>();
+/** Call `fn` with a pick's number once the router took it: it released every note held before that pick
+ * was sent (`Keyboard.tsx` drops their bookkeeping then, keeping any made after). Returns the unsubscribe. */
+export function onPickTaken(fn: (serial: number) => void): () => void {
+  pickTakers.add(fn);
+  return () => pickTakers.delete(fn);
 }
 
 /** The pick of the SYNTH that heads slot `slot`'s chain as applied, as the feed shows it (an index in
@@ -226,11 +260,23 @@ export function pickSynth(slot: 0 | 1, instrument: number): boolean {
   const head = appliedHead(slot);
   if (head?.kind !== 'synth' || head.state !== 'seated') return false;
   const unit = head.id;
-  if ((picksSent.get(unit) ?? head.params?.instrument ?? 0) !== instrument) {
-    picksSent.set(unit, instrument);
+  const shown = head.params?.instrument ?? 0;
+  const track = picksSent.get(unit);
+  if ((track?.sent.at(-1)?.instrument ?? shown) !== instrument) {
+    const pick = { instrument };
+    if (track) track.sent.push(pick);
+    else picksSent.set(unit, { shown, sent: [pick] });
+    const serial = ++pickSerial;
     void input.pickSynth(slot, unit, instrument).then((took) => {
-      // a pick that did not reach the router (lost, or dropped there) is not on its way
-      if (!took && picksSent.get(unit) === instrument) picksSent.delete(unit);
+      if (took) {
+        for (const fn of pickTakers) fn(serial);
+        return;
+      }
+      // a pick the router did not take (lost, or refused there) is not on its way
+      const now = picksSent.get(unit);
+      const at = now?.sent.indexOf(pick) ?? -1;
+      if (now && at >= 0) now.sent.splice(at, 1);
+      if (now?.sent.length === 0) picksSent.delete(unit);
     });
   }
   setActiveSlot(slot);

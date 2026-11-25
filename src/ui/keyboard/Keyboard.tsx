@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import { input } from '../../platform';
 import { heldNotes } from '../state/midi';
 import { activeIsDrum, activeSourceKey, ensureActive } from '../state/instrument';
+import { onPickTaken, picksSentSoFar } from '../state/chain';
 import { DRUM_KIT } from '../state/drum-kit';
 import type { KeyboardPlacement } from '../layout/layout-store';
 import { stageOpen } from '../stage/stage-store';
@@ -52,6 +53,9 @@ interface Hold {
   owner: string;
   active: boolean;
   sounding: boolean;
+  /** The chain SYNTH picks sent before its press (`chain.ts` `picksSentSoFar`): a pick taken after it
+   * released it natively. */
+  picks: number;
 }
 
 export function Keyboard(props: KeyboardProps = {}) {
@@ -124,7 +128,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     if (e.button !== 0) return;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
-    const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false };
+    const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false, picks: picksSentSoFar() };
     pointerNotes.set(e.pointerId, hold);
     startHold(hold, velocityFromPointer(e, el));
   }
@@ -133,7 +137,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     if (e.button !== 0) return;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
-    const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false };
+    const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false, picks: picksSentSoFar() };
     pointerNotes.set(e.pointerId, hold);
     startHold(hold, PAD_VELOCITY);
   }
@@ -183,7 +187,7 @@ export function Keyboard(props: KeyboardProps = {}) {
       const pad = DRUM_KIT.find((p) => p.key === k);
       if (pad === undefined || heldKeyNote.has(e.code)) return;
       e.preventDefault();
-      const hold: Hold = { note: pad.note, owner: `key:${e.code}`, active: true, sounding: false };
+      const hold: Hold = { note: pad.note, owner: `key:${e.code}`, active: true, sounding: false, picks: picksSentSoFar() };
       heldKeyNote.set(e.code, hold);
       startHold(hold, PAD_VELOCITY);
       return;
@@ -202,7 +206,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     const note = octaveBase(keyboardOctave()) + offset;
     // Owner per physical key: after an octave shift two held keys can land on the SAME note, and native
     // MIDI's router must keep it sounding (and lit) until the last of them lifts.
-    const hold: Hold = { note, owner: `key:${e.code}`, active: true, sounding: false };
+    const hold: Hold = { note, owner: `key:${e.code}`, active: true, sounding: false, picks: picksSentSoFar() };
     heldKeyNote.set(e.code, hold);
     startHold(hold, 100);
   }
@@ -236,9 +240,26 @@ export function Keyboard(props: KeyboardProps = {}) {
     clearLocalHeld();
   }
 
+  // A chain SYNTH's pick the router took released every note held before the pick was sent (`chain.ts`
+  // `pickSynth`): drop those holds' bookkeeping, as on a change of the active instrument below, and keep
+  // the holds pressed since, whose notes still sound and owe their note-off. No input traffic.
+  function dropHeldBefore(pick: number) {
+    dropFrom(heldKeyNote, pick);
+    dropFrom(pointerNotes, pick);
+  }
+  function dropFrom<K>(holds: Map<K, Hold>, pick: number) {
+    for (const [owner, hold] of holds) {
+      if (hold.picks >= pick) continue;
+      hold.active = false;
+      if (hold.sounding) own(hold.note, -1);
+      hold.sounding = false;
+      holds.delete(owner);
+    }
+  }
+
   // Flush local held state whenever the active instrument changes — a slot switch or the active
-  // slot's synth changing (e.g. pad <-> piano; a chain's SYNTH pick). The router's target switch or
-  // pick already released the notes
+  // slot's synth changing (e.g. pad <-> piano; a chain SYNTH's pick: `dropHeldBefore` above). The router's
+  // target switch already released the notes
   // natively (the router forgets their owners), so we only need to drop this
   // keyboard's stale bookkeeping: otherwise heldKeyNote keeps the old mapping, leaving the still-held
   // computer key dead (guarded by `heldKeyNote.has(e.code)`, the physical key) and the on-screen key visually stuck until
@@ -253,12 +274,15 @@ export function Keyboard(props: KeyboardProps = {}) {
     }
   });
 
+  let stopPicks = () => {};
   onMount(() => {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
+    stopPicks = onPickTaken(dropHeldBefore);
   });
   onCleanup(() => {
+    stopPicks();
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
     window.removeEventListener('blur', onBlur);
