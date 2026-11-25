@@ -1043,10 +1043,20 @@ impl Model {
     /// if it never seated): an effect parked for coming back a source was never the slot's source, and
     /// a source parked for coming back an effect (refused, say, for its latency) still was.
     fn take_older_sources_out_of_engine(&mut self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
+        let older = self.older_sources_out_of_engine(slot, unit, table);
+        self.slots[slot].plates.retain(|p| !older.contains(&p.id));
+        older
+    }
+
+    /// The older sources of `slot` that source `unit`'s install would take out when it applies at the
+    /// head ([`Self::take_older_sources_out_of_engine`]): each one's row live, its seat out of this
+    /// engine (a rebuild's eviction it has not reseated from, or parked) and no op of its queued. A host
+    /// add judges its install by it too (D9: it never replaces a source, also one awaiting its reseat,
+    /// which no projected seat shows: `head_source_id`).
+    pub(crate) fn older_sources_out_of_engine(&self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
         let sm = &self.slots[slot];
         let Some(rev) = sm.find(unit).map(|i| sm.plates[i].added_rev) else { return Vec::new() };
-        let older: Vec<UnitId> = sm
-            .plates
+        sm.plates
             .iter()
             .filter(|p| {
                 p.seated_source.unwrap_or(p.source)
@@ -1059,9 +1069,7 @@ impl Model {
                     && !sm.pending.iter().any(|q| q.unit == p.id)
             })
             .map(|p| p.id)
-            .collect();
-        self.slots[slot].plates.retain(|p| !older.contains(&p.id));
-        older
+            .collect()
     }
 
     /// Project an `Event::Chain` (or a snapshot read off `Engine::chain`) into the model.

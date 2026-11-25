@@ -1640,9 +1640,14 @@ impl UnitHost {
                 None => {}
             }
             let replaces = state.model.head_source_id(self.slot, Some(self.id));
+            let host_add = !applied && state.table.host_adds.contains(&self.install);
+            let awaiting = host_add && !state.model.older_sources_out_of_engine(self.slot, self.id, &state.table).is_empty();
             // A host add never replaces the slot's source (D9): its first install, not a reseat of one
-            // that applied (that one heads the slot itself).
-            if replaces.is_some() && !applied && state.table.host_adds.contains(&self.install) {
+            // that applied (that one heads the slot itself). The source is the projected head's, or an
+            // older one whose row is live while its seat is out of this engine (`awaiting`: a rebuild
+            // evicted it and it has not reseated): no projected seat shows that one, and this install
+            // applying would take it out (`Model::take_older_sources_out_of_engine`).
+            if host_add && (replaces.is_some() || awaiting) {
                 return Err((unit, SubmitError::SourceTaken));
             }
             (0, replaces)
@@ -2014,13 +2019,17 @@ impl EngineHost {
         if slot >= SLOT_COUNT {
             return Err(format!("no slot {slot}"));
         }
-        if self.core.closing.load(Acquire) {
-            return Err("the host is closing".to_string());
-        }
         if id == 0 {
             return Err("unit id 0 is invalid".to_string());
         }
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Read under `state`: the shutdown marks the host closing before it takes `state` for the units
+        // it removes (`Chains::unload_all`), so a reservation either lands ahead of that (its plate is
+        // removed with the rest) or sees closing and reserves nothing, an add that waited here for the
+        // lock while the shutdown began included.
+        if self.core.closing.load(Acquire) {
+            return Err("the host is closing".to_string());
+        }
         let is_legacy = matches!(spec, Spec::Legacy);
         if is_legacy {
             if state.table.has_any_chain() || state.model.has_non_legacy_plate() {

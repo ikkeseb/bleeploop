@@ -47,11 +47,15 @@
   join would leave loads unended past close, and the next launch would forget sound plugins. Next check, only
   if a crash report's stack shows a plugin's `DllMain` at thread detach: whether that load left the marker.
 - The rig restore's seed barrier (D1, `EngineHost::wait_taken`) is checked before each add, so no add
-  starts before the running engine took the seed; an install already in a slot's port across a rebuild can
-  still seat ahead of the new engine's replay (a block takes at most 64 commands, then services the ports:
-  `rig/host_tests.rs` `first_block_can_seat_an_install_ahead_of_a_long_replay`), playing that unit for a
-  block or two before the replayed levels and send-offs apply. Next check: none planned; on a report of a
-  restored unit heard at a wrong level right after a device switch, log the block that seats it.
+  starts before the running engine took the seed. An add already started is not covered: its device check
+  (`rig/host.rs` `AppHost::add`) comes before the slot's order lock, so a device that stops while the add
+  waits leaves the kept engine to take its install by idle service; and a rebuild during its plugin's load
+  hands the owner the new engine's terms, so its first install can sit in a port as the new engine's first
+  block takes at most 64 commands of a longer replay and then services the ports
+  (`rig/host_tests.rs` `first_block_can_seat_an_install_ahead_of_a_long_replay`): that unit plays a block
+  or two before the replayed levels and send-offs apply. Next check: none planned; on a report of a
+  restored unit heard at a wrong level right after a device switch, log the block that seats it and the
+  engine generation its add started under.
 - The rig's forget (`Chains::forget_files`) deletes a unit's tone files once no row, live plate or queued
   removal holds its id; whether a departing owner can still write `unit-<id>.tone` after its row is released
   is unread. Next check: read the order of `ToneKeeper`'s last write and the row's release in

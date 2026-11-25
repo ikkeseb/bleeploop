@@ -841,28 +841,40 @@ impl Chains {
     /// an id (never a slot's order lock: this waits at most for a mint, never for an add's load). `Held`,
     /// nothing deleted, when a unit holds the id (a row reserves it, a live plate or a queued removal
     /// carries it: its files are that unit's), and once the host is closing (the shutdown keeps each
-    /// removed unit's tone for the next launch). A file that cannot be deleted is logged and left.
+    /// removed unit's tone for the next launch). Both are decided under `state`, the lock the shutdown's
+    /// unit removal takes after it marks the host closing (`Self::unload_all`): either no unit held the
+    /// id before the shutdown began, and none can take it while `id_guard` is held here, so the shutdown
+    /// keeps no file of this id; or closing reads true. `Held` too when a file is left (any failure but
+    /// not found: a sharing violation, a denied access), logged: the restore asks again at a later turn.
     pub(crate) fn forget_files(&self, host: &EngineHost, id: UnitId, tones_dir: Option<&std::path::Path>) -> Forgot {
         let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
-        if self.closing.load(Acquire) || host.core.closing.load(Acquire) {
-            return Forgot::Held;
-        }
         {
             let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            if self.closing.load(Acquire) || host.core.closing.load(Acquire) {
+                return Forgot::Held;
+            }
             if state.table.is_id_reserved(id) || state.model.has_live_plate(id) || state.model.has_pending_remove(id) {
                 return Forgot::Held;
             }
         }
+        let mut left = false;
         if let Some(dir) = tones_dir {
             for name in [crate::host::tone::ToneIdentity::unit_file_name(id), crate::host::tone::ToneIdentity::unit_pin_name(id)] {
                 match std::fs::remove_file(dir.join(&name)) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => log::warn!("[chain_cmds] unit {id}: the forgotten unit's {name} was not deleted ({e})"),
+                    Err(e) => {
+                        log::warn!("[chain_cmds] unit {id}: the forgotten unit's {name} was not deleted ({e}); tried again later");
+                        left = true;
+                    }
                 }
             }
         }
-        Forgot::Deleted
+        if left {
+            Forgot::Held
+        } else {
+            Forgot::Deleted
+        }
     }
 
     /// Track `token`'s attempt by `exit` and answer the latch that stands for it now: registered at the
