@@ -1,0 +1,428 @@
+{
+  "frames": 60000,
+  "note": "sha256 of today's NoteTarget::Builtin bank rendering tests/synth_unit.rs's phrase (bus, heard, record: left frames then right, f32 LE), per instrument/input side/block size, keyed by the OS that rendered it. Regenerate: cargo test -p lf-engine --test synth_unit -- --ignored write_builtin_pin",
+  "pins": {
+    "linux": {
+      "bass/256/1": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/256/1024": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/256/127": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/256/128": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/256/32": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/256/480": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/256/64": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "f454233f5320bb3fade0dbc245d9eebc5f5abaaace6c3b0f5206f5401ec2af7e"
+      },
+      "bass/64/1": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "bass/64/1024": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "bass/64/127": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "bass/64/128": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "bass/64/32": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "bass/64/480": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "bass/64/64": {
+        "bus": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f",
+        "heard": "9f54d379ac0a5e315bb63ac45115dee22c10480cd9300717f4a088a340afbb78",
+        "record": "5dc1ee32c7c30a74ec868065a1114b8da7a85157a37b21008cd4e15a862a1d1f"
+      },
+      "drum/256/1": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/256/1024": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/256/127": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/256/128": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/256/32": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/256/480": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/256/64": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "b4ce3817400688e78bb7752523002d2b1d6f40d7480060e9519bfa497d58460d"
+      },
+      "drum/64/1": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "drum/64/1024": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "drum/64/127": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "drum/64/128": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "drum/64/32": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "drum/64/480": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "drum/64/64": {
+        "bus": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c",
+        "heard": "436d231ba3ec76d8770116a7fe6eec5bf6ad93c69041f47b88c79dc98b30df0e",
+        "record": "825dcac688fbcd23492063713676a390689605025edd488abdf223b85644677c"
+      },
+      "lead/256/1": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/256/1024": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/256/127": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/256/128": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/256/32": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/256/480": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/256/64": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "475795812dd67ab5742fdce96d96669c3665b07ae21a8c1080a6a63aff931342"
+      },
+      "lead/64/1": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "lead/64/1024": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "lead/64/127": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "lead/64/128": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "lead/64/32": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "lead/64/480": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "lead/64/64": {
+        "bus": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd",
+        "heard": "83b1172aa7fefeb36db2ff9e845c4c60e154a707d7ecb1749e9acadb39261d5e",
+        "record": "964d53bab7c759d93b0682456163158b0fa5b5e7c655ca125c496ef4130ad7fd"
+      },
+      "organ/256/1": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/256/1024": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/256/127": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/256/128": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/256/32": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/256/480": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/256/64": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "7e46f9bc4be52da030d63109e2970d71381d3bd3d3dd75e0be2cec58296b675f"
+      },
+      "organ/64/1": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "organ/64/1024": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "organ/64/127": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "organ/64/128": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "organ/64/32": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "organ/64/480": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "organ/64/64": {
+        "bus": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e",
+        "heard": "17f93353bf0de4856afce4d728d7bcb967d7543013888a472d29b8fdd5086caf",
+        "record": "fcda69d840217ed7b4bf318edbc92ce56cc76d46d88a43b40708aff9dc43281e"
+      },
+      "pad/256/1": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/256/1024": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/256/127": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/256/128": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/256/32": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/256/480": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/256/64": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "8c27b22e7e040460622574381d8026a14a51cf8ef159c93cca5ec66778218683"
+      },
+      "pad/64/1": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "pad/64/1024": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "pad/64/127": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "pad/64/128": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "pad/64/32": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "pad/64/480": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "pad/64/64": {
+        "bus": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50",
+        "heard": "bbe8476bd539d33ec8ea229e08e54dda466d7a035430935b6020f8a6cecb1ee7",
+        "record": "35bd6030dc39df49b069364851a2a9fa8fc0e48a16b4039c540aa89b4d00fc50"
+      },
+      "piano/256/1": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/256/1024": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/256/127": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/256/128": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/256/32": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/256/480": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/256/64": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "323220423a633eab5b6150e410007fa64c3d8add7e7ab3e14d5226adb012430d"
+      },
+      "piano/64/1": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      },
+      "piano/64/1024": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      },
+      "piano/64/127": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      },
+      "piano/64/128": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      },
+      "piano/64/32": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      },
+      "piano/64/480": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      },
+      "piano/64/64": {
+        "bus": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497",
+        "heard": "a837be869d5b09ad080e95cc28217d755ca885ee62e9021a21d0dfceb5322e0c",
+        "record": "6043bb8bc60728eafc7f251f924dc08c76c50cf7f2d9c614462501d1f9665497"
+      }
+    }
+  }
+}

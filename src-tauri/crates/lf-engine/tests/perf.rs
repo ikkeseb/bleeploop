@@ -9,6 +9,9 @@
 //!   real time (with the Stage 3 sound wired in and idle: bypassed FX, silent instruments).
 //! - Stage 3: that engine with every effect on, every input send and the input OTT on and the drum kit
 //!   playing, plus the other synths beside it (below), under 50 %.
+//! - Two SYNTH slots (E3, `docs/unit-contract.md` § Still to measure: two banks): the Stage 3 load with
+//!   two SYNTH units beside it, each a bank of its own picked to the pad with all 12 voices held, bent
+//!   and the mod wheel full, under the same 50 % (the bar this file already holds the heaviest load to).
 //! - The input sends (F15, F24): what ECHO, REVERB and RING MOD on the live input add to the Stage 2 engine, printed
 //!   beside it (no bar of their own; the Stage 3 bar carries them).
 //! - A lane's pan: the Stage 2 engine with every lane centred, then every lane panned and resting, then
@@ -66,6 +69,12 @@
 //! Snapshot callback (220 blocks of 64): mean 180.8 µs / 13.56 % (after it 107.0 µs / 8.03 %), p99.9 and
 //! worst 377.3 µs (28.3 %) on a standalone rerun (under a contention spike in the full-suite run: mean
 //! 3321.3 µs / 249.1 %, after it 1886.1 µs / 141.5 %, worst 25061.4 µs / 1879.6 %).
+//!
+//! Two SYNTH slots (E3; the Linux dev box, release, one run on a quiet machine, NOT the dev PC: rerun
+//! there): Stage 3 alone read a mean of 29.7 %; with the two SYNTHs, a mean of 503.7 µs (37.8 %),
+//! quantum-start blocks 71.4 %, scheduled worst 75.9 %, p99.9 80.1 %, worst 81.2 %. Each SYNTH 54.0 µs
+//! (4.05 %): about 25 µs over the 28.7 µs the pad alone takes beside the engine, presumably the bank's
+//! five unpicked instruments rendering silent (read off the parts, not timed apart).
 
 mod common;
 
@@ -77,11 +86,15 @@ use lf_engine::dsp::compressor::{Compressor, Params};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::dsp::ott::{MonoOtt, Setting, StereoOtt};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::render::{wet_master_measured, RenderOptions};
-use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, Load, LoadTrack, NoteTarget, Pair, ProcessContext, SessionJob, Snapshot};
+use lf_engine::units::{SynthUnit, SYNTH_IDS};
+use lf_engine::{
+    Command, InputSend, InputSendParam, Instrument, LaneState, Load, LoadTrack, NoteTarget, Pair, ProcessContext, SessionJob, SlotEvent, SlotEventKind, Snapshot, UnitCx,
+    UnitParam, UnitProcessor,
+};
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 64;
@@ -676,7 +689,20 @@ fn the_lanes_pan_cost() {
 }
 
 /// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.
-const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + input sends + input OTT + drum kit + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass"];
+/// The two SYNTH slots run only in their own bar ([`Stage3::with_synths`]).
+const PARTS: [&str; 8] = [
+    "engine: lanes + FX + reverb + input sends + input OTT + drum kit + click + limiter",
+    "lead x8",
+    "pad x12",
+    "piano x12",
+    "organ x8",
+    "bass",
+    "SYNTH 1: pad x12 (its bank of six)",
+    "SYNTH 2: pad x12 (its bank of six)",
+];
+
+/// The voices each SYNTH of [`Stage3::with_synths`] holds: the pad's whole polyphony.
+const SYNTH_VOICES: usize = 12;
 
 /// The Stage 3 acceptance load, the worst a session can ask of the built-in sound at once:
 ///
@@ -704,6 +730,11 @@ struct Stage3 {
     block: u64,
     mono: [f32; BLOCK],
     mix: [[f32; BLOCK]; 2],
+    /// Two SYNTH units beside it ([`Stage3::with_synths`]), or none.
+    synths: Vec<SynthUnit>,
+    /// What each SYNTH is sent on its first call: every voice's NoteOn, then both wheels.
+    synth_events: Vec<SlotEvent>,
+    unit_out: [[f32; BLOCK]; 2],
 }
 
 const BASS_NOTES: [u8; 5] = [28, 31, 33, 35, 36];
@@ -769,7 +800,32 @@ impl Stage3 {
             block: 0,
             mono: [0.0; BLOCK],
             mix: [[0.0; BLOCK]; 2],
+            synths: Vec::new(),
+            synth_events: Vec::new(),
+            unit_out: [[0.0; BLOCK]; 2],
         }
+    }
+
+    /// The Stage 3 load with two SYNTH slots playing beside it, driven as a slot drives its source
+    /// (`UnitProcessor::process`, notes and wheels as slot events, the DSP frame from 0), in the style
+    /// of the synths beside the engine: each picked to the pad, all 12 voices held from the first call,
+    /// bent 0.5 and the mod wheel full. A SYNTH is a whole bank: its five unpicked instruments render
+    /// too. The slot around it (its fades, meter fold, record line) is not in the timing.
+    fn with_synths() -> Self {
+        let mut load = Stage3::new();
+        let pad = SYNTH_IDS.iter().position(|&id| id == "pad").expect("the pad is in SYNTHS") as f64;
+        let cx = UnitCx { frame: 0, dsp_frame: 0, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        for _ in 0..2 {
+            let mut synth = SynthUnit::new(RATE as u32);
+            assert_eq!(synth.set_param(&cx, UnitParam::Instrument, pad), Some(pad));
+            load.synths.push(synth);
+        }
+        load.synth_events = (0..SYNTH_VOICES as u8)
+            .map(|k| SlotEventKind::NoteOn { key: 48 + 3 * k, velocity: 0.8 })
+            .chain([SlotEventKind::PitchBend { semitones: 0.5 }, SlotEventKind::Modulation { depth: 1.0 }])
+            .map(|kind| SlotEvent { offset: 0, kind })
+            .collect();
+        load
     }
 
     /// Render one block; `parts` gains each part's seconds. Returns the block's seconds.
@@ -825,6 +881,18 @@ impl Stage3 {
         }
         lap(5);
 
+        let cx = UnitCx { frame: f as Frame, dsp_frame: f as Frame, bpm: 120.0, meter: Meter::FOUR_FOUR };
+        let events: &[SlotEvent] = if b == 0 { &self.synth_events } else { &[] };
+        for (i, synth) in self.synths.iter_mut().enumerate() {
+            let [ul, ur] = &mut self.unit_out;
+            synth.process(&cx, [&[], &[]], events, [ul, ur]);
+            for ((l, r), (&x, &y)) in l.iter_mut().zip(r.iter_mut()).zip(ul.iter().zip(ur.iter())) {
+                *l += 0.25 * x;
+                *r += 0.25 * y;
+            }
+            lap(6 + i);
+        }
+
         std::hint::black_box(&self.mix);
         self.frame += BLOCK as u64;
         self.engine_frame += BLOCK as Frame;
@@ -842,7 +910,18 @@ impl Stage3 {
 #[test]
 #[ignore]
 fn stage3_full_load_costs_under_half_the_block() {
-    let mut load = Stage3::new();
+    assert_stage3_bar(Stage3::new(), "stage 3 load");
+}
+
+/// The two-SYNTH bar: [`Stage3::with_synths`] under half the block's real time on average, timed and
+/// printed as the Stage 3 bar is.
+#[test]
+#[ignore]
+fn stage3_load_with_two_synth_slots_costs_under_half_the_block() {
+    assert_stage3_bar(Stage3::with_synths(), "stage 3 load + two SYNTH slots");
+}
+
+fn assert_stage3_bar(mut load: Stage3, name: &str) {
     let mut parts = [0.0f64; PARTS.len()];
     // Past the pad's 0.8 s attack and the reverb's 2.62 s IR, then 20 s timed.
     for _ in 0..48000 * 3 / BLOCK {
@@ -870,7 +949,7 @@ fn stage3_full_load_costs_under_half_the_block() {
     };
     let worst_phase = (0..64).map(phase_median).fold(0.0, f64::max);
     println!(
-        "stage 3 load, {blocks} blocks of {BLOCK} at 48 k ({:.0} µs): mean {:.1} µs ({:.1} %); blocks that start a quantum {:.1} %; scheduled worst {:.1} %; p99.9 {:.1} %; worst {:.1} %",
+        "{name}, {blocks} blocks of {BLOCK} at 48 k ({:.0} µs): mean {:.1} µs ({:.1} %); blocks that start a quantum {:.1} %; scheduled worst {:.1} %; p99.9 {:.1} %; worst {:.1} %",
         period * 1e6,
         mean * 1e6,
         pct(mean),
@@ -879,24 +958,27 @@ fn stage3_full_load_costs_under_half_the_block() {
         pct(p999),
         pct(worst)
     );
-    for (name, t) in PARTS.iter().zip(parts) {
-        println!("  {name:<33} {:>6.1} µs  {:>5.2} %", t / blocks as f64 * 1e6, pct(t / blocks as f64));
+    for (part, t) in PARTS.iter().zip(parts).filter(|&(_, t)| t > 0.0) {
+        println!("  {part:<33} {:>6.1} µs  {:>5.2} %", t / blocks as f64 * 1e6, pct(t / blocks as f64));
     }
-    assert!(pct(mean) < 50.0, "mean block time {:.1} % of the block", pct(mean));
+    assert!(pct(mean) < 50.0, "{name}: mean block time {:.1} % of the block", pct(mean));
 }
 
-/// The Stage 3 load renders without allocating: a second of it (drum re-hits, bass notes and cutoff
-/// ramps included) under `assert_no_alloc` (debug builds check; release builds do not).
+/// The Stage 3 load renders without allocating, alone and with the two SYNTH slots: a second of each
+/// (drum re-hits, bass notes, cutoff ramps and the SYNTHs' notes included) under `assert_no_alloc`
+/// (debug builds check; release builds do not).
 #[test]
 fn stage3_full_load_renders_without_allocating() {
-    let mut load = Stage3::new();
-    let mut parts = [0.0f64; PARTS.len()];
-    let before = violation_count();
-    assert_no_alloc(|| {
-        for _ in 0..48000 / BLOCK {
-            load.render(&mut parts);
-        }
-    });
-    assert_eq!(violation_count(), before, "the Stage 3 load allocated while rendering");
-    assert!(load.mix.iter().flatten().all(|x| x.is_finite()));
+    for (mut load, name) in [(Stage3::new(), "the Stage 3 load"), (Stage3::with_synths(), "the Stage 3 load with two SYNTH slots")] {
+        let mut parts = [0.0f64; PARTS.len()];
+        let before = violation_count();
+        assert_no_alloc(|| {
+            for _ in 0..48000 / BLOCK {
+                load.render(&mut parts);
+            }
+        });
+        assert_eq!(violation_count(), before, "{name} allocated while rendering");
+        assert!(load.mix.iter().flatten().all(|x| x.is_finite()));
+        assert!(load.synths.is_empty() || load.unit_out[0].iter().any(|&x| x != 0.0), "{name}: the last SYNTH is silent");
+    }
 }

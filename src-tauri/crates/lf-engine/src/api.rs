@@ -122,7 +122,9 @@ pub enum Command {
     /// Where the notes go: a built-in instrument, a plugin slot, or nowhere ([`NoteTarget::Off`]). Sent on
     /// a slot switch, not per note: it releases the held notes (of the instrument or slot it leaves) and
     /// hands a built-in instrument the wheels, even when the target stays (two slots may hold the same
-    /// synth, as two web synths). A SYNTH in a slot keeps the wheels it last got, and the slot it leaves
+    /// synth, as two web synths). A slot it lands on from another is handed the engine's last wheels on
+    /// the frame while it seats a SYNTH (bent on one slot, centred on the other: the first plays centred
+    /// when the target comes back; a slot it stays on took every wheel already), and the slot it leaves
     /// releases its notes as a pick does ([`SlotEventKind::AllNotesOff`]), where a plugin gets a NoteOff
     /// per held key.
     SelectInstrument(NoteTarget),
@@ -1041,7 +1043,8 @@ pub trait UnitProcessor: Send {
     /// holds the engine, just before [`UnitProcessor::stop`]). A SYNTH alone also gets calls of no
     /// frames, every event at offset 0: the slot's events sent ahead of a [`Command::SetUnitParam`] on
     /// its frame, handed to it before the param so the two apply in ring order
-    /// (`Rack::set_unit_param`).
+    /// (`Rack::set_unit_param`), and the engine's last wheels when it is seated in the note target's
+    /// slot (installed, replacing, reseated: `Rack::apply`), ahead of everything the slot sends it.
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
     /// A built-in unit's parameter, on its frame (`cx.frame`, before the frames from it are rendered):
     /// `Some(applied)` when the unit took it (clamped to its own range), `None` when `param` is not a
