@@ -4,7 +4,7 @@
 
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
 Static checks first (the ones the change can reach; root `AGENTS.md`, the `main` line), then the runtime probe below. The engine's
-behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on a push to `main` or `dev`, or a pull
+behaviour is `cargo test -p lf-engine -p lf-rig` (`pnpm test:engine`, with the rig record's rules; CI runs it on a push to `main` or `dev`, or a pull
 request into `main`, that changes native code, not on Markdown alone); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
 

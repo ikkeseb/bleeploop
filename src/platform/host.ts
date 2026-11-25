@@ -11,6 +11,8 @@
  *   - EngineHost   — the native audio engine (`docs/ARCHITECTURE.md`).
  *   - ChainHost    — a slot's chain of units (`docs/unit-contract.md` §2): add, remove, move, reload, by unit.
  *                    Only the browser fake speaks it yet; the Tauri and production hosts refuse every call.
+ *   - RigHost      — chain mode's rig record, which the native host owns: the page's one handover. The
+ *                    interface only so far; no host implements it, and it is not on `Platform` yet.
  *   - MidiHost     — native MIDI (`src-tauri/src/engine_io/midi`): its ports, MIDI learn and the stored
  *                    bindings, and what it tells the UI. The app never opens Web MIDI (the WebView's
  *                    permission is denied, and `verify/guards/web-midi.mjs` keeps the Web MIDI API out
@@ -404,6 +406,53 @@ export interface ChainHost {
   /** Park a session's tone, identity-checked as today; `matches`: the units it may go to (unit contract §8). */
   importTone(slot: PluginSlot, bytes: Uint8Array, plugin: PluginRef, unit?: UnitId): Promise<{ token: number | null; name: string; matches: UnitId[] }>;
   forgetTone(token: number): Promise<void>;
+}
+
+/**
+ * What the native rig record is for this process (`src-tauri/crates/lf-rig/src/answer.rs` `RigStatus`):
+ * `present` (read, or stored by this import), `absent` (no record file: run the upgrade and import it),
+ * `unreadable` (kept, never written over; nothing restored), `unavailable` (no data folder, or another
+ * process owns the record).
+ * @public CP4a consumes it.
+ */
+export type RigStatus = 'present' | 'absent' | 'unreadable' | 'unavailable';
+
+/** What the restore forgot or held back; every `open` answers it until `seen(id)`.
+ * @public CP4a consumes it. */
+export interface RigNotice {
+  id: number;
+  /** The display names of the plugin units the crash marker named, now forgotten. */
+  forgotten: string[];
+  /** The crash marker could not be read: no plugin was restored this launch (built-ins were). */
+  pluginsHeld: boolean;
+}
+
+/** `rig_open`'s and `rig_import`'s answer (`answer.rs` `RigAnswer`).
+ * @public CP4a consumes it. */
+export interface RigAnswer {
+  status: RigStatus;
+  /** Each slot's volume for the fader, A then B (the player's level, else the record's); only with `present`. */
+  volumes: [number, number] | null;
+  notice: RigNotice | null;
+}
+
+/**
+ * Chain mode's rig record, owned by the native host (`src-tauri/crates/lf-rig`): the page never writes it,
+ * and hands over the legacy keys' upgrade once. Natively only in a DEV build with `lf.chainNative`
+ * (the `rig_*` commands are DEV-only until chains reach players).
+ * @public CP4a implements and consumes it.
+ */
+export interface RigHost {
+  readonly available: boolean;
+  /** `rig_open`: called before the device opens; the process's first call starts the restore, a later
+   * one (a reload) answers the same and starts nothing. */
+  open(): Promise<RigAnswer>;
+  /** `rig_import` with this document's epoch: `text` is `serializeRig(upgradeRig(…))`, stored only while no
+   * record exists (else it answers `present`). Rejects with `'stale'` for a replaced page, or with the
+   * reason the record could not be written (then nothing is restored). */
+  import(text: string): Promise<RigAnswer>;
+  /** `rig_seen`: the page showed notice `id`; native clears it. */
+  seen(id: number): Promise<void>;
 }
 
 /** A session export's one .zip, handed over for keeping. */

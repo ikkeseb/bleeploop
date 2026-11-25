@@ -1,0 +1,17 @@
+[package]
+name = "lf-rig"
+version = "0.1.0"
+description = "BleepLoop's rig record rules: chain mode's record, its projection and its restore, pure, tested off Windows"
+authors = ["ikkeseb"]
+license = "MIT"
+repository = "https://github.com/ikkeseb/bleeploop"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Pure on purpose: the rules only; every file, lock, thread and IPC call is the app's glue
+# (the crate doc, src/lib.rs). lf-engine for the unit vocabulary (`UnitId`, `UnitKind`, `UnitParam`).
+[dependencies]
+lf-engine = { path = "../lf-engine" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

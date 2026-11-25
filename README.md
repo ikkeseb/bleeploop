@@ -201,7 +201,7 @@ is gitignored for it). A binary built with it is GPLv3, see [License](#license).
 | `pnpm check` | Typecheck, oxlint, the capability-boundary check, and the `verify/` guards |
 | `pnpm check:push` | Typecheck and oxlint: the pre-push hook (CI runs the rest) |
 | `pnpm verify` | Deterministic guards for the frontend's pure logic, file formats, the engine wire and the docs; no browser or hardware |
-| `pnpm test:engine` | The engine's tests (`cargo test -p lf-engine`): looper, click, grid, synths and FX rendered offline, frame by frame |
+| `pnpm test:engine` | The engine's tests (`cargo test -p lf-engine -p lf-rig`): looper, click, grid, synths and FX rendered offline, frame by frame, and the rig record's rules |
 | `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |
 | `pnpm rust:check` | `cargo check` without and with ASIO, `cargo test`, then the check that keeps the engine crate free of host, device and plugin dependencies (Windows; the ASIO step needs the SDK) |
 | `pnpm native:smoke` · `native:survey` · `native:swap` · `native:recall` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |

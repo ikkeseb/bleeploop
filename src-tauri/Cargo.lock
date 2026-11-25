@@ -105,6 +105,7 @@ dependencies = [
  "clap-sys",
  "cpal",
  "lf-engine",
+ "lf-rig",
  "log",
  "midir",
  "rtrb",
@@ -2128,6 +2129,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "lf-rig"
+version = "0.1.0"
+dependencies = [
+ "lf-engine",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

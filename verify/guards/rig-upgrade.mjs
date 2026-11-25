@@ -5,13 +5,15 @@
 // send on, off, at its defaults or not, bound to a pedal or not, no bindings report at all; the OTT, which
 // v0.8.9 never stored, only when on, changed or bound; a SYNTH-headed slot's pending; chains a DEV run
 // reported before any record), ids from an injected mint; the placement of `pending` by the head's role;
-// the record's units from a `chains` report; the record's text, read tolerantly.
+// the record's units from a `chains` report; the record's text, read tolerantly; the fixture native
+// shares (`verify/fixtures/rig-record.json`: a snapshot and the record its upgrade makes, ids minted from 1).
 // What it cannot see: the keys' resolvers (`instrument.ts`, `engine-store.ts`, `midi.ts`), the storage, the
 // restore's order of adds and its marker: the chain-mode cases of verify/probes/rig-recall.mjs and
 // verify/probes/legacy-storage.mjs.
 // Run: node verify/guards/rig-upgrade.mjs
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   addSpec,
   boundKinds,
@@ -209,6 +211,15 @@ check('an adopted chain keeps the slot gain the reset frame replayed; one out of
   assert.deepEqual(vol([9, 0]), [1, 0]);
   assert.deepEqual(upgradeRig(snap({ reportedVolumes: [0.4, 0.4], slots: [slot({ savedSource: 'off', inputGain: 1.2 }), slot()] }), counter()).slots[0].volume, 1.2,
     'without adopted chains the reported gain is not read');
+});
+
+// ── the shared fixture (D12: the native record is `lf.rig` v1 unchanged) ─────────────────────────────
+
+check('the fixture: upgradeRig(input) is its record, and serializeRig writes that value (the Rust half: lf-rig tests/fixture.rs)', () => {
+  const { input, record } = JSON.parse(readFileSync(new URL('../fixtures/rig-record.json', import.meta.url), 'utf8'));
+  const upgraded = upgradeRig(input, counter(1));
+  assert.deepEqual(upgraded, record);
+  assert.deepEqual(JSON.parse(serializeRig(upgraded)), record);
 });
 
 // ── placement ──────────────────────────────────────────────────────────────────────────────────────────
