@@ -3,8 +3,8 @@
 //! the real teardown. Each test drives a [`TestDevice`]'s engine host (or a [`Chains`] over it), ticks the
 //! writer by hand and reads the record file back. Until CP3a wires the restore, the plan is the record as
 //! found, its units held at their place or matched to an applied plate (`held_plan`). No feed thread runs
-//! here: a close with a record to write waits its bound for a feed pass (`FEED_PASS_WAIT`) unless a test
-//! drains as the feed would.
+//! here: a close with a record to write waits its bound for its feed passes (`FEED_PASS_WAIT`) unless a
+//! test drains as the feed would.
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -921,8 +921,34 @@ fn close_writes_a_record_committed_but_not_yet_published() {
     assert_eq!(found.ids(0), vec![171, 172], "the opened record, then the unit applied after it");
 }
 
-/// Close waits for one completed feed pass before it takes its copy: an install the engine applied,
-/// its `Seat` still in the event ring, reaches the model first, so the record holds the unit.
+/// Once close has set `closing`, a tick changes the plan no more: close judges it at its own view. Here
+/// a tick runs between close's copy and its projection (the race, set by hand in close's order), its
+/// newer view showing the player's applied unit under a record id close's view still holds: close's
+/// projection keeps the record unit.
+#[test]
+fn a_tick_racing_close_does_not_end_an_id_closes_view_holds() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("tick-races-close");
+    let amp = plugin("tick-races-close");
+    let rig = folder.opened(host, &record(vec![plugin_unit(185, &amp)], Vec::new()));
+    // Close's first step, then its copy: no plate under 185, the record unit held at its place.
+    rig.closing.store(true, Release);
+    let (held, at_close) = (writer::slot_gains(host), view(host));
+    // The player's unit takes the id and applies; a tick takes the newer view.
+    let _player = seat(host, 185, &plugin("tick-races-player"), 0, 0);
+    settle(host);
+    assert!(plate(host, 185).applied);
+    assert!(!rig.tick(host, Instant::now()), "the writer stops: the rig is closing");
+    // Close projects its copy.
+    let last = rig.project(held, at_close, true).expect("a record to write");
+    let units = &last.slots[0].units;
+    assert_eq!(units.iter().map(|u| u.id).collect::<Vec<_>>(), vec![185], "close's view holds the id");
+    assert_eq!(path_of(&units[0]), amp.path, "the record's unit, not the player's");
+}
+
+/// Close waits for completed feed passes before it takes its copy: an install the engine applied, its
+/// `Seat` still in the event ring, reaches the model first, so the record holds the unit.
 #[test]
 fn close_waits_for_a_feed_pass_to_take_an_applied_install() {
     let device = fast_device();
@@ -932,8 +958,12 @@ fn close_waits_for_a_feed_pass_to_take_an_applied_install() {
     let uh = reserve(host, 180, &plugin("feed-pass"), 0, 0);
     let terms = uh.terms().expect("engine terms");
     let op = uh.submit(Box::new(StandIn(0)), terms).map_err(|(_, e)| e).expect("submit");
-    // The engine applies it within a few blocks; nothing drains its `Seat` into the model.
-    std::thread::sleep(Duration::from_millis(50));
+    // The engine seats it. Read under the engine lock, the block that seated it is over, its `Seat`
+    // offered to the event ring; nothing drains that ring into the model.
+    wait_until("the engine seats the unit", || {
+        let rt = host.core.rt.lock().unwrap();
+        rt.engine.as_ref().is_some_and(|e| e.chain(0).any(|s| s.unit == 180))
+    });
     assert!(!plate(host, 180).applied, "the model has not heard the seat yet");
 
     let done = AtomicBool::new(false);
@@ -966,20 +996,27 @@ fn a_second_close_returns_after_the_first_has_written() {
     let folder = Folder::new("second-close");
     let rig = folder.opened(host, &empty());
     let _unit = seat(host, 190, &plugin("second-close"), 0, 0);
-    let returned = AtomicBool::new(false);
+    let (started, returned) = (AtomicBool::new(false), AtomicBool::new(false));
     let (early, after) = std::thread::scope(|s| {
-        // The first close stops at `inner`, past `closing`, while the test holds it.
+        // The first close cannot finish while the test holds `inner`: with a record to write, it takes
+        // `inner` for its copy before it writes and sets `closed`.
         let inner = lock(&rig.inner);
         let first = s.spawn(|| rig.close(host));
         wait_until("the first close begins", || rig.closing.load(Acquire));
         let second = s.spawn(|| {
+            started.store(true, Release);
             rig.close(host);
             returned.store(true, Release);
             // What the second close leaves when it returns.
             let status = folder.rig().open(host).status;
             (folder.ids(0), status)
         });
-        std::thread::sleep(Duration::from_millis(100));
+        // The second close has begun while the first is still held; it is given 200 ms to return.
+        wait_until("the second close begins", || started.load(Acquire));
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while !returned.load(Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let early = returned.load(Acquire);
         drop(inner);
         first.join().unwrap();
@@ -989,8 +1026,10 @@ fn a_second_close_returns_after_the_first_has_written() {
     assert_eq!(after, (vec![190], RigStatus::Present), "the first had written and released the lock file");
 }
 
-/// Once close has begun nothing opens or reads the file: an open that comes before close's last step
-/// answers `unavailable` and takes no lock file.
+/// Once close has begun nothing opens or reads the file: an open after close's first step (`closing`
+/// set) and before its last (`closed`) answers `unavailable` and takes no lock file. The step is set
+/// here by hand: with no store open, close's own steps run under `disk` back to back, so no open can be
+/// placed between them, and `closed` alone already refuses an open after them.
 #[test]
 fn an_open_after_close_began_opens_no_file() {
     let device = fast_device();
@@ -998,18 +1037,10 @@ fn an_open_after_close_began_opens_no_file() {
     let folder = Folder::new("open-closing");
     folder.write(files(), &empty());
     let rig = folder.rig();
-    let (status, opened, lock_file) = std::thread::scope(|s| {
-        // Close stops at `inner` (if it gets there) while the test holds it, past `closing`.
-        let inner = lock(&rig.inner);
-        let close = s.spawn(|| rig.close(host));
-        wait_until("close begins", || rig.closing.load(Acquire));
-        let status = rig.opened().status;
-        let opened = lock(&rig.disk).store.is_some();
-        let lock_file = folder.0.join(files().lock).exists();
-        drop(inner);
-        close.join().unwrap();
-        (status, opened, lock_file)
-    });
+    rig.closing.store(true, Release);
+    let status = rig.open(host).status;
+    let opened = lock(&rig.disk).store.is_some();
+    let lock_file = folder.0.join(files().lock).exists();
     assert_eq!((status, opened, lock_file), (RigStatus::Unavailable, false, false));
 }
 

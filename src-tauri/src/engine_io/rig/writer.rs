@@ -164,7 +164,7 @@ impl Rig {
     /// then the view, each lock released before the next), projected under `inner` with the plan, whose
     /// ended ids go first, judged at the full view. At close a `Leaving` plate is then dropped (the
     /// shutdown retires its tone). `None` while there is no record.
-    fn project(&self, held: Volumes, mut view: RigView, closing: bool) -> Option<RigRecord> {
+    pub(super) fn project(&self, held: Volumes, mut view: RigView, closing: bool) -> Option<RigRecord> {
         let mut inner = lock(&self.inner);
         let inner = &mut *inner;
         let stored = inner.stored.as_ref()?;
