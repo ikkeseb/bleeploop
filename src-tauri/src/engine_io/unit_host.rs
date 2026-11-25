@@ -1667,6 +1667,9 @@ impl UnitHost {
             row.id_freed = true;
         }
         state.model.mark_failed(self.slot, self.id, why);
+        drop(state);
+        #[cfg(test)]
+        id_freed(self.id);
     }
 
     /// The owner gives up on its unit: its box, if it ever comes, leaks.
@@ -1688,6 +1691,27 @@ impl UnitHost {
         if let Some((op_n, op_state)) = state.table.release_row(self.install) {
             state.model.record_unowned_settled(op_n, op_state);
         }
+        drop(state);
+        #[cfg(test)]
+        id_freed(self.id);
+    }
+}
+
+/// Test-only: one-shot hooks by unit id, each called on the owner's thread the first time
+/// [`UnitHost::failed`] or [`UnitHost::release`] has let go of the state lock under that id, the
+/// points where an owner frees its id. A test holds the owner there while another add takes the id.
+#[cfg(test)]
+pub(crate) static ON_ID_FREED: std::sync::Mutex<Vec<(UnitId, Arc<dyn Fn() + Send + Sync>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn id_freed(id: UnitId) {
+    let hook = {
+        let mut hooks = ON_ID_FREED.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.iter().position(|(i, _)| *i == id).map(|pos| hooks.remove(pos).1)
+    };
+    if let Some(hook) = hook {
+        hook();
     }
 }
 

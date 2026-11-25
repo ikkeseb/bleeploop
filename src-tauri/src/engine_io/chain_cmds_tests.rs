@@ -3874,11 +3874,13 @@ fn e3_4_a_source_replacing_a_reload_candidate_ahead_of_the_shutdowns_removal_ret
 // ── E3-4 review round 3: a failed add's files go before its id is free; an add that answers `Err` keeps
 // nothing, whatever the shutdown did; a refused add's import goes back under its token ──
 
-/// A unit whose add the engine refuses in slot 0 deletes its pin while its id is still reserved: a
-/// same-id add in slot 1 made while the refused owner releases its plugin is refused as reserved, and made
-/// after it starts from slot 1's tone and pins that, its pin standing once the refused owner has ended.
+/// A unit whose add the engine refuses in slot 0 deletes its pin while its id is still reserved: held
+/// the moment its owner frees the id (`ON_ID_FREED`, `UnitHost::failed` or `release`, whichever comes
+/// first), its pin is already gone, and a same-id add in slot 1 made there seats, starts from slot 1's
+/// tone and pins that, its pin standing once the refused owner has ended.
 #[test]
 fn e3_4_a_refused_adds_files_go_before_its_id_is_free() {
+    use crate::engine_io::unit_host::ON_ID_FREED;
     use crate::host::tone::decode as decode_tone;
     use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
 
@@ -3892,22 +3894,23 @@ fn e3_4_a_refused_adds_files_go_before_its_id_is_free() {
     let amp = PluginRef { format: "clap".into(), path: "C:\\plugins\\ReuseAmp.clap".into(), id: "reuse.amp".into() };
     std::fs::write(dir.join(amp.file_name(0)), make_tone_bytes(&amp, "ReuseAmp", b"slot-0-tone")).unwrap();
     std::fs::write(dir.join(amp.file_name(1)), make_tone_bytes(&amp, "ReuseAmp", b"slot-1-tone")).unwrap();
-    let releasing = HookPause::new();
+    let freeing = HookPause::new();
     let exited = Arc::new(AtomicBool::new(false));
+    let restores_0: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::default();
     let restores_1: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::default();
     let spec = || UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp.clone()), params: None, bypass: false };
 
-    // Slot 0's add: refused on latency, its owner held in its plugin's release.
-    releasing.arm();
+    // Slot 0's add: refused on latency, its owner held where it frees the id.
+    freeing.arm();
+    ON_ID_FREED.lock().unwrap().push((991, freeing.hook()));
     let refused = {
         let (chains, host, doc, store, spec) = (chains.clone(), host.clone(), doc.clone(), store.clone(), spec());
-        let (on_release, exited) = (releasing.hook(), exited.clone());
+        let (restores_0, exited) = (restores_0.clone(), exited.clone());
         std::thread::spawn(move || {
             let open = |_fmt: PluginFormat, _plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
                 let cfg = FakePluginConfig {
                     latency: lf_engine::max_chain_latency(48_000) + 1,
-                    restores: Some(Arc::default()),
-                    on_release: Some(on_release.clone()),
+                    restores: Some(restores_0.clone()),
                     exited_flag: Some(exited.clone()),
                     ..Default::default()
                 };
@@ -3916,24 +3919,18 @@ fn e3_4_a_refused_adds_files_go_before_its_id_is_free() {
             chains.add(&host, (&doc, epoch), &empty_slots(), Some(&store), 0, 991, spec, 0, None, noop_sink(), &open)
         })
     };
-    releasing.wait_entered("the refused unit's owner never released its plugin");
-    assert!(dir.join("unit-991.pin").exists(), "the refused unit's load pinned slot 0's tone");
+    freeing.wait_entered("the refused unit's owner never freed its id");
+    assert_eq!(restores_0.lock().unwrap().as_slice(), &[Some(b"slot-0-tone".to_vec())], "the refused unit's load read (and pinned) slot 0's tone");
+    assert!(!dir.join("unit-991.pin").exists(), "the refused unit's pin is gone before its id is free");
 
     let open_1 = |_fmt: PluginFormat, _plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
         spawn_fake_unit(unit_host, sink, tone, FakePluginConfig { restores: Some(restores_1.clone()), ..Default::default() })
     };
-    let slots = empty_slots();
-    let during = chains.add(&host, (&doc, epoch), &slots, Some(&store), 1, 991, spec(), 0, None, noop_sink(), &open_1);
-    releasing.resume();
+    let during = chains.add(&host, (&doc, epoch), &empty_slots(), Some(&store), 1, 991, spec(), 0, None, noop_sink(), &open_1);
+    freeing.resume();
+    assert_eq!(during, Ok(Added::Seated), "the id is free: slot 1's unit 991 seats while the refused owner is held");
     assert!(refused.join().unwrap().is_err(), "the engine refuses slot 0's unit on latency");
     wait_until(PATIENCE, "the refused unit's owner ends", || exited.load(Ordering::Acquire));
-    if during.is_err() {
-        assert_eq!(
-            chains.add(&host, (&doc, epoch), &slots, Some(&store), 1, 991, spec(), 0, None, noop_sink(), &open_1),
-            Ok(Added::Seated),
-            "once the refused owner has ended, the id is free"
-        );
-    }
     assert_eq!(
         restores_1.lock().unwrap().as_slice(),
         &[Some(b"slot-1-tone".to_vec())],
@@ -4057,6 +4054,98 @@ fn e3_4_an_add_with_an_import_token_the_engine_refuses_leaves_no_file_and_the_to
     assert_eq!(decode_tone(&kept).unwrap().state, b"the-imported-tone");
     assert_eq!(std::fs::read(&slot_file).unwrap(), slot_before, "the slot file unchanged");
     chains.unload_all(host);
+    chains.join_all();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── E3-4 review round 3 fix: an add's undo is for a unit that never applied a seat ──
+
+/// A fresh add whose install applies with its `Event::Seat` undrained, and which the shutdown's removal
+/// (queued behind it while the engine was held still) ends before its owner's first answer: its add
+/// answers `Err`, but its unit applied a seat, so its owner takes the shutdown's keep, not an add's undo.
+/// Its pin stays for the next launch's restore under its id, and the slot's file as it was.
+#[test]
+fn e3_4_an_add_that_applied_and_left_before_its_answer_keeps_its_tone() {
+    use crate::engine_io::unit_host::Leave;
+    use crate::host::tone::decode as decode_tone;
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let device = start_device();
+    let host = device.host().clone();
+    let doc = Arc::new(PluginHostState::default());
+    let epoch = doc.begin_frontend_session();
+    let chains = Arc::new(Chains::new());
+    let (store, dir) = temp_tone_store("e3-4-applied-add");
+    std::fs::create_dir_all(&dir).unwrap();
+    let amp = PluginRef { format: "clap".into(), path: "C:\\plugins\\AppliedAmp.clap".into(), id: "applied.amp".into() };
+    let slot_file = dir.join(amp.file_name(0));
+    let slot_before = make_tone_bytes(&amp, "AppliedAmp", b"the-slot-tone");
+    std::fs::write(&slot_file, &slot_before).unwrap();
+    let turning = HookPause::new();
+    let exited = Arc::new(AtomicBool::new(false));
+    hold_self_drains(&host);
+    // The test device's render `try_lock`s the engine: held here, it takes no message.
+    let engine = host.core.rt.lock().unwrap();
+
+    // The add's owner is held at its first turn, its install queued.
+    turning.arm();
+    let adding = {
+        let (chains, host, doc, store) = (chains.clone(), host.clone(), doc.clone(), store.clone());
+        let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp.clone()), params: None, bypass: false };
+        let (on_turn, exited) = (turning.hook(), exited.clone());
+        std::thread::spawn(move || {
+            let open = |_fmt: PluginFormat, _plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+                let cfg = FakePluginConfig {
+                    restores: Some(Arc::default()),
+                    on_turn: Some(on_turn.clone()),
+                    exited_flag: Some(exited.clone()),
+                    ..Default::default()
+                };
+                spawn_fake_unit(unit_host, sink, tone, cfg)
+            };
+            chains.add(&host, (&doc, epoch), &empty_slots(), Some(&store), 0, 997, spec, 0, None, noop_sink(), &open)
+        })
+    };
+    turning.wait_entered("the add's owner never took a turn");
+    let token = {
+        let st = host.core.state.lock().unwrap();
+        assert!(st.model.has_pending_install(0, 997), "the add's install is queued");
+        st.table.active_row_for_id(997).map(|r| r.token).expect("the add's row")
+    };
+    assert!(dir.join("unit-997.pin").exists(), "its load pinned the slot's tone");
+
+    let unloading = {
+        let (chains, host) = (chains.clone(), host.clone());
+        std::thread::spawn(move || chains.unload_all(&host))
+    };
+    wait_until(PATIENCE, "the shutdown's removal of unit 997 is sent", || {
+        host.core.state.lock().unwrap().model.pending_remove_op(0, 997).is_some()
+    });
+    // The engine applies the install, then the removal: the unit's box comes back removed.
+    drop(engine);
+    wait_until(PATIENCE, "the unit's box is filed, removed", || {
+        let mut port = host.core.ports[0].lock().unwrap();
+        let mut st = host.core.state.lock().unwrap();
+        if let Some(port) = port.as_mut() {
+            st.reap_port(0, port);
+        }
+        st.table.row(token).is_some_and(|r| matches!(r.leave, Leave::Done))
+    });
+    assert!(
+        host.core.state.lock().unwrap().model.has_pending_install(0, 997),
+        "the install's Event::Seat is still undrained: the owner cannot have been told it seated"
+    );
+
+    turning.resume();
+    assert!(adding.join().unwrap().is_err(), "the add answers Err: its unit left before its owner's first answer");
+    wait_until(PATIENCE, "the add's owner ends", || exited.load(Ordering::Acquire));
+    let pin = std::fs::read(dir.join("unit-997.pin")).expect("a unit that applied a seat keeps its pin at the shutdown");
+    assert_eq!(decode_tone(&pin).unwrap().state, b"the-slot-tone", "its pin holds the tone it started from");
+    assert!(!dir.join("unit-997.tone").exists(), "it never saved a tone of its own");
+    assert_eq!(std::fs::read(&slot_file).unwrap(), slot_before, "the slot file unchanged");
+
+    host.drain_feed(&mut Vec::new());
+    unloading.join().unwrap();
     chains.join_all();
     let _ = std::fs::remove_dir_all(&dir);
 }
