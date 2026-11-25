@@ -30,9 +30,10 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   or a failed add; an add of a reserved id is refused at once, never at seating.
 - **The id names the instance and nothing else.** Two instances of one plugin, in one chain or in both,
   are two ids. It holds across a move, a bypass, a restart, an engine rebuild, an app restart and a save;
-  it ends with a removal. The native chain host still removes every unit at shutdown, but keeps each
-  plugin unit's tone file (`unit-<id>.tone`), so the rig record's restore at the next launch brings the unit
-  back under its id with its own tone; only a removal the player made retires a tone.
+  it ends with a removal. The native chain host still removes every unit at shutdown, but a plugin unit
+  that removal ends keeps its own file (`unit-<id>.tone`, or its pin `unit-<id>.pin`), so the rig record's
+  restore at the next launch brings it back under its id with its own tone; a unit already leaving (the
+  player's removal, a source replacement) retires as any removal does.
 - **The rig record** is `lf.rig` in the WebView's storage (`src/ui/state/rig-recall.ts`; its shape and
   rules, `rig-record.ts`): `{ version: 1, slots: [slot, slot] }`, per slot its `volume` (after the chain), its
   `units` in order as `UnitRecord`s (§2; a plugin unit's display name as `plugin.name`, as §8's rig) and,
@@ -67,12 +68,14 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   later epoch), or with some plugin units reported, a reload cut a restore short: it goes on, the marker
   kept until a settle completes. Unknown which (no epoch in time): the plugin units are kept and not added
   that launch.
-- **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`
-  `file_name`; today `slot<n>-<hash>.tone`). A removal renames it to that slot-and-plugin file, and a new
-  unit with no tone of its own starts from it and pins what it started from as `unit-<id>.pin` (empty:
-  the plugin's defaults), so another instance retiring into the slot's file later never changes the tone
-  this unit restores. A save replaces the pin with the unit's own file; a unit that never saved retires by
-  deleting its pin, the slot's file untouched, and so does an add that fails before it seats.
+- **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`), beside
+  one per slot and plugin, `slot<n>-<hash>.tone`. A load reads the unit's own file, else its pin
+  `unit-<id>.pin`, else the slot's file, which it then pins (empty: the plugin's defaults), so another
+  instance retiring into the slot's file later never changes the tone this unit restores. A save, or a
+  redeem of a session import's token (§8), writes the unit's own file and deletes its pin. A removal
+  retires it: the unit's own file moves into the slot's file, where the next unit of that plugin starts; a
+  unit with only a pin deletes it, the slot's file untouched. An add that fails before it seats, or answers
+  `Err`, deletes what it wrote (its pin, or a redeemed import, whose token is parked again).
 - **D29 follows the unit.** The editor affinity is per plugin FILE (`instrument.ts` `editorAffinity`);
   each plugin unit has its own owner thread, so a file's editor belongs to the unit loaded first, in either
   slot; a second instance in the SAME chain is refused its editor (its parameters work). `unordered` and

@@ -1596,6 +1596,12 @@ impl UnitHost {
         state.table.row(self.install).is_some_and(|r| r.keep_tone)
     }
 
+    /// Whether this install is a reload's candidate ([`EngineHost::reload_unit`]), not an add.
+    pub fn is_reload(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.row(self.install).is_some_and(|r| r.is_reload)
+    }
+
     /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or
     /// [`Leave::Settled`]): a stopping owner waits for that box, never for a seated unit's.
     pub fn removal_in_flight(&self) -> bool {

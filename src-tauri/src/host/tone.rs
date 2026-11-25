@@ -15,9 +15,10 @@
 //! slot's file (and pins it); a save or a redeem replaces the pin with the unit's tone. A unit that
 //! leaves for good (the player's removal, a source replacement) retires: its tone moves into the slot's
 //! file, where the next unit of that plugin in the slot starts; a unit with only a pin deletes it and
-//! leaves the slot's file alone. A unit whose add fails before it seats deletes the pin its own load
-//! wrote ([`ToneKeeper::unpin`]). The host's shutdown retires nothing: both files stay for the next
-//! launch's restore under the id.
+//! leaves the slot's file alone. A unit whose add answers `Err` deletes what that add wrote: the pin its
+//! own load wrote, or the session import its token redeemed, which goes back under its token
+//! ([`ToneKeeper::undo_add`], [`ToneTokens::repark`]). The host's shutdown retires nothing: both files
+//! stay for the next launch's restore under the id.
 //!
 //! Nothing here touches a plugin. The engine-mode owners (`clap_engine`, `vst3_engine`, `vst2_engine`) restore a tone
 //! only inside their load sequence, before the plugin activates, and save one only on their own thread,
@@ -606,6 +607,24 @@ impl ToneStore {
         }
     }
 
+    /// The add of the unit `key` names answered `Err`: delete the unit file its redeem wrote (counted
+    /// `revision`), while no later redeem has replaced it. The redeem had deleted any pin already.
+    pub(crate) fn unredeem(&self, key: &ToneKey, revision: u64) {
+        let ToneKey::Unit { unit, .. } = key else { return };
+        let unit_file = ToneIdentity::unit_file_name(*unit);
+        let unit_entry = self.entry_for(&unit_file);
+        let _unit_write = unit_entry.write();
+        if unit_entry.revision.load(Acquire) != revision {
+            return;
+        }
+        let path = self.path_for(&unit_file);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("tone of unit {unit}: {}: {e}", path.display()),
+        }
+    }
+
     /// A tone file's bytes checked against `expected`, the plugin session.json names: nothing written.
     pub(crate) fn check(bytes: &[u8], expected: &ToneIdentity) -> Result<Tone, String> {
         let tone = decode(bytes)?;
@@ -805,6 +824,18 @@ impl ToneTokens {
             self.parked.remove(pos);
         }
     }
+
+    /// The add that took `token`'s tone answered `Err` and deleted the file its redeem wrote: park the
+    /// tone under `token` again, so a later load can still redeem it (bounded as [`ToneTokens::park`]).
+    pub(crate) fn repark(&mut self, token: u32, tone: Tone) {
+        if self.parked.iter().any(|(t, _)| *t == token) {
+            return;
+        }
+        if self.parked.len() >= MAX_PARKED_TONES {
+            self.parked.remove(0);
+        }
+        self.parked.push((token, tone));
+    }
 }
 
 /// What a save did: the tone file's bytes (empty for a plugin that keeps no state), and why the store
@@ -827,13 +858,21 @@ pub(crate) struct ToneKeeper {
     revision: u64,
     /// This load's restore failed and nothing has changed since: the stored tone stays as it is.
     keep_stored: bool,
-    /// This load wrote its unit's pin ([`ToneKeeper::unpin`]).
+    /// This load wrote its unit's pin ([`ToneKeeper::undo_add`]).
     pinned: bool,
+    /// The import count of the unit file this add's redeem wrote before the load (a unit binding's
+    /// [`ToneBinding::imported`]; [`ToneKeeper::undo_add`]).
+    redeemed: Option<u64>,
 }
 
 impl ToneKeeper {
     pub(crate) fn new(binding: Option<ToneBinding>, edited: Arc<AtomicBool>) -> ToneKeeper {
-        ToneKeeper { binding, edited, debounce: Debounce::default(), revision: 0, keep_stored: false, pinned: false }
+        let redeemed = binding
+            .as_ref()
+            .filter(|b| matches!(b.key, ToneKey::Unit { .. }))
+            .and_then(|b| b.imported.as_ref())
+            .map(|imported| imported.revision);
+        ToneKeeper { binding, edited, debounce: Debounce::default(), revision: 0, keep_stored: false, pinned: false, redeemed }
     }
 
     /// The flag a change raises (the unit and the component handler hold it too).
@@ -950,10 +989,15 @@ impl ToneKeeper {
         }
     }
 
-    /// The unit's add failed before it seated: the pin this load wrote goes ([`ToneStore::unpin`]), so
-    /// no file is left for a unit that never stood. A pin or a tone the unit had before this load stays.
-    pub(crate) fn unpin(&mut self) {
+    /// The unit's add answers `Err` (a reload's never calls this): what the add wrote goes, so no file
+    /// is left for a unit that never stood: the pin this load wrote ([`ToneStore::unpin`]), or the unit
+    /// file its token's redeem wrote ([`ToneStore::unredeem`]; the caller parks the token's tone again).
+    /// Each only while no later redeem replaced it. A pin or a tone the unit had before this add stays.
+    pub(crate) fn undo_add(&mut self) {
         let Some(b) = &self.binding else { return };
+        if let Some(revision) = self.redeemed.take() {
+            b.store.unredeem(&b.key, revision);
+        }
         if std::mem::take(&mut self.pinned) {
             b.store.unpin(&b.key, self.revision);
         }
@@ -1434,11 +1478,11 @@ mod tests {
         let mut failed = ToneKeeper::new(Some(dir.unit_binding(23, 0, identity())), Arc::new(AtomicBool::new(false)));
         assert_eq!(failed.stored().unwrap().as_deref(), Some(&b"other's"[..]));
         assert!(dir.0.join("unit-23.pin").exists());
-        failed.unpin();
+        failed.undo_add();
         assert!(!dir.0.join("unit-23.pin").exists(), "the failed add leaves no file");
         let mut restored = ToneKeeper::new(Some(dir.unit_binding(20, 0, identity())), Arc::new(AtomicBool::new(false)));
         assert_eq!(restored.stored().unwrap(), None);
-        restored.unpin();
+        restored.undo_add();
         assert!(dir.0.join("unit-20.pin").exists(), "a pin from an earlier load stays");
         assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, b"other's", "no pin touched the slot's file");
     }

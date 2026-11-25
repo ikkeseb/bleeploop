@@ -359,10 +359,10 @@ fn submit_owed<P: OwnedPlugin>(
     }
 }
 
-/// End before the unit ever applied a seat: fail the plate, release the plugin and its unit (if
-/// held), delete the tone pin its load wrote (`ToneKeeper::unpin`: the failed plate's removal has no
-/// owner left to retire it), release the reservation, and then answer `Err(why)` so a caller that sees
-/// `Err` finds the plugin already gone.
+/// End before the unit ever applied a seat: release the plugin and its unit (if held), delete the
+/// files its add wrote (`undo_add`: the failed plate's removal has no owner left to retire them), fail
+/// the plate, release the reservation, and then answer `Err(why)` so a caller that sees `Err` finds the
+/// plugin already gone.
 #[allow(clippy::too_many_arguments)]
 fn fail_before_seat<P: OwnedPlugin>(
     host: UnitHost,
@@ -375,13 +375,13 @@ fn fail_before_seat<P: OwnedPlugin>(
     reported: &mut u32,
 ) -> Result<(), String> {
     let slot = host.slot();
-    host.failed(why.clone());
     if plugin.editor() != Editor::Closed {
         plugin.editor_close();
     }
     plugin.release(unit);
-    tone.unpin();
+    undo_add(&host, tone);
     report_faults(faults, slot, reported);
+    host.failed(why.clone());
     host.release();
     if let Some(tx) = ready.take() {
         let _ = tx.try_send(Err(why));
@@ -389,10 +389,45 @@ fn fail_before_seat<P: OwnedPlugin>(
     Ok(())
 }
 
+/// A unit that never stood: delete the files its add wrote (`ToneKeeper::undo_add`) while its id is
+/// still reserved, so a same-id add in the other slot (possible once `UnitHost::failed` or `release`
+/// frees the id) never reads them as its own nor loses its own to this cleanup. A reload candidate's
+/// redeemed tone is the seated unit's, and stays.
+fn undo_add(host: &UnitHost, tone: &mut ToneKeeper) {
+    if !host.is_reload() {
+        tone.undo_add();
+    }
+}
+
+/// How an owner whose unit is out of the engine ends its tone ([`ordered_release`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToneEnd {
+    /// The files stay as they are (a superseded instance; after a panic).
+    Stay,
+    /// The unit left for good: its tone retires into the slot's file, unless the host's shutdown's
+    /// removal ended it (`UnitHost::keeps_tone`).
+    Retire,
+    /// An add whose first answer is still owed, so it answers `Err`: nothing is saved and the files the
+    /// add wrote go ([`undo_add`]), whatever the shutdown's removal decided.
+    Undo,
+}
+
+/// The tone end for a unit out of the engine: [`ToneEnd::Undo`] for an add (not a reload) whose
+/// owner's first answer is still owed (`ready`), else retire or not as the terminal `Back` said.
+fn tone_end(host: &UnitHost, ready: &Option<SyncSender<Result<Answer, String>>>, retire: bool) -> ToneEnd {
+    if ready.is_some() && !host.is_reload() {
+        ToneEnd::Undo
+    } else if retire {
+        ToneEnd::Retire
+    } else {
+        ToneEnd::Stay
+    }
+}
+
 /// Ordered release once the unit is out of the engine (or none is held after `Dismissed`): close any
-/// editor → fold a last `turn` into the tone → `quiesce` → save if dirty or editor was open →
-/// optionally `retire` (never when the host's shutdown's removal ended the unit: `UnitHost::keeps_tone`) →
-/// `release(unit)` → `host.release()`. Skips `turn`, save and `retire` after a panic.
+/// editor → fold a last `turn` into the tone → `quiesce` → save if dirty or editor was open → end the
+/// tone as `end` says ([`ToneEnd`]) → `release(unit)` → `host.release()`. Skips `turn`, save and the
+/// tone's end after a panic, and `turn` and save for [`ToneEnd::Undo`].
 #[allow(clippy::too_many_arguments)]
 fn ordered_release<P: OwnedPlugin>(
     host: UnitHost,
@@ -401,7 +436,7 @@ fn ordered_release<P: OwnedPlugin>(
     tone: &mut ToneKeeper,
     name: &str,
     allow_save: bool,
-    retire: bool,
+    end: ToneEnd,
     faults: &AtomicU32,
     reported: &mut u32,
 ) -> Result<(), String> {
@@ -412,13 +447,14 @@ fn ordered_release<P: OwnedPlugin>(
     if editor_open {
         plugin.editor_close();
     }
-    if allow_save {
+    let save = allow_save && end != ToneEnd::Undo;
+    if save {
         let Reported { relist, changed } = plugin.turn(&(Arc::new(|_| {}) as EventSink));
         if relist || changed {
             tone.note_change(Instant::now());
         }
     }
-    let keep = allow_save && (editor_open || tone.dirty());
+    let keep = save && (editor_open || tone.dirty());
     plugin.quiesce();
     if keep {
         let _ = keep_tone(tone, slot, "unload", name, || plugin.state());
@@ -426,8 +462,10 @@ fn ordered_release<P: OwnedPlugin>(
     // When the host's shutdown's removal is what ended the unit, its own file stays for the next launch's
     // restore under the same id (`EngineHost::remove_unit_at_shutdown`, decided with the terminal `Back`);
     // any other end (the player's removal, a source replacement) retires it into the slot's file.
-    if allow_save && retire && !host.keeps_tone() {
-        tone.retire();
+    match end {
+        ToneEnd::Retire if allow_save && !host.keeps_tone() => tone.retire(),
+        ToneEnd::Undo if allow_save => tone.undo_add(),
+        ToneEnd::Retire | ToneEnd::Undo | ToneEnd::Stay => {}
     }
     plugin.release(unit);
     report_faults(faults, slot, reported);
@@ -509,6 +547,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 
     let Some(terms) = host.terms() else {
         let why = "no audio device is open".to_string();
+        undo_add(&host, &mut tone);
         host.failed(why.clone());
         host.release();
         if let Some(tx) = ready.take() {
@@ -530,8 +569,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let Loaded { mut plugin, unit, name, tone: restored, .. } = match load(setup) {
         Ok(loaded) => loaded,
         Err(e) => {
+            undo_add(&host, &mut tone);
             host.failed(e.clone());
-            tone.unpin();
             host.release();
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err(e));
@@ -713,7 +752,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             fail_before_seat(host, plugin, unit, &mut tone, why, &mut ready, &faults, &mut reported)
         }
         Ok(Exit::Returned { unit, retire }) => {
-            let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, retire, &faults, &mut reported);
+            let end = tone_end(&host, &ready, retire);
+            let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err("unit left before seating".to_string()));
             }
@@ -721,7 +761,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         }
         Ok(Exit::Dismissed) => {
             let unit = seat.take_unit();
-            let res = ordered_release(host, plugin, unit, &mut tone, &name, true, true, &faults, &mut reported);
+            let end = tone_end(&host, &ready, true);
+            let res = ordered_release(host, plugin, unit, &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err("unit dismissed before seating".to_string()));
             }
@@ -787,17 +828,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             // ahead of `Dismissed` in the mailbox, or a box held in `Leave::Pending` during a
             // pending removal) takes the ordered release.
             if in_hand.is_some() || dismissed {
-                ordered_release(
-                    host,
-                    plugin,
-                    in_hand,
-                    &mut tone,
-                    &name,
-                    !panicked,
-                    !panicked && retire,
-                    &faults,
-                    &mut reported,
-                )
+                let end = tone_end(&host, &ready, retire);
+                ordered_release(host, plugin, in_hand, &mut tone, &name, !panicked, end, &faults, &mut reported)
             } else {
                 abandon_in_engine(host, plugin, &mut tone, &name, !panicked, &faults, &mut reported)
             }
