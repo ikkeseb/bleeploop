@@ -46,6 +46,27 @@
   `exited` read true and the restore may have dropped that load from the crash marker. Setting it only after a
   join would leave loads unended past close, and the next launch would forget sound plugins. Next check, only
   if a crash report's stack shows a plugin's `DllMain` at thread detach: whether that load left the marker.
+- The rig restore's seed barrier (D1, `EngineHost::wait_taken`) is checked before each add, so no add
+  starts before the running engine took the seed. An add already started is not covered: its device check
+  (`rig/host.rs` `AppHost::add`) comes before the slot's order lock, so a device that stops while the add
+  waits leaves the kept engine to take its install by idle service; and a rebuild during its plugin's load
+  hands the owner the new engine's terms, so its first install can sit in a port as the new engine's first
+  block takes at most 64 commands of a longer replay and then services the ports
+  (`rig/host_tests.rs` `first_block_can_seat_an_install_ahead_of_a_long_replay`): that unit plays a block
+  or two before the replayed levels and send-offs apply. Next check: none planned; on a report of a
+  restored unit heard at a wrong level right after a device switch, log the block that seats it and the
+  engine generation its add started under.
+- The rig's forget (`Chains::forget_files`) deletes a unit's tone files once no row, live plate or queued
+  removal holds its id; whether a departing owner can still write `unit-<id>.tone` after its row is released
+  is unread. Next check: read the order of `ToneKeeper`'s last write and the row's release in
+  `unit_owner.rs` and `serve_builtin`.
+- A restore add's source while the player's source hides its role in the projection: a parked source
+  that reported itself an effect at its re-activation, or a same-id reload to an effect still queued. The projection (`chain.rs` `projected_engine_ids`) shows an effect at the head,
+  and the engine protects the place (a source goes only at the head: `SeatRefusal::Placement`). The host
+  guard now judges by the role the plate last applied in (`Model::source_role_held`), which reads both
+  as the slot's source, so the add should answer `SourceTaken`, not `Seat(Placement)`: read from source,
+  never run. Next check: a `rig/host_tests.rs` case for each (a fake owner's restart re-activated as an
+  effect and refused; a reload as an effect held in its port), each expecting `SourceTaken`.
 - A join can wait on the loader lock (a sweep's drop, a plugin add's join on its owner's failure or a
   disconnected answer, pre-existing): a plugin hung in `DllMain` holds it for every thread start and end in
   the process, so the app stalls whatever the add does. Next check, only on a hang report: the hung process's

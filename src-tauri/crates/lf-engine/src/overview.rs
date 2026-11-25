@@ -117,6 +117,13 @@ impl Overview {
         seen >= taken && self.slots_open.get(slot).is_some_and(|l| !l.load(Relaxed))
     }
 
+    /// The commands the engine had taken off its ring when its last rendered block ended (0 before
+    /// the first). A command the host pushed as the ring's `n`th was taken, and if unstamped applied,
+    /// once this reads `n` or more: the rig's seed barrier (`engine_io::EngineHost::wait_taken`).
+    pub fn commands_taken(&self) -> u64 {
+        self.commands_taken.load(Acquire)
+    }
+
     pub(crate) fn set_slot_gate_open(&self, slot: usize, open: bool) {
         if let Some(l) = self.slots_open.get(slot) {
             l.store(open, Relaxed);

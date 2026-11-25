@@ -71,7 +71,7 @@ use super::{lock, Rig};
 const TAKEN_WAIT: Duration = Duration::from_millis(20);
 
 /// What the restore drives (D1, D2, D5, D9, D10): the engine and the chain host, one method per need.
-/// The app's implementor (CP3b) wraps `EngineHost` and `Chains`; the tests' is a scripted fake. Its
+/// The app's implementor (`host.rs`'s `AppHost`) wraps `EngineHost` and `Chains`; the tests' is a scripted fake. Its
 /// [`RigModel`] half is the model the writer and the restore read, so one turn's view is one copy.
 pub(crate) trait RestoreHost: RigModel + Send + Sync {
     /// Push the seed as one batch (D1, D2): each slot's level from `volumes` (A, B), skipping a slot
@@ -110,12 +110,12 @@ pub(crate) trait RestoreHost: RigModel + Send + Sync {
     /// atomically with the check that no unit holds the id, so a unit added under it after this call
     /// keeps its files. `Held` when a unit holds it (nothing deleted; the driver asks again later).
     /// Called under the rig's `calls` lock, which close waits for: it takes no rig lock, and it never
-    /// waits on more than the reservation and the two deletes.
+    /// waits on more than the reservation and the two deletes (an add holds the reservation only at its
+    /// mint, never across a load).
     fn forget(&self, id: UnitId) -> Forgot;
 }
 
 /// [`RestoreHost::wait_taken`]'s answer.
-#[cfg_attr(not(test), allow(dead_code))] // made by the real host (CP3b) and the tests' fake
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SeedTaken {
     /// The engine of generation `gen` took the seed.
@@ -127,7 +127,6 @@ pub(crate) enum SeedTaken {
 }
 
 /// [`RestoreHost::forget`]'s answer.
-#[cfg_attr(not(test), allow(dead_code))] // made by the real host (CP3b) and the tests' fake
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Forgot {
     /// No unit held the id: its tone files are gone (or there were none).

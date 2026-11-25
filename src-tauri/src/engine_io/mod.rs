@@ -1191,6 +1191,12 @@ impl EngineHost {
     /// overview and the ring's count through the command (`Ends::pushed`); `None` with no engine.
     fn push_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<Option<(u64, Arc<Overview>, u64)>, String> {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsSend).map_err(|_| "engine settings poisoned".to_string())?;
+        self.push_locked(&mut settings, commands)
+    }
+
+    /// [`EngineHost::push_all`]'s body, under `settings` (held by the caller, which may decide what to
+    /// send under it: [`EngineHost::seed`]); takes `ends`, then `state` per command.
+    fn push_locked(&self, settings: &mut settings::Settings, commands: impl IntoIterator<Item = TimedCommand>) -> Result<Option<(u64, Arc<Overview>, u64)>, String> {
         let mut ends = lock_at(&self.core.ends, LockSite::EndsSend).map_err(|_| "engine ends poisoned".to_string())?;
         let mut refused = false;
         let mut mark = None;
@@ -1203,7 +1209,7 @@ impl EngineHost {
                     // refill the ring after every block could keep it waiting forever. Entries that may
                     // not go stay held and delay nothing ungated; a ring the flush fills, or found full for an
                     // entry that may go (the next free slot is that entry's), refuses this one.
-                    if !state.gate.is_empty() && unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state) {
+                    if !state.gate.is_empty() && unit_host::flush_gate_locked(&self.core, settings, ends, &mut state) {
                         self.core.counters.commands_full.fetch_add(1, Relaxed);
                         return Err("the engine's command ring is full".to_string());
                     }
@@ -1296,6 +1302,73 @@ impl EngineHost {
             }
             if Instant::now() >= deadline {
                 return Err(format!("slot {slot}'s live input did not close within {} ms", timeout.as_millis()));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The rig restore's seed (D1, D2): each slot's level from `volumes` (A, B) as a `SetSlotGain`, but
+    /// for a slot whose gain the settings memory already holds (a gesture's, or an earlier seed's that
+    /// the ring took), and the four input sends off, pushed as one batch. Decided and pushed under one
+    /// `settings` (`push_all`'s order: `settings → ends → state`), so a gesture is never overwritten,
+    /// before or between retries. `Ok(mark)`: the ring took it whole; the mark is the engine generation
+    /// and the ring's count through the batch, `None` with no engine (the settings memory keeps it, and
+    /// the next engine replays it). `Err` when the ring refused it or took part of it: a part it took
+    /// is kept (its levels then count as held, the same values), and the caller sends it again.
+    pub(crate) fn seed(&self, volumes: [f64; 2]) -> Result<Option<(u64, u64)>, String> {
+        let mut settings = lock_at(&self.core.settings, LockSite::SettingsSend).map_err(|_| "engine settings poisoned".to_string())?;
+        let mut held = [false; SLOT_COUNT];
+        for command in settings.replay() {
+            if let Command::SetSlotGain(slot, _) = command {
+                if let Some(h) = held.get_mut(usize::from(slot)) {
+                    *h = true;
+                }
+            }
+        }
+        let gains = (0..SLOT_COUNT).filter(|&s| !held[s]).map(|s| Command::SetSlotGain(s as u8, volumes.get(s).copied().unwrap_or(1.0) as f32));
+        let sends = lf_engine::InputSend::ALL.into_iter().map(|send| Command::SetInputSend(send, false));
+        let batch: Vec<TimedCommand> = gains.chain(sends).map(|command| TimedCommand { frame: None, command }).collect();
+        let mark = self.push_locked(&mut settings, batch)?;
+        Ok(mark.map(|(gen, _, pushed)| (gen, pushed)))
+    }
+
+    /// The running engine's generation (`Core::engine_gen`), `None` while no device runs or no engine
+    /// exists. Read under `ends`, which a rebuild raises the generation under.
+    pub(crate) fn device(&self) -> Option<u64> {
+        let ends = lock_at(&self.core.ends, LockSite::Ends).ok()?;
+        (self.core.running.load(Acquire) && ends.is_some()).then(|| self.core.engine_gen.load(Acquire))
+    }
+
+    /// Wait, at most `within`, until the engine now running took the seed `mark` names (D1's barrier,
+    /// as [`EngineHost::silence_slot`] waits: the engine generation and the ring's count the answer must
+    /// reach, read off that engine's overview, `Overview::commands_taken`). The mark moves with the
+    /// engine: a generation other than its own re-targets it to the new ring's count now, whose replay
+    /// carries the seed (the settings memory kept it), and answers `Moved` at once; a mark of `None` (a
+    /// seed sent with no engine) is set at the first engine seen. `Taken` once that engine's blocks took
+    /// the ring up to the mark; `Pending` when neither happened in time (no device runs, or its blocks
+    /// have not reached it).
+    pub(crate) fn wait_taken(&self, mark: &mut Option<(u64, u64)>, within: Duration) -> rig::SeedTaken {
+        let deadline = Instant::now() + within;
+        loop {
+            {
+                let Ok(ends) = lock_at(&self.core.ends, LockSite::Ends) else { return rig::SeedTaken::Pending };
+                let gen = self.core.engine_gen.load(Acquire);
+                if let Some(ends) = ends.as_ref() {
+                    match *mark {
+                        Some((at, _)) if at != gen => {
+                            *mark = Some((gen, ends.pushed));
+                            return rig::SeedTaken::Moved { gen };
+                        }
+                        None => *mark = Some((gen, ends.pushed)),
+                        Some(_) => {}
+                    }
+                    if mark.is_some_and(|(_, target)| ends.overview.commands_taken() >= target) {
+                        return rig::SeedTaken::Taken { gen };
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return rig::SeedTaken::Pending;
             }
             std::thread::sleep(Duration::from_millis(1));
         }

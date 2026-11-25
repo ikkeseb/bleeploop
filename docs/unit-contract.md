@@ -38,8 +38,8 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   crash marker; their rules in `src-tauri/crates/lf-rig`, the glue in `src-tauri/src/engine_io/rig/`). The
   page keeps only the one-time upgrade of the WebView's old record and hands it over (§6). The record, its
   writer and the shutdown's close are wired into the app, DEV only with chain mode. The restore and the crash
-  marker are wired behind a host interface (`RestoreHost`, `engine_io/rig/restore.rs`) the app does not
-  provide yet: no restore adds a unit and no marker is written. `rig.json` in the app-local data folder (`rig.dev.json`
+  marker run behind a host interface (`RestoreHost`, `engine_io/rig/restore.rs`) the app provides
+  (`engine_io/rig/host.rs`); with no engine started, no restore runs. `rig.json` in the app-local data folder (`rig.dev.json`
   in a DEV build), the same JSON as `lf.rig`. One process owns
   the file pair (a lock file); another answers `unavailable`. Only a missing file is no record; one that
   cannot be read or that a newer build wrote is reported, never written over, and nothing is restored or
@@ -339,6 +339,12 @@ below reads an old key through the resolver that reads it today, so a missing ke
   plugin unit with a fresh id (dropped when the legacy crash marker is stored, as v0.8.9 would have), else its
   source as `instrument.ts` resolves `lf.slotSource.<n>` (unset: Lead in A, Bass in B, Off on a guitar-first
   install) as a SYNTH unit or an empty chain. The old keys stay one release.
+- **The restore (native, once per process):** each slot's volume (unless the player set one) and the legacy
+  sends' send-off go in as settings and are taken by the engine before any unit is added; then, once a
+  device runs, each record unit the chain lacks is added under its id, right after the nearest record unit
+  before it that the chain holds then (else at the head, behind a source). A unit the chain already holds
+  (same slot, id, kind and plugin, applied) is not added twice; the restore never replaces a source the
+  player put in, and a forgotten unit's tone files go only while no unit holds its id.
 - **Tones:** a migrated plugin unit's first load starts from its slot and plugin's v0.8.9 file (§1).
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
   effect, 0.1 otherwise or when the scan did not find it, `instrument.ts`); an empty input-fed slot

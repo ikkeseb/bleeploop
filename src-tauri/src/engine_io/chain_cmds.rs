@@ -28,8 +28,9 @@ use super::builtins::Builtins;
 use super::chain::{PlateState, PluginRef, UnitSpec};
 use super::mode::{engine, EngineApp};
 use super::plugins::EngineSlot;
+use super::rig::Forgot;
 use super::unit_host::{
-    self, Activated, Back, BuiltinFactory, Op, OpState, Removal, Spec, SubmitError, Unit, UnitHost,
+    self, Activated, At, Back, BuiltinFactory, HostMint, Op, OpState, Removal, Spec, SubmitError, Unit, UnitHost,
 };
 use super::EngineHost;
 use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
@@ -389,6 +390,9 @@ pub(crate) struct Chains {
     /// The exit latch of every load attempt an add minted, by its install token, registered at the
     /// mint (`exited`) and kept once set (one entry per add). A leaf lock.
     exits: Mutex<BTreeMap<InstallToken, ExitLatch>>,
+    /// The error kind last logged for each tone file a forget left (`forget_files`): the restore asks
+    /// again each turn, so a lasting failure is logged once per kind, not every ~100 ms. A leaf lock.
+    forget_left: Mutex<BTreeMap<String, std::io::ErrorKind>>,
     closing: AtomicBool,
     #[cfg(test)]
     fail_next_spawn: AtomicBool,
@@ -434,6 +438,7 @@ impl Chains {
             affinity: Mutex::new(Affinity::default()),
             tokens: Mutex::new(ToneTokens::default()),
             exits: Mutex::new(BTreeMap::new()),
+            forget_left: Mutex::new(BTreeMap::new()),
             closing: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_spawn: AtomicBool::new(false),
@@ -763,6 +768,46 @@ impl Chains {
         sink: EventSink,
         open: Open<'_, E>,
     ) -> Result<AddOk, AddFail> {
+        self.add_at(host, slots, tones, slot, unit, spec, At::Index(at), tone_token, sink, open)
+    }
+
+    /// The rig's restore add (D9, `RestoreHost::add`): [`Self::add_unit`] at `place` instead of a plate
+    /// index, with no tone token. Under the slot's order lock and the model's `state`, before the mint
+    /// (`EngineHost::host_unit`): a live, applied plate of that slot that is the unit (its id, kind and
+    /// plugin identity) answers `Matched` with that plate's token, adding nothing; any other plate under
+    /// the id refuses (`Host`, no token). Its place resolves under `state` at the mint
+    /// (`Model::host_place`), and its install never replaces a source at the slot's head
+    /// (`AddFail::SourceTaken`). Refused before the mint once the host is closing.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_as_host<E: Into<LoadFail>>(
+        &self,
+        host: &EngineHost,
+        slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        tones: Option<&ToneStore>,
+        slot: usize,
+        unit: UnitId,
+        spec: UnitSpec,
+        place: &lf_rig::Place,
+        sink: EventSink,
+        open: Open<'_, E>,
+    ) -> Result<AddOk, AddFail> {
+        self.add_at(host, slots, tones, slot, unit, spec, At::Place(place), None, sink, open)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_at<E: Into<LoadFail>>(
+        &self,
+        host: &EngineHost,
+        slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        tones: Option<&ToneStore>,
+        slot: usize,
+        unit: UnitId,
+        spec: UnitSpec,
+        at: At<'_>,
+        tone_token: Option<u32>,
+        sink: EventSink,
+        open: Open<'_, E>,
+    ) -> Result<AddOk, AddFail> {
         self.sweep(Some(host));
         let (spec, bypassed) = spec.into_spec().map_err(refused)?;
         match spec {
@@ -783,10 +828,68 @@ impl Chains {
     /// read between its plate's insert and the registration (a `rig_view` may find it there), and one
     /// this host never minted for an add (a reload's candidate included; the rig reads only an add's,
     /// its plate's `added_by`).
-    #[allow(dead_code)] // the rig's restore driver reads it (CP3a part 2); the tests now
+    #[cfg_attr(not(test), allow(dead_code))] // the tests read it; the rig's host reads `exit_known`
     pub(crate) fn exited(&self, token: InstallToken) -> bool {
+        self.exit_known(token).unwrap_or(false)
+    }
+
+    /// [`Self::exited`] for a token this host registered a latch for; `None` for one it never did (no
+    /// add minted it, or it is read before its registration).
+    pub(crate) fn exit_known(&self, token: InstallToken) -> Option<bool> {
         let exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
-        exits.get(&token).is_some_and(ExitLatch::is_set)
+        exits.get(&token).map(ExitLatch::is_set)
+    }
+
+    /// The rig's forget (`RestoreHost::forget`): delete unit `id`'s tone files (`unit-<id>.tone`,
+    /// `unit-<id>.pin` in `tones_dir`) under `id_guard`, which every add's mint takes before it reserves
+    /// an id (never a slot's order lock: this waits at most for a mint, never for an add's load). `Held`,
+    /// nothing deleted, when a unit holds the id (a row reserves it, a live plate or a queued removal
+    /// carries it: its files are that unit's), and once the host is closing (the shutdown keeps each
+    /// removed unit's tone for the next launch). Both are decided under `state`, the lock the shutdown's
+    /// unit removal takes after it marks the host closing (`Self::unload_all`): either no unit held the
+    /// id before the shutdown began, and none can take it while `id_guard` is held here, so the shutdown
+    /// keeps no file of this id; or closing reads true. `Held` too when a file is left (any failure but
+    /// not found: a sharing violation, a denied access): the restore asks again at a later turn. A file
+    /// left is logged once per error kind (`forget_left`), and again only after it went or its error
+    /// changed.
+    pub(crate) fn forget_files(&self, host: &EngineHost, id: UnitId, tones_dir: Option<&std::path::Path>) -> Forgot {
+        let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+            if self.closing.load(Acquire) || host.core.closing.load(Acquire) {
+                return Forgot::Held;
+            }
+            if state.table.is_id_reserved(id) || state.model.has_live_plate(id) || state.model.has_pending_remove(id) {
+                return Forgot::Held;
+            }
+        }
+        let mut left = false;
+        if let Some(dir) = tones_dir {
+            for name in [crate::host::tone::ToneIdentity::unit_file_name(id), crate::host::tone::ToneIdentity::unit_pin_name(id)] {
+                let failed = match std::fs::remove_file(dir.join(&name)) {
+                    Ok(()) => None,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => Some(e),
+                };
+                let mut logged = self.forget_left.lock().unwrap_or_else(|e| e.into_inner());
+                match failed {
+                    None => {
+                        logged.remove(&name);
+                    }
+                    Some(e) => {
+                        left = true;
+                        if logged.insert(name.clone(), e.kind()) != Some(e.kind()) {
+                            log::warn!("[chain_cmds] unit {id}: the forgotten unit's {name} was not deleted ({e}); tried again later, logged once");
+                        }
+                    }
+                }
+            }
+        }
+        if left {
+            Forgot::Held
+        } else {
+            Forgot::Deleted
+        }
     }
 
     /// Track `token`'s attempt by `exit` and answer the latch that stands for it now: registered at the
@@ -813,7 +916,7 @@ impl Chains {
         slot: usize,
         unit: UnitId,
         plugin: PluginRef,
-        at: usize,
+        at: At<'_>,
         bypassed: bool,
         tone_token: Option<u32>,
         sink: EventSink,
@@ -830,7 +933,10 @@ impl Chains {
         }
 
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
-        let unit_host = self.mint(host, slots, slot, unit, Spec::Plugin(plugin.clone()), at, bypassed)?;
+        let unit_host = match self.mint(host, slots, slot, unit, Spec::Plugin(plugin.clone()), at, bypassed)? {
+            HostMint::New(unit_host) => unit_host,
+            HostMint::Matched(token) => return Ok(AddOk { state: AddState::Matched, token }),
+        };
         let token = unit_host.install_token();
         #[cfg(test)]
         if let Some(hook) = self.after_mint_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -970,8 +1076,9 @@ impl Chains {
     }
 
     /// Reserve `unit` under `order[slot]` (held by the caller) and mint its install token
-    /// (`EngineHost::unit`): refused at once for a legacy plugin slot in this run, or as the host says
-    /// (no slot, closing, the id reserved or still leaving, a full chain), each before any unit code ran.
+    /// (`EngineHost::unit`, or `EngineHost::host_unit` for a host add's place, which may match a plate
+    /// instead): refused at once for a legacy plugin slot in this run, or as the host says (no slot,
+    /// closing, the id reserved or still leaving, a full chain), each before any unit code ran.
     #[allow(clippy::too_many_arguments)]
     fn mint(
         &self,
@@ -980,9 +1087,9 @@ impl Chains {
         slot: usize,
         unit: UnitId,
         spec: Spec,
-        at: usize,
+        at: At<'_>,
         bypassed: bool,
-    ) -> Result<UnitHost, AddFail> {
+    ) -> Result<HostMint, AddFail> {
         let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
         let slots_guard = slots.lock().map_err(|_| refused("engine slots poisoned".to_string()))?;
         for (s, entry) in slots_guard.iter().enumerate() {
@@ -992,7 +1099,11 @@ impl Chains {
                 )));
             }
         }
-        host.unit(slot, unit, spec, at, bypassed).map_err(|why| {
+        let minted = match at {
+            At::Index(at) => host.unit(slot, unit, spec, at, bypassed).map(HostMint::New),
+            At::Place(place) => host.host_unit(slot, unit, spec, place, bypassed),
+        };
+        minted.map_err(|why| {
             if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
                 refused(format!(
                     "unit {unit} is still leaving its chain (a take holds its removal); add it again when the take ends"
@@ -1012,7 +1123,7 @@ impl Chains {
         unit: UnitId,
         kind: UnitKind,
         params: unit_host::Params,
-        at: usize,
+        at: At<'_>,
         bypassed: bool,
     ) -> Result<AddOk, AddFail> {
         if slot >= SLOT_COUNT {
@@ -1025,7 +1136,10 @@ impl Chains {
         }
 
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
-        let unit_host = self.mint(host, slots, slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed)?;
+        let unit_host = match self.mint(host, slots, slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed)? {
+            HostMint::New(unit_host) => unit_host,
+            HostMint::Matched(token) => return Ok(AddOk { state: AddState::Matched, token }),
+        };
         let token = unit_host.install_token();
         #[cfg(test)]
         if let Some(hook) = self.after_mint_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -2146,6 +2260,7 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
         SubmitError::NoEngine => "no audio device is open".to_string(),
+        SubmitError::SourceTaken => unit_owner::SOURCE_TAKEN.to_string(),
     }
 }
 
@@ -2268,6 +2383,14 @@ fn serve_builtin(
             drop(returned);
             host.release();
             send_first_answer(&mut ready, Err((FailClass::Host(Retry::Launch), "the host is closing".to_string())));
+            return;
+        }
+        // A host add's SYNTH never replaces the player's source (D9).
+        Err((returned, SubmitError::SourceTaken)) => {
+            drop(returned);
+            host.failed(unit_owner::SOURCE_TAKEN.to_string());
+            host.release();
+            send_first_answer(&mut ready, Err((FailClass::SourceTaken, unit_owner::SOURCE_TAKEN.to_string())));
             return;
         }
         Err((returned, err)) => {
@@ -2444,6 +2567,17 @@ fn serve_builtin(
                         }
                         seat.seat = BuiltinSeat::Closing { unit: returned };
                     }
+                    Err((returned, SubmitError::SourceTaken)) => {
+                        if !ever_seated {
+                            drop(returned);
+                            host.failed(unit_owner::SOURCE_TAKEN.to_string());
+                            host.release();
+                            send_first_answer(&mut ready, Err((FailClass::SourceTaken, unit_owner::SOURCE_TAKEN.to_string())));
+                            return;
+                        }
+                        host.parked(unit_owner::SOURCE_TAKEN.to_string());
+                        seat.seat = BuiltinSeat::Parked { unit: returned };
+                    }
                     Err((returned, err @ (SubmitError::Superseded | SubmitError::Replaced))) => {
                         drop(returned);
                         host.release();
@@ -2599,7 +2733,7 @@ pub async fn chain_add(
 /// A slot's seated SYNTH may have changed: native MIDI's router forgets the picks it kept for `slot` and
 /// for `unit` (`MidiHost::forget_picks`). Nothing when native MIDI does not run, nor in a release build
 /// (no pick there; the `chain_*` commands are DEV-only too).
-fn forget_picks(app: &EngineApp, slot: Option<u8>, unit: UnitId) {
+pub(crate) fn forget_picks(app: &EngineApp, slot: Option<u8>, unit: UnitId) {
     #[cfg(debug_assertions)]
     let _ = app.with_midi(|midi| midi.forget_picks(slot, unit));
     #[cfg(not(debug_assertions))]

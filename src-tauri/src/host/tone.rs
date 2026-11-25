@@ -395,6 +395,12 @@ impl ToneStore {
         }
     }
 
+    /// The store's folder: the rig's forget deletes a forgotten unit's files there
+    /// (`Chains::forget_files`).
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn path_for(&self, file_name: &str) -> PathBuf {
         self.dir.join(file_name)
     }

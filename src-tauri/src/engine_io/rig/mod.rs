@@ -44,9 +44,9 @@
 //! after the inputs, so no view older than an add's answer is fed after it (its plate would read as
 //! removed).
 //!
-//! **The driver** (`restore.rs`) runs only with a [`RestoreHost`] ([`Rig::with_restore`]); the app's
-//! `Rig::new` has none today (the real host is CP3b's: `mode.rs`, where `EngineApp` makes its `Rig`, is
-//! where it plugs in). Without one the restore is fed the record and every view but never seeded, so
+//! **The driver** (`restore.rs`) runs only with a [`RestoreHost`] ([`Rig::with_restore`]; the app's is
+//! `host.rs`'s `AppHost`, plugged in by `mode.rs` where `EngineApp` makes its `Rig`); `Rig::new`, the
+//! app's only when the engine did not start, has none. Without one the restore is fed the record and every view but never seeded, so
 //! its plan holds every record unit the model lacks at its place (`Queued`), matches a unit the model
 //! holds to its applied plate (a plate of the same unit that has not applied is no match: removed
 //! before it applies, it leaves the unit at its place), and lets an id go to the player's applied unit:
@@ -76,6 +76,9 @@
 //! [`Rig::close`], which then has nothing to write.
 
 mod disk;
+pub(super) mod host;
+#[cfg(test)]
+mod host_tests;
 mod restore;
 #[cfg(test)]
 mod restore_tests;
@@ -95,7 +98,6 @@ use super::EngineHost;
 use crate::host::PluginHostState;
 pub(crate) use disk::files;
 use disk::FileDisk;
-#[allow(unused_imports)] // the real host (CP3b) implements them
 pub(crate) use restore::{Forgot, RestoreHost, SeedTaken};
 use restore::{Calls, Driver};
 pub(crate) use writer::RigModel;
@@ -166,13 +168,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Rig {
-    /// The app's rig: no restore runs (its host is CP3b's; it plugs in here, by [`Rig::with_restore`]).
+    /// A rig with no restore: the app's only when the engine did not start (`mode.rs`).
     pub(crate) fn new(dir: Option<PathBuf>, files: Files) -> Rig {
         Rig::build(dir, files, None)
     }
 
     /// A rig whose restore drives `host` (D10).
-    #[allow(dead_code)] // the app's real host is CP3b's; the tests drive a fake one
     pub(crate) fn with_restore(dir: Option<PathBuf>, files: Files, host: Arc<dyn RestoreHost>) -> Rig {
         Rig::build(dir, files, Some(host))
     }

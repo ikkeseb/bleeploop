@@ -57,8 +57,9 @@ pub struct EngineApp {
     /// is held across every call into it ([`EngineApp::with_midi`]), so the shutdown's take waits for a
     /// call in flight and drops it before the host shuts down.
     midi: Mutex<Option<MidiHost>>,
-    pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
-    pub(super) chains: Chains,
+    /// Shared with the rig's restore host (`rig::host::AppHost`), as are `chains` and `tones`.
+    pub(super) slots: Arc<Mutex<[EngineSlot; SLOT_COUNT]>>,
+    pub(super) chains: Arc<Chains>,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
     pub(super) tones: Option<ToneStore>,
     /// A session import's tone, parked for the reload of the slot that held its plugin (`plugins`).
@@ -85,7 +86,6 @@ impl EngineApp {
             }
         };
         let tones = data_dir.as_ref().map(|dir| ToneStore::new(dir.join(TONES_DIR)));
-        let rig = Arc::new(Rig::new(data_dir.clone(), rig::files()));
         let started = EngineHost::new(HostConfig::default()).map_err(|e| format!("the device owner thread did not start ({e})")).and_then(|host| {
             match FeedThread::spawn(host.clone()) {
                 Ok(feed) => Ok((host, feed)),
@@ -103,7 +103,7 @@ impl EngineApp {
                 super::midi_bench::start_from_env(&host);
                 // Its bindings beside `plugin-folders.json` (`host/folders.rs`); it registers its rebuild
                 // handshake on the host.
-                let midi = MidiHost::start(Arc::new(host.clone()), data_dir);
+                let midi = MidiHost::start(Arc::new(host.clone()), data_dir.clone());
                 (Some((host, feed)), Some(midi))
             }
             Err(why) => {
@@ -111,11 +111,22 @@ impl EngineApp {
                 (None, None)
             }
         };
+        let slots = Arc::new(Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)));
+        let chains = Arc::new(Chains::new());
+        // The rig's restore drives the engine and the chain host (D10): none when the engine did not start.
+        let rig = Arc::new(match &engine {
+            Some((host, _)) => {
+                let loader = Box::new(rig::host::AppLoader { app: app.clone() });
+                let restore = rig::host::AppHost::new(host.clone(), chains.clone(), slots.clone(), tones.clone(), data_dir.clone(), loader);
+                Rig::with_restore(data_dir, rig::files(), Arc::new(restore))
+            }
+            None => Rig::new(data_dir, rig::files()),
+        });
         EngineApp {
             engine,
             midi: Mutex::new(midi),
-            slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
-            chains: Chains::new(),
+            slots,
+            chains,
             tones,
             reload_tones: Mutex::default(),
             rig,
