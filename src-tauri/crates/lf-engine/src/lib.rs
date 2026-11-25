@@ -185,9 +185,9 @@
 //! sends, the lanes' pan, the input OTT, a multiply's burst, a TRIM's) and the Stage 3 loads' alloc check.
 //! `tests/synth_unit.rs` holds SYNTH to today's bank and to that bank's pin,
 //! `tests/fixtures/builtin-bank.json` (a sha256 per instrument × input side × block size, keyed by the
-//! OS that rendered it: Linux only so far, so Windows and macOS check no pin and say so, and any other OS
-//! missing its entry fails); a deliberate change to
-//! the bank's sound regenerates it on each OS whose entry it keeps, `cargo test -p lf-engine --test
+//! OS that rendered it: Linux and Windows (Windows's equal to Linux's), so macOS alone checks no pin and
+//! says so, and any other OS missing its entry fails); a deliberate change to the bank's sound regenerates
+//! it on each OS whose entry it keeps (Windows: from a CI run, as no Windows machine builds here), `cargo test -p lf-engine --test
 //! synth_unit -- --ignored write_builtin_pin` (it replaces only its own OS's entry). `tests/synth.rs` and
 //! `tests/voices.rs` also play each Tone scenario through a SYNTH (`tests/common/unit_replay.rs`, against
 //! the DSP alone, applied on its own with a literal lead, at the seven block sizes), and
