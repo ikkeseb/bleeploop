@@ -931,7 +931,7 @@ function applyFrameNow(f: FeedFrame): void {
   // the units' meters into their plain mirror only, as the scope's columns (invariant 6). Only while the
   // row draws the chain (`chainShown`): otherwise the row is the fixed topology and a report is no state of it.
   if (chainShown()) {
-    if (f.chains) applyChains(f.chains);
+    if (f.chains) applyChains(f.chains, f.reset);
     if (f.unitMeters) applyUnitMeters(f.unitMeters);
   }
   // After the frame's events: a reading in the frame that turned the tuner on is shown, one in the frame
@@ -1167,9 +1167,13 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   // the frame's `Transport`.
   let meterKnown = false;
   const sendsKnown = new Set<string>();
+  const slotGains: [number | null, number | null] = [null, null];
   for (const c of settings) {
     if (typeof c === 'string') continue;
-    if ('SetMasterVolume' in c) {
+    if ('SetSlotGain' in c) {
+      const [slot, gain] = c.SetSlotGain;
+      if ((slot === 0 || slot === 1) && Number.isFinite(gain)) slotGains[slot] = gain;
+    } else if ('SetMasterVolume' in c) {
       masterKnown = true;
       setMasterVolumeSignal(c.SetMasterVolume);
       writeStoredNumber(MASTER_KEY, c.SetMasterVolume);
@@ -1222,6 +1226,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   // The input sends the engine lacks: values first, so a send that comes on comes on with them. In chain
   // mode every legacy send goes off instead, whatever the engine kept (unit contract §6: their values are
   // units now, `rig-record.ts`), and nothing of theirs is adopted or stored (`adoptInputSend`).
+  resetSlotGains = slotGains;
   if (chainShown()) {
     for (const id of INPUT_SENDS) lacking.push({ SetInputSend: [id, false] });
   } else {
@@ -1232,9 +1237,24 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
       if (!sendsKnown.has(id)) lacking.push({ SetInputSend: [id, inputSendOn[id][0]()] });
     }
   }
-  sendEngine(...lacking);
+  const sent = sendEngine(...lacking);
+  // The rig record's adds wait for a send-off the engine took (`legacySendsOff`); a refused batch goes again
+  // at the next reset frame, as every lacking setting does.
+  if (chainShown()) void sent.then((took) => took && sendsOffTaken());
   engineResync(plain.resets === 1);
 }
+
+/** Each slot's gain as the latest reset frame's settings replay it (`SetSlotGain`), null where none. */
+let resetSlotGains: [number | null, number | null] = [null, null];
+/** The slot gains the engine kept, as the latest reset frame replayed them: a DEV chain adopted into the
+ * rig record keeps its level (`rig-record.ts` `upgradeRig`). */
+export const reportedSlotGains = (): [number | null, number | null] => [...resetSlotGains];
+
+let sendsOffTaken!: () => void;
+const sendsOff = new Promise<void>((resolve) => (sendsOffTaken = resolve));
+/** Chain mode: settles once a reset frame's batch that sends every legacy send off was taken by the engine,
+ * so no unit the rig record adds plays beside a legacy send still on (unit contract §6). */
+export const legacySendsOff = (): Promise<void> => sendsOff;
 
 const clampLane = (i: number) => Math.max(0, Math.min(ENGINE_LANES - 1, Math.trunc(i)));
 

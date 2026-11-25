@@ -163,6 +163,9 @@ export interface LegacySnapshot {
   /** The chains the first reset frame reported, when any unit was in them (a DEV chain run before any
    * record): the record adopts them instead of the old plugin and source. */
   reported: [RigUnit[], RigUnit[]] | null;
+  /** Each slot's gain the engine applied, as the first reset frame's settings replay it (`SetSlotGain`);
+   * null where it holds none. The adopted chains keep it; absent or null: unity. */
+  reportedVolumes?: [number | null, number | null];
 }
 
 const IN_FX: Record<string, UnitEffectKindId> = { inFxOtt: 'ott', inFxRing: 'ring', inFxEcho: 'echo', inFxReverb: 'reverb' };
@@ -200,7 +203,7 @@ const SYNTH_GAIN: Record<string, UnitParamId> = {
  * the scan kind's default (decision f); else its source as `lf.slotSource.<n>` resolves: a SYNTH unit with
  * the instrument's index and every instrument's level, volume unity, or Off: no unit, volume the input
  * level. When the first reset frame reported units, the record adopts those chains as they are instead,
- * at unity. `pending` takes each send that migrates, in `SEND_ORDER`, its params as stored, bypassed when
+ * at the slot gain the engine reported (unity when it reported none). `pending` takes each send that migrates, in `SEND_ORDER`, its params as stored, bypassed when
  * it was off; a SYNTH-headed slot only the OTT (placement keeps it only if it was on). Ids come from
  * `mint`, slot 0's units then its pending, then slot 1's.
  */
@@ -211,7 +214,8 @@ export function upgradeRig(snap: LegacySnapshot, mint: () => UnitId): RigRecord 
     let volume: number;
     if (snap.reported) {
       units = snap.reported[n];
-      volume = 1;
+      const kept = snap.reportedVolumes?.[n];
+      volume = typeof kept === 'number' && kept >= 0 && kept <= SLOT_GAIN_MAX ? kept : 1;
     } else if (legacy.plugin && !snap.legacyMarker) {
       const { ref, isEffect, stored } = legacy.plugin;
       units = [{ id: mint(), kind: 'plugin', plugin: { ...ref }, bypass: false }];
@@ -253,7 +257,8 @@ export const isApplied = (u: UnitState): boolean =>
  * Slot's head's role as `reported` (the slot's chain in a `chains` report taken now) shows it: 'input'
  * with no head or a built-in effect at the head, 'source' with a SYNTH; a plugin head's role once it is
  * applied (its `source`). Null while it is unknown: the plugin head is missing from the scan, loading,
- * waiting, or its add's outcome not reported yet.
+ * waiting, failed with no seat (its cause unknown, so the slot is not known to be input-fed), or its add's
+ * outcome not reported yet.
  */
 export function headRole(units: readonly RigUnit[], reported: readonly UnitState[]): 'source' | 'input' | null {
   const head = units[0];
@@ -285,14 +290,15 @@ function recordOf(u: UnitState): RigUnit {
 }
 
 /**
- * A slot's units after a `chains` report (§1): every reported unit that is or is becoming applied, in its
- * order (a unit `leaving` and a failed add's plate are not kept: a confirmed removal and a confirmed load
- * failure); and every record unit this page's reports never named (`seen`), at its record place: a plugin
- * missing from the scan, an add still on its way. A unit a report named before and this one does not was
- * removed.
+ * A slot's units after a `chains` report (§1): every reported unit but one `leaving` (a confirmed removal), in
+ * its order, a failed add's plate included: the feed names no failure's cause (a plugin's own load and a host
+ * failure, a lost device or an owner thread that would not start, share `failed`), so the plate keeps its id
+ * and place, and the next launch adds it again, until the player removes it. And every record unit this
+ * page's reports never named (`seen`), at its record place: a plugin missing from the scan, an add still on
+ * its way. A unit a report named before and this one does not was removed.
  */
 export function unitsFromReport(record: readonly RigUnit[], reported: readonly UnitState[], seen: ReadonlySet<UnitId>): RigUnit[] {
-  const out = reported.filter((u) => u.state !== 'leaving' && !(u.state === 'failed' && u.parked !== true)).map(recordOf);
+  const out = reported.filter((u) => u.state !== 'leaving').map(recordOf);
   const named = new Set(reported.map((u) => u.id));
   record.forEach((u, i) => {
     if (!named.has(u.id) && !seen.has(u.id)) out.splice(Math.min(i, out.length), 0, u);

@@ -7,7 +7,8 @@
  *
  * - full older install: `OLDER_INSTALL`, every `lf.` key the app writes with a non-default value (surveyed
  *   from `src/`). After the boot settles, and again after a reload, every seeded key holds its exact text,
- *   only the new OTT switch is added (off), and the screen is the returning one: no amp-sim ask,
+ *   only the new OTT switch is added (off), chain mode's `lf.rig` is never read (as in each case out of
+ *   chain mode: a `getItem` spy), and the screen is the returning one: no amp-sim ask,
  *   slot B not folded, slot A Off and slot B on Pad as stored, slot A's input on the stored In 2 (and the
  *   device opened with the stored picks), the keyboard at the top with the stored weights, no start line
  *   on the empty looper;
@@ -175,11 +176,23 @@ await probe(async ({ browser, open }) => {
       context,
       viewport: { width: 1280, height: 820 },
       ...(seeded ? { storage: seeded } : { firstLaunch: true }),
-      init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
+      init: (p) => p.addInitScript(() => {
+        window.__lfEngineFake = true;
+        // Out of chain mode nothing reads the rig record (the release is as before it).
+        window.__rigReads = 0;
+        const real = Storage.prototype.getItem;
+        Storage.prototype.getItem = function (key) {
+          if (this === window.localStorage && key === 'lf.rig') window.__rigReads++;
+          return real.call(this, key);
+        };
+      }),
     });
     await boot(app.page);
     return { context, page: app.page };
   };
+  /** Nothing read `lf.rig` on this page (the chain mode's record; `openOver`'s spy). */
+  const assertNoRigRead = async (page, when) =>
+    assert.equal(await page.evaluate(() => window.__rigReads), 0, `${when}: lf.rig was read out of chain mode`);
   /** Every seeded key holds its exact text, and the keys beyond the seed are exactly `added`. */
   const assertKept = (stored, seeded, added, when) => {
     for (const [k, v] of Object.entries(seeded)) assert.equal(stored[k], v, `${when}: ${k} was rewritten`);
@@ -203,6 +216,7 @@ await probe(async ({ browser, open }) => {
       const stored = await storage(page);
       assert.equal(stored['lf.guitarFirst'], undefined, `${when}: lf.guitarFirst was written`);
       assertKept(stored, OLDER_INSTALL, { 'lf.inputSend.ott': '0' }, when);
+      await assertNoRigRead(page, when);
       const l = await look(page);
       assertReturning(l, ['Off', 'Pad'], when);
       assert.equal(l.placement, 'top', `${when}: the keyboard placement`);
@@ -222,6 +236,7 @@ await probe(async ({ browser, open }) => {
     const stored = await storage(page);
     assert.equal(stored['lf.guitarFirst'], undefined, `${when}: lf.guitarFirst was written`);
     assertKept(stored, MINIMAL_INSTALL, BOOT_ADDS, when);
+    await assertNoRigRead(page, when);
     const l = await look(page);
     assertReturning(l, ['Lead', 'Bass'], when);
     assert.equal(l.placement, 'bottom', `${when}: the keyboard placement`);
@@ -237,6 +252,7 @@ await probe(async ({ browser, open }) => {
     const when = 'fresh install';
     const stored = await storage(page);
     assert.equal(stored['lf.guitarFirst'], '1', `${when}: the guitar-first marker`);
+    await assertNoRigRead(page, when);
     const l = await look(page);
     assert.deepEqual(l.slots, [
       { picker: 'Pick your amp-sim', ask: true, folded: false },
@@ -287,7 +303,7 @@ await probe(async ({ browser, open }) => {
       const [a, b] = rig.slots;
       const sends = (list = []) => list.filter((u) => u.kind !== 'plugin' && u.kind !== 'synth').map(withoutId);
       console.log(`${when}: lf.rig ${stored['lf.rig']}; writes ${JSON.stringify(writes)}`);
-            assert.equal(rig.version, 1, `${when}: lf.rig's version`);
+      assert.equal(rig.version, 1, `${when}: lf.rig's version`);
       assert.deepEqual(a.units.map(withoutId), [{ kind: 'plugin', plugin: AMP_SIM, bypass: false }], `${when}: slot A's units`);
       assert.equal(a.volume, 0.75, `${when}: slot A's volume, its saved plugin level`);
       assert.deepEqual(sends(a.pending), [

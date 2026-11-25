@@ -44,11 +44,13 @@ const AMP = { format: 'vst3', path: 'C:\\VST3\\Amp.vst3', id: 'amp.id', name: 'A
 const KEYS = { lead: 'gainLead', bass: 'gainBass', pad: 'gainPad', piano: 'gainPiano', organ: 'gainOrgan', drum: 'gainDrum' };
 const SYNTH_GAINS = { lead: 0.8, bass: 1.2, pad: 1, piano: 0.5, organ: 1, drum: 1.1 };
 const synthParams = (instrument) => ({ instrument, ...Object.fromEntries(Object.entries(SYNTH_GAINS).map(([id, v]) => [KEYS[id], v])) });
-// The sends' defaults (`engine-store.ts` INPUT_SEND_PARAMS), what a v0.8.9 boot stored for an untouched send.
+// The sends' defaults as v0.8.9 resolves them (`git show v0.8.9:src/ui/state/engine-store.ts`
+// INPUT_SEND_PARAMS; the echo's time is the lane delay's, `fx-metadata.ts` DELAY_PARAMS: index 1), what a
+// v0.8.9 boot stored for an untouched send; the OTT's are the dev build's (v0.8.9 has none).
 const DEFAULTS = {
   ott: { ottDepth: 0.5, ottTime: 0.5, ottUpward: 1, ottDownward: 1 },
   ring: { ringFreq: 440, ringLevel: 0.5 },
-  echo: { echoTime: 2, echoFeedback: 0.4, echoLevel: 0.5 },
+  echo: { echoTime: 1, echoFeedback: 0.4, echoLevel: 0.5 },
   reverb: { reverbLevel: 0.5 },
 };
 const send = (kind, on = false, params = {}) => ({ on, params: { ...DEFAULTS[kind], ...params }, defaults: { ...DEFAULTS[kind] } });
@@ -73,6 +75,11 @@ function counter(start = 101) {
   return () => n++;
 }
 const kinds = (units) => (units ?? []).map((u) => u.kind);
+/** Every id in the record, units and pending of both slots: none twice. */
+function assertIdsUnique(r) {
+  const ids = r.slots.flatMap((s) => [...s.units, ...(s.pending ?? [])].map((u) => u.id));
+  assert.equal(new Set(ids).size, ids.length, `ids unique across both slots: ${JSON.stringify(ids)}`);
+}
 
 // ── the upgrade ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -103,9 +110,8 @@ check('the legacy crash marker drops the legacy plugins: the slot gets its sourc
 
 check('a SYNTH from lf.slotSource: the instrument index in SYNTHS order and every instrument level, volume 1', () => {
   const r = upgradeRig(snap({ slots: [slot({ savedSource: 'pad' }), slot({ savedSource: 'drum', defaultSynth: 'bass' })] }), counter());
-  assert.deepEqual(r.slots[0].units, [{ id: 101, kind: 'synth', params: synthParams(2), bypass: false }]);
-  assert.deepEqual(r.slots[1].units[0].params, synthParams(5));
-  assert.equal(r.slots[1].volume, 1);
+  assert.deepEqual(r.slots[0], { volume: 1, units: [{ id: 101, kind: 'synth', params: synthParams(2), bypass: false }] });
+  assert.deepEqual(r.slots[1], { volume: 1, units: [{ id: 102, kind: 'synth', params: synthParams(5), bypass: false }] });
 });
 
 check('unset sources: Lead in A, Bass in B; an unknown stored source reads the default too', () => {
@@ -136,15 +142,17 @@ check('sends: on → on, off but changed → bypassed, off at defaults but bound
   const r = upgradeRig(snap({ sends, bound: { ott: false, ring: false, echo: false, reverb: true }, slots: [slot({ savedSource: 'off' }), slot({ plugin: { ref: AMP, isEffect: true, stored: null } })] }), counter());
   for (const s of r.slots) assert.deepEqual(kinds(s.pending), ['ring', 'echo', 'reverb']);
   const [ring, echo, reverb] = r.slots[0].pending;
-  assert.deepEqual(echo, { id: 102, kind: 'echo', params: { echoTime: 2, echoFeedback: 0.6, echoLevel: 0.5 }, bypass: false });
+  assert.deepEqual(echo, { id: 102, kind: 'echo', params: { echoTime: 1, echoFeedback: 0.6, echoLevel: 0.5 }, bypass: false });
   assert.deepEqual([ring.bypass, ring.params.ringFreq], [true, 300]);
   assert.equal(reverb.bypass, true);
-  assert.notEqual(r.slots[0].pending[0].id, r.slots[1].pending[0].id, 'each slot its own instances');
+  assertIdsUnique(r);
 });
 
 check('a v0.8.9 profile has no OTT keys: no OTT; one on, changed or bound comes first in pending', () => {
-  const plain = upgradeRig(snap({ sends: { ...quietSends(), echo: send('echo', true) } }), counter());
-  assert.deepEqual(kinds(plain.slots[0].pending), []);
+  // v0.8.9's defaults, an input-fed slot: only the ECHO that was on is pending, exactly
+  const plain = upgradeRig(snap({ slots: [slot({ savedSource: 'off' }), slot({ savedSource: 'off' })], sends: { ...quietSends(), echo: send('echo', true) } }), counter());
+  assert.deepEqual(plain.slots[0].pending, [{ id: 101, kind: 'echo', params: DEFAULTS.echo, bypass: false }]);
+  assert.deepEqual(plain.slots[1].pending, [{ id: 102, kind: 'echo', params: DEFAULTS.echo, bypass: false }]);
   const on = upgradeRig(snap({ slots: [slot({ savedSource: 'off' }), slot({ savedSource: 'off' })], sends: { ...quietSends(), ott: send('ott', true), echo: send('echo', true) } }), counter());
   assert.deepEqual(kinds(on.slots[0].pending), ['ott', 'echo']);
   assert.equal(on.slots[0].pending[0].bypass, false);
@@ -169,6 +177,8 @@ check('no bindings report (null): every send counts as bound, all four migrate b
 check("boundKinds reads the InFx actions of the first bindings report", () => {
   const b = (action) => ({ binding: { action } });
   assert.deepEqual(boundKinds([b('inFxEcho'), b('playAll'), b('inFxRing')]), { ott: false, ring: true, echo: true, reverb: false });
+  assert.deepEqual(boundKinds([b('inFxReverb')]), { ott: false, ring: false, echo: false, reverb: true });
+  assert.deepEqual(boundKinds([b('inFxOtt')]), { ott: true, ring: false, echo: false, reverb: false });
   assert.deepEqual(boundKinds([]), { ott: false, ring: false, echo: false, reverb: false });
 });
 
@@ -176,15 +186,29 @@ check('ids come from the mint: slot 0 units, its pending, then slot 1', () => {
   const sends = { ...quietSends(), echo: send('echo', true) };
   const r = upgradeRig(snap({ sends, slots: [slot({ plugin: { ref: AMP, isEffect: true, stored: null } }), slot({ savedSource: 'off' })] }), counter(7));
   assert.deepEqual([r.slots[0].units[0].id, r.slots[0].pending[0].id, r.slots[1].pending[0].id], [7, 8, 9]);
+  assertIdsUnique(r);
+  const all = upgradeRig(snap({ bound: boundKinds(null), slots: [slot({ plugin: { ref: AMP, isEffect: true, stored: null } }), slot({ savedSource: 'pad' })] }), counter());
+  assertIdsUnique(all);
 });
 
-check('chains a DEV run reported before any record are adopted at unity; the sends still go pending', () => {
+check('chains a DEV run reported before any record are adopted whole; the sends still go pending', () => {
   const reported = [[{ id: 55, kind: 'echo', params: DEFAULTS.echo, bypass: false }], [{ id: 66, kind: 'synth', params: { instrument: 3 }, bypass: false }]];
   const sends = { ...quietSends(), ott: send('ott', true), reverb: send('reverb', true) };
   const r = upgradeRig(snap({ reported, sends, slots: [slot({ plugin: { ref: AMP, isEffect: true, stored: 0.3 } }), slot()] }), counter());
   assert.deepEqual(r.slots[0].units, reported[0]);
-  assert.deepEqual(r.slots.map((s) => s.volume), [1, 1]);
+  assert.deepEqual(r.slots[1].units, reported[1]);
+  assert.deepEqual(r.slots.map((s) => s.volume), [1, 1], 'no slot gain reported: unity');
   assert.deepEqual([kinds(r.slots[0].pending), kinds(r.slots[1].pending)], [['ott', 'reverb'], ['ott']]);
+  assertIdsUnique(r);
+});
+
+check('an adopted chain keeps the slot gain the reset frame replayed; one out of range or absent reads unity', () => {
+  const reported = [[{ id: 55, kind: 'echo', params: DEFAULTS.echo, bypass: false }], []];
+  const vol = (reportedVolumes) => upgradeRig(snap({ reported, reportedVolumes }), counter()).slots.map((s) => s.volume);
+  assert.deepEqual(vol([0.4, null]), [0.4, 1]);
+  assert.deepEqual(vol([9, 0]), [1, 0]);
+  assert.deepEqual(upgradeRig(snap({ reportedVolumes: [0.4, 0.4], slots: [slot({ savedSource: 'off', inputGain: 1.2 }), slot()] }), counter()).slots[0].volume, 1.2,
+    'without adopted chains the reported gain is not read');
 });
 
 // ── placement ──────────────────────────────────────────────────────────────────────────────────────────
@@ -199,7 +223,7 @@ check("headRole: none or a built-in effect → input, SYNTH → source, a plugin
   assert.equal(headRole([plug], []), null, 'missing from the chain (not in the scan, add not reported)');
   assert.equal(headRole([plug], [state(9, { state: 'loading' })]), null);
   assert.equal(headRole([plug], [state(9, { state: 'waiting' })]), null);
-  assert.equal(headRole([plug], [state(9, { state: 'failed', error: 'x' })]), null, 'a failed add is no role: the writer drops it');
+  assert.equal(headRole([plug], [state(9, { state: 'failed', error: 'x' })]), null, 'a failed add is no role: its cause is unknown, the slot keeps its pending');
   assert.equal(headRole([plug], [state(9)]), 'input');
   assert.equal(headRole([plug], [state(9, { source: true })]), 'source');
   assert.equal(headRole([plug], [state(9, { state: 'failed', parked: true, source: true })]), 'source', 'parked keeps its seat');
@@ -215,7 +239,7 @@ check('placement: an input-fed chain takes every pending unit at its end; a sour
 
 // ── the writer: a chains report into the record's units ────────────────────────────────────────────────
 
-check('a report writes applied and becoming-applied units in its order; leaving and a failed add are dropped', () => {
+check('a report writes its units in its order, a failed add\'s plate kept (no cause named); only leaving is dropped', () => {
   const report = [
     state(1, { state: 'loading', name: 'Amp 2' }),
     { id: 2, kind: 'echo', params: DEFAULTS.echo, bypass: true, source: false, name: 'ECHO', latency: 0, state: 'waiting' },
@@ -224,7 +248,8 @@ check('a report writes applied and becoming-applied units in its order; leaving 
     state(5, { state: 'failed', parked: true, error: 'park' }),
   ];
   const out = unitsFromReport([], report, new Set());
-  assert.deepEqual(out.map((u) => u.id), [1, 2, 5]);
+  assert.deepEqual(out.map((u) => u.id), [1, 2, 4, 5]);
+  assert.deepEqual(out[2], { id: 4, kind: 'plugin', plugin: { ...AMP }, bypass: false }, 'the failed plate keeps its id and plugin');
   assert.deepEqual(out[0], { id: 1, kind: 'plugin', plugin: { ...AMP, name: 'Amp 2' }, bypass: false });
   assert.deepEqual(out[1], { id: 2, kind: 'echo', params: DEFAULTS.echo, bypass: true });
 });

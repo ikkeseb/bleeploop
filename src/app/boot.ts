@@ -9,14 +9,16 @@ import {
 } from '../ui/state/instrument';
 import { recallChains, recallRig, savedRigPaths } from '../ui/state/rig-recall';
 import { boundKinds } from '../ui/state/rig-record';
-import { bindingsKnown } from '../ui/state/midi';
+import { bindingsKnown, firstPageOfLaunch } from '../ui/state/midi';
 import { setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
 import { mintUnitId, platform } from '../platform';
 import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
 import {
+  legacySendsOff,
   onEngineEvent,
   openEngineDevice,
+  reportedSlotGains,
   restoreEngineShare,
   startEngineStore,
   storedInputSends,
@@ -37,7 +39,7 @@ import { autosave } from '../session/autosave';
  * the recall is the rig record's (`recallChains`), with or without a plugin host: the upgrade of a v0.8.9
  * profile on its first run, then the restore of each chain unit the reset frame's `chains` lack, from the
  * same scan of their paths (the native host keeps its chains across a WebView reload, so a reload adds
- * nothing). So a
+ * nothing; native MIDI's epoch tells a reload from a new launch, `firstPageOfLaunch`). So a
  * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
  * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
  * and stays silent. Returns the dispose fn.
@@ -90,8 +92,11 @@ export function bootEngine(): () => void {
             ...legacyRigSnapshot(scan, legacy),
             sends: storedInputSends(),
             bound: boundKinds(await bindingsKnown()),
+            reportedVolumes: reportedSlotGains(),
           }),
           setVolume: adoptRigVolume,
+          sendsOff: legacySendsOff,
+          firstPage: firstPageOfLaunch,
           add: (slot, unit, spec, at) => platform.chain.add(slot, unit, spec, at),
           mint: mintUnitId,
         });

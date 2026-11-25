@@ -16,10 +16,12 @@
  *   its units in order and the old sends' units still to place (`rig-record.ts` holds the shape and its
  *   rules), marker `lf.rigInFlight`, never the legacy one, so a DEV crash never makes legacy mode forget its
  *   rig. `recallChains`: the upgrade of a v0.8.9 profile written whole before the first add, the restore of
- *   each record unit the reset frame's `chains` lacks, the settle, then each slot's `pending` placed once
- *   its head's role is known. One writer (`updateRig`) holds every write after the upgrade: the units from
+ *   each record unit the reset frame's `chains` lacks, the settle once each plugin add's outcome is in the
+ *   feed, then each slot's `pending` placed once its head's role is known. A crash is told from a WebView
+ *   reload by native MIDI's epoch (`midi.ts` `firstPageOfLaunch`), never by empty chains alone. One writer
+ *   (`updateRig`) holds every write once the record is known (read, or upgraded and stored): the units from
  *   each `chains` report once the restore finished (`rigChainsReported`), a placement, the slot volume
- *   (`keepRigVolume`, at any time).
+ *   (`keepRigVolume`, at any time; before the record is known, the record takes it then).
  */
 import type { ChainState, PluginDescriptor, UnitId, UnitSpec } from '../../platform';
 import { notifyError } from '../../notify';
@@ -143,8 +145,8 @@ let finished = false;
 let finish!: () => void;
 const done = new Promise<void>((resolve) => (finish = () => ((finished = true), resolve())));
 /** This launch's recall has finished, the settle window included (the probes await it). Settles on every
- * launch whose device opens in chain mode; never on one that runs no recall (no device, or legacy mode
- * without a plugin host). */
+ * launch whose device opens in chain mode (unless a recalled add never answers); never on one that runs no
+ * recall (no device, or legacy mode without a plugin host). */
 export function rigRecallDone(): Promise<void> {
   return done;
 }
@@ -155,10 +157,10 @@ export function rigRecallFinished(): boolean {
 
 /**
  * The app is closing through its close button (`close-guard.ts`, just before it approves the close).
- * Once this launch's recalled loads have all come back, the host has lived through them: the marker
- * goes now rather than at the end of the settle window, so a close right after a restore brings the
- * rig back at the next launch. A close while a recalled load still runs keeps it, since a load that
- * hangs the host looks just like that.
+ * Once this launch's recalled loads have all come back (in chain mode: each plugin add's outcome is in the
+ * feed, seated or failed), the host has lived through them: the marker goes now rather than at the end of
+ * the settle window, so a close right after a restore brings the rig back at the next launch. A close while
+ * a recalled load still runs keeps it, since a load that hangs the host looks just like that.
  */
 export function rigRecallOnClose(): void {
   if (settling !== null) removeMarker(settling);
@@ -229,21 +231,37 @@ export async function recallRig(
 
 // ── Chain mode: the rig record `lf.rig` (unit contract §1, §6) ───────────────────────────────────────
 
-/** How long the restore waits for the reset frame's `chains` when none came yet: a frame without them
- * counts as empty chains. */
+/** How long the restore waits for the first reset frame's `chains` (natively every reset frame carries
+ * them): none by then, nothing is restored or written this launch. */
 const REPORT_WAIT_MS = 5000;
+/** How long a rejected add waits for its plate in a report (the feed and the IPC answer race): named, it
+ * holds its place; not, the add's outcome is unknown. */
+const PLATE_WAIT_MS = 500;
 
-/** The rig record as stored; null when there is none or it cannot be read (the upgrade then runs). */
-export function readRigRecord(): RigRecord | null {
-  if (!KEYS) return null;
+/** `lf.rig` as stored: none (the upgrade runs), unreadable (an unsupported version, bad text, no storage:
+ * left as it is), or the record. */
+type StoredRig = { kind: 'absent' } | { kind: 'unreadable' } | { kind: 'record'; record: RigRecord };
+
+function readStoredRig(): StoredRig {
+  if (!KEYS) return { kind: 'unreadable' };
+  let raw: string | null;
   try {
-    return parseRig(localStorage.getItem(KEYS.rig));
+    raw = localStorage.getItem(KEYS.rig);
   } catch {
-    return null;
+    return { kind: 'unreadable' };
   }
+  if (raw === null) return { kind: 'absent' };
+  const record = parseRig(raw);
+  return record ? { kind: 'record', record } : { kind: 'unreadable' };
 }
 
-/** Each slot's kept volume, for `instrument.ts`' chain gains at load; null without a record. */
+/** The rig record as stored; null when there is none or it cannot be read. */
+export function readRigRecord(): RigRecord | null {
+  const s = readStoredRig();
+  return s.kind === 'record' ? s.record : null;
+}
+
+/** Each slot's kept volume, for `instrument.ts`' chain gains at load; null without a readable record. */
 export function rigVolumes(): [number, number] | null {
   const r = readRigRecord();
   return r && [r.slots[0].volume, r.slots[1].volume];
@@ -264,21 +282,40 @@ function storeRig(r: RigRecord): boolean {
 
 const withSlot = (r: RigRecord, slot: 0 | 1, s: RigSlot): RigRecord => ({ version: 1, slots: withAt(r.slots, slot, s) });
 
+/** On once this launch's restore has the record (read, or upgraded and stored): the writer writes only
+ * then, so a record that failed its first write or cannot be read is never written over. */
+let ready = false;
+/** The slot levels the player set before `ready`: the record takes them when it is known. */
+const levelsMeanwhile: [number | null, number | null] = [null, null];
+
+const withLevels = (r: RigRecord): RigRecord => ({
+  version: 1,
+  slots: [0, 1].map((n) => ({ ...r.slots[n], volume: levelsMeanwhile[n] ?? r.slots[n].volume })) as [RigSlot, RigSlot],
+});
+
 /**
- * THE record writer once a record exists: read, change, store, in one step, so a volume change never
- * overwrites newer units or pending. No record (before the upgrade, or it cannot be read): nothing is
- * written, so the upgrade still runs. True when the change is stored (or changed nothing).
+ * THE record writer once this launch's restore has the record (`ready`): read, change, store, in one step,
+ * so a volume change never overwrites newer units or pending. Before that, or with no record: nothing is
+ * written. True when the change is stored (or changed nothing).
  */
 function updateRig(change: (r: RigRecord) => RigRecord): boolean {
+  if (!ready) return false;
   const now = readRigRecord();
   if (!now) return false;
   const next = change(now);
   return serializeRig(next) === serializeRig(now) || storeRig(next);
 }
 
-/** Keep slot `slot`'s volume (the slot level's setter, at any time, a restore running included). */
+/** Keep slot `slot`'s volume (the slot level's setter, at any time, a restore running included): before the
+ * record is known, the record takes it then (the upgrade's first write included). */
 export function keepRigVolume(slot: 0 | 1, volume: number): void {
-  updateRig((r) => withSlot(r, slot, { ...r.slots[slot], volume }));
+  if (!ready) {
+    levelsMeanwhile[slot] = volume;
+    return;
+  }
+  if (!updateRig((r) => withSlot(r, slot, { ...r.slots[slot], volume }))) {
+    console.error(`[rig-recall] slot ${slot + 1}: could not store its level in the rig record; the next launch starts at the level stored before`);
+  }
 }
 
 /** What the chain restore needs from the modules that own it (`src/app/boot.ts` wires them). */
@@ -287,35 +324,76 @@ export interface ChainRecallDeps {
   scan(paths: string[]): Promise<readonly PluginDescriptor[]>;
   /** The old keys through their resolvers, `scan` saying which legacy plugins are found. */
   snapshot(scan: readonly PluginDescriptor[], legacy: SavedRig): Promise<Omit<LegacySnapshot, 'legacyMarker' | 'reported'>>;
-  /** Apply slot `slot`'s volume: the slot level as shown and the engine's `SetSlotGain`. */
-  setVolume(slot: 0 | 1, volume: number): void;
+  /** Apply slot `slot`'s volume (the slot level as shown and the engine's `SetSlotGain`); settles once the
+   * engine took it. */
+  setVolume(slot: 0 | 1, volume: number): Promise<void>;
+  /** Settles once the engine took the reset frame's send-off of the legacy sends (`legacySendsOff`). */
+  sendsOff(): Promise<void>;
+  /** Whether this page is the first of its native process: true a new launch, false a WebView reload, null
+   * unknown (`midi.ts` `firstPageOfLaunch`). */
+  firstPage(): Promise<boolean | null>;
   /** The chain host's `add`. */
   add(slot: 0 | 1, unit: UnitId, spec: UnitSpec, at: number): Promise<unknown>;
   /** A new unit id (`mintUnitId`). */
   mint(): UnitId;
 }
 
-// The `chains` reports this page has seen: the latest, and every id any of them named (a record unit
-// never named is still on its way or was never added; one named before and gone since was removed).
+// The `chains` reports this page has seen: the latest, whether a reset frame's came, and every id any of
+// them named (a record unit never named is still on its way or was never added; one named before and gone
+// since was removed).
 let reported: [ChainState, ChainState] | null = null;
+let resetReported = false;
 const seen = new Set<UnitId>();
 const reportWaiters: (() => void)[] = [];
-/** On once this launch's chain restore has finished: each report then writes the record's units. */
+/** On once this launch's chain restore has finished with the record known: each report then writes the
+ * record's units, and each slot's `pending` is placed. */
 let writing = false;
 let deps: ChainRecallDeps | null = null;
 const placing: [boolean, boolean] = [false, false];
-/** A placement whose durable write failed waits for the next launch. */
-const placementFailed: [boolean, boolean] = [false, false];
+/** A placement whose durable write failed, or whose add's outcome is unknown, waits for the next launch. */
+const placementStopped: [boolean, boolean] = [false, false];
+/** The units this page's adds put in (their add answered): a placement waits until the feed names each, so
+ * its index counts them. */
+const addedHere = new Set<UnitId>();
 
-/** The feed's `chains` in chain mode (`chain.ts` `applyChains`): remembered, written once the restore has
- * finished, and each slot's `pending` placed once its head's role is known. */
-export function rigChainsReported(next: [ChainState, ChainState]): void {
+/** The feed's `chains` in chain mode (`chain.ts` `applyChains`; `reset`: a reset frame's): remembered, written
+ * once the restore has finished, and each slot's `pending` placed once its head's role is known. */
+export function rigChainsReported(next: [ChainState, ChainState], reset = false): void {
   reported = next;
+  if (reset) resetReported = true;
   for (const c of next) for (const u of c.units) seen.add(u.id);
   reportWaiters.splice(0).forEach((wake) => wake());
   if (!writing) return;
   writeUnits();
   placePending();
+}
+
+/** Wait until `test()` holds, checked now and at each report; false when `ms` ran out first (none: no bound). */
+async function untilReported(test: () => boolean, ms?: number): Promise<boolean> {
+  const deadline = ms === undefined ? Infinity : Date.now() + ms;
+  for (;;) {
+    if (test()) return true;
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    await new Promise<void>((wake) => {
+      reportWaiters.push(wake);
+      if (left !== Infinity) setTimeout(wake, left);
+    });
+  }
+}
+
+const reportedUnit = (id: UnitId) => reported?.flatMap((c) => c.units).find((u) => u.id === id);
+
+/** Whether a rejected add's unit has a plate in the chain (a failed add's, or a reservation whose answer was
+ * lost), waiting PLATE_WAIT_MS for the report that names it. */
+const plated = (id: UnitId): Promise<boolean> => untilReported(() => reportedUnit(id) !== undefined, PLATE_WAIT_MS);
+
+/** A plugin unit's add has its outcome in the feed: seated, failed (parked or not), or gone again (removed);
+ * not while it loads or waits for a take. */
+function outcomeKnown(id: UnitId): boolean {
+  const u = reportedUnit(id);
+  if (!u) return seen.has(id);
+  return u.reloading !== true && (u.state === 'seated' || u.state === 'failed');
 }
 
 function writeUnits(): void {
@@ -328,16 +406,6 @@ function writeUnits(): void {
       { ...r.slots[1], units: unitsFromReport(r.slots[1].units, now[1].units, seen) },
     ],
   }));
-}
-
-/** The latest `chains`, waiting for the first (a reset frame carries them) at most REPORT_WAIT_MS. */
-async function firstChains(): Promise<[ChainState, ChainState]> {
-  if (!reported) await new Promise<void>((wake) => {
-    reportWaiters.push(wake);
-    setTimeout(wake, REPORT_WAIT_MS);
-  });
-  const empty: ChainState = { units: [], latency: 0, held: false };
-  return reported ?? [empty, empty];
 }
 
 const unitLabel = (u: RigUnit): string =>
@@ -366,30 +434,50 @@ function freshMint(mint: () => UnitId, taken: Set<UnitId>): () => UnitId {
 }
 
 /**
- * Chain mode's recall, once per launch (`src/app/boot.ts`): no record yet → the upgrade (§6) from this
- * launch's scan of the legacy recall's plugins and the old keys, adopting the reported chains instead when
- * the first reset frame already had units (a DEV chain run before any record); stored whole and read back
- * before anything is added, else nothing is restored and the next launch upgrades again. Each slot's
- * volume applied. A leftover marker with none of the record's plugin units reported means the last launch
- * died restoring: the record forgets its plugin units only (one log line, one toast), and the slots'
- * `pending` then place. With some reported, a WebView reload cut the last restore short: it goes on, and
- * the marker stays until a settle completes. Then each record unit the reported chains lack is added at its
- * index under its id, slot 0 then slot 1, one at a time; a plugin missing from the scan is skipped with one
- * log line and keeps its entry; a failed add's plate is the chain's to show, and the record drops it at the
- * next write (a confirmed failure; a rejection with no plate keeps it for the next launch). The marker is
- * stored before the first plugin add and removed SETTLE_MS after the last (or at a close through the close
- * button meanwhile, `rigRecallOnClose`). Nothing writes the record's units meanwhile; from then on each
- * `chains` report does, and a slot's `pending` is placed by a durable write before its adds.
+ * Chain mode's recall, once per launch (`src/app/boot.ts`), on the first reset frame's `chains` (none within
+ * REPORT_WAIT_MS: nothing restored or written). An unreadable `lf.rig` (bad text, an unsupported version) is
+ * left as it is: one log line, nothing restored, nothing written this launch. None yet → the upgrade (§6)
+ * from this launch's scan of the legacy recall's plugins and the old keys, adopting the reported chains
+ * instead when the first reset frame already had units (a DEV chain run before any record, at the slot gains
+ * the engine kept), a slot level the player set meanwhile included; stored whole and read back before
+ * anything is added, else nothing is restored or written and the next launch upgrades again. Each slot's
+ * volume applied and the legacy sends' send-off taken by the engine before the first add.
+ *
+ * A leftover marker means the last restore did not finish: in a new process (`firstPage`) with none of the
+ * record's plugin units reported, that launch died restoring, and the record forgets its plugin units only
+ * (one log line, one toast), the slots' `pending` then placing. A WebView reload (the same process; or some
+ * of its plugin units reported) cut it short: it goes on, and the marker stays until a settle completes.
+ * Unknown which: its plugin units are kept and not added this launch (the marker stays).
+ *
+ * Then each record unit the reported chains lack is added under its id, slot 0 then slot 1, one at a time,
+ * each after the units before it (a rejected add's plate holds its place; with no plate its outcome is
+ * unknown, and the slot's later units wait for the next launch); a plugin missing from the scan is skipped
+ * with one log line and keeps its entry; a failed plate keeps its entry too (the feed names no cause). The
+ * marker is stored before the first plugin add; the settle starts once every plugin add in flight has its
+ * outcome in the feed (seated or failed) and removes the marker SETTLE_MS later (a close through the close
+ * button meanwhile removes it then, `rigRecallOnClose`); with none in flight (each add rejected with no
+ * plate) the marker goes at once. Nothing writes the record's units meanwhile; from
+ * then on each `chains` report does, and a slot's `pending` is placed by a durable write before its adds.
  */
 export async function recallChains(d: ChainRecallDeps): Promise<void> {
+  let known = false;
   try {
     if (!KEYS) return;
     deps = d;
-    const chains = await firstChains();
+    if (!(await untilReported(() => resetReported, REPORT_WAIT_MS)) || !reported) {
+      console.error('[rig-recall] no chains report from the engine; nothing restored, the rig record untouched');
+      return;
+    }
+    const chains: [ChainState, ChainState] = reported;
     const reportedIds = new Set(chains.flatMap((c) => c.units.map((u) => u.id)));
-    let record = readRigRecord();
+    const stored = readStoredRig();
+    if (stored.kind === 'unreadable') {
+      console.error('[rig-recall] the rig record cannot be read (or is of a version this build does not know); left as it is, nothing restored');
+      return;
+    }
+    let record: RigRecord;
     let scan: readonly PluginDescriptor[] | null = null;
-    if (!record) {
+    if (stored.kind === 'absent') {
       const legacy = readRig();
       scan = await d.scan([...new Set(legacy.flatMap((p) => (p ? [p.path] : [])))]);
       const base = await d.snapshot(scan, legacy);
@@ -397,35 +485,66 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
         ? ([unitsFromReport([], chains[0].units, seen), unitsFromReport([], chains[1].units, seen)] as [RigUnit[], RigUnit[]])
         : null;
       const taken = new Set(reportedIds);
-      record = upgradeRig({ ...base, legacyMarker: storedMarker(KEYS.marker) !== null, reported: adopted }, freshMint(d.mint, taken));
+      record = withLevels(upgradeRig({ ...base, legacyMarker: storedMarker(KEYS.marker) !== null, reported: adopted }, freshMint(d.mint, taken)));
       if (!storeRig(record)) {
         console.error('[rig-recall] could not store the rig record; nothing restored, the upgrade runs again at the next launch');
         return;
       }
-    }
-    for (const slot of [0, 1] as const) d.setVolume(slot, record.slots[slot].volume);
-
-    const leftover = storedMarker(KEYS.chainMarker);
-    const plugins = record.slots.flatMap((s) => s.units.filter((u) => u.kind === 'plugin'));
-    if (leftover !== null && !plugins.some((u) => reportedIds.has(u.id))) {
-      const noPlugins = (s: RigSlot): RigSlot => ({ ...s, units: s.units.filter((u) => u.kind !== 'plugin') });
-      const forgotten: RigRecord = { version: 1, slots: [noPlugins(record.slots[0]), noPlugins(record.slots[1])] };
-      if (!storeRig(forgotten)) {
-        console.error('[rig-recall] could not store the rig record without its plugins; nothing restored');
-        return;
+    } else {
+      record = stored.record;
+      if (levelsMeanwhile.some((v) => v !== null)) {
+        record = withLevels(record);
+        if (!storeRig(record)) console.error('[rig-recall] could not store the slot levels set during the restore');
       }
-      record = forgotten;
-      removeMarker(KEYS.chainMarker);
-      console.error(`[rig-recall] the last launch stopped while restoring ${leftover}; its plugins are forgotten`);
-      notifyError('Could not restore the plugins. Add a plugin again to load it.', `The last launch stopped while restoring ${leftover}.`);
+    }
+    ready = true;
+    levelsMeanwhile.fill(null);
+    // The engine has each slot's level and the legacy sends off before any unit goes in (review finding 6).
+    await Promise.all([d.setVolume(0, record.slots[0].volume), d.setVolume(1, record.slots[1].volume), d.sendsOff()]);
+    known = true;
+
+    const plugins = record.slots.flatMap((s) => s.units.filter((u) => u.kind === 'plugin'));
+    const leftover = storedMarker(KEYS.chainMarker);
+    let keepPlugins = false;
+    if (leftover !== null && !plugins.some((u) => reportedIds.has(u.id))) {
+      const first = await d.firstPage();
+      if (first === true) {
+        const noPlugins = (s: RigSlot): RigSlot => ({ ...s, units: s.units.filter((u) => u.kind !== 'plugin') });
+        const forgotten: RigRecord = { version: 1, slots: [noPlugins(record.slots[0]), noPlugins(record.slots[1])] };
+        if (!storeRig(forgotten)) {
+          console.error('[rig-recall] could not store the rig record without its plugins; nothing restored');
+          known = false;
+          return;
+        }
+        record = forgotten;
+        removeMarker(KEYS.chainMarker);
+        console.error(`[rig-recall] the last launch stopped while restoring ${leftover}; its plugins are forgotten`);
+        notifyError('Could not restore the plugins. Add a plugin again to load it.', `The last launch stopped while restoring ${leftover}.`);
+      } else if (first === null) {
+        keepPlugins = true;
+        console.error(`[rig-recall] the last restore of ${leftover} did not finish, and whether this is a new launch or a reload is unknown; its plugins are kept, not restored now`);
+      }
     }
 
     const wanted = [
       ...new Set(record.slots.flatMap((s) => s.units.flatMap((u) => (u.kind === 'plugin' && !reportedIds.has(u.id) ? [u.plugin.path] : [])))),
     ];
-    if (scan === null) scan = wanted.length > 0 ? await d.scan(wanted) : [];
+    if (scan === null) scan = wanted.length > 0 && !keepPlugins ? await d.scan(wanted) : [];
     const found = scan;
-    const plan: { slot: 0 | 1; unit: RigUnit; at: number }[] = [];
+    const addable = (u: RigUnit): boolean => u.kind !== 'plugin' || (!keepPlugins && found.some((p) => samePluginDescriptor(p, u.plugin)));
+    const loads = record.slots.flatMap((s) => s.units.filter((u) => u.kind === 'plugin' && !reportedIds.has(u.id) && addable(u)));
+    // In flight: the plugins this launch adds, and, when the last restore did not finish, the reported ones.
+    const inFlight = new Set(loads.map((u) => u.id));
+    const carried = leftover !== null && storedMarker(KEYS.chainMarker) !== null;
+    if (carried) for (const u of plugins) if (reportedIds.has(u.id)) inFlight.add(u.id);
+    if (loads.length > 0) {
+      try {
+        localStorage.setItem(KEYS.chainMarker, loads.map(unitLabel).join(', '));
+      } catch (e) {
+        console.error('[rig-recall] could not store the in-flight marker; nothing restored', e);
+        return;
+      }
+    }
     for (const slot of [0, 1] as const) {
       let at = 0;
       for (const unit of record.slots[slot].units) {
@@ -433,43 +552,45 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
           at++;
           continue;
         }
-        if (unit.kind === 'plugin' && !found.some((p) => samePluginDescriptor(p, unit.plugin))) {
-          console.error(
-            `[rig-recall] slot ${slot + 1}: ${unitLabel(unit)} at ${unit.plugin.path} is not in this launch's plugin scan (file missing, plugin changed or no plugin host); kept for a later launch`,
-          );
+        if (unit.kind === 'plugin' && !addable(unit)) {
+          if (!keepPlugins) {
+            console.error(
+              `[rig-recall] slot ${slot + 1}: ${unitLabel(unit)} at ${unit.plugin.path} is not in this launch's plugin scan (file missing, plugin changed or no plugin host); kept for a later launch`,
+            );
+          }
           continue;
         }
-        plan.push({ slot, unit, at: at++ });
+        try {
+          await d.add(slot, unit.id, addSpec(unit), at);
+          addedHere.add(unit.id);
+          at++;
+        } catch (e) {
+          console.error(`[rig-recall] slot ${slot + 1}: ${unitLabel(unit)} was not restored`, e);
+          if (await plated(unit.id)) at++;
+          else {
+            // Reserved or not is unknown: a later unit's index would be a guess. They wait for the next launch.
+            inFlight.delete(unit.id);
+            break;
+          }
+        }
       }
     }
-    const loads = plan.filter((p) => p.unit.kind === 'plugin');
-    let marked = leftover !== null && storedMarker(KEYS.chainMarker) !== null;
-    if (loads.length > 0) {
-      try {
-        localStorage.setItem(KEYS.chainMarker, loads.map((p) => unitLabel(p.unit)).join(', '));
-        marked = true;
-      } catch (e) {
-        console.error('[rig-recall] could not store the in-flight marker; nothing restored', e);
-        return;
-      }
-    }
-    for (const { slot, unit, at } of plan) {
-      try {
-        await d.add(slot, unit.id, addSpec(unit), at);
-      } catch (e) {
-        console.error(`[rig-recall] slot ${slot + 1}: ${unitLabel(unit)} was not restored`, e);
-      }
-    }
-    if (marked) {
+    if (inFlight.size > 0) {
+      await untilReported(() => [...inFlight].every(outcomeKnown));
       settling = KEYS.chainMarker;
       await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      removeMarker(KEYS.chainMarker);
+    } else if (loads.length > 0) {
+      // This launch's marker, and none of its plugin adds reached the host (each rejected with no plate): no
+      // load is in flight, and an IPC failure is no crash (the next launch retries them).
       removeMarker(KEYS.chainMarker);
     }
   } catch (e) {
     console.error('[rig-recall] the chain restore failed', e);
+    known = false;
   } finally {
     settling = null;
-    writing = KEYS !== null;
+    writing = known;
     if (writing) {
       writeUnits();
       placePending();
@@ -484,37 +605,49 @@ function placePending(): void {
   const d = deps;
   if (!now || !d) return;
   for (const slot of [0, 1] as const) {
-    if (placing[slot] || placementFailed[slot]) continue;
+    if (placing[slot] || placementStopped[slot]) continue;
     const s = readRigRecord()?.slots[slot];
     if (!s?.pending?.length) continue;
     const role = headRole(s.units, now[slot].units);
     if (role === null) continue;
+    // an add this page made that the feed does not name yet would put the placement's index short
+    const named = new Set(now[slot].units.map((u) => u.id));
+    if (s.units.some((u) => addedHere.has(u.id) && !named.has(u.id) && !seen.has(u.id))) continue;
     placing[slot] = true;
-    void placeSlot(slot, role, now[slot].units.length, d).finally(() => (placing[slot] = false));
+    void placeSlot(slot, role, d).finally(() => (placing[slot] = false));
   }
 }
 
 /** Slot `slot`'s placement: one durable write moves what its role takes into its units and drops its
- * `pending`; then the adds, at the chain's end (`length`, the reported chain's). A restart between re-adds
- * them from `units` under the same ids. A failed write adds nothing and waits for the next launch. */
-async function placeSlot(slot: 0 | 1, role: 'source' | 'input', length: number, d: ChainRecallDeps): Promise<void> {
+ * `pending`; then the adds, appended in record order after the chain as reported, each after the one before
+ * (a rejected add's plate holds its place; with none, its outcome is unknown and the rest wait for the next
+ * launch's restore, under their ids at their record places). A restart between re-adds them from `units`.
+ * A failed write adds nothing and waits for the next launch. */
+async function placeSlot(slot: 0 | 1, role: 'source' | 'input', d: ChainRecallDeps): Promise<void> {
   let units: RigUnit[] = [];
   const stored = updateRig((r) => {
     units = placed(r.slots[slot], role);
     return withSlot(r, slot, withPlaced(r.slots[slot], role));
   });
   if (!stored) {
-    placementFailed[slot] = true;
+    placementStopped[slot] = true;
     console.error(`[rig-recall] slot ${slot + 1}: could not store the placed send units; none added, the next launch places them`);
     return;
   }
-  let at = length;
+  await d.sendsOff();
+  let at = reported?.[slot].units.length ?? 0;
   for (const unit of units) {
     try {
       await d.add(slot, unit.id, addSpec(unit), at);
+      addedHere.add(unit.id);
       at++;
     } catch (e) {
       console.error(`[rig-recall] slot ${slot + 1}: ${unitLabel(unit)} was not placed`, e);
+      if (await plated(unit.id)) at++;
+      else {
+        placementStopped[slot] = true;
+        return;
+      }
     }
   }
 }

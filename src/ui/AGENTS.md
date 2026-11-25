@@ -128,12 +128,21 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   the `pending` placement, the slot's level kept), the named pedal actions on `Toggle.Units` (native MIDI
   through `midi_subscribe_chain`, the UI's own press in `src/app/actions.ts`) and the legacy sends kept
   silent with their keys untouched (`state/engine-store.ts`). Not built: the activation itself (the flag
-  and the legacy arms go) and `input_fx.rs`' retirement (contract §9, E3). Chain mode
+  and the legacy arms go), step 1b (`Builtin`, `SetInstrumentGain` and `Instruments` leave the engine) and
+  `input_fx.rs`' retirement (contract §9, E3). Chain mode
   already routes notes to the slot (`{ Slot: n }`) and sends the slot's level as `SetSlotGain`, never the
   legacy `Builtin` target or `SetInstrumentGain`; a synth choice on a slot a seated SYNTH heads is a pick on
   it through the note router (§4, `state/chain.ts` `pickSynth`). Next check: a native restore on the PC
   (`tauri dev` with `lf.chainNative`, a v0.8.9 profile: the upgrade, a restart bringing each unit back
   under its id with its tone, a learned IN FX pedal on `Toggle.Units`).
+
+- **A failed plate's cause is not on the wire.** A plugin unit whose add ends in a `failed` plate stays in the
+  rig record with its slot's `pending` and is added again at each launch until the player removes it
+  (`state/rig-record.ts` `unitsFromReport`; contract §1, §6): `UnitState` carries only free text (`error`),
+  and a lost device or an owner thread that would not start fails a plate as the plugin's own load does. A
+  plugin that crashes the host at load is still caught by the crash marker. Next check: a native `failedBy`
+  on `UnitState` (`'plugin' | 'host'`, set where the unit owner's load fails), so a plugin's own load failure
+  is forgotten again, as legacy recall forgets one (contract §6).
 
 - **Chain mode's edges on the fake, left at the branch's third review** (each read from source by a
   reviewer, none reproduced; the next engine step rewrites held edits and moves, so they are judged there):

@@ -46,11 +46,12 @@ export const chainShown = (): boolean => platform.chain.available;
 /** Slot `slot`'s chain as last reported. */
 export const slotChain = (slot: 0 | 1): ChainState => chains()[slot];
 
-/** The feed's `chains` (the engine store's frame path, inside its batch); the rig record hears each
- * (`rigChainsReported`: written once the launch's restore finished). */
-export function applyChains(next: [ChainState, ChainState]): void {
+/** The feed's `chains` (the engine store's frame path, inside its batch; `reset`: a reset frame's, which
+ * natively every reset frame carries); the rig record hears each (`rigChainsReported`: written once the
+ * launch's restore finished). */
+export function applyChains(next: [ChainState, ChainState], reset = false): void {
   setChains(next);
-  rigChainsReported(next);
+  rigChainsReported(next, reset);
   forgetShownPicks(next);
   const ids = new Set(next.flatMap((c) => c.units.map((u) => u.id)));
   keepUnitMeters(ids);

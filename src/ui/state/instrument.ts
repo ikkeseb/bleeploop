@@ -153,14 +153,31 @@ function routeEngine(i: 0 | 1): void {
 
 // With the chain drawn: each slot's level after its chain (unit contract: the slot volume sits after the
 // chain), kept in the rig record (`rig-recall.ts`): read here at load (a WebView reload, a launch), set by
-// the record's restore (`adoptRigVolume`) and the slot level, unity with no record yet.
-const [chainGains, setChainGains] = createSignal<[number, number]>(rigVolumes() ?? [1, 1]);
+// the record's restore (`adoptRigVolume`) and the slot level. Null until one of them knows it: no level is
+// sent before (an engine keeps its own meanwhile; a migrated Off slot never passes its input at unity
+// first). Only chain mode reads `lf.rig`: the release never does.
+const [chainGains, setChainGains] = createSignal<[number | null, number | null]>(
+  (platform.chain.available ? rigVolumes() : null) ?? [null, null],
+);
+/** Per slot, who waits for its next level the engine takes (`adoptRigVolume`). */
+const levelTaken: [(() => void)[], (() => void)[]] = [[], []];
 
-/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. */
-export function adoptRigVolume(slot: 0 | 1, volume: number): void {
+/** Send slot `slot`'s chain-mode level; once the engine took it, its waiters go on. */
+function sendChainLevel(slot: 0 | 1, v: number): void {
+  void sendEngine({ SetSlotGain: [slot, v] }).then((took) => {
+    if (took) levelTaken[slot].splice(0).forEach((go) => go());
+  });
+}
+
+/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. Settles once
+ * the engine took a level of the slot (this one, or a later reset frame's resend when it was refused): the
+ * restore's adds wait for it, so no unit seats at another level. */
+export function adoptRigVolume(slot: 0 | 1, volume: number): Promise<void> {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, volume));
   setChainGains((prev) => withAt(prev, slot, v));
-  sendEngine({ SetSlotGain: [slot, v] });
+  const taken = new Promise<void>((go) => levelTaken[slot].push(go));
+  sendChainLevel(slot, v);
+  return taken;
 }
 
 /**
@@ -209,7 +226,10 @@ export function engineResync(first: boolean): void {
   applyActiveRouting();
   if (platform.chain.available) {
     // the chain's slot level after its chain; SYNTH's levels are its unit's params (unit contract §2, §4)
-    for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, chainGains()[slot]] });
+    for (const slot of [0, 1] as const) {
+      const v = chainGains()[slot];
+      if (v !== null) sendChainLevel(slot, v);
+    }
     if (first) disarmEngineLive();
     return;
   }
@@ -697,7 +717,7 @@ export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
   if (platform.chain.available) {
     setChainGains((prev) => withAt(prev, slot, v));
-    sendEngine({ SetSlotGain: [slot, v] });
+    sendChainLevel(slot, v);
     keepRigVolume(slot, v);
     return;
   }

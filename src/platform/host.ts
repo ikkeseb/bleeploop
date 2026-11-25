@@ -293,7 +293,10 @@ export interface MidiHost {
    * resync. The page names its age (`performance.timeOrigin`, the Tauri side reads it), so natively a
    * newer page's subscribe always wins over an older page's late one. `epoch` resolves with this page's
    * input epoch: natively the subscribe released the older pages' holds, cancelled a pending learn and
-   * replaced the last subscriber (one at a time). It rejects when native MIDI does not run. */
+   * replaced the last subscriber (one at a time). It rejects when native MIDI does not run. Native MIDI
+   * starts once per launch and counts its subscribes from 1 (`engine_io/midi/mod.rs` `Core::subscribe`), so an
+   * epoch of 1 is the launch's first page and a larger one a WebView reload: the chain rig's crash marker
+   * reads it (`src/ui/state/rig-recall.ts`). */
   subscribe(onEvent: (event: MidiEvent) => void): MidiSubscription;
   /** Learn the next CC or note-on, from any port, onto `action` (a lane action on track `target`, null the
    * selected track). Answered by `learning` and, once it captures, `learned`. */
