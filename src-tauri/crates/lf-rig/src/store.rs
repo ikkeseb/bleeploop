@@ -7,13 +7,16 @@
 //!   nothing, and neither writes the record nor reads, writes or removes the crash marker. The lock
 //!   is held as long as the `Disk` lives; a crash releases it with the process.
 //! - **Only a missing file is no record (D8).** Text that is not a v1 record, or a read that failed,
-//!   is `unreadable`: kept byte for byte, never written over, nothing written that process.
+//!   is `unreadable`: kept byte for byte, never written over, nothing written that process (the
+//!   crash marker neither written nor removed).
 //! - **The commit criterion (D3).** A write commits when [`Disk::write_atomic`] returned Ok (written,
 //!   synced, renamed); anything else leaves what was stored before, and the state dirty.
 //! - **The writer's pace (D3).** The glue projects at each [`TICK`] and hands the result to
 //!   [`Store::tick`]: units, order or `pending` changed are written at that tick; values once they have
-//!   been quiet for [`SAVE_QUIET`]. A failed write is retried at the next tick, and a failure run
-//!   reports one log line (its first failure); no logging here, the glue logs what it is told.
+//!   been quiet for [`SAVE_QUIET`]. A failed write is retried at the next tick (a failed
+//!   [`Store::commit`] too: its record is what the store owes until a tick projects otherwise), and a
+//!   failure run reports one log line (its first failure); no logging here, the glue logs what it is
+//!   told.
 //! - **Close (D7).** [`Store::close`] commits the last projection if it differs, then the store writes
 //!   no record again (a restore add that answers after close writes nothing).
 
@@ -174,16 +177,24 @@ impl<D: Disk> Store<D> {
     }
 
     /// A durable step's write, now (the restore's commits, D3): `Committed` when the file holds
-    /// `record` (in meaning) after it.
+    /// `record` (in meaning) after it. A failed one leaves `record` as what the store owes, so it is
+    /// [`Store::dirty`] and the next [`Store::tick`] retries it.
     pub fn commit(&mut self, record: &RigRecord) -> Commit {
         if let Some(refusal) = self.refusal() {
             return Commit::Refused(refusal);
         }
-        match &self.stored {
-            None => Commit::Refused(Refusal::Absent),
-            Some(stored) if change(stored, record) == Change::None => Commit::Committed,
+        let commit = match &self.stored {
+            None => return Commit::Refused(Refusal::Absent),
+            Some(stored) if change(stored, record) == Change::None => return Commit::Committed,
             Some(_) => self.write(record),
+        };
+        if matches!(commit, Commit::Failed { .. }) {
+            // Owed as the last projection seen; a failure run retries at once, so the instant only
+            // matters once the tick projects something else.
+            let since = self.seen.as_ref().map_or_else(Instant::now, |(_, since)| *since);
+            self.seen = Some((record.clone(), since));
         }
+        commit
     }
 
     /// The page's import (D13), as [`crate::project::import`] made it: stored only while no record
@@ -241,16 +252,17 @@ impl<D: Disk> Store<D> {
         self.marker_disk()?.read(name)
     }
 
-    /// Writes the crash marker, durably (the restore's `CommitMarker`, D6).
+    /// Writes the crash marker, durably (the restore's `CommitMarker`, D6). `Err` when this store is
+    /// unavailable or its record unreadable (D8: nothing is written that process).
     pub fn write_marker(&mut self, bytes: &[u8]) -> io::Result<()> {
         let name = self.files.marker;
-        self.marker_disk()?.write_atomic(name, bytes)
+        self.marker_writer()?.write_atomic(name, bytes)
     }
 
-    /// Removes the crash marker (D6).
+    /// Removes the crash marker (D6). `Err` as [`Store::write_marker`].
     pub fn remove_marker(&mut self) -> io::Result<()> {
         let name = self.files.marker;
-        self.marker_disk()?.remove(name)
+        self.marker_writer()?.remove(name)
     }
 
     /// The marker is this process's while it owns the file pair, also after close (D7's last step).
@@ -259,6 +271,14 @@ impl<D: Disk> Store<D> {
             return Err(io::Error::other("the rig's files belong to another process"));
         }
         Ok(&mut self.disk)
+    }
+
+    /// The marker's writes: refused also while the record is unreadable (D8).
+    fn marker_writer(&mut self) -> io::Result<&mut D> {
+        if self.status == RigStatus::Unreadable {
+            return Err(io::Error::other("the rig's record is unreadable: nothing is written this process"));
+        }
+        self.marker_disk()
     }
 
     fn refusal(&self) -> Option<Refusal> {

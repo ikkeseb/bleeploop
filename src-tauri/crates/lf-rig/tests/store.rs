@@ -193,6 +193,7 @@ fn tolerant_read_holds_the_fixture() {
 fn unknown_version_is_unreadable_and_kept_byte_for_byte() {
     for text in [&br#"{ "version": 2, "slots": [ {"volume": 1, "units": []}, {"volume": 1, "units": []} ], "new": true }"#[..], b"{ not json"] {
         let folder = folder_with(Some(text));
+        folder.borrow_mut().files.insert(RELEASE_FILES.marker.to_owned(), b"{}".to_vec());
         let (mut store, opened) = Store::open(disk(&folder), RELEASE_FILES);
         assert!(matches!(opened, Opened::Unreadable(_)), "{opened:?}");
         assert_eq!(store.status(), RigStatus::Unreadable);
@@ -200,9 +201,11 @@ fn unknown_version_is_unreadable_and_kept_byte_for_byte() {
         assert_eq!(store.import(&r), Commit::Refused(Refusal::Unreadable));
         assert_eq!(store.commit(&r), Commit::Refused(Refusal::Unreadable));
         assert_eq!(store.tick(r.clone(), Instant::now()), Some(Commit::Refused(Refusal::Unreadable)));
+        assert!(store.write_marker(b"[]").is_err() && store.remove_marker().is_err(), "nor the crash marker (D8)");
         assert_eq!(store.close(&r), Commit::Refused(Refusal::Unreadable));
         assert_eq!(file(&folder).as_deref(), Some(text), "kept byte for byte");
-        assert!(!folder.borrow().calls.iter().any(|c| c.starts_with("write")), "nothing written");
+        assert!(!folder.borrow().calls.iter().any(|c| c.starts_with("write") || c.starts_with("remove")), "nothing written");
+        assert_eq!(folder.borrow().files.get(RELEASE_FILES.marker).map(Vec::as_slice), Some(&b"{}"[..]), "the marker untouched");
     }
 }
 
@@ -297,6 +300,16 @@ fn write_failure_keeps_dirty_and_retries() {
     folder.borrow_mut().fail_writes = 1;
     assert!(matches!(store.tick(louder.clone(), t1 + SAVE_QUIET), Some(Commit::Failed { log: true, .. })), "a new failure run logs again");
     assert_eq!(store.tick(louder.clone(), t1 + SAVE_QUIET + TICK), Some(Commit::Committed));
+
+    // A durable step's commit that failed stays owed: the store is dirty and the next tick retries it,
+    // a value change too, without waiting for the quiet.
+    let placed = record(vec![echo(1, 0.9), echo(2, 0.5)], 0.6);
+    folder.borrow_mut().fail_writes = 1;
+    assert!(matches!(store.commit(&placed), Commit::Failed { log: true, .. }));
+    assert!(store.dirty(), "the failed commit is the dirty target");
+    assert_eq!(store.tick(placed.clone(), t1 + SAVE_QUIET + TICK * 2), Some(Commit::Committed));
+    assert!(!store.dirty());
+    assert_eq!(RigRecord::read(&file(&folder).expect("stored")).expect("readable"), placed);
 }
 
 #[test]
@@ -329,7 +342,8 @@ fn rename_failure_is_no_commit() {
     assert!(matches!(store.commit(&new), Commit::Failed { .. }), "a durable step is not committed when the rename failed");
     assert_eq!(store.stored(), Some(&old));
     assert_eq!(file(&folder), Some(bytes(&old)), "the file holds the old record");
-    assert!(matches!(store.commit(&new), Commit::Committed));
+    assert!(store.dirty());
+    assert_eq!(store.tick(new.clone(), Instant::now()), Some(Commit::Committed), "retried at the next tick");
     drop(store);
     let (_, opened) = Store::open(disk(&folder), RELEASE_FILES);
     assert_eq!(opened, Opened::Present(new));

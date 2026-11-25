@@ -4,12 +4,18 @@
 //! restore's [`Plan`]; the [`crate::store::Store`] writes what they return.
 //!
 //! **What a projection holds, per slot in plate order:** each plate the engine applied (a `Leaving`
-//! one too, until it is gone: a refused removal reverts it), and each plate whose install token
-//! carries a live disposition of the restore; then each record unit the restore still holds (`Queued`,
-//! `Issued`, `Held`) at its record place, whatever its plate shows; `pending` as the plan holds it;
-//! each slot's volume from the settings memory when it holds one, else the record's (D2). A fresh add
-//! that has not applied is not recorded (D4); nor is a plate that cannot be a record unit (a legacy
-//! row's shape: a plugin plate with no plugin identity, which `rig_view` already leaves out).
+//! one too, until it is gone: a refused removal reverts it), and each plate a `Restored` or `Matched`
+//! disposition names by its token; then each record unit the restore still holds (`Queued`, `Issued`,
+//! `Held`) at its record place; `pending` as the plan holds it; each slot's volume from the settings
+//! memory when it holds one, else the record's (D2). A fresh add that has not applied is not recorded
+//! (D4); nor is a plate that cannot be a record unit (a legacy row's shape: a plugin plate with no
+//! plugin identity, which `rig_view` already leaves out).
+//!
+//! **Each id once, and the player's unit wins it.** A disposition binds to its own token: its own
+//! plate is the restore's (a holding one writes the plan's unit in its place), any other plate under
+//! its id is judged by the plate rule alone. An applied plate of another token is a unit the player
+//! has: it is recorded and the restore's unit under that id is not; a pending unit whose id a recorded
+//! unit holds (either slot) is left out of that write.
 
 use std::collections::BTreeSet;
 
@@ -34,58 +40,86 @@ pub fn volumes(record: &RigRecord, held: Volumes) -> [f64; 2] {
 /// keeps its stored form (an omitted `bypass`, `params: {}`), so a projection of an unchanged chain is
 /// the stored record itself.
 pub fn project(record: &RigRecord, plan: &Plan, view: &RigView, held: Volumes) -> RigRecord {
-    let tokens: BTreeSet<InstallToken> = view.slots.iter().flatten().map(|p| p.added_by).collect();
-    let volumes = volumes(record, held);
-    let slots = [0, 1].map(|s| {
-        let mut units = Vec::new();
+    let plates = || view.slots.iter().flatten();
+    let in_model = Present { tokens: plates().map(|p| p.added_by).collect(), ids: plates().map(|p| p.id).collect() };
+    let recorded = |p: &PlateView| match bound(plan.dispositions.get(&p.id), p) {
+        Some(Disposition::Restored { .. } | Disposition::Matched { .. }) => true,
+        // Its own plate: the plan's unit is written in its place.
+        Some(_) => false,
+        None => p.applied,
+    };
+    // The ids the player's units win: an applied plate the restore does not hold.
+    let won: BTreeSet<UnitId> = plates().filter(|p| p.applied && recorded(p)).map(|p| p.id).collect();
+    let mut written = BTreeSet::new();
+    let mut units: [Vec<UnitRecord>; 2] = Default::default();
+    for (s, out) in units.iter_mut().enumerate() {
         for plate in &view.slots[s] {
-            if recorded(plate, plan.dispositions.get(&plate.id), &tokens) {
+            // An unapplied plate the restore names gives way to an applied one under its id.
+            let yields = !plate.applied && won.contains(&plate.id);
+            if recorded(plate) && !yields && !written.contains(&plate.id) {
                 if let Some(unit) = unit_of(plate, prior(record, plan, plate.id)) {
-                    units.push(unit);
+                    written.insert(unit.id);
+                    out.push(unit);
                 }
             }
         }
+    }
+    for (s, out) in units.iter_mut().enumerate() {
         // The units the restore still holds, each after the nearest unit before it in the plan that
         // the output holds (none: at the head), in plan order so an earlier held unit counts.
         let order = &plan.units[s];
         for (i, unit) in order.iter().enumerate() {
-            let holds = plan.dispositions.get(&unit.id).is_some_and(|d| holding(d, &tokens));
-            if !holds || units.iter().any(|u| u.id == unit.id) {
+            let holds = plan.dispositions.get(&unit.id).is_some_and(|d| holding(d, unit.id, &in_model));
+            if !holds || written.contains(&unit.id) {
                 continue;
             }
             let at = order[..i]
                 .iter()
                 .rev()
-                .find_map(|before| units.iter().position(|u| u.id == before.id))
+                .find_map(|before| out.iter().position(|u| u.id == before.id))
                 .map_or(0, |pos| pos + 1);
-            units.insert(at, unit.clone());
+            written.insert(unit.id);
+            out.insert(at, unit.clone());
         }
-        SlotRecord { volume: volumes[s], units, pending: plan.pending[s].clone() }
-    });
+    }
+    let volumes = volumes(record, held);
+    let [a, b] = units;
+    let mut slot = |s: usize, units: Vec<UnitRecord>| {
+        let pending = plan.pending[s].iter().filter(|u| written.insert(u.id)).cloned().collect();
+        SlotRecord { volume: volumes[s], units, pending }
+    };
+    let slots = [slot(0, a), slot(1, b)];
     RigRecord { version: Version1, slots }
 }
 
-/// Whether a disposition keeps its record unit at its place, whatever its plate shows: `Queued`, and
-/// an `Issued` or `Held` until a confirmed removal ends it (the plate carrying its token left the
-/// model; with no token, nothing of it is in the model to remove).
-fn holding(d: &Disposition, tokens: &BTreeSet<InstallToken>) -> bool {
-    match d {
-        Disposition::Queued => true,
-        Disposition::Issued { token } | Disposition::Held { token, .. } => token.is_none_or(|t| tokens.contains(&t)),
-        Disposition::Restored { .. } | Disposition::Matched { .. } | Disposition::Forgotten | Disposition::Yielded => false,
-    }
+/// What the model holds, both slots: its plates' install tokens and ids.
+struct Present {
+    tokens: BTreeSet<InstallToken>,
+    ids: BTreeSet<UnitId>,
 }
 
-/// Whether a plate is recorded from the model. A disposition wins over the plate's state: a holding
-/// one writes the plan's unit instead (so the id is written once), `Restored`/`Matched` record the
-/// plate their token names whatever its state, `Forgotten`/`Yielded` record nothing under the id. A
-/// plate no live disposition names is recorded once applied (D4), `Leaving` included.
-fn recorded(plate: &PlateView, d: Option<&Disposition>, tokens: &BTreeSet<InstallToken>) -> bool {
+/// The disposition when it binds to this plate: one whose token is the plate's `added_by`. A
+/// disposition with no token binds to no plate.
+fn bound<'a>(d: Option<&'a Disposition>, plate: &PlateView) -> Option<&'a Disposition> {
+    d.filter(|d| match d {
+        Disposition::Restored { token } | Disposition::Matched { token } => *token == plate.added_by,
+        Disposition::Issued { token } | Disposition::Held { token, .. } => *token == Some(plate.added_by),
+        Disposition::Queued | Disposition::Forgotten | Disposition::Yielded => false,
+    })
+}
+
+/// Whether a disposition keeps its record unit at its place: `Queued`, and an `Issued` or `Held`
+/// until a confirmed removal ends it: the plate carrying its token left the model and no other plate
+/// holds its id (a player's add reusing the id while the held unit's failed plate leaves keeps it).
+/// With no token, nothing of it was in the model to remove. An applied plate of another token under
+/// the id wins it in [`project`].
+fn holding(d: &Disposition, id: UnitId, model: &Present) -> bool {
     match d {
-        Some(Disposition::Forgotten | Disposition::Yielded) => false,
-        Some(Disposition::Restored { token } | Disposition::Matched { token }) if *token == plate.added_by => true,
-        Some(d) if holding(d, tokens) => false,
-        _ => plate.applied,
+        Disposition::Queued => true,
+        Disposition::Issued { token } | Disposition::Held { token, .. } => {
+            token.is_none_or(|t| model.tokens.contains(&t) || model.ids.contains(&id))
+        }
+        Disposition::Restored { .. } | Disposition::Matched { .. } | Disposition::Forgotten | Disposition::Yielded => false,
     }
 }
 
@@ -149,12 +183,13 @@ fn identity(unit: &UnitRecord) -> (UnitKind, Option<(&str, &str, &str)>) {
 }
 
 /// Two units equal in meaning: an omitted `bypass` is false, omitted `params` none, parameters in any
-/// order, a plugin name compared only when both carry one.
+/// order. A plugin's name is a value: a plate's name the stored unit lacks or spells otherwise is
+/// written, as the page's `recordOf` would.
 fn same_unit(a: &UnitRecord, b: &UnitRecord) -> bool {
     a.id == b.id
         && a.bypassed() == b.bypassed()
         && match (&a.body, &b.body) {
-            (UnitBody::Plugin(x), UnitBody::Plugin(y)) => x.plugin == y.plugin && (x.name.is_none() || y.name.is_none() || x.name == y.name),
+            (UnitBody::Plugin(x), UnitBody::Plugin(y)) => x.plugin == y.plugin && x.name == y.name,
             (UnitBody::Builtin { kind: k, params: p }, UnitBody::Builtin { kind: l, params: q }) => k == l && same_params(p.as_deref(), q.as_deref()),
             _ => false,
         }
