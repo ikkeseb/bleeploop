@@ -333,7 +333,8 @@ below reads an old key through the resolver that reads it today, so a missing ke
   OTT in a SYNTH-headed slot's `pending`, every migrating send in the others'; a source-headed slot (a
   SYNTH, or a plugin that activates as one) gets the OTT alone, if it was on. `lf.inputSend.*` stays as it
   is: in chain mode the legacy sends go off on every reset frame and nothing writes their keys.
-- **Rig recall:** `lf.rigRecall` becomes the native record (§1) by one handover: a chain-mode page calls
+- **Rig recall:** `lf.rigRecall` becomes the native record (§1) by one handover: a chain-mode page where
+  the rig host is available (native chains; in the browser build the DEV fake with `__lfRigFake`) calls
   `rig.open()` first, and no device opens before it settled (answered, refused, or 2 s without an answer; a
   later answer still brings its levels and notice); only on `absent` it runs the upgrade and, if the device
   still runs, calls `rig.import(record)` (5 s at most), which native stores only while it has none

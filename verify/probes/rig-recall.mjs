@@ -610,7 +610,8 @@ await probe(async ({ browser, open }) => {
     return fader.inputValue();
   }));
   /** What the handover did: the rig calls in order (an import's text parsed), what the page still kept of the
-   * WebView's record when it opened, the fake's state, the slot gains sent, the adds, the toasts, the keys. */
+   * WebView's record when it opened, the fake's state, the slot gains sent, the slots armed, the adds, the
+   * toasts, the keys. */
   const rigRead = async () => ({
     ...(await cp.evaluate(() => {
       const rig = window.__lf.native.rig;
@@ -624,6 +625,8 @@ await probe(async ({ browser, open }) => {
         seenSaw: window.__rigSeenSaw ?? null,
         state: { status: rig.status, volumes: rig.volumes, notice: rig.notice },
         gains: window.__lf.native.sent.filter((c) => 'SetSlotGain' in c).map((c) => c.SetSlotGain),
+        // GO LIVE is never restored (contract §6): a slot armed on this page
+        live: window.__lf.native.sent.filter((c) => c.SetSlotLive?.[1] === true).map((c) => c.SetSlotLive[0]),
         adds: window.__chainProbe.adds.length,
         toasts: window.__lf.notify.toasts().map((t) => `${t.message} x${t.count}`),
         keys: { rig: ls('lf.rig'), inFlight: ls('lf.rigInFlight'), rigRecall: ls('lf.rigRecall') },
@@ -663,9 +666,10 @@ await probe(async ({ browser, open }) => {
   };
 
   // H1. Absent: one import, equal to the v0.8.9 profile's upgrade (`UPGRADED_V089`; no reported chains),
-  // after the device's open answered and `host_init`; no add, no slot level sent; the faders show the import's
-  // answer. The open's answer is held a while after the device runs, its status already on the feed and the
-  // bindings in (a feed may report the device before `engine_open` answers): nothing is imported meanwhile.
+  // after the device's open answered and `host_init`; no add, no slot level sent, no slot armed (GO LIVE is
+  // never restored); the faders show the import's answer. The open's answer is held a while after the device
+  // runs, its status already on the feed and the bindings in (a feed may report the device before
+  // `engine_open` answers): nothing is imported meanwhile.
   await chainLaunch({
     seed: V089,
     rig: {},
@@ -685,17 +689,17 @@ await probe(async ({ browser, open }) => {
   r = await rigSettle();
   assert.deepEqual(r.importSaw, { devices: 1, hostInits: 1 }, 'the import comes after the device\'s open answered and host_init');
   assert.deepEqual(r.calls, [['open'], ['import', UPGRADED_V089]], 'open, then one import of the upgrade');
-  assert.deepEqual({ adds: r.adds, gains: r.gains, toasts: r.toasts, faders: r.faders }, { adds: 0, gains: [], toasts: [], faders: ['0.8', '1'] });
+  assert.deepEqual({ adds: r.adds, gains: r.gains, live: r.live, toasts: r.toasts, faders: r.faders }, { adds: 0, gains: [], live: [], toasts: [], faders: ['0.8', '1'] });
   const imported = r;
 
   // H3. A WebView reload of that process: open again, no import; the faders show open's volumes, but where the
-  // reset frame replays a slot gain (the engine's settings memory), that one.
+  // reset frame replays a slot gain (the engine's settings memory), that one. No slot armed either way.
   await chainLaunch({ mintFrom: 2001, rig: held(imported) });
   r = await rigSettle();
-  assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains }, { calls: [['open']], faders: ['0.8', '1'], gains: [] }, 'a reload imports nothing');
+  assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains, live: r.live }, { calls: [['open']], faders: ['0.8', '1'], gains: [], live: [] }, 'a reload imports nothing');
   await chainLaunch({ mintFrom: 2001, rig: held(imported), settings: [{ SetSlotGain: [1, 0.6] }] });
   r = await rigSettle();
-  assert.deepEqual({ calls: r.calls, faders: r.faders }, { calls: [['open']], faders: ['0.8', '0.6'] }, 'the reset frame\'s slot gain over open\'s');
+  assert.deepEqual({ calls: r.calls, faders: r.faders, live: r.live }, { calls: [['open']], faders: ['0.8', '0.6'], live: [] }, 'the reset frame\'s slot gain over open\'s');
 
   // H2. Present, unreadable, unavailable: no import; one log line for the last two (C20), none for present.
   for (const [status, recall, faders] of [
@@ -705,7 +709,7 @@ await probe(async ({ browser, open }) => {
   ]) {
     await chainLaunch({ seed: V089, rig: { status, volumes: status === 'present' ? [0.7, 1.2] : null } });
     r = await rigSettle({ recall });
-    assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains, adds: r.adds }, { calls: [['open']], faders, gains: [], adds: 0 }, status);
+    assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains, live: r.live, adds: r.adds }, { calls: [['open']], faders, gains: [], live: [], adds: 0 }, status);
   }
 
   // H4. A notice: one toast and one log line on the page, the toast before `seen(id)`; its answer held, a reload
