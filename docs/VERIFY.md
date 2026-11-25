@@ -40,11 +40,13 @@ the content of binary and `-diff` files.
   `tauri dev` from WSL takes env through `WSLENV=A:B`. Only the by-ear gates need a person at the PC.
 - **On a Linux machine** (a native checkout, Linux node and `cargo`; measured on Arch, 2026-11-24):
   `pnpm install`, `pnpm typecheck`, `pnpm lint`, `pnpm verify`, `pnpm build`, `pnpm test:engine` and the
-  full `pnpm probe --ci` run and pass as on the PC (the probes take about 19 minutes). Rust is the
-  toolchain `src-tauri/rust-toolchain.toml` pins; a toolchain manager can supply it per command
+  full `pnpm probe --ci` pass (the probes took about 19 minutes). Rust is the toolchain
+  `src-tauri/rust-toolchain.toml` pins; a toolchain manager can supply it per command
   (`mise exec rust@1.96.0 -- pnpm test:engine`) without a global install. `cargo check -p app` passes,
-  but most of the app crate's tests are Windows-only (on Linux `cargo test -p app` runs a few dozen):
-  the device side, ASIO, WASAPI and every native command below need the PC or CI's Windows runner.
+  and `cargo test -p app` runs only the app crate's few dozen portable tests: the rest are Windows-only.
+  CI's Windows runner checks and tests the whole workspace without ASIO (`ci.yml`, `rust-test.yml`);
+  `pnpm rust:check`'s ASIO step and the native commands below need the PC and, where they say so, its
+  audio rig.
 - The browser build has no engine. For looper UI, turn on the engine fake (an init script setting
   `window.__lfEngineFake = true` before the app loads), script feed frames with `__lf.native.emit`
   and read what the UI sent in `__lf.native.sent` (pattern: `verify/probes/engine-seam.mjs`), then
