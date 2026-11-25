@@ -19,19 +19,23 @@
  *   screen shows, slot A's input on In 1 (the device opened with it, slot B Auto), so the probe tells the
  *   two apart.
  *
- * - full older install in chain mode (DEV, `window.__lfChainFake` beside the engine fake; contract §6), with
- *   RING MOD off at its defaults and bound to no pedal (the first `bindings` report, scripted: the fake's
- *   subscribe sends none, names only a REC/DUB pedal): after the boot settles (`rigRecallDone`), and again
- *   after a relaunch, no v0.8.9 key is changed or removed, `lf.rig` is written (slot A the remembered
- *   amp-sim, missing from this build's empty scan, at its saved level, with the old sends waiting in its
- *   `pending`: ECHO on, REVERB bypassed, no RING MOD; slot B the stored Pad as a SYNTH unit at unity, its
- *   instrument levels from `lf.synthGain.*`, nothing pending, as no OTT was ever stored), its ids the same
- *   after the relaunch, the legacy sends go to the engine off and nothing else of them, and the app never
- *   writes an `lf.inputSend.*` key (a `localStorage` spy counts every write a module under `src/` makes).
+ * - full older install in chain mode (DEV, `window.__lfChainFake` beside the engine fake; contract §6), the
+ *   native rig record `absent` (the rig fake, `window.__lfRigFake`), with RING MOD off at its defaults and
+ *   bound to no pedal (the first `bindings` report, scripted: the fake's subscribe sends none, names only a
+ *   REC/DUB pedal): after the boot settles (`rigRecallDone`), no v0.8.9 key is changed or removed and no
+ *   `lf.rig` written; the page opens the native record and imports the upgrade once (read from the fake's
+ *   `calls`: slot A the remembered amp-sim, unscanned in the browser build, at its saved level, with the old
+ *   sends waiting in its `pending`: ECHO on, REVERB bypassed, no RING MOD; slot B the stored Pad as a SYNTH
+ *   unit at unity, its instrument levels from `lf.synthGain.*`, nothing pending, as no OTT was ever stored);
+ *   the legacy sends go to the engine off and nothing else of them, and the app never writes an
+ *   `lf.inputSend.*` key (a `localStorage` spy counts every write a module under `src/` makes). A relaunch
+ *   over the record the import left (the fake scripted `present`) opens it and imports nothing;
+ * - a legacy page with the rig host available (the fake's `available: true`, no chain fake) never calls
+ *   `rig.open` (the record is chain mode's alone).
  *
  * Not booted: the plugin host (the browser build has none), so the device prune, the ASIO probe and legacy
  * rig recall, which run only with it, leave `lf.audioDevices` and `lf.rigRecall` alone here; `audio-settings-
- * startup` and `rig-recall` cover those (and `rig-recall` the chain-mode restore and placement). `lf.rigRecallInFlight` is not in the fixture: it is stored from a
+ * startup` and `rig-recall` cover those (and `rig-recall` the chain-mode handover's edges). `lf.rigRecallInFlight` is not in the fixture: it is stored from a
  * recall's first load until the loads have settled, so an install holds it at boot only after a launch
  * that died or was stopped while restoring, which the next boot answers by forgetting the record (the
  * `rig-recall` probe's crash phase). Cannot see WebView2's storage or the native engine.
@@ -266,8 +270,10 @@ await probe(async ({ browser, open }) => {
     await context.close();
   }
 
-  // d) The full older install in DEV chain mode (contract §6): every v0.8.9 key kept, `lf.rig` written, the
-  // legacy sends silent and their keys never written, across a relaunch.
+  // d) The full older install in DEV chain mode (contract §6), the native rig record `absent` (the rig fake,
+  // `__lfRigFake`, scripted per launch through `rigScript` in sessionStorage, as that launch's process holds
+  // the record): every v0.8.9 key kept, no `lf.rig`, one import of the upgrade, the legacy sends silent and
+  // their keys never written; a relaunch over the record the import left opens it and imports nothing.
   {
     const context = await browser.newContext();
     const app = await open({
@@ -276,6 +282,7 @@ await probe(async ({ browser, open }) => {
       storage: CHAIN_INSTALL,
       init: (p) => p.addInitScript(() => {
         Object.assign(window, { __lfEngineFake: true, __lfChainFake: true, __lsWrites: [] });
+        window.__lfRigFake = JSON.parse(sessionStorage.getItem('rigScript') ?? '{}');
         // Every write or removal a module of the app makes (its stack names `/src/`), not the harness's seed.
         for (const method of ['setItem', 'removeItem']) {
           const real = Storage.prototype[method];
@@ -288,40 +295,68 @@ await probe(async ({ browser, open }) => {
     });
     const { page } = app;
     const pad = await page.evaluate(async () => (await import('/src/ui/state/instruments.ts')).SYNTHS.findIndex((s) => s.id === 'pad'));
-    let ids = null;
     for (const when of ['chain mode, booted', 'chain mode, relaunched']) {
       if (when.endsWith('relaunched')) await page.reload();
       await chainBoot(page);
       const stored = await storage(page);
-      // Ordinary boot writes may add keys (the meter, a layout); §6's rule is the old keys and `lf.rig`.
+      // Ordinary boot writes may add keys (the meter, a layout); §6's rule is the old keys, kept as they are.
       for (const [k, v] of Object.entries(CHAIN_INSTALL)) assert.equal(stored[k], v, `${when}: ${k} was changed or removed`);
-      assert.ok(stored['lf.rig'], `${when}: lf.rig was not written`);
+      assert.equal(stored['lf.rig'], undefined, `${when}: lf.rig was written (the record is native's)`);
       assert.deepEqual(Object.keys(stored).filter((k) => k.startsWith('lf.inputSend.') && !(k in CHAIN_INSTALL)), [], `${when}: an lf.inputSend key was added`);
       const writes = await page.evaluate(() => window.__lsWrites);
-      assert.deepEqual(writes.filter((w) => / lf\.(inputSend\.|rigRecall)/.test(w)), [], `${when}: the app wrote a legacy send or recall key`);
-      const rig = JSON.parse(stored['lf.rig']);
-      const [a, b] = rig.slots;
-      const sends = (list = []) => list.filter((u) => u.kind !== 'plugin' && u.kind !== 'synth').map(withoutId);
-      console.log(`${when}: lf.rig ${stored['lf.rig']}; writes ${JSON.stringify(writes)}`);
-      assert.equal(rig.version, 1, `${when}: lf.rig's version`);
-      assert.deepEqual(a.units.map(withoutId), [{ kind: 'plugin', plugin: AMP_SIM, bypass: false }], `${when}: slot A's units`);
-      assert.equal(a.volume, 0.75, `${when}: slot A's volume, its saved plugin level`);
-      assert.deepEqual(sends(a.pending), [
-        { kind: 'echo', params: { echoTime: 2, echoFeedback: 0.55, echoLevel: 0.35 }, bypass: false },
-        { kind: 'reverb', params: { reverbLevel: 0.6 }, bypass: true },
-      ], `${when}: slot A's pending: ECHO on, REVERB bypassed, RING MOD (off, at its defaults, unbound) not migrated`);
-      assert.deepEqual(b.units.map(withoutId), [{ kind: 'synth', bypass: false, params: {
-        instrument: pad, gainLead: 0.5, gainBass: 0.7, gainPad: 0.6, gainPiano: 0.9, gainOrgan: 0.4, gainDrum: 1.1 } }], `${when}: slot B's units`);
-      assert.deepEqual([b.volume, b.pending ?? []], [1, []], `${when}: slot B at unity, nothing pending`);
-      const now = [...a.units, ...a.pending, ...b.units].map((u) => u.id);
-      assert.equal(new Set(now).size, now.length, `${when}: each unit has its own id`);
-      if (ids) assert.deepEqual(now, ids, `${when}: the relaunch kept the record's ids (no second upgrade)`);
-      ids = now;
+      assert.deepEqual(writes.filter((w) => /^setItem lf\.rig$/.test(w) || / lf\.(inputSend\.|rigRecall)/.test(w)), [], `${when}: the app wrote lf.rig, a legacy send or a recall key`);
+      const rig = await page.evaluate(() => {
+        const fake = window.__lf.native.rig;
+        return { calls: fake.calls, status: fake.status, volumes: fake.volumes };
+      });
+      console.log(`${when}: rig calls ${JSON.stringify(rig.calls)}; writes ${JSON.stringify(writes)}`);
       const legacySends = await page.evaluate(() => window.__lf.native.sent.filter((c) => 'SetInputSend' in c || 'SetInputSendParam' in c));
       assert.deepEqual(legacySends.filter((c) => !('SetInputSend' in c && c.SetInputSend[1] === false)), [], `${when}: a legacy send went on or took a value`);
       assert.deepEqual([...new Set(legacySends.map((c) => c.SetInputSend[0]))].sort(), ['echo', 'ott', 'reverb', 'ring'], `${when}: the four legacy sends are sent off`);
-      app.consumeConsoleErrors(/^\[rig-recall\] slot 1: Amp Sim \(VST3\) .* is not in this launch's plugin scan/);
+      if (when.endsWith('relaunched')) {
+        assert.deepEqual(rig.calls, [['open']], `${when}: the relaunch opens the record and imports nothing (no second upgrade)`);
+        continue;
+      }
+      assert.deepEqual(rig.calls.map(([name]) => name), ['open', 'import'], `${when}: open, then one import`);
+      // The whole payload, ids aside, equals the upgrade: no unit more or less in any list, no field changed.
+      const payload = JSON.parse(rig.calls[1][1]);
+      const units = payload.slots.flatMap((s) => [...(s.units ?? []), ...(s.pending ?? [])]);
+      const unId = (s) => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, k === 'units' || k === 'pending' ? v.map(withoutId) : v]));
+      assert.deepEqual({ ...payload, slots: payload.slots.map(unId) }, { version: 1, slots: [
+        // slot A: the remembered amp-sim at its saved plugin level; pending ECHO on, REVERB bypassed, RING MOD
+        // (off, at its defaults, unbound) not migrated
+        { volume: 0.75, units: [{ kind: 'plugin', plugin: AMP_SIM, bypass: false }], pending: [
+          { kind: 'echo', params: { echoTime: 2, echoFeedback: 0.55, echoLevel: 0.35 }, bypass: false },
+          { kind: 'reverb', params: { reverbLevel: 0.6 }, bypass: true },
+        ] },
+        // slot B: the stored Pad at unity, its levels from `lf.synthGain.*`, nothing pending (no OTT stored)
+        { volume: 1, units: [{ kind: 'synth', bypass: false, params: {
+          instrument: pad, gainLead: 0.5, gainBass: 0.7, gainPad: 0.6, gainPiano: 0.9, gainOrgan: 0.4, gainDrum: 1.1 } }] },
+      ] }, `${when}: the import is the upgrade`);
+      const ids = units.map((u) => u.id);
+      assert.ok(ids.every((id) => Number.isInteger(id) && id > 0), `${when}: a unit without its id: ${JSON.stringify(ids)}`);
+      assert.equal(new Set(ids).size, ids.length, `${when}: each unit has its own id`);
+      // The next launch's process holds the record the import left.
+      await page.evaluate((r) => sessionStorage.setItem('rigScript', JSON.stringify({ status: r.status, volumes: r.volumes })), rig);
     }
+    await context.close();
+  }
+
+  // e) A legacy page (no chain mode) with the rig host available (the fake's `available`, apart from the chain
+  // fake): boot's chain-mode gate alone keeps it from opening the native rig record.
+  {
+    const context = await browser.newContext();
+    const app = await open({
+      context,
+      viewport: { width: 1280, height: 820 },
+      storage: OLDER_INSTALL,
+      init: (p) => p.addInitScript(() => Object.assign(window, { __lfEngineFake: true, __lfRigFake: { available: true } })),
+    });
+    await boot(app.page);
+    const { available, calls } = await app.page.evaluate(() => ({ available: window.__lf.native.rig.available, calls: window.__lf.native.rig.calls }));
+    assert.equal(available, true, 'the legacy page\'s rig host is available (else the case proves nothing)');
+    assert.deepEqual(calls, [], 'a legacy page called the native rig record');
+    console.log(`legacy page with the rig fake: rig calls ${JSON.stringify(calls)}`);
     await context.close();
   }
 });

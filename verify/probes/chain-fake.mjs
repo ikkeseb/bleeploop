@@ -61,14 +61,8 @@ function tone(plugin, name, state) {
   return out;
 }
 
-/** A returning player's profile whose rig record (`src/ui/state/rig-record.ts`) holds two empty slots: the
- * chain starts empty, as the checks below build it, not as the upgrade of a profile with no record (Lead in A,
- * Bass in B, `docs/unit-contract.md` §6) would. */
-const EMPTY_RIG = { 'lf.rig': JSON.stringify({ version: 1, slots: [{ volume: 1, units: [] }, { volume: 1, units: [] }] }) };
-
 await probe(async ({ open }) => {
   const { page, consumeConsoleErrors } = await open({
-    storage: EMPTY_RIG,
     init: (p) =>
       p.addInitScript(() => {
         window.__lfEngineFake = true;

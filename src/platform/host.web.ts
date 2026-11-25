@@ -350,7 +350,7 @@ type RigCall = 'open' | 'import' | 'seen';
  * `hold` (a call of that name waits until `release(name)`), `reply` (an `open` or `import` answers this raw
  * reply instead, its state unchanged: a native answer of any shape). Every answer goes through the page's
  * strict reading (`decodeRigAnswer`), as Tauri's does. Seeded from `window.__lfRigFake` (an init script's
- * `{ status?, volumes?, notice?, refuse?, hold?, reply? }`, `hold` a list of names) at its first use; a page reload
+ * `{ available?, status?, volumes?, notice?, refuse?, hold?, reply? }`, `hold` a list of names) at its first use; a page reload
  * starts it again, so a probe hands the state on through that script. Nothing else changes with it: no
  * restore, no adds (those are the native host's, CP2-CP3's Rust tests).
  */
@@ -365,6 +365,8 @@ export interface RigFake extends RigHost {
 }
 
 interface RigScript {
+  /** The rig host available without the chain fake (a probe proving a page's own gate); default: chain mode's. */
+  available?: boolean;
   status?: RigStatus;
   volumes?: [number, number] | null;
   notice?: RigNotice | null;
@@ -401,7 +403,8 @@ function rigFake(): RigFake {
   });
   const fake: RigFake = {
     get available() {
-      return chainPluginsOn() && rigScript() !== null;
+      const live = rigScript();
+      return live !== null && (live.available ?? chainPluginsOn());
     },
     status: script.status ?? 'absent',
     volumes: script.volumes ?? null,

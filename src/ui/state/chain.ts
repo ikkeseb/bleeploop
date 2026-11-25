@@ -14,9 +14,6 @@ import {
 import { availablePlugins, setActiveSlot } from './instrument';
 import { withAt } from './instrument-slots';
 import { keepUnitMeters } from '../units/unit-meters';
-import { rigChainsReported } from './rig-recall';
-// whether a unit is applied in its chain: the record's placement reads it too
-import { isApplied } from './rig-record';
 
 /**
  * The chain per slot as the UI knows it (`docs/unit-contract.md` §2): each slot's units in order, as the
@@ -36,7 +33,7 @@ const [scanned, setScanned] = createSignal<PluginDescriptor[] | null>(null);
  * Whether the row draws the chain: the platform's chain host answers. Fixed for a page.
  * THE GATE: natively the chain host answers only under the DEV flag `lf.chainNative` (`host.tauri.ts`;
  * release refuses every chain call before any IPC), so chain mode is the DEV fake's and that flag's. What
- * it needed is built: the rig record with the v0.8.9 upgrade and its restore (`rig-recall.ts`), the named
+ * it needed is built: the native rig record with the v0.8.9 upgrade's handover (`rig-recall.ts`), the named
  * pedal actions on `Toggle.Units` (native MIDI and `src/app/actions.ts`), the per-unit editor-closed event,
  * the slot's level kept. It turns on for players with what `src/ui/AGENTS.md` § Open threads (chain mode's
  * activation) still lists.
@@ -46,12 +43,10 @@ export const chainShown = (): boolean => platform.chain.available;
 /** Slot `slot`'s chain as last reported. */
 export const slotChain = (slot: 0 | 1): ChainState => chains()[slot];
 
-/** The feed's `chains` (the engine store's frame path, inside its batch; `reset`: a reset frame's, which
- * natively every reset frame carries); the rig record hears each (`rigChainsReported`: written once the
- * launch's restore finished). */
-export function applyChains(next: [ChainState, ChainState], reset = false): void {
+/** The feed's `chains` (the engine store's frame path, inside its batch; natively every reset frame carries
+ * them). */
+export function applyChains(next: [ChainState, ChainState]): void {
   setChains(next);
-  rigChainsReported(next, reset);
   forgetShownPicks(next);
   const ids = new Set(next.flatMap((c) => c.units.map((u) => u.id)));
   keepUnitMeters(ids);
@@ -67,6 +62,12 @@ if (platform.chain.available)
     if (editors().has(unit)) setEditors(new Set([...editors()].filter((id) => id !== unit)));
   });
 
+
+/** Whether `u` is applied in its chain: what sets the chain's role (seated, on its way out, parked in its
+ * seat, or reloading: its old instance plays on until the new one lands, unit contract §3). A unit still
+ * loading or waiting for its add is not, yet. */
+const isApplied = (u: UnitState): boolean =>
+  u.state === 'seated' || u.state === 'leaving' || u.reloading === true || (u.state === 'failed' && u.parked === true);
 
 /** The unit that heads slot `slot`'s chain as applied (unit contract §4: a source there makes it a source
  * chain), or undefined. */

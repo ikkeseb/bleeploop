@@ -5,7 +5,7 @@
 //!
 //! The serde derive here is the strict shape: a field of the wrong type, an unknown kind or parameter,
 //! a plugin unit without its plugin or a unit id 0 fails the whole parse. The reader the store uses on
-//! a file, and the import on the page's text, is tolerant ([`RigRecord::read`], `parseRig`'s rules: a
+//! a file, and the import on the page's text, is tolerant ([`RigRecord::read`], the rules the WebView's old reader had: a
 //! bad unit, an unknown parameter or a reused id skipped, a bad volume read as unity); what it cannot
 //! read as a v1 record at all is [`Unreadable`].
 //!
