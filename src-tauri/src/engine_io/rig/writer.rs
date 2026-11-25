@@ -16,6 +16,7 @@ use lf_rig::marker::{self, Cleared};
 use lf_rig::{Action, Commit, Event, PlateState, RigRecord, RigStatus, RigView, Store, Volumes};
 
 use super::disk::FileDisk;
+use super::restore::Turn;
 use super::{lock, Rig};
 use crate::engine_io::chain::STASH_AFTER;
 use crate::engine_io::mode::SHUTDOWN_WAIT;
@@ -103,37 +104,44 @@ impl Rig {
     /// actions (`Rig::drive`). False once nothing will ever be written again (closing, or a record this
     /// process never writes: unreadable, unavailable).
     pub(super) fn tick(&self, model: &(impl RigModel + ?Sized), now: Instant) -> bool {
+        let began = Instant::now();
         match self.writable() {
             Some(true) => {}
             Some(false) => return true, // no record yet: the import makes the first
             None => return false,
         }
-        let events = self.inputs(now);
+        let turn = self.inputs(now);
         // The copy is taken after the inputs: an add's answer is never fed after a view older than it.
         let held = model.gains();
         let view = model.view();
         // `None` with no record yet, or once close began (the plan is close's from then on).
-        let Some(projected) = self.judge(events, held, view, false) else { return !self.closing.load(Acquire) };
-        let (commit, seen) = {
-            let mut disk = lock(&self.disk);
-            if self.closing.load(Acquire) || disk.closed {
-                return false;
+        let Some(projected) = self.judge(turn, held, view, false) else { return !self.closing.load(Acquire) };
+        // A `Commit` the restore queued writes this projection itself: the store is not handed it ahead
+        // of that commit, which may fail and leave the plan as it was.
+        if !self.commit_queued() {
+            let (commit, seen) = {
+                let mut disk = lock(&self.disk);
+                if self.closing.load(Acquire) || disk.closed {
+                    return false;
+                }
+                let Some(store) = disk.store.as_mut() else { return true };
+                let commit = store.tick(projected, now);
+                if commit == Some(Commit::Committed) {
+                    disk.at += 1;
+                }
+                (commit, Rig::found(&disk))
+            };
+            match commit {
+                Some(Commit::Committed) => {
+                    self.keep(&seen, None);
+                }
+                Some(Commit::Failed { why, log: true }) => log::warn!("[rig] the rig record was not written ({why}); trying again at each tick"),
+                _ => {}
             }
-            let Some(store) = disk.store.as_mut() else { return true };
-            let commit = store.tick(projected, now);
-            if commit == Some(Commit::Committed) {
-                disk.at += 1;
-            }
-            (commit, Rig::found(&disk))
-        };
-        match commit {
-            Some(Commit::Committed) => {
-                self.keep(&seen, None);
-            }
-            Some(Commit::Failed { why, log: true }) => log::warn!("[rig] the rig record was not written ({why}); trying again at each tick"),
-            _ => {}
         }
-        self.drive(model, now);
+        // The actions' timers (a load's settle above all) count from this turn's view, not from the
+        // tick's start: `now` moves on by the real time the turn took so far.
+        self.drive(model, now + began.elapsed());
         true
     }
 
@@ -167,13 +175,15 @@ impl Rig {
             return;
         }
         let found = Rig::found(&lock(&self.disk));
+        // What the driver's call already answered and the latches already set, before the view.
+        let turn = self.closing_inputs();
         let last = if found.stored.is_some() {
             model.wait_feed();
             let held = model.gains();
             let view = model.view();
             // A first sight of the record (no open published it) makes the plan; its seed is not sent.
             let _ = self.keep(&found, Some(&view));
-            self.project(held, view, true)
+            self.judge(turn, held, view, true)
         } else {
             None
         };
@@ -218,25 +228,29 @@ impl Rig {
     }
 
     /// The record the chains stand for now, as [`Rig::judge`] makes it with no other event first.
+    #[cfg(test)] // the CP2b tests' projection; the app's ticks and close judge a turn
     pub(super) fn project(&self, held: Volumes, view: RigView, at_close: bool) -> Option<RigRecord> {
-        self.judge(Vec::new(), held, view, at_close)
+        self.judge(Turn::default(), held, view, at_close)
     }
 
-    /// The restore first, then the projection, at one view: under `inner`, `events` (the driver's
-    /// inputs, in order) and then `ViewChanged(view)` go to the restore, whose actions are queued for
-    /// the driver, and its plan (each id the view ends dropped) projects `view` with `held` (the slot
-    /// gains, then the view, as the caller took them, each lock released before the next). At close
-    /// (`at_close`) a `Leaving` plate is then dropped (the shutdown retires its tone), after the plan
-    /// judged the full view. `None` while there is no record, and for a tick once `closing` is set:
-    /// checked under `inner`, so a tick changes the plan no more once close began, and close judges it
-    /// at its own view (a tick that judged it before used a view older than close's).
-    pub(super) fn judge(&self, events: Vec<Event>, held: Volumes, mut view: RigView, at_close: bool) -> Option<RigRecord> {
+    /// The restore first, then the projection, at one view: under `inner`, the turn's inputs (in the
+    /// order `Rig::fed` gives them; at close an add that never started is answered there) and then
+    /// `ViewChanged(view)` go to the restore, whose actions are queued for the driver, and its plan
+    /// (each id the view ends dropped) projects `view` with `held` (the slot gains, then the view, as
+    /// the caller took them, each lock released before the next). At close (`at_close`) a `Leaving`
+    /// plate is then dropped (the shutdown retires its tone), after the plan judged the full view.
+    /// `None` while there is no record, and for a tick once `closing` is set: checked under `inner`, so
+    /// a tick changes the plan no more once close began, and close judges it at its own view (a tick
+    /// that judged it before used a view older than close's). A turn refused here leaves its answer and
+    /// its latches where close reads them.
+    pub(super) fn judge(&self, turn: Turn, held: Volumes, mut view: RigView, at_close: bool) -> Option<RigRecord> {
         let mut inner = lock(&self.inner);
         let inner = &mut *inner;
         if !at_close && self.closing.load(Acquire) {
             return None;
         }
         inner.stored.as_ref()?;
+        let events = self.fed(turn, &mut inner.actions, at_close);
         for event in events.into_iter().chain([Event::ViewChanged(view.clone())]) {
             let actions = inner.restore.handle(event);
             inner.actions.extend(actions);

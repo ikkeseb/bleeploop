@@ -48,8 +48,9 @@
 //! `Rig::new` has none today (the real host is CP3b's: `mode.rs`, where `EngineApp` makes its `Rig`, is
 //! where it plugs in). Without one the restore is fed the record and every view but never seeded, so
 //! its plan holds every record unit the model lacks at its place (`Queued`), matches a unit the model
-//! holds to its plate, and lets an id go to the player's applied unit: the writer keeps the record and
-//! adds what the player applies, and no marker is written.
+//! holds to its applied plate (a plate of the same unit that has not applied is no match: removed
+//! before it applies, it leaves the unit at its place), and lets an id go to the player's applied unit:
+//! the writer keeps the record and adds what the player applies, and no marker is written.
 //!
 //! **What the plan cannot see:** a record id the restore holds with no plate, which the player's unit
 //! takes, applies and leaves between two views, comes back from the plan: no view showed that plate
@@ -61,8 +62,12 @@
 //! `closed`, the done flag a second close waits on). Neither is held across a `settings` or `state`
 //! take, a scan, an add or a wait (a second close's wait on `closed_cv` releases `disk`), nor are the
 //! two held together; `disk` is held across one `write_atomic` at most (`remove` and a write for the
-//! marker's removal). A record write is never made under `state` or `settings`. The driver's own state
-//! (`driver`) is the rig thread's: taken before `inner` or `disk`, never by an open, an import or close.
+//! marker's removal), but by close, the last writer, across two (the record's last write, then the
+//! marker's), every other write being refused once `closing` is set. A record write is never made
+//! under `state` or `settings`. The driver's own state (`driver`) is the rig thread's: taken before
+//! `inner` or `disk`, never by an open, an import or close. `calls` (the driver's blocking call, its
+//! answer and the latches it follows) is taken alone or inside `driver` or `inner`, never across a
+//! host call or a write: close reads it without waiting on the driver (`restore.rs`).
 //!
 //! **Release.** The `rig_*` commands are DEV-only (`lib.rs`), in lockstep with `lf.chainNative`, so a
 //! release build opens no rig and runs no writer before activation; its shutdown still calls
@@ -90,7 +95,7 @@ pub(crate) use disk::files;
 use disk::FileDisk;
 #[allow(unused_imports)] // the real host (CP3b) implements them
 pub(crate) use restore::{Forgot, RestoreHost, SeedTaken};
-use restore::Driver;
+use restore::{Calls, Driver};
 pub(crate) use writer::RigModel;
 
 /// The process's rig record (the module doc).
@@ -106,6 +111,8 @@ pub(crate) struct Rig {
     host: Option<Arc<dyn RestoreHost>>,
     /// The driver's own state, the rig thread's (`restore.rs`).
     driver: Mutex<Driver>,
+    /// The driver's blocking call, its answer and the latches it follows, which close reads too.
+    calls: Mutex<Calls>,
     inner: Mutex<Inner>,
     disk: Mutex<DiskState>,
     /// Signalled under `disk` when the first close sets `closed` (a second close waits on it).
@@ -176,6 +183,7 @@ impl Rig {
             writer: AtomicBool::new(false),
             host,
             driver: Mutex::default(),
+            calls: Mutex::default(),
             inner: Mutex::default(),
             disk: Mutex::default(),
             closed_cv: Condvar::new(),

@@ -2,35 +2,55 @@
 //! on the rig thread, behind [`RestoreHost`], the one seam to the engine and the chain host. The machine
 //! decides everything (its module doc is the contract); this is a loop of I/O.
 //!
-//! **One turn per writer tick** (`writer.rs` `Rig::tick`): the inputs first ([`Rig::inputs`]: the
-//! answer of a blocking call that ended, the timers due, the exit latches of the attempts the restore
-//! follows, the device and its engine generation, the seed's barrier), then one fresh view fed to the
-//! restore and projected with its plan under one `inner`, then the store's tick, then the actions
-//! ([`Rig::drive`]). **The glue rule:** a turn feeds an add's answer before it takes its view, and a
-//! view taken before an answer was received is never fed after it: an answer that arrives while a turn
-//! takes its copy waits in its channel for the next turn. Fed after an older copy, the answer's plate
-//! would read as removed (`restore_tests.rs` `a_view_taken_before_an_answer_is_never_fed_after_it`).
+//! **One turn per writer tick** (`writer.rs` `Rig::tick`): the inputs first ([`Rig::inputs`]), then
+//! one fresh view fed to the restore and projected with its plan under one `inner`, then the store's
+//! tick (skipped while the turn queued a `Commit`, which writes that projection itself), then the
+//! actions ([`Rig::drive`]). **The inputs' order:** the answer of a blocking call that ended is taken
+//! from its channel first (not fed yet), then the device is read (its generation, a device that runs,
+//! the seed's barrier, D1), and the restore is fed the device's events, then that answer, then the
+//! exit latches of the attempts it follows and the timers due. So an add's answer that arrives with a
+//! rebuild is fed after the new generation, and the next add waits for its barrier; a rebuild after
+//! the turn's read is seen at the next turn. **The glue rule:** the answer is received before the
+//! turn's view is taken and fed before that view, which is what [`lf_rig::Plan::fate`] asks; an answer
+//! that arrives while a turn takes its copy waits in its channel for the next turn (fed after an older
+//! copy, its plate would read as removed: `restore_tests.rs`
+//! `a_view_taken_before_an_answer_is_never_fed_after_it`), and the machine's next add, issued at its
+//! last view, is checked again by the host's D9 under its locks.
 //!
 //! **The actions.** A seed goes out at once (`rig_open` sends the first one before it answers, D1),
 //! a refused one again on the machine's backoff. The waits for the device and the seed's barrier are
 //! polled once per turn, bounded ([`TAKEN_WAIT`]). A scan and an add block for seconds (a scan child, a
-//! plugin's setup): each runs on its own thread (`lf-rig-call`), one at a time as the machine issues
-//! them, and its answer is taken at the next turn; meanwhile the rig thread keeps its ticks and runs
-//! the writes the machine allows beside an add (a load that turned terminal leaves the marker at once,
-//! `restore.rs`'s side lane in `lf-rig`). `Commit` projects a fresh view (fed to the restore first)
-//! and commits it through the store; `CommitMarker` and `RemoveMarker` write the marker; each is one
-//! write under `disk`, refused once close began, and answered `Committed`/`CommitFailed`. `Settle` and
-//! `Backoff` are the loop's timers. `Forget` asks the host to delete the unit's tone files under the
-//! id's reservation; one a unit holds is asked again at each later turn (the files are that unit's
-//! until it leaves). Nothing here runs under `inner` or `disk` but the store's write.
+//! plugin's setup): each runs on its own thread (`lf-rig-call`, detached: it ends by the host's own
+//! bounds, and no shutdown joins it), one at a time as the machine issues them, and its answer is taken
+//! at the next turn; meanwhile the rig thread keeps its ticks and runs the writes the machine allows
+//! beside an add (a load that turned terminal leaves the marker at once, `restore.rs`'s side lane in
+//! `lf-rig`). A call whose thread ended with no answer (a panic): a scan found nothing; an add that
+//! started answers nothing, and the restore waits on it for the rest of the launch (its load stays in
+//! the marker); one that never started is a host refusal. `Commit` projects a fresh view (fed to the
+//! restore first) and commits it through the store; `CommitMarker` and `RemoveMarker` write the marker;
+//! each is one write under `disk`, refused once close began, and answered `Committed`/`CommitFailed`.
+//! `Settle` and `Backoff` are the loop's timers, counted from the turn's view (`now` moves on by the
+//! real time the turn took before its actions). `Forget` asks the host to delete the unit's tone files
+//! under the id's reservation; one a unit holds is asked again at each later turn (the files are that
+//! unit's until it leaves). Nothing here runs under `inner` or `disk` but the store's write.
 //!
-//! **Close** feeds `Closing` itself (`writer.rs` `Rig::close`) and never waits on the driver: a call
-//! in flight answers into a restore that is closing, and the driver runs no action after `closing`.
-//! Only `Closing`'s own actions run (the marker's, on the store before it drops): a `Forget` the
-//! restore emitted and the driver had not run by then is not run, and that unit's tone files stay.
+//! **Close** feeds `Closing` itself (`writer.rs` `Rig::close`) and never waits on the driver, a host
+//! call or an add. The driver's blocking call, its answer and the latches it follows sit behind their
+//! own small lock (`Rig.calls`, never held across a host call or a write), so close reads, before its
+//! feed wait and its view, what is already answered: the call's answer if one is in its channel, and
+//! each followed attempt's latch ([`RestoreHost::exited`], a read). It feeds them, in order, before its
+//! view, in the same `judge`. An add not started by then is cancelled: one still in the queue, or one
+//! whose `lf-rig-call` thread has not passed its start gate (one atomic: queued, then started or
+//! cancelled, whichever comes first); close answers it `AddFail::Host` (the restore withdraws its load
+//! and holds the unit at its place). An add that started stays as SEAT-C keeps one in flight. Once
+//! `closing` is set the driver makes no host call: [`Rig::inputs`] returns at once, and [`Rig::drive`]
+//! runs no action; only `Closing`'s own actions run (the marker's, on the store before it drops). A
+//! turn already past its check when close begins may still ask the host to forget a unit's files; the
+//! real host closes that window itself (its `forget` answers `Held` once the host is closing, decided
+//! under the id's reservation). A `Forget` not run by then is not run, and that unit's files stay.
 
-use std::sync::atomic::Ordering::Acquire;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::atomic::{AtomicU8, Ordering::{AcqRel, Acquire}};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -68,9 +88,10 @@ pub(crate) trait RestoreHost: RigModel + Send + Sync {
     fn scan(&self, paths: &[String]) -> Vec<PluginRefView>;
 
     /// Add record unit `unit` to slot `slot` under `id` at `place` (`add_as_host`: `add` minus the
-    /// document check), resolving `place` under the slot's order lock and the model's `state` (D9):
-    /// a live plate that is the unit answers `Matched` with its token; another holding the id refuses
-    /// (`Host`); a source the player put in answers `SourceTaken`. Typed as D5 (each answer past the
+    /// document check), resolving `place` under the slot's order lock and the model's `state` (D9),
+    /// by `lf_rig::place::find_match`'s rule: an applied live plate that is the unit answers `Matched`
+    /// with its token; any other live plate holding the id refuses (`Host`), one of the same unit that
+    /// has not applied too; a source the player put in answers `SourceTaken`. Typed as D5 (each answer past the
     /// mint names the attempt's token; `exited` read from its latch at the answer). Blocks for the
     /// load's first answer; called on a thread of its own, never under a rig lock.
     fn add(&self, slot: usize, id: UnitId, unit: &UnitRecord, place: &Place) -> Result<AddOk, AddFail>;
@@ -107,21 +128,71 @@ pub(crate) enum Forgot {
     Held,
 }
 
-/// The driver's own state, the rig thread's.
+/// The driver's own state, the rig thread's: taken by a turn's inputs and its actions, never by close.
 #[derive(Default)]
 pub(super) struct Driver {
     /// The timers due at their instant (`Settle`, `Backoff`, a seed sent again).
     timers: Vec<(Instant, Timer)>,
-    /// The blocking call out (a scan or an add), its answer taken at the next turn.
-    call: Option<(Call, Receiver<Event>)>,
     want_taken: bool,
     want_device: bool,
     /// The last engine generation the restore was told.
     gen: Option<u64>,
-    /// The attempts whose owner may still run: their latch is read each turn until it is set.
-    watch: Vec<InstallToken>,
     /// Forgotten ids a unit held when their files were to go: asked again each turn.
     held_forgets: Vec<UnitId>,
+}
+
+/// The driver's blocking call and what it answered, which close reads too: behind its own lock, taken
+/// alone or inside `inner`, never across a host call or a write (the module doc's close).
+#[derive(Default)]
+pub(super) struct Calls {
+    /// The blocking call out (a scan or an add), one at a time.
+    out: Option<Out>,
+    /// The answer received from `out`'s channel and not fed yet: fed under `inner`, by the turn that
+    /// received it or by close.
+    answer: Option<Event>,
+    /// The attempts whose owner may still run: their latch is read each turn, and once more by close.
+    /// A token leaves once its `LatchSet` was fed.
+    watch: Vec<InstallToken>,
+    /// Test only: run on the call's thread before its gate.
+    #[cfg(test)]
+    pub(super) before_gate: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test only: the next call gets no thread, as when the spawn fails.
+    #[cfg(test)]
+    pub(super) no_thread: bool,
+}
+
+/// A blocking call out: its kind, its answer's channel and its start gate.
+struct Out {
+    kind: Call,
+    answers: Receiver<Event>,
+    /// [`QUEUED`] until the call's thread moves it to [`STARTED`] right before the host call, or close
+    /// moves it to [`CANCELLED`] first, and then nothing is called.
+    gate: Arc<AtomicU8>,
+}
+
+const QUEUED: u8 = 0;
+const STARTED: u8 = 1;
+const CANCELLED: u8 = 2;
+
+/// A call queued by [`Rig::drive`], for [`spawn`].
+struct Start {
+    answer: Sender<Event>,
+    gate: Arc<AtomicU8>,
+    #[cfg(test)]
+    before_gate: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    no_thread: bool,
+}
+
+/// One turn's inputs, in the order `Rig::judge` (`writer.rs`) feeds them (the module doc).
+#[derive(Default)]
+pub(super) struct Turn {
+    /// The device: its generation, a device that runs, the seed's barrier (D1).
+    device: Vec<Event>,
+    /// The call's answer (`Calls::answer`) was received before the turn's view: fed after `device`.
+    answered: bool,
+    /// The latches set, then the timers due.
+    after: Vec<Event>,
 }
 
 enum Timer {
@@ -161,82 +232,115 @@ impl Rig {
         }
     }
 
-    /// This turn's inputs to the restore, in order (the module doc). Empty without a host.
-    pub(super) fn inputs(&self, now: Instant) -> Vec<Event> {
-        let Some(host) = &self.host else { return Vec::new() };
+    /// This turn's inputs to the restore (the module doc): empty without a host, and once close began
+    /// (no host call after it; close reads what it needs itself).
+    pub(super) fn inputs(&self, now: Instant) -> Turn {
+        let mut turn = Turn::default();
+        let Some(host) = &self.host else { return turn };
+        if self.closing.load(Acquire) {
+            return turn;
+        }
         let mut driver = lock(&self.driver);
         let d = &mut *driver;
-        let mut events = Vec::new();
-        if let Some((call, answers)) = &d.call {
-            let answer = match answers.try_recv() {
-                Ok(answer) => Some(answer),
-                Err(TryRecvError::Empty) => None,
-                // The call's thread ended with no answer (it panicked, or never started).
-                Err(TryRecvError::Disconnected) => Some(match call {
-                    Call::Scan => {
-                        log::error!("[rig] the restore's plugin scan ended with no answer; its plugins are held for a later launch");
-                        Event::Scanned(Vec::new())
-                    }
-                    Call::Add => {
-                        log::error!("[rig] a restore add ended with no answer; the unit is held at its place");
-                        let why = "the add ended with no answer".to_string();
-                        Event::AddAnswered(Err(AddFail::Host { why, retry: Retry::Launch, token: None }))
-                    }
-                }),
-            };
-            if let Some(answer) = answer {
-                d.call = None;
-                if let Some(token) = followed(&answer) {
-                    d.watch.push(token);
-                }
-                events.push(answer);
-            }
-        }
-        d.timers.sort_by_key(|(at, _)| *at);
-        let due = d.timers.iter().take_while(|(at, _)| *at <= now).count();
-        for (_, timer) in d.timers.drain(..due) {
-            events.push(match timer {
-                Timer::Seed(volumes) if host.seed(volumes) => Event::Seeded,
-                Timer::Seed(_) => Event::Refused,
-                Timer::Event(event) => event,
-            });
-        }
-        d.watch.retain(|&token| {
-            let exited = host.exited(token);
-            if exited {
-                events.push(Event::LatchSet { token });
-            }
-            !exited
-        });
+        // The answer first, received and not fed: the device's events go to the restore before it.
+        let watch = {
+            let mut calls = lock(&self.calls);
+            receive(&mut calls);
+            turn.answered = calls.answer.is_some();
+            calls.watch.clone()
+        };
         if let Some(gen) = host.device() {
             if d.gen != Some(gen) {
                 d.gen = Some(gen);
-                events.push(Event::GenMoved { gen });
+                turn.device.push(Event::GenMoved { gen });
             }
             if std::mem::take(&mut d.want_device) {
-                events.push(Event::DeviceRuns);
+                turn.device.push(Event::DeviceRuns);
             }
         }
         if d.want_taken {
             match host.wait_taken(TAKEN_WAIT) {
                 SeedTaken::Taken { gen } => {
                     d.want_taken = false;
-                    events.push(Event::Taken { gen });
+                    turn.device.push(Event::Taken { gen });
                 }
                 SeedTaken::Moved { gen } => {
                     d.gen = Some(gen);
-                    events.push(Event::GenMoved { gen });
+                    turn.device.push(Event::GenMoved { gen });
                 }
                 SeedTaken::Pending => {}
             }
         }
+        turn.after.extend(watch.into_iter().filter(|&token| host.exited(token)).map(|token| Event::LatchSet { token }));
+        // Close may have begun during the barrier's wait: the timers (a seed) and the forgets call the
+        // host, so they wait for a turn that never comes.
+        if self.closing.load(Acquire) {
+            return turn;
+        }
+        d.timers.sort_by_key(|(at, _)| *at);
+        let due = d.timers.iter().take_while(|(at, _)| *at <= now).count();
+        for (_, timer) in d.timers.drain(..due) {
+            turn.after.push(match timer {
+                Timer::Seed(volumes) if host.seed(volumes) => Event::Seeded,
+                Timer::Seed(_) => Event::Refused,
+                Timer::Event(event) => event,
+            });
+        }
         d.held_forgets.retain(|&id| host.forget(id) == Forgot::Held);
+        turn
+    }
+
+    /// Close's inputs, read before its feed wait and its view with no host call that can block: the
+    /// call's answer if one is in its channel, and the latch of each attempt followed (a read).
+    pub(super) fn closing_inputs(&self) -> Turn {
+        let Some(host) = &self.host else { return Turn::default() };
+        let watch = {
+            let mut calls = lock(&self.calls);
+            receive(&mut calls);
+            calls.watch.clone()
+        };
+        let after = watch.into_iter().filter(|&token| host.exited(token)).map(|token| Event::LatchSet { token }).collect();
+        Turn { device: Vec::new(), answered: true, after }
+    }
+
+    /// `turn`'s events in the order they are fed, under `inner` (`actions` is its queue): the device's,
+    /// the answer received, then the latches and the timers. At close, an add that never started is
+    /// cancelled and answered (`AddFail::Host`, before the latches): one still queued in `actions`, or
+    /// one whose gate its thread has not passed. The fed latches stop being followed.
+    pub(super) fn fed(&self, turn: Turn, actions: &mut Vec<Action>, at_close: bool) -> Vec<Event> {
+        let mut calls = lock(&self.calls);
+        let mut events = turn.device;
+        if turn.answered {
+            events.extend(calls.answer.take());
+        }
+        if at_close {
+            let queued = actions.iter().any(|a| matches!(a, Action::Add { .. }));
+            actions.retain(|a| !matches!(a, Action::Add { .. }));
+            // A queued scan is cancelled too (no host call after close) and answers nothing: the
+            // restore is closing and waits for no scan.
+            let gated = calls.out.as_ref().filter(|out| out.gate.compare_exchange(QUEUED, CANCELLED, AcqRel, Acquire).is_ok()).map(|out| out.kind);
+            if gated.is_some() {
+                calls.out = None;
+            }
+            if queued || matches!(gated, Some(Call::Add)) {
+                let why = "the app closed before the add started".to_string();
+                events.push(Event::AddAnswered(Err(AddFail::Host { why, retry: Retry::Launch, token: None })));
+            }
+        }
+        calls.watch.retain(|t| !turn.after.contains(&Event::LatchSet { token: *t }));
+        events.extend(turn.after);
         events
     }
 
-    /// Run the restore's queued actions, and those their answers bring, until none is left or close
-    /// began. Without a host they are dropped (the restore is never seeded, so it asks for nothing but
-    /// its first seed).
+    /// Whether the restore's queued actions hold a `Commit`: that commit writes this turn's projection,
+    /// so the tick does not hand the store one ahead of it.
+    pub(super) fn commit_queued(&self) -> bool {
+        lock(&self.inner).actions.contains(&Action::Commit)
+    }
+
+    /// Run the restore's queued actions, and those their answers bring, one at a time, until none is
+    /// left or close began. Without a host they are dropped (the restore is never seeded, so it asks for
+    /// nothing but its first seed).
     pub(super) fn drive(&self, model: &(impl RigModel + ?Sized), now: Instant) {
         let Some(host) = &self.host else {
             lock(&self.inner).actions.clear();
@@ -244,19 +348,29 @@ impl Rig {
         };
         let mut driver = lock(&self.driver);
         loop {
-            let actions = std::mem::take(&mut lock(&self.inner).actions);
-            if actions.is_empty() {
-                return;
-            }
-            for action in actions {
-                if self.closing.load(Acquire) {
+            let (action, start) = {
+                let mut inner = lock(&self.inner);
+                if self.closing.load(Acquire) || inner.actions.is_empty() {
                     return;
                 }
-                let Some(answer) = self.run(host, model, &mut driver, action, now) else { continue };
-                let mut inner = lock(&self.inner);
-                let more = inner.restore.handle(answer);
-                inner.actions.extend(more);
+                let action = inner.actions.remove(0);
+                // A call is registered as it leaves the queue, under `inner`: close finds an add either
+                // still queued or behind its gate.
+                let start = match &action {
+                    Action::Scan(_) => Some(self.queue(Call::Scan)),
+                    Action::Add { .. } => Some(self.queue(Call::Add)),
+                    _ => None,
+                };
+                (action, start)
+            };
+            // No host call once close began; a call registered stays queued, and close cancels it.
+            if self.closing.load(Acquire) {
+                return;
             }
+            let Some(answer) = self.run(host, model, &mut driver, action, start, now) else { continue };
+            let mut inner = lock(&self.inner);
+            let more = inner.restore.handle(answer);
+            inner.actions.extend(more);
         }
     }
 
@@ -265,14 +379,30 @@ impl Rig {
         lock(&self.driver).timers.iter().map(|(at, _)| at.saturating_duration_since(now)).min()
     }
 
+    /// A blocking call out, its gate queued (under `inner`, from `drive`).
+    fn queue(&self, kind: Call) -> Start {
+        let (answer, answers) = mpsc::channel();
+        let gate = Arc::new(AtomicU8::new(QUEUED));
+        let mut calls = lock(&self.calls);
+        calls.out = Some(Out { kind, answers, gate: gate.clone() });
+        Start {
+            answer,
+            gate,
+            #[cfg(test)]
+            before_gate: calls.before_gate.clone(),
+            #[cfg(test)]
+            no_thread: std::mem::take(&mut calls.no_thread),
+        }
+    }
+
     /// One action; the answer to feed now, if it has one (a blocking call's comes at a later turn).
-    fn run(&self, host: &Arc<dyn RestoreHost>, model: &(impl RigModel + ?Sized), d: &mut Driver, action: Action, now: Instant) -> Option<Event> {
+    fn run(&self, host: &Arc<dyn RestoreHost>, model: &(impl RigModel + ?Sized), d: &mut Driver, action: Action, start: Option<Start>, now: Instant) -> Option<Event> {
         match action {
             Action::Seed { volumes, after } => d.timers.push((now + after, Timer::Seed(volumes))),
             Action::WaitTaken => d.want_taken = true,
             Action::WaitDevice => d.want_device = true,
-            Action::Scan(paths) => call(host, d, Call::Scan, move |host| Event::Scanned(host.scan(&paths))),
-            Action::Add { slot, id, spec, place } => call(host, d, Call::Add, move |host| Event::AddAnswered(host.add(slot, id, &spec, &place))),
+            Action::Scan(paths) => spawn(host, start, move |host| Event::Scanned(host.scan(&paths))),
+            Action::Add { slot, id, spec, place } => spawn(host, start, move |host| Event::AddAnswered(host.add(slot, id, &spec, &place))),
             Action::Commit => return self.commit(model),
             Action::CommitMarker(ids) => return self.write(|store| store.write_marker(&marker::text(&ids))),
             Action::RemoveMarker => {
@@ -290,7 +420,7 @@ impl Rig {
             Action::Backoff { after } => d.timers.push((now + after, Timer::Event(Event::BackoffElapsed))),
             Action::Log(line) => log::info!("{line}"),
             // The restore follows no attempt's latch after it.
-            Action::Done => d.watch.clear(),
+            Action::Done => lock(&self.calls).watch.clear(),
         }
         None
     }
@@ -301,7 +431,7 @@ impl Rig {
     fn commit(&self, model: &(impl RigModel + ?Sized)) -> Option<Event> {
         let held = model.gains();
         let view = model.view();
-        let record = self.judge(Vec::new(), held, view, false)?;
+        let record = self.judge(Turn::default(), held, view, false)?;
         let (commit, seen) = {
             let mut disk = lock(&self.disk);
             if self.closing.load(Acquire) || disk.closed {
@@ -348,18 +478,70 @@ impl Rig {
     }
 }
 
-/// Run a blocking call on its own thread; its answer is taken at a later turn. A thread that cannot
-/// start drops its sender, which the next turn reads as no answer.
-fn call(host: &Arc<dyn RestoreHost>, d: &mut Driver, kind: Call, work: impl FnOnce(&dyn RestoreHost) -> Event + Send + 'static) {
-    let (answer, answers) = mpsc::channel();
+/// Run a blocking call on its own thread, `lf-rig-call` (detached: it ends by the host's own bounds,
+/// and no shutdown joins it); its answer is taken at a later turn. The thread passes the gate right
+/// before the host call and calls nothing if close cancelled it first. A thread that cannot start
+/// drops its sender with its gate still queued, which the next turn reads as an add that never started.
+fn spawn(host: &Arc<dyn RestoreHost>, start: Option<Start>, work: impl FnOnce(&dyn RestoreHost) -> Event + Send + 'static) {
+    let Some(start) = start else { return };
+    #[cfg(test)]
+    if start.no_thread {
+        log::error!("[rig] no thread for a restore call (a test's)");
+        return;
+    }
     let host = host.clone();
+    let Start { answer, gate, .. } = start;
+    #[cfg(test)]
+    let before_gate = start.before_gate;
     let spawned = std::thread::Builder::new().name("lf-rig-call".into()).spawn(move || {
-        let _ = answer.send(work(&*host));
+        #[cfg(test)]
+        if let Some(hook) = before_gate {
+            hook();
+        }
+        if gate.compare_exchange(QUEUED, STARTED, AcqRel, Acquire).is_ok() {
+            let _ = answer.send(work(&*host));
+        }
     });
     if let Err(e) = spawned {
         log::error!("[rig] no thread for a restore call ({e})");
     }
-    d.call = Some((kind, answers));
+}
+
+/// Take the call's answer, if one came, from its channel into `calls.answer` (not fed yet), and follow
+/// the attempt it leaves running. A call whose thread ended with no answer: a scan answers that it
+/// found nothing; an add that started answers nothing, and the restore waits on it for the rest of the
+/// launch (its load stays in the marker, as at close); one that never started is a host refusal.
+fn receive(calls: &mut Calls) {
+    if calls.answer.is_some() {
+        return;
+    }
+    let Some(out) = &calls.out else { return };
+    let answer = match out.answers.try_recv() {
+        Ok(answer) => Some(answer),
+        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Disconnected) => match out.kind {
+            Call::Scan => {
+                log::error!("[rig] the restore's plugin scan ended with no answer; its plugins are held for a later launch");
+                Some(Event::Scanned(Vec::new()))
+            }
+            Call::Add if out.gate.load(Acquire) == STARTED => {
+                log::error!("[rig] a restore add ended with no answer after it started; nothing more is restored this launch, and its load stays in the crash marker");
+                None
+            }
+            Call::Add => {
+                log::error!("[rig] a restore add never started; the unit is held at its place");
+                let why = "the add never started".to_string();
+                Some(Event::AddAnswered(Err(AddFail::Host { why, retry: Retry::Launch, token: None })))
+            }
+        },
+    };
+    calls.out = None;
+    if let Some(answer) = answer {
+        if let Some(token) = followed(&answer) {
+            calls.watch.push(token);
+        }
+        calls.answer = Some(answer);
+    }
 }
 
 /// The attempt an add's answer leaves running: its owner's latch is followed until it is set (D5, D6).

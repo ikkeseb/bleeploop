@@ -8,17 +8,18 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use lf_engine::InputSendParam;
 use lf_rig::marker::{self, MarkerRead};
 use lf_rig::{
-    AddFail, AddOk, AddState, Disposition, InstallToken, Notice, Place, PlateState, PlateView, PluginRecord, PluginRefView, Retry, RigRecord,
+    Action, AddFail, AddOk, AddState, Disposition, InstallToken, Notice, Place, PlateState, PlateView, PluginRecord, PluginRefView, Retry, RigRecord,
     RigStatus, RigView, UnitBody, UnitId, UnitKind, UnitParam, UnitRecord, Volumes, SETTLE,
 };
 
 use super::tests::{echo_unit, record, wait_until, Folder};
+use crate::engine_io::test_rig::PATIENCE;
 use super::{files, lock, Forgot, RestoreHost, Rig, RigModel, SeedTaken};
 
 // ── the fake host ───────────────────────────────────────────────────────────────────────────────────
@@ -41,6 +42,18 @@ enum Script {
     /// The add blocks with no plate until the test releases it; then the unit is in the slot, applied
     /// (a plate the host found under its lock), and the add answers `Matched` with its token.
     Appears,
+    /// [`Script::Block`], and the plugin activates as a source.
+    BlockSource,
+    /// The add blocks with no plate until the test releases it; then a host refusal (no plugin code).
+    HostLate,
+    /// The plugin's own setup failed: its failed plate stays, its owner gone.
+    PluginFails,
+    /// The seat was refused after the plugin ran: its failed plate stays, its owner gone.
+    SeatRefused,
+    /// A source the player put in heads the slot: no plate, its owner gone.
+    SourceTaken,
+    /// The call's thread panics inside the add (after its start gate).
+    Panic,
 }
 
 #[derive(Default)]
@@ -69,9 +82,25 @@ struct State {
     release_on_view: Option<UnitId>,
     exited: BTreeSet<InstallToken>,
     forgot: Vec<UnitId>,
+    /// How many times a forget was asked.
+    forget_asks: usize,
+    /// Ids a unit holds for the forget (its files are that unit's), whether or not a plate shows it.
+    reserved: BTreeSet<UnitId>,
+    /// The next this many seeds are refused (the ring full).
+    refuse_seeds: usize,
+    /// The next view takes this long after its copy (a slow turn).
+    slow_view: Option<Duration>,
+    /// Slot A's gain as the settings hold it.
+    gain: Option<f64>,
+    /// At the n-th gain read from now: slot A's gain moves (0.5), the record file is copied into
+    /// `trapped` and replaced by a directory, so the next record write fails.
+    trap: Option<usize>,
+    trapped: Option<Vec<u8>>,
 }
 
 struct FakeHost {
+    /// Itself: the driver's call thread holds one more reference while it runs.
+    me: Weak<FakeHost>,
     dir: PathBuf,
     state: Mutex<State>,
     cv: Condvar,
@@ -90,7 +119,7 @@ impl FakeHost {
             })
             .collect();
         let state = State { next_token: 100, device: Some(1), installed, ..State::default() };
-        Arc::new(FakeHost { dir: folder.0.clone(), state: Mutex::new(state), cv: Condvar::new() })
+        Arc::new_cyclic(|me| FakeHost { me: me.clone(), dir: folder.0.clone(), state: Mutex::new(state), cv: Condvar::new() })
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -132,6 +161,10 @@ impl FakeHost {
 
     fn answered(&self) -> usize {
         self.st().answered
+    }
+
+    fn forget_asks(&self) -> usize {
+        self.st().forget_asks
     }
 
     fn plate(&self, id: UnitId) -> Option<PlateView> {
@@ -190,22 +223,34 @@ fn put(st: &mut State, slot: usize, place: &Place, plate: PlateView) {
 
 impl RigModel for FakeHost {
     fn gains(&self) -> Volumes {
-        [None, None]
+        let mut st = self.st();
+        if let Some(n) = st.trap.as_mut() {
+            *n -= 1;
+            if *n == 0 {
+                st.trap = None;
+                st.gain = Some(0.5);
+                let path = self.dir.join(files().record);
+                st.trapped = Some(std::fs::read(&path).expect("read the record"));
+                std::fs::remove_file(&path).expect("remove the record");
+                std::fs::create_dir(&path).expect("an obstacle at the record's path");
+            }
+        }
+        [st.gain, None]
     }
 
     fn view(&self) -> RigView {
-        let (view, release) = {
+        let (view, release, slow) = {
             let mut st = self.st();
-            (RigView { rev: st.rev, slots: st.slots.clone() }, st.release_on_view.take())
+            (RigView { rev: st.rev, slots: st.slots.clone() }, st.release_on_view.take(), st.slow_view.take())
         };
-        // The copy is taken; the add answers now, before the caller goes on with that copy.
+        // The copy is taken; the add answers now, before the caller goes on with that copy: its call
+        // thread ends once its answer is in the channel.
         if let Some(id) = release {
-            let before = self.answered();
             self.release(id);
-            let st = self.st();
-            drop(self.cv.wait_while(st, |s| s.answered == before).unwrap_or_else(|e| e.into_inner()));
-            // The call thread sends the answer right after the add returns.
-            std::thread::sleep(Duration::from_millis(50));
+            wait_until("the add's thread ended", || self.me.strong_count() == 2);
+        }
+        if let Some(slow) = slow {
+            std::thread::sleep(slow);
         }
         view
     }
@@ -213,7 +258,12 @@ impl RigModel for FakeHost {
 
 impl RestoreHost for FakeHost {
     fn seed(&self, volumes: [f64; 2]) -> bool {
-        self.st().seeds.push(volumes);
+        let mut st = self.st();
+        st.seeds.push(volumes);
+        if st.refuse_seeds > 0 {
+            st.refuse_seeds -= 1;
+            return false;
+        }
         true
     }
 
@@ -241,6 +291,10 @@ impl RestoreHost for FakeHost {
         let mut st = self.st();
         let script = st.scripts.get_mut(&id).and_then(VecDeque::pop_front).unwrap_or(Script::Seat { source: false });
         st.adds.push((slot, id, place.clone(), unit.clone()));
+        if matches!(script, Script::Panic) {
+            drop(st);
+            panic!("the fake's add of unit {id} panics (a test's)");
+        }
         let token = st.next_token;
         st.next_token += 1;
         // The add replaces a failed add's plate under its id.
@@ -264,23 +318,40 @@ impl RestoreHost for FakeHost {
                 }
                 Err(AddFail::Host { why: "refused".into(), retry, token: None })
             }
-            Script::Block | Script::Appears => {
-                let block = matches!(script, Script::Block);
+            Script::PluginFails | Script::SeatRefused => {
+                let mut plate = plate_of(unit, token, PlateState::Failed, false, false);
+                plate.failed_add = true;
+                put(&mut st, slot, place, plate);
+                let why = "failed".to_string();
+                match script {
+                    Script::PluginFails => Err(AddFail::Plugin { why, token, exited: true }),
+                    _ => Err(AddFail::Seat { why, token, exited: true }),
+                }
+            }
+            Script::SourceTaken => Err(AddFail::SourceTaken { why: "a source heads the slot".into(), token, exited: true }),
+            Script::Block | Script::BlockSource | Script::Appears | Script::HostLate => {
+                let block = matches!(script, Script::Block | Script::BlockSource);
                 if block {
                     put(&mut st, slot, place, plate_of(unit, token, PlateState::Loading, false, false));
                 }
                 st = self.cv.wait_while(st, |s| !s.release_all && !s.released.contains(&id)).unwrap_or_else(|e| e.into_inner());
-                if block {
-                    for p in st.slots.iter_mut().flatten().filter(|p| p.added_by == token) {
-                        (p.state, p.applied) = (PlateState::Seated, true);
+                match script {
+                    Script::Block | Script::BlockSource => {
+                        let source = matches!(script, Script::BlockSource);
+                        for p in st.slots.iter_mut().flatten().filter(|p| p.added_by == token) {
+                            (p.state, p.applied, p.source) = (PlateState::Seated, true, source);
+                        }
+                        st.rev += 1;
+                        Ok(AddOk { state: AddState::Seated, token })
                     }
-                    st.rev += 1;
-                    Ok(AddOk { state: AddState::Seated, token })
-                } else {
-                    put(&mut st, slot, place, plate_of(unit, token, PlateState::Seated, true, false));
-                    Ok(AddOk { state: AddState::Matched, token })
+                    Script::Appears => {
+                        put(&mut st, slot, place, plate_of(unit, token, PlateState::Seated, true, false));
+                        Ok(AddOk { state: AddState::Matched, token })
+                    }
+                    _ => Err(AddFail::Host { why: "refused late".into(), retry: Retry::Launch, token: None }),
                 }
             }
+            Script::Panic => unreachable!("panicked above"),
         };
         st.answered += 1;
         self.cv.notify_all();
@@ -291,10 +362,12 @@ impl RestoreHost for FakeHost {
         self.st().exited.contains(&token)
     }
 
-    /// Under the fake's one lock: the id's check and the deletion are one step.
+    /// Under the fake's one lock: the id's check and the deletion are one step. A failed add's plate
+    /// holds no files.
     fn forget(&self, id: UnitId) -> Forgot {
         let mut st = self.st();
-        if st.slots.iter().flatten().any(|p| p.id == id) {
+        st.forget_asks += 1;
+        if st.reserved.contains(&id) || st.slots.iter().flatten().any(|p| p.id == id && !p.failed_add) {
             return Forgot::Held;
         }
         st.forgot.push(id);
@@ -350,6 +423,28 @@ impl Launch {
     fn close(&self) {
         self.rig.close(&*self.fake);
     }
+
+    /// [`Launch::close`], which must not wait on the driver or an add: a close that does fails the
+    /// test by timeout, after its blocked add is let go (so the suite does not hang).
+    fn close_within(&self) {
+        let (done, finished) = mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                self.close();
+                let _ = done.send(());
+            });
+            if finished.recv_timeout(PATIENCE).is_err() {
+                self.fake.release_all();
+                panic!("close waited on the driver or an add");
+            }
+        });
+    }
+
+    /// Wait until the driver's call thread has ended (its answer, if any, is in its channel): the
+    /// fake is then held by the launch and the rig alone.
+    fn call_ended(&self) {
+        wait_until("the call's thread ended", || Arc::strong_count(&self.fake) == 2);
+    }
 }
 
 impl Drop for Launch {
@@ -357,6 +452,10 @@ impl Drop for Launch {
         self.fake.release_all();
     }
 }
+
+/// How far past a timer's instant a test ticks to run it out: a timer counts from its turn's view,
+/// which the real time the turn took moves past the tick's instant (r1, decision 5a).
+const LATE: Duration = Duration::from_secs(1);
 
 // ── fixtures ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -421,15 +520,15 @@ fn restart_brings_same_ids_values_and_file() {
         }
         assert_eq!(l.fake.st().seeds, vec![[0.8, 1.0]], "launch {launch}: one seed, the record's levels");
         assert_eq!(on_disk(&folder), Some(vec![1]), "launch {launch}: the plugin's load settles");
-        l.until(t0 + SETTLE, "the marker goes", || on_disk(&folder).is_none());
+        l.until(t0 + SETTLE + LATE, "the marker goes", || on_disk(&folder).is_none());
         l.close();
         assert_eq!(folder.bytes(files()), before, "launch {launch}: the record file as it was");
-        assert!(tone(&folder, 1).exists(), "launch {launch}: the tone file kept");
+        assert_eq!(std::fs::read_to_string(tone(&folder, 1)).expect("the tone file"), "tone 1", "launch {launch}: the tone file kept");
     }
 }
 
-/// C4, C15: a reload while an add is in its plugin's setup, and again after its settle, starts
-/// nothing: one seed, each unit added once.
+/// C4, C15: a reload while an add is in its plugin's setup, again during its settle, and again after
+/// it, starts nothing: one seed, each unit added once.
 #[test]
 fn reload_under_load_and_settle_adds_nothing() {
     let folder = Folder::new("reload");
@@ -446,9 +545,13 @@ fn reload_under_load_and_settle_adds_nothing() {
     assert_eq!(l.fake.adds(), [1], "a reload under load adds nothing");
     l.fake.release(1);
     l.until(t0, "both are in", || l.fake.applied(1) && l.fake.applied(2));
-    l.until(t0 + SETTLE, "the load settles", || on_disk(&folder).is_none());
+    assert_eq!(on_disk(&folder), Some(vec![1]), "in its settle");
     l.open();
-    l.turns(t0 + SETTLE, 20);
+    l.turns(t0, 20);
+    assert_eq!(l.fake.adds(), [1, 2], "a reload during the settle adds nothing");
+    l.until(t0 + SETTLE + LATE, "the load settles", || on_disk(&folder).is_none());
+    l.open();
+    l.turns(t0 + SETTLE + LATE, 20);
     assert_eq!(l.fake.adds(), [1, 2], "each unit once");
     assert_eq!(l.fake.st().seeds.len(), 1, "one seed");
     assert_eq!(folder.ids(0), vec![1, 2]);
@@ -475,7 +578,7 @@ fn unanswered_then_seated_settles_after_seat() {
     l.until(t1, "restored", || l.disposition(1).is_some_and(|d| matches!(d, Disposition::Restored { .. })));
     l.turns(t1 + SETTLE - Duration::from_millis(1), 10);
     assert_eq!(on_disk(&folder), Some(vec![1]), "its settle runs from the seat");
-    l.until(t1 + SETTLE, "the marker goes", || on_disk(&folder).is_none());
+    l.until(t1 + SETTLE + LATE, "the marker goes", || on_disk(&folder).is_none());
     assert_eq!(folder.ids(0), vec![1]);
 }
 
@@ -668,7 +771,7 @@ fn c26_refuse_a_then_crash_b_reopen_forgets_b_only() {
     assert!(!tone(&folder, 2).exists() && tone(&folder, 1).exists(), "B's tone file goes, A's stays");
     let notice = l.open().expect("told");
     assert_eq!(notice.forgotten, vec!["b".to_string()]);
-    l.until(t0 + SETTLE, "the marker goes", || on_disk(&folder).is_none());
+    l.until(t0 + SETTLE + LATE, "the marker goes", || on_disk(&folder).is_none());
 }
 
 /// C23: the marker names nothing before the first add of any kind, so a crash while a built-in hangs
@@ -710,7 +813,7 @@ fn a_settled_load_leaves_the_marker_while_the_next_add_blocks() {
     let t0 = Instant::now();
     l.open();
     l.until(t0, "the second plugin in setup", || l.fake.adds() == [1, 2] && on_disk(&folder) == Some(vec![1, 2]));
-    l.until(t0 + SETTLE, "the first leaves the marker", || on_disk(&folder) == Some(vec![2]));
+    l.until(t0 + SETTLE + LATE, "the first leaves the marker", || on_disk(&folder) == Some(vec![2]));
     assert_eq!(l.fake.answered(), 1, "the second add still blocks");
 }
 
@@ -766,7 +869,7 @@ fn close_while_owner_in_setup_keeps_marker() {
     let t0 = Instant::now();
     l.open();
     l.until(t0, "the second plugin in setup", || l.fake.adds() == [1, 2] && on_disk(&folder) == Some(vec![1, 2]));
-    l.close();
+    l.close_within();
     assert_eq!(l.fake.answered(), 1, "close did not wait for the add");
     assert_eq!(on_disk(&folder), Some(vec![2]), "the load in setup stays, the settling one goes");
     assert_eq!(folder.ids(0), vec![1, 2]);
@@ -795,4 +898,354 @@ fn close_while_a_restore_add_is_held_keeps_its_entry_and_marker() {
     l.close();
     assert_eq!(on_disk(&folder), Some(vec![1]));
     assert_eq!(folder.ids(0), vec![1, 2], "the held unit keeps its entry at its place");
+}
+
+// ── review round 1's decisions (r1 D2-D7) ───────────────────────────────────────────────────────────
+
+/// A flag a test's hook sets and waits on, bounded.
+#[derive(Default)]
+struct Flag(Mutex<bool>, Condvar);
+
+impl Flag {
+    fn set(&self) {
+        *lock(&self.0) = true;
+        self.1.notify_all();
+    }
+
+    fn is_set(&self) -> bool {
+        *lock(&self.0)
+    }
+
+    fn wait(&self) {
+        let set = lock(&self.0);
+        drop(self.1.wait_timeout_while(set, PATIENCE, |s| !*s).unwrap_or_else(|e| e.into_inner()));
+    }
+}
+
+/// D2: no host call after close. A forget a unit held is asked again at each turn, but not by a tick
+/// after close began: the unit's files stay.
+#[test]
+fn a_held_forget_is_not_asked_again_after_close() {
+    let folder = Folder::new("forget-close");
+    let rec = record(vec![amp(1, "crashed"), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    write_marker(&folder, &[1]);
+    write_tone(&folder, 1);
+    let l = Launch::new(&folder, &rec);
+    l.fake.st().reserved.insert(1);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the forget asked again", || l.fake.forget_asks() >= 2 && l.fake.applied(2));
+    l.close();
+    l.fake.st().reserved.clear();
+    assert!(!l.rig.tick(&*l.fake, t0), "the writer stops at close");
+    assert!(tone(&folder, 1).exists(), "its tone file stays");
+    assert_eq!(l.fake.st().forgot, Vec::<UnitId>::new());
+}
+
+/// D3: close reads the exit latch already set of an attempt it follows. A setup that timed out, its
+/// plate failed, its owner gone just before close: its load is terminal, and the marker does not keep it.
+#[test]
+fn close_reads_an_owner_exit_already_set() {
+    let folder = Folder::new("close-latch");
+    let rec = record(vec![amp(1, "timeout")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::Unresolved]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "its answer is in", || l.disposition(1).is_some_and(|d| matches!(d, Disposition::Issued { token: Some(_) })));
+    l.fake.set(1, PlateState::Failed);
+    l.turns(t0, 5);
+    assert_eq!(on_disk(&folder), Some(vec![1]), "its owner may still be in plugin code");
+    l.fake.exit(l.fake.token(1));
+    l.close_within();
+    assert!(on_disk(&folder).unwrap_or_default().is_empty(), "the marker does not keep a load whose owner is gone");
+    assert_eq!(folder.ids(0), vec![1], "held at its place");
+}
+
+/// D3: close reads an answer already in its channel. A host refusal (no plugin code ran) that came
+/// after the last turn: its load is withdrawn, and the marker does not keep it.
+#[test]
+fn close_reads_an_answer_already_in() {
+    let folder = Folder::new("close-answer");
+    let rec = record(vec![amp(1, "late")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::HostLate]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add is out, named", || l.fake.adds() == [1] && on_disk(&folder) == Some(vec![1]));
+    l.fake.release(1);
+    l.call_ended();
+    l.close_within();
+    assert!(on_disk(&folder).unwrap_or_default().is_empty(), "the marker does not keep a refused load");
+    assert!(matches!(l.disposition(1), Some(Disposition::Held { .. })));
+    assert_eq!(folder.ids(0), vec![1], "held at its place");
+}
+
+/// D4: an add the restore issued and the driver never dispatched is cancelled by close and answered
+/// as a host refusal: the unit is held at its place, not left issued.
+#[test]
+fn close_cancels_an_add_never_dispatched() {
+    let folder = Folder::new("close-queued");
+    let rec = record(vec![echo_unit(1), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::Block]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the first add is out", || l.fake.adds() == [1]);
+    l.fake.release(1);
+    l.call_ended();
+    // One turn's inputs and judgement, without its actions: the next add is queued, never run.
+    let turn = l.rig.inputs(t0);
+    let _ = l.rig.judge(turn, l.fake.gains(), l.fake.view(), false);
+    assert!(lock(&l.rig.inner).actions.iter().any(|a| matches!(a, Action::Add { id: 2, .. })), "the next add is queued");
+    l.close_within();
+    assert!(matches!(l.disposition(2), Some(Disposition::Held { .. })), "{:?}", l.disposition(2));
+    assert_eq!(l.fake.adds(), [1]);
+    assert_eq!(folder.ids(0), vec![1, 2]);
+}
+
+/// D4: an add whose call thread has not passed its start gate when close begins never starts: close
+/// holds the unit, and the thread calls nothing after. Needs the test hook (`Calls::before_gate`).
+#[test]
+fn close_cancels_an_add_before_its_gate() {
+    let folder = Folder::new("close-gate");
+    let rec = record(vec![echo_unit(1)], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    let (entered, go) = (Arc::new(Flag::default()), Arc::new(Flag::default()));
+    let (e, g) = (entered.clone(), go.clone());
+    lock(&l.rig.calls).before_gate = Some(Arc::new(move || {
+        e.set();
+        g.wait();
+    }));
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add's thread at its gate", || entered.is_set());
+    l.close_within();
+    assert!(matches!(l.disposition(1), Some(Disposition::Held { .. })), "{:?}", l.disposition(1));
+    go.set();
+    l.call_ended();
+    assert_eq!(l.fake.adds(), Vec::<UnitId>::new(), "nothing called after close");
+    assert_eq!(folder.ids(0), vec![1]);
+}
+
+/// D5a: a load's settle counts from the turn's view, not the tick's instant: a slow turn moves it on.
+#[test]
+fn a_settle_counts_from_the_turns_view() {
+    let folder = Folder::new("settle-view");
+    let rec = record(vec![amp(1, "slow")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::Block]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add is out", || l.fake.adds() == [1]);
+    l.fake.release(1);
+    l.call_ended();
+    l.fake.st().slow_view = Some(Duration::from_millis(60));
+    l.turns(t0, 1);
+    assert!(l.fake.applied(1));
+    l.turns(t0 + SETTLE + Duration::from_millis(30), 10);
+    assert_eq!(on_disk(&folder), Some(vec![1]), "its settle began after the turn's view");
+    l.until(t0 + SETTLE + LATE, "the marker goes", || on_disk(&folder).is_none());
+}
+
+/// D5b: an add whose thread ended with no answer after it started (a panic) is waited on for the rest
+/// of the launch: no later add, its load kept in the marker, also by close.
+#[test]
+fn an_add_that_ended_unanswered_after_it_started_is_waited_on() {
+    let folder = Folder::new("panic");
+    let rec = record(vec![amp(1, "panics"), amp(2, "next")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::Panic]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add is out", || l.fake.adds() == [1]);
+    l.call_ended();
+    l.turns(t0 + LATE, 20);
+    assert_eq!(l.fake.adds(), [1], "no later add");
+    assert_eq!(on_disk(&folder), Some(vec![1]), "its load stays named");
+    l.close_within();
+    assert_eq!(on_disk(&folder), Some(vec![1]), "close keeps it as an add in flight");
+    assert_eq!(folder.ids(0), vec![1, 2]);
+}
+
+/// D5b: an add whose thread never started is a host refusal: the unit is held at its place, and the
+/// next unit goes. Needs the test hook (`Calls::no_thread`).
+#[test]
+fn an_add_that_never_started_is_held() {
+    let folder = Folder::new("no-thread");
+    let rec = record(vec![echo_unit(1), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    lock(&l.rig.calls).no_thread = true;
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the next unit is in", || l.fake.applied(2));
+    assert!(matches!(l.disposition(1), Some(Disposition::Held { .. })), "{:?}", l.disposition(1));
+    assert_eq!(l.fake.adds(), [2]);
+    assert_eq!(folder.ids(0), vec![1, 2]);
+}
+
+/// D6: a tick never stores ahead of the restore's `Commit`. The source head places the OTT and drops
+/// the ECHO from `pending`; a gain change makes that commit write, and the write fails: the file never
+/// held the placement, and keeps the ECHO in `pending` after.
+#[test]
+fn a_tick_never_stores_a_placement_ahead_of_its_commit() {
+    let folder = Folder::new("place-commit");
+    let mut rec = record(vec![amp(1, "keys")], Vec::new());
+    rec.slots[0].pending = vec![ott_on(10), echo_unit(11)];
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::BlockSource]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add is out", || l.fake.adds() == [1]);
+    l.fake.release(1);
+    l.call_ended();
+    // The tick's gain read, then the commit's: at the second, the file is copied and blocked.
+    l.fake.st().trap = Some(2);
+    l.turns(t0, 1);
+    let trapped = l.fake.st().trapped.take().expect("the commit read the gains");
+    let held = RigRecord::read(&trapped).expect("a record");
+    let pending = |r: &RigRecord| r.slots[0].pending.iter().map(|u| u.id).collect::<Vec<_>>();
+    assert_eq!(pending(&held), vec![10, 11], "the file did not hold the placement before its commit");
+    assert_eq!(held.slots[0].units.iter().map(|u| u.id).collect::<Vec<_>>(), vec![1]);
+
+    let path = folder.path(files());
+    std::fs::remove_dir(&path).expect("lift the obstacle");
+    std::fs::write(&path, &trapped).expect("put the record back");
+    l.until(t0, "the gain is written", || RigRecord::read(&folder.bytes(files())).is_ok_and(|r| r.slots[0].volume == 0.5));
+    let stored = RigRecord::read(&folder.bytes(files())).expect("a record");
+    assert_eq!(pending(&stored), vec![10, 11], "the failed placement keeps the ECHO pending");
+    assert_eq!(l.fake.adds(), [1], "nothing placed is added");
+}
+
+/// D7: an add's answer that comes with a rebuild is fed after the new generation: the next add waits
+/// for the seed's barrier on it.
+#[test]
+fn an_answer_with_a_rebuild_waits_for_the_new_barrier() {
+    let folder = Folder::new("rebuild-between");
+    let rec = record(vec![echo_unit(1), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::Block]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the first add is out", || l.fake.adds() == [1]);
+    {
+        let mut st = l.fake.st();
+        st.device = Some(2);
+        st.hold_taken = true;
+    }
+    l.fake.release(1);
+    l.call_ended();
+    l.turns(t0, 10);
+    assert_eq!(l.fake.adds(), [1], "the next add waits for the new engine's barrier");
+    l.fake.st().hold_taken = false;
+    l.until(t0, "the next unit is in", || l.fake.applied(2));
+    assert_eq!(l.fake.adds(), [1, 2]);
+}
+
+// ── coverage through the driver ─────────────────────────────────────────────────────────────────────
+
+/// A seed the ring refuses is sent again on the restore's backoff; the adds wait for it.
+#[test]
+fn a_refused_seed_is_sent_again() {
+    let folder = Folder::new("seed-refused");
+    let rec = record(vec![echo_unit(1)], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.st().refuse_seeds = 2;
+    let t0 = Instant::now();
+    l.open();
+    l.turns(t0, 10);
+    assert_eq!(l.fake.adds(), Vec::<UnitId>::new(), "not seeded yet");
+    // The first retry is refused too; its backoff runs from that turn.
+    l.turns(t0 + LATE, 5);
+    assert_eq!(l.fake.adds(), Vec::<UnitId>::new(), "refused again");
+    l.until(t0 + 2 * LATE, "seeded and added", || l.fake.applied(1));
+    assert_eq!(l.fake.st().seeds.len(), 3, "two refused, then taken");
+}
+
+/// A plugin whose own setup failed is forgotten: out of the record, its tone file gone, the next unit
+/// added.
+#[test]
+fn a_plugin_failure_forgets_the_unit() {
+    let folder = Folder::new("plugin-fails");
+    let rec = record(vec![amp(1, "fails"), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    write_tone(&folder, 1);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::PluginFails]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "forgotten, the next unit in", || l.fake.applied(2) && !tone(&folder, 1).exists());
+    assert!(matches!(l.disposition(1), Some(Disposition::Forgotten)));
+    assert_eq!(l.fake.st().forgot, vec![1]);
+    assert_eq!(folder.ids(0), vec![2]);
+    l.until(t0, "the marker goes", || on_disk(&folder).is_none());
+}
+
+/// A seat refused after the plugin ran holds the unit at its place, its tone file kept.
+#[test]
+fn a_seat_refusal_holds_the_unit() {
+    let folder = Folder::new("seat-refused");
+    let rec = record(vec![amp(1, "refused"), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    write_tone(&folder, 1);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::SeatRefused]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the next unit is in", || l.fake.applied(2));
+    assert!(matches!(l.disposition(1), Some(Disposition::Held { .. })), "{:?}", l.disposition(1));
+    assert!(tone(&folder, 1).exists());
+    assert_eq!(folder.ids(0), vec![1, 2]);
+    l.until(t0, "the marker goes", || on_disk(&folder).is_none());
+}
+
+/// A source the player put in heads the slot: the record's unit yields to it.
+#[test]
+fn a_source_taken_yields_the_unit() {
+    let folder = Folder::new("source-taken");
+    let rec = record(vec![amp(1, "synth"), echo_unit(2)], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::SourceTaken]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the next unit is in", || l.fake.applied(2));
+    assert!(matches!(l.disposition(1), Some(Disposition::Yielded)), "{:?}", l.disposition(1));
+    assert_eq!(l.fake.adds(), [1, 2]);
+    l.until(t0, "the marker goes", || on_disk(&folder).is_none());
+}
+
+/// A marker write that fails is tried again on the restore's backoff, not at once: the settle's
+/// removal fails behind an obstacle, waits its backoff, and goes once it may.
+#[test]
+fn a_failed_marker_write_waits_its_backoff() {
+    let folder = Folder::new("marker-fault");
+    let rec = record(vec![amp(1, "settles")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "seated, settling", || l.fake.applied(1) && on_disk(&folder) == Some(vec![1]));
+    let path = folder.0.join(files().marker);
+    std::fs::remove_file(&path).expect("remove the marker");
+    std::fs::create_dir(&path).expect("an obstacle at the marker's path");
+    let t1 = t0 + SETTLE + LATE;
+    // The settle's write failed once a timer later than this instant waits: the backoff.
+    l.until(t1, "the write failed, its backoff armed", || l.rig.next_due(t1).is_some_and(|due| !due.is_zero()));
+    std::fs::remove_dir(&path).expect("lift the obstacle");
+    write_marker(&folder, &[1]);
+    l.turns(t1, 10);
+    assert_eq!(on_disk(&folder), Some(vec![1]), "not tried again before its backoff");
+    l.until(t1 + LATE, "the marker goes", || on_disk(&folder).is_none());
 }

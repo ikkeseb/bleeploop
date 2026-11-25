@@ -46,7 +46,7 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   written that launch (the crash marker included). A write commits when it is synced and renamed; a failed
   one is retried at the writer's next tick. The record is a projection of the chain model: each unit the engine applied (until its
   removal is confirmed) and each record unit the restore still holds (while no restore runs, each
-  record unit the chain lacks), at its place, each id once (a unit the player added under a held unit's id wins it once applied); `volume` is
+  record unit the chain does not hold applied), at its place, each id once (a unit the player added under a held unit's id wins it once applied); `volume` is
   the slot gain the settings memory keeps, else the record's. A fresh add enters once applied. The shutdown
   first closes the rig: it takes the chain and the levels as they stand, keeps what the restore had not
   finished at its place, leaves out a unit whose removal is under way (before that removal is confirmed),
@@ -57,8 +57,10 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   restore's first add and before each plugin load, and rewritten as soon as a load ends. A plugin whose
   own load failed leaves it only after the record without that unit is written. A process's first open
   that finds it forgets those units and tells the page until it confirms (the rules: `crates/lf-rig`,
-  `marker.rs`, `restore.rs`). At close the marker keeps each plugin load whose add was issued and has not
-  applied; one that applied goes, also inside its settle (the process lived through it).
+  `marker.rs`, `restore.rs`). At close the marker keeps each plugin load whose add started and has not
+  applied; one that applied goes, also inside its settle (the process lived through it), and so do one
+  whose add had not started (close cancels it) and one whose answer or owner's exit close can already
+  read.
 - **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`), beside
   one per slot and plugin, `slot<n>-<hash>.tone`. A load reads the unit's own file, else its pin
   `unit-<id>.pin`, else the slot's file, which it then pins (empty: the plugin's defaults), so another

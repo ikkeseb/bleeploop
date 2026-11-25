@@ -36,7 +36,7 @@
 //! (while a plate of another attempt holds the id they wait, the files being that plate's, and go at
 //! the first view without one; still owed at close, they stay) and its load leaves the marker.
 //!
-//! **Each id once:** at each view the machine matches each queued unit the model already holds (D9),
+//! **Each id once:** at each view the machine matches each queued unit the model already holds applied (D9),
 //! then drops from the plan every id whose [`Plan::fate`] is [`Fate::Ended`], the rule the projection
 //! writes by. A load no unit can use then leaves the marker by a rewrite: one whose add was never
 //! issued once its unit left the plan, one whose id the player's applied unit won, and one withdrawn

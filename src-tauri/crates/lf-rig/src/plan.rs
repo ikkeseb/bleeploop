@@ -43,7 +43,7 @@ pub enum Disposition {
     Issued { token: Option<InstallToken> },
     /// Its add seated, under this token.
     Restored { token: InstallToken },
-    /// The model already held it (same slot, id, kind and plugin identity, D9): never added.
+    /// The model already held it, applied (same slot, id, kind and plugin identity, D9): never added.
     Matched { token: InstallToken },
     /// Not restored this launch, kept at its place for the next: missing from the scan, a host or seat
     /// refusal, an unresolved add whose owner exited, the restore stopped, no plugin host. `why` is for
@@ -86,7 +86,9 @@ impl Plan {
     /// and this one does not, and (for a held one) no plate holds its id. A token no view has shown ends
     /// nothing: the plan keeps the unit at its place. A `Queued` unit's id held by an applied plate that
     /// is the unit itself (D9's match) does not end it: the restore matches it at that view, so the
-    /// player's removal of that plate ends it as any `Matched` unit's. An `Issued` unit whose add has
+    /// player's removal of that plate ends it as any `Matched` unit's. A plate of the same unit that
+    /// has not applied is no match ([`crate::place::find_match`]): it ends nothing, and its removal
+    /// before it applies leaves the unit at its place. An `Issued` unit whose add has
     /// not answered yet never ends: a plate under its id may be the add's own. What stays open there: a
     /// built-in whose add is out when the app closes is written at its place, even when the player
     /// applied and removed its plate before the add answered.

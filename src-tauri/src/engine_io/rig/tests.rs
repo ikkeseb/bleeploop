@@ -572,6 +572,29 @@ fn a_record_unit_the_player_removed_is_not_written_back() {
     uh.release();
 }
 
+/// `Rig::new` (no restore runs): a plate of the record unit itself that has not applied is no match
+/// (r1, decision 1). The player's attempt leaves before it applies, and the record unit stays at its
+/// place: matched to that attempt, it would have left with it.
+#[test]
+fn a_same_unit_plate_gone_before_it_applied_leaves_the_record_unit() {
+    let device = fast_device();
+    let host = device.host();
+    let folder = Folder::new("unapplied");
+    let amp = plugin("unapplied");
+    let rig = folder.opened(host, &record(vec![plugin_unit(96, &amp)], Vec::new()));
+    let uh = reserve(host, 96, &amp, 0, 0);
+    tick(&rig, host);
+    assert!(!plate(host, 96).applied);
+    assert_eq!(folder.ids(0), vec![96], "held at its place while the attempt loads");
+
+    host.remove_unit(96).expect("remove the attempt");
+    tick(&rig, host);
+    assert!(view(host).slots[0].is_empty(), "the attempt is gone");
+    tick(&rig, host);
+    assert_eq!(folder.ids(0), vec![96], "the record unit stays at its place");
+    uh.release();
+}
+
 // ── the close (D7) ───────────────────────────────────────────────────────────────────────────────────
 
 /// The close takes the chain and the level as they stand, past the last tick: a unit removed, a fader
