@@ -20,9 +20,11 @@ import type {
   PluginInfo,
   PluginParamDesc,
   PluginSlot,
+  RigHost,
   ToneImport,
   UpdateProgress,
 } from './host';
+import { decodeRigAnswer } from './host';
 import { decodeDeviceStatus, decodeFeedFrame, isUnitCommand, type PluginRef, type UnitId } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
@@ -529,8 +531,37 @@ const tauriChainHost: ChainHost = chainNative
       forgetTone: noChain,
     };
 
+const NO_RIG = 'The native rig record is off (enable lf.chainNative in DEV).';
+
 /**
- * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, native `midi` and `input`,
+ * Chain mode's rig record over Tauri IPC (`rig_open`, `rig_import`, `rig_seen`; `src-tauri/crates/lf-rig`
+ * holds their shapes), in lockstep with the chain host: only in DEV with `lf.chainNative`, the commands
+ * registered in a DEV build alone; otherwise every call rejects before any IPC. The import carries this
+ * document's epoch (`host_init`), so a replaced page's import is refused (`'stale'`).
+ */
+const tauriRig: RigHost = chainNative
+  ? {
+      available: true,
+      async open() {
+        return decodeRigAnswer(await invoke<unknown>('rig_open'), 'open');
+      },
+      async import(text) {
+        return decodeRigAnswer(await invoke<unknown>('rig_import', { text, frontendEpoch: requireEpoch() }), 'import');
+      },
+      async seen(id) {
+        await invoke('rig_seen', { id });
+      },
+    }
+  : {
+      available: false,
+      open: () => Promise.reject(new Error(NO_RIG)),
+      import: () => Promise.reject(new Error(NO_RIG)),
+      seen: () => Promise.reject(new Error(NO_RIG)),
+    };
+
+/**
+ * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, its `chain` and `rig` (DEV with
+ * `lf.chainNative`), native `midi` and `input`,
  * the export's save (`exports`), the release log's folder (`logs`) and the updater (`updates`).
  */
 export const tauriPlatform: Platform = {
@@ -538,6 +569,7 @@ export const tauriPlatform: Platform = {
   pluginHost: tauriPluginHost,
   engine: tauriEngineHost,
   chain: tauriChainHost,
+  rig: tauriRig,
   midi: tauriMidi,
   input: tauriInput,
   exports: tauriExports,

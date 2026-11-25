@@ -358,8 +358,14 @@ below reads an old key through the resolver that reads it today, so a missing ke
   OTT in a SYNTH-headed slot's `pending`, every migrating send in the others'; a source-headed slot (a
   SYNTH, or a plugin that activates as one) gets the OTT alone, if it was on. `lf.inputSend.*` stays as it
   is: in chain mode the legacy sends go off on every reset frame and nothing writes their keys.
-- **Rig recall:** `lf.rigRecall` becomes `lf.rig`, written whole before the first load (§1), after a scan of
-  the legacy recall's plugin paths: each slot's plugin a plugin unit with a fresh id (dropped when the
+- **Rig recall:** `lf.rigRecall` becomes the native record (§1) by one handover: a chain-mode page calls
+  `rig.open()` first, and no device opens before it settled (answered, refused, or 2 s without an answer; a
+  later answer still brings its levels and notice); only on `absent` it runs the upgrade and, if the device still runs, calls `rig.import(record)` (5 s at
+  most), which native stores only while it has none (`src/ui/state/rig-recall.ts` `openRig`, `importRig`).
+  An answer of another shape than D13's counts as a refusal. The first chain-mode page of this build deletes `lf.rig` and `lf.rigInFlight` (a DEV record
+  never restored natively). Until every chain-mode page hands over (the browser fake does only with
+  `__lfRigFake`), the WebView's record is `lf.rig`, written whole before the first load (§1). The upgrade
+  runs after a scan of the legacy recall's plugin paths: each slot's plugin a plugin unit with a fresh id (dropped when the
   legacy crash marker is stored, as v0.8.9 would have), else its source as `instrument.ts` resolves
   `lf.slotSource.<n>` (unset: Lead in A, Bass in B, Off on a guitar-first install) as a SYNTH unit or an
   empty chain. A DEV chain already reported on the first reset frame with no record yet is adopted as the
@@ -370,12 +376,12 @@ below reads an old key through the resolver that reads it today, so a missing ke
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
   effect, 0.1 otherwise or when the scan did not find it, `instrument.ts`); an empty input-fed slot
   `lf.slotInputGain.<n>`; a SYNTH slot unity, its instrument levels from `lf.synthGain.<id>` (the input trim
-  never scaled a synth). In chain mode no slot level is sent before the record is known: with no record yet
-  the slot's fader shows the level these rules give from the old keys (the scan kind not yet known), and a
-  level set on it waits for the record's first write. The restore then applies each slot's volume
-  (`SetSlotGain`) and adds nothing until the engine took it and the reset's send-off of the legacy sends;
-  either refused (a briefly full command ring) goes again a short backoff apart until taken, with no reset
-  frame needed. GO LIVE is never restored.
+  never scaled a synth). In chain mode the fader shows what `rig.open` answers (the upgrade's level until
+  the import), and a level gesture is a plain `SetSlotGain`; the player's level always wins over the
+  record's (a gesture over everything before it, a reset frame's slot gain over an answer's); the fader stays
+  where the player put it, and a refused gesture goes again alone until taken or replaced. The reset's send-off of the legacy sends,
+  refused or refused partly (a briefly full command ring), goes again in a batch of its own a short backoff
+  apart until taken, with no reset frame needed. GO LIVE is never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
   `inputChannel` seeding both, as today) each become a mono pick, `null` auto; stereo is the player's (§7).
 - **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.

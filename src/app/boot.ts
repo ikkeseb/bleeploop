@@ -6,15 +6,18 @@ import {
   restorePlugin,
   resyncNativeSlots,
   scanForPlugins,
+  showRigLevels,
 } from '../ui/state/instrument';
-import { recallChains, recallRig, savedRigPaths } from '../ui/state/rig-recall';
+import { importRig, openRig, recallChains, recallRig, savedRigPaths, type SavedRig } from '../ui/state/rig-recall';
 import { boundKinds } from '../ui/state/rig-record';
 import { bindingsKnown, firstPageOfLaunch } from '../ui/state/midi';
-import { setNativeHostReady } from '../ui/state/instrument-slots';
+import { nativeHostReady, setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
-import { mintUnitId, platform } from '../platform';
+import { mintUnitId, platform, type PluginDescriptor } from '../platform';
 import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
 import {
+  engineDevice,
+  holdDeviceOpens,
   legacySendsOff,
   onEngineEvent,
   openEngineDevice,
@@ -39,7 +42,12 @@ import { autosave } from '../session/autosave';
  * the recall is the rig record's (`recallChains`), with or without a plugin host: the upgrade of a v0.8.9
  * profile on its first run, then the restore of each chain unit the reset frame's `chains` lack, from the
  * same scan of their paths (the native host keeps its chains across a WebView reload, so a reload adds
- * nothing; native MIDI's epoch tells a reload from a new launch, `firstPageOfLaunch`). So a
+ * nothing; native MIDI's epoch tells a reload from a new launch, `firstPageOfLaunch`). With the native rig
+ * record (`platform.rig.available`, every native chain-mode page) none of that runs: the page opens the
+ * record first, and no device opens before that open settled (`openRig`, `holdDeviceOpens`; a failure never
+ * stops the audio boot), and only when native has none, once the device and the plugin host run, scans the
+ * legacy recall's plugins, upgrades the old keys and imports the result once while the device still runs
+ * (`importRig`); the restore is native's. So a
  * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
  * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
  * and stays silent. Returns the dispose fn.
@@ -57,12 +65,18 @@ export function bootEngine(): () => void {
   let stopAutosave: (() => void) | null = null;
   let disposed = false;
   if (platform.pluginHost.available) setNativeHostReady(false);
+  // The native rig's open goes first, and no device opens before it settled: boot's, nor one Audio Settings
+  // asks for meanwhile (`holdDeviceOpens`; SEAT-B). It never rejects (a refusal or a timeout is null).
+  const rigNative = platform.chain.available && platform.rig.available;
+  const opening = rigNative ? openRig({ levels: showRigLevels }) : Promise.resolve(null);
+  if (rigNative) holdDeviceOpens(opening);
   void (async () => {
     try {
       if (platform.pluginHost.available) {
         await initAudioDeviceSettings();
         await refreshAndPruneDevices();
       }
+      const opened = await opening;
       await openEngineDevice();
       await whenDevice();
       if (disposed) return;
@@ -71,7 +85,8 @@ export function bootEngine(): () => void {
       if (platform.chain.available) {
         // The rig record's recall instead of legacy `recallRig`, on every chain-mode launch: a SYNTH or an
         // empty rig needs no plugin host. With one, the full scan fills the `+` picker meanwhile and the
-        // restore scans its plugins' own paths; without one, a plugin unit is kept in the record, not added.
+        // restore (or the upgrade) scans its plugins' own paths; without one, a plugin unit is kept in the
+        // record, not added. With the native record, its handover; the WebView's recall stays out.
         const host = platform.pluginHost.available;
         if (host) {
           await platform.pluginHost.init();
@@ -79,27 +94,31 @@ export function bootEngine(): () => void {
           setNativeHostReady(true);
         }
         const full = host ? scanForPlugins() : Promise.resolve();
-        const restored = recallChains({
-          scan: (paths) =>
-            !host || paths.length === 0
-              ? Promise.resolve([])
-              : platform.pluginHost.scanPluginPaths(paths).catch((e: unknown) => {
-                  // The restore waits for the full scan instead.
-                  console.error('[app] rig plugin scan failed', e);
-                  return full.then(() => availablePlugins());
-                }),
-          snapshot: async (scan, legacy) => ({
-            ...legacyRigSnapshot(scan, legacy),
-            sends: storedInputSends(),
-            bound: boundKinds(await bindingsKnown()),
-            reportedVolumes: reportedSlotGains(),
-          }),
-          setVolume: adoptRigVolume,
-          sendsOff: legacySendsOff,
-          firstPage: firstPageOfLaunch,
-          add: (slot, unit, spec, at) => platform.chain.add(slot, unit, spec, at),
-          mint: mintUnitId,
+        const scan = (paths: string[]) =>
+          !host || paths.length === 0
+            ? Promise.resolve([])
+            : platform.pluginHost.scanPluginPaths(paths).catch((e: unknown) => {
+                // The restore waits for the full scan instead.
+                console.error('[app] rig plugin scan failed', e);
+                return full.then(() => availablePlugins());
+              });
+        const legacy = async (found: readonly PluginDescriptor[], saved: SavedRig) => ({
+          ...legacyRigSnapshot(found, saved),
+          sends: storedInputSends(),
+          bound: boundKinds(await bindingsKnown()),
         });
+        const ready = () => engineDevice() !== null && (!host || nativeHostReady());
+        const restored = rigNative
+          ? importRig(opened, { levels: showRigLevels, scan, snapshot: legacy, mint: mintUnitId, ready })
+          : recallChains({
+              scan,
+              snapshot: async (found, saved) => ({ ...(await legacy(found, saved)), reportedVolumes: reportedSlotGains() }),
+              setVolume: adoptRigVolume,
+              sendsOff: legacySendsOff,
+              firstPage: firstPageOfLaunch,
+              add: (slot, unit, spec, at) => platform.chain.add(slot, unit, spec, at),
+              mint: mintUnitId,
+            });
         await full;
         await restored;
         return;
