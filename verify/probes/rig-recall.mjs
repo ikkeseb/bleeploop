@@ -61,6 +61,16 @@
  * frame that already reports a chain, the record adopts it instead of the legacy plugin, at the slot gain
  * the reset frame replays.
  *
+ * The native record's handover (H cases, the same context with the rig fake on, `__lfRigFake`, scripted per
+ * launch as that launch's process holds the record): on `absent` one import, equal to the WebView's upgrade of
+ * the same profile, and no add or slot level from the page; `present`, `unreadable` and `unavailable` import
+ * nothing, the last two with one log line; a reload opens again and imports nothing; the fader shows the reset
+ * frame's slot gain over open's volumes, and the upgrade's level until the import answers, a gesture one plain
+ * `SetSlotGain` that the import's answer does not override; a notice is one toast and one log line per page,
+ * then `seen`, shown again by a reload before `seen` answered; a refused or stale import and a refused open
+ * are one log line each, the device opening anyway; `lf.rig` and `lf.rigInFlight` are deleted before the open,
+ * which comes before the device opens; a refused reset send-off goes again alone until taken.
+ *
  * The native load, the scan, the OS close and a real crash are out of reach here: `pnpm native:recall`
  * covers them on the PC.
  * Run: pnpm probe rig-recall
@@ -165,6 +175,8 @@ function installChainProbe() {
     };
   }
   window.__refuse = cfg.refuse ?? null;
+  // The native record's handover on (`host.web.ts` `RigFake`), scripted as this launch's process holds it.
+  if (cfg.rig) window.__lfRigFake = cfg.rig;
   if (cfg.garbleRig) {
     // A store that lands but reads back other text (the read-back check's case).
     const real = Storage.prototype.getItem;
@@ -542,8 +554,14 @@ await probe(async ({ browser, open }) => {
           + '\n{ const take = webInput.send; webInput.send = (epoch, items) => {'
           + ' const refused = window.__refuse;'
           + ' if (refused && items.map(decodeInputItem).some((it) => \'engine\' in it && typeof it.engine === \'object\' && refused.includes(Object.keys(it.engine)[0])))'
-          + ' return Promise.reject(new Error(\'injected: the command ring is full\'));'
-          + ' return take(epoch, items); }; }\n';
+          + ' { (window.__refusedBatches ??= []).push(items.map(decodeInputItem));'
+          + ' return Promise.reject(new Error(\'injected: the command ring is full\')); }'
+          + ' return take(epoch, items); }; }\n'
+          // The native record's open (`__lfRigFake`): what the page had kept of the WebView's record, and how many
+          // devices it had opened, when it called.
+          + '\n{ const rig = webEngineFake.rig; const open = rig.open; rig.open = () => {'
+          + ' window.__rigOpenSaw = { rig: localStorage.getItem(\'lf.rig\'), inFlight: localStorage.getItem(\'lf.rigInFlight\'), devices: webEngineFake.opened.length };'
+          + ' return open(); }; }\n';
         await route.fulfill({ response, body });
       }),
     ]),
@@ -695,6 +713,8 @@ await probe(async ({ browser, open }) => {
   assert.deepEqual(c.adds, ['A0 1001 plugin'], 'while the head loads, only its add has run');
   assert.ok(c.rigAt[0], 'lf.rig is stored before the first add');
   assert.deepEqual(slotsOf(c.rigAt[0]), UPGRADED, 'lf.rig at the first add: the whole upgraded record');
+  // the WebView's upgrade of the v0.8.9 profile: the native handover imports the same record (H1)
+  const upgradedV089 = c.rigAt[0];
   assert.deepEqual(slotsOf(c.rig), UPGRADED, 'pending kept while the head loads');
   {
     const [a, b] = c.rig.slots;
@@ -1076,6 +1096,155 @@ await probe(async ({ browser, open }) => {
   await cp.evaluate(() => void (window.__refuse = null));
   c = await chainSettle({ adds: 2, refused: true });
   assert.deepEqual(c.adds, ['A0 1001 plugin', 'B0 1002 synth'], 'taken past 10 s with no reset frame: the restore goes on');
+
+  // ── The native record's handover (D12, D13; `rig-recall.ts` `openRig`, `importRig`) ───────────────────
+  // The same chain context with the rig fake on (`__lfRigFake`, scripted per launch as that launch's process
+  // holds the record): the WebView's chain recall stays out, the page opens the record before the device and
+  // imports the upgrade only on `absent`.
+
+  /** Both slots' faders as shown. */
+  const faderValues = () => Promise.all(['A', 'B'].map(async (letter) => {
+    const fader = cp.getByRole('slider', { name: `Volume for slot ${letter}`, exact: true });
+    await fader.waitFor({ timeout: 5000 });
+    return fader.inputValue();
+  }));
+  /** What the handover did: the rig calls in order (an import's text parsed), what the page still kept of the
+   * WebView's record when it opened, the fake's state, the slot gains sent, the adds, the toasts, the keys. */
+  const rigRead = async () => ({
+    ...(await cp.evaluate(() => {
+      const rig = window.__lf.native.rig;
+      const ls = (k) => localStorage.getItem(k);
+      return {
+        calls: rig.calls.map(([name, ...args]) => (name === 'import' ? [name, JSON.parse(args[0])] : [name, ...args])),
+        saw: window.__rigOpenSaw ?? null,
+        state: { status: rig.status, volumes: rig.volumes, notice: rig.notice },
+        gains: window.__lf.native.sent.filter((c) => 'SetSlotGain' in c).map((c) => c.SetSlotGain),
+        adds: window.__chainProbe.adds.length,
+        toasts: window.__lf.notify.toasts().map((t) => `${t.message} x${t.count}`),
+        keys: { rig: ls('lf.rig'), inFlight: ls('lf.rigInFlight'), rigRecall: ls('lf.rigRecall') },
+      };
+    })),
+    faders: await faderValues(),
+  });
+  /** Wait for the handover (`rigRecallDone`), then read it; its `[rig-recall]` lines must match `recall`. */
+  async function rigSettle({ recall = [] } = {}) {
+    await cp.waitForFunction(() => window.__chainProbe.recall.rigRecallFinished(), undefined, { timeout: 20_000 });
+    await cp.waitForTimeout(300);
+    const r = await rigRead();
+    const recallLogs = chainApp.consumeConsoleErrors(/^\[rig-recall\]/);
+    console.log(JSON.stringify({ ...r, calls: r.calls.map(([name]) => name), recallLogs }));
+    assert.equal(recallLogs.length, recall.length, `[rig-recall] lines: ${JSON.stringify(recallLogs)}`);
+    recall.forEach((re, i) => assert.match(recallLogs[i], re));
+    return r;
+  }
+  /** The fake's record as this launch left it: the next page of the same process (a WebView reload) opens it. */
+  const held = (r) => ({ status: r.state.status, volumes: r.state.volumes, notice: r.state.notice });
+  const NOTICE = { id: 7, forgotten: ['Fake Amp (VST3)'], pluginsHeld: false };
+  const FORGOT = 'Could not restore the plugins. Add a plugin again to load it. x1';
+  let r;
+
+  // H1. Absent: one import, equal to the WebView's upgrade of the same v0.8.9 profile (no reported chains),
+  // after the device; no add, no slot level sent; the faders show the import's answer.
+  await chainLaunch({ seed: V089, rig: {} });
+  r = await rigSettle();
+  assert.deepEqual(r.calls, [['open'], ['import', upgradedV089]], 'open, then one import of the upgrade');
+  assert.deepEqual({ adds: r.adds, gains: r.gains, toasts: r.toasts, faders: r.faders }, { adds: 0, gains: [], toasts: [], faders: ['0.8', '1'] });
+  const imported = r;
+
+  // H3. A WebView reload of that process: open again, no import; the faders show open's volumes, but where the
+  // reset frame replays a slot gain (the engine's settings memory), that one.
+  await chainLaunch({ mintFrom: 2001, epochBase: 1, rig: held(imported) });
+  r = await rigSettle();
+  assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains }, { calls: [['open']], faders: ['0.8', '1'], gains: [] }, 'a reload imports nothing');
+  await chainLaunch({ mintFrom: 2001, epochBase: 1, rig: held(imported), settings: [{ SetSlotGain: [1, 0.6] }] });
+  r = await rigSettle();
+  assert.deepEqual({ calls: r.calls, faders: r.faders }, { calls: [['open']], faders: ['0.8', '0.6'] }, 'the reset frame\'s slot gain over open\'s');
+
+  // H2. Present, unreadable, unavailable: no import; one log line for the last two (C20), none for present.
+  for (const [status, recall, faders] of [
+    ['present', [], ['0.7', '1.2']],
+    ['unreadable', [/^\[rig-recall\] the native rig record cannot be read/], ['1', '1']],
+    ['unavailable', [/^\[rig-recall\] the native rig record is unavailable/], ['1', '1']],
+  ]) {
+    await chainLaunch({ seed: V089, rig: { status, volumes: status === 'present' ? [0.7, 1.2] : null } });
+    r = await rigSettle({ recall });
+    assert.deepEqual({ calls: r.calls, faders: r.faders, gains: r.gains, adds: r.adds }, { calls: [['open']], faders, gains: [], adds: 0 }, status);
+  }
+
+  // H4. A notice: one toast and one log line on the page, then `seen(id)`; its answer held, a reload shows it
+  // again (every open answers it until `seen`); confirmed, the next page shows nothing. An unreadable marker's
+  // notice tells its own.
+  await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [1, 1], notice: NOTICE, hold: ['seen'] } });
+  r = await rigSettle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Fake Amp \(VST3\); its plugins are forgotten/] });
+  assert.deepEqual({ calls: r.calls, toasts: r.toasts }, { calls: [['open'], ['seen', 7]], toasts: [FORGOT] }, 'one toast, then seen');
+  await chainLaunch({ epochBase: 1, rig: held(r) });
+  r = await rigSettle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Fake Amp/] });
+  assert.deepEqual({ calls: r.calls, toasts: r.toasts, notice: r.state.notice }, { calls: [['open'], ['seen', 7]], toasts: [FORGOT], notice: null },
+    'a reload before seen shows it again; confirmed now');
+  await chainLaunch({ epochBase: 2, rig: held(r) });
+  r = await rigSettle();
+  assert.deepEqual({ calls: r.calls, toasts: r.toasts }, { calls: [['open']], toasts: [] }, 'seen: no notice on the next page');
+  await chainLaunch({ seed: V089, rig: { notice: { id: 8, forgotten: [], pluginsHeld: true }, hold: ['seen'] } });
+  r = await rigSettle({ recall: [/^\[rig-recall\] the last restore's crash marker could not be read/] });
+  assert.deepEqual({ calls: r.calls.map(([name, x]) => (name === 'import' ? name : [name, x].filter((v) => v !== undefined).join(' '))), toasts: r.toasts },
+    { calls: ['open', 'seen 8', 'import'], toasts: ['Could not restore the plugins this time. Restart BleepLoop to bring them back. x1'] },
+    'told once, though the import answers it again while seen is on its way');
+
+  // H5. Before the import answers, the faders show the upgrade's level; a gesture sends `SetSlotGain` once
+  // and holds against the import's answer (the player's level wins).
+  await chainLaunch({ seed: V089, rig: { hold: ['import'] } });
+  await cp.waitForFunction(() => window.__lf.native.rig.calls.some(([name]) => name === 'import'));
+  assert.deepEqual(await faderValues(), ['0.8', '1'], 'the upgrade\'s levels before the import answers');
+  await cp.getByRole('slider', { name: 'Volume for slot B', exact: true }).fill('0.5');
+  await cp.evaluate(() => window.__lf.native.rig.release('import'));
+  r = await rigSettle();
+  assert.deepEqual({ gains: r.gains, faders: r.faders }, { gains: [[1, 0.5]], faders: ['0.8', '0.5'] }, 'one plain SetSlotGain; the gesture kept');
+
+  // H6. The import refused (a failed write) or stale (a replaced page): one log line, nothing else.
+  for (const [why, line] of [
+    ['injected: the record could not be written', /^\[rig-recall\] could not import the rig record; nothing restored/],
+    ['stale', /^\[rig-recall\] the native rig record refused this page's import: a newer page replaced it/],
+  ]) {
+    await chainLaunch({ seed: V089, rig: { refuse: { import: why } } });
+    r = await rigSettle({ recall: [line] });
+    assert.deepEqual({ calls: r.calls.map(([name]) => name), toasts: r.toasts, gains: r.gains, adds: r.adds, status: r.state.status },
+      { calls: ['open', 'import'], toasts: [], gains: [], adds: 0, status: 'absent' }, why);
+  }
+
+  // H7. The open refused: one log line, and the device still opens (`chainLaunch` waits for it); no import.
+  await chainLaunch({ seed: V089, rig: { refuse: { open: 'rig_open: not registered' } } });
+  r = await rigSettle({ recall: [/^\[rig-recall\] could not open the native rig record/] });
+  assert.deepEqual({ calls: r.calls, adds: r.adds, gains: r.gains }, { calls: [['open']], adds: 0, gains: [] });
+
+  // H8. The DEV cutover: `lf.rig` and `lf.rigInFlight` deleted before the open, which comes before the device
+  // opens; the legacy keys untouched.
+  await chainLaunch({ seed: { ...V089, 'lf.rig': TWO_PLUGINS, 'lf.rigInFlight': '[1001]' }, rig: { status: 'present', volumes: [1, 1] } });
+  r = await rigSettle();
+  assert.deepEqual(r.saw, { rig: null, inFlight: null, devices: 0 }, 'the old keys gone and no device opened at the open');
+  assert.deepEqual(r.keys, { rig: null, inFlight: null, rigRecall: V089['lf.rigRecall'] }, 'nothing writes them back; the legacy keys kept');
+
+  // H9. The engine refuses every batch carrying the reset's send-off of the legacy sends (a full command ring):
+  // the four `SetInputSend false` go again alone until taken, then stop.
+  await chainLaunch({ seed: V089, rig: { status: 'present', volumes: [1, 1] }, refuse: ['SetInputSend'] });
+  await cp.waitForTimeout(1000);
+  {
+    const refusedBatches = await cp.evaluate(() => window.__refusedBatches ?? []);
+    const offs = (items) => items.map((it) => JSON.stringify(it.engine)).join(' ');
+    const alone = ['echo', 'reverb', 'ring', 'ott'].map((id) => JSON.stringify({ SetInputSend: [id, false] })).join(' ');
+    console.log(JSON.stringify({ refused: refusedBatches.map(offs) }));
+    // the reset's batch (the outbox sends a refused batch once more itself), then the resends
+    const [reset, ...rest] = refusedBatches.map(offs);
+    const resends = rest.filter((b) => b !== reset);
+    assert.ok(reset.includes(alone) && reset !== alone, 'the reset\'s batch carries the send-off among the settings');
+    assert.ok(resends.length >= 2 && resends.every((b) => b === alone), `the four send-offs sent again alone while refused: ${resends.length}`);
+  }
+  await cp.evaluate(() => void (window.__refuse = null));
+  await cp.waitForFunction(() => window.__lf.native.sent.filter((c) => c.SetInputSend?.[1] === false).length === 4, undefined, { timeout: 5000 });
+  await cp.waitForTimeout(1000);
+  assert.equal(await cp.evaluate(() => window.__lf.native.sent.filter((c) => 'SetInputSend' in c).length), 4, 'taken once, then no more');
+  assert.ok(chainApp.consumeConsoleErrors(/^\[platform\] input batch failed/).length > 0, 'the refused batches are logged');
+  r = await rigSettle();
+  assert.deepEqual(r.calls, [['open']]);
 
   await chainContext.close();
 });

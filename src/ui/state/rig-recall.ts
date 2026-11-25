@@ -22,8 +22,13 @@
  *   (`updateRig`) holds every write once the record is known (read, or upgraded and stored): the units from
  *   each `chains` report once the restore finished (`rigChainsReported`), a placement, the slot volume
  *   (`keepRigVolume`, at any time; before the record is known, the record takes it then).
+ * - **Chain with the native record** (`platform.rig.available`: natively every chain-mode page, DEV only; on
+ *   the browser fake only with `__lfRigFake`): the record, its writer, the restore and the crash marker are
+ *   the native host's (`src-tauri/crates/lf-rig`); the page hands over the legacy keys' upgrade once
+ *   (`openRig`, `importRig`) and runs none of the chain half above, which goes once every chain-mode page
+ *   hands over.
  */
-import type { ChainState, PluginDescriptor, UnitId, UnitSpec } from '../../platform';
+import { NATIVE_WAIT_MS, platform, within, type ChainState, type PluginDescriptor, type RigAnswer, type UnitId, type UnitSpec } from '../../platform';
 import { notifyError } from '../../notify';
 import { samePluginDescriptor } from './plugin-descriptor';
 import { isPluginFormat } from './plugin-format';
@@ -706,5 +711,117 @@ async function placeSlot(slot: 0 | 1, role: 'source' | 'input', d: ChainRecallDe
         return;
       }
     }
+  }
+}
+
+// ── Chain mode with the native record: the handover (unit contract §1, §6; D12, D13) ────────────────────
+
+/** What the handover needs from the modules that own the fader (`src/app/boot.ts` wires it). */
+export interface RigHandoverDeps {
+  /** Show these levels on the slots' faders (`instrument.ts` `showRigLevels`): an answer's (null: none, the
+   * engine's unity), or the upgrade's own until the import answers. */
+  levels(volumes: [number, number] | null, from: 'answer' | 'upgrade'): void;
+}
+
+/** What the import needs besides (`src/app/boot.ts` wires them). */
+export interface RigImportDeps extends RigHandoverDeps {
+  /** This launch's scan of `paths` (the legacy recall's plugins), the full scan when it fails. */
+  scan(paths: string[]): Promise<readonly PluginDescriptor[]>;
+  /** The old keys through their resolvers, `scan` saying which legacy plugins are found. */
+  snapshot(scan: readonly PluginDescriptor[], legacy: SavedRig): Promise<Omit<LegacySnapshot, 'legacyMarker' | 'reported' | 'reportedVolumes'>>;
+  /** A new unit id (`mintUnitId`). */
+  mint(): UnitId;
+}
+
+/** Whether this page showed a rig notice: one toast per page (a reload's page shows it again until `seen`). */
+let noticeShown = false;
+
+/** Tell the player what the restore forgot or held back (`answer.notice`), once per page, then confirm it to
+ * native (`seen`), which answers it to every open until then. */
+function tellNotice(answer: RigAnswer): void {
+  const notice = answer.notice;
+  if (notice === null || noticeShown) return;
+  noticeShown = true;
+  if (notice.forgotten.length > 0) {
+    const names = notice.forgotten.join(', ');
+    console.error(`[rig-recall] the last launch stopped while restoring ${names}; its plugins are forgotten`);
+    notifyError('Could not restore the plugins. Add a plugin again to load it.', `The last launch stopped while restoring ${names}.`);
+  } else if (notice.pluginsHeld) {
+    console.error("[rig-recall] the last restore's crash marker could not be read; no plugin restored this launch");
+    notifyError('Could not restore the plugins this time. Restart BleepLoop to bring them back.', 'What the last launch was loading could not be read.');
+  }
+  platform.rig.seen(notice.id).catch((e: unknown) => {
+    console.error('[rig-recall] could not confirm the rig notice; the next page shows it again', e);
+  });
+}
+
+/**
+ * The handover's first half, before the device opens (SEAT-B: on `present` native seeds the slot levels and
+ * the send-off before it answers, so the device that opens next replays them): the DEV cutover (D12: `lf.rig`
+ * and `lf.rigInFlight` go, a record never restored natively), then `rig.open()`. Its levels go on the faders
+ * (but `absent`'s: the upgrade's stay until the import answers), its notice to the player. A rejection, or no
+ * answer in NATIVE_WAIT_MS, is one log line and boot goes on without a record this launch, as `unreadable`
+ * (kept, never written over) and `unavailable` (another process owns it) are. Null when it did not answer, or
+ * when this page keeps no rig (a DEV native probe's: `KEYS`, so its run never opens the owner's record).
+ */
+export async function openRig(d: RigHandoverDeps): Promise<RigAnswer | null> {
+  if (!KEYS) return null;
+  for (const key of [KEYS.rig, KEYS.chainMarker]) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* no storage: nothing of the old record to drop */
+    }
+  }
+  let answer: RigAnswer;
+  try {
+    answer = await within(platform.rig.open(), NATIVE_WAIT_MS, 'rig_open');
+  } catch (e) {
+    console.error('[rig-recall] could not open the native rig record; nothing restored or imported this launch', e);
+    d.levels(null, 'answer');
+    return null;
+  }
+  if (answer.status === 'unreadable') {
+    console.error('[rig-recall] the native rig record cannot be read (or a newer build wrote it); left as it is, nothing restored');
+  } else if (answer.status === 'unavailable') {
+    console.error('[rig-recall] the native rig record is unavailable (another BleepLoop owns it, or no data folder); nothing restored or kept this launch');
+  }
+  if (answer.status !== 'absent') d.levels(answer.volumes, 'answer');
+  tellNotice(answer);
+  return answer;
+}
+
+/**
+ * The handover's second half, once the device runs and the plugin host is up: only when `opened` (`openRig`'s
+ * answer) is `absent`, the upgrade of the old keys (§6) from this launch's scan of the legacy recall's plugins,
+ * with no reported chains (D12: native adopts what its model holds), and one `rig.import`, which native stores
+ * only while it has none. The fader shows the upgrade's levels until the import answers, then the answer's. A
+ * refused import (a replaced page: `'stale'`; a failed write: nothing restored, the next launch imports
+ * again) is one log line. Settles `rigRecallDone` in every case.
+ */
+export async function importRig(opened: RigAnswer | null, d: RigImportDeps): Promise<void> {
+  try {
+    if (!KEYS || opened?.status !== 'absent') return;
+    const legacy = readRig();
+    const scan = await d.scan([...new Set(legacy.flatMap((p) => (p ? [p.path] : [])))]);
+    const base = await d.snapshot(scan, legacy);
+    const record = upgradeRig({ ...base, legacyMarker: storedMarker(KEYS.marker) !== null, reported: null }, freshMint(d.mint, new Set()));
+    d.levels([record.slots[0].volume, record.slots[1].volume], 'upgrade');
+    let answer: RigAnswer;
+    try {
+      answer = await platform.rig.import(serializeRig(record));
+    } catch (e) {
+      const stale = e === 'stale' || (e instanceof Error && e.message === 'stale');
+      if (stale) console.error('[rig-recall] the native rig record refused this page\'s import: a newer page replaced it');
+      else console.error('[rig-recall] could not import the rig record; nothing restored, the next launch imports it again', e);
+      d.levels(null, 'answer');
+      return;
+    }
+    d.levels(answer.volumes, 'answer');
+    tellNotice(answer);
+  } catch (e) {
+    console.error("[rig-recall] the rig record's handover failed", e);
+  } finally {
+    finish();
   }
 }

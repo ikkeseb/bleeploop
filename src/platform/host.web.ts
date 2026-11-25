@@ -2,7 +2,7 @@
  * Browser implementation of the capability boundary. Zero Tauri/Rust dependency.
  * This is what `pnpm dev` runs against.
  */
-import type { AppUpdate, AppUpdates, EngineHost, ExportFiles, InputHost, LogFolder, MidiHost, Platform, PluginHost, UpdateProgress } from './host';
+import type { AppUpdate, AppUpdates, EngineHost, ExportFiles, InputHost, LogFolder, MidiHost, Platform, PluginHost, RigAnswer, RigHost, RigNotice, RigStatus, UpdateProgress } from './host';
 import {
   ENGINE_LANES,
   FOUR_FOUR,
@@ -271,6 +271,9 @@ export interface EngineFake extends EngineHost {
   readonly inputs: readonly string[];
   /** The chain per slot (`chain-fake.ts`): its `ChainHost`, its record and its probe seams. */
   readonly chain: ChainFake;
+  /** The native rig record's handover (`RigHost`), scripted: on with the chain fake when an init script sets
+   * `window.__lfRigFake`. */
+  readonly rig: RigFake;
   /**
    * Probe seam, the engine's report: while set, the `Mix` each application owes waits (applied, not yet
    * reported), queued in order, one per changed lane per application (a lane going A, B, A owes three);
@@ -331,6 +334,100 @@ export interface EngineFake extends EngineHost {
    * @public
    */
   midiEmit(raw: unknown): void;
+}
+
+/** A `RigHost` call's name, for the fake's seams. */
+type RigCall = 'open' | 'import' | 'seen';
+
+/**
+ * The native rig record's handover, scripted (`RigHost`; natively `src-tauri/crates/lf-rig`). It stands for
+ * the process's record as `rig_open` reports it: `status`, the `volumes` it answers with `present` and the
+ * `notice` every open answers until `seen(id)` clears it. An import while `absent` is stored: the status goes
+ * `present` and the volumes are the imported record's (no gesture in the settings memory); while a record
+ * exists it answers `present` and stores nothing, as native. Every call is recorded in `calls` as it comes.
+ * Its seams: `refuse` (a call of that name rejects with the reason, `'stale'` the replaced page's import),
+ * `hold` (a call of that name waits until `release(name)`). Seeded from `window.__lfRigFake` (an init script's
+ * `{ status?, volumes?, notice?, refuse?, hold? }`, `hold` a list of names) at its first use; a page reload
+ * starts it again, so a probe hands the state on through that script. Nothing else changes with it: no
+ * restore, no adds (those are the native host's, CP2-CP3's Rust tests).
+ */
+export interface RigFake extends RigHost {
+  status: RigStatus;
+  volumes: [number, number] | null;
+  notice: RigNotice | null;
+  refuse: Partial<Record<RigCall, string>>;
+  readonly calls: [RigCall, ...unknown[]][];
+  /** Let the held calls of `name` answer, and the later ones go through. */
+  release(name: RigCall): void;
+}
+
+interface RigScript {
+  status?: RigStatus;
+  volumes?: [number, number] | null;
+  notice?: RigNotice | null;
+  refuse?: Partial<Record<RigCall, string>>;
+  hold?: RigCall[];
+}
+
+const rigScript = (): RigScript | null => {
+  const script = (globalThis as { __lfRigFake?: unknown }).__lfRigFake;
+  return typeof script === 'object' && script !== null ? (script as RigScript) : null;
+};
+
+let rigFakeMade: RigFake | null = null;
+/** The rig fake, made on first use as the chain fake is (never at module load: the production bundle check). */
+function rigFake(): RigFake {
+  if (rigFakeMade) return rigFakeMade;
+  const script = rigScript() ?? {};
+  const holds = new Map<RigCall, { done: Promise<void>; go: () => void }>();
+  for (const name of script.hold ?? []) {
+    let go!: () => void;
+    holds.set(name, { done: new Promise<void>((resolve) => (go = resolve)), go });
+  }
+  const call = async (name: RigCall, args: unknown[]): Promise<void> => {
+    fake.calls.push([name, ...args]);
+    await holds.get(name)?.done;
+    const why = fake.refuse[name];
+    if (why !== undefined) throw why;
+  };
+  const answer = (): RigAnswer => ({
+    status: fake.status,
+    volumes: fake.status === 'present' ? fake.volumes : null,
+    notice: fake.notice && { ...fake.notice, forgotten: [...fake.notice.forgotten] },
+  });
+  const fake: RigFake = {
+    get available() {
+      return chainPluginsOn() && rigScript() !== null;
+    },
+    status: script.status ?? 'absent',
+    volumes: script.volumes ?? null,
+    notice: script.notice ?? null,
+    refuse: { ...script.refuse },
+    calls: [],
+    release(name) {
+      holds.get(name)?.go();
+      holds.delete(name);
+    },
+    async open() {
+      await call('open', []);
+      return answer();
+    },
+    async import(text) {
+      await call('import', [text]);
+      if (fake.status === 'absent') {
+        const record = JSON.parse(text) as { slots: { volume: number }[] };
+        fake.status = 'present';
+        fake.volumes = [record.slots[0].volume, record.slots[1].volume];
+      }
+      return answer();
+    },
+    async seen(id) {
+      await call('seen', [id]);
+      if (fake.notice?.id === id) fake.notice = null;
+    },
+  };
+  rigFakeMade = fake;
+  return fake;
 }
 
 const NO_ENGINE = 'The native engine is unavailable in the browser build.';
@@ -1061,6 +1158,9 @@ export const webEngineFake: EngineFake = {
   get chain() {
     return chainFake();
   },
+  get rig() {
+    return rigFake();
+  },
   async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.shares.push(endpoint);
@@ -1119,6 +1219,9 @@ export const webPlatform: Platform = {
   engine: webEngineFake,
   get chain() {
     return chainFake().host;
+  },
+  get rig() {
+    return rigFake();
   },
   exports: webExports,
   logs: webLogFolder,

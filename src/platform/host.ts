@@ -11,8 +11,9 @@
  *   - EngineHost   — the native audio engine (`docs/ARCHITECTURE.md`).
  *   - ChainHost    — a slot's chain of units (`docs/unit-contract.md` §2): add, remove, move, reload, by unit.
  *                    Only the browser fake speaks it yet; the Tauri and production hosts refuse every call.
- *   - RigHost      — chain mode's rig record, which the native host owns: the page's one handover. The
- *                    interface only so far; no host implements it, and it is not on `Platform` yet.
+ *   - RigHost      — chain mode's rig record, which the native host owns: the page's one handover. Only
+ *                    the DEV browser fake (`__lfRigFake`) and, natively, a DEV build with `lf.chainNative`
+ *                    speak it; the native side's commands land with the record's writer.
  *   - MidiHost     — native MIDI (`src-tauri/src/engine_io/midi`): its ports, MIDI learn and the stored
  *                    bindings, and what it tells the UI. The app never opens Web MIDI (the WebView's
  *                    permission is denied, and `verify/guards/web-midi.mjs` keeps the Web MIDI API out
@@ -413,12 +414,10 @@ export interface ChainHost {
  * `present` (read, or stored by this import), `absent` (no record file: run the upgrade and import it),
  * `unreadable` (kept, never written over; nothing restored), `unavailable` (no data folder, or another
  * process owns the record).
- * @public CP4a consumes it.
  */
 export type RigStatus = 'present' | 'absent' | 'unreadable' | 'unavailable';
 
-/** What the restore forgot or held back; every `open` answers it until `seen(id)`.
- * @public CP4a consumes it. */
+/** What the restore forgot or held back; every `open` answers it until `seen(id)`. */
 export interface RigNotice {
   id: number;
   /** The display names of the plugin units the crash marker named, now forgotten. */
@@ -427,8 +426,7 @@ export interface RigNotice {
   pluginsHeld: boolean;
 }
 
-/** `rig_open`'s and `rig_import`'s answer (`answer.rs` `RigAnswer`).
- * @public CP4a consumes it. */
+/** `rig_open`'s and `rig_import`'s answer (`answer.rs` `RigAnswer`). */
 export interface RigAnswer {
   status: RigStatus;
   /** Each slot's volume for the fader, A then B (the player's level, else the record's); only with `present`. */
@@ -439,8 +437,8 @@ export interface RigAnswer {
 /**
  * Chain mode's rig record, owned by the native host (`src-tauri/crates/lf-rig`): the page never writes it,
  * and hands over the legacy keys' upgrade once. Natively only in a DEV build with `lf.chainNative`
- * (the `rig_*` commands are DEV-only until chains reach players).
- * @public CP4a implements and consumes it.
+ * (the `rig_*` commands are DEV-only until chains reach players); otherwise every call rejects
+ * (`available` false). A chain-mode page's boot is the one caller (`src/ui/state/rig-recall.ts` `openRig`).
  */
 export interface RigHost {
   readonly available: boolean;
@@ -527,6 +525,7 @@ export interface Platform {
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
   readonly chain: ChainHost;
+  readonly rig: RigHost;
   readonly exports: ExportFiles;
   readonly logs: LogFolder;
   readonly updates: AppUpdates;

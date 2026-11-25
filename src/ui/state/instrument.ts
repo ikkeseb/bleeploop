@@ -36,7 +36,7 @@ import {
   slotUnset,
   withAt,
 } from './instrument-slots';
-import { engineDevice } from './engine-store';
+import { engineDevice, reportedSlotGains } from './engine-store';
 import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
 import { forgetSlotPlugin, keepRigVolume, recallInFlight, rememberSlotPlugin, rigVolumes, savedRig, type SavedRig } from './rig-recall';
@@ -160,11 +160,30 @@ function routeEngine(i: 0 | 1): void {
 // the record is known (`chainLevelKnown`: an engine keeps its own meanwhile; a migrated Off slot never passes
 // its input at unity first): a level set meanwhile lands in the record's first write, and the restore sends
 // it. An unreadable record shows none. Only chain mode reads `lf.rig`: the release never does.
-const rigAtLoad = platform.chain.available ? rigVolumes() : null;
+//
+// With the native rig record (`rigNative`: `platform.rig.available`, the WebView's record above unread) the
+// fader shows the latest reset frame's slot gain (the engine's settings memory, where a gesture lands), else
+// what `rig.open` answered, else the upgrade's level until the import answers (`showRigLevels`); a gesture is
+// a plain `SetSlotGain`, and native keeps it in the record (D2: the player's level wins over the record's).
+const rigNative = platform.chain.available && platform.rig.available;
+const rigAtLoad = platform.chain.available && !rigNative ? rigVolumes() : null;
 const chainLevelKnown: [boolean, boolean] = Array.isArray(rigAtLoad) ? [true, true] : [false, false];
 const [chainGains, setChainGains] = createSignal<[number | null, number | null]>(
-  rigAtLoad === 'absent' ? upgradeLevels() : (rigAtLoad ?? [null, null]),
+  rigNative || rigAtLoad === 'absent' ? upgradeLevels() : (rigAtLoad ?? [null, null]),
 );
+/** `rigNative`: per slot, what the fader's level came from: 1 the upgrade, 2 a rig answer, 3 the engine (a
+ * reset frame's slot gain) or the player's gesture. A level from a lower rank never replaces a higher one. */
+const levelFrom: [number, number] = [1, 1];
+function showLevel(slot: 0 | 1, v: number, rank: number): void {
+  if (rank < levelFrom[slot]) return;
+  levelFrom[slot] = rank;
+  setChainGains((prev) => withAt(prev, slot, Math.max(0, Math.min(SLOT_GAIN_MAX, v))));
+}
+/** The rig handover's levels on the faders (`rig-recall.ts` `openRig`, `importRig`): an answer's (null: it
+ * holds none, so the engine's unity), or the upgrade's until the import answers. */
+export function showRigLevels(volumes: [number, number] | null, from: 'answer' | 'upgrade'): void {
+  for (const slot of [0, 1] as const) showLevel(slot, volumes?.[slot] ?? 1, from === 'upgrade' ? 1 : 2);
+}
 /** Each slot's level as the upgrade derives it from the old keys (the plugin's scan kind not known yet). */
 function upgradeLevels(): [number, number] {
   const { slots } = legacyRigSnapshot([], savedRig());
@@ -268,6 +287,16 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
  */
 export function engineResync(first: boolean): void {
   applyActiveRouting();
+  if (rigNative) {
+    // the engine keeps the slot level natively (the rig's seed, a gesture): shown, never sent from here
+    const kept = reportedSlotGains();
+    for (const slot of [0, 1] as const) {
+      const v = kept[slot];
+      if (v !== null) showLevel(slot, v, 3);
+    }
+    if (first) disarmEngineLive();
+    return;
+  }
   if (platform.chain.available) {
     // the chain's slot level after its chain; SYNTH's levels are its unit's params (unit contract §2, §4)
     for (const slot of [0, 1] as const) {
@@ -756,9 +785,15 @@ export function slotLevel(slot: 0 | 1): number | null {
 }
 
 /** Set slot `slot`'s level (`slotLevel`), heard and recorded; an Off slot's and a synth's are kept
- * for the next launch, and in chain mode the slot's volume in the rig record (`keepRigVolume`). */
+ * for the next launch, and in chain mode the slot's volume in the rig record (`keepRigVolume`; with the
+ * native record a plain `SetSlotGain`, which native keeps). */
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
+  if (rigNative) {
+    showLevel(slot, v, 3);
+    sendEngine({ SetSlotGain: [slot, v] });
+    return;
+  }
   if (platform.chain.available) {
     setChainGains((prev) => withAt(prev, slot, v));
     keepRigVolume(slot, v);

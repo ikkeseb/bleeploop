@@ -1238,12 +1238,12 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     }
   }
   const sent = sendEngine(...lacking);
-  // The rig record's adds wait for a send-off the engine took (`legacySendsOff`). Refused, the send-off alone
-  // goes again a short backoff apart until taken, this engine's reset frame the latest and its device running
-  // (review r2 finding 3: a briefly full ring must not hold the restore until a reset), with no cap (review r3
-  // finding 2); a later reset frame's own send-off takes over, and with no device running the gate settles
-  // refused (the restore adds nothing this launch). The other lacking settings go again at the next reset
-  // frame, as ever.
+  // D11: refused (or refused partly), the send-off alone goes again a short backoff apart until taken, this
+  // engine's reset frame the latest and its device running, with no cap and one log line at 10 s
+  // (`resendUntilTaken`); a later reset frame's own send-off takes over. It covers a DEV process whose earlier
+  // page ran legacy, whichever record the page has (the native rig's restore sends its own, D1). The WebView's
+  // rig record's adds wait for it (`legacySendsOff`): with no device running that gate settles refused (the
+  // restore adds nothing this launch). The other lacking settings go again at the next reset frame, as ever.
   if (chainShown()) {
     const reset = plain.resets;
     const off = INPUT_SENDS.map((id): EngineCommand => ({ SetInputSend: [id, false] }));

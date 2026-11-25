@@ -1026,6 +1026,8 @@ await probe(async ({ open }) => {
           return args.at === 0 ? 'seated' : 'waiting';
         }
         if (cmd === 'chain_reload') return 'reloaded';
+        // the native rig record's handover (`rig_open` under `lf.chainNative`): a record exists, nothing to import
+        if (cmd === 'rig_open') return { status: 'present', volumes: null, notice: null };
         if (cmd === 'chain_list_params') return [{ id: 3, name: 'Gain', minValue: 0, maxValue: 1, defaultValue: 0.5, value: 0.5 }];
         if (cmd === 'chain_tone_take') return args.unit === 11 ? new Uint8Array([1, 2, 3]).buffer : new ArrayBuffer(0);
         if (cmd === 'chain_tone_import') return { token: args[0] === 9 ? 5 : null, name: 'Fake Amp', matches: args[0] === 9 ? [11] : [] };
