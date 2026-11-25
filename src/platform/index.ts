@@ -12,7 +12,7 @@ import { webEngineFake, webPlatform, type EngineFake } from './host.web';
 import { inertPlatform } from './host.inert';
 import { notifyError } from '../notify';
 import { settingsAction } from '../settings-opener';
-import { reportTauriDiagnostics, tauriConfirmClose, tauriOnCloseRequested, tauriPlatform } from './host.tauri';
+import { reportTauriDiagnostics, tauriConfirmClose, tauriDebugAbort, tauriOnCloseRequested, tauriPlatform } from './host.tauri';
 
 const underTauri = isTauri();
 
@@ -55,6 +55,15 @@ export const onNativeCloseRequested: (cb: () => void) => void = underTauri
 export const confirmNativeClose: () => Promise<void> = underTauri
   ? tauriConfirmClose
   : async () => {};
+
+/**
+ * DEV-only: end the native host process at once, as a plugin crashing it would (the storage-kill probe,
+ * `src/debug/storage-kill.ts`). `setAt`: the page's `Date.now()` at the write being measured. Rejects in
+ * the browser build and in a release build (no such command).
+ */
+export const debugAbortHost: (setAt: number) => Promise<void> = underTauri
+  ? tauriDebugAbort
+  : () => Promise.reject(new Error('no native host to abort'));
 
 // ── The outbox: the engine's commands and the UI's input events, in one order ───────────────────────
 

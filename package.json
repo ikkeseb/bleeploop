@@ -34,6 +34,7 @@
     "native:tone-recall": "node scripts/native-probe.mjs tone-recall",
     "native:export-master": "node scripts/native-probe.mjs export-master",
     "native:midi": "node scripts/native-probe.mjs midi-switch",
+    "native:storage-kill": "node scripts/native-probe.mjs storage-kill",
     "release:smoke": "node scripts/release-smoke.mjs",
     "native:spike": "node scripts/native-spike.mjs",
     "native:engine": "node scripts/native-engine.mjs",

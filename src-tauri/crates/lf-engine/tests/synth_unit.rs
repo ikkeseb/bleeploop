@@ -251,8 +251,9 @@ fn unit_phrase(i: Instrument, block: usize, input_latency: Frame) -> Taps {
 // instrument × input side × block size, keyed by the OS that rendered it, so SYNTH keeps a reference
 // once `NoteTarget::Builtin` is gone (`docs/unit-contract.md` §4). Keyed by OS because the synths'
 // oscillators call the platform libm (`exp2` for a detune, the FFT's twiddles: `dsp::oscillator`),
-// whose last bit differs between Windows and Linux (`dsp::fdlibm`). Only an OS of `UNPINNED` (Windows,
-// macOS: no entry generated there yet) may lack its entry, and checks no pin and says so; any other OS
+// whose last bit can differ between platforms (`dsp::fdlibm`; the Windows entry, generated on CI's
+// windows-latest at 64a82f1, came out equal to Linux's in all 84 keys). Only an OS of `UNPINNED` (macOS:
+// no entry generated there yet) may lack its entry, and checks no pin and says so; any other OS
 // without one fails, so a lost entry never turns the pin off. A deliberate change to what the bank sounds regenerates it, on each OS whose entry it
 // keeps (the generator replaces only its own OS's):
 // `cargo test -p lf-engine --test synth_unit -- --ignored write_builtin_pin`.
@@ -273,7 +274,7 @@ fn pin_hashes(t: &Taps) -> serde_json::Value {
 
 /// The OSes the pin has no entry for by design (nobody has generated one there yet). Any other OS
 /// without its entry fails: an entry lost from the fixture must never turn the pin off silently.
-const UNPINNED: [&str; 2] = ["windows", "macos"];
+const UNPINNED: [&str; 1] = ["macos"];
 
 /// This OS's pins: `None` only on an OS of [`UNPINNED`] whose entry is missing.
 fn pins() -> Option<serde_json::Value> {

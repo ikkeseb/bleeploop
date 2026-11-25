@@ -15,6 +15,8 @@
 //     (src/debug/export-master.ts): one launch, on WASAPI
 //   pnpm native:midi  the UI's note sources through native MIDI's router, a WebView reload included
 //     (src/debug/midi-switch.ts): one launch, on WASAPI, the master muted
+//   pnpm native:storage-kill  whether a localStorage write survives app.exe dying 0-2000 ms after it
+//     (src/debug/storage-kill.ts): ten launches, on WASAPI; measures, passes on any outcome
 //   node scripts/native-probe.mjs bench-load --asio  the MIDI benchmark's jam load, held while
 //     `LF_MIDI_BENCH` sends (src/debug/bench-load.ts): one launch, on ASIO 128, the master at 0
 //
@@ -26,7 +28,8 @@
 // only on a clean verdict. A phased probe launches once per phase with `VITE_LF_PROBE_PHASE` set; a
 // phase ends the way its probe says: the app closes itself (`close`), the runner sends its window the
 // OS close on the verdict line, as the close button does (`os-close`: Rust hands it to the app's close
-// guard), or the runner kills app.exe alone on that line, as a crashing plugin would (`crash`). The
+// guard), the runner kills app.exe alone on that line, as a crashing plugin would (`crash`), or the
+// page has app.exe abort itself after that line and the runner waits for it to go (`abort`). The
 // full log lands in logs/native-<probe>.log. Windows node only: the app windows open on the PC desktop.
 
 import { execFileSync, spawn } from 'node:child_process';
@@ -123,6 +126,22 @@ const PROBES = {
     requireLine: /\[midi-bench\] report: /,
     phases: [{ name: 'load', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
+  // A profile of its own (its keys only). Each way of dying writes a stamp and is followed by a launch that
+  // reads it back; `abort-<ms>` has app.exe abort itself <ms> after the write, `kill` is killed by the
+  // runner. `webviewCensus`: after each phase, count the profile's WebView2 processes and wait until they
+  // are gone (up to 30 s), so a launch never reuses the last one's browser process.
+  'storage-kill': {
+    tag: 'storage-kill',
+    config: 'scripts/storage-probe.tauri.json',
+    webviewCensus: true,
+    phases: [0, 50, 500, 2000].flatMap((ms) => [
+      { name: `abort-${ms}`, end: /^(armed: .*|FAIL.*)$/, pass: /^armed: /, exit: 'abort' },
+      { name: `read-abort-${ms}`, end: /^(read: .*|FAIL.*)$/, pass: /^read: /, exit: 'close' },
+    ]).concat([
+      { name: 'kill', end: /^(set: .*|FAIL.*)$/, pass: /^set: /, exit: 'crash' },
+      { name: 'read-kill', end: /^(read: .*|FAIL.*)$/, pass: /^read: /, exit: 'close' },
+    ]),
+  },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
     tag: 'recall',
@@ -138,6 +157,7 @@ const PROBES = {
 };
 const BOOT_MIN = 20; // the first `tauri dev` after a Cargo change compiles for minutes
 const EXIT_WAIT_MS = 60_000; // how long a `close` phase's app may take to quit
+const WEBVIEW_WAIT_MS = 30_000; // how long a census waits for the profile's WebView2 processes to go
 
 const [name, ...args] = process.argv.slice(2);
 const spec = PROBES[name];
@@ -193,6 +213,32 @@ function stopRun(child) {
   return killNative({ cargo: false });
 }
 
+/** How many msedgewebview2.exe processes run on this profile's user data folder (its command line names
+ * the identifier's folder); null when PowerShell could not tell. */
+function webviewCount() {
+  const ps = `@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*${identifier}*' }).Count`;
+  try {
+    return Number(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' }).trim());
+  } catch {
+    return null;
+  }
+}
+
+/** After app.exe is gone: the profile's WebView2 processes then, and how long they took to go (ms; null
+ * when they outlived the wait). */
+async function webviewCensus() {
+  const t0 = Date.now();
+  const atExit = webviewCount();
+  let left = atExit;
+  while (left && Date.now() - t0 < WEBVIEW_WAIT_MS) {
+    await sleep(250);
+    left = webviewCount();
+  }
+  const goneMs = left === 0 ? Date.now() - t0 : null;
+  console.log(`  WebView2: ${atExit ?? '?'} process(es) of this profile when app.exe was seen gone; ${goneMs === null ? `${left ?? '?'} left after ${WEBVIEW_WAIT_MS / 1000} s` : `none after ${goneMs} ms`}`);
+  return { atExit, goneMs };
+}
+
 /**
  * One launch: resolves `{ line, reason, recallLines }` — `line` is the verdict line (null when there
  * was none), `reason` says why not, `recallLines` counts the launch's `[rig-recall]` lines.
@@ -206,6 +252,9 @@ function launch(phase, phaseEnv) {
     let partial = '';
     let recallLines = 0;
     let requiredSeen = false;
+    let killLag = null;
+    let census = null;
+    const lines = [];
     const failLines = [];
     const webviewErrors = [];
     const rustErrors = [];
@@ -216,7 +265,7 @@ function launch(phase, phaseEnv) {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
-      resolve({ line, reason, recallLines, requiredSeen, failLines, webviewErrors, rustErrors, stopped: stopRun(child) });
+      resolve({ line, reason, recallLines, requiredSeen, lines, killLag, census, failLines, webviewErrors, rustErrors, stopped: stopRun(child) });
     };
     // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
     // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
@@ -236,6 +285,13 @@ function launch(phase, phaseEnv) {
           return done(null, 'app.exe was already gone at the crash line');
         }
         console.log(`  killed app.exe ${Date.now() - t0} ms after the in-flight line`);
+        // A line that carries the page's `Date.now()` (`"at":`): the lag from the page to the kill, on the
+        // one system clock both read.
+        const at = Number(line.match(/"at":(\d+)/)?.[1]);
+        if (at) {
+          killLag = { line: t0 - at, kill: Date.now() - at };
+          console.log(`  the line reached the runner ${killLag.line} ms after the page's write; app.exe killed ${killLag.kill} ms after it`);
+        }
       }
       if (phase.exit !== 'kill') {
         const deadline = Date.now() + EXIT_WAIT_MS;
@@ -243,6 +299,7 @@ function launch(phase, phaseEnv) {
           if (Date.now() > deadline) return done(null, `app.exe did not quit within ${EXIT_WAIT_MS / 1000} s after: ${line}`);
           await sleep(500);
         }
+        if (spec.webviewCensus) census = await webviewCensus();
         await sleep(1000); // let the dev run print its last lines
       }
       done(line);
@@ -263,6 +320,7 @@ function launch(phase, phaseEnv) {
         if (msg === undefined) continue;
         seen = true;
         lastLine = Date.now();
+        lines.push(msg);
         if (spec.failLine?.test(msg)) failLines.push(msg);
         if (!/^\s/.test(msg)) console.log(`  [${spec.tag}]${phase.name ? ` ${phase.name}:` : ''} ${msg}`);
         if (verdict === undefined && phase.end.test(msg)) void afterVerdict(msg);
@@ -288,10 +346,12 @@ const phases = spec.phases ?? [{ ...spec, name: null, exit: 'kill' }];
 let handover = null;
 let result = { line: null, reason: 'no phase ran' };
 let ok = true;
+const ran = [];
 for (const phase of phases) {
   const phaseEnv = { ...env, ...(phase.name ? { VITE_LF_PROBE_PHASE: phase.name } : {}) };
   if (handover) phaseEnv.VITE_LF_PROBE_EXPECT = handover;
   result = await launch(phase, phaseEnv);
+  ran.push({ phase, result });
   if (result.stopped.length) console.log(`  stopped ${result.stopped.join(', ')}`);
   ok = result.line !== null && phase.pass.test(result.line);
   if (ok && result.failLines.length) {
@@ -323,14 +383,14 @@ for (const phase of phases) {
     result.reason = `${phase.name}: ${result.recallLines} [rig-recall] line(s), expected ${phase.recallLines}`;
     result.line = null;
   }
-  if (ok && /^(saved|set): /.test(result.line)) handover = result.line.replace(/^\w+: /, '');
+  if (ok && /^(saved|set|armed): /.test(result.line)) handover = result.line.replace(/^\w+: /, '');
   if (!ok) {
     if (phase.name && result.line) result.line = `${phase.name}: ${result.line}`;
     break;
   }
 }
 await new Promise((r) => log.end(r));
-const extra = name === 'restart-survey' && result.line ? `; ${surveySummary()}` : '';
+const extra = name === 'restart-survey' && result.line ? `; ${surveySummary()}` : name === 'storage-kill' ? `; ${storageSummary()}` : '';
 const shown = ok && spec.phases ? `${spec.phases.length} phases, last: ${result.line}` : (result.line ?? result.reason);
 console.log(`\n=== ${name}: ${ok ? 'PASS' : 'FAIL'}: ${shown}${extra} ===`);
 process.exit(ok ? 0 : 1);
@@ -346,4 +406,21 @@ function surveySummary() {
   const failed = (text.match(/\[survey\] LOAD FAILED/g) ?? []).length;
   const byFlag = [...flags].map(([f, n]) => `${f} ${n}`).join(', ');
   return `${vst3} VST3 restartComponent${byFlag ? ` (${byFlag})` : ''}, ${clap} CLAP request_restart line(s), ${failed} load failure(s)`;
+}
+
+// storage-kill's table: per way of dying, the lag from the write to the death, the profile's WebView2
+// processes at app.exe's death and how long they lived on, and whether the read-back found the stamp.
+function storageSummary() {
+  const rows = [];
+  for (const { phase, result } of ran) {
+    if (phase.name.startsWith('read-')) continue;
+    const read = ran.find((r) => r.phase.name === `read-${phase.name}`)?.result.line?.match(/survived=(yes|no)/)?.[1] ?? 'not read';
+    const abortLag = result.lines.map((l) => l.match(/^abort: called (-?\d+) ms after/)?.[1]).find(Boolean);
+    const lag = phase.exit === 'crash' ? (result.killLag ? `${result.killLag.kill} ms (line ${result.killLag.line} ms)` : '?') : abortLag !== undefined ? `${abortLag} ms` : '? (no abort line)';
+    const wv = result.census ? `${result.census.atExit ?? '?'} WebView2 at death, ${result.census.goneMs === null ? 'outlived the wait' : `gone in ${result.census.goneMs} ms`}` : 'WebView2 not counted';
+    const way = phase.exit === 'crash' ? 'runner kill' : `abort after ${phase.name.slice('abort-'.length)} ms`;
+    rows.push(`${way}: write to death ${lag}; ${wv}; survived ${read}`);
+  }
+  console.log(`\nstorage-kill:\n${rows.map((r) => `  ${r}`).join('\n')}`);
+  return rows.map((r) => `${r.split(':')[0]} ${r.match(/survived (.*)$/)[1]}`).join(', ');
 }
