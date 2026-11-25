@@ -10,6 +10,22 @@
   and stamp the loop's stop on the engine's frame. Next check, only if one fails again: loop it under a
   parallel `cargo build` and read the failing line against these bounds.
 
+- A DEV session shares the release profile's tones and scan cache. `tauri dev` and the release share the
+  app's data folder: the rig record is split by build kind (a DEV build keeps its own record and lock), but
+  DEV chain units read and write the same `tones/` folder (`unit-<id>.tone`, `unit-<id>.pin`, a retire into
+  the slot's file), and a DEV scan writes the same scan cache. A never-changed unit's pin is its own, but
+  its retire still overwrites the slot's file when it has a tone file of its own (`retire` copies the unit's
+  file whenever it exists, and `redeem` writes one for an imported tone: `host/tone.rs`), so what is left is a DEV
+  unit the player changed, or one that redeemed an import, retiring into a slot file the release reads,
+  and a DEV scan's cache entries. Not new with the native record (DEV chain units did it before).
+  Next check, before chains reach players: a DEV run on a copy of a release profile, diffing `tones/` and
+  the scan cache after a session; if the release's tones moved, a DEV tone folder of its own with the
+  release's as a read-only fallback.
+- Two shutdowns (the updater's, then the exit's) both run the teardown after the rig's close: the second
+  close waits for the first (bounded), then both threads run `run_shutdown`, so the second may find MIDI
+  already taken and go on to the device's close while the first still drops MIDI. Not new with the rig
+  (the exit's caller is bounded by its 8 s `recv_timeout`). Next check: read `engine_io/mode.rs`'
+  `shutdown` for a once-guard; a test that calls the shutdown twice.
 - Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
@@ -25,6 +41,38 @@
   copies); a disk failure inside `redeem` loses it (pre-existing). Next check: a `chain_cmds_tests.rs` case
   per end on `Chains::add` with a gated fake (`unload_all` from `before_register_hook`; a failing spawn as in
   `p4f1_2a`). The native rig move, whose restore reads the outcome by token, is where the fix lands.
+- The exit latch (`Chains::exited`, D5, D6) sets when the owner thread's last Rust drop ran, before Windows
+  ends the thread: `DLL_THREAD_DETACH` can still run a plugin's `DllMain` for it, so a crash there comes after
+  `exited` read true and the restore may have dropped that load from the crash marker. Setting it only after a
+  join would leave loads unended past close, and the next launch would forget sound plugins. Next check, only
+  if a crash report's stack shows a plugin's `DllMain` at thread detach: whether that load left the marker.
+- The rig restore's seed barrier (D1, `EngineHost::wait_taken`) is checked before each add, so no add
+  starts before the running engine took the seed. An add already started is not covered: its device check
+  (`rig/host.rs` `AppHost::add`) comes before the slot's order lock, so a device that stops while the add
+  waits leaves the kept engine to take its install by idle service; and a rebuild during its plugin's load
+  hands the owner the new engine's terms, so its first install can sit in a port as the new engine's first
+  block takes at most 64 commands of a longer replay and then services the ports
+  (`rig/host_tests.rs` `first_block_can_seat_an_install_ahead_of_a_long_replay`): that unit plays a block
+  or two before the replayed levels and send-offs apply. Next check: none planned; on a report of a
+  restored unit heard at a wrong level right after a device switch, log the block that seats it and the
+  engine generation its add started under.
+- The rig's forget (`Chains::forget_files`) deletes a unit's tone files once no row, live plate or queued
+  removal holds its id; whether a departing owner can still write `unit-<id>.tone` after its row is released
+  is unread. Next check: read the order of `ToneKeeper`'s last write and the row's release in
+  `unit_owner.rs` and `serve_builtin`.
+- A restore add's source while the player's source hides its role in the projection: a parked source
+  that reported itself an effect at its re-activation, or a same-id reload to an effect still queued. The projection (`chain.rs` `projected_engine_ids`) shows an effect at the head,
+  and the engine protects the place (a source goes only at the head: `SeatRefusal::Placement`). The host
+  guard now judges by the role the plate last applied in (`Model::source_role_held`), which reads both
+  as the slot's source, so the add should answer `SourceTaken`, not `Seat(Placement)`: read from source,
+  never run. Next check: a `rig/host_tests.rs` case for each (a fake owner's restart re-activated as an
+  effect and refused; a reload as an effect held in its port), each expecting `SourceTaken`.
+- A join can wait on the loader lock (a sweep's drop, a plugin add's join on its owner's failure or a
+  disconnected answer, pre-existing): a plugin hung in `DllMain` holds it for every thread start and end in
+  the process, so the app stalls whatever the add does. Next check, only on a hang report: the hung process's
+  stacks for `LdrpLoaderLock`.
+- A plugin binary removed between its add's file check (`refused_before_code`) and its load answers `Plugin`,
+  not `Host`, so the next launch forgets that unit (a microsecond window). Next check: none planned.
 - An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
   that command's drop of the handle still tears the plugin down (read from source, never run; no
   command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on

@@ -30,6 +30,7 @@
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms, the scope's columns), on its own thread |
 //! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands, shutdown on exit |
 //! | `midi_mode` | native MIDI's Tauri commands: the UI's one ordered input path (`input_send`: its engine commands, through native MIDI's routing, and its note input), the document's subscription and input epoch (`midi_subscribe`), the learn UI's `midi_*` calls |
+//! | `rig` | chain mode's rig record on disk (`Rig`, one per process): its files and lock, the page's handover (`rig_*`), the writer's tick and the close at shutdown; its rules are `crates/lf-rig` |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
@@ -167,6 +168,9 @@ pub mod mode;
 mod owner;
 pub(crate) mod pipes;
 mod plugins;
+// Its commands are registered in DEV builds only (`lib.rs`); release keeps the close for shutdown.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub mod rig;
 #[cfg(debug_assertions)]
 pub(crate) mod probe;
 mod session;
@@ -185,7 +189,7 @@ mod transition;
 pub(crate) mod unit_host;
 pub mod wire;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -700,6 +704,11 @@ pub(crate) struct Core {
     pub(crate) closing: AtomicBool,
     /// Count of `Event::Seat` protocol mismatches (`Model::on_seat`).
     pub(crate) chain_protocol_errors: AtomicU64,
+    /// The feed's completed drains (`EngineHost::drain_feed_taps`), each bumped under `settings` at
+    /// its end: a count read under `settings` (`EngineHost::feed_passes`) moves only by a drain that
+    /// began after the read, which took every event the engine had published by then. The rig's close
+    /// waits for two (`rig::Rig::close`); nothing on the audio thread reads or writes it.
+    pub(crate) feed_passes: AtomicU64,
     /// Count of gated unit commands dropped because their unit left or missed `GATE_DEADLINE`.
     pub(crate) gate_dropped: AtomicU64,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
@@ -867,6 +876,7 @@ impl Core {
             stash: Mutex::new(chain::Stash::new()),
             closing: AtomicBool::new(false),
             chain_protocol_errors: AtomicU64::new(0),
+            feed_passes: AtomicU64::new(0),
             gate_dropped: AtomicU64::new(0),
             fault: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -1181,6 +1191,12 @@ impl EngineHost {
     /// overview and the ring's count through the command (`Ends::pushed`); `None` with no engine.
     fn push_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<Option<(u64, Arc<Overview>, u64)>, String> {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsSend).map_err(|_| "engine settings poisoned".to_string())?;
+        self.push_locked(&mut settings, commands)
+    }
+
+    /// [`EngineHost::push_all`]'s body, under `settings` (held by the caller, which may decide what to
+    /// send under it: [`EngineHost::seed`]); takes `ends`, then `state` per command.
+    fn push_locked(&self, settings: &mut settings::Settings, commands: impl IntoIterator<Item = TimedCommand>) -> Result<Option<(u64, Arc<Overview>, u64)>, String> {
         let mut ends = lock_at(&self.core.ends, LockSite::EndsSend).map_err(|_| "engine ends poisoned".to_string())?;
         let mut refused = false;
         let mut mark = None;
@@ -1193,7 +1209,7 @@ impl EngineHost {
                     // refill the ring after every block could keep it waiting forever. Entries that may
                     // not go stay held and delay nothing ungated; a ring the flush fills, or found full for an
                     // entry that may go (the next free slot is that entry's), refuses this one.
-                    if !state.gate.is_empty() && unit_host::flush_gate_locked(&self.core, &mut settings, ends, &mut state) {
+                    if !state.gate.is_empty() && unit_host::flush_gate_locked(&self.core, settings, ends, &mut state) {
                         self.core.counters.commands_full.fetch_add(1, Relaxed);
                         return Err("the engine's command ring is full".to_string());
                     }
@@ -1291,6 +1307,73 @@ impl EngineHost {
         }
     }
 
+    /// The rig restore's seed (D1, D2): each slot's level from `volumes` (A, B) as a `SetSlotGain`, but
+    /// for a slot whose gain the settings memory already holds (a gesture's, or an earlier seed's that
+    /// the ring took), and the four input sends off, pushed as one batch. Decided and pushed under one
+    /// `settings` (`push_all`'s order: `settings → ends → state`), so a gesture is never overwritten,
+    /// before or between retries. `Ok(mark)`: the ring took it whole; the mark is the engine generation
+    /// and the ring's count through the batch, `None` with no engine (the settings memory keeps it, and
+    /// the next engine replays it). `Err` when the ring refused it or took part of it: a part it took
+    /// is kept (its levels then count as held, the same values), and the caller sends it again.
+    pub(crate) fn seed(&self, volumes: [f64; 2]) -> Result<Option<(u64, u64)>, String> {
+        let mut settings = lock_at(&self.core.settings, LockSite::SettingsSend).map_err(|_| "engine settings poisoned".to_string())?;
+        let mut held = [false; SLOT_COUNT];
+        for command in settings.replay() {
+            if let Command::SetSlotGain(slot, _) = command {
+                if let Some(h) = held.get_mut(usize::from(slot)) {
+                    *h = true;
+                }
+            }
+        }
+        let gains = (0..SLOT_COUNT).filter(|&s| !held[s]).map(|s| Command::SetSlotGain(s as u8, volumes.get(s).copied().unwrap_or(1.0) as f32));
+        let sends = lf_engine::InputSend::ALL.into_iter().map(|send| Command::SetInputSend(send, false));
+        let batch: Vec<TimedCommand> = gains.chain(sends).map(|command| TimedCommand { frame: None, command }).collect();
+        let mark = self.push_locked(&mut settings, batch)?;
+        Ok(mark.map(|(gen, _, pushed)| (gen, pushed)))
+    }
+
+    /// The running engine's generation (`Core::engine_gen`), `None` while no device runs or no engine
+    /// exists. Read under `ends`, which a rebuild raises the generation under.
+    pub(crate) fn device(&self) -> Option<u64> {
+        let ends = lock_at(&self.core.ends, LockSite::Ends).ok()?;
+        (self.core.running.load(Acquire) && ends.is_some()).then(|| self.core.engine_gen.load(Acquire))
+    }
+
+    /// Wait, at most `within`, until the engine now running took the seed `mark` names (D1's barrier,
+    /// as [`EngineHost::silence_slot`] waits: the engine generation and the ring's count the answer must
+    /// reach, read off that engine's overview, `Overview::commands_taken`). The mark moves with the
+    /// engine: a generation other than its own re-targets it to the new ring's count now, whose replay
+    /// carries the seed (the settings memory kept it), and answers `Moved` at once; a mark of `None` (a
+    /// seed sent with no engine) is set at the first engine seen. `Taken` once that engine's blocks took
+    /// the ring up to the mark; `Pending` when neither happened in time (no device runs, or its blocks
+    /// have not reached it).
+    pub(crate) fn wait_taken(&self, mark: &mut Option<(u64, u64)>, within: Duration) -> rig::SeedTaken {
+        let deadline = Instant::now() + within;
+        loop {
+            {
+                let Ok(ends) = lock_at(&self.core.ends, LockSite::Ends) else { return rig::SeedTaken::Pending };
+                let gen = self.core.engine_gen.load(Acquire);
+                if let Some(ends) = ends.as_ref() {
+                    match *mark {
+                        Some((at, _)) if at != gen => {
+                            *mark = Some((gen, ends.pushed));
+                            return rig::SeedTaken::Moved { gen };
+                        }
+                        None => *mark = Some((gen, ends.pushed)),
+                        Some(_) => {}
+                    }
+                    if mark.is_some_and(|(_, target)| ends.overview.commands_taken() >= target) {
+                        return rig::SeedTaken::Taken { gen };
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return rig::SeedTaken::Pending;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// While no device runs: shut slot `slot`'s live gate in the engine at once until `live_off` (the
     /// overview of the engine whose ring took the live-off, and the ring's count through it) has applied
     /// (`Engine::close_slot_idle`), under the engine lock, as a slot host services its port
@@ -1319,6 +1402,13 @@ impl EngineHost {
     /// The kept settings, in replay order (a reset frame hands them to the UI).
     pub(crate) fn settings(&self) -> Vec<lf_engine::Command> {
         lock_at(&self.core.settings, LockSite::Settings).map(|s| s.replay().collect()).unwrap_or_default()
+    }
+
+    /// The feed's completed drains (`Core::feed_passes`), read under `settings`, so no drain is midway:
+    /// the count moves next by a drain that takes every event the engine published before this call.
+    pub(crate) fn feed_passes(&self) -> u64 {
+        let _settings = lock_at(&self.core.settings, LockSite::Settings);
+        self.core.feed_passes.load(Acquire)
     }
 
     /// Each lane's mix as the engine last reported it (`Event::Mix`), for the lanes it has reported.
@@ -1391,6 +1481,8 @@ impl EngineHost {
             }
         }
         let Some(ends) = ends.as_mut() else {
+            // No engine: nothing is left to drain, and the pass is complete.
+            self.core.feed_passes.fetch_add(1, Release);
             return FeedDrain { gen, overview: None, scope_bin: 0, rate: 0, chains: self.core.chain_snapshot_for(gen), stash_lost };
         };
         let chains = {
@@ -1423,6 +1515,8 @@ impl EngineHost {
                 unit_meters.push(meter);
             }
         }
+        // Still under `settings`: the pass is complete (`Core::feed_passes`).
+        self.core.feed_passes.fetch_add(1, Release);
         FeedDrain { gen, overview: Some(ends.overview.clone()), scope_bin, rate: ends.rate, chains, stash_lost }
     }
 

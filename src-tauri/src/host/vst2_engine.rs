@@ -686,8 +686,10 @@ pub(super) fn run_unit(ctx: UnitCtx, path: String, id: &str) -> Result<(), Strin
 
 /// Create the instance for `id` (the effect's unique id as 8 hex digits) on a context of its own,
 /// bound to this thread as its owner. An instance this host refuses was never called, so it cannot
-/// be closed: its module and its context stay loaded for the rest of the process. A shell (several
-/// plugins in one file) is refused here as the scan refuses it, and closed like any open instance.
+/// be closed: its module and its context stay loaded for the rest of the process, and its code may
+/// still run (a thread its constructor started), so a chain unit owner's load never reads ended
+/// (`unit_owner::abandon_own_exit`). A shell (several plugins in one file) is refused here as the scan
+/// refuses it, and closed like any open instance.
 fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &dyn Place) -> Result<Vst2Plugin, String> {
     let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
     let ctx = HostContext::new(f64::from(rate), slot.max_block().max(1) as i32)?;
@@ -698,6 +700,8 @@ fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &dyn Place
         Ok(effect) => effect,
         Err(OpenError::NoInstance(e)) => return Err(e),
         Err(OpenError::Refused(e)) => {
+            // This load's code outlives its owner: the owner's latch never sets (D5, D6).
+            super::unit_owner::abandon_own_exit();
             if let Some(module) = module {
                 module.leak();
             }

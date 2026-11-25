@@ -54,7 +54,9 @@ use std::time::{Duration, Instant};
 use super::engine_slot::PluginFormat;
 
 /// How long a plugin must go without a change before its tone is saved. A kill loses at most this.
-pub(crate) const SAVE_QUIET: Duration = Duration::from_secs(2);
+/// The rig record's writer waits the same quiet for a value change (`lf_rig::SAVE_QUIET`): one quiet
+/// time for a player's edit, whether it lands in a tone or in the record.
+pub(crate) const SAVE_QUIET: Duration = lf_rig::SAVE_QUIET;
 
 /// The largest state a tone holds. A session import sizes its archive limit from it
 /// (`src/session/archive-limits.ts`, `MAX_TONE_BYTES`); change them together.
@@ -391,6 +393,12 @@ impl ToneStore {
             #[cfg(test)]
             stall: Arc::default(),
         }
+    }
+
+    /// The store's folder: the rig's forget deletes a forgotten unit's files there
+    /// (`Chains::forget_files`).
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
     }
 
     fn path_for(&self, file_name: &str) -> PathBuf {

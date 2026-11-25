@@ -20,6 +20,7 @@ use super::chain_cmds::Chains;
 use super::feed::{FeedHold, FeedThread};
 use super::midi::MidiHost;
 use super::plugins::EngineSlot;
+use super::rig::{self, Rig};
 use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::FeedFrame;
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
@@ -30,8 +31,9 @@ const TONES_DIR: &str = "tones";
 /// Set once, at setup.
 static APP: OnceLock<EngineApp> = OnceLock::new();
 
-/// How long the exit waits for the engine's shutdown (the plugins' unloads, then the device's close).
-const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
+/// How long the exit waits for the engine's shutdown (the plugins' unloads, then the device's close);
+/// a second shutdown's rig close waits as long for the first's (`rig::Rig::close`).
+pub(super) const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
 
 /// This launch's engine; an error when it did not start (the log says why).
 pub fn engine() -> Result<&'static EngineApp, String> {
@@ -55,12 +57,15 @@ pub struct EngineApp {
     /// is held across every call into it ([`EngineApp::with_midi`]), so the shutdown's take waits for a
     /// call in flight and drops it before the host shuts down.
     midi: Mutex<Option<MidiHost>>,
-    pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
-    pub(super) chains: Chains,
+    /// Shared with the rig's restore host (`rig::host::AppHost`), as are `chains` and `tones`.
+    pub(super) slots: Arc<Mutex<[EngineSlot; SLOT_COUNT]>>,
+    pub(super) chains: Arc<Chains>,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
     pub(super) tones: Option<ToneStore>,
     /// A session import's tone, parked for the reload of the slot that held its plugin (`plugins`).
     pub(super) reload_tones: Mutex<ToneHandoff<SLOT_COUNT>>,
+    /// Chain mode's rig record (`engine_io/rig`): opened by the page's `rig_open`, closed first at shutdown.
+    pub(super) rig: Arc<Rig>,
 }
 
 impl EngineApp {
@@ -98,7 +103,7 @@ impl EngineApp {
                 super::midi_bench::start_from_env(&host);
                 // Its bindings beside `plugin-folders.json` (`host/folders.rs`); it registers its rebuild
                 // handshake on the host.
-                let midi = MidiHost::start(Arc::new(host.clone()), data_dir);
+                let midi = MidiHost::start(Arc::new(host.clone()), data_dir.clone());
                 (Some((host, feed)), Some(midi))
             }
             Err(why) => {
@@ -106,13 +111,25 @@ impl EngineApp {
                 (None, None)
             }
         };
+        let slots = Arc::new(Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)));
+        let chains = Arc::new(Chains::new());
+        // The rig's restore drives the engine and the chain host (D10): none when the engine did not start.
+        let rig = Arc::new(match &engine {
+            Some((host, _)) => {
+                let loader = Box::new(rig::host::AppLoader { app: app.clone() });
+                let restore = rig::host::AppHost::new(host.clone(), chains.clone(), slots.clone(), tones.clone(), data_dir.clone(), loader);
+                Rig::with_restore(data_dir, rig::files(), Arc::new(restore))
+            }
+            None => Rig::new(data_dir, rig::files()),
+        });
         EngineApp {
             engine,
             midi: Mutex::new(midi),
-            slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
-            chains: Chains::new(),
+            slots,
+            chains,
             tones,
             reload_tones: Mutex::default(),
+            rig,
         }
     }
 
@@ -147,6 +164,8 @@ impl EngineApp {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
+                // The rig record first takes the chains as they stand and writes nothing after (D7).
+                app.rig.close(host);
                 run_shutdown(
                     host,
                     feed,

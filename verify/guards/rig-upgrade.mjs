@@ -1,32 +1,19 @@
-// verify/guards/rig-upgrade.mjs — the rig record's pure rules (src/ui/state/rig-record.ts, unit contract
-// §1, §6) in plain Node: a v0.8.9 profile's upgrade into `lf.rig` case by case (a plugin slot found or
-// missing from the scan, an effect or not, a stored level; the legacy crash marker; a SYNTH from
-// `lf.slotSource`; unset sources, the guitar-first install's included; an Off slot's input level; each
-// send on, off, at its defaults or not, bound to a pedal or not, no bindings report at all; the OTT, which
-// v0.8.9 never stored, only when on, changed or bound; a SYNTH-headed slot's pending; chains a DEV run
-// reported before any record), ids from an injected mint; the placement of `pending` by the head's role;
-// the record's units from a `chains` report; the record's text, read tolerantly; the fixture native
-// shares (`verify/fixtures/rig-record.json`: a snapshot and the record its upgrade makes, ids minted from 1).
-// What it cannot see: the keys' resolvers (`instrument.ts`, `engine-store.ts`, `midi.ts`), the storage, the
-// restore's order of adds and its marker: the chain-mode cases of verify/probes/rig-recall.mjs and
-// verify/probes/legacy-storage.mjs.
+// verify/guards/rig-upgrade.mjs — the rig record's upgrade (src/ui/state/rig-record.ts, unit contract §6) in
+// plain Node: a v0.8.9 profile's upgrade into the record the page imports, case by case (a plugin slot found
+// or missing from the scan, an effect or not, a stored level; the legacy crash marker; a SYNTH from
+// `lf.slotSource`; unset sources, the guitar-first install's included; an Off slot's input level; each send
+// on, off, at its defaults or not, bound to a pedal or not, no bindings report at all; the OTT, which v0.8.9
+// never stored, only when on, changed or bound; a SYNTH-headed slot's pending), ids from an injected mint;
+// the text the import hands over; the fixture native shares (`verify/fixtures/rig-record.json`: a snapshot
+// and the record its upgrade makes, ids minted from 1). The record's rules from then on (its parse, the
+// placement of `pending`, the units from a report) are native's: `src-tauri/crates/lf-rig`'s tests.
+// What it cannot see: the keys' resolvers (`instrument.ts`, `engine-store.ts`, `midi.ts`), the handover's
+// order and answers: verify/probes/rig-recall.mjs's H cases and verify/probes/legacy-storage.mjs.
 // Run: node verify/guards/rig-upgrade.mjs
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import {
-  addSpec,
-  boundKinds,
-  defaultPluginLevel,
-  headRole,
-  parseRig,
-  placed,
-  serializeRig,
-  storedSlotSource,
-  unitsFromReport,
-  upgradeRig,
-  withPlaced,
-} from '../../src/ui/state/rig-record.ts';
+import { boundKinds, defaultPluginLevel, serializeRig, storedSlotSource, upgradeRig } from '../../src/ui/state/rig-record.ts';
 
 let passed = 0;
 let failed = 0;
@@ -67,7 +54,6 @@ function snap(over = {}) {
     sends: quietSends(),
     bound: { ott: false, ring: false, echo: false, reverb: false },
     legacyMarker: false,
-    reported: null,
     ...over,
   };
 }
@@ -193,26 +179,6 @@ check('ids come from the mint: slot 0 units, its pending, then slot 1', () => {
   assertIdsUnique(all);
 });
 
-check('chains a DEV run reported before any record are adopted whole; the sends still go pending', () => {
-  const reported = [[{ id: 55, kind: 'echo', params: DEFAULTS.echo, bypass: false }], [{ id: 66, kind: 'synth', params: { instrument: 3 }, bypass: false }]];
-  const sends = { ...quietSends(), ott: send('ott', true), reverb: send('reverb', true) };
-  const r = upgradeRig(snap({ reported, sends, slots: [slot({ plugin: { ref: AMP, isEffect: true, stored: 0.3 } }), slot()] }), counter());
-  assert.deepEqual(r.slots[0].units, reported[0]);
-  assert.deepEqual(r.slots[1].units, reported[1]);
-  assert.deepEqual(r.slots.map((s) => s.volume), [1, 1], 'no slot gain reported: unity');
-  assert.deepEqual([kinds(r.slots[0].pending), kinds(r.slots[1].pending)], [['ott', 'reverb'], ['ott']]);
-  assertIdsUnique(r);
-});
-
-check('an adopted chain keeps the slot gain the reset frame replayed; one out of range or absent reads unity', () => {
-  const reported = [[{ id: 55, kind: 'echo', params: DEFAULTS.echo, bypass: false }], []];
-  const vol = (reportedVolumes) => upgradeRig(snap({ reported, reportedVolumes }), counter()).slots.map((s) => s.volume);
-  assert.deepEqual(vol([0.4, null]), [0.4, 1]);
-  assert.deepEqual(vol([9, 0]), [1, 0]);
-  assert.deepEqual(upgradeRig(snap({ reportedVolumes: [0.4, 0.4], slots: [slot({ savedSource: 'off', inputGain: 1.2 }), slot()] }), counter()).slots[0].volume, 1.2,
-    'without adopted chains the reported gain is not read');
-});
-
 // ── the shared fixture (D12: the native record is `lf.rig` v1 unchanged) ─────────────────────────────
 
 check('the fixture: upgradeRig(input) is its record, and serializeRig writes that value (the Rust half: lf-rig tests/fixture.rs)', () => {
@@ -222,86 +188,14 @@ check('the fixture: upgradeRig(input) is its record, and serializeRig writes tha
   assert.deepEqual(JSON.parse(serializeRig(upgraded)), record);
 });
 
-check("the fixture's written records are ones the page writes: parseRig then serializeRig gives each back (bypass omitted, params {})", () => {
-  const { written } = JSON.parse(readFileSync(new URL('../fixtures/rig-record.json', import.meta.url), 'utf8'));
-  assert.ok(written.length > 0);
-  for (const w of written) assert.deepEqual(JSON.parse(serializeRig(parseRig(JSON.stringify(w)))), w);
-});
+// ── the text the import hands over ─────────────────────────────────────────────────────────────────────
 
-// ── placement ──────────────────────────────────────────────────────────────────────────────────────────
-
-const state = (id, over = {}) => ({ id, kind: 'plugin', plugin: AMP, bypass: false, source: false, name: 'Amp', latency: 0, state: 'seated', ...over });
-const plug = { id: 9, kind: 'plugin', plugin: AMP, bypass: false };
-
-check("headRole: none or a built-in effect → input, SYNTH → source, a plugin only once applied", () => {
-  assert.equal(headRole([], []), 'input');
-  assert.equal(headRole([{ id: 3, kind: 'ott' }], []), 'input');
-  assert.equal(headRole([{ id: 3, kind: 'synth' }], []), 'source');
-  assert.equal(headRole([plug], []), null, 'missing from the chain (not in the scan, add not reported)');
-  assert.equal(headRole([plug], [state(9, { state: 'loading' })]), null);
-  assert.equal(headRole([plug], [state(9, { state: 'waiting' })]), null);
-  assert.equal(headRole([plug], [state(9, { state: 'failed', error: 'x' })]), null, 'a failed add is no role: its cause is unknown, the slot keeps its pending');
-  assert.equal(headRole([plug], [state(9)]), 'input');
-  assert.equal(headRole([plug], [state(9, { source: true })]), 'source');
-  assert.equal(headRole([plug], [state(9, { state: 'failed', parked: true, source: true })]), 'source', 'parked keeps its seat');
-});
-
-check('placement: an input-fed chain takes every pending unit at its end; a source-headed one only an OTT that was on', () => {
-  const pending = [{ id: 20, kind: 'ott', bypass: false }, { id: 21, kind: 'ring', bypass: true }, { id: 22, kind: 'echo', bypass: false }];
-  const s = { volume: 0.9, units: [plug], pending };
-  assert.deepEqual(withPlaced(s, 'input'), { volume: 0.9, units: [plug, ...pending] });
-  assert.deepEqual(withPlaced(s, 'source'), { volume: 0.9, units: [plug, pending[0]] });
-  assert.deepEqual(placed({ ...s, pending: [{ ...pending[0], bypass: true }, pending[2]] }, 'source'), [], 'a bypassed OTT is not placed on a source chain');
-});
-
-// ── the writer: a chains report into the record's units ────────────────────────────────────────────────
-
-check('a report writes its units in its order, a failed add\'s plate kept (no cause named); only leaving is dropped', () => {
-  const report = [
-    state(1, { state: 'loading', name: 'Amp 2' }),
-    { id: 2, kind: 'echo', params: DEFAULTS.echo, bypass: true, source: false, name: 'ECHO', latency: 0, state: 'waiting' },
-    state(3, { state: 'leaving' }),
-    state(4, { state: 'failed', error: 'no' }),
-    state(5, { state: 'failed', parked: true, error: 'park' }),
-  ];
-  const out = unitsFromReport([], report, new Set());
-  assert.deepEqual(out.map((u) => u.id), [1, 2, 4, 5]);
-  assert.deepEqual(out[2], { id: 4, kind: 'plugin', plugin: { ...AMP }, bypass: false }, 'the failed plate keeps its id and plugin');
-  assert.deepEqual(out[0], { id: 1, kind: 'plugin', plugin: { ...AMP, name: 'Amp 2' }, bypass: false });
-  assert.deepEqual(out[1], { id: 2, kind: 'echo', params: DEFAULTS.echo, bypass: true });
-});
-
-check('a record unit no report named keeps its place (a missing plugin, an add on its way); one named before is removed', () => {
-  const record = [plug, { id: 10, kind: 'echo', bypass: false }, { id: 11, kind: 'reverb', bypass: false }];
-  const report = [{ id: 11, kind: 'reverb', bypass: false, source: false, name: 'REVERB', latency: 0, state: 'seated' }];
-  assert.deepEqual(unitsFromReport(record, report, new Set([11])).map((u) => u.id), [9, 10, 11]);
-  assert.deepEqual(unitsFromReport(record, report, new Set([10, 11])).map((u) => u.id), [9, 11]);
-});
-
-// ── the record's text ──────────────────────────────────────────────────────────────────────────────────
-
-check('the record round-trips; a plugin keeps its name inside plugin; empty pending is not written', () => {
+check('the text: a plugin keeps its name inside plugin; an empty pending is not written', () => {
+  const plug = { id: 9, kind: 'plugin', plugin: AMP, bypass: false };
   const r = { version: 1, slots: [{ volume: 0.9, units: [plug], pending: [{ id: 4, kind: 'ott', params: DEFAULTS.ott, bypass: true }] }, { volume: 1, units: [], pending: [] }] };
-  const text = serializeRig(r);
-  assert.deepEqual(JSON.parse(text).slots[1], { volume: 1, units: [] });
-  assert.deepEqual(parseRig(text), { ...r, slots: [r.slots[0], { volume: 1, units: [] }] });
-  assert.equal(JSON.parse(text).slots[0].units[0].plugin.name, 'Amp');
-});
-
-check('parse is tolerant: unreadable → absent; a bad unit, an unknown param or a reused id is skipped; a bad volume reads 1', () => {
-  for (const raw of [null, '', '{', '[]', '{"version":2,"slots":[{},{}]}', '{"version":1,"slots":[{}]}', '{"version":1,"slots":[1,2]}']) {
-    assert.equal(parseRig(raw), null, String(raw));
-  }
-  const raw = JSON.stringify({ version: 1, slots: [
-    { volume: 9, units: [{ id: 0, kind: 'ott' }, { id: 1, kind: 'flanger' }, { id: 2, kind: 'ott', params: { ottDepth: 0.2, wobble: 1, ottTime: 'x' } }, { id: 3, kind: 'plugin', plugin: { format: 'au', path: 'p', id: 'i' } }] },
-    { volume: 0.5, units: [{ id: 2, kind: 'echo' }], pending: [{ id: 4, kind: 'ring', bypass: 'yes' }] },
-  ] });
-  assert.deepEqual(parseRig(raw), { version: 1, slots: [{ volume: 1, units: [{ id: 2, kind: 'ott', params: { ottDepth: 0.2 } }] }, { volume: 0.5, units: [] }] });
-});
-
-check("add's spec leaves the record's plugin name off the wire", () => {
-  assert.deepEqual(addSpec({ ...plug, plugin: AMP }), { kind: 'plugin', plugin: { format: 'vst3', path: AMP.path, id: 'amp.id' }, bypass: false });
-  assert.deepEqual(addSpec({ id: 5, kind: 'echo', params: { echoLevel: 1 }, bypass: true }), { kind: 'echo', params: { echoLevel: 1 }, bypass: true });
+  const text = JSON.parse(serializeRig(r));
+  assert.deepEqual(text, { version: 1, slots: [r.slots[0], { volume: 1, units: [] }] });
+  assert.equal(text.slots[0].units[0].plugin.name, 'Amp');
 });
 
 console.log(`=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);

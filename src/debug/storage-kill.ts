@@ -1,8 +1,8 @@
 /**
- * DEV probe: does a `localStorage.setItem` survive the host process dying shortly after it? The rig
- * restore's crash marker (`lf.rigInFlight`, `src/ui/state/rig-recall.ts`) is written that way just before
- * each plugin add; if WebView2 has not kept the write when a plugin crashes app.exe milliseconds later,
- * the marker cannot catch a fast crash. WebView2 keeps localStorage in its own browser process
+ * DEV probe: does a `localStorage.setItem` survive the host process dying shortly after it? Legacy rig
+ * recall's crash marker (`lf.rigRecallInFlight`, `src/ui/state/rig-recall.ts`) is written that way just
+ * before its first plugin load; if WebView2 has not kept the write when a plugin crashes app.exe
+ * milliseconds later, the marker cannot catch a fast crash (chain mode's marker is the native host's file). WebView2 keeps localStorage in its own browser process
  * (msedgewebview2.exe), not app.exe: the runner counts this profile's WebView2 processes at app.exe's
  * death and waits for them to go before the next launch, so a read never reuses the dead launch's browser
  * process. `pnpm native:storage-kill` launches the app once per phase (`VITE_LF_PROBE_PHASE`):

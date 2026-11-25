@@ -75,6 +75,14 @@ pub(crate) struct Plate {
     /// Reload candidate's pending plugin ref and activation info until its install applies.
     pub(crate) reload_plugin: Option<PluginRef>,
     pub(crate) reload_activated: Option<Activated>,
+    /// The install token `EngineHost::unit` minted for the add that created this plate. A plate is
+    /// created per add, so a reused id has a new token: the rig record never carries a fact of one
+    /// unit over to the next under the same id (`lf_rig::PlateView::added_by`).
+    pub(crate) added_by: InstallToken,
+    /// Set at the plate's first applied install, in both places an install applies (`on_seat`'s
+    /// `Applied`, a rebuild's settle), and never cleared: a reload, a rebuild, a withdrawal or a park
+    /// keeps it. The rig record holds a unit only once it applied (`lf_rig::project`, D4).
+    pub(crate) applied: bool,
 }
 
 impl Plate {
@@ -490,9 +498,49 @@ impl Model {
             .is_some_and(|p| p.source)
     }
 
-    /// Add a new plate at plate index `at`. If an un-removed failed-add plate already carries `id`,
-    /// it is cleared first (its id was freed by `failed()`).
-    pub(crate) fn add_plate(&mut self, slot: usize, id: UnitId, spec: &Spec, at: usize, bypassed: bool) {
+    /// A host add's match (D9), under `state` before its mint: `Some(Ok(token))` when a live plate of
+    /// `slot` already is the unit (id `id`, the kind and plugin identity `spec` names, applied, neither a
+    /// failed add nor `Leaving`), with that plate's `added_by`; `Some(Err(why))` when another plate holds
+    /// the id (the other slot, another kind or plugin, a `Leaving` one, or this unit's that has not
+    /// applied yet: its own add may still fail, and adding beside it would double it); `None` when no
+    /// plate holds it (a failed add's does not: the add replaces it).
+    pub(crate) fn host_match(&self, slot: usize, id: UnitId, spec: &Spec) -> Option<Result<InstallToken, String>> {
+        let (s, plate) = self.find_plate(id).filter(|(_, p)| !p.is_failed_add())?;
+        let same = match spec {
+            Spec::Plugin(plugin) => plate.kind == UnitKind::Plugin && plate.plugin.as_ref() == Some(plugin),
+            Spec::Builtin { kind, .. } => plate.kind == *kind && plate.plugin.is_none(),
+            Spec::Legacy => false,
+        };
+        if s == slot && !plate.legacy && same && plate.applied && plate.state != PlateState::Leaving {
+            return Some(Ok(plate.added_by));
+        }
+        Some(Err(format!("unit id {id} is held by another unit, or by this one still loading or leaving")))
+    }
+
+    /// A host add's plate index (D9), under `state`: right after the nearest of `place`'s record units
+    /// (nearest last) that is a plate of `slot` now, else at the head: after the slot's source, when its
+    /// first plate is one (an effect never goes ahead of it). `End` is the slot's end. Counted as the
+    /// plates will stand once `add_plate` has dropped a failed add's plate under `id`.
+    pub(crate) fn host_place(&self, slot: usize, id: UnitId, place: &lf_rig::Place) -> usize {
+        let plates: Vec<&Plate> = self.slots[slot].plates.iter().filter(|p| !(p.id == id && p.is_failed_add())).collect();
+        let live = |p: &&Plate| !p.is_failed_add();
+        match place {
+            lf_rig::Place::End => plates.len(),
+            lf_rig::Place::After(before) => before
+                .iter()
+                .rev()
+                .find_map(|anchor| plates.iter().position(|p| p.id == *anchor && live(p)))
+                .map(|i| i + 1)
+                .unwrap_or_else(|| match plates.iter().position(live) {
+                    Some(first) if plates[first].source => first + 1,
+                    _ => 0,
+                }),
+        }
+    }
+
+    /// Add a new plate at plate index `at`, made by the add whose row `token` names. If an un-removed
+    /// failed-add plate already carries `id`, it is cleared first (its id was freed by `failed()`).
+    pub(crate) fn add_plate(&mut self, slot: usize, id: UnitId, spec: &Spec, at: usize, bypassed: bool, token: InstallToken) {
         // Clear any leftover failed-add plate with the same freed id.
         for s in &mut self.slots {
             s.plates.retain(|p| !(p.id == id && p.is_failed_add()));
@@ -533,8 +581,37 @@ impl Model {
                 seated_source: None,
                 reload_plugin: None,
                 reload_activated: None,
+                added_by: token,
+                applied: false,
             },
         );
+    }
+
+    /// The chains as the rig record reads them (`lf_rig::RigView`, D3): both slots' plates in chain
+    /// order, legacy rows left out, copied with the revision the feed's `chains` carry. The caller takes
+    /// it under `state` and releases the lock before it projects anything (`engine_io/rig`).
+    pub(crate) fn rig_view(&self) -> lf_rig::RigView {
+        let plate = |p: &Plate| lf_rig::PlateView {
+            id: p.id,
+            added_by: p.added_by,
+            kind: p.kind,
+            plugin: p.plugin.as_ref().map(|r| lf_rig::PluginRefView { format: r.format.clone(), path: r.path.clone(), id: r.id.clone() }),
+            name: p.name.clone(),
+            params: if p.kind == UnitKind::Plugin { None } else { p.params.clone() },
+            bypass: p.bypass,
+            source: p.source,
+            state: match p.state {
+                PlateState::Loading => lf_rig::PlateState::Loading,
+                PlateState::Waiting => lf_rig::PlateState::Waiting,
+                PlateState::Seated => lf_rig::PlateState::Seated,
+                PlateState::Leaving => lf_rig::PlateState::Leaving,
+                PlateState::Failed => lf_rig::PlateState::Failed,
+            },
+            applied: p.applied,
+            failed_add: p.is_failed_add(),
+        };
+        let slot = |s: usize| self.slots.get(s).map(|m| m.plates.iter().filter(|p| !p.legacy).map(plate).collect()).unwrap_or_default();
+        lf_rig::RigView { rev: self.rev, slots: [slot(0), slot(1)] }
     }
 
     pub(crate) fn remove_plate(&mut self, slot: usize, id: UnitId) -> bool {
@@ -815,6 +892,7 @@ impl Model {
                                 plate.state = PlateState::Seated;
                             }
                             plate.seated_in_engine = true;
+                            plate.applied = true;
                             plate.seated_source = Some(plate.source);
                             plate.withdrawn = false;
                             plate.parked = false;
@@ -965,10 +1043,18 @@ impl Model {
     /// if it never seated): an effect parked for coming back a source was never the slot's source, and
     /// a source parked for coming back an effect (refused, say, for its latency) still was.
     fn take_older_sources_out_of_engine(&mut self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
+        let older = self.older_sources_out_of_engine(slot, unit, table);
+        self.slots[slot].plates.retain(|p| !older.contains(&p.id));
+        older
+    }
+
+    /// The older sources of `slot` that source `unit`'s install would take out when it applies at the
+    /// head ([`Self::take_older_sources_out_of_engine`]): each one's row live, its seat out of this
+    /// engine (a rebuild's eviction it has not reseated from, or parked) and no op of its queued.
+    fn older_sources_out_of_engine(&self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
         let sm = &self.slots[slot];
         let Some(rev) = sm.find(unit).map(|i| sm.plates[i].added_rev) else { return Vec::new() };
-        let older: Vec<UnitId> = sm
-            .plates
+        sm.plates
             .iter()
             .filter(|p| {
                 p.seated_source.unwrap_or(p.source)
@@ -981,9 +1067,25 @@ impl Model {
                     && !sm.pending.iter().any(|q| q.unit == p.id)
             })
             .map(|p| p.id)
-            .collect();
-        self.slots[slot].plates.retain(|p| !older.contains(&p.id));
-        older
+            .collect()
+    }
+
+    /// Whether a plate of `slot` other than `unit` still holds the slot's source role, as a host add's
+    /// first install must leave it (D9, `UnitHost::submit`): its row live, not leaving, and a source by
+    /// the role its last applied install seated it in (`seated_source`; its reported role if it never
+    /// applied). It keeps that role until an install in another role applies or it leaves, whatever is
+    /// queued for it meanwhile and wherever its seat is: a reseat as an effect the engine may still
+    /// refuse (for its latency, say), a rebuild's eviction it has not reseated from, a park. No
+    /// projected seat need show it (`head_source_id` projects the reported role), and a source install
+    /// applying while it stands takes it out ([`Self::take_older_sources_out_of_engine`]).
+    pub(crate) fn source_role_held(&self, slot: usize, unit: UnitId, table: &Table) -> bool {
+        self.slots[slot].plates.iter().any(|p| {
+            p.id != unit
+                && !p.legacy
+                && p.state != PlateState::Leaving
+                && p.seated_source.unwrap_or(p.source)
+                && table.has_active_row(p.id)
+        })
     }
 
     /// Project an `Event::Chain` (or a snapshot read off `Engine::chain`) into the model.
@@ -1180,6 +1282,7 @@ impl Model {
                                     }
                                     plate.bypass = bypassed;
                                     plate.seated_in_engine = true;
+                                    plate.applied = true;
                                     plate.seated_source = Some(plate.source);
                                     plate.withdrawn = false;
                                     plate.parked = false;

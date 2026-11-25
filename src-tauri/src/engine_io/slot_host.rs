@@ -129,7 +129,7 @@ impl SlotHost {
             if let Some(unit) = unit {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
-            state.model.add_plate(self.slot, id, &Spec::Legacy, MAX_UNITS, false);
+            state.model.add_plate(self.slot, id, &Spec::Legacy, MAX_UNITS, false, install);
             let op = state.model.mint_op(install, gen, self.slot);
             state.table.insert(Row {
                 token: install,

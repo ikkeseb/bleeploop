@@ -56,10 +56,6 @@ import assert from 'node:assert/strict';
 import { arg, probe } from '../harness/probe.ts';
 
 const SHOTS = arg('shots');
-/** A returning player's profile whose rig record (`src/ui/state/rig-record.ts`) holds two empty slots: the
- * chain starts empty, as the checks below build it, not as the upgrade of a profile with no record (Lead in A,
- * Bass in B, `docs/unit-contract.md` §6) would. */
-const EMPTY_RIG = { 'lf.rig': JSON.stringify({ version: 1, slots: [{ volume: 1, units: [] }, { volume: 1, units: [] }] }) };
 const lane = (state) => ({ state, length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 });
 const emptyLanes = () => [0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty') } }));
 const SIZES = [
@@ -94,7 +90,6 @@ await probe(async ({ open }) => {
     const first = W === 1920;
     const { page, consumeConsoleErrors } = await open({
       viewport: { width: W, height: H },
-      storage: EMPTY_RIG,
       init: (p) =>
         p.addInitScript(() => {
           window.__lfEngineFake = true;
@@ -872,7 +867,7 @@ await probe(async ({ open }) => {
         }
         assert.equal((await ids(1)).length, 2, 'B as it was: a synth heading the OTT');
       });
-      await check('chain mode: notes to the slot, its level as SetSlotGain, never SetInstrumentGain', async () => {
+      await check('chain mode: notes to the slot, its level as SetSlotGain, never SetInstrumentGain; a reset sends no level', async () => {
         await page.evaluate(() => window.__lf.setActiveSlot(1));
         await settle();
         const targets = await page.evaluate(() => JSON.parse(JSON.stringify(window.__lf.native.inputSent)).filter((e) => e.selectTarget));
@@ -885,11 +880,14 @@ await probe(async ({ open }) => {
         await settle();
         const gains = (await sent()).slice(before).filter((c) => c.SetSlotGain);
         assert.ok(gains.length > 0 && gains.at(-1).SetSlotGain[0] === 0 && gains.at(-1).SetSlotGain[1] < 1, `SetSlotGain for A: ${JSON.stringify(gains)}`);
+        // The engine's settings memory keeps the gesture's SetSlotGain and replays it into a new engine: the
+        // page sends no level at a reset (`instrument.ts`'s fader ranking reads the reset frame's instead).
+        const atReset = (await sent()).length;
         await emit({ reset: true, settings: [], events: emptyLanes() });
         await settle();
         assert.ok(!(await sent()).some((c) => c.SetInstrumentGain), 'no SetInstrumentGain in chain mode');
-        const last = (await sent()).filter((c) => c.SetSlotGain).slice(-2).map((c) => c.SetSlotGain[0]).sort();
-        assert.deepEqual(last, [0, 1], 'a reset resends both slots’ levels');
+        const resent = (await sent()).slice(atReset).filter((c) => c.SetSlotGain);
+        assert.deepEqual(resent, [], `a reset sends no slot level: ${JSON.stringify(resent)}`);
       });
       await check('a synth choice on a slot a SYNTH heads is a pick on it: the + menu and the legacy picker; the drum layout follows the pick', async () => {
         const inputSent = () => page.evaluate(() => JSON.parse(JSON.stringify(window.__lf.native.inputSent)));

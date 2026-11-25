@@ -454,7 +454,8 @@ fn c7_head_role_from_applied_source_not_scan() {
     assert_eq!(rig.m.plan().units[0].iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2]);
     assert!(rig.m.plan().pending[0].is_empty());
 
-    // A head the model already held (matched), still loading: its `source` counts only once applied.
+    // A head plate of the same unit still loading is no match (CP3a r1): the head is held, so `pending`
+    // waits; once it applies the player's unit wins the id, and its `source` decides the role.
     let mut rig = Rig::new();
     let p1 = plug(1);
     rig.view.slots[0] = vec![plate(&p1, 500, PlateState::Loading, false, true)];
@@ -462,9 +463,10 @@ fn c7_head_role_from_applied_source_not_scan() {
     let event = Event::ViewChanged(rig.view.clone());
     rig.feed(event);
     rig.open(record(slot(vec![p1], vec![fx(2, UnitKind::Ott), fx(3, UnitKind::Ring)]), slot(vec![], vec![])), MarkerRead::None);
-    assert_eq!(rig.disposition(1), Some(&Disposition::Matched { token: 500 }));
-    assert!(!rig.trace.contains(&Action::Commit), "no role before the matched head applies");
+    assert!(rig.held(1));
+    assert!(!rig.trace.contains(&Action::Commit), "no role before the head applies");
     rig.set_plate(1, PlateState::Seated, true, false);
+    assert_eq!(rig.disposition(1), None, "the player's unit won the id");
     assert_eq!(rig.adds(), [2, 3], "an effect: every send");
 }
 
@@ -1359,4 +1361,57 @@ fn a_forget_whose_id_a_plate_holds_waits_for_it_to_leave() {
     let mut rig = start();
     assert!(matches!(rig.feed(Event::Closing)[..], [Action::Log(_)]));
     assert!(!rig.trace.contains(&Action::Forget { id: 1 }));
+}
+
+// ── CP3a part 2, review round 1 ──────────────────────────────────────────────────────────────────
+
+/// D9's match needs an applied plate (CP3a r1). The machine as the app's `Rig::new` runs it (fed the
+/// record and every view, never seeded): a queued unit whose same-unit plate the player put in is shown
+/// loading, then gone before it applied, stays in the plan at its place.
+#[test]
+fn a_same_unit_plate_gone_before_it_applied_leaves_the_unit_at_its_place() {
+    let p = plug(1);
+    let rec = record(slot(vec![p.clone()], vec![]), slot(vec![], vec![]));
+    for state in [PlateState::Loading, PlateState::Waiting] {
+        let mut m = Restore::new();
+        assert!(matches!(m.handle(Event::Opened { record: rec.clone(), marker: MarkerRead::None })[..], [Action::Seed { .. }]));
+        let mut view = RigView::default();
+        view.rev = 1;
+        view.slots[0].push(plate(&p, 900, state, false, false));
+        m.handle(Event::ViewChanged(view.clone()));
+        assert_eq!(m.plan().dispositions.get(&1), Some(&Disposition::Queued), "{state:?}: not the unit before it applies");
+        view.rev = 2;
+        view.slots[0].clear();
+        m.handle(Event::ViewChanged(view.clone()));
+        assert_eq!(m.plan().dispositions.get(&1), Some(&Disposition::Queued), "{state:?}: kept");
+        assert_eq!(m.plan().fate(1, &view), Some(Fate::AtPlace));
+        assert_eq!(rows(&project(&rec, m.plan(), &view, [None, None])), BTreeMap::from([(1, 1)]), "{state:?}: written at its place");
+    }
+}
+
+/// At an add, a same-unit plate that has not applied holds the id: the restore holds the unit (no
+/// token) and adds nothing. The player's plate wins the id if it applies; if it leaves first, the unit
+/// stays at its place.
+#[test]
+fn a_same_unit_plate_not_applied_at_the_add_holds_the_unit() {
+    let p = plug(1);
+    let rec = record(slot(vec![p.clone()], vec![]), slot(vec![], vec![]));
+    let start = || {
+        let mut rig = Rig::new();
+        rig.player_plate(0, &p, 900, false);
+        rig.open(rec.clone(), MarkerRead::None);
+        assert_eq!(rig.adds(), Vec::<UnitId>::new(), "never added over the player's attempt");
+        assert_eq!(rig.disposition(1), Some(&Disposition::Held { why: "another unit holds its id".into(), token: None }));
+        rig
+    };
+    // It applies: the player's unit wins the id, recorded from its plate.
+    let mut rig = start();
+    rig.set_plate(1, PlateState::Seated, true, false);
+    assert_eq!(rig.disposition(1), None, "the player's unit won the id");
+    assert_eq!(rows(&rig.projected(&rec)), BTreeMap::from([(1, 1)]));
+    // It leaves before it applies: the unit stays at its place.
+    let mut rig = start();
+    rig.remove_plate(1);
+    assert!(rig.held(1));
+    assert_eq!(rows(&rig.projected(&rec)), BTreeMap::from([(1, 1)]));
 }

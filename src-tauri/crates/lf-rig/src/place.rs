@@ -13,9 +13,12 @@
 //!   is on. One commit moves it to the units' end and clears `pending`, before any of its adds.
 //! - **The anchor** of a record unit is the record units before it ([`Place::After`]), resolved by the
 //!   app under its slot lock to the nearest one present; a placed unit goes to the chain's end.
-//! - **A match** is a live plate of the unit's slot with its id, kind and plugin identity, neither a
-//!   failed add nor `Leaving`: the model already holds the unit, so it is never added. Any other live
-//!   plate holding the id refuses the add.
+//! - **A match** is an **applied** live plate of the unit's slot with its id, kind and plugin identity,
+//!   neither a failed add nor `Leaving`: the model already holds the unit, so it is never added. Any
+//!   other live plate holding the id refuses the add, one of the same unit that has not applied too:
+//!   the player's attempt is not the unit until it applies (it may still leave first, and the record's
+//!   unit must not leave with it). At an add the restore then holds the unit (no token): the player's
+//!   plate wins the id if it applies, and if it leaves first the unit stays at its place.
 
 use std::collections::BTreeMap;
 
@@ -111,10 +114,10 @@ pub fn anchor(units: &[UnitRecord], dispositions: &BTreeMap<UnitId, Disposition>
 /// Whether the model already holds a record unit (D9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Match {
-    /// A live plate of its slot is this unit: never added; its plate carries this token.
+    /// An applied live plate of its slot is this unit: never added; its plate carries this token.
     Matched(InstallToken),
-    /// Another live plate holds its id (another kind or plugin, the other slot, or `Leaving`): the add
-    /// would be refused.
+    /// Another live plate holds its id (another kind or plugin, the other slot, `Leaving`, or the same
+    /// unit not yet applied): the add would be refused.
     Taken,
     /// No live plate holds its id: add it.
     Free,
@@ -126,7 +129,7 @@ pub fn find_match(slot: usize, unit: &UnitRecord, view: &RigView) -> Match {
     let mut taken = false;
     for (s, plates) in view.slots.iter().enumerate() {
         for plate in plates.iter().filter(|p| p.id == unit.id && !p.failed_add) {
-            if s == slot && plate.state != PlateState::Leaving && same_unit(unit, plate) {
+            if s == slot && plate.applied && plate.state != PlateState::Leaving && same_unit(unit, plate) {
                 return Match::Matched(plate.added_by);
             }
             taken = true;

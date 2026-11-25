@@ -137,6 +137,12 @@ pub enum SubmitError {
     /// place (`SeatRefusal::Placement`, `docs/unit-contract.md` §3). The owner parks, as on
     /// [`Back::Refused`].
     Refused(SeatRefusal),
+    /// A host add's unit (the rig's restore, [`EngineHost::host_unit`]) came out a source while the slot
+    /// has one (one the player put in: at its head, or holding the role while its seat is out of this
+    /// engine or a reseat in another role is only queued, `Model::source_role_held`): a host add never
+    /// replaces it (D9). Nothing was sent; its owner fails the add (`FailClass::SourceTaken`), before any
+    /// seat.
+    SourceTaken,
     /// [`UnitHost::submit_before`]'s deadline passed before the install could enter the port: nothing
     /// was sent.
     Late,
@@ -306,6 +312,10 @@ pub(crate) struct Table {
     /// ends another way, its row ends or leaves, its owner parks or fails, or a rebuild replaces the
     /// ports; none holds back the shutdown's removals.
     port_claims: VecDeque<(InstallToken, Instant)>,
+    /// The rows a host add made ([`EngineHost::host_unit`], the rig's restore, D9): their install never
+    /// replaces the slot's source ([`SubmitError::SourceTaken`]). A row's token leaves at its
+    /// release.
+    host_adds: BTreeSet<InstallToken>,
 }
 
 /// How long a claim on a full port ([`Table::port_claimed_ahead`]) stands without its owner's retry:
@@ -328,6 +338,7 @@ impl Table {
             applied: BTreeSet::new(),
             reload_refusals: BTreeMap::new(),
             port_claims: VecDeque::new(),
+            host_adds: BTreeSet::new(),
         }
     }
 
@@ -999,6 +1010,7 @@ impl Table {
     pub(crate) fn release_row(&mut self, token: InstallToken) -> Option<(u64, OpState)> {
         self.reload_predecessor.remove(&token);
         self.applied.remove(&token);
+        self.host_adds.remove(&token);
         let pos = self.rows.iter().position(|r| r.token == token)?;
         let row = &mut self.rows[pos];
         row.released = true;
@@ -1590,6 +1602,7 @@ impl UnitHost {
         let seated_in_engine = plate.seated_in_engine;
         let withdrawn = plate.withdrawn;
         let was_effect = plate.seated_source == Some(false);
+        let applied = plate.applied;
 
         let (at, replaces) = if is_reload {
             (0, Some(self.id))
@@ -1628,7 +1641,21 @@ impl UnitHost {
                 }
                 None => {}
             }
-            (0, state.model.head_source_id(self.slot, Some(self.id)))
+            let replaces = state.model.head_source_id(self.slot, Some(self.id));
+            let host_add = !applied && state.table.host_adds.contains(&self.install);
+            let held = host_add && state.model.source_role_held(self.slot, self.id, &state.table);
+            // A host add never replaces the slot's source (D9): its first install, not a reseat of one
+            // that applied (that one heads the slot itself). The source is the projected head's, or any
+            // live plate whose last applied install seated it a source (`held`): it keeps the role
+            // until an install in another role applies or it leaves (`Model::source_role_held`). A
+            // reseat as an effect only queued, or a seat out of this engine (a rebuild's eviction, a
+            // park), shows no source in the projection, and the engine may still refuse that reseat
+            // (its latency, say): this install, queued behind it, would then take the head and the
+            // player's source out (`Model::take_older_sources_out_of_engine`).
+            if host_add && (replaces.is_some() || held) {
+                return Err((unit, SubmitError::SourceTaken));
+            }
+            (0, replaces)
         } else {
             (state.model.engine_index_for_insert(self.slot, self.id), None)
         };
@@ -1916,6 +1943,15 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: called once on this thread by a reservation (`EngineHost::reserve`) right before it
+    /// takes `state`, past every check made before that lock. A test marks the host closing there: a
+    /// shutdown that begins while the add waits for the lock.
+    pub(crate) static BEFORE_RESERVE_STATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Test-only: `EngineHost::remove`'s slot port guard. The state lock is taken under it, so it is
 /// released before or with it (a scope's end drops the later guard first); dropping this one, however
 /// the call drops it, releases the port lock and then calls [`AFTER_REMOVE_UNLOCKED`].
@@ -1958,21 +1994,60 @@ pub trait BuiltinFactory: Send + Sync {
     fn build(&self, kind: UnitKind, params: &Params, terms: Terms) -> Result<(Unit, Params), String>;
 }
 
+/// Where an add's plate goes: the player's plate index, or a host add's place (D9).
+#[derive(Clone, Copy)]
+pub(crate) enum At<'a> {
+    Index(usize),
+    Place(&'a lf_rig::Place),
+}
+
+/// What [`EngineHost::host_unit`] reserved.
+pub(crate) enum HostMint {
+    /// A fresh plate and its install, as [`EngineHost::unit`] makes.
+    New(UnitHost),
+    /// The model already holds the unit: its plate's install token (`added_by`); nothing reserved.
+    Matched(InstallToken),
+}
+
 impl EngineHost {
     /// Reserve `id` across both slots and show its plate `loading` at plate index `at`. Refused at
     /// once: 0, reserved, a full chain unless it may replace the head source, the slot or the run held
     /// by the other mode (legacy / chain), closing.
     pub fn unit(&self, slot: usize, id: UnitId, spec: Spec, at: usize, bypassed: bool) -> Result<UnitHost, String> {
+        match self.reserve(slot, id, spec, At::Index(at), bypassed)? {
+            HostMint::New(unit) => Ok(unit),
+            HostMint::Matched(_) => unreachable!("only a host add matches"),
+        }
+    }
+
+    /// A host add's reservation (the rig's restore, D9): [`EngineHost::unit`] with its plate index
+    /// resolved from `place` under `state` ([`Model::host_place`]), after its match, also under `state`
+    /// ([`Model::host_match`]): the model already holds the unit (`Matched`, nothing reserved), or
+    /// another plate holds the id (refused). Its install never replaces the slot's source
+    /// ([`SubmitError::SourceTaken`]).
+    pub(crate) fn host_unit(&self, slot: usize, id: UnitId, spec: Spec, place: &lf_rig::Place, bypassed: bool) -> Result<HostMint, String> {
+        self.reserve(slot, id, spec, At::Place(place), bypassed)
+    }
+
+    fn reserve(&self, slot: usize, id: UnitId, spec: Spec, at: At<'_>, bypassed: bool) -> Result<HostMint, String> {
         if slot >= SLOT_COUNT {
             return Err(format!("no slot {slot}"));
-        }
-        if self.core.closing.load(Acquire) {
-            return Err("the host is closing".to_string());
         }
         if id == 0 {
             return Err("unit id 0 is invalid".to_string());
         }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_RESERVE_STATE.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Read under `state`: the shutdown marks the host closing before it takes `state` for the units
+        // it removes (`Chains::unload_all`), so a reservation either lands ahead of that (its plate is
+        // removed with the rest) or sees closing and reserves nothing, an add that waited here for the
+        // lock while the shutdown began included.
+        if self.core.closing.load(Acquire) {
+            return Err("the host is closing".to_string());
+        }
         let is_legacy = matches!(spec, Spec::Legacy);
         if is_legacy {
             if state.table.has_any_chain() || state.model.has_non_legacy_plate() {
@@ -1980,6 +2055,13 @@ impl EngineHost {
             }
         } else if state.table.has_any_legacy() || state.model.has_legacy_plate() {
             return Err("legacy plugin slots are active in this run".to_string());
+        }
+        if let At::Place(_) = at {
+            match state.model.host_match(slot, id, &spec) {
+                Some(Ok(token)) => return Ok(HostMint::Matched(token)),
+                Some(Err(why)) => return Err(why),
+                None => {}
+            }
         }
         if state.table.is_id_reserved(id) || state.model.has_live_plate(id) || state.model.has_pending_remove(id) {
             return Err(format!("unit id {id} is already reserved"));
@@ -1998,7 +2080,14 @@ impl EngineHost {
             self.core.gate_dropped.fetch_add(dropped, Relaxed);
         }
         let token = state.table.mint_token();
-        state.model.add_plate(slot, id, &spec, at, bypassed);
+        let at = match at {
+            At::Index(at) => at,
+            At::Place(place) => {
+                state.table.host_adds.insert(token);
+                state.model.host_place(slot, id, place)
+            }
+        };
+        state.model.add_plate(slot, id, &spec, at, bypassed, token);
         state.table.insert(Row {
             token,
             id,
@@ -2018,7 +2107,7 @@ impl EngineHost {
             legacy_owner: 0,
             keep_tone: false,
         });
-        Ok(UnitHost::new(self.core.clone(), slot, id, token))
+        Ok(HostMint::New(UnitHost::new(self.core.clone(), slot, id, token)))
     }
 
     /// A reload candidate under a reserved id: a second row; the plate reads `reloading`. While it

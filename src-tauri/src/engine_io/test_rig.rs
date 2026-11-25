@@ -167,7 +167,13 @@ impl TestDevice {
     /// Wait until `n` more blocks have rendered (or [`PATIENCE`] passed): true when they did. The bound
     /// is a ceiling a starved render thread on a loaded machine still meets; a pass never waits for it.
     pub(crate) fn wait_blocks(&self, n: u64) -> bool {
-        let target = self.blocks.load(Relaxed) + n;
+        self.wait_block_count(self.blocks.load(Relaxed) + n)
+    }
+
+    /// Wait until `target` blocks have rendered in all (or [`PATIENCE`] passed): true when they did. For
+    /// a count read before the render could move it ([`TestDevice::resume`] renders its first block at
+    /// once), where [`TestDevice::wait_blocks`] would count from after that block.
+    pub(crate) fn wait_block_count(&self, target: u64) -> bool {
         let deadline = Instant::now() + PATIENCE;
         while self.blocks.load(Relaxed) < target {
             if Instant::now() >= deadline {

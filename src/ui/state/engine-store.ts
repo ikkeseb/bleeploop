@@ -932,7 +932,7 @@ function applyFrameNow(f: FeedFrame): void {
   // the units' meters into their plain mirror only, as the scope's columns (invariant 6). Only while the
   // row draws the chain (`chainShown`): otherwise the row is the fixed topology and a report is no state of it.
   if (chainShown()) {
-    if (f.chains) applyChains(f.chains, f.reset);
+    if (f.chains) applyChains(f.chains);
     if (f.unitMeters) applyUnitMeters(f.unitMeters);
   }
   // After the frame's events: a reading in the frame that turned the tuner on is shown, one in the frame
@@ -1242,32 +1242,22 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   // D11: refused (or refused partly), the send-off alone goes again a short backoff apart until taken, this
   // engine's reset frame the latest and its device running, with no cap and one log line at 10 s
   // (`resendUntilTaken`); a later reset frame's own send-off takes over. Each resend is a batch of its own
-  // (`sendEngineAlone`), so "taken" means those four, never a batch they shared with other commands. It covers a DEV process whose earlier
-  // page ran legacy, whichever record the page has (the native rig's restore sends its own, D1). The WebView's
-  // rig record's adds wait for it (`legacySendsOff`): with no device running that gate settles refused (the
-  // restore adds nothing this launch). The other lacking settings go again at the next reset frame, as ever.
+  // (`sendEngineAlone`), so "taken" means those four, never a batch they shared with other commands. It covers a
+  // DEV process whose earlier page ran legacy (the native rig's restore sends its own, D1). The other lacking
+  // settings go again at the next reset frame, as ever.
   if (chainShown()) {
     const reset = plain.resets;
     const off = INPUT_SENDS.map((id): EngineCommand => ({ SetInputSend: [id, false] }));
-    void sent
-      .then((took) => took || resendUntilTaken("the legacy sends' send-off", () => sendEngineAlone(...off), () => plain.resets === reset && device() !== null))
-      .then((took) => (took || device() === null) && sendsOffTaken(took));
+    void sent.then((took) => took || resendUntilTaken("the legacy sends' send-off", () => sendEngineAlone(...off), () => plain.resets === reset && device() !== null));
   }
   engineResync(plain.resets === 1);
 }
 
 /** Each slot's gain as the latest reset frame's settings replay it (`SetSlotGain`), null where none. */
 let resetSlotGains: [number | null, number | null] = [null, null];
-/** The slot gains the engine kept, as the latest reset frame replayed them: a DEV chain adopted into the
- * rig record keeps its level (`rig-record.ts` `upgradeRig`). */
+/** The slot gains the engine kept, as the latest reset frame replayed them: in chain mode the fader shows
+ * them (`instrument.ts` `engineResync`). */
 export const reportedSlotGains = (): [number | null, number | null] => [...resetSlotGains];
-
-let sendsOffTaken!: (took: boolean) => void;
-const sendsOff = new Promise<boolean>((resolve) => (sendsOffTaken = resolve));
-/** Chain mode: settles true once a reset frame's batch that sends every legacy send off (or its resend) was
- * taken by the engine, so no unit the rig record adds plays beside a legacy send still on (unit contract §6);
- * false when no device runs before that (the first settle holds). */
-export const legacySendsOff = (): Promise<boolean> => sendsOff;
 
 const clampLane = (i: number) => Math.max(0, Math.min(ENGINE_LANES - 1, Math.trunc(i)));
 

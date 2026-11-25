@@ -71,7 +71,9 @@ fn match_by_slot_id_kind_and_identity() {
         view
     };
     assert_eq!(find_match(0, &p, &at(0, plate(&p, 9, PlateState::Seated, true, false))), Match::Matched(9));
-    assert_eq!(find_match(0, &p, &at(0, plate(&p, 9, PlateState::Loading, false, false))), Match::Matched(9), "a live plate, not yet applied");
+    // A live plate of the unit that has not applied is not the unit yet (CP3a r1): it holds the id.
+    assert_eq!(find_match(0, &p, &at(0, plate(&p, 9, PlateState::Loading, false, false))), Match::Taken, "loading, not yet applied");
+    assert_eq!(find_match(0, &p, &at(0, plate(&p, 9, PlateState::Waiting, false, false))), Match::Taken, "waiting, not yet applied");
     assert_eq!(find_match(0, &p, &at(1, plate(&p, 9, PlateState::Seated, true, false))), Match::Taken, "the other slot");
     assert_eq!(find_match(0, &p, &at(0, plate(&plug(5, "b.clap"), 9, PlateState::Seated, true, false))), Match::Taken, "another plugin");
     assert_eq!(find_match(0, &p, &at(0, plate(&fx(5, UnitKind::Echo), 9, PlateState::Seated, true, false))), Match::Taken, "another kind");
