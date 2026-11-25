@@ -261,10 +261,12 @@ export function readRigRecord(): RigRecord | null {
   return s.kind === 'record' ? s.record : null;
 }
 
-/** Each slot's kept volume, for `instrument.ts`' chain gains at load; null without a readable record. */
-export function rigVolumes(): [number, number] | null {
-  const r = readRigRecord();
-  return r && [r.slots[0].volume, r.slots[1].volume];
+/** Each slot's kept volume, for `instrument.ts`' chain gains at load: 'absent' with no record yet (the upgrade
+ * runs this launch), null when it cannot be read. */
+export function rigVolumes(): [number, number] | 'absent' | null {
+  const s = readStoredRig();
+  if (s.kind === 'absent') return 'absent';
+  return s.kind === 'record' ? [s.record.slots[0].volume, s.record.slots[1].volume] : null;
 }
 
 /** Store `r` whole and read it back: true only when the stored text is `r`'s (review finding 2: a
@@ -419,6 +421,29 @@ function storedMarker(key: string): string | null {
   }
 }
 
+/** The ids a chain marker names (a JSON list of unit ids); a marker of an earlier build named its plugins in
+ * words: every plugin unit of the record, as it meant then. */
+function markedIds(marker: string, plugins: readonly RigUnit[]): Set<UnitId> {
+  try {
+    const ids: unknown = JSON.parse(marker);
+    if (Array.isArray(ids) && ids.every((id) => Number.isSafeInteger(id))) return new Set(ids as UnitId[]);
+  } catch {
+    /* an earlier build's marker */
+  }
+  return new Set(plugins.map((u) => u.id));
+}
+
+/** Store the chain marker naming `ids`; false when storage refused it. */
+function storeChainMarker(ids: ReadonlySet<UnitId>): boolean {
+  if (!KEYS) return false;
+  try {
+    localStorage.setItem(KEYS.chainMarker, JSON.stringify([...ids]));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** `mint`, never answering an id already `taken` (a reported unit, a record unit) or one it gave before. */
 function freshMint(mint: () => UnitId, taken: Set<UnitId>): () => UnitId {
   return () => {
@@ -443,20 +468,23 @@ function freshMint(mint: () => UnitId, taken: Set<UnitId>): () => UnitId {
  * anything is added, else nothing is restored or written and the next launch upgrades again. Each slot's
  * volume applied and the legacy sends' send-off taken by the engine before the first add.
  *
- * A leftover marker means the last restore did not finish: in a new process (`firstPage`) with none of the
- * record's plugin units reported, that launch died restoring, and the record forgets its plugin units only
- * (one log line, one toast), the slots' `pending` then placing. A WebView reload (the same process; or some
- * of its plugin units reported) cut it short: it goes on, and the marker stays until a settle completes.
- * Unknown which: its plugin units are kept and not added this launch (the marker stays).
+ * A leftover marker (`lf.rigInFlight`) names the plugin units whose adds the last restore issued: it did not
+ * finish. In a new process (`firstPage`) with none of the record's plugin units reported, that launch died
+ * restoring, and the record forgets those units only, through the writer (one log line, one toast), the
+ * slots' `pending` then placing. A WebView reload (the same process; or some of its plugin units reported)
+ * cut it short: it goes on, and the marker stays until a settle completes. Unknown which: its plugin units
+ * are kept and not added this launch (the marker stays). A marker naming no unit the record holds goes.
  *
  * Then each record unit the reported chains lack is added under its id, slot 0 then slot 1, one at a time,
  * each after the units before it (a rejected add's plate holds its place; with no plate its outcome is
- * unknown, and the slot's later units wait for the next launch); a plugin missing from the scan is skipped
- * with one log line and keeps its entry; a failed plate keeps its entry too (the feed names no cause). The
- * marker is stored before the first plugin add; the settle starts once every plugin add in flight has its
- * outcome in the feed (seated or failed) and removes the marker SETTLE_MS later (a close through the close
- * button meanwhile removes it then, `rigRecallOnClose`); with none in flight (each add rejected with no
- * plate) the marker goes at once. Nothing writes the record's units meanwhile; from
+ * unknown, and the slot's later units wait for the next launch, never issued); a plugin missing from the scan
+ * is skipped with one log line and keeps its entry; a failed plate keeps its entry too (the feed names no
+ * cause). The marker is stored before the first add of any kind (storage refusing it: nothing is added or
+ * placed this launch), and again naming each plugin unit just before its add (refused: no further add, no
+ * placement); the settle starts once every plugin add issued has its outcome in the feed (seated or failed)
+ * and removes the marker SETTLE_MS later (a close through the close button meanwhile removes it then,
+ * `rigRecallOnClose`); with none in flight (none issued, or each rejected with no plate) the marker goes at
+ * once. Nothing writes the record's units meanwhile; from
  * then on each `chains` report does, and a slot's `pending` is placed by a durable write before its adds.
  */
 export async function recallChains(d: ChainRecallDeps): Promise<void> {
@@ -505,24 +533,30 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
 
     const plugins = record.slots.flatMap((s) => s.units.filter((u) => u.kind === 'plugin'));
     const leftover = storedMarker(KEYS.chainMarker);
+    // The plugin units the last restore had issued adds for, as the record still holds them.
+    const marked = leftover === null ? [] : plugins.filter((u) => markedIds(leftover, plugins).has(u.id));
     let keepPlugins = false;
-    if (leftover !== null && !plugins.some((u) => reportedIds.has(u.id))) {
+    if (leftover !== null && marked.length === 0) removeMarker(KEYS.chainMarker); // it names nothing kept
+    else if (leftover !== null && !plugins.some((u) => reportedIds.has(u.id))) {
       const first = await d.firstPage();
       if (first === true) {
-        const noPlugins = (s: RigSlot): RigSlot => ({ ...s, units: s.units.filter((u) => u.kind !== 'plugin') });
-        const forgotten: RigRecord = { version: 1, slots: [noPlugins(record.slots[0]), noPlugins(record.slots[1])] };
-        if (!storeRig(forgotten)) {
+        // Through the writer, on the record as it stands now: a level set meanwhile is kept (review r2 finding 4).
+        const forget = new Set(marked.map((u) => u.id));
+        const without = (s: RigSlot): RigSlot => ({ ...s, units: s.units.filter((u) => !forget.has(u.id)) });
+        const now = updateRig((r) => ({ version: 1, slots: [without(r.slots[0]), without(r.slots[1])] })) ? readRigRecord() : null;
+        if (!now) {
           console.error('[rig-recall] could not store the rig record without its plugins; nothing restored');
           known = false;
           return;
         }
-        record = forgotten;
+        record = now;
         removeMarker(KEYS.chainMarker);
-        console.error(`[rig-recall] the last launch stopped while restoring ${leftover}; its plugins are forgotten`);
-        notifyError('Could not restore the plugins. Add a plugin again to load it.', `The last launch stopped while restoring ${leftover}.`);
+        const names = marked.map(unitLabel).join(', ');
+        console.error(`[rig-recall] the last launch stopped while restoring ${names}; its plugins are forgotten`);
+        notifyError('Could not restore the plugins. Add a plugin again to load it.', `The last launch stopped while restoring ${names}.`);
       } else if (first === null) {
         keepPlugins = true;
-        console.error(`[rig-recall] the last restore of ${leftover} did not finish, and whether this is a new launch or a reload is unknown; its plugins are kept, not restored now`);
+        console.error(`[rig-recall] the last restore of ${marked.map(unitLabel).join(', ')} did not finish, and whether this is a new launch or a reload is unknown; its plugins are kept, not restored now`);
       }
     }
 
@@ -533,19 +567,21 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
     const found = scan;
     const addable = (u: RigUnit): boolean => u.kind !== 'plugin' || (!keepPlugins && found.some((p) => samePluginDescriptor(p, u.plugin)));
     const loads = record.slots.flatMap((s) => s.units.filter((u) => u.kind === 'plugin' && !reportedIds.has(u.id) && addable(u)));
-    // In flight: the plugins this launch adds, and, when the last restore did not finish, the reported ones.
-    const inFlight = new Set(loads.map((u) => u.id));
-    const carried = leftover !== null && storedMarker(KEYS.chainMarker) !== null;
-    if (carried) for (const u of plugins) if (reportedIds.has(u.id)) inFlight.add(u.id);
-    if (loads.length > 0) {
-      try {
-        localStorage.setItem(KEYS.chainMarker, loads.map(unitLabel).join(', '));
-      } catch (e) {
-        console.error('[rig-recall] could not store the in-flight marker; nothing restored', e);
-        return;
-      }
+    // The marker names the plugin units whose adds were issued (a leftover one's, when it is still stored),
+    // each written just before its add (review r2 finding 2); in flight: the adds issued now, and the
+    // leftover's units the chains already hold (a reload during the last settle). A plugin never issued
+    // (skipped, or after an add with an unknown outcome) is neither (review r2 finding 1).
+    const carried = storedMarker(KEYS.chainMarker) !== null ? marked : [];
+    const issued = new Set(carried.map((u) => u.id));
+    const inFlight = new Set(carried.filter((u) => reportedIds.has(u.id)).map((u) => u.id));
+    // Before the first add of any kind: a marker storage refuses adds and places nothing (review r2 finding 6).
+    if (loads.length > 0 && !storeChainMarker(issued)) {
+      console.error('[rig-recall] could not store the in-flight marker; nothing restored');
+      known = false;
+      return;
     }
-    for (const slot of [0, 1] as const) {
+    let stopped = false;
+    restore: for (const slot of [0, 1] as const) {
       let at = 0;
       for (const unit of record.slots[slot].units) {
         if (reportedIds.has(unit.id)) {
@@ -559,6 +595,15 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
             );
           }
           continue;
+        }
+        if (unit.kind === 'plugin') {
+          issued.add(unit.id);
+          if (!storeChainMarker(issued)) {
+            console.error('[rig-recall] could not store the in-flight marker; the rest is not restored now');
+            stopped = true;
+            break restore;
+          }
+          inFlight.add(unit.id);
         }
         try {
           await d.add(slot, unit.id, addSpec(unit), at);
@@ -581,10 +626,11 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
       removeMarker(KEYS.chainMarker);
     } else if (loads.length > 0) {
-      // This launch's marker, and none of its plugin adds reached the host (each rejected with no plate): no
-      // load is in flight, and an IPC failure is no crash (the next launch retries them).
+      // This launch's marker, and none of its plugin adds reached the host (none issued, or each rejected with
+      // no plate): no load is in flight, and an IPC failure is no crash (the next launch retries them).
       removeMarker(KEYS.chainMarker);
     }
+    if (stopped) known = false;
   } catch (e) {
     console.error('[rig-recall] the chain restore failed', e);
     known = false;

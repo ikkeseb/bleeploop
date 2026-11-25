@@ -197,6 +197,15 @@ const SYNTH_GAIN: Record<string, UnitParamId> = {
   lead: 'gainLead', bass: 'gainBass', pad: 'gainPad', piano: 'gainPiano', organ: 'gainOrgan', drum: 'gainDrum',
 };
 
+/** A slot's volume as the upgrade derives it from its old keys (no adopted chain): the legacy recall's
+ * plugin's saved level, else the scan kind's default (decision f); else unity for a SYNTH, the input level
+ * for Off. `instrument.ts` shows it on the slot's fader from the first page of a launch with no record yet. */
+export function legacySlotVolume(legacy: LegacySlot, guitarFirst: boolean, legacyMarker: boolean): number {
+  if (legacy.plugin && !legacyMarker) return legacy.plugin.stored ?? defaultPluginLevel(legacy.plugin.isEffect);
+  const source = storedSlotSource(legacy.savedSource, guitarFirst) ?? legacy.defaultSynth;
+  return source === 'off' || source === 'unset' ? legacy.inputGain : 1;
+}
+
 /**
  * The record a v0.8.9 profile becomes (§6), written whole before the first load. Per slot: the legacy
  * recall's plugin as a plugin unit (dropped when the legacy marker is stored), volume its saved level, else
@@ -216,20 +225,18 @@ export function upgradeRig(snap: LegacySnapshot, mint: () => UnitId): RigRecord 
       units = snap.reported[n];
       const kept = snap.reportedVolumes?.[n];
       volume = typeof kept === 'number' && kept >= 0 && kept <= SLOT_GAIN_MAX ? kept : 1;
-    } else if (legacy.plugin && !snap.legacyMarker) {
-      const { ref, isEffect, stored } = legacy.plugin;
-      units = [{ id: mint(), kind: 'plugin', plugin: { ...ref }, bypass: false }];
-      volume = stored ?? defaultPluginLevel(isEffect);
     } else {
-      const source = storedSlotSource(legacy.savedSource, snap.guitarFirst) ?? legacy.defaultSynth;
-      if (source === 'off' || source === 'unset') {
-        units = [];
-        volume = legacy.inputGain;
+      volume = legacySlotVolume(legacy, snap.guitarFirst, snap.legacyMarker);
+      if (legacy.plugin && !snap.legacyMarker) {
+        units = [{ id: mint(), kind: 'plugin', plugin: { ...legacy.plugin.ref }, bypass: false }];
       } else {
-        const params: Partial<Record<UnitParamId, number>> = { instrument: SYNTHS.findIndex((s) => s.id === source) };
-        for (const s of SYNTHS) params[SYNTH_GAIN[s.id]] = snap.synthGains[s.id] ?? 1;
-        units = [{ id: mint(), kind: 'synth', params, bypass: false }];
-        volume = 1;
+        const source = storedSlotSource(legacy.savedSource, snap.guitarFirst) ?? legacy.defaultSynth;
+        if (source === 'off' || source === 'unset') units = [];
+        else {
+          const params: Partial<Record<UnitParamId, number>> = { instrument: SYNTHS.findIndex((s) => s.id === source) };
+          for (const s of SYNTHS) params[SYNTH_GAIN[s.id]] = snap.synthGains[s.id] ?? 1;
+          units = [{ id: mint(), kind: 'synth', params, bypass: false }];
+        }
       }
     }
     const synthHead = units[0]?.kind === 'synth';

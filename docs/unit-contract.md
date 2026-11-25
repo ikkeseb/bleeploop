@@ -51,15 +51,20 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   plate as the plugin's own load does), so the plate keeps its id and place and each launch adds it again
   until the player removes it. A durable step (the upgrade, a placement) adds nothing until its write reads
   back equal; a failed one logs and waits for the next launch. Its crash marker is `lf.rigInFlight`, the
-  chain's own (legacy recall's `lf.rigRecallInFlight` stays legacy mode's): stored before the restore's
-  first plugin add, removed only by a settle that completed, which starts once each plugin add's outcome is
-  in the feed (seated or failed), or at once when none reached the host (each rejected with no plate: an IPC
-  failure is no crash). Left over, the last launch died restoring only in a new native process (the page's
-  first native MIDI subscribe answers epoch 1, `midi.ts` `firstPageOfLaunch`) with none of the record's
-  plugin units in the first reported chains: the record forgets its plugin units only, and the slots'
-  `pending` then place. An empty report alone is no proof of a crash: in a WebView reload (a later epoch), or
-  with some plugin units reported, a reload cut a restore short: it goes on, the marker kept until a settle
-  completes. Unknown which (no epoch in time): the plugin units are kept and not added that launch.
+  chain's own (legacy recall's `lf.rigRecallInFlight` stays legacy mode's), naming the plugin unit ids whose
+  adds the restore issued: stored (naming none) before the restore's first add of any kind, and again just
+  before each plugin add, naming it too; storage refusing it, no further add and no placement that launch. A
+  plugin never issued (missing from the scan, or after an add with no plate, whose later units wait for the
+  next launch) is neither named nor waited for. Removed only by a settle that completed, which starts once
+  each issued plugin add's outcome is in the feed (seated or failed), or at once when none reached the host
+  (none issued, or each rejected with no plate: an IPC failure is no crash). Left over, the last launch died
+  restoring only in a new native process (the page's first native MIDI subscribe answers epoch 1, `midi.ts`
+  `firstPageOfLaunch`) with none of the record's plugin units in the first reported chains: the record
+  forgets the units the marker names only, through the record's one writer (a level set meanwhile stays),
+  and the slots' `pending` then place. An empty report alone is no proof of a crash: in a WebView reload (a
+  later epoch), or with some plugin units reported, a reload cut a restore short: it goes on, the marker
+  kept until a settle completes. Unknown which (no epoch in time): the plugin units are kept and not added
+  that launch.
 - **A tone is the unit's:** one file per unit id, `unit-<id>.tone` (`src-tauri/src/host/tone.rs`
   `file_name`; today `slot<n>-<hash>.tone`). A removal renames it to that slot-and-plugin file, and a new
   unit with no tone of its own starts from it.
@@ -335,9 +340,12 @@ below reads an old key through the resolver that reads it today, so a missing ke
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
   effect, 0.1 otherwise or when the scan did not find it, `instrument.ts`); an empty input-fed slot
   `lf.slotInputGain.<n>`; a SYNTH slot unity, its instrument levels from `lf.synthGain.<id>` (the input trim
-  never scaled a synth). In chain mode no slot level is sent before the record is known; the restore then
-  applies each slot's volume (`SetSlotGain`) and adds nothing until the engine took it and the reset's
-  send-off of the legacy sends. GO LIVE is never restored.
+  never scaled a synth). In chain mode no slot level is sent before the record is known: with no record yet
+  the slot's fader shows the level these rules give from the old keys (the scan kind not yet known), and a
+  level set on it waits for the record's first write. The restore then applies each slot's volume
+  (`SetSlotGain`) and adds nothing until the engine took it and the reset's send-off of the legacy sends;
+  either refused (a briefly full command ring) goes again a short backoff apart until taken, with no reset
+  frame needed. GO LIVE is never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
   `inputChannel` seeding both, as today) each become a mono pick, `null` auto; stereo is the player's (§7).
 - **The autosaved jam:** a v1 or v2 recovery restores into both channels (§8); the next save writes v3.

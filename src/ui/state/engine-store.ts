@@ -47,7 +47,7 @@ import {
   usingAsio,
 } from './audio-devices';
 import { autosave } from '../../session/autosave';
-import { engineResync } from './instrument';
+import { engineResync, resendUntilTaken } from './instrument';
 import { endStartLine, withAt } from './instrument-slots';
 import { adoptEngineLive, engineInputLive, setEngineInput } from './native-io';
 import { notifyError, notifyInfo, notifyNote } from '../../notify';
@@ -1238,9 +1238,17 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     }
   }
   const sent = sendEngine(...lacking);
-  // The rig record's adds wait for a send-off the engine took (`legacySendsOff`); a refused batch goes again
-  // at the next reset frame, as every lacking setting does.
-  if (chainShown()) void sent.then((took) => took && sendsOffTaken());
+  // The rig record's adds wait for a send-off the engine took (`legacySendsOff`). Refused, the send-off alone
+  // goes again a short backoff apart until taken, this engine's reset frame the latest and its device running
+  // (review r2 finding 3: a briefly full ring must not hold the restore until a reset); the other lacking
+  // settings go again at the next reset frame, as ever.
+  if (chainShown()) {
+    const reset = plain.resets;
+    const off = INPUT_SENDS.map((id): EngineCommand => ({ SetInputSend: [id, false] }));
+    void sent
+      .then((took) => took || resendUntilTaken("the legacy sends' send-off", () => sendEngine(...off), () => plain.resets === reset && device() !== null))
+      .then((took) => took && sendsOffTaken());
+  }
   engineResync(plain.resets === 1);
 }
 
@@ -1252,8 +1260,8 @@ export const reportedSlotGains = (): [number | null, number | null] => [...reset
 
 let sendsOffTaken!: () => void;
 const sendsOff = new Promise<void>((resolve) => (sendsOffTaken = resolve));
-/** Chain mode: settles once a reset frame's batch that sends every legacy send off was taken by the engine,
- * so no unit the rig record adds plays beside a legacy send still on (unit contract §6). */
+/** Chain mode: settles once a reset frame's batch that sends every legacy send off (or its resend) was taken
+ * by the engine, so no unit the rig record adds plays beside a legacy send still on (unit contract §6). */
 export const legacySendsOff = (): Promise<void> => sendsOff;
 
 const clampLane = (i: number) => Math.max(0, Math.min(ENGINE_LANES - 1, Math.trunc(i)));

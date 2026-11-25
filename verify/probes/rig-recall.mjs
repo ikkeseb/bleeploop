@@ -35,14 +35,19 @@
  * RING MOD and ECHO on, REVERB off at a changed level, no OTT key): `lf.rig` is written whole before the
  * first add; the record's units are added in order under the minted ids; no slot level is sent before the
  * record is known, then each slot's as `SetSlotGain`, and no add before the engine took the levels and the
- * legacy sends' send-off; a level set before the first record lands in it; the old sends wait in `pending` until the head seats (a held `loading` head
+ * legacy sends' send-off, each refused apart (a full command ring) and resent with no reset frame until taken;
+ * before the first record each slot's fader shows the upgrade's level, and a level set on it lands in the
+ * record's first write; the old sends wait in `pending` until the head seats (a held `loading` head
  * keeps them, a slot-level change meanwhile keeps units and `pending`), then are placed into the input-fed
  * slot in RING MOD, ECHO, REVERB order (the OTT first when its key is on), on/off as bypass, while a
  * source-headed slot takes only an OTT that was on; GO LIVE is never pressed; a second launch restores the
  * same ids with no second upgrade; a WebView reload whose reset frame carries the chains adds nothing, and
- * one during the settle keeps the marker until the reloaded page's settle; a leftover marker forgets the
- * plugin units only, never touching the legacy keys, in a new launch, while in a reload (before the add
- * reached the host) it forgets nothing; the settle starts only once each plugin add's outcome is in the
+ * one during the settle keeps the marker until the reloaded page's settle; the marker names the plugin units
+ * whose adds were issued, so a leftover one forgets those units only, never touching the legacy keys and
+ * keeping a level set meanwhile, in a new launch, nothing when no plugin add was issued yet, and in a reload
+ * (before the add reached the host) nothing; a marker storage refuses adds and places nothing; a plugin after
+ * an add rejected with no plate (in time) is never tried nor waited for, so the restore finishes and both are
+ * restored next launch, a late plate holding its place; the settle starts only once each plugin add's outcome is in the
  * feed (a lost reply's included), so a close meanwhile keeps the marker; a lost reply holds its unit's
  * place, so the units after it keep record order; a plugin missing from the scan keeps its entry and its
  * slot's `pending` until it is back; an Off slot keeps its input level and takes the sends; adds that never
@@ -121,13 +126,17 @@ function installFakeHost() {
  * Chain mode's per-launch seams, run before the app on every load of the chain phase's page (its config the
  * `chainProbe` sessionStorage entry `chainLaunch()` writes): the chain fake on; a one-shot `chainSeed`
  * replacing the whole localStorage (a fresh profile); `failRig` makes every store of `lf.rig` throw, and
- * `garbleRig` every read of it answer other text than was stored (a failed read-back).
+ * `garbleRig` every read of it answer other text than was stored (a failed read-back); `failMarker` every
+ * store of `lf.rigInFlight` throw; `refuse` (engine command names) refuses every batch carrying one of them,
+ * as a full command ring would, until `window.__refuse` is cleared (the chain context's route of
+ * `host.web.ts` gates `InputHost.send`).
  * `install(chain)`, called once `__lf` is up and before the reset frame (the restore waits for its chains,
  * so nothing is minted or added before): `mint` counts from `mintFrom`; `hold` holds every activation
  * (`release()`); `failures` scripts failed plates by id; the add wrapper logs each add with `lf.rig` as
  * stored at the call, rejects the ids in `reject` once as an IPC failure would (a string, no plate),
- * passes the ids in `lose` to the host but rejects them at once (a lost reply: the plate shows) and never
- * answers the ids in `hang` (or every add for 'all'). The page's native MIDI epoch counts from `epochBase`
+ * passes the ids in `lose` to the host but rejects them at once (a lost reply: the plate shows), rejects the
+ * ids in `late` at once and passes them to the host that many ms later (a plate after the restore's cutoff),
+ * and never answers the ids in `hang` (or every add for 'all'). The page's native MIDI epoch counts from `epochBase`
  * (the chain context's route of `host.web.ts`): 0 a new launch, more a WebView reload of the same process.
  */
 function installChainProbe() {
@@ -146,6 +155,14 @@ function installChainProbe() {
       return real.call(this, key, value);
     };
   }
+  if (cfg.failMarker) {
+    const real = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (this === window.localStorage && key === 'lf.rigInFlight') throw new DOMException('injected: the quota is full', 'QuotaExceededError');
+      return real.call(this, key, value);
+    };
+  }
+  window.__refuse = cfg.refuse ?? null;
   if (cfg.garbleRig) {
     // A store that lands but reads back other text (the read-back check's case).
     const real = Storage.prototype.getItem;
@@ -171,11 +188,19 @@ function installChainProbe() {
     const rejects = new Set(cfg.reject ?? []);
     const loses = new Set(cfg.lose ?? []);
     const hangs = cfg.hang ?? [];
+    const lates = new Map(Object.entries(cfg.late ?? {}).map(([id, ms]) => [Number(id), ms]));
     const real = chain.host.add;
     chain.host.add = (slot, unit, spec, at, toneToken) => {
       probe.adds.push({ slot, unit, spec: structuredClone(spec), at, rig: localStorage.getItem('lf.rig') });
       if (rejects.delete(unit)) return Promise.reject(`chain_add: injected IPC failure for unit ${unit}`);
       if (hangs === 'all' || hangs.includes(unit)) return new Promise(() => {});
+      if (lates.has(unit)) {
+        // The answer comes first; the host takes the add only later, so its plate shows after the cutoff.
+        const ms = lates.get(unit);
+        lates.delete(unit);
+        setTimeout(() => void real(slot, unit, spec, at, toneToken).catch(() => {}), ms);
+        return Promise.reject(`chain_add: injected early rejection for unit ${unit}`);
+      }
       if (loses.delete(unit)) {
         // The host takes the add (its plate shows in the next report); its answer is lost on the way.
         void real(slot, unit, spec, at, toneToken).catch(() => {});
@@ -510,7 +535,13 @@ await probe(async ({ browser, open }) => {
         const epoch = 'let fakeEpoch = 0;';
         if (!source.includes(epoch)) throw new Error('Cannot locate the fake\'s MIDI epoch counter');
         const body = source.replace(epoch, 'let fakeEpoch = Number(JSON.parse(sessionStorage.getItem(\'chainProbe\') ?? \'{}\').epochBase ?? 0);')
-          + '\nObject.assign(webPluginHost, window.__recallHost ?? {});\n';
+          + '\nObject.assign(webPluginHost, window.__recallHost ?? {});\n'
+          // `refuse`: a batch carrying a refused command is rejected whole before the fake takes any of it.
+          + '\n{ const take = webInput.send; webInput.send = (epoch, items) => {'
+          + ' const refused = window.__refuse;'
+          + ' if (refused && items.map(decodeInputItem).some((it) => \'engine\' in it && typeof it.engine === \'object\' && refused.includes(Object.keys(it.engine)[0])))'
+          + ' return Promise.reject(new Error(\'injected: the command ring is full\'));'
+          + ' return take(epoch, items); }; }\n';
         await route.fulfill({ response, body });
       }),
     ]),
@@ -565,15 +596,15 @@ await probe(async ({ browser, open }) => {
    * One chain-mode launch: reload with this launch's seams (`installChainProbe`; `seed` replaces the whole
    * storage first), wait for the engine and the MIDI subscription, install the seams, then the first
    * `bindings` report (unless `bindings` is false: the probe emits it later) and the reset frame (`chains`: a
-   * WebView reload's; `settings`: what it replays). `sendHold` holds every batch's answer from before the
-   * reset frame until `window.__releaseSends()` (the fake's `sendHold`).
+   * WebView reload's; `settings`: what it replays); `holdPaths` holds the restore's scan of its plugins' paths
+   * until `window.__recallProbe.releasePaths()`.
    */
-  async function chainLaunch({ scan = CANNED, seed = null, chains = null, settings = [], bindings = true, sendHold = false, ...cfg } = {}) {
+  async function chainLaunch({ scan = CANNED, seed = null, chains = null, settings = [], bindings = true, holdPaths = false, ...cfg } = {}) {
     await cp.evaluate(([r, c, sd]) => {
       sessionStorage.setItem('recallProbe', JSON.stringify(r));
       sessionStorage.setItem('chainProbe', JSON.stringify(c));
       if (sd) sessionStorage.setItem('chainSeed', JSON.stringify(sd));
-    }, [{ scan }, cfg, seed]);
+    }, [{ scan, holdPaths }, cfg, seed]);
     await cp.reload();
     await cp.waitForFunction(
       () => '__lf' in window && window.__lf.native.opened.length === 1 && window.__lf.native.midiCalls.some(([c]) => c === 'subscribe'),
@@ -584,7 +615,6 @@ await probe(async ({ browser, open }) => {
       window.__chainProbe.install(window.__lf.native.chain);
       window.__chainProbe.recall = await import('/src/ui/state/rig-recall.ts');
     });
-    if (sendHold) await cp.evaluate(() => void (window.__lf.native.sendHold = new Promise((resolve) => (window.__releaseSends = resolve))));
     if (bindings) await cp.evaluate((b) => window.__lf.native.midiEmit(b), BINDINGS);
     await cp.evaluate((f) => window.__lf.native.emit(f), resetFrame(chains, settings));
   }
@@ -618,15 +648,19 @@ await probe(async ({ browser, open }) => {
   /**
    * Wait for this launch's restore (`rigRecallDone`, the settle included), then for `adds` adds in all and
    * every reported unit out of `loading`; its `[rig-recall]` lines must match `recall` one for one and its
-   * toasts be `toasts`.
+   * toasts be `toasts` (`refused`: batches were refused on purpose, their log lines and toast taken out).
    */
-  async function chainSettle({ adds = 0, recall = [], toasts = [] } = {}) {
+  async function chainSettle({ adds = 0, recall = [], toasts = [], refused = false } = {}) {
     await cp.waitForFunction(() => window.__chainProbe.recall.rigRecallFinished(), undefined, { timeout: 20_000 });
     await cp.waitForFunction((n) => window.__chainProbe.adds.length >= n
       && window.__lf.native.chain.chains().every((c) => c.units.every((u) => u.state !== 'loading')), adds, { timeout: 10_000 });
     // a placement's write and its last report land a moment after its adds
     await cp.waitForTimeout(300);
     const c = await chainRead();
+    if (refused) {
+      assert.ok(chainApp.consumeConsoleErrors(/^\[platform\] input batch failed/).length > 0, 'the refused batches are logged');
+      c.toasts = c.toasts.filter((t) => !t.startsWith('Could not send that to the audio engine.'));
+    }
     const recallLogs = chainApp.consumeConsoleErrors(/^\[rig-recall\]/);
     console.log(JSON.stringify({ ...c, rigAt: undefined, rig: c.rig && slotsOf(c.rig), recallLogs }));
     assert.equal(recallLogs.length, recall.length, `[rig-recall] lines: ${JSON.stringify(recallLogs)}`);
@@ -669,7 +703,7 @@ await probe(async ({ browser, open }) => {
   // no slot level before the record is known (an Off slot never passes its input at unity first), then
   // each slot's migrated level
   assert.deepEqual(c.gains, [[0, 0.8], [1, 1]], 'each slot\'s level, sent before the adds, and nothing before it');
-  assert.equal(c.marker, 'Fake Amp (VST3)', 'the chain marker names the plugin in flight');
+  assert.equal(c.marker, '[1001]', 'the chain marker names the plugin unit whose add is in flight');
   assert.deepEqual(c.legacy, { rigRecall: V089['lf.rigRecall'], inFlight: null }, 'the legacy recall\'s keys untouched');
   await cp.evaluate(async () => (await import('/src/ui/state/instrument.ts')).setSlotLevel(1, 0.5));
   c = await chainRead();
@@ -706,7 +740,7 @@ await probe(async ({ browser, open }) => {
     && localStorage.getItem('lf.rigInFlight') !== null && !window.__chainProbe.recall.rigRecallFinished());
   const mid = await cp.evaluate(() => window.__lf.native.chain.chains());
   await chainLaunch({ mintFrom: 2001, chains: mid, epochBase: 1 });
-  assert.equal(await cp.evaluate(() => localStorage.getItem('lf.rigInFlight')), 'Fake Amp (VST3)', 'the marker is kept across a reload during the settle');
+  assert.equal(await cp.evaluate(() => localStorage.getItem('lf.rigInFlight')), '[1001]', 'the marker is kept across a reload during the settle');
   c = await chainSettle();
   assert.deepEqual({ rig: c.rig, marker: c.marker }, { rig: restored, marker: null }, 'nothing forgotten; the reloaded page\'s settle clears the marker');
   await chainLaunch({ mintFrom: 2001 });
@@ -868,7 +902,7 @@ await probe(async ({ browser, open }) => {
   await cp.waitForFunction(() => window.__lf.native.chain.chains()[0].units.some((u) => u.id === 1001 && u.state === 'loading'));
   await cp.waitForTimeout(300);
   await cp.evaluate(() => window.__chainProbe.recall.rigRecallOnClose());
-  assert.equal(await cp.evaluate(() => localStorage.getItem('lf.rigInFlight')), 'Fake Amp (VST3)', 'the marker kept while the amp-sim loads, through a close');
+  assert.equal(await cp.evaluate(() => localStorage.getItem('lf.rigInFlight')), '[1001]', 'the marker kept while the amp-sim loads, through a close');
   await cp.evaluate(() => window.__chainProbe.release());
   c = await chainSettle({ adds: 7, recall: [/^\[rig-recall\] slot 1: Fake Amp \(VST3\) was not restored/] });
   assert.deepEqual({ A: addsIn(c, 'A'), B: addsIn(c, 'B'), marker: c.marker }, {
@@ -886,22 +920,38 @@ await probe(async ({ browser, open }) => {
     units: PLACED_A,
   }, 'the chain and the record in record order');
 
-  // C18. A restart whose engine has not answered the reset's send-off and levels yet: no add meanwhile;
-  // answered, every unit comes back.
-  await chainLaunch({ mintFrom: 2001, sendHold: true });
-  await cp.waitForTimeout(1000);
-  assert.deepEqual(await cp.evaluate(() => window.__chainProbe.adds.length), 0, 'no add before the engine took the send-off and the levels');
-  await cp.evaluate(() => window.__releaseSends());
-  c = await chainSettle({ adds: 5 });
-  assert.deepEqual({ A: addsIn(c, 'A'), B: addsIn(c, 'B') }, RESTORE_ALL);
+  // C18. A restart whose engine refuses, as a briefly full command ring does, every batch carrying the legacy
+  // sends' send-off (the slot levels taken), then every one carrying a slot level (the send-off taken): no add
+  // meanwhile; the refusal over, with no reset frame between, the resends are taken and every unit comes back.
+  const sentKinds = () => cp.evaluate(() => [...new Set(window.__lf.native.sent.map((c) => Object.keys(c)[0]))]);
+  for (const [refuse, taken] of [['SetInputSend', 'SetSlotGain'], ['SetSlotGain', 'SetInputSend']]) {
+    await chainLaunch({ mintFrom: 2001, refuse: [refuse] });
+    await cp.waitForTimeout(1000);
+    assert.equal(await cp.evaluate(() => window.__chainProbe.adds.length), 0, `no add while the engine refuses ${refuse}`);
+    const kinds = await sentKinds();
+    assert.ok(kinds.includes(taken) && !kinds.includes(refuse), `${taken} taken, ${refuse} not: ${JSON.stringify(kinds)}`);
+    await cp.evaluate(() => void (window.__refuse = null));
+    c = await chainSettle({ adds: 5, refused: true });
+    assert.deepEqual({ A: addsIn(c, 'A'), B: addsIn(c, 'B') }, RESTORE_ALL, `${refuse} resent and taken with no reset frame`);
+  }
 
-  // C19. A slot level set before the first record exists (the bindings report late): the upgrade's first
-  // write takes it.
-  await chainLaunch({ seed: V089, bindings: false });
-  await cp.evaluate(async () => (await import('/src/ui/state/instrument.ts')).setSlotLevel(1, 0.5));
-  await cp.evaluate((b) => window.__lf.native.midiEmit(b), BINDINGS);
+  // C19. A slot level set on the slot's fader before the first record exists (the upgrade's scan of the legacy
+  // plugin held): the fader shows the level the upgrade derives from the old keys, nothing is sent to the
+  // engine and no record written meanwhile, and the upgrade's first write takes the player's level.
+  await chainLaunch({ seed: V089, holdPaths: true });
+  await cp.waitForFunction(() => window.__recallProbe.calls.paths.length === 1);
+  const faderB = cp.getByRole('slider', { name: 'Volume for slot B', exact: true });
+  await faderB.waitFor({ timeout: 5000 });
+  assert.deepEqual([await cp.getByRole('slider', { name: 'Volume for slot A', exact: true }).inputValue(), await faderB.inputValue()], ['0.8', '1'],
+    'each fader at the upgrade\'s level before the record');
+  await faderB.fill('0.5');
+  await cp.waitForTimeout(300);
+  c = await chainRead();
+  assert.deepEqual({ gains: c.gains, rig: c.rig }, { gains: [], rig: null }, 'no slot level sent, no record, while the upgrade waits');
+  await cp.evaluate(() => window.__recallProbe.releasePaths());
   c = await chainSettle({ adds: 5 });
   assert.deepEqual([c.rigAt[0].slots[1].volume, c.rig.slots[1].volume], [0.5, 0.5], 'the level set meanwhile, in the first write and after');
+  assert.deepEqual(c.gains.slice(0, 2), [[0, 0.8], [1, 0.5]], 'then each slot\'s level, the player\'s included');
 
   // C20. A stored record of a version this build does not know: one log line, left as it is, nothing added,
   // no slot level sent.
@@ -909,6 +959,84 @@ await probe(async ({ browser, open }) => {
   await chainLaunch({ seed: { ...V089, 'lf.rig': future } });
   c = await chainSettle({ recall: [/^\[rig-recall\] the rig record cannot be read/] });
   assert.deepEqual({ adds: c.adds, gains: c.gains, rig: await cp.evaluate(() => localStorage.getItem('lf.rig')) }, { adds: [], gains: [], rig: future });
+
+  /** `lf.rig` as stored: each slot `[volume, units, pending]`; units by `<id> <kind>` (`plugin` the AMP, `look`
+   * the Fake Lookahead, `synth` a Pad, `echo` the v0.8.9 ECHO). */
+  const rigText = (...slots) => {
+    const unit = (u) => {
+      const [id, kind] = u.split(' ');
+      if (kind === 'plugin' || kind === 'look') return { id: Number(id), kind: 'plugin', plugin: saved(kind === 'look' ? LOOK : AMP), bypass: false };
+      if (kind === 'synth') return { id: Number(id), kind: 'synth', params: { instrument: 2 }, bypass: false };
+      return { id: Number(id), kind, params: ECHO, bypass: false };
+    };
+    return JSON.stringify({ version: 1, slots: slots.map(([volume, units, pending = []]) => ({ volume, units: units.map(unit), ...(pending.length ? { pending: pending.map(unit) } : {}) })) });
+  };
+  // Slot A: the amp-sim, then the lookahead, ECHO still to place; slot B: a SYNTH.
+  const TWO_PLUGINS = rigText([1, ['1001 plugin', '1002 look'], ['1003 echo']], [1, ['1004 synth']]);
+  const TWO_KEPT = [
+    { volume: 1, units: ['1001 plugin', '1002 plugin'], pending: ['1003 echo'] },
+    { volume: 1, units: ['1004 synth'], pending: [] },
+  ];
+
+  // C21. Two plugins in one slot, the first's add rejected with no plate: the second is never tried (its index
+  // would be a guess) and not waited for, so the restore finishes; both kept with the slot's `pending`, the
+  // marker gone; the next launch forgets nothing and restores both, then places ECHO.
+  await chainLaunch({ seed: { 'lf.rig': TWO_PLUGINS }, mintFrom: 2001, reject: [1001] });
+  c = await chainSettle({ adds: 2, recall: [/^\[rig-recall\] slot 1: Fake Amp \(VST3\) was not restored/] });
+  assert.deepEqual(c.adds, ['A0 1001 plugin', 'B0 1004 synth'], 'the second plugin never tried');
+  assert.deepEqual({ rig: slotsOf(c.rig), marker: c.marker }, { rig: TWO_KEPT, marker: null }, 'both kept, the marker gone');
+  await chainLaunch({ mintFrom: 2001 });
+  c = await chainSettle({ adds: 4 });
+  assert.deepEqual({ A: addsIn(c, 'A'), B: addsIn(c, 'B') }, { A: ['0 1001 plugin', '1 1002 plugin', '2 1003 echo'], B: ['0 1004 synth'] },
+    'nothing forgotten: both restored, then ECHO placed');
+
+  // C22. The same, the first add's plate showing only after the restore's cutoff: the second waits for the next
+  // launch, the late plate seats and holds its place, and ECHO is placed after it; the record keeps record
+  // order, so the next launch restores all three in it.
+  await chainLaunch({ seed: { 'lf.rig': TWO_PLUGINS }, mintFrom: 2001, late: { 1001: 800 } });
+  c = await chainSettle({ adds: 3, recall: [/^\[rig-recall\] slot 1: Fake Amp \(VST3\) was not restored/] });
+  assert.deepEqual(c.adds, ['A0 1001 plugin', 'B0 1004 synth', 'A1 1003 echo'], 'the second plugin never tried; ECHO after the late plate');
+  assert.deepEqual({ chain: c.chains[0], units: slotsOf(c.rig)[0].units, marker: c.marker },
+    { chain: ['1001 plugin seated', '1003 echo seated'], units: ['1001 plugin', '1002 plugin', '1003 echo'], marker: null });
+  await chainLaunch({ mintFrom: 2001 });
+  c = await chainSettle({ adds: 4 });
+  assert.deepEqual(addsIn(c, 'A'), ['0 1001 plugin', '1 1002 plugin', '2 1003 echo'], 'the next launch restores in record order');
+
+  // C23. A built-in's add in slot A hangs before slot B's plugin add was issued: the marker names no plugin,
+  // so the next launch forgets nothing (no log line, no toast) and restores both.
+  await chainLaunch({ seed: { 'lf.rig': rigText([1, ['1001 synth']], [1, ['1002 plugin']]) }, mintFrom: 2001, hang: [1001] });
+  await cp.waitForFunction(() => window.__chainProbe.adds.length === 1 && localStorage.getItem('lf.rigInFlight') !== null);
+  assert.equal(await cp.evaluate(() => localStorage.getItem('lf.rigInFlight')), '[]', 'the marker names no plugin before a plugin add');
+  await chainLaunch({ mintFrom: 2001 });
+  c = await chainSettle({ adds: 2 });
+  assert.deepEqual({ adds: c.adds, units: slotsOf(c.rig)[1].units }, { adds: ['A0 1001 synth', 'B0 1002 plugin'], units: ['1002 plugin'] },
+    'the plugin never issued is kept and restored');
+
+  // C24. A leftover marker in a new launch, the engine refusing the send-off a while: slot B's level set on its
+  // fader meanwhile is kept when the record forgets the marked plugin.
+  await chainLaunch({
+    seed: { 'lf.rig': rigText([0.8, ['1001 plugin']], [1, ['1002 synth']]), 'lf.rigInFlight': '[1001]' },
+    mintFrom: 2001,
+    refuse: ['SetInputSend'],
+  });
+  await cp.waitForTimeout(300);
+  await cp.getByRole('slider', { name: 'Volume for slot B', exact: true }).fill('0.5');
+  assert.equal(await cp.evaluate(() => JSON.parse(localStorage.getItem('lf.rig')).slots[1].volume), 0.5, 'the level stored meanwhile');
+  await cp.evaluate(() => void (window.__refuse = null));
+  c = await chainSettle({
+    adds: 1,
+    refused: true,
+    recall: [/^\[rig-recall\] the last launch stopped while restoring Fake Amp \(VST3\); its plugins are forgotten/],
+    toasts: ['Could not restore the plugins. Add a plugin again to load it. x1'],
+  });
+  assert.deepEqual(slotsOf(c.rig), [{ volume: 0.8, units: [], pending: [] }, { volume: 0.5, units: ['1002 synth'], pending: [] }],
+    'the plugin forgotten, the level set meanwhile kept');
+
+  // C25. Storage refuses the in-flight marker: nothing is added and nothing placed this launch (slot B Off,
+  // its sends pending), the record stored; the next launch restores and places.
+  await chainLaunch({ seed: { ...V089, 'lf.slotSource.1': 'off' }, failMarker: true });
+  c = await chainSettle({ recall: [/^\[rig-recall\] could not store the in-flight marker; nothing restored/] });
+  assert.deepEqual({ adds: c.adds, pending: slotsOf(c.rig).map((sl) => sl.pending.length) }, { adds: [], pending: [3, 3] }, 'nothing added or placed');
 
   await chainContext.close();
 });
