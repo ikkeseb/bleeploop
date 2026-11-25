@@ -272,6 +272,10 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
+    /// The unreleased rows an install of which has applied in some engine (its `Event::Seat` drained
+    /// `Applied`, or its box came back with a seated verdict: removed, replaced, withdrawn, evicted),
+    /// read by [`UnitHost::ever_applied`]. A row's token leaves at its release.
+    applied: BTreeSet<InstallToken>,
 }
 
 impl Table {
@@ -283,6 +287,14 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
+            applied: BTreeSet::new(),
+        }
+    }
+
+    /// Note that an install of row `token` applied in some engine ([`Table::applied`]).
+    fn note_applied(&mut self, token: InstallToken) {
+        if self.row(token).is_some_and(|r| !r.released) {
+            self.applied.insert(token);
         }
     }
 
@@ -431,6 +443,7 @@ impl Table {
     }
 
     pub(crate) fn mark_seated(&mut self, token: InstallToken, gen: u64) {
+        self.note_applied(token);
         if let Some(row) = self.row_mut(token) {
             if row.in_engine == (RowEngineState::Queued { generation: gen }) {
                 row.in_engine = RowEngineState::Seated { generation: gen };
@@ -455,6 +468,7 @@ impl Table {
         if let Some(row) = self.row_mut(token) {
             row.is_reload = false;
         }
+        self.note_applied(token);
     }
 
     /// End a live reload candidate without touching any predecessor row. Returns `true` if `token`
@@ -718,6 +732,9 @@ impl Table {
             }
             return;
         }
+        if matches!(ret.left, Left::Removed | Left::Replaced | Left::Withdrawn | Left::Evicted) {
+            self.applied.insert(ret.token);
+        }
 
         // A reload candidate's install refusal always surfaces as `Back::Refused`, never `Superseded`
         // or `Removed`, even if `Event::Seat(Refused)` drained first or a removal was queued behind it.
@@ -876,6 +893,7 @@ impl Table {
     /// concurrent `wait_op` caller can still read it.
     pub(crate) fn release_row(&mut self, token: InstallToken) -> Option<(u64, OpState)> {
         self.reload_predecessor.remove(&token);
+        self.applied.remove(&token);
         let pos = self.rows.iter().position(|r| r.token == token)?;
         let row = &mut self.rows[pos];
         row.released = true;
@@ -1596,10 +1614,17 @@ impl UnitHost {
         state.table.row(self.install).is_some_and(|r| r.keep_tone)
     }
 
-    /// Whether this install is a reload's candidate ([`EngineHost::reload_unit`]), not an add.
+    /// Whether this install is a reload's candidate ([`EngineHost::reload_unit`]), not an add. Read it
+    /// before the install can apply: a promotion makes the candidate the id's active row.
     pub fn is_reload(&self) -> bool {
         let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         state.table.row(self.install).is_some_and(|r| r.is_reload)
+    }
+
+    /// Whether an install of this row has applied in some engine ([`Table::applied`]), told or not.
+    pub fn ever_applied(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.applied.contains(&self.install)
     }
 
     /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or

@@ -14,13 +14,17 @@
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- Chain tones: two ends leave a unit file behind an add that answered `Err` (read from source, never run).
-  An add whose unit seated but whose registration met the host closing (`Chains::add_plugin`'s
-  `outcome_err`) answers `Err` while the shutdown's removal keeps its `unit-<id>.tone` or pin; and an owner
-  thread that fails to spawn (`spawn_unit_with`) drops its `ToneKeeper` unrun, so an import its token
-  redeemed stays in `unit-<id>.tone` (the token parked again too). Each is a stray file under an id no rig
-  record may name. Next check: a `chain_cmds_tests.rs` case for each (`unload_all` run from
-  `before_register_hook`; a failing spawn as in `p4f1_2a`), asserting no `unit-<id>` file is left.
+- Chain tones: an add's files and its import token do not follow every outcome (read from source, never
+  run). Files left behind an add that answered `Err`: a unit that applied a seat before it left keeps its
+  tone's end as any seated unit (the shutdown's keep, also after `Chains::add_plugin`'s `outcome_err`), and
+  an owner thread that fails to spawn (`spawn_unit_with`) drops its `ToneKeeper` unrun, so a redeemed import
+  stays in `unit-<id>.tone`; each is a file under an id no rig record may name. The token: a 15 s setup
+  timeout parks it again before the owner's cleanup, so a second id can redeem it while the first file
+  exists; a 30 s `Unanswered` add that later ends in an undo deletes the file without parking it (the
+  import is lost); an applied add that answers `Err` keeps or retires its file and parks it too (two
+  copies); a disk failure inside `redeem` loses it (pre-existing). Next check: a `chain_cmds_tests.rs` case
+  per end on `Chains::add` with a gated fake (`unload_all` from `before_register_hook`; a failing spawn as in
+  `p4f1_2a`). The native rig move, whose restore reads the outcome by token, is where the fix lands.
 - An unload that gives up waiting (6 s) for a command still using the handle empties the slot while
   that command's drop of the handle still tears the plugin down (read from source, never run; no
   command found holds a handle that long: each owner round trip is ≤ 5 s). A load meanwhile fails on

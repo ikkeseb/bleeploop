@@ -737,8 +737,8 @@ impl Chains {
         let token = unit_host.install_token();
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
-        // The token's tone this add redeemed into `unit-<id>.tone`: an owner whose add answers `Err` deletes
-        // that file (`ToneKeeper::undo_add`), so the tone goes back under its token for a later load.
+        // The token's tone this add redeemed into `unit-<id>.tone`: an owner whose add ends without ever applying
+        // a seat deletes that file (`ToneKeeper::undo_add`), so the tone goes back under its token for a later load.
         let mut redeemed: Option<(u32, Tone)> = None;
         let tone = match tones {
             Some(store) => {

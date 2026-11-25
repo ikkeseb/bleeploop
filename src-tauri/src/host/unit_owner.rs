@@ -369,6 +369,7 @@ fn fail_before_seat<P: OwnedPlugin>(
     mut plugin: P,
     unit: Option<Box<P::Unit>>,
     tone: &mut ToneKeeper,
+    add: bool,
     why: String,
     ready: &mut Option<SyncSender<Result<Answer, String>>>,
     faults: &AtomicU32,
@@ -379,7 +380,7 @@ fn fail_before_seat<P: OwnedPlugin>(
         plugin.editor_close();
     }
     plugin.release(unit);
-    undo_add(&host, tone);
+    undo_add(add, tone);
     report_faults(faults, slot, reported);
     host.failed(why.clone());
     host.release();
@@ -391,10 +392,11 @@ fn fail_before_seat<P: OwnedPlugin>(
 
 /// A unit that never stood: delete the files its add wrote (`ToneKeeper::undo_add`) while its id is
 /// still reserved, so a same-id add in the other slot (possible once `UnitHost::failed` or `release`
-/// frees the id) never reads them as its own nor loses its own to this cleanup. A reload candidate's
-/// redeemed tone is the seated unit's, and stays.
-fn undo_add(host: &UnitHost, tone: &mut ToneKeeper) {
-    if !host.is_reload() {
+/// frees the id) never reads them as its own nor loses its own to this cleanup. `add`: the owner was
+/// spawned for an add, not a reload (read at its start); a reload candidate's redeemed tone is the
+/// seated unit's, and stays.
+fn undo_add(add: bool, tone: &mut ToneKeeper) {
+    if add {
         tone.undo_add();
     }
 }
@@ -407,15 +409,17 @@ enum ToneEnd {
     /// The unit left for good: its tone retires into the slot's file, unless the host's shutdown's
     /// removal ended it (`UnitHost::keeps_tone`).
     Retire,
-    /// An add whose first answer is still owed, so it answers `Err`: nothing is saved and the files the
-    /// add wrote go ([`undo_add`]), whatever the shutdown's removal decided.
+    /// An add whose unit never applied a seat in any engine: nothing is saved and the files the add
+    /// wrote go ([`undo_add`]), whatever the shutdown's removal decided.
     Undo,
 }
 
-/// The tone end for a unit out of the engine: [`ToneEnd::Undo`] for an add (not a reload) whose
-/// owner's first answer is still owed (`ready`), else retire or not as the terminal `Back` said.
-fn tone_end(host: &UnitHost, ready: &Option<SyncSender<Result<Answer, String>>>, retire: bool) -> ToneEnd {
-    if ready.is_some() && !host.is_reload() {
+/// The tone end for a unit out of the engine: [`ToneEnd::Undo`] for an add (`add`: not a reload, read
+/// at the owner's start) whose unit never applied a seat in any engine ([`UnitHost::ever_applied`]),
+/// else retire or not as the terminal `Back` said. A unit that applied keeps its tone's end even when
+/// it left before its owner's first answer: it played, and a reload's promotion makes it the id's unit.
+fn tone_end(host: &UnitHost, add: bool, retire: bool) -> ToneEnd {
+    if add && !host.ever_applied() {
         ToneEnd::Undo
     } else if retire {
         ToneEnd::Retire
@@ -544,10 +548,12 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let faults = Arc::new(AtomicU32::new(0));
     let mut reported = 0u32;
     let mut ready = Some(ready);
+    // Read once, before the install can apply: a reload's promotion clears the row's flag.
+    let add = !host.is_reload();
 
     let Some(terms) = host.terms() else {
         let why = "no audio device is open".to_string();
-        undo_add(&host, &mut tone);
+        undo_add(add, &mut tone);
         host.failed(why.clone());
         host.release();
         if let Some(tx) = ready.take() {
@@ -569,7 +575,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let Loaded { mut plugin, unit, name, tone: restored, .. } = match load(setup) {
         Ok(loaded) => loaded,
         Err(e) => {
-            undo_add(&host, &mut tone);
+            undo_add(add, &mut tone);
             host.failed(e.clone());
             host.release();
             if let Some(tx) = ready.take() {
@@ -590,6 +596,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             plugin,
             Some(unit),
             &mut tone,
+            add,
             "plugin load cancelled".to_string(),
             &mut ready,
             &faults,
@@ -749,10 +756,10 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 
     match served {
         Ok(Exit::FailedBeforeSeat { unit, why }) => {
-            fail_before_seat(host, plugin, unit, &mut tone, why, &mut ready, &faults, &mut reported)
+            fail_before_seat(host, plugin, unit, &mut tone, add, why, &mut ready, &faults, &mut reported)
         }
         Ok(Exit::Returned { unit, retire }) => {
-            let end = tone_end(&host, &ready, retire);
+            let end = tone_end(&host, add, retire);
             let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err("unit left before seating".to_string()));
@@ -761,7 +768,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         }
         Ok(Exit::Dismissed) => {
             let unit = seat.take_unit();
-            let end = tone_end(&host, &ready, true);
+            let end = tone_end(&host, add, true);
             let res = ordered_release(host, plugin, unit, &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
                 let _ = tx.try_send(Err("unit dismissed before seating".to_string()));
@@ -828,7 +835,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             // ahead of `Dismissed` in the mailbox, or a box held in `Leave::Pending` during a
             // pending removal) takes the ordered release.
             if in_hand.is_some() || dismissed {
-                let end = tone_end(&host, &ready, retire);
+                let end = tone_end(&host, add, retire);
                 ordered_release(host, plugin, in_hand, &mut tone, &name, !panicked, end, &faults, &mut reported)
             } else {
                 abandon_in_engine(host, plugin, &mut tone, &name, !panicked, &faults, &mut reported)

@@ -15,7 +15,7 @@
 //! slot's file (and pins it); a save or a redeem replaces the pin with the unit's tone. A unit that
 //! leaves for good (the player's removal, a source replacement) retires: its tone moves into the slot's
 //! file, where the next unit of that plugin in the slot starts; a unit with only a pin deletes it and
-//! leaves the slot's file alone. A unit whose add answers `Err` deletes what that add wrote: the pin its
+//! leaves the slot's file alone. A unit whose add ends without ever having applied a seat deletes what that add wrote: the pin its
 //! own load wrote, or the session import its token redeemed, which goes back under its token
 //! ([`ToneKeeper::undo_add`], [`ToneTokens::repark`]). The host's shutdown retires nothing: both files
 //! stay for the next launch's restore under the id.
@@ -989,7 +989,7 @@ impl ToneKeeper {
         }
     }
 
-    /// The unit's add answers `Err` (a reload's never calls this): what the add wrote goes, so no file
+    /// The unit's add ended without ever applying a seat (a reload's never calls this): what the add wrote goes, so no file
     /// is left for a unit that never stood: the pin this load wrote ([`ToneStore::unpin`]), or the unit
     /// file its token's redeem wrote ([`ToneStore::unredeem`]; the caller parks the token's tone again).
     /// Each only while no later redeem replaced it. A pin or a tone the unit had before this add stays.

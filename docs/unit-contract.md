@@ -74,8 +74,9 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   instance retiring into the slot's file later never changes the tone this unit restores. A save, or a
   redeem of a session import's token (§8), writes the unit's own file and deletes its pin. A removal
   retires it: the unit's own file moves into the slot's file, where the next unit of that plugin starts; a
-  unit with only a pin deletes it, the slot's file untouched. An add that fails before it seats, or answers
-  `Err`, deletes what it wrote (its pin, or a redeemed import, whose token is parked again).
+  unit with only a pin deletes it, the slot's file untouched. An add that ends without ever having applied a
+  seat (it failed before it seated, or answers `Err`) deletes what it wrote (its pin, or a redeemed import,
+  whose token is parked again); one that applied a seat keeps its files (`src-tauri/OPEN-THREADS.md`).
 - **D29 follows the unit.** The editor affinity is per plugin FILE (`instrument.ts` `editorAffinity`);
   each plugin unit has its own owner thread, so a file's editor belongs to the unit loaded first, in either
   slot; a second instance in the SAME chain is refused its editor (its parameters work). `unordered` and
