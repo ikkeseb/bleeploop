@@ -35,6 +35,8 @@
 //! [`Rig::close`], which then has nothing to write.
 
 mod disk;
+#[cfg(test)]
+mod tests;
 mod writer;
 
 use std::path::PathBuf;
