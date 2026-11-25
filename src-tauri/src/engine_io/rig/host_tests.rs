@@ -5,24 +5,25 @@
 //! (no plugin code); built-ins are the engine's own (`Builtins`) unless a test gates their build.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Release}};
+use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, LaneState, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, SLOT_COUNT};
+use lf_engine::{Command, InputSend, LaneState, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, SLOT_COUNT, TRACK_COUNT};
 use lf_rig::{AddFail, AddOk, AddState, Place, PluginRecord, PluginRefView, Retry, RigRecord, RigStatus, UnitBody, UnitRecord, SAVE_QUIET};
 
 use super::host::{AppHost, Loader};
 use super::tests::{echo_unit, record, wait_until, Folder};
 use super::{files, writer, Forgot, RestoreHost, Rig, SeedTaken};
 use crate::engine_io::builtins::Builtins;
-use crate::engine_io::chain::{PluginRef, UnitSpec};
+use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec};
 use crate::engine_io::chain_cmds::tests::{empty_slots, ClampingBuiltinFactory};
 use crate::engine_io::chain_cmds::Chains;
 use crate::engine_io::plugins::EngineSlot;
 use crate::engine_io::test_rig::{TestDevice, PATIENCE};
-use crate::engine_io::unit_host::{Activated, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost};
+use crate::engine_io::unit_host::{Activated, Back, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost};
 use crate::engine_io::EngineHost;
 use crate::host::engine_slot::{EventSink, PluginFormat};
 use crate::host::tone::{ToneBinding, ToneIdentity, ToneStore};
@@ -128,11 +129,21 @@ fn builtin(id: UnitId, kind: UnitKind) -> UnitRecord {
 }
 
 fn plugin_ref(tag: &str) -> PluginRef {
-    PluginRef { format: "clap".into(), path: format!("C:\\plugins\\{tag}.clap"), id: format!("host.{tag}") }
+    plugin_at(tag, tag)
+}
+
+/// The plugin `host.<id_tag>` in the file `C:\plugins\<file>.clap`.
+fn plugin_at(file: &str, id_tag: &str) -> PluginRef {
+    PluginRef { format: "clap".into(), path: format!("C:\\plugins\\{file}.clap"), id: format!("host.{id_tag}") }
 }
 
 fn amp(id: UnitId, tag: &str) -> UnitRecord {
-    let p = plugin_ref(tag);
+    amp_at(id, tag, tag)
+}
+
+/// A record plugin unit of [`plugin_at`]'s identity.
+fn amp_at(id: UnitId, file: &str, id_tag: &str) -> UnitRecord {
+    let p = plugin_at(file, id_tag);
     let plugin = PluginRefView { format: p.format, path: p.path, id: p.id };
     UnitRecord { id, body: UnitBody::Plugin(PluginRecord { plugin, name: None }), bypass: None }
 }
@@ -162,16 +173,24 @@ fn gains(host: &EngineHost) -> [Option<f32>; 2] {
     held
 }
 
+/// Whether the settings memory holds all four input sends off (the seed's send-offs).
+fn sends_off(host: &EngineHost) -> bool {
+    let kept = host.settings();
+    InputSend::ALL.into_iter().all(|send| kept.contains(&Command::SetInputSend(send, false)))
+}
+
 fn send(host: &EngineHost, command: Command) {
     host.send(TimedCommand { frame: None, command }).expect("the ring takes it");
 }
 
-/// A pass-through plugin stand-in.
-struct Thru;
+/// A pass-through plugin stand-in, an instrument (a source) when `source`.
+struct Thru {
+    source: bool,
+}
 
 impl UnitProcessor for Thru {
     fn info(&self) -> UnitInfo {
-        UnitInfo { kind: UnitKind::Plugin, source: false, latency: 0 as Frame }
+        UnitInfo { kind: UnitKind::Plugin, source: self.source, latency: 0 as Frame }
     }
     fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
         for (o, i) in out.into_iter().zip(input) {
@@ -228,14 +247,15 @@ fn player_edit_meanwhile_does_not_shift_anchor() {
 // ── the match (D9) ───────────────────────────────────────────────────────────────────────────────────
 
 /// A live, applied plate of that slot under the id, of that kind and plugin identity, is `Matched`
-/// (its own token, nothing added); the same id as another plugin, another kind or in the other slot
-/// refuses (`Host`, no token).
+/// (its own token, nothing added); the same id as another plugin (another id in the same file, or the
+/// same plugin id in another file), another kind or in the other slot refuses (`Host`, no token).
 #[test]
 fn matched_by_identity_not_id() {
     let b = Bench::new(fast_device());
     let token = seated(b.app.add(0, 5, &amp(5, "amp"), &Place::After(vec![])));
     assert_eq!(b.app.add(0, 5, &amp(5, "amp"), &Place::End), Ok(AddOk { state: AddState::Matched, token }));
-    assert_eq!(host_refusal(b.app.add(0, 5, &amp(5, "other"), &Place::End)).1, None, "another plugin under the id");
+    assert_eq!(host_refusal(b.app.add(0, 5, &amp_at(5, "amp", "other"), &Place::End)).1, None, "the same file, another plugin id in it");
+    assert_eq!(host_refusal(b.app.add(0, 5, &amp_at(5, "other", "amp"), &Place::End)).1, None, "the same plugin id, another file");
     assert_eq!(host_refusal(b.app.add(1, 5, &amp(5, "amp"), &Place::End)).1, None, "the id in the other slot");
     let echo = seated(b.app.add(0, 6, &builtin(6, UnitKind::Echo), &Place::End));
     assert_eq!(host_refusal(b.app.add(0, 6, &builtin(6, UnitKind::Reverb), &Place::End)).1, None, "another kind under the id");
@@ -245,7 +265,8 @@ fn matched_by_identity_not_id() {
 
 /// A plate that has not applied yet (its add may still fail) and a `Leaving` one are no match: the add
 /// is refused with no token. A failed add's plate is no match either: the add replaces it, a new
-/// attempt with its own token.
+/// attempt with its own token. The `Leaving` plate is a SYNTH at its slot's head whose removal a take
+/// holds (it changes the slot's role, so the engine answers it `Waiting` until the take ends).
 #[test]
 fn leaving_or_failed_plate_is_no_match() {
     let b = Bench::new(TestDevice::start(48_000, 64, Duration::from_millis(5), |_| 0.0));
@@ -261,7 +282,7 @@ fn leaving_or_failed_plate_is_no_match() {
     let again = seated(b.app.add(0, 8, &amp(8, "amp"), &Place::End));
     assert_ne!(again, failed, "a new attempt replaces the failed plate");
 
-    seated(b.app.add(0, 10, &builtin(10, UnitKind::Echo), &Place::End));
+    seated(b.app.add(1, 10, &builtin(10, UnitKind::Synth), &Place::End));
     send(host, Command::SetBpm(240.0));
     send(host, Command::SetFixedLength(false));
     send(host, Command::RecDub(0));
@@ -269,12 +290,16 @@ fn leaving_or_failed_plate_is_no_match() {
         let (_, ov) = host.drain_feed(&mut Vec::new());
         ov.is_some_and(|ov| ov.lane(0).state == LaneState::Recording && ov.lane(0).frames > 0)
     });
-    let Removal::Sent(_) = host.remove_unit(10).expect("remove") else { panic!("expected a sent removal") };
+    let Removal::Sent(op) = host.remove_unit(10).expect("remove") else { panic!("expected a sent removal") };
     wait_until("the take holds the removal", || {
         settle(host);
-        host.core.state.lock().unwrap().model.has_pending_remove(10)
+        host.core.state.lock().unwrap().poll(op) == OpState::Held
     });
-    assert_eq!(host_refusal(b.app.add(0, 10, &builtin(10, UnitKind::Echo), &Place::End)).1, None, "a leaving plate");
+    {
+        let state = host.core.state.lock().unwrap();
+        assert!(state.model.find_plate(10).is_some_and(|(_, p)| p.state == PlateState::Leaving && p.applied), "an applied plate, leaving");
+    }
+    assert_eq!(host_refusal(b.app.add(1, 10, &builtin(10, UnitKind::Synth), &Place::End)).1, None, "a leaving plate");
 }
 
 // ── the player's source (D9) ─────────────────────────────────────────────────────────────────────────
@@ -300,16 +325,52 @@ fn restore_never_replaces_players_source() {
     assert!(!b.applied(7) && !b.applied(11), "neither restore source applied");
 }
 
+/// A source the player put in that a rebuild evicted and that has not reseated yet: its row is live,
+/// and no projected seat shows it (`Model::head_source_id`). A restore SYNTH added meanwhile is
+/// `SourceTaken` (applied, it would take that source out: `Model::take_older_sources_out_of_engine`),
+/// and the player's source reseats, applied.
+#[test]
+fn restore_never_replaces_a_source_awaiting_its_reseat() {
+    let b = Bench::new(fast_device());
+    let host = b.host().clone();
+    let player = host.unit(0, 9, Spec::Plugin(plugin_ref("player")), 0, false).expect("reserve the player's source");
+    player.activated(Activated { name: "player".into(), source: true, latency: 0 });
+    let terms = player.terms().expect("engine terms");
+    let op = player.submit(Box::new(Thru { source: true }), terms).map_err(|(_, e)| e).expect("submit");
+    assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
+    b.device.rebuild_at(44_100, 256);
+    {
+        let state = host.core.state.lock().unwrap();
+        let (_, plate) = state.model.find_plate(9).expect("its plate stays");
+        assert!(!plate.seated_in_engine && plate.reseating_since.is_some(), "it awaits its reseat");
+        assert_eq!(state.model.head_source_id(0, None), None, "no projected seat shows it");
+    }
+    match b.app.add(0, 7, &builtin(7, UnitKind::Synth), &Place::After(vec![])) {
+        Err(AddFail::SourceTaken { .. }) => {}
+        other => panic!("a restore SYNTH while the player's source awaits its reseat: expected SourceTaken, got {other:?}"),
+    }
+    assert_eq!(b.ids(0).first(), Some(&9), "the player's source keeps its plate at the head");
+    assert!(!b.applied(7), "the restore's SYNTH never applied");
+    let Some(Back::Evicted { unit, .. }) = player.take_back() else { panic!("the rebuild handed the player's source back") };
+    let terms = player.terms().expect("the new engine's terms");
+    let op = player.submit(unit, terms).map_err(|(_, e)| e).expect("reseat");
+    assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
+    assert!(b.applied(9), "the player's source reseats");
+}
+
 // ── the seed and its barrier (D1, D2) ────────────────────────────────────────────────────────────────
 
 /// D2: a slot whose gain the player set (a gesture) keeps it; the other takes the record's level; a
-/// second seed changes neither. The seed is taken by the running engine.
+/// second seed changes neither. The four input sends go off with it. The seed is taken by the running
+/// engine.
 #[test]
 fn seed_skips_a_slot_gain_set_by_gesture() {
     let b = Bench::new(fast_device());
     send(b.host(), Command::SetSlotGain(0, 0.3));
+    assert!(!sends_off(b.host()), "no send-off before the seed");
     assert!(b.app.seed([0.8, 0.6]), "the ring takes the seed whole");
     assert_eq!(gains(b.host()), [Some(0.3), Some(0.6)]);
+    assert!(sends_off(b.host()), "the four send-offs go with the levels");
     assert!(b.app.seed([0.9, 0.9]));
     assert_eq!(gains(b.host()), [Some(0.3), Some(0.6)], "both held now");
     assert!(matches!(b.app.wait_taken(PATIENCE), SeedTaken::Taken { .. }));
@@ -326,13 +387,47 @@ fn c18_partial_take_on_full_ring_retry_keeps_gesture() {
     b.host().send_all(fill).expect("the ring takes the fill");
     assert!(!b.app.seed([0.8, 0.6]), "the ring took one level and refused the rest");
     assert_eq!(gains(b.host()), [Some(0.8), None], "the part it took is kept");
+    assert!(!sends_off(b.host()), "the send-offs were refused with the second level");
     b.device.resume();
     wait_until("the ring drains", || b.host().core.ends.lock().unwrap().as_ref().unwrap().commands.slots() >= free);
     send(b.host(), Command::SetSlotGain(0, 0.3));
     send(b.host(), Command::SetSlotGain(1, 0.25));
     assert!(b.app.seed([0.8, 0.6]), "the retry is taken whole");
     assert_eq!(gains(b.host()), [Some(0.3), Some(0.25)], "the gestures win over the retry");
+    assert!(sends_off(b.host()), "the retry's send-offs");
     assert!(matches!(b.app.wait_taken(PATIENCE), SeedTaken::Taken { .. }));
+}
+
+/// D1, D2: a seed sent while no engine exists (before a device's first open) is kept by the settings
+/// memory (the levels and the four send-offs) with no mark; the first engine's replay carries it, and
+/// the barrier, set at that first engine, answers `Taken` once its blocks took the replay.
+#[test]
+fn seed_with_no_engine_is_replayed_by_the_first_engine() {
+    let mut b = Bench::new(fast_device());
+    b.device.stop();
+    // No engine yet: the engine, its ring and its slot ports go (none holds a unit).
+    let old = b.host().core.rt.lock().unwrap().engine.take();
+    *b.host().core.ends.lock().unwrap() = None;
+    for port in &b.host().core.ports {
+        *port.lock().unwrap() = None;
+    }
+    drop(old);
+    assert_eq!(b.app.device(), None);
+    assert!(b.app.seed([0.8, 0.6]), "kept for the first engine");
+    assert_eq!(gains(b.host()), [Some(0.8), Some(0.6)]);
+    assert!(sends_off(b.host()));
+    assert_eq!(b.app.wait_taken(Duration::from_millis(20)), SeedTaken::Pending, "no engine takes it");
+    b.device.rebuild_at(48_000, 256);
+    let g = b.host().core.engine_gen.load(Acquire);
+    let replayed = b.host().core.ends.lock().unwrap().as_ref().expect("the first engine").pushed;
+    assert!(replayed >= 6, "the first engine's replay carries the two levels and the four send-offs ({replayed})");
+    b.device.resume();
+    assert_eq!(b.app.device(), Some(g));
+    assert_eq!(b.app.wait_taken(PATIENCE), SeedTaken::Taken { gen: g });
+    let taken = b.host().core.ends.lock().unwrap().as_ref().unwrap().overview.commands_taken();
+    assert!(taken >= replayed, "the first engine took its whole replay");
+    assert_eq!(gains(b.host()), [Some(0.8), Some(0.6)]);
+    assert!(sends_off(b.host()));
 }
 
 /// D1: the barrier is the engine generation and the ring's count through the seed; a rebuild moves
@@ -359,18 +454,37 @@ fn barrier_retargets_on_rebuild() {
 
 /// D1's open question, settled: a new engine's first block takes at most `MAX_PENDING` (64) commands
 /// off its ring, then services the slot ports, so an install already in a port seats in that block
-/// while the replay and the seed behind them wait for the next ones. The barrier sees it: `Pending`
-/// after that block, `Taken` later. So the restore re-checks the barrier before each add, and an
-/// install already queued across a rebuild is the residual window (`OPEN-THREADS.md`).
+/// while the rest of a longer replay and the seed behind it wait for the next ones. The replay here is
+/// the settings memory's (each lane's mix off its defaults, which the old engine applied), more than
+/// 64 commands. The barrier sees it: `Pending` after that block, `Taken` later. So the restore
+/// re-checks the barrier before each add, and an install already queued across a rebuild is the
+/// residual window (`OPEN-THREADS.md`). The block count is read before the device resumes, and the
+/// first block's reads are made before the second (300 ms later) renders.
 #[test]
 fn first_block_can_seat_an_install_ahead_of_a_long_replay() {
     let mut b = Bench::new(TestDevice::start(48_000, 256, Duration::from_millis(300), |_| 0.0));
+    let host = b.host().clone();
+    let mut long = Vec::new();
+    for lane in 0..TRACK_COUNT as u8 {
+        long.extend([Command::SetVolume(lane, 0.5), Command::SetPan(lane, 0.5), Command::SetDubFeedback(lane, 0.5), Command::SetMute(lane, true)]);
+        for kind in FxKind::ALL {
+            long.push(Command::SetFxBypass(lane, kind, false));
+            for def in kind.params() {
+                let param = FxParam::from_key(kind, def.key).expect("a listed param");
+                long.push(Command::SetFxParam(lane, param, if def.min != def.default { def.min } else { def.max }));
+            }
+        }
+    }
+    host.send_all(long.into_iter().map(|command| TimedCommand { frame: None, command })).expect("the ring takes them");
+    let sent = host.core.ends.lock().unwrap().as_ref().expect("an engine").pushed;
+    wait_until("the old engine takes them", || host.core.ends.lock().unwrap().as_ref().unwrap().overview.commands_taken() >= sent);
+    assert!(b.device.wait_blocks(1), "and applies them");
+    settle(&host);
     b.device.stop();
     b.device.rebuild_at(48_000, 256);
-    let ahead: Vec<TimedCommand> = (0..70).map(|_| TimedCommand { frame: None, command: Command::SetBpm(120.0) }).collect();
-    b.host().send_all(ahead).expect("the ring takes them");
+    let replayed = host.core.ends.lock().unwrap().as_ref().expect("the new engine").pushed;
+    assert!(replayed > 64, "the new engine's replay is longer than one block takes ({replayed})");
     assert!(b.app.seed([0.8, 0.6]));
-    let host = b.host().clone();
     let uh = host.unit(0, 1, Spec::Plugin(plugin_ref("ahead")), 0, false).expect("reserve");
     uh.activated(Activated { name: "ahead".into(), source: false, latency: 0 });
     {
@@ -379,12 +493,14 @@ fn first_block_can_seat_an_install_ahead_of_a_long_replay() {
         host.core.running.store(true, Release);
     }
     let terms = uh.terms().expect("engine terms");
-    let op = uh.submit(Box::new(Thru), terms).map_err(|(_, e)| e).expect("submit");
+    let op = uh.submit(Box::new(Thru { source: false }), terms).map_err(|(_, e)| e).expect("submit");
+    let first = b.device.blocks.load(Relaxed) + 1;
     b.device.resume();
-    assert!(b.device.wait_blocks(1), "the first block renders");
+    assert!(b.device.wait_block_count(first), "the first block renders");
     assert_eq!(b.app.wait_taken(Duration::ZERO), SeedTaken::Pending, "the seed is still in the ring after the first block");
     settle(&host);
     assert!(b.applied(1), "the install seated in the first block, ahead of the seed");
+    assert_eq!(b.device.blocks.load(Relaxed), first, "both read within the first block");
     assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
     assert!(matches!(b.app.wait_taken(PATIENCE), SeedTaken::Taken { .. }));
 }
@@ -417,6 +533,29 @@ fn forget_is_held_while_a_unit_holds_the_id_and_once_closing() {
     assert!(files_of(5).iter().all(|f| f.exists()), "5's files kept for the next launch");
 }
 
+/// `forget` answers `Deleted` only once no file of the id is left: a tone file another handle holds
+/// with no delete sharing (a sharing violation) is no delete, and it answers `Held`, so the restore asks
+/// again; once the handle is closed, the next forget deletes it.
+#[test]
+fn forget_is_held_while_a_file_cannot_be_deleted() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let folder = Folder::new("host-forget-locked");
+    let tones = folder.0.join("tones");
+    std::fs::create_dir_all(&tones).unwrap();
+    let tone = tones.join(ToneIdentity::unit_file_name(6));
+    let pin = tones.join(ToneIdentity::unit_pin_name(6));
+    for f in [&tone, &pin] {
+        std::fs::write(f, b"tone").unwrap();
+    }
+    let b = Bench::with(fast_device(), Chains::new(), FakePluginConfig::default(), Some(ToneStore::new(tones.clone())));
+    let open = std::fs::OpenOptions::new().read(true).share_mode(0).open(&tone).expect("hold the tone file");
+    assert_eq!(b.app.forget(6), Forgot::Held, "a file is left");
+    assert!(tone.exists(), "the held file is left");
+    drop(open);
+    assert_eq!(b.app.forget(6), Forgot::Deleted);
+    assert!(!tone.exists() && !pin.exists(), "6's files are gone");
+}
+
 /// An add is refused before the mint (`Host`, no token, nothing on the chain) while no device runs
 /// (`Device`) and once the host is closing (`Launch`).
 #[test]
@@ -428,6 +567,37 @@ fn add_refused_before_the_mint_without_a_device_and_once_closing() {
     b.host().set_closing();
     assert_eq!(host_refusal(b.app.add(0, 3, &builtin(3, UnitKind::Echo), &Place::End)), (Retry::Launch, None));
     assert!(b.ids(0).is_empty(), "no plate");
+}
+
+/// The shutdown marks the host closing while an add waits for `state` in its reservation (past its
+/// first closing checks, its plugin slots' lock held: `Chains::mint`): the add reserves nothing
+/// (`Host`, no token, no plate), so no unit escapes the shutdown's removal of the units it sees.
+#[test]
+fn add_waiting_on_state_as_the_host_closes_reserves_nothing() {
+    let b = Bench::new(fast_device());
+    let app = b.app.clone();
+    let state = b.host().core.state.lock().unwrap();
+    let adding = std::thread::spawn(move || app.add(0, 3, &builtin(3, UnitKind::Echo), &Place::End));
+    wait_until("the add is in its reservation", || b.slots.try_lock().is_err());
+    // From the slots' lock to `state` is a few reads: give it ample time to block there.
+    std::thread::sleep(Duration::from_millis(50));
+    b.host().set_closing();
+    drop(state);
+    let added = adding.join().expect("the add's thread");
+    assert_eq!(host_refusal(added), (Retry::Launch, None), "refused with no token");
+    assert!(b.ids(0).is_empty(), "no plate");
+}
+
+/// [`RestoreHost::exited`] over the chain host's latches: a live attempt's token reads not ended; a
+/// token no add minted reads ended (the trait's rule), where `Chains::exited` reads it not ended.
+#[test]
+fn exited_reads_an_unknown_token_ended_and_a_live_attempt_not() {
+    let b = Bench::new(fast_device());
+    let token = seated(b.app.add(0, 5, &amp(5, "amp"), &Place::End));
+    assert!(!b.app.exited(token), "its owner runs");
+    let unknown = token + 1_000;
+    assert!(b.app.exited(unknown), "a token no add minted reads ended");
+    assert!(!b.chains.exited(unknown), "the chain host's own read differs: the adapter maps it");
 }
 
 // ── a whole restore through the rig ──────────────────────────────────────────────────────────────────
