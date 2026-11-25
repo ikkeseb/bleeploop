@@ -53,6 +53,8 @@ pub(crate) use clap::engine_spike_run;
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use scan::scan_one;
 #[cfg(windows)]
+pub(crate) use scan::scan_paths;
+#[cfg(windows)]
 #[allow(unused_imports)] // the native engine's plugin slots (the `plugin_*` commands)
 pub(crate) use clap::engine_slot;
 #[cfg(windows)]

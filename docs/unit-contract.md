@@ -337,6 +337,12 @@ below reads an old key through the resolver that reads it today, so a missing ke
   plugin unit with a fresh id (dropped when the legacy crash marker is stored, as v0.8.9 would have), else its
   source as `instrument.ts` resolves `lf.slotSource.<n>` (unset: Lead in A, Bass in B, Off on a guitar-first
   install) as a SYNTH unit or an empty chain. The old keys stay one release.
+- **The restore (native, once per process):** each slot's volume (unless the player set one) and the legacy
+  sends' send-off go in as settings and are taken by the engine before any unit is added; then, once a
+  device runs, each record unit the chain lacks is added under its id, right after the nearest record unit
+  before it that the chain holds then (else at the head, behind a source). A unit the chain already holds
+  (same slot, id, kind and plugin, applied) is not added twice; the restore never replaces a source the
+  player put in, and a forgotten unit's tone files go only while no unit holds its id.
 - **Tones:** a migrated plugin unit's first load starts from its slot and plugin's v0.8.9 file (§1).
 - **Slot volume:** a plugin slot takes `savedPluginLevel` (`lf.pluginGain.*`, else 0.9 for a scanned
   effect, 0.1 otherwise or when the scan did not find it, `instrument.ts`); an empty input-fed slot

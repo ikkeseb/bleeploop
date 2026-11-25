@@ -498,6 +498,46 @@ impl Model {
             .is_some_and(|p| p.source)
     }
 
+    /// A host add's match (D9), under `state` before its mint: `Some(Ok(token))` when a live plate of
+    /// `slot` already is the unit (id `id`, the kind and plugin identity `spec` names, applied, neither a
+    /// failed add nor `Leaving`), with that plate's `added_by`; `Some(Err(why))` when another plate holds
+    /// the id (the other slot, another kind or plugin, a `Leaving` one, or this unit's that has not
+    /// applied yet: its own add may still fail, and adding beside it would double it); `None` when no
+    /// plate holds it (a failed add's does not: the add replaces it).
+    pub(crate) fn host_match(&self, slot: usize, id: UnitId, spec: &Spec) -> Option<Result<InstallToken, String>> {
+        let (s, plate) = self.find_plate(id).filter(|(_, p)| !p.is_failed_add())?;
+        let same = match spec {
+            Spec::Plugin(plugin) => plate.kind == UnitKind::Plugin && plate.plugin.as_ref() == Some(plugin),
+            Spec::Builtin { kind, .. } => plate.kind == *kind && plate.plugin.is_none(),
+            Spec::Legacy => false,
+        };
+        if s == slot && !plate.legacy && same && plate.applied && plate.state != PlateState::Leaving {
+            return Some(Ok(plate.added_by));
+        }
+        Some(Err(format!("unit id {id} is held by another unit, or by this one still loading or leaving")))
+    }
+
+    /// A host add's plate index (D9), under `state`: right after the nearest of `place`'s record units
+    /// (nearest last) that is a plate of `slot` now, else at the head: after the slot's source, when its
+    /// first plate is one (an effect never goes ahead of it). `End` is the slot's end. Counted as the
+    /// plates will stand once `add_plate` has dropped a failed add's plate under `id`.
+    pub(crate) fn host_place(&self, slot: usize, id: UnitId, place: &lf_rig::Place) -> usize {
+        let plates: Vec<&Plate> = self.slots[slot].plates.iter().filter(|p| !(p.id == id && p.is_failed_add())).collect();
+        let live = |p: &&Plate| !p.is_failed_add();
+        match place {
+            lf_rig::Place::End => plates.len(),
+            lf_rig::Place::After(before) => before
+                .iter()
+                .rev()
+                .find_map(|anchor| plates.iter().position(|p| p.id == *anchor && live(p)))
+                .map(|i| i + 1)
+                .unwrap_or_else(|| match plates.iter().position(live) {
+                    Some(first) if plates[first].source => first + 1,
+                    _ => 0,
+                }),
+        }
+    }
+
     /// Add a new plate at plate index `at`, made by the add whose row `token` names. If an un-removed
     /// failed-add plate already carries `id`, it is cleared first (its id was freed by `failed()`).
     pub(crate) fn add_plate(&mut self, slot: usize, id: UnitId, spec: &Spec, at: usize, bypassed: bool, token: InstallToken) {

@@ -163,9 +163,8 @@ pub(crate) enum FailClass {
     /// scan or an id no plugin of its format can have: [`Retry::Launch`]); also no engine after the load,
     /// answered once the owner had ended, so nothing is left to wait for.
     Host(Retry),
-    /// A source the player put in heads the slot (D9). No path answers it before CP3b's host-add rule
-    /// (`SubmitError::SourceTaken`, met in `submit_owed`).
-    #[allow(dead_code)] // CP3b's `SubmitError::SourceTaken` answers it
+    /// A host add's unit came out a source while a source the player put in heads the slot (D9:
+    /// `SubmitError::SourceTaken`, met at its first submit), before any seat.
     SourceTaken,
     /// The engine or the host refused the seat after the unit was built (a seat refusal, a full port,
     /// a replaced or removed unit, the host closing).
@@ -340,8 +339,12 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
         SubmitError::NoEngine => "no audio device is open".to_string(),
+        SubmitError::SourceTaken => SOURCE_TAKEN.to_string(),
     }
 }
+
+/// Why a host add's source is not seated (D9, `SubmitError::SourceTaken`).
+pub(crate) const SOURCE_TAKEN: &str = "a source the player put in heads the slot; a restore never replaces it";
 
 fn send_answer(ready: &mut Option<SyncSender<First>>, slot: usize, id: UnitId, answer: Answer) {
     if let Some(tx) = ready.take() {
@@ -398,7 +401,9 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
                 | SubmitError::Closing
                 | SubmitError::NoEngine
                 | SubmitError::Refused(_)
-                | SubmitError::Late),
+                | SubmitError::Late
+                // A submit's answer only; `withdraw` never gives it.
+                | SubmitError::SourceTaken),
             ) => {
                 log::info!(
                     "[plugin_host] engine slot {slot} unit {id}: dropping restart ({why}); withdraw refused ({err:?})"
@@ -557,8 +562,17 @@ fn submit_owed<P: OwnedPlugin>(
         }
         Err((returned, SubmitError::Superseded)) => Some(Exit::Returned { unit: own(returned), retire: false }),
         Err((returned, SubmitError::Replaced)) => Some(Exit::Returned { unit: own(returned), retire: true }),
-        // CP3b's `SubmitError::SourceTaken` (a host add never replaces, D9) ends here before a seat as
-        // `Exit::FailedBeforeSeat` with `FailClass::SourceTaken`.
+        // A host add never replaces the player's source (D9). Met only before the unit's first seat
+        // (`UnitHost::submit`), so `ever_seated` is false; were it not, the unit parks, as a refused reseat.
+        Err((returned, SubmitError::SourceTaken)) => {
+            let returned = own(returned);
+            if !ever_seated {
+                return Some(Exit::FailedBeforeSeat { unit: Some(returned), why: SOURCE_TAKEN.to_string(), class: FailClass::SourceTaken });
+            }
+            host.parked(SOURCE_TAKEN.to_string());
+            *seat = Seat::Parked { unit: returned };
+            None
+        }
     }
 }
 

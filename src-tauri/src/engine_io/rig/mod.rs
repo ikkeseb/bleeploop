@@ -69,6 +69,9 @@
 //! [`Rig::close`], which then has nothing to write.
 
 mod disk;
+pub(super) mod host;
+#[cfg(test)]
+mod host_tests;
 mod restore;
 #[cfg(test)]
 mod restore_tests;
