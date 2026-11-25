@@ -8,18 +8,20 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use lf_engine::InputSendParam;
 use lf_rig::marker::{self, MarkerRead};
 use lf_rig::{
-    Action, AddFail, AddOk, AddState, Disposition, InstallToken, Notice, Place, PlateState, PlateView, PluginRecord, PluginRefView, Retry, RigRecord,
+    Action, AddFail, AddOk, AddState, Disposition, Event, InstallToken, Notice, Place, PlateState, PlateView, PluginRecord, PluginRefView, Retry, RigRecord,
     RigStatus, RigView, UnitBody, UnitId, UnitKind, UnitParam, UnitRecord, Volumes, SETTLE,
 };
 
 use super::tests::{echo_unit, record, wait_until, Folder};
 use crate::engine_io::test_rig::PATIENCE;
+use super::restore::Pause;
 use super::{files, lock, Forgot, RestoreHost, Rig, RigModel, SeedTaken};
 
 // ── the fake host ───────────────────────────────────────────────────────────────────────────────────
@@ -96,6 +98,14 @@ struct State {
     /// `trapped` and replaced by a directory, so the next record write fails.
     trap: Option<usize>,
     trapped: Option<Vec<u8>>,
+    /// How many scans ran.
+    scans: usize,
+    /// The next feed wait (close's) stops here until the test lets it go.
+    feed_stop: Option<Arc<Stop>>,
+    /// The next view stops here once its copy is taken, until the test lets it go.
+    view_stop: Option<Arc<Stop>>,
+    /// The forget of this unit stops here, before its check, until the test lets it go.
+    forget_stop: Option<(UnitId, Arc<Stop>)>,
 }
 
 struct FakeHost {
@@ -238,11 +248,21 @@ impl RigModel for FakeHost {
         [st.gain, None]
     }
 
+    fn wait_feed(&self) {
+        let stop = self.st().feed_stop.take();
+        if let Some(stop) = stop {
+            stop.hold();
+        }
+    }
+
     fn view(&self) -> RigView {
-        let (view, release, slow) = {
+        let (view, release, slow, stop) = {
             let mut st = self.st();
-            (RigView { rev: st.rev, slots: st.slots.clone() }, st.release_on_view.take(), st.slow_view.take())
+            (RigView { rev: st.rev, slots: st.slots.clone() }, st.release_on_view.take(), st.slow_view.take(), st.view_stop.take())
         };
+        if let Some(stop) = stop {
+            stop.hold();
+        }
         // The copy is taken; the add answers now, before the caller goes on with that copy: its call
         // thread ends once its answer is in the channel.
         if let Some(id) = release {
@@ -284,7 +304,9 @@ impl RestoreHost for FakeHost {
     }
 
     fn scan(&self, paths: &[String]) -> Vec<PluginRefView> {
-        self.st().installed.iter().filter(|p| paths.contains(&p.path)).cloned().collect()
+        let mut st = self.st();
+        st.scans += 1;
+        st.installed.iter().filter(|p| paths.contains(&p.path)).cloned().collect()
     }
 
     fn add(&self, slot: usize, id: UnitId, unit: &UnitRecord, place: &Place) -> Result<AddOk, AddFail> {
@@ -365,6 +387,19 @@ impl RestoreHost for FakeHost {
     /// Under the fake's one lock: the id's check and the deletion are one step. A failed add's plate
     /// holds no files.
     fn forget(&self, id: UnitId) -> Forgot {
+        let stop = {
+            let mut st = self.st();
+            match st.forget_stop.take() {
+                Some((at, stop)) if at == id => Some(stop),
+                other => {
+                    st.forget_stop = other;
+                    None
+                }
+            }
+        };
+        if let Some(stop) = stop {
+            stop.hold();
+        }
         let mut st = self.st();
         st.forget_asks += 1;
         if st.reserved.contains(&id) || st.slots.iter().flatten().any(|p| p.id == id && !p.failed_add) {
@@ -765,7 +800,8 @@ fn c26_refuse_a_then_crash_b_reopen_forgets_b_only() {
     let l = Launch::new(&folder, &rec);
     let t0 = Instant::now();
     l.open();
-    l.until(t0, "A is in", || l.fake.applied(1));
+    // The driver has its answer (its settle armed at `t0`'s turn) before the clock moves on.
+    l.until(t0, "A is in", || matches!(l.disposition(1), Some(Disposition::Restored { .. })));
     assert_eq!(l.fake.adds(), [1], "B is not loaded again");
     assert_eq!(l.fake.st().forgot, vec![2]);
     assert_eq!(folder.ids(0), vec![1]);
@@ -907,6 +943,20 @@ fn close_while_a_restore_add_is_held_keeps_its_entry_and_marker() {
 #[derive(Default)]
 struct Flag(Mutex<bool>, Condvar);
 
+/// A place a thread stops at: it says it got there, then waits (bounded) until the test lets it go.
+#[derive(Default)]
+struct Stop {
+    reached: Flag,
+    go: Flag,
+}
+
+impl Stop {
+    fn hold(&self) {
+        self.reached.set();
+        self.go.wait();
+    }
+}
+
 impl Flag {
     fn set(&self) {
         *lock(&self.0) = true;
@@ -986,11 +1036,12 @@ fn close_reads_an_answer_already_in() {
 }
 
 /// D4: an add the restore issued and the driver never dispatched is cancelled by close and answered
-/// as a host refusal: the unit is held at its place, not left issued.
+/// as a host refusal: the unit is held at its place, not left issued, and the marker, which named its
+/// load before the add, does not keep it.
 #[test]
 fn close_cancels_an_add_never_dispatched() {
     let folder = Folder::new("close-queued");
-    let rec = record(vec![echo_unit(1), echo_unit(2)], Vec::new());
+    let rec = record(vec![amp(1, "first"), amp(2, "queued")], Vec::new());
     folder.write(files(), &rec);
     let l = Launch::new(&folder, &rec);
     l.fake.script(1, &[Script::Block]);
@@ -999,36 +1050,59 @@ fn close_cancels_an_add_never_dispatched() {
     l.until(t0, "the first add is out", || l.fake.adds() == [1]);
     l.fake.release(1);
     l.call_ended();
-    // One turn's inputs and judgement, without its actions: the next add is queued, never run.
+    // One turn's inputs and judgement, without its actions: the next load's marker write is queued.
     let turn = l.rig.inputs(t0);
     let _ = l.rig.judge(turn, l.fake.gains(), l.fake.view(), false);
-    assert!(lock(&l.rig.inner).actions.iter().any(|a| matches!(a, Action::Add { id: 2, .. })), "the next add is queued");
+    // That write, as the driver runs it, and its answer: the next add is queued, never run.
+    {
+        let mut inner = lock(&l.rig.inner);
+        let inner = &mut *inner;
+        let at = inner.actions.iter().position(|a| matches!(a, Action::CommitMarker(_))).expect("the next load's marker write");
+        let Action::CommitMarker(ids) = inner.actions.remove(at) else { unreachable!("a marker write") };
+        assert_eq!(ids, [1, 2]);
+        write_marker(&folder, &ids);
+        let more = inner.restore.handle(Event::Committed);
+        inner.actions.extend(more);
+        assert!(inner.actions.iter().any(|a| matches!(a, Action::Add { id: 2, .. })), "the next add is queued");
+    }
     l.close_within();
     assert!(matches!(l.disposition(2), Some(Disposition::Held { .. })), "{:?}", l.disposition(2));
     assert_eq!(l.fake.adds(), [1]);
+    assert!(on_disk(&folder).unwrap_or_default().is_empty(), "the marker keeps no load that never started: {:?}", on_disk(&folder));
     assert_eq!(folder.ids(0), vec![1, 2]);
 }
 
+/// A `before_gate` hook that stops the `n`-th call's thread (from 0, in the order the driver makes
+/// them) right before its start gate.
+fn stop_call(l: &Launch, n: usize) -> Arc<Stop> {
+    let stop = Arc::new(Stop::default());
+    let (at, calls) = (stop.clone(), AtomicUsize::new(0));
+    lock(&l.rig.calls).before_gate = Some(Arc::new(move || {
+        if calls.fetch_add(1, SeqCst) == n {
+            at.hold();
+        }
+    }));
+    stop
+}
+
 /// D4: an add whose call thread has not passed its start gate when close begins never starts: close
-/// holds the unit, and the thread calls nothing after. Needs the test hook (`Calls::before_gate`).
+/// holds the unit, the marker does not keep its load, and the thread calls nothing after. Needs the
+/// test hook (`Calls::before_gate`).
 #[test]
 fn close_cancels_an_add_before_its_gate() {
     let folder = Folder::new("close-gate");
-    let rec = record(vec![echo_unit(1)], Vec::new());
+    let rec = record(vec![amp(1, "gated")], Vec::new());
     folder.write(files(), &rec);
     let l = Launch::new(&folder, &rec);
-    let (entered, go) = (Arc::new(Flag::default()), Arc::new(Flag::default()));
-    let (e, g) = (entered.clone(), go.clone());
-    lock(&l.rig.calls).before_gate = Some(Arc::new(move || {
-        e.set();
-        g.wait();
-    }));
+    // The scan is the first call, the add the second.
+    let gate = stop_call(&l, 1);
     let t0 = Instant::now();
     l.open();
-    l.until(t0, "the add's thread at its gate", || entered.is_set());
+    l.until(t0, "the add's thread at its gate, its load named", || gate.reached.is_set() && on_disk(&folder) == Some(vec![1]));
     l.close_within();
     assert!(matches!(l.disposition(1), Some(Disposition::Held { .. })), "{:?}", l.disposition(1));
-    go.set();
+    assert!(on_disk(&folder).unwrap_or_default().is_empty(), "the marker keeps no load that never started: {:?}", on_disk(&folder));
+    gate.go.set();
     l.call_ended();
     assert_eq!(l.fake.adds(), Vec::<UnitId>::new(), "nothing called after close");
     assert_eq!(folder.ids(0), vec![1]);
@@ -1237,7 +1311,9 @@ fn a_failed_marker_write_waits_its_backoff() {
     let l = Launch::new(&folder, &rec);
     let t0 = Instant::now();
     l.open();
-    l.until(t0, "seated, settling", || l.fake.applied(1) && on_disk(&folder) == Some(vec![1]));
+    // The driver has its answer (its settle armed at `t0`'s turn) before the clock moves on: armed
+    // later, the settle's own timer would read as the backoff below.
+    l.until(t0, "seated, settling", || matches!(l.disposition(1), Some(Disposition::Restored { .. })) && on_disk(&folder) == Some(vec![1]));
     let path = folder.0.join(files().marker);
     std::fs::remove_file(&path).expect("remove the marker");
     std::fs::create_dir(&path).expect("an obstacle at the marker's path");
@@ -1249,4 +1325,194 @@ fn a_failed_marker_write_waits_its_backoff() {
     l.turns(t1, 10);
     assert_eq!(on_disk(&folder), Some(vec![1]), "not tried again before its backoff");
     l.until(t1 + LATE, "the marker goes", || on_disk(&folder).is_none());
+}
+
+// ── review round 2's decisions (r2 D1-D4): close's boundaries ───────────────────────────────────────
+
+/// Ticks at `at` on their own thread until the writer stops (close).
+fn ticking<'s>(s: &'s std::thread::Scope<'s, '_>, l: &'s Launch, at: Instant) -> std::thread::ScopedJoinHandle<'s, ()> {
+    s.spawn(move || {
+        while l.rig.tick(&*l.fake, at) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    })
+}
+
+/// r2 D1: an add whose call thread reaches its start gate while close waits for the feed calls
+/// nothing: close cancelled it right after it set `closing`, and the marker does not keep its load.
+#[test]
+fn close_cancels_an_add_that_reaches_its_gate_during_the_feed_wait() {
+    let folder = Folder::new("close-gate-feed");
+    let rec = record(vec![amp(1, "gated")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    // Answered at once with its owner in setup: a started add stays in the marker at close.
+    l.fake.script(1, &[Script::Unresolved]);
+    // The scan is the first call, the add the second.
+    let gate = stop_call(&l, 1);
+    let feed = Arc::new(Stop::default());
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add's thread at its gate, its load named", || gate.reached.is_set() && on_disk(&folder) == Some(vec![1]));
+    l.fake.st().feed_stop = Some(feed.clone());
+    std::thread::scope(|s| {
+        let closing = s.spawn(|| l.close());
+        feed.reached.wait();
+        assert!(feed.reached.is_set(), "close waits for the feed");
+        gate.go.set();
+        l.call_ended();
+        feed.go.set();
+        closing.join().expect("close");
+    });
+    assert_eq!(l.fake.adds(), Vec::<UnitId>::new(), "nothing called after close began");
+    assert!(on_disk(&folder).unwrap_or_default().is_empty(), "the marker keeps no load that never started: {:?}", on_disk(&folder));
+    assert!(matches!(l.disposition(1), Some(Disposition::Held { .. })), "{:?}", l.disposition(1));
+    assert_eq!(folder.ids(0), vec![1]);
+}
+
+/// r2 D1: a scan whose call thread reaches its start gate while close waits for the feed is not run.
+#[test]
+fn close_cancels_a_scan_that_reaches_its_gate_during_the_feed_wait() {
+    let folder = Folder::new("close-scan");
+    let rec = record(vec![amp(1, "unscanned")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    let gate = stop_call(&l, 0);
+    let feed = Arc::new(Stop::default());
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the scan's thread at its gate", || gate.reached.is_set());
+    l.fake.st().feed_stop = Some(feed.clone());
+    std::thread::scope(|s| {
+        let closing = s.spawn(|| l.close());
+        feed.reached.wait();
+        assert!(feed.reached.is_set(), "close waits for the feed");
+        gate.go.set();
+        l.call_ended();
+        feed.go.set();
+        closing.join().expect("close");
+    });
+    assert_eq!(l.fake.st().scans, 0, "no scan after close began");
+    assert_eq!(l.fake.adds(), Vec::<UnitId>::new());
+    assert_eq!(folder.ids(0), vec![1]);
+}
+
+/// r2 D2: a load's marker write that landed before close, its answer fed between close's judge and
+/// its `Closing`, would queue an add close never sees, and `Closing` would keep that load as started.
+/// The driver feeds nothing once close began: the marker names no load that never started. Needs the
+/// test hook (`Calls::pause`).
+#[test]
+fn an_answer_after_closes_judge_is_not_fed() {
+    let folder = Folder::new("close-committed");
+    let rec = record(vec![amp(1, "late-commit")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    let (before_feed, judged) = (Arc::new(Stop::default()), Arc::new(Stop::default()));
+    {
+        let (fed, judged, path, once) = (before_feed.clone(), judged.clone(), folder.0.join(files().marker), AtomicBool::new(false));
+        // The first answer fed after the marker names the load: its marker write's.
+        let names_it = move || std::fs::read(&path).is_ok_and(|b| matches!(marker::read(Some(&b)), MarkerRead::Names(ids) if ids == [1]));
+        lock(&l.rig.calls).pause = Some(Arc::new(move |at| match at {
+            Pause::BeforeFeed if names_it() && !once.swap(true, SeqCst) => fed.hold(),
+            Pause::AfterJudge => judged.hold(),
+            _ => {}
+        }));
+    }
+    let t0 = Instant::now();
+    l.open();
+    std::thread::scope(|s| {
+        let ticks = ticking(s, &l, t0);
+        before_feed.reached.wait();
+        assert!(before_feed.reached.is_set(), "the load's marker write is in, its answer not fed");
+        let closing = s.spawn(|| l.close());
+        judged.reached.wait();
+        assert!(judged.reached.is_set(), "close judged");
+        before_feed.go.set();
+        wait_until("the ticks stop", || ticks.is_finished());
+        judged.go.set();
+        closing.join().expect("close");
+    });
+    assert_eq!(l.fake.adds(), Vec::<UnitId>::new());
+    assert!(on_disk(&folder).unwrap_or_default().is_empty(), "the marker names no load that never started: {:?}", on_disk(&folder));
+    assert_eq!(folder.ids(0), vec![1]);
+}
+
+/// r2 D3: close feeds the answer it took in its own inputs, and none a tick past its check receives
+/// later. Here the add answers (a matched unit, its plate in no earlier view) after close took its
+/// view, and a tick receives it: fed after close's older view, the plate would read as removed and the
+/// unit leave the record. Not fed, the unit stays issued at its place and its load in the marker.
+/// Needs the test hook (`Calls::pause`).
+#[test]
+fn close_feeds_no_answer_received_after_its_view() {
+    let folder = Folder::new("close-late-answer");
+    let rec = record(vec![amp(1, "appears")], Vec::new());
+    folder.write(files(), &rec);
+    let l = Launch::new(&folder, &rec);
+    l.fake.script(1, &[Script::Appears]);
+    let t0 = Instant::now();
+    l.open();
+    l.until(t0, "the add is out, its load named", || l.fake.adds() == [1] && on_disk(&folder) == Some(vec![1]));
+    let (receive, view) = (Arc::new(Stop::default()), Arc::new(Stop::default()));
+    {
+        let (receive, once) = (receive.clone(), AtomicBool::new(false));
+        lock(&l.rig.calls).pause = Some(Arc::new(move |at| {
+            if at == Pause::BeforeReceive && !once.swap(true, SeqCst) {
+                receive.hold();
+            }
+        }));
+    }
+    std::thread::scope(|s| {
+        let tick = s.spawn(|| l.rig.tick(&*l.fake, t0));
+        receive.reached.wait();
+        assert!(receive.reached.is_set(), "a tick past its check, before it receives");
+        // The tick is stopped before its own view: the next view is close's.
+        l.fake.st().view_stop = Some(view.clone());
+        let closing = s.spawn(|| l.close());
+        view.reached.wait();
+        assert!(view.reached.is_set(), "close took its view");
+        l.fake.release(1);
+        l.call_ended();
+        receive.go.set();
+        assert!(!tick.join().expect("the tick"), "the writer stops at close");
+        view.go.set();
+        closing.join().expect("close");
+    });
+    assert_eq!(l.fake.answered(), 1);
+    assert!(matches!(l.disposition(1), Some(Disposition::Issued { token: None })), "{:?}", l.disposition(1));
+    assert_eq!(folder.ids(0), vec![1], "the unit stays in the record");
+    assert_eq!(on_disk(&folder), Some(vec![1]), "a started add stays in the marker");
+}
+
+/// r2 D4: no forget after close. A forget in progress when close begins holds close's inputs until it
+/// is done (two file deletes), and no forget runs after them: the second leftover unit's files stay.
+#[test]
+fn close_waits_for_a_forget_in_progress_and_none_runs_after() {
+    let folder = Folder::new("close-forget");
+    let rec = record(vec![amp(1, "crashed"), amp(2, "crashed-too")], Vec::new());
+    folder.write(files(), &rec);
+    write_marker(&folder, &[1, 2]);
+    write_tone(&folder, 1);
+    write_tone(&folder, 2);
+    let l = Launch::new(&folder, &rec);
+    let forget = Arc::new(Stop::default());
+    l.fake.st().forget_stop = Some((1, forget.clone()));
+    let t0 = Instant::now();
+    l.open();
+    let closed_first = std::thread::scope(|s| {
+        let ticks = ticking(s, &l, t0);
+        forget.reached.wait();
+        assert!(forget.reached.is_set(), "the first forget in progress");
+        let closing = s.spawn(|| l.close());
+        // Bounded: long enough for a close that does not wait to be done.
+        std::thread::sleep(Duration::from_millis(200));
+        let closed_first = closing.is_finished();
+        forget.go.set();
+        closing.join().expect("close");
+        ticks.join().expect("the ticks");
+        closed_first
+    });
+    assert!(!closed_first, "close waited for the forget in progress");
+    assert_eq!(l.fake.st().forgot, vec![1]);
+    assert!(!tone(&folder, 1).exists(), "the forget in progress ran out");
+    assert!(tone(&folder, 2).exists(), "no forget after close: its tone file stays");
 }

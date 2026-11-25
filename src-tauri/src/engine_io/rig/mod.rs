@@ -67,7 +67,9 @@
 //! under `state` or `settings`. The driver's own state (`driver`) is the rig thread's: taken before
 //! `inner` or `disk`, never by an open, an import or close. `calls` (the driver's blocking call, its
 //! answer and the latches it follows) is taken alone or inside `driver` or `inner`, never across a
-//! host call or a write: close reads it without waiting on the driver (`restore.rs`).
+//! write, nor a host call but a forget's: close reads it without waiting on the driver, and waits at
+//! most for one forget's two file deletes, after which no forget runs (`restore.rs`). The order:
+//! `calls`, then the host's id reservation, then `state`.
 //!
 //! **Release.** The `rig_*` commands are DEV-only (`lib.rs`), in lockstep with `lf.chainNative`, so a
 //! release build opens no rig and runs no writer before activation; its shutdown still calls

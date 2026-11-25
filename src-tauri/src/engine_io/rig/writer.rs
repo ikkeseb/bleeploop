@@ -149,7 +149,9 @@ impl Rig {
     /// 1. set `closing`: no write and no open starts after it; nothing here takes a slot's order lock or
     ///    waits for an add. A second close (the updater's shutdown, then the exit's) waits until the
     ///    first has finished, its write and the lock file's release, bounded by `SHUTDOWN_WAIT`, then
-    ///    does nothing;
+    ///    does nothing. Right after it, the restore's inputs (`Rig::closing_inputs`, under `calls`, which
+    ///    waits for a forget in progress): the call's answer already in (the only one close feeds),
+    ///    the add or scan whose thread has not passed its start gate cancelled, the latches already set;
     /// 2. under `disk`, whether there is a record to write: the store's status and record, not
     ///    `inner`'s copy (an import or a first open may have committed and not yet published it), which
     ///    is final now (every commit but this one checks `closing` under `disk`);
@@ -166,17 +168,20 @@ impl Rig {
     ///    it); a load that applied goes, also inside its settle, and one never issued goes. A restore
     ///    that never wrote a marker answers nothing, so a marker an earlier launch left stays for the
     ///    next launch's open. Close never waits for the driver: an add in flight answers into a
-    ///    restore that is closing, and every write the driver tries after step 1 is refused under
-    ///    `disk`;
+    ///    restore that is closing, every write the driver tries after step 1 is refused under
+    ///    `disk`, and every answer it would feed after step 1 is refused under `inner` (fed after
+    ///    step 4 and before this one, it would queue an add `Closing` keeps as started);
     /// 7. release the lock file and set `closed`.
     pub(crate) fn close(&self, model: &(impl RigModel + ?Sized)) {
         if self.closing.swap(true, AcqRel) {
             self.wait_closed();
             return;
         }
-        let found = Rig::found(&lock(&self.disk));
-        // What the driver's call already answered and the latches already set, before the view.
+        // Right after `closing`: what the driver's call already answered and the latches already set,
+        // and the add or scan its thread has not started yet cancelled, before the feed wait and the
+        // view (a call that passes its gate during the wait would load a plugin close never sees).
         let turn = self.closing_inputs();
+        let found = Rig::found(&lock(&self.disk));
         let last = if found.stored.is_some() {
             model.wait_feed();
             let held = model.gains();
@@ -187,6 +192,8 @@ impl Rig {
         } else {
             None
         };
+        #[cfg(test)]
+        self.paused(super::restore::Pause::AfterJudge);
         let marker = lock(&self.inner).restore.handle(Event::Closing);
         let mut disk = lock(&self.disk);
         if let Some(mut store) = disk.store.take() {
