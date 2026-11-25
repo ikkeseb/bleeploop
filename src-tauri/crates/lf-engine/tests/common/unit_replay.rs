@@ -3,10 +3,12 @@
 //! first call, each event a slot event on its own frame in `block`-frame calls from DSP frame 0, every
 //! call under assert_no_alloc. The oracle is the instrument's DSP alone, called as the SYNTH's bank calls
 //! it (`instruments.rs` `Bank`): the pick's release and wheels at frame 0, a note scheduled
-//! [`LEAD`] after its frame at its velocity as an f32 clamped to 0..1, a wheel applied on its frame
+//! [`ORACLE_LEAD`] after its frame at its velocity as an f32 clamped to 0..1, a wheel applied on its frame
 //! and re-applying both wheels (the mod wheel clamped to 0..1), the output as the bank's sum leaves it
 //! (`0.0 + x`, so a -0.0 reads +0.0). The DSP alone is pinned to Tone by the calling file; this pins
-//! the unit's event handling to the DSP, bit for bit, at blocks 1, 64, 127, 128 and 480.
+//! the unit's event handling to the DSP, bit for bit, at blocks 1, 32, 64, 127, 128, 480 and 1024. The
+//! two sides share nothing but the scenario file: the oracle reads and applies its events on its own,
+//! with its own lead, so a slip in what the unit's side passes on or in the engine's `LEAD` shows.
 //!
 //! A bit-for-bit replay of the Tone reference itself through the unit is not possible: the reference
 //! schedules every note up front and a wheel on Tone's offline clock ticks, where the bank applies them
@@ -18,7 +20,6 @@ use assert_no_alloc::assert_no_alloc;
 use lf_engine::dsp::buffer_source::AudioBuffer;
 use lf_engine::dsp::synth::{Bass, DrumKit, PolySynth};
 use lf_engine::grid::{Frame, Meter};
-use lf_engine::instruments::LEAD;
 use lf_engine::units::{SynthUnit, SYNTH_IDS};
 use lf_engine::{Instrument, SlotEvent, SlotEventKind, UnitCx, UnitParam, UnitProcessor};
 
@@ -26,7 +27,12 @@ use super::refs::{self, ScriptEvent};
 use super::violation_count;
 
 /// The block sizes a unit replay runs at.
-pub const BLOCKS: [usize; 5] = [1, 64, 127, 128, 480];
+pub const BLOCKS: [usize; 7] = [1, 32, 64, 127, 128, 480, 1024];
+
+/// The frames from a note's frame to its sound in the bank: one 128-frame render quantum (the lead the
+/// engine's `instruments::LEAD` names). Stated here as a literal, not that constant, so a change to the
+/// engine's lead fails the replay instead of moving both sides with it.
+pub const ORACLE_LEAD: u64 = 128;
 
 /// One instrument's DSP as the bank calls it.
 pub trait Oracle {
@@ -95,7 +101,8 @@ impl Oracle for DrumKit {
 }
 
 /// The scenario's events by frame (a stable sort: one frame keeps the manifest's order), those inside
-/// its render only, as the files' live replays apply them.
+/// its render only, as the files' live replays apply them: the unit's side only ([`render_oracle`]
+/// selects its own).
 fn events(id: &str) -> Vec<&'static ScriptEvent> {
     let s = refs::scenario(id);
     let mut events: Vec<&ScriptEvent> = s.events.iter().filter(|e| (e.frame as usize) < s.frames).collect();
@@ -150,7 +157,11 @@ pub fn render_oracle(id: &str, oracle: &mut dyn Oracle) -> [Vec<f32>; 2] {
     let s = refs::scenario(id);
     let rate = s.rate as f32 as f64;
     let time = |f: u64| f as f64 / rate;
-    let events = events(id);
+    // Its own selection of the scenario's events: inside the render, by frame, one frame in the
+    // manifest's order.
+    let mut events: Vec<&ScriptEvent> = s.events.iter().filter(|e| (e.frame as usize) < s.frames).collect();
+    events.sort_by_key(|e| e.frame);
+    let control = |e: &ScriptEvent| e.value.as_ref().and_then(|v| v.as_f64()).expect("a control value");
     // The pick on frame 0: its release, then both wheels at rest.
     oracle.all_notes_off(0);
     oracle.wheels(0.0, 0.0, 0.0, 0);
@@ -162,14 +173,14 @@ pub fn render_oracle(id: &str, oracle: &mut dyn Oracle) -> [Vec<f32>; 2] {
             let e = events[next];
             let f = e.frame;
             match e.kind.as_str() {
-                "on" => oracle.note_on(e.note.unwrap(), (e.velocity.unwrap() as f32).clamp(0.0, 1.0) as f64, time(f + LEAD as u64), f),
-                "off" => oracle.note_off(e.note.unwrap(), time(f + LEAD as u64), f),
+                "on" => oracle.note_on(e.note.unwrap(), (e.velocity.unwrap() as f32).clamp(0.0, 1.0) as f64, time(f + ORACLE_LEAD), f),
+                "off" => oracle.note_off(e.note.unwrap(), time(f + ORACLE_LEAD), f),
                 "bend" => {
-                    bend = value(e);
+                    bend = control(e);
                     oracle.wheels(bend, modulation, time(f), f);
                 }
                 "mod" => {
-                    modulation = value(e).clamp(0.0, 1.0);
+                    modulation = control(e).clamp(0.0, 1.0);
                     oracle.wheels(bend, modulation, time(f), f);
                 }
                 other => panic!("unknown event {other}"),

@@ -563,8 +563,8 @@ fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
     }
 }
 
-/// The events one unit gets over a call into `ev`: a playing unit every NoteOn and wheel of the slot's
-/// `events` (it holds a NoteOn's key from there) and a NoteOff only for a key it holds, the slot's
+/// The events one unit gets over a call into `ev`: a playing unit every NoteOn of the slot's `events` (it
+/// holds a NoteOn's key from there) and a NoteOff only for a key it holds, the slot's wheels and
 /// [`SlotEventKind::AllNotesOff`] only if it is a SYNTH, held keys or not ([`Slot::release_all`]); a leaving
 /// one (removed, withdrawn, replaced) none of them, only the releases of what it holds, at the call's first
 /// frame, once (`owes`): a NoteOff per key, ascending, or for a SYNTH (`synth`) one
@@ -600,7 +600,12 @@ fn unit_events(ev: &mut Vec<SlotEvent>, (held, owes): (&mut [u64; 2], &mut bool)
                     }
                     *held = [0; 2];
                 }
-                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => {}
+                // The wheels are a SYNTH's alone (D12): a plugin seated behind one gets none.
+                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => {
+                    if !synth {
+                        continue;
+                    }
+                }
             }
             ev.push(*e);
         }

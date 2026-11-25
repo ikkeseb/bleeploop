@@ -908,10 +908,11 @@ pub enum SlotEventKind {
     NoteOn { key: u8, velocity: f32 },
     NoteOff { key: u8 },
     /// The pitch wheel ([`Command::PitchBend`]), in semitones as sent: SYNTH applies it to its picked
-    /// instrument, a plugin ignores it (owner decision D12). Only a chain that seats a SYNTH gets it.
+    /// instrument, a plugin ignores it (owner decision D12). Only a SYNTH gets it, in a chain that seats
+    /// one: a plugin seated beside it never does.
     PitchBend { semitones: f64 },
     /// The mod wheel ([`Command::Modulation`]), as sent (SYNTH clamps it to 0..1); a plugin ignores it
-    /// (D12). Only a chain that seats a SYNTH gets it.
+    /// (D12). Only a SYNTH gets it, as [`SlotEventKind::PitchBend`].
     Modulation { depth: f64 },
     /// Every note the unit holds released at once, as a pick releases them (`Bank::select`: at the
     /// sounding pitch, so a mono bass never falls back to an older key on its way out). Only a SYNTH

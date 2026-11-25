@@ -15,7 +15,9 @@
 //!   new source silent until its own NoteOn, a stray NoteOff dropped, in both orders of a replacement
 //!   and a NoteOff sent for the same block.
 //! - The wheels never reach a chain without a SYNTH, nor split its render; a withdrawing SYNTH and a
-//!   SYNTH slot the note target has left take none and split nothing.
+//!   SYNTH slot the note target has left take none and split nothing; in a SYNTH's chain they reach the
+//!   SYNTH alone, the handover on a target switch too (a plugin effect after it sees none, its calls as
+//!   with no wheels).
 //! - A departing SYNTH (replaced, removed) leaves the tail a pick's release of the same notes leaves, bit
 //!   for bit (a mono bass never falls back to an older key on its way out), also after its last NoteOff
 //!   (a pick releases a bass's tail again); a withdrawn and reseated one is silent until its next note.
@@ -249,8 +251,9 @@ fn unit_phrase(i: Instrument, block: usize, input_latency: Frame) -> Taps {
 // instrument × input side × block size, keyed by the OS that rendered it, so SYNTH keeps a reference
 // once `NoteTarget::Builtin` is gone (`docs/unit-contract.md` §4). Keyed by OS because the synths'
 // oscillators call the platform libm (`exp2` for a detune, the FFT's twiddles: `dsp::oscillator`),
-// whose last bit differs between Windows and Linux (`dsp::fdlibm`); an OS with no entry checks no pin
-// and says so. A deliberate change to what the bank sounds regenerates it, on each OS whose entry it
+// whose last bit differs between Windows and Linux (`dsp::fdlibm`). Only an OS of `UNPINNED` (Windows,
+// macOS: no entry generated there yet) may lack its entry, and checks no pin and says so; any other OS
+// without one fails, so a lost entry never turns the pin off. A deliberate change to what the bank sounds regenerates it, on each OS whose entry it
 // keeps (the generator replaces only its own OS's):
 // `cargo test -p lf-engine --test synth_unit -- --ignored write_builtin_pin`.
 
@@ -268,11 +271,21 @@ fn pin_hashes(t: &Taps) -> serde_json::Value {
     serde_json::json!({ "bus": h(&t.bus), "heard": h(&t.heard), "record": h(&t.record) })
 }
 
-/// This OS's pins, if the fixture holds any.
+/// The OSes the pin has no entry for by design (nobody has generated one there yet). Any other OS
+/// without its entry fails: an entry lost from the fixture must never turn the pin off silently.
+const UNPINNED: [&str; 2] = ["windows", "macos"];
+
+/// This OS's pins: `None` only on an OS of [`UNPINNED`] whose entry is missing.
 fn pins() -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(pin_path()).expect("tests/fixtures/builtin-bank.json");
     let all: serde_json::Value = serde_json::from_str(&text).expect("the pin is JSON");
-    all["pins"].get(std::env::consts::OS).cloned()
+    let os = std::env::consts::OS;
+    let mine = all["pins"].get(os).cloned();
+    assert!(
+        mine.is_some() || UNPINNED.contains(&os),
+        "tests/fixtures/builtin-bank.json holds no pin for {os}, an OS it is generated on (only {UNPINNED:?} have none by design): regenerate it with `cargo test -p lf-engine --test synth_unit -- --ignored write_builtin_pin`"
+    );
+    mine
 }
 
 fn assert_pinned(pins: &serde_json::Value, key: &str, t: &Taps, what: &str) {
@@ -307,7 +320,7 @@ fn write_builtin_pin() {
 fn synth_alone_is_todays_bank() {
     let pins = pins();
     if pins.is_none() {
-        eprintln!("tests/fixtures/builtin-bank.json holds no pin for {}: SYNTH is checked against today's bank alone here", std::env::consts::OS);
+        eprintln!("tests/fixtures/builtin-bank.json holds no pin for {} by design ({UNPINNED:?}): SYNTH is checked against today's bank alone here", std::env::consts::OS);
     }
     for i in Instrument::ALL {
         // 256: the record line delays the bank by 256 - LEAD; 64: under the lead, the line clamps to 0.
@@ -931,7 +944,7 @@ fn the_wheels_never_reach_or_split_a_chain_without_a_synth() {
         assert_eq!(with, without, "block {block}: the wheels changed a plugins-only chain's calls or events");
         assert!(with.1.iter().all(|(_, k)| matches!(k, SlotEventKind::NoteOn { .. } | SlotEventKind::NoteOff { .. })));
     }
-    // A SYNTH chain gets them on their frames: a plugin effect after it sees them too, and ignores them.
+    // A SYNTH chain gets them on their frames, the SYNTH alone: a plugin effect after it sees none (D12).
     let mut rig = rig(480);
     let synth_id = rig.install_id(0, Box::new(Spy::new(picked(Instrument::Lead))));
     let fx = rig.install_id(0, Box::new(Spy::new(Pass)));
@@ -943,7 +956,64 @@ fn the_wheels_never_reach_or_split_a_chain_without_a_synth() {
     let s = spy_of::<SynthUnit>(unit_back(&mut back, synth_id).0);
     let f = spy_of::<Pass>(unit_back(&mut back, fx).0);
     assert_eq!(s.events[..5], want[..], "the SYNTH's events");
-    assert_eq!(f.events[..5], want[..], "the effect after it");
+    let notes: Vec<_> = want.iter().copied().filter(|(_, k)| matches!(k, SlotEventKind::NoteOn { .. })).collect();
+    assert_eq!(f.events[..1], notes[..], "the effect after it: its note, no wheel");
+    assert!(f.wheels().is_empty(), "a wheel reached the plugin effect after the SYNTH: {:?}", f.wheels());
+}
+
+/// Slot 0 holds a lead SYNTH and a plugin effect after it, slot 1 a plugin source. The note target
+/// starts on slot 1 and lands on slot 0 at `LAND`, a note played on each; `wheels`: wheels moved while
+/// slot 1 is the target and a bend on the switch's frame (sent after the switch, `wheel_last`, or
+/// before it). Answers the effect's calls and events and the SYNTH's wheels.
+#[allow(clippy::type_complexity)]
+fn land_on_synth_chain(block: usize, wheels: bool, wheel_last: bool) -> (Vec<(Frame, usize)>, Vec<(Frame, SlotEventKind)>, Vec<(Frame, SlotEventKind)>) {
+    const LAND: Frame = 10_000;
+    let mut rig = rig(block);
+    let synth_id = rig.install_id(0, Box::new(Spy::new(picked(Instrument::Lead))));
+    let fx = rig.install_id(0, Box::new(Spy::new(Pass)));
+    let src = rig.install_id(1, Box::new(Spy::new(FakeSource { held: [0; 2] })));
+    let mut script = vec![(0, Command::SelectInstrument(NoteTarget::Slot(1))), (1_000, Command::NoteOn(60, 0.9)), (3_000, Command::NoteOff(60))];
+    if wheels {
+        for j in 0..10 {
+            script.push((101 + j * 853, Command::PitchBend(j as f64 / 5.0)));
+            script.push((503 + j * 911, Command::Modulation(j as f64 / 9.0)));
+        }
+    }
+    script.sort_by_key(|&(f, _)| f);
+    let select = (LAND, Command::SelectInstrument(NoteTarget::Slot(0)));
+    match (wheels, wheel_last) {
+        (false, _) => script.push(select),
+        (true, true) => script.extend([select, (LAND, Command::PitchBend(-0.5))]),
+        (true, false) => script.extend([(LAND, Command::PitchBend(-0.5)), select]),
+    }
+    script.push((LAND + 1_000, Command::NoteOn(67, 0.7)));
+    play(&mut rig, &script, S0 + 16_000);
+    let mut back = take_back(&mut rig, 0, &[fx, synth_id]);
+    let f = spy_of::<Pass>(unit_back(&mut back, fx).0);
+    let synth = spy_of::<SynthUnit>(unit_back(&mut back, synth_id).0);
+    let _ = take_back(&mut rig, 1, &[src]);
+    (f.calls.clone(), f.events.clone(), synth.wheels())
+}
+
+#[test]
+fn the_wheels_handed_to_a_synth_never_reach_a_plugin_after_it() {
+    for block in BLOCKS {
+        let (calls, events, synth) = land_on_synth_chain(block, false, true);
+        assert_eq!(synth, rest(S0 + 10_000).to_vec(), "block {block}, no wheels: the SYNTH's wheels");
+        let (bend, modulation) = (|semitones: f64| SlotEventKind::PitchBend { semitones }, |depth: f64| SlotEventKind::Modulation { depth });
+        let land = S0 + 10_000;
+        for wheel_last in [true, false] {
+            let order = if wheel_last { "after" } else { "before" };
+            let (c, e, synth) = land_on_synth_chain(block, true, wheel_last);
+            // The handover reached the SYNTH (the last bend, 9/5 or the switch's, and mod wheel, 1)...
+            let want = if wheel_last { vec![(land, bend(1.8)), (land, modulation(1.0)), (land, bend(-0.5))] } else { vec![(land, bend(-0.5)), (land, modulation(1.0))] };
+            assert_eq!(synth, want, "block {block}, the switch's bend sent {order}: the SYNTH's wheels");
+            // ...and nothing of it the plugin effect after it: no wheel, the calls and events as with none.
+            assert!(!e.iter().any(|(_, k)| matches!(k, SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. })), "block {block}, the switch's bend sent {order}: a wheel reached the plugin effect after the SYNTH");
+            assert_eq!((&c, &e), (&calls, &events), "block {block}, the switch's bend sent {order}: wheels changed the effect's calls or events");
+        }
+        assert!(events.iter().any(|&(f, k)| f == land + 1_000 && k == SlotEventKind::NoteOn { key: 67, velocity: 0.7 }), "block {block}: the effect sees the SYNTH chain's note");
+    }
 }
 
 // ── A withdrawing SYNTH and a note-target switch: the wheels ────────────────────────────────────────
