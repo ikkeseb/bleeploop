@@ -33,7 +33,10 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   it ends with a removal. The native chain host still removes every unit at shutdown, but keeps each
   plugin unit's tone file (`unit-<id>.tone`), so the rig record's restore at the next launch brings the unit
   back under its id with its own tone; only a removal the player made retires a tone.
-- **The rig record** is `lf.rig` in the WebView's storage (`src/ui/state/rig-recall.ts`; its shape and
+- **The rig record moves to the native host** before chain mode's activation (decided 2026-11-25: the
+  record, its writer, the restore and the crash marker; their rules in a pure crate beside lf-engine, the
+  glue in the device side, being built; the page keeps the one-time upgrade and hands it over).
+  Until that lands, this bullet describes today's record, which is `lf.rig` in the WebView's storage (`src/ui/state/rig-recall.ts`; its shape and
   rules, `rig-record.ts`): `{ version: 1, slots: [slot, slot] }`, per slot its `volume` (after the chain), its
   `units` in order as `UnitRecord`s (§2; a plugin unit's display name as `plugin.name`, as §8's rig) and,
   while §6's second step is owed, `pending`. The upgrade writes it whole before the first add (§6). One

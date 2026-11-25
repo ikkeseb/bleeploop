@@ -18,7 +18,8 @@ outside its locks (`lf_engine::pitch`), and the device side breaks the analysis 
 or a device start. The wire is
 `src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings and rig
 recall stay in the WebView's storage and are mirrored to native at boot (MIDI-learn bindings are
-native's); the engine host replays every remembered setting into each new engine
+native's, and chain mode's rig record moves native before its activation: unit contract §1); the
+engine host replays every remembered setting into each new engine
 (`engine_io/settings.rs`).
 
 `src/platform/` is the **only** place allowed to import `@tauri-apps/*` (enforced by
