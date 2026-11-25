@@ -209,6 +209,17 @@
   0, the first never saving, the second saving a new tone and removed by the player, then `unload_all` and
   the first re-added under its id: read the tone its load restores. A fix writes the inherited tone to
   `unit-<id>.tone` at a unit's first load.
+- The shutdown's keep of a unit's tone misses a reload in flight (DEV chain mode, read from source by a
+  review, not run; declined at E3f's second review round as rare and no worse than before E3f): with a same-id
+  reload queued ahead of the shutdown's removal and its `Event::Seat` undrained, the candidate's owner can end
+  on `Left::Removed` before `Table::promote_reload` carries the predecessor's `Row::keep_tone` to it, so its tone
+  retires into the slot's file (the restore then reads it from there: the pre-E3f behaviour, wrong only with two
+  instances of one plugin in a slot); and a different-id source replacing that candidate ahead of the shutdown's
+  removal can have its cleared keep revived by the later promotion, so the replaced unit keeps an orphan
+  `unit-<id>.tone` instead of retiring it. Next check: a `chain_cmds_tests.rs` test per case (a reload queued,
+  then `unload_all` with the Seat undrained; a reload then a replacing source then `unload_all`), asserting both
+  files. A fix binds the disposition before the candidate's terminal return is posted and lets promotion copy
+  the keep only onto a row still `Staying`.
 - Two `chain_tests.rs` tests are `#[ignore]`d (quarantined): `held_remove_outlives_remove_timeout` and
   `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`. On CI's Windows
   runner (`rust-test`) their `start_take` never sees lane 0 recording, even with `test_rig::PATIENCE`
