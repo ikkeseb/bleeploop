@@ -1687,23 +1687,45 @@ impl UnitHost {
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only: called on this thread by every `EngineHost::remove` with the removed id the moment the
-    /// call releases the host's locks, its message sent ([`AfterRemoveUnlocked`]): no line of the call runs
-    /// after it. A test holds the caller there while the engine applies the removal.
+    /// Test-only: called on this thread by `EngineHost::remove` with the removed id the moment the call
+    /// lets go of its slot's port lock ([`RemovePortGuard`]), the last host lock it holds: every line of
+    /// the call that runs unguarded runs after it. A test holds the caller there while the engine
+    /// applies the removal.
     pub(crate) static AFTER_REMOVE_UNLOCKED: std::cell::RefCell<Option<Box<dyn FnMut(UnitId)>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Test-only: declared first in `EngineHost::remove`, so it drops last, after the port and state guards.
+/// Test-only: `EngineHost::remove`'s slot port guard. The state lock is taken under it, so it is
+/// released before or with it (a scope's end drops the later guard first); dropping this one, however
+/// the call drops it, releases the port lock and then calls [`AFTER_REMOVE_UNLOCKED`].
 #[cfg(test)]
-struct AfterRemoveUnlocked(UnitId);
+struct RemovePortGuard<'a> {
+    guard: Option<MutexGuard<'a, Option<SlotPort>>>,
+    id: UnitId,
+}
 
 #[cfg(test)]
-impl Drop for AfterRemoveUnlocked {
+impl std::ops::Deref for RemovePortGuard<'_> {
+    type Target = Option<SlotPort>;
+    fn deref(&self) -> &Option<SlotPort> {
+        self.guard.as_ref().expect("held until drop")
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for RemovePortGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<SlotPort> {
+        self.guard.as_mut().expect("held until drop")
+    }
+}
+
+#[cfg(test)]
+impl Drop for RemovePortGuard<'_> {
     fn drop(&mut self) {
+        drop(self.guard.take());
         AFTER_REMOVE_UNLOCKED.with(|hook| {
             if let Some(hook) = hook.borrow_mut().as_mut() {
-                hook(self.0);
+                hook(self.id);
             }
         });
     }
@@ -1847,8 +1869,6 @@ impl EngineHost {
     }
 
     fn remove(&self, id: UnitId, keep_tone: bool) -> Result<Removal, String> {
-        #[cfg(test)]
-        let _after_unlock = AfterRemoveUnlocked(id);
         let slot = {
             let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
             state
@@ -1857,7 +1877,10 @@ impl EngineHost {
                 .map(|(s, _)| s)
                 .ok_or_else(|| format!("unit {id} not found"))?
         };
-        let mut port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
+        let port_guard = self.core.ports[slot].lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        let port_guard = RemovePortGuard { guard: Some(port_guard), id };
+        let mut port_guard = port_guard;
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(port) = port_guard.as_mut() {
             state.reap_port(slot, port);

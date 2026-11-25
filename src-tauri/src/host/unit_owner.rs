@@ -1135,6 +1135,8 @@ pub(crate) mod test_support {
         pub(crate) on_release: Option<Arc<dyn Fn() + Send + Sync>>,
         /// Called at every owner turn (`OwnedPlugin::turn`): a test may hold the owner's loop there.
         pub(crate) on_turn: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Called inside the load, after its tone read (`restores`), before the owner claims and submits.
+        pub(crate) on_load: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) released_count: Option<Arc<AtomicUsize>>,
         pub(crate) exited_flag: Option<Arc<AtomicBool>>,
         /// When set, the load reads its tone as a real plugin's load does (`ToneKeeper::stored`) and
@@ -1153,6 +1155,7 @@ pub(crate) mod test_support {
                 on_reactivate: None,
                 on_release: None,
                 on_turn: None,
+                on_load: None,
                 released_count: None,
                 exited_flag: None,
                 restores: None,
@@ -1269,6 +1272,9 @@ pub(crate) mod test_support {
                 if let Some(restores) = &cfg.restores {
                     let stored = setup.tone.stored().ok().flatten();
                     restores.lock().unwrap_or_else(|e| e.into_inner()).push(stored);
+                }
+                if let Some(cb) = &cfg.on_load {
+                    cb();
                 }
                 let rate = setup.slot.rate().unwrap_or(0);
                 let unit = Box::new(FakePluginUnit { source: cfg.source, latency: cfg.latency });
