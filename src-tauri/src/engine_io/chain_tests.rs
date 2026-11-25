@@ -3796,6 +3796,30 @@ fn edge_b_a_newer_source_applied_by_a_rebuilds_idle_service_ends_an_older_parked
     u_b.release();
 }
 
+/// [`super::unit_host::UnitHost::submit_before`] (chain host edge d's push bound): past its deadline it
+/// sends nothing and hands the box back (`Late`); before it, it submits as `submit` does. Written with
+/// the fix (the method is new), so it is not red before it.
+#[test]
+fn edge_d_submit_before_sends_nothing_past_its_deadline() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u = host.unit(0, 670, Spec::Plugin(plugin_ref("late")), 0, false).expect("reserve");
+    u.activated(Activated { name: "late".into(), source: false, latency: 0 });
+    let terms = u.terms().unwrap();
+    let (back, err) = u
+        .submit_before(LatentUnit::new(1, 0, stops.clone()), terms, Instant::now())
+        .expect_err("past its deadline nothing is sent");
+    assert_eq!(err, SubmitError::Late);
+    assert!(engine_chain_ids(&device, 0).is_empty());
+    let op = ok_op(u.submit_before(back, terms, Instant::now() + Duration::from_secs(60)));
+    assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let Removal::Sent(rem) = host.remove_unit(670).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    drop(u.take_back());
+    u.release();
+}
+
 /// 56. A kind toggle (`Toggle::Units`) survives a rebuild in send order (`docs/unit-contract.md` §2): a
 ///     per-unit command and the toggle the stopped engine never took, then a per-unit command sent while
 ///     the unit reseats, apply after the reseat in that order. A: bypass on; K: none of the kind on, so

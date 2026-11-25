@@ -178,6 +178,14 @@
   engine-side fence (the command carrying its install, or a removal dropping its id's queued commands).
   Next check: a test that queues a command for a later frame, removes the unit and re-adds one under
   the same id before that frame.
+- A plugin add's first push has no bound of its own (DEV chain mode, read from source, never run; found
+  settling the chain host edges): its call answers `Unanswered` after `LOAD_TIMEOUT` twice and releases
+  the slot's order, while an owner held up before that push (a rebuild between its load and its claim
+  makes it re-activate the plugin first, `host/unit_owner.rs` `submit_owed`) still pushes afterwards, so a
+  later edit on the slot can enter the port first. A built-in's first push is bounded under the port lock
+  (`UnitHost::submit_before`); a plugin's could take a bound from its claim the same way. Next check: a
+  `chain_cmds_tests.rs` test whose fake plugin's re-activation (gated, as the edge tests do) outlasts the
+  add's two waits, then a move on that slot: read which entered the port first.
 - `tauriChainHost`'s per-slot queue (`src/platform/host.tauri.ts` `onChainSlot`) waits for each call to
   settle, so a remove or reload held across a take keeps the slot's later calls waiting until the take
   ends, while the native order mutex was already released at `waiting` (`chain_cmds.rs`

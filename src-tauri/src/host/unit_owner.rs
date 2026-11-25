@@ -117,7 +117,7 @@ enum Seat<U> {
     Withdrawing { op: Op },
     /// Out of the engine and parked (refused reseat or failed reactivate): the seat stays,
     /// `host.parked(why)` was reported. Retries on the next plugin-asked restart; ends on
-    /// `Back::Dismissed` (the player's removal, or a newer source seating in its slot).
+    /// `Back::Dismissed` (the player's removal, or, for a source, a newer source seating in its slot).
     Parked { unit: Box<U> },
     /// Out of the engine while the host is closing (`SubmitError::Closing`): kept in hand with no
     /// retry until shutdown releases it.
@@ -172,6 +172,8 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
         SubmitError::Replaced => "a newer source replaced this unit".to_string(),
         SubmitError::Behind => "a newer source is queued ahead of this unit".to_string(),
+        SubmitError::Refused(why) => refusal_reason(why),
+        SubmitError::Late => "the unit could not be submitted in time".to_string(),
         SubmitError::Removing => "the unit is being removed".to_string(),
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
@@ -227,7 +229,15 @@ fn apply_pending_restart<U>(host: &UnitHost, seat: &mut Seat<U>, pending_restart
                 );
                 *pending_restart = None;
             }
-            Err(err @ (SubmitError::Superseded | SubmitError::Replaced | SubmitError::Removing | SubmitError::Closing | SubmitError::NoEngine)) => {
+            Err(
+                err @ (SubmitError::Superseded
+                | SubmitError::Replaced
+                | SubmitError::Removing
+                | SubmitError::Closing
+                | SubmitError::NoEngine
+                | SubmitError::Refused(_)
+                | SubmitError::Late),
+            ) => {
                 log::info!(
                     "[plugin_host] engine slot {slot} unit {id}: dropping restart ({why}); withdraw refused ({err:?})"
                 );
@@ -321,17 +331,28 @@ fn submit_owed<P: OwnedPlugin>(
             *seat = Seat::Installing { op };
             None
         }
-        Err((returned, SubmitError::PortFull)) if !ever_seated && answering_caller => {
-            // A first submit into a full port fails while the add's caller still holds the slot's
-            // order (as a built-in's does): retried past the add's bound, it would enter the port
-            // after a later edit on that slot.
-            return Some(Exit::FailedBeforeSeat {
-                unit: Some(own(returned)),
-                why: submit_error_reason(SubmitError::PortFull),
-            });
-        }
-        Err((returned, SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind)) => {
+        // A full port keeps this install's place (`UnitHost::submit`): the retry enters before any
+        // later edit on the slot, whether or not the add's caller still waits. `Late` is
+        // `submit_before`'s alone; retried like the rest should it ever come.
+        Err((returned, SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind | SubmitError::Late)) => {
             *seat = Seat::Owed { unit: own(returned), activated_at };
+            None
+        }
+        Err((returned, SubmitError::Refused(why))) => {
+            // The host answered for the engine (an effect that came back a source behind another
+            // seat): as `Back::Refused`.
+            let returned = own(returned);
+            let msg = refusal_reason(why);
+            if !ever_seated {
+                return Some(Exit::FailedBeforeSeat { unit: Some(returned), why: msg });
+            }
+            log::warn!(
+                "[plugin_host] engine slot {} unit {}: reseat refused ({msg}); parking",
+                host.slot(),
+                host.id()
+            );
+            host.parked(msg);
+            *seat = Seat::Parked { unit: returned };
             None
         }
         Err((returned, SubmitError::Stale)) => {

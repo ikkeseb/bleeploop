@@ -128,10 +128,18 @@ pub enum SubmitError {
     /// A newer source already seats at the slot's head after a rebuild: retire the unit's tone and tear
     /// down.
     Replaced,
-    /// A newer source's install is queued at the head after a rebuild and the engine has not taken it
-    /// yet (it can still refuse it): keep the unit and retry. Should that install apply, the unit is
-    /// dismissed (`Back::Dismissed`); refused, the retry seats it.
+    /// A newer source's install is queued after a rebuild and the engine has not answered it yet (it can
+    /// still refuse it), whatever is queued behind that install: keep the unit and retry. Should that
+    /// install apply, the unit is dismissed (`Back::Dismissed`); refused, the retry seats it.
     Behind,
+    /// The host answers what the engine would have, had a rebuild not emptied it: an effect that sat
+    /// behind another seat, or behind a newer source now seated, and came back a source is refused its
+    /// place (`SeatRefusal::Placement`, `docs/unit-contract.md` §3). The owner parks, as on
+    /// [`Back::Refused`].
+    Refused(SeatRefusal),
+    /// [`UnitHost::submit_before`]'s deadline passed before the install could enter the port: nothing
+    /// was sent.
+    Late,
     /// A removal is pending or settled for this row: keep the unit and wait for the removal's terminal.
     Removing,
     /// A reload candidate stands for this id: keep a pending restart and retry when the reload ends.
@@ -275,14 +283,20 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
-    /// Why the engine refused a reload candidate, by its token, the latest [`RELOAD_REFUSALS_KEPT`]:
-    /// its row's `settled` goes at `release`, often before the reload's waiter polls
-    /// (`chain_cmds::reload_outcome`), which reads the cause here.
-    reload_refusals: VecDeque<(InstallToken, SeatRefusal)>,
+    /// Why the engine refused a reload candidate, by its token: its row's `settled` goes at `release`,
+    /// often before the reload's waiter polls (`chain_cmds::reload_outcome`), which reads the cause
+    /// here. Kept, never evicted by count, until the reload has no reader left
+    /// ([`Table::forget_reload_refusal`]): the one that retires the pending candidate (the `reload` call
+    /// or a sweep), or the call that returns without leaving it to a sweep. Noted only while the row
+    /// stands, so a cause noted after its call returned (at shutdown) is the one that can stay.
+    reload_refusals: BTreeMap<InstallToken, SeatRefusal>,
+    /// The installs whose submit found the slot's port full, oldest first: the port's next free place
+    /// is the first one's, so no later push on that slot (another install, a removal, a move, a
+    /// withdrawal) overtakes it while its owner retries ([`UnitHost::submit`]). A claim ends when its
+    /// install enters the port, its submit ends another way, its row ends or leaves, its owner parks or
+    /// fails, or a rebuild replaces the ports; none holds back the shutdown's removals.
+    port_claims: VecDeque<InstallToken>,
 }
-
-/// How many reload refusals [`Table`] keeps for a waiter that polls after the candidate's release.
-const RELOAD_REFUSALS_KEPT: usize = 32;
 
 impl Table {
     pub(crate) fn new() -> Table {
@@ -293,24 +307,61 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
-            reload_refusals: VecDeque::new(),
+            reload_refusals: BTreeMap::new(),
+            port_claims: VecDeque::new(),
         }
     }
 
-    /// Keep why the engine refused reload candidate `token` past its row's release.
+    /// Keep why the engine refused reload candidate `token` past its row's release (its first cause).
     fn note_reload_refusal(&mut self, token: InstallToken, why: SeatRefusal) {
-        if self.reload_refusals.iter().any(|&(t, _)| t == token) {
-            return;
-        }
-        if self.reload_refusals.len() == RELOAD_REFUSALS_KEPT {
-            self.reload_refusals.pop_front();
-        }
-        self.reload_refusals.push_back((token, why));
+        self.reload_refusals.entry(token).or_insert(why);
     }
 
     /// Why the engine refused reload candidate `token`, if it did (kept past the row's release).
     pub(crate) fn reload_refusal(&self, token: InstallToken) -> Option<SeatRefusal> {
-        self.reload_refusals.iter().find_map(|&(t, why)| (t == token).then_some(why))
+        self.reload_refusals.get(&token).copied()
+    }
+
+    /// The reload of candidate `token` has no reader left: drop its refusal's cause.
+    pub(crate) fn forget_reload_refusal(&mut self, token: InstallToken) {
+        self.reload_refusals.remove(&token);
+    }
+
+    /// Whether an install other than `token`'s waits for room on `slot`'s port with an older claim
+    /// (any claim, for a push that has none): the next free place is not this push's.
+    pub(crate) fn port_claimed_ahead(&mut self, slot: usize, token: Option<InstallToken>) -> bool {
+        let rows = &self.rows;
+        let live = |t: InstallToken| {
+            rows.iter()
+                .find(|r| r.token == t)
+                .filter(|r| !r.released && !r.abandoned && !r.superseded && !r.leave.is_leaving())
+        };
+        self.port_claims.retain(|&t| live(t).is_some());
+        for &t in &self.port_claims {
+            if Some(t) == token {
+                return false;
+            }
+            if live(t).is_some_and(|r| r.slot == slot) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `token`'s submit found its slot's port full (or claimed ahead of it): it keeps its place.
+    pub(crate) fn claim_port(&mut self, token: InstallToken) {
+        if !self.port_claims.contains(&token) {
+            self.port_claims.push_back(token);
+        }
+    }
+
+    pub(crate) fn release_port_claim(&mut self, token: InstallToken) {
+        self.port_claims.retain(|&t| t != token);
+    }
+
+    /// A rebuild replaced the ports: every claim was on a port that is gone.
+    pub(crate) fn clear_port_claims(&mut self) {
+        self.port_claims.clear();
     }
 
     pub(crate) fn mint_token(&mut self) -> InstallToken {
@@ -1404,9 +1455,41 @@ impl UnitHost {
     /// seated one; a reload candidate: its own id) and the bypass are the model's (a same-id reseat
     /// sends the model's latest bypass, never a stale one). Index and push happen in one port-locked
     /// section. Stale terms, a full port, a superseded row, closing, or no engine: the box comes back.
+    ///
+    /// A full port keeps this install's place ([`SubmitError::PortFull`], `Table::port_claims`): until
+    /// a retry gets it in, every other push on the slot is refused as a full port (but the shutdown's
+    /// removals), so a later edit never takes the place that frees first, whether or not the add's
+    /// command still waits.
     pub fn submit(&self, unit: Unit, terms: Terms) -> Result<Op, (Unit, SubmitError)> {
+        self.submit_inner(unit, terms, None)
+    }
+
+    /// [`UnitHost::submit`], sending nothing once `deadline` has passed ([`SubmitError::Late`]): the
+    /// deadline is read under the port's lock, where the push happens, so an owner delayed on its way
+    /// here (a lock, a box built again) never sends after its caller stopped waiting.
+    pub fn submit_before(&self, unit: Unit, terms: Terms, deadline: Instant) -> Result<Op, (Unit, SubmitError)> {
+        self.submit_inner(unit, terms, Some(deadline))
+    }
+
+    fn submit_inner(&self, unit: Unit, terms: Terms, deadline: Option<Instant>) -> Result<Op, (Unit, SubmitError)> {
         let mut port_guard = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        let res = self.submit_locked(&mut port_guard, &mut state, unit, terms, deadline);
+        match &res {
+            Err((_, SubmitError::PortFull)) => state.table.claim_port(self.install),
+            _ => state.table.release_port_claim(self.install),
+        }
+        res
+    }
+
+    fn submit_locked(
+        &self,
+        port_guard: &mut Option<SlotPort>,
+        state: &mut HostState,
+        unit: Unit,
+        terms: Terms,
+        deadline: Option<Instant>,
+    ) -> Result<Op, (Unit, SubmitError)> {
         if let Some(port) = port_guard.as_mut() {
             state.reap_port(self.slot, port);
         }
@@ -1460,39 +1543,49 @@ impl UnitHost {
         };
         let seated_in_engine = plate.seated_in_engine;
         let withdrawn = plate.withdrawn;
-        let my_added_rev = plate.added_rev;
+        let was_effect = plate.seated_source == Some(false);
 
         let (at, replaces) = if is_reload {
             (0, Some(self.id))
         } else if seated_in_engine && withdrawn {
             (0, None)
         } else if is_source {
-            let head = state.model.head_source_id(self.slot, Some(self.id));
-            if let Some(head_id) = head {
-                // An evicted/older source retrying after a rebuild must never replace a newer
-                // source that has already queued or seated in the new engine. Seated, it ended this
-                // one; only queued, the engine can still refuse it, so this one waits for its answer.
-                let newer_head = state
-                    .model
-                    .find_plate(head_id)
-                    .filter(|(_, hp)| hp.added_rev > my_added_rev)
-                    .map(|(_, hp)| hp.seated_in_engine);
-                if newer_head == Some(false) {
-                    return Err((unit, SubmitError::Behind));
-                }
-                if newer_head == Some(true) {
+            // An effect that came back a source with no seat in this engine (a rebuild took it): the
+            // engine would refuse its withdrawn seat that role behind another seat, and the empty
+            // engine cannot, so the host does, by the plates' order. At the head it may change role.
+            if was_effect && state.model.live_plate_ahead(self.slot, self.id, &state.table) {
+                return Err((unit, SubmitError::Refused(SeatRefusal::Placement)));
+            }
+            // An older source retrying after a rebuild never replaces a newer one. Seated, the newer
+            // one ended this one. Its install only queued (whatever is queued behind it, its own
+            // removal included), the engine can still refuse it, so this one waits for that answer:
+            // judged on the queue itself, never on the projected head, which a queued removal empties.
+            // An effect back as a source was never the slot's source: a newer one seated refuses it
+            // its place, as the engine would behind that head, and ends nothing of it.
+            match state.model.newer_source(self.slot, self.id) {
+                Some(false) => return Err((unit, SubmitError::Behind)),
+                Some(true) if was_effect => return Err((unit, SubmitError::Refused(SeatRefusal::Placement))),
+                Some(true) => {
                     if let Some(row) = state.table.row_mut(self.install) {
                         row.superseded = true;
                     }
                     state.model.remove_plate(self.slot, self.id);
                     return Err((unit, SubmitError::Replaced));
                 }
+                None => {}
             }
-            (0, head)
+            (0, state.model.head_source_id(self.slot, Some(self.id)))
         } else {
             (state.model.engine_index_for_insert(self.slot, self.id), None)
         };
 
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err((unit, SubmitError::Late));
+        }
+        // The port's next free place belongs to the oldest install waiting for room.
+        if state.table.port_claimed_ahead(self.slot, Some(self.install)) {
+            return Err((unit, SubmitError::PortFull));
+        }
         if let Err(unit) = port.install_at(self.id, self.install, at, bypassed, replaces, unit) {
             return Err((unit, SubmitError::PortFull));
         }
@@ -1572,7 +1665,7 @@ impl UnitHost {
         if row.is_reload || row.in_engine.generation() != Some(gen) {
             return Err(SubmitError::Stale);
         }
-        if !port.withdraw(self.id) {
+        if state.table.port_claimed_ahead(self.slot, Some(self.install)) || !port.withdraw(self.id) {
             return Err(SubmitError::PortFull);
         }
         if let Some(row) = state.table.row_mut(self.install) {
@@ -1669,6 +1762,8 @@ impl UnitHost {
         if row.superseded || row.released || row.abandoned || row.is_reload || row.leave.is_leaving() {
             return;
         }
+        // A parked owner stops retrying: it holds no place on the port.
+        state.table.release_port_claim(self.install);
         state.model.mark_parked(self.slot, self.id, why);
     }
 
@@ -1679,13 +1774,15 @@ impl UnitHost {
         if row.superseded || row.released || row.abandoned {
             return;
         }
-        if row.is_reload {
+        let (is_reload, leaving) = (row.is_reload, row.leave.is_leaving());
+        state.table.release_port_claim(self.install);
+        if is_reload {
             if state.table.fail_reload(self.install) {
                 state.model.cancel_reloading(self.slot, self.id);
             }
             return;
         }
-        if row.leave.is_leaving() || state.model.has_pending_remove(self.id) {
+        if leaving || state.model.has_pending_remove(self.id) {
             return;
         }
         if let Some(row) = state.table.row_mut(self.install) {
@@ -1941,7 +2038,11 @@ impl EngineHost {
         }
 
         let port = port_guard.as_mut().expect("checked above");
-        if !port.remove(id) {
+        // An install waiting for room on this port goes first (`Table::port_claims`); the unit's own
+        // claim never holds its removal back, and none holds the shutdown's, sent once with no retry
+        // (every claimant's next submit answers `Closing` and ends its claim).
+        let claimed = !self.core.closing.load(Acquire) && state.table.port_claimed_ahead(slot, owner_token);
+        if claimed || !port.remove(id) {
             return Err(format!("slot {slot}'s port is full"));
         }
         let gen = self.core.engine_gen.load(Acquire);
@@ -1987,7 +2088,7 @@ impl EngineHost {
             return Err("no audio device is open".to_string());
         };
         let (to_plate, to_engine) = state.model.translate_move(slot, id, to)?;
-        if !port.move_to(id, to_engine) {
+        if state.table.port_claimed_ahead(slot, None) || !port.move_to(id, to_engine) {
             return Err(format!("slot {slot}'s port is full"));
         }
         let gen = self.core.engine_gen.load(Acquire);
