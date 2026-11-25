@@ -1108,7 +1108,7 @@ impl Drop for UnitOwner {
 pub(crate) mod test_support {
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use lf_engine::grid::Frame;
     use lf_engine::{SlotEvent, UnitCx, UnitInfo, UnitKind, UnitParam, UnitProcessor};
@@ -1127,8 +1127,13 @@ pub(crate) mod test_support {
         pub(crate) on_state: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) on_reactivate: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) on_release: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Called at every owner turn (`OwnedPlugin::turn`): a test may hold the owner's loop there.
+        pub(crate) on_turn: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) released_count: Option<Arc<AtomicUsize>>,
         pub(crate) exited_flag: Option<Arc<AtomicBool>>,
+        /// When set, the load reads its tone as a real plugin's load does (`ToneKeeper::stored`) and
+        /// records the state it would restore (`None`: nothing stored or unreadable).
+        pub(crate) restores: Option<Arc<Mutex<Vec<Option<Vec<u8>>>>>>,
     }
 
     impl Default for FakePluginConfig {
@@ -1141,8 +1146,10 @@ pub(crate) mod test_support {
                 on_state: None,
                 on_reactivate: None,
                 on_release: None,
+                on_turn: None,
                 released_count: None,
                 exited_flag: None,
+                restores: None,
             }
         }
     }
@@ -1202,6 +1209,9 @@ pub(crate) mod test_support {
         }
 
         fn turn(&mut self, _sink: &EventSink) -> Reported {
+            if let Some(cb) = &self.cfg.on_turn {
+                cb();
+            }
             Reported::default()
         }
 
@@ -1250,6 +1260,10 @@ pub(crate) mod test_support {
         let exited = cfg.exited_flag.clone();
         spawn_unit(PluginFormat::Clap, unit_host, 0, sink, tone, move |ctx| {
             let res = serve_unit(ctx, move |setup: Setup<'_>| {
+                if let Some(restores) = &cfg.restores {
+                    let stored = setup.tone.stored().ok().flatten();
+                    restores.lock().unwrap_or_else(|e| e.into_inner()).push(stored);
+                }
                 let rate = setup.slot.rate().unwrap_or(0);
                 let unit = Box::new(FakePluginUnit { source: cfg.source, latency: cfg.latency });
                 let name = cfg.name.clone();
