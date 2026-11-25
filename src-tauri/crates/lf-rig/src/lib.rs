@@ -19,7 +19,7 @@
 //! | [`view`] | The chain model as the rig reads it ([`RigView`], [`PlateView`]) |
 //! | [`add`] | An add's answer as the restore sees it ([`AddOk`], [`AddFail`]) and where it goes ([`Place`]) |
 //! | [`answer`] | The handover's IPC shapes ([`RigAnswer`], [`RigImport`], [`NoticeId`]) |
-//! | [`plan`] | What the restore holds per record unit ([`Plan`], [`Disposition`]): filled by the restore, read by the projection |
+//! | [`plan`] | What the restore holds per record unit ([`Plan`], [`Disposition`]): filled by the restore, read by the projection; the id rule both judge by ([`Plan::fate`]) |
 //! | [`project`](mod@project) | The record as a projection of the model ([`project()`]), a change's kind ([`Change`]), the import ([`import()`]) |
 //! | [`store`] | The record's file over a [`Disk`]: the lock, the commit criterion, the writer's pace ([`Store`]) |
 //! | [`restore`] | The restore, a sans-IO state machine ([`Restore`]: events in, actions out; D1, D5, D10) |
@@ -44,7 +44,7 @@ pub use add::{AddFail, AddOk, AddState, Place, Retry};
 pub use answer::{Notice, NoticeId, RigAnswer, RigImport, RigStatus, IMPORT_STALE};
 pub use marker::{Loads, MarkerRead, SETTLE};
 pub use place::{HeadRole, Match, Role};
-pub use plan::{Disposition, Plan};
+pub use plan::{Disposition, Fate, Plan};
 pub use project::{change, import, project, volumes, Change, ImportError, Volumes};
 pub use record::{Params, PluginRecord, RigRecord, SlotRecord, UnitBody, UnitRecord, Unreadable, Version1, SLOT_GAIN_MAX};
 pub use restore::{Action, Event, Restore};

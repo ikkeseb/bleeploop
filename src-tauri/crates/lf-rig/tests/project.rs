@@ -55,8 +55,17 @@ fn record(a: Vec<UnitRecord>) -> RigRecord {
     RigRecord { version: Version1, slots: [SlotRecord { volume: 0.8, units: a, pending: vec![] }, SlotRecord { volume: 1.0, units: vec![], pending: vec![] }] }
 }
 
+/// A plan whose dispositions' plates an earlier view showed (each token named is `seen`).
 fn plan(a: Vec<UnitRecord>, dispositions: Vec<(UnitId, Disposition)>) -> Plan {
-    Plan { units: [a, vec![]], pending: [vec![], vec![]], dispositions: dispositions.into_iter().collect::<BTreeMap<_, _>>() }
+    let seen = dispositions
+        .iter()
+        .filter_map(|(_, d)| match d {
+            Disposition::Restored { token } | Disposition::Matched { token } => Some(*token),
+            Disposition::Issued { token } | Disposition::Held { token, .. } => *token,
+            Disposition::Queued | Disposition::Forgotten | Disposition::Yielded => None,
+        })
+        .collect();
+    Plan { units: [a, vec![]], pending: [vec![], vec![]], dispositions: dispositions.into_iter().collect::<BTreeMap<_, _>>(), seen }
 }
 
 const NONE: [Option<f64>; 2] = [None, None];

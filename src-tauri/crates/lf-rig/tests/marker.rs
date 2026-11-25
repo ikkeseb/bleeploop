@@ -42,13 +42,18 @@ fn marker_file_reads_and_writes() {
 #[test]
 fn loads_go_terminal_by_settle_or_failure_with_latch() {
     let mut loads = Loads::default();
-    for id in [1, 2, 3, 4] {
+    for id in [1, 2, 3, 4, 5] {
         loads.issue(id);
+    }
+    // 5's marker write is durable but its add never went out.
+    for id in [1, 2, 3, 4] {
+        loads.start(id);
     }
     loads.answered(1, 11);
     loads.answered(2, 12);
     loads.answered(3, 13);
-    // 1 applied: inside its settle it stays, except at a clean close.
+    // 1 applied: inside its settle it stays, except at a clean close; 5 never started goes then too.
+    assert_eq!(loads.named(), [1, 2, 3, 4, 5]);
     assert!(loads.applied(11));
     assert!(!loads.applied(11), "the settle starts once");
     assert_eq!(loads.at_close(), [2, 3, 4]);
@@ -61,5 +66,6 @@ fn loads_go_terminal_by_settle_or_failure_with_latch() {
     assert!(loads.failed(13, false));
     // 4 refused by the host: gone at the next write, with no rewrite of its own.
     loads.withdraw(4);
+    loads.withdraw(5);
     assert!(loads.is_empty());
 }

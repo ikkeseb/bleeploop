@@ -6,22 +6,22 @@
 //! **What a projection holds, per slot in plate order:** each plate the engine applied (a `Leaving`
 //! one too, until it is gone: a refused removal reverts it), and each plate a `Restored` or `Matched`
 //! disposition names by its token; then each record unit the restore still holds (`Queued`, `Issued`,
-//! `Held`) at its record place; `pending` as the plan holds it; each slot's volume from the settings
+//! `Held`, a `Restored` or `Matched` one whose plate no view has shown yet) at its record place;
+//! `pending` as the plan holds it, less an id the player's unit won; each slot's volume from the settings
 //! memory when it holds one, else the record's (D2). A fresh add that has not applied is not recorded
 //! (D4); nor is a plate that cannot be a record unit (a legacy row's shape: a plugin plate with no
 //! plugin identity, which `rig_view` already leaves out).
 //!
-//! **Each id once, and the player's unit wins it.** A disposition binds to its own token: its own
-//! plate is the restore's (a holding one writes the plan's unit in its place), any other plate under
-//! its id is judged by the plate rule alone. An applied plate of another token is a unit the player
-//! has: it is recorded and the restore's unit under that id is not; a pending unit whose id a recorded
-//! unit holds (either slot) is left out of that write.
+//! **Each id once, and the player's unit wins it:** the rule is [`Plan::fate`], the one the restore
+//! judges by too. Its own plate is the restore's (a holding one writes the plan's unit in its place),
+//! any other plate under its id is judged by the plate rule alone; a plan unit is written at its place
+//! when its fate is [`Fate::AtPlace`].
 
 use std::collections::BTreeSet;
 
-use lf_engine::{InstallToken, UnitId, UnitKind, UnitParam};
+use lf_engine::{UnitId, UnitKind, UnitParam};
 
-use crate::plan::{Disposition, Plan};
+use crate::plan::{Disposition, Fate, Plan};
 use crate::record::{PluginRecord, RigRecord, SlotRecord, UnitBody, UnitRecord, Unreadable, Version1};
 use crate::view::{PlateView, RigView};
 
@@ -41,7 +41,7 @@ pub fn volumes(record: &RigRecord, held: Volumes) -> [f64; 2] {
 /// the stored record itself.
 pub fn project(record: &RigRecord, plan: &Plan, view: &RigView, held: Volumes) -> RigRecord {
     let plates = || view.slots.iter().flatten();
-    let in_model = Present { tokens: plates().map(|p| p.added_by).collect(), ids: plates().map(|p| p.id).collect() };
+    let at_place = |id: UnitId| plan.fate(id, view) == Some(Fate::AtPlace);
     let recorded = |p: &PlateView| match bound(plan.dispositions.get(&p.id), p) {
         Some(Disposition::Restored { .. } | Disposition::Matched { .. }) => true,
         // Its own plate: the plan's unit is written in its place.
@@ -69,8 +69,7 @@ pub fn project(record: &RigRecord, plan: &Plan, view: &RigView, held: Volumes) -
         // the output holds (none: at the head), in plan order so an earlier held unit counts.
         let order = &plan.units[s];
         for (i, unit) in order.iter().enumerate() {
-            let holds = plan.dispositions.get(&unit.id).is_some_and(|d| holding(d, unit.id, &in_model));
-            if !holds || written.contains(&unit.id) {
+            if !at_place(unit.id) || written.contains(&unit.id) {
                 continue;
             }
             let at = order[..i]
@@ -85,17 +84,11 @@ pub fn project(record: &RigRecord, plan: &Plan, view: &RigView, held: Volumes) -
     let volumes = volumes(record, held);
     let [a, b] = units;
     let mut slot = |s: usize, units: Vec<UnitRecord>| {
-        let pending = plan.pending[s].iter().filter(|u| written.insert(u.id)).cloned().collect();
+        let pending = plan.pending[s].iter().filter(|u| at_place(u.id) && written.insert(u.id)).cloned().collect();
         SlotRecord { volume: volumes[s], units, pending }
     };
     let slots = [slot(0, a), slot(1, b)];
     RigRecord { version: Version1, slots }
-}
-
-/// What the model holds, both slots: its plates' install tokens and ids.
-struct Present {
-    tokens: BTreeSet<InstallToken>,
-    ids: BTreeSet<UnitId>,
 }
 
 /// The disposition when it binds to this plate: one whose token is the plate's `added_by`. A
@@ -106,21 +99,6 @@ fn bound<'a>(d: Option<&'a Disposition>, plate: &PlateView) -> Option<&'a Dispos
         Disposition::Issued { token } | Disposition::Held { token, .. } => *token == Some(plate.added_by),
         Disposition::Queued | Disposition::Forgotten | Disposition::Yielded => false,
     })
-}
-
-/// Whether a disposition keeps its record unit at its place: `Queued`, and an `Issued` or `Held`
-/// until a confirmed removal ends it: the plate carrying its token left the model and no other plate
-/// holds its id (a player's add reusing the id while the held unit's failed plate leaves keeps it).
-/// With no token, nothing of it was in the model to remove. An applied plate of another token under
-/// the id wins it in [`project`].
-fn holding(d: &Disposition, id: UnitId, model: &Present) -> bool {
-    match d {
-        Disposition::Queued => true,
-        Disposition::Issued { token } | Disposition::Held { token, .. } => {
-            token.is_none_or(|t| model.tokens.contains(&t) || model.ids.contains(&id))
-        }
-        Disposition::Restored { .. } | Disposition::Matched { .. } | Disposition::Forgotten | Disposition::Yielded => false,
-    }
 }
 
 /// The stored form of a unit by id: the last record's, else the plan's.

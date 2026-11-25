@@ -15,7 +15,10 @@
 //!   is left as it is, and the marker goes ([`MarkerRead::Unreadable`]).
 //! - **Removal** unlinks the file; a failed unlink writes an empty marker in its place ([`clear`]).
 //! - **At a clean close** (SEAT-C) a load inside its settle counts as terminal: the process lived
-//!   through it ([`Loads::at_close`]).
+//!   through it; a load whose add was never issued goes too: no plugin code ran ([`Loads::at_close`]).
+//! - **A load no record unit can use leaves early** (the restore's `release_loads`): one whose add was
+//!   never issued when its unit leaves the plan, and one whose id the player's applied unit won (an
+//!   entry under that id could only forget the player's unit at the next launch).
 //!
 //! The rules only: the app's glue reads and writes the file (`engine_io/rig/`), and the restore
 //! machine ([`crate::restore`]) decides what it names.
@@ -78,8 +81,9 @@ pub enum Cleared {
     Removed,
     /// The unlink failed and an empty marker (read as none) stands in its place.
     Emptied,
-    /// Both failed: the marker still names what it named, and the next launch forgets those units (a
-    /// false crash, told then). One log line.
+    /// Both failed: the marker still names what it named. The restore tries again after D1's backoff
+    /// (one log line); a process that ends first leaves it, and the next launch forgets those units (a
+    /// false crash, told then).
     Failed,
 }
 
@@ -111,6 +115,8 @@ struct Load {
     failed: bool,
     /// Its owner thread ended (the exit latch).
     exited: bool,
+    /// Its add was issued (after the marker write naming it): plugin code may run.
+    started: bool,
 }
 
 impl Loads {
@@ -119,9 +125,10 @@ impl Loads {
         self.loads.keys().copied().collect()
     }
 
-    /// What the marker keeps at a clean close (SEAT-C): a load inside its settle goes too.
+    /// What the marker keeps at a clean close (D7, SEAT-C): each load whose add was issued and whose
+    /// plate has not applied. A load inside its settle goes; one whose add never started goes too.
     pub fn at_close(&self) -> Vec<UnitId> {
-        self.loads.iter().filter(|(_, l)| !l.applied).map(|(id, _)| *id).collect()
+        self.loads.iter().filter(|(_, l)| l.started && !l.applied).map(|(id, _)| *id).collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -137,8 +144,26 @@ impl Loads {
         self.loads.insert(id, Load::default());
     }
 
-    /// `id`'s load never ran plugin code (a host refusal, a match found after its write, a write that
-    /// failed): it leaves the marker at the next write, which no rewrite of its own is owed for.
+    /// `id`'s add goes out now (the marker write naming it is durable).
+    pub fn start(&mut self, id: UnitId) {
+        if let Some(load) = self.loads.get_mut(&id) {
+            load.started = true;
+        }
+    }
+
+    /// Whether `id`'s add was issued.
+    pub fn started(&self, id: UnitId) -> bool {
+        self.loads.get(&id).is_some_and(|l| l.started)
+    }
+
+    /// The attempt token an answer named for `id`'s load.
+    pub fn token(&self, id: UnitId) -> Option<InstallToken> {
+        self.loads.get(&id).and_then(|l| l.token)
+    }
+
+    /// `id`'s load leaves the set. It never ran plugin code (a host refusal, a match found after its
+    /// write, a write that failed): it leaves the marker at the next write, which no rewrite of its own
+    /// is owed for. Or no record unit can use it any more (the module doc): the caller owes a rewrite.
     pub fn withdraw(&mut self, id: UnitId) {
         self.loads.remove(&id);
     }
