@@ -54,6 +54,12 @@ const BUILTIN_ADD_TIMEOUT: Duration = Duration::from_secs(15);
 /// install of a first answer still owed enters after it.
 const BUILTIN_INITIAL_SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a failed built-in add waits for its owner's exit latch before it answers (D5): the owner's
+/// failure answer is its last act, so it ends at once. Never an unbounded join under the slot's order
+/// lock: a thread's end can wait on the process's loader lock (`DLL_THREAD_DETACH`), which a plugin
+/// hanging in its `DllMain` holds.
+const BUILTIN_EXIT_WAIT: Duration = Duration::from_millis(200);
+
 /// Bound for stopping/joining a late entry that finished opening after `join_all` already completed.
 const LATE_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -378,8 +384,8 @@ pub(crate) struct Chains {
     id_guard: Mutex<()>,
     affinity: Mutex<Affinity>,
     tokens: Mutex<ToneTokens>,
-    /// The exit latches of unit owners not known to have ended, by the install token their add minted
-    /// (`exited`); `sweep` drops each once set. A leaf lock.
+    /// The exit latches of the load attempts not known to have ended, by the install token their add
+    /// minted, registered at the mint (`exited`); `sweep` drops each once set. A leaf lock.
     exits: Mutex<BTreeMap<InstallToken, ExitLatch>>,
     closing: AtomicBool,
     #[cfg(test)]
@@ -388,6 +394,9 @@ pub(crate) struct Chains {
     fail_next_late_drop_spawn: AtomicBool,
     #[cfg(test)]
     before_register_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test-only: run on the next built-in owner's thread after its serving ended, before the thread does.
+    #[cfg(test)]
+    builtin_end_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     before_reload_poll_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -423,6 +432,8 @@ impl Chains {
             fail_next_late_drop_spawn: AtomicBool::new(false),
             #[cfg(test)]
             before_register_hook: Mutex::new(None),
+            #[cfg(test)]
+            builtin_end_hook: Mutex::new(None),
             #[cfg(test)]
             before_reload_poll_hook: Mutex::new(None),
             #[cfg(test)]
@@ -742,19 +753,26 @@ impl Chains {
         }
     }
 
-    /// The owner's exit latch for the add that minted `token` (D5, D6): true once the owner thread
-    /// ended, or when none ran. Asked for a token an add answered, it is exact from that answer on, from
-    /// any thread; a token no add of this host answered yet reads true.
+    /// Whether the load attempt that minted `token` has ended (D5, D6): its exit latch
+    /// ([`ExitLatch`]), from any thread. Registered unset at the mint, before any unit code runs, so a
+    /// setup still in progress reads false; it stays false while the owner runs and for good when it
+    /// left its unit in the engine. Two tokens read true without a latch: one whose latch set and was
+    /// swept, and one this host never minted for an add (a reload's candidate included).
     #[allow(dead_code)] // the rig's restore driver reads it (CP3a part 2); the tests now
     pub(crate) fn exited(&self, token: InstallToken) -> bool {
         let exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
         !exits.get(&token).is_some_and(|latch| !latch.is_set())
     }
 
-    /// Keep `exit` under `token` until it is set (`sweep` drops it then: a token kept by none reads set).
-    fn keep_exit(&self, token: InstallToken, exit: &ExitLatch) {
-        if !exit.is_set() {
-            self.exits.lock().unwrap_or_else(|e| e.into_inner()).insert(token, exit.clone());
+    /// Track `token`'s attempt by `exit` until it is set (`sweep` drops it then): registered at the
+    /// mint, and again with the latch the opener answered (the same one in production, `hand_exit`; a
+    /// test opener's own otherwise).
+    fn track_exit(&self, token: InstallToken, exit: &ExitLatch) {
+        let mut exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
+        if exit.is_set() {
+            exits.remove(&token);
+        } else {
+            exits.insert(token, exit.clone());
         }
     }
 
@@ -786,6 +804,9 @@ impl Chains {
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
         let unit_host = self.mint(host, slots, slot, unit, Spec::Plugin(plugin.clone()), at, bypassed)?;
         let token = unit_host.install_token();
+        // The attempt's latch, known from the mint on and handed to the owner the opener spawns.
+        let minted = ExitLatch::new();
+        self.track_exit(token, &minted);
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
         // The token's tone this add redeemed into `unit-<id>.tone`: an owner whose add ends without ever applying
@@ -832,10 +853,14 @@ impl Chains {
             }
         };
 
-        match open(format, &plugin, unit_host, sink, tone).map_err(Into::into) {
+        let opened = {
+            let _handed = unit_owner::hand_exit(&minted);
+            open(format, &plugin, unit_host, sink, tone).map_err(Into::into)
+        };
+        match opened {
             Ok((owner, answer)) => {
                 let exit = owner.exit_latch().clone();
-                self.keep_exit(token, &exit);
+                self.track_exit(token, &exit);
                 self.affinity
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -849,7 +874,9 @@ impl Chains {
                 if let Some(hook) = self.before_register_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
                     hook();
                 }
-                let closing = || (FailClass::Host(Retry::Launch), "the host is closing".to_string());
+                // The plugin's code ran: closing now refuses the seat, not the load (D5), and its owner may
+                // still run (it ends with `join_all`).
+                let closing = || (FailClass::Seat, "the host is closing".to_string());
                 let (outcome_err, late_entry) = {
                     let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
                     let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
@@ -887,11 +914,12 @@ impl Chains {
                 }
             }
             Err(LoadFail { why, class, exit }) => {
-                self.keep_exit(token, &exit);
+                self.track_exit(token, &exit);
                 {
                     let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-                    // The owner may still be in plugin code: its module stays loaded.
-                    if class == FailClass::Unresolved {
+                    // The owner may still be in plugin code, or left its unit in the engine: its module
+                    // stays loaded.
+                    if !exit.is_set() {
                         aff.leak(inst, &plugin.path);
                     } else {
                         aff.release(inst, &plugin.path);
@@ -963,6 +991,11 @@ impl Chains {
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
         let unit_host = self.mint(host, slots, slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed)?;
         let token = unit_host.install_token();
+        // The attempt's latch, known from the mint on: the owner thread holds its guard first and drops it
+        // last; a refusal before the owner's spawn sets it (no owner ran), as does a thread that never
+        // starts (its closure drops the guard).
+        let exit = ExitLatch::new();
+        self.track_exit(token, &exit);
         // A refusal after the mint, of the host's (no engine, the owner's spawn, closing): the token is the attempt's.
         let host_fail = |why: String, retry: Retry| AddFail::Host { why, retry, token: Some(token) };
 
@@ -970,6 +1003,7 @@ impl Chains {
             let why = "no audio device is open".to_string();
             unit_host.failed(why.clone());
             unit_host.release();
+            exit.end();
             return Err(host_fail(why, Retry::Device));
         };
 
@@ -978,6 +1012,7 @@ impl Chains {
             Err(why) => {
                 unit_host.failed(why.clone());
                 unit_host.release();
+                exit.end();
                 return Err(AddFail::Plugin { why, token, exited: true });
             }
         };
@@ -1000,13 +1035,17 @@ impl Chains {
         let owner_stop = stop.clone();
         let owner_wake = wake.clone();
         let rebuild = Rebuild { factory: self.factory.clone(), kind, host: host.clone() };
-        // The owner thread holds the latch's guard first and drops it last; a thread that never starts
-        // drops it with its closure.
-        let exit = ExitLatch::new();
         let exit_guard = exit.guard();
+        let owner_exit = exit.clone();
+        #[cfg(test)]
+        let end_hook = self.builtin_end_hook.lock().unwrap_or_else(|e| e.into_inner()).take();
         let main = move || {
             let _exit = exit_guard;
-            serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild)
+            serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild, owner_exit);
+            #[cfg(test)]
+            if let Some(hook) = end_hook {
+                hook();
+            }
         };
         #[cfg(test)]
         let spawned = if self.fail_next_spawn.swap(false, Acquire) {
@@ -1028,7 +1067,6 @@ impl Chains {
                 return Err(host_fail(why, Retry::Launch));
             }
         };
-        self.keep_exit(token, &exit);
 
         let entry = Arc::new(Entry {
             slot,
@@ -1075,7 +1113,9 @@ impl Chains {
                     unit_host.failed("the host is closing".to_string());
                     host_fail("the host is closing".to_string(), Retry::Launch)
                 }
-                BuiltinRegErr::Inactive(why) => AddFail::Seat { why, token, exited: exit.is_set() },
+                BuiltinRegErr::Inactive(why) => {
+                    AddFail::Seat { why, token, exited: wait_exit(&exit, BUILTIN_EXIT_WAIT) }
+                }
             };
             unit_host.release();
             drop(order);
@@ -1100,14 +1140,11 @@ impl Chains {
             Ok(Ok(Added::Seated)) => Ok(AddOk { state: AddState::Seated, token }),
             Ok(Ok(Added::Waiting)) => Ok(AddOk { state: AddState::Waiting, token }),
             Ok(Err((class, why))) => {
-                // A failed first answer is the owner's last act: joined, its latch reads set, as a plugin
-                // owner's does (`unit_owner::load_unit` joins it too).
-                let owner = self.registry.lock().unwrap_or_else(|e| e.into_inner()).get(&unit).filter(|e| e.token == token).cloned();
-                if let Some(owner) = owner {
-                    owner.owner.join();
-                }
+                // A failed first answer is the owner's last act: its latch sets as its thread ends, waited
+                // for within a bound (never a join under `order`), and read as it stands then.
+                let exited = wait_exit(&exit, BUILTIN_EXIT_WAIT);
                 self.retire_to_gone(unit, Some(token));
-                Err(add_fail(class, why, token, exit.is_set()))
+                Err(add_fail(class, why, token, exited))
             }
             Err(_) => Err(AddFail::Unresolved {
                 why: format!("built-in unit {unit} did not answer within {} s", BUILTIN_ADD_TIMEOUT.as_secs()),
@@ -1418,13 +1455,14 @@ impl Chains {
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
         match open(format, &plugin, unit_host, sink, Some(binding)).map_err(Into::into) {
-            Err(LoadFail { why, class, .. }) => {
+            Err(LoadFail { why, exit, .. }) => {
                 // The candidate's owner released it before answering: no outcome is read after this.
                 forget_reload_refusal(host, new_token);
                 {
                     let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-                    // The owner may still be in plugin code: its module stays loaded.
-                    if class == FailClass::Unresolved {
+                    // The owner may still be in plugin code, or left its unit in the engine: its module
+                    // stays loaded.
+                    if !exit.is_set() {
                         aff.leak(inst, &plugin.path);
                     } else {
                         aff.release(inst, &plugin.path);
@@ -1924,6 +1962,15 @@ fn late_add_refusal_reason(state: &unit_host::HostState, unit: UnitId, token: In
     format!("unit {unit} was refused or replaced before registration")
 }
 
+/// Wait up to `bound` for `exit` to set, polled: whether it did.
+fn wait_exit(exit: &ExitLatch, bound: Duration) -> bool {
+    let deadline = Instant::now() + bound;
+    while !exit.is_set() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    exit.is_set()
+}
+
 /// A refusal before the mint (D5's `Host`): no unit, no token, no owner; tried again at the next launch.
 fn refused(why: String) -> AddFail {
     AddFail::Host { why, retry: Retry::Launch, token: None }
@@ -2131,6 +2178,7 @@ fn serve_builtin(
     stop: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
     rebuild: Rebuild,
+    exit: ExitLatch,
 ) {
     let Ok((host, boxed, initial_terms, asked)) = start_rx.recv() else {
         return;
@@ -2401,6 +2449,8 @@ fn serve_builtin(
         drain_shutdown(&mut have_box, &mut dismissed);
     }
     if !have_box && !dismissed {
+        // The box stays in the engine: this attempt's latch never sets (D5, D6).
+        exit.abandon();
         host.abandon();
     }
     host.release();

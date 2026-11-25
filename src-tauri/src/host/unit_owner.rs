@@ -8,10 +8,11 @@
 //! Legacy slots keep `engine_slot::serve` untouched; chain units run here beside it. Never drops a
 //! unit box that may still live in the engine (`abandon` + `std::mem::forget`).
 
+use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{
-    AtomicBool, AtomicU32,
-    Ordering::{Acquire, Release},
+    AtomicBool, AtomicU32, AtomicU8,
+    Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -64,11 +65,21 @@ pub(crate) fn set_load_wait(wait: Duration) {
     LOAD_WAIT.with(|w| w.set(wait));
 }
 
-/// Whether a unit's owner thread has ended (D5, D6): set by the thread's last drop, after its plugin's
-/// release, so a set latch means no code of that load runs any more. An add answers with it and
-/// `Chains` keeps it per install token (`Chains::exited`); cloned freely, read from any thread.
+/// [`ExitLatch`]'s states.
+const EXIT_UNSET: u8 = 0;
+const EXIT_SET: u8 = 1;
+/// The owner left a unit box in the engine ([`ExitLatch::abandon`]): never set.
+const EXIT_ABANDONED: u8 = 2;
+
+/// Whether a load attempt's code has ended (D5, D6): set means no code of that attempt can run any
+/// more, neither its owner's nor its plugin's in the engine. Set by the owner thread's last drop, after
+/// its plugin's release; never set when the owner leaves a unit box the engine still holds (the plugin
+/// stays loaded and may still process). A set read too early would let the restore drop the attempt from
+/// the crash marker; an unset one only keeps it there longer, so when in doubt it stays unset. `Chains`
+/// registers it per install token at the mint and hands it to the owner ([`hand_exit`]); an add answers
+/// with it, and `Chains::exited` reads it later. Cloned freely, read from any thread.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ExitLatch(Arc<AtomicBool>);
+pub(crate) struct ExitLatch(Arc<AtomicU8>);
 
 impl ExitLatch {
     /// Unset: an owner is about to run ([`ExitLatch::guard`] goes to its thread).
@@ -78,26 +89,62 @@ impl ExitLatch {
 
     /// Already set: no owner ran.
     pub(crate) fn ended() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
+        Self(Arc::new(AtomicU8::new(EXIT_SET)))
     }
 
     pub(crate) fn is_set(&self) -> bool {
-        self.0.load(Acquire)
+        self.0.load(Acquire) == EXIT_SET
+    }
+
+    /// Set it now: no owner ran with it (a refusal before the owner's spawn). Never undoes an abandon.
+    pub(crate) fn end(&self) {
+        let _ = self.0.compare_exchange(EXIT_UNSET, EXIT_SET, Release, Relaxed);
+    }
+
+    /// The owner leaks a unit box the engine still holds: the latch never sets, its guard's drop
+    /// included.
+    pub(crate) fn abandon(&self) {
+        self.0.store(EXIT_ABANDONED, Release);
     }
 
     /// The guard an owner thread holds first and drops last: its drop (a return or an unwind) sets the
-    /// latch. A thread that never starts drops it with its closure.
+    /// latch unless the owner abandoned its unit. A thread that never starts drops it with its closure.
     pub(crate) fn guard(&self) -> ExitGuard {
         ExitGuard(self.clone())
     }
 }
 
-/// Sets its [`ExitLatch`] when dropped.
+/// Sets its [`ExitLatch`] when dropped (unless abandoned).
 pub(crate) struct ExitGuard(ExitLatch);
 
 impl Drop for ExitGuard {
     fn drop(&mut self) {
-        self.0 .0.store(true, Release);
+        self.0.end();
+    }
+}
+
+thread_local! {
+    /// On an add's thread: the latch `Chains` registered at the mint, for the owner [`spawn_owner`]
+    /// spawns next ([`hand_exit`]).
+    static HANDED_EXIT: RefCell<Option<ExitLatch>> = const { RefCell::new(None) };
+    /// On a unit owner's thread: its own latch, which [`abandon_in_engine`] abandons.
+    static OWN_EXIT: RefCell<Option<ExitLatch>> = const { RefCell::new(None) };
+}
+
+/// Hand `exit` to the owner the next [`load_unit`] on this thread spawns, so the latch `Chains` keeps
+/// for the attempt from its mint on is that owner's own (the opener seam takes no latch). Cleared when
+/// the returned guard drops, taken or not.
+pub(crate) fn hand_exit(exit: &ExitLatch) -> HandedExit {
+    HANDED_EXIT.with(|h| *h.borrow_mut() = Some(exit.clone()));
+    HandedExit(())
+}
+
+/// Clears a latch [`hand_exit`] handed and no owner took.
+pub(crate) struct HandedExit(());
+
+impl Drop for HandedExit {
+    fn drop(&mut self) {
+        HANDED_EXIT.with(|h| h.borrow_mut().take());
     }
 }
 
@@ -105,26 +152,26 @@ impl Drop for ExitGuard {
 /// and `Chains` maps onto `AddFail` with the attempt's token and its owner's [`ExitLatch`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailClass {
-    /// Refused before the plugin's code ran (no engine: [`Retry::Device`]); also a refusal after the
-    /// load whose owner had already ended at the answer (no engine, closing), so nothing is left to wait
-    /// for.
+    /// Refused before the plugin's code ran (no engine: [`Retry::Device`]; the binary gone since the
+    /// scan or an id no plugin of its format can have: [`Retry::Launch`]); also no engine after the load,
+    /// answered once the owner had ended, so nothing is left to wait for.
     Host(Retry),
     /// A source the player put in heads the slot (D9). No path answers it before CP3b's host-add rule
     /// (`SubmitError::SourceTaken`, met in `submit_owed`).
     #[allow(dead_code)] // CP3b's `SubmitError::SourceTaken` answers it
     SourceTaken,
     /// The engine or the host refused the seat after the unit was built (a seat refusal, a full port,
-    /// a replaced or removed unit).
+    /// a replaced or removed unit, the host closing).
     Seat,
     /// The unit's own setup or activation failed.
     Plugin,
     /// No answer to trust: the setup outlasted its wait before it claimed, and the owner may still be
-    /// in plugin code.
+    /// in plugin code; or the owner ended without answering (a host panic), which says nothing of the
+    /// plugin.
     Unresolved,
 }
 
-/// A load that failed: its reason, its class, and its owner's exit latch (set unless the owner may
-/// still run, [`FailClass::Unresolved`]).
+/// A load that failed: its reason, its class, and its owner's exit latch (as it read at the answer).
 #[derive(Clone, Debug)]
 pub(crate) struct LoadFail {
     pub(crate) why: String,
@@ -393,6 +440,10 @@ fn submit_owed<P: OwnedPlugin>(
         }
     };
 
+    // No engine after the plugin loaded (here and at `submit`'s `NoEngine` below) stays
+    // `Host(Retry::Device)` (D5), not `Seat`: this owner answers as its last act (the caller joins it, its
+    // latch set), so no code of the load runs any more, and the useful outcome is the retry in this
+    // process once a device runs, under the same id.
     let Some(fresh) = host.terms() else {
         if !ever_seated && answering_caller {
             return Some(Exit::FailedBeforeSeat {
@@ -481,10 +532,11 @@ fn submit_owed<P: OwnedPlugin>(
         Err((returned, SubmitError::Closing)) => {
             let returned = own(returned);
             if !ever_seated && answering_caller {
+                // The plugin's code ran: closing now is a refusal of the seat, not of the load (D5).
                 return Some(Exit::FailedBeforeSeat {
                     unit: Some(returned),
                     why: submit_error_reason(SubmitError::Closing),
-                    class: FailClass::Host(Retry::Launch),
+                    class: FailClass::Seat,
                 });
             }
             *seat = Seat::Closing { unit: returned };
@@ -640,6 +692,9 @@ fn abandon_in_engine<P: OwnedPlugin>(
     faults: &AtomicU32,
     reported: &mut u32,
 ) -> Result<(), String> {
+    // First, before any plugin call that could unwind: this thread's end must not set its latch while the
+    // engine may still run the plugin (D5, D6).
+    abandon_own_exit();
     let slot = host.slot();
     let id = host.id();
     let editor_open = plugin.editor() != Editor::Closed;
@@ -665,6 +720,79 @@ fn abandon_in_engine<P: OwnedPlugin>(
     report_faults(faults, slot, reported);
     host.release();
     Err(msg)
+}
+
+/// This owner thread's latch never sets ([`ExitLatch::abandon`]); a thread with none (a fixture's) has
+/// nothing to abandon.
+fn abandon_own_exit() {
+    OWN_EXIT.with(|e| {
+        if let Some(exit) = e.borrow().as_ref() {
+            exit.abandon();
+        }
+    });
+}
+
+/// End an owner before its plugin loaded (or before its code ran): delete what its add wrote, fail the
+/// plate, release the reservation, answer `why` by its `class`.
+fn fail_unloaded(
+    host: UnitHost,
+    tone: &mut ToneKeeper,
+    add: bool,
+    ready: &mut Option<SyncSender<First>>,
+    class: FailClass,
+    why: String,
+) {
+    undo_add(add, tone);
+    host.failed(why.clone());
+    host.release();
+    if let Some(tx) = ready.take() {
+        let _ = tx.try_send(Err((class, why)));
+    }
+}
+
+/// A load this host refuses before any of the plugin's code runs (D5 `Host`, [`Retry::Launch`]): its
+/// binary gone since the scan, or an id no plugin of its format can have (VST3: not a 32-digit class id;
+/// VST2: not 8 lowercase hex digits; CLAP: a NUL inside). One that passes may still fail later in the
+/// plugin's own code (a binary removed in between, an id the file does not hold): that is `Plugin`.
+fn refused_before_code(format: PluginFormat, path: &str, id: &str) -> Option<String> {
+    let file = std::path::Path::new(path);
+    match format {
+        PluginFormat::Vst3 => {
+            if super::super::scan::resolve_vst3_binary(file).is_none() {
+                Some(format!("no loadable VST3 binary inside {path}"))
+            } else if super::super::scan::hex_to_tuid(id).is_none() {
+                Some(format!("bad VST3 class id: {id}"))
+            } else {
+                None
+            }
+        }
+        PluginFormat::Clap => {
+            if !file.is_file() {
+                Some(format!("load failed: no CLAP file at {path}"))
+            } else if id.contains('\0') {
+                Some(format!("bad CLAP plugin id: {id:?}"))
+            } else {
+                None
+            }
+        }
+        PluginFormat::Vst2 => {
+            if !file.is_file() {
+                Some(format!("no VST2 file at {path}"))
+            } else if !(id.len() == 8 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+                Some(format!("bad VST2 plugin id: {id}"))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// An owner whose load [`refused_before_code`]: it ends as one with no engine does, answering `Host`.
+fn refuse_before_code(ctx: UnitCtx, why: String) -> Result<(), String> {
+    let UnitCtx { unit: host, ready, mut tone, .. } = ctx;
+    let add = !host.is_reload();
+    fail_unloaded(host, &mut tone, add, &mut Some(ready), FailClass::Host(Retry::Launch), why);
+    Ok(())
 }
 
 /// The chain-unit owner loop every format shares: `load` builds the plugin and its unit from
@@ -698,12 +826,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 
     let Some(terms) = host.terms() else {
         let why = "no audio device is open".to_string();
-        undo_add(add, &mut tone);
-        host.failed(why.clone());
-        host.release();
-        if let Some(tx) = ready.take() {
-            let _ = tx.try_send(Err((FailClass::Host(Retry::Device), why)));
-        }
+        fail_unloaded(host, &mut tone, add, &mut ready, FailClass::Host(Retry::Device), why);
         return Ok(());
     };
 
@@ -720,12 +843,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     let Loaded { mut plugin, unit, name, tone: restored, .. } = match load(setup) {
         Ok(loaded) => loaded,
         Err(e) => {
-            undo_add(add, &mut tone);
-            host.failed(e.clone());
-            host.release();
-            if let Some(tx) = ready.take() {
-                let _ = tx.try_send(Err((FailClass::Plugin, e)));
-            }
+            fail_unloaded(host, &mut tone, add, &mut ready, FailClass::Plugin, e);
             return Ok(());
         }
     };
@@ -992,7 +1110,9 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
 }
 
 /// Load plugin `id` from `path` into a chain unit owned through `unit`: the owner and its install's
-/// first answer, or the failure by D5's class with the owner's exit latch ([`LoadFail`]).
+/// first answer, or the failure by D5's class with the owner's exit latch ([`LoadFail`]). The owner
+/// refuses a load before the plugin's code runs when its binary or its id cannot be loaded
+/// ([`refused_before_code`]); its latch is the one [`hand_exit`] handed on this thread, if any.
 #[allow(dead_code)] // P4 calls this
 pub(crate) fn load_unit(
     format: PluginFormat,
@@ -1003,7 +1123,13 @@ pub(crate) fn load_unit(
     sink: EventSink,
     tone: Option<ToneBinding>,
 ) -> Result<(UnitOwner, Answer), LoadFail> {
-    let spawn = |run: Box<dyn FnOnce(UnitCtx) -> Result<(), String> + Send>| {
+    let (checked_path, checked_id) = (path.clone(), id.clone());
+    let spawn = move |run: Box<dyn FnOnce(UnitCtx) -> Result<(), String> + Send>| {
+        // Checked on the owner thread, right before the load: the plugin's file as it stands then.
+        let run = move |ctx: UnitCtx| match refused_before_code(format, &checked_path, &checked_id) {
+            Some(why) => refuse_before_code(ctx, why),
+            None => run(ctx),
+        };
         spawn_owner(format, unit, editor_parent, sink, tone, run, spawn_thread)
     };
     match format {
@@ -1057,8 +1183,9 @@ pub(super) fn spawn_unit_with(
 }
 
 /// Spawn the owner and wait for its first answer, as [`spawn_unit`] says, answering a failure's class
-/// and the owner's exit latch ([`LoadFail`]): the latch's guard is the first thing the owner thread
-/// holds, so it is set once the thread's last drop ran.
+/// and the owner's exit latch ([`LoadFail`]): the one [`hand_exit`] handed on this thread, else a new
+/// one. Its guard is the first thing the owner thread holds, so it is set once the thread's last drop
+/// ran, unless the owner abandoned a unit in the engine ([`abandon_in_engine`]).
 fn spawn_owner(
     format: PluginFormat,
     unit: UnitHost,
@@ -1079,8 +1206,9 @@ fn spawn_owner(
     let (ready, ready_rx) = ready_channel();
     let param_ids = ParamIds::default();
     let shared_name = Arc::new(OnceLock::new());
-    let exit = ExitLatch::new();
+    let exit = HANDED_EXIT.with(|h| h.borrow_mut().take()).unwrap_or_default();
     let exit_guard = exit.guard();
+    let own_exit = exit.clone();
     let on_spawn_err = unit.clone();
     let ctx = UnitCtx {
         unit,
@@ -1098,6 +1226,7 @@ fn spawn_owner(
     };
     let main = move || {
         let _exit = exit_guard;
+        OWN_EXIT.with(|e| *e.borrow_mut() = Some(own_exit));
         run(ctx)
     };
     let owner = match spawn(format!("lf-{}-unit-{id}", format.as_str()), Box::new(main)) {
@@ -1109,7 +1238,9 @@ fn spawn_owner(
             let why = format!("spawn unit owner thread: {e}");
             on_spawn_err.failed(why.clone());
             on_spawn_err.release();
-            return Err(LoadFail { why, class: FailClass::Host(Retry::Launch), exit: ExitLatch::ended() });
+            // No owner ran (the closure's guard, dropped unrun, sets it too).
+            exit.end();
+            return Err(LoadFail { why, class: FailClass::Host(Retry::Launch), exit });
         }
     };
 
@@ -1167,12 +1298,13 @@ fn spawn_owner(
             let _ = owner.join();
             Err(LoadFail { why, class, exit })
         }
-        // The owner ended without an answer: its runner failed before serving (the plugin's own setup)
-        // or the loop panicked.
+        // The owner ended without an answer (a panic: every runner answers before it ends otherwise). That
+        // says nothing of the plugin: unresolved, with the latch as it reads once joined (unset if the
+        // owner left its unit in the engine).
         Err(_) => {
             running.store(false, Release);
             let _ = owner.join();
-            Err(LoadFail { why: "plugin unit owner exited before answering".to_string(), class: FailClass::Plugin, exit })
+            Err(LoadFail { why: "plugin unit owner exited before answering".to_string(), class: FailClass::Unresolved, exit })
         }
     }
 }
@@ -1190,7 +1322,7 @@ pub(crate) struct UnitOwner {
     param_ids: ParamIds,
     /// The owner's `ToneKeeper` flag: a host parameter set is a change to save.
     edited: Arc<AtomicBool>,
-    /// Set once the owner thread ended.
+    /// Set once the owner thread ended, unless it left its unit in the engine.
     exit: ExitLatch,
 }
 
@@ -1200,7 +1332,8 @@ impl UnitOwner {
         &self.name
     }
 
-    /// The owner thread's exit latch (D5): set once the thread ended, whoever ended it.
+    /// The owner thread's exit latch (D5): set once the thread ended, whoever ended it, unless it left
+    /// its unit in the engine ([`ExitLatch::abandon`]).
     pub(crate) fn exit_latch(&self) -> &ExitLatch {
         &self.exit
     }

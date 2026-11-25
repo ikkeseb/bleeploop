@@ -5619,3 +5619,41 @@ fn d5_an_owner_that_ends_without_answering_is_unresolved() {
     chains.unload_all(host);
     chains.join_all();
 }
+
+/// D5: a failed built-in add answers within its bound (`BUILTIN_EXIT_WAIT`) while its owner's thread is
+/// held after its answer, never joining it under the slot's order lock; the latch reads as it stands
+/// (unset) and sets once the thread ends.
+#[test]
+fn d5_a_failed_builtin_answers_within_its_bound_while_its_owner_ends() {
+    use lf_rig::AddFail;
+    let device = start_device();
+    let host = device.host();
+    let slots = empty_slots();
+    let too_late = lf_engine::max_chain_latency(48_000) + 1;
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_latency(too_late)));
+
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    *chains.builtin_end_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = gate_rx.recv_timeout(PATIENCE);
+    }));
+    let asked = Instant::now();
+    let res = typed_add(&chains, host, &slots, 0, 450, echo_spec(0.5, false), 0, &no_open);
+    let took = asked.elapsed();
+    let token = match res {
+        Err(AddFail::Seat { token, exited: false, why }) => {
+            assert!(why.contains("Latency"), "got: {why}");
+            token
+        }
+        other => panic!("expected a seat refusal with the owner still ending, got {other:?}"),
+    };
+    assert!(took < Duration::from_secs(5), "the add answered in {took:?}");
+    assert!(!chains.exited(token), "the owner's thread is held");
+    // The slot's next call is not held up either.
+    assert!(typed_add(&chains, host, &slots, 0, 451, echo_spec(0.5, false), 0, &no_open).is_err());
+
+    gate_tx.send(()).unwrap();
+    wait_until(PATIENCE, "the latch sets once the owner's thread ends", || chains.exited(token));
+
+    chains.unload_all(host);
+    chains.join_all();
+}
