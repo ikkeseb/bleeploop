@@ -3503,46 +3503,13 @@ fn e3f_r1_e_a_shutdown_terminal_taken_by_the_final_drain_keeps_the_tone() {
 
 // ── Chain host edges (a review of the chain commands, settled before chains reach players) ──
 
-/// Chain host edge d: a built-in add answered `Waiting` (held by a take) whose box a rebuild returns
-/// after the 10 s first-answer bound (`BUILTIN_INITIAL_SUBMIT_TIMEOUT`) is offered to the new engine and
-/// seats. Red before the fix: `serve_builtin` failed any never-seated box past that bound ("could not
-/// submit before timeout"), though its caller had long been answered and moved on.
-#[test]
-fn edge_d_a_waiting_builtin_add_returned_by_a_rebuild_after_the_first_answer_bound_seats() {
-    // 20 ms per 256-frame block keeps the take open past the bound without hitting max_loop_seconds.
-    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
-    let host = device.host();
-    let doc_state = PluginHostState::default();
-    let epoch = doc_state.begin_frontend_session();
-    let slots = empty_slots();
-    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_latency(64)));
-
-    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 530, echo_spec(0.5, false), 0), Ok(Added::Seated));
-    start_take(&device);
-    // A latent add during a take changes the chain's latency: held, answered `Waiting`.
-    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 531, echo_spec(0.5, false), 1), Ok(Added::Waiting));
-    std::thread::sleep(super::BUILTIN_INITIAL_SUBMIT_TIMEOUT + Duration::from_millis(500));
-
-    device.rebuild_at(48_000, 512);
-    stop_take(&device);
-    wait_until(PATIENCE, "the waiting add seated in the new engine", || {
-        let mut ev = Vec::new();
-        host.drain_feed(&mut ev);
-        plate_state(host, 531).state == PlateState::Seated
-            && engine_chain_summary(&device, 0).iter().any(|&(id, _)| id == 531)
-    });
-    assert_eq!(plate_state(host, 531).error, None);
-
-    chains.unload_all(host);
-    chains.join_all();
-}
-
-/// A stand-in plugin unit with a set latency (a reload candidate the engine refuses for it).
-struct LatentStandIn(Frame);
+/// A stand-in plugin unit with a set latency and role (a reload candidate or a newer source the engine
+/// refuses).
+struct LatentStandIn(Frame, bool);
 
 impl UnitProcessor for LatentStandIn {
     fn info(&self) -> UnitInfo {
-        UnitInfo { kind: UnitKind::Plugin, source: false, latency: self.0 }
+        UnitInfo { kind: UnitKind::Plugin, source: self.1, latency: self.0 }
     }
     fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
         for (o, i) in out.into_iter().zip(input) {
@@ -3555,81 +3522,154 @@ impl UnitProcessor for LatentStandIn {
     }
 }
 
-/// Chain host edge e: a reload candidate the engine refused (latency) whose owner released its row before
-/// the reload's waiter polls still reads the engine's cause (`reload_outcome`, which the waiter and the
-/// sweep log), in both orders: its box taken before the refusal's `Seat` drained, and after. Red before
-/// the fix: `release` cleared the row's `settled`, so the poll fell back to the generic "reload
-/// candidate was refused or cancelled before seating".
-#[test]
-fn edge_e_a_refused_reload_released_before_its_waiter_polls_keeps_the_engines_cause() {
-    use crate::engine_io::unit_host::Back;
-    use lf_engine::{max_chain_latency, SeatRefusal};
-
-    for drain_first in [false, true] {
-        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
-        let host = device.host().clone();
-        let v1 = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeE.clap".into(), id: "edge.e".into() };
-        let a = seat_stand_in_plugin(&host, 0, 10, &v1, 0);
-        let old = a.install_token();
-        let start_gen = host.core.engine_gen.load(Ordering::Acquire);
-
-        let b = host.reload_unit(10, v1.clone()).expect("reserve the reload candidate");
-        let candidate = b.install_token();
-        let past = max_chain_latency(48_000) + 1;
-        b.activated(Activated { name: "edge.e".into(), source: false, latency: past });
-        let terms = b.terms().expect("engine terms");
-        device.stop();
-        let op = b.submit(Box::new(LatentStandIn(past)), terms).map_err(|(_, e)| e).expect("submit candidate");
-        crate::engine_io::unit_host::service_if_idle(&host.core);
-        if drain_first {
-            let mut ev = Vec::new();
-            host.drain_feed(&mut ev);
-            assert_eq!(b.poll(op), OpState::Refused(SeatRefusal::Latency));
-        }
-
-        // The candidate's owner takes its refusal and ends (`fail_before_seat`) before any poll.
-        assert!(matches!(b.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
-        b.failed("refused".into());
-        b.release();
-
-        match super::reload_outcome(&host, 10, old, candidate, start_gen) {
-            super::ReloadOutcome::Failed(why) => assert!(
-                why.contains("Latency"),
-                "the waiter must read the engine's cause (drain first: {drain_first}), got: {why}"
-            ),
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        a.release();
+/// A fake plugin owner whose re-activation (after a rebuild) waits until `gate` opens, with
+/// `reactivating` raised as it starts waiting.
+fn gated_fake_plugin(
+    name: &str,
+    source: bool,
+    gate: &Arc<AtomicBool>,
+    reactivating: &Arc<AtomicBool>,
+    released: &Arc<AtomicUsize>,
+) -> crate::host::unit_owner::test_support::FakePluginConfig {
+    let (gate, reactivating) = (gate.clone(), reactivating.clone());
+    crate::host::unit_owner::test_support::FakePluginConfig {
+        name: name.to_string(),
+        source,
+        on_reactivate: Some(Arc::new(move || {
+            reactivating.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + PATIENCE;
+            while !gate.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })),
+        released_count: Some(released.clone()),
+        ..Default::default()
     }
 }
 
-/// Chain host edge c: a plugin add whose first submit finds the slot's port full (behind a held edit)
-/// fails at once and releases the slot's order, as a built-in's does (`p4f1_5a`), so no owner retries
-/// past the add's bound and enters the port after a later edit on that slot. Red before the fix: the
-/// owner retried `PortFull` while the add waited out both 15 s load bounds and returned `Unanswered`,
-/// the order released with the owner still retrying.
-#[test]
-fn edge_c_a_plugin_add_into_a_full_port_fails_promptly_and_never_enters_after_a_later_add() {
-    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+/// Fill the engine's event ring with nothing draining it (the device must be rendering).
+fn fill_event_ring_undrained(device: &TestDevice) {
+    let ring_full = || {
+        let ends = device.host().core.ends.lock().unwrap();
+        let ev = &ends.as_ref().unwrap().events;
+        ev.slots() == ev.buffer().capacity()
+    };
+    for _batch in 0..120u32 {
+        for i in 0..50u32 {
+            let _ = device.host().send(TimedCommand { frame: None, command: Command::SetMetronome(i % 2 == 0) });
+        }
+        assert!(device.wait_blocks(2));
+        if ring_full() {
+            return;
+        }
+    }
+    panic!("event ring never filled");
+}
 
-    let device = TestDevice::start(48_000, 256, Duration::from_millis(20), |_| 0.0);
-    let host = device.host();
+/// Chain host edge a, through a real plugin owner: after a rebuild, an evicted source whose owner retries
+/// while a newer source B is only queued keeps its plugin, plate and tone; the engine refuses B
+/// (latency), and the owner seats the source again. Red before the fix: the retry was answered
+/// `Replaced`, so the owner retired the tone and tore the unit down, leaving the slot with neither.
+#[test]
+fn edge_a_a_plugin_owner_keeps_an_evicted_source_while_a_newer_one_is_queued_and_reseats_it_when_refused() {
+    use crate::engine_io::unit_host::Back;
+    use crate::host::unit_owner::test_support::spawn_fake_unit;
+    use lf_engine::{max_chain_latency, SeatRefusal};
+
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
     let doc_state = PluginHostState::default();
     let epoch = doc_state.begin_frontend_session();
     let slots = empty_slots();
-    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_latency(64)));
-
-    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 540, echo_spec(0.5, false), 0), Ok(Added::Seated));
-    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 545, echo_spec(0.5, false), 1), Ok(Added::Seated));
-    start_take(&device);
-    let Removal::Sent(_held_rem) = host.remove_unit(540).expect("queue held removal") else {
-        panic!("expected Sent removal");
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new()));
+    let (gate, reactivating, released) =
+        (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let cfg = gated_fake_plugin("EdgeA", true, &gate, &reactivating, &released);
+    let cfg = Mutex::new(Some(cfg));
+    let open = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(uh, sink, tone, cfg.lock().unwrap().take().expect("one open"))
     };
-    wait_until(Duration::from_secs(3), "slot 0 held during take", || {
+    let src = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeA.clap".into(), id: "edge.a".into() };
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(src), params: None, bypass: false };
+    let added = chains.add(&host, (&doc_state, epoch), &slots, None, 0, 650, spec, 0, None, noop_sink(), &open);
+    assert_eq!(added, Ok(Added::Seated));
+
+    device.rebuild_at(96_000, 512);
+    wait_until(PATIENCE, "A's owner re-activating", || reactivating.load(Ordering::SeqCst));
+    // B, newer and past the latency budget, queued while the engine is still.
+    device.stop();
+    let past = max_chain_latency(96_000) + 1;
+    let b_ref = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeB.clap".into(), id: "edge.b".into() };
+    let b = host.unit(0, 651, Spec::Plugin(b_ref), 0, false).expect("reserve newer source B");
+    b.activated(Activated { name: "EdgeB".into(), source: true, latency: past });
+    let op_b = b.submit(Box::new(LatentStandIn(past, true)), b.terms().unwrap()).map_err(|(_, e)| e).expect("queue B");
+    gate.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        host.core.chain_snapshot().chains[0].units.iter().any(|u| u.id == 650),
+        "A keeps its plate while B is only queued"
+    );
+    assert_eq!(released.load(Ordering::SeqCst), 0, "A's owner keeps its plugin while B is only queued");
+
+    // The engine refuses B; its owner fails and releases.
+    crate::engine_io::unit_host::service_if_idle(&host.core);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(b.poll(op_b), OpState::Refused(SeatRefusal::Latency));
+    assert!(matches!(b.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
+    b.failed("refused".into());
+    b.release();
+
+    wait_until(PATIENCE, "A seated again by its owner", || {
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
-        host.core.state.lock().unwrap().model.slot_held(0)
+        plate_state(&host, 650).state == PlateState::Seated
+            && engine_chain_summary(&device, 0).iter().any(|&(id, _)| id == 650)
     });
+    assert_eq!(released.load(Ordering::SeqCst), 0, "A's owner never tore its plugin down");
+
+    chains.unload_all(&host);
+    chains.join_all();
+}
+
+/// Chain host edge c: a plugin owner whose add already answered, retrying its reseat into a full port
+/// (a rebuild took the unit out), keeps the port's next free place: a later edit on that slot enters
+/// only after the owner's install. Red before the fix: the owner retried `PortFull` with no place kept,
+/// and the edit issued as the port freed went in first.
+#[test]
+fn edge_c_a_plugin_owner_retrying_a_full_port_keeps_its_place_ahead_of_a_later_edit() {
+    use crate::host::unit_owner::test_support::spawn_fake_unit;
+
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new()));
+    assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 540, echo_spec(0.5, false), 0), Ok(Added::Seated));
+    assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 545, echo_spec(0.5, false), 1), Ok(Added::Seated));
+    let (gate, reactivating, released) =
+        (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let cfg = Mutex::new(Some(gated_fake_plugin("EdgeC", false, &gate, &reactivating, &released)));
+    let open = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        spawn_fake_unit(uh, sink, tone, cfg.lock().unwrap().take().expect("one open"))
+    };
+    let amp = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeC.clap".into(), id: "edge.c".into() };
+    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp), params: None, bypass: false };
+    let added = chains.add(&host, (&doc_state, epoch), &slots, None, 0, 541, spec, 2, None, noop_sink(), &open);
+    assert_eq!(added, Ok(Added::Seated), "the add answered; its caller moved on");
+
+    // A rebuild takes the plugin out; its owner waits at the gate to re-activate, the echoes reseat.
+    device.rebuild_at(48_000, 512);
+    wait_until(PATIENCE, "the plugin's owner re-activating", || reactivating.load(Ordering::SeqCst));
+    wait_until(PATIENCE, "the echoes reseated", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        let ids: Vec<UnitId> = engine_chain_summary(&device, 0).iter().map(|&(id, _)| id).collect();
+        ids.contains(&540) && ids.contains(&545)
+    });
+    // With the engine still nothing serves the port: fill it.
+    device.stop();
     let mut pushed = 0;
     loop {
         match host.move_unit(545, 0) {
@@ -3643,34 +3683,179 @@ fn edge_c_a_plugin_add_into_a_full_port_fails_promptly_and_never_enters_after_a_
             }
         }
     }
+    // The owner re-activates and finds the port full: it retries.
+    gate.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(200));
 
-    let amp = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeC.clap".into(), id: "edge.c".into() };
-    let open = |_fmt: PluginFormat, _p: &PluginRef, uh: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
-        spawn_fake_unit(uh, sink, tone, FakePluginConfig { name: "EdgeC".into(), ..Default::default() })
-    };
-    let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(amp), params: None, bypass: false };
-    let t0 = Instant::now();
-    let res = chains.add(host, (&doc_state, epoch), &slots, None, 0, 541, spec, 2, None, noop_sink(), &open);
-    let elapsed = t0.elapsed();
-    assert!(elapsed < Duration::from_secs(5), "a full-port plugin add held the slot's order {elapsed:?} ({res:?})");
-    let err = res.expect_err("a full-port plugin add fails");
-    assert!(err.contains("port is full"), "expected the port-full cause, got: {err}");
-    assert!(chains.order[0].try_lock().is_ok(), "the slot's order is released");
-
-    stop_take(&device);
-    wait_until(Duration::from_secs(3), "port drained after take", || {
+    // The port frees; a later edit on the slot is issued at once, racing the owner's next retry.
+    crate::engine_io::unit_host::service_if_idle(&host.core);
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match host.move_unit(540, 1) {
+            Ok(_) => {
+                let state = host.core.state.lock().unwrap();
+                let owner_in = state.model.has_pending_install(0, 541)
+                    || state.model.find_plate(541).is_some_and(|(_, p)| p.seated_in_engine);
+                assert!(owner_in, "a later edit entered the port ahead of the owner's queued reseat");
+                break;
+            }
+            Err(why) => assert!(why.contains("port is full"), "unexpected error: {why}"),
+        }
+        assert!(Instant::now() < deadline, "the later edit never entered the port");
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    wait_until(PATIENCE, "the plugin seated again", || {
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
-        !host.core.state.lock().unwrap().model.slot_held(0)
+        plate_state(&host, 541).state == PlateState::Seated
     });
-    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 542, echo_spec(0.5, false), 1), Ok(Added::Seated));
-    std::thread::sleep(Duration::from_millis(80));
-    assert_eq!(
-        engine_chain_summary(&device, 0),
-        vec![(545, false), (542, false)],
-        "the failed plugin add must never enter after the later add"
-    );
+    assert_eq!(released.load(Ordering::SeqCst), 0);
 
-    chains.unload_all(host);
+    chains.unload_all(&host);
     chains.join_all();
+}
+
+/// Chain host edge d: a built-in add answered `waiting` (queued behind a held edit) whose install a
+/// rebuild hands back unsent (the engine had no place for its answer) after the 10 s first-answer bound
+/// (`BUILTIN_INITIAL_SUBMIT_TIMEOUT`) is offered to the new engine and seats. No drain runs from the
+/// held edit's `waiting` on, so the engine's answers stay owed and the slot takes nothing more: the
+/// install comes back `Unsent`, never applied. Red before the fix: `serve_builtin` failed any box that
+/// never seated once past that bound ("could not submit before timeout"), though its caller had long
+/// been answered and moved on.
+#[test]
+fn edge_d_a_waiting_builtin_add_handed_back_unsent_after_the_first_answer_bound_seats() {
+    use crate::engine_io::unit_host::Back;
+
+    // 20 ms per 256-frame block keeps the take below `max_loop_seconds` until the test stops it.
+    let mut device = TestDevice::start_with_events(48_000, 256, Duration::from_millis(20), 8, |_| 0.0);
+    let host = device.host().clone();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Chains::with_factory(Arc::new(ClampingBuiltinFactory::new().with_latency(64)));
+    let v1 = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeD.clap".into(), id: "edge.d".into() };
+    let helper = seat_stand_in_plugin(&host, 0, 10, &v1, 0);
+    assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 530, echo_spec(0.5, false), 1), Ok(Added::Seated));
+
+    // A latent echo's removal during a take is held: the model reads slot 0 held.
+    start_take(&device);
+    let Removal::Sent(_held) = host.remove_unit(530).expect("queue the held removal") else {
+        panic!("expected a sent removal");
+    };
+    wait_until(Duration::from_secs(3), "slot 0 held during the take", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        host.core.state.lock().unwrap().model.slot_held(0)
+    });
+
+    // From here nothing drains (a feed that ticks keeps every wait's own drain idle).
+    let ticking = Arc::new(AtomicBool::new(true));
+    let ticker = {
+        let (core, ticking) = (host.core.clone(), ticking.clone());
+        std::thread::spawn(move || {
+            while ticking.load(Ordering::SeqCst) {
+                core.stash.lock().unwrap().mark_feed_drain(Instant::now());
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    fill_event_ring_undrained(&device);
+    // The take ends: the removal applies, its answers owed (the model still reads the slot held).
+    host.send(TimedCommand { frame: None, command: Command::Stop(0) }).unwrap();
+    wait_until(PATIENCE, "the held removal applied", || !engine_chain_summary(&device, 0).iter().any(|&(id, _)| id == 530));
+    device.stop();
+    // The helper's withdrawals and reseats fill what slot 0 owes, until it takes no more.
+    let t1 = helper.terms().unwrap();
+    for _ in 0..32 {
+        if helper.withdraw().is_err() {
+            break;
+        }
+        crate::engine_io::unit_host::service_if_idle(&host.core);
+        let Some(Back::Withdrawn { unit, .. }) = helper.take_back() else { break };
+        helper.submit(unit, t1).map_err(|(_, e)| e).expect("the helper reseats");
+        crate::engine_io::unit_host::service_if_idle(&host.core);
+    }
+
+    // The add answers `waiting` (queued behind what the model reads held), and the slot takes nothing.
+    assert_eq!(add_builtin(&chains, &host, (&doc_state, epoch), &slots, 0, 531, echo_spec(0.5, false), 1), Ok(Added::Waiting));
+    std::thread::sleep(super::BUILTIN_INITIAL_SUBMIT_TIMEOUT + Duration::from_millis(500));
+    assert!(!engine_chain_summary(&device, 0).iter().any(|&(id, _)| id == 531), "the install was never applied");
+
+    device.rebuild_at(48_000, 512);
+    ticking.store(false, Ordering::SeqCst);
+    ticker.join().unwrap();
+    wait_until(PATIENCE, "the waiting add seated in the new engine", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        plate_state(&host, 531).state == PlateState::Seated
+            && engine_chain_summary(&device, 0).iter().any(|&(id, _)| id == 531)
+    });
+    assert_eq!(plate_state(&host, 531).error, None);
+
+    chains.unload_all(&host);
+    chains.join_all();
+    while helper.take_back().is_some() {}
+    helper.release();
+}
+
+/// Chain host edge e: a reload candidate the engine refused (latency) whose owner released its row before
+/// the reload's waiter polls still reads the engine's cause (`reload_outcome`, which the waiter and the
+/// sweep log), in both orders (its box taken before the refusal's `Seat` drained, and after), however
+/// many later reloads were refused for another cause meanwhile (here 40, for `Placement`), each
+/// reading its own. Red before the fix: `release` cleared the row's `settled`, so the poll fell back to
+/// the generic "reload candidate was refused or cancelled before seating"; a record bounded by count
+/// lost the first cause, and one keeping only the latest read `Placement` for it.
+#[test]
+fn edge_e_a_refused_reload_released_before_its_waiter_polls_keeps_the_engines_cause() {
+    use crate::engine_io::unit_host::Back;
+    use lf_engine::{max_chain_latency, SeatRefusal};
+
+    for drain_first in [false, true] {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let host = device.host().clone();
+        let v1 = PluginRef { format: "clap".into(), path: "C:\\plugins\\EdgeE.clap".into(), id: "edge.e".into() };
+        let a = seat_stand_in_plugin(&host, 0, 10, &v1, 0);
+        let old = a.install_token();
+        let start_gen = host.core.engine_gen.load(Ordering::Acquire);
+        device.stop();
+
+        // Reload a candidate of `unit` the engine refuses for `why`; its owner takes the refusal and
+        // ends (`fail_before_seat`) before any poll.
+        let refuse = |stand_in: LatentStandIn, why: SeatRefusal| {
+            let b = host.reload_unit(10, v1.clone()).expect("reserve the reload candidate");
+            let candidate = b.install_token();
+            b.activated(Activated { name: "edge.e".into(), source: stand_in.1, latency: stand_in.0 });
+            let terms = b.terms().expect("engine terms");
+            let op = b.submit(Box::new(stand_in), terms).map_err(|(_, e)| e).expect("submit candidate");
+            crate::engine_io::unit_host::service_if_idle(&host.core);
+            if drain_first {
+                let mut ev = Vec::new();
+                host.drain_feed(&mut ev);
+                assert_eq!(b.poll(op), OpState::Refused(why));
+            }
+            let back = b.take_back();
+            assert!(matches!(back, Some(Back::Refused { why: w, .. }) if w == why), "refused for {why:?}");
+            b.failed("refused".into());
+            b.release();
+            candidate
+        };
+        let read = |candidate| match super::reload_outcome(&host, 10, old, candidate, start_gen) {
+            super::ReloadOutcome::Failed(why) => why,
+            other => panic!("expected Failed, got {other:?}"),
+        };
+
+        let past = max_chain_latency(48_000) + 1;
+        let first = refuse(LatentStandIn(past, false), SeatRefusal::Latency);
+        // Later reloads refused for another cause (an effect's seat taken by an instrument).
+        let mut last = first;
+        for _ in 0..40 {
+            last = refuse(LatentStandIn(0, true), SeatRefusal::Placement);
+        }
+
+        let why = read(first);
+        assert!(why.contains("Latency"), "the first waiter reads its own cause (drain first: {drain_first}), got: {why}");
+        let why = read(last);
+        assert!(why.contains("Placement"), "the last waiter reads its own cause (drain first: {drain_first}), got: {why}");
+        a.release();
+    }
 }

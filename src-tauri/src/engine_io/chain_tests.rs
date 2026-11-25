@@ -3494,10 +3494,14 @@ fn edge_a_evicted_source_waits_for_a_queued_newer_source_and_seats_when_the_engi
     box_b.source = true;
     let op_b = ok_op(u_b.submit(box_b, t2));
 
+    // `Behind` is the one answer both owners keep their unit on and retry (named by its Debug form, so
+    // this compiles on the enum before it): `Replaced` and `Superseded` end A in a real owner.
     let kept_a = match u_a.submit(evicted_a, t2) {
         Ok(op) => panic!("A must not enqueue ahead of the engine's answer to B (got Ok({op:?}))"),
-        Err((_, SubmitError::Replaced)) => panic!("A must not retire before the engine has taken B"),
-        Err((returned_a, _)) => returned_a,
+        Err((returned_a, e)) => {
+            assert_eq!(format!("{e:?}"), "Behind", "A must keep its unit until the engine has taken B");
+            returned_a
+        }
     };
     assert!(
         host.core.chain_snapshot().chains[0].units.iter().any(|u| u.id == 610),
@@ -3531,7 +3535,8 @@ fn edge_a_evicted_source_waits_for_a_queued_newer_source_and_seats_when_the_engi
 
 /// Chain host edge b (a review of the chain commands): a source parked after a failed re-activation (out of
 /// the new engine) is ended when a newer source seats in its slot: its plate goes and its owner gets
-/// `Back::Dismissed` (the tone retires), as a replacement of a seated source would. Red before the fix:
+/// `Back::Dismissed` (the tone retires), as a replacement of a seated source would; a newer source the
+/// engine refuses ends nothing of it, neither at its submit nor at its answer. Red before the fix:
 /// B's install named no `replaces` (A is not in the projected head), so A's mailbox stayed empty and its
 /// plate stayed beside B until A's owner retried.
 #[test]
@@ -3557,6 +3562,27 @@ fn edge_b_a_newer_source_seating_dismisses_an_older_source_parked_out_of_the_eng
     // A's re-activation at the new terms fails: its owner parks, holding the box.
     u_a.parked("reactivate failed".into());
 
+    // A newer source the engine refuses (latency) costs the parked one nothing: ended at the newer
+    // one's submit or answer, A would lose its tone to a source that never played.
+    let past = max_chain_latency(96_000) + 1;
+    let u_r = host
+        .unit(0, 622, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve a newer source the engine refuses");
+    u_r.activated(Activated { name: "SynthR".into(), source: true, latency: past });
+    let mut box_r = LatentUnit::new(3, past, stops.clone());
+    box_r.source = true;
+    let op_r = ok_op(u_r.submit(box_r, u_r.terms().unwrap()));
+    assert!(u_a.take_back().is_none(), "a newer source only queued ends nothing of A's");
+    assert_eq!(host.wait_op(op_r, Duration::from_secs(2)).unwrap(), OpState::Refused(SeatRefusal::Latency));
+    assert!(matches!(u_r.take_back(), Some(Back::Refused { why: SeatRefusal::Latency, .. })));
+    u_r.failed("refused".into());
+    u_r.release();
+    assert!(u_a.take_back().is_none(), "a refused newer source ends nothing of A's");
+    assert!(
+        host.core.chain_snapshot().chains[0].units.iter().any(|u| u.id == 620 && u.parked),
+        "A stays parked in its place"
+    );
+
     let u_b = host
         .unit(0, 621, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
         .expect("reserve newer source B");
@@ -3572,14 +3598,199 @@ fn edge_b_a_newer_source_seating_dismisses_an_older_source_parked_out_of_the_eng
         "the parked older source must be dismissed once the newer seats"
     );
     assert_eq!(
-        host.core.chain_snapshot().chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>(),
+        host.core.chain_snapshot().chains[0].units.iter().map(|u| u.id).filter(|&id| id != 622).collect::<Vec<_>>(),
         vec![621],
-        "only the newer source's plate stays"
+        "only the newer source's plate stays (beside the refused add's, the player's to remove)"
     );
     drop(parked_a);
     u_a.release();
 
     let Removal::Sent(rem_b) = host.remove_unit(621).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    drop(u_b.take_back());
+    u_b.release();
+}
+
+/// Chain host edge a, the projected head (a review of b992d39): after a rebuild, a newer source B queued
+/// and its removal queued behind it hide B from the projected head, yet B still seats before the
+/// removal. An evicted older source A retrying then waits (`Behind`) instead of queuing behind the
+/// removal; B seating ends A (`Back::Dismissed`), and A never comes back once B has gone. Red before
+/// the fix: A's retry read the projected head (empty) and queued, so A seated again after B's removal
+/// though B had replaced it.
+#[test]
+fn edge_a_an_evicted_source_waits_for_a_newer_source_queued_ahead_of_its_own_removal() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u_a = host
+        .unit(0, 630, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve source A");
+    u_a.activated(Activated { name: "SynthA".into(), source: true, latency: 0 });
+    let mut box_a = LatentUnit::new(1, 0, stops.clone());
+    box_a.source = true;
+    let op_a = ok_op(u_a.submit(box_a, u_a.terms().unwrap()));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.rebuild_at(96_000, 512);
+    let Back::Evicted { unit: evicted_a, .. } = u_a.take_back().expect("A evicted on rebuild") else {
+        panic!("expected Back::Evicted for A");
+    };
+    let t2 = u_a.terms().unwrap();
+
+    // B queued while the engine is still, then its removal behind it.
+    device.stop();
+    let u_b = host
+        .unit(0, 631, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve newer source B");
+    u_b.activated(Activated { name: "SynthB".into(), source: true, latency: 0 });
+    let mut box_b = LatentUnit::new(2, 0, stops.clone());
+    box_b.source = true;
+    let op_b = ok_op(u_b.submit(box_b, t2));
+    let Removal::Sent(rem_b) = host.remove_unit(631).expect("queue B's removal") else {
+        panic!("expected a sent removal behind B's queued install");
+    };
+
+    let kept_a = match u_a.submit(evicted_a, t2) {
+        Ok(op) => panic!("A must not queue behind B's removal: B seats first and ends A (got Ok({op:?}))"),
+        Err((returned_a, e)) => {
+            assert_eq!(format!("{e:?}"), "Behind", "A must wait for the engine's answer to B");
+            returned_a
+        }
+    };
+
+    super::unit_host::service_if_idle(&host.core);
+    let mut ev = Vec::new();
+    host.drain_feed(&mut ev);
+    assert_eq!(u_b.poll(op_b), OpState::Applied);
+    assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(matches!(u_a.take_back(), Some(Back::Dismissed)), "B seating ends A");
+    assert!(
+        matches!(u_a.submit(kept_a, t2), Err((_, SubmitError::Removing))),
+        "an ended A never queues again"
+    );
+    super::unit_host::service_if_idle(&host.core);
+    host.drain_feed(&mut ev);
+    assert!(engine_chain_ids(&device, 0).is_empty(), "nothing comes back after B's removal");
+    assert!(host.core.chain_snapshot().chains[0].units.is_empty(), "no plate stays");
+
+    drop(u_b.take_back());
+    u_b.release();
+    u_a.release();
+}
+
+/// Chain host edge b, an effect back as a source (a review of b992d39; `docs/unit-contract.md` §3): an
+/// effect seated behind the head source that a rebuild takes out and whose re-activation reports a
+/// source is refused its place (`Placement`, as the engine refuses a withdrawn seat that role) and
+/// parks; the older head source then reseats and keeps its owner. Red before the fix: the empty engine
+/// took the effect as the slot's new head, and the head source's retry was answered `Replaced` (its
+/// owner retires the tone).
+#[test]
+fn edge_b_an_effect_back_as_a_source_after_a_rebuild_parks_behind_the_head_source() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u_a = host
+        .unit(0, 640, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve source A");
+    u_a.activated(Activated { name: "SynthA".into(), source: true, latency: 0 });
+    let t1 = u_a.terms().unwrap();
+    let mut box_a = LatentUnit::new(1, 0, stops.clone());
+    box_a.source = true;
+    let op_a = ok_op(u_a.submit(box_a, t1));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let u_e = host.unit(0, 641, Spec::Plugin(plugin_ref("fx")), 1, false).expect("reserve effect E");
+    u_e.activated(Activated { name: "fx".into(), source: false, latency: 0 });
+    let op_e = ok_op(u_e.submit(LatentUnit::new(2, 0, stops.clone()), t1));
+    assert_eq!(host.wait_op(op_e, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.rebuild_at(96_000, 512);
+    let Back::Evicted { unit: evicted_a, .. } = u_a.take_back().expect("A evicted") else { panic!("expected Evicted for A") };
+    let Back::Evicted { unit: evicted_e, .. } = u_e.take_back().expect("E evicted") else { panic!("expected Evicted for E") };
+    let t2 = u_e.terms().unwrap();
+
+    // E's re-activation reports an instrument, and it submits first.
+    u_e.activated(Activated { name: "fx".into(), source: true, latency: 0 });
+    let mut box_e = evicted_e.into_any().downcast::<LatentUnit>().unwrap();
+    box_e.source = true;
+    let kept_e = match u_e.submit(box_e, t2) {
+        Ok(op) => panic!("an effect back as a source must not take the head from A (got Ok({op:?}))"),
+        Err((returned, e)) => {
+            assert_eq!(format!("{e:?}"), "Refused(Placement)", "E is refused its place, as the engine would");
+            returned
+        }
+    };
+    u_e.parked("the unit cannot be placed at that position in the chain (Placement)".into());
+
+    let op_a2 = ok_op(u_a.submit(evicted_a, t2));
+    assert_eq!(host.wait_op(op_a2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(u_a.take_back().is_none(), "A keeps its owner and tone");
+    assert_eq!(engine_chain_ids(&device, 0), vec![(640, false)], "A heads slot 0 again");
+    let units = host.core.chain_snapshot().chains[0].units.clone();
+    assert_eq!(units.iter().map(|u| u.id).collect::<Vec<_>>(), vec![640, 641], "E keeps its place, parked");
+    assert!(units[1].parked);
+
+    assert_eq!(host.remove_unit(641).unwrap(), Removal::Plate);
+    assert!(matches!(u_e.take_back(), Some(Back::Dismissed)));
+    drop(kept_e);
+    u_e.release();
+    let Removal::Sent(rem_a) = host.remove_unit(640).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(rem_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    drop(u_a.take_back());
+    u_a.release();
+}
+
+/// Chain host edge b, a newer source applied by a rebuild (a review of b992d39): a newer source B whose
+/// install the old engine applies in the rebuild's idle service (before the eviction) seated, so an
+/// older source A parked out of that engine ends there (`Back::Dismissed`), as at B's answered `Seat`.
+/// Red before the fix: the rebuild settled B's install `Applied` and ended nothing, so A kept its owner
+/// and tone beside B.
+#[test]
+fn edge_b_a_newer_source_applied_by_a_rebuilds_idle_service_ends_an_older_parked_source() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+
+    let u_a = host
+        .unit(0, 660, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve source A");
+    u_a.activated(Activated { name: "SynthA".into(), source: true, latency: 0 });
+    let mut box_a = LatentUnit::new(1, 0, stops.clone());
+    box_a.source = true;
+    let op_a = ok_op(u_a.submit(box_a, u_a.terms().unwrap()));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.rebuild_at(96_000, 512);
+    let Back::Evicted { unit: parked_a, .. } = u_a.take_back().expect("A evicted") else { panic!("expected Evicted for A") };
+    u_a.parked("reactivate failed".into());
+
+    // B queued in this engine while it is still: the next rebuild's idle service applies it.
+    device.stop();
+    let u_b = host
+        .unit(0, 661, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve newer source B");
+    u_b.activated(Activated { name: "SynthB".into(), source: true, latency: 0 });
+    let mut box_b = LatentUnit::new(2, 0, stops.clone());
+    box_b.source = true;
+    let op_b = ok_op(u_b.submit(box_b, u_b.terms().unwrap()));
+    assert!(u_a.take_back().is_none(), "B only queued ends nothing of A's");
+
+    device.rebuild_at(44_100, 256);
+    assert_eq!(u_b.poll(op_b), OpState::Applied, "the old engine applied B before evicting it");
+    assert!(matches!(u_a.take_back(), Some(Back::Dismissed)), "B seated: the parked A ends");
+    assert_eq!(
+        host.core.chain_snapshot().chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![661],
+        "only B's plate stays"
+    );
+    drop(parked_a);
+    u_a.release();
+
+    let Back::Evicted { unit: evicted_b, .. } = u_b.take_back().expect("B evicted") else { panic!("expected Evicted for B") };
+    let op_b2 = ok_op(u_b.submit(evicted_b, u_b.terms().unwrap()));
+    assert_eq!(host.wait_op(op_b2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let Removal::Sent(rem_b) = host.remove_unit(661).unwrap() else { panic!("expected Sent") };
     assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
     drop(u_b.take_back());
     u_b.release();
