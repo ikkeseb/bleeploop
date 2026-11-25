@@ -768,8 +768,10 @@ function tellNotice(answer: RigAnswer): void {
  * and `lf.rigInFlight` go, a record never restored natively), then `rig.open()`. Its levels go on the faders
  * (but `absent`'s: the upgrade's stay until the import answers), its notice to the player. A rejection, or no
  * answer in NATIVE_WAIT_MS, is one log line and boot goes on without a record this launch, as `unreadable`
- * (kept, never written over) and `unavailable` (another process owns it) are. Null when it did not answer, or
- * when this page keeps no rig (a DEV native probe's: `KEYS`, so its run never opens the owner's record).
+ * (kept, never written over) and `unavailable` (another process owns it) are; an answer that comes after
+ * NATIVE_WAIT_MS is still taken (its levels at an answer's rank, below a reset frame's and a gesture's, and its
+ * notice), though nothing is imported on it. Null when it did not answer in time, or when this page keeps no
+ * rig (a DEV native probe's: `KEYS`, so its run never opens the owner's record).
  */
 export async function openRig(d: RigHandoverDeps): Promise<RigAnswer | null> {
   if (!KEYS) return null;
@@ -780,22 +782,26 @@ export async function openRig(d: RigHandoverDeps): Promise<RigAnswer | null> {
       /* no storage: nothing of the old record to drop */
     }
   }
-  let answer: RigAnswer;
+  const call = platform.rig.open();
+  const take = (answer: RigAnswer): RigAnswer => {
+    if (answer.status === 'unreadable') {
+      console.error('[rig-recall] the native rig record cannot be read (or a newer build wrote it); left as it is, nothing restored');
+    } else if (answer.status === 'unavailable') {
+      console.error('[rig-recall] the native rig record is unavailable (another BleepLoop owns it, or no data folder); nothing restored or kept this launch');
+    }
+    if (answer.status !== 'absent') d.levels(answer.volumes, 'answer');
+    tellNotice(answer);
+    return answer;
+  };
   try {
-    answer = await within(platform.rig.open(), NATIVE_WAIT_MS, 'rig_open');
+    return take(await within(call, NATIVE_WAIT_MS, 'rig_open'));
   } catch (e) {
     console.error('[rig-recall] could not open the native rig record; nothing restored or imported this launch', e);
     d.levels(null, 'answer');
+    // a late answer (the device-open gate has let go): what native seeded and its notice still count
+    if (e instanceof TimedOut) void call.then(take, () => {});
     return null;
   }
-  if (answer.status === 'unreadable') {
-    console.error('[rig-recall] the native rig record cannot be read (or a newer build wrote it); left as it is, nothing restored');
-  } else if (answer.status === 'unavailable') {
-    console.error('[rig-recall] the native rig record is unavailable (another BleepLoop owns it, or no data folder); nothing restored or kept this launch');
-  }
-  if (answer.status !== 'absent') d.levels(answer.volumes, 'answer');
-  tellNotice(answer);
-  return answer;
 }
 
 /**
@@ -835,7 +841,9 @@ export async function importRig(opened: RigAnswer | null, d: RigImportDeps): Pro
             d.levels(late.volumes, 'answer');
             tellNotice(late);
           },
-          () => {},
+          // Logged only: the faders stay on the upgrade's levels, which no engine took from this import, but
+          // which the next launch imports again (D13: a failed commit leaves no record, so it answers `absent`).
+          (late: unknown) => console.error('[rig-recall] the rig record\'s import failed after its timeout; nothing restored, the next launch imports it again', late),
         );
         return;
       }

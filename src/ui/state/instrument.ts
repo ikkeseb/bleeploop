@@ -12,6 +12,7 @@ import {
   input,
   platform,
   sendEngine,
+  sendEngineAlone,
   type InstrumentId,
   type NoteTarget,
   type PluginDescriptor,
@@ -165,8 +166,10 @@ function routeEngine(i: 0 | 1): void {
 // fader shows the player's latest gesture, else the latest reset frame's slot gain (the engine's settings
 // memory), else what `rig.open` answered, else the upgrade's level until the import answers (`showRigLevels`).
 // A gesture is a plain `SetSlotGain`, and native keeps it in the record (D2: the player's level wins over the
-// record's); a reset frame or an answer that arrives after it names an older level. A refused gesture puts the
-// fader back on the last level the engine took (else the answer's, else the upgrade's).
+// record's); a reset frame or an answer that arrives after it names an older level. The fader stays where the
+// player put it: a refused gesture goes again alone until the engine takes it or a newer gesture on the slot
+// replaces it (a batch that answers false may still have carried it into the engine: the same level twice is
+// harmless, a fader put back on a guess is not).
 const rigNative = platform.chain.available && platform.rig.available;
 const rigAtLoad = platform.chain.available && !rigNative ? rigVolumes() : null;
 const chainLevelKnown: [boolean, boolean] = Array.isArray(rigAtLoad) ? [true, true] : [false, false];
@@ -178,37 +181,26 @@ const FROM = { upgrade: 1, answer: 2, engine: 3, gesture: 4 } as const;
 type LevelFrom = (typeof FROM)[keyof typeof FROM];
 /** Per slot, the rank the fader shows: a level from a lower rank never replaces a higher one's. */
 const levelFrom: [LevelFrom, LevelFrom] = [FROM.upgrade, FROM.upgrade];
-/** Per slot, the level each rank last named (by rank; `engine` also a gesture the engine took): what a
- * refused gesture goes back to. */
-const levelNamed: [(number | undefined)[], (number | undefined)[]] = [[], []];
-chainGains().forEach((v, slot) => void (levelNamed[slot][FROM.upgrade] = v ?? undefined));
-/** Per slot, the latest gesture's count: only its own refusal moves the fader back. */
+/** Per slot, the latest gesture's count: an older gesture's resend stops. */
 const gestures: [number, number] = [0, 0];
 function showLevel(slot: 0 | 1, v: number, rank: LevelFrom): void {
-  const level = Math.max(0, Math.min(SLOT_GAIN_MAX, v));
-  levelNamed[slot][rank] = level;
   if (rank < levelFrom[slot]) return;
   levelFrom[slot] = rank;
-  setChainGains((prev) => withAt(prev, slot, level));
+  setChainGains((prev) => withAt(prev, slot, Math.max(0, Math.min(SLOT_GAIN_MAX, v))));
 }
 /** The rig handover's levels on the faders (`rig-recall.ts` `openRig`, `importRig`): an answer's (null: it
  * holds none, so the engine's unity), or the upgrade's until the import answers. */
 export function showRigLevels(volumes: [number, number] | null, from: 'answer' | 'upgrade'): void {
   for (const slot of [0, 1] as const) showLevel(slot, volumes?.[slot] ?? 1, from === 'upgrade' ? FROM.upgrade : FROM.answer);
 }
-/** `rigNative`: the player's level on slot `slot`, a plain `SetSlotGain`. Taken, it is the engine's level; refused
- * (and still the latest gesture), the fader goes back to the highest rank below a gesture that named one. */
+/** `rigNative`: the player's level on slot `slot`, a plain `SetSlotGain`, shown at once. Its batch refused (whole
+ * or partly), it goes again in a batch of its own (`sendEngineAlone`, D11's backoff) until taken, while it is the
+ * slot's latest gesture. */
 function gestureLevel(slot: 0 | 1, v: number): void {
   const n = ++gestures[slot];
   showLevel(slot, v, FROM.gesture);
-  void sendEngine({ SetSlotGain: [slot, v] }).then((took) => {
-    if (took) levelNamed[slot][FROM.engine] = v;
-    if (took || n !== gestures[slot]) return;
-    levelNamed[slot][FROM.gesture] = undefined;
-    const back = ([FROM.engine, FROM.answer, FROM.upgrade] as const).find((r) => levelNamed[slot][r] !== undefined) ?? FROM.upgrade;
-    levelFrom[slot] = back;
-    setChainGains((prev) => withAt(prev, slot, levelNamed[slot][back] ?? 1));
-  });
+  const send = () => sendEngineAlone({ SetSlotGain: [slot, v] });
+  void sendEngine({ SetSlotGain: [slot, v] }).then((took) => took || resendUntilTaken(`slot ${slot + 1}'s level`, send, () => gestures[slot] === n));
 }
 /** Each slot's level as the upgrade derives it from the old keys (the plugin's scan kind not known yet). */
 function upgradeLevels(): [number, number] {

@@ -233,7 +233,7 @@ async function drain(): Promise<void> {
       const batch = waiting.shift()!;
       waitingItems -= batch.items.length;
       overflowTold = false;
-      batch.settle(await submit(batch.items, batch.toastLost));
+      batch.settle(await submit(batch.items, batch.toastLost, batch.alone));
     }
   } finally {
     sending = false;
@@ -275,10 +275,12 @@ const DROPPED_TOAST: Record<Exclude<Dropped, 'stale'>, readonly [string, string]
  * natively (a note must not stick); a blur that is lost too rides at the head of the next batch. What
  * native MIDI dropped of a batch that ran (a press with no device running) is logged and toasted once
  * (`toldDropped`); input of a page native MIDI no longer counts as current is logged once per epoch. True
- * when the batch ran and nothing of it was dropped.
+ * when the batch ran and nothing of it was dropped. `alone` (`enqueue`'s): an owed blur goes first in a call
+ * of its own, never inside the batch, whose answer stays its items' alone.
  */
-async function submit(items: InputItem[], toastLost: boolean): Promise<boolean> {
-  const batch = pendingBlur ? [BLUR, ...items] : items;
+async function submit(items: InputItem[], toastLost: boolean, alone: boolean): Promise<boolean> {
+  if (pendingBlur && alone && !('lost' in (await sendOnce([BLUR])))) pendingBlur = false;
+  const batch = pendingBlur && !alone ? [BLUR, ...items] : items;
   let sent = await sendOnce(batch);
   if ('lost' in sent && !sent.timedOut) sent = await sendOnce(batch);
   if ('lost' in sent) {
@@ -292,7 +294,7 @@ async function submit(items: InputItem[], toastLost: boolean): Promise<boolean> 
     }
     return false;
   }
-  pendingBlur = false;
+  if (!alone) pendingBlur = false;
   const { epoch, dropped } = sent;
   if (dropped === 'stale') {
     if (toldStale !== epoch) {

@@ -334,8 +334,8 @@ below reads an old key through the resolver that reads it today, so a missing ke
   SYNTH, or a plugin that activates as one) gets the OTT alone, if it was on. `lf.inputSend.*` stays as it
   is: in chain mode the legacy sends go off on every reset frame and nothing writes their keys.
 - **Rig recall:** `lf.rigRecall` becomes the native record (§1) by one handover: a chain-mode page calls
-  `rig.open()` first, and no device opens before it settled (answered, refused, or 2 s without an answer);
-  only on `absent` it runs the upgrade and, if the device still runs, calls `rig.import(record)` (5 s at
+  `rig.open()` first, and no device opens before it settled (answered, refused, or 2 s without an answer; a
+  later answer still brings its levels and notice); only on `absent` it runs the upgrade and, if the device still runs, calls `rig.import(record)` (5 s at
   most), which native stores only while it has none (`src/ui/state/rig-recall.ts` `openRig`, `importRig`).
   An answer of another shape than D13's counts as a refusal. The first chain-mode page of this build deletes `lf.rig` and `lf.rigInFlight` (a DEV record
   never restored natively). Until every chain-mode page hands over (the browser fake does only with
@@ -353,8 +353,8 @@ below reads an old key through the resolver that reads it today, so a missing ke
   `lf.slotInputGain.<n>`; a SYNTH slot unity, its instrument levels from `lf.synthGain.<id>` (the input trim
   never scaled a synth). In chain mode the fader shows what `rig.open` answers (the upgrade's level until
   the import), and a level gesture is a plain `SetSlotGain`; the player's level always wins over the
-  record's (a gesture over everything before it, a reset frame's slot gain over an answer's), and a refused
-  gesture puts the fader back on the last level the engine took. The reset's send-off of the legacy sends,
+  record's (a gesture over everything before it, a reset frame's slot gain over an answer's); the fader stays
+  where the player put it, and a refused gesture goes again alone until taken or replaced. The reset's send-off of the legacy sends,
   refused or refused partly (a briefly full command ring), goes again in a batch of its own a short backoff
   apart until taken, with no reset frame needed. GO LIVE is never restored.
 - **Input picks:** `lf.audioDevices`' per-slot picks (`readAudioDeviceSettings`, the legacy single
