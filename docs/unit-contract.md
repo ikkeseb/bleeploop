@@ -36,6 +36,14 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
 - **The rig record moves to the native host** before chain mode's activation (decided 2026-11-25: the
   record, its writer, the restore and the crash marker; their rules in a pure crate beside lf-engine, the
   glue in the device side, being built; the page keeps the one-time upgrade and hands it over).
+  The native record (its rules built in `src-tauri/crates/lf-rig`, not yet wired into the app): `rig.json`
+  in the app-local data folder (`rig.dev.json` in a DEV build), the same JSON as `lf.rig`. One process owns
+  the file pair (a lock file); another answers `unavailable`. Only a missing file is no record; one that
+  cannot be read or that a newer build wrote is reported, never written over, and nothing is restored that
+  launch. A write commits when it is synced and renamed; a failed one is retried. After the restore starts,
+  the record is a projection of the chain model: each unit the engine applied (until its removal is
+  confirmed) and each record unit the restore still holds, at its place; `volume` is the slot gain the
+  settings memory keeps, else the record's. A fresh add enters once applied.
   Until that lands, this bullet describes today's record, which is `lf.rig` in the WebView's storage (`src/ui/state/rig-recall.ts`; its shape and
   rules, `rig-record.ts`): `{ version: 1, slots: [slot, slot] }`, per slot its `volume` (after the chain), its
   `units` in order as `UnitRecord`s (§2; a plugin unit's display name as `plugin.name`, as §8's rig) and,

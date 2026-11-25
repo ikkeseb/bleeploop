@@ -20,6 +20,8 @@
 //! | [`add`] | An add's answer as the restore sees it ([`AddOk`], [`AddFail`]) and where it goes ([`Place`]) |
 //! | [`answer`] | The handover's IPC shapes ([`RigAnswer`], [`RigImport`], [`NoticeId`]) |
 //! | [`plan`] | What the restore holds per record unit ([`Plan`], [`Disposition`]): filled by the restore, read by the projection |
+//! | [`project`](mod@project) | The record as a projection of the model ([`project()`]), a change's kind ([`Change`]), the import ([`import()`]) |
+//! | [`store`] | The record's file over a [`Disk`]: the lock, the commit criterion, the writer's pace ([`Store`]) |
 //!
 //! The decisions cited as `D<n>` are the build plan's (`native-rig-plan.md`, a working document
 //! while the move is open); each lands in `docs/unit-contract.md` with the checkpoint that builds it.
@@ -27,13 +29,17 @@
 pub mod add;
 pub mod answer;
 pub mod plan;
+pub mod project;
 pub mod record;
+pub mod store;
 pub mod view;
 
 pub use add::{AddFail, AddOk, AddState, Place, Retry};
 pub use answer::{Notice, NoticeId, RigAnswer, RigImport, RigStatus, IMPORT_STALE};
 pub use plan::{Disposition, Plan};
-pub use record::{Params, PluginRecord, RigRecord, SlotRecord, UnitBody, UnitRecord, Version1};
+pub use project::{change, import, project, volumes, Change, ImportError, Volumes};
+pub use record::{Params, PluginRecord, RigRecord, SlotRecord, UnitBody, UnitRecord, Unreadable, Version1, SLOT_GAIN_MAX};
+pub use store::{Commit, Disk, Files, Opened, Refusal, Store, DEV_FILES, RELEASE_FILES, SAVE_QUIET, TICK};
 pub use view::{PlateState, PlateView, PluginRefView, RigView};
 
 /// The unit vocabulary the record and the model share, from the engine.

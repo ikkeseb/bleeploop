@@ -5,8 +5,9 @@
 //!
 //! The serde derive here is the strict shape: a field of the wrong type, an unknown kind or parameter,
 //! a plugin unit without its plugin or a unit id 0 fails the whole parse. The reader the store uses on
-//! a file is tolerant (`parseRig`'s rules: a bad unit, an unknown parameter or a reused id skipped, a
-//! bad volume read as unity) and lands with the store (CP2a).
+//! a file, and the import on the page's text, is tolerant ([`RigRecord::read`], `parseRig`'s rules: a
+//! bad unit, an unknown parameter or a reused id skipped, a bad volume read as unity); what it cannot
+//! read as a v1 record at all is [`Unreadable`].
 //!
 //! **Field presence round-trips (D12).** The page reads and writes `bypass` and `params` as optional,
 //! so a record it wrote may omit a unit's `bypass` or carry `params: {}`; the native record keeps each
@@ -18,6 +19,7 @@ use std::collections::BTreeMap;
 
 use lf_engine::{UnitId, UnitKind, UnitParam};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 
 use crate::view::PluginRefView;
 
@@ -182,4 +184,110 @@ impl From<UnitRecord> for RawUnit {
         };
         RawUnit { id: unit.id, kind: kind.to_owned(), plugin, params, bypass: unit.bypass }
     }
+}
+
+// ── the tolerant reader (D8, `parseRig`) ─────────────────────────────────────────────────────────────
+
+/// The highest slot volume, unity at 1 (`SLOT_GAIN_MAX` in `rig-record.ts`).
+pub const SLOT_GAIN_MAX: f64 = 1.5;
+
+/// The plugin formats the app hosts (`plugin-format.ts`); a unit naming another is skipped.
+const PLUGIN_FORMATS: [&str; 3] = ["clap", "vst3", "vst2"];
+
+/// Text that is not a v1 record: not UTF-8 or not JSON, a version this build does not know (a newer
+/// build wrote it), or no two slots. The store keeps such a file byte for byte and writes nothing over
+/// it that process (D8); only a missing file is no record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    /// For the log line.
+    pub why: String,
+}
+
+impl RigRecord {
+    /// The record in `bytes`, read as the page's `parseRig` reads `lf.rig`: a unit that cannot be read
+    /// (no valid id, an unknown kind, a `bypass` that is not a boolean, a plugin without a known format,
+    /// a path or an id, `params` that is not an object) is skipped, as is a unit whose id came earlier
+    /// (across both slots, `units` before `pending`); an unknown parameter or one that is not a number
+    /// is dropped from its unit; a volume that is not a number in 0..=[`SLOT_GAIN_MAX`] reads 1. Where
+    /// `parseRig` answers "no record" for a whole-record fault, this answers [`Unreadable`]: natively,
+    /// only a missing file is no record (D8).
+    pub fn read(bytes: &[u8]) -> Result<RigRecord, Unreadable> {
+        let bad = |why: &str| Unreadable { why: why.to_owned() };
+        let text = std::str::from_utf8(bytes).map_err(|_| bad("not UTF-8"))?;
+        let value: Value = serde_json::from_str(text).map_err(|e| Unreadable { why: format!("not JSON: {e}") })?;
+        let top = value.as_object().ok_or_else(|| bad("not an object"))?;
+        if top.get("version").and_then(Value::as_f64) != Some(1.0) {
+            return Err(Unreadable { why: format!("version {} is not 1", top.get("version").unwrap_or(&Value::Null)) });
+        }
+        let slots = top.get("slots").and_then(Value::as_array).ok_or_else(|| bad("no slots"))?;
+        let [a, b] = slots.as_slice() else { return Err(bad("not two slots")) };
+        let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else { return Err(bad("a slot is not an object")) };
+        let mut ids = Vec::new();
+        let a = read_slot(a, &mut ids);
+        let b = read_slot(b, &mut ids);
+        Ok(RigRecord { version: Version1, slots: [a, b] })
+    }
+}
+
+fn read_slot(slot: &Map<String, Value>, ids: &mut Vec<UnitId>) -> SlotRecord {
+    let volume = slot.get("volume").and_then(Value::as_f64).filter(|v| (0.0..=SLOT_GAIN_MAX).contains(v)).unwrap_or(1.0);
+    let units = read_units(slot.get("units"), ids);
+    let pending = read_units(slot.get("pending"), ids);
+    SlotRecord { volume, units, pending }
+}
+
+/// A stored unit list: unreadable entries and an id met before are skipped; anything but a list is empty.
+fn read_units(list: Option<&Value>, ids: &mut Vec<UnitId>) -> Vec<UnitRecord> {
+    let Some(list) = list.and_then(Value::as_array) else { return Vec::new() };
+    let mut out = Vec::new();
+    for unit in list.iter().filter_map(read_unit) {
+        if ids.contains(&unit.id) {
+            continue;
+        }
+        ids.push(unit.id);
+        out.push(unit);
+    }
+    out
+}
+
+/// One stored unit, or `None` when it cannot be read (`readUnit`'s rules).
+fn read_unit(v: &Value) -> Option<UnitRecord> {
+    let v = v.as_object()?;
+    let id = read_id(v.get("id")?)?;
+    let kind = v.get("kind")?.as_str()?;
+    let kind = KIND_KEYS.iter().find(|(_, key)| *key == kind).map(|(kind, _)| *kind)?;
+    let bypass = match v.get("bypass") {
+        None => None,
+        Some(b) => Some(b.as_bool()?),
+    };
+    let body = if kind == UnitKind::Plugin {
+        let p = v.get("plugin")?.as_object()?;
+        let format = p.get("format")?.as_str().filter(|f| PLUGIN_FORMATS.contains(f))?;
+        let path = p.get("path")?.as_str()?;
+        let plugin_id = p.get("id")?.as_str()?;
+        let name = p.get("name").and_then(Value::as_str).map(str::to_owned);
+        let plugin = PluginRefView { format: format.to_owned(), path: path.to_owned(), id: plugin_id.to_owned() };
+        UnitBody::Plugin(PluginRecord { plugin, name })
+    } else {
+        let params = match v.get("params") {
+            None => None,
+            Some(params) => {
+                // Sorted by key, as the strict parse reads them, so both readers give one value.
+                let known: BTreeMap<&str, f64> = params
+                    .as_object()?
+                    .iter()
+                    .filter_map(|(key, x)| Some((key.as_str(), x.as_f64().filter(|x| x.is_finite())?)))
+                    .collect();
+                Some(known.into_iter().filter_map(|(key, x)| Some((UnitParam::from_key(key)?, x))).collect())
+            }
+        };
+        UnitBody::Builtin { kind, params }
+    };
+    Some(UnitRecord { id, body, bypass })
+}
+
+/// A unit id as JSON may spell it: an integer 1..=u32::MAX (`1.0` too, as JavaScript reads it).
+fn read_id(v: &Value) -> Option<UnitId> {
+    let n = v.as_u64().or_else(|| v.as_f64().filter(|f| f.fract() == 0.0 && *f >= 1.0 && *f <= f64::from(u32::MAX)).map(|f| f as u64))?;
+    UnitId::try_from(n).ok().filter(|id| *id != 0)
 }
