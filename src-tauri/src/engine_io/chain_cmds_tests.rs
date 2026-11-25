@@ -5,14 +5,17 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
+use lf_engine::instruments::LEAD;
+use lf_engine::units::{OttUnit, SynthUnit, SYNTH_GAIN_MAX};
 use lf_engine::{
-    Command, InputSendParam, LaneState, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo,
-    UnitKind, UnitParam, UnitProcessor, MAX_UNITS, SLOT_COUNT,
+    Command, InputSendParam, Instrument, LaneState, NoteTarget, SlotEvent, TimedCommand, UnitCx, UnitId,
+    UnitInfo, UnitKind, UnitParam, UnitProcessor, MAX_UNITS, SLOT_COUNT,
 };
 
 use super::{chain_event, chain_units_exist, Added, Affinity, Chains, Reloaded, EDITOR_CLOSED, PARAM_CHANGED, PARAMS_CHANGED};
 use crate::audio_output::AudioBackend;
-use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec, WireParams};
+use crate::engine_io::builtins::Builtins;
+use crate::engine_io::chain::{PlateState, PluginRef, UnitSpec, UnitState, WireParams};
 use crate::engine_io::fake_driver::{Fake, FakeDriver};
 use crate::engine_io::plugins::EngineSlot;
 use crate::engine_io::test_rig::{TestDevice, PATIENCE};
@@ -597,9 +600,224 @@ fn f_held_remove_during_take_refuses_readd_with_still_leaving_then_succeeds() {
     chains.join_all();
 }
 
-/// (g) (g) `factory: None`: a built-in add is refused at once, and nothing is reserved.
+fn spec_with(kind: UnitKind, params: Params) -> UnitSpec {
+    UnitSpec { kind, plugin: None, params: Some(WireParams(params)), bypass: false }
+}
+
+/// The plate of `unit` in the model's snapshot.
+fn plate_state(host: &EngineHost, unit: UnitId) -> UnitState {
+    let rev = host.core.state.lock().unwrap().model.snapshot();
+    rev.chains.iter().flat_map(|c| c.units.iter()).find(|u| u.id == unit).cloned().expect("plate")
+}
+
+/// `unit`'s params as its plate reads them, as a map (the answer's order is `UnitParam::ALL`'s).
+fn plate_params(host: &EngineHost, unit: UnitId) -> BTreeMap<usize, f64> {
+    let params = plate_state(host, unit).params.expect("a built-in's params").0;
+    let map: BTreeMap<usize, f64> = params.iter().map(|&(p, v)| (p.index(), v)).collect();
+    assert_eq!(map.len(), params.len(), "each param answered once");
+    let mut order: Vec<usize> = params.iter().map(|&(p, _)| p.index()).collect();
+    order.sort_unstable();
+    assert_eq!(order, params.iter().map(|&(p, _)| p.index()).collect::<Vec<_>>(), "in UnitParam::ALL's order");
+    map
+}
+
+fn send_param(p: InputSendParam) -> usize {
+    UnitParam::Send(p).index()
+}
+
+fn engine_kinds(device: &TestDevice, slot: usize) -> Vec<(UnitId, UnitKind)> {
+    let rt = device.host().core.rt.lock().unwrap();
+    rt.engine.as_ref().expect("engine present").chain(slot).map(|s| (s.unit, s.kind)).collect()
+}
+
+/// The left channel's peak over the last `frames` the device rendered.
+fn recent_peak(device: &TestDevice, frames: usize) -> f32 {
+    let out = device.output.lock().unwrap();
+    out.iter().rev().take(frames).fold(0.0f32, |m, &s| m.max(s.abs()))
+}
+
+/// Whether a note played to `slot` sounds: silence first, then heard within 32 blocks of the NoteOn.
+fn note_sounds(device: &TestDevice, slot: u8) -> bool {
+    let host = device.host();
+    host.send(TimedCommand { frame: None, command: Command::SetSlotLive(slot, true) }).unwrap();
+    host.send(TimedCommand { frame: None, command: Command::SelectInstrument(NoteTarget::Slot(slot)) }).unwrap();
+    wait_until(PATIENCE, "silence before the note (an earlier note's tail rung out)", || recent_peak(device, 1024) < 1e-4);
+    host.send(TimedCommand { frame: None, command: Command::NoteOn(60, 0.9) }).unwrap();
+    assert!(device.wait_blocks(32));
+    let heard = recent_peak(device, 4096) > 1e-3;
+    host.send(TimedCommand { frame: None, command: Command::AllNotesOff }).unwrap();
+    assert!(device.wait_blocks(64));
+    heard
+}
+
+/// Wraps the production factory and keeps each build's kind, asked params, rate and answer, and what a
+/// twin built by the same call renders of one note ([`render_note`]).
+struct RecordingBuiltins {
+    builds: Mutex<Vec<(UnitKind, Params, u32, Params, Vec<f32>)>>,
+}
+
+impl BuiltinFactory for RecordingBuiltins {
+    fn build(&self, kind: UnitKind, params: &Params, terms: Terms) -> Result<(Unit, Params), String> {
+        let (unit, answer) = Builtins.build(kind, params, terms)?;
+        let (mut twin, _) = Builtins.build(kind, params, terms)?;
+        let heard = render_note(twin.as_mut());
+        self.builds.lock().unwrap().push((kind, params.clone(), terms.rate, answer.clone(), heard));
+        Ok((unit, answer))
+    }
+}
+
+/// A `UnitCx` for a block from `frame`, at 120 bpm in 4/4.
+fn unit_cx(frame: usize) -> UnitCx {
+    UnitCx { frame: frame as Frame, dsp_frame: frame as Frame, bpm: 120.0, meter: lf_engine::grid::Meter::FOUR_FOUR }
+}
+
+/// What a SYNTH renders of one A4 played at its first frame, 12 000 frames in blocks of 256, left channel.
+fn render_note(unit: &mut dyn UnitProcessor) -> Vec<f32> {
+    let mut heard = Vec::with_capacity(12_000);
+    let note = [SlotEvent { offset: 0, kind: lf_engine::SlotEventKind::NoteOn { key: 69, velocity: 0.8 } }];
+    let silence = [0.0f32; 256];
+    for frame in (0..12_000).step_by(256) {
+        let n = 256.min(12_000 - frame);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let events: &[SlotEvent] = if frame == 0 { &note } else { &[] };
+        unit.process(&unit_cx(frame), [&silence[..n], &silence[..n]], events, [&mut l, &mut r]);
+        heard.extend(l);
+    }
+    heard
+}
+
+/// How long [`render_effect`] renders, in frames at 48 kHz: 1.2 s, past ECHO's second repeat at 1/4 and
+/// 120 bpm (the first at 0.5 s, the feedback's at 1 s).
+const EFFECT_FRAMES: usize = 57_600;
+
+/// What an effect renders of a 10 ms burst at its first frame, [`EFFECT_FRAMES`] in blocks of 256: the
+/// left channel's frames, then the right's.
+fn render_effect(unit: &mut dyn UnitProcessor) -> Vec<f32> {
+    let (mut left, mut right) = (Vec::with_capacity(EFFECT_FRAMES * 2), Vec::with_capacity(EFFECT_FRAMES));
+    for frame in (0..EFFECT_FRAMES).step_by(256) {
+        let n = 256.min(EFFECT_FRAMES - frame);
+        let input: Vec<f32> = (frame..frame + n).map(|f| if f < 480 { 0.5 * (f as f32 * 0.07).sin() } else { 0.0 }).collect();
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        unit.process(&unit_cx(frame), [&input, &input], &[], [&mut l, &mut r]);
+        left.extend(l);
+        right.extend(r);
+    }
+    left.extend(right);
+    left
+}
+
+fn terms_at(rate: u32) -> Terms {
+    Terms { generation: 1, rate, max_block: 256 }
+}
+
+/// (g) The production factory (`Chains::new`) seats ECHO, REVERB, RING MOD and OTT through `add`, each
+/// built at the engine's rate with its asked params applied in order as the engine would: clamped (ECHO
+/// level 2 → 1, REVERB level −1 → 0, RING freq 5000 → 1500), refused and so at its default (ECHO time
+/// NaN, an ECHO level asked of RING MOD, which answers no ECHO param), and every param it was not asked
+/// at its default. Plate names, roles and latencies are the units' own; the engine's chain holds the four
+/// kinds in order.
 #[test]
-fn g_no_factory_refuses_builtin_without_reserving() {
+fn g_production_factory_seats_each_effect_with_its_params_applied_and_answered() {
+    let device = start_device();
+    let host = device.host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Chains::new();
+    let send = |p: InputSendParam, v: f64| (UnitParam::Send(p), v);
+    let def = |p: InputSendParam| p.range().2;
+
+    let echo = vec![send(InputSendParam::EchoLevel, 2.0), send(InputSendParam::EchoFeedback, 0.3), send(InputSendParam::EchoTime, f64::NAN)];
+    let reverb = vec![send(InputSendParam::ReverbLevel, -1.0)];
+    let ring = vec![send(InputSendParam::RingFreq, 5000.0), send(InputSendParam::EchoLevel, 0.9)];
+    let ott = vec![send(InputSendParam::OttDepth, 0.25)];
+    for (k, (kind, params)) in [(UnitKind::Echo, echo), (UnitKind::Reverb, reverb), (UnitKind::Ring, ring), (UnitKind::Ott, ott)].into_iter().enumerate() {
+        let id = 90 + k as UnitId;
+        assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, id, spec_with(kind, params), k), Ok(Added::Seated), "{kind:?}");
+    }
+    assert_eq!(engine_kinds(&device, 0), vec![(90, UnitKind::Echo), (91, UnitKind::Reverb), (92, UnitKind::Ring), (93, UnitKind::Ott)]);
+
+    let expect = |id: UnitId, want: &[(InputSendParam, f64)]| {
+        let want: BTreeMap<usize, f64> = want.iter().map(|&(p, v)| (send_param(p), v)).collect();
+        assert_eq!(plate_params(host, id), want, "unit {id}'s params");
+    };
+    expect(90, &[(InputSendParam::EchoTime, def(InputSendParam::EchoTime)), (InputSendParam::EchoFeedback, 0.3), (InputSendParam::EchoLevel, 1.0)]);
+    expect(91, &[(InputSendParam::ReverbLevel, 0.0)]);
+    expect(92, &[(InputSendParam::RingFreq, 1500.0), (InputSendParam::RingLevel, def(InputSendParam::RingLevel))]);
+    expect(
+        93,
+        &[
+            (InputSendParam::OttDepth, 0.25),
+            (InputSendParam::OttTime, def(InputSendParam::OttTime)),
+            (InputSendParam::OttUpward, def(InputSendParam::OttUpward)),
+            (InputSendParam::OttDownward, def(InputSendParam::OttDownward)),
+        ],
+    );
+    for (id, name) in [(90, "ECHO"), (91, "REVERB"), (92, "RING MOD"), (93, "OTT")] {
+        let plate = plate_state(host, id);
+        assert_eq!((plate.name.as_str(), plate.source, plate.latency, plate.state), (name, false, 0, PlateState::Seated));
+    }
+
+    // The boxes themselves: built at the asked rate, holding what they answered.
+    let (ott_box, _) = Builtins.build(UnitKind::Ott, &vec![send(InputSendParam::OttDepth, 0.25), send(InputSendParam::OttUpward, 7.0)], terms_at(44_100)).unwrap();
+    let ott_box = ott_box.into_any().downcast::<OttUnit>().expect("an OttUnit");
+    assert_eq!(ott_box.controls(), [0.25, def(InputSendParam::OttTime), 1.0, def(InputSendParam::OttDownward)]);
+    for kind in [UnitKind::Echo, UnitKind::Reverb, UnitKind::Ring] {
+        let (unit, _) = Builtins.build(kind, &Params::new(), terms_at(44_100)).unwrap();
+        assert_eq!(unit.info().kind, kind);
+    }
+    assert!(Builtins.build(UnitKind::Plugin, &Params::new(), terms_at(48_000)).is_err(), "a plugin is not the factory's");
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// (g1) The production factory applies what it answers: ECHO, REVERB and RING MOD built with every param
+/// of theirs away from its default render bit for bit what the same unit built directly and set to those
+/// params renders, and not what a build with no params (every default) renders. A factory that answered
+/// the params but built a unit at its defaults, or left one of them out, fails here: the render runs past
+/// ECHO's feedback repeat.
+#[test]
+fn g1_production_factory_builds_render_their_params_as_the_unit_set_directly() {
+    use lf_engine::units::{EchoUnit, ReverbUnit, RingUnit};
+    let send = |p: InputSendParam, v: f64| (UnitParam::Send(p), v);
+    let cases: [(UnitKind, Params, Box<dyn UnitProcessor>); 3] = [
+        (
+            UnitKind::Echo,
+            vec![send(InputSendParam::EchoTime, 0.0), send(InputSendParam::EchoFeedback, 0.7), send(InputSendParam::EchoLevel, 0.9)],
+            Box::new(EchoUnit::new(48_000)),
+        ),
+        (UnitKind::Reverb, vec![send(InputSendParam::ReverbLevel, 0.9)], Box::new(ReverbUnit::new(48_000))),
+        (UnitKind::Ring, vec![send(InputSendParam::RingFreq, 1000.0), send(InputSendParam::RingLevel, 0.9)], Box::new(RingUnit::new(48_000))),
+    ];
+    for (kind, params, mut direct) in cases {
+        for &(param, value) in &params {
+            if let UnitParam::Send(p) = param {
+                assert_ne!(value, p.range().2, "{kind:?}: {} away from its default", param.key());
+            }
+            assert_eq!(direct.set_param(&unit_cx(0), param, value), Some(value), "{kind:?} takes {}", param.key());
+        }
+        let (mut built, answer) = Builtins.build(kind, &params, terms_at(48_000)).unwrap();
+        assert_eq!(answer, params, "{kind:?}: every param of its own, asked, answered as taken");
+        let (mut defaults, _) = Builtins.build(kind, &Params::new(), terms_at(48_000)).unwrap();
+        let heard = render_effect(built.as_mut());
+        assert!(heard.iter().any(|&x| x != 0.0), "{kind:?} renders something");
+        if kind == UnitKind::Echo {
+            // 0.9 to 1.1 s, left: the feedback's repeat, which only the applied feedback makes.
+            assert!(heard[43_200..52_800].iter().any(|&x| x.abs() > 1e-4), "the render reaches ECHO's feedback repeat");
+        }
+        assert!(heard == render_effect(direct.as_mut()), "{kind:?}: the factory's box renders as the unit set directly");
+        assert!(heard != render_effect(defaults.as_mut()), "{kind:?}: its params change what it renders");
+    }
+}
+
+/// (g2) SYNTH through the production factory: one seated with its pick in its params (2.4 → 2, Pad, in the
+/// UI's `SYNTHS` order) and its levels clamped (Lead 9 → `SYNTH_GAIN_MAX`), one with no params, which
+/// gets pick 0 (Lead), every level 1. Each is a source with `instruments::LEAD` latency, and each plays
+/// a note sent to its slot (an unpicked SYNTH is silent). Built directly: the box holds the answered pick,
+/// and a pick out of range is refused, so it too plays Lead.
+#[test]
+fn g2_production_factory_seats_synth_with_its_pick_and_without_one_plays_lead() {
     let device = start_device();
     let host = device.host();
     let doc_state = PluginHostState::default();
@@ -607,11 +825,127 @@ fn g_no_factory_refuses_builtin_without_reserving() {
     let slots = empty_slots();
     let chains = Chains::new();
 
-    let t0 = Instant::now();
-    let err = add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 60, echo_spec(0.5, false), 0).unwrap_err();
-    assert!(t0.elapsed() < Duration::from_millis(100));
-    assert!(err.contains("ECHO") && err.contains("later build"), "{err}");
-    assert!(!chain_units_exist(host), "refused add must reserve nothing");
+    let picked = vec![(UnitParam::Instrument, 2.4), (UnitParam::Gain(Instrument::Pad), 0.7), (UnitParam::Gain(Instrument::Lead), 9.0)];
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 100, spec_with(UnitKind::Synth, picked), 0), Ok(Added::Seated));
+    let bare = UnitSpec { kind: UnitKind::Synth, plugin: None, params: None, bypass: false };
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 1, 101, bare, 0), Ok(Added::Seated));
+    assert_eq!(engine_kinds(&device, 0), vec![(100, UnitKind::Synth)]);
+    assert_eq!(engine_kinds(&device, 1), vec![(101, UnitKind::Synth)]);
+
+    let synth = |pick: f64, levels: &[(Instrument, f64)]| -> BTreeMap<usize, f64> {
+        let mut m: BTreeMap<usize, f64> = Instrument::ALL.iter().map(|&i| (UnitParam::Gain(i).index(), 1.0)).collect();
+        for &(i, v) in levels {
+            m.insert(UnitParam::Gain(i).index(), v);
+        }
+        m.insert(UnitParam::Instrument.index(), pick);
+        m
+    };
+    assert_eq!(plate_params(host, 100), synth(2.0, &[(Instrument::Pad, 0.7), (Instrument::Lead, SYNTH_GAIN_MAX)]));
+    assert_eq!(plate_params(host, 101), synth(0.0, &[]));
+    for id in [100, 101] {
+        let plate = plate_state(host, id);
+        assert_eq!((plate.name.as_str(), plate.source, plate.latency), ("SYNTH", true, LEAD), "unit {id}");
+    }
+    assert!(note_sounds(&device, 0), "the picked SYNTH plays");
+    assert!(note_sounds(&device, 1), "the SYNTH added with no pick plays Lead");
+
+    let picked_box = |params: Params| {
+        let (unit, answer) = Builtins.build(UnitKind::Synth, &params, terms_at(48_000)).unwrap();
+        (unit.into_any().downcast::<SynthUnit>().expect("a SynthUnit").instrument(), answer)
+    };
+    let (pick, _) = picked_box(vec![(UnitParam::Instrument, 2.4)]);
+    assert_eq!(pick, Some(Instrument::Pad), "index 2 is Pad in the UI's order, not the enum's");
+    let (pick, answer) = picked_box(Params::new());
+    assert_eq!(pick, Some(Instrument::Lead));
+    assert!(answer.contains(&(UnitParam::Instrument, 0.0)));
+    let (pick, answer) = picked_box(vec![(UnitParam::Instrument, 5.6)]);
+    assert_eq!(pick, Some(Instrument::Lead), "a pick out of range is refused, as the engine refuses it");
+    assert!(answer.contains(&(UnitParam::Instrument, 0.0)));
+
+    chains.unload_all(host);
+    chains.join_all();
+}
+
+/// (g3) An engine at a new rate builds a seated SYNTH again at that rate from its applied params: the
+/// pick and the levels it was added with and a level set live after on the instrument it plays (Piano),
+/// answered by the engine. The plate reads the same params after and the SYNTH plays at the new rate: a
+/// twin of the rebuilt box renders a note bit for bit as a SYNTH built directly at 44.1 kHz and set to
+/// those params, and neither as one at 48 kHz, nor as one on pick 0 (Lead), nor as one without the live
+/// level (a rebuild that dropped it fails). A rebuild at the same rate keeps the box (no build).
+#[test]
+fn g3_rebuild_at_a_new_rate_builds_synth_again_with_its_applied_pick_and_levels() {
+    let device = start_device();
+    let host = device.host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let factory = Arc::new(RecordingBuiltins { builds: Mutex::new(Vec::new()) });
+    let chains = Chains::with_factory(factory.clone());
+
+    // Pick 3 is Piano (`SYNTH_IDS`): the live level is the played instrument's, so the render hears it.
+    let asked = vec![(UnitParam::Instrument, 3.0), (UnitParam::Gain(Instrument::Organ), 0.6)];
+    assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 110, spec_with(UnitKind::Synth, asked), 0), Ok(Added::Seated));
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(110, UnitParam::Gain(Instrument::Piano), 0.4) }).unwrap();
+    let piano = UnitParam::Gain(Instrument::Piano).index();
+    wait_until(PATIENCE, "the live level answered into the model", || {
+        let mut ev = Vec::new();
+        host.drain_feed(&mut ev);
+        plate_params(host, 110).get(&piano) == Some(&0.4)
+    });
+    let applied = plate_params(host, 110);
+    assert_eq!(applied[&UnitParam::Instrument.index()], 3.0);
+    assert_eq!(applied[&UnitParam::Gain(Instrument::Organ).index()], 0.6);
+    assert_eq!(factory.builds.lock().unwrap().len(), 1);
+
+    let reseated = |what: &str| {
+        wait_until(PATIENCE, what, || {
+            let mut ev = Vec::new();
+            host.drain_feed(&mut ev);
+            let st = host.core.state.lock().unwrap();
+            let seated = st.model.find_plate(110).is_some_and(|(_, p)| p.state == PlateState::Seated && p.seated_in_engine);
+            drop(st);
+            seated && engine_kinds(&device, 0) == vec![(110, UnitKind::Synth)]
+        });
+    };
+    device.rebuild_at(44_100, 256);
+    reseated("SYNTH reseated at 44.1 kHz");
+    {
+        let builds = factory.builds.lock().unwrap();
+        assert_eq!(builds.len(), 2, "a new rate builds the box again");
+        let (kind, params, rate, answer, heard) = &builds[1];
+        assert_eq!((*kind, *rate), (UnitKind::Synth, 44_100));
+        let asked: BTreeMap<usize, f64> = params.iter().map(|&(p, v)| (p.index(), v)).collect();
+        assert_eq!(asked, applied, "built from the params as applied (the live level included)");
+        let answered: BTreeMap<usize, f64> = answer.iter().map(|&(p, v)| (p.index(), v)).collect();
+        assert_eq!(answered, applied, "the rebuilt box took the same pick and levels");
+        // A SYNTH built directly at `rate`, set to the applied params in `UnitParam::ALL`'s order, but for
+        // the ones `unlike` changes (pick 0, Lead, in the applied pick's place; the asked level, 1, in the
+        // live one's).
+        let direct = |rate: u32, unlike: &[(UnitParam, f64)]| {
+            let mut unit = SynthUnit::new(rate);
+            for param in UnitParam::ALL {
+                if let Some(&value) = applied.get(&param.index()) {
+                    let value = unlike.iter().find(|(p, _)| *p == param).map_or(value, |&(_, v)| v);
+                    assert!(unit.set_param(&unit_cx(0), param, value).is_some(), "{}", param.key());
+                }
+            }
+            render_note(&mut unit)
+        };
+        assert!(heard.iter().any(|&x| x != 0.0), "the rebuilt box sounds");
+        assert!(*heard == direct(44_100, &[]), "the rebuilt box renders as a SYNTH at 44.1 kHz with the applied pick and levels");
+        assert!(*heard != direct(48_000, &[]), "not as one at the old rate");
+        assert!(*heard != direct(44_100, &[(UnitParam::Instrument, 0.0)]), "not as one with pick 0 (Lead)");
+        assert!(*heard != direct(44_100, &[(UnitParam::Gain(Instrument::Piano), 1.0)]), "not as one without the live level");
+    }
+    assert_eq!(plate_params(host, 110), applied, "the plate reads the same params");
+    assert!(note_sounds(&device, 0), "the rebuilt SYNTH plays at the new rate");
+
+    device.rebuild_at(44_100, 512);
+    reseated("SYNTH reseated at the same rate");
+    assert_eq!(factory.builds.lock().unwrap().len(), 2, "the same rate resubmits the same box");
+
+    chains.unload_all(host);
+    chains.join_all();
 }
 
 /// (h) A move: three ECHOs, `move(c, 0)` -> `Ok`, and the engine's order equals the snapshot's.
@@ -639,8 +973,9 @@ fn h_move_reorders_engine_and_snapshot() {
     chains.join_all();
 }
 
-/// (i) A rebuild (`TestDevice::rebuild_at` at another rate): each built-in comes back seated with its
-/// bypass and level (the owner resubmits the same box instances, never rebuilding equivalent boxes).
+/// (i) A rebuild (`TestDevice::rebuild_at`): each built-in comes back seated with its bypass and level.
+/// At the same rate the owner resubmits the same box; at another rate it builds a new one from the
+/// model's applied params (a built-in's DSP is built for one rate) and drops the old.
 #[test]
 fn i_rebuild_reseats_builtins_with_bypass_and_level() {
     let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.5);
@@ -665,40 +1000,42 @@ fn i_rebuild_reseats_builtins_with_bypass_and_level() {
     assert_eq!(tracker.stops(1), 0);
     assert_eq!(tracker.stops(2), 0);
 
-    device.rebuild_at(96_000, 512);
-
-    wait_until(Duration::from_secs(3), "both units reseated after rebuild", || {
-        let mut ev = Vec::new();
-        host.drain_feed(&mut ev);
-        let eng = engine_chain_summary(&device, 0);
-        let st = host.core.state.lock().unwrap();
-        let all_seated = [80u32, 81u32].into_iter().all(|id| {
-            st.model
-                .find_plate(id)
-                .is_some_and(|(_, p)| p.state == PlateState::Seated && p.seated_in_engine)
+    let reseated = |what: &str| {
+        wait_until(Duration::from_secs(3), what, || {
+            let mut ev = Vec::new();
+            host.drain_feed(&mut ev);
+            let eng = engine_chain_summary(&device, 0);
+            let st = host.core.state.lock().unwrap();
+            let all_seated = [80u32, 81u32].into_iter().all(|id| {
+                st.model
+                    .find_plate(id)
+                    .is_some_and(|(_, p)| p.state == PlateState::Seated && p.seated_in_engine)
+            });
+            eng == vec![(80, false), (81, true)] && all_seated
         });
-        eng == vec![(80, false), (81, true)] && all_seated
-    });
+    };
 
-    // Verify rendered output reflects level 0.25 (unit 80 active, unit 81 bypassed) on 0.5 input -> ~0.125,
-    // AND verify the exact same two box instances (1 and 2) were evicted once and keep processing in the rebuilt engine.
+    // The same rate: the same two boxes, evicted once each, keep processing in the new engine.
+    device.rebuild_at(48_000, 512);
+    reseated("both units reseated after a rebuild at the same rate");
     assert!(device.wait_blocks(8));
-    assert_eq!(tracker.builds.load(Ordering::SeqCst), 2, "rebuild must resubmit same boxes, not build new ones");
-    assert_eq!(tracker.drops.load(Ordering::SeqCst), 0, "original boxes must survive rebuild intact");
+    assert_eq!(tracker.builds.load(Ordering::SeqCst), 2, "the same rate resubmits the same boxes");
+    assert_eq!(tracker.drops.load(Ordering::SeqCst), 0, "original boxes survive a same-rate rebuild");
     assert_eq!(tracker.stops(1), 1, "original box 1 stopped once during eviction");
     assert_eq!(tracker.stops(2), 1, "original box 2 stopped once during eviction");
-    assert!(
-        tracker.calls(1) > calls_before_1,
-        "original box 1 must keep processing in rebuilt engine ({} vs {})",
-        tracker.calls(1),
-        calls_before_1
-    );
-    assert!(
-        tracker.calls(2) > calls_before_2,
-        "original box 2 (bypassed, warm) must keep processing in rebuilt engine ({} vs {})",
-        tracker.calls(2),
-        calls_before_2
-    );
+    assert!(tracker.calls(1) > calls_before_1, "original box 1 keeps processing in the rebuilt engine");
+    assert!(tracker.calls(2) > calls_before_2, "original box 2 (bypassed, warm) keeps processing in the rebuilt engine");
+
+    // Another rate: each box built again (instances 3 and 4, in either order), the old ones stopped once
+    // more and dropped.
+    device.rebuild_at(96_000, 512);
+    reseated("both units reseated after a rebuild at another rate");
+    assert!(device.wait_blocks(8));
+    assert_eq!(tracker.builds.load(Ordering::SeqCst), 4, "another rate builds both boxes again");
+    assert_eq!(tracker.drops.load(Ordering::SeqCst), 2, "the old boxes are dropped");
+    assert_eq!(tracker.stops(1), 2);
+    assert_eq!(tracker.stops(2), 2);
+    assert!(tracker.calls(3) > 0 && tracker.calls(4) > 0, "both rebuilt boxes (one bypassed, warm) process");
 
     let tail_peak = {
         let out = device.output.lock().unwrap();

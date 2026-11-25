@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js';
 import {
+  input,
   mintUnitId,
   platform,
   sendEngine,
@@ -10,7 +11,7 @@ import {
   type UnitSpec,
   type UnitState,
 } from '../../platform';
-import { availablePlugins } from './instrument';
+import { availablePlugins, setActiveSlot } from './instrument';
 import { withAt } from './instrument-slots';
 import { keepUnitMeters } from '../units/unit-meters';
 
@@ -43,6 +44,7 @@ export const slotChain = (slot: 0 | 1): ChainState => chains()[slot];
 /** The feed's `chains` (the engine store's frame path, inside its batch). */
 export function applyChains(next: [ChainState, ChainState]): void {
   setChains(next);
+  forgetShownPicks(next);
   const ids = new Set(next.flatMap((c) => c.units.map((u) => u.id)));
   keepUnitMeters(ids);
   // an editor's unit that left the chain, or no longer sounds (parked, withdrawn), has no window any more
@@ -187,6 +189,104 @@ export async function moveUnit(unit: UnitId, to: number): Promise<void> {
  * the batch drops one for any other. */
 export function toggleUnit(unit: UnitId): void {
   if (unitSeated(unit)) void sendEngine({ Action: { ToggleUnit: unit } });
+}
+
+// ── SYNTH's pick (unit contract §4): an instrument choice on a slot a SYNTH heads is a pick on it ───────
+
+/**
+ * The picks sent to each SYNTH that the feed has not shown yet, in the order sent, and `shown`, the pick
+ * the feed last showed while they were on their way. The router applies them in that order, so the last
+ * one sent is where the unit ends: a choice is skipped only when it equals that, or, with none on its way,
+ * the feed's pick (judged against the feed alone, Lead, Bass, Lead sent before the feed says Bass would
+ * skip the second Lead). A pick the router did not take is struck out (`pickSynth`).
+ */
+const picksSent = new Map<UnitId, { shown: number; sent: { instrument: number }[] }>();
+
+/**
+ * The feed's pick of each SYNTH with picks on their way acknowledges the picks it shows applied: the
+ * earliest place in the order sent that reads it (the pick shown before them counts as the first), with
+ * every pick before it. Never later: a frame may show one pick of several alike (Bass, Pad, Bass with the
+ * first Bass applied) and must not strike out one still on its way. A frame that skipped picks (two applied
+ * between frames, or two the queue coalesced) may leave applied ones listed: they end where the unit is,
+ * so no choice is judged wrong by them. A unit that is no SYNTH in the chain any more takes its picks along.
+ */
+function forgetShownPicks(next: [ChainState, ChainState]): void {
+  if (picksSent.size === 0) return;
+  const units = new Map(next.flatMap((c) => c.units.map((u) => [u.id, u] as const)));
+  for (const [unit, track] of picksSent) {
+    const u = units.get(unit);
+    if (u?.kind !== 'synth') {
+      picksSent.delete(unit);
+      continue;
+    }
+    const shown = u.params?.instrument ?? 0;
+    if (shown === track.shown) continue;
+    const at = track.sent.findIndex((p) => p.instrument === shown);
+    if (at < 0) continue;
+    track.sent.splice(0, at + 1);
+    track.shown = shown;
+    if (track.sent.length === 0) picksSent.delete(unit);
+  }
+}
+
+/** Picks sent so far, as a running count: a keyboard hold stamps it at its press (`picksSentSoFar`). */
+let pickSerial = 0;
+/** The count of picks sent so far; a pick's number is the count once it was sent. */
+export const picksSentSoFar = (): number => pickSerial;
+const pickTakers = new Set<(serial: number) => void>();
+/** Call `fn` with a pick's number once the router took it: it released every note held before that pick
+ * was sent (`Keyboard.tsx` drops their bookkeeping then, keeping any made after). Returns the unsubscribe. */
+export function onPickTaken(fn: (serial: number) => void): () => void {
+  pickTakers.add(fn);
+  return () => pickTakers.delete(fn);
+}
+
+/** The pick of the SYNTH that heads slot `slot`'s chain as applied, as the feed shows it (an index in
+ * `SYNTHS`; an add that asked none plays 0), or null when no SYNTH heads it. */
+export function headSynthPick(slot: 0 | 1): number | null {
+  const head = appliedHead(slot);
+  return head?.kind === 'synth' ? (head.params?.instrument ?? 0) : null;
+}
+
+/**
+ * Built-in instrument `instrument` (an index in `SYNTHS`) chosen for slot `slot`: with a SYNTH seated at
+ * the head of its chain, a pick on it through the note router (one bank: what sounds is released and a
+ * released note rings out, as a legacy synth switch does), sent only when neither the feed nor a pick
+ * still on its way already says it; the slot becomes the MIDI slot either way, as a legacy synth pick
+ * makes it (natively the pick has selected it already, so this changes nothing there). False when no
+ * SYNTH is seated there: nothing sent, the caller's own path runs.
+ */
+export function pickSynth(slot: 0 | 1, instrument: number): boolean {
+  const head = appliedHead(slot);
+  if (head?.kind !== 'synth' || head.state !== 'seated') return false;
+  const unit = head.id;
+  const shown = head.params?.instrument ?? 0;
+  const track = picksSent.get(unit);
+  if ((track?.sent.at(-1)?.instrument ?? shown) !== instrument) {
+    const pick = { instrument };
+    if (track) track.sent.push(pick);
+    else picksSent.set(unit, { shown, sent: [pick] });
+    const serial = ++pickSerial;
+    void input.pickSynth(slot, unit, instrument).then((took) => {
+      if (took) {
+        for (const fn of pickTakers) fn(serial);
+        return;
+      }
+      // a pick the router did not take (lost, or refused there) is not on its way
+      const now = picksSent.get(unit);
+      const at = now?.sent.indexOf(pick) ?? -1;
+      if (now && at >= 0) now.sent.splice(at, 1);
+      if (now?.sent.length === 0) picksSent.delete(unit);
+    });
+  }
+  setActiveSlot(slot);
+  return true;
+}
+
+/** The `+` menu's built-in instrument: a pick on the SYNTH seated at the slot's head (`pickSynth`), else a
+ * SYNTH added with that pick (it lands at the head, replacing a source there). */
+export function chooseSynth(slot: 0 | 1, instrument: number): void {
+  if (!pickSynth(slot, instrument)) void addUnit(slot, { kind: 'synth', params: { instrument } });
 }
 
 /** A built-in unit's parameter, while it is seated; the feed's `chains` brings back the value it took. */

@@ -16,8 +16,11 @@
  *   a scripted `failed` plate without `parked` is a failed add (no seat in the sum, no source, gone at once);
  * - the batch: `SetUnitBypass`, `ToggleUnit` and `Toggle.Units` (any on: all off, else all on, one
  *   `Toggled`; none of the kind: nothing) switch the model; `SetUnitParam` clamped as the engine clamps
- *   (ECHO's level 2 reads 1, its time rounds to an index, SYNTH's level stops at 1.5); a param of another
- *   kind and an unseated id dropped;
+ *   (ECHO's level 2 reads 1, its time rounds to an index, SYNTH's level stops at 1.5; a SYNTH added with
+ *   its pick out of range plays pick 0); a param of another kind and an unseated id dropped; a SYNTH pick
+ *   (`input.pickSynth`) lands in the model as the router's `SetUnitParam`, a pick on another kind dropped,
+ *   a batch carrying the pick as an engine command or a pick past Drum on the wire refused whole (none of
+ *   the items ahead of it run), a SYNTH added with no pick asked plays pick 0;
  * - D29 by unit across both slots (a move keeps the owner; orphaned; unordered); tones by §8 (a tone file
  *   read and identity-checked, its own unit first in either slot, an unmatched tone kept as the slot's file
  *   a new unit starts from, a token bound to its plugin); reload (the old seat counted while it loads, its plate
@@ -59,7 +62,7 @@ function tone(plugin, name, state) {
 }
 
 await probe(async ({ open }) => {
-  const { page } = await open({
+  const { page, consumeConsoleErrors } = await open({
     init: (p) =>
       p.addInitScript(() => {
         window.__lfEngineFake = true;
@@ -442,11 +445,47 @@ await probe(async ({ open }) => {
   assert.deepEqual(await call('add', 1, synthB, { kind: 'synth', params: { gainLead: 3, instrument: 9 } }, 2), { ok: 'seated' });
   assert.deepEqual(ids(await last(), 1), [synthB, echoB], 'SYNTH heads slot B');
   const synthParams = unit(await last(), synthB).params;
-  assert.deepEqual([synthParams.gainLead, synthParams.instrument, synthParams.gainBass], [1.5, 5, 1], 'built clamped, the rest at defaults');
+  assert.deepEqual([synthParams.gainLead, synthParams.instrument, synthParams.gainBass], [1.5, 0, 1], 'built clamped, a pick out of range refused (pick 0, as the native factory), the rest at defaults');
   m = await mark();
   await send({ SetUnitParam: [synthB, 'gainPad', -2] });
   await waitFrames(m, (f) => f.chains && f.chains[1].units[0].params.gainPad === 0, 'SYNTH level clamped');
+  // SYNTH's pick: only through the router's `pickSynth`, applied as its `SetUnitParam`; an engine batch
+  // carrying one is refused whole, as native MIDI refuses a router command.
+  const pickDropped = await page.evaluate(() => window.__lf.native.chain.dropped.length);
+  m = await mark();
+  assert.equal(await page.evaluate((id) => window.__platform.input.pickSynth(1, id, 5), synthB), true, 'the pick batch ran');
+  await waitFrames(m, (f) => f.chains && f.chains[1].units[0].params.instrument === 5, 'the pick in the model');
+  assert.deepEqual(await page.evaluate(() => window.__lf.native.inputSent.at(-1)), { pickSynth: { slot: 1, unit: synthB, instrument: 5 } });
+  assert.ok(!(await page.evaluate(() => window.__lf.native.sent.some((c) => c.SetUnitParam?.[1] === 'instrument'))), 'the router’s param is no command the UI sent');
+  const direct = await page.evaluate(
+    async (id) => window.__lf.platform.input.send(1, [{ engine: { SetUnitParam: [id, 'instrument', 2] } }]).then(() => 'ran', (e) => e.message),
+    synthB,
+  );
+  assert.match(direct, /goes through the note router/, 'an engine batch carrying the pick is refused');
+  await page.evaluate((id) => window.__platform.input.pickSynth(1, id, 3), echoB);
+  await page.waitForTimeout(50);
+  assert.equal(unit(await last(), synthB).params.instrument, 5, 'nothing else moved the pick');
+  assert.deepEqual((await page.evaluate(() => window.__lf.native.chain.dropped.slice())).slice(pickDropped).map((d) => d.SetUnitParam), [[echoB, 'instrument', 3]], 'a pick on an ECHO dropped');
+  // A batch is refused whole, as native MIDI refuses it (its wire's reading, or a router command among its
+  // engine commands): none of the items ahead of the refused one runs.
+  const record = () =>
+    page.evaluate(() => JSON.stringify([window.__lf.native.sent.length, window.__lf.native.inputSent.length, window.__lf.native.chain.dropped.length]));
+  const before = await record();
+  const refusedBatch = (items) => page.evaluate(async (i) => window.__lf.platform.input.send(1, i).then(() => 'ran', (e) => e.message), items);
+  const itemsAhead = [{ engine: { SetUnitParam: [synthB, 'gainPad', 0.5] } }, { input: { note: { owner: 'key:KeyA', note: 60, velocity: 100, on: true } } }];
+  assert.match(await refusedBatch([...itemsAhead, { engine: { SetUnitParam: [synthB, 'instrument', 2] } }]), /goes through the note router/, 'a mixed batch ending in the router’s param refused');
+  assert.match(await refusedBatch([...itemsAhead, { input: { pickSynth: { slot: 1, unit: synthB, instrument: 6 } } }]), /pickSynth\.instrument/, 'a pick past Drum refused at the wire, as native refuses it');
+  assert.equal(await page.evaluate((id) => window.__platform.input.pickSynth(1, id, 9), synthB), false, 'the outbox’s pick out of range: lost, not taken');
+  await page.waitForTimeout(50);
+  assert.equal(await record(), before, 'nothing of a refused batch ran or was recorded');
+  assert.deepEqual([unit(await last(), synthB).params.gainPad, unit(await last(), synthB).params.instrument], [0, 5], 'the model untouched');
+  consumeConsoleErrors('[platform] input batch failed');
   for (const id of [synthB, echoB]) assert.deepEqual(await call('remove', id), { ok: null });
+  // A SYNTH added without a pick plays pick 0, and the feed says so, as the native factory builds it.
+  const synthC = await mint();
+  assert.deepEqual(await call('add', 1, synthC, { kind: 'synth', params: { gainLead: 1.2 } }, 0), { ok: 'seated' });
+  assert.equal(unit(await last(), synthC).params.instrument, 0, 'no instrument asked: pick 0 on the feed');
+  assert.deepEqual(await call('remove', synthC), { ok: null });
 
   // ── D29 by unit, across both slots ────────────────────────────────────────────────────────────────
   const amp2 = await mint();

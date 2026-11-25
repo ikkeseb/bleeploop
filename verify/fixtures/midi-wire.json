@@ -6,7 +6,8 @@
     { "selectTarget": { "slot": 0, "target": { "Slot": 0 } } },
     { "selectTarget": { "slot": null, "target": { "Builtin": "lead" } } },
     { "selectTarget": { "slot": null, "target": "Off" } },
-    "allNotesOff"
+    "allNotesOff",
+    { "pickSynth": { "slot": 1, "unit": 7, "instrument": 2 } }
   ],
   "inputEventsAccepted": [
     { "sent": { "blur": null }, "reads": "blur" },
@@ -18,7 +19,8 @@
     { "engine": "Press" },
     { "input": "blur" },
     { "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } },
-    { "input": "allNotesOff" }
+    { "input": "allNotesOff" },
+    { "input": { "pickSynth": { "slot": 0, "unit": 3, "instrument": 5 } } }
   ],
   "inputAnswers": [null, "noDevice", "rebuilding", "full", "stale"],
   "epochs": [1, 42],

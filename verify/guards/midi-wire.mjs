@@ -46,7 +46,7 @@ const tag = (v) => (typeof v === 'string' ? [v, undefined] : Object.entries(v)[0
 const sorted = (list) => [...new Set(list)].sort();
 
 const EVENTS = ['ports', 'gone', 'bindings', 'learning', 'awaitingRelease', 'learned', 'refused', 'run', 'pressed', 'store', 'held'];
-const INPUT_EVENTS = ['note', 'blur', 'selectTarget', 'allNotesOff'];
+const INPUT_EVENTS = ['note', 'blur', 'selectTarget', 'allNotesOff', 'pickSynth'];
 
 /** The decoded event back in the wire's shape. */
 function rewire(ev) {
@@ -102,6 +102,7 @@ function encodeLike(e) {
   const [name, p] = tag(e);
   if (name === 'note') return encodeInput.note(p.owner, p.note, p.velocity, p.on);
   if (name === 'selectTarget') return encodeInput.selectTarget(p.slot, p.target);
+  if (name === 'pickSynth') return encodeInput.pickSynth(p.slot, p.unit, p.instrument);
   return encodeInput[name]();
 }
 for (const e of fixture.inputEvents) {
@@ -184,6 +185,12 @@ const refused = {
   'a velocity out of range': () => decodeInputEvent({ note: { owner: 'key:KeyA', note: 60, velocity: 128, on: true } }),
   'a fractional velocity': () => decodeInputEvent({ note: { owner: 'key:KeyA', note: 60, velocity: 0.8, on: true } }),
   'a note target in another case': () => decodeInputEvent({ selectTarget: { slot: 0, target: 'off' } }),
+  'a synth pick on no plugin slot': () => decodeInputEvent({ pickSynth: { slot: 2, unit: 7, instrument: 0 } }),
+  'a synth pick on unit 0': () => decodeInputEvent({ pickSynth: { slot: 0, unit: 0, instrument: 0 } }),
+  'a synth pick past drum': () => decodeInputEvent({ pickSynth: { slot: 0, unit: 7, instrument: 6 } }),
+  'a fractional synth pick': () => decodeInputEvent({ pickSynth: { slot: 0, unit: 7, instrument: 1.5 } }),
+  'a synth pick by name': () => decodeInputEvent({ pickSynth: { slot: 0, unit: 7, instrument: 'bass' } }),
+  'a synth pick in PascalCase': () => decodeInputEvent({ PickSynth: { slot: 0, unit: 7, instrument: 1 } }),
   'an import report in snake_case': () => decodeImportReport({ ...fixture.importReports[0], already: undefined, already_done: true }),
   'a list without its revision': () => {
     const e = structuredClone(bindings);

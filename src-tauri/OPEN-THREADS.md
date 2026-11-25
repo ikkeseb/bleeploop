@@ -214,3 +214,21 @@
   failed once in a 479-test `cargo test -p app` run and pass alone. Next check: rerun the full
   `cargo test -p app` on a quiet PC; if it fails again, widen the bounds to `test_rig::PATIENCE` or
   stamp them on the engine's frames, as the timing tests above were.
+- A note can overtake a synth pick held at the unit gate (DEV chain mode, read from source, never run): across
+  a device rebuild a queued `PickSynth` waits at the gate for its SYNTH's reseat; once the SYNTH is back in the
+  engine but its `Seat` answer is still unread (the model says reseating), a fresh `NoteOn` through
+  `EngineHost::send` is not gated and reaches the ring before the pick (`engine_io/mod.rs` `send`,
+  `unit_host.rs` `flush_gate_locked`), so it plays the previous instrument. Next check: `midi/tests.rs`'
+  `a_queued_synth_pick_reaches_its_reseated_synth_through_the_gate_before_a_later_note` without its wait for
+  the gate to empty (send the note right after `wait_op`), and read the log's order. A fix gates a note behind a
+  pick held for its slot's unit.
+- A target switch split across two blocks can retrigger a sustained note under a mono Bass for one block
+  (read from source, never run; review finding). The MIDI queue drains command by command (`midi/queue.rs`
+  module doc), so when the engine's command ring takes only part of a switch's batch (held notes' `NoteOff`s
+  first, then the sustained ones, then `SelectInstrument`), the Bass holding G with C sustained gets G's
+  `NoteOff` alone, falls back to C and attacks it before C's release and the switch arrive a block later.
+  Today's `Builtin` target switch has it, in the same order; a DEV synth pick's batch is the same shape and
+  adds nothing new. It needs the 1024-command ring full. Next check: an lf-engine test that plays a mono Bass,
+  G held over a sustained C, applies G's `NoteOff` alone in one block and C's with the switch in the next, and
+  reads whether the first block carries a new C attack; if it does, a jam settles whether one block of it is
+  heard. A fix sends a switch's or a pick's batch to the ring whole or not at all.

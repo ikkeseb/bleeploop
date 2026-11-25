@@ -7,6 +7,11 @@
 //! The drum kit's random draws are its three NoiseSynth starts (clap, e-snare, snare, in call order):
 //! the probe seeds `Math.random` with mulberry32(1000 + the scenario's index), and the kit's random
 //! source replays that seed, checked against the recorded draws.
+//!
+//! Each scenario also plays through a SYNTH (`units::SynthUnit`) picked to the bass or the kit, its
+//! events as slot events on their frames, bit for bit against the instrument alone called as the
+//! SYNTH's bank calls it (`common::unit_replay`): the kit built as the bank builds it, on its fixed
+//! seed (`instruments.rs` `DRUM_SEED`, 1), the bass as `Bass::new`.
 
 mod common;
 
@@ -14,11 +19,13 @@ use std::sync::{Arc, OnceLock};
 
 use assert_no_alloc::assert_no_alloc;
 use common::refs::{self, Class, ScriptEvent};
+use common::unit_replay;
 use common::violation_count;
 use lf_engine::dsp::buffer_source::AudioBuffer;
 use lf_engine::dsp::noise::NoiseTables;
 use lf_engine::dsp::rng::Mulberry32;
 use lf_engine::dsp::synth::{Bass, DrumKit};
+use lf_engine::Instrument;
 
 const BLOCKS: [usize; 4] = [1, 64, 127, 480];
 
@@ -131,6 +138,9 @@ fn assert_bass(id: &str, class: Class) {
     for block in BLOCKS {
         assert!(bits(&render_bass_live(id, block)) == bits(&live), "{id}: live, block {block} differs");
     }
+    let (white, pink) = tables();
+    let rate = refs::scenario(id).rate as f32;
+    unit_replay::assert_unit(id, Instrument::Bass, &[white.clone(), pink.clone()], &mut Bass::new(rate, 0.0, 0));
 }
 
 #[test]
@@ -228,6 +238,9 @@ fn synth_drum_kit_48000() {
         let r: Vec<Vec<u32>> = render_drum(block, true).iter().map(|c| bits(c)).collect();
         assert!(r == live, "{DRUM}: live, block {block} differs");
     }
+    let (white, pink) = tables();
+    let rate = refs::scenario(DRUM).rate as f32;
+    unit_replay::assert_unit(DRUM, Instrument::Drums, &[white.clone(), pink.clone()], &mut DrumKit::new(rate, white, pink, Mulberry32::new(1), 0.0, 0));
 }
 
 /// The kit's cost with all 16 voices ringing, per 128 frames at 48 k. Ignored by default (timing on

@@ -563,8 +563,8 @@ fn dip_gain(dip: Option<Frame>, f: Frame, n: Frame) -> f32 {
     }
 }
 
-/// The events one unit gets over a call into `ev`: a playing unit every NoteOn and wheel of the slot's
-/// `events` (it holds a NoteOn's key from there) and a NoteOff only for a key it holds, the slot's
+/// The events one unit gets over a call into `ev`: a playing unit every NoteOn of the slot's `events` (it
+/// holds a NoteOn's key from there) and a NoteOff only for a key it holds, the slot's wheels and
 /// [`SlotEventKind::AllNotesOff`] only if it is a SYNTH, held keys or not ([`Slot::release_all`]); a leaving
 /// one (removed, withdrawn, replaced) none of them, only the releases of what it holds, at the call's first
 /// frame, once (`owes`): a NoteOff per key, ascending, or for a SYNTH (`synth`) one
@@ -600,7 +600,12 @@ fn unit_events(ev: &mut Vec<SlotEvent>, (held, owes): (&mut [u64; 2], &mut bool)
                     }
                     *held = [0; 2];
                 }
-                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => {}
+                // The wheels are a SYNTH's alone (D12): a plugin seated behind one gets none.
+                SlotEventKind::PitchBend { .. } | SlotEventKind::Modulation { .. } => {
+                    if !synth {
+                        continue;
+                    }
+                }
             }
             ev.push(*e);
         }
@@ -1116,6 +1121,11 @@ pub(crate) struct Rack {
     gain_coef: f64,
     /// The slot that takes the notes, if a slot is the note target.
     target: Option<usize>,
+    /// The last pitch bend and mod wheel the engine applied (`Command::PitchBend`, `Command::Modulation`,
+    /// whatever the target then), as a SYNTH's bank keeps them: what [`Rack::select`] and a SYNTH seated
+    /// in the note target's slot hand the SYNTH there, as `Instruments::select` hands today's bank its
+    /// wheels.
+    wheels: [f64; 2],
     /// The live latency the record tap is aligned on ([`Rack::latch_record`]).
     record_latency: Frame,
     /// The device frame the next render call starts at.
@@ -1233,6 +1243,7 @@ impl Rack {
             rendered: false,
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             target: None,
+            wheels: [0.0; 2],
             record_latency: 0,
             cursor: 0,
             clock: UnitClock { skipped: 0, bpm: 120.0, meter: Meter::FOUR_FOUR },
@@ -1529,6 +1540,17 @@ impl Rack {
                 // bypass.
                 if into.is_none() || !fade || !rendered || seat.outgoing.is_some() {
                     seat.wet = if seat.wet_on { n } else { 0 };
+                }
+                // A SYNTH seated in the note target's slot (installed, replacing, or reseated after a
+                // withdrawal, which took no wheel meanwhile) is handed the engine's last wheels on its
+                // applied frame, in a call of no frames ahead of everything the slot sends it: as
+                // `Instruments::select` hands the instrument it picks the wheels it keeps.
+                if self.target == Some(i) && info.kind == UnitKind::Synth {
+                    if let Some(unit) = seat.unit.as_mut() {
+                        let [semitones, depth] = self.wheels;
+                        let wheels = [SlotEvent { offset: 0, kind: SlotEventKind::PitchBend { semitones } }, SlotEvent { offset: 0, kind: SlotEventKind::Modulation { depth } }];
+                        unit.process(&cx, [&[], &[]], &wheels, [&mut [], &mut []]);
+                    }
                 }
             }
             SlotMsg::Remove { id } => {
@@ -1993,13 +2015,25 @@ impl Rack {
     /// The note target moves (`Command::SelectInstrument`): the slot it leaves releases its notes, once,
     /// also when it stays, as `Instruments::select` releases the instrument it leaves or picks again. A
     /// slot it lands on from elsewhere holds no note and its SYNTH is not released again (today's bank
-    /// releases nothing on a pick from no instrument).
+    /// releases nothing on a pick from no instrument), but is handed the engine's last wheels on the
+    /// frame, while it seats a SYNTH that plays: bent on one slot, centred on the other, the first
+    /// plays centred when the target comes back. A slot the target stays on keeps them already (it took
+    /// every wheel since), and a plugins-only slot gets none.
     pub(crate) fn select(&mut self, target: Option<usize>, now: Frame) {
         let offset = self.offset(now);
         if let Some(s) = self.target.map(|i| &mut self.slots[i]) {
             s.release_all(offset, &mut self.events_dropped);
         }
-        self.target = target.filter(|&i| i < SLOT_COUNT);
+        let target = target.filter(|&i| i < SLOT_COUNT);
+        let landed = target.filter(|&i| self.target != Some(i));
+        self.target = target;
+        if let Some(s) = landed.map(|i| &mut self.slots[i]) {
+            if s.takes_wheels() {
+                let [semitones, depth] = self.wheels;
+                s.queue(SlotEventKind::PitchBend { semitones }, offset, &mut self.events_dropped);
+                s.queue(SlotEventKind::Modulation { depth }, offset, &mut self.events_dropped);
+            }
+        }
     }
 
     pub(crate) fn note_on(&mut self, key: u8, velocity: f32, now: Frame) {
@@ -2037,8 +2071,15 @@ impl Rack {
     }
 
     /// A wheel ([`SlotEventKind::PitchBend`] or [`SlotEventKind::Modulation`]) for the note target's
-    /// chain on `now`, as a note goes, while it seats a SYNTH; nowhere otherwise.
+    /// chain on `now`, as a note goes, while it seats a SYNTH; nowhere otherwise. Kept, whatever the
+    /// target, as a bank keeps it (a bend that is no number changes nothing, a depth is clamped to 0..1),
+    /// for the SYNTH the target lands on next ([`Rack::select`]).
     pub(crate) fn wheel(&mut self, kind: SlotEventKind, now: Frame) {
+        match kind {
+            SlotEventKind::PitchBend { semitones } if semitones.is_finite() => self.wheels[0] = semitones,
+            SlotEventKind::Modulation { depth } if depth.is_finite() => self.wheels[1] = depth.clamp(0.0, 1.0),
+            _ => {}
+        }
         let offset = self.offset(now);
         let Some(s) = self.target.map(|i| &mut self.slots[i]) else { return };
         if s.takes_wheels() {

@@ -280,6 +280,10 @@ export interface EngineFake extends EngineHost {
   /** Probe seam, the engine's application: while set, the commands a batch carries wait unapplied (and
    * unreported); cleared, they apply in order and their `Mix` follows. */
   holdApply: boolean;
+  /** Probe seam, with `holdApply` set: apply the first command it holds, as the engine applies one block's
+   * worth, and report it as clearing the hold would. False when none is held.
+   * @public */
+  applyNextHeld(): boolean;
   /** Probe seam: while set, a batch that carries a mix command is refused (`InputHost.send` rejects, as a
    * host that could not take it): its commands are recorded in `sent`, and nothing in it applies. */
   refuseMix: boolean;
@@ -293,7 +297,8 @@ export interface EngineFake extends EngineHost {
    */
   emit(raw: unknown): void;
   /** Every input event the UI sent (`InputHost.send`'s input items: notes by owner, blurs, note targets,
-   * panics), in order, batches flattened. Recorded only while the fake engine is on, as `sent`. */
+   * panics, SYNTH picks), in order, batches flattened. Recorded only while the fake engine is on, as `sent`.
+   * Only a pick is applied (to the chain, as the router's `SetUnitParam`); the rest are recorded. */
   readonly inputSent: InputEvent[];
   /** Every `InputHost.send` call as it came (a refused one too): its epoch and its items, in order. */
   readonly batches: { epoch: number; items: InputItem[] }[];
@@ -305,7 +310,9 @@ export interface EngineFake extends EngineHost {
    * meanwhile). */
   sendHold: Promise<void> | null;
   /** Probe seam: while set, every batch `InputHost.send` takes answers it, as native MIDI does when it
-   * dropped some of the batch (a press with no device running); the batch is recorded and applied. */
+   * dropped some of the batch (a press with no device running); the batch is recorded and applied. As
+   * native: `noDevice` and `rebuilding` only answer a batch carrying a press (a note-on, a looper press),
+   * and under `full` or `stale` a SYNTH pick is not applied (the router refused it). */
   dropped: Dropped | null;
   /** Every native MIDI call (`MidiHost`), in order: its method's name and arguments, the page's epoch
    * first, e.g. `['learn', 1, 'recDub', null]` or `['forget', 1, revision, index]`; `['subscribe']`. */
@@ -782,7 +789,7 @@ const engineSubscribers = new Set<(frame: FeedFrame) => void>();
 let fakeStatus: DeviceStatus | null = null;
 const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngineFakeRate ?? 48000;
 
-// ── The fake's native MIDI and input: recorded, never run ───────────────────────────────────────────
+// ── The fake's native MIDI and input: recorded, never run but a SYNTH pick ─────────────────────────────
 
 const midiCalls: [string, ...unknown[]][] = [];
 const inputSent: InputEvent[] = [];
@@ -875,22 +882,47 @@ const webInput: InputHost = {
       throw new Error('The fake lost the batch (failSends)');
     }
     const commands = read.flatMap((item) => ('engine' in item ? [item.engine] : []));
+    // As native MIDI refuses a router command sent as an engine command, the whole batch with it
+    // (`midi/mod.rs` `ui_commands`): a SYNTH's pick goes only through `pickSynth` (unit contract §4).
+    const routerOnly = commands.find((c) => typeof c === 'object' && 'SetUnitParam' in c && c.SetUnitParam[1] === 'instrument');
+    if (routerOnly) throw new Error(`${JSON.stringify(routerOnly)} goes through the note router, not as an engine command`);
     if (webEngineFake.refuseMix && commands.some(isMixCommand)) {
       // It reached the host, which ran none of it.
       webEngineFake.sent.push(...commands);
       throw new Error('The fake engine refused the batch (refuseMix)');
     }
+    // As native MIDI answers: no device running (or a rebuild) drops only a press, so a batch without one
+    // answers nothing dropped; no room, or a replaced page, refuses a pick too.
+    const scripted = webEngineFake.dropped;
+    const answer = (scripted === 'noDevice' || scripted === 'rebuilding') && !read.some(pressItem) ? null : scripted;
+    const pickRefused = answer === 'full' || answer === 'stale';
     for (const item of read) {
       if ('engine' in item) runCommand(item.engine);
-      else inputSent.push(item.input);
+      else {
+        inputSent.push(item.input);
+        // The router's pick reaches the engine as the unit's `instrument` param (its releases and its
+        // target are the router's, which the fake does not run); it is no command the UI sent (`sent`).
+        if (typeof item.input === 'object' && 'pickSynth' in item.input && !pickRefused) {
+          const { unit, instrument } = item.input.pickSynth;
+          const command: EngineCommand = { SetUnitParam: [unit, 'instrument', instrument] };
+          if (applyHeld) heldCommands.push(command);
+          else applyCommand(command);
+        }
+      }
     }
     echoChanges();
-    const answer = webEngineFake.dropped;
     const hold = webEngineFake.sendHold;
     if (hold) await hold;
     return answer;
   },
 };
+
+/** What native MIDI drops while no device runs (`index.ts` `press`): a note-on, or a looper press (an
+ * engine command that sets no setting). */
+const pressItem = (item: InputItem): boolean =>
+  'engine' in item
+    ? !(typeof item.engine === 'object' && Object.keys(item.engine)[0].startsWith('Set'))
+    : typeof item.input === 'object' && 'note' in item.input && item.input.note.on;
 
 /** One engine command, as the fake takes it: recorded, then applied, or held while `holdApply` is set. */
 function runCommand(command: EngineCommand): void {
@@ -968,6 +1000,13 @@ export const webEngineFake: EngineFake = {
     if (on) return;
     heldCommands.splice(0).forEach(applyCommand);
     echoChanges();
+  },
+  applyNextHeld() {
+    const next = heldCommands.shift();
+    if (next === undefined) return false;
+    applyCommand(next);
+    echoChanges();
+    return true;
   },
   refuseMix: false,
   async open(request, force = false) {

@@ -1651,8 +1651,8 @@ impl UnitHost {
     }
 }
 
-/// Builds a built-in unit at the engine's terms and answers its params as it clamped them. E3:
-/// `lf_engine::units`; E2: none in the app (a built-in add is refused), a clamping fake in the tests.
+/// Builds a built-in unit at the engine's terms and answers its params as it clamped them: in the app
+/// `super::builtins::Builtins` over `lf_engine::units`; a clamping fake in the tests.
 pub trait BuiltinFactory: Send + Sync {
     fn build(&self, kind: UnitKind, params: &Params, terms: Terms) -> Result<(Unit, Params), String>;
 }

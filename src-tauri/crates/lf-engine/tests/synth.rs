@@ -2,7 +2,9 @@
 //! `dsp::delay`) against the Tone references: each `synth-*` scenario replayed from the manifest the
 //! way the probe drove it, the same bits at any block size (scheduled up front, as the probe does, and
 //! live, as the engine will: every call made at its own frame), and no allocation while scheduling or
-//! rendering.
+//! rendering. Each scenario also plays through a SYNTH (`units::SynthUnit`) picked to its synth, its
+//! events as slot events on their frames, bit for bit against the synth alone called as the SYNTH's
+//! bank calls it (`common::unit_replay`, which says why that oracle and not the Tone reference).
 //!
 //! The probe calls every noteOn/noteOff before the offline render starts (Blink's context time 0), and
 //! pitch bend and mod wheel from Tone's offline clock: a tick every 128 frames whose time is a running
@@ -13,8 +15,11 @@ mod common;
 
 use assert_no_alloc::assert_no_alloc;
 use common::refs::{self, Class, ScriptEvent};
+use common::unit_replay;
 use common::violation_count;
 use lf_engine::dsp::synth::{PolyKind, PolySynth};
+use lf_engine::units::tone_noise;
+use lf_engine::Instrument;
 
 /// A scenario's calls in the probe's order, each with the Tone time it is made at: notes up front,
 /// controls at their ticks.
@@ -136,6 +141,9 @@ fn assert_scenario(id: &str, class: Class) {
     for block in [1, 64, 127, 480] {
         assert!(bits(&render_live(id, block)) == bits(&live), "{id}: live, block {block} differs");
     }
+    let rate = refs::scenario(id).rate;
+    let instrument = Instrument::from_id(refs::scenario(id).setup["synth"].as_str().unwrap()).expect("a SYNTH instrument");
+    unit_replay::assert_unit(id, instrument, &tone_noise(rate), &mut PolySynth::new(kind(id), rate as f32, 0.0, 0));
 }
 
 #[test]

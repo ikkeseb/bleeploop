@@ -15,7 +15,9 @@
  * - an unload waits until the slot's live-off reached the host, and one the host did not take aborts it
  *   (a live slot without its plugin passes the input dry): the old plugin kept, no unload call;
  * - a keypress while a swap's load is in flight (`ensureActive`) keeps the notes going nowhere, never to
- *   the slot's built-in.
+ *   the slot's built-in;
+ * - with no chain drawn, a Drum pick is the built-in target and the pad layout, and no SYNTH pick
+ *   (`pickSynth`) is ever sent (chain mode's: `chain-ui`).
  *
  * What moved to Rust with the router (`src-tauri/src/engine_io/midi/router.rs` tests): the release of
  * held and sustained notes before a new target, the same slot and target changing nothing, host-side
@@ -159,6 +161,12 @@ await probe(async ({ open }) => {
     unloadFailures = 1;
     instrument.selectSynth(1, 'lead'); await idle();
     out.failedPick = { slot1: instrument.slotPlugins()[1]?.id, active: instrument.activeSlot() };
+    // Legacy mode (no chain drawn): a Drum pick is the slot's built-in target and the pad layout, never a
+    // SYNTH pick to the router.
+    await targets();
+    instrument.selectSynth(0, 'drum'); await idle();
+    out.legacyDrum = { drum: instrument.activeIsDrum(), targets: await targets() };
+    out.picks = lf.native.inputSent.filter((e) => e.pickSynth).length;
     out.engineNotes = lf.native.sent.filter((c) => c.SelectInstrument || c.NoteOn || c.NoteOff !== undefined).length;
     return out;
   });
@@ -191,4 +199,6 @@ await probe(async ({ open }) => {
   assert.equal(consumeConsoleErrors('[instrument] plugin unload (swap) failed').length, 1, 'the failed swap reaches the release log');
   assert.equal(consumeConsoleErrors('[instrument] plugin unload failed').length, 2, 'and so do the failed clear and pick');
   assert.equal(result.engineNotes, 0, 'no note or target goes past the router (engine_send)');
+  assert.deepEqual(result.legacyDrum, { drum: true, targets: [builtin(0, 'drum')] }, 'legacy mode: a Drum pick routes to the built-in and draws pads');
+  assert.equal(result.picks, 0, 'legacy mode sends no SYNTH pick');
 });

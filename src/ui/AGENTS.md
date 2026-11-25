@@ -126,9 +126,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   does not draw the old IN FX sends, and their values do not become units); the named pedal actions
   (`InFxEcho`, `InFxReverb`, `InFxRing`, `InFxOtt`) running `Toggle.Units` in chain mode instead of the
   legacy sends; the slot's level kept across a launch (chain mode holds it in memory, unity at boot,
-  `state/instrument.ts` `chainGains`); SYNTH's instrument pick through the note router (§4; a synth unit takes its pick only at its add). Chain mode
+  `state/instrument.ts` `chainGains`). Chain mode
   already routes notes to the slot (`{ Slot: n }`) and sends the slot's level as `SetSlotGain`, never the
-  legacy `Builtin` target or `SetInstrumentGain`. Next check: with the engine step, `rig-recall` on a stored
+  legacy `Builtin` target or `SetInstrumentGain`; a synth choice on a slot a seated SYNTH heads is a pick on
+  it through the note router (§4, `state/chain.ts` `pickSynth`). Next check: with the engine step, `rig-recall` on a stored
   v0.8.9 profile in chain mode.
 
 - **Chain mode's edges on the fake, left at the branch's third review** (each read from source by a

@@ -122,7 +122,9 @@ pub enum Command {
     /// Where the notes go: a built-in instrument, a plugin slot, or nowhere ([`NoteTarget::Off`]). Sent on
     /// a slot switch, not per note: it releases the held notes (of the instrument or slot it leaves) and
     /// hands a built-in instrument the wheels, even when the target stays (two slots may hold the same
-    /// synth, as two web synths). A SYNTH in a slot keeps the wheels it last got, and the slot it leaves
+    /// synth, as two web synths). A slot it lands on from another is handed the engine's last wheels on
+    /// the frame while it seats a SYNTH (bent on one slot, centred on the other: the first plays centred
+    /// when the target comes back; a slot it stays on took every wheel already), and the slot it leaves
     /// releases its notes as a pick does ([`SlotEventKind::AllNotesOff`]), where a plugin gets a NoteOff
     /// per held key.
     SelectInstrument(NoteTarget),
@@ -906,10 +908,11 @@ pub enum SlotEventKind {
     NoteOn { key: u8, velocity: f32 },
     NoteOff { key: u8 },
     /// The pitch wheel ([`Command::PitchBend`]), in semitones as sent: SYNTH applies it to its picked
-    /// instrument, a plugin ignores it (owner decision D12). Only a chain that seats a SYNTH gets it.
+    /// instrument, a plugin ignores it (owner decision D12). Only a SYNTH gets it, in a chain that seats
+    /// one: a plugin seated beside it never does.
     PitchBend { semitones: f64 },
     /// The mod wheel ([`Command::Modulation`]), as sent (SYNTH clamps it to 0..1); a plugin ignores it
-    /// (D12). Only a chain that seats a SYNTH gets it.
+    /// (D12). Only a SYNTH gets it, as [`SlotEventKind::PitchBend`].
     Modulation { depth: f64 },
     /// Every note the unit holds released at once, as a pick releases them (`Bank::select`: at the
     /// sounding pitch, so a mono bass never falls back to an older key on its way out). Only a SYNTH
@@ -1041,7 +1044,8 @@ pub trait UnitProcessor: Send {
     /// holds the engine, just before [`UnitProcessor::stop`]). A SYNTH alone also gets calls of no
     /// frames, every event at offset 0: the slot's events sent ahead of a [`Command::SetUnitParam`] on
     /// its frame, handed to it before the param so the two apply in ring order
-    /// (`Rack::set_unit_param`).
+    /// (`Rack::set_unit_param`), and the engine's last wheels when it is seated in the note target's
+    /// slot (installed, replacing, reseated: `Rack::apply`), ahead of everything the slot sends it.
     fn process(&mut self, cx: &UnitCx, input: [&[f32]; 2], events: &[SlotEvent], out: [&mut [f32]; 2]);
     /// A built-in unit's parameter, on its frame (`cx.frame`, before the frames from it are rendered):
     /// `Some(applied)` when the unit took it (clamped to its own range), `None` when `param` is not a
