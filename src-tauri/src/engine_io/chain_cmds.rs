@@ -51,9 +51,10 @@ const BUILTIN_POLL: Duration = Duration::from_millis(20);
 const BUILTIN_ADD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound for an initial built-in submit retrying `Stale`/`Reloading`/`Behind` before failing cleanly,
-/// while its caller still waits for the first answer; strictly below `BUILTIN_ADD_TIMEOUT` so the owner
-/// always exits and answers before the caller releases order. Judged under the port's lock at the
-/// push (`UnitHost::submit_before`), so no install of a first answer still owed enters after it.
+/// while its caller still waits for the first answer, counted from where that wait starts; strictly
+/// below `BUILTIN_ADD_TIMEOUT` so the owner always exits and answers before the caller releases order.
+/// Judged under the port's lock at every push, the first included (`UnitHost::submit_before`), so no
+/// install of a first answer still owed enters after it.
 const BUILTIN_INITIAL_SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bound for stopping/joining a late entry that finished opening after `join_all` already completed.
@@ -309,6 +310,9 @@ struct PendingReload {
     plugin: PluginRef,
     inst: u64,
     owner: UnitOwner,
+    /// Its `reload` call still waits on it (`Answer::Waiting`) and reads its outcome itself: a sweep that
+    /// retires it first leaves the refusal's cause to that call (`Table::forget_reload_refusal`).
+    waiter: bool,
 }
 
 struct BuiltinOwner {
@@ -447,9 +451,11 @@ impl Chains {
                         let _ = self.promote_pending_reload(unit, inst, candidate_token);
                     }
                     ReloadOutcome::Failed(why) => {
-                        if self.retire_pending_reload(inst) {
+                        if let Some(waiter) = self.retire_pending_reload(inst) {
                             log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
-                            forget_reload_refusal(host, candidate_token);
+                            if !waiter {
+                                forget_reload_refusal(host, candidate_token);
+                            }
                         }
                     }
                 }
@@ -608,14 +614,17 @@ impl Chains {
         aborted
     }
 
-    fn retire_pending_reload(&self, inst: u64) -> bool {
+    /// Retire pending reload `inst` to `gone`: `Some(waiter)` (whether its call still waits on it, see
+    /// [`PendingReload::waiter`]) if this call took it, `None` if another already had.
+    fn retire_pending_reload(&self, inst: u64) -> Option<bool> {
         let (retired, late_entry) = {
             let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
             let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
             let Some(pos) = pending.iter().position(|c| c.inst == inst) else {
-                return false;
+                return None;
             };
             let cand = pending.swap_remove(pos);
+            let waiter = cand.waiter;
             let entry = Arc::new(Entry {
                 slot: cand.slot,
                 token: 0,
@@ -625,12 +634,25 @@ impl Chains {
                     owner: cand.owner,
                 }),
             });
-            (true, Self::push_gone_locked(&mut gone, entry))
+            (Some(waiter), Self::push_gone_locked(&mut gone, entry))
         };
         if let Some(late) = late_entry {
             self.dispose_late_entry(late);
         }
         retired
+    }
+
+    /// The `reload` call waiting on pending reload `inst` stops waiting with it still standing: a sweep
+    /// reads its outcome from now on. False if a sweep already took it (and left its cause to this call).
+    fn leave_pending_reload_to_sweep(&self, inst: u64) -> bool {
+        let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+        match pending.iter_mut().find(|c| c.inst == inst) {
+            Some(cand) => {
+                cand.waiter = false;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`),
@@ -913,7 +935,7 @@ impl Chains {
         // Spawn the owner BEFORE submitting to the engine; hand `(unit_host, boxed, terms)` across
         // only AFTER registering in `self.registry` so spawn failure cleanly drops/releases and
         // shutdown can never snapshot `registry` after `submit()` has handed the box to the engine.
-        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<(UnitHost, Unit, unit_host::Terms)>(1);
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<(UnitHost, Unit, unit_host::Terms, Instant)>(1);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<Added, String>>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
@@ -999,7 +1021,9 @@ impl Chains {
             return Err(msg);
         }
 
-        if let Err(std::sync::mpsc::SendError((unit_host, boxed, _))) = start_tx.send((unit_host, boxed, terms)) {
+        // The caller's wait starts here, and the owner's first-answer bound with it.
+        let asked = Instant::now();
+        if let Err(std::sync::mpsc::SendError((unit_host, boxed, _, _))) = start_tx.send((unit_host, boxed, terms, asked)) {
             drop(boxed);
             let why = format!("built-in unit {unit} owner exited before starting");
             unit_host.failed(why.clone());
@@ -1008,7 +1032,7 @@ impl Chains {
             return Err(why);
         }
 
-        match ready_rx.recv_timeout(BUILTIN_ADD_TIMEOUT) {
+        match ready_rx.recv_timeout(BUILTIN_ADD_TIMEOUT.saturating_sub(asked.elapsed())) {
             Ok(Ok(added)) => Ok(added),
             Ok(Err(why)) => {
                 self.retire_to_gone(unit, Some(token));
@@ -1392,6 +1416,7 @@ impl Chains {
                             plugin,
                             inst,
                             owner,
+                            waiter: true,
                         });
                         (false, None)
                     }
@@ -1424,12 +1449,11 @@ impl Chains {
                             return Ok(Reloaded::Reloaded);
                         }
                         ReloadOutcome::Failed(why) => {
-                            // Whoever retires the candidate logs its cause, once: a sweep that got there
-                            // first logged it (and forgot it), and this read may then be generic.
-                            if self.retire_pending_reload(inst) {
-                                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
-                                forget_reload_refusal(host, new_token);
-                            }
+                            // This call answers the failure, so it logs its cause, whoever retired the
+                            // candidate: a sweep that got there first left the cause for this read.
+                            self.retire_pending_reload(inst);
+                            log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+                            forget_reload_refusal(host, new_token);
                             return Ok(Reloaded::Failed);
                         }
                         ReloadOutcome::Standing => {}
@@ -1452,6 +1476,9 @@ impl Chains {
                     if !slot_held {
                         unheld += dt;
                         if unheld >= RELOAD_WAIT_TIMEOUT {
+                            if !self.leave_pending_reload_to_sweep(inst) {
+                                forget_reload_refusal(host, new_token);
+                            }
                             return Err(format!(
                                 "unit {unit} reload did not settle within {} s",
                                 RELOAD_WAIT_TIMEOUT.as_secs()
@@ -1486,6 +1513,7 @@ impl Chains {
                             plugin,
                             inst,
                             owner,
+                            waiter: false,
                         });
                         (false, None)
                     }
@@ -1995,21 +2023,24 @@ impl Rebuild {
 /// or a failed rebuild, drops the box off the RT thread on terminal return, and drains/abandons
 /// cleanly on stop.
 fn serve_builtin(
-    start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms)>,
+    start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms, Instant)>,
     ready_tx: SyncSender<Result<Added, String>>,
     stop: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
     rebuild: Rebuild,
 ) {
-    let Ok((host, boxed, initial_terms)) = start_rx.recv() else {
+    let Ok((host, boxed, initial_terms, asked)) = start_rx.recv() else {
         return;
     };
     let mut built_rate = initial_terms.rate;
     let mut ready = Some(ready_tx);
     let mut ever_seated = false;
-    let initial_deadline = Instant::now() + BUILTIN_INITIAL_SUBMIT_TIMEOUT;
+    // Counted from where the caller's wait started, not from this thread's start.
+    let initial_deadline = asked + BUILTIN_INITIAL_SUBMIT_TIMEOUT;
 
-    let mut seat = match host.submit(boxed, initial_terms) {
+    // Bounded like every push while the first answer is owed: delayed on the way (the port's lock),
+    // it sends nothing once its caller may have stopped waiting.
+    let mut seat = match host.submit_before(boxed, initial_terms, initial_deadline) {
         Ok(op) => BuiltinSeat::Installing { op },
         Err((returned, SubmitError::Stale | SubmitError::Reloading | SubmitError::Behind)) => BuiltinSeat::Owed { unit: returned },
         Err((returned, SubmitError::Closing)) => {
@@ -2019,7 +2050,7 @@ fn serve_builtin(
             return;
         }
         Err((returned, err)) => {
-            // PortFull, NoEngine, Removing, Superseded on initial submit: fail immediately so the
+            // PortFull, NoEngine, Removing, Superseded, Late on initial submit: fail immediately so the
             // caller releases the slot's order mutex and no background retry can enqueue out of order.
             drop(returned);
             let why = submit_error_reason(err);

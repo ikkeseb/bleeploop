@@ -453,11 +453,32 @@ impl Model {
 
     /// Whether a plate that holds or awaits a seat stands ahead of `id` in `slot`'s plate order: one
     /// seated in this engine, or one whose owner still holds its unit (out after a rebuild, parked or
-    /// reseating, which a rebuild leaves `failed` with no seat). A failed add (its id freed) holds none.
+    /// reseating, which a rebuild leaves `failed` with no seat). A failed add (its id freed) holds none,
+    /// nor does one whose removal is queued: it is gone before an install pushed now is judged.
     pub(crate) fn live_plate_ahead(&self, slot: usize, id: UnitId, table: &Table) -> bool {
         let sm = &self.slots[slot];
-        sm.find(id)
-            .is_some_and(|pos| sm.plates[..pos].iter().any(|p| p.seated_in_engine || table.has_active_row(p.id)))
+        let leaving = |p: &Plate| {
+            sm.pending.iter().any(|q| q.unit == p.id && matches!(q.kind, PendingKind::Remove { .. }))
+        };
+        sm.find(id).is_some_and(|pos| {
+            sm.plates[..pos]
+                .iter()
+                .any(|p| (p.seated_in_engine || table.has_active_row(p.id)) && !leaving(p))
+        })
+    }
+
+    /// Whether an install queued in `slot` takes `id`'s seat (`replaces: Some(id)`, another id's: a
+    /// newer source taking the head) and the engine has not answered it yet.
+    pub(crate) fn seat_taken_by_queued_install(&self, slot: usize, id: UnitId) -> bool {
+        self.slots[slot].pending.iter().any(|p| {
+            p.unit != id && matches!(p.kind, PendingKind::Install { replaces: Some(r), is_reload: false, .. } if r == id)
+        })
+    }
+
+    /// The messages pushed on `slot`'s port whose answer the model has not taken yet: never fewer than
+    /// the port holds ([`super::unit_host::Table::port_claimed_ahead`]).
+    pub(crate) fn queued(&self, slot: usize) -> usize {
+        self.slots[slot].pending.len()
     }
 
     /// Whether `slot` has any head source plate (even loading/reseating) for capacity check.
@@ -940,8 +961,9 @@ impl Model {
     /// earlier: a newer source the engine refuses costs the older one nothing (its retry meanwhile
     /// answers `Behind`, `UnitHost::submit`, so it never has an install queued behind the newer one's).
     /// One with an op still queued is leaving or seated and is left to that op; a failed add (its id
-    /// freed) is the player's to remove; an effect parked for coming back a source was never the slot's
-    /// source.
+    /// freed) is the player's to remove. Each is judged by the role it last seated in (its reported one
+    /// if it never seated): an effect parked for coming back a source was never the slot's source, and
+    /// a source parked for coming back an effect (refused, say, for its latency) still was.
     fn take_older_sources_out_of_engine(&mut self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
         let sm = &self.slots[slot];
         let Some(rev) = sm.find(unit).map(|i| sm.plates[i].added_rev) else { return Vec::new() };
@@ -949,13 +971,12 @@ impl Model {
             .plates
             .iter()
             .filter(|p| {
-                p.source
+                p.seated_source.unwrap_or(p.source)
                     && p.id != unit
                     && !p.legacy
                     && !p.seated_in_engine
                     && p.state != PlateState::Leaving
                     && p.added_rev < rev
-                    && p.seated_source != Some(false)
                     && table.has_active_row(p.id)
                     && !sm.pending.iter().any(|q| q.unit == p.id)
             })

@@ -3828,6 +3828,21 @@ fn claim_a_full_port(host: &EngineHost, id: UnitId, stops: &Arc<AtomicUsize>) ->
     }
 }
 
+/// The host's copy of the engine's port size (`unit_host::PORT_PLACES`, lf-engine's private
+/// `MSG_CAPACITY`) is the number of messages a still engine's slot port takes.
+#[test]
+fn port_places_matches_the_engines_slot_port() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u = host.unit(0, 700, Spec::Plugin(plugin_ref("pin")), 0, false).expect("reserve");
+    u.activated(Activated { name: "pin".into(), source: false, latency: 0 });
+    let op = ok_op(u.submit(LatentUnit::new(1, 0, stops), u.terms().unwrap()));
+    assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    device.stop();
+    assert_eq!(fill_port_with_moves(&host, 700), super::unit_host::PORT_PLACES);
+}
+
 /// Chain host edge c, the claim (review round 2, finding 9; host level, so nothing races): an install
 /// that found its slot's port full keeps the place it needs. The port is served, but the model has not
 /// taken the answers yet, so it can count no place to spare: a later move is refused while the claim
